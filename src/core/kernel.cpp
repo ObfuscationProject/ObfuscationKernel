@@ -1,0 +1,191 @@
+#include "ok/core/kernel.hpp"
+
+#include <array>
+#include <cstring>
+
+namespace ok {
+namespace {
+
+std::vector<memory::MemoryRegion> default_memory_map()
+{
+    return {
+        memory::MemoryRegion {.base = 0x0010'0000, .size = 64 * 1024 * 1024, .type = memory::RegionType::usable},
+    };
+}
+
+std::span<const std::byte> as_bytes(std::string_view text)
+{
+    return {reinterpret_cast<const std::byte*>(text.data()), text.size()};
+}
+
+} // namespace
+
+Kernel::Kernel()
+    : arch_(arch::make_arch_operations(arch::configured_architecture()))
+{
+}
+
+Status Kernel::boot(KernelConfig config)
+{
+    if (config.architecture == arch::Architecture::host) {
+        config.architecture = arch::configured_architecture();
+    }
+    if (config.memory_map.empty()) {
+        config.memory_map = default_memory_map();
+    }
+
+    config_ = std::move(config);
+    arch_ = arch::make_arch_operations(config_.architecture);
+
+    if (auto status = memory_.initialize(config_.memory_map, arch_->page_size()); !status.ok()) {
+        return status;
+    }
+
+    auto& console = drivers_.add<driver::ConsoleDriver>();
+    auto& timer = drivers_.add<driver::TimerDriver>();
+    static_cast<void>(drivers_.add<driver::NullBlockDriver>());
+
+    if (auto status = drivers_.start_all(); !status.ok()) {
+        return status;
+    }
+    if (auto status = register_builtin_interrupts(timer); !status.ok()) {
+        return status;
+    }
+    if (auto status = register_builtin_syscalls(console); !status.ok()) {
+        return status;
+    }
+
+    const auto idle_context = arch_->make_kernel_context(0x1000, 0x8000);
+    auto idle = scheduler_.create_process("idle", idle_context);
+    if (!idle) {
+        return idle.status();
+    }
+    if (auto status = scheduler_.set_runnable(idle.value()); !status.ok()) {
+        return status;
+    }
+    if (!scheduler_.schedule_next()) {
+        return Status::fault("failed to schedule idle process");
+    }
+
+    if (auto status = vfs_.create("/tmp/kernel.log", fs::NodeType::regular); !status.ok()) {
+        return status;
+    }
+
+    booted_ = true;
+    return Status::success();
+}
+
+Status Kernel::run_smoke_suite()
+{
+    if (!booted_) {
+        return Status::not_initialized("kernel not booted");
+    }
+
+    auto frame = memory_.frames().allocate();
+    if (!frame) {
+        return frame.status();
+    }
+    if (auto status = memory_.kernel_address_space().map(0xffff'8000'0000'0000ull, frame.value(), 0b11); !status.ok()) {
+        return status;
+    }
+    if (auto status = memory_.kernel_address_space().unmap(0xffff'8000'0000'0000ull); !status.ok()) {
+        return status;
+    }
+    if (auto status = memory_.frames().release(frame.value()); !status.ok()) {
+        return status;
+    }
+
+    arch::TrapFrame trap {.vector = 32, .context = arch_->make_kernel_context(0x1000, 0x8000)};
+    if (auto status = interrupts_.dispatch(trap); !status.ok()) {
+        return status;
+    }
+
+    auto channel = ipc_.create_channel();
+    if (!channel) {
+        return channel.status();
+    }
+    struct Payload {
+        u32 value;
+    };
+    if (auto status = ipc_.send_value(channel.value(), scheduler_.current_pid(), scheduler_.current_pid(), Payload {42});
+        !status.ok()) {
+        return status;
+    }
+    auto message = ipc_.receive(channel.value());
+    if (!message || message.value().size != sizeof(Payload)) {
+        return Status::fault("IPC smoke test failed");
+    }
+
+    if (auto status = vfs_.write_file("/tmp/kernel.log", as_bytes("booted\n")); !status.ok()) {
+        return status;
+    }
+    auto log = vfs_.read_file("/tmp/kernel.log");
+    if (!log || log.value().size() != 7) {
+        return Status::fault("VFS smoke test failed");
+    }
+
+    syscall::Request getpid {.number = syscall::Number::getpid, .caller = scheduler_.current_pid()};
+    auto getpid_result = syscalls_.dispatch(getpid);
+    if (!getpid_result.status.ok() || getpid_result.value != static_cast<i64>(scheduler_.current_pid())) {
+        return Status::fault("getpid syscall smoke test failed");
+    }
+
+    auto context = arch_->make_user_context(arch::UserEntry {
+        .instruction_pointer = 0x400000,
+        .stack_pointer = 0x800000,
+        .argument = 7,
+    });
+    if (auto status = user_space_.enter_process(scheduler_.current_pid(),
+                                                arch::UserEntry {
+                                                    .instruction_pointer = 0x400000,
+                                                    .stack_pointer = 0x800000,
+                                                    .argument = 7,
+                                                },
+                                                context);
+        !status.ok()) {
+        return status;
+    }
+    if (context.mode != arch::PrivilegeMode::user) {
+        return Status::fault("user mode transition smoke test failed");
+    }
+
+    return Status::success();
+}
+
+Status Kernel::register_builtin_interrupts(driver::TimerDriver& timer)
+{
+    return interrupts_.register_function(32, "timer", [&timer](arch::TrapFrame&) {
+        timer.tick();
+        return Status::success();
+    });
+}
+
+Status Kernel::register_builtin_syscalls(driver::ConsoleDriver& console)
+{
+    if (auto status = syscalls_.register_function(syscall::Number::getpid, "getpid", [](const syscall::Request& request) {
+            return syscall::Response {.value = static_cast<i64>(request.caller), .status = Status::success()};
+        });
+        !status.ok()) {
+        return status;
+    }
+
+    if (auto status = syscalls_.register_function(syscall::Number::write, "write", [&console](const syscall::Request& request) {
+            if (request.args[1] == 0 || request.args[2] == 0) {
+                return syscall::Response {.value = -1, .status = Status::invalid_argument("write buffer is empty")};
+            }
+            const auto* text = reinterpret_cast<const char*>(request.args[1]);
+            const auto size = static_cast<usize>(request.args[2]);
+            const auto status = console.write(std::string_view {text, size});
+            return syscall::Response {.value = status.ok() ? static_cast<i64>(size) : -1, .status = status};
+        });
+        !status.ok()) {
+        return status;
+    }
+
+    return syscalls_.register_function(syscall::Number::ok_debug, "ok_debug", [](const syscall::Request& request) {
+        return syscall::Response {.value = static_cast<i64>(request.args[0]), .status = Status::success()};
+    });
+}
+
+} // namespace ok
+

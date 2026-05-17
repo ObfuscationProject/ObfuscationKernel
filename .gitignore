@@ -1,0 +1,15 @@
+build/
+.xmake/
+.cache/
+compile_commands.json
+
+toolchains/*
+!toolchains/README.md
+
+*.o
+*.a
+*.so
+*.bin
+*.elf
+*.map
+*.log
