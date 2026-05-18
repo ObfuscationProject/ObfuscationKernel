@@ -1,13 +1,25 @@
 #include "../ops_private.hpp"
 
-namespace ok::arch::detail {
-namespace {
+namespace ok::arch::detail
+{
+namespace
+{
 
-class I386Operations final : public ProfiledArchOperationsBase<Architecture::i386> {
-public:
-    [[nodiscard]] std::string_view interrupt_model() const override { return "idt-pic-apic"; }
-    [[nodiscard]] std::string_view syscall_model() const override { return "int80-sysenter"; }
-    [[nodiscard]] std::string_view user_transition_model() const override { return "iret-tss"; }
+class I386Operations final : public ProfiledArchOperationsBase<Architecture::i386>
+{
+  public:
+    [[nodiscard]] std::string_view interrupt_model() const override
+    {
+        return "idt-pic-apic";
+    }
+    [[nodiscard]] std::string_view syscall_model() const override
+    {
+        return "int80-sysenter";
+    }
+    [[nodiscard]] std::string_view user_transition_model() const override
+    {
+        return "iret-tss";
+    }
 
     [[nodiscard]] u64 read_cycle_counter() const noexcept override
     {
@@ -61,7 +73,7 @@ public:
 
 } // namespace
 
-ArchOperations& i386_operations()
+ArchOperations &i386_operations()
 {
     static I386Operations operations;
     return operations;

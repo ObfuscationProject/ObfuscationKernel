@@ -1,7 +1,8 @@
 #include "ok/arch/arch.hpp"
 #include "ops_private.hpp"
 
-namespace ok::arch {
+namespace ok::arch
+{
 
 Architecture configured_architecture()
 {
@@ -24,7 +25,7 @@ Architecture configured_architecture()
 #endif
 }
 
-ArchOperations& arch_operations(Architecture architecture)
+ArchOperations &arch_operations(Architecture architecture)
 {
     static_cast<void>(architecture);
 #if defined(OK_ARCH_TARGET_I386)

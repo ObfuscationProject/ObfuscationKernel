@@ -1,42 +1,50 @@
 #include "ok/interrupt/interrupt.hpp"
 
-namespace ok::interrupt {
-
-Status InterruptDispatcher::register_handler(Vector vector, InterruptHandler& handler)
+namespace ok::interrupt
 {
-    if (vector >= max_vectors) {
+
+Status InterruptDispatcher::register_handler(Vector vector, InterruptHandler &handler)
+{
+    if (vector >= max_vectors)
+    {
         return Status::invalid_argument("invalid interrupt handler");
     }
-    if (handlers_[vector].handler != nullptr || handlers_[vector].callback != nullptr) {
+    if (handlers_[vector].handler != nullptr || handlers_[vector].callback != nullptr)
+    {
         return Status::already_exists("interrupt vector already registered");
     }
-    handlers_[vector] = Entry {.name = handler.name(), .handler = &handler};
+    handlers_[vector] = Entry{.name = handler.name(), .handler = &handler};
     return Status::success();
 }
 
-Status InterruptDispatcher::register_callback(Vector vector, std::string_view name, void* context, Callback callback)
+Status InterruptDispatcher::register_callback(Vector vector, std::string_view name, void *context, Callback callback)
 {
-    if (vector >= max_vectors || callback == nullptr) {
+    if (vector >= max_vectors || callback == nullptr)
+    {
         return Status::invalid_argument("invalid interrupt callback");
     }
-    if (handlers_[vector].handler != nullptr || handlers_[vector].callback != nullptr) {
+    if (handlers_[vector].handler != nullptr || handlers_[vector].callback != nullptr)
+    {
         return Status::already_exists("interrupt vector already registered");
     }
-    handlers_[vector] = Entry {.name = name, .context = context, .callback = callback};
+    handlers_[vector] = Entry{.name = name, .context = context, .callback = callback};
     return Status::success();
 }
 
-Status InterruptDispatcher::dispatch(arch::TrapFrame& frame)
+Status InterruptDispatcher::dispatch(arch::TrapFrame &frame)
 {
-    if (frame.vector >= max_vectors) {
+    if (frame.vector >= max_vectors)
+    {
         return Status::invalid_argument("interrupt vector out of range");
     }
-    auto& entry = handlers_[frame.vector];
-    if (entry.handler == nullptr && entry.callback == nullptr) {
+    auto &entry = handlers_[frame.vector];
+    if (entry.handler == nullptr && entry.callback == nullptr)
+    {
         return Status::not_found("unhandled interrupt vector");
     }
     auto status = entry.handler != nullptr ? entry.handler->handle(frame) : entry.callback(entry.context, frame);
-    if (status.ok()) {
+    if (status.ok())
+    {
         ++handled_counts_[frame.vector];
     }
     return status;
@@ -44,7 +52,8 @@ Status InterruptDispatcher::dispatch(arch::TrapFrame& frame)
 
 usize InterruptDispatcher::handled_count(Vector vector) const
 {
-    if (vector >= max_vectors) {
+    if (vector >= max_vectors)
+    {
         return 0;
     }
     return handled_counts_[vector];
@@ -63,10 +72,12 @@ Status SimulatedInterruptController::initialize()
 
 Status SimulatedInterruptController::enable(Vector vector)
 {
-    if (!initialized_) {
+    if (!initialized_)
+    {
         return Status::not_initialized("interrupt controller not initialized");
     }
-    if (vector >= max_vectors) {
+    if (vector >= max_vectors)
+    {
         return Status::invalid_argument("interrupt vector out of range");
     }
     enabled_[vector] = true;
@@ -75,10 +86,12 @@ Status SimulatedInterruptController::enable(Vector vector)
 
 Status SimulatedInterruptController::disable(Vector vector)
 {
-    if (!initialized_) {
+    if (!initialized_)
+    {
         return Status::not_initialized("interrupt controller not initialized");
     }
-    if (vector >= max_vectors) {
+    if (vector >= max_vectors)
+    {
         return Status::invalid_argument("interrupt vector out of range");
     }
     enabled_[vector] = false;

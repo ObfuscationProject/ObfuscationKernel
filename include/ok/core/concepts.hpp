@@ -7,11 +7,11 @@
 #include <string_view>
 #include <type_traits>
 
-namespace ok {
+namespace ok
+{
 
 template <typename T>
-concept ByteLike = std::same_as<std::remove_cv_t<T>, std::byte> ||
-                   std::same_as<std::remove_cv_t<T>, u8> ||
+concept ByteLike = std::same_as<std::remove_cv_t<T>, std::byte> || std::same_as<std::remove_cv_t<T>, u8> ||
                    std::same_as<std::remove_cv_t<T>, char>;
 
 template <typename T>
@@ -29,4 +29,3 @@ concept PageSized = requires(T value) {
 };
 
 } // namespace ok
-

@@ -5,9 +5,11 @@
 #include <array>
 #include <string_view>
 
-namespace ok::arch {
+namespace ok::arch
+{
 
-enum class Architecture : u8 {
+enum class Architecture : u8
+{
     i386,
     x86_64,
     aarch64,
@@ -17,39 +19,45 @@ enum class Architecture : u8 {
     loongarch64,
 };
 
-enum class Endianness : u8 {
+enum class Endianness : u8
+{
     little,
     big,
 };
 
-enum class PrivilegeMode : u8 {
+enum class PrivilegeMode : u8
+{
     kernel,
     user,
 };
 
-struct CpuContext {
-    Architecture architecture {Architecture::x86_64};
-    std::array<uptr, 32> registers {};
-    uptr program_counter {0};
-    uptr stack_pointer {0};
-    uptr status_register {0};
-    PrivilegeMode mode {PrivilegeMode::kernel};
+struct CpuContext
+{
+    Architecture architecture{Architecture::x86_64};
+    std::array<uptr, 32> registers{};
+    uptr program_counter{0};
+    uptr stack_pointer{0};
+    uptr status_register{0};
+    PrivilegeMode mode{PrivilegeMode::kernel};
 };
 
-struct TrapFrame {
-    u64 vector {0};
-    u64 error_code {0};
-    CpuContext context {};
+struct TrapFrame
+{
+    u64 vector{0};
+    u64 error_code{0};
+    CpuContext context{};
 };
 
-struct UserEntry {
-    uptr instruction_pointer {0};
-    uptr stack_pointer {0};
-    uptr argument {0};
+struct UserEntry
+{
+    uptr instruction_pointer{0};
+    uptr stack_pointer{0};
+    uptr argument{0};
 };
 
-class ArchOperations {
-public:
+class ArchOperations
+{
+  public:
     virtual ~ArchOperations() = default;
 
     [[nodiscard]] virtual std::string_view name() const = 0;
@@ -71,12 +79,12 @@ public:
     virtual void halt() noexcept = 0;
 };
 
-template <Architecture A>
-struct ArchTraits;
+template <Architecture A> struct ArchTraits;
 
 [[nodiscard]] constexpr std::string_view to_string(Architecture architecture)
 {
-    switch (architecture) {
+    switch (architecture)
+    {
     case Architecture::i386:
         return "i386";
     case Architecture::x86_64:
@@ -97,31 +105,38 @@ struct ArchTraits;
 
 [[nodiscard]] constexpr Architecture architecture_from_string(std::string_view value)
 {
-    if (value == "i386") {
+    if (value == "i386")
+    {
         return Architecture::i386;
     }
-    if (value == "x86_64" || value == "x64") {
+    if (value == "x86_64" || value == "x64")
+    {
         return Architecture::x86_64;
     }
-    if (value == "aarch64") {
+    if (value == "aarch64")
+    {
         return Architecture::aarch64;
     }
-    if (value == "arm32" || value == "arm") {
+    if (value == "arm32" || value == "arm")
+    {
         return Architecture::arm32;
     }
-    if (value == "rv64" || value == "riscv64") {
+    if (value == "rv64" || value == "riscv64")
+    {
         return Architecture::rv64;
     }
-    if (value == "rv32" || value == "riscv32") {
+    if (value == "rv32" || value == "riscv32")
+    {
         return Architecture::rv32;
     }
-    if (value == "loongarch64") {
+    if (value == "loongarch64")
+    {
         return Architecture::loongarch64;
     }
     return Architecture::x86_64;
 }
 
 [[nodiscard]] Architecture configured_architecture();
-[[nodiscard]] ArchOperations& arch_operations(Architecture architecture);
+[[nodiscard]] ArchOperations &arch_operations(Architecture architecture);
 
 } // namespace ok::arch

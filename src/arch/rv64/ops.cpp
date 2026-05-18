@@ -1,13 +1,25 @@
 #include "../ops_private.hpp"
 
-namespace ok::arch::detail {
-namespace {
+namespace ok::arch::detail
+{
+namespace
+{
 
-class Rv64Operations final : public ProfiledArchOperationsBase<Architecture::rv64> {
-public:
-    [[nodiscard]] std::string_view interrupt_model() const override { return "stvec-plic-sbi"; }
-    [[nodiscard]] std::string_view syscall_model() const override { return "ecall"; }
-    [[nodiscard]] std::string_view user_transition_model() const override { return "sret"; }
+class Rv64Operations final : public ProfiledArchOperationsBase<Architecture::rv64>
+{
+  public:
+    [[nodiscard]] std::string_view interrupt_model() const override
+    {
+        return "stvec-plic-sbi";
+    }
+    [[nodiscard]] std::string_view syscall_model() const override
+    {
+        return "ecall";
+    }
+    [[nodiscard]] std::string_view user_transition_model() const override
+    {
+        return "sret";
+    }
 
     [[nodiscard]] u64 read_cycle_counter() const noexcept override
     {
@@ -58,7 +70,7 @@ public:
 
 } // namespace
 
-ArchOperations& rv64_operations()
+ArchOperations &rv64_operations()
 {
     static Rv64Operations operations;
     return operations;

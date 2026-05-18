@@ -1,13 +1,25 @@
 #include "../ops_private.hpp"
 
-namespace ok::arch::detail {
-namespace {
+namespace ok::arch::detail
+{
+namespace
+{
 
-class Rv32Operations final : public ProfiledArchOperationsBase<Architecture::rv32> {
-public:
-    [[nodiscard]] std::string_view interrupt_model() const override { return "stvec-plic-sbi"; }
-    [[nodiscard]] std::string_view syscall_model() const override { return "ecall"; }
-    [[nodiscard]] std::string_view user_transition_model() const override { return "sret"; }
+class Rv32Operations final : public ProfiledArchOperationsBase<Architecture::rv32>
+{
+  public:
+    [[nodiscard]] std::string_view interrupt_model() const override
+    {
+        return "stvec-plic-sbi";
+    }
+    [[nodiscard]] std::string_view syscall_model() const override
+    {
+        return "ecall";
+    }
+    [[nodiscard]] std::string_view user_transition_model() const override
+    {
+        return "sret";
+    }
 
     [[nodiscard]] u64 read_cycle_counter() const noexcept override
     {
@@ -15,7 +27,8 @@ public:
         u32 high_before = 0;
         u32 low = 0;
         u32 high_after = 0;
-        do {
+        do
+        {
             asm volatile("rdcycleh %0" : "=r"(high_before));
             asm volatile("rdcycle %0" : "=r"(low));
             asm volatile("rdcycleh %0" : "=r"(high_after));
@@ -64,7 +77,7 @@ public:
 
 } // namespace
 
-ArchOperations& rv32_operations()
+ArchOperations &rv32_operations()
 {
     static Rv32Operations operations;
     return operations;

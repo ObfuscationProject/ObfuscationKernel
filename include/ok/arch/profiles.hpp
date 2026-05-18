@@ -4,7 +4,8 @@
 
 #include <concepts>
 
-namespace ok::arch {
+namespace ok::arch
+{
 
 template <typename T>
 concept ArchitectureProfile = requires {
@@ -15,8 +16,8 @@ concept ArchitectureProfile = requires {
     { T::endianness } -> std::convertible_to<Endianness>;
 };
 
-template <>
-struct ArchTraits<Architecture::i386> {
+template <> struct ArchTraits<Architecture::i386>
+{
     static constexpr Architecture architecture = Architecture::i386;
     static constexpr std::string_view name = "i386";
     static constexpr usize page_size = 4096;
@@ -26,8 +27,8 @@ struct ArchTraits<Architecture::i386> {
     static constexpr usize hardware_threads = 2;
 };
 
-template <>
-struct ArchTraits<Architecture::x86_64> {
+template <> struct ArchTraits<Architecture::x86_64>
+{
     static constexpr Architecture architecture = Architecture::x86_64;
     static constexpr std::string_view name = "x86_64";
     static constexpr usize page_size = 4096;
@@ -37,8 +38,8 @@ struct ArchTraits<Architecture::x86_64> {
     static constexpr usize hardware_threads = 4;
 };
 
-template <>
-struct ArchTraits<Architecture::aarch64> {
+template <> struct ArchTraits<Architecture::aarch64>
+{
     static constexpr Architecture architecture = Architecture::aarch64;
     static constexpr std::string_view name = "aarch64";
     static constexpr usize page_size = 4096;
@@ -48,8 +49,8 @@ struct ArchTraits<Architecture::aarch64> {
     static constexpr usize hardware_threads = 4;
 };
 
-template <>
-struct ArchTraits<Architecture::arm32> {
+template <> struct ArchTraits<Architecture::arm32>
+{
     static constexpr Architecture architecture = Architecture::arm32;
     static constexpr std::string_view name = "arm32";
     static constexpr usize page_size = 4096;
@@ -59,8 +60,8 @@ struct ArchTraits<Architecture::arm32> {
     static constexpr usize hardware_threads = 2;
 };
 
-template <>
-struct ArchTraits<Architecture::rv64> {
+template <> struct ArchTraits<Architecture::rv64>
+{
     static constexpr Architecture architecture = Architecture::rv64;
     static constexpr std::string_view name = "rv64";
     static constexpr usize page_size = 4096;
@@ -70,8 +71,8 @@ struct ArchTraits<Architecture::rv64> {
     static constexpr usize hardware_threads = 4;
 };
 
-template <>
-struct ArchTraits<Architecture::rv32> {
+template <> struct ArchTraits<Architecture::rv32>
+{
     static constexpr Architecture architecture = Architecture::rv32;
     static constexpr std::string_view name = "rv32";
     static constexpr usize page_size = 4096;
@@ -81,8 +82,8 @@ struct ArchTraits<Architecture::rv32> {
     static constexpr usize hardware_threads = 2;
 };
 
-template <>
-struct ArchTraits<Architecture::loongarch64> {
+template <> struct ArchTraits<Architecture::loongarch64>
+{
     static constexpr Architecture architecture = Architecture::loongarch64;
     static constexpr std::string_view name = "loongarch64";
     static constexpr usize page_size = 4096;

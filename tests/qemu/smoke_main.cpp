@@ -4,15 +4,18 @@
 #include <string_view>
 #include <unistd.h>
 
-namespace {
+namespace
+{
 
 void write_all(int fd, std::string_view text)
 {
-    const char* data = text.data();
+    const char *data = text.data();
     auto size = text.size();
-    while (size != 0) {
+    while (size != 0)
+    {
         const auto written = ::write(fd, data, size);
-        if (written <= 0) {
+        if (written <= 0)
+        {
             return;
         }
         data += written;
@@ -22,15 +25,17 @@ void write_all(int fd, std::string_view text)
 
 void write_unsigned(int fd, ok::u64 value)
 {
-    char digits[20] {};
+    char digits[20]{};
     ok::usize count = 0;
-    do {
+    do
+    {
         digits[count++] = static_cast<char>('0' + (value % 10));
         value /= 10;
     } while (value != 0);
-    while (count != 0) {
+    while (count != 0)
+    {
         --count;
-        write_all(fd, std::string_view {&digits[count], 1});
+        write_all(fd, std::string_view{&digits[count], 1});
     }
 }
 
@@ -57,14 +62,16 @@ int fail(ok::Status status)
 int main()
 {
     ok::Kernel kernel;
-    ok::KernelConfig config {};
+    ok::KernelConfig config{};
     config.architecture = ok::arch::configured_architecture();
     const auto architecture = config.architecture;
 
-    if (auto status = kernel.boot(config); !status.ok()) {
+    if (auto status = kernel.boot(config); !status.ok())
+    {
         return fail(status);
     }
-    if (auto status = kernel.run_smoke_suite(); !status.ok()) {
+    if (auto status = kernel.run_smoke_suite(); !status.ok())
+    {
         return fail(status);
     }
 

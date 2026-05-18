@@ -1,10 +1,12 @@
 #include "ok/user/user.hpp"
 
-namespace ok::user {
-
-Status SimulatedUserModeGateway::enter(arch::UserEntry entry, arch::CpuContext& context)
+namespace ok::user
 {
-    if (entry.instruction_pointer == 0 || entry.stack_pointer == 0) {
+
+Status SimulatedUserModeGateway::enter(arch::UserEntry entry, arch::CpuContext &context)
+{
+    if (entry.instruction_pointer == 0 || entry.stack_pointer == 0)
+    {
         return Status::invalid_argument("invalid user entry point");
     }
     last_entry_ = entry;
@@ -15,23 +17,25 @@ Status SimulatedUserModeGateway::enter(arch::UserEntry entry, arch::CpuContext& 
     return Status::success();
 }
 
-UserSpaceManager::UserSpaceManager(UserModeGateway& gateway) : gateway_(&gateway)
+UserSpaceManager::UserSpaceManager(UserModeGateway &gateway) : gateway_(&gateway)
 {
 }
 
-UserModeGateway& UserSpaceManager::default_gateway()
+UserModeGateway &UserSpaceManager::default_gateway()
 {
     static SimulatedUserModeGateway gateway;
     return gateway;
 }
 
-Status UserSpaceManager::enter_process(sched::ProcessId pid, arch::UserEntry entry, arch::CpuContext& context)
+Status UserSpaceManager::enter_process(sched::ProcessId pid, arch::UserEntry entry, arch::CpuContext &context)
 {
-    if (pid == 0) {
+    if (pid == 0)
+    {
         return Status::invalid_argument("invalid process id");
     }
     auto status = gateway_->enter(entry, context);
-    if (!status.ok()) {
+    if (!status.ok())
+    {
         return status;
     }
     last_pid_ = pid;

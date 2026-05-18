@@ -1,13 +1,25 @@
 #include "../ops_private.hpp"
 
-namespace ok::arch::detail {
-namespace {
+namespace ok::arch::detail
+{
+namespace
+{
 
-class Arm32Operations final : public ProfiledArchOperationsBase<Architecture::arm32> {
-public:
-    [[nodiscard]] std::string_view interrupt_model() const override { return "vector-table-gic"; }
-    [[nodiscard]] std::string_view syscall_model() const override { return "svc"; }
-    [[nodiscard]] std::string_view user_transition_model() const override { return "exception-return-user"; }
+class Arm32Operations final : public ProfiledArchOperationsBase<Architecture::arm32>
+{
+  public:
+    [[nodiscard]] std::string_view interrupt_model() const override
+    {
+        return "vector-table-gic";
+    }
+    [[nodiscard]] std::string_view syscall_model() const override
+    {
+        return "svc";
+    }
+    [[nodiscard]] std::string_view user_transition_model() const override
+    {
+        return "exception-return-user";
+    }
 
     [[nodiscard]] u64 read_cycle_counter() const noexcept override
     {
@@ -58,7 +70,7 @@ public:
 
 } // namespace
 
-ArchOperations& arm32_operations()
+ArchOperations &arm32_operations()
 {
     static Arm32Operations operations;
     return operations;

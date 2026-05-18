@@ -8,9 +8,11 @@
 #include <concepts>
 #include <string_view>
 
-namespace ok::syscall {
+namespace ok::syscall
+{
 
-enum class Number : u64 {
+enum class Number : u64
+{
     read = 0,
     write = 1,
     open = 2,
@@ -43,46 +45,54 @@ enum class Number : u64 {
     ok_debug = 1024,
 };
 
-struct Request {
-    Number number {Number::ok_debug};
-    sched::ProcessId caller {0};
-    std::array<u64, 6> args {};
+struct Request
+{
+    Number number{Number::ok_debug};
+    sched::ProcessId caller{0};
+    std::array<u64, 6> args{};
 };
 
-struct Response {
-    i64 value {0};
-    Status status {Status::success()};
+struct Response
+{
+    i64 value{0};
+    Status status{Status::success()};
 };
 
-using Callback = Response (*)(void* context, const Request& request);
+using Callback = Response (*)(void *context, const Request &request);
 
-class Handler {
-public:
+class Handler
+{
+  public:
     virtual ~Handler() = default;
     [[nodiscard]] virtual std::string_view name() const = 0;
-    virtual Response invoke(const Request& request) = 0;
+    virtual Response invoke(const Request &request) = 0;
 };
 
 template <typename F>
-concept SyscallCallable = requires(F function, const Request& request) {
+concept SyscallCallable = requires(F function, const Request &request) {
     { function(request) } -> std::same_as<Response>;
 };
 
-class Table final {
-public:
-    Status register_handler(Number number, Handler& handler);
-    Status register_callback(Number number, std::string_view name, void* context, Callback callback);
-    Response dispatch(const Request& request);
+class Table final
+{
+  public:
+    Status register_handler(Number number, Handler &handler);
+    Status register_callback(Number number, std::string_view name, void *context, Callback callback);
+    Response dispatch(const Request &request);
     [[nodiscard]] bool has_handler(Number number) const;
-    [[nodiscard]] usize handler_count() const { return handlers_.size(); }
+    [[nodiscard]] usize handler_count() const
+    {
+        return handlers_.size();
+    }
 
-private:
-    struct Entry {
-        u64 number {0};
-        std::string_view name {};
-        Handler* handler {nullptr};
-        void* context {nullptr};
-        Callback callback {nullptr};
+  private:
+    struct Entry
+    {
+        u64 number{0};
+        std::string_view name{};
+        Handler *handler{nullptr};
+        void *context{nullptr};
+        Callback callback{nullptr};
     };
 
     StaticVector<Entry, 128> handlers_;

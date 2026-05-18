@@ -1,13 +1,25 @@
 #include "../ops_private.hpp"
 
-namespace ok::arch::detail {
-namespace {
+namespace ok::arch::detail
+{
+namespace
+{
 
-class X86_64Operations final : public ProfiledArchOperationsBase<Architecture::x86_64> {
-public:
-    [[nodiscard]] std::string_view interrupt_model() const override { return "idt-ist-x2apic"; }
-    [[nodiscard]] std::string_view syscall_model() const override { return "syscall-sysret"; }
-    [[nodiscard]] std::string_view user_transition_model() const override { return "iretq-sysret"; }
+class X86_64Operations final : public ProfiledArchOperationsBase<Architecture::x86_64>
+{
+  public:
+    [[nodiscard]] std::string_view interrupt_model() const override
+    {
+        return "idt-ist-x2apic";
+    }
+    [[nodiscard]] std::string_view syscall_model() const override
+    {
+        return "syscall-sysret";
+    }
+    [[nodiscard]] std::string_view user_transition_model() const override
+    {
+        return "iretq-sysret";
+    }
 
     [[nodiscard]] u64 read_cycle_counter() const noexcept override
     {
@@ -59,7 +71,7 @@ public:
 
 } // namespace
 
-ArchOperations& x86_64_operations()
+ArchOperations &x86_64_operations()
 {
     static X86_64Operations operations;
     return operations;
