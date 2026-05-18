@@ -13,6 +13,7 @@ public:
     [[nodiscard]] usize page_size() const override { return 4096; }
     [[nodiscard]] usize register_count() const override { return 16; }
     [[nodiscard]] Endianness endianness() const override { return Endianness::little; }
+    [[nodiscard]] usize hardware_thread_count() const override { return 4; }
     [[nodiscard]] bool supports_user_mode() const override { return false; }
     [[nodiscard]] std::string_view interrupt_model() const override { return "host-simulated"; }
     [[nodiscard]] std::string_view syscall_model() const override { return "host-simulated"; }

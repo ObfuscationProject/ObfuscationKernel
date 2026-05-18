@@ -30,6 +30,8 @@ int main()
 
     std::cout << "OK_TEST_PASS arch=" << ok::arch::to_string(architecture)
               << " processes=" << kernel.scheduler().process_count()
+              << " cpus=" << kernel.topology().online_count()
+              << " drivers=" << kernel.drivers().driver_count()
               << " free_frames=" << kernel.memory().frames().free_frames()
               << " syscalls=" << kernel.syscalls().handler_count()
               << " debug_test_points=" << kernel.debug_test_points_run()

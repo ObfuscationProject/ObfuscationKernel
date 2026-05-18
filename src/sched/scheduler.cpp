@@ -63,6 +63,22 @@ Result<ProcessId> Scheduler::create_process(std::string_view name, arch::CpuCont
     return pid;
 }
 
+Status Scheduler::configure_cpus(usize cpu_count)
+{
+    if (cpu_count == 0) {
+        return Status::invalid_argument("scheduler cpu count must be non-zero");
+    }
+    if (cpu_count > smp::max_cpus) {
+        return Status::overflow("scheduler cpu capacity exceeded");
+    }
+    cpu_count_ = cpu_count;
+    for (auto& pid : current_by_cpu_) {
+        pid = 0;
+    }
+    current_pid_ = 0;
+    return Status::success();
+}
+
 Status Scheduler::set_runnable(ProcessId pid)
 {
     auto* process = find(pid);
@@ -78,12 +94,22 @@ Status Scheduler::set_runnable(ProcessId pid)
 
 Result<ProcessId> Scheduler::schedule_next()
 {
-    auto next = policy_->pick_next(std::span<const ProcessControlBlock>(processes_.begin(), processes_.size()), current_pid_);
+    return schedule_next_on_cpu(0);
+}
+
+Result<ProcessId> Scheduler::schedule_next_on_cpu(smp::CpuId cpu)
+{
+    if (cpu >= cpu_count_) {
+        return Status::invalid_argument("scheduler cpu id out of range");
+    }
+
+    const auto previous_pid = current_by_cpu_[cpu];
+    auto next = policy_->pick_next(std::span<const ProcessControlBlock>(processes_.begin(), processes_.size()), previous_pid);
     if (!next) {
         return next.status();
     }
 
-    if (auto* current = find(current_pid_); current && current->state() == ProcessState::running) {
+    if (auto* current = find(previous_pid); current && current->state() == ProcessState::running) {
         current->set_state(ProcessState::runnable);
     }
 
@@ -93,7 +119,16 @@ Result<ProcessId> Scheduler::schedule_next()
     }
     selected->set_state(ProcessState::running);
     current_pid_ = selected->pid();
+    current_by_cpu_[cpu] = selected->pid();
     return current_pid_;
+}
+
+ProcessId Scheduler::current_pid(smp::CpuId cpu) const
+{
+    if (cpu >= cpu_count_) {
+        return 0;
+    }
+    return current_by_cpu_[cpu];
 }
 
 ProcessControlBlock* Scheduler::find(ProcessId pid)

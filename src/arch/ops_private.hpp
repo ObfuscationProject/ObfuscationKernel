@@ -64,6 +64,7 @@ public:
     [[nodiscard]] usize page_size() const override { return ArchTraits<A>::page_size; }
     [[nodiscard]] usize register_count() const override { return ArchTraits<A>::register_count; }
     [[nodiscard]] Endianness endianness() const override { return ArchTraits<A>::endianness; }
+    [[nodiscard]] usize hardware_thread_count() const override { return ArchTraits<A>::hardware_threads; }
     [[nodiscard]] bool supports_user_mode() const override { return ArchTraits<A>::has_user_mode; }
 };
 

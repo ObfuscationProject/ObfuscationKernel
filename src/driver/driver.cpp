@@ -114,4 +114,70 @@ Status NullBlockDriver::write(uptr, std::span<const std::byte>)
     return Status::success();
 }
 
+Status FramebufferDisplayDriver::probe()
+{
+    return Status::success();
+}
+
+Status FramebufferDisplayDriver::start()
+{
+    started_ = true;
+    return clear(0xff000000u);
+}
+
+Status FramebufferDisplayDriver::stop()
+{
+    started_ = false;
+    return Status::success();
+}
+
+Status FramebufferDisplayDriver::clear(u32 rgba)
+{
+    if (!started_) {
+        return Status::not_initialized("framebuffer driver not started");
+    }
+    for (auto& pixel : pixels_) {
+        pixel = rgba;
+    }
+    return Status::success();
+}
+
+Status FramebufferDisplayDriver::put_pixel(u32 x, u32 y, u32 rgba)
+{
+    if (!started_) {
+        return Status::not_initialized("framebuffer driver not started");
+    }
+    if (x >= mode_.width || y >= mode_.height) {
+        return Status::invalid_argument("pixel coordinate out of range");
+    }
+    pixels_[static_cast<usize>(y) * mode_.width + x] = rgba;
+    return Status::success();
+}
+
+Status FramebufferDisplayDriver::fill_rect(u32 x, u32 y, u32 width, u32 height, u32 rgba)
+{
+    if (!started_) {
+        return Status::not_initialized("framebuffer driver not started");
+    }
+    if (x + width > mode_.width || y + height > mode_.height) {
+        return Status::invalid_argument("rectangle out of range");
+    }
+    for (u32 row = 0; row < height; ++row) {
+        for (u32 column = 0; column < width; ++column) {
+            pixels_[static_cast<usize>(y + row) * mode_.width + x + column] = rgba;
+        }
+    }
+    return Status::success();
+}
+
+u64 FramebufferDisplayDriver::checksum() const
+{
+    u64 value = 1469598103934665603ull;
+    for (const auto pixel : pixels_) {
+        value ^= pixel;
+        value *= 1099511628211ull;
+    }
+    return value;
+}
+
 } // namespace ok::driver

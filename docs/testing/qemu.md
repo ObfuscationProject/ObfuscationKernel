@@ -11,6 +11,16 @@ xmake f -c --arch_target=host
 xmake run qemu_smoke
 ```
 
+The convenience task is safe to run even after configuring a freestanding
+`ok-*-elf` toolchain. It temporarily builds the hosted smoke target with a
+hosted/profile compiler and restores the previous xmake architecture/toolchain
+selection afterward:
+
+```sh
+xmake qemu-test
+xmake qemu-test -a x86_64
+```
+
 To compile and directly execute every architecture profile on the host compiler:
 
 ```sh
@@ -27,12 +37,20 @@ xmake freestanding-check --allow-missing
 For an architecture user-mode test binary:
 
 ```sh
-xmake f -c --arch_target=aarch64 --toolchain=ok-aarch64-linux
-xmake -y -b qemu_smoke
-xmake run qemu_smoke
+xmake qemu-test -a aarch64 --user
 ```
 
-The runner maps architecture profiles to qemu-user binaries:
+For a visible QEMU status window:
+
+```sh
+xmake qemu-window-test
+```
+
+`qemu-window-test` runs the architecture smoke matrix, generates a small
+bootable VGA text image, and launches QEMU with a graphical display showing each
+architecture result.
+
+The qemu-user runner maps architecture profiles to qemu-user binaries:
 
 | Profile | QEMU binary |
 | --- | --- |
@@ -51,11 +69,10 @@ is a failure.
 
 ## CI Coverage
 
-GitHub Actions has two separate cross-architecture jobs:
+GitHub Actions keeps smoke testing adjacent to each architecture build:
 
 - `host-smoke` runs the native smoke binary and the full architecture profile
   sweep.
 - `cross-toolchain-build` builds the freestanding GCC/binutils toolchains and
-  compiles `okernel`.
-- `qemu-user-smoke` installs distro Linux cross compilers and qemu-user, then
-  runs `qemu_smoke` for direct binary execution.
+  compiles `okernel`, checks freestanding runtime symbol closure, and then runs
+  the matching smoke test in the same matrix job.

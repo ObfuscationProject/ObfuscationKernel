@@ -7,6 +7,7 @@
 #include "ok/ipc/ipc.hpp"
 #include "ok/memory/memory.hpp"
 #include "ok/sched/scheduler.hpp"
+#include "ok/smp/smp.hpp"
 #include "ok/syscall/syscall.hpp"
 #include "ok/user/user.hpp"
 
@@ -34,6 +35,7 @@ public:
     [[nodiscard]] interrupt::InterruptDispatcher& interrupts() { return interrupts_; }
     [[nodiscard]] memory::MemoryManager& memory() { return memory_; }
     [[nodiscard]] sched::Scheduler& scheduler() { return scheduler_; }
+    [[nodiscard]] smp::CpuTopology& topology() { return topology_; }
     [[nodiscard]] ipc::IpcRouter& ipc() { return ipc_; }
     [[nodiscard]] syscall::Table& syscalls() { return syscalls_; }
     [[nodiscard]] driver::DriverManager& drivers() { return drivers_; }
@@ -51,9 +53,11 @@ private:
     driver::ConsoleDriver console_driver_ {};
     driver::TimerDriver timer_driver_ {};
     driver::NullBlockDriver null_block_driver_ {};
+    driver::FramebufferDisplayDriver display_driver_ {};
     interrupt::InterruptDispatcher interrupts_;
     memory::MemoryManager memory_;
     sched::Scheduler scheduler_;
+    smp::CpuTopology topology_;
     ipc::IpcRouter ipc_;
     syscall::Table syscalls_;
     driver::DriverManager drivers_;

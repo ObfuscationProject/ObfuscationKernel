@@ -42,6 +42,21 @@ points enabled:
 xmake arch-check -m debug
 ```
 
+To run a single hosted smoke test from any current configuration, including a
+current freestanding `ok-*-elf` toolchain configuration:
+
+```sh
+xmake qemu-test
+xmake qemu-test -a x86_64
+```
+
+Where a Linux user-mode compiler and qemu-user are installed, run the smoke
+binary under qemu-user:
+
+```sh
+xmake qemu-test -a aarch64 --user
+```
+
 Use release mode to confirm the same profiles compile without debug test point
 code:
 
@@ -67,6 +82,13 @@ This task builds `okernel` with the matching `ok-*-elf` toolchain and performs a
 relocatable whole-archive link to catch unresolved libc/libstdc++ runtime
 symbols.
 
+The separate graphical demo task runs the architecture smoke matrix and displays
+the result in a QEMU window:
+
+```sh
+xmake qemu-window-test
+```
+
 ## Cross Toolchains
 
 The script `scripts/build-toolchain.sh` builds binutils and GCC under
@@ -86,7 +108,7 @@ The script `scripts/build-toolchain.sh` builds binutils and GCC under
 Example:
 
 ```sh
-xmake toolchains --arch rv64 --jobs 4
+xmake toolchains -a rv64 -j 4
 xmake f -c --arch_target=rv64 --toolchain=ok-rv64-elf
 xmake -y -b okernel
 ```

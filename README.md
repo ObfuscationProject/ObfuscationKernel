@@ -4,7 +4,8 @@ ObfuscationKernel is a C++23 multi-architecture kernel framework built with xmak
 The current tree is a working foundation: it compiles a reusable kernel library,
 boots a simulated kernel instance, and runs smoke tests that exercise interrupts,
 memory management, scheduling, IPC, syscalls, drivers, VFS, and user-mode
-transition state.
+transition state. The foundation also includes SMP topology state, a simple
+framebuffer display driver, and a read-only EXT4 superblock/block reader.
 
 This is not yet a complete production POSIX kernel. The implementation defines
 the ABI, module boundaries, architecture profiles, build flow, and regression
@@ -55,7 +56,7 @@ toolchains installed.
 Build GCC/binutils toolchains into `toolchains/`:
 
 ```sh
-xmake toolchains --arch x86_64 --jobs 4
+xmake toolchains -a x86_64 -j 4
 ```
 
 Then configure xmake with the matching toolchain:
@@ -74,8 +75,20 @@ qemu-user for non-host user-mode ELF test binaries:
 xmake qemu-test
 ```
 
-For cross-architecture direct-execution tests, configure one of the Linux
-user-mode test toolchains such as `ok-aarch64-linux` or `ok-rv64-linux`.
+`xmake qemu-test` intentionally rebuilds the hosted smoke target with a hosted
+compiler even if the current xmake configuration uses a freestanding `*-elf`
+toolchain. Use `--user` to select qemu-user and Linux cross toolchains where
+available:
+
+```sh
+xmake qemu-test -a aarch64 --user
+```
+
+For a visible QEMU window that displays the current architecture smoke matrix:
+
+```sh
+xmake qemu-window-test
+```
 
 The bootless test model is intentionally separate from future bootloader or
 firmware integration. It validates kernel module behavior through a normal test

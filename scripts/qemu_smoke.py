@@ -35,8 +35,8 @@ QEMU_LD_PREFIX_BY_ARCH = {
 }
 
 
-def command_for(arch: str, binary: Path) -> list[str]:
-    if arch == "host":
+def command_for(arch: str, binary: Path, direct: bool) -> list[str]:
+    if direct or arch == "host":
         return [str(binary)]
     qemu = QEMU_BY_ARCH.get(arch)
     if qemu is None:
@@ -51,6 +51,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--arch", required=True)
     parser.add_argument("--binary", required=True, type=Path)
+    parser.add_argument("--direct", action="store_true", help="Run the smoke binary directly as a hosted profile test")
     args = parser.parse_args()
 
     binary = args.binary.resolve()
@@ -58,7 +59,7 @@ def main() -> int:
         print(f"smoke binary does not exist: {binary}", file=sys.stderr)
         return 2
 
-    command = command_for(args.arch, binary)
+    command = command_for(args.arch, binary, args.direct)
     env = os.environ.copy()
     ld_prefix = QEMU_LD_PREFIX_BY_ARCH.get(args.arch)
     if "QEMU_LD_PREFIX" not in env and ld_prefix and Path(ld_prefix).exists():

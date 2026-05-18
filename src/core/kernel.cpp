@@ -37,6 +37,26 @@ Status Kernel::boot(KernelConfig config)
     config_ = config;
     arch_ = &arch::arch_operations(config_.architecture);
 
+    const auto hardware_threads = arch_->hardware_thread_count();
+    if (auto status = topology_.initialize(hardware_threads == 0 ? 1 : hardware_threads); !status.ok()) {
+        return status;
+    }
+    if (auto status = topology_.mark_online(0); !status.ok()) {
+        return status;
+    }
+    for (usize cpu = 1; cpu < topology_.cpu_count(); ++cpu) {
+        const auto cpu_id = static_cast<smp::CpuId>(cpu);
+        if (auto status = topology_.mark_starting(cpu_id); !status.ok()) {
+            return status;
+        }
+        if (auto status = topology_.mark_online(cpu_id); !status.ok()) {
+            return status;
+        }
+    }
+    if (auto status = scheduler_.configure_cpus(topology_.cpu_count()); !status.ok()) {
+        return status;
+    }
+
     if (auto status = memory_.initialize(memory_map_span(config_), arch_->page_size()); !status.ok()) {
         return status;
     }
@@ -50,8 +70,14 @@ Status Kernel::boot(KernelConfig config)
     if (auto status = drivers_.add(null_block_driver_); !status.ok()) {
         return status;
     }
+    if (auto status = drivers_.add(display_driver_); !status.ok()) {
+        return status;
+    }
 
     if (auto status = drivers_.start_all(); !status.ok()) {
+        return status;
+    }
+    if (auto status = display_driver_.fill_rect(8, 8, 48, 24, 0xff44aa88u); !status.ok()) {
         return status;
     }
     if (auto status = register_builtin_interrupts(timer_driver_); !status.ok()) {
@@ -71,6 +97,9 @@ Status Kernel::boot(KernelConfig config)
     }
     if (!scheduler_.schedule_next()) {
         return Status::fault("failed to schedule idle process");
+    }
+    if (auto status = topology_.record_schedule(0); !status.ok()) {
+        return status;
     }
 
     if (auto status = vfs_.create("/tmp/kernel.log", fs::NodeType::regular); !status.ok()) {

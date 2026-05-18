@@ -14,6 +14,7 @@ enum class Class : u8 {
     console,
     timer,
     block,
+    display,
     network,
     input,
     entropy,
@@ -34,6 +35,9 @@ concept KernelDriver = std::derived_from<T, Driver>;
 
 inline constexpr usize max_drivers = 32;
 inline constexpr usize console_buffer_size = 4096;
+inline constexpr usize framebuffer_width = 160;
+inline constexpr usize framebuffer_height = 100;
+inline constexpr usize framebuffer_pixels = framebuffer_width * framebuffer_height;
 
 class DriverManager final {
 public:
@@ -90,6 +94,32 @@ public:
 
 private:
     bool started_ {false};
+};
+
+struct DisplayMode {
+    u32 width {framebuffer_width};
+    u32 height {framebuffer_height};
+    u32 pitch {framebuffer_width * sizeof(u32)};
+    u8 bits_per_pixel {32};
+};
+
+class FramebufferDisplayDriver final : public Driver {
+public:
+    [[nodiscard]] std::string_view name() const override { return "simple-framebuffer"; }
+    [[nodiscard]] Class driver_class() const override { return Class::display; }
+    Status probe() override;
+    Status start() override;
+    Status stop() override;
+    Status clear(u32 rgba);
+    Status put_pixel(u32 x, u32 y, u32 rgba);
+    Status fill_rect(u32 x, u32 y, u32 width, u32 height, u32 rgba);
+    [[nodiscard]] DisplayMode mode() const { return mode_; }
+    [[nodiscard]] u64 checksum() const;
+
+private:
+    bool started_ {false};
+    DisplayMode mode_ {};
+    std::array<u32, framebuffer_pixels> pixels_ {};
 };
 
 } // namespace ok::driver

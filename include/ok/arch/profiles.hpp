@@ -23,6 +23,7 @@ struct ArchTraits<Architecture::i386> {
     static constexpr usize register_count = 8;
     static constexpr Endianness endianness = Endianness::little;
     static constexpr bool has_user_mode = true;
+    static constexpr usize hardware_threads = 2;
 };
 
 template <>
@@ -33,6 +34,7 @@ struct ArchTraits<Architecture::x86_64> {
     static constexpr usize register_count = 16;
     static constexpr Endianness endianness = Endianness::little;
     static constexpr bool has_user_mode = true;
+    static constexpr usize hardware_threads = 4;
 };
 
 template <>
@@ -43,6 +45,7 @@ struct ArchTraits<Architecture::aarch64> {
     static constexpr usize register_count = 31;
     static constexpr Endianness endianness = Endianness::little;
     static constexpr bool has_user_mode = true;
+    static constexpr usize hardware_threads = 4;
 };
 
 template <>
@@ -53,6 +56,7 @@ struct ArchTraits<Architecture::arm32> {
     static constexpr usize register_count = 16;
     static constexpr Endianness endianness = Endianness::little;
     static constexpr bool has_user_mode = true;
+    static constexpr usize hardware_threads = 2;
 };
 
 template <>
@@ -63,6 +67,7 @@ struct ArchTraits<Architecture::rv64> {
     static constexpr usize register_count = 32;
     static constexpr Endianness endianness = Endianness::little;
     static constexpr bool has_user_mode = true;
+    static constexpr usize hardware_threads = 4;
 };
 
 template <>
@@ -73,6 +78,7 @@ struct ArchTraits<Architecture::rv32> {
     static constexpr usize register_count = 32;
     static constexpr Endianness endianness = Endianness::little;
     static constexpr bool has_user_mode = true;
+    static constexpr usize hardware_threads = 2;
 };
 
 template <>
@@ -83,6 +89,7 @@ struct ArchTraits<Architecture::loongarch64> {
     static constexpr usize register_count = 32;
     static constexpr Endianness endianness = Endianness::little;
     static constexpr bool has_user_mode = true;
+    static constexpr usize hardware_threads = 4;
 };
 
 static_assert(ArchitectureProfile<ArchTraits<Architecture::i386>>);
@@ -92,4 +99,3 @@ static_assert(ArchitectureProfile<ArchTraits<Architecture::arm32>>);
 static_assert(ArchitectureProfile<ArchTraits<Architecture::rv64>>);
 
 } // namespace ok::arch
-

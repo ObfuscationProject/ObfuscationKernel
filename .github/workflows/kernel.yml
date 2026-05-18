@@ -31,24 +31,38 @@ jobs:
           - arch: i386
             toolchain: ok-i386-elf
             triple: i386-elf
+            smoke_user: true
+            smoke_package: g++-i686-linux-gnu
           - arch: x86_64
             toolchain: ok-x86_64-elf
             triple: x86_64-elf
+            smoke_user: false
+            smoke_package: ""
           - arch: aarch64
             toolchain: ok-aarch64-elf
             triple: aarch64-elf
+            smoke_user: true
+            smoke_package: g++-aarch64-linux-gnu
           - arch: arm32
             toolchain: ok-arm32-elf
             triple: arm-none-eabi
+            smoke_user: true
+            smoke_package: g++-arm-linux-gnueabihf
           - arch: rv64
             toolchain: ok-rv64-elf
             triple: riscv64-elf
+            smoke_user: true
+            smoke_package: g++-riscv64-linux-gnu
           - arch: rv32
             toolchain: ok-rv32-elf
             triple: riscv32-elf
+            smoke_user: false
+            smoke_package: ""
           - arch: loongarch64
             toolchain: ok-loongarch64-elf
             triple: loongarch64-elf
+            smoke_user: false
+            smoke_package: ""
     steps:
       - uses: actions/checkout@v4
       - uses: xmake-io/github-action-setup-xmake@v1
@@ -73,37 +87,15 @@ jobs:
         run: |
           toolchains/${{ matrix.triple }}/bin/${{ matrix.triple }}-ld -r --whole-archive build/linux/x86_64/release/libokernel.a -o /tmp/okernel-${{ matrix.triple }}.o
           test -z "$(toolchains/${{ matrix.triple }}/bin/${{ matrix.triple }}-nm -u /tmp/okernel-${{ matrix.triple }}.o)"
-
-  qemu-user-smoke:
-    runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: i386
-            toolchain: ok-i386-linux
-            package: g++-i686-linux-gnu
-          - arch: aarch64
-            toolchain: ok-aarch64-linux
-            package: g++-aarch64-linux-gnu
-          - arch: arm32
-            toolchain: ok-arm32-linux
-            package: g++-arm-linux-gnueabihf
-          - arch: rv64
-            toolchain: ok-rv64-linux
-            package: g++-riscv64-linux-gnu
-    steps:
-      - uses: actions/checkout@v4
-      - uses: xmake-io/github-action-setup-xmake@v1
-        with:
-          xmake-version: latest
-      - name: Install QEMU and Linux user-mode compiler
+      - name: Install smoke test dependencies
+        if: ${{ matrix.smoke_user }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-user ${{ matrix.package }}
-      - name: Configure
-        run: xmake f -c --arch_target=${{ matrix.arch }} --toolchain=${{ matrix.toolchain }}
-      - name: Build smoke binary
-        run: xmake -y -b qemu_smoke
-      - name: Run smoke binary through qemu-user
-        run: xmake run qemu_smoke
+          sudo apt-get install -y qemu-user ${{ matrix.smoke_package }}
+      - name: Smoke architecture immediately after build
+        run: |
+          if [ "${{ matrix.smoke_user }}" = "true" ]; then
+            xmake qemu-test -a ${{ matrix.arch }} --user
+          else
+            xmake qemu-test -a ${{ matrix.arch }}
+          fi
