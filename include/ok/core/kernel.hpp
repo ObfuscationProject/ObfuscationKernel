@@ -29,6 +29,7 @@ public:
     Status run_smoke_suite();
 
     [[nodiscard]] bool booted() const { return booted_; }
+    [[nodiscard]] usize debug_test_points_run() const { return debug_test_points_run_; }
     [[nodiscard]] arch::ArchOperations& arch() { return *arch_; }
     [[nodiscard]] interrupt::InterruptDispatcher& interrupts() { return interrupts_; }
     [[nodiscard]] memory::MemoryManager& memory() { return memory_; }
@@ -44,6 +45,7 @@ private:
     Status register_builtin_syscalls(driver::ConsoleDriver& console);
 
     bool booted_ {false};
+    usize debug_test_points_run_ {0};
     KernelConfig config_ {};
     std::unique_ptr<arch::ArchOperations> arch_;
     interrupt::InterruptDispatcher interrupts_;
@@ -57,4 +59,3 @@ private:
 };
 
 } // namespace ok
-

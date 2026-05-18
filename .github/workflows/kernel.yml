@@ -19,6 +19,8 @@ jobs:
         run: xmake -y -b qemu_smoke
       - name: Smoke
         run: xmake run qemu_smoke
+      - name: Architecture profile sweep
+        run: xmake arch-check -m debug
 
   cross-toolchain-build:
     runs-on: ubuntu-24.04

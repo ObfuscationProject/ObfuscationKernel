@@ -11,6 +11,12 @@ xmake f -c --arch_target=host
 xmake run qemu_smoke
 ```
 
+To compile and directly execute every architecture profile on the host compiler:
+
+```sh
+xmake arch-check -m debug
+```
+
 For an architecture user-mode test binary:
 
 ```sh
@@ -40,6 +46,8 @@ is a failure.
 
 GitHub Actions has two separate cross-architecture jobs:
 
+- `host-smoke` runs the native smoke binary and the full architecture profile
+  sweep.
 - `cross-toolchain-build` builds the freestanding GCC/binutils toolchains and
   compiles `okernel`.
 - `qemu-user-smoke` installs distro Linux cross compilers and qemu-user, then

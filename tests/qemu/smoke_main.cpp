@@ -32,6 +32,7 @@ int main()
               << " processes=" << kernel.scheduler().process_count()
               << " free_frames=" << kernel.memory().frames().free_frames()
               << " syscalls=" << kernel.syscalls().handler_count()
+              << " debug_test_points=" << kernel.debug_test_points_run()
               << '\n';
     return 0;
 }

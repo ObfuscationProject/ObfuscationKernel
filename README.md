@@ -32,7 +32,13 @@ xmake run qemu_smoke
 Expected result:
 
 ```text
-OK_TEST_PASS arch=host processes=1 free_frames=16384 syscalls=3
+OK_TEST_PASS arch=host processes=1 free_frames=16384 syscalls=3 debug_test_points=0
+```
+
+Run every architecture profile with debug-only test points:
+
+```sh
+xmake arch-check -m debug
 ```
 
 ## Cross Toolchains
@@ -65,6 +71,15 @@ user-mode test toolchains such as `ok-aarch64-linux` or `ok-rv64-linux`.
 The bootless test model is intentionally separate from future bootloader or
 firmware integration. It validates kernel module behavior through a normal test
 entry point first, which keeps architecture bring-up fast and debuggable.
+
+## Architecture Implementations
+
+Generic kernel modules call `ok::arch::ArchOperations`. Each supported
+architecture has a concrete implementation under `src/arch/<arch>/ops.cpp`.
+Those files provide architecture-specific interrupt, syscall, user-transition,
+cycle-counter, fence, and control-operation behavior. Inline assembly is guarded
+by compiler target macros so profile checks can still run on a normal host
+compiler, while real cross builds compile the matching target assembly.
 
 ## Documentation
 

@@ -23,6 +23,20 @@ xmake f -c --arch_target=rv64
 Supported values are `host`, `i386`, `x86_64`, `aarch64`, `arm32`, `rv64`,
 `rv32`, and `loongarch64`.
 
+To build and directly smoke-test every architecture profile with debug test
+points enabled:
+
+```sh
+xmake arch-check -m debug
+```
+
+Use release mode to confirm the same profiles compile without debug test point
+code:
+
+```sh
+xmake arch-check -m release
+```
+
 ## Cross Toolchains
 
 The script `scripts/build-toolchain.sh` builds binutils and GCC under

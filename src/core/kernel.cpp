@@ -1,4 +1,5 @@
 #include "ok/core/kernel.hpp"
+#include "ok/core/test_point.hpp"
 
 #include <array>
 #include <cstring>
@@ -149,6 +150,12 @@ Status Kernel::run_smoke_suite()
         return Status::fault("user mode transition smoke test failed");
     }
 
+    auto debug_test_points = test::run_kernel_test_points(*this);
+    if (!debug_test_points) {
+        return debug_test_points.status();
+    }
+    debug_test_points_run_ = debug_test_points.value();
+
     return Status::success();
 }
 
@@ -188,4 +195,3 @@ Status Kernel::register_builtin_syscalls(driver::ConsoleDriver& console)
 }
 
 } // namespace ok
-

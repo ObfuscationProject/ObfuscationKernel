@@ -6,6 +6,8 @@ or policy boundaries and concepts at compile-time extension points.
 ## Layers
 
 - `include/ok/arch`: CPU profile traits and architecture operation interface.
+- `src/arch/<arch>`: concrete architecture operation implementations and
+  guarded inline assembly.
 - `include/ok/interrupt`: interrupt handler registration and dispatch.
 - `include/ok/memory`: physical frame allocation and address-space interface.
 - `include/ok/sched`: process/thread model and scheduler policy.
@@ -40,3 +42,23 @@ tags.
 
 The smoke suite then validates one operation from every core module.
 
+## Architecture-Specific Operations
+
+The architecture-independent kernel code depends on `ok::arch::ArchOperations`.
+The concrete implementations are separate files:
+
+| Profile | Implementation |
+| --- | --- |
+| `host` | `src/arch/host/ops.cpp` |
+| `i386` | `src/arch/i386/ops.cpp` |
+| `x86_64` | `src/arch/x86_64/ops.cpp` |
+| `aarch64` | `src/arch/aarch64/ops.cpp` |
+| `arm32` | `src/arch/arm32/ops.cpp` |
+| `rv64` | `src/arch/rv64/ops.cpp` |
+| `rv32` | `src/arch/rv32/ops.cpp` |
+| `loongarch64` | `src/arch/loongarch64/ops.cpp` |
+
+Inline assembly is used for safe low-level primitives such as cycle counters and
+memory fences. Privileged instructions such as interrupt enable/disable and CPU
+idle are guarded behind `OK_USE_PRIVILEGED_ASM`, because the current test harness
+executes as a normal user-mode process.

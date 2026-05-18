@@ -57,10 +57,17 @@ public:
     [[nodiscard]] virtual std::string_view name() const = 0;
     [[nodiscard]] virtual Architecture architecture() const = 0;
     [[nodiscard]] virtual usize page_size() const = 0;
+    [[nodiscard]] virtual usize register_count() const = 0;
+    [[nodiscard]] virtual Endianness endianness() const = 0;
     [[nodiscard]] virtual usize hardware_thread_count() const = 0;
     [[nodiscard]] virtual bool supports_user_mode() const = 0;
+    [[nodiscard]] virtual std::string_view interrupt_model() const = 0;
+    [[nodiscard]] virtual std::string_view syscall_model() const = 0;
+    [[nodiscard]] virtual std::string_view user_transition_model() const = 0;
     [[nodiscard]] virtual CpuContext make_kernel_context(uptr entry, uptr stack_top) const = 0;
     [[nodiscard]] virtual CpuContext make_user_context(UserEntry entry) const = 0;
+    [[nodiscard]] virtual u64 read_cycle_counter() const noexcept = 0;
+    virtual void memory_fence() noexcept = 0;
     virtual void enable_interrupts() noexcept = 0;
     virtual void disable_interrupts() noexcept = 0;
     virtual void halt() noexcept = 0;
@@ -122,4 +129,3 @@ struct ArchTraits;
 [[nodiscard]] std::unique_ptr<ArchOperations> make_arch_operations(Architecture architecture);
 
 } // namespace ok::arch
-
