@@ -25,9 +25,7 @@ Kernel::Kernel()
 
 Status Kernel::boot(KernelConfig config)
 {
-    if (config.architecture == arch::Architecture::host) {
-        config.architecture = arch::configured_architecture();
-    }
+    config.architecture = arch::configured_architecture();
     if (config.memory_region_count == 0) {
         config.memory_map[0] =
             memory::MemoryRegion {.base = 0x0010'0000, .size = 64 * 1024 * 1024, .type = memory::RegionType::usable};

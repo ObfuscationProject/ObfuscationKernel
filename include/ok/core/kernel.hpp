@@ -16,7 +16,7 @@
 namespace ok {
 
 struct KernelConfig {
-    arch::Architecture architecture {arch::Architecture::host};
+    arch::Architecture architecture {arch::Architecture::x86_64};
     std::array<memory::MemoryRegion, 8> memory_map {};
     usize memory_region_count {0};
     usize timer_hz {1000};

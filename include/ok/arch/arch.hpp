@@ -8,7 +8,6 @@
 namespace ok::arch {
 
 enum class Architecture : u8 {
-    host,
     i386,
     x86_64,
     aarch64,
@@ -29,7 +28,7 @@ enum class PrivilegeMode : u8 {
 };
 
 struct CpuContext {
-    Architecture architecture {Architecture::host};
+    Architecture architecture {Architecture::x86_64};
     std::array<uptr, 32> registers {};
     uptr program_counter {0};
     uptr stack_pointer {0};
@@ -78,8 +77,6 @@ struct ArchTraits;
 [[nodiscard]] constexpr std::string_view to_string(Architecture architecture)
 {
     switch (architecture) {
-    case Architecture::host:
-        return "host";
     case Architecture::i386:
         return "i386";
     case Architecture::x86_64:
@@ -121,7 +118,7 @@ struct ArchTraits;
     if (value == "loongarch64") {
         return Architecture::loongarch64;
     }
-    return Architecture::host;
+    return Architecture::x86_64;
 }
 
 [[nodiscard]] Architecture configured_architecture();

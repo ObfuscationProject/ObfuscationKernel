@@ -36,7 +36,7 @@ QEMU_LD_PREFIX_BY_ARCH = {
 
 
 def command_for(arch: str, binary: Path, direct: bool) -> list[str]:
-    if direct or arch == "host":
+    if direct:
         return [str(binary)]
     qemu = QEMU_BY_ARCH.get(arch)
     if qemu is None:

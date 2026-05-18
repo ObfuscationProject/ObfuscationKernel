@@ -97,5 +97,7 @@ static_assert(ArchitectureProfile<ArchTraits<Architecture::x86_64>>);
 static_assert(ArchitectureProfile<ArchTraits<Architecture::aarch64>>);
 static_assert(ArchitectureProfile<ArchTraits<Architecture::arm32>>);
 static_assert(ArchitectureProfile<ArchTraits<Architecture::rv64>>);
+static_assert(ArchitectureProfile<ArchTraits<Architecture::rv32>>);
+static_assert(ArchitectureProfile<ArchTraits<Architecture::loongarch64>>);
 
 } // namespace ok::arch

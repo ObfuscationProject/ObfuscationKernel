@@ -20,7 +20,7 @@ Architecture configured_architecture()
 #elif defined(OK_ARCH_TARGET_LOONGARCH64)
     return Architecture::loongarch64;
 #else
-    return Architecture::host;
+    return Architecture::x86_64;
 #endif
 }
 
@@ -42,7 +42,7 @@ ArchOperations& arch_operations(Architecture architecture)
 #elif defined(OK_ARCH_TARGET_LOONGARCH64)
     return detail::loongarch64_operations();
 #else
-    return detail::host_operations();
+    return detail::x86_64_operations();
 #endif
 }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Show architecture smoke status in a standalone QEMU graphical window."""
+"""Show the current architecture smoke result in a standalone QEMU window."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import tempfile
 from pathlib import Path
 
 
-ARCHES = ("host", "i386", "x86_64", "aarch64", "arm32", "rv64", "rv32", "loongarch64")
 PASS_RE = re.compile(r"OK_TEST_PASS arch=([^ ]+).*debug_test_points=([0-9]+)")
 
 
@@ -32,13 +31,13 @@ class BootSector:
         self.fixups.append((len(self.code) - 1, label))
 
     def build(self, text: str) -> bytes:
-        self.emit(b"\x31\xc0\x8e\xd8")  # xor ax, ax; mov ds, ax
+        self.emit(b"\x31\xc0\x8e\xd8")
         si_fixup = len(self.code) + 1
-        self.emit(b"\xbe\x00\x00")  # mov si, message
+        self.emit(b"\xbe\x00\x00")
         self.label("loop")
-        self.emit(b"\xac\x84\xc0")  # lodsb; test al, al
+        self.emit(b"\xac\x84\xc0")
         self.jmp_short(0x74, "halt")
-        self.emit(b"\x3c\x0a")  # cmp al, 0x0a
+        self.emit(b"\x3c\x0a")
         self.jmp_short(0x75, "print")
         self.emit(b"\xb4\x0e\xb0\x0d\xcd\x10\xb0\x0a\xcd\x10")
         self.jmp_short(0xeb, "loop")
@@ -68,93 +67,88 @@ class BootSector:
         return bytes(self.code)
 
 
-def run_arch_check(root: Path, mode: str) -> dict[str, str]:
-    process = subprocess.Popen(
-        ["python3", str(root / "scripts" / "arch_check.py"), "--mode", mode],
-        cwd=root,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+def smoke_binary(root: Path, arch: str, mode: str) -> Path:
+    binary = root / "build" / "linux" / arch / mode / "qemu_smoke"
+    if not binary.is_file():
+        raise FileNotFoundError(f"qemu_smoke binary was not produced for {arch}/{mode}: {binary}")
+    return binary
+
+
+def run_current_smoke(root: Path, arch: str, mode: str) -> str:
+    subprocess.run(["xmake", "-y", "-b", "qemu_smoke"], cwd=root, check=True)
+    binary = smoke_binary(root, arch, mode)
+    result = subprocess.run([str(binary)], cwd=root, text=True, capture_output=True, check=False)
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="")
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, [str(binary)])
+    if "OK_TEST_PASS" not in result.stdout:
+        raise RuntimeError("qemu_smoke did not print OK_TEST_PASS")
+    return result.stdout.strip()
+
+
+def demo_text(arch: str, smoke_output: str) -> str:
+    match = PASS_RE.search(smoke_output)
+    status = "PASS" if match else "FAIL"
+    test_points = match.group(2) if match else "0"
+    return "\n".join(
+        [
+            "ObfuscationKernel QEMU Window Test",
+            "",
+            f"arch:        {arch}",
+            f"status:      {status}",
+            f"test points: {test_points}",
+            "",
+            smoke_output[:320],
+            "",
+            "Close the QEMU window or press Ctrl-A X.",
+        ]
     )
-    output: list[str] = []
-    if process.stdout is not None:
-        for line in process.stdout:
-            output.append(line)
-            print(line, end="")
-    return_code = process.wait()
-    if return_code != 0:
-        raise subprocess.CalledProcessError(return_code, ["arch_check"])
-
-    status = {arch: "MISSING" for arch in ARCHES}
-    for line in output:
-        match = PASS_RE.search(line)
-        if match:
-            status[match.group(1)] = f"PASS tp={match.group(2)}"
-    return status
-
-
-def demo_text(status: dict[str, str]) -> str:
-    lines = ["ObfuscationKernel QEMU Window Test", ""]
-    for arch in ARCHES:
-        lines.append(f"{arch:<12} {status.get(arch, 'MISSING')}")
-    lines.extend(["", "Close the QEMU window or press Ctrl-A X."])
-    return "\n".join(lines)
-
-
-def restore(root: Path, arch: str | None, toolchain: str | None, mode: str) -> None:
-    if not arch:
-        return
-    command = ["xmake", "f", "-c", "-m", mode, f"--arch_target={arch}"]
-    if toolchain:
-        command.append(f"--toolchain={toolchain}")
-    subprocess.run(command, cwd=root, check=False)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=("debug", "release"), default="debug")
+    parser.add_argument("--arch", required=True)
+    parser.add_argument("--mode", choices=("debug", "release"), default="release")
     parser.add_argument("--display", default="gtk", help="QEMU display backend, for example gtk or sdl")
-    parser.add_argument("--no-launch", action="store_true", help="Only generate the boot image")
-    parser.add_argument("--restore-arch")
-    parser.add_argument("--restore-toolchain")
+    parser.add_argument("--no-launch", action="store_true", help="Only generate the demo image")
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
-    try:
-        status = run_arch_check(root, args.mode)
-        sector = BootSector().build(demo_text(status))
+    smoke_output = run_current_smoke(root, args.arch, args.mode)
+    sector = BootSector().build(demo_text(args.arch, smoke_output))
 
-        out_dir = Path(tempfile.mkdtemp(prefix="ok-qemu-window-"))
-        image = out_dir / "ok-window-demo.img"
-        image.write_bytes(sector + bytes(1474560 - len(sector)))
-        print(f"QEMU_WINDOW_IMAGE {image}")
+    out_dir = Path(tempfile.mkdtemp(prefix="ok-qemu-window-"))
+    image = out_dir / "ok-window-demo.img"
+    image.write_bytes(sector + bytes(1474560 - len(sector)))
+    print(f"QEMU_WINDOW_IMAGE {image}")
 
-        if args.no_launch:
-            return 0
-
-        qemu = shutil.which("qemu-system-x86_64") or shutil.which("qemu-system-i386")
-        if qemu is None:
-            raise FileNotFoundError("qemu-system-x86_64 or qemu-system-i386 was not found in PATH")
-
-        subprocess.run(
-            [
-                qemu,
-                "-drive",
-                f"file={image},format=raw,if=floppy",
-                "-boot",
-                "a",
-                "-display",
-                args.display,
-                "-no-reboot",
-                "-name",
-                "ObfuscationKernel smoke status",
-            ],
-            cwd=root,
-            check=True,
-        )
+    if args.no_launch:
         return 0
-    finally:
-        restore(root, args.restore_arch, args.restore_toolchain or None, args.mode)
+
+    qemu = shutil.which("qemu-system-x86_64") or shutil.which("qemu-system-i386")
+    if qemu is None:
+        raise FileNotFoundError("qemu-system-x86_64 or qemu-system-i386 was not found in PATH")
+
+    subprocess.run(
+        [
+            qemu,
+            "-drive",
+            f"file={image},format=raw,if=floppy",
+            "-boot",
+            "a",
+            "-display",
+            args.display,
+            "-no-reboot",
+            "-name",
+            "ObfuscationKernel smoke status",
+        ],
+        cwd=root,
+        check=True,
+    )
+    return 0
 
 
 if __name__ == "__main__":

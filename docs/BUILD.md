@@ -1,10 +1,97 @@
 # Build
 
-The primary build system is xmake. Every target is compiled as C++23 and RTTI is
-kept enabled so kernel modules can use inheritance and `dynamic_cast` where it is
-the clearest boundary.
+The primary build system is xmake. The project uses xmake's built-in
+architecture setting (`-a/--arch`) as the only architecture selector.
 
-`okernel` is a freestanding target. It is compiled with:
+`okernel` is freestanding C++23 and automatically selects the matching
+`ok-*-elf` toolchain for the configured xmake architecture. For example:
+
+```sh
+xmake f -c -m release -a x86_64
+xmake toolchain-check
+xmake -y -b okernel
+```
+
+The output follows xmake's normal layout:
+
+```text
+build/linux/x86_64/release/libokernel.a
+```
+
+## Supported Architectures
+
+- `i386`
+- `x86_64`
+- `aarch64`
+- `arm32`
+- `rv64`
+- `rv32`
+- `loongarch64`
+
+## Toolchains
+
+Build a missing freestanding GCC/binutils toolchain with:
+
+```sh
+xmake toolchains -a rv64 -j 4
+```
+
+Check the current architecture toolchain:
+
+```sh
+xmake toolchain-check
+```
+
+Check all supported toolchains:
+
+```sh
+xmake toolchain-check --all
+```
+
+If a required toolchain is missing, the build fails with the command to run, for
+example:
+
+```text
+missing freestanding toolchain for rv64 (riscv64-elf). Run: xmake toolchains -a rv64
+```
+
+The toolchain declarations live in `xmake/toolchains.lua`; the architecture to
+toolchain selection lives in `xmake/arch.lua`.
+
+## Tests
+
+`qemu_smoke` is registered as an xmake test. It builds a direct-execution test
+binary for the current xmake architecture profile and runs the kernel module
+smoke suite:
+
+```sh
+xmake test
+```
+
+The convenience task does the same for the current architecture:
+
+```sh
+xmake qemu-test
+```
+
+To temporarily test another architecture profile:
+
+```sh
+xmake qemu-test -a aarch64
+```
+
+The visual task shows the current architecture test result in a QEMU window:
+
+```sh
+xmake qemu-window-test
+```
+
+Use `--no-launch` in headless environments to only generate the bootable status
+image.
+
+## Freestanding Flags
+
+`okernel` is compiled with:
 
 - `-ffreestanding`
 - `-fno-exceptions`
@@ -15,118 +102,3 @@ the clearest boundary.
 
 Hosted containers such as `std::vector`, `std::string`, `std::map`, and
 `std::unordered_map` are not used by the kernel library.
-
-## Native Build
-
-```sh
-xmake f -c --arch_target=host
-xmake -y -b qemu_smoke
-xmake run qemu_smoke
-```
-
-## Architecture Profiles
-
-`--arch_target` selects compile-time traits:
-
-```sh
-xmake f -c --arch_target=rv64
-```
-
-Supported values are `host`, `i386`, `x86_64`, `aarch64`, `arm32`, `rv64`,
-`rv32`, and `loongarch64`.
-
-To build and directly smoke-test every architecture profile with debug test
-points enabled:
-
-```sh
-xmake arch-check -m debug
-```
-
-To run a single hosted smoke test from any current configuration, including a
-current freestanding `ok-*-elf` toolchain configuration:
-
-```sh
-xmake qemu-test
-xmake qemu-test -a x86_64
-```
-
-Where a Linux user-mode compiler and qemu-user are installed, run the smoke
-binary under qemu-user:
-
-```sh
-xmake qemu-test -a aarch64 --user
-```
-
-Use release mode to confirm the same profiles compile without debug test point
-code:
-
-```sh
-xmake arch-check -m release
-```
-
-## Freestanding Architecture Builds
-
-After installing the `*-elf` toolchains, build every freestanding architecture:
-
-```sh
-xmake freestanding-check
-```
-
-For a partial local setup:
-
-```sh
-xmake freestanding-check --allow-missing
-```
-
-This task builds `okernel` with the matching `ok-*-elf` toolchain and performs a
-relocatable whole-archive link to catch unresolved libc/libstdc++ runtime
-symbols.
-
-The separate graphical demo task runs the architecture smoke matrix and displays
-the result in a QEMU window:
-
-```sh
-xmake qemu-window-test
-```
-
-## Cross Toolchains
-
-The script `scripts/build-toolchain.sh` builds binutils and GCC under
-`toolchains/<triple>`. The xmake toolchains are predeclared in
-`xmake/toolchains.lua`:
-
-| xmake toolchain | Prefix directory |
-| --- | --- |
-| `ok-i386-elf` | `toolchains/i386-elf` |
-| `ok-x86_64-elf` | `toolchains/x86_64-elf` |
-| `ok-aarch64-elf` | `toolchains/aarch64-elf` |
-| `ok-arm32-elf` | `toolchains/arm-none-eabi` |
-| `ok-rv64-elf` | `toolchains/riscv64-elf` |
-| `ok-rv32-elf` | `toolchains/riscv32-elf` |
-| `ok-loongarch64-elf` | `toolchains/loongarch64-elf` |
-
-Example:
-
-```sh
-xmake toolchains -a rv64 -j 4
-xmake f -c --arch_target=rv64 --toolchain=ok-rv64-elf
-xmake -y -b okernel
-```
-
-The current cross toolchains are freestanding `*-elf` toolchains intended for
-kernel code. QEMU user-mode tests need Linux user-mode cross toolchains or a
-future freestanding semihosting payload.
-
-## Linux User-Mode Test Toolchains
-
-The repository also declares xmake toolchains for qemu-user smoke tests:
-
-| xmake toolchain | Compiler prefix |
-| --- | --- |
-| `ok-i386-linux` | `i686-linux-gnu` |
-| `ok-aarch64-linux` | `aarch64-linux-gnu` |
-| `ok-arm32-linux` | `arm-linux-gnueabihf` |
-| `ok-rv64-linux` | `riscv64-linux-gnu` |
-
-These are meant for CI and local QEMU user-mode testing, not for freestanding
-kernel image builds.

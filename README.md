@@ -20,36 +20,34 @@ test harness needed to grow into one without rewriting the project structure.
 - `rv64`
 - `rv32`
 - `loongarch64`
-- `host` for native development and fast smoke tests
 
 ## Quick Start
 
 ```sh
-xmake f -c --arch_target=host
-xmake -y -b qemu_smoke
-xmake run qemu_smoke
+xmake f -c -a x86_64
+xmake toolchain-check
+xmake -y -b okernel
+xmake test
 ```
 
 Expected result:
 
 ```text
-OK_TEST_PASS arch=host processes=1 free_frames=16384 syscalls=3 debug_test_points=0
+100% tests passed
 ```
 
-Run every architecture profile with debug-only test points:
+Enable debug test points for the current architecture:
 
 ```sh
-xmake arch-check -m debug
+xmake f -c -m debug -a x86_64
+xmake test
 ```
 
-Build freestanding kernel libraries with the installed `*-elf` toolchains:
+Check every configured freestanding toolchain:
 
 ```sh
-xmake freestanding-check
+xmake toolchain-check --all
 ```
-
-Use `--allow-missing` while developing on a machine that only has some
-toolchains installed.
 
 ## Cross Toolchains
 
@@ -59,32 +57,28 @@ Build GCC/binutils toolchains into `toolchains/`:
 xmake toolchains -a x86_64 -j 4
 ```
 
-Then configure xmake with the matching toolchain:
+Then configure xmake with the matching architecture. `okernel` selects the
+matching freestanding toolchain automatically:
 
 ```sh
-xmake f -c --arch_target=x86_64 --toolchain=ok-x86_64-elf
+xmake f -c -a x86_64
 xmake -y -b okernel
 ```
 
 ## QEMU Smoke Tests
 
-The smoke runner executes a test binary directly on the host for `host`, or via
-qemu-user for non-host user-mode ELF test binaries:
-
 ```sh
 xmake qemu-test
 ```
 
-`xmake qemu-test` intentionally rebuilds the hosted smoke target with a hosted
-compiler even if the current xmake configuration uses a freestanding `*-elf`
-toolchain. Use `--user` to select qemu-user and Linux cross toolchains where
-available:
+`qemu-test` tests the current xmake architecture. Pass `-a` only when you want a
+temporary one-off test for another architecture:
 
 ```sh
-xmake qemu-test -a aarch64 --user
+xmake qemu-test -a aarch64
 ```
 
-For a visible QEMU window that displays the current architecture smoke matrix:
+For a visible QEMU window that displays the current architecture smoke result:
 
 ```sh
 xmake qemu-window-test

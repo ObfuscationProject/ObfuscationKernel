@@ -38,7 +38,7 @@ kernel does not depend on libc, libstdc++, or libsupc++ at link time.
 
 `ok::Kernel::boot` performs the current simulated boot sequence:
 
-1. Select architecture operations from `arch_target`.
+1. Select architecture operations from xmake's configured architecture.
 2. Initialize physical memory from a memory map.
 3. Register and start built-in drivers.
 4. Register timer interrupt and baseline syscalls.
@@ -54,7 +54,6 @@ The concrete implementations are separate files:
 
 | Profile | Implementation |
 | --- | --- |
-| `host` | `src/arch/host/ops.cpp` |
 | `i386` | `src/arch/i386/ops.cpp` |
 | `x86_64` | `src/arch/x86_64/ops.cpp` |
 | `aarch64` | `src/arch/aarch64/ops.cpp` |

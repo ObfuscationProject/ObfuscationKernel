@@ -6,63 +6,26 @@ on:
   workflow_dispatch:
 
 jobs:
-  host-smoke:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: xmake-io/github-action-setup-xmake@v1
-        with:
-          xmake-version: latest
-      - name: Configure
-        run: xmake f -c --arch_target=host
-      - name: Build
-        run: xmake -y -b qemu_smoke
-      - name: Smoke
-        run: xmake run qemu_smoke
-      - name: Architecture profile sweep
-        run: xmake arch-check -m debug
-
-  cross-toolchain-build:
+  build-and-test:
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: i386
-            toolchain: ok-i386-elf
             triple: i386-elf
-            smoke_user: true
-            smoke_package: g++-i686-linux-gnu
           - arch: x86_64
-            toolchain: ok-x86_64-elf
             triple: x86_64-elf
-            smoke_user: false
-            smoke_package: ""
           - arch: aarch64
-            toolchain: ok-aarch64-elf
             triple: aarch64-elf
-            smoke_user: true
-            smoke_package: g++-aarch64-linux-gnu
           - arch: arm32
-            toolchain: ok-arm32-elf
             triple: arm-none-eabi
-            smoke_user: true
-            smoke_package: g++-arm-linux-gnueabihf
           - arch: rv64
-            toolchain: ok-rv64-elf
             triple: riscv64-elf
-            smoke_user: true
-            smoke_package: g++-riscv64-linux-gnu
           - arch: rv32
-            toolchain: ok-rv32-elf
             triple: riscv32-elf
-            smoke_user: false
-            smoke_package: ""
           - arch: loongarch64
-            toolchain: ok-loongarch64-elf
             triple: loongarch64-elf
-            smoke_user: false
-            smoke_package: ""
     steps:
       - uses: actions/checkout@v4
       - uses: xmake-io/github-action-setup-xmake@v1
@@ -79,23 +42,15 @@ jobs:
           key: ok-${{ matrix.triple }}-binutils-2.42-gcc-14.2.0
       - name: Build cross GCC/binutils
         run: scripts/build-toolchain.sh --arch ${{ matrix.arch }} --jobs 2
-      - name: Configure cross profile
-        run: xmake f -c --arch_target=${{ matrix.arch }} --toolchain=${{ matrix.toolchain }}
-      - name: Build kernel library for architecture
+      - name: Configure architecture
+        run: xmake f -c -m release -a ${{ matrix.arch }}
+      - name: Check toolchain
+        run: xmake toolchain-check
+      - name: Build kernel library
         run: xmake -y -b okernel
       - name: Check freestanding link closure
         run: |
-          toolchains/${{ matrix.triple }}/bin/${{ matrix.triple }}-ld -r --whole-archive build/linux/x86_64/release/libokernel.a -o /tmp/okernel-${{ matrix.triple }}.o
+          toolchains/${{ matrix.triple }}/bin/${{ matrix.triple }}-ld -r --whole-archive build/linux/${{ matrix.arch }}/release/libokernel.a -o /tmp/okernel-${{ matrix.triple }}.o
           test -z "$(toolchains/${{ matrix.triple }}/bin/${{ matrix.triple }}-nm -u /tmp/okernel-${{ matrix.triple }}.o)"
-      - name: Install smoke test dependencies
-        if: ${{ matrix.smoke_user }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-user ${{ matrix.smoke_package }}
-      - name: Smoke architecture immediately after build
-        run: |
-          if [ "${{ matrix.smoke_user }}" = "true" ]; then
-            xmake qemu-test -a ${{ matrix.arch }} --user
-          else
-            xmake qemu-test -a ${{ matrix.arch }}
-          fi
+      - name: Run architecture test
+        run: xmake test

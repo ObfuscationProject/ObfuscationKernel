@@ -35,9 +35,9 @@ Each architecture must provide:
 
 ## Tests
 
-Every new module feature needs a host smoke assertion first. Architecture
-features need either qemu-user coverage or a documented qemu-system test until
-they can be run without a bootloader.
+Every new module feature needs a `qemu_smoke` assertion for the current xmake
+architecture. Architecture features need either direct smoke coverage or a
+documented qemu-system test until they can be run without a bootloader.
 
 Debug-only test points live behind `OK_ENABLE_TEST_POINTS`, which xmake defines
 only in debug mode. Release builds must keep `debug_test_points=0` in the smoke
@@ -46,8 +46,8 @@ output.
 Before submitting architecture-sensitive changes, run:
 
 ```sh
-xmake arch-check -m debug
-xmake freestanding-check --allow-missing
-xmake f -c -m release --arch_target=host
-xmake run qemu_smoke
+xmake f -c -m debug -a x86_64
+xmake toolchain-check
+xmake -y -b okernel
+xmake test
 ```

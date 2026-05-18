@@ -68,7 +68,6 @@ public:
     [[nodiscard]] bool supports_user_mode() const override { return ArchTraits<A>::has_user_mode; }
 };
 
-ArchOperations& host_operations();
 ArchOperations& i386_operations();
 ArchOperations& x86_64_operations();
 ArchOperations& aarch64_operations();
