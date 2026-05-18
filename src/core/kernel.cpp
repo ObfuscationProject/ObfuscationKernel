@@ -2,16 +2,13 @@
 #include "ok/core/test_point.hpp"
 
 #include <array>
-#include <cstring>
 
 namespace ok {
 namespace {
 
-std::vector<memory::MemoryRegion> default_memory_map()
+std::span<const memory::MemoryRegion> memory_map_span(const KernelConfig& config)
 {
-    return {
-        memory::MemoryRegion {.base = 0x0010'0000, .size = 64 * 1024 * 1024, .type = memory::RegionType::usable},
-    };
+    return {config.memory_map.data(), config.memory_region_count};
 }
 
 std::span<const std::byte> as_bytes(std::string_view text)
@@ -22,7 +19,7 @@ std::span<const std::byte> as_bytes(std::string_view text)
 } // namespace
 
 Kernel::Kernel()
-    : arch_(arch::make_arch_operations(arch::configured_architecture()))
+    : arch_(&arch::arch_operations(arch::configured_architecture()))
 {
 }
 
@@ -31,28 +28,36 @@ Status Kernel::boot(KernelConfig config)
     if (config.architecture == arch::Architecture::host) {
         config.architecture = arch::configured_architecture();
     }
-    if (config.memory_map.empty()) {
-        config.memory_map = default_memory_map();
+    if (config.memory_region_count == 0) {
+        config.memory_map[0] =
+            memory::MemoryRegion {.base = 0x0010'0000, .size = 64 * 1024 * 1024, .type = memory::RegionType::usable};
+        config.memory_region_count = 1;
     }
 
-    config_ = std::move(config);
-    arch_ = arch::make_arch_operations(config_.architecture);
+    config_ = config;
+    arch_ = &arch::arch_operations(config_.architecture);
 
-    if (auto status = memory_.initialize(config_.memory_map, arch_->page_size()); !status.ok()) {
+    if (auto status = memory_.initialize(memory_map_span(config_), arch_->page_size()); !status.ok()) {
         return status;
     }
 
-    auto& console = drivers_.add<driver::ConsoleDriver>();
-    auto& timer = drivers_.add<driver::TimerDriver>();
-    static_cast<void>(drivers_.add<driver::NullBlockDriver>());
+    if (auto status = drivers_.add(console_driver_); !status.ok()) {
+        return status;
+    }
+    if (auto status = drivers_.add(timer_driver_); !status.ok()) {
+        return status;
+    }
+    if (auto status = drivers_.add(null_block_driver_); !status.ok()) {
+        return status;
+    }
 
     if (auto status = drivers_.start_all(); !status.ok()) {
         return status;
     }
-    if (auto status = register_builtin_interrupts(timer); !status.ok()) {
+    if (auto status = register_builtin_interrupts(timer_driver_); !status.ok()) {
         return status;
     }
-    if (auto status = register_builtin_syscalls(console); !status.ok()) {
+    if (auto status = register_builtin_syscalls(console_driver_); !status.ok()) {
         return status;
     }
 
@@ -121,7 +126,7 @@ Status Kernel::run_smoke_suite()
         return status;
     }
     auto log = vfs_.read_file("/tmp/kernel.log");
-    if (!log || log.value().size() != 7) {
+    if (!log || log.value().size != 7) {
         return Status::fault("VFS smoke test failed");
     }
 
@@ -161,35 +166,35 @@ Status Kernel::run_smoke_suite()
 
 Status Kernel::register_builtin_interrupts(driver::TimerDriver& timer)
 {
-    return interrupts_.register_function(32, "timer", [&timer](arch::TrapFrame&) {
-        timer.tick();
+    return interrupts_.register_callback(32, "timer", &timer, [](void* context, arch::TrapFrame&) {
+        static_cast<driver::TimerDriver*>(context)->tick();
         return Status::success();
     });
 }
 
 Status Kernel::register_builtin_syscalls(driver::ConsoleDriver& console)
 {
-    if (auto status = syscalls_.register_function(syscall::Number::getpid, "getpid", [](const syscall::Request& request) {
+    if (auto status = syscalls_.register_callback(syscall::Number::getpid, "getpid", nullptr, [](void*, const syscall::Request& request) {
             return syscall::Response {.value = static_cast<i64>(request.caller), .status = Status::success()};
         });
         !status.ok()) {
         return status;
     }
 
-    if (auto status = syscalls_.register_function(syscall::Number::write, "write", [&console](const syscall::Request& request) {
+    if (auto status = syscalls_.register_callback(syscall::Number::write, "write", &console, [](void* context, const syscall::Request& request) {
             if (request.args[1] == 0 || request.args[2] == 0) {
                 return syscall::Response {.value = -1, .status = Status::invalid_argument("write buffer is empty")};
             }
             const auto* text = reinterpret_cast<const char*>(request.args[1]);
             const auto size = static_cast<usize>(request.args[2]);
-            const auto status = console.write(std::string_view {text, size});
+            const auto status = static_cast<driver::ConsoleDriver*>(context)->write(std::string_view {text, size});
             return syscall::Response {.value = status.ok() ? static_cast<i64>(size) : -1, .status = status};
         });
         !status.ok()) {
         return status;
     }
 
-    return syscalls_.register_function(syscall::Number::ok_debug, "ok_debug", [](const syscall::Request& request) {
+    return syscalls_.register_callback(syscall::Number::ok_debug, "ok_debug", nullptr, [](void*, const syscall::Request& request) {
         return syscall::Response {.value = static_cast<i64>(request.args[0]), .status = Status::success()};
     });
 }

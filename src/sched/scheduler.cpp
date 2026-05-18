@@ -1,16 +1,13 @@
 #include "ok/sched/scheduler.hpp"
 
-#include <algorithm>
-
 namespace ok::sched {
 
-ProcessControlBlock::ProcessControlBlock(ProcessId pid, std::string name)
-    : pid_(pid), name_(std::move(name))
+ProcessControlBlock::ProcessControlBlock(ProcessId pid, std::string_view name) : pid_(pid)
 {
+    static_cast<void>(name_.assign(name));
 }
 
-Result<ProcessId> RoundRobinPolicy::pick_next(std::span<const std::shared_ptr<ProcessControlBlock>> processes,
-                                              ProcessId current)
+Result<ProcessId> RoundRobinPolicy::pick_next(std::span<const ProcessControlBlock> processes, ProcessId current)
 {
     if (processes.empty()) {
         return Status::not_found("no processes available");
@@ -18,7 +15,7 @@ Result<ProcessId> RoundRobinPolicy::pick_next(std::span<const std::shared_ptr<Pr
 
     usize start = 0;
     for (usize i = 0; i < processes.size(); ++i) {
-        if (processes[i]->pid() == current) {
+        if (processes[i].pid() == current) {
             start = (i + 1) % processes.size();
             break;
         }
@@ -26,30 +23,43 @@ Result<ProcessId> RoundRobinPolicy::pick_next(std::span<const std::shared_ptr<Pr
 
     for (usize offset = 0; offset < processes.size(); ++offset) {
         const auto& process = processes[(start + offset) % processes.size()];
-        if (process->state() == ProcessState::runnable || process->state() == ProcessState::running) {
-            return process->pid();
+        if (process.state() == ProcessState::runnable || process.state() == ProcessState::running) {
+            return process.pid();
         }
     }
 
     return Status::would_block("no runnable process");
 }
 
-Scheduler::Scheduler(std::unique_ptr<SchedulerPolicy> policy)
-    : policy_(std::move(policy))
+Scheduler::Scheduler(SchedulerPolicy& policy) : policy_(&policy)
 {
 }
 
-Result<ProcessId> Scheduler::create_process(std::string name, arch::CpuContext initial_context)
+SchedulerPolicy& Scheduler::default_round_robin_policy()
 {
-    auto process = std::make_shared<ProcessControlBlock>(next_pid_++, std::move(name));
-    process->threads().push_back(ThreadControlBlock {
+    static RoundRobinPolicy policy;
+    return policy;
+}
+
+Result<ProcessId> Scheduler::create_process(std::string_view name, arch::CpuContext initial_context)
+{
+    if (processes_.full()) {
+        return Status::overflow("process table capacity exceeded");
+    }
+    ProcessControlBlock process {next_pid_++, name};
+    if (auto status = process.threads().push_back(ThreadControlBlock {
         .tid = next_tid_++,
-        .owner = process->pid(),
+        .owner = process.pid(),
         .state = ProcessState::created,
         .context = initial_context,
     });
-    const auto pid = process->pid();
-    processes_.push_back(std::move(process));
+        !status.ok()) {
+        return status;
+    }
+    const auto pid = process.pid();
+    if (auto status = processes_.push_back(process); !status.ok()) {
+        return status;
+    }
     return pid;
 }
 
@@ -68,7 +78,7 @@ Status Scheduler::set_runnable(ProcessId pid)
 
 Result<ProcessId> Scheduler::schedule_next()
 {
-    auto next = policy_->pick_next(std::span<const std::shared_ptr<ProcessControlBlock>>(processes_), current_pid_);
+    auto next = policy_->pick_next(std::span<const ProcessControlBlock>(processes_.begin(), processes_.size()), current_pid_);
     if (!next) {
         return next.status();
     }
@@ -88,19 +98,22 @@ Result<ProcessId> Scheduler::schedule_next()
 
 ProcessControlBlock* Scheduler::find(ProcessId pid)
 {
-    const auto it = std::find_if(processes_.begin(), processes_.end(), [pid](const auto& process) {
-        return process->pid() == pid;
-    });
-    return it == processes_.end() ? nullptr : it->get();
+    for (auto& process : processes_) {
+        if (process.pid() == pid) {
+            return &process;
+        }
+    }
+    return nullptr;
 }
 
 const ProcessControlBlock* Scheduler::find(ProcessId pid) const
 {
-    const auto it = std::find_if(processes_.begin(), processes_.end(), [pid](const auto& process) {
-        return process->pid() == pid;
-    });
-    return it == processes_.end() ? nullptr : it->get();
+    for (const auto& process : processes_) {
+        if (process.pid() == pid) {
+            return &process;
+        }
+    }
+    return nullptr;
 }
 
 } // namespace ok::sched
-

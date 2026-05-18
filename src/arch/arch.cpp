@@ -24,27 +24,26 @@ Architecture configured_architecture()
 #endif
 }
 
-std::unique_ptr<ArchOperations> make_arch_operations(Architecture architecture)
+ArchOperations& arch_operations(Architecture architecture)
 {
-    switch (architecture) {
-    case Architecture::i386:
-        return detail::make_i386_operations();
-    case Architecture::x86_64:
-        return detail::make_x86_64_operations();
-    case Architecture::aarch64:
-        return detail::make_aarch64_operations();
-    case Architecture::arm32:
-        return detail::make_arm32_operations();
-    case Architecture::rv64:
-        return detail::make_rv64_operations();
-    case Architecture::rv32:
-        return detail::make_rv32_operations();
-    case Architecture::loongarch64:
-        return detail::make_loongarch64_operations();
-    case Architecture::host:
-        return detail::make_host_operations();
-    }
-    return detail::make_host_operations();
+    static_cast<void>(architecture);
+#if defined(OK_ARCH_TARGET_I386)
+    return detail::i386_operations();
+#elif defined(OK_ARCH_TARGET_X86_64)
+    return detail::x86_64_operations();
+#elif defined(OK_ARCH_TARGET_AARCH64)
+    return detail::aarch64_operations();
+#elif defined(OK_ARCH_TARGET_ARM32)
+    return detail::arm32_operations();
+#elif defined(OK_ARCH_TARGET_RV64)
+    return detail::rv64_operations();
+#elif defined(OK_ARCH_TARGET_RV32)
+    return detail::rv32_operations();
+#elif defined(OK_ARCH_TARGET_LOONGARCH64)
+    return detail::loongarch64_operations();
+#else
+    return detail::host_operations();
+#endif
 }
 
 } // namespace ok::arch

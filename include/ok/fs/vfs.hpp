@@ -1,16 +1,19 @@
 #pragma once
 
+#include "ok/core/fixed.hpp"
 #include "ok/core/types.hpp"
 
+#include <array>
 #include <cstddef>
-#include <map>
-#include <memory>
 #include <span>
-#include <string>
 #include <string_view>
-#include <vector>
 
 namespace ok::fs {
+
+inline constexpr usize max_path_segment = 32;
+inline constexpr usize max_ram_nodes = 128;
+inline constexpr usize max_child_nodes = 16;
+inline constexpr usize max_file_data = 4096;
 
 enum class NodeType : u8 {
     directory,
@@ -25,33 +28,46 @@ struct Metadata {
     u32 mode {0644};
 };
 
+struct FileBuffer {
+    std::array<std::byte, max_file_data> data {};
+    usize size {0};
+};
+
 class Node {
 public:
     virtual ~Node() = default;
     [[nodiscard]] virtual std::string_view name() const = 0;
     [[nodiscard]] virtual Metadata metadata() const = 0;
-    virtual Result<std::vector<std::byte>> read(usize offset, usize count) const = 0;
+    virtual Result<FileBuffer> read(usize offset, usize count) const = 0;
     virtual Status write(usize offset, std::span<const std::byte> data) = 0;
     virtual Node* lookup(std::string_view child) = 0;
-    virtual Status create(std::string name, NodeType type) = 0;
+    virtual Status create(std::string_view name, NodeType type) = 0;
 };
 
 class RamNode final : public Node {
 public:
-    RamNode(std::string name, NodeType type);
+    RamNode() = default;
 
-    [[nodiscard]] std::string_view name() const override { return name_; }
+    Status configure(std::string_view name, NodeType type);
+    Status attach_child(RamNode& child);
+
+    [[nodiscard]] std::string_view name() const override { return name_.view(); }
     [[nodiscard]] Metadata metadata() const override;
-    Result<std::vector<std::byte>> read(usize offset, usize count) const override;
+    Result<FileBuffer> read(usize offset, usize count) const override;
     Status write(usize offset, std::span<const std::byte> data) override;
     Node* lookup(std::string_view child) override;
-    Status create(std::string name, NodeType type) override;
+    Status create(std::string_view name, NodeType type) override;
+    [[nodiscard]] bool used() const { return used_; }
+    [[nodiscard]] NodeType type() const { return type_; }
 
 private:
-    std::string name_;
-    NodeType type_;
-    std::vector<std::byte> data_;
-    std::map<std::string, std::unique_ptr<RamNode>> children_;
+    bool used_ {false};
+    FixedString<max_path_segment> name_ {};
+    NodeType type_ {NodeType::regular};
+    std::array<std::byte, max_file_data> data_ {};
+    usize data_size_ {0};
+    std::array<RamNode*, max_child_nodes> children_ {};
+    usize child_count_ {0};
 };
 
 class VirtualFileSystem final {
@@ -60,14 +76,17 @@ public:
 
     Status create(std::string_view path, NodeType type);
     Status write_file(std::string_view path, std::span<const std::byte> data);
-    Result<std::vector<std::byte>> read_file(std::string_view path);
+    Result<FileBuffer> read_file(std::string_view path);
     [[nodiscard]] Node* lookup(std::string_view path);
 
 private:
-    [[nodiscard]] std::vector<std::string> split_path(std::string_view path) const;
-    [[nodiscard]] RamNode* parent_for(std::string_view path, std::string& leaf);
+    [[nodiscard]] RamNode* allocate_node(std::string_view name, NodeType type);
+    [[nodiscard]] RamNode* parent_for(std::string_view path, FixedString<max_path_segment>& leaf);
+    [[nodiscard]] static bool next_segment(std::string_view path, usize& cursor, std::string_view& segment);
 
-    std::unique_ptr<RamNode> root_;
+    std::array<RamNode, max_ram_nodes> nodes_ {};
+    usize used_nodes_ {0};
+    RamNode* root_ {nullptr};
 };
 
 } // namespace ok::fs

@@ -5,7 +5,6 @@
 
 #include <array>
 #include <concepts>
-#include <memory>
 #include <string_view>
 
 namespace ok::interrupt {
@@ -20,43 +19,31 @@ public:
     virtual Status handle(arch::TrapFrame& frame) = 0;
 };
 
+using Callback = Status (*)(void* context, arch::TrapFrame& frame);
+
 template <typename F>
 concept InterruptCallable = requires(F function, arch::TrapFrame& frame) {
     { function(frame) } -> std::same_as<Status>;
 };
 
-template <InterruptCallable F>
-class FunctionInterruptHandler final : public InterruptHandler {
-public:
-    FunctionInterruptHandler(std::string_view handler_name, F function)
-        : name_(handler_name), function_(std::move(function))
-    {
-    }
-
-    [[nodiscard]] std::string_view name() const override { return name_; }
-    Status handle(arch::TrapFrame& frame) override { return function_(frame); }
-
-private:
-    std::string_view name_;
-    F function_;
-};
-
 class InterruptDispatcher final {
 public:
-    template <InterruptCallable F>
-    Status register_function(Vector vector, std::string_view name, F function)
-    {
-        return register_handler(vector, std::make_unique<FunctionInterruptHandler<F>>(name, std::move(function)));
-    }
-
-    Status register_handler(Vector vector, std::unique_ptr<InterruptHandler> handler);
+    Status register_handler(Vector vector, InterruptHandler& handler);
+    Status register_callback(Vector vector, std::string_view name, void* context, Callback callback);
     Status dispatch(arch::TrapFrame& frame);
 
     [[nodiscard]] usize handled_count(Vector vector) const;
     [[nodiscard]] bool has_handler(Vector vector) const;
 
 private:
-    std::array<std::unique_ptr<InterruptHandler>, max_vectors> handlers_ {};
+    struct Entry {
+        std::string_view name {};
+        InterruptHandler* handler {nullptr};
+        void* context {nullptr};
+        Callback callback {nullptr};
+    };
+
+    std::array<Entry, max_vectors> handlers_ {};
     std::array<usize, max_vectors> handled_counts_ {};
 };
 
@@ -83,4 +70,3 @@ private:
 };
 
 } // namespace ok::interrupt
-

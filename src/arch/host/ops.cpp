@@ -23,10 +23,10 @@ public:
 
 } // namespace
 
-std::unique_ptr<ArchOperations> make_host_operations()
+ArchOperations& host_operations()
 {
-    return std::make_unique<HostOperations>();
+    static HostOperations operations;
+    return operations;
 }
 
 } // namespace ok::arch::detail
-

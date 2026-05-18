@@ -4,8 +4,6 @@
 
 #if defined(OK_ENABLE_TEST_POINTS)
 #include <array>
-#include <cstring>
-#include <memory>
 #endif
 
 namespace ok::test {
@@ -45,57 +43,46 @@ private:
 
 Status test_architecture_profiles(TestPointRunner& runner)
 {
-    constexpr std::array architectures {
-        arch::Architecture::host,
-        arch::Architecture::i386,
-        arch::Architecture::x86_64,
-        arch::Architecture::aarch64,
-        arch::Architecture::arm32,
-        arch::Architecture::rv64,
-        arch::Architecture::rv32,
-        arch::Architecture::loongarch64,
+    const std::array architectures {
+        arch::configured_architecture(),
     };
 
     for (auto architecture : architectures) {
-        auto operations = arch::make_arch_operations(architecture);
+        auto& operations = arch::arch_operations(architecture);
         const auto module = arch::to_string(architecture);
-        if (auto status = runner.check(module, "factory", operations != nullptr, "architecture factory returned null");
-            !status.ok()) {
-            return status;
-        }
         if (auto status = runner.check(module,
                                        "identity",
-                                       operations->architecture() == architecture,
+                                       operations.architecture() == architecture,
                                        "architecture identity mismatch");
             !status.ok()) {
             return status;
         }
-        if (auto status = runner.check(module, "page-size", operations->page_size() >= 4096, "invalid page size");
+        if (auto status = runner.check(module, "page-size", operations.page_size() >= 4096, "invalid page size");
             !status.ok()) {
             return status;
         }
-        if (auto status = runner.check(module, "register-count", operations->register_count() > 0, "invalid register count");
+        if (auto status = runner.check(module, "register-count", operations.register_count() > 0, "invalid register count");
             !status.ok()) {
             return status;
         }
         if (auto status =
-                runner.check(module, "interrupt-model", !operations->interrupt_model().empty(), "missing interrupt model");
+                runner.check(module, "interrupt-model", !operations.interrupt_model().empty(), "missing interrupt model");
             !status.ok()) {
             return status;
         }
-        if (auto status = runner.check(module, "syscall-model", !operations->syscall_model().empty(), "missing syscall model");
+        if (auto status = runner.check(module, "syscall-model", !operations.syscall_model().empty(), "missing syscall model");
             !status.ok()) {
             return status;
         }
         if (auto status = runner.check(module,
                                        "user-transition-model",
-                                       !operations->user_transition_model().empty(),
+                                       !operations.user_transition_model().empty(),
                                        "missing user transition model");
             !status.ok()) {
             return status;
         }
 
-        auto kernel_context = operations->make_kernel_context(0x1000, 0x8000);
+        auto kernel_context = operations.make_kernel_context(0x1000, 0x8000);
         if (auto status = runner.check(module,
                                        "kernel-context",
                                        kernel_context.mode == arch::PrivilegeMode::kernel &&
@@ -105,7 +92,7 @@ Status test_architecture_profiles(TestPointRunner& runner)
             return status;
         }
 
-        auto user_context = operations->make_user_context(arch::UserEntry {
+        auto user_context = operations.make_user_context(arch::UserEntry {
             .instruction_pointer = 0x400000,
             .stack_pointer = 0x800000,
             .argument = 0x55,
@@ -119,15 +106,15 @@ Status test_architecture_profiles(TestPointRunner& runner)
             return status;
         }
 
-        operations->memory_fence();
+        operations.memory_fence();
         if (auto status =
-                runner.check(module, "cycle-counter", operations->read_cycle_counter() != 0, "cycle counter returned zero");
+                runner.check(module, "cycle-counter", operations.read_cycle_counter() != 0, "cycle counter returned zero");
             !status.ok()) {
             return status;
         }
-        operations->disable_interrupts();
-        operations->enable_interrupts();
-        operations->halt();
+        operations.disable_interrupts();
+        operations.enable_interrupts();
+        operations.halt();
         if (auto status = runner.check(module, "control-ops", true, "architecture control operations failed"); !status.ok()) {
             return status;
         }
@@ -139,7 +126,7 @@ Status test_architecture_profiles(TestPointRunner& runner)
 Status test_interrupts(TestPointRunner& runner)
 {
     interrupt::InterruptDispatcher dispatcher;
-    if (auto status = runner.check_status("interrupt", "register", dispatcher.register_function(90, "debug-test", [](arch::TrapFrame&) {
+    if (auto status = runner.check_status("interrupt", "register", dispatcher.register_callback(90, "debug-test", nullptr, [](void*, arch::TrapFrame&) {
             return Status::success();
         }));
         !status.ok()) {
@@ -178,9 +165,9 @@ Status test_memory(TestPointRunner& runner)
 Status test_scheduler(TestPointRunner& runner)
 {
     sched::Scheduler scheduler;
-    auto operations = arch::make_arch_operations(arch::Architecture::x86_64);
-    auto first = scheduler.create_process("first", operations->make_kernel_context(0x1000, 0x8000));
-    auto second = scheduler.create_process("second", operations->make_kernel_context(0x2000, 0x9000));
+    auto& operations = arch::arch_operations(arch::Architecture::x86_64);
+    auto first = scheduler.create_process("first", operations.make_kernel_context(0x1000, 0x8000));
+    auto second = scheduler.create_process("second", operations.make_kernel_context(0x2000, 0x9000));
     if (auto status = runner.check("sched", "create", first.ok() && second.ok(), "process creation failed"); !status.ok()) {
         return status;
     }
@@ -215,9 +202,10 @@ Status test_ipc(TestPointRunner& runner)
 Status test_syscalls(TestPointRunner& runner)
 {
     syscall::Table table;
-    if (auto status = runner.check_status("syscall", "register", table.register_function(syscall::Number::ok_debug,
+    if (auto status = runner.check_status("syscall", "register", table.register_callback(syscall::Number::ok_debug,
                                                                                           "debug",
-                                                                                          [](const syscall::Request& request) {
+                                                                                          nullptr,
+                                                                                          [](void*, const syscall::Request& request) {
                                                                                               return syscall::Response {
                                                                                                   .value = static_cast<i64>(
                                                                                                       request.args[0]),
@@ -233,9 +221,12 @@ Status test_syscalls(TestPointRunner& runner)
 Status test_drivers(TestPointRunner& runner)
 {
     driver::DriverManager manager;
-    auto& console = manager.add<driver::ConsoleDriver>();
-    static_cast<void>(manager.add<driver::TimerDriver>());
-    static_cast<void>(manager.add<driver::NullBlockDriver>());
+    driver::ConsoleDriver console;
+    driver::TimerDriver timer;
+    driver::NullBlockDriver block;
+    static_cast<void>(manager.add(console));
+    static_cast<void>(manager.add(timer));
+    static_cast<void>(manager.add(block));
     if (auto status = runner.check_status("driver", "start-all", manager.start_all()); !status.ok()) {
         return status;
     }
@@ -251,20 +242,20 @@ Status test_filesystem(TestPointRunner& runner)
     if (auto status = runner.check_status("fs", "create", vfs.create("/tmp/debug.txt", fs::NodeType::regular)); !status.ok()) {
         return status;
     }
-    const auto* text = "debug";
-    std::span<const std::byte> bytes {reinterpret_cast<const std::byte*>(text), std::strlen(text)};
+    constexpr std::string_view text {"debug"};
+    std::span<const std::byte> bytes {reinterpret_cast<const std::byte*>(text.data()), text.size()};
     if (auto status = runner.check_status("fs", "write", vfs.write_file("/tmp/debug.txt", bytes)); !status.ok()) {
         return status;
     }
     auto read = vfs.read_file("/tmp/debug.txt");
-    return runner.check("fs", "read", read.ok() && read.value().size() == std::strlen(text), "VFS read failed");
+    return runner.check("fs", "read", read.ok() && read.value().size == text.size(), "VFS read failed");
 }
 
 Status test_user_mode(TestPointRunner& runner)
 {
     user::UserSpaceManager manager;
-    auto operations = arch::make_arch_operations(arch::Architecture::aarch64);
-    auto context = operations->make_kernel_context(0x1000, 0x8000);
+    auto& operations = arch::arch_operations(arch::Architecture::aarch64);
+    auto context = operations.make_kernel_context(0x1000, 0x8000);
     auto status = manager.enter_process(1,
                                         arch::UserEntry {
                                             .instruction_pointer = 0x400000,
@@ -318,4 +309,3 @@ Result<usize> run_kernel_test_points(Kernel&)
 #endif
 
 } // namespace ok::test
-

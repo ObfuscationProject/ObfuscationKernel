@@ -25,9 +25,14 @@ to differ by machine, bus, device, or policy. Concepts are used for local,
 zero-overhead extension points such as function-backed interrupt handlers,
 syscall handlers, serializable IPC payloads, and driver registration.
 
-RTTI is intentionally enabled. Kernel code may use `dynamic_cast` when crossing
-a generic interface boundary and when the alternative would be unsafe manual type
-tags.
+RTTI is intentionally enabled so type metadata is available to kernel code.
+Current freestanding code avoids `dynamic_cast` in core paths to keep the ABI
+surface explicit and self-contained.
+
+The kernel target is freestanding. Dynamic allocation and hosted containers are
+kept out of `okernel`; fixed-capacity containers provide the current storage
+model. `src/core/runtime.cpp` supplies minimal memory and C++ ABI symbols so the
+kernel does not depend on libc, libstdc++, or libsupc++ at link time.
 
 ## Boot Flow
 

@@ -3,7 +3,6 @@
 #include "ok/core/types.hpp"
 
 #include <array>
-#include <memory>
 #include <string_view>
 
 namespace ok::arch {
@@ -126,6 +125,6 @@ struct ArchTraits;
 }
 
 [[nodiscard]] Architecture configured_architecture();
-[[nodiscard]] std::unique_ptr<ArchOperations> make_arch_operations(Architecture architecture);
+[[nodiscard]] ArchOperations& arch_operations(Architecture architecture);
 
 } // namespace ok::arch

@@ -1,13 +1,12 @@
 #pragma once
 
+#include "ok/core/fixed.hpp"
 #include "ok/core/types.hpp"
 #include "ok/sched/scheduler.hpp"
 
 #include <array>
 #include <concepts>
-#include <memory>
 #include <string_view>
-#include <unordered_map>
 
 namespace ok::syscall {
 
@@ -55,6 +54,8 @@ struct Response {
     Status status {Status::success()};
 };
 
+using Callback = Response (*)(void* context, const Request& request);
+
 class Handler {
 public:
     virtual ~Handler() = default;
@@ -67,35 +68,24 @@ concept SyscallCallable = requires(F function, const Request& request) {
     { function(request) } -> std::same_as<Response>;
 };
 
-template <SyscallCallable F>
-class FunctionHandler final : public Handler {
-public:
-    FunctionHandler(std::string_view handler_name, F function) : name_(handler_name), function_(std::move(function)) {}
-
-    [[nodiscard]] std::string_view name() const override { return name_; }
-    Response invoke(const Request& request) override { return function_(request); }
-
-private:
-    std::string_view name_;
-    F function_;
-};
-
 class Table final {
 public:
-    template <SyscallCallable F>
-    Status register_function(Number number, std::string_view name, F function)
-    {
-        return register_handler(number, std::make_unique<FunctionHandler<F>>(name, std::move(function)));
-    }
-
-    Status register_handler(Number number, std::unique_ptr<Handler> handler);
+    Status register_handler(Number number, Handler& handler);
+    Status register_callback(Number number, std::string_view name, void* context, Callback callback);
     Response dispatch(const Request& request);
     [[nodiscard]] bool has_handler(Number number) const;
     [[nodiscard]] usize handler_count() const { return handlers_.size(); }
 
 private:
-    std::unordered_map<u64, std::unique_ptr<Handler>> handlers_;
+    struct Entry {
+        u64 number {0};
+        std::string_view name {};
+        Handler* handler {nullptr};
+        void* context {nullptr};
+        Callback callback {nullptr};
+    };
+
+    StaticVector<Entry, 128> handlers_;
 };
 
 } // namespace ok::syscall
-

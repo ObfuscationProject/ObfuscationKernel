@@ -1,12 +1,15 @@
 #include "ok/driver/driver.hpp"
 
-#include <algorithm>
-
 namespace ok::driver {
+
+Status DriverManager::add(Driver& driver)
+{
+    return drivers_.push_back(&driver);
+}
 
 Status DriverManager::start_all()
 {
-    for (auto& driver : drivers_) {
+    for (auto* driver : drivers_) {
         if (auto status = driver->probe(); !status.ok()) {
             return status;
         }
@@ -19,10 +22,12 @@ Status DriverManager::start_all()
 
 Driver* DriverManager::find(Class driver_class)
 {
-    const auto it = std::find_if(drivers_.begin(), drivers_.end(), [driver_class](const auto& driver) {
-        return driver->driver_class() == driver_class;
-    });
-    return it == drivers_.end() ? nullptr : it->get();
+    for (auto* driver : drivers_) {
+        if (driver->driver_class() == driver_class) {
+            return driver;
+        }
+    }
+    return nullptr;
 }
 
 Status ConsoleDriver::probe()
@@ -47,7 +52,12 @@ Status ConsoleDriver::write(std::string_view text)
     if (!started_) {
         return Status::not_initialized("console driver not started");
     }
-    buffer_.append(text);
+    if (buffer_size_ + text.size() > buffer_.size()) {
+        return Status::overflow("console buffer full");
+    }
+    for (usize i = 0; i < text.size(); ++i) {
+        buffer_[buffer_size_++] = text[i];
+    }
     return Status::success();
 }
 
@@ -90,7 +100,9 @@ Status NullBlockDriver::read(uptr, std::span<std::byte> out)
     if (!started_) {
         return Status::not_initialized("null block driver not started");
     }
-    std::ranges::fill(out, std::byte {0});
+    for (auto& byte : out) {
+        byte = std::byte {0};
+    }
     return Status::success();
 }
 
@@ -103,4 +115,3 @@ Status NullBlockDriver::write(uptr, std::span<const std::byte>)
 }
 
 } // namespace ok::driver
-

@@ -45,3 +45,21 @@ task("arch-check")
         })
     end)
 task_end()
+
+task("freestanding-check")
+    set_menu {
+        usage = "xmake freestanding-check",
+        description = "Build freestanding okernel for every architecture toolchain",
+        options = {
+            {nil, "allow-missing", "k", nil, "Skip architectures whose toolchain is not installed"}
+        }
+    }
+    on_run(function ()
+        import("core.base.option")
+        local argv = {path.join(os.projectdir(), "scripts", "freestanding_check.py")}
+        if option.get("allow-missing") then
+            table.insert(argv, "--allow-missing")
+        end
+        os.execv("python3", argv)
+    end)
+task_end()

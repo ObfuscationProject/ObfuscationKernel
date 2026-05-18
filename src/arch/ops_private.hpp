@@ -4,7 +4,6 @@
 #include "ok/arch/profiles.hpp"
 
 #include <atomic>
-#include <memory>
 
 namespace ok::arch::detail {
 
@@ -68,14 +67,13 @@ public:
     [[nodiscard]] bool supports_user_mode() const override { return ArchTraits<A>::has_user_mode; }
 };
 
-std::unique_ptr<ArchOperations> make_host_operations();
-std::unique_ptr<ArchOperations> make_i386_operations();
-std::unique_ptr<ArchOperations> make_x86_64_operations();
-std::unique_ptr<ArchOperations> make_aarch64_operations();
-std::unique_ptr<ArchOperations> make_arm32_operations();
-std::unique_ptr<ArchOperations> make_rv64_operations();
-std::unique_ptr<ArchOperations> make_rv32_operations();
-std::unique_ptr<ArchOperations> make_loongarch64_operations();
+ArchOperations& host_operations();
+ArchOperations& i386_operations();
+ArchOperations& x86_64_operations();
+ArchOperations& aarch64_operations();
+ArchOperations& arm32_operations();
+ArchOperations& rv64_operations();
+ArchOperations& rv32_operations();
+ArchOperations& loongarch64_operations();
 
 } // namespace ok::arch::detail
-

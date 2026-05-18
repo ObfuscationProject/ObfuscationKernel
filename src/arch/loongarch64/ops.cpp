@@ -58,10 +58,10 @@ public:
 
 } // namespace
 
-std::unique_ptr<ArchOperations> make_loongarch64_operations()
+ArchOperations& loongarch64_operations()
 {
-    return std::make_unique<LoongArch64Operations>();
+    static LoongArch64Operations operations;
+    return operations;
 }
 
 } // namespace ok::arch::detail
-

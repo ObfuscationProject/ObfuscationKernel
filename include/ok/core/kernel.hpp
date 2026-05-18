@@ -10,14 +10,14 @@
 #include "ok/syscall/syscall.hpp"
 #include "ok/user/user.hpp"
 
-#include <memory>
-#include <vector>
+#include <array>
 
 namespace ok {
 
 struct KernelConfig {
     arch::Architecture architecture {arch::Architecture::host};
-    std::vector<memory::MemoryRegion> memory_map {};
+    std::array<memory::MemoryRegion, 8> memory_map {};
+    usize memory_region_count {0};
     usize timer_hz {1000};
 };
 
@@ -47,7 +47,10 @@ private:
     bool booted_ {false};
     usize debug_test_points_run_ {0};
     KernelConfig config_ {};
-    std::unique_ptr<arch::ArchOperations> arch_;
+    arch::ArchOperations* arch_ {nullptr};
+    driver::ConsoleDriver console_driver_ {};
+    driver::TimerDriver timer_driver_ {};
+    driver::NullBlockDriver null_block_driver_ {};
     interrupt::InterruptDispatcher interrupts_;
     memory::MemoryManager memory_;
     sched::Scheduler scheduler_;

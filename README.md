@@ -41,6 +41,15 @@ Run every architecture profile with debug-only test points:
 xmake arch-check -m debug
 ```
 
+Build freestanding kernel libraries with the installed `*-elf` toolchains:
+
+```sh
+xmake freestanding-check
+```
+
+Use `--allow-missing` while developing on a machine that only has some
+toolchains installed.
+
 ## Cross Toolchains
 
 Build GCC/binutils toolchains into `toolchains/`:
@@ -80,6 +89,11 @@ Those files provide architecture-specific interrupt, syscall, user-transition,
 cycle-counter, fence, and control-operation behavior. Inline assembly is guarded
 by compiler target macros so profile checks can still run on a normal host
 compiler, while real cross builds compile the matching target assembly.
+
+`okernel` is built as freestanding C++23 with exceptions disabled and RTTI kept
+enabled. The kernel library avoids hosted containers and allocation-heavy APIs;
+fixed-capacity kernel containers live in `include/ok/core/fixed.hpp`, and
+minimal C/C++ ABI support lives in `src/core/runtime.cpp`.
 
 ## Documentation
 

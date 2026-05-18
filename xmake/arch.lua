@@ -24,9 +24,14 @@ function add_ok_arch_profile()
     end
 end
 
+function add_ok_arch_files()
+    local arch = get_config("arch_target") or "host"
+    add_files("src/arch/arch.cpp")
+    add_files(path.join("src/arch", arch, "ops.cpp"))
+end
+
 function add_ok_debug_test_points()
     if is_mode("debug") then
         add_defines("OK_ENABLE_TEST_POINTS")
     end
 end
-

@@ -15,9 +15,14 @@ Status SimulatedUserModeGateway::enter(arch::UserEntry entry, arch::CpuContext& 
     return Status::success();
 }
 
-UserSpaceManager::UserSpaceManager(std::unique_ptr<UserModeGateway> gateway)
-    : gateway_(std::move(gateway))
+UserSpaceManager::UserSpaceManager(UserModeGateway& gateway) : gateway_(&gateway)
 {
+}
+
+UserModeGateway& UserSpaceManager::default_gateway()
+{
+    static SimulatedUserModeGateway gateway;
+    return gateway;
 }
 
 Status UserSpaceManager::enter_process(sched::ProcessId pid, arch::UserEntry entry, arch::CpuContext& context)
@@ -34,4 +39,3 @@ Status UserSpaceManager::enter_process(sched::ProcessId pid, arch::UserEntry ent
 }
 
 } // namespace ok::user
-

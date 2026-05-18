@@ -1,17 +1,18 @@
 #pragma once
 
 #include "ok/core/concepts.hpp"
+#include "ok/core/fixed.hpp"
 #include "ok/core/types.hpp"
 #include "ok/sched/scheduler.hpp"
 
 #include <array>
-#include <deque>
-#include <unordered_map>
 
 namespace ok::ipc {
 
 using ChannelId = u64;
 inline constexpr usize max_inline_payload = 128;
+inline constexpr usize max_channels = 64;
+inline constexpr usize max_channel_messages = 32;
 
 struct Message {
     sched::ProcessId sender {0};
@@ -25,6 +26,7 @@ concept MessagePayload = TriviallySerializable<T> && (sizeof(T) <= max_inline_pa
 
 class Channel final {
 public:
+    Channel() = default;
     explicit Channel(ChannelId id, usize capacity = 32) : id_(id), capacity_(capacity) {}
 
     [[nodiscard]] ChannelId id() const { return id_; }
@@ -35,7 +37,7 @@ public:
 private:
     ChannelId id_;
     usize capacity_;
-    std::deque<Message> queue_;
+    StaticQueue<Message, max_channel_messages> queue_;
 };
 
 class IpcRouter final {
@@ -59,9 +61,8 @@ public:
     }
 
 private:
-    std::unordered_map<ChannelId, Channel> channels_;
+    StaticVector<Channel, max_channels> channels_;
     ChannelId next_channel_ {1};
 };
 
 } // namespace ok::ipc
-

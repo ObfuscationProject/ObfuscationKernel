@@ -61,9 +61,10 @@ public:
 
 } // namespace
 
-std::unique_ptr<ArchOperations> make_i386_operations()
+ArchOperations& i386_operations()
 {
-    return std::make_unique<I386Operations>();
+    static I386Operations operations;
+    return operations;
 }
 
 } // namespace ok::arch::detail

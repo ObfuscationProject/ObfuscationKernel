@@ -58,10 +58,10 @@ public:
 
 } // namespace
 
-std::unique_ptr<ArchOperations> make_rv64_operations()
+ArchOperations& rv64_operations()
 {
-    return std::make_unique<Rv64Operations>();
+    static Rv64Operations operations;
+    return operations;
 }
 
 } // namespace ok::arch::detail
-

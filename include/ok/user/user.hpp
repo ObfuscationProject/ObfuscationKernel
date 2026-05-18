@@ -4,7 +4,6 @@
 #include "ok/core/types.hpp"
 #include "ok/sched/scheduler.hpp"
 
-#include <memory>
 #include <string_view>
 
 namespace ok::user {
@@ -28,15 +27,16 @@ private:
 
 class UserSpaceManager final {
 public:
-    explicit UserSpaceManager(std::unique_ptr<UserModeGateway> gateway = std::make_unique<SimulatedUserModeGateway>());
+    explicit UserSpaceManager(UserModeGateway& gateway = default_gateway());
+
+    static UserModeGateway& default_gateway();
 
     Status enter_process(sched::ProcessId pid, arch::UserEntry entry, arch::CpuContext& context);
     [[nodiscard]] sched::ProcessId last_entered_pid() const { return last_pid_; }
 
 private:
-    std::unique_ptr<UserModeGateway> gateway_;
+    UserModeGateway* gateway_ {nullptr};
     sched::ProcessId last_pid_ {0};
 };
 
 } // namespace ok::user
-

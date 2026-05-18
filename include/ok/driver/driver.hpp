@@ -1,14 +1,12 @@
 #pragma once
 
 #include "ok/core/concepts.hpp"
+#include "ok/core/fixed.hpp"
 #include "ok/core/types.hpp"
 
 #include <concepts>
-#include <memory>
 #include <span>
-#include <string>
 #include <string_view>
-#include <vector>
 
 namespace ok::driver {
 
@@ -34,23 +32,19 @@ public:
 template <typename T>
 concept KernelDriver = std::derived_from<T, Driver>;
 
+inline constexpr usize max_drivers = 32;
+inline constexpr usize console_buffer_size = 4096;
+
 class DriverManager final {
 public:
-    template <KernelDriver D, typename... Args>
-    D& add(Args&&... args)
-    {
-        auto driver = std::make_unique<D>(std::forward<Args>(args)...);
-        auto& ref = *driver;
-        drivers_.push_back(std::move(driver));
-        return ref;
-    }
+    Status add(Driver& driver);
 
     Status start_all();
     [[nodiscard]] Driver* find(Class driver_class);
-    [[nodiscard]] const std::vector<std::unique_ptr<Driver>>& drivers() const { return drivers_; }
+    [[nodiscard]] usize driver_count() const { return drivers_.size(); }
 
 private:
-    std::vector<std::unique_ptr<Driver>> drivers_;
+    StaticVector<Driver*, max_drivers> drivers_;
 };
 
 class ConsoleDriver final : public Driver {
@@ -61,11 +55,12 @@ public:
     Status start() override;
     Status stop() override;
     Status write(std::string_view text);
-    [[nodiscard]] std::string_view buffer() const { return buffer_; }
+    [[nodiscard]] std::string_view buffer() const { return {buffer_.data(), buffer_size_}; }
 
 private:
     bool started_ {false};
-    std::string buffer_;
+    std::array<char, console_buffer_size> buffer_ {};
+    usize buffer_size_ {0};
 };
 
 class TimerDriver final : public Driver {
@@ -98,4 +93,3 @@ private:
 };
 
 } // namespace ok::driver
-

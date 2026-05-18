@@ -59,10 +59,10 @@ public:
 
 } // namespace
 
-std::unique_ptr<ArchOperations> make_x86_64_operations()
+ArchOperations& x86_64_operations()
 {
-    return std::make_unique<X86_64Operations>();
+    static X86_64Operations operations;
+    return operations;
 }
 
 } // namespace ok::arch::detail
-

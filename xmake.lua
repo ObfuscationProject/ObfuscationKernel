@@ -11,9 +11,30 @@ includes("xmake/toolchains.lua")
 target("okernel")
     set_kind("static")
     set_languages("c++23")
-    add_files("src/**/*.cpp")
+    add_files("src/core/*.cpp")
+    add_files("src/driver/*.cpp")
+    add_files("src/fs/*.cpp")
+    add_files("src/interrupt/*.cpp")
+    add_files("src/ipc/*.cpp")
+    add_files("src/memory/*.cpp")
+    add_files("src/sched/*.cpp")
+    add_files("src/syscall/*.cpp")
+    add_files("src/user/*.cpp")
+    add_ok_arch_files()
     add_includedirs("include", {public = true})
-    add_cxxflags("-frtti", "-Wall", "-Wextra", "-Wpedantic", {tools = {"gcc", "clang"}})
+    add_cxxflags(
+        "-ffreestanding",
+        "-fno-exceptions",
+        "-fno-stack-protector",
+        "-fno-use-cxa-atexit",
+        "-fno-threadsafe-statics",
+        "-frtti",
+        "-Wall",
+        "-Wextra",
+        "-Wpedantic",
+        {force = true}
+    )
+    add_defines("OK_KERNEL_FREESTANDING")
     add_ok_arch_profile()
     add_ok_debug_test_points()
 target_end()

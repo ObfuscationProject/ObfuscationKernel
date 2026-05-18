@@ -1,23 +1,22 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
 #include <optional>
 #include <string_view>
 #include <utility>
 
 namespace ok {
 
-using u8 = std::uint8_t;
-using u16 = std::uint16_t;
-using u32 = std::uint32_t;
-using u64 = std::uint64_t;
-using i8 = std::int8_t;
-using i16 = std::int16_t;
-using i32 = std::int32_t;
-using i64 = std::int64_t;
-using usize = std::size_t;
-using uptr = std::uintptr_t;
+using u8 = __UINT8_TYPE__;
+using u16 = __UINT16_TYPE__;
+using u32 = __UINT32_TYPE__;
+using u64 = __UINT64_TYPE__;
+using i8 = __INT8_TYPE__;
+using i16 = __INT16_TYPE__;
+using i32 = __INT32_TYPE__;
+using i64 = __INT64_TYPE__;
+using usize = decltype(sizeof(0));
+using uptr = __UINTPTR_TYPE__;
 
 enum class StatusCode : u32 {
     ok = 0,
@@ -96,4 +95,3 @@ public:
 };
 
 } // namespace ok
-

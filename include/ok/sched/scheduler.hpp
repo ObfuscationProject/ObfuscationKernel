@@ -1,18 +1,19 @@
 #pragma once
 
 #include "ok/arch/arch.hpp"
+#include "ok/core/fixed.hpp"
 #include "ok/core/types.hpp"
 
-#include <memory>
 #include <span>
-#include <string>
 #include <string_view>
-#include <vector>
 
 namespace ok::sched {
 
 using ProcessId = u64;
 using ThreadId = u64;
+inline constexpr usize max_processes = 64;
+inline constexpr usize max_threads_per_process = 8;
+inline constexpr usize max_process_name = 32;
 
 enum class ProcessState : u8 {
     created,
@@ -31,42 +32,43 @@ struct ThreadControlBlock {
 
 class ProcessControlBlock {
 public:
-    ProcessControlBlock(ProcessId pid, std::string name);
+    ProcessControlBlock() = default;
+    ProcessControlBlock(ProcessId pid, std::string_view name);
 
     [[nodiscard]] ProcessId pid() const { return pid_; }
-    [[nodiscard]] std::string_view name() const { return name_; }
+    [[nodiscard]] std::string_view name() const { return name_.view(); }
     [[nodiscard]] ProcessState state() const { return state_; }
     void set_state(ProcessState state) { state_ = state; }
-    [[nodiscard]] std::vector<ThreadControlBlock>& threads() { return threads_; }
-    [[nodiscard]] const std::vector<ThreadControlBlock>& threads() const { return threads_; }
+    [[nodiscard]] StaticVector<ThreadControlBlock, max_threads_per_process>& threads() { return threads_; }
+    [[nodiscard]] const StaticVector<ThreadControlBlock, max_threads_per_process>& threads() const { return threads_; }
 
 private:
-    ProcessId pid_;
-    std::string name_;
+    ProcessId pid_ {0};
+    FixedString<max_process_name> name_ {};
     ProcessState state_ {ProcessState::created};
-    std::vector<ThreadControlBlock> threads_;
+    StaticVector<ThreadControlBlock, max_threads_per_process> threads_ {};
 };
 
 class SchedulerPolicy {
 public:
     virtual ~SchedulerPolicy() = default;
     [[nodiscard]] virtual std::string_view name() const = 0;
-    virtual Result<ProcessId> pick_next(std::span<const std::shared_ptr<ProcessControlBlock>> processes,
-                                        ProcessId current) = 0;
+    virtual Result<ProcessId> pick_next(std::span<const ProcessControlBlock> processes, ProcessId current) = 0;
 };
 
 class RoundRobinPolicy final : public SchedulerPolicy {
 public:
     [[nodiscard]] std::string_view name() const override { return "round-robin"; }
-    Result<ProcessId> pick_next(std::span<const std::shared_ptr<ProcessControlBlock>> processes,
-                                ProcessId current) override;
+    Result<ProcessId> pick_next(std::span<const ProcessControlBlock> processes, ProcessId current) override;
 };
 
 class Scheduler final {
 public:
-    explicit Scheduler(std::unique_ptr<SchedulerPolicy> policy = std::make_unique<RoundRobinPolicy>());
+    explicit Scheduler(SchedulerPolicy& policy = default_round_robin_policy());
 
-    Result<ProcessId> create_process(std::string name, arch::CpuContext initial_context);
+    static SchedulerPolicy& default_round_robin_policy();
+
+    Result<ProcessId> create_process(std::string_view name, arch::CpuContext initial_context);
     Status set_runnable(ProcessId pid);
     Result<ProcessId> schedule_next();
 
@@ -76,12 +78,11 @@ public:
     [[nodiscard]] const ProcessControlBlock* find(ProcessId pid) const;
 
 private:
-    std::unique_ptr<SchedulerPolicy> policy_;
-    std::vector<std::shared_ptr<ProcessControlBlock>> processes_;
+    SchedulerPolicy* policy_ {nullptr};
+    StaticVector<ProcessControlBlock, max_processes> processes_ {};
     ProcessId next_pid_ {1};
     ThreadId next_tid_ {1};
     ProcessId current_pid_ {0};
 };
 
 } // namespace ok::sched
-

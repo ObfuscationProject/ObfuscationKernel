@@ -58,10 +58,10 @@ public:
 
 } // namespace
 
-std::unique_ptr<ArchOperations> make_arm32_operations()
+ArchOperations& arm32_operations()
 {
-    return std::make_unique<Arm32Operations>();
+    static Arm32Operations operations;
+    return operations;
 }
 
 } // namespace ok::arch::detail
-

@@ -1,10 +1,10 @@
 #pragma once
 
 #include "ok/core/concepts.hpp"
+#include "ok/core/fixed.hpp"
 #include "ok/core/types.hpp"
 
 #include <span>
-#include <vector>
 
 namespace ok::memory {
 
@@ -26,6 +26,9 @@ struct PhysicalFrame {
     usize index {0};
 };
 
+inline constexpr usize max_physical_frames = 16384;
+inline constexpr usize max_virtual_mappings = 256;
+
 class FrameAllocator final {
 public:
     Status initialize(std::span<const MemoryRegion> regions, usize page_size);
@@ -39,7 +42,8 @@ public:
 private:
     uptr base_ {0};
     usize page_size_ {4096};
-    std::vector<bool> frame_used_ {};
+    usize frame_count_ {0};
+    std::array<bool, max_physical_frames> frame_used_ {};
 };
 
 class AddressSpace {
@@ -64,7 +68,7 @@ private:
         usize flags;
     };
 
-    std::vector<Mapping> mappings_;
+    StaticVector<Mapping, max_virtual_mappings> mappings_;
 };
 
 class MemoryManager final {
@@ -80,4 +84,3 @@ private:
 };
 
 } // namespace ok::memory
-

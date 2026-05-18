@@ -11,6 +11,8 @@ The project language, comments, commit messages, and documentation are English.
   variation.
 - Use concepts for compile-time extension contracts.
 - Return `ok::Status` or `ok::Result<T>` from kernel module operations.
+- Keep `okernel` freestanding: no hosted STL containers, heap allocation,
+  exceptions, libc calls, or external C++ runtime dependencies.
 - Keep comments short and reserved for non-obvious behavior.
 - Do not introduce architecture-specific code into generic modules.
 
@@ -45,6 +47,7 @@ Before submitting architecture-sensitive changes, run:
 
 ```sh
 xmake arch-check -m debug
+xmake freestanding-check --allow-missing
 xmake f -c -m release --arch_target=host
 xmake run qemu_smoke
 ```

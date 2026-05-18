@@ -2,33 +2,55 @@
 
 namespace ok::syscall {
 
-Status Table::register_handler(Number number, std::unique_ptr<Handler> handler)
+Status Table::register_handler(Number number, Handler& handler)
 {
-    if (!handler) {
-        return Status::invalid_argument("syscall handler is null");
+    const auto key = static_cast<u64>(number);
+    for (const auto& entry : handlers_) {
+        if (entry.number == key) {
+            return Status::already_exists("syscall handler already registered");
+        }
+    }
+    return handlers_.push_back(Entry {.number = key, .name = handler.name(), .handler = &handler});
+}
+
+Status Table::register_callback(Number number, std::string_view name, void* context, Callback callback)
+{
+    if (callback == nullptr) {
+        return Status::invalid_argument("syscall callback is null");
     }
     const auto key = static_cast<u64>(number);
-    if (handlers_.contains(key)) {
-        return Status::already_exists("syscall handler already registered");
+    for (const auto& entry : handlers_) {
+        if (entry.number == key) {
+            return Status::already_exists("syscall handler already registered");
+        }
     }
-    handlers_.emplace(key, std::move(handler));
-    return Status::success();
+    return handlers_.push_back(Entry {.number = key, .name = name, .context = context, .callback = callback});
 }
 
 Response Table::dispatch(const Request& request)
 {
     const auto key = static_cast<u64>(request.number);
-    auto it = handlers_.find(key);
-    if (it == handlers_.end()) {
-        return Response {.value = -1, .status = Status::unsupported("syscall not implemented")};
+    for (auto& entry : handlers_) {
+        if (entry.number != key) {
+            continue;
+        }
+        if (entry.handler != nullptr) {
+            return entry.handler->invoke(request);
+        }
+        return entry.callback(entry.context, request);
     }
-    return it->second->invoke(request);
+    return Response {.value = -1, .status = Status::unsupported("syscall not implemented")};
 }
 
 bool Table::has_handler(Number number) const
 {
-    return handlers_.contains(static_cast<u64>(number));
+    const auto key = static_cast<u64>(number);
+    for (const auto& entry : handlers_) {
+        if (entry.number == key) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace ok::syscall
-

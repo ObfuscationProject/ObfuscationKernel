@@ -64,10 +64,10 @@ public:
 
 } // namespace
 
-std::unique_ptr<ArchOperations> make_rv32_operations()
+ArchOperations& rv32_operations()
 {
-    return std::make_unique<Rv32Operations>();
+    static Rv32Operations operations;
+    return operations;
 }
 
 } // namespace ok::arch::detail
-

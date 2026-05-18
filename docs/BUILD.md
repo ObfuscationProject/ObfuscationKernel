@@ -4,6 +4,18 @@ The primary build system is xmake. Every target is compiled as C++23 and RTTI is
 kept enabled so kernel modules can use inheritance and `dynamic_cast` where it is
 the clearest boundary.
 
+`okernel` is a freestanding target. It is compiled with:
+
+- `-ffreestanding`
+- `-fno-exceptions`
+- `-fno-stack-protector`
+- `-fno-use-cxa-atexit`
+- `-fno-threadsafe-statics`
+- `-frtti`
+
+Hosted containers such as `std::vector`, `std::string`, `std::map`, and
+`std::unordered_map` are not used by the kernel library.
+
 ## Native Build
 
 ```sh
@@ -37,10 +49,29 @@ code:
 xmake arch-check -m release
 ```
 
+## Freestanding Architecture Builds
+
+After installing the `*-elf` toolchains, build every freestanding architecture:
+
+```sh
+xmake freestanding-check
+```
+
+For a partial local setup:
+
+```sh
+xmake freestanding-check --allow-missing
+```
+
+This task builds `okernel` with the matching `ok-*-elf` toolchain and performs a
+relocatable whole-archive link to catch unresolved libc/libstdc++ runtime
+symbols.
+
 ## Cross Toolchains
 
 The script `scripts/build-toolchain.sh` builds binutils and GCC under
-`toolchains/<triple>`. The xmake toolchains are predeclared in `xmake.lua`:
+`toolchains/<triple>`. The xmake toolchains are predeclared in
+`xmake/toolchains.lua`:
 
 | xmake toolchain | Prefix directory |
 | --- | --- |
@@ -61,9 +92,8 @@ xmake -y -b okernel
 ```
 
 The current cross toolchains are freestanding `*-elf` toolchains intended for
-kernel code. The script also builds the freestanding libstdc++ subset so C++23
-headers used by the kernel framework are available. QEMU user-mode tests need
-Linux user-mode cross toolchains or a future freestanding semihosting payload.
+kernel code. QEMU user-mode tests need Linux user-mode cross toolchains or a
+future freestanding semihosting payload.
 
 ## Linux User-Mode Test Toolchains
 

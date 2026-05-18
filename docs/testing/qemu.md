@@ -17,6 +17,13 @@ To compile and directly execute every architecture profile on the host compiler:
 xmake arch-check -m debug
 ```
 
+To build every installed freestanding architecture toolchain and check for
+unresolved runtime symbols:
+
+```sh
+xmake freestanding-check --allow-missing
+```
+
 For an architecture user-mode test binary:
 
 ```sh
