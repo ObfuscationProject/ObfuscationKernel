@@ -1,5 +1,8 @@
 #include "ok/core/types.hpp"
 
+// Minimal compiler/runtime symbols for the freestanding okernel target.
+// This is not a process runtime and must not grow into libc/libstdc++.
+
 extern "C" void* memcpy(void* destination, const void* source, ok::usize count)
 {
     auto* out = static_cast<ok::u8*>(destination);
@@ -30,6 +33,42 @@ extern "C" int memcmp(const void* lhs, const void* rhs, ok::usize count)
     }
     return 0;
 }
+
+#if defined(__arm__)
+extern "C" ok::u32 __aeabi_uidiv(ok::u32 numerator, ok::u32 denominator)
+{
+    if (denominator == 0) {
+        return 0;
+    }
+
+    ok::u32 quotient = 0;
+    ok::u32 bit = 1;
+    while (denominator < numerator && (denominator & 0x8000'0000u) == 0) {
+        denominator <<= 1;
+        bit <<= 1;
+    }
+    while (bit != 0) {
+        if (numerator >= denominator) {
+            numerator -= denominator;
+            quotient |= bit;
+        }
+        denominator >>= 1;
+        bit >>= 1;
+    }
+    return quotient;
+}
+
+extern "C" [[gnu::naked]] void __aeabi_uidivmod()
+{
+    asm volatile(
+        "push {r0, r1, lr}\n"
+        "bl __aeabi_uidiv\n"
+        "pop {r1, r2, lr}\n"
+        "mul r3, r0, r2\n"
+        "sub r1, r1, r3\n"
+        "bx lr\n");
+}
+#endif
 
 extern "C" int atexit(void (*)())
 {
@@ -63,4 +102,3 @@ __si_class_type_info::~__si_class_type_info() = default;
 __vmi_class_type_info::~__vmi_class_type_info() = default;
 
 } // namespace __cxxabiv1
-

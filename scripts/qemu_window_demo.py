@@ -67,23 +67,15 @@ class BootSector:
         return bytes(self.code)
 
 
-def smoke_binary(root: Path, arch: str, mode: str) -> Path:
-    binary = root / "build" / "linux" / arch / mode / "qemu_smoke"
-    if not binary.is_file():
-        raise FileNotFoundError(f"qemu_smoke binary was not produced for {arch}/{mode}: {binary}")
-    return binary
-
-
-def run_current_smoke(root: Path, arch: str, mode: str) -> str:
+def run_current_smoke(root: Path) -> str:
     subprocess.run(["xmake", "-y", "-b", "qemu_smoke"], cwd=root, check=True)
-    binary = smoke_binary(root, arch, mode)
-    result = subprocess.run([str(binary)], cwd=root, text=True, capture_output=True, check=False)
+    result = subprocess.run(["xmake", "run", "qemu_smoke"], cwd=root, text=True, capture_output=True, check=False)
     if result.stdout:
         print(result.stdout, end="")
     if result.stderr:
         print(result.stderr, end="")
     if result.returncode != 0:
-        raise subprocess.CalledProcessError(result.returncode, [str(binary)])
+        raise subprocess.CalledProcessError(result.returncode, ["xmake", "run", "qemu_smoke"])
     if "OK_TEST_PASS" not in result.stdout:
         raise RuntimeError("qemu_smoke did not print OK_TEST_PASS")
     return result.stdout.strip()
@@ -117,7 +109,7 @@ def main() -> int:
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
-    smoke_output = run_current_smoke(root, args.arch, args.mode)
+    smoke_output = run_current_smoke(root)
     sector = BootSector().build(demo_text(args.arch, smoke_output))
 
     out_dir = Path(tempfile.mkdtemp(prefix="ok-qemu-window-"))

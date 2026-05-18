@@ -29,6 +29,7 @@ target("okernel")
     set_kind("static")
     set_languages("c++23")
     add_ok_freestanding_toolchain()
+    add_ok_freestanding_arch_flags()
     add_ok_kernel_sources(true)
     add_includedirs("include", {public = true})
     add_cxxflags(
@@ -51,6 +52,8 @@ target_end()
 target("qemu_smoke")
     set_kind("binary")
     set_languages("c++23")
+    set_arch(os.arch())
+    set_values("ok.arch", ok_current_arch())
     add_ok_kernel_sources(false)
     add_files("tests/qemu/smoke_main.cpp")
     add_includedirs("include")
@@ -60,7 +63,7 @@ target("qemu_smoke")
     on_run(function (target)
         os.execv("python3", {
             path.join(os.projectdir(), "scripts", "qemu_smoke.py"),
-            "--arch", ok_current_arch(),
+            "--arch", target:values("ok.arch"),
             "--binary", target:targetfile(),
             "--direct"
         })

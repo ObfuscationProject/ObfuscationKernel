@@ -23,7 +23,8 @@ OK_ARCH_SPECS = {
         define = "OK_ARCH_TARGET_ARM32",
         source = "arm32",
         toolchain = "ok-arm32-elf",
-        triple = "arm-none-eabi"
+        triple = "arm-none-eabi",
+        freestanding_cxxflags = {"-march=armv7-a", "-marm"}
     },
     rv64 = {
         define = "OK_ARCH_TARGET_RV64",
@@ -127,6 +128,15 @@ function add_ok_freestanding_toolchain()
                   arch, spec.triple, arch)
         end
     end)
+end
+
+function add_ok_freestanding_arch_flags()
+    local _, spec = ok_require_arch(ok_current_arch())
+    if spec.freestanding_cxxflags then
+        for _, flag in ipairs(spec.freestanding_cxxflags) do
+            add_cxxflags(flag, {force = true})
+        end
+    end
 end
 
 function add_ok_debug_test_points()

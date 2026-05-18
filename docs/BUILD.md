@@ -102,3 +102,12 @@ image.
 
 Hosted containers such as `std::vector`, `std::string`, `std::map`, and
 `std::unordered_map` are not used by the kernel library.
+
+## Freestanding Runtime
+
+`src/core/runtime.cpp` provides only the small set of symbols that the compiler
+can emit for freestanding C++ code: byte memory routines, ARM EABI arithmetic
+helpers, sized delete operators, `atexit`, and RTTI type-info destructors. It is
+not a hosted runtime, not a process runtime, and not a libc/libstdc++
+replacement. The `qemu_smoke` test target excludes this file because that binary
+is a hosted test harness.

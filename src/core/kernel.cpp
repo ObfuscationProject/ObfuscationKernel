@@ -16,6 +16,22 @@ std::span<const std::byte> as_bytes(std::string_view text)
     return {reinterpret_cast<const std::byte*>(text.data()), text.size()};
 }
 
+uptr smoke_mapping_address(arch::Architecture architecture)
+{
+    switch (architecture) {
+    case arch::Architecture::i386:
+    case arch::Architecture::arm32:
+    case arch::Architecture::rv32:
+        return static_cast<uptr>(0xc000'0000u);
+    case arch::Architecture::x86_64:
+    case arch::Architecture::aarch64:
+    case arch::Architecture::rv64:
+    case arch::Architecture::loongarch64:
+        return static_cast<uptr>(0xffff'8000'0000'0000ull);
+    }
+    return static_cast<uptr>(0xc000'0000u);
+}
+
 } // namespace
 
 Kernel::Kernel()
@@ -118,10 +134,11 @@ Status Kernel::run_smoke_suite()
     if (!frame) {
         return frame.status();
     }
-    if (auto status = memory_.kernel_address_space().map(0xffff'8000'0000'0000ull, frame.value(), 0b11); !status.ok()) {
+    const auto smoke_address = smoke_mapping_address(config_.architecture);
+    if (auto status = memory_.kernel_address_space().map(smoke_address, frame.value(), 0b11); !status.ok()) {
         return status;
     }
-    if (auto status = memory_.kernel_address_space().unmap(0xffff'8000'0000'0000ull); !status.ok()) {
+    if (auto status = memory_.kernel_address_space().unmap(smoke_address); !status.ok()) {
         return status;
     }
     if (auto status = memory_.frames().release(frame.value()); !status.ok()) {
