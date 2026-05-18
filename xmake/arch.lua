@@ -119,8 +119,14 @@ function add_ok_freestanding_toolchain()
         spec = OK_ARCH_SPECS.x86_64
     end
     local compiler = ok_toolchain_binary(spec, "g++")
+    local toolchain_dir = path.join(os.projectdir(), "toolchains", spec.triple)
     if os.isfile(compiler) then
         set_toolchains(spec.toolchain)
+        add_includedirs(path.join(toolchain_dir, spec.triple, "include"), {public = true})
+        add_includedirs(path.join(toolchain_dir, "include"), {public = true})
+        if os.isdir(toolchain_dir) then
+            add_cxxflags("--sysroot=" .. toolchain_dir, {force = true})
+        end
     end
     before_build(function ()
         if not os.isfile(compiler) then

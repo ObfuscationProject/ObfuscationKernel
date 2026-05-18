@@ -63,6 +63,32 @@ triple_for_arch() {
     esac
 }
 
+sync_toolchain_include_layout() {
+    local prefix="$1"
+    local target="$2"
+    local include_root="${prefix}/include"
+    local cxx_include="${prefix}/${target}/include"
+    local gcc_include="${prefix}/lib/gcc/${target}/${GCC_VERSION}/include"
+    local gcc_fixed_include="${prefix}/lib/gcc/${target}/${GCC_VERSION}/include-fixed"
+
+    mkdir -p "$include_root"
+
+    if [[ -d "${cxx_include}/c++" ]]; then
+        rm -rf "${include_root}/c++"
+        ln -sfn "${cxx_include}/c++" "${include_root}/c++"
+    fi
+
+    for item in "$gcc_include"/* "$gcc_fixed_include"/*; do
+        if [[ -e "$item" ]]; then
+            local base
+            base="$(basename "$item")"
+            if [[ ! -e "${include_root}/${base}" ]]; then
+                ln -sfn "$item" "${include_root}/${base}"
+            fi
+        fi
+    done
+}
+
 download() {
     local url="$1"
     local output="$2"
@@ -99,6 +125,7 @@ build_one() {
 
     if [[ -f "$stamp" ]]; then
         echo "[toolchain] ${target} already built at ${prefix}"
+        sync_toolchain_include_layout "$prefix" "$target"
         return
     fi
 
@@ -139,6 +166,7 @@ build_one() {
         PATH="${prefix}/bin:${PATH}" make install-gcc install-target-libgcc install-target-libstdc++-v3
     )
 
+    sync_toolchain_include_layout "$prefix" "$target"
     touch "$stamp"
 }
 
