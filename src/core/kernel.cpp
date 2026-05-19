@@ -72,6 +72,16 @@ Status Kernel::boot(KernelConfig config)
 
     config_ = config;
     arch_ = &arch::arch_operations(config_.architecture);
+    memory_.set_translation_mode(config_.modes.memory);
+    interrupts_.set_mode(config_.modes.interrupts);
+    topology_.set_mode(config_.modes.smp);
+    scheduler_.set_mode(config_.modes.scheduler);
+    ipc_.set_mode(config_.modes.ipc);
+    syscalls_.set_mode(config_.modes.syscalls);
+    vfs_.set_mode(config_.modes.filesystem);
+    user_space_.set_mode(config_.modes.user);
+    keyboard_driver_.set_mode(config_.modes.drivers);
+    mouse_driver_.set_mode(config_.modes.drivers);
 
     const auto hardware_threads = arch_->hardware_thread_count();
     if (auto status = topology_.initialize(hardware_threads == 0 ? 1 : hardware_threads); !status.ok())
@@ -120,6 +130,14 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
+    if (auto status = drivers_.add(keyboard_driver_); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = drivers_.add(mouse_driver_); !status.ok())
+    {
+        return status;
+    }
 
     if (auto status = drivers_.start_all(); !status.ok())
     {
@@ -141,7 +159,7 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
-    if (auto status = log_boot_line("[    0.000004] driver: console timer block framebuffer started"); !status.ok())
+    if (auto status = log_boot_line("[    0.000004] driver: console timer block framebuffer input started"); !status.ok())
     {
         return status;
     }
@@ -297,6 +315,37 @@ Status Kernel::run_debug_test_suite()
         return Status::fault("display debug test failed");
     }
     test_report_.display = true;
+
+    if (auto status = keyboard_driver_.feed_scancode(0x23); !status.ok())
+    {
+        return status;
+    }
+    auto key = keyboard_driver_.read_event();
+    if (!key || !key.value().pressed || key.value().ascii != 'h')
+    {
+        return Status::fault("keyboard debug test failed");
+    }
+    if (auto status = mouse_driver_.feed_packet(driver::MousePacket{.delta_x = 3, .delta_y = -2, .left_button = true});
+        !status.ok())
+    {
+        return status;
+    }
+    auto mouse = mouse_driver_.read_packet();
+    if (!mouse || mouse.value().delta_x != 3 || mouse.value().delta_y != -2 || !mouse.value().left_button)
+    {
+        return Status::fault("mouse debug test failed");
+    }
+    test_report_.input = true;
+
+    if (memory_.translation_mode() != config_.modes.memory || interrupts_.mode() != config_.modes.interrupts ||
+        topology_.mode() != config_.modes.smp || scheduler_.mode() != config_.modes.scheduler ||
+        ipc_.mode() != config_.modes.ipc || syscalls_.mode() != config_.modes.syscalls ||
+        vfs_.mode() != config_.modes.filesystem || user_space_.mode() != config_.modes.user ||
+        keyboard_driver_.mode() != config_.modes.drivers || mouse_driver_.mode() != config_.modes.drivers)
+    {
+        return Status::fault("module mode propagation failed");
+    }
+    test_report_.modes = true;
 
     auto debug_test_points = test::run_kernel_test_points(*this);
     if (!debug_test_points)

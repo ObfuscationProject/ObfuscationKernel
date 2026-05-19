@@ -155,10 +155,10 @@ task("qemu-test")
             os.execv("xmake", {"f", "-c", "-m", mode, "-a", test_arch})
         end
 
-        local build_code = os.execv("xmake", {"-y", "-b", "kernel"}, {try = true})
+        local build_code = os.execv("xmake", {"-y", "-b", "okernel_image"}, {try = true})
         local test_code = 0
         if build_code == 0 then
-            test_code = os.execv("xmake", {"run", "kernel"}, {try = true})
+            test_code = os.execv("xmake", {"run", "okernel_image"}, {try = true})
         end
 
         if reconfigured then
@@ -199,7 +199,7 @@ task("qemu-window-test")
         if reconfigured then
             os.execv("xmake", {"f", "-c", "-m", mode, "-a", arch})
         end
-        local build_code = os.execv("xmake", {"-y", "-b", "kernel"}, {try = true})
+        local build_code = os.execv("xmake", {"-y", "-b", "okernel_image"}, {try = true})
         if build_code ~= 0 then
             if reconfigured then
                 os.execv("xmake", {"f", "-c", "-m", current_mode, "-a", arch})

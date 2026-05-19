@@ -17,6 +17,13 @@ enum class RegionType : u8
     kernel_image,
 };
 
+enum class TranslationMode : u8
+{
+    linear,
+    paged,
+    higher_half,
+};
+
 struct MemoryRegion
 {
     uptr base{0};
@@ -94,6 +101,14 @@ class LinearAddressSpace final : public AddressSpace
 class MemoryManager final
 {
   public:
+    void set_translation_mode(TranslationMode mode)
+    {
+        mode_ = mode;
+    }
+    [[nodiscard]] TranslationMode translation_mode() const
+    {
+        return mode_;
+    }
     Status initialize(std::span<const MemoryRegion> regions, usize page_size);
     [[nodiscard]] FrameAllocator &frames()
     {
@@ -109,6 +124,7 @@ class MemoryManager final
     }
 
   private:
+    TranslationMode mode_{TranslationMode::linear};
     FrameAllocator frames_;
     LinearAddressSpace kernel_space_;
 };

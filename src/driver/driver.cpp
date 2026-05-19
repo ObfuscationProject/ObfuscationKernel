@@ -128,6 +128,115 @@ Status NullBlockDriver::write(uptr, std::span<const std::byte>)
     return Status::success();
 }
 
+Status KeyboardDriver::probe()
+{
+    return Status::success();
+}
+
+Status KeyboardDriver::start()
+{
+    started_ = true;
+    return Status::success();
+}
+
+Status KeyboardDriver::stop()
+{
+    started_ = false;
+    return Status::success();
+}
+
+char KeyboardDriver::translate(u8 scancode) const
+{
+    constexpr char normal[] = {
+        0, 0, '1', '2', '3', '4', '5', '6', '7', '8',
+        '9', '0', '-', '=', '\b', '\t', 'q', 'w', 'e', 'r',
+        't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n', 0,
+        'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';',
+        '\'', '`', 0, '\\', 'z', 'x', 'c', 'v', 'b', 'n',
+        'm', ',', '.', '/', 0, '*', 0, ' ',
+    };
+    constexpr char shifted[] = {
+        0, 0, '!', '@', '#', '$', '%', '^', '&', '*',
+        '(', ')', '_', '+', '\b', '\t', 'Q', 'W', 'E', 'R',
+        'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n', 0,
+        'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':',
+        '"', '~', 0, '|', 'Z', 'X', 'C', 'V', 'B', 'N',
+        'M', '<', '>', '?', 0, '*', 0, ' ',
+    };
+    if (scancode >= sizeof(normal))
+    {
+        return 0;
+    }
+    return (left_shift_ || right_shift_) ? shifted[scancode] : normal[scancode];
+}
+
+Status KeyboardDriver::feed_scancode(u8 scancode)
+{
+    if (!started_)
+    {
+        return Status::not_initialized("keyboard driver not started");
+    }
+    const bool released = (scancode & 0x80u) != 0;
+    const auto key = static_cast<u8>(scancode & 0x7fu);
+    if (key == 0x2a)
+    {
+        left_shift_ = !released;
+        return Status::success();
+    }
+    if (key == 0x36)
+    {
+        right_shift_ = !released;
+        return Status::success();
+    }
+
+    const char ascii = released ? 0 : translate(key);
+    return events_.push(KeyEvent{.scancode = key, .ascii = ascii, .pressed = !released});
+}
+
+Result<KeyEvent> KeyboardDriver::read_event()
+{
+    if (!started_)
+    {
+        return Status::not_initialized("keyboard driver not started");
+    }
+    return events_.pop();
+}
+
+Status Ps2MouseDriver::probe()
+{
+    return Status::success();
+}
+
+Status Ps2MouseDriver::start()
+{
+    started_ = true;
+    return Status::success();
+}
+
+Status Ps2MouseDriver::stop()
+{
+    started_ = false;
+    return Status::success();
+}
+
+Status Ps2MouseDriver::feed_packet(MousePacket packet)
+{
+    if (!started_)
+    {
+        return Status::not_initialized("mouse driver not started");
+    }
+    return packets_.push(packet);
+}
+
+Result<MousePacket> Ps2MouseDriver::read_packet()
+{
+    if (!started_)
+    {
+        return Status::not_initialized("mouse driver not started");
+    }
+    return packets_.pop();
+}
+
 Status FramebufferDisplayDriver::probe()
 {
     return Status::success();

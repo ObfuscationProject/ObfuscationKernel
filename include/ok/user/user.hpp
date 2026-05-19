@@ -9,6 +9,13 @@
 namespace ok::user
 {
 
+enum class TransitionMode : u8
+{
+    simulated,
+    trap_return,
+    fast_return,
+};
+
 class UserModeGateway
 {
   public:
@@ -41,6 +48,14 @@ class UserSpaceManager final
 
     static UserModeGateway &default_gateway();
 
+    void set_mode(TransitionMode mode)
+    {
+        mode_ = mode;
+    }
+    [[nodiscard]] TransitionMode mode() const
+    {
+        return mode_;
+    }
     Status enter_process(sched::ProcessId pid, arch::UserEntry entry, arch::CpuContext &context);
     [[nodiscard]] sched::ProcessId last_entered_pid() const
     {
@@ -48,6 +63,7 @@ class UserSpaceManager final
     }
 
   private:
+    TransitionMode mode_{TransitionMode::simulated};
     UserModeGateway *gateway_{nullptr};
     sched::ProcessId last_pid_{0};
 };

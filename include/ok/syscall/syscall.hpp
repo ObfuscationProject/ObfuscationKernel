@@ -45,6 +45,13 @@ enum class Number : u64
     ok_debug = 1024,
 };
 
+enum class DispatchMode : u8
+{
+    trap,
+    fast_path,
+    vdso_assisted,
+};
+
 struct Request
 {
     Number number{Number::ok_debug};
@@ -76,6 +83,14 @@ concept SyscallCallable = requires(F function, const Request &request) {
 class Table final
 {
   public:
+    void set_mode(DispatchMode mode)
+    {
+        mode_ = mode;
+    }
+    [[nodiscard]] DispatchMode mode() const
+    {
+        return mode_;
+    }
     Status register_handler(Number number, Handler &handler);
     Status register_callback(Number number, std::string_view name, void *context, Callback callback);
     Response dispatch(const Request &request);
@@ -95,6 +110,7 @@ class Table final
         Callback callback{nullptr};
     };
 
+    DispatchMode mode_{DispatchMode::trap};
     StaticVector<Entry, 128> handlers_;
 };
 

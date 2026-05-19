@@ -13,6 +13,13 @@ namespace ok::interrupt
 using Vector = u16;
 inline constexpr usize max_vectors = 256;
 
+enum class DispatchMode : u8
+{
+    direct,
+    priority_masked,
+    deferred,
+};
+
 class InterruptHandler
 {
   public:
@@ -31,6 +38,14 @@ concept InterruptCallable = requires(F function, arch::TrapFrame &frame) {
 class InterruptDispatcher final
 {
   public:
+    void set_mode(DispatchMode mode)
+    {
+        mode_ = mode;
+    }
+    [[nodiscard]] DispatchMode mode() const
+    {
+        return mode_;
+    }
     Status register_handler(Vector vector, InterruptHandler &handler);
     Status register_callback(Vector vector, std::string_view name, void *context, Callback callback);
     Status dispatch(arch::TrapFrame &frame);
@@ -47,6 +62,7 @@ class InterruptDispatcher final
         Callback callback{nullptr};
     };
 
+    DispatchMode mode_{DispatchMode::direct};
     std::array<Entry, max_vectors> handlers_{};
     std::array<usize, max_vectors> handled_counts_{};
 };

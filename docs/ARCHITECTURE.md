@@ -33,6 +33,15 @@ The kernel target is freestanding. Dynamic allocation and hosted containers are
 kept out of `okernel`; fixed-capacity containers provide the current storage
 model.
 
+## Module Modes
+
+`KernelConfig::modes` carries the mode selection for the main subsystems:
+memory translation, interrupt dispatch, SMP topology, scheduler policy, IPC
+delivery, syscall dispatch, driver I/O, filesystem, and user-mode transition
+strategy. The current implementation keeps the safe defaults active, but every
+mode is stored in the owning subsystem and covered by the debug test path so
+future implementations can switch behavior without changing the boot contract.
+
 ## Boot Flow
 
 For `i386` and `x86_64`, the system boot path is:

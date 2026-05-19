@@ -15,6 +15,12 @@ inline constexpr usize max_inline_payload = 128;
 inline constexpr usize max_channels = 64;
 inline constexpr usize max_channel_messages = 32;
 
+enum class DeliveryMode : u8
+{
+    copy,
+    shared_ring,
+};
+
 struct Message
 {
     sched::ProcessId sender{0};
@@ -54,6 +60,14 @@ class Channel final
 class IpcRouter final
 {
   public:
+    void set_mode(DeliveryMode mode)
+    {
+        mode_ = mode;
+    }
+    [[nodiscard]] DeliveryMode mode() const
+    {
+        return mode_;
+    }
     Result<ChannelId> create_channel(usize capacity = 32);
     Status send(ChannelId channel, Message message);
     Result<Message> receive(ChannelId channel);
@@ -74,6 +88,7 @@ class IpcRouter final
     }
 
   private:
+    DeliveryMode mode_{DeliveryMode::copy};
     StaticVector<Channel, max_channels> channels_;
     ChannelId next_channel_{1};
 };

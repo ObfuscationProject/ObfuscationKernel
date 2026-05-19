@@ -14,6 +14,7 @@ from pathlib import Path
 QEMU_SYSTEM_BY_ARCH = {
     "i386": "qemu-system-i386",
     "x86_64": "qemu-system-x86_64",
+    "aarch64": "qemu-system-aarch64",
 }
 
 QEMU_DEBUG_EXIT_SUCCESS = 33
@@ -33,6 +34,24 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool) -> lis
     qemu_path = shutil.which(qemu)
     if qemu_path is None:
         raise SystemExit(f"{qemu} was not found in PATH")
+
+    if arch == "aarch64":
+        return [
+            qemu_path,
+            "-M",
+            "virt",
+            "-cpu",
+            "cortex-a57",
+            "-kernel",
+            str(kernel),
+            "-serial",
+            "stdio",
+            "-monitor",
+            "none",
+            "-no-reboot",
+            "-display",
+            display,
+        ]
 
     command = [
         qemu_path,
@@ -58,7 +77,23 @@ def run_kernel(arch: str, kernel: Path, display: str, debug_exit: bool, timeout:
         runnable_kernel = Path(tmp) / "kernel.bin"
         shutil.copyfile(kernel, runnable_kernel)
         command = qemu_command(arch, runnable_kernel, display, debug_exit)
+        if not debug_exit:
+            return run_until_marker(command, timeout)
         return subprocess.run(command, text=True, capture_output=True, check=False, timeout=timeout)
+
+
+def run_until_marker(command: list[str], timeout: float | None) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(command, text=True, capture_output=True, check=False, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or "qemu marker timeout\n"
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        returncode = 0 if "OK_TEST_PASS " in stdout else 124
+        return subprocess.CompletedProcess(command, returncode, stdout, stderr)
 
 
 def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: bool) -> int:
@@ -89,7 +124,7 @@ def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: 
     if int(fields.get("debug_test_points", "0")) == 0:
         print("debug kernel did not run debug test points", file=sys.stderr)
         return 7
-    for required in ("fs", "ext4", "user", "display"):
+    for required in ("fs", "ext4", "user", "display", "input", "modes"):
         if fields.get(required) != "1":
             print(f"debug kernel did not pass {required} test coverage", file=sys.stderr)
             return 8
@@ -126,12 +161,13 @@ def main() -> int:
         print(f"kernel image does not exist: {kernel}", file=sys.stderr)
         return 2
 
-    result = run_kernel(arch, kernel, args.display, not args.no_debug_exit, args.timeout)
+    use_debug_exit = not args.no_debug_exit and arch in ("i386", "x86_64")
+    result = run_kernel(arch, kernel, args.display, use_debug_exit, args.timeout)
     if result.stdout:
         print(result.stdout, end="")
     if result.stderr:
         print(result.stderr, end="", file=sys.stderr)
-    return validate_output(arch, result.stdout, result.returncode, not args.no_debug_exit)
+    return validate_output(arch, result.stdout, result.returncode, use_debug_exit)
 
 
 if __name__ == "__main__":

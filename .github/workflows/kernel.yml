@@ -1,4 +1,4 @@
-name: kernel
+name: okernel
 
 on:
   push:
@@ -54,8 +54,7 @@ jobs:
         run: xmake f -c -m debug -a ${{ matrix.arch }}
       - name: Check toolchain
         run: xmake toolchain-check
-      - name: Build kernel library
+      - name: Build okernel library
         run: xmake -y -b okernel
-      - name: Run booted QEMU test
-        if: matrix.arch == 'i386' || matrix.arch == 'x86_64'
-        run: xmake qemu-test
+      - name: Run xmake tests
+        run: xmake test

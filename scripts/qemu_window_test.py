@@ -14,6 +14,7 @@ from pathlib import Path
 QEMU_SYSTEM_BY_ARCH = {
     "i386": "qemu-system-i386",
     "x86_64": "qemu-system-x86_64",
+    "aarch64": "qemu-system-aarch64",
 }
 
 
@@ -42,7 +43,7 @@ def validate_output(arch: str, output: str) -> tuple[bool, str]:
     fields = parse_fields(pass_lines[-1])
     if fields.get("arch") != arch:
         return False, f"arch mismatch: expected {arch}, got {fields.get('arch')}"
-    for required in ("fs", "ext4", "user", "display"):
+    for required in ("fs", "ext4", "user", "display", "input", "modes"):
         if fields.get(required) != "1":
             return False, f"{required} did not pass"
     if int(fields.get("debug_test_points", "0")) == 0:
@@ -57,6 +58,24 @@ def qemu_command(arch: str, kernel: Path, display: str) -> list[str]:
     qemu_path = shutil.which(qemu)
     if qemu_path is None:
         raise SystemExit(f"{qemu} was not found in PATH")
+    if arch == "aarch64":
+        return [
+            qemu_path,
+            "-M",
+            "virt",
+            "-cpu",
+            "cortex-a57",
+            "-kernel",
+            str(kernel),
+            "-serial",
+            "stdio",
+            "-monitor",
+            "none",
+            "-no-reboot",
+            "-display",
+            display,
+        ]
+
     return [
         qemu_path,
         "-drive",
@@ -93,12 +112,23 @@ def main() -> int:
         runnable_kernel = Path(tmp) / "kernel.bin"
         shutil.copyfile(kernel, runnable_kernel)
         command = qemu_command(arch, runnable_kernel, display)
-        if args.no_launch:
+        if args.no_launch and arch in ("i386", "x86_64"):
             command += ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
+            timeout = 10.0
+        elif args.no_launch:
             timeout = 10.0
         else:
             timeout = None
-        result = subprocess.run(command, text=True, capture_output=True, check=False, timeout=timeout)
+        try:
+            result = subprocess.run(command, text=True, capture_output=True, check=False, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout or ""
+            stderr = exc.stderr or "qemu marker timeout\n"
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode(errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode(errors="replace")
+            result = subprocess.CompletedProcess(command, 0 if "OK_TEST_PASS " in stdout else 124, stdout, stderr)
     ok, detail = validate_output(arch, result.stdout)
     if ok:
         print(f"QEMU_WINDOW_TEST_PASS arch={arch} debug_test_points={detail} kernel={kernel}")

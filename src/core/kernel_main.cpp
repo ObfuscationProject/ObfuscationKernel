@@ -4,121 +4,20 @@
 namespace
 {
 
-constexpr ok::u16 com1 = 0x3f8;
-constexpr ok::u16 debug_exit_port = 0x00f4;
-constexpr ok::usize vga_columns = 80;
-constexpr ok::usize vga_rows = 25;
-
-ok::usize vga_row = 0;
-ok::usize vga_column = 0;
-
-void outb(ok::u16 port, ok::u8 value)
-{
-    asm volatile("outb %0, %1" : : "a"(value), "Nd"(port) : "memory");
-}
-
-[[maybe_unused]] void outl(ok::u16 port, ok::u32 value)
-{
-    asm volatile("outl %0, %1" : : "a"(value), "Nd"(port) : "memory");
-}
-
-ok::u8 inb(ok::u16 port)
-{
-    ok::u8 value = 0;
-    asm volatile("inb %1, %0" : "=a"(value) : "Nd"(port) : "memory");
-    return value;
-}
-
-void serial_init()
-{
-    outb(com1 + 1, 0x00);
-    outb(com1 + 3, 0x80);
-    outb(com1 + 0, 0x03);
-    outb(com1 + 1, 0x00);
-    outb(com1 + 3, 0x03);
-    outb(com1 + 2, 0xc7);
-    outb(com1 + 4, 0x0b);
-}
-
-void serial_write_char(char value)
-{
-    for (ok::usize attempt = 0; attempt < 100000; ++attempt)
-    {
-        if ((inb(com1 + 5) & 0x20u) != 0)
-        {
-            break;
-        }
-    }
-    outb(com1, static_cast<ok::u8>(value));
-}
-
-volatile ok::u16 *vga_buffer()
-{
-    return reinterpret_cast<volatile ok::u16 *>(0xb8000);
-}
-
-void vga_clear()
-{
-    auto *buffer = vga_buffer();
-    for (ok::usize i = 0; i < vga_columns * vga_rows; ++i)
-    {
-        buffer[i] = static_cast<ok::u16>(0x0f00u | ' ');
-    }
-    vga_row = 0;
-    vga_column = 0;
-}
-
-void vga_newline()
-{
-    vga_column = 0;
-    if (vga_row + 1 < vga_rows)
-    {
-        ++vga_row;
-        return;
-    }
-
-    auto *buffer = vga_buffer();
-    for (ok::usize row = 1; row < vga_rows; ++row)
-    {
-        for (ok::usize column = 0; column < vga_columns; ++column)
-        {
-            buffer[(row - 1) * vga_columns + column] = buffer[row * vga_columns + column];
-        }
-    }
-    for (ok::usize column = 0; column < vga_columns; ++column)
-    {
-        buffer[(vga_rows - 1) * vga_columns + column] = static_cast<ok::u16>(0x0f00u | ' ');
-    }
-}
-
-void vga_write_char(char value)
-{
-    if (value == '\n')
-    {
-        vga_newline();
-        return;
-    }
-    if (value == '\r')
-    {
-        vga_column = 0;
-        return;
-    }
-
-    auto *buffer = vga_buffer();
-    buffer[vga_row * vga_columns + vga_column] = static_cast<ok::u16>(0x0f00u | static_cast<ok::u8>(value));
-    ++vga_column;
-    if (vga_column == vga_columns)
-    {
-        vga_newline();
-    }
-}
+extern "C" void ok_platform_console_init();
+extern "C" void ok_platform_console_write_char(char value);
+extern "C" void ok_platform_display_clear();
+extern "C" void ok_platform_display_write_char(char value);
+extern "C" void ok_platform_debug_exit(ok::u32 code);
+extern "C" void ok_platform_halt();
+extern "C" int ok_platform_input_poll();
 
 void platform_write(std::string_view text)
 {
     for (const auto value : text)
     {
-        serial_write_char(value);
-        vga_write_char(value);
+        ok_platform_console_write_char(value);
+        ok_platform_display_write_char(value);
     }
 }
 
@@ -131,7 +30,29 @@ void platform_write(std::string_view text)
 {
     for (;;)
     {
-        asm volatile("hlt" ::: "memory");
+        ok_platform_halt();
+    }
+}
+
+[[maybe_unused, noreturn]] void interactive_loop()
+{
+    platform_write("\nOK_INTERACTIVE ready keyboard=ps2 mouse=ps2\n[input] ");
+    for (;;)
+    {
+        const int value = ok_platform_input_poll();
+        if (value >= 0)
+        {
+            const char ch = static_cast<char>(value);
+            if (ch == '\r' || ch == '\n')
+            {
+                platform_write("\n[input] ");
+            }
+            else
+            {
+                platform_write(std::string_view{&ch, 1});
+            }
+        }
+        asm volatile("" ::: "memory");
     }
 }
 
@@ -141,15 +62,15 @@ extern "C" void ok_platform_display_write_line(const char *text, ok::usize size)
 {
     for (ok::usize i = 0; i < size; ++i)
     {
-        vga_write_char(text[i]);
+        ok_platform_display_write_char(text[i]);
     }
-    vga_write_char('\n');
+    ok_platform_display_write_char('\n');
 }
 
 extern "C" [[noreturn]] void kernel_main()
 {
-    serial_init();
-    vga_clear();
+    ok_platform_console_init();
+    ok_platform_display_clear();
 
     ok::KernelEntryConfig config{};
     config.kernel.architecture = ok::arch::configured_architecture();
@@ -164,7 +85,11 @@ extern "C" [[noreturn]] void kernel_main()
     [[maybe_unused]] const auto status = ok::ok_kernel_entry(config);
 
 #if defined(OK_ENABLE_TEST_POINTS)
-    outl(debug_exit_port, status.ok() ? 0x10u : 0x11u);
+    ok_platform_debug_exit(status.ok() ? 0x10u : 0x11u);
+    if (status.ok())
+    {
+        interactive_loop();
+    }
 #endif
 
     halt_forever();

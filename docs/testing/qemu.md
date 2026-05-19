@@ -29,10 +29,14 @@ Pass `-a` only for a temporary one-off test of another architecture:
 xmake qemu-test -a i386
 ```
 
-The current bootable QEMU system targets are `i386` and `x86_64`. Other
-architecture profiles can build `okernel`, but they intentionally fail
-`qemu-test` until that architecture has real boot assembly, a linker script, and
-a QEMU launch profile.
+The current bootable QEMU system test targets are `i386` and `x86_64`. Other
+architecture profiles can build `okernel`; AArch64 can also build an
+`okernel_image` Linux `Image`-style payload. They intentionally fail
+`qemu-test` until that architecture has a complete early platform contract and a
+validated QEMU launch profile.
+
+`xmake test` always has a freestanding profile test for `okernel`. On
+`i386`/`x86_64` it also runs the `okernel_image` QEMU boot test.
 
 ## Visual Test
 
@@ -51,6 +55,11 @@ environments:
 xmake qemu-window-test --no-launch
 ```
 
+In graphical x86 window mode the debug kernel does not attach the debug-exit
+device. After `OK_TEST_PASS`, it enters an interactive loop and echoes PS/2
+keyboard input through the kernel display path and serial console. Close the
+QEMU window when you want the script to print its final result.
+
 ## Pass Signal
 
 The debug kernel must print `OK_MODE debug`, `OK_DEBUG boot=complete`,
@@ -65,4 +74,5 @@ GitHub Actions has one matrix job. For each architecture it:
 1. Builds or restores the matching freestanding GCC/binutils toolchain.
 2. Configures xmake with `-a <arch>`.
 3. Builds `okernel`.
-4. Runs `xmake qemu-test` for bootable system targets.
+4. Runs `xmake test`; bootable x86 targets immediately boot the generated
+   kernel in QEMU, while other targets run the freestanding compile profile.

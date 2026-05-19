@@ -4,6 +4,7 @@
 #include "ok/core/fixed.hpp"
 #include "ok/core/types.hpp"
 
+#include <array>
 #include <concepts>
 #include <span>
 #include <string_view>
@@ -44,6 +45,14 @@ inline constexpr usize framebuffer_pixels = framebuffer_width * framebuffer_heig
 inline constexpr usize display_text_columns = 80;
 inline constexpr usize display_text_rows = 25;
 inline constexpr usize display_text_buffer_size = (display_text_columns + 1) * display_text_rows;
+inline constexpr usize input_queue_capacity = 128;
+
+enum class IoMode : u8
+{
+    polling,
+    interrupt,
+    dma,
+};
 
 class DriverManager final
 {
@@ -134,6 +143,92 @@ class NullBlockDriver final : public Driver
 
   private:
     bool started_{false};
+};
+
+struct KeyEvent
+{
+    u8 scancode{0};
+    char ascii{0};
+    bool pressed{false};
+};
+
+class KeyboardDriver final : public Driver
+{
+  public:
+    [[nodiscard]] std::string_view name() const override
+    {
+        return "ps2-keyboard";
+    }
+    [[nodiscard]] Class driver_class() const override
+    {
+        return Class::input;
+    }
+    Status probe() override;
+    Status start() override;
+    Status stop() override;
+    Status feed_scancode(u8 scancode);
+    Result<KeyEvent> read_event();
+    [[nodiscard]] IoMode mode() const
+    {
+        return mode_;
+    }
+    void set_mode(IoMode mode)
+    {
+        mode_ = mode;
+    }
+    [[nodiscard]] usize queued() const
+    {
+        return events_.size();
+    }
+
+  private:
+    [[nodiscard]] char translate(u8 scancode) const;
+
+    bool started_{false};
+    bool left_shift_{false};
+    bool right_shift_{false};
+    IoMode mode_{IoMode::polling};
+    StaticQueue<KeyEvent, input_queue_capacity> events_{};
+};
+
+struct MousePacket
+{
+    i8 delta_x{0};
+    i8 delta_y{0};
+    bool left_button{false};
+    bool right_button{false};
+    bool middle_button{false};
+};
+
+class Ps2MouseDriver final : public Driver
+{
+  public:
+    [[nodiscard]] std::string_view name() const override
+    {
+        return "ps2-mouse";
+    }
+    [[nodiscard]] Class driver_class() const override
+    {
+        return Class::input;
+    }
+    Status probe() override;
+    Status start() override;
+    Status stop() override;
+    Status feed_packet(MousePacket packet);
+    Result<MousePacket> read_packet();
+    [[nodiscard]] IoMode mode() const
+    {
+        return mode_;
+    }
+    void set_mode(IoMode mode)
+    {
+        mode_ = mode;
+    }
+
+  private:
+    bool started_{false};
+    IoMode mode_{IoMode::polling};
+    StaticQueue<MousePacket, input_queue_capacity> packets_{};
 };
 
 struct DisplayMode

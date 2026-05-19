@@ -24,6 +24,13 @@ enum class NodeType : u8
     symlink,
 };
 
+enum class FileSystemMode : u8
+{
+    ram_only,
+    ext4_read_only,
+    ext4_journaled,
+};
+
 struct Metadata
 {
     NodeType type{NodeType::regular};
@@ -90,6 +97,14 @@ class VirtualFileSystem final
   public:
     VirtualFileSystem();
 
+    void set_mode(FileSystemMode mode)
+    {
+        mode_ = mode;
+    }
+    [[nodiscard]] FileSystemMode mode() const
+    {
+        return mode_;
+    }
     Status create(std::string_view path, NodeType type);
     Status write_file(std::string_view path, std::span<const std::byte> data);
     Result<FileBuffer> read_file(std::string_view path);
@@ -100,6 +115,7 @@ class VirtualFileSystem final
     [[nodiscard]] RamNode *parent_for(std::string_view path, FixedString<max_path_segment> &leaf);
     [[nodiscard]] static bool next_segment(std::string_view path, usize &cursor, std::string_view &segment);
 
+    FileSystemMode mode_{FileSystemMode::ram_only};
     std::array<RamNode, max_ram_nodes> nodes_{};
     usize used_nodes_{0};
     RamNode *root_{nullptr};

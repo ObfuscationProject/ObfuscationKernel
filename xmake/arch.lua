@@ -11,7 +11,8 @@ OK_ARCH_SPECS = {
         triple = "i386-elf",
         boot_source = "src/arch/i386/boot.S",
         linker_script = "src/arch/i386/linker.ld",
-        qemu_system = "qemu-system-i386"
+        qemu_system = "qemu-system-i386",
+        platform_source = "src/arch/x86_common/platform.cpp"
     },
     x86_64 = {
         define = "OK_ARCH_TARGET_X86_64",
@@ -21,6 +22,7 @@ OK_ARCH_SPECS = {
         boot_source = "src/arch/x86_64/boot.S",
         linker_script = "src/arch/x86_64/linker.ld",
         qemu_system = "qemu-system-x86_64",
+        platform_source = "src/arch/x86_common/platform.cpp",
         freestanding_cxxflags = {"-mno-red-zone"}
     },
     aarch64 = {
@@ -28,6 +30,11 @@ OK_ARCH_SPECS = {
         source = "aarch64",
         toolchain = "ok-aarch64-elf",
         triple = "aarch64-elf",
+        boot_source = "src/arch/aarch64/boot.S",
+        linker_script = "src/arch/aarch64/linker.ld",
+        qemu_system = "qemu-system-aarch64",
+        platform_source = "src/arch/aarch64/platform.cpp",
+        image_format = "linux-image",
         freestanding_cxxflags = {"-mno-outline-atomics"}
     },
     arm32 = {
@@ -168,7 +175,11 @@ function add_ok_boot_files()
         return
     end
     add_files(spec.boot_source)
+    if spec.platform_source then
+        add_files(spec.platform_source)
+    end
     set_values("ok.linker_script", path.join(os.projectdir(), spec.linker_script))
+    set_values("ok.image_format", spec.image_format or "bios-disk")
     set_values("ok.kernel_bin", path.join(os.projectdir(), "build", "linux", arch, get_config("mode") or "release", "kernel.bin"))
 end
 

@@ -28,6 +28,7 @@ end
 target("okernel")
     set_kind("static")
     set_languages("c++23")
+    set_values("ok.arch", ok_current_arch())
     add_ok_freestanding_toolchain()
     add_ok_freestanding_arch_flags()
     add_ok_kernel_sources(false)
@@ -47,16 +48,22 @@ target("okernel")
     add_defines("OK_KERNEL_FREESTANDING")
     add_ok_arch_profile()
     add_ok_debug_test_points()
+    add_tests("profile")
+    on_test(function (target)
+        print("freestanding profile compiled for " .. target:values("ok.arch"))
+        return true
+    end)
 target_end()
 
-target("kernel")
+target("okernel_image")
     set_kind("binary")
     set_languages("c++23")
     set_filename("kernel.elf")
     set_values("ok.arch", ok_current_arch())
+    add_deps("okernel")
     add_ok_freestanding_toolchain()
     add_ok_freestanding_arch_flags()
-    add_ok_kernel_sources(true)
+    add_files("src/core/kernel_main.cpp")
     add_ok_boot_files()
     add_includedirs("include")
     add_cxxflags(
@@ -93,12 +100,15 @@ target("kernel")
     add_defines("OK_KERNEL_FREESTANDING")
     add_ok_arch_profile()
     add_ok_debug_test_points()
-    add_tests("qemu")
+    if ok_current_arch() == "i386" or ok_current_arch() == "x86_64" then
+        add_tests("qemu")
+    end
     after_build(function (target)
         local arch = target:values("ok.arch")
         local triples = {
             i386 = "i386-elf",
-            x86_64 = "x86_64-elf"
+            x86_64 = "x86_64-elf",
+            aarch64 = "aarch64-elf"
         }
         local triple = triples[arch]
         if triple == nil then
@@ -108,6 +118,16 @@ target("kernel")
         local gcc = path.join(toolchain_bin, triple .. "-gcc")
         local ld = path.join(toolchain_bin, triple .. "-ld")
         local objcopy = path.join(toolchain_bin, triple .. "-objcopy")
+
+        local payload_bin = path.join(target:targetdir(), "kernel_payload.bin")
+        os.execv(objcopy, {"-O", "binary", target:targetfile(), payload_bin})
+
+        local kernel_bin = path.join(target:targetdir(), "kernel.bin")
+        if target:values("ok.image_format") == "linux-image" then
+            os.cp(payload_bin, kernel_bin)
+            return
+        end
+
         local autogen = path.join(target:autogendir(), "boot")
         os.mkdir(autogen)
 
@@ -116,15 +136,11 @@ target("kernel")
         os.execv(gcc, {"-c", path.join(os.projectdir(), "src/arch/x86_64/boot16.S"), "-o", boot_object})
         os.execv(ld, {"-Ttext=0x7c00", "--oformat=binary", boot_object, "-o", boot_sector})
 
-        local payload_bin = path.join(target:targetdir(), "kernel_payload.bin")
-        os.execv(objcopy, {"-O", "binary", target:targetfile(), payload_bin})
-
         local payload_size = os.filesize(payload_bin)
-        local payload_capacity = 256 * 512
+        local payload_capacity = 512 * 512
         if payload_size > payload_capacity then
             raise("kernel payload is too large: %d bytes > %d bytes", payload_size, payload_capacity)
         end
-        local kernel_bin = path.join(target:targetdir(), "kernel.bin")
         os.cp(boot_sector, kernel_bin)
         os.execv("truncate", {"-s", tostring(512 + payload_capacity), kernel_bin})
         os.execv("dd", {"if=" .. payload_bin, "of=" .. kernel_bin, "bs=512", "seek=1", "conv=notrunc", "status=none"})

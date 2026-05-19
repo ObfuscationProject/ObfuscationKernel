@@ -32,7 +32,7 @@ test harness needed to grow into one without rewriting the project structure.
 xmake f -c -m debug -a x86_64
 xmake toolchain-check
 xmake -y -b okernel
-xmake qemu-test
+xmake test
 ```
 
 Expected result:
@@ -76,10 +76,12 @@ xmake -y -b okernel
 xmake qemu-test
 ```
 
-`qemu-test` tests the current xmake architecture by building the debug `kernel`
-target, placing the generated `kernel.bin` in QEMU, and validating the kernel's
-own serial debug output. Pass `-a` only when you want a temporary one-off test
-for another architecture with a bootable system target:
+`xmake test` always validates the current architecture freestanding profile. For
+bootable x86 targets it also builds the debug `okernel_image` target, places the
+generated `kernel.bin` in QEMU, and validates the kernel's own serial debug
+output. `qemu-test` is the direct wrapper for that booted check. Pass `-a` only
+when you want a temporary one-off test for another architecture with a bootable
+system target:
 
 ```sh
 xmake qemu-test -a i386
@@ -92,13 +94,19 @@ output:
 xmake qemu-window-test
 ```
 
+In graphical x86 mode the kernel remains interactive after the debug checks pass:
+PS/2 keyboard input is echoed by the kernel through the display and serial
+paths, then the script reports after the QEMU window is closed.
+
 The test scripts do not contain a kernel `main`. Debug and release builds enter
 through the same `kernel_main`; debug builds enable `OK_ENABLE_TEST_POINTS` and
 emit `OK_*` diagnostics through serial and the kernel display driver. The
 current bootable QEMU system targets are `i386` and `x86_64`. Other
 architecture profiles build the freestanding kernel library and have
-architecture-specific operation implementations, but still need their own
-first-stage boot files and linker scripts before they can produce `kernel.bin`.
+architecture-specific operation implementations. AArch64 also has a Linux
+`Image`-style boot image build scaffold; the remaining profiles keep documented
+Linux boot contracts until their platform I/O, linker scripts, and QEMU launch
+profiles are ready to be promoted to `qemu-test`.
 
 ## Architecture Implementations
 
@@ -116,6 +124,7 @@ fixed-capacity kernel containers live in `include/ok/core/fixed.hpp`.
 ## Documentation
 
 - [Build](docs/BUILD.md)
+- [Boot Profiles](docs/BOOT.md)
 - [Testing](docs/testing/qemu.md)
 - [Development Standard](docs/DEVELOPMENT.md)
 - [Architecture Overview](docs/ARCHITECTURE.md)

@@ -27,6 +27,13 @@ enum class ProcessState : u8
     exited,
 };
 
+enum class SchedulingMode : u8
+{
+    cooperative,
+    round_robin,
+    per_cpu_round_robin,
+};
+
 struct ThreadControlBlock
 {
     ThreadId tid{0};
@@ -98,6 +105,14 @@ class Scheduler final
 
     static SchedulerPolicy &default_round_robin_policy();
 
+    void set_mode(SchedulingMode mode)
+    {
+        mode_ = mode;
+    }
+    [[nodiscard]] SchedulingMode mode() const
+    {
+        return mode_;
+    }
     Result<ProcessId> create_process(std::string_view name, arch::CpuContext initial_context);
     Status configure_cpus(usize cpu_count);
     Status set_runnable(ProcessId pid);
@@ -121,6 +136,7 @@ class Scheduler final
     [[nodiscard]] const ProcessControlBlock *find(ProcessId pid) const;
 
   private:
+    SchedulingMode mode_{SchedulingMode::round_robin};
     SchedulerPolicy *policy_{nullptr};
     StaticVector<ProcessControlBlock, max_processes> processes_{};
     ProcessId next_pid_{1};

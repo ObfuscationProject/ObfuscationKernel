@@ -20,6 +20,13 @@ enum class CpuState : u8
     halted,
 };
 
+enum class TopologyMode : u8
+{
+    single_core,
+    symmetric,
+    numa_aware,
+};
+
 struct CpuInfo
 {
     CpuId id{0};
@@ -31,6 +38,14 @@ struct CpuInfo
 class CpuTopology final
 {
   public:
+    void set_mode(TopologyMode mode)
+    {
+        mode_ = mode;
+    }
+    [[nodiscard]] TopologyMode mode() const
+    {
+        return mode_;
+    }
     Status initialize(usize cpu_count);
     Status mark_starting(CpuId cpu);
     Status mark_online(CpuId cpu);
@@ -51,6 +66,7 @@ class CpuTopology final
         return cpu < cpu_count_;
     }
 
+    TopologyMode mode_{TopologyMode::single_core};
     std::array<CpuInfo, max_cpus> cpus_{};
     usize cpu_count_{0};
 };

@@ -12,7 +12,7 @@ _start:
 
     mov $0x0800, %bx
     mov $1, %eax
-    mov $4, %di
+    mov $8, %di
 read_chunk:
     mov %bx, dap_segment
     mov %eax, dap_lba
@@ -88,7 +88,7 @@ protected_entry:
     cld
     mov $0x00008000, %esi
     mov $0x00100000, %edi
-    mov $32768, %ecx
+    mov $65536, %ecx
     rep movsl
     ljmp $0x08, $0x00101000
 

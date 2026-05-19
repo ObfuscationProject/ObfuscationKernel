@@ -16,12 +16,26 @@
 namespace ok
 {
 
+struct KernelModuleModes
+{
+    memory::TranslationMode memory{memory::TranslationMode::linear};
+    interrupt::DispatchMode interrupts{interrupt::DispatchMode::direct};
+    smp::TopologyMode smp{smp::TopologyMode::single_core};
+    sched::SchedulingMode scheduler{sched::SchedulingMode::round_robin};
+    ipc::DeliveryMode ipc{ipc::DeliveryMode::copy};
+    syscall::DispatchMode syscalls{syscall::DispatchMode::trap};
+    driver::IoMode drivers{driver::IoMode::polling};
+    fs::FileSystemMode filesystem{fs::FileSystemMode::ram_only};
+    user::TransitionMode user{user::TransitionMode::simulated};
+};
+
 struct KernelConfig
 {
     arch::Architecture architecture{arch::Architecture::x86_64};
     std::array<memory::MemoryRegion, 8> memory_map{};
     usize memory_region_count{0};
     usize timer_hz{1000};
+    KernelModuleModes modes{};
 };
 
 struct KernelTestReport
@@ -34,6 +48,8 @@ struct KernelTestReport
     bool syscalls{false};
     bool user_mode{false};
     bool display{false};
+    bool input{false};
+    bool modes{false};
 };
 
 class Kernel final
@@ -96,6 +112,14 @@ class Kernel final
     {
         return display_driver_;
     }
+    [[nodiscard]] driver::KeyboardDriver &keyboard()
+    {
+        return keyboard_driver_;
+    }
+    [[nodiscard]] driver::Ps2MouseDriver &mouse()
+    {
+        return mouse_driver_;
+    }
     [[nodiscard]] fs::VirtualFileSystem &vfs()
     {
         return vfs_;
@@ -120,6 +144,8 @@ class Kernel final
     driver::TimerDriver timer_driver_{};
     driver::NullBlockDriver null_block_driver_{};
     driver::FramebufferDisplayDriver display_driver_{};
+    driver::KeyboardDriver keyboard_driver_{};
+    driver::Ps2MouseDriver mouse_driver_{};
     interrupt::InterruptDispatcher interrupts_;
     memory::MemoryManager memory_;
     sched::Scheduler scheduler_;
