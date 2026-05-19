@@ -35,7 +35,19 @@ model.
 
 ## Boot Flow
 
-`ok::Kernel::boot` performs the current simulated boot sequence:
+For `i386` and `x86_64`, the system boot path is:
+
+1. The raw `kernel.bin` boot sector is executed by BIOS/QEMU at `0x7c00`.
+2. The boot sector loads the kernel payload into memory and enters protected
+   mode.
+3. `src/arch/i386/boot.S` clears normal `.bss`, sets up the bootstrap stack,
+   and calls `kernel_main`; `src/arch/x86_64/boot.S` additionally builds early
+   identity page tables and enables PAE plus long mode before calling
+   `kernel_main`.
+4. `kernel_main` initializes serial/VGA output, selects debug or normal mode,
+   and calls the architecture-independent kernel entry.
+
+`ok::Kernel::boot` then performs the generic boot sequence:
 
 1. Select architecture operations from xmake's configured architecture.
 2. Initialize physical memory from a memory map.
@@ -65,7 +77,8 @@ The concrete implementations are separate files:
 | `ppc` | `src/arch/ppc/ops.cpp` |
 | `ppc64` | `src/arch/ppc64/ops.cpp` |
 
-Inline assembly is used for safe low-level primitives such as cycle counters and
-memory fences. Privileged instructions such as interrupt enable/disable and CPU
-idle are guarded behind `OK_USE_PRIVILEGED_ASM`, because the current test harness
-executes as a normal user-mode process.
+Inline assembly is used for low-level primitives such as cycle counters, memory
+fences, interrupt control, halt, and early boot entry. The freestanding library
+profile keeps privileged instructions guarded where they must still compile
+under non-system test builds; the bootable kernel target uses the real
+architecture entry files for implemented system targets.

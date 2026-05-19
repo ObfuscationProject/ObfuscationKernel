@@ -2,10 +2,11 @@
 
 ObfuscationKernel is a C++23 multi-architecture kernel framework built with xmake.
 The current tree is a working foundation: it compiles a reusable kernel library,
-boots a simulated kernel instance, and runs debug kernel tests that exercise interrupts,
-memory management, scheduling, IPC, syscalls, drivers, VFS, and user-mode
-transition state. The foundation also includes SMP topology state, a simple
-framebuffer display driver, and a read-only EXT4 superblock/block reader.
+builds a bootable `kernel.bin` for the implemented system target, and runs debug
+kernel tests that exercise interrupts, memory management, scheduling, IPC,
+syscalls, drivers, VFS, EXT4 parsing, and user-mode transition state. The
+foundation also includes SMP topology state, a VGA-backed display path, and a
+read-only EXT4 superblock/block reader.
 
 This is not yet a complete production POSIX kernel. The implementation defines
 the ABI, module boundaries, architecture profiles, build flow, and regression
@@ -37,7 +38,7 @@ xmake qemu-test
 Expected result:
 
 ```text
-100% tests passed
+OK_TEST_PASS arch=x86_64 ...
 ```
 
 Enable debug test points for the current architecture:
@@ -75,11 +76,13 @@ xmake -y -b okernel
 xmake qemu-test
 ```
 
-`qemu-test` tests the current xmake architecture. Pass `-a` only when you want a
-temporary one-off test for another architecture:
+`qemu-test` tests the current xmake architecture by building the debug `kernel`
+target, placing the generated `kernel.bin` in QEMU, and validating the kernel's
+own serial debug output. Pass `-a` only when you want a temporary one-off test
+for another architecture with a bootable system target:
 
 ```sh
-xmake qemu-test -a aarch64
+xmake qemu-test -a i386
 ```
 
 For a visible QEMU window that displays the current architecture debug kernel
@@ -89,9 +92,13 @@ output:
 xmake qemu-window-test
 ```
 
-The bootless test model is intentionally separate from future bootloader or
-firmware integration. The test binary only calls `ok_kernel_main`; the debug
-kernel performs boot, module checks, and diagnostic output itself.
+The test scripts do not contain a kernel `main`. Debug and release builds enter
+through the same `kernel_main`; debug builds enable `OK_ENABLE_TEST_POINTS` and
+emit `OK_*` diagnostics through serial and the kernel display driver. The
+current bootable QEMU system targets are `i386` and `x86_64`. Other
+architecture profiles build the freestanding kernel library and have
+architecture-specific operation implementations, but still need their own
+first-stage boot files and linker scripts before they can produce `kernel.bin`.
 
 ## Architecture Implementations
 

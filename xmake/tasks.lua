@@ -4,8 +4,8 @@ local task_arches = {
 }
 
 local task_arch_specs = {
-    i386 = {triple = "i386-elf"},
-    x86_64 = {triple = "x86_64-elf"},
+    i386 = {triple = "i386-elf", bootable = true},
+    x86_64 = {triple = "x86_64-elf", bootable = true},
     aarch64 = {triple = "aarch64-elf"},
     arm32 = {triple = "arm-none-eabi"},
     rv64 = {triple = "riscv64-elf"},
@@ -145,16 +145,20 @@ task("qemu-test")
             test_arch = task_normalize_arch(requested_arch)
             task_require_arch(test_arch)
         end
+        local _, test_spec = task_require_arch(test_arch)
+        if not test_spec.bootable then
+            raise("qemu boot test is not implemented for %s yet; build okernel to check the freestanding profile", test_arch)
+        end
 
         local reconfigured = requested_arch or current_mode ~= mode
         if reconfigured then
             os.execv("xmake", {"f", "-c", "-m", mode, "-a", test_arch})
         end
 
-        local build_code = os.execv("xmake", {"-y", "-b", "qemu_kernel"}, {try = true})
+        local build_code = os.execv("xmake", {"-y", "-b", "kernel"}, {try = true})
         local test_code = 0
         if build_code == 0 then
-            test_code = os.execv("xmake", {"run", "qemu_kernel"}, {try = true})
+            test_code = os.execv("xmake", {"run", "kernel"}, {try = true})
         end
 
         if reconfigured then
@@ -162,7 +166,7 @@ task("qemu-test")
         end
 
         if build_code ~= 0 then
-            raise("qemu kernel test build failed for %s", test_arch)
+            raise("kernel build failed for %s", test_arch)
         end
         if test_code ~= 0 then
             raise("qemu kernel test failed for %s", test_arch)
@@ -185,17 +189,28 @@ task("qemu-window-test")
         import("core.project.config")
         config.load()
         local arch = task_normalize_arch(config.get("arch") or "x86_64")
-        task_require_arch(arch)
+        local _, spec = task_require_arch(arch)
+        if not spec.bootable then
+            raise("qemu window test is not implemented for %s yet; build okernel to check the freestanding profile", arch)
+        end
         local mode = option.get("check-mode") or "debug"
         local current_mode = config.get("mode") or "release"
         local reconfigured = current_mode ~= mode
         if reconfigured then
             os.execv("xmake", {"f", "-c", "-m", mode, "-a", arch})
         end
+        local build_code = os.execv("xmake", {"-y", "-b", "kernel"}, {try = true})
+        if build_code ~= 0 then
+            if reconfigured then
+                os.execv("xmake", {"f", "-c", "-m", current_mode, "-a", arch})
+            end
+            raise("kernel build failed for %s", arch)
+        end
         local argv = {
             path.join(os.projectdir(), "scripts", "qemu_window_test.py"),
             "--arch", arch,
             "--mode", mode,
+            "--kernel", path.join(os.projectdir(), "build", "linux", arch, mode, "kernel.bin"),
             "--display", option.get("display") or "gtk"
         }
         if option.get("no-launch") then

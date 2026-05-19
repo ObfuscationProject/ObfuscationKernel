@@ -8,13 +8,20 @@ OK_ARCH_SPECS = {
         define = "OK_ARCH_TARGET_I386",
         source = "i386",
         toolchain = "ok-i386-elf",
-        triple = "i386-elf"
+        triple = "i386-elf",
+        boot_source = "src/arch/i386/boot.S",
+        linker_script = "src/arch/i386/linker.ld",
+        qemu_system = "qemu-system-i386"
     },
     x86_64 = {
         define = "OK_ARCH_TARGET_X86_64",
         source = "x86_64",
         toolchain = "ok-x86_64-elf",
-        triple = "x86_64-elf"
+        triple = "x86_64-elf",
+        boot_source = "src/arch/x86_64/boot.S",
+        linker_script = "src/arch/x86_64/linker.ld",
+        qemu_system = "qemu-system-x86_64",
+        freestanding_cxxflags = {"-mno-red-zone"}
     },
     aarch64 = {
         define = "OK_ARCH_TARGET_AARCH64",
@@ -52,13 +59,15 @@ OK_ARCH_SPECS = {
         define = "OK_ARCH_TARGET_MIPS",
         source = "mips",
         toolchain = "ok-mips-elf",
-        triple = "mips-elf"
+        triple = "mips-elf",
+        freestanding_cxxflags = {"-march=mips32r2"}
     },
     mips64 = {
         define = "OK_ARCH_TARGET_MIPS64",
         source = "mips64",
         toolchain = "ok-mips64-elf",
-        triple = "mips64-elf"
+        triple = "mips64-elf",
+        freestanding_cxxflags = {"-march=mips64r2"}
     },
     ppc = {
         define = "OK_ARCH_TARGET_PPC",
@@ -148,6 +157,19 @@ function add_ok_arch_files()
     local _, spec = ok_require_arch(ok_current_arch())
     add_files("src/arch/arch.cpp")
     add_files(path.join("src/arch", spec.source, "ops.cpp"))
+end
+
+function add_ok_boot_files()
+    local arch, spec = ok_require_arch(ok_current_arch())
+    if spec.boot_source == nil or spec.linker_script == nil then
+        before_build(function ()
+            raise("bootable kernel output is not implemented for %s yet", arch)
+        end)
+        return
+    end
+    add_files(spec.boot_source)
+    set_values("ok.linker_script", path.join(os.projectdir(), spec.linker_script))
+    set_values("ok.kernel_bin", path.join(os.projectdir(), "build", "linux", arch, get_config("mode") or "release", "kernel.bin"))
 end
 
 function add_ok_freestanding_toolchain()

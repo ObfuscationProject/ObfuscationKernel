@@ -1,9 +1,11 @@
 # QEMU Testing
 
-The current test model is bootless. `qemu_kernel` is a hosted debug entry that
-calls the kernel's `ok_kernel_main` entry point. The debug kernel boots itself,
-runs module-level checks, writes Linux-style boot lines through the framebuffer
-driver, and emits `OK_*` diagnostics for the Python runner to validate.
+The QEMU tests boot the compiled `kernel.bin` directly. There is no test
+`main.cpp`, hosted debug wrapper, GRUB image, or external bootloader. The image
+contains a small kernel-owned first-stage boot sector plus the linked kernel
+payload. Both debug and release builds enter the same `kernel_main`; debug mode
+adds `OK_ENABLE_TEST_POINTS` and emits serial/display diagnostics for the Python
+runner to validate.
 
 ## Current Architecture Test
 
@@ -24,8 +26,13 @@ xmake qemu-test
 Pass `-a` only for a temporary one-off test of another architecture:
 
 ```sh
-xmake qemu-test -a aarch64
+xmake qemu-test -a i386
 ```
+
+The current bootable QEMU system targets are `i386` and `x86_64`. Other
+architecture profiles can build `okernel`, but they intentionally fail
+`qemu-test` until that architecture has real boot assembly, a linker script, and
+a QEMU launch profile.
 
 ## Visual Test
 
@@ -35,9 +42,10 @@ The windowed task is also current-architecture only:
 xmake qemu-window-test
 ```
 
-It builds and runs `qemu_kernel`, generates a small bootable VGA text image from
-the kernel's framebuffer text, and launches QEMU. The script prints the test
-result only after the QEMU window is closed. In headless environments:
+It builds and runs the same `kernel.bin` in QEMU. The visible text comes from
+the kernel's own VGA display path, while the script captures serial diagnostics
+and prints the test result only after the QEMU window is closed. In headless
+environments:
 
 ```sh
 xmake qemu-window-test --no-launch
@@ -57,4 +65,4 @@ GitHub Actions has one matrix job. For each architecture it:
 1. Builds or restores the matching freestanding GCC/binutils toolchain.
 2. Configures xmake with `-a <arch>`.
 3. Builds `okernel`.
-4. Runs `xmake qemu-test` for that same configured architecture.
+4. Runs `xmake qemu-test` for bootable system targets.

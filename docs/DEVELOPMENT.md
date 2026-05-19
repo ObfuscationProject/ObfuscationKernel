@@ -35,9 +35,10 @@ Each architecture must provide:
 
 ## Tests
 
-Every new module feature needs a `qemu_kernel` assertion for the current xmake
-architecture. Architecture features need either direct debug test coverage or a
-documented qemu-system test until they can be run without a bootloader.
+Every new module feature needs debug-kernel coverage that is reached through
+`kernel_main` and validated by `xmake qemu-test` for bootable system targets.
+Architecture features need either direct debug test coverage or a documented
+qemu-system test until that architecture has a bootable `kernel.bin`.
 
 Debug-only test points live behind `OK_ENABLE_TEST_POINTS`, which xmake defines
 only in debug mode. QEMU tests require debug mode and fail if the kernel does

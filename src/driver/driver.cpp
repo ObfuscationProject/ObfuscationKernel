@@ -1,5 +1,7 @@
 #include "ok/driver/driver.hpp"
 
+extern "C" void ok_platform_display_write_line(const char *text, ok::usize size) __attribute__((weak));
+
 namespace ok::driver
 {
 
@@ -238,6 +240,10 @@ Status FramebufferDisplayDriver::write_line(std::string_view text)
         draw_cell(static_cast<u32>(i), row, value);
     }
     text_[text_size_++] = '\n';
+    if (ok_platform_display_write_line != nullptr)
+    {
+        ok_platform_display_write_line(text.data(), count);
+    }
     return Status::success();
 }
 

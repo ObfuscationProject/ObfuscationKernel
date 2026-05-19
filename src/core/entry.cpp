@@ -5,6 +5,12 @@ namespace ok
 namespace
 {
 
+Kernel &kernel_instance()
+{
+    static Kernel kernel;
+    return kernel;
+}
+
 void emit(const KernelDebugSink &sink, std::string_view text)
 {
     sink.emit(text);
@@ -120,18 +126,24 @@ void emit_display_text(const KernelDebugSink &sink, std::string_view text)
 Status ok_kernel_entry(const KernelEntryConfig &config, KernelEntryResult *result)
 {
     const auto &sink = config.debug;
-    emit(sink, config.mode == KernelBootMode::debug ? "OK_MODE debug\n" : "OK_MODE normal\n");
 
-    if (config.mode != KernelBootMode::debug)
+    if (config.mode == KernelBootMode::normal)
     {
-        const auto status = Status::invalid_argument("kernel test entry requires debug boot mode");
-        emit_failure(sink, status);
+        Kernel &kernel = kernel_instance();
+        const auto status = kernel.boot(config.kernel);
         if (result != nullptr)
         {
             result->status = status;
+            if (status.ok())
+            {
+                result->tests = kernel.test_report();
+                result->display_checksum = kernel.display().checksum();
+            }
         }
         return status;
     }
+
+    emit(sink, "OK_MODE debug\n");
 
 #if !defined(OK_ENABLE_TEST_POINTS)
     const auto status = Status::invalid_argument("kernel test entry requires a debug build with OK_ENABLE_TEST_POINTS");
@@ -142,7 +154,7 @@ Status ok_kernel_entry(const KernelEntryConfig &config, KernelEntryResult *resul
     }
     return status;
 #else
-    Kernel kernel;
+    Kernel &kernel = kernel_instance();
     emit(sink, "OK_DEBUG boot=begin\n");
     if (auto status = kernel.boot(config.kernel); !status.ok())
     {

@@ -1,95 +1,77 @@
 #!/usr/bin/env python3
-"""Run an ObfuscationKernel debug kernel test binary."""
+"""Boot an ObfuscationKernel kernel.bin in QEMU and validate debug output."""
 
 from __future__ import annotations
 
 import argparse
-import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
-QEMU_BY_ARCH = {
-    "i386": "qemu-i386",
-    "x86_64": "qemu-x86_64",
-    "x64": "qemu-x86_64",
-    "aarch64": "qemu-aarch64",
-    "arm32": "qemu-arm",
-    "arm": "qemu-arm",
-    "rv64": "qemu-riscv64",
-    "riscv64": "qemu-riscv64",
-    "rv32": "qemu-riscv32",
-    "riscv32": "qemu-riscv32",
-    "loongarch64": "qemu-loongarch64",
-    "loong64": "qemu-loongarch64",
-    "mips": "qemu-mips",
-    "mips64": "qemu-mips64",
-    "ppc": "qemu-ppc",
-    "ppc64": "qemu-ppc64",
+QEMU_SYSTEM_BY_ARCH = {
+    "i386": "qemu-system-i386",
+    "x86_64": "qemu-system-x86_64",
 }
 
-QEMU_LD_PREFIX_BY_ARCH = {
-    "i386": "/usr/i686-linux-gnu",
-    "aarch64": "/usr/aarch64-linux-gnu",
-    "arm32": "/usr/arm-linux-gnueabihf",
-    "arm": "/usr/arm-linux-gnueabihf",
-    "rv64": "/usr/riscv64-linux-gnu",
-    "riscv64": "/usr/riscv64-linux-gnu",
-}
+QEMU_DEBUG_EXIT_SUCCESS = 33
 
 
-def parse_fields(line: str) -> dict[str, str]:
-    fields: dict[str, str] = {}
-    for token in line.strip().split()[1:]:
-        if "=" in token:
-            key, value = token.split("=", 1)
-            fields[key] = value
-    return fields
+def normalize_arch(arch: str) -> str:
+    aliases = {
+        "x64": "x86_64",
+    }
+    return aliases.get(arch, arch)
 
 
-def command_for(arch: str, binary: Path, direct: bool) -> list[str]:
-    if direct:
-        return [str(binary)]
-    qemu = QEMU_BY_ARCH.get(arch)
+def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool) -> list[str]:
+    qemu = QEMU_SYSTEM_BY_ARCH.get(arch)
     if qemu is None:
-        raise SystemExit(f"unsupported qemu test architecture: {arch}")
+        raise SystemExit(f"qemu-system boot is not implemented for {arch} yet")
     qemu_path = shutil.which(qemu)
     if qemu_path is None:
         raise SystemExit(f"{qemu} was not found in PATH")
-    return [qemu_path, str(binary)]
+
+    command = [
+        qemu_path,
+        "-drive",
+        f"file={kernel},format=raw,if=ide",
+        "-boot",
+        "c",
+        "-serial",
+        "stdio",
+        "-monitor",
+        "none",
+        "-no-reboot",
+        "-display",
+        display,
+    ]
+    if debug_exit:
+        command += ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
+    return command
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--arch", required=True)
-    parser.add_argument("--binary", required=True, type=Path)
-    parser.add_argument("--direct", action="store_true", help="Run the debug kernel test binary directly")
-    args = parser.parse_args()
+def run_kernel(arch: str, kernel: Path, display: str, debug_exit: bool, timeout: float | None) -> subprocess.CompletedProcess[str]:
+    with tempfile.TemporaryDirectory(prefix="okernel-qemu-") as tmp:
+        runnable_kernel = Path(tmp) / "kernel.bin"
+        shutil.copyfile(kernel, runnable_kernel)
+        command = qemu_command(arch, runnable_kernel, display, debug_exit)
+        return subprocess.run(command, text=True, capture_output=True, check=False, timeout=timeout)
 
-    binary = args.binary.resolve()
-    if not binary.exists():
-        print(f"debug kernel test binary does not exist: {binary}", file=sys.stderr)
-        return 2
 
-    command = command_for(args.arch, binary, args.direct)
-    env = os.environ.copy()
-    ld_prefix = QEMU_LD_PREFIX_BY_ARCH.get(args.arch)
-    if "QEMU_LD_PREFIX" not in env and ld_prefix and Path(ld_prefix).exists():
-        env["QEMU_LD_PREFIX"] = ld_prefix
+def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: bool) -> int:
+    if accept_debug_exit and returncode != QEMU_DEBUG_EXIT_SUCCESS:
+        print(f"qemu did not exit through debug-exit success path: returncode={returncode}", file=sys.stderr)
+        return returncode if returncode != 0 else 11
+    if not accept_debug_exit and returncode != 0:
+        print(f"qemu exited with returncode={returncode}", file=sys.stderr)
+        return returncode
 
-    result = subprocess.run(command, text=True, capture_output=True, check=False, env=env)
-    if result.stdout:
-        print(result.stdout, end="")
-    if result.stderr:
-        print(result.stderr, end="", file=sys.stderr)
-    if result.returncode != 0:
-        return result.returncode
-
-    lines = result.stdout.splitlines()
+    lines = output.splitlines()
     if "OK_MODE debug" not in lines:
-        print("test binary did not boot a debug kernel", file=sys.stderr)
+        print("kernel did not boot in debug mode", file=sys.stderr)
         return 3
     if not any(line.startswith("OK_DEBUG boot=complete") for line in lines):
         print("debug kernel did not report boot completion", file=sys.stderr)
@@ -101,9 +83,8 @@ def main() -> int:
         return 5
 
     fields = parse_fields(pass_lines[-1])
-    expected_arch = args.arch
-    if fields.get("arch") != expected_arch:
-        print(f"debug kernel arch mismatch: expected {expected_arch}, got {fields.get('arch')}", file=sys.stderr)
+    if fields.get("arch") != arch:
+        print(f"debug kernel arch mismatch: expected {arch}, got {fields.get('arch')}", file=sys.stderr)
         return 6
     if int(fields.get("debug_test_points", "0")) == 0:
         print("debug kernel did not run debug test points", file=sys.stderr)
@@ -119,6 +100,38 @@ def main() -> int:
         print("display driver did not report boot text", file=sys.stderr)
         return 10
     return 0
+
+
+def parse_fields(line: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for token in line.strip().split()[1:]:
+        if "=" in token:
+            key, value = token.split("=", 1)
+            fields[key] = value
+    return fields
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--arch", required=True)
+    parser.add_argument("--kernel", required=True, type=Path, help="Path to the compiled kernel.bin")
+    parser.add_argument("--display", default="none")
+    parser.add_argument("--no-debug-exit", action="store_true")
+    parser.add_argument("--timeout", type=float, default=10.0)
+    args = parser.parse_args()
+
+    arch = normalize_arch(args.arch)
+    kernel = args.kernel.resolve()
+    if not kernel.exists():
+        print(f"kernel image does not exist: {kernel}", file=sys.stderr)
+        return 2
+
+    result = run_kernel(arch, kernel, args.display, not args.no_debug_exit, args.timeout)
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    return validate_output(arch, result.stdout, result.returncode, not args.no_debug_exit)
 
 
 if __name__ == "__main__":
