@@ -30,17 +30,17 @@ Each architecture must provide:
 - Interrupt entry and return strategy.
 - User-mode entry strategy.
 - Memory-management constants and page-table model.
-- A QEMU smoke path.
+- A QEMU debug test path.
 - Documentation under `docs/arch/`.
 
 ## Tests
 
-Every new module feature needs a `qemu_smoke` assertion for the current xmake
-architecture. Architecture features need either direct smoke coverage or a
+Every new module feature needs a `qemu_kernel` assertion for the current xmake
+architecture. Architecture features need either direct debug test coverage or a
 documented qemu-system test until they can be run without a bootloader.
 
 Debug-only test points live behind `OK_ENABLE_TEST_POINTS`, which xmake defines
-only in debug mode. Smoke tests require debug mode and fail if the kernel does
+only in debug mode. QEMU tests require debug mode and fail if the kernel does
 not emit `OK_MODE debug` and a non-zero `debug_test_points` count.
 
 Before submitting architecture-sensitive changes, run:
@@ -49,5 +49,5 @@ Before submitting architecture-sensitive changes, run:
 xmake f -c -m debug -a x86_64
 xmake toolchain-check
 xmake -y -b okernel
-xmake test
+xmake qemu-test
 ```

@@ -24,7 +24,7 @@ struct KernelConfig
     usize timer_hz{1000};
 };
 
-struct KernelSmokeReport
+struct KernelTestReport
 {
     bool memory{false};
     bool interrupts{false};
@@ -42,7 +42,7 @@ class Kernel final
     Kernel();
 
     Status boot(KernelConfig config);
-    Status run_smoke_suite();
+    Status run_debug_test_suite();
 
     [[nodiscard]] bool booted() const
     {
@@ -52,9 +52,9 @@ class Kernel final
     {
         return debug_test_points_run_;
     }
-    [[nodiscard]] const KernelSmokeReport &smoke_report() const
+    [[nodiscard]] const KernelTestReport &test_report() const
     {
-        return smoke_report_;
+        return test_report_;
     }
     [[nodiscard]] arch::ArchOperations &arch()
     {
@@ -109,11 +109,11 @@ class Kernel final
     Status register_builtin_interrupts(driver::TimerDriver &timer);
     Status register_builtin_syscalls(driver::ConsoleDriver &console);
     Status log_boot_line(std::string_view line);
-    Status run_ext4_smoke();
+    Status run_ext4_test();
 
     bool booted_{false};
     usize debug_test_points_run_{0};
-    KernelSmokeReport smoke_report_{};
+    KernelTestReport test_report_{};
     KernelConfig config_{};
     arch::ArchOperations *arch_{nullptr};
     driver::ConsoleDriver console_driver_{};

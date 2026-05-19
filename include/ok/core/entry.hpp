@@ -37,7 +37,7 @@ struct KernelEntryConfig
 struct KernelEntryResult
 {
     Status status{};
-    KernelSmokeReport smoke{};
+    KernelTestReport tests{};
     usize debug_test_points{};
     u64 display_checksum{};
 };

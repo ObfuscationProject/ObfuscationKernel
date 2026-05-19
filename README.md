@@ -2,7 +2,7 @@
 
 ObfuscationKernel is a C++23 multi-architecture kernel framework built with xmake.
 The current tree is a working foundation: it compiles a reusable kernel library,
-boots a simulated kernel instance, and runs smoke tests that exercise interrupts,
+boots a simulated kernel instance, and runs debug kernel tests that exercise interrupts,
 memory management, scheduling, IPC, syscalls, drivers, VFS, and user-mode
 transition state. The foundation also includes SMP topology state, a simple
 framebuffer display driver, and a read-only EXT4 superblock/block reader.
@@ -31,7 +31,7 @@ test harness needed to grow into one without rewriting the project structure.
 xmake f -c -m debug -a x86_64
 xmake toolchain-check
 xmake -y -b okernel
-xmake test
+xmake qemu-test
 ```
 
 Expected result:
@@ -44,7 +44,7 @@ Enable debug test points for the current architecture:
 
 ```sh
 xmake f -c -m debug -a x86_64
-xmake test
+xmake qemu-test
 ```
 
 Check every configured freestanding toolchain:
@@ -69,7 +69,7 @@ xmake f -c -a x86_64
 xmake -y -b okernel
 ```
 
-## QEMU Smoke Tests
+## QEMU Tests
 
 ```sh
 xmake qemu-test
@@ -82,7 +82,8 @@ temporary one-off test for another architecture:
 xmake qemu-test -a aarch64
 ```
 
-For a visible QEMU window that displays the current architecture smoke result:
+For a visible QEMU window that displays the current architecture debug kernel
+output:
 
 ```sh
 xmake qemu-window-test
@@ -103,8 +104,7 @@ compiler, while real cross builds compile the matching target assembly.
 
 `okernel` is built as freestanding C++23 with exceptions disabled and RTTI kept
 enabled. The kernel library avoids hosted containers and allocation-heavy APIs;
-fixed-capacity kernel containers live in `include/ok/core/fixed.hpp`, and
-minimal freestanding ABI/compiler helper support lives in `src/core/abi.cpp`.
+fixed-capacity kernel containers live in `include/ok/core/fixed.hpp`.
 
 ## Documentation
 

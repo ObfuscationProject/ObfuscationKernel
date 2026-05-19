@@ -15,4 +15,4 @@ and idle/yield behavior.
 - Memory: LoongArch page-table format and privilege bits.
 - User mode: architecture-specific exception return.
 - Syscalls: architecture ABI syscall entry.
-- QEMU: `qemu-loongarch64` for user-mode smoke when available.
+- QEMU: `qemu-loongarch64` for user-mode debug tests when available.

@@ -12,17 +12,43 @@ void emit(const KernelDebugSink &sink, std::string_view text)
 
 void emit_unsigned(const KernelDebugSink &sink, u64 value)
 {
-    char digits[20]{};
-    usize count = 0;
-    do
+    constexpr u64 powers[] = {
+        10'000'000'000'000'000'000ull,
+        1'000'000'000'000'000'000ull,
+        100'000'000'000'000'000ull,
+        10'000'000'000'000'000ull,
+        1'000'000'000'000'000ull,
+        100'000'000'000'000ull,
+        10'000'000'000'000ull,
+        1'000'000'000'000ull,
+        100'000'000'000ull,
+        10'000'000'000ull,
+        1'000'000'000ull,
+        100'000'000ull,
+        10'000'000ull,
+        1'000'000ull,
+        100'000ull,
+        10'000ull,
+        1'000ull,
+        100ull,
+        10ull,
+        1ull,
+    };
+    bool started = false;
+    for (const auto power : powers)
     {
-        digits[count++] = static_cast<char>('0' + (value % 10));
-        value /= 10;
-    } while (value != 0);
-    while (count != 0)
-    {
-        --count;
-        emit(sink, std::string_view{&digits[count], 1});
+        u8 digit = 0;
+        while (value >= power)
+        {
+            value -= power;
+            ++digit;
+        }
+        if (digit != 0 || started || power == 1)
+        {
+            const char out = static_cast<char>('0' + digit);
+            emit(sink, std::string_view{&out, 1});
+            started = true;
+        }
     }
 }
 
@@ -71,7 +97,7 @@ void emit_display_text(const KernelDebugSink &sink, std::string_view text)
 
 [[maybe_unused]] void emit_pass(const KernelDebugSink &sink, Kernel &kernel)
 {
-    const auto &report = kernel.smoke_report();
+    const auto &report = kernel.test_report();
     emit_display_text(sink, kernel.display().text());
     emit(sink, "OK_TEST_PASS arch=");
     emit(sink, arch::to_string(kernel.arch().architecture()));
@@ -98,7 +124,7 @@ Status ok_kernel_entry(const KernelEntryConfig &config, KernelEntryResult *resul
 
     if (config.mode != KernelBootMode::debug)
     {
-        const auto status = Status::invalid_argument("smoke entry requires debug boot mode");
+        const auto status = Status::invalid_argument("kernel test entry requires debug boot mode");
         emit_failure(sink, status);
         if (result != nullptr)
         {
@@ -108,7 +134,7 @@ Status ok_kernel_entry(const KernelEntryConfig &config, KernelEntryResult *resul
     }
 
 #if !defined(OK_ENABLE_TEST_POINTS)
-    const auto status = Status::invalid_argument("smoke entry requires a debug build with OK_ENABLE_TEST_POINTS");
+    const auto status = Status::invalid_argument("kernel test entry requires a debug build with OK_ENABLE_TEST_POINTS");
     emit_failure(sink, status);
     if (result != nullptr)
     {
@@ -129,7 +155,7 @@ Status ok_kernel_entry(const KernelEntryConfig &config, KernelEntryResult *resul
     }
     emit(sink, "OK_DEBUG boot=complete\n");
 
-    if (auto status = kernel.run_smoke_suite(); !status.ok())
+    if (auto status = kernel.run_debug_test_suite(); !status.ok())
     {
         emit_failure(sink, status);
         if (result != nullptr)
@@ -145,7 +171,7 @@ Status ok_kernel_entry(const KernelEntryConfig &config, KernelEntryResult *resul
     if (result != nullptr)
     {
         result->status = Status::success();
-        result->smoke = kernel.smoke_report();
+        result->tests = kernel.test_report();
         result->debug_test_points = kernel.debug_test_points_run();
         result->display_checksum = kernel.display().checksum();
     }

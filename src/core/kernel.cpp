@@ -31,7 +31,7 @@ void write_le32(std::span<std::byte> out, usize offset, u32 value)
     write_le16(out, offset + 2, static_cast<u16>((value >> 16) & 0xffffu));
 }
 
-uptr smoke_mapping_address(arch::Architecture architecture)
+uptr test_mapping_address(arch::Architecture architecture)
 {
     switch (architecture)
     {
@@ -61,7 +61,7 @@ Kernel::Kernel() : arch_(&arch::arch_operations(arch::configured_architecture())
 Status Kernel::boot(KernelConfig config)
 {
     config.architecture = arch::configured_architecture();
-    smoke_report_ = {};
+    test_report_ = {};
     debug_test_points_run_ = 0;
     if (config.memory_region_count == 0)
     {
@@ -190,7 +190,7 @@ Status Kernel::boot(KernelConfig config)
     return Status::success();
 }
 
-Status Kernel::run_smoke_suite()
+Status Kernel::run_debug_test_suite()
 {
     if (!booted_)
     {
@@ -202,12 +202,12 @@ Status Kernel::run_smoke_suite()
     {
         return frame.status();
     }
-    const auto smoke_address = smoke_mapping_address(config_.architecture);
-    if (auto status = memory_.kernel_address_space().map(smoke_address, frame.value(), 0b11); !status.ok())
+    const auto test_address = test_mapping_address(config_.architecture);
+    if (auto status = memory_.kernel_address_space().map(test_address, frame.value(), 0b11); !status.ok())
     {
         return status;
     }
-    if (auto status = memory_.kernel_address_space().unmap(smoke_address); !status.ok())
+    if (auto status = memory_.kernel_address_space().unmap(test_address); !status.ok())
     {
         return status;
     }
@@ -215,14 +215,14 @@ Status Kernel::run_smoke_suite()
     {
         return status;
     }
-    smoke_report_.memory = true;
+    test_report_.memory = true;
 
     arch::TrapFrame trap{.vector = 32, .context = arch_->make_kernel_context(0x1000, 0x8000)};
     if (auto status = interrupts_.dispatch(trap); !status.ok())
     {
         return status;
     }
-    smoke_report_.interrupts = true;
+    test_report_.interrupts = true;
 
     auto channel = ipc_.create_channel();
     if (!channel)
@@ -241,9 +241,9 @@ Status Kernel::run_smoke_suite()
     auto message = ipc_.receive(channel.value());
     if (!message || message.value().size != sizeof(Payload))
     {
-        return Status::fault("IPC smoke test failed");
+        return Status::fault("IPC debug test failed");
     }
-    smoke_report_.ipc = true;
+    test_report_.ipc = true;
 
     if (auto status = vfs_.write_file("/tmp/kernel.log", as_bytes("booted\n")); !status.ok())
     {
@@ -252,23 +252,23 @@ Status Kernel::run_smoke_suite()
     auto log = vfs_.read_file("/tmp/kernel.log");
     if (!log || log.value().size != 7)
     {
-        return Status::fault("VFS smoke test failed");
+        return Status::fault("VFS debug test failed");
     }
-    smoke_report_.vfs = true;
+    test_report_.vfs = true;
 
-    if (auto status = run_ext4_smoke(); !status.ok())
+    if (auto status = run_ext4_test(); !status.ok())
     {
         return status;
     }
-    smoke_report_.ext4 = true;
+    test_report_.ext4 = true;
 
     syscall::Request getpid{.number = syscall::Number::getpid, .caller = scheduler_.current_pid()};
     auto getpid_result = syscalls_.dispatch(getpid);
     if (!getpid_result.status.ok() || getpid_result.value != static_cast<i64>(scheduler_.current_pid()))
     {
-        return Status::fault("getpid syscall smoke test failed");
+        return Status::fault("getpid syscall debug test failed");
     }
-    smoke_report_.syscalls = true;
+    test_report_.syscalls = true;
 
     auto context = arch_->make_user_context(arch::UserEntry{
         .instruction_pointer = 0x400000,
@@ -288,15 +288,15 @@ Status Kernel::run_smoke_suite()
     }
     if (context.mode != arch::PrivilegeMode::user)
     {
-        return Status::fault("user mode transition smoke test failed");
+        return Status::fault("user mode transition debug test failed");
     }
-    smoke_report_.user_mode = true;
+    test_report_.user_mode = true;
 
     if (display_driver_.text().empty() || display_driver_.checksum() == 0)
     {
-        return Status::fault("display smoke test failed");
+        return Status::fault("display debug test failed");
     }
-    smoke_report_.display = true;
+    test_report_.display = true;
 
     auto debug_test_points = test::run_kernel_test_points(*this);
     if (!debug_test_points)
@@ -321,7 +321,7 @@ Status Kernel::log_boot_line(std::string_view line)
     return display_driver_.write_line(line);
 }
 
-Status Kernel::run_ext4_smoke()
+Status Kernel::run_ext4_test()
 {
     std::array<std::byte, 4096> image{};
     auto bytes = std::span<std::byte>(image.data(), image.size());
@@ -349,7 +349,7 @@ Status Kernel::run_ext4_smoke()
     if (!info || info.value().block_size != 1024 || info.value().inode_size != 256 ||
         info.value().volume_name.view() != name || !info.value().has_extents)
     {
-        return Status::fault("EXT4 smoke test failed");
+        return Status::fault("EXT4 debug test failed");
     }
 
     std::array<std::byte, 1024> block{};

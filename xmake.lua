@@ -8,11 +8,8 @@ set_languages("c++23")
 includes("xmake/arch.lua")
 includes("xmake/toolchains.lua")
 
-function add_ok_kernel_sources(abi)
+function add_ok_kernel_sources()
     add_files("src/core/*.cpp")
-    if not abi then
-        remove_files("src/core/abi.cpp")
-    end
     add_files("src/driver/*.cpp")
     add_files("src/fs/*.cpp")
     add_files("src/interrupt/*.cpp")
@@ -30,7 +27,7 @@ target("okernel")
     set_languages("c++23")
     add_ok_freestanding_toolchain()
     add_ok_freestanding_arch_flags()
-    add_ok_kernel_sources(true)
+    add_ok_kernel_sources()
     add_includedirs("include", {public = true})
     add_cxxflags(
         "-ffreestanding",
@@ -49,20 +46,20 @@ target("okernel")
     add_ok_debug_test_points()
 target_end()
 
-target("qemu_smoke")
+target("qemu_kernel")
     set_kind("binary")
     set_languages("c++23")
     set_arch(os.arch())
     set_values("ok.arch", ok_current_arch())
-    add_ok_kernel_sources(false)
-    add_files("tests/qemu/smoke_main.cpp")
+    add_ok_kernel_sources()
+    add_files("tests/qemu/debug_kernel_main.cpp")
     add_includedirs("include")
     add_ok_arch_profile()
     add_ok_debug_test_points()
-    add_tests("smoke")
+    add_tests("debug-kernel")
     on_run(function (target)
         os.execv("python3", {
-            path.join(os.projectdir(), "scripts", "qemu_smoke.py"),
+            path.join(os.projectdir(), "scripts", "qemu_test.py"),
             "--arch", target:values("ok.arch"),
             "--binary", target:targetfile(),
             "--direct"
@@ -70,7 +67,7 @@ target("qemu_smoke")
     end)
     on_test(function (target)
         local code = os.execv("python3", {
-            path.join(os.projectdir(), "scripts", "qemu_smoke.py"),
+            path.join(os.projectdir(), "scripts", "qemu_test.py"),
             "--arch", target:values("ok.arch"),
             "--binary", target:targetfile(),
             "--direct"

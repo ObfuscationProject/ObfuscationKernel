@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run an ObfuscationKernel smoke binary directly or through qemu-user."""
+"""Run an ObfuscationKernel debug kernel test binary."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def command_for(arch: str, binary: Path, direct: bool) -> list[str]:
         return [str(binary)]
     qemu = QEMU_BY_ARCH.get(arch)
     if qemu is None:
-        raise SystemExit(f"unsupported qemu smoke architecture: {arch}")
+        raise SystemExit(f"unsupported qemu test architecture: {arch}")
     qemu_path = shutil.which(qemu)
     if qemu_path is None:
         raise SystemExit(f"{qemu} was not found in PATH")
@@ -65,12 +65,12 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--arch", required=True)
     parser.add_argument("--binary", required=True, type=Path)
-    parser.add_argument("--direct", action="store_true", help="Run the smoke binary directly as a hosted profile test")
+    parser.add_argument("--direct", action="store_true", help="Run the debug kernel test binary directly")
     args = parser.parse_args()
 
     binary = args.binary.resolve()
     if not binary.exists():
-        print(f"smoke binary does not exist: {binary}", file=sys.stderr)
+        print(f"debug kernel test binary does not exist: {binary}", file=sys.stderr)
         return 2
 
     command = command_for(args.arch, binary, args.direct)
@@ -89,7 +89,7 @@ def main() -> int:
 
     lines = result.stdout.splitlines()
     if "OK_MODE debug" not in lines:
-        print("smoke binary did not boot a debug kernel", file=sys.stderr)
+        print("test binary did not boot a debug kernel", file=sys.stderr)
         return 3
     if not any(line.startswith("OK_DEBUG boot=complete") for line in lines):
         print("debug kernel did not report boot completion", file=sys.stderr)
@@ -97,20 +97,20 @@ def main() -> int:
 
     pass_lines = [line for line in lines if line.startswith("OK_TEST_PASS ")]
     if not pass_lines:
-        print("smoke binary did not report OK_TEST_PASS", file=sys.stderr)
+        print("debug kernel did not report OK_TEST_PASS", file=sys.stderr)
         return 5
 
     fields = parse_fields(pass_lines[-1])
     expected_arch = args.arch
     if fields.get("arch") != expected_arch:
-        print(f"smoke arch mismatch: expected {expected_arch}, got {fields.get('arch')}", file=sys.stderr)
+        print(f"debug kernel arch mismatch: expected {expected_arch}, got {fields.get('arch')}", file=sys.stderr)
         return 6
     if int(fields.get("debug_test_points", "0")) == 0:
         print("debug kernel did not run debug test points", file=sys.stderr)
         return 7
     for required in ("fs", "ext4", "user", "display"):
         if fields.get(required) != "1":
-            print(f"debug kernel did not pass {required} smoke coverage", file=sys.stderr)
+            print(f"debug kernel did not pass {required} test coverage", file=sys.stderr)
             return 8
     if int(fields.get("display_checksum", "0")) == 0:
         print("display driver did not produce a framebuffer checksum", file=sys.stderr)

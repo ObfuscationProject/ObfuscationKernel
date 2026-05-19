@@ -11,4 +11,4 @@ Built-in drivers:
 - `FramebufferDisplayDriver`: exposes a simple 32-bit RGBA framebuffer with
   clear, pixel, rectangle, text-line, and checksum operations. Kernel boot writes
   Linux-style startup lines through this driver so `qemu-window-test` can show
-  the same debug output that the smoke runner validates.
+  the same debug output that the QEMU checker validates.

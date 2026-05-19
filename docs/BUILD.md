@@ -64,16 +64,17 @@ toolchain selection lives in `xmake/arch.lua`.
 
 ## Tests
 
-`qemu_smoke` is registered as an xmake test. It builds a hosted harness for the
-current xmake architecture profile, verifies that the kernel was built in debug
-mode, calls `ok_kernel_main`, and parses the debug kernel's `OK_*` diagnostic
-lines:
+`qemu_kernel` is registered as an xmake test. It builds a hosted debug entry for
+the current xmake architecture profile, verifies that the kernel was built in
+debug mode, calls `ok_kernel_main`, and parses the debug kernel's `OK_*`
+diagnostic lines:
 
 ```sh
 xmake test
 ```
 
-The convenience task does the same for the current architecture:
+The convenience task builds `qemu_kernel` and runs the Python checker for the
+current architecture:
 
 ```sh
 xmake qemu-test
@@ -85,14 +86,14 @@ To temporarily test another architecture profile:
 xmake qemu-test -a aarch64
 ```
 
-The visual task shows the current architecture test result in a QEMU window:
+The visual task shows the kernel's framebuffer text in a QEMU window:
 
 ```sh
 xmake qemu-window-test
 ```
 
-Use `--no-launch` in headless environments to only generate the bootable status
-image.
+Use `--no-launch` in headless environments to generate the bootable display
+image and print the result without launching a window.
 
 ## Freestanding Flags
 
@@ -107,12 +108,3 @@ image.
 
 Hosted containers such as `std::vector`, `std::string`, `std::map`, and
 `std::unordered_map` are not used by the kernel library.
-
-## Freestanding ABI Shim
-
-`src/core/abi.cpp` provides only the small set of symbols that the compiler can
-emit for freestanding C++ code: byte memory routines, ARM EABI arithmetic
-helpers, sized delete operators, `atexit`, and RTTI type-info destructors. It is
-not a runtime, not a process runtime, and not a libc/libstdc++ replacement. The
-`qemu_smoke` test target excludes this file because that binary is a hosted test
-harness.

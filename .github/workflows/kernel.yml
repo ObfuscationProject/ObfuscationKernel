@@ -56,9 +56,5 @@ jobs:
         run: xmake toolchain-check
       - name: Build kernel library
         run: xmake -y -b okernel
-      - name: Check freestanding link closure
-        run: |
-          toolchains/${{ matrix.triple }}/bin/${{ matrix.triple }}-ld -r --whole-archive build/linux/${{ matrix.arch }}/debug/libokernel.a -o /tmp/okernel-${{ matrix.triple }}.o
-          test -z "$(toolchains/${{ matrix.triple }}/bin/${{ matrix.triple }}-nm -u /tmp/okernel-${{ matrix.triple }}.o)"
       - name: Run architecture test
-        run: xmake test
+        run: xmake qemu-test

@@ -124,10 +124,10 @@ task_end()
 task("qemu-test")
     set_menu {
         usage = "xmake qemu-test [-a ARCH]",
-        description = "Build and test qemu_smoke for the current xmake architecture",
+        description = "Build and run the debug kernel test for the current xmake architecture",
         options = {
             {"a", "profile", "kv", nil, "Temporarily test another architecture"},
-            {"m", "check-mode", "kv", nil, "Build mode used for the smoke test"}
+            {"m", "check-mode", "kv", nil, "Build mode used for the debug kernel test"}
         }
     }
     on_run(function ()
@@ -151,10 +151,10 @@ task("qemu-test")
             os.execv("xmake", {"f", "-c", "-m", mode, "-a", test_arch})
         end
 
-        local build_code = os.execv("xmake", {"-y", "-b", "qemu_smoke"}, {try = true})
+        local build_code = os.execv("xmake", {"-y", "-b", "qemu_kernel"}, {try = true})
         local test_code = 0
         if build_code == 0 then
-            test_code = os.execv("xmake", {"test"}, {try = true})
+            test_code = os.execv("xmake", {"run", "qemu_kernel"}, {try = true})
         end
 
         if reconfigured then
@@ -162,10 +162,10 @@ task("qemu-test")
         end
 
         if build_code ~= 0 then
-            raise("qemu_smoke build failed for %s", test_arch)
+            raise("qemu kernel test build failed for %s", test_arch)
         end
         if test_code ~= 0 then
-            raise("qemu_smoke test failed for %s", test_arch)
+            raise("qemu kernel test failed for %s", test_arch)
         end
     end)
 task_end()
@@ -173,9 +173,9 @@ task_end()
 task("qemu-window-test")
     set_menu {
         usage = "xmake qemu-window-test",
-        description = "Show the current architecture smoke result in a QEMU graphical window",
+        description = "Show the debug kernel display output in a QEMU graphical window",
         options = {
-            {"m", "check-mode", "kv", nil, "Build mode used for the smoke test"},
+            {"m", "check-mode", "kv", nil, "Build mode used for the debug kernel test"},
             {nil, "display", "kv", "gtk", "QEMU display backend"},
             {nil, "no-launch", "k", nil, "Generate the demo image without opening QEMU"}
         }
@@ -193,7 +193,7 @@ task("qemu-window-test")
             os.execv("xmake", {"f", "-c", "-m", mode, "-a", arch})
         end
         local argv = {
-            path.join(os.projectdir(), "scripts", "qemu_window_demo.py"),
+            path.join(os.projectdir(), "scripts", "qemu_window_test.py"),
             "--arch", arch,
             "--mode", mode,
             "--display", option.get("display") or "gtk"
@@ -206,7 +206,7 @@ task("qemu-window-test")
             os.execv("xmake", {"f", "-c", "-m", current_mode, "-a", arch})
         end
         if code ~= 0 then
-            raise("qemu window smoke test failed for %s", arch)
+            raise("qemu window test failed for %s", arch)
         end
     end)
 task_end()

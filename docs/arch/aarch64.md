@@ -15,4 +15,4 @@ transition metadata, and guarded AArch64 inline assembly for `cntvct_el0`,
 - Memory: TTBR0 for user space, TTBR1 for kernel space, MAIR/TCR setup.
 - User mode: `eret` from EL1 to EL0.
 - Syscalls: `svc #0` with arguments in `x0` through `x5`.
-- QEMU: `qemu-aarch64` for user-mode smoke, `qemu-system-aarch64` for EL tests.
+- QEMU: `qemu-aarch64` for user-mode debug tests, `qemu-system-aarch64` for EL tests.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Show the current architecture smoke result in a standalone QEMU window."""
+"""Show the debug kernel display output in a standalone QEMU window."""
 
 from __future__ import annotations
 
@@ -67,43 +67,41 @@ class BootSector:
         return bytes(self.code)
 
 
-def run_current_smoke(root: Path) -> str:
-    subprocess.run(["xmake", "-y", "-b", "qemu_smoke"], cwd=root, check=True)
-    result = subprocess.run(["xmake", "run", "qemu_smoke"], cwd=root, text=True, capture_output=True, check=False)
-    if result.stdout:
-        print(result.stdout, end="")
-    if result.stderr:
-        print(result.stderr, end="")
-    if result.returncode != 0:
-        raise subprocess.CalledProcessError(result.returncode, ["xmake", "run", "qemu_smoke"])
-    if "OK_TEST_PASS" not in result.stdout:
-        raise RuntimeError("qemu_smoke did not print OK_TEST_PASS")
-    return result.stdout.strip()
+def run_current_kernel(root: Path) -> tuple[str, str, int]:
+    build = subprocess.run(["xmake", "-y", "-b", "qemu_kernel"], cwd=root, text=True, capture_output=True, check=False)
+    if build.returncode != 0:
+        if build.stdout:
+            print(build.stdout, end="")
+        if build.stderr:
+            print(build.stderr, end="")
+        raise subprocess.CalledProcessError(build.returncode, ["xmake", "-y", "-b", "qemu_kernel"])
+    result = subprocess.run(["xmake", "run", "qemu_kernel"], cwd=root, text=True, capture_output=True, check=False)
+    return result.stdout, result.stderr, result.returncode
 
 
-def demo_text(arch: str, smoke_output: str) -> str:
-    match = PASS_RE.search(smoke_output)
-    status = "PASS" if match else "FAIL"
-    test_points = match.group(2) if match else "0"
+def kernel_display_text(kernel_output: str) -> str:
     display_lines = [
         line.removeprefix("OK_DISPLAY_TEXT ")
-        for line in smoke_output.splitlines()
+        for line in kernel_output.splitlines()
         if line.startswith("OK_DISPLAY_TEXT ")
     ]
-    display_text = "\n".join(display_lines[:12]) if display_lines else smoke_output[:320]
-    return "\n".join(
-        [
-            "ObfuscationKernel QEMU Window Test",
-            "",
-            f"arch:        {arch}",
-            f"status:      {status}",
-            f"test points: {test_points}",
-            "",
-            display_text,
-            "",
-            "Close the QEMU window or press Ctrl-A X.",
-        ]
-    )
+    if display_lines:
+        return "\n".join(display_lines[:12])
+    return "[    0.000000] okernel: no framebuffer text reported\n"
+
+
+def print_result(arch: str, stdout: str, stderr: str, returncode: int, image: Path) -> int:
+    match = PASS_RE.search(stdout)
+    if returncode == 0 and match:
+        print(f"QEMU_WINDOW_TEST_PASS arch={arch} debug_test_points={match.group(2)} image={image}")
+        return 0
+
+    if stdout:
+        print(stdout, end="")
+    if stderr:
+        print(stderr, end="")
+    print(f"QEMU_WINDOW_TEST_FAIL arch={arch} returncode={returncode} image={image}")
+    return returncode if returncode != 0 else 1
 
 
 def main() -> int:
@@ -115,22 +113,21 @@ def main() -> int:
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parents[1]
-    smoke_output = run_current_smoke(root)
-    sector = BootSector().build(demo_text(args.arch, smoke_output))
+    kernel_stdout, kernel_stderr, kernel_returncode = run_current_kernel(root)
+    sector = BootSector().build(kernel_display_text(kernel_stdout))
 
     out_dir = Path(tempfile.mkdtemp(prefix="ok-qemu-window-"))
     image = out_dir / "ok-window-demo.img"
     image.write_bytes(sector + bytes(1474560 - len(sector)))
-    print(f"QEMU_WINDOW_IMAGE {image}")
 
     if args.no_launch:
-        return 0
+        return print_result(args.arch, kernel_stdout, kernel_stderr, kernel_returncode, image)
 
     qemu = shutil.which("qemu-system-x86_64") or shutil.which("qemu-system-i386")
     if qemu is None:
         raise FileNotFoundError("qemu-system-x86_64 or qemu-system-i386 was not found in PATH")
 
-    subprocess.run(
+    qemu_result = subprocess.run(
         [
             qemu,
             "-drive",
@@ -141,12 +138,15 @@ def main() -> int:
             args.display,
             "-no-reboot",
             "-name",
-            "ObfuscationKernel smoke status",
+            "ObfuscationKernel debug kernel",
         ],
         cwd=root,
-        check=True,
+        check=False,
     )
-    return 0
+    if qemu_result.returncode != 0:
+        print(f"QEMU_WINDOW_TEST_FAIL arch={args.arch} qemu_returncode={qemu_result.returncode} image={image}")
+        return qemu_result.returncode
+    return print_result(args.arch, kernel_stdout, kernel_stderr, kernel_returncode, image)
 
 
 if __name__ == "__main__":

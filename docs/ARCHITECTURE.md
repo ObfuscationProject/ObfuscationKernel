@@ -31,8 +31,7 @@ surface explicit and self-contained.
 
 The kernel target is freestanding. Dynamic allocation and hosted containers are
 kept out of `okernel`; fixed-capacity containers provide the current storage
-model. `src/core/abi.cpp` supplies minimal compiler ABI symbols so the kernel
-does not depend on libc, libstdc++, or libsupc++ at link time.
+model.
 
 ## Boot Flow
 
@@ -45,7 +44,7 @@ does not depend on libc, libstdc++, or libsupc++ at link time.
 5. Create and schedule the idle process.
 6. Create `/tmp/kernel.log` in the RAM VFS.
 
-The smoke suite then validates one operation from every core module.
+The debug test suite then validates one operation from every core module.
 
 ## Architecture-Specific Operations
 
