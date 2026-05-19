@@ -41,6 +41,9 @@ inline constexpr usize console_buffer_size = 4096;
 inline constexpr usize framebuffer_width = 160;
 inline constexpr usize framebuffer_height = 100;
 inline constexpr usize framebuffer_pixels = framebuffer_width * framebuffer_height;
+inline constexpr usize display_text_columns = 80;
+inline constexpr usize display_text_rows = 25;
+inline constexpr usize display_text_buffer_size = (display_text_columns + 1) * display_text_rows;
 
 class DriverManager final
 {
@@ -158,16 +161,26 @@ class FramebufferDisplayDriver final : public Driver
     Status clear(u32 rgba);
     Status put_pixel(u32 x, u32 y, u32 rgba);
     Status fill_rect(u32 x, u32 y, u32 width, u32 height, u32 rgba);
+    Status write_line(std::string_view text);
     [[nodiscard]] DisplayMode mode() const
     {
         return mode_;
     }
+    [[nodiscard]] std::string_view text() const
+    {
+        return {text_.data(), text_size_};
+    }
     [[nodiscard]] u64 checksum() const;
 
   private:
+    void draw_cell(u32 column, u32 row, char value);
+
     bool started_{false};
     DisplayMode mode_{};
     std::array<u32, framebuffer_pixels> pixels_{};
+    std::array<char, display_text_buffer_size> text_{};
+    usize text_size_{0};
+    u32 cursor_row_{0};
 };
 
 } // namespace ok::driver

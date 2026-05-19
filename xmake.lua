@@ -8,10 +8,10 @@ set_languages("c++23")
 includes("xmake/arch.lua")
 includes("xmake/toolchains.lua")
 
-function add_ok_kernel_sources(runtime)
+function add_ok_kernel_sources(abi)
     add_files("src/core/*.cpp")
-    if not runtime then
-        remove_files("src/core/runtime.cpp")
+    if not abi then
+        remove_files("src/core/abi.cpp")
     end
     add_files("src/driver/*.cpp")
     add_files("src/fs/*.cpp")
@@ -67,6 +67,15 @@ target("qemu_smoke")
             "--binary", target:targetfile(),
             "--direct"
         })
+    end)
+    on_test(function (target)
+        local code = os.execv("python3", {
+            path.join(os.projectdir(), "scripts", "qemu_smoke.py"),
+            "--arch", target:values("ok.arch"),
+            "--binary", target:targetfile(),
+            "--direct"
+        }, {try = true})
+        return code == 0
     end)
 target_end()
 

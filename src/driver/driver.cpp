@@ -153,6 +153,8 @@ Status FramebufferDisplayDriver::clear(u32 rgba)
     {
         pixel = rgba;
     }
+    text_size_ = 0;
+    cursor_row_ = 0;
     return Status::success();
 }
 
@@ -187,6 +189,55 @@ Status FramebufferDisplayDriver::fill_rect(u32 x, u32 y, u32 width, u32 height, 
             pixels_[static_cast<usize>(y + row) * mode_.width + x + column] = rgba;
         }
     }
+    return Status::success();
+}
+
+void FramebufferDisplayDriver::draw_cell(u32 column, u32 row, char value)
+{
+    constexpr u32 cell_width = 2;
+    constexpr u32 cell_height = 4;
+    constexpr u32 foreground = 0xffd8f3ffu;
+    constexpr u32 background = 0xff061018u;
+    const auto origin_x = column * cell_width;
+    const auto origin_y = row * cell_height;
+    const auto code = static_cast<u8>(value);
+    for (u32 y = 0; y < cell_height; ++y)
+    {
+        for (u32 x = 0; x < cell_width; ++x)
+        {
+            const auto pixel = ((code >> ((x + y) & 7u)) & 1u) != 0 || value == '[' || value == ']'
+                                   ? foreground
+                                   : background;
+            pixels_[static_cast<usize>(origin_y + y) * mode_.width + origin_x + x] = pixel;
+        }
+    }
+}
+
+Status FramebufferDisplayDriver::write_line(std::string_view text)
+{
+    if (!started_)
+    {
+        return Status::not_initialized("framebuffer driver not started");
+    }
+    if (cursor_row_ >= display_text_rows)
+    {
+        return Status::overflow("display text rows exhausted");
+    }
+
+    const auto row = cursor_row_++;
+    const auto count = text.size() < display_text_columns ? text.size() : display_text_columns;
+    if (text_size_ + count + 1 > text_.size())
+    {
+        return Status::overflow("display text buffer full");
+    }
+
+    for (usize i = 0; i < count; ++i)
+    {
+        const auto value = text[i];
+        text_[text_size_++] = value;
+        draw_cell(static_cast<u32>(i), row, value);
+    }
+    text_[text_size_++] = '\n';
     return Status::success();
 }
 

@@ -6,6 +6,10 @@ local freestanding_toolchains = {
     {"ok-rv64-elf", "riscv64-elf"},
     {"ok-rv32-elf", "riscv32-elf"},
     {"ok-loongarch64-elf", "loongarch64-elf"},
+    {"ok-mips-elf", "mips-elf"},
+    {"ok-mips64-elf", "mips64-elf"},
+    {"ok-ppc-elf", "powerpc-eabi"},
+    {"ok-ppc64-elf", "powerpc64-elf"},
 }
 
 local linux_user_toolchains = {
@@ -39,4 +43,3 @@ for _, spec in ipairs(linux_user_toolchains) do
         set_toolset("strip", spec[2] .. "-strip")
     toolchain_end()
 end
-

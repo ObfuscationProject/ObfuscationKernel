@@ -1,8 +1,9 @@
 # QEMU Testing
 
-The current test model is bootless. `qemu_smoke` is an xmake test binary that
-creates an `ok::Kernel`, boots it with a synthetic memory map, and runs
-module-level checks.
+The current test model is bootless. `qemu_smoke` is a hosted harness that calls
+the kernel's `ok_kernel_main` entry point. The debug kernel boots itself, runs
+module-level checks, writes Linux-style boot lines through the framebuffer
+driver, and emits `OK_*` diagnostics for the Python runner to validate.
 
 ## Current Architecture Test
 
@@ -44,8 +45,10 @@ xmake qemu-window-test --no-launch
 
 ## Pass Signal
 
-The smoke binary must print `OK_TEST_PASS`. Any non-zero exit code or missing
-pass marker is a failure.
+The smoke binary must print `OK_MODE debug`, `OK_DEBUG boot=complete`,
+`OK_DISPLAY_TEXT`, and `OK_TEST_PASS`. The Python runner also verifies that
+debug test points ran and that filesystem, EXT4, user-mode, and display checks
+reported success. Any non-zero exit code or missing marker is a failure.
 
 ## CI Coverage
 

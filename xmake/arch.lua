@@ -1,4 +1,7 @@
-OK_SUPPORTED_ARCHES = {"i386", "x86_64", "aarch64", "arm32", "rv64", "rv32", "loongarch64"}
+OK_SUPPORTED_ARCHES = {
+    "i386", "x86_64", "aarch64", "arm32", "rv64", "rv32", "loongarch64",
+    "mips", "mips64", "ppc", "ppc64"
+}
 
 OK_ARCH_SPECS = {
     i386 = {
@@ -17,7 +20,8 @@ OK_ARCH_SPECS = {
         define = "OK_ARCH_TARGET_AARCH64",
         source = "aarch64",
         toolchain = "ok-aarch64-elf",
-        triple = "aarch64-elf"
+        triple = "aarch64-elf",
+        freestanding_cxxflags = {"-mno-outline-atomics"}
     },
     arm32 = {
         define = "OK_ARCH_TARGET_ARM32",
@@ -44,6 +48,30 @@ OK_ARCH_SPECS = {
         toolchain = "ok-loongarch64-elf",
         triple = "loongarch64-elf"
     },
+    mips = {
+        define = "OK_ARCH_TARGET_MIPS",
+        source = "mips",
+        toolchain = "ok-mips-elf",
+        triple = "mips-elf"
+    },
+    mips64 = {
+        define = "OK_ARCH_TARGET_MIPS64",
+        source = "mips64",
+        toolchain = "ok-mips64-elf",
+        triple = "mips64-elf"
+    },
+    ppc = {
+        define = "OK_ARCH_TARGET_PPC",
+        source = "ppc",
+        toolchain = "ok-ppc-elf",
+        triple = "powerpc-eabi"
+    },
+    ppc64 = {
+        define = "OK_ARCH_TARGET_PPC64",
+        source = "ppc64",
+        toolchain = "ok-ppc64-elf",
+        triple = "powerpc64-elf"
+    },
 }
 
 function ok_normalize_arch(arch)
@@ -64,6 +92,15 @@ function ok_normalize_arch(arch)
     end
     if arch == "riscv32" then
         return "rv32"
+    end
+    if arch == "loong64" then
+        return "loongarch64"
+    end
+    if arch == "powerpc" then
+        return "ppc"
+    end
+    if arch == "powerpc64" then
+        return "ppc64"
     end
     return arch
 end

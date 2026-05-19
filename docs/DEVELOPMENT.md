@@ -40,8 +40,8 @@ architecture. Architecture features need either direct smoke coverage or a
 documented qemu-system test until they can be run without a bootloader.
 
 Debug-only test points live behind `OK_ENABLE_TEST_POINTS`, which xmake defines
-only in debug mode. Release builds must keep `debug_test_points=0` in the smoke
-output.
+only in debug mode. Smoke tests require debug mode and fail if the kernel does
+not emit `OK_MODE debug` and a non-zero `debug_test_points` count.
 
 Before submitting architecture-sensitive changes, run:
 

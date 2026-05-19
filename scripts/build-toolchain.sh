@@ -17,7 +17,7 @@ Usage: scripts/build-toolchain.sh [--arch ARCH] [--jobs N]
 Build binutils and GCC cross toolchains under ./toolchains.
 
 Architectures:
-  i386 x86_64 aarch64 arm32 rv64 rv32 loongarch64 all
+  i386 x86_64 aarch64 arm32 rv64 rv32 loongarch64 mips mips64 ppc ppc64 all
 
 Environment:
   BINUTILS_VERSION  default: 2.42
@@ -59,6 +59,10 @@ triple_for_arch() {
         rv64|riscv64) echo "riscv64-elf" ;;
         rv32|riscv32) echo "riscv32-elf" ;;
         loongarch64) echo "loongarch64-elf" ;;
+        mips) echo "mips-elf" ;;
+        mips64) echo "mips64-elf" ;;
+        ppc|powerpc) echo "powerpc-eabi" ;;
+        ppc64|powerpc64) echo "powerpc64-elf" ;;
         *) echo "unsupported architecture: $1" >&2; return 1 ;;
     esac
 }
@@ -173,7 +177,7 @@ build_one() {
 main() {
     prepare_sources
     if [[ "$ARCH" == "all" ]]; then
-        for arch in i386 x86_64 aarch64 arm32 rv64 rv32 loongarch64; do
+        for arch in i386 x86_64 aarch64 arm32 rv64 rv32 loongarch64 mips mips64 ppc ppc64; do
             build_one "$arch"
         done
     else

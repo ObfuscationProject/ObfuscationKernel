@@ -17,6 +17,10 @@ enum class Architecture : u8
     rv64,
     rv32,
     loongarch64,
+    mips,
+    mips64,
+    ppc,
+    ppc64,
 };
 
 enum class Endianness : u8
@@ -99,6 +103,14 @@ template <Architecture A> struct ArchTraits;
         return "rv32";
     case Architecture::loongarch64:
         return "loongarch64";
+    case Architecture::mips:
+        return "mips";
+    case Architecture::mips64:
+        return "mips64";
+    case Architecture::ppc:
+        return "ppc";
+    case Architecture::ppc64:
+        return "ppc64";
     }
     return "unknown";
 }
@@ -132,6 +144,22 @@ template <Architecture A> struct ArchTraits;
     if (value == "loongarch64")
     {
         return Architecture::loongarch64;
+    }
+    if (value == "mips")
+    {
+        return Architecture::mips;
+    }
+    if (value == "mips64")
+    {
+        return Architecture::mips64;
+    }
+    if (value == "ppc" || value == "powerpc")
+    {
+        return Architecture::ppc;
+    }
+    if (value == "ppc64" || value == "powerpc64")
+    {
+        return Architecture::ppc64;
     }
     return Architecture::x86_64;
 }

@@ -26,6 +26,14 @@ jobs:
             triple: riscv32-elf
           - arch: loongarch64
             triple: loongarch64-elf
+          - arch: mips
+            triple: mips-elf
+          - arch: mips64
+            triple: mips64-elf
+          - arch: ppc
+            triple: powerpc-eabi
+          - arch: ppc64
+            triple: powerpc64-elf
     steps:
       - uses: actions/checkout@v4
       - uses: xmake-io/github-action-setup-xmake@v1
@@ -43,14 +51,14 @@ jobs:
       - name: Build cross GCC/binutils
         run: scripts/build-toolchain.sh --arch ${{ matrix.arch }} --jobs 2
       - name: Configure architecture
-        run: xmake f -c -m release -a ${{ matrix.arch }}
+        run: xmake f -c -m debug -a ${{ matrix.arch }}
       - name: Check toolchain
         run: xmake toolchain-check
       - name: Build kernel library
         run: xmake -y -b okernel
       - name: Check freestanding link closure
         run: |
-          toolchains/${{ matrix.triple }}/bin/${{ matrix.triple }}-ld -r --whole-archive build/linux/${{ matrix.arch }}/release/libokernel.a -o /tmp/okernel-${{ matrix.triple }}.o
+          toolchains/${{ matrix.triple }}/bin/${{ matrix.triple }}-ld -r --whole-archive build/linux/${{ matrix.arch }}/debug/libokernel.a -o /tmp/okernel-${{ matrix.triple }}.o
           test -z "$(toolchains/${{ matrix.triple }}/bin/${{ matrix.triple }}-nm -u /tmp/okernel-${{ matrix.triple }}.o)"
       - name: Run architecture test
         run: xmake test

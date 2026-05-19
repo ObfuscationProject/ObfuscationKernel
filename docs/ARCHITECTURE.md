@@ -31,8 +31,8 @@ surface explicit and self-contained.
 
 The kernel target is freestanding. Dynamic allocation and hosted containers are
 kept out of `okernel`; fixed-capacity containers provide the current storage
-model. `src/core/runtime.cpp` supplies minimal memory and C++ ABI symbols so the
-kernel does not depend on libc, libstdc++, or libsupc++ at link time.
+model. `src/core/abi.cpp` supplies minimal compiler ABI symbols so the kernel
+does not depend on libc, libstdc++, or libsupc++ at link time.
 
 ## Boot Flow
 
@@ -61,6 +61,10 @@ The concrete implementations are separate files:
 | `rv64` | `src/arch/rv64/ops.cpp` |
 | `rv32` | `src/arch/rv32/ops.cpp` |
 | `loongarch64` | `src/arch/loongarch64/ops.cpp` |
+| `mips` | `src/arch/mips/ops.cpp` |
+| `mips64` | `src/arch/mips64/ops.cpp` |
+| `ppc` | `src/arch/ppc/ops.cpp` |
+| `ppc64` | `src/arch/ppc64/ops.cpp` |
 
 Inline assembly is used for safe low-level primitives such as cycle counters and
 memory fences. Privileged instructions such as interrupt enable/disable and CPU

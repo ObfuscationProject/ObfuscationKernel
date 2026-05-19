@@ -1,5 +1,6 @@
 #include "ok/core/kernel.hpp"
 #include "ok/core/test_point.hpp"
+#include "ok/fs/ext4.hpp"
 
 #include <array>
 
@@ -18,6 +19,18 @@ std::span<const std::byte> as_bytes(std::string_view text)
     return {reinterpret_cast<const std::byte *>(text.data()), text.size()};
 }
 
+void write_le16(std::span<std::byte> out, usize offset, u16 value)
+{
+    out[offset] = static_cast<std::byte>(value & 0xffu);
+    out[offset + 1] = static_cast<std::byte>((value >> 8) & 0xffu);
+}
+
+void write_le32(std::span<std::byte> out, usize offset, u32 value)
+{
+    write_le16(out, offset, static_cast<u16>(value & 0xffffu));
+    write_le16(out, offset + 2, static_cast<u16>((value >> 16) & 0xffffu));
+}
+
 uptr smoke_mapping_address(arch::Architecture architecture)
 {
     switch (architecture)
@@ -25,11 +38,15 @@ uptr smoke_mapping_address(arch::Architecture architecture)
     case arch::Architecture::i386:
     case arch::Architecture::arm32:
     case arch::Architecture::rv32:
+    case arch::Architecture::mips:
+    case arch::Architecture::ppc:
         return static_cast<uptr>(0xc000'0000u);
     case arch::Architecture::x86_64:
     case arch::Architecture::aarch64:
     case arch::Architecture::rv64:
     case arch::Architecture::loongarch64:
+    case arch::Architecture::mips64:
+    case arch::Architecture::ppc64:
         return static_cast<uptr>(0xffff'8000'0000'0000ull);
     }
     return static_cast<uptr>(0xc000'0000u);
@@ -44,6 +61,8 @@ Kernel::Kernel() : arch_(&arch::arch_operations(arch::configured_architecture())
 Status Kernel::boot(KernelConfig config)
 {
     config.architecture = arch::configured_architecture();
+    smoke_report_ = {};
+    debug_test_points_run_ = 0;
     if (config.memory_region_count == 0)
     {
         config.memory_map[0] =
@@ -106,7 +125,27 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
-    if (auto status = display_driver_.fill_rect(8, 8, 48, 24, 0xff44aa88u); !status.ok())
+    if (auto status = log_boot_line("[    0.000000] okernel: C++23 kernel debug console online"); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = log_boot_line("[    0.000001] arch: operations selected"); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = log_boot_line("[    0.000002] smp: boot cpu online, secondary cpu records ready"); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = log_boot_line("[    0.000003] memory: frame allocator and address space ready"); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = log_boot_line("[    0.000004] driver: console timer block framebuffer started"); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = display_driver_.fill_rect(8, 76, 48, 12, 0xff44aa88u); !status.ok())
     {
         return status;
     }
@@ -142,6 +181,10 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
+    if (auto status = log_boot_line("[    0.000005] fs: ram vfs mounted at /"); !status.ok())
+    {
+        return status;
+    }
 
     booted_ = true;
     return Status::success();
@@ -172,12 +215,14 @@ Status Kernel::run_smoke_suite()
     {
         return status;
     }
+    smoke_report_.memory = true;
 
     arch::TrapFrame trap{.vector = 32, .context = arch_->make_kernel_context(0x1000, 0x8000)};
     if (auto status = interrupts_.dispatch(trap); !status.ok())
     {
         return status;
     }
+    smoke_report_.interrupts = true;
 
     auto channel = ipc_.create_channel();
     if (!channel)
@@ -198,6 +243,7 @@ Status Kernel::run_smoke_suite()
     {
         return Status::fault("IPC smoke test failed");
     }
+    smoke_report_.ipc = true;
 
     if (auto status = vfs_.write_file("/tmp/kernel.log", as_bytes("booted\n")); !status.ok())
     {
@@ -208,6 +254,13 @@ Status Kernel::run_smoke_suite()
     {
         return Status::fault("VFS smoke test failed");
     }
+    smoke_report_.vfs = true;
+
+    if (auto status = run_ext4_smoke(); !status.ok())
+    {
+        return status;
+    }
+    smoke_report_.ext4 = true;
 
     syscall::Request getpid{.number = syscall::Number::getpid, .caller = scheduler_.current_pid()};
     auto getpid_result = syscalls_.dispatch(getpid);
@@ -215,6 +268,7 @@ Status Kernel::run_smoke_suite()
     {
         return Status::fault("getpid syscall smoke test failed");
     }
+    smoke_report_.syscalls = true;
 
     auto context = arch_->make_user_context(arch::UserEntry{
         .instruction_pointer = 0x400000,
@@ -236,6 +290,13 @@ Status Kernel::run_smoke_suite()
     {
         return Status::fault("user mode transition smoke test failed");
     }
+    smoke_report_.user_mode = true;
+
+    if (display_driver_.text().empty() || display_driver_.checksum() == 0)
+    {
+        return Status::fault("display smoke test failed");
+    }
+    smoke_report_.display = true;
 
     auto debug_test_points = test::run_kernel_test_points(*this);
     if (!debug_test_points)
@@ -245,6 +306,54 @@ Status Kernel::run_smoke_suite()
     debug_test_points_run_ = debug_test_points.value();
 
     return Status::success();
+}
+
+Status Kernel::log_boot_line(std::string_view line)
+{
+    if (auto status = console_driver_.write(line); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = console_driver_.write("\n"); !status.ok())
+    {
+        return status;
+    }
+    return display_driver_.write_line(line);
+}
+
+Status Kernel::run_ext4_smoke()
+{
+    std::array<std::byte, 4096> image{};
+    auto bytes = std::span<std::byte>(image.data(), image.size());
+    const auto base = fs::ext4_superblock_offset;
+    write_le32(bytes, base + 0x00, 128);
+    write_le32(bytes, base + 0x04, 4);
+    write_le32(bytes, base + 0x0c, 2);
+    write_le32(bytes, base + 0x18, 0);
+    write_le16(bytes, base + 0x38, fs::ext4_superblock_magic);
+    write_le16(bytes, base + 0x58, 256);
+    write_le32(bytes, base + 0x60, 0x40);
+
+    constexpr std::string_view name{"OKEXT4"};
+    for (usize i = 0; i < name.size(); ++i)
+    {
+        bytes[base + 0x78 + i] = static_cast<std::byte>(name[i]);
+    }
+
+    fs::Ext4Volume volume;
+    if (auto status = volume.mount(image); !status.ok())
+    {
+        return status;
+    }
+    auto info = volume.info();
+    if (!info || info.value().block_size != 1024 || info.value().inode_size != 256 ||
+        info.value().volume_name.view() != name || !info.value().has_extents)
+    {
+        return Status::fault("EXT4 smoke test failed");
+    }
+
+    std::array<std::byte, 1024> block{};
+    return volume.read_block(1, block);
 }
 
 Status Kernel::register_builtin_interrupts(driver::TimerDriver &timer)

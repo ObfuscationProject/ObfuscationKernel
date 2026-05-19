@@ -93,6 +93,50 @@ template <> struct ArchTraits<Architecture::loongarch64>
     static constexpr usize hardware_threads = 4;
 };
 
+template <> struct ArchTraits<Architecture::mips>
+{
+    static constexpr Architecture architecture = Architecture::mips;
+    static constexpr std::string_view name = "mips";
+    static constexpr usize page_size = 4096;
+    static constexpr usize register_count = 32;
+    static constexpr Endianness endianness = Endianness::big;
+    static constexpr bool has_user_mode = true;
+    static constexpr usize hardware_threads = 2;
+};
+
+template <> struct ArchTraits<Architecture::mips64>
+{
+    static constexpr Architecture architecture = Architecture::mips64;
+    static constexpr std::string_view name = "mips64";
+    static constexpr usize page_size = 4096;
+    static constexpr usize register_count = 32;
+    static constexpr Endianness endianness = Endianness::big;
+    static constexpr bool has_user_mode = true;
+    static constexpr usize hardware_threads = 4;
+};
+
+template <> struct ArchTraits<Architecture::ppc>
+{
+    static constexpr Architecture architecture = Architecture::ppc;
+    static constexpr std::string_view name = "ppc";
+    static constexpr usize page_size = 4096;
+    static constexpr usize register_count = 32;
+    static constexpr Endianness endianness = Endianness::big;
+    static constexpr bool has_user_mode = true;
+    static constexpr usize hardware_threads = 2;
+};
+
+template <> struct ArchTraits<Architecture::ppc64>
+{
+    static constexpr Architecture architecture = Architecture::ppc64;
+    static constexpr std::string_view name = "ppc64";
+    static constexpr usize page_size = 4096;
+    static constexpr usize register_count = 32;
+    static constexpr Endianness endianness = Endianness::big;
+    static constexpr bool has_user_mode = true;
+    static constexpr usize hardware_threads = 4;
+};
+
 static_assert(ArchitectureProfile<ArchTraits<Architecture::i386>>);
 static_assert(ArchitectureProfile<ArchTraits<Architecture::x86_64>>);
 static_assert(ArchitectureProfile<ArchTraits<Architecture::aarch64>>);
@@ -100,5 +144,9 @@ static_assert(ArchitectureProfile<ArchTraits<Architecture::arm32>>);
 static_assert(ArchitectureProfile<ArchTraits<Architecture::rv64>>);
 static_assert(ArchitectureProfile<ArchTraits<Architecture::rv32>>);
 static_assert(ArchitectureProfile<ArchTraits<Architecture::loongarch64>>);
+static_assert(ArchitectureProfile<ArchTraits<Architecture::mips>>);
+static_assert(ArchitectureProfile<ArchTraits<Architecture::mips64>>);
+static_assert(ArchitectureProfile<ArchTraits<Architecture::ppc>>);
+static_assert(ArchitectureProfile<ArchTraits<Architecture::ppc64>>);
 
 } // namespace ok::arch

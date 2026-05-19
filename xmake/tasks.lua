@@ -1,4 +1,7 @@
-local task_arches = {"i386", "x86_64", "aarch64", "arm32", "rv64", "rv32", "loongarch64"}
+local task_arches = {
+    "i386", "x86_64", "aarch64", "arm32", "rv64", "rv32", "loongarch64",
+    "mips", "mips64", "ppc", "ppc64"
+}
 
 local task_arch_specs = {
     i386 = {triple = "i386-elf"},
@@ -8,6 +11,10 @@ local task_arch_specs = {
     rv64 = {triple = "riscv64-elf"},
     rv32 = {triple = "riscv32-elf"},
     loongarch64 = {triple = "loongarch64-elf"},
+    mips = {triple = "mips-elf"},
+    mips64 = {triple = "mips64-elf"},
+    ppc = {triple = "powerpc-eabi"},
+    ppc64 = {triple = "powerpc64-elf"},
 }
 
 local function task_normalize_arch(arch)
@@ -28,6 +35,15 @@ local function task_normalize_arch(arch)
     end
     if arch == "riscv32" then
         return "rv32"
+    end
+    if arch == "loong64" then
+        return "loongarch64"
+    end
+    if arch == "powerpc" then
+        return "ppc"
+    end
+    if arch == "powerpc64" then
+        return "ppc64"
     end
     return arch
 end
@@ -50,7 +66,7 @@ task("toolchains")
         usage = "xmake toolchains -a ARCH",
         description = "Build GCC/binutils cross toolchains into ./toolchains",
         options = {
-            {"a", "target-arch", "kv", "all", "Architecture: i386/x86_64/aarch64/arm32/rv64/rv32/loongarch64/all"},
+            {"a", "target-arch", "kv", "all", "Architecture: i386/x86_64/aarch64/arm32/rv64/rv32/loongarch64/mips/mips64/ppc/ppc64/all"},
             {"j", "jobs", "kv", nil, "Parallel build jobs"}
         }
     }
@@ -121,20 +137,35 @@ task("qemu-test")
 
         local current_arch = config.get("arch") or "x86_64"
         local current_mode = config.get("mode") or "release"
-        local mode = option.get("check-mode") or current_mode
+        local mode = option.get("check-mode") or "debug"
         local requested_arch = option.get("profile")
+        local test_arch = current_arch
 
         if requested_arch then
-            local arch = task_normalize_arch(requested_arch)
-            task_require_arch(arch)
-            os.execv("xmake", {"f", "-c", "-m", mode, "-a", arch})
+            test_arch = task_normalize_arch(requested_arch)
+            task_require_arch(test_arch)
         end
 
-        os.execv("xmake", {"-y", "-b", "qemu_smoke"})
-        os.execv("xmake", {"test"})
+        local reconfigured = requested_arch or current_mode ~= mode
+        if reconfigured then
+            os.execv("xmake", {"f", "-c", "-m", mode, "-a", test_arch})
+        end
 
-        if requested_arch then
+        local build_code = os.execv("xmake", {"-y", "-b", "qemu_smoke"}, {try = true})
+        local test_code = 0
+        if build_code == 0 then
+            test_code = os.execv("xmake", {"test"}, {try = true})
+        end
+
+        if reconfigured then
             os.execv("xmake", {"f", "-c", "-m", current_mode, "-a", current_arch})
+        end
+
+        if build_code ~= 0 then
+            raise("qemu_smoke build failed for %s", test_arch)
+        end
+        if test_code ~= 0 then
+            raise("qemu_smoke test failed for %s", test_arch)
         end
     end)
 task_end()
@@ -155,15 +186,27 @@ task("qemu-window-test")
         config.load()
         local arch = task_normalize_arch(config.get("arch") or "x86_64")
         task_require_arch(arch)
+        local mode = option.get("check-mode") or "debug"
+        local current_mode = config.get("mode") or "release"
+        local reconfigured = current_mode ~= mode
+        if reconfigured then
+            os.execv("xmake", {"f", "-c", "-m", mode, "-a", arch})
+        end
         local argv = {
             path.join(os.projectdir(), "scripts", "qemu_window_demo.py"),
             "--arch", arch,
-            "--mode", option.get("check-mode") or config.get("mode") or "release",
+            "--mode", mode,
             "--display", option.get("display") or "gtk"
         }
         if option.get("no-launch") then
             table.insert(argv, "--no-launch")
         end
-        os.execv("python3", argv)
+        local code = os.execv("python3", argv, {try = true})
+        if reconfigured then
+            os.execv("xmake", {"f", "-c", "-m", current_mode, "-a", arch})
+        end
+        if code ~= 0 then
+            raise("qemu window smoke test failed for %s", arch)
+        end
     end)
 task_end()

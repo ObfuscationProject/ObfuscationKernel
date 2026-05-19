@@ -24,6 +24,18 @@ struct KernelConfig
     usize timer_hz{1000};
 };
 
+struct KernelSmokeReport
+{
+    bool memory{false};
+    bool interrupts{false};
+    bool ipc{false};
+    bool vfs{false};
+    bool ext4{false};
+    bool syscalls{false};
+    bool user_mode{false};
+    bool display{false};
+};
+
 class Kernel final
 {
   public:
@@ -39,6 +51,10 @@ class Kernel final
     [[nodiscard]] usize debug_test_points_run() const
     {
         return debug_test_points_run_;
+    }
+    [[nodiscard]] const KernelSmokeReport &smoke_report() const
+    {
+        return smoke_report_;
     }
     [[nodiscard]] arch::ArchOperations &arch()
     {
@@ -72,6 +88,14 @@ class Kernel final
     {
         return drivers_;
     }
+    [[nodiscard]] driver::ConsoleDriver &console()
+    {
+        return console_driver_;
+    }
+    [[nodiscard]] driver::FramebufferDisplayDriver &display()
+    {
+        return display_driver_;
+    }
     [[nodiscard]] fs::VirtualFileSystem &vfs()
     {
         return vfs_;
@@ -84,9 +108,12 @@ class Kernel final
   private:
     Status register_builtin_interrupts(driver::TimerDriver &timer);
     Status register_builtin_syscalls(driver::ConsoleDriver &console);
+    Status log_boot_line(std::string_view line);
+    Status run_ext4_smoke();
 
     bool booted_{false};
     usize debug_test_points_run_{0};
+    KernelSmokeReport smoke_report_{};
     KernelConfig config_{};
     arch::ArchOperations *arch_{nullptr};
     driver::ConsoleDriver console_driver_{};

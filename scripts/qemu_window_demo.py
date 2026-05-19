@@ -85,6 +85,12 @@ def demo_text(arch: str, smoke_output: str) -> str:
     match = PASS_RE.search(smoke_output)
     status = "PASS" if match else "FAIL"
     test_points = match.group(2) if match else "0"
+    display_lines = [
+        line.removeprefix("OK_DISPLAY_TEXT ")
+        for line in smoke_output.splitlines()
+        if line.startswith("OK_DISPLAY_TEXT ")
+    ]
+    display_text = "\n".join(display_lines[:12]) if display_lines else smoke_output[:320]
     return "\n".join(
         [
             "ObfuscationKernel QEMU Window Test",
@@ -93,7 +99,7 @@ def demo_text(arch: str, smoke_output: str) -> str:
             f"status:      {status}",
             f"test points: {test_points}",
             "",
-            smoke_output[:320],
+            display_text,
             "",
             "Close the QEMU window or press Ctrl-A X.",
         ]
@@ -103,7 +109,7 @@ def demo_text(arch: str, smoke_output: str) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--arch", required=True)
-    parser.add_argument("--mode", choices=("debug", "release"), default="release")
+    parser.add_argument("--mode", choices=("debug", "release"), default="debug")
     parser.add_argument("--display", default="gtk", help="QEMU display backend, for example gtk or sdl")
     parser.add_argument("--no-launch", action="store_true", help="Only generate the demo image")
     args = parser.parse_args()

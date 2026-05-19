@@ -20,11 +20,15 @@ test harness needed to grow into one without rewriting the project structure.
 - `rv64`
 - `rv32`
 - `loongarch64`
+- `mips`
+- `mips64`
+- `ppc`
+- `ppc64`
 
 ## Quick Start
 
 ```sh
-xmake f -c -a x86_64
+xmake f -c -m debug -a x86_64
 xmake toolchain-check
 xmake -y -b okernel
 xmake test
@@ -85,8 +89,8 @@ xmake qemu-window-test
 ```
 
 The bootless test model is intentionally separate from future bootloader or
-firmware integration. It validates kernel module behavior through a normal test
-entry point first, which keeps architecture bring-up fast and debuggable.
+firmware integration. The test binary only calls `ok_kernel_main`; the debug
+kernel performs boot, module checks, and diagnostic output itself.
 
 ## Architecture Implementations
 
@@ -100,7 +104,7 @@ compiler, while real cross builds compile the matching target assembly.
 `okernel` is built as freestanding C++23 with exceptions disabled and RTTI kept
 enabled. The kernel library avoids hosted containers and allocation-heavy APIs;
 fixed-capacity kernel containers live in `include/ok/core/fixed.hpp`, and
-minimal C/C++ ABI support lives in `src/core/runtime.cpp`.
+minimal freestanding ABI/compiler helper support lives in `src/core/abi.cpp`.
 
 ## Documentation
 

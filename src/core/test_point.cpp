@@ -207,7 +207,7 @@ Status test_scheduler(TestPointRunner &runner)
     {
         return status;
     }
-    auto &operations = arch::arch_operations(arch::Architecture::x86_64);
+    auto &operations = arch::arch_operations(arch::configured_architecture());
     auto first = scheduler.create_process("first", operations.make_kernel_context(0x1000, 0x8000));
     auto second = scheduler.create_process("second", operations.make_kernel_context(0x2000, 0x9000));
     if (auto status = runner.check("sched", "create", first.ok() && second.ok(), "process creation failed");
@@ -413,7 +413,7 @@ Status test_ext4(TestPointRunner &runner)
 Status test_user_mode(TestPointRunner &runner)
 {
     user::UserSpaceManager manager;
-    auto &operations = arch::arch_operations(arch::Architecture::aarch64);
+    auto &operations = arch::arch_operations(arch::configured_architecture());
     auto context = operations.make_kernel_context(0x1000, 0x8000);
     auto status = manager.enter_process(1,
                                         arch::UserEntry{
