@@ -62,7 +62,7 @@ triple_for_arch() {
         mips) echo "mips-elf" ;;
         mips64) echo "mips64-elf" ;;
         ppc|powerpc) echo "powerpc-eabi" ;;
-        ppc64|powerpc64) echo "powerpc64-elf" ;;
+        ppc64|powerpc64) echo "powerpc64-linux-gnu" ;;
         *) echo "unsupported architecture: $1" >&2; return 1 ;;
     esac
 }
@@ -138,8 +138,18 @@ build_one() {
 
     local binutils_build="${BUILD_ROOT}/binutils-${target}"
     local gcc_build="${BUILD_ROOT}/gcc-${target}"
+    local gcc_extra_flags=()
     rm -rf "$binutils_build" "$gcc_build"
     mkdir -p "$binutils_build" "$gcc_build"
+
+    case "$arch" in
+        ppc64|powerpc64)
+            # GCC 14 does not provide a powerpc64-elf target configuration.
+            # Use the supported big-endian powerpc64-linux-gnu frontend and keep
+            # the project itself freestanding through xmake's compile/link flags.
+            gcc_extra_flags+=(--disable-multilib)
+            ;;
+    esac
 
     (
         cd "$binutils_build"
@@ -165,7 +175,8 @@ build_one() {
             --disable-libssp \
             --disable-libquadmath \
             --disable-libgomp \
-            --disable-libstdcxx-pch
+            --disable-libstdcxx-pch \
+            "${gcc_extra_flags[@]}"
         PATH="${prefix}/bin:${PATH}" make all-gcc all-target-libgcc all-target-libstdc++-v3 -j"$JOBS"
         PATH="${prefix}/bin:${PATH}" make install-gcc install-target-libgcc install-target-libstdc++-v3
     )

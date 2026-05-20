@@ -50,6 +50,9 @@ inline constexpr usize display_text_buffer_size = (display_text_columns + 1) * d
 inline constexpr usize input_queue_capacity = 128;
 inline constexpr usize max_pci_devices = 32;
 inline constexpr usize max_usb_devices = 32;
+inline constexpr usize block_sector_size = 512;
+inline constexpr usize ram_block_sector_count = 512;
+inline constexpr usize ram_block_storage_size = block_sector_size * ram_block_sector_count;
 
 enum class IoMode : u8
 {
@@ -128,7 +131,23 @@ class TimerDriver final : public Driver
     u64 ticks_{0};
 };
 
-class NullBlockDriver final : public Driver
+struct BlockGeometry
+{
+    u64 block_count{0};
+    u32 block_size{block_sector_size};
+    bool writable{false};
+};
+
+class BlockDevice
+{
+  public:
+    virtual ~BlockDevice() = default;
+    [[nodiscard]] virtual BlockGeometry geometry() const = 0;
+    virtual Status read_blocks(u64 first_block, std::span<std::byte> out) = 0;
+    virtual Status write_blocks(u64 first_block, std::span<const std::byte> in) = 0;
+};
+
+class NullBlockDriver final : public Driver, public BlockDevice
 {
   public:
     [[nodiscard]] std::string_view name() const override
@@ -142,11 +161,40 @@ class NullBlockDriver final : public Driver
     Status probe() override;
     Status start() override;
     Status stop() override;
+    [[nodiscard]] BlockGeometry geometry() const override;
+    Status read_blocks(u64 first_block, std::span<std::byte> out) override;
+    Status write_blocks(u64 first_block, std::span<const std::byte> in) override;
     Status read(uptr, std::span<std::byte> out);
     Status write(uptr, std::span<const std::byte> in);
 
   private:
     bool started_{false};
+};
+
+class RamBlockDriver final : public Driver, public BlockDevice
+{
+  public:
+    [[nodiscard]] std::string_view name() const override
+    {
+        return "ram-block0";
+    }
+    [[nodiscard]] Class driver_class() const override
+    {
+        return Class::block;
+    }
+    Status probe() override;
+    Status start() override;
+    Status stop() override;
+    [[nodiscard]] BlockGeometry geometry() const override;
+    Status read_blocks(u64 first_block, std::span<std::byte> out) override;
+    Status write_blocks(u64 first_block, std::span<const std::byte> in) override;
+    Status clear();
+
+  private:
+    [[nodiscard]] Status check_transfer(u64 first_block, usize byte_count) const;
+
+    bool started_{false};
+    std::array<std::byte, ram_block_storage_size> storage_{};
 };
 
 struct PciDeviceId

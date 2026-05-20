@@ -93,7 +93,7 @@ OK_ARCH_SPECS = {
         define = "OK_ARCH_TARGET_PPC64",
         source = "ppc64",
         toolchain = "ok-ppc64-elf",
-        triple = "powerpc64-elf"
+        triple = "powerpc64-linux-gnu"
     },
 }
 

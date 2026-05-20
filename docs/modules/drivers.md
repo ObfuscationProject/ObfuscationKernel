@@ -8,6 +8,8 @@ Built-in drivers:
 - `ConsoleDriver`: appends output to an in-memory console buffer.
 - `TimerDriver`: counts timer ticks.
 - `NullBlockDriver`: accepts writes and returns zero-filled reads.
+- `RamBlockDriver`: exposes a writable fixed-size RAM disk through the generic
+  `BlockDevice` sector API for SimpleFS and future block-stack tests.
 - `FramebufferDisplayDriver`: exposes a simple 32-bit RGBA framebuffer with
   clear, pixel, rectangle, text-line, and checksum operations. Kernel boot writes
   Linux-style startup lines through this driver so `qemu-window-test` can show
@@ -29,6 +31,10 @@ Driver I/O mode is represented by `IoMode` with polling, interrupt, and DMA
 variants. The current x86 boot image uses polling for the early keyboard path;
 the mode field is already part of `KernelConfig` so interrupt-backed drivers can
 be enabled without changing the generic kernel entry.
+
+Block storage uses `BlockDevice`, which reports geometry and performs aligned
+sector reads/writes. `NullBlockDriver` and `RamBlockDriver` implement that
+interface today; ATA, NVMe, USB mass storage, and virtio-blk can share it later.
 
 The PCIe/USB driver plan keeps discovery separate from transport:
 

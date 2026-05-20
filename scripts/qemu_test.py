@@ -171,7 +171,7 @@ def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: 
     if int(fields.get("debug_test_points", "0")) == 0:
         print("debug kernel did not run debug test points", file=sys.stderr)
         return 7
-    for required in ("fs", "ext4", "user", "display", "input", "posix", "bus", "usb", "shell", "modes"):
+    for required in ("fs", "simplefs", "ext4", "user", "display", "input", "posix", "bus", "usb", "shell", "modes"):
         if fields.get(required) != "1":
             print(f"debug kernel did not pass {required} test coverage", file=sys.stderr)
             return 8

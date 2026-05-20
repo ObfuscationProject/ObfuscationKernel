@@ -65,9 +65,9 @@ QEMU window when you want the script to print its final result.
 The debug kernel must print `OK_MODE debug`, `OK_DEBUG boot=complete`,
 `OK_DISPLAY_TEXT`, and `OK_TEST_PASS`. The Python runner also verifies that
 debug test points ran and that filesystem, EXT4, user-mode, and display checks
-reported success. The current required coverage fields are `fs`, `ext4`,
-`user`, `display`, `input`, `posix`, `bus`, `usb`, `shell`, and `modes`. Any
-non-zero exit code or missing marker is a failure.
+reported success. The current required coverage fields are `fs`, `simplefs`,
+`ext4`, `user`, `display`, `input`, `posix`, `bus`, `usb`, `shell`, and
+`modes`. Any non-zero exit code or missing marker is a failure.
 
 ## CI Coverage
 

@@ -10,19 +10,25 @@ _start:
     mov $0x7c00, %sp
     mov %dl, boot_drive
 
-    mov $0x0800, %bx
-    mov $1, %eax
-    mov $8, %di
+    movw $0x0800, next_segment
+    movl $1, next_lba
+    mov $16, %di
 read_chunk:
+    mov next_segment, %bx
     mov %bx, dap_segment
+    mov next_lba, %eax
     mov %eax, dap_lba
     movb boot_drive, %dl
     mov $dap, %si
     mov $0x42, %ah
     int $0x13
     jc disk_error
-    add $0x0800, %bx
-    add $64, %eax
+    mov next_segment, %bx
+    add $0x0400, %bx
+    mov %bx, next_segment
+    mov next_lba, %eax
+    add $32, %eax
+    mov %eax, next_lba
     dec %di
     jnz read_chunk
 
@@ -55,7 +61,7 @@ halt:
 dap:
     .byte 0x10
     .byte 0
-    .word 64
+    .word 32
     .word 0
 dap_segment:
     .word 0x0800
@@ -65,6 +71,10 @@ dap_lba:
 
 boot_drive:
     .byte 0
+next_segment:
+    .word 0
+next_lba:
+    .long 0
 error_message:
     .asciz "okernel disk read failed"
 

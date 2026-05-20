@@ -125,6 +125,25 @@ Status RamNode::create(std::string_view, NodeType)
     return Status::unsupported("create must be routed through VirtualFileSystem");
 }
 
+Result<DirectoryListing> RamNode::list() const
+{
+    if (type_ != NodeType::directory)
+    {
+        return Status::invalid_argument("node is not a directory");
+    }
+    DirectoryListing listing{};
+    for (usize i = 0; i < child_count_; ++i)
+    {
+        auto &entry = listing.entries[listing.count++];
+        if (auto status = entry.name.assign(children_[i]->name()); !status.ok())
+        {
+            return status;
+        }
+        entry.metadata = children_[i]->metadata();
+    }
+    return listing;
+}
+
 VirtualFileSystem::VirtualFileSystem()
 {
     root_ = allocate_node("/", NodeType::directory);
@@ -199,6 +218,17 @@ Result<FileBuffer> VirtualFileSystem::read_file(std::string_view path)
     }
     const auto metadata = node->metadata();
     return node->read(0, metadata.size);
+}
+
+Result<DirectoryListing> VirtualFileSystem::list(std::string_view path)
+{
+    auto *node = lookup(path);
+    if (node == nullptr)
+    {
+        return Status::not_found("path not found");
+    }
+    auto *ram_node = static_cast<RamNode *>(node);
+    return ram_node->list();
 }
 
 Result<Metadata> VirtualFileSystem::stat(std::string_view path)

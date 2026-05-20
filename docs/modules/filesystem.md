@@ -12,7 +12,15 @@ The initial root contains `/dev` and `/tmp`.
 The current implementation supports node lookup, creation, read/write, truncate,
 unlink, metadata queries, and POSIX file-descriptor tests through
 `ok::posix::PosixService`. Future work should add mounts, permissions, path
-normalization, and a block-backed writable filesystem.
+normalization, and mount routing.
+
+`ok::fs::SimpleDiskFileSystem` is the first block-backed writable filesystem.
+It formats and mounts any `ok::driver::BlockDevice` with 512-byte sectors. The
+on-disk layout is deliberately small: block 0 is a superblock, blocks 1-4 are a
+fixed directory table, and file data is allocated as contiguous extents after
+that table. It currently supports a flat root directory with create, unlink,
+list, stat, whole-file read, and whole-file write. This gives the kernel a real
+disk-management path before VFS mount routing and before full EXT4 write support.
 
 `ok::fs::Ext4Volume` is a read-only EXT4 foundation. It validates the
 superblock magic, parses block size, inode size, extent support, basic counters,

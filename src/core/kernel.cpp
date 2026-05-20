@@ -141,6 +141,10 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
+    if (auto status = drivers_.add(ram_block_driver_); !status.ok())
+    {
+        return status;
+    }
     if (auto status = drivers_.add(display_driver_); !status.ok())
     {
         return status;
@@ -243,6 +247,14 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
+    if (auto status = simplefs_.format(ram_block_driver_, "okroot"); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = log_boot_line("[    0.000006] fs: simplefs formatted on ram-block0"); !status.ok())
+    {
+        return status;
+    }
 
     booted_ = true;
     return Status::success();
@@ -313,6 +325,38 @@ Status Kernel::run_debug_test_suite()
         return Status::fault("VFS debug test failed");
     }
     test_report_.vfs = true;
+
+    const auto geometry = ram_block_driver_.geometry();
+    if (geometry.block_count == 0 || geometry.block_size != driver::block_sector_size || !geometry.writable)
+    {
+        return Status::fault("RAM block driver debug test failed");
+    }
+    static_cast<void>(simplefs_.unlink("/suite.txt"));
+    if (auto status = simplefs_.create("/suite.txt", fs::NodeType::regular); !status.ok())
+    {
+        return status;
+    }
+    constexpr std::string_view simplefs_text{"simplefs"};
+    if (auto status = simplefs_.write_file("/suite.txt", as_bytes(simplefs_text)); !status.ok())
+    {
+        return status;
+    }
+    auto simplefs_file = simplefs_.read_file("/suite.txt");
+    if (!simplefs_file || simplefs_file.value().size != simplefs_text.size())
+    {
+        return Status::fault("SimpleFS read debug test failed");
+    }
+    auto simplefs_stat = simplefs_.stat("/suite.txt");
+    if (!simplefs_stat || simplefs_stat.value().size != simplefs_text.size())
+    {
+        return Status::fault("SimpleFS stat debug test failed");
+    }
+    auto simplefs_listing = simplefs_.list_root();
+    if (!simplefs_listing || simplefs_listing.value().count == 0)
+    {
+        return Status::fault("SimpleFS list debug test failed");
+    }
+    test_report_.simplefs = true;
 
     if (auto status = run_ext4_test(); !status.ok())
     {
@@ -466,8 +510,42 @@ Status Kernel::run_debug_test_suite()
     test_report_.posix = true;
 
     auto shell_status = debug_shell_.execute("status");
+    if (!shell_status || shell_status.value().empty())
+    {
+        return Status::fault("debug shell status test failed");
+    }
     auto shell_posix = debug_shell_.execute("posix");
-    if (!shell_status || shell_status.value().empty() || !shell_posix || shell_posix.value().empty())
+    if (!shell_posix || shell_posix.value().empty())
+    {
+        return Status::fault("debug shell POSIX test failed");
+    }
+    auto shell_ls = debug_shell_.execute("ls /tmp");
+    if (!shell_ls || shell_ls.value().empty())
+    {
+        return Status::fault("debug shell ls test failed");
+    }
+    auto shell_user = debug_shell_.execute("whoami");
+    if (!shell_user || shell_user.value().empty())
+    {
+        return Status::fault("debug shell user test failed");
+    }
+    auto shell_su = debug_shell_.execute("su root");
+    if (!shell_su || shell_su.value().empty())
+    {
+        return Status::fault("debug shell su test failed");
+    }
+    auto shell_sfs_write = debug_shell_.execute("sfs write shell.txt hello");
+    if (!shell_sfs_write)
+    {
+        return Status::fault("debug shell SimpleFS write test failed");
+    }
+    auto shell_sfs_ls = debug_shell_.execute("sfs ls");
+    if (!shell_sfs_ls || shell_sfs_ls.value().empty())
+    {
+        return Status::fault("debug shell SimpleFS ls test failed");
+    }
+    auto shell_su_kernel = debug_shell_.execute("su kernel");
+    if (!shell_su_kernel || shell_su_kernel.value().empty())
     {
         return Status::fault("debug shell test failed");
     }

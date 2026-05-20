@@ -9,7 +9,7 @@ local freestanding_toolchains = {
     {"ok-mips-elf", "mips-elf"},
     {"ok-mips64-elf", "mips64-elf"},
     {"ok-ppc-elf", "powerpc-eabi"},
-    {"ok-ppc64-elf", "powerpc64-elf"},
+    {"ok-ppc64-elf", "powerpc64-linux-gnu"},
 }
 
 local linux_user_toolchains = {

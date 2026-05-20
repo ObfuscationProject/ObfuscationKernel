@@ -44,6 +44,18 @@ struct FileBuffer
     usize size{0};
 };
 
+struct DirectoryEntry
+{
+    FixedString<max_path_segment> name{};
+    Metadata metadata{};
+};
+
+struct DirectoryListing
+{
+    std::array<DirectoryEntry, max_child_nodes> entries{};
+    usize count{0};
+};
+
 class Node
 {
   public:
@@ -74,6 +86,7 @@ class RamNode final : public Node
     Status write(usize offset, std::span<const std::byte> data) override;
     Node *lookup(std::string_view child) override;
     Status create(std::string_view name, NodeType type) override;
+    [[nodiscard]] Result<DirectoryListing> list() const;
     [[nodiscard]] bool used() const
     {
         return used_;
@@ -110,6 +123,7 @@ class VirtualFileSystem final
     Status unlink(std::string_view path);
     Status write_file(std::string_view path, std::span<const std::byte> data);
     Result<FileBuffer> read_file(std::string_view path);
+    Result<DirectoryListing> list(std::string_view path);
     Result<Metadata> stat(std::string_view path);
     [[nodiscard]] Node *lookup(std::string_view path);
 

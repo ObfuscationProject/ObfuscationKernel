@@ -4,7 +4,7 @@ The primary build system is xmake. The project uses xmake's built-in
 architecture setting (`-a/--arch`) as the only architecture selector.
 
 `okernel` is freestanding C++23 and automatically selects the matching
-`ok-*-elf` toolchain for the configured xmake architecture. For example:
+`ok-*` cross toolchain for the configured xmake architecture. For example:
 
 ```sh
 xmake f -c -m debug -a x86_64
@@ -47,6 +47,10 @@ because QEMU virt can jump directly to that ELF entry with `-kernel`.
 - `mips64`
 - `ppc`
 - `ppc64`
+
+`ppc64` uses GCC's supported big-endian `powerpc64-linux-gnu` target behind the
+local `ok-ppc64-elf` wrapper because upstream GCC does not ship a
+`powerpc64-elf` configuration.
 
 ## Toolchains
 

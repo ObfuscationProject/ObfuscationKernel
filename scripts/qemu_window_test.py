@@ -46,7 +46,7 @@ def validate_output(arch: str, output: str) -> tuple[bool, str]:
     fields = parse_fields(pass_lines[-1])
     if fields.get("arch") != arch:
         return False, f"arch mismatch: expected {arch}, got {fields.get('arch')}"
-    for required in ("fs", "ext4", "user", "display", "input", "posix", "bus", "usb", "shell", "modes"):
+    for required in ("fs", "simplefs", "ext4", "user", "display", "input", "posix", "bus", "usb", "shell", "modes"):
         if fields.get(required) != "1":
             return False, f"{required} did not pass"
     if int(fields.get("debug_test_points", "0")) == 0:

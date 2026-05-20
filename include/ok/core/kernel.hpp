@@ -3,6 +3,7 @@
 #include "ok/arch/arch.hpp"
 #include "ok/core/shell.hpp"
 #include "ok/driver/driver.hpp"
+#include "ok/fs/simplefs.hpp"
 #include "ok/fs/vfs.hpp"
 #include "ok/interrupt/interrupt.hpp"
 #include "ok/ipc/ipc.hpp"
@@ -46,6 +47,7 @@ struct KernelTestReport
     bool interrupts{false};
     bool ipc{false};
     bool vfs{false};
+    bool simplefs{false};
     bool ext4{false};
     bool syscalls{false};
     bool user_mode{false};
@@ -142,9 +144,17 @@ class Kernel final
     {
         return usb_mouse_driver_;
     }
+    [[nodiscard]] driver::RamBlockDriver &disk()
+    {
+        return ram_block_driver_;
+    }
     [[nodiscard]] fs::VirtualFileSystem &vfs()
     {
         return vfs_;
+    }
+    [[nodiscard]] fs::SimpleDiskFileSystem &simplefs()
+    {
+        return simplefs_;
     }
     [[nodiscard]] posix::PosixService &posix()
     {
@@ -173,6 +183,7 @@ class Kernel final
     driver::ConsoleDriver console_driver_{};
     driver::TimerDriver timer_driver_{};
     driver::NullBlockDriver null_block_driver_{};
+    driver::RamBlockDriver ram_block_driver_{};
     driver::FramebufferDisplayDriver display_driver_{};
     driver::KeyboardDriver keyboard_driver_{};
     driver::Ps2MouseDriver mouse_driver_{};
@@ -188,6 +199,7 @@ class Kernel final
     syscall::Table syscalls_;
     driver::DriverManager drivers_;
     fs::VirtualFileSystem vfs_;
+    fs::SimpleDiskFileSystem simplefs_;
     posix::PosixService posix_;
     user::UserSpaceManager user_space_;
     KernelDebugShell debug_shell_;

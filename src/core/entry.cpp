@@ -114,6 +114,7 @@ void emit_display_text(const KernelDebugSink &sink, std::string_view text)
     emit_unsigned_field(sink, "syscalls", kernel.syscalls().handler_count());
     emit_unsigned_field(sink, "debug_test_points", kernel.debug_test_points_run());
     emit_bool_field(sink, "fs", report.vfs);
+    emit_bool_field(sink, "simplefs", report.simplefs);
     emit_bool_field(sink, "ext4", report.ext4);
     emit_bool_field(sink, "user", report.user_mode);
     emit_bool_field(sink, "display", report.display);

@@ -106,7 +106,12 @@ Status NullBlockDriver::stop()
     return Status::success();
 }
 
-Status NullBlockDriver::read(uptr, std::span<std::byte> out)
+BlockGeometry NullBlockDriver::geometry() const
+{
+    return BlockGeometry{.block_count = 0, .block_size = block_sector_size, .writable = true};
+}
+
+Status NullBlockDriver::read_blocks(u64, std::span<std::byte> out)
 {
     if (!started_)
     {
@@ -119,11 +124,106 @@ Status NullBlockDriver::read(uptr, std::span<std::byte> out)
     return Status::success();
 }
 
-Status NullBlockDriver::write(uptr, std::span<const std::byte>)
+Status NullBlockDriver::write_blocks(u64, std::span<const std::byte>)
 {
     if (!started_)
     {
         return Status::not_initialized("null block driver not started");
+    }
+    return Status::success();
+}
+
+Status NullBlockDriver::read(uptr offset, std::span<std::byte> out)
+{
+    return read_blocks(offset / block_sector_size, out);
+}
+
+Status NullBlockDriver::write(uptr offset, std::span<const std::byte> in)
+{
+    return write_blocks(offset / block_sector_size, in);
+}
+
+Status RamBlockDriver::probe()
+{
+    return Status::success();
+}
+
+Status RamBlockDriver::start()
+{
+    started_ = true;
+    return Status::success();
+}
+
+Status RamBlockDriver::stop()
+{
+    started_ = false;
+    return Status::success();
+}
+
+BlockGeometry RamBlockDriver::geometry() const
+{
+    return BlockGeometry{
+        .block_count = ram_block_sector_count,
+        .block_size = block_sector_size,
+        .writable = true,
+    };
+}
+
+Status RamBlockDriver::check_transfer(u64 first_block, usize byte_count) const
+{
+    if (!started_)
+    {
+        return Status::not_initialized("RAM block driver not started");
+    }
+    if ((byte_count % block_sector_size) != 0)
+    {
+        return Status::invalid_argument("block transfer size is not sector aligned");
+    }
+    const auto block_count = static_cast<u64>(byte_count / block_sector_size);
+    if (first_block > ram_block_sector_count || block_count > ram_block_sector_count - first_block)
+    {
+        return Status::invalid_argument("block transfer is out of range");
+    }
+    return Status::success();
+}
+
+Status RamBlockDriver::read_blocks(u64 first_block, std::span<std::byte> out)
+{
+    if (auto status = check_transfer(first_block, out.size()); !status.ok())
+    {
+        return status;
+    }
+    const auto offset = static_cast<usize>(first_block) * block_sector_size;
+    for (usize i = 0; i < out.size(); ++i)
+    {
+        out[i] = storage_[offset + i];
+    }
+    return Status::success();
+}
+
+Status RamBlockDriver::write_blocks(u64 first_block, std::span<const std::byte> in)
+{
+    if (auto status = check_transfer(first_block, in.size()); !status.ok())
+    {
+        return status;
+    }
+    const auto offset = static_cast<usize>(first_block) * block_sector_size;
+    for (usize i = 0; i < in.size(); ++i)
+    {
+        storage_[offset + i] = in[i];
+    }
+    return Status::success();
+}
+
+Status RamBlockDriver::clear()
+{
+    if (!started_)
+    {
+        return Status::not_initialized("RAM block driver not started");
+    }
+    for (auto &byte : storage_)
+    {
+        byte = std::byte{0};
     }
     return Status::success();
 }
