@@ -37,6 +37,10 @@ and a validated QEMU launch profile.
 `xmake test` always has a freestanding profile test for `okernel`. On
 bootable system targets it also runs the `okernel_image` QEMU boot test.
 
+Every booted QEMU check also creates a temporary 16 MiB disk image and attaches
+it as `virtio-blk-pci`. The kernel binds that PCI device as `virtio-blk0`, then
+formats and exercises SimpleFS/EXT4 through the generic block-device interface.
+
 ## Visual Test
 
 The windowed task is also current-architecture only:
@@ -46,19 +50,20 @@ xmake qemu-window-test
 ```
 
 It builds and runs the same `kernel.bin` in QEMU. The visible text comes from
-the kernel's own VGA display path on x86 targets, while the script captures
-serial diagnostics and prints the test result only after the QEMU window is
-closed. Non-x86 boot targets currently use serial-only platform output, so use
-the headless validation form for those architectures:
+the kernel's own display path: x86/i386 use the virtio-gpu PCI path, while
+`aarch64` and `rv64` launch with both `ramfb` and `virtio-gpu-pci` available.
+The script captures serial diagnostics and prints the test result only after
+the QEMU window is closed. Use the headless validation form in environments
+without a graphical display:
 
 ```sh
 xmake qemu-window-test --no-launch
 ```
 
-In graphical x86 window mode the debug kernel does not attach the debug-exit
-device. After `OK_TEST_PASS`, it enters an interactive debug shell and echoes
-keyboard input through the kernel display path and serial console. Close the
-QEMU window when you want the script to print its final result.
+In graphical window mode the debug kernel does not attach the debug-exit device.
+After `OK_TEST_PASS`, it enters an interactive debug shell and echoes keyboard
+input through the kernel display path and serial console. Close the QEMU window
+when you want the script to print its final result.
 
 ## Pass Signal
 

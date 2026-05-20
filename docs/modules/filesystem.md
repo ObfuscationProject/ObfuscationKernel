@@ -11,8 +11,13 @@ The initial root contains `/dev` and `/tmp`.
 
 The current implementation supports node lookup, creation, read/write, truncate,
 unlink, metadata queries, and POSIX file-descriptor tests through
-`ok::posix::PosixService`. Future work should add mounts, permissions, path
-normalization, and mount routing.
+`ok::posix::PosixService`. RAM VFS nodes keep Linux-style metadata in one
+structure: type bits are encoded in `mode`, permission bits remain in the low
+12 bits, and `uid`, `gid`, link count, block size, and allocated block count are
+reported through `stat`. File payload storage is separated from directory/node
+metadata so directory-heavy trees do not reserve a 4 KiB data buffer per node.
+Future work should add mounts, permission enforcement, path normalization, and
+mount routing.
 
 `ok::fs::SimpleDiskFileSystem` is the first block-backed writable filesystem.
 It formats and mounts any `ok::driver::BlockDevice` with 512-byte sectors. The
@@ -21,10 +26,13 @@ fixed directory table, and file data is allocated as contiguous extents after
 that table. It currently supports a flat root directory with create, unlink,
 list, stat, whole-file read, and whole-file write. This gives the kernel a real
 disk-management path before VFS mount routing and before full EXT4 write support.
+SimpleFS directory entries persist the same Linux-style mode/owner/link metadata
+fields, so the POSIX facade and debug shell see consistent type and permission
+data across RAM VFS and block-backed files.
 
 `ok::fs::Ext4Volume` is a read-only EXT4 foundation. It validates the
 superblock magic, parses block size, inode size, extent support, basic counters,
 and volume name, and can read raw filesystem blocks from either an image span or
 any `ok::driver::BlockDevice`. The block-device mount path is the interface real
-ATA/NVMe/virtio-blk drivers will use. Directory walking, inode data reads,
+ATA/NVMe/virtio-blk drivers use. Directory walking, inode data reads,
 journal replay, allocation, and writeback remain follow-up layers.

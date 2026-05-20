@@ -26,8 +26,6 @@ Architecture configured_architecture()
     return Architecture::mips64;
 #elif defined(OK_ARCH_TARGET_PPC)
     return Architecture::ppc;
-#elif defined(OK_ARCH_TARGET_PPC64)
-    return Architecture::ppc64;
 #else
     return Architecture::x86_64;
 #endif
@@ -56,8 +54,6 @@ ArchOperations &arch_operations(Architecture architecture)
     return detail::mips64_operations();
 #elif defined(OK_ARCH_TARGET_PPC)
     return detail::ppc_operations();
-#elif defined(OK_ARCH_TARGET_PPC64)
-    return detail::ppc64_operations();
 #else
     return detail::x86_64_operations();
 #endif

@@ -20,7 +20,6 @@ enum class Architecture : u8
     mips,
     mips64,
     ppc,
-    ppc64,
 };
 
 enum class Endianness : u8
@@ -109,8 +108,6 @@ template <Architecture A> struct ArchTraits;
         return "mips64";
     case Architecture::ppc:
         return "ppc";
-    case Architecture::ppc64:
-        return "ppc64";
     }
     return "unknown";
 }
@@ -156,10 +153,6 @@ template <Architecture A> struct ArchTraits;
     if (value == "ppc" || value == "powerpc")
     {
         return Architecture::ppc;
-    }
-    if (value == "ppc64" || value == "powerpc64")
-    {
-        return Architecture::ppc64;
     }
     return Architecture::x86_64;
 }

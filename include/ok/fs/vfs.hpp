@@ -13,6 +13,7 @@ namespace ok::fs
 
 inline constexpr usize max_path_segment = 32;
 inline constexpr usize max_ram_nodes = 128;
+inline constexpr usize max_ram_file_buffers = 32;
 inline constexpr usize max_child_nodes = 16;
 inline constexpr usize max_file_data = 4096;
 
@@ -31,11 +32,55 @@ enum class FileSystemMode : u8
     ext4_journaled,
 };
 
+inline constexpr u32 mode_type_mask = 0170000u;
+inline constexpr u32 mode_socket = 0140000u;
+inline constexpr u32 mode_symlink = 0120000u;
+inline constexpr u32 mode_regular = 0100000u;
+inline constexpr u32 mode_block_device = 0060000u;
+inline constexpr u32 mode_directory = 0040000u;
+inline constexpr u32 mode_character_device = 0020000u;
+inline constexpr u32 mode_fifo = 0010000u;
+inline constexpr u32 mode_permission_mask = 07777u;
+inline constexpr u32 default_uid = 0;
+inline constexpr u32 default_gid = 0;
+inline constexpr u32 metadata_block_size = 512;
+
+[[nodiscard]] constexpr u32 node_type_mode(NodeType type)
+{
+    switch (type)
+    {
+    case NodeType::directory:
+        return mode_directory;
+    case NodeType::regular:
+        return mode_regular;
+    case NodeType::device:
+        return mode_character_device;
+    case NodeType::symlink:
+        return mode_symlink;
+    }
+    return mode_regular;
+}
+
+[[nodiscard]] constexpr u32 mode_for(NodeType type, u32 permissions)
+{
+    return node_type_mode(type) | (permissions & mode_permission_mask);
+}
+
+[[nodiscard]] constexpr u64 blocks_for_size(usize size)
+{
+    return static_cast<u64>((size + metadata_block_size - 1) / metadata_block_size);
+}
+
 struct Metadata
 {
     NodeType type{NodeType::regular};
     usize size{0};
-    u32 mode{0644};
+    u32 mode{mode_for(NodeType::regular, 0644u)};
+    u32 uid{default_uid};
+    u32 gid{default_gid};
+    u32 link_count{1};
+    u32 block_size{metadata_block_size};
+    u64 blocks{0};
 };
 
 struct FileBuffer
@@ -73,7 +118,7 @@ class RamNode final : public Node
   public:
     RamNode() = default;
 
-    Status configure(std::string_view name, NodeType type);
+    Status configure(std::string_view name, NodeType type, FileBuffer *data);
     Status attach_child(RamNode &child);
     Status detach_child(std::string_view child);
 
@@ -93,15 +138,14 @@ class RamNode final : public Node
     }
     [[nodiscard]] NodeType type() const
     {
-        return type_;
+        return metadata_.type;
     }
 
   private:
     bool used_{false};
     FixedString<max_path_segment> name_{};
-    NodeType type_{NodeType::regular};
-    std::array<std::byte, max_file_data> data_{};
-    usize data_size_{0};
+    Metadata metadata_{};
+    FileBuffer *data_{nullptr};
     std::array<RamNode *, max_child_nodes> children_{};
     usize child_count_{0};
 };
@@ -129,11 +173,15 @@ class VirtualFileSystem final
 
   private:
     [[nodiscard]] RamNode *allocate_node(std::string_view name, NodeType type);
+    [[nodiscard]] FileBuffer *allocate_file_buffer(NodeType type);
+    void release_file_buffer(FileBuffer *buffer);
     [[nodiscard]] RamNode *parent_for(std::string_view path, FixedString<max_path_segment> &leaf);
     [[nodiscard]] static bool next_segment(std::string_view path, usize &cursor, std::string_view &segment);
 
     FileSystemMode mode_{FileSystemMode::ram_only};
     std::array<RamNode, max_ram_nodes> nodes_{};
+    std::array<FileBuffer, max_ram_file_buffers> file_buffers_{};
+    std::array<bool, max_ram_file_buffers> file_buffer_used_{};
     usize used_nodes_{0};
     RamNode *root_{nullptr};
 };

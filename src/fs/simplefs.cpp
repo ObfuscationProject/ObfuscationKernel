@@ -164,7 +164,12 @@ Result<SimpleFsDirectoryListing> SimpleDiskFileSystem::list_root()
         out.metadata = Metadata{
             .type = entry.value().type,
             .size = entry.value().size,
-            .mode = entry.value().type == NodeType::directory ? 0755u : 0644u,
+            .mode = entry.value().mode,
+            .uid = entry.value().uid,
+            .gid = entry.value().gid,
+            .link_count = entry.value().link_count,
+            .block_size = driver::block_sector_size,
+            .blocks = entry.value().block_count,
         };
     }
     return listing;
@@ -199,6 +204,10 @@ Status SimpleDiskFileSystem::create(std::string_view path, NodeType type)
     DiskEntry entry{};
     entry.used = true;
     entry.type = type;
+    entry.mode = mode_for(type, type == NodeType::directory ? 0755u : 0644u);
+    entry.uid = default_uid;
+    entry.gid = default_gid;
+    entry.link_count = type == NodeType::directory ? 2u : 1u;
     if (auto status = entry.name.assign(name.value().view()); !status.ok())
     {
         return status;
@@ -366,7 +375,12 @@ Result<Metadata> SimpleDiskFileSystem::stat(std::string_view path)
     return Metadata{
         .type = entry.value().type,
         .size = entry.value().size,
-        .mode = entry.value().type == NodeType::directory ? 0755u : 0644u,
+        .mode = entry.value().mode,
+        .uid = entry.value().uid,
+        .gid = entry.value().gid,
+        .link_count = entry.value().link_count,
+        .block_size = driver::block_sector_size,
+        .blocks = entry.value().block_count,
     };
 }
 
@@ -403,6 +417,18 @@ Result<SimpleDiskFileSystem::DiskEntry> SimpleDiskFileSystem::read_entry(usize i
     entry.size = read_le32(bytes, block_offset + 4);
     entry.start_block = read_le32(bytes, block_offset + 8);
     entry.block_count = read_le32(bytes, block_offset + 12);
+    entry.mode = read_le32(bytes, block_offset + 48);
+    entry.uid = read_le32(bytes, block_offset + 52);
+    entry.gid = read_le32(bytes, block_offset + 56);
+    entry.link_count = read_le32(bytes, block_offset + 60);
+    if (entry.mode == 0)
+    {
+        entry.mode = mode_for(entry.type, entry.type == NodeType::directory ? 0755u : 0644u);
+    }
+    if (entry.link_count == 0)
+    {
+        entry.link_count = entry.type == NodeType::directory ? 2u : 1u;
+    }
 
     const auto *name = reinterpret_cast<const char *>(block.data() + block_offset + 16);
     usize name_size = 0;
@@ -442,6 +468,10 @@ Status SimpleDiskFileSystem::write_entry(usize index, const DiskEntry &entry)
     write_le32(std::span<std::byte>(block.data(), block.size()), block_offset + 4, entry.size);
     write_le32(std::span<std::byte>(block.data(), block.size()), block_offset + 8, entry.start_block);
     write_le32(std::span<std::byte>(block.data(), block.size()), block_offset + 12, entry.block_count);
+    write_le32(std::span<std::byte>(block.data(), block.size()), block_offset + 48, entry.mode);
+    write_le32(std::span<std::byte>(block.data(), block.size()), block_offset + 52, entry.uid);
+    write_le32(std::span<std::byte>(block.data(), block.size()), block_offset + 56, entry.gid);
+    write_le32(std::span<std::byte>(block.data(), block.size()), block_offset + 60, entry.link_count);
     const auto name = entry.name.view();
     for (usize i = 0; i < name.size(); ++i)
     {

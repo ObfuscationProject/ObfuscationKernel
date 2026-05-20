@@ -53,6 +53,8 @@ inline constexpr usize max_usb_devices = 32;
 inline constexpr usize block_sector_size = 512;
 inline constexpr usize ram_block_sector_count = 512;
 inline constexpr usize ram_block_storage_size = block_sector_size * ram_block_sector_count;
+inline constexpr usize virtio_block_sector_count = 8192;
+inline constexpr usize virtio_block_storage_size = block_sector_size * virtio_block_sector_count;
 
 enum class IoMode : u8
 {
@@ -213,6 +215,39 @@ struct PciDevice
     u8 function{0};
     PciDeviceId id{};
     std::array<uptr, 6> bars{};
+};
+
+class VirtioBlockDriver final : public Driver, public BlockDevice
+{
+  public:
+    [[nodiscard]] std::string_view name() const override
+    {
+        return "virtio-blk0";
+    }
+    [[nodiscard]] Class driver_class() const override
+    {
+        return Class::block;
+    }
+    Status probe() override;
+    Status start() override;
+    Status stop() override;
+    Status bind(const PciDevice &device);
+    [[nodiscard]] BlockGeometry geometry() const override;
+    Status read_blocks(u64 first_block, std::span<std::byte> out) override;
+    Status write_blocks(u64 first_block, std::span<const std::byte> in) override;
+    Status clear();
+    [[nodiscard]] bool bound() const
+    {
+        return bound_;
+    }
+
+  private:
+    [[nodiscard]] Status check_transfer(u64 first_block, usize byte_count) const;
+
+    bool started_{false};
+    bool bound_{false};
+    PciDevice device_{};
+    std::array<std::byte, virtio_block_storage_size> storage_{};
 };
 
 class PciBusDriver final : public Driver

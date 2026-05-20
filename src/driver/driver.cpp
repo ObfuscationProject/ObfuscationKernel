@@ -228,6 +228,111 @@ Status RamBlockDriver::clear()
     return Status::success();
 }
 
+Status VirtioBlockDriver::probe()
+{
+    return Status::success();
+}
+
+Status VirtioBlockDriver::start()
+{
+    started_ = true;
+    return Status::success();
+}
+
+Status VirtioBlockDriver::stop()
+{
+    started_ = false;
+    bound_ = false;
+    return Status::success();
+}
+
+Status VirtioBlockDriver::bind(const PciDevice &device)
+{
+    if (!started_)
+    {
+        return Status::not_initialized("virtio block driver not started");
+    }
+    if (device.id.vendor_id != 0x1af4 || device.id.class_code != 0x01)
+    {
+        return Status::invalid_argument("PCI device is not a virtio block device");
+    }
+    device_ = device;
+    bound_ = true;
+    return Status::success();
+}
+
+BlockGeometry VirtioBlockDriver::geometry() const
+{
+    return BlockGeometry{
+        .block_count = virtio_block_sector_count,
+        .block_size = block_sector_size,
+        .writable = true,
+    };
+}
+
+Status VirtioBlockDriver::check_transfer(u64 first_block, usize byte_count) const
+{
+    if (!started_)
+    {
+        return Status::not_initialized("virtio block driver not started");
+    }
+    if (!bound_)
+    {
+        return Status::not_initialized("virtio block driver has no PCI device");
+    }
+    if ((byte_count % block_sector_size) != 0)
+    {
+        return Status::invalid_argument("block transfer size is not sector aligned");
+    }
+    const auto block_count = static_cast<u64>(byte_count / block_sector_size);
+    if (first_block > virtio_block_sector_count || block_count > virtio_block_sector_count - first_block)
+    {
+        return Status::invalid_argument("block transfer is out of range");
+    }
+    return Status::success();
+}
+
+Status VirtioBlockDriver::read_blocks(u64 first_block, std::span<std::byte> out)
+{
+    if (auto status = check_transfer(first_block, out.size()); !status.ok())
+    {
+        return status;
+    }
+    const auto offset = static_cast<usize>(first_block) * block_sector_size;
+    for (usize i = 0; i < out.size(); ++i)
+    {
+        out[i] = storage_[offset + i];
+    }
+    return Status::success();
+}
+
+Status VirtioBlockDriver::write_blocks(u64 first_block, std::span<const std::byte> in)
+{
+    if (auto status = check_transfer(first_block, in.size()); !status.ok())
+    {
+        return status;
+    }
+    const auto offset = static_cast<usize>(first_block) * block_sector_size;
+    for (usize i = 0; i < in.size(); ++i)
+    {
+        storage_[offset + i] = in[i];
+    }
+    return Status::success();
+}
+
+Status VirtioBlockDriver::clear()
+{
+    if (!started_)
+    {
+        return Status::not_initialized("virtio block driver not started");
+    }
+    for (auto &byte : storage_)
+    {
+        byte = std::byte{0};
+    }
+    return Status::success();
+}
+
 Status PciBusDriver::probe()
 {
     return Status::success();
@@ -242,14 +347,30 @@ Status PciBusDriver::start()
                 .bus = 0,
                 .slot = 20,
                 .function = 0,
-            .id = PciDeviceId{
-                .vendor_id = 0x1b36,
-                .device_id = 0x000d,
-                .class_code = 0x0c,
-                .subclass = 0x03,
-                .programming_interface = 0x30,
-            },
-        });
+                .id = PciDeviceId{
+                    .vendor_id = 0x1b36,
+                    .device_id = 0x000d,
+                    .class_code = 0x0c,
+                    .subclass = 0x03,
+                    .programming_interface = 0x30,
+                },
+            });
+            !status.ok())
+        {
+            return status;
+        }
+        if (auto status = add_emulated_device(PciDevice{
+                .bus = 0,
+                .slot = 3,
+                .function = 0,
+                .id = PciDeviceId{
+                    .vendor_id = 0x1af4,
+                    .device_id = 0x1042,
+                    .class_code = 0x01,
+                    .subclass = 0x00,
+                    .programming_interface = 0x00,
+                },
+            });
             !status.ok())
         {
             return status;

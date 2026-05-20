@@ -127,6 +127,10 @@ class Kernel final
     {
         return virtio_gpu_driver_;
     }
+    [[nodiscard]] driver::VirtioBlockDriver &virtio_block()
+    {
+        return virtio_block_driver_;
+    }
     [[nodiscard]] driver::KeyboardDriver &keyboard()
     {
         return keyboard_driver_;
@@ -151,9 +155,14 @@ class Kernel final
     {
         return usb_mouse_driver_;
     }
-    [[nodiscard]] driver::RamBlockDriver &disk()
+    [[nodiscard]] driver::BlockDevice &disk()
     {
-        return ram_block_driver_;
+        return virtio_block_driver_.bound() ? static_cast<driver::BlockDevice &>(virtio_block_driver_)
+                                            : static_cast<driver::BlockDevice &>(ram_block_driver_);
+    }
+    [[nodiscard]] std::string_view disk_name() const
+    {
+        return virtio_block_driver_.bound() ? virtio_block_driver_.name() : ram_block_driver_.name();
     }
     [[nodiscard]] fs::VirtualFileSystem &vfs()
     {
@@ -195,6 +204,7 @@ class Kernel final
     driver::TimerDriver timer_driver_{};
     driver::NullBlockDriver null_block_driver_{};
     driver::RamBlockDriver ram_block_driver_{};
+    driver::VirtioBlockDriver virtio_block_driver_{};
     driver::FramebufferDisplayDriver display_driver_{};
     driver::VirtioGpuPciDisplayDriver virtio_gpu_driver_{};
     driver::KeyboardDriver keyboard_driver_{};

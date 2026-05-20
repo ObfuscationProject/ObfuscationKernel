@@ -955,6 +955,46 @@ Status KernelDebugShell::command_stat(std::string_view path)
     {
         return status;
     }
+    if (auto status = append(" uid="); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_unsigned(stat.value().uid); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(" gid="); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_unsigned(stat.value().gid); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(" links="); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_unsigned(stat.value().link_count); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(" blocks="); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_unsigned(stat.value().blocks); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(" blksize="); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_unsigned(stat.value().block_size); !status.ok())
+    {
+        return status;
+    }
     return append("\n");
 }
 
@@ -1026,7 +1066,15 @@ Status KernelDebugShell::command_disk()
         return Status::not_initialized("shell has no kernel");
     }
     const auto geometry = kernel_->disk().geometry();
-    if (auto status = append("disk=ram-block0 blocks="); !status.ok())
+    if (auto status = append("disk="); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(kernel_->disk_name()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(" blocks="); !status.ok())
     {
         return status;
     }

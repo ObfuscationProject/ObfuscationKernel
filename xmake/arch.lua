@@ -1,6 +1,6 @@
 OK_SUPPORTED_ARCHES = {
     "i386", "x86_64", "aarch64", "arm32", "rv64", "rv32", "loongarch64",
-    "mips", "mips64", "ppc", "ppc64"
+    "mips", "mips64", "ppc"
 }
 
 OK_ARCH_SPECS = {
@@ -89,12 +89,6 @@ OK_ARCH_SPECS = {
         toolchain = "ok-ppc-elf",
         triple = "powerpc-eabi"
     },
-    ppc64 = {
-        define = "OK_ARCH_TARGET_PPC64",
-        source = "ppc64",
-        toolchain = "ok-ppc64-elf",
-        triple = "powerpc64-linux-gnu"
-    },
 }
 
 function ok_normalize_arch(arch)
@@ -121,9 +115,6 @@ function ok_normalize_arch(arch)
     end
     if arch == "powerpc" then
         return "ppc"
-    end
-    if arch == "powerpc64" then
-        return "ppc64"
     end
     return arch
 end

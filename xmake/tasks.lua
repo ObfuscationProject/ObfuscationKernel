@@ -1,6 +1,6 @@
 local task_arches = {
     "i386", "x86_64", "aarch64", "arm32", "rv64", "rv32", "loongarch64",
-    "mips", "mips64", "ppc", "ppc64"
+    "mips", "mips64", "ppc"
 }
 
 local task_arch_specs = {
@@ -14,7 +14,6 @@ local task_arch_specs = {
     mips = {triple = "mips-elf"},
     mips64 = {triple = "mips64-elf"},
     ppc = {triple = "powerpc-eabi"},
-    ppc64 = {triple = "powerpc64-elf"},
 }
 
 local function task_normalize_arch(arch)
@@ -42,9 +41,6 @@ local function task_normalize_arch(arch)
     if arch == "powerpc" then
         return "ppc"
     end
-    if arch == "powerpc64" then
-        return "ppc64"
-    end
     return arch
 end
 
@@ -66,7 +62,7 @@ task("toolchains")
         usage = "xmake toolchains -a ARCH",
         description = "Build GCC/binutils cross toolchains into ./toolchains",
         options = {
-            {"a", "target-arch", "kv", "all", "Architecture: i386/x86_64/aarch64/arm32/rv64/rv32/loongarch64/mips/mips64/ppc/ppc64/all"},
+            {"a", "target-arch", "kv", "all", "Architecture: i386/x86_64/aarch64/arm32/rv64/rv32/loongarch64/mips/mips64/ppc/all"},
             {"j", "jobs", "kv", nil, "Parallel build jobs"}
         }
     }
@@ -192,9 +188,6 @@ task("qemu-window-test")
         local _, spec = task_require_arch(arch)
         if not spec.bootable then
             raise("qemu window test is not implemented for %s yet; build okernel to check the freestanding profile", arch)
-        end
-        if not option.get("no-launch") and arch ~= "i386" and arch ~= "x86_64" then
-            raise("qemu graphical window output is currently wired for x86 targets; use xmake qemu-test or qemu-window-test --no-launch for %s", arch)
         end
         local mode = option.get("check-mode") or "debug"
         local current_mode = config.get("mode") or "release"

@@ -17,7 +17,7 @@ Usage: scripts/build-toolchain.sh [--arch ARCH] [--jobs N]
 Build binutils and GCC cross toolchains under ./toolchains.
 
 Architectures:
-  i386 x86_64 aarch64 arm32 rv64 rv32 loongarch64 mips mips64 ppc ppc64 all
+  i386 x86_64 aarch64 arm32 rv64 rv32 loongarch64 mips mips64 ppc all
 
 Environment:
   BINUTILS_VERSION  default: 2.42
@@ -62,7 +62,6 @@ triple_for_arch() {
         mips) echo "mips-elf" ;;
         mips64) echo "mips64-elf" ;;
         ppc|powerpc) echo "powerpc-eabi" ;;
-        ppc64|powerpc64) echo "powerpc64-linux-gnu" ;;
         *) echo "unsupported architecture: $1" >&2; return 1 ;;
     esac
 }
@@ -142,15 +141,6 @@ build_one() {
     rm -rf "$binutils_build" "$gcc_build"
     mkdir -p "$binutils_build" "$gcc_build"
 
-    case "$arch" in
-        ppc64|powerpc64)
-            # GCC 14 does not provide a powerpc64-elf target configuration.
-            # Use the supported big-endian powerpc64-linux-gnu frontend and keep
-            # the project itself freestanding through xmake's compile/link flags.
-            gcc_extra_flags+=(--disable-multilib)
-            ;;
-    esac
-
     (
         cd "$binutils_build"
         "${SRC_ROOT}/binutils-${BINUTILS_VERSION}/configure" \
@@ -188,7 +178,7 @@ build_one() {
 main() {
     prepare_sources
     if [[ "$ARCH" == "all" ]]; then
-        for arch in i386 x86_64 aarch64 arm32 rv64 rv32 loongarch64 mips mips64 ppc ppc64; do
+        for arch in i386 x86_64 aarch64 arm32 rv64 rv32 loongarch64 mips mips64 ppc; do
             build_one "$arch"
         done
     else

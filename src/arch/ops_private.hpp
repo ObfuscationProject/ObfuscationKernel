@@ -120,6 +120,5 @@ ArchOperations &loongarch64_operations();
 ArchOperations &mips_operations();
 ArchOperations &mips64_operations();
 ArchOperations &ppc_operations();
-ArchOperations &ppc64_operations();
 
 } // namespace ok::arch::detail

@@ -7,10 +7,10 @@ kernel tests that exercise interrupts, memory management, scheduling, IPC,
 POSIX-oriented syscalls, drivers, VFS, EXT4 parsing, and user-mode transition
 state. The foundation also includes SMP topology state, a VGA-backed display
 path, PCIe/USB HID driver scaffolding, a kernel debug shell, and a read-only
-EXT4 superblock/block reader. A fixed RAM disk and SimpleFS provide the first
-block-backed writable filesystem path for early disk-management tests, and the
-debug kernel now includes virtio-gpu/ramfb test plumbing plus an IPv4/UDP/TCP
-loopback stack for network-debug bring-up.
+EXT4 superblock/block reader. A fixed RAM disk, a QEMU virtio-blk test disk, and
+SimpleFS provide the first block-backed writable filesystem path for early
+disk-management tests, and the debug kernel now includes virtio-gpu/ramfb test
+plumbing plus an IPv4/UDP/TCP loopback stack for network-debug bring-up.
 
 This is not yet a complete production POSIX kernel. The implementation defines
 the ABI, module boundaries, architecture profiles, build flow, and regression
@@ -28,7 +28,6 @@ test harness needed to grow into one without rewriting the project structure.
 - `mips`
 - `mips64`
 - `ppc`
-- `ppc64`
 
 ## Quick Start
 
@@ -91,16 +90,17 @@ system target:
 xmake qemu-test -a i386
 ```
 
-For a visible QEMU window that displays the current x86 debug kernel output:
+For a visible QEMU window that displays the current bootable debug kernel output:
 
 ```sh
 xmake qemu-window-test
 ```
 
-In graphical x86 mode the kernel remains interactive after the debug checks pass:
-keyboard input is handled by the kernel input stack and routed through the
-debug shell, display path, and serial console. The script reports after the QEMU
-window is closed.
+In graphical mode the kernel remains interactive after the debug checks pass:
+keyboard input is handled by the kernel input stack and routed through the debug
+shell, display path, and serial console. x86/i386 use `virtio-gpu-pci`;
+`aarch64` and `rv64` launch with `ramfb` plus `virtio-gpu-pci`. The script
+reports after the QEMU window is closed.
 
 The test scripts do not contain a kernel `main`. Debug and release builds enter
 through the same `kernel_main`; debug builds enable `OK_ENABLE_TEST_POINTS` and

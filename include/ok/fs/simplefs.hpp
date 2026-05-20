@@ -68,6 +68,10 @@ class SimpleDiskFileSystem final
         u32 size{0};
         u32 start_block{0};
         u32 block_count{0};
+        u32 mode{mode_for(NodeType::regular, 0644u)};
+        u32 uid{default_uid};
+        u32 gid{default_gid};
+        u32 link_count{1};
         FixedString<simplefs_name_capacity> name{};
     };
 

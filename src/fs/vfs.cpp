@@ -3,22 +3,35 @@
 namespace ok::fs
 {
 
-Status RamNode::configure(std::string_view name, NodeType type)
+Status RamNode::configure(std::string_view name, NodeType type, FileBuffer *data)
 {
     if (auto status = name_.assign(name); !status.ok())
     {
         return status;
     }
-    type_ = type;
+    metadata_ = Metadata{
+        .type = type,
+        .size = 0,
+        .mode = mode_for(type, type == NodeType::directory ? 0755u : 0644u),
+        .uid = default_uid,
+        .gid = default_gid,
+        .link_count = type == NodeType::directory ? 2u : 1u,
+        .block_size = metadata_block_size,
+        .blocks = 0,
+    };
     used_ = true;
-    data_size_ = 0;
+    data_ = data;
+    if (data_ != nullptr)
+    {
+        *data_ = {};
+    }
     child_count_ = 0;
     return Status::success();
 }
 
 Status RamNode::attach_child(RamNode &child)
 {
-    if (type_ != NodeType::directory)
+    if (metadata_.type != NodeType::directory)
     {
         return Status::invalid_argument("parent is not a directory");
     }
@@ -27,12 +40,16 @@ Status RamNode::attach_child(RamNode &child)
         return Status::overflow("directory child capacity exceeded");
     }
     children_[child_count_++] = &child;
+    if (child.metadata_.type == NodeType::directory)
+    {
+        ++metadata_.link_count;
+    }
     return Status::success();
 }
 
 Status RamNode::detach_child(std::string_view child)
 {
-    if (type_ != NodeType::directory)
+    if (metadata_.type != NodeType::directory)
     {
         return Status::invalid_argument("parent is not a directory");
     }
@@ -40,6 +57,10 @@ Status RamNode::detach_child(std::string_view child)
     {
         if (children_[i]->name() == child)
         {
+            if (children_[i]->metadata_.type == NodeType::directory && metadata_.link_count > 2)
+            {
+                --metadata_.link_count;
+            }
             for (usize j = i; j + 1 < child_count_; ++j)
             {
                 children_[j] = children_[j + 1];
@@ -54,59 +75,73 @@ Status RamNode::detach_child(std::string_view child)
 
 Metadata RamNode::metadata() const
 {
-    return Metadata{.type = type_, .size = data_size_, .mode = type_ == NodeType::directory ? 0755u : 0644u};
+    auto out = metadata_;
+    out.blocks = blocks_for_size(out.size);
+    return out;
 }
 
 Result<FileBuffer> RamNode::read(usize offset, usize count) const
 {
-    if (type_ != NodeType::regular && type_ != NodeType::device)
+    if (metadata_.type != NodeType::regular && metadata_.type != NodeType::device)
     {
         return Status::invalid_argument("node is not readable");
     }
-    if (offset > data_size_)
+    if (offset > metadata_.size)
     {
         return Status::invalid_argument("read offset beyond file size");
     }
-    const usize available = data_size_ - offset;
+    if (data_ == nullptr)
+    {
+        return Status::invalid_argument("node has no file storage");
+    }
+    const usize available = metadata_.size - offset;
     const usize length = count < available ? count : available;
     FileBuffer out{};
     out.size = length;
     for (usize i = 0; i < length; ++i)
     {
-        out.data[i] = data_[offset + i];
+        out.data[i] = data_->data[offset + i];
     }
     return out;
 }
 
 Status RamNode::write(usize offset, std::span<const std::byte> data)
 {
-    if (type_ != NodeType::regular && type_ != NodeType::device)
+    if (metadata_.type != NodeType::regular && metadata_.type != NodeType::device)
     {
         return Status::invalid_argument("node is not writable");
     }
-    if (offset + data.size() > data_.size())
+    if (data_ == nullptr)
+    {
+        return Status::invalid_argument("node has no file storage");
+    }
+    if (offset + data.size() > data_->data.size())
     {
         return Status::overflow("file data capacity exceeded");
     }
     if (offset == 0 && data.empty())
     {
-        data_size_ = 0;
+        metadata_.size = 0;
+        metadata_.blocks = 0;
+        data_->size = 0;
         return Status::success();
     }
     for (usize i = 0; i < data.size(); ++i)
     {
-        data_[offset + i] = data[i];
+        data_->data[offset + i] = data[i];
     }
-    if (offset + data.size() > data_size_)
+    if (offset + data.size() > metadata_.size)
     {
-        data_size_ = offset + data.size();
+        metadata_.size = offset + data.size();
+        metadata_.blocks = blocks_for_size(metadata_.size);
+        data_->size = metadata_.size;
     }
     return Status::success();
 }
 
 Node *RamNode::lookup(std::string_view child)
 {
-    if (type_ != NodeType::directory)
+    if (metadata_.type != NodeType::directory)
     {
         return nullptr;
     }
@@ -127,7 +162,7 @@ Status RamNode::create(std::string_view, NodeType)
 
 Result<DirectoryListing> RamNode::list() const
 {
-    if (type_ != NodeType::directory)
+    if (metadata_.type != NodeType::directory)
     {
         return Status::invalid_argument("node is not a directory");
     }
@@ -268,13 +303,54 @@ RamNode *VirtualFileSystem::allocate_node(std::string_view name, NodeType type)
     {
         return nullptr;
     }
-    auto &node = nodes_[used_nodes_++];
-    if (!node.configure(name, type).ok())
+    auto *buffer = allocate_file_buffer(type);
+    if ((type == NodeType::regular || type == NodeType::device || type == NodeType::symlink) && buffer == nullptr)
     {
+        return nullptr;
+    }
+    auto &node = nodes_[used_nodes_++];
+    if (!node.configure(name, type, buffer).ok())
+    {
+        release_file_buffer(buffer);
         --used_nodes_;
         return nullptr;
     }
     return &node;
+}
+
+FileBuffer *VirtualFileSystem::allocate_file_buffer(NodeType type)
+{
+    if (type == NodeType::directory)
+    {
+        return nullptr;
+    }
+    for (usize i = 0; i < file_buffers_.size(); ++i)
+    {
+        if (!file_buffer_used_[i])
+        {
+            file_buffer_used_[i] = true;
+            file_buffers_[i] = {};
+            return &file_buffers_[i];
+        }
+    }
+    return nullptr;
+}
+
+void VirtualFileSystem::release_file_buffer(FileBuffer *buffer)
+{
+    if (buffer == nullptr)
+    {
+        return;
+    }
+    for (usize i = 0; i < file_buffers_.size(); ++i)
+    {
+        if (&file_buffers_[i] == buffer)
+        {
+            file_buffers_[i] = {};
+            file_buffer_used_[i] = false;
+            return;
+        }
+    }
 }
 
 RamNode *VirtualFileSystem::parent_for(std::string_view path, FixedString<max_path_segment> &leaf)

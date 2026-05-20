@@ -19,6 +19,7 @@ QEMU_SYSTEM_BY_ARCH = {
     "aarch64": "qemu-system-aarch64",
     "rv64": "qemu-system-riscv64",
 }
+VIRTUAL_DISK_SIZE = 16 * 1024 * 1024
 
 
 def normalize_arch(arch: str) -> str:
@@ -54,7 +55,21 @@ def validate_output(arch: str, output: str) -> tuple[bool, str]:
     return True, fields.get("debug_test_points", "0")
 
 
-def qemu_command(arch: str, kernel: Path, display: str) -> list[str]:
+def create_virtual_disk(path: Path) -> None:
+    with path.open("wb") as handle:
+        handle.truncate(VIRTUAL_DISK_SIZE)
+
+
+def virtio_disk_args(disk: Path) -> list[str]:
+    return [
+        "-drive",
+        f"file={disk},format=raw,if=none,id=fsdisk",
+        "-device",
+        "virtio-blk-pci,drive=fsdisk",
+    ]
+
+
+def qemu_command(arch: str, kernel: Path, display: str, disk: Path) -> list[str]:
     qemu = QEMU_SYSTEM_BY_ARCH.get(arch)
     if qemu is None:
         raise SystemExit(f"qemu-system boot is not implemented for {arch} yet")
@@ -62,7 +77,7 @@ def qemu_command(arch: str, kernel: Path, display: str) -> list[str]:
     if qemu_path is None:
         raise SystemExit(f"{qemu} was not found in PATH")
     if arch == "aarch64":
-        return [
+        command = [
             qemu_path,
             "-M",
             "virt",
@@ -82,8 +97,10 @@ def qemu_command(arch: str, kernel: Path, display: str) -> list[str]:
             "-device",
             "virtio-gpu-pci",
         ]
+        command += virtio_disk_args(disk)
+        return command
     if arch == "rv64":
-        return [
+        command = [
             qemu_path,
             "-M",
             "virt",
@@ -105,6 +122,8 @@ def qemu_command(arch: str, kernel: Path, display: str) -> list[str]:
             "-device",
             "virtio-gpu-pci",
         ]
+        command += virtio_disk_args(disk)
+        return command
 
     command = [
         qemu_path,
@@ -120,6 +139,7 @@ def qemu_command(arch: str, kernel: Path, display: str) -> list[str]:
         "-display",
         display,
     ]
+    command += virtio_disk_args(disk)
     if arch in ("i386", "x86_64"):
         command += ["-device", "virtio-gpu-pci"]
     return command
@@ -181,8 +201,10 @@ def main() -> int:
     display = "none" if args.no_launch else args.display
     with tempfile.TemporaryDirectory(prefix="okernel-qemu-window-") as tmp:
         runnable_kernel = Path(tmp) / "kernel.bin"
+        scratch_disk = Path(tmp) / "fs.img"
         shutil.copyfile(kernel, runnable_kernel)
-        command = qemu_command(arch, runnable_kernel, display)
+        create_virtual_disk(scratch_disk)
+        command = qemu_command(arch, runnable_kernel, display, scratch_disk)
         if args.no_launch and arch in ("i386", "x86_64"):
             command += ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
             timeout = 10.0

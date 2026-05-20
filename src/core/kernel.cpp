@@ -61,7 +61,6 @@ uptr test_mapping_address(arch::Architecture architecture)
     case arch::Architecture::rv64:
     case arch::Architecture::loongarch64:
     case arch::Architecture::mips64:
-    case arch::Architecture::ppc64:
         return static_cast<uptr>(0xffff'8000'0000'0000ull);
     }
     return static_cast<uptr>(0xc000'0000u);
@@ -83,7 +82,6 @@ driver::DisplayBackend display_backend_for_arch(arch::Architecture architecture)
     case arch::Architecture::mips:
     case arch::Architecture::mips64:
     case arch::Architecture::ppc:
-    case arch::Architecture::ppc64:
         return driver::DisplayBackend::memory_framebuffer;
     }
     return driver::DisplayBackend::memory_framebuffer;
@@ -168,6 +166,10 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
+    if (auto status = drivers_.add(virtio_block_driver_); !status.ok())
+    {
+        return status;
+    }
     if (auto status = drivers_.add(display_driver_); !status.ok())
     {
         return status;
@@ -204,6 +206,13 @@ Status Kernel::boot(KernelConfig config)
     if (auto status = drivers_.start_all(); !status.ok())
     {
         return status;
+    }
+    if (const auto *block = pci_bus_driver_.find_class(0x01, 0x00, 0x00); block != nullptr)
+    {
+        if (auto status = virtio_block_driver_.bind(*block); !status.ok())
+        {
+            return status;
+        }
     }
     if (const auto *gpu = pci_bus_driver_.find_class(0x03, 0x00, 0x00); gpu != nullptr)
     {
@@ -293,11 +302,11 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
-    if (auto status = simplefs_.format(ram_block_driver_, "okroot"); !status.ok())
+    if (auto status = simplefs_.format(disk(), "okroot"); !status.ok())
     {
         return status;
     }
-    if (auto status = log_boot_line("[    0.000006] fs: simplefs formatted on ram-block0"); !status.ok())
+    if (auto status = log_boot_line("[    0.000006] fs: simplefs formatted on block device"); !status.ok())
     {
         return status;
     }
@@ -372,10 +381,10 @@ Status Kernel::run_debug_test_suite()
     }
     test_report_.vfs = true;
 
-    const auto geometry = ram_block_driver_.geometry();
+    const auto geometry = disk().geometry();
     if (geometry.block_count == 0 || geometry.block_size != driver::block_sector_size || !geometry.writable)
     {
-        return Status::fault("RAM block driver debug test failed");
+        return Status::fault("block driver debug test failed");
     }
     static_cast<void>(simplefs_.unlink("/suite.txt"));
     if (auto status = simplefs_.create("/suite.txt", fs::NodeType::regular); !status.ok())
@@ -472,7 +481,8 @@ Status Kernel::run_debug_test_suite()
     }
     test_report_.input = true;
 
-    if (pci_bus_driver_.device_count() == 0 || pci_bus_driver_.find_class(0x0c, 0x03, 0x30) == nullptr)
+    if (pci_bus_driver_.device_count() == 0 || pci_bus_driver_.find_class(0x0c, 0x03, 0x30) == nullptr ||
+        pci_bus_driver_.find_class(0x01, 0x00, 0x00) == nullptr)
     {
         return Status::fault("PCIe debug test failed");
     }
@@ -716,13 +726,14 @@ Status Kernel::run_ext4_test()
         return status;
     }
 
-    if (auto status = ram_block_driver_.write_blocks(0, std::span<const std::byte>(image.data(), image.size()));
+    auto &block_device = disk();
+    if (auto status = block_device.write_blocks(0, std::span<const std::byte>(image.data(), image.size()));
         !status.ok())
     {
         return status;
     }
     fs::Ext4Volume block_volume;
-    if (auto status = block_volume.mount(ram_block_driver_); !status.ok())
+    if (auto status = block_volume.mount(block_device); !status.ok())
     {
         return status;
     }
@@ -730,7 +741,7 @@ Status Kernel::run_ext4_test()
     {
         return status;
     }
-    return simplefs_.format(ram_block_driver_, "okroot");
+    return simplefs_.format(block_device, "okroot");
 }
 
 Status Kernel::register_builtin_interrupts(driver::TimerDriver &timer)

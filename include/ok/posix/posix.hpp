@@ -32,7 +32,12 @@ struct FileStatus
 {
     fs::NodeType type{fs::NodeType::regular};
     usize size{0};
-    u32 mode{0644};
+    u32 mode{fs::mode_for(fs::NodeType::regular, 0644u)};
+    u32 uid{fs::default_uid};
+    u32 gid{fs::default_gid};
+    u32 link_count{1};
+    u32 block_size{fs::metadata_block_size};
+    u64 blocks{0};
 };
 
 struct ClockTime

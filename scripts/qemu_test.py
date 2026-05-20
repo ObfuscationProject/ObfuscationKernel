@@ -21,6 +21,7 @@ QEMU_SYSTEM_BY_ARCH = {
 }
 
 QEMU_DEBUG_EXIT_SUCCESS = 33
+VIRTUAL_DISK_SIZE = 16 * 1024 * 1024
 
 
 def normalize_arch(arch: str) -> str:
@@ -30,7 +31,21 @@ def normalize_arch(arch: str) -> str:
     return aliases.get(arch, arch)
 
 
-def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool) -> list[str]:
+def create_virtual_disk(path: Path) -> None:
+    with path.open("wb") as handle:
+        handle.truncate(VIRTUAL_DISK_SIZE)
+
+
+def virtio_disk_args(disk: Path) -> list[str]:
+    return [
+        "-drive",
+        f"file={disk},format=raw,if=none,id=fsdisk",
+        "-device",
+        "virtio-blk-pci,drive=fsdisk",
+    ]
+
+
+def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool, disk: Path) -> list[str]:
     qemu = QEMU_SYSTEM_BY_ARCH.get(arch)
     if qemu is None:
         raise SystemExit(f"qemu-system boot is not implemented for {arch} yet")
@@ -39,7 +54,7 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool) -> lis
         raise SystemExit(f"{qemu} was not found in PATH")
 
     if arch == "aarch64":
-        return [
+        command = [
             qemu_path,
             "-M",
             "virt",
@@ -55,8 +70,10 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool) -> lis
             "-display",
             display,
         ]
+        command += virtio_disk_args(disk)
+        return command
     if arch == "rv64":
-        return [
+        command = [
             qemu_path,
             "-M",
             "virt",
@@ -74,6 +91,8 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool) -> lis
             "-display",
             display,
         ]
+        command += virtio_disk_args(disk)
+        return command
 
     command = [
         qemu_path,
@@ -89,6 +108,7 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool) -> lis
         "-display",
         display,
     ]
+    command += virtio_disk_args(disk)
     if debug_exit:
         command += ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
     return command
@@ -97,8 +117,10 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool) -> lis
 def run_kernel(arch: str, kernel: Path, display: str, debug_exit: bool, timeout: float | None) -> subprocess.CompletedProcess[str]:
     with tempfile.TemporaryDirectory(prefix="okernel-qemu-") as tmp:
         runnable_kernel = Path(tmp) / "kernel.bin"
+        scratch_disk = Path(tmp) / "fs.img"
         shutil.copyfile(kernel, runnable_kernel)
-        command = qemu_command(arch, runnable_kernel, display, debug_exit)
+        create_virtual_disk(scratch_disk)
+        command = qemu_command(arch, runnable_kernel, display, debug_exit, scratch_disk)
         if not debug_exit:
             return run_until_marker(command, timeout)
         return subprocess.run(command, text=True, capture_output=True, check=False, timeout=timeout)

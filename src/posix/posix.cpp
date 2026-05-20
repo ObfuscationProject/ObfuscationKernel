@@ -263,7 +263,16 @@ Result<FileStatus> PosixService::stat(std::string_view path)
     {
         return metadata.status();
     }
-    return FileStatus{.type = metadata.value().type, .size = metadata.value().size, .mode = metadata.value().mode};
+    return FileStatus{
+        .type = metadata.value().type,
+        .size = metadata.value().size,
+        .mode = metadata.value().mode,
+        .uid = metadata.value().uid,
+        .gid = metadata.value().gid,
+        .link_count = metadata.value().link_count,
+        .block_size = metadata.value().block_size,
+        .blocks = metadata.value().blocks,
+    };
 }
 
 ClockTime PosixService::clock_gettime() const

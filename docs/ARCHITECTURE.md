@@ -91,7 +91,6 @@ The concrete implementations are separate files:
 | `mips` | `src/arch/mips/ops.cpp` |
 | `mips64` | `src/arch/mips64/ops.cpp` |
 | `ppc` | `src/arch/ppc/ops.cpp` |
-| `ppc64` | `src/arch/ppc64/ops.cpp` |
 
 Inline assembly is used for low-level primitives such as cycle counters, memory
 fences, interrupt control, halt, and early boot entry. The freestanding library
