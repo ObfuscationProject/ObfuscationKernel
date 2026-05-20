@@ -13,7 +13,11 @@ Built-in drivers:
 - `FramebufferDisplayDriver`: exposes a simple 32-bit RGBA framebuffer with
   clear, pixel, rectangle, text-line, and checksum operations. Kernel boot writes
   Linux-style startup lines through this driver so `qemu-window-test` can show
-  the same debug output that the QEMU checker validates.
+  the same debug output that the QEMU checker validates. The backend tag can be
+  `memory_framebuffer`, `vga_text`, `ramfb`, or `virtio_gpu_pci`.
+- `VirtioGpuPciDisplayDriver`: binds the emulated PCI display device and
+  presents the kernel framebuffer through the virtio-gpu-pci path used by QEMU
+  window tests.
 - `KeyboardDriver`: decodes PS/2 set-1 scancodes into key events and ASCII
   characters in polling or interrupt mode.
 - `Ps2MouseDriver`: queues PS/2 mouse packets for pointer/button input.
@@ -45,3 +49,8 @@ The PCIe/USB driver plan keeps discovery separate from transport:
   keyboard, and mouse report objects.
 - Real xHCI MMIO rings, MSI/MSI-X, DMA mapping, and hotplug handling are future
   transport implementations behind the existing driver interfaces.
+
+QEMU window tests attach `virtio-gpu-pci` on x86/i386 and attach both `ramfb`
+and `virtio-gpu-pci` on `aarch64`/`rv64`. The current driver model validates
+enumeration and framebuffer presentation; BAR mapping, virtqueues, EDID, and
+scanout resource management are the next implementation steps.

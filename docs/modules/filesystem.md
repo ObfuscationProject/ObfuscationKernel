@@ -24,5 +24,7 @@ disk-management path before VFS mount routing and before full EXT4 write support
 
 `ok::fs::Ext4Volume` is a read-only EXT4 foundation. It validates the
 superblock magic, parses block size, inode size, extent support, basic counters,
-and volume name, and can read raw filesystem blocks from an image span. Directory
-walking and inode data reads are intentionally separate follow-up layers.
+and volume name, and can read raw filesystem blocks from either an image span or
+any `ok::driver::BlockDevice`. The block-device mount path is the interface real
+ATA/NVMe/virtio-blk drivers will use. Directory walking, inode data reads,
+journal replay, allocation, and writeback remain follow-up layers.

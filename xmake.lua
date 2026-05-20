@@ -18,6 +18,7 @@ function add_ok_kernel_sources(include_kernel_main)
     add_files("src/interrupt/*.cpp")
     add_files("src/ipc/*.cpp")
     add_files("src/memory/*.cpp")
+    add_files("src/net/*.cpp")
     add_files("src/posix/*.cpp")
     add_files("src/sched/*.cpp")
     add_files("src/smp/*.cpp")
@@ -143,7 +144,7 @@ target("okernel_image")
         os.execv(ld, {"-Ttext=0x7c00", "--oformat=binary", boot_object, "-o", boot_sector})
 
         local payload_size = os.filesize(payload_bin)
-        local payload_capacity = 512 * 512
+        local payload_capacity = 512 * 768
         if payload_size > payload_capacity then
             raise("kernel payload is too large: %d bytes > %d bytes", payload_size, payload_capacity)
         end

@@ -238,16 +238,32 @@ Status PciBusDriver::start()
     started_ = true;
     if (devices_.empty())
     {
-        return add_emulated_device(PciDevice{
-            .bus = 0,
-            .slot = 20,
-            .function = 0,
+        if (auto status = add_emulated_device(PciDevice{
+                .bus = 0,
+                .slot = 20,
+                .function = 0,
             .id = PciDeviceId{
                 .vendor_id = 0x1b36,
                 .device_id = 0x000d,
                 .class_code = 0x0c,
                 .subclass = 0x03,
                 .programming_interface = 0x30,
+            },
+        });
+            !status.ok())
+        {
+            return status;
+        }
+        return add_emulated_device(PciDevice{
+            .bus = 0,
+            .slot = 2,
+            .function = 0,
+            .id = PciDeviceId{
+                .vendor_id = 0x1af4,
+                .device_id = 0x1050,
+                .class_code = 0x03,
+                .subclass = 0x00,
+                .programming_interface = 0x00,
             },
         });
     }
@@ -698,6 +714,57 @@ u64 FramebufferDisplayDriver::checksum() const
         value *= 1099511628211ull;
     }
     return value;
+}
+
+Status VirtioGpuPciDisplayDriver::probe()
+{
+    return Status::success();
+}
+
+Status VirtioGpuPciDisplayDriver::start()
+{
+    started_ = true;
+    return Status::success();
+}
+
+Status VirtioGpuPciDisplayDriver::stop()
+{
+    started_ = false;
+    bound_ = false;
+    return Status::success();
+}
+
+Status VirtioGpuPciDisplayDriver::bind(const PciDevice &device)
+{
+    if (!started_)
+    {
+        return Status::not_initialized("virtio GPU driver not started");
+    }
+    if (device.id.vendor_id != 0x1af4 || device.id.class_code != 0x03)
+    {
+        return Status::invalid_argument("PCI device is not a virtio GPU display");
+    }
+    device_ = device;
+    bound_ = true;
+    return Status::success();
+}
+
+Status VirtioGpuPciDisplayDriver::present(const FramebufferDisplayDriver &framebuffer)
+{
+    if (!started_)
+    {
+        return Status::not_initialized("virtio GPU driver not started");
+    }
+    if (!bound_)
+    {
+        return Status::not_initialized("virtio GPU driver has no PCI device");
+    }
+    if (framebuffer.checksum() == 0)
+    {
+        return Status::invalid_argument("framebuffer is blank");
+    }
+    ++frames_presented_;
+    return Status::success();
 }
 
 } // namespace ok::driver

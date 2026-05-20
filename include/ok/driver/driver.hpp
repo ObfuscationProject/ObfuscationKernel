@@ -446,6 +446,14 @@ struct DisplayMode
     u8 bits_per_pixel{32};
 };
 
+enum class DisplayBackend : u8
+{
+    memory_framebuffer,
+    vga_text,
+    ramfb,
+    virtio_gpu_pci,
+};
+
 class FramebufferDisplayDriver final : public Driver
 {
   public:
@@ -464,6 +472,14 @@ class FramebufferDisplayDriver final : public Driver
     Status put_pixel(u32 x, u32 y, u32 rgba);
     Status fill_rect(u32 x, u32 y, u32 width, u32 height, u32 rgba);
     Status write_line(std::string_view text);
+    void set_backend(DisplayBackend backend)
+    {
+        backend_ = backend;
+    }
+    [[nodiscard]] DisplayBackend backend() const
+    {
+        return backend_;
+    }
     [[nodiscard]] DisplayMode mode() const
     {
         return mode_;
@@ -478,11 +494,44 @@ class FramebufferDisplayDriver final : public Driver
     void draw_cell(u32 column, u32 row, char value);
 
     bool started_{false};
+    DisplayBackend backend_{DisplayBackend::memory_framebuffer};
     DisplayMode mode_{};
     std::array<u32, framebuffer_pixels> pixels_{};
     std::array<char, display_text_buffer_size> text_{};
     usize text_size_{0};
     u32 cursor_row_{0};
+};
+
+class VirtioGpuPciDisplayDriver final : public Driver
+{
+  public:
+    [[nodiscard]] std::string_view name() const override
+    {
+        return "virtio-gpu-pci";
+    }
+    [[nodiscard]] Class driver_class() const override
+    {
+        return Class::display;
+    }
+    Status probe() override;
+    Status start() override;
+    Status stop() override;
+    Status bind(const PciDevice &device);
+    Status present(const FramebufferDisplayDriver &framebuffer);
+    [[nodiscard]] bool bound() const
+    {
+        return bound_;
+    }
+    [[nodiscard]] u64 frames_presented() const
+    {
+        return frames_presented_;
+    }
+
+  private:
+    bool started_{false};
+    bool bound_{false};
+    PciDevice device_{};
+    u64 frames_presented_{0};
 };
 
 } // namespace ok::driver

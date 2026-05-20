@@ -67,6 +67,28 @@ uptr test_mapping_address(arch::Architecture architecture)
     return static_cast<uptr>(0xc000'0000u);
 }
 
+driver::DisplayBackend display_backend_for_arch(arch::Architecture architecture)
+{
+    switch (architecture)
+    {
+    case arch::Architecture::i386:
+    case arch::Architecture::x86_64:
+        return driver::DisplayBackend::virtio_gpu_pci;
+    case arch::Architecture::aarch64:
+    case arch::Architecture::rv64:
+        return driver::DisplayBackend::ramfb;
+    case arch::Architecture::arm32:
+    case arch::Architecture::rv32:
+    case arch::Architecture::loongarch64:
+    case arch::Architecture::mips:
+    case arch::Architecture::mips64:
+    case arch::Architecture::ppc:
+    case arch::Architecture::ppc64:
+        return driver::DisplayBackend::memory_framebuffer;
+    }
+    return driver::DisplayBackend::memory_framebuffer;
+}
+
 } // namespace
 
 Kernel::Kernel() : arch_(&arch::arch_operations(arch::configured_architecture()))
@@ -95,6 +117,7 @@ Status Kernel::boot(KernelConfig config)
     syscalls_.set_mode(config_.modes.syscalls);
     vfs_.set_mode(config_.modes.filesystem);
     user_space_.set_mode(config_.modes.user);
+    display_driver_.set_backend(display_backend_for_arch(config_.architecture));
     keyboard_driver_.set_mode(config_.modes.drivers);
     mouse_driver_.set_mode(config_.modes.drivers);
 
@@ -149,6 +172,10 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
+    if (auto status = drivers_.add(virtio_gpu_driver_); !status.ok())
+    {
+        return status;
+    }
     if (auto status = drivers_.add(keyboard_driver_); !status.ok())
     {
         return status;
@@ -178,6 +205,14 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
+    if (const auto *gpu = pci_bus_driver_.find_class(0x03, 0x00, 0x00); gpu != nullptr)
+    {
+        if (auto status = virtio_gpu_driver_.bind(*gpu); !status.ok())
+        {
+            return status;
+        }
+        display_driver_.set_backend(driver::DisplayBackend::virtio_gpu_pci);
+    }
     if (auto status = log_boot_line("[    0.000000] okernel: C++23 kernel debug console online"); !status.ok())
     {
         return status;
@@ -203,11 +238,22 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
+    if (virtio_gpu_driver_.bound())
+    {
+        if (auto status = virtio_gpu_driver_.present(display_driver_); !status.ok())
+        {
+            return status;
+        }
+    }
     if (auto status = register_builtin_interrupts(timer_driver_); !status.ok())
     {
         return status;
     }
     if (auto status = posix_.initialize(vfs_, console_driver_, scheduler_); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = network_.initialize(net::Ipv4Address{{127, 0, 0, 1}}); !status.ok())
     {
         return status;
     }
@@ -399,6 +445,11 @@ Status Kernel::run_debug_test_suite()
         return Status::fault("display debug test failed");
     }
     test_report_.display = true;
+    if (!virtio_gpu_driver_.bound() || virtio_gpu_driver_.frames_presented() == 0)
+    {
+        return Status::fault("virtio GPU display debug test failed");
+    }
+    test_report_.gpu = true;
 
     if (auto status = keyboard_driver_.feed_scancode(0x23); !status.ok())
     {
@@ -455,6 +506,30 @@ Status Kernel::run_debug_test_suite()
         return Status::fault("USB HID mouse debug test failed");
     }
     test_report_.usb = true;
+
+    constexpr std::string_view udp_payload{"netdbg"};
+    if (auto status = network_.send_udp(net::UdpEndpoint{.address = network_.local_address(), .port = 30000},
+                                        net::UdpEndpoint{.address = network_.local_address(), .port = 30001},
+                                        as_bytes(udp_payload));
+        !status.ok())
+    {
+        return status;
+    }
+    auto datagram = network_.receive_udp();
+    if (!datagram || datagram.value().payload_size != udp_payload.size())
+    {
+        return Status::fault("UDP/IP debug test failed");
+    }
+    if (auto status = network_.listen_tcp(31337); !status.ok())
+    {
+        return status;
+    }
+    auto tcp = network_.connect_tcp(net::UdpEndpoint{.address = network_.local_address(), .port = 31337}, 31338);
+    if (!tcp || tcp.value().state != net::TcpState::established)
+    {
+        return Status::fault("TCP debug test failed");
+    }
+    test_report_.net = true;
 
     auto fd = posix_.open("/tmp/posix.txt", posix::o_CREAT | posix::o_RDWR | posix::o_TRUNC);
     if (!fd)
@@ -544,6 +619,26 @@ Status Kernel::run_debug_test_suite()
     {
         return Status::fault("debug shell SimpleFS ls test failed");
     }
+    auto shell_sh = debug_shell_.execute("false && echo bad || echo ok # comment");
+    if (!shell_sh || shell_sh.value() != "ok\n")
+    {
+        return Status::fault("debug shell sh operator test failed");
+    }
+    auto shell_net_send = debug_shell_.execute("net udp 30002 shell-net");
+    if (!shell_net_send)
+    {
+        return Status::fault("debug shell network send test failed");
+    }
+    auto shell_net_recv = debug_shell_.execute("net recv");
+    if (!shell_net_recv || shell_net_recv.value().empty())
+    {
+        return Status::fault("debug shell network receive test failed");
+    }
+    auto shell_ext4 = debug_shell_.execute("ext4 status");
+    if (!shell_ext4 || shell_ext4.value().empty())
+    {
+        return Status::fault("debug shell ext4 status test failed");
+    }
     auto shell_su_kernel = debug_shell_.execute("su kernel");
     if (!shell_su_kernel || shell_su_kernel.value().empty())
     {
@@ -616,7 +711,26 @@ Status Kernel::run_ext4_test()
     }
 
     std::array<std::byte, 1024> block{};
-    return volume.read_block(1, block);
+    if (auto status = volume.read_block(1, block); !status.ok())
+    {
+        return status;
+    }
+
+    if (auto status = ram_block_driver_.write_blocks(0, std::span<const std::byte>(image.data(), image.size()));
+        !status.ok())
+    {
+        return status;
+    }
+    fs::Ext4Volume block_volume;
+    if (auto status = block_volume.mount(ram_block_driver_); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = block_volume.read_block(1, block); !status.ok())
+    {
+        return status;
+    }
+    return simplefs_.format(ram_block_driver_, "okroot");
 }
 
 Status Kernel::register_builtin_interrupts(driver::TimerDriver &timer)

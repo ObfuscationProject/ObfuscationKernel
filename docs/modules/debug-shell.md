@@ -4,9 +4,14 @@
 windowed QEMU sessions. It does not provide a separate test executable or hosted
 `main`; it is attached during the normal `kernel_main` boot path.
 
+The interactive line editor keeps the prompt outside the editable buffer:
+Backspace/Delete only erase user input, and Ctrl-U clears the current input
+line. The command evaluator supports comments beginning with `#`, command
+sequences separated by `;`, and basic `&&`/`||` conditionals.
+
 Supported commands:
 
-- `help`: list available commands.
+- `help`, `true`, `false`, `:`, `clear`, `uname`: basic shell commands.
 - `status`: print architecture, process, CPU, driver, syscall, and POSIX state.
 - `mem`: print frame allocator counters.
 - `ps`: print scheduler/process state.
@@ -24,6 +29,10 @@ Supported commands:
 - `mkfs [label]`: format the RAM disk as SimpleFS.
 - `sfs info|ls|touch|write|cat|stat|rm`: operate directly on the SimpleFS flat
   root directory for block-filesystem testing.
+- `ext4 status|disk`: report EXT4 parser/block-mount state or try mounting the
+  current block device as EXT4.
+- `net status|udp|recv|listen|tcp`: inspect and exercise the IPv4/UDP/TCP
+  loopback stack used by early network-debug work.
 
 The shell is intentionally fixed-buffer and freestanding. Windowed QEMU mode
 routes keyboard input into the shell after `OK_TEST_PASS`, then mirrors output

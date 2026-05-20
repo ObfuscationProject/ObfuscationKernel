@@ -36,8 +36,10 @@ void platform_write(std::string_view text)
 
 [[maybe_unused, noreturn]] void interactive_loop()
 {
+    constexpr std::string_view prompt{"ok> "};
     ok::FixedString<128> line;
-    platform_write("\nOK_INTERACTIVE ready shell=oksh input=platform\nok> ");
+    platform_write("\nOK_INTERACTIVE ready shell=oksh input=platform\n");
+    platform_write(prompt);
     for (;;)
     {
         const int value = ok_platform_input_poll();
@@ -53,12 +55,23 @@ void platform_write(std::string_view text)
                     platform_write(out.value());
                 }
                 line.clear();
-                platform_write("ok> ");
+                platform_write(prompt);
             }
-            else if (ch == '\b')
+            else if (ch == '\b' || ch == 0x7f)
             {
-                line.pop_back();
-                platform_write("\b");
+                if (!line.empty())
+                {
+                    line.pop_back();
+                    platform_write("\b");
+                }
+            }
+            else if (ch == 0x15)
+            {
+                while (!line.empty())
+                {
+                    line.pop_back();
+                    platform_write("\b");
+                }
             }
             else
             {

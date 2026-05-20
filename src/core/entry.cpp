@@ -118,10 +118,12 @@ void emit_display_text(const KernelDebugSink &sink, std::string_view text)
     emit_bool_field(sink, "ext4", report.ext4);
     emit_bool_field(sink, "user", report.user_mode);
     emit_bool_field(sink, "display", report.display);
+    emit_bool_field(sink, "gpu", report.gpu);
     emit_bool_field(sink, "input", report.input);
     emit_bool_field(sink, "posix", report.posix);
     emit_bool_field(sink, "bus", report.bus);
     emit_bool_field(sink, "usb", report.usb);
+    emit_bool_field(sink, "net", report.net);
     emit_bool_field(sink, "shell", report.shell);
     emit_bool_field(sink, "modes", report.modes);
     emit_unsigned_field(sink, "display_checksum", kernel.display().checksum());

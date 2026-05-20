@@ -30,7 +30,13 @@ class KernelDebugShell final
     Status append_node_type(fs::NodeType type);
     Status append_session_user();
     [[nodiscard]] Result<std::string_view> resolve_path(std::string_view path);
+    Status dispatch_command(std::string_view command_line);
     Status command_help();
+    Status command_true();
+    Status command_false();
+    Status command_noop();
+    Status command_clear();
+    Status command_uname();
     Status command_status();
     Status command_memory();
     Status command_processes();
@@ -53,6 +59,8 @@ class KernelDebugShell final
     Status command_disk();
     Status command_mkfs(std::string_view label);
     Status command_simplefs(std::string_view args);
+    Status command_ext4(std::string_view args);
+    Status command_net(std::string_view args);
 
     Kernel *kernel_{nullptr};
     SessionUser session_user_{SessionUser::kernel};

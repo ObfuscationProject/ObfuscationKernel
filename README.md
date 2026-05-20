@@ -8,7 +8,9 @@ POSIX-oriented syscalls, drivers, VFS, EXT4 parsing, and user-mode transition
 state. The foundation also includes SMP topology state, a VGA-backed display
 path, PCIe/USB HID driver scaffolding, a kernel debug shell, and a read-only
 EXT4 superblock/block reader. A fixed RAM disk and SimpleFS provide the first
-block-backed writable filesystem path for early disk-management tests.
+block-backed writable filesystem path for early disk-management tests, and the
+debug kernel now includes virtio-gpu/ramfb test plumbing plus an IPv4/UDP/TCP
+loopback stack for network-debug bring-up.
 
 This is not yet a complete production POSIX kernel. The implementation defines
 the ABI, module boundaries, architecture profiles, build flow, and regression

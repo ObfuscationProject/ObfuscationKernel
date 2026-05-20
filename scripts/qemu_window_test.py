@@ -46,7 +46,7 @@ def validate_output(arch: str, output: str) -> tuple[bool, str]:
     fields = parse_fields(pass_lines[-1])
     if fields.get("arch") != arch:
         return False, f"arch mismatch: expected {arch}, got {fields.get('arch')}"
-    for required in ("fs", "simplefs", "ext4", "user", "display", "input", "posix", "bus", "usb", "shell", "modes"):
+    for required in ("fs", "simplefs", "ext4", "user", "display", "gpu", "input", "posix", "bus", "usb", "net", "shell", "modes"):
         if fields.get(required) != "1":
             return False, f"{required} did not pass"
     if int(fields.get("debug_test_points", "0")) == 0:
@@ -77,6 +77,10 @@ def qemu_command(arch: str, kernel: Path, display: str) -> list[str]:
             "-no-reboot",
             "-display",
             display,
+            "-device",
+            "ramfb",
+            "-device",
+            "virtio-gpu-pci",
         ]
     if arch == "rv64":
         return [
@@ -96,9 +100,13 @@ def qemu_command(arch: str, kernel: Path, display: str) -> list[str]:
             "-no-reboot",
             "-display",
             display,
+            "-device",
+            "ramfb",
+            "-device",
+            "virtio-gpu-pci",
         ]
 
-    return [
+    command = [
         qemu_path,
         "-drive",
         f"file={kernel},format=raw,if=ide",
@@ -112,6 +120,9 @@ def qemu_command(arch: str, kernel: Path, display: str) -> list[str]:
         "-display",
         display,
     ]
+    if arch in ("i386", "x86_64"):
+        command += ["-device", "virtio-gpu-pci"]
+    return command
 
 def run_until_marker(command: list[str], timeout: float | None) -> subprocess.CompletedProcess[str]:
     process = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

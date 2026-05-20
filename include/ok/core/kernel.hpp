@@ -8,6 +8,7 @@
 #include "ok/interrupt/interrupt.hpp"
 #include "ok/ipc/ipc.hpp"
 #include "ok/memory/memory.hpp"
+#include "ok/net/net.hpp"
 #include "ok/posix/posix.hpp"
 #include "ok/sched/scheduler.hpp"
 #include "ok/smp/smp.hpp"
@@ -52,10 +53,12 @@ struct KernelTestReport
     bool syscalls{false};
     bool user_mode{false};
     bool display{false};
+    bool gpu{false};
     bool input{false};
     bool posix{false};
     bool bus{false};
     bool usb{false};
+    bool net{false};
     bool shell{false};
     bool modes{false};
 };
@@ -120,6 +123,10 @@ class Kernel final
     {
         return display_driver_;
     }
+    [[nodiscard]] driver::VirtioGpuPciDisplayDriver &virtio_gpu()
+    {
+        return virtio_gpu_driver_;
+    }
     [[nodiscard]] driver::KeyboardDriver &keyboard()
     {
         return keyboard_driver_;
@@ -156,6 +163,10 @@ class Kernel final
     {
         return simplefs_;
     }
+    [[nodiscard]] net::NetworkStack &network()
+    {
+        return network_;
+    }
     [[nodiscard]] posix::PosixService &posix()
     {
         return posix_;
@@ -185,6 +196,7 @@ class Kernel final
     driver::NullBlockDriver null_block_driver_{};
     driver::RamBlockDriver ram_block_driver_{};
     driver::FramebufferDisplayDriver display_driver_{};
+    driver::VirtioGpuPciDisplayDriver virtio_gpu_driver_{};
     driver::KeyboardDriver keyboard_driver_{};
     driver::Ps2MouseDriver mouse_driver_{};
     driver::PciBusDriver pci_bus_driver_{};
@@ -200,6 +212,7 @@ class Kernel final
     driver::DriverManager drivers_;
     fs::VirtualFileSystem vfs_;
     fs::SimpleDiskFileSystem simplefs_;
+    net::NetworkStack network_;
     posix::PosixService posix_;
     user::UserSpaceManager user_space_;
     KernelDebugShell debug_shell_;

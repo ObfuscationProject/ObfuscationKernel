@@ -1,6 +1,7 @@
 #include "ok/core/shell.hpp"
 
 #include "ok/core/kernel.hpp"
+#include "ok/fs/ext4.hpp"
 
 namespace ok
 {
@@ -44,6 +45,109 @@ std::span<const std::byte> as_bytes(std::string_view text)
     return {reinterpret_cast<const std::byte *>(text.data()), text.size()};
 }
 
+Result<u64> parse_unsigned(std::string_view text)
+{
+    text = trim(text);
+    if (text.empty())
+    {
+        return Status::invalid_argument("expected unsigned integer");
+    }
+    u64 value = 0;
+    for (const auto ch : text)
+    {
+        if (ch < '0' || ch > '9')
+        {
+            return Status::invalid_argument("invalid unsigned integer");
+        }
+        value = value * 10 + static_cast<u64>(ch - '0');
+    }
+    return value;
+}
+
+enum class ShellOperator : u8
+{
+    always,
+    and_if,
+    or_if,
+};
+
+std::string_view strip_comment(std::string_view value)
+{
+    bool single_quote = false;
+    bool double_quote = false;
+    for (usize i = 0; i < value.size(); ++i)
+    {
+        const auto ch = value[i];
+        if (ch == '\'' && !double_quote)
+        {
+            single_quote = !single_quote;
+        }
+        else if (ch == '"' && !single_quote)
+        {
+            double_quote = !double_quote;
+        }
+        else if (ch == '#' && !single_quote && !double_quote)
+        {
+            if (i == 0 || value[i - 1] == ' ' || value[i - 1] == '\t')
+            {
+                return value.substr(0, i);
+            }
+        }
+    }
+    return value;
+}
+
+usize find_shell_operator(std::string_view value)
+{
+    bool single_quote = false;
+    bool double_quote = false;
+    for (usize i = 0; i < value.size(); ++i)
+    {
+        const auto ch = value[i];
+        if (ch == '\'' && !double_quote)
+        {
+            single_quote = !single_quote;
+            continue;
+        }
+        if (ch == '"' && !single_quote)
+        {
+            double_quote = !double_quote;
+            continue;
+        }
+        if (single_quote || double_quote)
+        {
+            continue;
+        }
+        if (ch == ';')
+        {
+            return i;
+        }
+        if (i + 1 < value.size() && ((ch == '&' && value[i + 1] == '&') || (ch == '|' && value[i + 1] == '|')))
+        {
+            return i;
+        }
+    }
+    return value.size();
+}
+
+ShellOperator operator_after(std::string_view value, usize index)
+{
+    if (index >= value.size() || value[index] == ';')
+    {
+        return ShellOperator::always;
+    }
+    return value[index] == '&' ? ShellOperator::and_if : ShellOperator::or_if;
+}
+
+usize operator_width(std::string_view value, usize index)
+{
+    if (index >= value.size())
+    {
+        return 0;
+    }
+    return value[index] == ';' ? 1 : 2;
+}
+
 } // namespace
 
 Status KernelDebugShell::attach(Kernel &kernel)
@@ -55,118 +159,177 @@ Status KernelDebugShell::attach(Kernel &kernel)
 Result<std::string_view> KernelDebugShell::execute(std::string_view line)
 {
     output_.clear();
-    const auto command_line = trim(line);
-    if (command_line.empty())
+    auto remaining = trim(strip_comment(line));
+    if (remaining.empty())
     {
         return output_.view();
     }
+
+    Status last_status = Status::success();
+    auto gate = ShellOperator::always;
+    while (!remaining.empty())
+    {
+        const auto split = find_shell_operator(remaining);
+        const auto command_line = trim(remaining.substr(0, split));
+        const auto next_gate = operator_after(remaining, split);
+        const auto next_offset = split + operator_width(remaining, split);
+
+        const bool should_run = gate == ShellOperator::always || (gate == ShellOperator::and_if && last_status.ok()) ||
+                                (gate == ShellOperator::or_if && !last_status.ok());
+        if (should_run && !command_line.empty())
+        {
+            last_status = dispatch_command(command_line);
+            if (!last_status.ok() && !last_status.message().empty())
+            {
+                static_cast<void>(append("shell error: "));
+                static_cast<void>(append(last_status.message()));
+                static_cast<void>(append("\n"));
+            }
+        }
+
+        if (next_offset >= remaining.size())
+        {
+            break;
+        }
+        remaining.remove_prefix(next_offset);
+        remaining = trim(remaining);
+        gate = next_gate;
+    }
+    return output_.view();
+}
+
+Status KernelDebugShell::dispatch_command(std::string_view command_line)
+{
     const auto command = first_word(command_line);
     const auto args = after_first_word(command_line);
-    Status status{};
+    if (command.empty())
+    {
+        return Status::success();
+    }
     if (command == "help")
     {
-        status = command_help();
+        return command_help();
+    }
+    if (command == "true")
+    {
+        return command_true();
+    }
+    if (command == "false")
+    {
+        return command_false();
+    }
+    if (command == ":")
+    {
+        return command_noop();
+    }
+    if (command == "clear")
+    {
+        return command_clear();
+    }
+    if (command == "uname")
+    {
+        return command_uname();
     }
     else if (command == "status")
     {
-        status = command_status();
+        return command_status();
     }
     else if (command == "mem")
     {
-        status = command_memory();
+        return command_memory();
     }
     else if (command == "ps")
     {
-        status = command_processes();
+        return command_processes();
     }
     else if (command == "drivers")
     {
-        status = command_drivers();
+        return command_drivers();
     }
     else if (command == "fs")
     {
-        status = command_filesystem();
+        return command_filesystem();
     }
     else if (command == "posix")
     {
-        status = command_posix();
+        return command_posix();
     }
     else if (command == "test")
     {
-        status = command_tests();
+        return command_tests();
     }
     else if (command == "echo")
     {
-        status = command_echo(args);
+        return command_echo(args);
     }
     else if (command == "pwd")
     {
-        status = command_pwd();
+        return command_pwd();
     }
     else if (command == "cd")
     {
-        status = command_cd(args);
+        return command_cd(args);
     }
     else if (command == "ls")
     {
-        status = command_ls(args);
+        return command_ls(args);
     }
     else if (command == "cat")
     {
-        status = command_cat(args);
+        return command_cat(args);
     }
     else if (command == "touch")
     {
-        status = command_touch(args);
+        return command_touch(args);
     }
     else if (command == "mkdir")
     {
-        status = command_mkdir(args);
+        return command_mkdir(args);
     }
     else if (command == "rm")
     {
-        status = command_rm(args);
+        return command_rm(args);
     }
     else if (command == "stat")
     {
-        status = command_stat(args);
+        return command_stat(args);
     }
     else if (command == "whoami")
     {
-        status = command_whoami();
+        return command_whoami();
     }
     else if (command == "id")
     {
-        status = command_id();
+        return command_id();
     }
     else if (command == "su")
     {
-        status = command_su(args);
+        return command_su(args);
     }
     else if (command == "disk")
     {
-        status = command_disk();
+        return command_disk();
     }
     else if (command == "mkfs")
     {
-        status = command_mkfs(args);
+        return command_mkfs(args);
     }
     else if (command == "sfs")
     {
-        status = command_simplefs(args);
+        return command_simplefs(args);
+    }
+    else if (command == "ext4")
+    {
+        return command_ext4(args);
+    }
+    else if (command == "net")
+    {
+        return command_net(args);
     }
     else
     {
-        status = append("unknown command\n");
+        return Status::not_found("command not found");
     }
-    if (!status.ok())
-    {
-        output_.clear();
-        static_cast<void>(append("shell error: "));
-        static_cast<void>(append(status.message()));
-        static_cast<void>(append("\n"));
-    }
-    return output_.view();
 }
 
 Status KernelDebugShell::append(std::string_view text)
@@ -311,7 +474,74 @@ Result<std::string_view> KernelDebugShell::resolve_path(std::string_view path)
 Status KernelDebugShell::command_help()
 {
     return append(
-        "help status mem ps drivers fs posix test echo pwd cd ls cat touch mkdir rm stat whoami id su disk mkfs sfs\n");
+        "help true false : clear uname status mem ps drivers fs posix test echo pwd cd ls cat touch mkdir rm stat "
+        "whoami id su disk mkfs sfs ext4 net\n");
+}
+
+Status KernelDebugShell::command_true()
+{
+    return Status::success();
+}
+
+Status KernelDebugShell::command_false()
+{
+    return Status{StatusCode::fault};
+}
+
+Status KernelDebugShell::command_noop()
+{
+    return Status::success();
+}
+
+Status KernelDebugShell::command_clear()
+{
+    return append("\f");
+}
+
+Status KernelDebugShell::command_uname()
+{
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+    const auto info = kernel_->posix().uname();
+    if (auto status = append(info.sysname.view()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(" "); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(info.nodename.view()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(" "); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(info.release.view()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(" "); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(info.version.view()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(" "); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(info.machine.view()); !status.ok())
+    {
+        return status;
+    }
+    return append("\n");
 }
 
 Status KernelDebugShell::command_status()
@@ -1029,6 +1259,194 @@ Status KernelDebugShell::command_simplefs(std::string_view args)
         return kernel_->simplefs().write_file(path, as_bytes(text));
     }
     return Status::invalid_argument("unknown sfs subcommand");
+}
+
+Status KernelDebugShell::command_ext4(std::string_view args)
+{
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+    const auto subcommand = first_word(args);
+    if (subcommand.empty() || subcommand == "status")
+    {
+        return append("ext4=read-only-superblock block-device-mount=1 extents=1 journal=replay-pending\n");
+    }
+    if (subcommand == "disk")
+    {
+        fs::Ext4Volume volume;
+        if (auto status = volume.mount(kernel_->disk()); !status.ok())
+        {
+            return status;
+        }
+        auto info = volume.info();
+        if (!info)
+        {
+            return info.status();
+        }
+        if (auto status = append("label="); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(info.value().volume_name.view()); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(" block_size="); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_unsigned(info.value().block_size); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(" blocks="); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_unsigned(info.value().block_count_low); !status.ok())
+        {
+            return status;
+        }
+        return append("\n");
+    }
+    return Status::invalid_argument("unknown ext4 subcommand");
+}
+
+Status KernelDebugShell::command_net(std::string_view args)
+{
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+    const auto subcommand = first_word(args);
+    const auto rest = after_first_word(args);
+    if (subcommand.empty() || subcommand == "status")
+    {
+        const auto stats = kernel_->network().stats();
+        if (auto status = append("ip=127.0.0.1 udp_queue="); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_unsigned(kernel_->network().udp_queued()); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(" tcp_listeners="); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_unsigned(kernel_->network().tcp_listener_count()); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(" ipv4_tx="); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_unsigned(stats.ipv4_tx); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(" ipv4_rx="); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_unsigned(stats.ipv4_rx); !status.ok())
+        {
+            return status;
+        }
+        return append("\n");
+    }
+    if (subcommand == "udp")
+    {
+        const auto port_text = first_word(rest);
+        const auto payload = after_first_word(rest);
+        auto port = parse_unsigned(port_text);
+        if (!port)
+        {
+            return port.status();
+        }
+        if (port.value() > 0xffffu)
+        {
+            return Status::invalid_argument("UDP port out of range");
+        }
+        return kernel_->network().send_udp(net::UdpEndpoint{.address = kernel_->network().local_address(), .port = 30000},
+                                           net::UdpEndpoint{.address = kernel_->network().local_address(),
+                                                            .port = static_cast<u16>(port.value())},
+                                           as_bytes(payload));
+    }
+    if (subcommand == "recv")
+    {
+        auto datagram = kernel_->network().receive_udp();
+        if (!datagram)
+        {
+            return datagram.status();
+        }
+        if (auto status = append("udp port="); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_unsigned(datagram.value().destination.port); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(" payload="); !status.ok())
+        {
+            return status;
+        }
+        for (usize i = 0; i < datagram.value().payload_size; ++i)
+        {
+            if (auto status = output_.append(static_cast<char>(datagram.value().payload[i])); !status.ok())
+            {
+                return status;
+            }
+        }
+        return append("\n");
+    }
+    if (subcommand == "listen")
+    {
+        auto port = parse_unsigned(rest);
+        if (!port)
+        {
+            return port.status();
+        }
+        if (port.value() > 0xffffu)
+        {
+            return Status::invalid_argument("TCP port out of range");
+        }
+        return kernel_->network().listen_tcp(static_cast<u16>(port.value()));
+    }
+    if (subcommand == "tcp")
+    {
+        auto port = parse_unsigned(rest);
+        if (!port)
+        {
+            return port.status();
+        }
+        if (port.value() > 0xffffu)
+        {
+            return Status::invalid_argument("TCP port out of range");
+        }
+        auto connection =
+            kernel_->network().connect_tcp(net::UdpEndpoint{.address = kernel_->network().local_address(),
+                                                            .port = static_cast<u16>(port.value())},
+                                           40000);
+        if (!connection)
+        {
+            return connection.status();
+        }
+        if (auto status = append("tcp state="); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(net::tcp_state_name(connection.value().state)); !status.ok())
+        {
+            return status;
+        }
+        return append("\n");
+    }
+    return Status::invalid_argument("unknown net subcommand");
 }
 
 } // namespace ok

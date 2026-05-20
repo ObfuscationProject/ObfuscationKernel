@@ -2,7 +2,9 @@
 
 #include "ok/core/fixed.hpp"
 #include "ok/core/types.hpp"
+#include "ok/driver/driver.hpp"
 
+#include <array>
 #include <cstddef>
 #include <span>
 
@@ -28,6 +30,7 @@ class Ext4Volume final
 {
   public:
     Status mount(std::span<const std::byte> image);
+    Status mount(driver::BlockDevice &device);
     [[nodiscard]] Result<Ext4MountInfo> info() const;
     Status read_block(u64 block, std::span<std::byte> out) const;
     [[nodiscard]] bool mounted() const
@@ -36,9 +39,13 @@ class Ext4Volume final
     }
 
   private:
+    Status parse_superblock(std::span<const std::byte> superblock);
+
     bool mounted_{false};
     std::span<const std::byte> image_{};
+    driver::BlockDevice *device_{nullptr};
     Ext4MountInfo info_{};
+    std::array<std::byte, 1024> superblock_{};
 };
 
 } // namespace ok::fs
