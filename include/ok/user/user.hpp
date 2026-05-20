@@ -44,7 +44,7 @@ class SimulatedUserModeGateway final : public UserModeGateway
 class UserSpaceManager final
 {
   public:
-    explicit UserSpaceManager(UserModeGateway &gateway = default_gateway());
+    explicit UserSpaceManager(UserModeGateway *gateway = nullptr);
 
     static UserModeGateway &default_gateway();
 
@@ -64,6 +64,7 @@ class UserSpaceManager final
 
   private:
     TransitionMode mode_{TransitionMode::simulated};
+    SimulatedUserModeGateway owned_gateway_{};
     UserModeGateway *gateway_{nullptr};
     sched::ProcessId last_pid_{0};
 };

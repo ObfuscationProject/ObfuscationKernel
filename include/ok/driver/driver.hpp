@@ -20,6 +20,8 @@ enum class Class : u8
     display,
     network,
     input,
+    bus,
+    usb,
     entropy,
 };
 
@@ -46,6 +48,8 @@ inline constexpr usize display_text_columns = 80;
 inline constexpr usize display_text_rows = 25;
 inline constexpr usize display_text_buffer_size = (display_text_columns + 1) * display_text_rows;
 inline constexpr usize input_queue_capacity = 128;
+inline constexpr usize max_pci_devices = 32;
+inline constexpr usize max_usb_devices = 32;
 
 enum class IoMode : u8
 {
@@ -145,6 +149,50 @@ class NullBlockDriver final : public Driver
     bool started_{false};
 };
 
+struct PciDeviceId
+{
+    u16 vendor_id{0xffff};
+    u16 device_id{0xffff};
+    u8 class_code{0};
+    u8 subclass{0};
+    u8 programming_interface{0};
+};
+
+struct PciDevice
+{
+    u8 bus{0};
+    u8 slot{0};
+    u8 function{0};
+    PciDeviceId id{};
+    std::array<uptr, 6> bars{};
+};
+
+class PciBusDriver final : public Driver
+{
+  public:
+    [[nodiscard]] std::string_view name() const override
+    {
+        return "pcie-root-bus";
+    }
+    [[nodiscard]] Class driver_class() const override
+    {
+        return Class::bus;
+    }
+    Status probe() override;
+    Status start() override;
+    Status stop() override;
+    Status add_emulated_device(PciDevice device);
+    [[nodiscard]] const PciDevice *find_class(u8 class_code, u8 subclass, u8 programming_interface) const;
+    [[nodiscard]] usize device_count() const
+    {
+        return devices_.size();
+    }
+
+  private:
+    bool started_{false};
+    StaticVector<PciDevice, max_pci_devices> devices_{};
+};
+
 struct KeyEvent
 {
     u8 scancode{0};
@@ -228,6 +276,117 @@ class Ps2MouseDriver final : public Driver
   private:
     bool started_{false};
     IoMode mode_{IoMode::polling};
+    StaticQueue<MousePacket, input_queue_capacity> packets_{};
+};
+
+enum class UsbSpeed : u8
+{
+    low,
+    full,
+    high,
+    super,
+};
+
+enum class UsbDeviceClass : u8
+{
+    hid = 0x03,
+    mass_storage = 0x08,
+    hub = 0x09,
+    vendor = 0xff,
+};
+
+struct UsbDevice
+{
+    u8 address{0};
+    UsbSpeed speed{UsbSpeed::full};
+    UsbDeviceClass device_class{UsbDeviceClass::vendor};
+    u8 subclass{0};
+    u8 protocol{0};
+};
+
+struct UsbKeyboardReport
+{
+    u8 modifiers{0};
+    std::array<u8, 6> keys{};
+};
+
+struct UsbMouseReport
+{
+    u8 buttons{0};
+    i8 delta_x{0};
+    i8 delta_y{0};
+    i8 wheel{0};
+};
+
+class UsbXhciControllerDriver final : public Driver
+{
+  public:
+    [[nodiscard]] std::string_view name() const override
+    {
+        return "xhci-usb-controller";
+    }
+    [[nodiscard]] Class driver_class() const override
+    {
+        return Class::usb;
+    }
+    Status probe() override;
+    Status start() override;
+    Status stop() override;
+    Status attach_device(UsbDevice device);
+    [[nodiscard]] const UsbDevice *find_device(UsbDeviceClass device_class, u8 subclass, u8 protocol) const;
+    [[nodiscard]] usize device_count() const
+    {
+        return devices_.size();
+    }
+
+  private:
+    bool started_{false};
+    StaticVector<UsbDevice, max_usb_devices> devices_{};
+};
+
+class UsbHidKeyboardDriver final : public Driver
+{
+  public:
+    [[nodiscard]] std::string_view name() const override
+    {
+        return "usb-hid-keyboard";
+    }
+    [[nodiscard]] Class driver_class() const override
+    {
+        return Class::input;
+    }
+    Status probe() override;
+    Status start() override;
+    Status stop() override;
+    Status feed_report(UsbKeyboardReport report);
+    Result<KeyEvent> read_event();
+
+  private:
+    [[nodiscard]] char translate_usage(u8 usage, bool shift) const;
+
+    bool started_{false};
+    StaticQueue<KeyEvent, input_queue_capacity> events_{};
+};
+
+class UsbHidMouseDriver final : public Driver
+{
+  public:
+    [[nodiscard]] std::string_view name() const override
+    {
+        return "usb-hid-mouse";
+    }
+    [[nodiscard]] Class driver_class() const override
+    {
+        return Class::input;
+    }
+    Status probe() override;
+    Status start() override;
+    Status stop() override;
+    Status feed_report(UsbMouseReport report);
+    Result<MousePacket> read_packet();
+
+  private:
+    bool started_{false};
     StaticQueue<MousePacket, input_queue_capacity> packets_{};
 };
 

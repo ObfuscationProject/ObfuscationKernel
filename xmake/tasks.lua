@@ -6,9 +6,9 @@ local task_arches = {
 local task_arch_specs = {
     i386 = {triple = "i386-elf", bootable = true},
     x86_64 = {triple = "x86_64-elf", bootable = true},
-    aarch64 = {triple = "aarch64-elf"},
+    aarch64 = {triple = "aarch64-elf", bootable = true},
     arm32 = {triple = "arm-none-eabi"},
-    rv64 = {triple = "riscv64-elf"},
+    rv64 = {triple = "riscv64-elf", bootable = true},
     rv32 = {triple = "riscv32-elf"},
     loongarch64 = {triple = "loongarch64-elf"},
     mips = {triple = "mips-elf"},
@@ -192,6 +192,9 @@ task("qemu-window-test")
         local _, spec = task_require_arch(arch)
         if not spec.bootable then
             raise("qemu window test is not implemented for %s yet; build okernel to check the freestanding profile", arch)
+        end
+        if not option.get("no-launch") and arch ~= "i386" and arch ~= "x86_64" then
+            raise("qemu graphical window output is currently wired for x86 targets; use xmake qemu-test or qemu-window-test --no-launch for %s", arch)
         end
         local mode = option.get("check-mode") or "debug"
         local current_mode = config.get("mode") or "release"

@@ -36,7 +36,8 @@ void platform_write(std::string_view text)
 
 [[maybe_unused, noreturn]] void interactive_loop()
 {
-    platform_write("\nOK_INTERACTIVE ready keyboard=ps2 mouse=ps2\n[input] ");
+    ok::FixedString<128> line;
+    platform_write("\nOK_INTERACTIVE ready shell=oksh input=platform\nok> ");
     for (;;)
     {
         const int value = ok_platform_input_poll();
@@ -45,11 +46,26 @@ void platform_write(std::string_view text)
             const char ch = static_cast<char>(value);
             if (ch == '\r' || ch == '\n')
             {
-                platform_write("\n[input] ");
+                platform_write("\n");
+                auto out = ok::ok_debug_shell_execute(line.view());
+                if (out && !out.value().empty())
+                {
+                    platform_write(out.value());
+                }
+                line.clear();
+                platform_write("ok> ");
+            }
+            else if (ch == '\b')
+            {
+                line.pop_back();
+                platform_write("\b");
             }
             else
             {
-                platform_write(std::string_view{&ch, 1});
+                if (line.append(ch).ok())
+                {
+                    platform_write(std::string_view{&ch, 1});
+                }
             }
         }
         asm volatile("" ::: "memory");

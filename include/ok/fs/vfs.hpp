@@ -63,6 +63,7 @@ class RamNode final : public Node
 
     Status configure(std::string_view name, NodeType type);
     Status attach_child(RamNode &child);
+    Status detach_child(std::string_view child);
 
     [[nodiscard]] std::string_view name() const override
     {
@@ -106,8 +107,10 @@ class VirtualFileSystem final
         return mode_;
     }
     Status create(std::string_view path, NodeType type);
+    Status unlink(std::string_view path);
     Status write_file(std::string_view path, std::span<const std::byte> data);
     Result<FileBuffer> read_file(std::string_view path);
+    Result<Metadata> stat(std::string_view path);
     [[nodiscard]] Node *lookup(std::string_view path);
 
   private:

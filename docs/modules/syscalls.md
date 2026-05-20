@@ -12,8 +12,19 @@ must satisfy `SyscallCallable`.
 Implemented baseline syscalls:
 
 - `getpid`
+- `read`
 - `write`
+- `open`
+- `close`
+- `stat`
+- `mkdir`
+- `unlink`
+- `chdir`
+- `getcwd`
+- `uname`
+- `clock_gettime`
 - `ok_debug`
 
 The number table reserves common POSIX/Linux-compatible syscall IDs to make the
-future user ABI predictable.
+future user ABI predictable. File-oriented syscalls currently route into
+`ok::posix::PosixService`, which is backed by the RAM VFS.

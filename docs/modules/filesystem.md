@@ -9,9 +9,10 @@ The initial root contains `/dev` and `/tmp`.
 - `ext4_read_only`: EXT4 parser/reader mounted from a block device.
 - `ext4_journaled`: reserved mode for journal replay and write support.
 
-The current implementation is enough for syscall and module tests. Future work
-should add file descriptors, mounts, permissions, path normalization, and a
-block-backed filesystem.
+The current implementation supports node lookup, creation, read/write, truncate,
+unlink, metadata queries, and POSIX file-descriptor tests through
+`ok::posix::PosixService`. Future work should add mounts, permissions, path
+normalization, and a block-backed writable filesystem.
 
 `ok::fs::Ext4Volume` is a read-only EXT4 foundation. It validates the
 superblock magic, parses block size, inode size, extent support, basic counters,

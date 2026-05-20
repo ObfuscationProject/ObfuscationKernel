@@ -4,9 +4,10 @@ ObfuscationKernel is a C++23 multi-architecture kernel framework built with xmak
 The current tree is a working foundation: it compiles a reusable kernel library,
 builds a bootable `kernel.bin` for the implemented system target, and runs debug
 kernel tests that exercise interrupts, memory management, scheduling, IPC,
-syscalls, drivers, VFS, EXT4 parsing, and user-mode transition state. The
-foundation also includes SMP topology state, a VGA-backed display path, and a
-read-only EXT4 superblock/block reader.
+POSIX-oriented syscalls, drivers, VFS, EXT4 parsing, and user-mode transition
+state. The foundation also includes SMP topology state, a VGA-backed display
+path, PCIe/USB HID driver scaffolding, a kernel debug shell, and a read-only
+EXT4 superblock/block reader.
 
 This is not yet a complete production POSIX kernel. The implementation defines
 the ABI, module boundaries, architecture profiles, build flow, and regression
@@ -77,8 +78,8 @@ xmake qemu-test
 ```
 
 `xmake test` always validates the current architecture freestanding profile. For
-bootable x86 targets it also builds the debug `okernel_image` target, places the
-generated `kernel.bin` in QEMU, and validates the kernel's own serial debug
+bootable system targets it also builds the debug `okernel_image` target, places
+the generated `kernel.bin` in QEMU, and validates the kernel's own serial debug
 output. `qemu-test` is the direct wrapper for that booted check. Pass `-a` only
 when you want a temporary one-off test for another architecture with a bootable
 system target:
@@ -87,26 +88,25 @@ system target:
 xmake qemu-test -a i386
 ```
 
-For a visible QEMU window that displays the current architecture debug kernel
-output:
+For a visible QEMU window that displays the current x86 debug kernel output:
 
 ```sh
 xmake qemu-window-test
 ```
 
 In graphical x86 mode the kernel remains interactive after the debug checks pass:
-PS/2 keyboard input is echoed by the kernel through the display and serial
-paths, then the script reports after the QEMU window is closed.
+keyboard input is handled by the kernel input stack and routed through the
+debug shell, display path, and serial console. The script reports after the QEMU
+window is closed.
 
 The test scripts do not contain a kernel `main`. Debug and release builds enter
 through the same `kernel_main`; debug builds enable `OK_ENABLE_TEST_POINTS` and
 emit `OK_*` diagnostics through serial and the kernel display driver. The
-current bootable QEMU system targets are `i386` and `x86_64`. Other
-architecture profiles build the freestanding kernel library and have
-architecture-specific operation implementations. AArch64 also has a Linux
-`Image`-style boot image build scaffold; the remaining profiles keep documented
-Linux boot contracts until their platform I/O, linker scripts, and QEMU launch
-profiles are ready to be promoted to `qemu-test`.
+current bootable QEMU system targets are `i386`, `x86_64`, `aarch64`, and
+`rv64`. Other architecture profiles build the freestanding kernel library and
+have architecture-specific operation implementations, with documented Linux boot
+contracts until their platform I/O, linker scripts, and QEMU launch profiles are
+ready to be promoted to `qemu-test`.
 
 ## Architecture Implementations
 

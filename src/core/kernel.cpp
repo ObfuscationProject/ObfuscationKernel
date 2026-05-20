@@ -19,6 +19,21 @@ std::span<const std::byte> as_bytes(std::string_view text)
     return {reinterpret_cast<const std::byte *>(text.data()), text.size()};
 }
 
+std::string_view bounded_c_string(uptr address)
+{
+    if (address == 0)
+    {
+        return {};
+    }
+    const auto *text = reinterpret_cast<const char *>(address);
+    usize size = 0;
+    while (size < 255 && text[size] != '\0')
+    {
+        ++size;
+    }
+    return {text, size};
+}
+
 void write_le16(std::span<std::byte> out, usize offset, u16 value)
 {
     out[offset] = static_cast<std::byte>(value & 0xffu);
@@ -138,6 +153,22 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
+    if (auto status = drivers_.add(pci_bus_driver_); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = drivers_.add(usb_xhci_driver_); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = drivers_.add(usb_keyboard_driver_); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = drivers_.add(usb_mouse_driver_); !status.ok())
+    {
+        return status;
+    }
 
     if (auto status = drivers_.start_all(); !status.ok())
     {
@@ -159,7 +190,8 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
-    if (auto status = log_boot_line("[    0.000004] driver: console timer block framebuffer input started"); !status.ok())
+    if (auto status = log_boot_line("[    0.000004] driver: console timer block framebuffer pcie usb input started");
+        !status.ok())
     {
         return status;
     }
@@ -171,7 +203,15 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
-    if (auto status = register_builtin_syscalls(console_driver_); !status.ok())
+    if (auto status = posix_.initialize(vfs_, console_driver_, scheduler_); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = debug_shell_.attach(*this); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = register_builtin_syscalls(posix_); !status.ok())
     {
         return status;
     }
@@ -337,6 +377,102 @@ Status Kernel::run_debug_test_suite()
     }
     test_report_.input = true;
 
+    if (pci_bus_driver_.device_count() == 0 || pci_bus_driver_.find_class(0x0c, 0x03, 0x30) == nullptr)
+    {
+        return Status::fault("PCIe debug test failed");
+    }
+    test_report_.bus = true;
+
+    if (usb_xhci_driver_.find_device(driver::UsbDeviceClass::hid, 1, 1) == nullptr ||
+        usb_xhci_driver_.find_device(driver::UsbDeviceClass::hid, 1, 2) == nullptr)
+    {
+        return Status::fault("USB enumeration debug test failed");
+    }
+    if (auto status = usb_keyboard_driver_.feed_report(driver::UsbKeyboardReport{.keys = {0x0b, 0, 0, 0, 0, 0}});
+        !status.ok())
+    {
+        return status;
+    }
+    auto usb_key = usb_keyboard_driver_.read_event();
+    if (!usb_key || usb_key.value().ascii != 'h')
+    {
+        return Status::fault("USB HID keyboard debug test failed");
+    }
+    if (auto status = usb_mouse_driver_.feed_report(
+            driver::UsbMouseReport{.buttons = 1, .delta_x = 5, .delta_y = -4, .wheel = 0});
+        !status.ok())
+    {
+        return status;
+    }
+    auto usb_mouse = usb_mouse_driver_.read_packet();
+    if (!usb_mouse || usb_mouse.value().delta_x != 5 || usb_mouse.value().delta_y != -4 ||
+        !usb_mouse.value().left_button)
+    {
+        return Status::fault("USB HID mouse debug test failed");
+    }
+    test_report_.usb = true;
+
+    auto fd = posix_.open("/tmp/posix.txt", posix::o_CREAT | posix::o_RDWR | posix::o_TRUNC);
+    if (!fd)
+    {
+        return fd.status();
+    }
+    constexpr std::string_view posix_text{"posix"};
+    auto written = posix_.write(fd.value(), as_bytes(posix_text));
+    if (!written || written.value() != posix_text.size())
+    {
+        return Status::fault("POSIX write debug test failed");
+    }
+    if (auto seek = posix_.seek(fd.value(), 0, posix::SeekWhence::set); !seek)
+    {
+        return seek.status();
+    }
+    std::array<std::byte, 8> posix_buffer{};
+    auto read = posix_.read(fd.value(), posix_buffer);
+    if (!read || read.value() != posix_text.size())
+    {
+        return Status::fault("POSIX read debug test failed");
+    }
+    auto posix_stat = posix_.stat("/tmp/posix.txt");
+    if (!posix_stat || posix_stat.value().size != posix_text.size())
+    {
+        return Status::fault("POSIX stat debug test failed");
+    }
+    if (auto status = posix_.close(fd.value()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = posix_.chdir("/tmp"); !status.ok())
+    {
+        return status;
+    }
+    auto relative_fd = posix_.open("posix-relative.txt", posix::o_CREAT | posix::o_RDWR | posix::o_TRUNC);
+    if (!relative_fd)
+    {
+        return relative_fd.status();
+    }
+    if (auto status = posix_.close(relative_fd.value()); !status.ok())
+    {
+        return status;
+    }
+    if (auto relative_stat = posix_.stat("/tmp/posix-relative.txt"); !relative_stat)
+    {
+        return Status::fault("POSIX relative path debug test failed");
+    }
+    if (auto status = posix_.chdir("/"); !status.ok())
+    {
+        return status;
+    }
+    test_report_.posix = true;
+
+    auto shell_status = debug_shell_.execute("status");
+    auto shell_posix = debug_shell_.execute("posix");
+    if (!shell_status || shell_status.value().empty() || !shell_posix || shell_posix.value().empty())
+    {
+        return Status::fault("debug shell test failed");
+    }
+    test_report_.shell = true;
+
     if (memory_.translation_mode() != config_.modes.memory || interrupts_.mode() != config_.modes.interrupts ||
         topology_.mode() != config_.modes.smp || scheduler_.mode() != config_.modes.scheduler ||
         ipc_.mode() != config_.modes.ipc || syscalls_.mode() != config_.modes.syscalls ||
@@ -413,10 +549,10 @@ Status Kernel::register_builtin_interrupts(driver::TimerDriver &timer)
     });
 }
 
-Status Kernel::register_builtin_syscalls(driver::ConsoleDriver &console)
+Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
 {
     if (auto status = syscalls_.register_callback(
-            syscall::Number::getpid, "getpid", nullptr,
+            syscall::Number::getpid, "getpid", &posix,
             [](void *, const syscall::Request &request) {
                 return syscall::Response{.value = static_cast<i64>(request.caller), .status = Status::success()};
             });
@@ -426,16 +562,161 @@ Status Kernel::register_builtin_syscalls(driver::ConsoleDriver &console)
     }
 
     if (auto status = syscalls_.register_callback(
-            syscall::Number::write, "write", &console,
+            syscall::Number::read, "read", &posix,
             [](void *context, const syscall::Request &request) {
-                if (request.args[1] == 0 || request.args[2] == 0)
+                auto *service = static_cast<posix::PosixService *>(context);
+                auto *buffer = reinterpret_cast<std::byte *>(request.args[1]);
+                auto result = service->read(static_cast<posix::Fd>(request.args[0]),
+                                            std::span<std::byte>{buffer, static_cast<usize>(request.args[2])});
+                return syscall::Response{.value = result ? static_cast<i64>(result.value()) : -1,
+                                         .status = result ? Status::success() : result.status()};
+            });
+        !status.ok())
+    {
+        return status;
+    }
+
+    if (auto status = syscalls_.register_callback(
+            syscall::Number::write, "write", &posix,
+            [](void *context, const syscall::Request &request) {
+                if (request.args[1] == 0 && request.args[2] != 0)
                 {
                     return syscall::Response{.value = -1, .status = Status::invalid_argument("write buffer is empty")};
                 }
-                const auto *text = reinterpret_cast<const char *>(request.args[1]);
-                const auto size = static_cast<usize>(request.args[2]);
-                const auto status = static_cast<driver::ConsoleDriver *>(context)->write(std::string_view{text, size});
-                return syscall::Response{.value = status.ok() ? static_cast<i64>(size) : -1, .status = status};
+                auto *service = static_cast<posix::PosixService *>(context);
+                const auto *bytes = reinterpret_cast<const std::byte *>(request.args[1]);
+                auto result = service->write(static_cast<posix::Fd>(request.args[0]),
+                                             std::span<const std::byte>{bytes, static_cast<usize>(request.args[2])});
+                return syscall::Response{.value = result ? static_cast<i64>(result.value()) : -1,
+                                         .status = result ? Status::success() : result.status()};
+            });
+        !status.ok())
+    {
+        return status;
+    }
+
+    if (auto status = syscalls_.register_callback(
+            syscall::Number::open, "open", &posix,
+            [](void *context, const syscall::Request &request) {
+                auto *service = static_cast<posix::PosixService *>(context);
+                auto result = service->open(bounded_c_string(request.args[0]), static_cast<u32>(request.args[1]),
+                                            static_cast<u32>(request.args[2]));
+                return syscall::Response{.value = result ? static_cast<i64>(result.value()) : -1,
+                                         .status = result ? Status::success() : result.status()};
+            });
+        !status.ok())
+    {
+        return status;
+    }
+
+    if (auto status = syscalls_.register_callback(
+            syscall::Number::close, "close", &posix,
+            [](void *context, const syscall::Request &request) {
+                auto status = static_cast<posix::PosixService *>(context)->close(static_cast<posix::Fd>(request.args[0]));
+                return syscall::Response{.value = status.ok() ? 0 : -1, .status = status};
+            });
+        !status.ok())
+    {
+        return status;
+    }
+
+    if (auto status = syscalls_.register_callback(
+            syscall::Number::stat, "stat", &posix,
+            [](void *context, const syscall::Request &request) {
+                auto result = static_cast<posix::PosixService *>(context)->stat(bounded_c_string(request.args[0]));
+                if (result && request.args[1] != 0)
+                {
+                    *reinterpret_cast<posix::FileStatus *>(request.args[1]) = result.value();
+                }
+                return syscall::Response{.value = result ? 0 : -1, .status = result ? Status::success() : result.status()};
+            });
+        !status.ok())
+    {
+        return status;
+    }
+
+    if (auto status = syscalls_.register_callback(
+            syscall::Number::mkdir, "mkdir", &posix,
+            [](void *context, const syscall::Request &request) {
+                auto status = static_cast<posix::PosixService *>(context)->mkdir(bounded_c_string(request.args[0]),
+                                                                                 static_cast<u32>(request.args[1]));
+                return syscall::Response{.value = status.ok() ? 0 : -1, .status = status};
+            });
+        !status.ok())
+    {
+        return status;
+    }
+
+    if (auto status = syscalls_.register_callback(
+            syscall::Number::unlink, "unlink", &posix,
+            [](void *context, const syscall::Request &request) {
+                auto status = static_cast<posix::PosixService *>(context)->unlink(bounded_c_string(request.args[0]));
+                return syscall::Response{.value = status.ok() ? 0 : -1, .status = status};
+            });
+        !status.ok())
+    {
+        return status;
+    }
+
+    if (auto status = syscalls_.register_callback(
+            syscall::Number::chdir, "chdir", &posix,
+            [](void *context, const syscall::Request &request) {
+                auto status = static_cast<posix::PosixService *>(context)->chdir(bounded_c_string(request.args[0]));
+                return syscall::Response{.value = status.ok() ? 0 : -1, .status = status};
+            });
+        !status.ok())
+    {
+        return status;
+    }
+
+    if (auto status = syscalls_.register_callback(
+            syscall::Number::getcwd, "getcwd", &posix,
+            [](void *context, const syscall::Request &request) {
+                auto cwd = static_cast<posix::PosixService *>(context)->getcwd();
+                auto *out = reinterpret_cast<char *>(request.args[0]);
+                const auto capacity = static_cast<usize>(request.args[1]);
+                if (out == nullptr || capacity <= cwd.size())
+                {
+                    return syscall::Response{.value = -1, .status = Status::overflow("getcwd buffer too small")};
+                }
+                for (usize i = 0; i < cwd.size(); ++i)
+                {
+                    out[i] = cwd[i];
+                }
+                out[cwd.size()] = '\0';
+                return syscall::Response{.value = static_cast<i64>(cwd.size()), .status = Status::success()};
+            });
+        !status.ok())
+    {
+        return status;
+    }
+
+    if (auto status = syscalls_.register_callback(
+            syscall::Number::uname, "uname", &posix,
+            [](void *context, const syscall::Request &request) {
+                if (request.args[0] == 0)
+                {
+                    return syscall::Response{.value = -1, .status = Status::invalid_argument("uname buffer is null")};
+                }
+                *reinterpret_cast<posix::UnameInfo *>(request.args[0]) =
+                    static_cast<posix::PosixService *>(context)->uname();
+                return syscall::Response{.value = 0, .status = Status::success()};
+            });
+        !status.ok())
+    {
+        return status;
+    }
+
+    if (auto status = syscalls_.register_callback(
+            syscall::Number::clock_gettime, "clock_gettime", &posix,
+            [](void *context, const syscall::Request &request) {
+                if (request.args[1] == 0)
+                {
+                    return syscall::Response{.value = -1, .status = Status::invalid_argument("clock buffer is null")};
+                }
+                *reinterpret_cast<posix::ClockTime *>(request.args[1]) =
+                    static_cast<posix::PosixService *>(context)->clock_gettime();
+                return syscall::Response{.value = 0, .status = Status::success()};
             });
         !status.ok())
     {

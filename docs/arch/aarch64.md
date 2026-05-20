@@ -22,6 +22,7 @@ transition metadata, and guarded AArch64 inline assembly for `cntvct_el0`,
 - Memory: TTBR0 for user space, TTBR1 for kernel space, MAIR/TCR setup.
 - User mode: `eret` from EL1 to EL0.
 - Syscalls: `svc #0` with arguments in `x0` through `x5`.
-- QEMU: `okernel_image` builds a raw ARM64 `Image` payload. The full
-  `qemu-system-aarch64` pass/fail test is not promoted yet because the early
-  exception-level and device-tree handoff still need to be completed.
+- QEMU: `okernel_image` builds a raw ARM64 `Image` payload and
+  `qemu-system-aarch64 -M virt -kernel` validates the debug boot path through
+  PL011 serial output. Device-tree parsing and full EL handoff remain future
+  work.

@@ -35,7 +35,7 @@ OK_ARCH_SPECS = {
         qemu_system = "qemu-system-aarch64",
         platform_source = "src/arch/aarch64/platform.cpp",
         image_format = "linux-image",
-        freestanding_cxxflags = {"-mno-outline-atomics"}
+        freestanding_cxxflags = {"-mno-outline-atomics", "-mgeneral-regs-only"}
     },
     arm32 = {
         define = "OK_ARCH_TARGET_ARM32",
@@ -48,7 +48,14 @@ OK_ARCH_SPECS = {
         define = "OK_ARCH_TARGET_RV64",
         source = "rv64",
         toolchain = "ok-rv64-elf",
-        triple = "riscv64-elf"
+        triple = "riscv64-elf",
+        boot_source = "src/arch/rv64/boot.S",
+        linker_script = "src/arch/rv64/linker.ld",
+        qemu_system = "qemu-system-riscv64",
+        platform_source = "src/arch/rv64/platform.cpp",
+        image_format = "elf",
+        freestanding_cxxflags = {"-mcmodel=medany"},
+        freestanding_asflags = {"-mcmodel=medany"}
     },
     rv32 = {
         define = "OK_ARCH_TARGET_RV32",
@@ -211,6 +218,11 @@ function add_ok_freestanding_arch_flags()
     if spec.freestanding_cxxflags then
         for _, flag in ipairs(spec.freestanding_cxxflags) do
             add_cxxflags(flag, {force = true})
+        end
+    end
+    if spec.freestanding_asflags then
+        for _, flag in ipairs(spec.freestanding_asflags) do
+            add_asflags(flag, {force = true})
         end
     end
 end

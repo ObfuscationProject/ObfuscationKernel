@@ -30,9 +30,9 @@ build/linux/<arch>/<mode>/kernel.bin
 
 For BIOS x86 targets, `kernel.bin` is a single raw disk image containing the
 first-stage kernel boot sector and the linked kernel payload. It does not use
-GRUB or an external bootloader. AArch64 also builds a Linux `Image`-style raw
-payload with the 64-byte ARM64 header, but its QEMU test path is still staged
-until the full virt-machine early platform contract is implemented.
+GRUB or an external bootloader. AArch64 builds a Linux `Image`-style raw payload
+with the 64-byte ARM64 header. RV64 keeps `kernel.bin` as the linked ELF image
+because QEMU virt can jump directly to that ELF entry with `-kernel`.
 
 ## Supported Architectures
 
@@ -81,9 +81,9 @@ toolchain selection lives in `xmake/arch.lua`.
 ## Tests
 
 `xmake test` always validates the current architecture's freestanding `okernel`
-profile. For bootable system targets (`i386` and `x86_64`) it also builds
-`okernel_image`, boots the generated `kernel.bin` in QEMU, and parses the debug
-kernel's `OK_*` diagnostic lines:
+profile. For bootable system targets (`i386`, `x86_64`, `aarch64`, and `rv64`)
+it also builds `okernel_image`, boots the generated `kernel.bin` in QEMU, and
+parses the debug kernel's `OK_*` diagnostic lines:
 
 ```sh
 xmake test

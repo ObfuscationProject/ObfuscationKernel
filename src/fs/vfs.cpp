@@ -30,6 +30,28 @@ Status RamNode::attach_child(RamNode &child)
     return Status::success();
 }
 
+Status RamNode::detach_child(std::string_view child)
+{
+    if (type_ != NodeType::directory)
+    {
+        return Status::invalid_argument("parent is not a directory");
+    }
+    for (usize i = 0; i < child_count_; ++i)
+    {
+        if (children_[i]->name() == child)
+        {
+            for (usize j = i; j + 1 < child_count_; ++j)
+            {
+                children_[j] = children_[j + 1];
+            }
+            children_[child_count_ - 1] = nullptr;
+            --child_count_;
+            return Status::success();
+        }
+    }
+    return Status::not_found("directory child not found");
+}
+
 Metadata RamNode::metadata() const
 {
     return Metadata{.type = type_, .size = data_size_, .mode = type_ == NodeType::directory ? 0755u : 0644u};
@@ -65,6 +87,11 @@ Status RamNode::write(usize offset, std::span<const std::byte> data)
     if (offset + data.size() > data_.size())
     {
         return Status::overflow("file data capacity exceeded");
+    }
+    if (offset == 0 && data.empty())
+    {
+        data_size_ = 0;
+        return Status::success();
     }
     for (usize i = 0; i < data.size(); ++i)
     {
@@ -133,6 +160,26 @@ Status VirtualFileSystem::create(std::string_view path, NodeType type)
     return parent->attach_child(*node);
 }
 
+Status VirtualFileSystem::unlink(std::string_view path)
+{
+    FixedString<max_path_segment> leaf;
+    auto *parent = parent_for(path, leaf);
+    if (parent == nullptr || leaf.empty())
+    {
+        return Status::not_found("parent path not found");
+    }
+    auto *node = parent->lookup(leaf.view());
+    if (node == nullptr)
+    {
+        return Status::not_found("path not found");
+    }
+    if (node->metadata().type == NodeType::directory)
+    {
+        return Status::invalid_argument("cannot unlink directory");
+    }
+    return parent->detach_child(leaf.view());
+}
+
 Status VirtualFileSystem::write_file(std::string_view path, std::span<const std::byte> data)
 {
     auto *node = lookup(path);
@@ -152,6 +199,16 @@ Result<FileBuffer> VirtualFileSystem::read_file(std::string_view path)
     }
     const auto metadata = node->metadata();
     return node->read(0, metadata.size);
+}
+
+Result<Metadata> VirtualFileSystem::stat(std::string_view path)
+{
+    auto *node = lookup(path);
+    if (node == nullptr)
+    {
+        return Status::not_found("path not found");
+    }
+    return node->metadata();
 }
 
 Node *VirtualFileSystem::lookup(std::string_view path)

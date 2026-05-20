@@ -429,9 +429,33 @@ Status test_user_mode(TestPointRunner &runner)
     return runner.check("user", "mode", context.mode == arch::PrivilegeMode::user, "user mode transition failed");
 }
 
+Status test_kernel_services(TestPointRunner &runner, Kernel &kernel)
+{
+    if (auto status = runner.check("posix", "initialized", kernel.posix().initialized(), "POSIX service not initialized");
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = runner.check("pcie", "xhci", kernel.pci().find_class(0x0c, 0x03, 0x30) != nullptr,
+                                   "PCIe xHCI device not enumerated");
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = runner.check("usb", "hid-keyboard",
+                                   kernel.usb().find_device(driver::UsbDeviceClass::hid, 1, 1) != nullptr,
+                                   "USB HID keyboard not enumerated");
+        !status.ok())
+    {
+        return status;
+    }
+    auto output = kernel.debug_shell().execute("help");
+    return runner.check("shell", "help", output.ok() && !output.value().empty(), "debug shell help failed");
+}
+
 } // namespace
 
-Result<usize> run_kernel_test_points(Kernel &)
+Result<usize> run_kernel_test_points(Kernel &kernel)
 {
     TestPointRunner runner;
 
@@ -476,6 +500,10 @@ Result<usize> run_kernel_test_points(Kernel &)
         return status;
     }
     if (auto status = test_user_mode(runner); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_kernel_services(runner, kernel); !status.ok())
     {
         return status;
     }

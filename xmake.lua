@@ -18,6 +18,7 @@ function add_ok_kernel_sources(include_kernel_main)
     add_files("src/interrupt/*.cpp")
     add_files("src/ipc/*.cpp")
     add_files("src/memory/*.cpp")
+    add_files("src/posix/*.cpp")
     add_files("src/sched/*.cpp")
     add_files("src/smp/*.cpp")
     add_files("src/syscall/*.cpp")
@@ -100,15 +101,21 @@ target("okernel_image")
     add_defines("OK_KERNEL_FREESTANDING")
     add_ok_arch_profile()
     add_ok_debug_test_points()
-    if ok_current_arch() == "i386" or ok_current_arch() == "x86_64" then
+    if ok_current_arch() == "i386" or ok_current_arch() == "x86_64" or ok_current_arch() == "aarch64" or ok_current_arch() == "rv64" then
         add_tests("qemu")
     end
     after_build(function (target)
         local arch = target:values("ok.arch")
+        local kernel_bin = path.join(target:targetdir(), "kernel.bin")
+        if target:values("ok.image_format") == "elf" then
+            os.cp(target:targetfile(), kernel_bin)
+            return
+        end
         local triples = {
             i386 = "i386-elf",
             x86_64 = "x86_64-elf",
-            aarch64 = "aarch64-elf"
+            aarch64 = "aarch64-elf",
+            rv64 = "riscv64-elf"
         }
         local triple = triples[arch]
         if triple == nil then
@@ -122,7 +129,6 @@ target("okernel_image")
         local payload_bin = path.join(target:targetdir(), "kernel_payload.bin")
         os.execv(objcopy, {"-O", "binary", target:targetfile(), payload_bin})
 
-        local kernel_bin = path.join(target:targetdir(), "kernel.bin")
         if target:values("ok.image_format") == "linux-image" then
             os.cp(payload_bin, kernel_bin)
             return

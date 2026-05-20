@@ -11,8 +11,10 @@ Bootable targets are split from the freestanding `okernel` library. The
 - `x86_64`: BIOS disk image, shared x86 boot sector, protected-mode to long-mode
   entry, identity page tables, VGA, COM1 serial, PS/2 keyboard polling.
 - `aarch64`: Linux `Image`-style 64-byte header and QEMU virt PL011 UART
-  platform scaffold. The image builds, but `qemu-test` is not enabled until EL
-  setup and DT/FDT handoff are complete.
+  platform path. `qemu-system-aarch64` boots the debug image directly with
+  `-kernel` and validates the serial `OK_TEST_PASS` marker.
+- `rv64`: QEMU virt direct ELF boot at `0x80000000`, bootstrap stack, `.bss`
+  clearing, NS16550 UART output, and `qemu-system-riscv64` debug validation.
 
 ## Protocol Notes
 
@@ -22,7 +24,9 @@ Bootable targets are split from the freestanding `okernel` library. The
 - ARM32 Linux boot expects boot data through ATAGs or a device tree pointer in
   `r2`, with `r0 = 0` and `r1` carrying the machine type for non-DT systems.
 - RISC-V Linux images use a 64-byte header with text offset, image size,
-  version, and `RISCV`/`RSC\x05` magic values; image size is mandatory.
+  version, and `RISCV`/`RSC\x05` magic values; image size is mandatory. The
+  current RV64 QEMU test uses the simpler `-bios none -kernel` ELF path so QEMU
+  transfers control directly to the kernel entry at the DRAM base.
 - BMIPS DT-aware boot passes `a0 = 0`, `a1 = 0xffffffff`, and `a2 = DTB physical
   pointer`.
 - PowerPC Linux uses wrapper formats because there is no single firmware

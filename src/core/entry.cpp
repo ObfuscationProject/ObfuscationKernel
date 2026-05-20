@@ -118,6 +118,10 @@ void emit_display_text(const KernelDebugSink &sink, std::string_view text)
     emit_bool_field(sink, "user", report.user_mode);
     emit_bool_field(sink, "display", report.display);
     emit_bool_field(sink, "input", report.input);
+    emit_bool_field(sink, "posix", report.posix);
+    emit_bool_field(sink, "bus", report.bus);
+    emit_bool_field(sink, "usb", report.usb);
+    emit_bool_field(sink, "shell", report.shell);
     emit_bool_field(sink, "modes", report.modes);
     emit_unsigned_field(sink, "display_checksum", kernel.display().checksum());
     emit(sink, "\n");
@@ -191,6 +195,16 @@ Status ok_kernel_entry(const KernelEntryConfig &config, KernelEntryResult *resul
     }
     return Status::success();
 #endif
+}
+
+Result<std::string_view> ok_debug_shell_execute(std::string_view command)
+{
+    Kernel &kernel = kernel_instance();
+    if (!kernel.booted())
+    {
+        return Status::not_initialized("kernel is not booted");
+    }
+    return kernel.debug_shell().execute(command);
 }
 
 extern "C" int ok_kernel_main(const KernelEntryConfig *config)

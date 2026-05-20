@@ -13,7 +13,9 @@ or policy boundaries and concepts at compile-time extension points.
 - `include/ok/sched`: process/thread model and scheduler policy.
 - `include/ok/ipc`: bounded message channels.
 - `include/ok/syscall`: POSIX-oriented syscall table and handlers.
-- `include/ok/driver`: driver base class and basic console/timer/block drivers.
+- `include/ok/posix`: bounded POSIX file descriptor and metadata service.
+- `include/ok/driver`: driver base class plus console, timer, block, display,
+  PCIe, USB, and input drivers.
 - `include/ok/fs`: RAM-backed VFS node model.
 - `include/ok/user`: user-mode transition gateway.
 - `include/ok/core`: kernel composition and shared types.
@@ -66,6 +68,11 @@ For `i386` and `x86_64`, the system boot path is:
 6. Create `/tmp/kernel.log` in the RAM VFS.
 
 The debug test suite then validates one operation from every core module.
+
+For `aarch64`, QEMU loads the ARM64 `Image`-style payload directly with
+`-kernel`; the platform path uses the QEMU virt PL011 UART. For `rv64`, QEMU
+loads the linked ELF at `0x80000000` with `-bios none -kernel`; the platform
+path uses the QEMU virt NS16550 UART.
 
 ## Architecture-Specific Operations
 

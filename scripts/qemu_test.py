@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import select
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -15,6 +17,7 @@ QEMU_SYSTEM_BY_ARCH = {
     "i386": "qemu-system-i386",
     "x86_64": "qemu-system-x86_64",
     "aarch64": "qemu-system-aarch64",
+    "rv64": "qemu-system-riscv64",
 }
 
 QEMU_DEBUG_EXIT_SUCCESS = 33
@@ -42,6 +45,25 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool) -> lis
             "virt",
             "-cpu",
             "cortex-a57",
+            "-kernel",
+            str(kernel),
+            "-serial",
+            "stdio",
+            "-monitor",
+            "none",
+            "-no-reboot",
+            "-display",
+            display,
+        ]
+    if arch == "rv64":
+        return [
+            qemu_path,
+            "-M",
+            "virt",
+            "-m",
+            "256M",
+            "-bios",
+            "none",
             "-kernel",
             str(kernel),
             "-serial",
@@ -83,17 +105,42 @@ def run_kernel(arch: str, kernel: Path, display: str, debug_exit: bool, timeout:
 
 
 def run_until_marker(command: list[str], timeout: float | None) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout_parts: list[str] = []
+    deadline = None if timeout is None else time.monotonic() + timeout
+    marker_seen = False
+
+    assert process.stdout is not None
+    while True:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        wait = 0.1 if deadline is None else max(0.0, min(0.1, deadline - time.monotonic()))
+        ready, _, _ = select.select([process.stdout], [], [], wait)
+        if ready:
+            line = process.stdout.readline()
+            if line:
+                stdout_parts.append(line)
+                if line.startswith("OK_TEST_PASS "):
+                    marker_seen = True
+                    break
+        if process.poll() is not None:
+            break
+
+    if marker_seen and process.poll() is None:
+        process.terminate()
     try:
-        return subprocess.run(command, text=True, capture_output=True, check=False, timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or "qemu marker timeout\n"
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode(errors="replace")
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode(errors="replace")
-        returncode = 0 if "OK_TEST_PASS " in stdout else 124
-        return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+        tail_stdout, stderr = process.communicate(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        tail_stdout, stderr = process.communicate()
+    stdout = "".join(stdout_parts) + (tail_stdout or "")
+    returncode = 0 if marker_seen else (process.returncode if process.returncode is not None else 124)
+    if marker_seen:
+        stderr = ""
+    if not marker_seen and returncode == 0 and "OK_TEST_PASS " not in stdout:
+        returncode = 124
+        stderr = (stderr or "") + "qemu marker timeout\n"
+    return subprocess.CompletedProcess(command, returncode, stdout, stderr or "")
 
 
 def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: bool) -> int:
@@ -124,7 +171,7 @@ def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: 
     if int(fields.get("debug_test_points", "0")) == 0:
         print("debug kernel did not run debug test points", file=sys.stderr)
         return 7
-    for required in ("fs", "ext4", "user", "display", "input", "modes"):
+    for required in ("fs", "ext4", "user", "display", "input", "posix", "bus", "usb", "shell", "modes"):
         if fields.get(required) != "1":
             print(f"debug kernel did not pass {required} test coverage", file=sys.stderr)
             return 8

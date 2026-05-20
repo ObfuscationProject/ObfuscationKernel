@@ -1,11 +1,13 @@
 #pragma once
 
 #include "ok/arch/arch.hpp"
+#include "ok/core/shell.hpp"
 #include "ok/driver/driver.hpp"
 #include "ok/fs/vfs.hpp"
 #include "ok/interrupt/interrupt.hpp"
 #include "ok/ipc/ipc.hpp"
 #include "ok/memory/memory.hpp"
+#include "ok/posix/posix.hpp"
 #include "ok/sched/scheduler.hpp"
 #include "ok/smp/smp.hpp"
 #include "ok/syscall/syscall.hpp"
@@ -49,6 +51,10 @@ struct KernelTestReport
     bool user_mode{false};
     bool display{false};
     bool input{false};
+    bool posix{false};
+    bool bus{false};
+    bool usb{false};
+    bool shell{false};
     bool modes{false};
 };
 
@@ -120,18 +126,42 @@ class Kernel final
     {
         return mouse_driver_;
     }
+    [[nodiscard]] driver::PciBusDriver &pci()
+    {
+        return pci_bus_driver_;
+    }
+    [[nodiscard]] driver::UsbXhciControllerDriver &usb()
+    {
+        return usb_xhci_driver_;
+    }
+    [[nodiscard]] driver::UsbHidKeyboardDriver &usb_keyboard()
+    {
+        return usb_keyboard_driver_;
+    }
+    [[nodiscard]] driver::UsbHidMouseDriver &usb_mouse()
+    {
+        return usb_mouse_driver_;
+    }
     [[nodiscard]] fs::VirtualFileSystem &vfs()
     {
         return vfs_;
+    }
+    [[nodiscard]] posix::PosixService &posix()
+    {
+        return posix_;
     }
     [[nodiscard]] user::UserSpaceManager &user_space()
     {
         return user_space_;
     }
+    [[nodiscard]] KernelDebugShell &debug_shell()
+    {
+        return debug_shell_;
+    }
 
   private:
     Status register_builtin_interrupts(driver::TimerDriver &timer);
-    Status register_builtin_syscalls(driver::ConsoleDriver &console);
+    Status register_builtin_syscalls(posix::PosixService &posix);
     Status log_boot_line(std::string_view line);
     Status run_ext4_test();
 
@@ -146,6 +176,10 @@ class Kernel final
     driver::FramebufferDisplayDriver display_driver_{};
     driver::KeyboardDriver keyboard_driver_{};
     driver::Ps2MouseDriver mouse_driver_{};
+    driver::PciBusDriver pci_bus_driver_{};
+    driver::UsbXhciControllerDriver usb_xhci_driver_{};
+    driver::UsbHidKeyboardDriver usb_keyboard_driver_{};
+    driver::UsbHidMouseDriver usb_mouse_driver_{};
     interrupt::InterruptDispatcher interrupts_;
     memory::MemoryManager memory_;
     sched::Scheduler scheduler_;
@@ -154,7 +188,9 @@ class Kernel final
     syscall::Table syscalls_;
     driver::DriverManager drivers_;
     fs::VirtualFileSystem vfs_;
+    posix::PosixService posix_;
     user::UserSpaceManager user_space_;
+    KernelDebugShell debug_shell_;
 };
 
 } // namespace ok

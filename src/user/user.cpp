@@ -17,7 +17,7 @@ Status SimulatedUserModeGateway::enter(arch::UserEntry entry, arch::CpuContext &
     return Status::success();
 }
 
-UserSpaceManager::UserSpaceManager(UserModeGateway &gateway) : gateway_(&gateway)
+UserSpaceManager::UserSpaceManager(UserModeGateway *gateway) : gateway_(gateway == nullptr ? &owned_gateway_ : gateway)
 {
 }
 

@@ -33,6 +33,47 @@ template <usize Capacity> class FixedString final
         return Status::success();
     }
 
+    constexpr void clear()
+    {
+        size_ = 0;
+        data_[0] = '\0';
+    }
+
+    constexpr Status append(char value)
+    {
+        if (size_ + 1 >= Capacity)
+        {
+            return Status::overflow("fixed string capacity exceeded");
+        }
+        data_[size_++] = value;
+        data_[size_] = '\0';
+        return Status::success();
+    }
+
+    constexpr Status append(std::string_view value)
+    {
+        if (size_ + value.size() >= Capacity)
+        {
+            return Status::overflow("fixed string capacity exceeded");
+        }
+        for (usize i = 0; i < value.size(); ++i)
+        {
+            data_[size_++] = value[i];
+        }
+        data_[size_] = '\0';
+        return Status::success();
+    }
+
+    constexpr void pop_back()
+    {
+        if (size_ == 0)
+        {
+            return;
+        }
+        --size_;
+        data_[size_] = '\0';
+    }
+
     [[nodiscard]] constexpr std::string_view view() const
     {
         return {data_.data(), size_};

@@ -37,7 +37,7 @@ Result<ProcessId> RoundRobinPolicy::pick_next(std::span<const ProcessControlBloc
     return Status::would_block("no runnable process");
 }
 
-Scheduler::Scheduler(SchedulerPolicy &policy) : policy_(&policy)
+Scheduler::Scheduler(SchedulerPolicy *policy) : policy_(policy == nullptr ? &owned_round_robin_policy_ : policy)
 {
 }
 
@@ -113,6 +113,10 @@ Result<ProcessId> Scheduler::schedule_next()
 
 Result<ProcessId> Scheduler::schedule_next_on_cpu(smp::CpuId cpu)
 {
+    if (policy_ == nullptr)
+    {
+        policy_ = &owned_round_robin_policy_;
+    }
     if (cpu >= cpu_count_)
     {
         return Status::invalid_argument("scheduler cpu id out of range");

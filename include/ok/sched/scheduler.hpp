@@ -101,7 +101,7 @@ class RoundRobinPolicy final : public SchedulerPolicy
 class Scheduler final
 {
   public:
-    explicit Scheduler(SchedulerPolicy &policy = default_round_robin_policy());
+    explicit Scheduler(SchedulerPolicy *policy = nullptr);
 
     static SchedulerPolicy &default_round_robin_policy();
 
@@ -137,6 +137,7 @@ class Scheduler final
 
   private:
     SchedulingMode mode_{SchedulingMode::round_robin};
+    RoundRobinPolicy owned_round_robin_policy_{};
     SchedulerPolicy *policy_{nullptr};
     StaticVector<ProcessControlBlock, max_processes> processes_{};
     ProcessId next_pid_{1};

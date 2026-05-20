@@ -29,14 +29,13 @@ Pass `-a` only for a temporary one-off test of another architecture:
 xmake qemu-test -a i386
 ```
 
-The current bootable QEMU system test targets are `i386` and `x86_64`. Other
-architecture profiles can build `okernel`; AArch64 can also build an
-`okernel_image` Linux `Image`-style payload. They intentionally fail
-`qemu-test` until that architecture has a complete early platform contract and a
-validated QEMU launch profile.
+The current bootable QEMU system test targets are `i386`, `x86_64`, `aarch64`,
+and `rv64`. Other architecture profiles can build `okernel` and intentionally
+fail `qemu-test` until that architecture has a complete early platform contract
+and a validated QEMU launch profile.
 
 `xmake test` always has a freestanding profile test for `okernel`. On
-`i386`/`x86_64` it also runs the `okernel_image` QEMU boot test.
+bootable system targets it also runs the `okernel_image` QEMU boot test.
 
 ## Visual Test
 
@@ -47,16 +46,17 @@ xmake qemu-window-test
 ```
 
 It builds and runs the same `kernel.bin` in QEMU. The visible text comes from
-the kernel's own VGA display path, while the script captures serial diagnostics
-and prints the test result only after the QEMU window is closed. In headless
-environments:
+the kernel's own VGA display path on x86 targets, while the script captures
+serial diagnostics and prints the test result only after the QEMU window is
+closed. Non-x86 boot targets currently use serial-only platform output, so use
+the headless validation form for those architectures:
 
 ```sh
 xmake qemu-window-test --no-launch
 ```
 
 In graphical x86 window mode the debug kernel does not attach the debug-exit
-device. After `OK_TEST_PASS`, it enters an interactive loop and echoes PS/2
+device. After `OK_TEST_PASS`, it enters an interactive debug shell and echoes
 keyboard input through the kernel display path and serial console. Close the
 QEMU window when you want the script to print its final result.
 
@@ -65,7 +65,9 @@ QEMU window when you want the script to print its final result.
 The debug kernel must print `OK_MODE debug`, `OK_DEBUG boot=complete`,
 `OK_DISPLAY_TEXT`, and `OK_TEST_PASS`. The Python runner also verifies that
 debug test points ran and that filesystem, EXT4, user-mode, and display checks
-reported success. Any non-zero exit code or missing marker is a failure.
+reported success. The current required coverage fields are `fs`, `ext4`,
+`user`, `display`, `input`, `posix`, `bus`, `usb`, `shell`, and `modes`. Any
+non-zero exit code or missing marker is a failure.
 
 ## CI Coverage
 
@@ -74,5 +76,5 @@ GitHub Actions has one matrix job. For each architecture it:
 1. Builds or restores the matching freestanding GCC/binutils toolchain.
 2. Configures xmake with `-a <arch>`.
 3. Builds `okernel`.
-4. Runs `xmake test`; bootable x86 targets immediately boot the generated
+4. Runs `xmake test`; bootable system targets immediately boot the generated
    kernel in QEMU, while other targets run the freestanding compile profile.

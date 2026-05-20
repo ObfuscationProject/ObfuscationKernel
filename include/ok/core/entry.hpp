@@ -43,6 +43,7 @@ struct KernelEntryResult
 };
 
 Status ok_kernel_entry(const KernelEntryConfig &config, KernelEntryResult *result = nullptr);
+Result<std::string_view> ok_debug_shell_execute(std::string_view command);
 
 extern "C" int ok_kernel_main(const KernelEntryConfig *config);
 
