@@ -7,9 +7,9 @@ local task_arch_specs = {
     i386 = {triple = "i386-elf", bootable = true},
     x86_64 = {triple = "x86_64-elf", bootable = true},
     aarch64 = {triple = "aarch64-elf", bootable = true},
-    arm32 = {triple = "arm-none-eabi"},
+    arm32 = {triple = "arm-none-eabi", bootable = true},
     rv64 = {triple = "riscv64-elf", bootable = true},
-    rv32 = {triple = "riscv32-elf"},
+    rv32 = {triple = "riscv32-elf", bootable = true},
     loongarch64 = {triple = "loongarch64-elf"},
     mips = {triple = "mips-elf"},
     mips64 = {triple = "mips64-elf"},
@@ -256,9 +256,10 @@ task_end()
 
 task("qemu-window-test")
     set_menu {
-        usage = "xmake qemu-window-test",
+        usage = "xmake qemu-window-test [-a ARCH]",
         description = "Show the debug kernel display output in a QEMU graphical window",
         options = {
+            {"a", "profile", "kv", nil, "Temporarily test another architecture"},
             {"m", "check-mode", "kv", nil, "Build mode used for the debug kernel test"},
             {nil, "display", "kv", "gtk", "QEMU display backend"},
             {nil, "no-launch", "k", nil, "Generate the demo image without opening QEMU"}
@@ -268,14 +269,15 @@ task("qemu-window-test")
         import("core.base.option")
         import("core.project.config")
         config.load()
-        local arch = task_normalize_arch(config.get("arch") or "x86_64")
+        local current_arch = task_normalize_arch(config.get("arch") or "x86_64")
+        local arch = task_normalize_arch(option.get("profile") or current_arch)
         local _, spec = task_require_arch(arch)
         if not spec.bootable then
             raise("qemu window test is not implemented for %s yet; build okernel to check the freestanding profile", arch)
         end
         local mode = option.get("check-mode") or "debug"
         local current_mode = config.get("mode") or "release"
-        local reconfigured = current_mode ~= mode
+        local reconfigured = current_mode ~= mode or arch ~= current_arch
         if reconfigured then
             os.execv("xmake", {"f", "-c", "-m", mode, "-a", arch})
         end
@@ -298,7 +300,7 @@ task("qemu-window-test")
         end
         local code = os.execv("python3", argv, {try = true})
         if reconfigured then
-            os.execv("xmake", {"f", "-c", "-m", current_mode, "-a", arch})
+            os.execv("xmake", {"f", "-c", "-m", current_mode, "-a", current_arch})
         end
         if code ~= 0 then
             raise("qemu window test failed for %s", arch)

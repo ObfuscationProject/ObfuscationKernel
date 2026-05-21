@@ -5,14 +5,17 @@
 namespace
 {
 
-constexpr ok::uptr uart_base = 0x10000000;
-constexpr ok::uptr fw_cfg_base = 0x10100000;
-constexpr ok::uptr uart_rbr_thr = uart_base + 0x00;
-constexpr ok::uptr uart_lsr = uart_base + 0x05;
-constexpr ok::u8 uart_lsr_data_ready = 1u << 0;
-constexpr ok::u8 uart_lsr_tx_empty = 1u << 5;
+constexpr ok::uptr pl011_base = 0x09000000;
+constexpr ok::uptr fw_cfg_base = 0x09020000;
+constexpr ok::uptr uart_dr = pl011_base + 0x00;
+constexpr ok::uptr uart_fr = pl011_base + 0x18;
+constexpr ok::u32 uart_fr_rxfe = 1u << 4;
+constexpr ok::u32 uart_fr_txff = 1u << 5;
 constexpr ok::uptr virtio_input_bases[] = {
-    0x10001000, 0x10002000, 0x10003000, 0x10004000, 0x10005000, 0x10006000, 0x10007000, 0x10008000,
+    0x0a000000, 0x0a000200, 0x0a000400, 0x0a000600, 0x0a000800, 0x0a000a00, 0x0a000c00, 0x0a000e00,
+    0x0a001000, 0x0a001200, 0x0a001400, 0x0a001600, 0x0a001800, 0x0a001a00, 0x0a001c00, 0x0a001e00,
+    0x0a002000, 0x0a002200, 0x0a002400, 0x0a002600, 0x0a002800, 0x0a002a00, 0x0a002c00, 0x0a002e00,
+    0x0a003000, 0x0a003200, 0x0a003400, 0x0a003600, 0x0a003800, 0x0a003a00, 0x0a003c00, 0x0a003e00,
 };
 using RamFb = ok::driver::qemu_virt::RamFbConsole<fw_cfg_base>;
 ok::driver::qemu_virt::VirtioInputDevice virtio_keyboard;
@@ -21,9 +24,9 @@ bool virtio_left_shift = false;
 bool virtio_right_shift = false;
 bool virtio_mouse_left = false;
 
-volatile ok::u8 &mmio8(ok::uptr address)
+volatile ok::u32 &mmio32(ok::uptr address)
 {
-    return *reinterpret_cast<volatile ok::u8 *>(address);
+    return *reinterpret_cast<volatile ok::u32 *>(address);
 }
 
 void uart_write_char(char value)
@@ -32,10 +35,10 @@ void uart_write_char(char value)
     {
         uart_write_char('\r');
     }
-    while ((mmio8(uart_lsr) & uart_lsr_tx_empty) == 0)
+    while ((mmio32(uart_fr) & uart_fr_txff) != 0)
     {
     }
-    mmio8(uart_rbr_thr) = static_cast<ok::u8>(value);
+    mmio32(uart_dr) = static_cast<ok::u32>(static_cast<unsigned char>(value));
 }
 
 void poll_virtio_mouse()
@@ -149,9 +152,9 @@ extern "C" int ok_platform_input_poll()
     {
         return input;
     }
-    if ((mmio8(uart_lsr) & uart_lsr_data_ready) == 0)
+    if ((mmio32(uart_fr) & uart_fr_rxfe) != 0)
     {
         return -1;
     }
-    return static_cast<int>(mmio8(uart_rbr_thr));
+    return static_cast<int>(mmio32(uart_dr) & 0xffu);
 }

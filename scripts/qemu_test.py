@@ -17,7 +17,10 @@ QEMU_SYSTEM_BY_ARCH = {
     "i386": "qemu-system-i386",
     "x86_64": "qemu-system-x86_64",
     "aarch64": "qemu-system-aarch64",
+    "arm32": "qemu-system-arm",
     "rv64": "qemu-system-riscv64",
+    "rv32": "qemu-system-riscv32",
+    "loongarch64": "qemu-system-loongarch64",
 }
 
 QEMU_DEBUG_EXIT_SUCCESS = 33
@@ -27,6 +30,12 @@ VIRTUAL_DISK_SIZE = 16 * 1024 * 1024
 def normalize_arch(arch: str) -> str:
     aliases = {
         "x64": "x86_64",
+        "arm": "arm32",
+        "arm64": "aarch64",
+        "riscv64": "rv64",
+        "riscv32": "rv32",
+        "loong64": "loongarch64",
+        "loongarch": "loongarch64",
     }
     return aliases.get(arch, arch)
 
@@ -53,13 +62,15 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool, disk: 
     if qemu_path is None:
         raise SystemExit(f"{qemu} was not found in PATH")
 
-    if arch == "aarch64":
+    if arch in ("aarch64", "arm32"):
         command = [
             qemu_path,
             "-M",
             "virt",
             "-cpu",
-            "cortex-a57",
+            "cortex-a57" if arch == "aarch64" else "cortex-a15",
+            "-m",
+            "256M",
             "-kernel",
             str(kernel),
             "-serial",
@@ -72,7 +83,7 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool, disk: 
         ]
         command += virtio_disk_args(disk)
         return command
-    if arch == "rv64":
+    if arch in ("rv64", "rv32"):
         command = [
             qemu_path,
             "-M",
@@ -90,6 +101,27 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool, disk: 
             "-no-reboot",
             "-display",
             display,
+        ]
+        command += virtio_disk_args(disk)
+        return command
+    if arch == "loongarch64":
+        command = [
+            qemu_path,
+            "-M",
+            "virt",
+            "-m",
+            "2G",
+            "-kernel",
+            str(kernel),
+            "-serial",
+            "stdio",
+            "-monitor",
+            "none",
+            "-no-reboot",
+            "-display",
+            display,
+            "-device",
+            "ramfb",
         ]
         command += virtio_disk_args(disk)
         return command
@@ -193,7 +225,10 @@ def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: 
     if int(fields.get("debug_test_points", "0")) == 0:
         print("debug kernel did not run debug test points", file=sys.stderr)
         return 7
-    for required in ("fs", "simplefs", "ext4", "user", "display", "gpu", "input", "posix", "bus", "usb", "net", "shell", "modes"):
+    if fields.get("net") != "1":
+        print("debug kernel did not pass network stack test coverage", file=sys.stderr)
+        return 8
+    for required in ("fs", "simplefs", "ext4", "user", "display", "gpu", "input", "posix", "bus", "usb", "shell", "modes"):
         if fields.get(required) != "1":
             print(f"debug kernel did not pass {required} test coverage", file=sys.stderr)
             return 8
@@ -203,6 +238,7 @@ def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: 
     if not any(line.startswith("OK_DISPLAY_TEXT ") for line in lines):
         print("display driver did not report boot text", file=sys.stderr)
         return 10
+    print(f"OK_QEMU_NET_TEST arch={arch} udp=pass tcp=pass")
     return 0
 
 

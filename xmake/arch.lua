@@ -42,7 +42,13 @@ OK_ARCH_SPECS = {
         source = "arm32",
         toolchain = "ok-arm32-elf",
         triple = "arm-none-eabi",
-        freestanding_cxxflags = {"-march=armv7-a", "-marm"}
+        boot_source = "src/arch/arm32/boot.S",
+        linker_script = "src/arch/arm32/linker.ld",
+        qemu_system = "qemu-system-arm",
+        platform_source = "src/arch/arm32/platform.cpp",
+        image_format = "elf",
+        freestanding_cxxflags = {"-march=armv7-a", "-marm"},
+        freestanding_asflags = {"-march=armv7-a", "-marm"}
     },
     rv64 = {
         define = "OK_ARCH_TARGET_RV64",
@@ -61,7 +67,14 @@ OK_ARCH_SPECS = {
         define = "OK_ARCH_TARGET_RV32",
         source = "rv32",
         toolchain = "ok-rv32-elf",
-        triple = "riscv32-elf"
+        triple = "riscv32-elf",
+        boot_source = "src/arch/rv32/boot.S",
+        linker_script = "src/arch/rv32/linker.ld",
+        qemu_system = "qemu-system-riscv32",
+        platform_source = "src/arch/rv32/platform.cpp",
+        image_format = "elf",
+        freestanding_cxxflags = {"-mcmodel=medany"},
+        freestanding_asflags = {"-mcmodel=medany"}
     },
     loongarch64 = {
         define = "OK_ARCH_TARGET_LOONGARCH64",

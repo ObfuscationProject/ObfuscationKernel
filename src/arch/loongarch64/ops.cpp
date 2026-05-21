@@ -26,7 +26,7 @@ class LoongArch64Operations final : public ProfiledArchOperationsBase<Architectu
 #if defined(__loongarch__) && defined(__loongarch64)
         u64 value = 0;
         asm volatile("rdtime.d %0, $r0" : "=r"(value));
-        return value;
+        return value == 0 ? fallback_cycle_counter() : value;
 #else
         return fallback_cycle_counter();
 #endif

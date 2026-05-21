@@ -41,9 +41,9 @@ supported architecture. `qemu-matrix` only runs architectures with boot image
 support.
 
 The current bootable QEMU system test targets are `i386`, `x86_64`, `aarch64`,
-and `rv64`. Other architecture profiles can build `okernel` and intentionally
-fail `qemu-test` until that architecture has a complete early platform contract
-and a validated QEMU launch profile.
+`arm32`, `rv64`, and `rv32`. Other architecture profiles can build `okernel`
+and intentionally fail `qemu-test` until that architecture has a complete early
+platform contract and a validated QEMU launch profile.
 
 `xmake test` always has a freestanding profile test for `okernel`. On
 bootable system targets it also runs the `okernel_image` QEMU boot test.
@@ -51,19 +51,28 @@ bootable system targets it also runs the `okernel_image` QEMU boot test.
 Every booted QEMU check also creates a temporary 16 MiB disk image and attaches
 it as `virtio-blk-pci`. The kernel binds that PCI device as `virtio-blk0`, then
 formats and exercises SimpleFS/EXT4 through the generic block-device interface.
+The debug suite also exercises UDP and TCP loopback through the kernel network
+stack, and the Python runner emits `OK_QEMU_NET_TEST` when that coverage passes.
 
 ## Visual Test
 
-The windowed task is also current-architecture only:
+The windowed task defaults to the current architecture:
 
 ```sh
 xmake qemu-window-test
 ```
 
+Pass `-a` to run another bootable window profile without permanently switching
+the checkout:
+
+```sh
+xmake qemu-window-test -a rv32 --no-launch
+```
+
 It builds and runs the same `kernel.bin` in QEMU. The visible output comes from
 the kernel's own ramfb display path on every bootable architecture: x86/i386 use
-fw_cfg I/O ports, while `aarch64` and `rv64` use fw_cfg MMIO, then all draw
-pixels directly into guest RAM.
+fw_cfg I/O ports, while `aarch64`, `arm32`, `rv64`, and `rv32` use fw_cfg MMIO,
+then all draw pixels directly into guest RAM.
 The script captures serial diagnostics and prints the test result only after
 the QEMU window is closed. Use the headless validation form in environments
 without a graphical display:
@@ -80,10 +89,11 @@ pixel mode with spaced bitmap glyph cells and keeps mouse `x`, `y`, and left
 button state on one fixed bottom-row line. Close the QEMU window when you want
 the script to print its final result.
 
-For non-x86 window sessions, QEMU attaches `virtio-keyboard-device` and
-`virtio-mouse-device`; the guest consumes their legacy virtio-mmio event queues
-so keyboard input reaches the shell and mouse motion updates the framebuffer
-pointer.
+For `aarch64`, `arm32`, `rv64`, and `rv32` window sessions, QEMU attaches
+`virtio-keyboard-device` and `virtio-mouse-device`; the guest consumes their
+legacy virtio-mmio event queues so keyboard input reaches the shell and mouse
+motion updates the framebuffer pointer. x86/i386 use PS/2 keyboard and mouse
+events from the PC platform while rendering through ramfb.
 
 ## Pass Signal
 

@@ -1,5 +1,5 @@
 #include "ok/core/types.hpp"
-#include "../qemu_virt/ramfb.hpp"
+#include "ok/driver/qemu_virt/ramfb.hpp"
 
 namespace
 {
@@ -11,12 +11,27 @@ constexpr ok::usize vga_columns = 80;
 constexpr ok::usize vga_rows = 25;
 constexpr ok::u16 keyboard_data_port = 0x60;
 constexpr ok::u16 keyboard_status_port = 0x64;
-using RamFb = ok::platform::qemu_virt::RamFbConsole<fw_cfg_io_base, true>;
+constexpr ok::u8 ps2_status_output_full = 1u << 0;
+constexpr ok::u8 ps2_status_input_full = 1u << 1;
+constexpr ok::u8 ps2_status_aux_output = 1u << 5;
+constexpr ok::u8 ps2_config_aux_irq = 1u << 1;
+constexpr ok::u8 ps2_config_aux_clock_disabled = 1u << 5;
+constexpr ok::u8 ps2_command_read_config = 0x20;
+constexpr ok::u8 ps2_command_write_config = 0x60;
+constexpr ok::u8 ps2_command_enable_aux = 0xa8;
+constexpr ok::u8 ps2_command_write_aux = 0xd4;
+constexpr ok::u8 ps2_mouse_ack = 0xfa;
+constexpr ok::u8 ps2_mouse_set_defaults = 0xf6;
+constexpr ok::u8 ps2_mouse_enable_streaming = 0xf4;
+using RamFb = ok::driver::qemu_virt::RamFbConsole<fw_cfg_io_base, true>;
 
 ok::usize vga_row = 0;
 ok::usize vga_column = 0;
 bool left_shift = false;
 bool right_shift = false;
+bool ps2_mouse_initialized = false;
+ok::u8 ps2_mouse_packet[3]{};
+ok::usize ps2_mouse_packet_index = 0;
 
 void outb(ok::u16 port, ok::u8 value)
 {
@@ -170,6 +185,158 @@ char map_scancode(ok::u8 scancode)
     return (left_shift || right_shift) ? shifted[scancode] : normal[scancode];
 }
 
+bool ps2_wait_input_clear()
+{
+    for (ok::usize attempt = 0; attempt < 100000; ++attempt)
+    {
+        if ((inb(keyboard_status_port) & ps2_status_input_full) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ps2_wait_output_full()
+{
+    for (ok::usize attempt = 0; attempt < 100000; ++attempt)
+    {
+        if ((inb(keyboard_status_port) & ps2_status_output_full) != 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ps2_read_byte(ok::u8 &value)
+{
+    if (!ps2_wait_output_full())
+    {
+        return false;
+    }
+    value = inb(keyboard_data_port);
+    return true;
+}
+
+bool ps2_write_controller(ok::u8 command)
+{
+    if (!ps2_wait_input_clear())
+    {
+        return false;
+    }
+    outb(keyboard_status_port, command);
+    return true;
+}
+
+bool ps2_write_data(ok::u8 value)
+{
+    if (!ps2_wait_input_clear())
+    {
+        return false;
+    }
+    outb(keyboard_data_port, value);
+    return true;
+}
+
+void ps2_flush_output()
+{
+    for (ok::usize attempt = 0; attempt < 32; ++attempt)
+    {
+        if ((inb(keyboard_status_port) & ps2_status_output_full) == 0)
+        {
+            return;
+        }
+        static_cast<void>(inb(keyboard_data_port));
+    }
+}
+
+bool ps2_read_config(ok::u8 &config)
+{
+    if (!ps2_write_controller(ps2_command_read_config))
+    {
+        return false;
+    }
+    return ps2_read_byte(config);
+}
+
+bool ps2_write_config(ok::u8 config)
+{
+    return ps2_write_controller(ps2_command_write_config) && ps2_write_data(config);
+}
+
+bool ps2_write_mouse(ok::u8 command)
+{
+    if (!ps2_write_controller(ps2_command_write_aux) || !ps2_write_data(command))
+    {
+        return false;
+    }
+    ok::u8 ack = 0;
+    return ps2_read_byte(ack) && ack == ps2_mouse_ack;
+}
+
+void ps2_mouse_init()
+{
+    ps2_flush_output();
+    static_cast<void>(ps2_write_controller(ps2_command_enable_aux));
+
+    ok::u8 config = 0;
+    if (ps2_read_config(config))
+    {
+        config = static_cast<ok::u8>(config & ~ps2_config_aux_irq);
+        config = static_cast<ok::u8>(config & ~ps2_config_aux_clock_disabled);
+        static_cast<void>(ps2_write_config(config));
+    }
+
+    static_cast<void>(ps2_write_mouse(ps2_mouse_set_defaults));
+    static_cast<void>(ps2_write_mouse(ps2_mouse_enable_streaming));
+    ps2_mouse_initialized = true;
+    ps2_mouse_packet_index = 0;
+}
+
+void handle_ps2_mouse_byte(ok::u8 value)
+{
+    if (ps2_mouse_packet_index == 0 && (value & 0x08u) == 0)
+    {
+        return;
+    }
+
+    ps2_mouse_packet[ps2_mouse_packet_index++] = value;
+    if (ps2_mouse_packet_index < 3)
+    {
+        return;
+    }
+    ps2_mouse_packet_index = 0;
+
+    const ok::u8 header = ps2_mouse_packet[0];
+    if ((header & 0xc0u) != 0)
+    {
+        return;
+    }
+
+    const auto dx = static_cast<ok::i32>(static_cast<ok::i8>(ps2_mouse_packet[1]));
+    const auto dy = static_cast<ok::i32>(static_cast<ok::i8>(ps2_mouse_packet[2]));
+    const bool left_button = (header & 0x01u) != 0;
+    RamFb::move_pointer(dx, -dy, left_button);
+}
+
+void poll_ps2_mouse()
+{
+    if (!ps2_mouse_initialized)
+    {
+        return;
+    }
+    for (ok::usize attempt = 0; attempt < 32; ++attempt)
+    {
+        const auto status = inb(keyboard_status_port);
+        if ((status & ps2_status_output_full) == 0 || (status & ps2_status_aux_output) == 0)
+        {
+            return;
+        }
+        handle_ps2_mouse_byte(inb(keyboard_data_port));
+    }
+}
+
 } // namespace
 
 extern "C" void ok_platform_console_init()
@@ -181,6 +348,7 @@ extern "C" void ok_platform_console_init()
     outb(com1 + 3, 0x03);
     outb(com1 + 2, 0xc7);
     outb(com1 + 4, 0x0b);
+    ps2_mouse_init();
 }
 
 extern "C" void ok_platform_console_write_char(char value)
@@ -236,18 +404,19 @@ extern "C" void ok_platform_halt()
 
 extern "C" int ok_platform_input_poll()
 {
+    poll_ps2_mouse();
     const auto status = inb(keyboard_status_port);
-    if ((status & 0x01u) == 0)
+    if ((status & ps2_status_output_full) == 0)
     {
         return -1;
     }
-    if ((status & 0x20u) != 0)
+    const auto scancode = inb(keyboard_data_port);
+    if ((status & ps2_status_aux_output) != 0)
     {
-        static_cast<void>(inb(keyboard_data_port));
+        handle_ps2_mouse_byte(scancode);
         return -1;
     }
 
-    const auto scancode = inb(keyboard_data_port);
     const bool released = (scancode & 0x80u) != 0;
     const auto key = static_cast<ok::u8>(scancode & 0x7fu);
     if (key == 0x2a)

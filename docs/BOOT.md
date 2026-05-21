@@ -7,14 +7,21 @@ Bootable targets are split from the freestanding `okernel` library. The
 ## Implemented
 
 - `i386`: BIOS disk image, shared x86 boot sector, protected-mode entry, VGA,
-  COM1 serial, PS/2 keyboard polling.
+  COM1 serial, PS/2 keyboard and mouse polling.
 - `x86_64`: BIOS disk image, shared x86 boot sector, protected-mode to long-mode
-  entry, identity page tables, VGA, COM1 serial, PS/2 keyboard polling.
+  entry, identity page tables, VGA, COM1 serial, PS/2 keyboard and mouse
+  polling.
 - `aarch64`: Linux `Image`-style 64-byte header and QEMU virt PL011 UART
   platform path. `qemu-system-aarch64` boots the debug image directly with
   `-kernel` and validates the serial `OK_TEST_PASS` marker.
+- `arm32`: QEMU virt direct ELF boot at `0x40008000`, bootstrap stack, `.bss`
+  clearing, PL011 UART output, ramfb display, and virtio-mmio keyboard/mouse
+  input.
 - `rv64`: QEMU virt direct ELF boot at `0x80000000`, bootstrap stack, `.bss`
   clearing, NS16550 UART output, and `qemu-system-riscv64` debug validation.
+- `rv32`: QEMU virt direct ELF boot at `0x80000000`, bootstrap stack, `.bss`
+  clearing, NS16550 UART output, ramfb display, and virtio-mmio keyboard/mouse
+  input.
 
 ## Protocol Notes
 
@@ -23,6 +30,8 @@ Bootable targets are split from the freestanding `okernel` library. The
   environment must also prepare RAM and a device tree before calling the image.
 - ARM32 Linux boot expects boot data through ATAGs or a device tree pointer in
   `r2`, with `r0 = 0` and `r1` carrying the machine type for non-DT systems.
+  The current ARM32 QEMU test intentionally uses direct ELF loading instead of
+  the Linux zImage protocol.
 - RISC-V Linux images use a 64-byte header with text offset, image size,
   version, and `RISCV`/`RSC\x05` magic values; image size is mandatory. The
   current RV64 QEMU test uses the simpler `-bios none -kernel` ELF path so QEMU

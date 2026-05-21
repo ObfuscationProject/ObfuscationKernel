@@ -102,7 +102,8 @@ target("okernel_image")
     add_defines("OK_KERNEL_FREESTANDING")
     add_ok_arch_profile()
     add_ok_debug_test_points()
-    if ok_current_arch() == "i386" or ok_current_arch() == "x86_64" or ok_current_arch() == "aarch64" or ok_current_arch() == "rv64" then
+    if ok_current_arch() == "i386" or ok_current_arch() == "x86_64" or ok_current_arch() == "aarch64" or
+        ok_current_arch() == "arm32" or ok_current_arch() == "rv64" or ok_current_arch() == "rv32" then
         add_tests("qemu")
     end
     after_build(function (target)

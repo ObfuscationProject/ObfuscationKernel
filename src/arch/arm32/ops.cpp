@@ -26,7 +26,7 @@ class Arm32Operations final : public ProfiledArchOperationsBase<Architecture::ar
 #if defined(__arm__)
         u32 value = 0;
         asm volatile("mrc p15, 0, %0, c9, c13, 0" : "=r"(value));
-        return value;
+        return value == 0 ? fallback_cycle_counter() : value;
 #else
         return fallback_cycle_counter();
 #endif

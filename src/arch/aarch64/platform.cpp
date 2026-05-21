@@ -1,6 +1,6 @@
 #include "ok/core/types.hpp"
-#include "../qemu_virt/ramfb.hpp"
-#include "../qemu_virt/virtio_input.hpp"
+#include "ok/driver/qemu_virt/ramfb.hpp"
+#include "ok/driver/qemu_virt/virtio_input.hpp"
 
 namespace
 {
@@ -17,9 +17,9 @@ constexpr ok::uptr virtio_input_bases[] = {
     0x0a002000, 0x0a002200, 0x0a002400, 0x0a002600, 0x0a002800, 0x0a002a00, 0x0a002c00, 0x0a002e00,
     0x0a003000, 0x0a003200, 0x0a003400, 0x0a003600, 0x0a003800, 0x0a003a00, 0x0a003c00, 0x0a003e00,
 };
-using RamFb = ok::platform::qemu_virt::RamFbConsole<fw_cfg_base>;
-ok::platform::qemu_virt::VirtioInputDevice virtio_keyboard;
-ok::platform::qemu_virt::VirtioInputDevice virtio_mouse;
+using RamFb = ok::driver::qemu_virt::RamFbConsole<fw_cfg_base>;
+ok::driver::qemu_virt::VirtioInputDevice virtio_keyboard;
+ok::driver::qemu_virt::VirtioInputDevice virtio_mouse;
 bool virtio_left_shift = false;
 bool virtio_right_shift = false;
 bool virtio_mouse_left = false;
@@ -44,29 +44,29 @@ void uart_write_char(char value)
 void poll_virtio_mouse()
 {
     virtio_mouse.initialize(virtio_input_bases, sizeof(virtio_input_bases) / sizeof(virtio_input_bases[0]),
-                            ok::platform::qemu_virt::VirtioInputKind::mouse);
-    ok::platform::qemu_virt::VirtioInputEvent event{};
+                            ok::driver::qemu_virt::VirtioInputKind::mouse);
+    ok::driver::qemu_virt::VirtioInputEvent event{};
     ok::i32 dx = 0;
     ok::i32 dy = 0;
     bool changed = false;
     while (virtio_mouse.poll(event))
     {
-        if (event.type == ok::platform::qemu_virt::input_event_relative)
+        if (event.type == ok::driver::qemu_virt::input_event_relative)
         {
             const auto value = static_cast<ok::i32>(event.value);
-            if (event.code == ok::platform::qemu_virt::input_relative_x)
+            if (event.code == ok::driver::qemu_virt::input_relative_x)
             {
                 dx += value;
                 changed = true;
             }
-            else if (event.code == ok::platform::qemu_virt::input_relative_y)
+            else if (event.code == ok::driver::qemu_virt::input_relative_y)
             {
                 dy += value;
                 changed = true;
             }
         }
-        else if (event.type == ok::platform::qemu_virt::input_event_key &&
-                 event.code == ok::platform::qemu_virt::input_button_left)
+        else if (event.type == ok::driver::qemu_virt::input_event_key &&
+                 event.code == ok::driver::qemu_virt::input_button_left)
         {
             virtio_mouse_left = event.value != 0;
             changed = true;
@@ -81,21 +81,21 @@ void poll_virtio_mouse()
 int poll_virtio_keyboard()
 {
     virtio_keyboard.initialize(virtio_input_bases, sizeof(virtio_input_bases) / sizeof(virtio_input_bases[0]),
-                               ok::platform::qemu_virt::VirtioInputKind::keyboard);
-    ok::platform::qemu_virt::VirtioInputEvent event{};
+                               ok::driver::qemu_virt::VirtioInputKind::keyboard);
+    ok::driver::qemu_virt::VirtioInputEvent event{};
     while (virtio_keyboard.poll(event))
     {
-        if (event.type != ok::platform::qemu_virt::input_event_key)
+        if (event.type != ok::driver::qemu_virt::input_event_key)
         {
             continue;
         }
         const bool pressed = event.value != 0;
-        if (event.code == ok::platform::qemu_virt::input_key_left_shift)
+        if (event.code == ok::driver::qemu_virt::input_key_left_shift)
         {
             virtio_left_shift = pressed;
             continue;
         }
-        if (event.code == ok::platform::qemu_virt::input_key_right_shift)
+        if (event.code == ok::driver::qemu_virt::input_key_right_shift)
         {
             virtio_right_shift = pressed;
             continue;
@@ -105,7 +105,7 @@ int poll_virtio_keyboard()
             continue;
         }
         const char value =
-            ok::platform::qemu_virt::map_linux_key_code(event.code, virtio_left_shift || virtio_right_shift);
+            ok::driver::qemu_virt::map_linux_key_code(event.code, virtio_left_shift || virtio_right_shift);
         if (value != 0)
         {
             return static_cast<unsigned char>(value);

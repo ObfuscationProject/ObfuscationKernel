@@ -3,7 +3,7 @@
 #include "ok/core/types.hpp"
 #include "font.hpp"
 
-namespace ok::platform::qemu_virt
+namespace ok::driver::qemu_virt
 {
 
 template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
@@ -25,11 +25,15 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
         cursor_column_ = 0;
         cursor_row_ = 0;
         pointer_drawn_ = false;
+        pointer_x_ = framebuffer_width / 2;
+        pointer_y_ = framebuffer_height / 2;
+        pointer_left_button_ = false;
         for (auto &pixel : pixels_)
         {
             pixel = background_color;
         }
         draw_mouse_status();
+        draw_pointer(false);
     }
 
     static void write_char(char value)
@@ -212,6 +216,7 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
         if (ready_)
         {
             draw_mouse_status();
+            draw_pointer(false);
         }
     }
 
@@ -864,4 +869,4 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
     alignas(16) static inline RamFbConfig ramfb_config_{};
 };
 
-} // namespace ok::platform::qemu_virt
+} // namespace ok::driver::qemu_virt

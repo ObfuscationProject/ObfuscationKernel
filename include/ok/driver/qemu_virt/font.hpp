@@ -2,7 +2,7 @@
 
 #include "ok/core/types.hpp"
 
-namespace ok::platform::qemu_virt
+namespace ok::driver::qemu_virt
 {
 
 class BitmapFontRenderer final
@@ -47,4 +47,4 @@ class BitmapFontRenderer final
     static constexpr u32 glyph_height = 7;
 };
 
-} // namespace ok::platform::qemu_virt
+} // namespace ok::driver::qemu_virt

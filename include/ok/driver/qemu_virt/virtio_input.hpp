@@ -2,7 +2,7 @@
 
 #include "ok/core/types.hpp"
 
-namespace ok::platform::qemu_virt
+namespace ok::driver::qemu_virt
 {
 
 struct VirtioInputEvent
@@ -390,4 +390,4 @@ class VirtioInputDevice final
     alignas(16) VirtioInputEvent events_[queue_size]{};
 };
 
-} // namespace ok::platform::qemu_virt
+} // namespace ok::driver::qemu_virt
