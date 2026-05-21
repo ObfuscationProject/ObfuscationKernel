@@ -49,10 +49,10 @@ The windowed task is also current-architecture only:
 xmake qemu-window-test
 ```
 
-It builds and runs the same `kernel.bin` in QEMU. The visible text comes from
-the kernel's own display path: x86/i386 use the virtio-gpu PCI path, while
-`aarch64` and `rv64` initialize QEMU ramfb through fw_cfg DMA and draw pixels
-directly into guest RAM.
+It builds and runs the same `kernel.bin` in QEMU. The visible output comes from
+the kernel's own ramfb display path on every bootable architecture: x86/i386 use
+fw_cfg I/O ports, while `aarch64` and `rv64` use fw_cfg MMIO, then all draw
+pixels directly into guest RAM.
 The script captures serial diagnostics and prints the test result only after
 the QEMU window is closed. Use the headless validation form in environments
 without a graphical display:

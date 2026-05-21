@@ -1,14 +1,17 @@
 #include "ok/core/types.hpp"
+#include "../qemu_virt/ramfb.hpp"
 
 namespace
 {
 
 constexpr ok::u16 com1 = 0x3f8;
 constexpr ok::u16 debug_exit_port = 0x00f4;
+constexpr ok::uptr fw_cfg_io_base = 0x510;
 constexpr ok::usize vga_columns = 80;
 constexpr ok::usize vga_rows = 25;
 constexpr ok::u16 keyboard_data_port = 0x60;
 constexpr ok::u16 keyboard_status_port = 0x64;
+using RamFb = ok::platform::qemu_virt::RamFbConsole<fw_cfg_io_base, true>;
 
 ok::usize vga_row = 0;
 ok::usize vga_column = 0;
@@ -123,6 +126,25 @@ void vga_write_char(char value)
     }
 }
 
+void vga_debug_marker()
+{
+    auto *buffer = vga_buffer();
+    constexpr ok::usize marker_width = 9;
+    constexpr ok::usize marker_height = 3;
+    constexpr ok::usize left = vga_columns - marker_width - 2;
+    constexpr ok::usize top = vga_rows - marker_height - 1;
+    constexpr ok::u8 colors[] = {0x1e, 0x2b, 0x3d, 0x4f, 0x5e, 0x6b, 0x9f, 0xb0, 0xe4};
+    for (ok::usize row = 0; row < marker_height; ++row)
+    {
+        for (ok::usize column = 0; column < marker_width; ++column)
+        {
+            const auto color = colors[(row + column) % (sizeof(colors) / sizeof(colors[0]))];
+            buffer[(top + row) * vga_columns + left + column] =
+                static_cast<ok::u16>((static_cast<ok::u16>(color) << 8) | 0xdbu);
+        }
+    }
+}
+
 char map_scancode(ok::u8 scancode)
 {
     constexpr char normal[] = {
@@ -168,6 +190,11 @@ extern "C" void ok_platform_console_write_char(char value)
 
 extern "C" void ok_platform_display_clear()
 {
+    if (RamFb::available())
+    {
+        RamFb::clear();
+        return;
+    }
     auto *buffer = vga_buffer();
     for (ok::usize i = 0; i < vga_columns * vga_rows; ++i)
     {
@@ -179,7 +206,22 @@ extern "C" void ok_platform_display_clear()
 
 extern "C" void ok_platform_display_write_char(char value)
 {
+    if (RamFb::available())
+    {
+        RamFb::write_char(value);
+        return;
+    }
     vga_write_char(value);
+}
+
+extern "C" void ok_platform_display_debug_marker()
+{
+    if (RamFb::available())
+    {
+        RamFb::draw_debug_marker();
+        return;
+    }
+    vga_debug_marker();
 }
 
 extern "C" void ok_platform_debug_exit(ok::u32 code)

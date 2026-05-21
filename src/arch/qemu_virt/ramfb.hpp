@@ -5,12 +5,22 @@
 namespace ok::platform::qemu_virt
 {
 
-template <uptr FwCfgBase> class RamFbConsole
+template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
 {
   public:
+    static bool available()
+    {
+        initialize();
+        return ready_;
+    }
+
     static void clear()
     {
         initialize();
+        if (!ready_)
+        {
+            return;
+        }
         cursor_column_ = 0;
         cursor_row_ = 0;
         for (auto &pixel : pixels_)
@@ -182,14 +192,16 @@ template <uptr FwCfgBase> class RamFbConsole
         return fw_cfg_read8() == 'Q' && fw_cfg_read8() == 'E' && fw_cfg_read8() == 'M' && fw_cfg_read8() == 'U';
     }
 
-    static void fw_cfg_select(u16 selector)
-    {
-        mmio16(FwCfgBase + 8) = bswap16(selector);
-    }
-
     static u8 fw_cfg_read8()
     {
-        return mmio8(FwCfgBase);
+        if constexpr (IoPort)
+        {
+            return port_inb(static_cast<u16>(FwCfgBase + 1));
+        }
+        else
+        {
+            return mmio8(FwCfgBase);
+        }
     }
 
     static u16 fw_cfg_read_be16()
@@ -262,7 +274,7 @@ template <uptr FwCfgBase> class RamFbConsole
         dma_access_.length = bswap32(length);
         dma_access_.address = bswap64(reinterpret_cast<uptr>(data));
         asm volatile("" ::: "memory");
-        mmio64(FwCfgBase + 16) = bswap64(reinterpret_cast<uptr>(&dma_access_));
+        write_dma_address(reinterpret_cast<uptr>(&dma_access_));
         for (usize attempt = 0; attempt < 1000000; ++attempt)
         {
             asm volatile("" ::: "memory");
@@ -287,20 +299,293 @@ template <uptr FwCfgBase> class RamFbConsole
         }
     }
 
+    static u8 glyph_row(char value, u32 row)
+    {
+        if (value >= 'a' && value <= 'z')
+        {
+            value = static_cast<char>(value - 'a' + 'A');
+        }
+        switch (value)
+        {
+        case 'A': {
+            constexpr u8 rows[] = {0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001};
+            return rows[row];
+        }
+        case 'B': {
+            constexpr u8 rows[] = {0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110};
+            return rows[row];
+        }
+        case 'C': {
+            constexpr u8 rows[] = {0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111};
+            return rows[row];
+        }
+        case 'D': {
+            constexpr u8 rows[] = {0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110};
+            return rows[row];
+        }
+        case 'E': {
+            constexpr u8 rows[] = {0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111};
+            return rows[row];
+        }
+        case 'F': {
+            constexpr u8 rows[] = {0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000};
+            return rows[row];
+        }
+        case 'G': {
+            constexpr u8 rows[] = {0b01111, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111};
+            return rows[row];
+        }
+        case 'H': {
+            constexpr u8 rows[] = {0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001};
+            return rows[row];
+        }
+        case 'I': {
+            constexpr u8 rows[] = {0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111};
+            return rows[row];
+        }
+        case 'J': {
+            constexpr u8 rows[] = {0b00111, 0b00010, 0b00010, 0b00010, 0b10010, 0b10010, 0b01100};
+            return rows[row];
+        }
+        case 'K': {
+            constexpr u8 rows[] = {0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001};
+            return rows[row];
+        }
+        case 'L': {
+            constexpr u8 rows[] = {0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111};
+            return rows[row];
+        }
+        case 'M': {
+            constexpr u8 rows[] = {0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001};
+            return rows[row];
+        }
+        case 'N': {
+            constexpr u8 rows[] = {0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001};
+            return rows[row];
+        }
+        case 'O': {
+            constexpr u8 rows[] = {0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110};
+            return rows[row];
+        }
+        case 'P': {
+            constexpr u8 rows[] = {0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000};
+            return rows[row];
+        }
+        case 'Q': {
+            constexpr u8 rows[] = {0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101};
+            return rows[row];
+        }
+        case 'R': {
+            constexpr u8 rows[] = {0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001};
+            return rows[row];
+        }
+        case 'S': {
+            constexpr u8 rows[] = {0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110};
+            return rows[row];
+        }
+        case 'T': {
+            constexpr u8 rows[] = {0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100};
+            return rows[row];
+        }
+        case 'U': {
+            constexpr u8 rows[] = {0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110};
+            return rows[row];
+        }
+        case 'V': {
+            constexpr u8 rows[] = {0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100};
+            return rows[row];
+        }
+        case 'W': {
+            constexpr u8 rows[] = {0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010};
+            return rows[row];
+        }
+        case 'X': {
+            constexpr u8 rows[] = {0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001};
+            return rows[row];
+        }
+        case 'Y': {
+            constexpr u8 rows[] = {0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100};
+            return rows[row];
+        }
+        case 'Z': {
+            constexpr u8 rows[] = {0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111};
+            return rows[row];
+        }
+        case '0': {
+            constexpr u8 rows[] = {0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110};
+            return rows[row];
+        }
+        case '1': {
+            constexpr u8 rows[] = {0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110};
+            return rows[row];
+        }
+        case '2': {
+            constexpr u8 rows[] = {0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111};
+            return rows[row];
+        }
+        case '3': {
+            constexpr u8 rows[] = {0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110};
+            return rows[row];
+        }
+        case '4': {
+            constexpr u8 rows[] = {0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010};
+            return rows[row];
+        }
+        case '5': {
+            constexpr u8 rows[] = {0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110};
+            return rows[row];
+        }
+        case '6': {
+            constexpr u8 rows[] = {0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110};
+            return rows[row];
+        }
+        case '7': {
+            constexpr u8 rows[] = {0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000};
+            return rows[row];
+        }
+        case '8': {
+            constexpr u8 rows[] = {0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110};
+            return rows[row];
+        }
+        case '9': {
+            constexpr u8 rows[] = {0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100};
+            return rows[row];
+        }
+        case '[': {
+            constexpr u8 rows[] = {0b11100, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11100};
+            return rows[row];
+        }
+        case ']': {
+            constexpr u8 rows[] = {0b00111, 0b00001, 0b00001, 0b00001, 0b00001, 0b00001, 0b00111};
+            return rows[row];
+        }
+        case '(':
+        case '<': {
+            constexpr u8 rows[] = {0b00010, 0b00100, 0b01000, 0b10000, 0b01000, 0b00100, 0b00010};
+            return rows[row];
+        }
+        case ')':
+        case '>': {
+            constexpr u8 rows[] = {0b01000, 0b00100, 0b00010, 0b00001, 0b00010, 0b00100, 0b01000};
+            return rows[row];
+        }
+        case '-': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000};
+            return rows[row];
+        }
+        case '_': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b11111};
+            return rows[row];
+        }
+        case '=': {
+            constexpr u8 rows[] = {0b00000, 0b11111, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000};
+            return rows[row];
+        }
+        case '+': {
+            constexpr u8 rows[] = {0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000};
+            return rows[row];
+        }
+        case '.': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b01100};
+            return rows[row];
+        }
+        case ':': {
+            constexpr u8 rows[] = {0b00000, 0b01100, 0b01100, 0b00000, 0b01100, 0b01100, 0b00000};
+            return rows[row];
+        }
+        case '/': {
+            constexpr u8 rows[] = {0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000};
+            return rows[row];
+        }
+        case '\\': {
+            constexpr u8 rows[] = {0b10000, 0b01000, 0b01000, 0b00100, 0b00010, 0b00010, 0b00001};
+            return rows[row];
+        }
+        case '|': {
+            constexpr u8 rows[] = {0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100};
+            return rows[row];
+        }
+        case ',': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b00100, 0b01000};
+            return rows[row];
+        }
+        case '\'':
+        case '`': {
+            constexpr u8 rows[] = {0b00100, 0b00100, 0b01000, 0b00000, 0b00000, 0b00000, 0b00000};
+            return rows[row];
+        }
+        case '"': {
+            constexpr u8 rows[] = {0b01010, 0b01010, 0b01010, 0b00000, 0b00000, 0b00000, 0b00000};
+            return rows[row];
+        }
+        case ' ':
+            return 0;
+        default: {
+            constexpr u8 rows[] = {0b11111, 0b10001, 0b00101, 0b00110, 0b00100, 0b00000, 0b00100};
+            return rows[row];
+        }
+        }
+    }
+
     static void draw_cell(u32 column, u32 row, char value, u32 foreground, u32 background)
     {
         const u32 origin_x = column * cell_width;
         const u32 origin_y = row * cell_height;
-        const auto code = static_cast<u8>(value);
         for (u32 y = 0; y < cell_height; ++y)
         {
+            const u32 glyph_y = (y * 7) / cell_height;
+            const u8 row_bits = glyph_row(value, glyph_y);
             for (u32 x = 0; x < cell_width; ++x)
             {
-                const bool edge = x == 0 || y == 0 || x + 1 == cell_width || y + 1 == cell_height;
-                const bool bit = ((code >> (((x >> 1) + (y >> 2)) & 7u)) & 1u) != 0;
-                put_pixel(origin_x + x, origin_y + y, (bit || (edge && value != ' ')) ? foreground : background);
+                const u32 glyph_x = (x * 5) / cell_width;
+                const bool bit = ((row_bits >> (4 - glyph_x)) & 1u) != 0;
+                put_pixel(origin_x + x, origin_y + y, bit ? foreground : background);
             }
         }
+    }
+
+    static void write_dma_address(uptr address)
+    {
+        if constexpr (IoPort)
+        {
+            const auto wide_address = static_cast<u64>(address);
+            port_outl(static_cast<u16>(FwCfgBase + 4),
+                      bswap32(static_cast<u32>((wide_address >> 32) & 0xffff'ffffull)));
+            port_outl(static_cast<u16>(FwCfgBase + 8), bswap32(static_cast<u32>(wide_address & 0xffff'ffffull)));
+        }
+        else
+        {
+            mmio64(FwCfgBase + 16) = bswap64(address);
+        }
+    }
+
+    static void fw_cfg_select(u16 selector)
+    {
+        if constexpr (IoPort)
+        {
+            port_outw(static_cast<u16>(FwCfgBase), selector);
+        }
+        else
+        {
+            mmio16(FwCfgBase + 8) = bswap16(selector);
+        }
+    }
+
+    static u8 port_inb(u16 port)
+    {
+        u8 value = 0;
+        asm volatile("inb %1, %0" : "=a"(value) : "Nd"(port) : "memory");
+        return value;
+    }
+
+    static void port_outw(u16 port, u16 value)
+    {
+        asm volatile("outw %0, %1" : : "a"(value), "Nd"(port) : "memory");
+    }
+
+    static void port_outl(u16 port, u32 value)
+    {
+        asm volatile("outl %0, %1" : : "a"(value), "Nd"(port) : "memory");
     }
 
     static void erase_cell(u32 column, u32 row)

@@ -132,12 +132,14 @@ def qemu_command(arch: str, kernel: Path, display: str, disk: Path) -> list[str]
         "-monitor",
         "none",
         "-no-reboot",
+        "-vga",
+        "none",
         "-display",
         display,
+        "-device",
+        "ramfb",
     ]
     command += virtio_disk_args(disk)
-    if arch in ("i386", "x86_64"):
-        command += ["-device", "virtio-gpu-pci"]
     return command
 
 def run_until_marker(command: list[str], timeout: float | None) -> subprocess.CompletedProcess[str]:
