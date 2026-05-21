@@ -94,6 +94,10 @@ def qemu_command(arch: str, kernel: Path, display: str, disk: Path) -> list[str]
             display,
             "-device",
             "ramfb",
+            "-device",
+            "virtio-keyboard-device",
+            "-device",
+            "virtio-mouse-device",
         ]
         command += virtio_disk_args(disk)
         return command
@@ -117,6 +121,10 @@ def qemu_command(arch: str, kernel: Path, display: str, disk: Path) -> list[str]
             display,
             "-device",
             "ramfb",
+            "-device",
+            "virtio-keyboard-device",
+            "-device",
+            "virtio-mouse-device",
         ]
         command += virtio_disk_args(disk)
         return command

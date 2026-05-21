@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ok/core/types.hpp"
+#include "font.hpp"
 
 namespace ok::platform::qemu_virt
 {
@@ -86,6 +87,19 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
         }
     }
 
+    static void move_pointer(i32 delta_x, i32 delta_y, bool left_button)
+    {
+        initialize();
+        if (!ready_)
+        {
+            return;
+        }
+        restore_pointer();
+        pointer_x_ = clamp_pointer(static_cast<i32>(pointer_x_) + delta_x, framebuffer_width - pointer_width);
+        pointer_y_ = clamp_pointer(static_cast<i32>(pointer_y_) + delta_y, framebuffer_height - pointer_height);
+        draw_pointer(left_button);
+    }
+
   private:
     struct DmaAccess
     {
@@ -114,6 +128,9 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
     static constexpr u32 text_rows = framebuffer_height / cell_height;
     static constexpr u32 background_color = 0xff061018u;
     static constexpr u32 foreground_color = 0xffd8f3ffu;
+    static constexpr u32 pointer_width = 11;
+    static constexpr u32 pointer_height = 15;
+    static constexpr usize pointer_pixels = static_cast<usize>(pointer_width) * pointer_height;
     static constexpr u16 fw_cfg_signature = 0x0000;
     static constexpr u16 fw_cfg_file_dir = 0x0019;
     static constexpr u32 fw_cfg_dma_error = 1u << 0;
@@ -299,12 +316,72 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
         }
     }
 
+    static u32 clamp_pointer(i32 value, u32 maximum)
+    {
+        if (value < 0)
+        {
+            return 0;
+        }
+        const auto converted = static_cast<u32>(value);
+        return converted > maximum ? maximum : converted;
+    }
+
+    static void restore_pointer()
+    {
+        if (!pointer_drawn_)
+        {
+            return;
+        }
+        for (u32 y = 0; y < pointer_height; ++y)
+        {
+            for (u32 x = 0; x < pointer_width; ++x)
+            {
+                put_pixel(pointer_x_ + x, pointer_y_ + y,
+                          pointer_saved_[static_cast<usize>(y) * pointer_width + x]);
+            }
+        }
+        pointer_drawn_ = false;
+    }
+
+    static void draw_pointer(bool left_button)
+    {
+        constexpr u16 shape[] = {
+            0b10000000000,
+            0b11000000000,
+            0b11100000000,
+            0b11110000000,
+            0b11111000000,
+            0b11111100000,
+            0b11111110000,
+            0b11111111000,
+            0b11111111100,
+            0b11111000000,
+            0b11011000000,
+            0b10011000000,
+            0b00001100000,
+            0b00001100000,
+            0b00000110000,
+        };
+        const u32 fill = left_button ? 0xfff4d35eu : 0xffffffffu;
+        for (u32 y = 0; y < pointer_height; ++y)
+        {
+            for (u32 x = 0; x < pointer_width; ++x)
+            {
+                const auto index = static_cast<usize>(y) * pointer_width + x;
+                pointer_saved_[index] = pixels_[static_cast<usize>(pointer_y_ + y) * framebuffer_width + pointer_x_ + x];
+                if (((shape[y] >> (pointer_width - 1 - x)) & 1u) != 0)
+                {
+                    const bool edge = x == 0 || y == 0 || ((shape[y] >> (pointer_width - x)) & 1u) == 0 ||
+                                      y + 1 == pointer_height || ((shape[y + 1] >> (pointer_width - 1 - x)) & 1u) == 0;
+                    put_pixel(pointer_x_ + x, pointer_y_ + y, edge ? 0xff000000u : fill);
+                }
+            }
+        }
+        pointer_drawn_ = true;
+    }
+
     static u8 glyph_row(char value, u32 row)
     {
-        if (value >= 'a' && value <= 'z')
-        {
-            value = static_cast<char>(value - 'a' + 'A');
-        }
         switch (value)
         {
         case 'A': {
@@ -409,6 +486,110 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
         }
         case 'Z': {
             constexpr u8 rows[] = {0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111};
+            return rows[row];
+        }
+        case 'a': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b01110, 0b00001, 0b01111, 0b10001, 0b01111};
+            return rows[row];
+        }
+        case 'b': {
+            constexpr u8 rows[] = {0b10000, 0b10000, 0b10110, 0b11001, 0b10001, 0b10001, 0b11110};
+            return rows[row];
+        }
+        case 'c': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b01111, 0b10000, 0b10000, 0b10000, 0b01111};
+            return rows[row];
+        }
+        case 'd': {
+            constexpr u8 rows[] = {0b00001, 0b00001, 0b01101, 0b10011, 0b10001, 0b10001, 0b01111};
+            return rows[row];
+        }
+        case 'e': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b01110, 0b10001, 0b11111, 0b10000, 0b01111};
+            return rows[row];
+        }
+        case 'f': {
+            constexpr u8 rows[] = {0b00110, 0b01000, 0b01000, 0b11110, 0b01000, 0b01000, 0b01000};
+            return rows[row];
+        }
+        case 'g': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b01111, 0b10001, 0b01111, 0b00001, 0b01110};
+            return rows[row];
+        }
+        case 'h': {
+            constexpr u8 rows[] = {0b10000, 0b10000, 0b10110, 0b11001, 0b10001, 0b10001, 0b10001};
+            return rows[row];
+        }
+        case 'i': {
+            constexpr u8 rows[] = {0b00100, 0b00000, 0b01100, 0b00100, 0b00100, 0b00100, 0b01110};
+            return rows[row];
+        }
+        case 'j': {
+            constexpr u8 rows[] = {0b00010, 0b00000, 0b00110, 0b00010, 0b00010, 0b10010, 0b01100};
+            return rows[row];
+        }
+        case 'k': {
+            constexpr u8 rows[] = {0b10000, 0b10000, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010};
+            return rows[row];
+        }
+        case 'l': {
+            constexpr u8 rows[] = {0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110};
+            return rows[row];
+        }
+        case 'm': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b11010, 0b10101, 0b10101, 0b10101, 0b10101};
+            return rows[row];
+        }
+        case 'n': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b10110, 0b11001, 0b10001, 0b10001, 0b10001};
+            return rows[row];
+        }
+        case 'o': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b01110, 0b10001, 0b10001, 0b10001, 0b01110};
+            return rows[row];
+        }
+        case 'p': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b11110, 0b10001, 0b11110, 0b10000, 0b10000};
+            return rows[row];
+        }
+        case 'q': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b01111, 0b10001, 0b01111, 0b00001, 0b00001};
+            return rows[row];
+        }
+        case 'r': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b10110, 0b11001, 0b10000, 0b10000, 0b10000};
+            return rows[row];
+        }
+        case 's': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b01111, 0b10000, 0b01110, 0b00001, 0b11110};
+            return rows[row];
+        }
+        case 't': {
+            constexpr u8 rows[] = {0b01000, 0b01000, 0b11110, 0b01000, 0b01000, 0b01001, 0b00110};
+            return rows[row];
+        }
+        case 'u': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b10001, 0b10001, 0b10001, 0b10011, 0b01101};
+            return rows[row];
+        }
+        case 'v': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100};
+            return rows[row];
+        }
+        case 'w': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010};
+            return rows[row];
+        }
+        case 'x': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001};
+            return rows[row];
+        }
+        case 'y': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b10001, 0b10001, 0b01111, 0b00001, 0b01110};
+            return rows[row];
+        }
+        case 'z': {
+            constexpr u8 rows[] = {0b00000, 0b00000, 0b11111, 0b00010, 0b00100, 0b01000, 0b11111};
             return rows[row];
         }
         case '0': {
@@ -531,17 +712,10 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
     {
         const u32 origin_x = column * cell_width;
         const u32 origin_y = row * cell_height;
-        for (u32 y = 0; y < cell_height; ++y)
-        {
-            const u32 glyph_y = (y * 7) / cell_height;
-            const u8 row_bits = glyph_row(value, glyph_y);
-            for (u32 x = 0; x < cell_width; ++x)
-            {
-                const u32 glyph_x = (x * 5) / cell_width;
-                const bool bit = ((row_bits >> (4 - glyph_x)) & 1u) != 0;
-                put_pixel(origin_x + x, origin_y + y, bit ? foreground : background);
-            }
-        }
+        BitmapFontRenderer::draw_cell(
+            value, origin_x, origin_y, cell_width, cell_height, foreground, background,
+            [](char ch, u32 glyph_y) { return glyph_row(ch, glyph_y); },
+            [](u32 x, u32 y, u32 color) { put_pixel(x, y, color); });
     }
 
     static void write_dma_address(uptr address)
@@ -618,6 +792,10 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
     static inline bool ready_{false};
     static inline u32 cursor_column_{0};
     static inline u32 cursor_row_{0};
+    static inline u32 pointer_x_{framebuffer_width / 2};
+    static inline u32 pointer_y_{framebuffer_height / 2};
+    static inline bool pointer_drawn_{false};
+    static inline u32 pointer_saved_[pointer_pixels]{};
     alignas(4096) static inline u32 pixels_[framebuffer_pixels]{};
     alignas(16) static inline volatile DmaAccess dma_access_{};
     alignas(16) static inline RamFbConfig ramfb_config_{};

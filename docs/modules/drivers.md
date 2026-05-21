@@ -62,3 +62,9 @@ serial console or VGA text surface. The current driver model still validates
 virtio-gpu enumeration through the internal PCI model; BAR mapping, virtqueues,
 EDID, scanout resource management, and true disk DMA are the next implementation
 steps.
+
+On `aarch64` and `rv64`, graphical keyboard and mouse input is delivered through
+QEMU virtio-mmio input devices. The platform code sets up the virtio event queue,
+maps Linux input key codes into shell characters, and moves a small framebuffer
+pointer for mouse-relative events. UART input remains as a fallback for headless
+serial use.

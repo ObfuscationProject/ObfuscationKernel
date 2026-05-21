@@ -67,6 +67,10 @@ then enters an interactive debug shell and echoes keyboard input through the
 kernel display path and serial console. Close the QEMU window when you want the
 script to print its final result.
 
+For non-x86 window sessions, QEMU attaches `virtio-keyboard-device` and
+`virtio-mouse-device`; the guest consumes them through virtio-mmio so keyboard
+input reaches the shell and mouse motion updates the framebuffer pointer.
+
 ## Pass Signal
 
 The debug kernel must print `OK_MODE debug`, `OK_DEBUG boot=complete`,
