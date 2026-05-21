@@ -12,7 +12,9 @@ OK_ARCH_SPECS = {
         boot_source = "src/arch/i386/boot.S",
         linker_script = "src/arch/i386/linker.ld",
         qemu_system = "qemu-system-i386",
-        platform_source = "src/arch/x86_common/platform.cpp"
+        platform_source = "src/arch/x86_common/platform.cpp",
+        capabilities = {"serial_console", "framebuffer", "keyboard_input", "mouse_input", "pci_bus", "virtio_block",
+                        "virtio_gpu", "usb_hid", "network_loopback"}
     },
     x86_64 = {
         define = "OK_ARCH_TARGET_X86_64",
@@ -23,7 +25,9 @@ OK_ARCH_SPECS = {
         linker_script = "src/arch/x86_64/linker.ld",
         qemu_system = "qemu-system-x86_64",
         platform_source = "src/arch/x86_common/platform.cpp",
-        freestanding_cxxflags = {"-mno-red-zone"}
+        freestanding_cxxflags = {"-mno-red-zone"},
+        capabilities = {"serial_console", "framebuffer", "keyboard_input", "mouse_input", "pci_bus", "virtio_block",
+                        "virtio_gpu", "usb_hid", "network_loopback"}
     },
     aarch64 = {
         define = "OK_ARCH_TARGET_AARCH64",
@@ -35,7 +39,9 @@ OK_ARCH_SPECS = {
         qemu_system = "qemu-system-aarch64",
         platform_source = "src/arch/aarch64/platform.cpp",
         image_format = "linux-image",
-        freestanding_cxxflags = {"-mno-outline-atomics", "-mgeneral-regs-only"}
+        freestanding_cxxflags = {"-mno-outline-atomics", "-mgeneral-regs-only"},
+        capabilities = {"serial_console", "framebuffer", "keyboard_input", "mouse_input", "pci_bus", "virtio_block",
+                        "ramfb", "usb_hid", "network_loopback"}
     },
     arm32 = {
         define = "OK_ARCH_TARGET_ARM32",
@@ -48,7 +54,8 @@ OK_ARCH_SPECS = {
         platform_source = "src/arch/arm32/platform.cpp",
         image_format = "elf",
         freestanding_cxxflags = {"-march=armv7-a", "-marm"},
-        freestanding_asflags = {"-march=armv7-a", "-marm"}
+        freestanding_asflags = {"-march=armv7-a", "-marm"},
+        capabilities = {"serial_console", "framebuffer", "virtio_block", "ramfb", "network_loopback"}
     },
     rv64 = {
         define = "OK_ARCH_TARGET_RV64",
@@ -61,7 +68,9 @@ OK_ARCH_SPECS = {
         platform_source = "src/arch/rv64/platform.cpp",
         image_format = "elf",
         freestanding_cxxflags = {"-mcmodel=medany"},
-        freestanding_asflags = {"-mcmodel=medany"}
+        freestanding_asflags = {"-mcmodel=medany"},
+        capabilities = {"serial_console", "framebuffer", "keyboard_input", "mouse_input", "pci_bus", "virtio_block",
+                        "ramfb", "usb_hid", "network_loopback"}
     },
     rv32 = {
         define = "OK_ARCH_TARGET_RV32",
@@ -74,33 +83,38 @@ OK_ARCH_SPECS = {
         platform_source = "src/arch/rv32/platform.cpp",
         image_format = "elf",
         freestanding_cxxflags = {"-mcmodel=medany"},
-        freestanding_asflags = {"-mcmodel=medany"}
+        freestanding_asflags = {"-mcmodel=medany"},
+        capabilities = {"serial_console", "framebuffer", "virtio_block", "ramfb", "network_loopback"}
     },
     loongarch64 = {
         define = "OK_ARCH_TARGET_LOONGARCH64",
         source = "loongarch64",
         toolchain = "ok-loongarch64-elf",
-        triple = "loongarch64-elf"
+        triple = "loongarch64-elf",
+        capabilities = {"serial_console", "network_loopback"}
     },
     mips = {
         define = "OK_ARCH_TARGET_MIPS",
         source = "mips",
         toolchain = "ok-mips-elf",
         triple = "mips-elf",
-        freestanding_cxxflags = {"-march=mips32r2"}
+        freestanding_cxxflags = {"-march=mips32r2"},
+        capabilities = {"serial_console", "network_loopback"}
     },
     mips64 = {
         define = "OK_ARCH_TARGET_MIPS64",
         source = "mips64",
         toolchain = "ok-mips64-elf",
         triple = "mips64-elf",
-        freestanding_cxxflags = {"-march=mips64r2"}
+        freestanding_cxxflags = {"-march=mips64r2"},
+        capabilities = {"serial_console", "network_loopback"}
     },
     ppc = {
         define = "OK_ARCH_TARGET_PPC",
         source = "ppc",
         toolchain = "ok-ppc-elf",
-        triple = "powerpc-eabi"
+        triple = "powerpc-eabi",
+        capabilities = {"serial_console", "network_loopback"}
     },
 }
 
@@ -138,6 +152,11 @@ end
 
 function ok_arch_spec(arch)
     return OK_ARCH_SPECS[ok_normalize_arch(arch)]
+end
+
+function ok_arch_capabilities(arch)
+    local spec = ok_arch_spec(arch)
+    return spec and spec.capabilities or {}
 end
 
 function ok_require_arch(arch)

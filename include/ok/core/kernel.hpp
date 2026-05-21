@@ -61,6 +61,29 @@ struct KernelTestReport
     bool net{false};
     bool shell{false};
     bool modes{false};
+    bool modules{false};
+    bool vm{false};
+    bool proc{false};
+    bool elf{false};
+    bool userland{false};
+    bool vfs_unix{false};
+    bool devfs{false};
+    bool pipe{false};
+    bool tty{false};
+    bool linux_abi{false};
+    bool linux_syscalls{false};
+    bool driver_abi{false};
+    bool linux_driver_shim{false};
+    bool module_load{false};
+    bool netdev{false};
+    bool sockets{false};
+    bool block{false};
+    bool ext4_readonly{false};
+    bool smp_roadmap{false};
+    bool irq_roadmap{false};
+    bool preempt{false};
+    usize module_count{0};
+    usize module_failed_count{0};
 };
 
 class Kernel final

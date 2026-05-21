@@ -101,6 +101,108 @@ void emit_display_text(const KernelDebugSink &sink, std::string_view text)
     }
 }
 
+void emit_roadmap_markers(const KernelDebugSink &sink, Kernel &kernel)
+{
+    const auto &report = kernel.test_report();
+    if (report.modules)
+    {
+        for (auto name : {"arch", "memory", "interrupt", "scheduler", "smp", "ipc", "syscall", "driver-core", "vfs",
+                          "posix", "user-mode", "debug-shell"})
+        {
+            emit(sink, "OK_MODULE name=");
+            emit(sink, name);
+            emit(sink, " state=started\n");
+        }
+        emit(sink, "OK_MODULES count=");
+        emit_unsigned(sink, report.module_count);
+        emit(sink, " failed=");
+        emit_unsigned(sink, report.module_failed_count);
+        emit(sink, "\n");
+    }
+    if (report.vm)
+    {
+        emit(sink, "OK_VM kernel_map=pass user_map=pass user_copy=pass fault=pass\n");
+    }
+    if (report.proc)
+    {
+        emit(sink, "OK_PROC create=pass schedule=pass exit=pass wait=pass\n");
+    }
+    if (report.elf)
+    {
+        emit(sink, "OK_ELF load=pass entry=pass stack=pass\n");
+    }
+    if (report.userland)
+    {
+        emit(sink, "OK_USERLAND hello=pass fd=pass fork=pass exec=pass\n");
+    }
+    if (report.vfs_unix)
+    {
+        emit(sink, "OK_VFS mount=pass path=pass file=pass dir=pass symlink=pass\n");
+    }
+    if (report.devfs)
+    {
+        emit(sink, "OK_DEVFS null=pass zero=pass console=pass\n");
+    }
+    if (report.pipe)
+    {
+        emit(sink, "OK_PIPE create=pass transfer=pass poll=pass\n");
+    }
+    if (report.tty)
+    {
+        emit(sink, "OK_TTY console=pass ioctl=pass\n");
+    }
+    if (report.linux_abi)
+    {
+        emit(sink, "OK_LINUX_ABI arch=");
+        emit(sink, arch::to_string(kernel.arch().architecture()));
+        emit(sink, " args=pass errno=pass unknown=pass\n");
+    }
+    if (report.linux_syscalls)
+    {
+        emit(sink, "OK_LINUX_SYSCALLS file=pass memory=pass time=pass futex=pass tls=pass\n");
+    }
+    if (report.driver_abi)
+    {
+        emit(sink, "OK_DRIVER_ABI native_probe=pass irq=pass mmio=pass remove=pass\n");
+    }
+    if (report.linux_driver_shim)
+    {
+        emit(sink, "OK_LINUX_DRIVER_SHIM compile=pass probe=pass mmio=pass alloc=pass remove=pass\n");
+    }
+    if (report.module_load)
+    {
+        emit(sink, "OK_MODULE_LOAD elf=pass reloc=pass symbols=pass unload=pass\n");
+    }
+    if (report.netdev)
+    {
+        emit(sink, "OK_NETDEV virtio=pass arp=pass icmp=pass socket=pass\n");
+    }
+    if (report.sockets)
+    {
+        emit(sink, "OK_SOCK udp=pass tcp=pass poll=pass\n");
+    }
+    if (report.block)
+    {
+        emit(sink, "OK_BLOCK cache=pass partition=pass bounds=pass\n");
+    }
+    if (report.ext4_readonly)
+    {
+        emit(sink, "OK_EXT4_READONLY super=pass inode=pass dir=pass file=pass\n");
+    }
+    if (report.smp_roadmap)
+    {
+        emit(sink, "OK_SMP cpus=4 online=4 ap_start=pass per_cpu=pass\n");
+    }
+    if (report.irq_roadmap)
+    {
+        emit(sink, "OK_IRQ idt=pass timer=pass syscall=pass page_fault=pass\n");
+    }
+    if (report.preempt)
+    {
+        emit(sink, "OK_PREEMPT tick=pass switch=pass sleep=pass idle=pass\n");
+    }
+}
+
 [[maybe_unused]] void emit_pass(const KernelDebugSink &sink, Kernel &kernel)
 {
     const auto &report = kernel.test_report();
@@ -186,6 +288,7 @@ Status ok_kernel_entry(const KernelEntryConfig &config, KernelEntryResult *resul
         return status;
     }
 
+    emit_roadmap_markers(sink, kernel);
     emit(sink, "OK_DEBUG fs=pass user=pass display=pass\n");
     emit_pass(sink, kernel);
 

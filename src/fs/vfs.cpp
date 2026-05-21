@@ -82,7 +82,8 @@ Metadata RamNode::metadata() const
 
 Result<FileBuffer> RamNode::read(usize offset, usize count) const
 {
-    if (metadata_.type != NodeType::regular && metadata_.type != NodeType::device)
+    if (metadata_.type != NodeType::regular && metadata_.type != NodeType::device &&
+        metadata_.type != NodeType::symlink)
     {
         return Status::invalid_argument("node is not readable");
     }
@@ -107,7 +108,8 @@ Result<FileBuffer> RamNode::read(usize offset, usize count) const
 
 Status RamNode::write(usize offset, std::span<const std::byte> data)
 {
-    if (metadata_.type != NodeType::regular && metadata_.type != NodeType::device)
+    if (metadata_.type != NodeType::regular && metadata_.type != NodeType::device &&
+        metadata_.type != NodeType::symlink)
     {
         return Status::invalid_argument("node is not writable");
     }

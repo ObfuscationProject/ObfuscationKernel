@@ -26,6 +26,27 @@ QEMU_SYSTEM_BY_ARCH = {
 QEMU_DEBUG_EXIT_SUCCESS = 33
 VIRTUAL_DISK_SIZE = 16 * 1024 * 1024
 
+CAPABILITIES_BY_ARCH = {
+    "i386": (
+        "serial_console", "framebuffer", "keyboard_input", "mouse_input", "pci_bus",
+        "virtio_block", "virtio_gpu", "usb_hid", "network_loopback",
+    ),
+    "x86_64": (
+        "serial_console", "framebuffer", "keyboard_input", "mouse_input", "pci_bus",
+        "virtio_block", "virtio_gpu", "usb_hid", "network_loopback",
+    ),
+    "aarch64": (
+        "serial_console", "framebuffer", "keyboard_input", "mouse_input", "pci_bus",
+        "virtio_block", "ramfb", "usb_hid", "network_loopback",
+    ),
+    "arm32": ("serial_console", "framebuffer", "virtio_block", "ramfb", "network_loopback"),
+    "rv64": (
+        "serial_console", "framebuffer", "keyboard_input", "mouse_input", "pci_bus",
+        "virtio_block", "ramfb", "usb_hid", "network_loopback",
+    ),
+    "rv32": ("serial_console", "framebuffer", "virtio_block", "ramfb", "network_loopback"),
+}
+
 
 def normalize_arch(arch: str) -> str:
     aliases = {
@@ -242,6 +263,54 @@ def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: 
     return 0
 
 
+def write_summary(kernel: Path, arch: str, output: str, qemu_returncode: int, validation_code: int) -> None:
+    summary = kernel.parent / "qemu-test-summary.txt"
+    lines = output.splitlines()
+    pass_lines = [line for line in lines if line.startswith("OK_TEST_PASS ")]
+    fields = parse_fields(pass_lines[-1]) if pass_lines else {}
+    roadmap_markers = [
+        "OK_MODULES",
+        "OK_VM",
+        "OK_PROC",
+        "OK_ELF",
+        "OK_USERLAND",
+        "OK_VFS",
+        "OK_DEVFS",
+        "OK_PIPE",
+        "OK_TTY",
+        "OK_LINUX_ABI",
+        "OK_LINUX_SYSCALLS",
+        "OK_DRIVER_ABI",
+        "OK_LINUX_DRIVER_SHIM",
+        "OK_MODULE_LOAD",
+        "OK_NETDEV",
+        "OK_SOCK",
+        "OK_BLOCK",
+        "OK_EXT4_READONLY",
+        "OK_SMP",
+        "OK_IRQ",
+        "OK_PREEMPT",
+    ]
+    marker_status = {
+        marker: any(line.startswith(marker + " ") for line in lines)
+        for marker in roadmap_markers
+    }
+    with summary.open("w", encoding="utf-8") as handle:
+        handle.write(f"arch={arch}\n")
+        handle.write(f"kernel={kernel}\n")
+        handle.write(f"qemu_returncode={qemu_returncode}\n")
+        handle.write(f"validation_code={validation_code}\n")
+        handle.write(f"capabilities={','.join(CAPABILITIES_BY_ARCH.get(arch, ()))}\n")
+        handle.write(f"ok_mode={'OK_MODE debug' in lines}\n")
+        handle.write(f"boot_complete={any(line.startswith('OK_DEBUG boot=complete') for line in lines)}\n")
+        handle.write(f"ok_test_pass={bool(pass_lines)}\n")
+        if fields:
+            for key in sorted(fields):
+                handle.write(f"field.{key}={fields[key]}\n")
+        for marker, present in marker_status.items():
+            handle.write(f"marker.{marker}={'present' if present else 'missing'}\n")
+
+
 def parse_fields(line: str) -> dict[str, str]:
     fields: dict[str, str] = {}
     for token in line.strip().split()[1:]:
@@ -272,7 +341,9 @@ def main() -> int:
         print(result.stdout, end="")
     if result.stderr:
         print(result.stderr, end="", file=sys.stderr)
-    return validate_output(arch, result.stdout, result.returncode, use_debug_exit)
+    validation_code = validate_output(arch, result.stdout, result.returncode, use_debug_exit)
+    write_summary(kernel, arch, result.stdout, result.returncode, validation_code)
+    return validation_code
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ concept ByteLike = std::same_as<std::remove_cv_t<T>, std::byte> || std::same_as<
                    std::same_as<std::remove_cv_t<T>, char>;
 
 template <typename T>
-concept KernelService = requires(T service) {
+concept KernelServiceConcept = requires(T service) {
     { service.name() } -> std::convertible_to<std::string_view>;
     { service.initialize() } -> std::same_as<Status>;
 };
