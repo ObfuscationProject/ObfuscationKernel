@@ -61,6 +61,8 @@ class FrameAllocator final
     uptr base_{0};
     usize page_size_{4096};
     usize frame_count_{0};
+    usize used_count_{0};
+    usize next_free_hint_{0};
     std::array<bool, max_physical_frames> frame_used_{};
 };
 

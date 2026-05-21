@@ -50,6 +50,8 @@ Status FrameAllocator::initialize(std::span<const MemoryRegion> regions, usize p
         return Status::overflow("physical frame table capacity exceeded");
     }
     frame_count_ = frame_count;
+    used_count_ = frame_count_;
+    next_free_hint_ = 0;
     for (usize i = 0; i < frame_count_; ++i)
     {
         frame_used_[i] = true;
@@ -68,7 +70,15 @@ Status FrameAllocator::initialize(std::span<const MemoryRegion> regions, usize p
             const usize index = (address - base_) / page_size_;
             if (index < frame_count_)
             {
-                frame_used_[index] = false;
+                if (frame_used_[index])
+                {
+                    frame_used_[index] = false;
+                    --used_count_;
+                    if (index < next_free_hint_)
+                    {
+                        next_free_hint_ = index;
+                    }
+                }
             }
         }
     }
@@ -78,11 +88,19 @@ Status FrameAllocator::initialize(std::span<const MemoryRegion> regions, usize p
 
 Result<PhysicalFrame> FrameAllocator::allocate()
 {
-    for (usize index = 0; index < frame_count_; ++index)
+    if (used_count_ >= frame_count_)
     {
+        return Status::no_memory("physical frame allocator exhausted");
+    }
+
+    for (usize offset = 0; offset < frame_count_; ++offset)
+    {
+        const usize index = (next_free_hint_ + offset) % frame_count_;
         if (!frame_used_[index])
         {
             frame_used_[index] = true;
+            ++used_count_;
+            next_free_hint_ = (index + 1) % frame_count_;
             return PhysicalFrame{.address = base_ + index * page_size_, .index = index};
         }
     }
@@ -100,20 +118,17 @@ Status FrameAllocator::release(PhysicalFrame frame)
         return Status::invalid_argument("physical frame already free");
     }
     frame_used_[frame.index] = false;
+    --used_count_;
+    if (frame.index < next_free_hint_)
+    {
+        next_free_hint_ = frame.index;
+    }
     return Status::success();
 }
 
 usize FrameAllocator::free_frames() const
 {
-    usize count = 0;
-    for (usize i = 0; i < frame_count_; ++i)
-    {
-        if (!frame_used_[i])
-        {
-            ++count;
-        }
-    }
-    return count;
+    return frame_count_ - used_count_;
 }
 
 Status LinearAddressSpace::map(uptr virtual_address, PhysicalFrame frame, usize flags)

@@ -29,6 +29,17 @@ Pass `-a` only for a temporary one-off test of another architecture:
 xmake qemu-test -a i386
 ```
 
+Use the matrix tasks when validating architecture coverage from one checkout:
+
+```sh
+xmake profile-matrix
+xmake qemu-matrix
+```
+
+`profile-matrix` compiles the freestanding `okernel` static profile for every
+supported architecture. `qemu-matrix` only runs architectures with boot image
+support.
+
 The current bootable QEMU system test targets are `i386`, `x86_64`, `aarch64`,
 and `rv64`. Other architecture profiles can build `okernel` and intentionally
 fail `qemu-test` until that architecture has a complete early platform contract

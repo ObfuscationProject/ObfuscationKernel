@@ -117,6 +117,90 @@ task("toolchain-check")
     end)
 task_end()
 
+task("profile-matrix")
+    set_menu {
+        usage = "xmake profile-matrix [-a ARCH|all] [-m MODE]",
+        description = "Compile the freestanding okernel profile for one or every supported architecture",
+        options = {
+            {"a", "profile", "kv", "all", "Architecture to compile, or all"},
+            {"m", "check-mode", "kv", nil, "Build mode used for profile compilation"}
+        }
+    }
+    on_run(function ()
+        import("core.base.option")
+        import("core.project.config")
+        config.load()
+
+        local current_arch = task_normalize_arch(config.get("arch") or "x86_64")
+        local current_mode = config.get("mode") or "release"
+        local mode = option.get("check-mode") or current_mode
+        local requested = option.get("profile") or "all"
+        local arches = {}
+        if requested == "all" then
+            arches = task_arches
+        else
+            table.insert(arches, task_normalize_arch(requested))
+        end
+
+        local failed = {}
+        for _, arch in ipairs(arches) do
+            task_require_arch(arch)
+            print(string.format("[profile] building %s (%s)", arch, mode))
+            local config_code = os.execv("xmake", {"f", "-c", "-m", mode, "-a", arch}, {try = true})
+            local build_code = config_code == 0 and os.execv("xmake", {"-y", "-b", "okernel"}, {try = true}) or config_code
+            if build_code ~= 0 then
+                table.insert(failed, arch)
+            end
+        end
+
+        os.execv("xmake", {"f", "-c", "-m", current_mode, "-a", current_arch})
+        if #failed > 0 then
+            raise("profile build failed for: %s", table.concat(failed, ", "))
+        end
+    end)
+task_end()
+
+task("qemu-matrix")
+    set_menu {
+        usage = "xmake qemu-matrix [-m MODE]",
+        description = "Build and run QEMU tests for every architecture with boot image support",
+        options = {
+            {"m", "check-mode", "kv", nil, "Build mode used for QEMU tests"}
+        }
+    }
+    on_run(function ()
+        import("core.base.option")
+        import("core.project.config")
+        config.load()
+
+        local current_arch = task_normalize_arch(config.get("arch") or "x86_64")
+        local current_mode = config.get("mode") or "release"
+        local mode = option.get("check-mode") or "debug"
+        local failed = {}
+
+        for _, arch in ipairs(task_arches) do
+            local _, spec = task_require_arch(arch)
+            if spec.bootable then
+                print(string.format("[qemu] testing %s (%s)", arch, mode))
+                local config_code = os.execv("xmake", {"f", "-c", "-m", mode, "-a", arch}, {try = true})
+                local build_code = config_code == 0 and os.execv("xmake", {"-y", "-b", "okernel_image"}, {try = true}) or config_code
+                local test_code = 0
+                if build_code == 0 then
+                    test_code = os.execv("xmake", {"run", "okernel_image"}, {try = true})
+                end
+                if build_code ~= 0 or test_code ~= 0 then
+                    table.insert(failed, arch)
+                end
+            end
+        end
+
+        os.execv("xmake", {"f", "-c", "-m", current_mode, "-a", current_arch})
+        if #failed > 0 then
+            raise("QEMU test failed for: %s", table.concat(failed, ", "))
+        end
+    end)
+task_end()
+
 task("qemu-test")
     set_menu {
         usage = "xmake qemu-test [-a ARCH]",

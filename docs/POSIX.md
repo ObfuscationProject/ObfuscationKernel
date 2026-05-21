@@ -4,8 +4,9 @@ The syscall namespace uses POSIX/Linux-compatible numbers for common calls such
 as `read`, `write`, `open`, `close`, `getpid`, `fork`, `execve`, and `exit`.
 
 The current kernel exposes a bounded POSIX service over the RAM VFS. It is not a
-complete POSIX implementation yet, but it provides enough real file-descriptor
-behavior for kernel debug tests and early user-mode ABI work.
+complete POSIX implementation yet, but it provides enough real file-descriptor,
+time, identity, and memory-mapping behavior for kernel debug tests, early
+user-mode ABI work, and glibc startup probes.
 
 ## Implemented Calls
 
@@ -13,20 +14,70 @@ behavior for kernel debug tests and early user-mode ABI work.
 - `read`
 - `write`
 - `open`
+- `openat`
+- `creat`
 - `close`
+- `close_range`
+- `dup`, `dup2`, `dup3`
 - `stat`
+- `lstat`
+- `fstat`
+- `newfstatat`
+- `lseek`
+- `pread64`
+- `pwrite64`
+- `readv`
+- `writev`
 - `mkdir`
+- `mkdirat`
 - `unlink`
+- `unlinkat`
 - `chdir`
+- `fchdir`
 - `getcwd`
+- `access`
+- `faccessat`
+- `faccessat2`
+- `fcntl`
+- `getdents64`
 - `uname`
 - `clock_gettime`
+- `clock_getres`
+- `nanosleep`
+- `clock_nanosleep`
+- `gettimeofday`
+- `time`
+- `getpid`
+- `getppid`
+- `gettid`
+- `getuid`, `geteuid`, `getgid`, `getegid`
+- `getrlimit`
+- `prlimit64`
+- `sysinfo`
+- `brk`
+- `mmap`
+- `mprotect`
+- `munmap`
+- `arch_prctl`
+- `futex`
+- `getrandom`
+- `set_tid_address`
+- `set_robust_list`
+- `rseq`
+- `rt_sigaction`
+- `rt_sigprocmask`
+- `sched_yield`
+- `exit`
+- `exit_group`
+- `umask`
 - `ok_debug`
 
 `stdin`, `stdout`, and `stderr` are reserved as descriptors `0`, `1`, and `2`.
-File descriptors are fixed-capacity kernel objects, not hosted runtime handles.
-Path operations currently resolve absolute paths and simple working-directory
-relative paths against the RAM VFS.
+File descriptors and memory mappings are fixed-capacity kernel objects, not
+hosted runtime handles. Path operations resolve absolute paths, working-directory
+relative paths, and `openat`-style directory-relative paths against the RAM VFS.
+Process, signal, futex, and rseq calls currently use single-process fallback
+semantics unless a richer subsystem exists behind them.
 
 ## Compatibility Goals
 

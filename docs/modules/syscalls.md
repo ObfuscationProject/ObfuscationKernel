@@ -9,21 +9,21 @@ must satisfy `SyscallCallable`.
 - `fast_path`: architecture fast syscall instruction path.
 - `vdso_assisted`: user-mapped helper page path.
 
-Implemented baseline syscalls:
+Implemented baseline syscall groups:
 
-- `getpid`
-- `read`
-- `write`
-- `open`
-- `close`
-- `stat`
-- `mkdir`
-- `unlink`
-- `chdir`
-- `getcwd`
-- `uname`
-- `clock_gettime`
-- `ok_debug`
+- FD I/O: `read`, `write`, `pread64`, `pwrite64`, `readv`, `writev`, `close`,
+  `close_range`, `dup`, `dup2`, `dup3`, `fcntl`, `ioctl`.
+- Paths and metadata: `open`, `openat`, `creat`, `stat`, `lstat`, `fstat`,
+  `newfstatat`, `mkdir`, `mkdirat`, `unlink`, `unlinkat`, `chdir`, `fchdir`,
+  `getcwd`, `access`, `faccessat`, `faccessat2`, `getdents64`.
+- Time and identity: `getpid`, `getppid`, `gettid`, uid/gid queries,
+  `clock_gettime`, `clock_getres`, `nanosleep`, `clock_nanosleep`,
+  `gettimeofday`, `time`, `uname`, `sysinfo`.
+- glibc startup support: `brk`, `mmap`, `mprotect`, `munmap`, `arch_prctl`,
+  `futex`, `getrandom`, `getrlimit`, `prlimit64`, `set_tid_address`,
+  `set_robust_list`, `rseq`, `rt_sigaction`, `rt_sigprocmask`, `sched_yield`,
+  `exit`, `exit_group`, `umask`.
+- Kernel debug: `ok_debug`.
 
 The number table reserves common POSIX/Linux-compatible syscall IDs to make the
 future user ABI predictable. File-oriented syscalls currently route into
