@@ -64,12 +64,15 @@ xmake qemu-window-test --no-launch
 In graphical window mode the debug kernel does not attach the debug-exit device.
 After `OK_TEST_PASS`, the kernel draws a colored pixel marker in the framebuffer,
 then enters an interactive debug shell and echoes keyboard input through the
-kernel display path and serial console. Close the QEMU window when you want the
-script to print its final result.
+kernel display path and serial console. The framebuffer console uses a 960x540
+pixel mode with spaced bitmap glyph cells and keeps mouse `x`, `y`, and left
+button state on one fixed bottom-row line. Close the QEMU window when you want
+the script to print its final result.
 
 For non-x86 window sessions, QEMU attaches `virtio-keyboard-device` and
-`virtio-mouse-device`; the guest consumes them through virtio-mmio so keyboard
-input reaches the shell and mouse motion updates the framebuffer pointer.
+`virtio-mouse-device`; the guest consumes their legacy virtio-mmio event queues
+so keyboard input reaches the shell and mouse motion updates the framebuffer
+pointer.
 
 ## Pass Signal
 

@@ -24,10 +24,12 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
         }
         cursor_column_ = 0;
         cursor_row_ = 0;
+        pointer_drawn_ = false;
         for (auto &pixel : pixels_)
         {
             pixel = background_color;
         }
+        draw_mouse_status();
     }
 
     static void write_char(char value)
@@ -74,7 +76,7 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
         constexpr u32 marker_width = 72;
         constexpr u32 marker_height = 24;
         const u32 left = framebuffer_width - marker_width - 12;
-        const u32 top = framebuffer_height - marker_height - 12;
+        const u32 top = framebuffer_height - cell_height - marker_height - 12;
         for (u32 y = 0; y < marker_height; ++y)
         {
             for (u32 x = 0; x < marker_width; ++x)
@@ -97,6 +99,8 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
         restore_pointer();
         pointer_x_ = clamp_pointer(static_cast<i32>(pointer_x_) + delta_x, framebuffer_width - pointer_width);
         pointer_y_ = clamp_pointer(static_cast<i32>(pointer_y_) + delta_y, framebuffer_height - pointer_height);
+        pointer_left_button_ = left_button;
+        draw_mouse_status();
         draw_pointer(left_button);
     }
 
@@ -118,16 +122,20 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
         u32 stride;
     };
 
-    static constexpr u32 framebuffer_width = 640;
-    static constexpr u32 framebuffer_height = 400;
+    static constexpr u32 framebuffer_width = 960;
+    static constexpr u32 framebuffer_height = 540;
     static constexpr u32 framebuffer_stride = framebuffer_width * sizeof(u32);
     static constexpr usize framebuffer_pixels = static_cast<usize>(framebuffer_width) * framebuffer_height;
-    static constexpr u32 cell_width = 8;
-    static constexpr u32 cell_height = 16;
+    static constexpr u32 cell_width = 10;
+    static constexpr u32 cell_height = 18;
     static constexpr u32 text_columns = framebuffer_width / cell_width;
-    static constexpr u32 text_rows = framebuffer_height / cell_height;
+    static constexpr u32 text_rows = framebuffer_height / cell_height - 1;
+    static constexpr u32 mouse_status_row = text_rows;
     static constexpr u32 background_color = 0xff061018u;
     static constexpr u32 foreground_color = 0xffd8f3ffu;
+    static constexpr u32 mouse_status_background = 0xff102030u;
+    static constexpr u32 mouse_status_foreground = 0xffbfe7ffu;
+    static constexpr u32 mouse_status_pressed_foreground = 0xfff4d35eu;
     static constexpr u32 pointer_width = 11;
     static constexpr u32 pointer_height = 15;
     static constexpr usize pointer_pixels = static_cast<usize>(pointer_width) * pointer_height;
@@ -201,6 +209,10 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
             .stride = bswap32(framebuffer_stride),
         };
         ready_ = dma_write(ramfb_selector, &ramfb_config_, ramfb_config_size);
+        if (ready_)
+        {
+            draw_mouse_status();
+        }
     }
 
     static bool fw_cfg_present()
@@ -718,6 +730,56 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
             [](u32 x, u32 y, u32 color) { put_pixel(x, y, color); });
     }
 
+    static usize append_literal(char *line, usize position, usize capacity, const char *text)
+    {
+        for (usize i = 0; text[i] != '\0' && position < capacity; ++i)
+        {
+            line[position++] = text[i];
+        }
+        return position;
+    }
+
+    static usize append_unsigned(char *line, usize position, usize capacity, u32 value)
+    {
+        char reversed[10]{};
+        usize digits = 0;
+        do
+        {
+            reversed[digits++] = static_cast<char>('0' + value % 10);
+            value /= 10;
+        } while (value != 0 && digits < sizeof(reversed));
+        while (digits > 0 && position < capacity)
+        {
+            line[position++] = reversed[--digits];
+        }
+        return position;
+    }
+
+    static void draw_mouse_status()
+    {
+        char line[text_columns + 1]{};
+        usize position = 0;
+        position = append_literal(line, position, text_columns, "mouse x=");
+        position = append_unsigned(line, position, text_columns, pointer_x_);
+        position = append_literal(line, position, text_columns, " y=");
+        position = append_unsigned(line, position, text_columns, pointer_y_);
+        position = append_literal(line, position, text_columns, " left=");
+        if (position < text_columns)
+        {
+            line[position++] = pointer_left_button_ ? '1' : '0';
+        }
+        while (position < text_columns)
+        {
+            line[position++] = ' ';
+        }
+
+        const u32 foreground = pointer_left_button_ ? mouse_status_pressed_foreground : mouse_status_foreground;
+        for (u32 column = 0; column < text_columns; ++column)
+        {
+            draw_cell(column, mouse_status_row, line[column], foreground, mouse_status_background);
+        }
+    }
+
     static void write_dma_address(uptr address)
     {
         if constexpr (IoPort)
@@ -794,6 +856,7 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
     static inline u32 cursor_row_{0};
     static inline u32 pointer_x_{framebuffer_width / 2};
     static inline u32 pointer_y_{framebuffer_height / 2};
+    static inline bool pointer_left_button_{false};
     static inline bool pointer_drawn_{false};
     static inline u32 pointer_saved_[pointer_pixels]{};
     alignas(4096) static inline u32 pixels_[framebuffer_pixels]{};

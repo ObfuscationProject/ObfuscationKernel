@@ -40,7 +40,8 @@ void uart_write_char(char value)
 
 void poll_virtio_mouse()
 {
-    virtio_mouse.initialize(virtio_input_bases, sizeof(virtio_input_bases) / sizeof(virtio_input_bases[0]), 1);
+    virtio_mouse.initialize(virtio_input_bases, sizeof(virtio_input_bases) / sizeof(virtio_input_bases[0]),
+                            ok::platform::qemu_virt::VirtioInputKind::mouse);
     ok::platform::qemu_virt::VirtioInputEvent event{};
     ok::i32 dx = 0;
     ok::i32 dy = 0;
@@ -76,7 +77,8 @@ void poll_virtio_mouse()
 
 int poll_virtio_keyboard()
 {
-    virtio_keyboard.initialize(virtio_input_bases, sizeof(virtio_input_bases) / sizeof(virtio_input_bases[0]), 0);
+    virtio_keyboard.initialize(virtio_input_bases, sizeof(virtio_input_bases) / sizeof(virtio_input_bases[0]),
+                               ok::platform::qemu_virt::VirtioInputKind::keyboard);
     ok::platform::qemu_virt::VirtioInputEvent event{};
     while (virtio_keyboard.poll(event))
     {

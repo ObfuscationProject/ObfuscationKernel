@@ -58,13 +58,15 @@ QEMU tests attach a temporary `virtio-blk-pci` disk on every bootable target.
 QEMU window tests attach `ramfb` on every bootable architecture. The platform
 code initializes ramfb through the QEMU fw_cfg DMA interface and draws into
 guest RAM, so the visible window is a real pixel framebuffer rather than a
-serial console or VGA text surface. The current driver model still validates
+serial console or VGA text surface. The ramfb console currently uses a 960x540
+surface, spaced bitmap glyph rendering, a colored boot marker, and a fixed
+bottom-row mouse position/button monitor. The current driver model still validates
 virtio-gpu enumeration through the internal PCI model; BAR mapping, virtqueues,
 EDID, scanout resource management, and true disk DMA are the next implementation
 steps.
 
 On `aarch64` and `rv64`, graphical keyboard and mouse input is delivered through
-QEMU virtio-mmio input devices. The platform code sets up the virtio event queue,
-maps Linux input key codes into shell characters, and moves a small framebuffer
-pointer for mouse-relative events. UART input remains as a fallback for headless
-serial use.
+QEMU virtio-mmio input devices. The platform code supports the legacy
+virtio-mmio queue registers used by QEMU `virt` here, maps Linux input key codes
+into shell characters, and moves a small framebuffer pointer for mouse-relative
+events. UART input remains as a fallback for headless serial use.
