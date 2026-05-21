@@ -99,8 +99,9 @@ xmake qemu-window-test
 In graphical mode the kernel remains interactive after the debug checks pass:
 keyboard input is handled by the kernel input stack and routed through the debug
 shell, display path, and serial console. x86/i386 use `virtio-gpu-pci`;
-`aarch64` and `rv64` launch with `ramfb` plus `virtio-gpu-pci`. The script
-reports after the QEMU window is closed.
+`aarch64` and `rv64` use QEMU `ramfb` initialized by the guest through fw_cfg
+DMA. Before entering the shell, the kernel draws a colored pixel marker in the
+framebuffer. The script reports after the QEMU window is closed.
 
 The test scripts do not contain a kernel `main`. Debug and release builds enter
 through the same `kernel_main`; debug builds enable `OK_ENABLE_TEST_POINTS` and

@@ -32,8 +32,6 @@ jobs:
             triple: mips64-elf
           - arch: ppc
             triple: powerpc-eabi
-          - arch: ppc64
-            triple: powerpc64-elf
     steps:
       - uses: actions/checkout@v4
       - uses: xmake-io/github-action-setup-xmake@v1

@@ -51,7 +51,8 @@ xmake qemu-window-test
 
 It builds and runs the same `kernel.bin` in QEMU. The visible text comes from
 the kernel's own display path: x86/i386 use the virtio-gpu PCI path, while
-`aarch64` and `rv64` launch with both `ramfb` and `virtio-gpu-pci` available.
+`aarch64` and `rv64` initialize QEMU ramfb through fw_cfg DMA and draw pixels
+directly into guest RAM.
 The script captures serial diagnostics and prints the test result only after
 the QEMU window is closed. Use the headless validation form in environments
 without a graphical display:
@@ -61,9 +62,10 @@ xmake qemu-window-test --no-launch
 ```
 
 In graphical window mode the debug kernel does not attach the debug-exit device.
-After `OK_TEST_PASS`, it enters an interactive debug shell and echoes keyboard
-input through the kernel display path and serial console. Close the QEMU window
-when you want the script to print its final result.
+After `OK_TEST_PASS`, the kernel draws a colored pixel marker in the framebuffer,
+then enters an interactive debug shell and echoes keyboard input through the
+kernel display path and serial console. Close the QEMU window when you want the
+script to print its final result.
 
 ## Pass Signal
 

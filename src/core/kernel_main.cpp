@@ -7,6 +7,7 @@ namespace
 extern "C" void ok_platform_console_init();
 extern "C" void ok_platform_console_write_char(char value);
 extern "C" void ok_platform_display_clear();
+extern "C" void ok_platform_display_debug_marker() __attribute__((weak));
 extern "C" void ok_platform_display_write_char(char value);
 extern "C" void ok_platform_debug_exit(ok::u32 code);
 extern "C" void ok_platform_halt();
@@ -114,6 +115,10 @@ extern "C" [[noreturn]] void kernel_main()
     [[maybe_unused]] const auto status = ok::ok_kernel_entry(config);
 
 #if defined(OK_ENABLE_TEST_POINTS)
+    if (status.ok() && ok_platform_display_debug_marker != nullptr)
+    {
+        ok_platform_display_debug_marker();
+    }
     ok_platform_debug_exit(status.ok() ? 0x10u : 0x11u);
     if (status.ok())
     {

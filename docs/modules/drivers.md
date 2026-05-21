@@ -55,8 +55,10 @@ The PCIe/USB driver plan keeps discovery separate from transport:
   transport implementations behind the existing driver interfaces.
 
 QEMU tests attach a temporary `virtio-blk-pci` disk on every bootable target.
-QEMU window tests attach `virtio-gpu-pci` on x86/i386 and attach both `ramfb`
-and `virtio-gpu-pci` on `aarch64`/`rv64`. The current driver model validates
-enumeration, block-device routing, and framebuffer presentation; BAR mapping,
-virtqueues, EDID, scanout resource management, and true disk DMA are the next
-implementation steps.
+QEMU window tests attach `virtio-gpu-pci` on x86/i386 and `ramfb` on
+`aarch64`/`rv64`. The ARM64/RISC-V platform code initializes ramfb through the
+QEMU fw_cfg DMA interface and draws into guest RAM, so the visible window is a
+real pixel framebuffer rather than a serial console. The current driver model
+validates enumeration, block-device routing, and framebuffer presentation; BAR
+mapping, virtqueues, EDID, scanout resource management, and true disk DMA are
+the next implementation steps.
