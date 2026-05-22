@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for the P0 QEMU validation harness."""
+"""Unit tests for the baseline QEMU validation harness."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-#include "kernel_roadmap_tests.hpp"
+#include "roadmap_tests.hpp"
 
 #include "ok/driver/abi.hpp"
 
@@ -96,8 +96,7 @@ Status test_driver_abi_helpers()
     driver::OkIoPortRegion ports{.base = 0x3f8, .length = 8};
     driver::OkWorkQueue work{.queued = 1};
     driver::OkTimer timer{.deadline_ticks = 20, .armed = true};
-    if (dma.size != 32 || dma.bytes[0] != std::byte{0xa5} || ports.length != 8 || work.queued != 1 ||
-        !timer.armed)
+    if (dma.size != 32 || dma.bytes[0] != std::byte{0xa5} || ports.length != 8 || work.queued != 1 || !timer.armed)
     {
         return Status::fault("driver ABI value helpers failed");
     }
@@ -149,17 +148,21 @@ Status test_native_driver_lifecycle()
 
     const auto manifest = lifecycle.manifest();
     driver::OkDriverOps ops{
-        .match = [](const driver::OkDevice &candidate, const driver::OkDriverManifest &driver_manifest) {
-            return candidate.bus == driver_manifest.bus ? Status::success() : Status::not_found("driver did not match");
-        },
-        .probe = [](driver::OkProbeContext &probe_context) {
-            return probe_context.device == nullptr ? Status::invalid_argument("missing probe device")
-                                                   : Status::success();
-        },
-        .remove = [](driver::OkProbeContext &remove_context) {
-            return remove_context.device == nullptr ? Status::invalid_argument("missing remove device")
-                                                    : Status::success();
-        },
+        .match =
+            [](const driver::OkDevice &candidate, const driver::OkDriverManifest &driver_manifest) {
+                return candidate.bus == driver_manifest.bus ? Status::success()
+                                                            : Status::not_found("driver did not match");
+            },
+        .probe =
+            [](driver::OkProbeContext &probe_context) {
+                return probe_context.device == nullptr ? Status::invalid_argument("missing probe device")
+                                                       : Status::success();
+            },
+        .remove =
+            [](driver::OkProbeContext &remove_context) {
+                return remove_context.device == nullptr ? Status::invalid_argument("missing remove device")
+                                                        : Status::success();
+            },
     };
     if (!ops.match(device, manifest).ok() || !ops.probe(context).ok() || !ops.remove(context).ok())
     {
@@ -251,14 +254,16 @@ Status test_linux_driver_shim()
     driver::linux_compat::pci_driver linux_driver{
         .name = "linux-fake-pci",
         .ids = ids,
-        .probe = [](driver::OkDevice &, const driver::linux_compat::pci_device_id &) {
-            shim_state.probed = true;
-            return Status::success();
-        },
-        .remove = [](driver::OkDevice &) {
-            shim_state.removed = true;
-            return Status::success();
-        },
+        .probe =
+            [](driver::OkDevice &, const driver::linux_compat::pci_device_id &) {
+                shim_state.probed = true;
+                return Status::success();
+            },
+        .remove =
+            [](driver::OkDevice &) {
+                shim_state.removed = true;
+                return Status::success();
+            },
     };
     if (auto status = shim.register_driver(linux_driver); !status.ok())
     {
@@ -282,8 +287,8 @@ Status test_linux_driver_shim()
     }
 
     auto *mmio = shim.ioremap(0x1000, 64);
-    if (mmio == nullptr || !mmio->writel(0, 0xfeed).ok() || mmio->readl(0) != 0xfeed ||
-        !shim.iounmap(mmio).ok() || mmio->writel(0, 0).code() != StatusCode::not_initialized)
+    if (mmio == nullptr || !mmio->writel(0, 0xfeed).ok() || mmio->readl(0) != 0xfeed || !shim.iounmap(mmio).ok() ||
+        mmio->writel(0, 0).code() != StatusCode::not_initialized)
     {
         return Status::fault("Linux driver shim MMIO validation failed");
     }
@@ -307,8 +312,9 @@ Status test_linux_driver_shim()
     spinlock.unlock();
 
     driver::OkIrqHandle irq{};
-    if (!shim.request_irq(irq, 44).ok() || irq.vector != 44 || shim.request_irq(irq, 45).code() != StatusCode::already_exists ||
-        !shim.free_irq(irq).ok() || shim.free_irq(irq).code() != StatusCode::invalid_argument)
+    if (!shim.request_irq(irq, 44).ok() || irq.vector != 44 ||
+        shim.request_irq(irq, 45).code() != StatusCode::already_exists || !shim.free_irq(irq).ok() ||
+        shim.free_irq(irq).code() != StatusCode::invalid_argument)
     {
         return Status::fault("Linux driver shim IRQ validation failed");
     }

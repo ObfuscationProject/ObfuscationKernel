@@ -9,9 +9,13 @@ includes("xmake/toolchains.lua")
 
 function add_ok_kernel_sources(include_kernel_main)
     add_files("src/core/*.cpp")
+    add_files("src/core/shell/*.cpp")
     if not include_kernel_main then
         remove_files("src/core/kernel_main.cpp")
     end
+    add_files("tests/kernel/debug/*.cpp")
+    add_files("tests/kernel/points/*.cpp")
+    add_files("tests/kernel/roadmap/*.cpp")
     add_files("src/driver/*.cpp")
     add_files("src/fs/*.cpp")
     add_files("src/interrupt/*.cpp")

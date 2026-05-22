@@ -1,4 +1,4 @@
-#include "kernel_roadmap_tests.hpp"
+#include "roadmap_tests.hpp"
 
 #include "ok/fs/unix.hpp"
 
@@ -10,12 +10,12 @@ namespace ok
 namespace
 {
 
-std::span<const std::byte> p4_bytes(std::string_view text)
+std::span<const std::byte> vfs_bytes(std::string_view text)
 {
     return {reinterpret_cast<const std::byte *>(text.data()), text.size()};
 }
 
-bool p4_buffer_equals(const fs::FileBuffer &buffer, std::string_view text)
+bool vfs_buffer_equals(const fs::FileBuffer &buffer, std::string_view text)
 {
     if (buffer.size != text.size())
     {
@@ -31,7 +31,7 @@ bool p4_buffer_equals(const fs::FileBuffer &buffer, std::string_view text)
     return true;
 }
 
-bool p4_bytes_equal(std::span<const std::byte> bytes, std::string_view text)
+bool vfs_bytes_equal(std::span<const std::byte> bytes, std::string_view text)
 {
     if (bytes.size() != text.size())
     {
@@ -47,7 +47,7 @@ bool p4_bytes_equal(std::span<const std::byte> bytes, std::string_view text)
     return true;
 }
 
-bool p4_contains(std::string_view haystack, std::string_view needle)
+bool vfs_contains(std::string_view haystack, std::string_view needle)
 {
     if (needle.empty())
     {
@@ -78,142 +78,142 @@ bool p4_contains(std::string_view haystack, std::string_view needle)
 
 Status verify_regular_file(fs::VirtualFileSystem &vfs)
 {
-    static_cast<void>(vfs.unlink("/tmp/p4-file"));
-    if (auto status = vfs.create("/tmp/p4-file", fs::NodeType::regular); !status.ok())
+    static_cast<void>(vfs.unlink("/tmp/vfs-file"));
+    if (auto status = vfs.create("/tmp/vfs-file", fs::NodeType::regular); !status.ok())
     {
         return status;
     }
-    constexpr std::string_view text{"p4 file"};
-    if (auto status = vfs.write_file("/tmp/p4-file", p4_bytes(text)); !status.ok())
+    constexpr std::string_view text{"vfs file"};
+    if (auto status = vfs.write_file("/tmp/vfs-file", vfs_bytes(text)); !status.ok())
     {
         return status;
     }
-    auto read = vfs.read_file("/tmp/p4-file");
-    if (!read || !p4_buffer_equals(read.value(), text))
+    auto read = vfs.read_file("/tmp/vfs-file");
+    if (!read || !vfs_buffer_equals(read.value(), text))
     {
-        return Status::fault("P4 regular file read/write validation failed");
+        return Status::fault("VFS regular file read/write validation failed");
     }
-    auto metadata = vfs.stat("/tmp/p4-file");
+    auto metadata = vfs.stat("/tmp/vfs-file");
     if (!metadata || metadata.value().size != text.size() ||
         (metadata.value().mode & fs::mode_type_mask) != fs::mode_regular)
     {
-        return Status::fault("P4 regular file metadata validation failed");
+        return Status::fault("VFS regular file metadata validation failed");
     }
-    if (auto status = vfs.write_file("/tmp/p4-file", std::span<const std::byte>{}); !status.ok())
+    if (auto status = vfs.write_file("/tmp/vfs-file", std::span<const std::byte>{}); !status.ok())
     {
         return status;
     }
-    auto truncated = vfs.stat("/tmp/p4-file");
+    auto truncated = vfs.stat("/tmp/vfs-file");
     return truncated && truncated.value().size == 0 ? Status::success()
-                                                    : Status::fault("P4 regular file truncate validation failed");
+                                                    : Status::fault("VFS regular file truncate validation failed");
 }
 
 Status verify_directories(Kernel &kernel)
 {
     auto &posix = kernel.posix();
-    static_cast<void>(posix.unlink("/tmp/p4-nonempty/child"));
-    static_cast<void>(posix.rmdir("/tmp/p4-empty"));
-    static_cast<void>(posix.rmdir("/tmp/p4-nonempty"));
+    static_cast<void>(posix.unlink("/tmp/vfs-nonempty/child"));
+    static_cast<void>(posix.rmdir("/tmp/vfs-empty"));
+    static_cast<void>(posix.rmdir("/tmp/vfs-nonempty"));
 
     const auto before = kernel.vfs().stat("/tmp");
     if (!before || before.value().type != fs::NodeType::directory)
     {
-        return Status::fault("P4 /tmp metadata validation failed");
+        return Status::fault("VFS /tmp metadata validation failed");
     }
-    if (auto status = posix.mkdir("/tmp/p4-empty"); !status.ok())
+    if (auto status = posix.mkdir("/tmp/vfs-empty"); !status.ok())
     {
         return status;
     }
     auto listing = kernel.vfs().list("/tmp");
     if (!listing || listing.value().count == 0)
     {
-        return Status::fault("P4 directory listing validation failed");
+        return Status::fault("VFS directory listing validation failed");
     }
     auto after_mkdir = kernel.vfs().stat("/tmp");
     if (!after_mkdir || after_mkdir.value().link_count <= before.value().link_count)
     {
-        return Status::fault("P4 directory link-count validation failed");
+        return Status::fault("VFS directory link-count validation failed");
     }
-    if (auto status = posix.rmdir("/tmp/p4-empty"); !status.ok())
+    if (auto status = posix.rmdir("/tmp/vfs-empty"); !status.ok())
     {
         return status;
     }
-    if (kernel.vfs().stat("/tmp/p4-empty"))
+    if (kernel.vfs().stat("/tmp/vfs-empty"))
     {
-        return Status::fault("P4 empty directory removal left a visible node");
+        return Status::fault("VFS empty directory removal left a visible node");
     }
 
-    if (auto status = posix.mkdir("/tmp/p4-nonempty"); !status.ok())
+    if (auto status = posix.mkdir("/tmp/vfs-nonempty"); !status.ok())
     {
         return status;
     }
-    if (auto status = kernel.vfs().create("/tmp/p4-nonempty/child", fs::NodeType::regular); !status.ok())
+    if (auto status = kernel.vfs().create("/tmp/vfs-nonempty/child", fs::NodeType::regular); !status.ok())
     {
         return status;
     }
-    if (posix.rmdir("/tmp/p4-nonempty").ok())
+    if (posix.rmdir("/tmp/vfs-nonempty").ok())
     {
-        return Status::fault("P4 non-empty directory removal was not rejected");
+        return Status::fault("VFS non-empty directory removal was not rejected");
     }
-    if (auto status = posix.unlink("/tmp/p4-nonempty/child"); !status.ok())
+    if (auto status = posix.unlink("/tmp/vfs-nonempty/child"); !status.ok())
     {
         return status;
     }
-    return posix.rmdir("/tmp/p4-nonempty");
+    return posix.rmdir("/tmp/vfs-nonempty");
 }
 
 Status verify_paths_and_symlinks(fs::VirtualFileSystem &vfs)
 {
-    static_cast<void>(vfs.rmdir("/tmp/p4-dot"));
-    if (auto status = vfs.create("/tmp/p4-dot", fs::NodeType::directory); !status.ok())
+    static_cast<void>(vfs.rmdir("/tmp/vfs-dot"));
+    if (auto status = vfs.create("/tmp/vfs-dot", fs::NodeType::directory); !status.ok())
     {
         return status;
     }
-    if (vfs.lookup("/tmp/.") != vfs.lookup("/tmp") || vfs.lookup("/tmp/p4-dot/..") != vfs.lookup("/tmp"))
+    if (vfs.lookup("/tmp/.") != vfs.lookup("/tmp") || vfs.lookup("/tmp/vfs-dot/..") != vfs.lookup("/tmp"))
     {
-        return Status::fault("P4 dot or dot-dot path resolution failed");
+        return Status::fault("VFS dot or dot-dot path resolution failed");
     }
 
-    static_cast<void>(vfs.unlink("/tmp/p4-link"));
-    if (auto status = vfs.create("/tmp/p4-link", fs::NodeType::symlink); !status.ok())
+    static_cast<void>(vfs.unlink("/tmp/vfs-link"));
+    if (auto status = vfs.create("/tmp/vfs-link", fs::NodeType::symlink); !status.ok())
     {
         return status;
     }
-    constexpr std::string_view target{"/tmp/p4-file"};
-    if (auto status = vfs.write_file("/tmp/p4-link", p4_bytes(target)); !status.ok())
+    constexpr std::string_view target{"/tmp/vfs-file"};
+    if (auto status = vfs.write_file("/tmp/vfs-link", vfs_bytes(target)); !status.ok())
     {
         return status;
     }
-    auto link = vfs.read_file("/tmp/p4-link");
-    auto metadata = vfs.stat("/tmp/p4-link");
-    if (!link || !p4_buffer_equals(link.value(), target) || !metadata ||
+    auto link = vfs.read_file("/tmp/vfs-link");
+    auto metadata = vfs.stat("/tmp/vfs-link");
+    if (!link || !vfs_buffer_equals(link.value(), target) || !metadata ||
         (metadata.value().mode & fs::mode_type_mask) != fs::mode_symlink)
     {
-        return Status::fault("P4 symlink create/read validation failed");
+        return Status::fault("VFS symlink create/read validation failed");
     }
-    return vfs.rmdir("/tmp/p4-dot");
+    return vfs.rmdir("/tmp/vfs-dot");
 }
 
 Status verify_file_offsets(Kernel &kernel)
 {
     auto &posix = kernel.posix();
-    static_cast<void>(posix.unlink("/tmp/p4-offset"));
-    auto first = posix.open("/tmp/p4-offset", posix::o_CREAT | posix::o_RDWR | posix::o_TRUNC);
+    static_cast<void>(posix.unlink("/tmp/vfs-offset"));
+    auto first = posix.open("/tmp/vfs-offset", posix::o_CREAT | posix::o_RDWR | posix::o_TRUNC);
     if (!first)
     {
         return first.status();
     }
     constexpr std::string_view text{"abcdef"};
-    auto written = posix.write(first.value(), p4_bytes(text));
+    auto written = posix.write(first.value(), vfs_bytes(text));
     if (!written || written.value() != text.size())
     {
-        return Status::fault("P4 file offset setup write failed");
+        return Status::fault("VFS file offset setup write failed");
     }
     if (auto seek = posix.seek(first.value(), 0, posix::SeekWhence::set); !seek)
     {
         return seek.status();
     }
-    auto second = posix.open("/tmp/p4-offset", posix::o_RDONLY);
+    auto second = posix.open("/tmp/vfs-offset", posix::o_RDONLY);
     if (!second)
     {
         static_cast<void>(posix.close(first.value()));
@@ -227,9 +227,9 @@ Status verify_file_offsets(Kernel &kernel)
     static_cast<void>(posix.close(first.value()));
     static_cast<void>(posix.close(second.value()));
     if (!first_count || first_count.value() != 2 || !second_count || second_count.value() != 3 ||
-        !p4_bytes_equal(std::span<const std::byte>{second_read.data(), second_read.size()}, "abc"))
+        !vfs_bytes_equal(std::span<const std::byte>{second_read.data(), second_read.size()}, "abc"))
     {
-        return Status::fault("P4 per-open file offset validation failed");
+        return Status::fault("VFS per-open file offset validation failed");
     }
     return Status::success();
 }
@@ -241,28 +241,28 @@ Status verify_device_nodes()
     fs::DeviceNode console_device{fs::DeviceKind::console};
 
     constexpr std::string_view text{"device"};
-    auto null_write = null_device.write(p4_bytes(text));
+    auto null_write = null_device.write(vfs_bytes(text));
     if (!null_write || null_write.value() != text.size() || null_device.bytes_written() != text.size())
     {
-        return Status::fault("P4 /dev/null write validation failed");
+        return Status::fault("VFS /dev/null write validation failed");
     }
     std::array<std::byte, 8> zeros{};
     auto zero_read = zero_device.read(zeros);
     if (!zero_read || zero_read.value() != zeros.size())
     {
-        return Status::fault("P4 /dev/zero read validation failed");
+        return Status::fault("VFS /dev/zero read validation failed");
     }
     for (auto byte : zeros)
     {
         if (byte != std::byte{0})
         {
-            return Status::fault("P4 /dev/zero returned non-zero data");
+            return Status::fault("VFS /dev/zero returned non-zero data");
         }
     }
-    auto console_write = console_device.write(p4_bytes(text));
+    auto console_write = console_device.write(vfs_bytes(text));
     if (!console_write || console_write.value() != text.size() || console_device.bytes_written() != text.size())
     {
-        return Status::fault("P4 /dev/console write validation failed");
+        return Status::fault("VFS /dev/console write validation failed");
     }
     return Status::success();
 }
@@ -273,39 +273,38 @@ Status verify_pipe_and_tty()
     auto initial_poll = pipe.poll();
     if (!initial_poll || (initial_poll.value() & 0x04u) == 0 || (initial_poll.value() & 0x01u) != 0)
     {
-        return Status::fault("P4 empty pipe poll validation failed");
+        return Status::fault("VFS empty pipe poll validation failed");
     }
     constexpr std::string_view payload{"pipe"};
-    auto written = pipe.write(p4_bytes(payload));
+    auto written = pipe.write(vfs_bytes(payload));
     auto readable_poll = pipe.poll();
-    if (!written || written.value() != payload.size() || !readable_poll ||
-        (readable_poll.value() & 0x01u) == 0)
+    if (!written || written.value() != payload.size() || !readable_poll || (readable_poll.value() & 0x01u) == 0)
     {
-        return Status::fault("P4 pipe transfer poll validation failed");
+        return Status::fault("VFS pipe transfer poll validation failed");
     }
     std::array<std::byte, 8> out{};
     auto read = pipe.read(out);
     if (!read || read.value() != payload.size() ||
-        !p4_bytes_equal(std::span<const std::byte>{out.data(), payload.size()}, payload))
+        !vfs_bytes_equal(std::span<const std::byte>{out.data(), payload.size()}, payload))
     {
-        return Status::fault("P4 pipe byte transfer validation failed");
+        return Status::fault("VFS pipe byte transfer validation failed");
     }
     pipe.set_non_blocking(true);
     auto empty = pipe.read(out);
     if (empty || empty.status().code() != StatusCode::would_block)
     {
-        return Status::fault("P4 non-blocking empty pipe validation failed");
+        return Status::fault("VFS non-blocking empty pipe validation failed");
     }
 
     fs::TtyDevice tty;
-    auto tty_write = tty.write(p4_bytes("tty"));
+    auto tty_write = tty.write(vfs_bytes("tty"));
     auto tcgets = tty.ioctl(0x5401, 0);
     auto tcsets = tty.ioctl(0x5402, 0);
     auto tcgets_after = tty.ioctl(0x5401, 0);
-    if (!tty_write || tty_write.value() != 3 || !tcgets || tcgets.value() != 1 || !tcsets ||
-        !tcgets_after || tcgets_after.value() != 0 || tty.echo())
+    if (!tty_write || tty_write.value() != 3 || !tcgets || tcgets.value() != 1 || !tcsets || !tcgets_after ||
+        tcgets_after.value() != 0 || tty.echo())
     {
-        return Status::fault("P4 TTY console or ioctl validation failed");
+        return Status::fault("VFS TTY console or ioctl validation failed");
     }
     return Status::success();
 }
@@ -316,45 +315,45 @@ Status verify_shell_commands(Kernel &kernel)
     static_cast<void>(kernel.posix().rmdir("/tmp/d"));
 
     auto root = kernel.debug_shell().execute("ls /");
-    if (!root || !p4_contains(root.value(), "dev/") || !p4_contains(root.value(), "tmp/"))
+    if (!root || !vfs_contains(root.value(), "dev/") || !vfs_contains(root.value(), "tmp/"))
     {
-        return Status::fault("P4 shell ls / validation failed");
+        return Status::fault("VFS shell ls / validation failed");
     }
     auto dev = kernel.debug_shell().execute("ls /dev");
-    if (!dev || !p4_contains(dev.value(), "null") || !p4_contains(dev.value(), "zero") ||
-        !p4_contains(dev.value(), "console") || !p4_contains(dev.value(), "tty0"))
+    if (!dev || !vfs_contains(dev.value(), "null") || !vfs_contains(dev.value(), "zero") ||
+        !vfs_contains(dev.value(), "console") || !vfs_contains(dev.value(), "tty0"))
     {
-        return Status::fault("P4 shell ls /dev validation failed");
+        return Status::fault("VFS shell ls /dev validation failed");
     }
     auto zero = kernel.debug_shell().execute("cat /dev/zero");
     if (!zero)
     {
-        return Status::fault("P4 shell cat /dev/zero validation failed");
+        return Status::fault("VFS shell cat /dev/zero validation failed");
     }
     if (!kernel.debug_shell().execute("touch /tmp/a"))
     {
-        return Status::fault("P4 shell touch validation failed");
+        return Status::fault("VFS shell touch validation failed");
     }
     if (!kernel.debug_shell().execute("echo hello > /tmp/a"))
     {
-        return Status::fault("P4 shell output redirection validation failed");
+        return Status::fault("VFS shell output redirection validation failed");
     }
     auto cat = kernel.debug_shell().execute("cat /tmp/a");
     if (!cat || cat.value() != "hello\n")
     {
-        return Status::fault("P4 shell cat /tmp/a validation failed");
+        return Status::fault("VFS shell cat /tmp/a validation failed");
     }
     if (!kernel.debug_shell().execute("mkdir /tmp/d"))
     {
-        return Status::fault("P4 shell mkdir validation failed");
+        return Status::fault("VFS shell mkdir validation failed");
     }
     if (!kernel.debug_shell().execute("rm /tmp/a"))
     {
-        return Status::fault("P4 shell rm validation failed");
+        return Status::fault("VFS shell rm validation failed");
     }
     if (kernel.vfs().stat("/tmp/a"))
     {
-        return Status::fault("P4 shell rm left file visible");
+        return Status::fault("VFS shell rm left file visible");
     }
     return kernel.posix().rmdir("/tmp/d");
 }

@@ -1,4 +1,4 @@
-#include "kernel_roadmap_tests.hpp"
+#include "roadmap_tests.hpp"
 
 #include "ok/posix/posix.hpp"
 #include "ok/sched/process.hpp"
@@ -251,17 +251,17 @@ Status verify_process_lifecycle(Kernel &kernel, std::span<const std::byte> elf, 
     auto *execed_child = processes.find(child.value());
     if (execed_child == nullptr || execed_child->memory_map().area_count() != 1 ||
         execed_child->fd_table().open_count() != fd_count_before_exec || !execed_child->fd_table().contains(7) ||
-        execed_child->parent_pid() != user.value() || execed_child->threads()[0].context.mode != arch::PrivilegeMode::user)
+        execed_child->parent_pid() != user.value() ||
+        execed_child->threads()[0].context.mode != arch::PrivilegeMode::user)
     {
         return Status::fault("execve did not replace address space while preserving selected metadata");
     }
 
-    auto extra_thread =
-        processes.create_user_thread(child.value(), ops.make_user_context(arch::UserEntry{
-                                                .instruction_pointer = 0x401000,
-                                                .stack_pointer = 0x810000,
-                                                .argument = 1,
-                                            }));
+    auto extra_thread = processes.create_user_thread(child.value(), ops.make_user_context(arch::UserEntry{
+                                                                        .instruction_pointer = 0x401000,
+                                                                        .stack_pointer = 0x810000,
+                                                                        .argument = 1,
+                                                                    }));
     if (!extra_thread)
     {
         return extra_thread.status();
@@ -306,8 +306,8 @@ Status verify_userland_smoke(Kernel &kernel, std::span<const std::byte> elf, sch
         return Status::fault("userland hello smoke write failed");
     }
 
-    static_cast<void>(kernel.posix().unlink("/tmp/p3_fd.txt"));
-    auto fd = kernel.posix().open("/tmp/p3_fd.txt", posix::o_CREAT | posix::o_RDWR | posix::o_TRUNC, 0644);
+    static_cast<void>(kernel.posix().unlink("/tmp/process_fd.txt"));
+    auto fd = kernel.posix().open("/tmp/process_fd.txt", posix::o_CREAT | posix::o_RDWR | posix::o_TRUNC, 0644);
     if (!fd)
     {
         return fd.status();

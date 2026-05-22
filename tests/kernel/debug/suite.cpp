@@ -2,7 +2,7 @@
 #include "ok/core/test_point.hpp"
 #include "ok/fs/ext4.hpp"
 
-#include "kernel_roadmap_tests.hpp"
+#include "../roadmap/roadmap_tests.hpp"
 
 #include <array>
 #include <span>
@@ -316,8 +316,8 @@ Status Kernel::run_debug_test_suite()
     {
         return status;
     }
-    auto relative_fd = posix_.openat(posix::at_FDCWD, "posix-relative.txt",
-                                     posix::o_CREAT | posix::o_RDWR | posix::o_TRUNC);
+    auto relative_fd =
+        posix_.openat(posix::at_FDCWD, "posix-relative.txt", posix::o_CREAT | posix::o_RDWR | posix::o_TRUNC);
     if (!relative_fd)
     {
         return relative_fd.status();
@@ -345,8 +345,8 @@ Status Kernel::run_debug_test_suite()
     {
         return status;
     }
-    auto mapping = posix_.mmap(0, 4096, posix::prot_READ | posix::prot_WRITE,
-                               posix::map_PRIVATE | posix::map_ANONYMOUS, -1, 0);
+    auto mapping =
+        posix_.mmap(0, 4096, posix::prot_READ | posix::prot_WRITE, posix::map_PRIVATE | posix::map_ANONYMOUS, -1, 0);
     if (!mapping)
     {
         return mapping.status();

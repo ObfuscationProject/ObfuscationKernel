@@ -1,4 +1,4 @@
-#include "kernel_roadmap_tests.hpp"
+#include "roadmap_tests.hpp"
 
 #include "ok/core/module.hpp"
 
@@ -15,8 +15,7 @@ class DebugModule final : public KernelModule
   public:
     DebugModule(std::string_view name, std::string_view klass, std::span<const ModuleDependency> dependencies,
                 std::span<const std::string_view> exports, std::span<const std::string_view> required_services,
-                u32 priority,
-                usize *start_sequence = nullptr, usize *stop_sequence = nullptr)
+                u32 priority, usize *start_sequence = nullptr, usize *stop_sequence = nullptr)
         : name_(name), klass_(klass), dependencies_(dependencies), exports_(exports), requires_(required_services),
           priority_(priority), start_sequence_(start_sequence), stop_sequence_(stop_sequence)
     {
@@ -205,16 +204,15 @@ Status test_builtin_module_graph(KernelTestReport &report)
     };
 
     DebugModule arch_module{"arch", "architecture", {}, arch_exports, {}, 0, &start_sequence, &stop_sequence};
-    DebugModule memory_module{"memory", "memory", depends_arch, memory_exports, required_arch, 10, &start_sequence,
-                              &stop_sequence};
+    DebugModule memory_module{"memory",      "memory", depends_arch,    memory_exports,
+                              required_arch, 10,       &start_sequence, &stop_sequence};
     DebugModule interrupt_module{"interrupt", "interrupt", depends_arch, {}, {}, 20, &start_sequence, &stop_sequence};
-    DebugModule scheduler_module{"scheduler", "scheduler", depends_interrupt, {}, {}, 30, &start_sequence,
-                                 &stop_sequence};
+    DebugModule scheduler_module{"scheduler", "scheduler", depends_interrupt, {},
+                                 {},          30,          &start_sequence,   &stop_sequence};
     DebugModule smp_module{"smp", "smp", depends_scheduler, {}, {}, 40, &start_sequence, &stop_sequence};
     DebugModule ipc_module{"ipc", "ipc", depends_scheduler, {}, {}, 50, &start_sequence, &stop_sequence};
     DebugModule syscall_module{"syscall", "syscall", depends_scheduler, {}, {}, 60, &start_sequence, &stop_sequence};
-    DebugModule driver_module{"driver-core", "driver", depends_interrupt, {}, {}, 70, &start_sequence,
-                              &stop_sequence};
+    DebugModule driver_module{"driver-core", "driver", depends_interrupt, {}, {}, 70, &start_sequence, &stop_sequence};
     DebugModule vfs_module{"vfs", "filesystem", depends_driver, vfs_exports, {}, 80, &start_sequence, &stop_sequence};
     DebugModule posix_module{"posix", "posix", depends_vfs_and_syscall, {}, {}, 90, &start_sequence, &stop_sequence};
     DebugModule user_module{"user-mode", "user", depends_scheduler, {}, {}, 100, &start_sequence, &stop_sequence};
@@ -247,8 +245,7 @@ Status test_builtin_module_graph(KernelTestReport &report)
         scheduler_module.started_at() >= ipc_module.started_at() ||
         scheduler_module.started_at() >= syscall_module.started_at() ||
         interrupt_module.started_at() >= driver_module.started_at() ||
-        driver_module.started_at() >= vfs_module.started_at() ||
-        vfs_module.started_at() >= posix_module.started_at() ||
+        driver_module.started_at() >= vfs_module.started_at() || vfs_module.started_at() >= posix_module.started_at() ||
         syscall_module.started_at() >= posix_module.started_at() ||
         scheduler_module.started_at() >= user_module.started_at() ||
         vfs_module.started_at() >= shell_module.started_at())
@@ -261,8 +258,7 @@ Status test_builtin_module_graph(KernelTestReport &report)
     }
     if (memory_module.stopped_at() >= arch_module.stopped_at() ||
         scheduler_module.stopped_at() >= interrupt_module.stopped_at() ||
-        vfs_module.stopped_at() >= driver_module.stopped_at() ||
-        posix_module.stopped_at() >= vfs_module.stopped_at() ||
+        vfs_module.stopped_at() >= driver_module.stopped_at() || posix_module.stopped_at() >= vfs_module.stopped_at() ||
         shell_module.stopped_at() >= vfs_module.stopped_at())
     {
         return Status::fault("module manager stop order is not reverse dependency order");

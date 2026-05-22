@@ -1,4 +1,4 @@
-#include "kernel_roadmap_tests.hpp"
+#include "roadmap_tests.hpp"
 
 #include "ok/fs/ext4.hpp"
 #include "ok/fs/storage.hpp"
@@ -42,7 +42,7 @@ std::array<std::byte, 4096> make_ext4_test_image(bool valid_magic)
     write_le16(bytes, base + 0x58, 256);
     write_le32(bytes, base + 0x60, 0x40);
 
-    constexpr std::string_view name{"P7EXT4"};
+    constexpr std::string_view name{"OKEXT4"};
     for (usize i = 0; i < name.size(); ++i)
     {
         bytes[base + 0x78 + i] = static_cast<std::byte>(name[i]);
@@ -113,10 +113,8 @@ Status test_network_device_and_protocols(Kernel &kernel)
     {
         return Status::fault("ICMP echo loopback validation failed");
     }
-    if (kernel.network()
-            .send_icmp_echo(net::Ipv4Address{{192, 0, 2, 1}}, 1, 1, as_bytes(ping))
-            .status()
-            .code() != StatusCode::unsupported)
+    if (kernel.network().send_icmp_echo(net::Ipv4Address{{192, 0, 2, 1}}, 1, 1, as_bytes(ping)).status().code() !=
+        StatusCode::unsupported)
     {
         return Status::fault("ICMP non-loopback route was not rejected");
     }
@@ -149,7 +147,8 @@ Status test_socket_table(Kernel &kernel)
     {
         return Status::fault("invalid socket operation errno mapping failed");
     }
-    if (auto status = sockets.bind(udp.value(), net::UdpEndpoint{.address = kernel.network().local_address(), .port = 41000});
+    if (auto status =
+            sockets.bind(udp.value(), net::UdpEndpoint{.address = kernel.network().local_address(), .port = 41000});
         !status.ok())
     {
         return status;
@@ -209,8 +208,9 @@ Status test_socket_table(Kernel &kernel)
     {
         return Status::fault("TCP accept validation failed");
     }
-    if (sockets.sendto(tcp_client.value(), as_bytes(payload),
-                       net::UdpEndpoint{.address = kernel.network().local_address(), .port = 42000})
+    if (sockets
+            .sendto(tcp_client.value(), as_bytes(payload),
+                    net::UdpEndpoint{.address = kernel.network().local_address(), .port = 42000})
             .status()
             .code() != StatusCode::invalid_argument)
     {
@@ -295,7 +295,7 @@ Status test_storage(Kernel &kernel)
     }
     auto info = volume.info();
     if (!info || info.value().block_size != 1024 || info.value().inode_size != 256 ||
-        info.value().volume_name.view() != "P7EXT4" || !info.value().has_extents)
+        info.value().volume_name.view() != "OKEXT4" || !info.value().has_extents)
     {
         return Status::fault("EXT4 superblock validation failed");
     }
@@ -304,8 +304,7 @@ Status test_storage(Kernel &kernel)
     {
         return status;
     }
-    if (ext4_block[0] != std::byte{0x7e} ||
-        volume.read_block(4, ext4_block).code() != StatusCode::invalid_argument)
+    if (ext4_block[0] != std::byte{0x7e} || volume.read_block(4, ext4_block).code() != StatusCode::invalid_argument)
     {
         return Status::fault("EXT4 read-only block validation failed");
     }

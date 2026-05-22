@@ -431,7 +431,8 @@ Status test_user_mode(TestPointRunner &runner)
 
 Status test_kernel_services(TestPointRunner &runner, Kernel &kernel)
 {
-    if (auto status = runner.check("posix", "initialized", kernel.posix().initialized(), "POSIX service not initialized");
+    if (auto status =
+            runner.check("posix", "initialized", kernel.posix().initialized(), "POSIX service not initialized");
         !status.ok())
     {
         return status;
@@ -442,9 +443,9 @@ Status test_kernel_services(TestPointRunner &runner, Kernel &kernel)
     {
         return status;
     }
-    if (auto status = runner.check("usb", "hid-keyboard",
-                                   kernel.usb().find_device(driver::UsbDeviceClass::hid, 1, 1) != nullptr,
-                                   "USB HID keyboard not enumerated");
+    if (auto status =
+            runner.check("usb", "hid-keyboard", kernel.usb().find_device(driver::UsbDeviceClass::hid, 1, 1) != nullptr,
+                         "USB HID keyboard not enumerated");
         !status.ok())
     {
         return status;

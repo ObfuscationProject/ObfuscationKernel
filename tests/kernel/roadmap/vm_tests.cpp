@@ -1,4 +1,4 @@
-#include "kernel_roadmap_tests.hpp"
+#include "roadmap_tests.hpp"
 
 #include "ok/memory/memory.hpp"
 #include "ok/syscall/syscall.hpp"
@@ -106,8 +106,8 @@ Status verify_user_mapping_edges(memory::UserAddressSpace &user_space)
     }
 
     std::array<std::byte, 1> byte{};
-    if (user_space.copy_from_user(memory::UserSlice<const std::byte>{.address = 0, .count = 1}, byte)
-            .status.code() != StatusCode::invalid_argument)
+    if (user_space.copy_from_user(memory::UserSlice<const std::byte>{.address = 0, .count = 1}, byte).status.code() !=
+        StatusCode::invalid_argument)
     {
         return Status::fault("null user pointer did not return a stable invalid-argument result");
     }
@@ -129,16 +129,16 @@ Status verify_user_copy_helpers(memory::UserAddressSpace &user_space)
     }
     source[text.size()] = std::byte{0};
 
-    auto written = user_space.copy_to_user(memory::UserSlice<std::byte>{.address = 0x400010, .count = source.size()},
-                                           source);
+    auto written =
+        user_space.copy_to_user(memory::UserSlice<std::byte>{.address = 0x400010, .count = source.size()}, source);
     if (!written.ok() || written.bytes != source.size())
     {
         return Status::fault("copy_to_user failed");
     }
 
     std::array<std::byte, 6> out{};
-    auto read = user_space.copy_from_user(memory::UserSlice<const std::byte>{.address = 0x400010, .count = out.size()},
-                                          out);
+    auto read =
+        user_space.copy_from_user(memory::UserSlice<const std::byte>{.address = 0x400010, .count = out.size()}, out);
     if (!read.ok() || read.bytes != out.size() || out != source)
     {
         return Status::fault("copy_from_user failed");
@@ -151,18 +151,17 @@ Status verify_user_copy_helpers(memory::UserAddressSpace &user_space)
     }
 
     constexpr std::array<u32, 3> words{0x11, 0x22, 0x33};
-    auto word_bytes = std::span<const std::byte>{reinterpret_cast<const std::byte *>(words.data()),
-                                                 words.size() * sizeof(u32)};
-    if (!user_space.copy_to_user(memory::UserSlice<std::byte>{.address = 0x400100, .count = word_bytes.size()},
-                                 word_bytes)
+    auto word_bytes =
+        std::span<const std::byte>{reinterpret_cast<const std::byte *>(words.data()), words.size() * sizeof(u32)};
+    if (!user_space
+             .copy_to_user(memory::UserSlice<std::byte>{.address = 0x400100, .count = word_bytes.size()}, word_bytes)
              .ok())
     {
         return Status::fault("copy_to_user for vector source failed");
     }
     std::array<u32, 3> copied_words{};
-    auto vector_copy = user_space.copy_vector_from_user(memory::UserSlice<const u32>{.address = 0x400100,
-                                                                                    .count = copied_words.size()},
-                                                        std::span<u32>{copied_words});
+    auto vector_copy = user_space.copy_vector_from_user(
+        memory::UserSlice<const u32>{.address = 0x400100, .count = copied_words.size()}, std::span<u32>{copied_words});
     if (!vector_copy.ok() || copied_words != words)
     {
         return Status::fault("copy_vector_from_user failed");
@@ -186,8 +185,8 @@ Status verify_safe_syscall_user_copy(memory::UserAddressSpace &user_space)
                                                       },
                                                       static_cast<usize>(request.args[1]));
                                                   return syscall::Response{
-                                                      .value = copied ? static_cast<i64>(copied.value().view().size())
-                                                                      : -1,
+                                                      .value =
+                                                          copied ? static_cast<i64>(copied.value().view().size()) : -1,
                                                       .status = copied ? Status::success() : copied.status(),
                                                   };
                                               });
@@ -216,9 +215,7 @@ Status run_vm_roadmap_tests(Kernel &kernel, KernelTestReport &report)
     auto readonly_frame = kernel.memory().frames().allocate();
     if (!kernel_frame || !user_frame || !readonly_frame)
     {
-        return !kernel_frame   ? kernel_frame.status()
-               : !user_frame   ? user_frame.status()
-                                : readonly_frame.status();
+        return !kernel_frame ? kernel_frame.status() : !user_frame ? user_frame.status() : readonly_frame.status();
     }
     if (auto status = release_frames.keep(kernel_frame.value()); !status.ok())
     {
@@ -257,8 +254,9 @@ Status run_vm_roadmap_tests(Kernel &kernel, KernelTestReport &report)
     {
         return status;
     }
-    if (user_space.copy_to_user(memory::UserSlice<std::byte>{.address = 0x401000, .count = 1},
-                                std::span<const std::byte>{reinterpret_cast<const std::byte *>("x"), 1})
+    if (user_space
+            .copy_to_user(memory::UserSlice<std::byte>{.address = 0x401000, .count = 1},
+                          std::span<const std::byte>{reinterpret_cast<const std::byte *>("x"), 1})
             .status.code() != StatusCode::denied)
     {
         return Status::fault("write into read-only user mapping was not rejected");
@@ -278,8 +276,9 @@ Status run_vm_roadmap_tests(Kernel &kernel, KernelTestReport &report)
     {
         return status;
     }
-    if (user_space.copy_to_user(memory::UserSlice<std::byte>{.address = 0x400010, .count = 1},
-                                std::span<const std::byte>{reinterpret_cast<const std::byte *>("!"), 1})
+    if (user_space
+            .copy_to_user(memory::UserSlice<std::byte>{.address = 0x400010, .count = 1},
+                          std::span<const std::byte>{reinterpret_cast<const std::byte *>("!"), 1})
             .status.code() != StatusCode::denied)
     {
         return Status::fault("copy-on-write placeholder did not protect writes");

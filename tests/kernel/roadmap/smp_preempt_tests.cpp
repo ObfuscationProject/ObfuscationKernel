@@ -1,4 +1,4 @@
-#include "kernel_roadmap_tests.hpp"
+#include "roadmap_tests.hpp"
 
 #include "ok/interrupt/interrupt.hpp"
 #include "ok/smp/preempt.hpp"
