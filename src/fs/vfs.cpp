@@ -236,6 +236,36 @@ Status VirtualFileSystem::unlink(std::string_view path)
     return parent->detach_child(leaf.view());
 }
 
+Status VirtualFileSystem::rmdir(std::string_view path)
+{
+    FixedString<max_path_segment> leaf;
+    auto *parent = parent_for(path, leaf);
+    if (parent == nullptr || leaf.empty())
+    {
+        return Status::not_found("parent path not found");
+    }
+    auto *node = parent->lookup(leaf.view());
+    if (node == nullptr)
+    {
+        return Status::not_found("path not found");
+    }
+    if (node->metadata().type != NodeType::directory)
+    {
+        return Status::invalid_argument("path is not a directory");
+    }
+    auto *ram_node = static_cast<RamNode *>(node);
+    auto listing = ram_node->list();
+    if (!listing)
+    {
+        return listing.status();
+    }
+    if (listing.value().count != 0)
+    {
+        return Status::busy("directory is not empty");
+    }
+    return parent->detach_child(leaf.view());
+}
+
 Status VirtualFileSystem::write_file(std::string_view path, std::span<const std::byte> data)
 {
     auto *node = lookup(path);
@@ -285,15 +315,38 @@ Node *VirtualFileSystem::lookup(std::string_view path)
         return root_;
     }
     RamNode *current = root_;
+    std::array<RamNode *, max_child_nodes + 1> stack{};
+    usize depth = 0;
+    if (current != nullptr)
+    {
+        stack[depth++] = current;
+    }
     usize cursor = 0;
     std::string_view segment;
     while (next_segment(path, cursor, segment))
     {
+        if (segment == ".")
+        {
+            continue;
+        }
+        if (segment == "..")
+        {
+            if (depth > 1)
+            {
+                --depth;
+                current = stack[depth - 1];
+            }
+            continue;
+        }
         auto *next = current == nullptr ? nullptr : current->lookup(segment);
         current = static_cast<RamNode *>(next);
         if (current == nullptr)
         {
             return nullptr;
+        }
+        if (depth < stack.size())
+        {
+            stack[depth++] = current;
         }
     }
     return current;

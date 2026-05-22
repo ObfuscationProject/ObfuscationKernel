@@ -117,6 +117,28 @@ task("toolchain-check")
     end)
 task_end()
 
+task("qemu-harness-test")
+    set_menu {
+        usage = "xmake qemu-harness-test",
+        description = "Run host-side unit tests for the P0 QEMU validation harness"
+    }
+    on_run(function ()
+        local code = os.execv("python3", {
+            "-B",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            path.join(os.projectdir(), "tests", "qemu"),
+            "-p",
+            "test_*.py",
+        }, {try = true})
+        if code ~= 0 then
+            raise("QEMU harness unit tests failed")
+        end
+    end)
+task_end()
+
 task("profile-matrix")
     set_menu {
         usage = "xmake profile-matrix [-a ARCH|all] [-m MODE]",

@@ -185,6 +185,20 @@ extern "C" int memcmp(const void *lhs, const void *rhs, ok::usize count)
     return 0;
 }
 
+extern "C" void *memchr(const void *memory, int value, ok::usize count)
+{
+    const auto *bytes = static_cast<const ok::u8 *>(memory);
+    const auto needle = static_cast<ok::u8>(value);
+    for (ok::usize i = 0; i < count; ++i)
+    {
+        if (bytes[i] == needle)
+        {
+            return const_cast<ok::u8 *>(&bytes[i]);
+        }
+    }
+    return nullptr;
+}
+
 extern "C" ok::usize strlen(const char *text)
 {
     ok::usize size = 0;

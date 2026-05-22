@@ -126,6 +126,35 @@ u16 NetworkStack::checksum(std::span<const std::byte> data)
     return static_cast<u16>(~sum & 0xffffu);
 }
 
+Result<IcmpEchoReply> NetworkStack::send_icmp_echo(Ipv4Address destination, u16 identifier, u16 sequence,
+                                                   std::span<const std::byte> payload)
+{
+    if (!initialized_)
+    {
+        return Status::not_initialized("network stack is not initialized");
+    }
+    if (payload.size() + 28 > max_packet_size)
+    {
+        return Status::overflow("ICMP echo payload exceeds MTU");
+    }
+
+    ++stats_.ipv4_tx;
+    if (!is_local(destination))
+    {
+        ++stats_.dropped;
+        return Status::unsupported("ICMP echo currently supports loopback only");
+    }
+
+    ++stats_.ipv4_rx;
+    return IcmpEchoReply{
+        .source = destination,
+        .destination = local_,
+        .identifier = identifier,
+        .sequence = sequence,
+        .payload_size = payload.size(),
+    };
+}
+
 Status NetworkStack::send_udp(UdpEndpoint source, UdpEndpoint destination, std::span<const std::byte> payload)
 {
     if (!initialized_)
@@ -399,6 +428,48 @@ Result<UdpDatagram> SocketTable::recvfrom(i32 fd)
         return Status::invalid_argument("recvfrom currently supports UDP sockets");
     }
     return stack_->receive_udp();
+}
+
+Result<usize> SocketTable::write(i32 fd, std::span<const std::byte> payload)
+{
+    auto *socket_entry = find(fd);
+    if (socket_entry == nullptr)
+    {
+        return Status::not_found("socket not found");
+    }
+    if (socket_entry->state != SocketState::connected)
+    {
+        return Status::invalid_argument("socket is not connected");
+    }
+    if (socket_entry->type != SocketType::udp)
+    {
+        return Status::unsupported("stream socket write path is not implemented");
+    }
+    return sendto(fd, payload, socket_entry->remote);
+}
+
+Result<usize> SocketTable::read(i32 fd, std::span<std::byte> out)
+{
+    auto *socket_entry = find(fd);
+    if (socket_entry == nullptr)
+    {
+        return Status::not_found("socket not found");
+    }
+    if (socket_entry->type != SocketType::udp)
+    {
+        return Status::unsupported("stream socket read path is not implemented");
+    }
+    auto datagram = recvfrom(fd);
+    if (!datagram)
+    {
+        return datagram.status();
+    }
+    const auto count = datagram.value().payload_size < out.size() ? datagram.value().payload_size : out.size();
+    for (usize i = 0; i < count; ++i)
+    {
+        out[i] = datagram.value().payload[i];
+    }
+    return count;
 }
 
 Result<u32> SocketTable::poll(i32 fd) const

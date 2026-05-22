@@ -92,9 +92,18 @@ Status PosixService::unlinkat(Fd dirfd, std::string_view path, u32 flags)
     return vfs_->unlink(normalized.value());
 }
 
-Status PosixService::rmdir(std::string_view)
+Status PosixService::rmdir(std::string_view path)
 {
-    return Status::unsupported("directory removal is not implemented by RAM VFS");
+    if (!initialized_ || vfs_ == nullptr)
+    {
+        return Status::not_initialized("POSIX service not initialized");
+    }
+    auto normalized = normalize_path(path);
+    if (!normalized)
+    {
+        return normalized.status();
+    }
+    return vfs_->rmdir(normalized.value());
 }
 
 Status PosixService::chdir(std::string_view path)

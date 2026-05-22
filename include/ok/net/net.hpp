@@ -41,6 +41,15 @@ struct UdpDatagram
     usize payload_size{0};
 };
 
+struct IcmpEchoReply
+{
+    Ipv4Address source{};
+    Ipv4Address destination{};
+    u16 identifier{0};
+    u16 sequence{0};
+    usize payload_size{0};
+};
+
 enum class TcpState : u8
 {
     closed,
@@ -165,6 +174,8 @@ class NetworkStack final
         return stats_;
     }
     [[nodiscard]] static u16 checksum(std::span<const std::byte> data);
+    Result<IcmpEchoReply> send_icmp_echo(Ipv4Address destination, u16 identifier, u16 sequence,
+                                         std::span<const std::byte> payload);
     Status send_udp(UdpEndpoint source, UdpEndpoint destination, std::span<const std::byte> payload);
     Result<UdpDatagram> receive_udp();
     Status listen_tcp(u16 port);
@@ -200,6 +211,8 @@ class SocketTable final
     Status connect(i32 fd, UdpEndpoint remote);
     Result<usize> sendto(i32 fd, std::span<const std::byte> payload, UdpEndpoint remote);
     Result<UdpDatagram> recvfrom(i32 fd);
+    Result<usize> write(i32 fd, std::span<const std::byte> payload);
+    Result<usize> read(i32 fd, std::span<std::byte> out);
     Result<u32> poll(i32 fd) const;
     Status shutdown(i32 fd);
     [[nodiscard]] Socket *find(i32 fd);

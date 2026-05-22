@@ -144,7 +144,7 @@ target("okernel_image")
         os.execv(ld, {"-Ttext=0x7c00", "--oformat=binary", boot_object, "-o", boot_sector})
 
         local payload_size = os.filesize(payload_bin)
-        local payload_capacity = 512 * 1024
+        local payload_capacity = 576 * 1024
         if payload_size > payload_capacity then
             raise("kernel payload is too large: %d bytes > %d bytes", payload_size, payload_capacity)
         end

@@ -25,6 +25,16 @@ QEMU_SYSTEM_BY_ARCH = {
 
 QEMU_DEBUG_EXIT_SUCCESS = 33
 VIRTUAL_DISK_SIZE = 16 * 1024 * 1024
+BASE_COVERAGE_FIELDS = ("fs", "simplefs", "ext4", "user", "posix", "shell", "modes")
+CAPABILITY_COVERAGE_FIELDS = {
+    "display": ("framebuffer", "ramfb", "virtio_gpu"),
+    "gpu": ("virtio_gpu",),
+    "input": ("keyboard_input", "mouse_input"),
+    "bus": ("pci_bus",),
+    "usb": ("usb_hid",),
+    "net": ("network_loopback",),
+}
+ALL_COVERAGE_FIELDS = BASE_COVERAGE_FIELDS + tuple(CAPABILITY_COVERAGE_FIELDS)
 
 CAPABILITIES_BY_ARCH = {
     "i386": (
@@ -48,6 +58,10 @@ CAPABILITIES_BY_ARCH = {
 }
 
 
+class QemuConfigurationError(RuntimeError):
+    """Raised before QEMU starts when the requested launch profile is invalid."""
+
+
 def normalize_arch(arch: str) -> str:
     aliases = {
         "x64": "x86_64",
@@ -59,6 +73,35 @@ def normalize_arch(arch: str) -> str:
         "loongarch": "loongarch64",
     }
     return aliases.get(arch, arch)
+
+
+def arch_capabilities(arch: str) -> set[str]:
+    return set(CAPABILITIES_BY_ARCH.get(arch, ()))
+
+
+def required_coverage_fields(arch: str) -> set[str]:
+    capabilities = arch_capabilities(arch)
+    fields = set(BASE_COVERAGE_FIELDS)
+    for field, required_caps in CAPABILITY_COVERAGE_FIELDS.items():
+        if any(capability in capabilities for capability in required_caps):
+            fields.add(field)
+    return fields
+
+
+def coverage_statuses(arch: str, fields: dict[str, str]) -> dict[str, str]:
+    required = required_coverage_fields(arch)
+    statuses: dict[str, str] = {}
+    for field in ALL_COVERAGE_FIELDS:
+        if field in required:
+            if field not in fields:
+                statuses[field] = "missing"
+            elif fields[field] == "1":
+                statuses[field] = "pass"
+            else:
+                statuses[field] = "fail"
+            continue
+        statuses[field] = "pass" if fields.get(field) == "1" else "skip"
+    return statuses
 
 
 def create_virtual_disk(path: Path) -> None:
@@ -78,10 +121,10 @@ def virtio_disk_args(disk: Path) -> list[str]:
 def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool, disk: Path) -> list[str]:
     qemu = QEMU_SYSTEM_BY_ARCH.get(arch)
     if qemu is None:
-        raise SystemExit(f"qemu-system boot is not implemented for {arch} yet")
+        raise QemuConfigurationError(f"qemu-system boot is not implemented for {arch} yet")
     qemu_path = shutil.which(qemu)
     if qemu_path is None:
-        raise SystemExit(f"{qemu} was not found in PATH")
+        raise QemuConfigurationError(f"QEMU executable missing: {qemu} was not found in PATH")
 
     if arch in ("aarch64", "arm32"):
         command = [
@@ -220,9 +263,15 @@ def run_until_marker(command: list[str], timeout: float | None) -> subprocess.Co
 
 def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: bool) -> int:
     if accept_debug_exit and returncode != QEMU_DEBUG_EXIT_SUCCESS:
+        if returncode == 124:
+            print("qemu timed out before OK_TEST_PASS", file=sys.stderr)
+            return 12
         print(f"qemu did not exit through debug-exit success path: returncode={returncode}", file=sys.stderr)
         return returncode if returncode != 0 else 11
     if not accept_debug_exit and returncode != 0:
+        if returncode == 124:
+            print("qemu timed out before OK_TEST_PASS", file=sys.stderr)
+            return 12
         print(f"qemu exited with returncode={returncode}", file=sys.stderr)
         return returncode
 
@@ -246,17 +295,25 @@ def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: 
     if int(fields.get("debug_test_points", "0")) == 0:
         print("debug kernel did not run debug test points", file=sys.stderr)
         return 7
-    if fields.get("net") != "1":
-        print("debug kernel did not pass network stack test coverage", file=sys.stderr)
-        return 8
-    for required in ("fs", "simplefs", "ext4", "user", "display", "gpu", "input", "posix", "bus", "usb", "shell", "modes"):
-        if fields.get(required) != "1":
-            print(f"debug kernel did not pass {required} test coverage", file=sys.stderr)
+
+    coverage = coverage_statuses(arch, fields)
+    required = required_coverage_fields(arch)
+    for field in ALL_COVERAGE_FIELDS:
+        if field not in required:
+            if coverage[field] == "skip":
+                print(f"OK_QEMU_SKIP arch={arch} coverage={field} reason=missing_capability")
+            continue
+        if coverage[field] == "missing":
+            print(f"debug kernel did not report required coverage field: {field}", file=sys.stderr)
             return 8
-    if int(fields.get("display_checksum", "0")) == 0:
+        if coverage[field] == "fail":
+            print(f"debug kernel did not pass required coverage field: {field}", file=sys.stderr)
+            return 8
+
+    if fields.get("display") == "1" and int(fields.get("display_checksum", "0")) == 0:
         print("display driver did not produce a framebuffer checksum", file=sys.stderr)
         return 9
-    if not any(line.startswith("OK_DISPLAY_TEXT ") for line in lines):
+    if fields.get("display") == "1" and not any(line.startswith("OK_DISPLAY_TEXT ") for line in lines):
         print("display driver did not report boot text", file=sys.stderr)
         return 10
     print(f"OK_QEMU_NET_TEST arch={arch} udp=pass tcp=pass")
@@ -295,6 +352,7 @@ def write_summary(kernel: Path, arch: str, output: str, qemu_returncode: int, va
         marker: any(line.startswith(marker + " ") for line in lines)
         for marker in roadmap_markers
     }
+    coverage = coverage_statuses(arch, fields)
     with summary.open("w", encoding="utf-8") as handle:
         handle.write(f"arch={arch}\n")
         handle.write(f"kernel={kernel}\n")
@@ -307,6 +365,10 @@ def write_summary(kernel: Path, arch: str, output: str, qemu_returncode: int, va
         if fields:
             for key in sorted(fields):
                 handle.write(f"field.{key}={fields[key]}\n")
+        for field in ALL_COVERAGE_FIELDS:
+            handle.write(f"coverage.{field}={coverage[field]}\n")
+            if coverage[field] == "skip":
+                handle.write(f"skip.{field}=missing_capability\n")
         for marker, present in marker_status.items():
             handle.write(f"marker.{marker}={'present' if present else 'missing'}\n")
 
@@ -336,7 +398,26 @@ def main() -> int:
         return 2
 
     use_debug_exit = not args.no_debug_exit and arch in ("i386", "x86_64")
-    result = run_kernel(arch, kernel, args.display, use_debug_exit, args.timeout)
+    try:
+        result = run_kernel(arch, kernel, args.display, use_debug_exit, args.timeout)
+    except QemuConfigurationError as error:
+        print(str(error), file=sys.stderr)
+        write_summary(kernel, arch, "", 127, 11)
+        return 11
+    except subprocess.TimeoutExpired as error:
+        stdout = error.stdout or ""
+        stderr = error.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        if stdout:
+            print(stdout, end="")
+        if stderr:
+            print(stderr, end="", file=sys.stderr)
+        print("qemu timed out before OK_TEST_PASS", file=sys.stderr)
+        write_summary(kernel, arch, stdout, 124, 12)
+        return 12
     if result.stdout:
         print(result.stdout, end="")
     if result.stderr:

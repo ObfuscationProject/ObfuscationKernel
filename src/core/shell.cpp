@@ -130,6 +130,31 @@ usize find_shell_operator(std::string_view value)
     return value.size();
 }
 
+usize find_output_redirection(std::string_view value)
+{
+    bool single_quote = false;
+    bool double_quote = false;
+    for (usize i = 0; i < value.size(); ++i)
+    {
+        const auto ch = value[i];
+        if (ch == '\'' && !double_quote)
+        {
+            single_quote = !single_quote;
+            continue;
+        }
+        if (ch == '"' && !single_quote)
+        {
+            double_quote = !double_quote;
+            continue;
+        }
+        if (!single_quote && !double_quote && ch == '>')
+        {
+            return i;
+        }
+    }
+    return value.size();
+}
+
 ShellOperator operator_after(std::string_view value, usize index)
 {
     if (index >= value.size() || value[index] == ';')
@@ -200,6 +225,58 @@ Result<std::string_view> KernelDebugShell::execute(std::string_view line)
 
 Status KernelDebugShell::dispatch_command(std::string_view command_line)
 {
+    const auto redirect = find_output_redirection(command_line);
+    if (redirect < command_line.size())
+    {
+        const auto producer = trim(command_line.substr(0, redirect));
+        const auto target = trim(command_line.substr(redirect + 1));
+        if (producer.empty() || target.empty())
+        {
+            return Status::invalid_argument("output redirection requires a command and path");
+        }
+        if (find_output_redirection(target) < target.size())
+        {
+            return Status::invalid_argument("multiple output redirections are not supported");
+        }
+
+        const auto output_start = output_.size();
+        const auto producer_status = dispatch_command(producer);
+        FixedString<4096> redirected;
+        if (producer_status.ok())
+        {
+            if (auto status = redirected.assign(output_.view().substr(output_start)); !status.ok())
+            {
+                return status;
+            }
+        }
+        while (output_.size() > output_start)
+        {
+            output_.pop_back();
+        }
+        if (!producer_status.ok())
+        {
+            return producer_status;
+        }
+
+        auto resolved = resolve_path(target);
+        if (!resolved)
+        {
+            return resolved.status();
+        }
+        auto fd = kernel_->posix().open(resolved.value(), posix::o_CREAT | posix::o_WRONLY | posix::o_TRUNC);
+        if (!fd)
+        {
+            return fd.status();
+        }
+        auto written = kernel_->posix().write(fd.value(), as_bytes(redirected.view()));
+        if (!written)
+        {
+            static_cast<void>(kernel_->posix().close(fd.value()));
+            return written.status();
+        }
+        return kernel_->posix().close(fd.value());
+    }
+
     const auto command = first_word(command_line);
     const auto args = after_first_word(command_line);
     if (command.empty())

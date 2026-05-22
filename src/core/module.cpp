@@ -157,26 +157,31 @@ Status ModuleManager::sort_modules()
         }
     }
 
+    std::array<usize, max_kernel_modules> visit_order{};
     for (usize i = 0; i < modules_.size(); ++i)
     {
-        if (auto status = visit(i); !status.ok())
+        visit_order[i] = i;
+    }
+    for (usize i = 0; i < modules_.size(); ++i)
+    {
+        for (usize j = i + 1; j < modules_.size(); ++j)
         {
-            return status;
+            const auto left = modules_[visit_order[i]]->manifest();
+            const auto right = modules_[visit_order[j]]->manifest();
+            if (right.init_priority < left.init_priority)
+            {
+                const auto tmp = visit_order[i];
+                visit_order[i] = visit_order[j];
+                visit_order[j] = tmp;
+            }
         }
     }
 
-    for (usize i = 0; i < sorted_order_.size(); ++i)
+    for (usize i = 0; i < modules_.size(); ++i)
     {
-        for (usize j = i + 1; j < sorted_order_.size(); ++j)
+        if (auto status = visit(visit_order[i]); !status.ok())
         {
-            const auto left = modules_[sorted_order_[i]]->manifest();
-            const auto right = modules_[sorted_order_[j]]->manifest();
-            if (right.init_priority < left.init_priority)
-            {
-                const auto tmp = sorted_order_[i];
-                sorted_order_[i] = sorted_order_[j];
-                sorted_order_[j] = tmp;
-            }
+            return status;
         }
     }
 

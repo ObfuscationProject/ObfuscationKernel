@@ -118,6 +118,10 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
     }
 
     if (auto status = add(syscall::Number::read, "read", [](void *context, const syscall::Request &request) {
+            if (request.args[1] == 0 && request.args[2] != 0)
+            {
+                return syscall::Response{.value = -1, .status = Status::fault("read buffer is null")};
+            }
             auto *buffer = reinterpret_cast<std::byte *>(request.args[1]);
             auto result = static_cast<posix::PosixService *>(context)->read(
                 static_cast<posix::Fd>(request.args[0]),
@@ -131,7 +135,7 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
     if (auto status = add(syscall::Number::write, "write", [](void *context, const syscall::Request &request) {
             if (request.args[1] == 0 && request.args[2] != 0)
             {
-                return syscall::Response{.value = -1, .status = Status::invalid_argument("write buffer is empty")};
+                return syscall::Response{.value = -1, .status = Status::fault("write buffer is null")};
             }
             const auto *bytes = reinterpret_cast<const std::byte *>(request.args[1]);
             auto result = static_cast<posix::PosixService *>(context)->write(

@@ -165,6 +165,7 @@ class VirtualFileSystem final
     }
     Status create(std::string_view path, NodeType type);
     Status unlink(std::string_view path);
+    Status rmdir(std::string_view path);
     Status write_file(std::string_view path, std::span<const std::byte> data);
     Result<FileBuffer> read_file(std::string_view path);
     Result<DirectoryListing> list(std::string_view path);

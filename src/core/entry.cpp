@@ -187,7 +187,7 @@ void emit_roadmap_markers(const KernelDebugSink &sink, Kernel &kernel)
     }
     if (report.ext4_readonly)
     {
-        emit(sink, "OK_EXT4_READONLY super=pass inode=pass dir=pass file=pass\n");
+        emit(sink, "OK_EXT4_READONLY super=pass block=pass corrupt=pass bounds=pass\n");
     }
     if (report.smp_roadmap)
     {
