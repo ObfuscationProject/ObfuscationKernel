@@ -117,6 +117,12 @@ def virtio_disk_args(disk: Path) -> list[str]:
     ]
 
 
+def serial_args(arch: str, display: str) -> list[str]:
+    if arch in ("mips", "mips64", "ppc") and display != "none":
+        return ["-serial", "vc:80Cx24C", "-serial", "stdio"]
+    return ["-serial", "stdio"]
+
+
 def qemu_command(arch: str, kernel: Path, display: str, disk: Path) -> list[str]:
     qemu = QEMU_SYSTEM_BY_ARCH.get(arch)
     if qemu is None:
@@ -135,8 +141,6 @@ def qemu_command(arch: str, kernel: Path, display: str, disk: Path) -> list[str]
             "256M",
             "-kernel",
             str(kernel),
-            "-serial",
-            "stdio",
             "-monitor",
             "none",
             "-no-reboot",
@@ -149,6 +153,7 @@ def qemu_command(arch: str, kernel: Path, display: str, disk: Path) -> list[str]
             "-device",
             "virtio-mouse-device",
         ]
+        command += serial_args(arch, display)
         command += virtio_disk_args(disk)
         return command
     if arch in ("rv64", "rv32"):
@@ -162,8 +167,6 @@ def qemu_command(arch: str, kernel: Path, display: str, disk: Path) -> list[str]
             "none",
             "-kernel",
             str(kernel),
-            "-serial",
-            "stdio",
             "-monitor",
             "none",
             "-no-reboot",
@@ -176,6 +179,7 @@ def qemu_command(arch: str, kernel: Path, display: str, disk: Path) -> list[str]
             "-device",
             "virtio-mouse-device",
         ]
+        command += serial_args(arch, display)
         command += virtio_disk_args(disk)
         return command
     if arch == "loongarch64":
@@ -187,8 +191,6 @@ def qemu_command(arch: str, kernel: Path, display: str, disk: Path) -> list[str]
             "2G",
             "-kernel",
             str(kernel),
-            "-serial",
-            "stdio",
             "-monitor",
             "none",
             "-no-reboot",
@@ -201,6 +203,7 @@ def qemu_command(arch: str, kernel: Path, display: str, disk: Path) -> list[str]
             "-device",
             "virtio-mouse-pci",
         ]
+        command += serial_args(arch, display)
         command += virtio_disk_args(disk)
         return command
     if arch in ("mips", "mips64"):
@@ -212,18 +215,19 @@ def qemu_command(arch: str, kernel: Path, display: str, disk: Path) -> list[str]
         if arch == "mips64":
             command += ["-cpu", "MIPS64R2-generic"]
         command += [
+            "-vga",
+            "none",
             "-m",
             "256M",
             "-kernel",
             str(kernel),
-            "-serial",
-            "stdio",
             "-monitor",
             "none",
             "-no-reboot",
             "-display",
             display,
         ]
+        command += serial_args(arch, display)
         command += virtio_disk_args(disk)
         return command
     if arch == "ppc":
@@ -235,14 +239,13 @@ def qemu_command(arch: str, kernel: Path, display: str, disk: Path) -> list[str]
             "256M",
             "-kernel",
             str(kernel),
-            "-serial",
-            "stdio",
             "-monitor",
             "none",
             "-no-reboot",
             "-display",
             display,
         ]
+        command += serial_args(arch, display)
         command += virtio_disk_args(disk)
         return command
 

@@ -3,15 +3,48 @@
 namespace
 {
 
-constexpr ok::uptr uart_base = 0xb80003f8; // Malta ISA COM1 through PCI I/O KSEG1 window.
-constexpr ok::uptr uart_rbr_thr = uart_base + 0x00;
-constexpr ok::uptr uart_lsr = uart_base + 0x05;
+constexpr ok::uptr uart_primary_base = 0xb80003f8;   // Malta ISA COM1 through PCI I/O KSEG1 window.
+constexpr ok::uptr uart_secondary_base = 0xb80002f8; // Malta ISA COM2 through PCI I/O KSEG1 window.
 constexpr ok::u8 uart_lsr_data_ready = 1u << 0;
 constexpr ok::u8 uart_lsr_tx_empty = 1u << 5;
+bool uart_secondary_enabled = true;
 
 volatile ok::u8 &mmio8(ok::uptr address)
 {
     return *reinterpret_cast<volatile ok::u8 *>(address);
+}
+
+void uart_write_char_at(ok::uptr base, char value, bool required)
+{
+    const auto lsr = base + 0x05;
+    if (!required && !uart_secondary_enabled)
+    {
+        return;
+    }
+    if (required)
+    {
+        while ((mmio8(lsr) & uart_lsr_tx_empty) == 0)
+        {
+        }
+    }
+    else
+    {
+        bool ready = false;
+        for (ok::usize attempt = 0; attempt < 100000; ++attempt)
+        {
+            if ((mmio8(lsr) & uart_lsr_tx_empty) != 0)
+            {
+                ready = true;
+                break;
+            }
+        }
+        if (!ready)
+        {
+            uart_secondary_enabled = false;
+            return;
+        }
+    }
+    mmio8(base) = static_cast<ok::u8>(value);
 }
 
 void uart_write_char(char value)
@@ -20,10 +53,8 @@ void uart_write_char(char value)
     {
         uart_write_char('\r');
     }
-    while ((mmio8(uart_lsr) & uart_lsr_tx_empty) == 0)
-    {
-    }
-    mmio8(uart_rbr_thr) = static_cast<ok::u8>(value);
+    uart_write_char_at(uart_primary_base, value, true);
+    uart_write_char_at(uart_secondary_base, value, false);
 }
 
 } // namespace
@@ -52,9 +83,10 @@ extern "C" void ok_platform_halt()
 
 extern "C" int ok_platform_input_poll()
 {
+    constexpr ok::uptr uart_lsr = uart_primary_base + 0x05;
     if ((mmio8(uart_lsr) & uart_lsr_data_ready) == 0)
     {
         return -1;
     }
-    return static_cast<int>(mmio8(uart_rbr_thr));
+    return static_cast<int>(mmio8(uart_primary_base));
 }

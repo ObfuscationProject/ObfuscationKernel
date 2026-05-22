@@ -120,6 +120,12 @@ def virtio_pci_input_args() -> list[str]:
     return ["-device", "virtio-keyboard-pci", "-device", "virtio-mouse-pci"]
 
 
+def serial_args(arch: str, display: str) -> list[str]:
+    if arch in ("mips", "mips64", "ppc") and display != "none":
+        return ["-serial", "vc:80Cx24C", "-serial", "stdio"]
+    return ["-serial", "stdio"]
+
+
 def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool, disk: Path) -> list[str]:
     qemu = QEMU_SYSTEM_BY_ARCH.get(arch)
     if qemu is None:
@@ -139,14 +145,13 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool, disk: 
             "256M",
             "-kernel",
             str(kernel),
-            "-serial",
-            "stdio",
             "-monitor",
             "none",
             "-no-reboot",
             "-display",
             display,
         ]
+        command += serial_args(arch, display)
         command += ramfb_args()
         command += virtio_mmio_input_args()
         command += virtio_disk_args(disk)
@@ -162,14 +167,13 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool, disk: 
             "none",
             "-kernel",
             str(kernel),
-            "-serial",
-            "stdio",
             "-monitor",
             "none",
             "-no-reboot",
             "-display",
             display,
         ]
+        command += serial_args(arch, display)
         command += ramfb_args()
         command += virtio_mmio_input_args()
         command += virtio_disk_args(disk)
@@ -183,14 +187,13 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool, disk: 
             "2G",
             "-kernel",
             str(kernel),
-            "-serial",
-            "stdio",
             "-monitor",
             "none",
             "-no-reboot",
             "-display",
             display,
         ]
+        command += serial_args(arch, display)
         command += ramfb_args()
         command += virtio_pci_input_args()
         command += virtio_disk_args(disk)
@@ -204,18 +207,19 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool, disk: 
         if arch == "mips64":
             command += ["-cpu", "MIPS64R2-generic"]
         command += [
+            "-vga",
+            "none",
             "-m",
             "256M",
             "-kernel",
             str(kernel),
-            "-serial",
-            "stdio",
             "-monitor",
             "none",
             "-no-reboot",
             "-display",
             display,
         ]
+        command += serial_args(arch, display)
         command += virtio_disk_args(disk)
         return command
     if arch == "ppc":
@@ -227,14 +231,13 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool, disk: 
             "256M",
             "-kernel",
             str(kernel),
-            "-serial",
-            "stdio",
             "-monitor",
             "none",
             "-no-reboot",
             "-display",
             display,
         ]
+        command += serial_args(arch, display)
         command += virtio_disk_args(disk)
         return command
 

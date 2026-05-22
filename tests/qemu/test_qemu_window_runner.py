@@ -79,6 +79,19 @@ class QemuWindowRunnerTests(unittest.TestCase):
                     if arch == "mips64":
                         self.assertIn("MIPS64R2-generic", command)
 
+    def test_mips_window_command_disables_guest_vga_and_uses_serial_vc(self) -> None:
+        with mock.patch.object(qemu_window_test.shutil, "which", return_value="/usr/bin/qemu-system-mips"):
+            command = qemu_window_test.qemu_command("mips", Path("kernel.bin"), "gtk", Path("disk.img"))
+        self.assertIn("vc:80Cx24C", command)
+        self.assertIn("stdio", command)
+        self.assertEqual(command[command.index("-vga") + 1], "none")
+
+    def test_ppc_window_command_uses_serial_vc(self) -> None:
+        with mock.patch.object(qemu_window_test.shutil, "which", return_value="/usr/bin/qemu-system-ppc"):
+            command = qemu_window_test.qemu_command("ppc", Path("kernel.bin"), "gtk", Path("disk.img"))
+        self.assertIn("vc:80Cx24C", command)
+        self.assertIn("stdio", command)
+
 
 if __name__ == "__main__":
     unittest.main()
