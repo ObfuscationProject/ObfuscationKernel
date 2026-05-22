@@ -14,3 +14,4 @@ toolchains/*
 *.elf
 *.map
 *.log
+*.pyc

@@ -122,6 +122,34 @@ usize operator_width(std::string_view value, usize index)
     return value[index] == ';' ? 1 : 2;
 }
 
+constexpr gui::Rect shell_gui_bounds{.x = 4, .y = 4, .width = 96, .height = 56};
+constexpr u32 shell_gui_background = 0xff061018u;
+constexpr u32 shell_gui_foreground = 0xffd8f3ffu;
+constexpr u32 shell_gui_prompt = 0xfff4d35eu;
+constexpr usize shell_gui_rows = shell_gui_bounds.height / gui::gui_glyph_height - 2;
+constexpr usize shell_gui_history_keep = 1800;
+
+std::string_view tail_lines(std::string_view text, usize max_lines)
+{
+    if (max_lines == 0)
+    {
+        return {};
+    }
+    usize lines = 0;
+    for (usize i = text.size(); i != 0; --i)
+    {
+        if (text[i - 1] == '\n')
+        {
+            ++lines;
+            if (lines > max_lines)
+            {
+                return text.substr(i);
+            }
+        }
+    }
+    return text;
+}
+
 } // namespace
 Status KernelDebugShell::attach(Kernel &kernel)
 {
@@ -168,6 +196,7 @@ Result<std::string_view> KernelDebugShell::execute(std::string_view line)
         remaining = trim(remaining);
         gate = next_gate;
     }
+    static_cast<void>(render_to_gui(line, output_.view()));
     return output_.view();
 }
 
@@ -421,6 +450,138 @@ Status KernelDebugShell::append_node_type(fs::NodeType type)
         return append("link");
     }
     return append("unknown");
+}
+
+Status KernelDebugShell::ensure_gui_surface()
+{
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+
+    auto &gui_module = kernel_->gui();
+    auto &compositor = gui_module.compositor();
+    if (compositor.crashed())
+    {
+        gui::GuiSupervisor supervisor{kernel_->kernel_modules(), gui_module};
+        if (auto status = supervisor.tick(); !status.ok())
+        {
+            return status;
+        }
+        gui_surface_id_ = 0;
+    }
+    if (compositor.state() != gui::GuiState::running)
+    {
+        return Status::not_initialized("GUI compositor is not running");
+    }
+    if (gui_surface_id_ != 0)
+    {
+        if (compositor.surface_info(gui_surface_id_))
+        {
+            return Status::success();
+        }
+        gui_surface_id_ = 0;
+    }
+
+    auto surface = compositor.create_surface(shell_gui_bounds, "oksh");
+    if (!surface)
+    {
+        return surface.status();
+    }
+    gui_surface_id_ = surface.value();
+    return Status::success();
+}
+
+Status KernelDebugShell::append_gui_history(std::string_view text)
+{
+    if (auto status = gui_history_.append(text); status.ok())
+    {
+        return Status::success();
+    }
+
+    gui_history_.clear();
+    static_cast<void>(gui_history_.append("[shell history truncated]\n"));
+    const auto tail = text.size() > shell_gui_history_keep ? text.substr(text.size() - shell_gui_history_keep) : text;
+    return gui_history_.append(tail);
+}
+
+Status KernelDebugShell::redraw_gui_terminal()
+{
+    if (auto status = ensure_gui_surface(); !status.ok())
+    {
+        return status;
+    }
+
+    auto &compositor = kernel_->gui().compositor();
+    if (auto status = compositor.fill(gui_surface_id_, shell_gui_background); !status.ok())
+    {
+        return status;
+    }
+    const auto visible = tail_lines(gui_history_.view(), shell_gui_rows);
+    if (auto status = compositor.draw_text(gui_surface_id_, 1, 1, visible, shell_gui_foreground, shell_gui_background);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.draw_text(gui_surface_id_, 1, 0, "oksh", shell_gui_prompt, shell_gui_background);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.present(); !status.ok())
+    {
+        return status;
+    }
+    ++gui_render_count_;
+    return Status::success();
+}
+
+Status KernelDebugShell::render_to_gui(std::string_view command_line, std::string_view output)
+{
+    bool clears_screen = false;
+    for (const auto value : output)
+    {
+        if (value == '\f')
+        {
+            clears_screen = true;
+            break;
+        }
+    }
+    if (clears_screen)
+    {
+        gui_history_.clear();
+    }
+
+    if (auto status = append_gui_history("ok> "); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_gui_history(command_line); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_gui_history("\n"); !status.ok())
+    {
+        return status;
+    }
+
+    usize segment_start = 0;
+    for (usize i = 0; i <= output.size(); ++i)
+    {
+        if (i == output.size() || output[i] == '\f')
+        {
+            if (i > segment_start)
+            {
+                if (auto status = append_gui_history(output.substr(segment_start, i - segment_start)); !status.ok())
+                {
+                    return status;
+                }
+            }
+            segment_start = i + 1;
+        }
+    }
+
+    return redraw_gui_terminal();
 }
 
 Status KernelDebugShell::append_session_user()

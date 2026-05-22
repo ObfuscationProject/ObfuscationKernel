@@ -15,9 +15,11 @@ inline constexpr std::string_view gui_service_id{"gui.compositor"};
 inline constexpr usize max_gui_surfaces = 8;
 inline constexpr usize max_gui_title = 32;
 inline constexpr usize max_gui_crash_reason = 64;
-inline constexpr u32 max_gui_surface_width = 64;
-inline constexpr u32 max_gui_surface_height = 48;
+inline constexpr u32 max_gui_surface_width = 96;
+inline constexpr u32 max_gui_surface_height = 56;
 inline constexpr usize max_gui_surface_pixels = max_gui_surface_width * max_gui_surface_height;
+inline constexpr u32 gui_glyph_width = 2;
+inline constexpr u32 gui_glyph_height = 4;
 
 using SurfaceId = u16;
 
@@ -68,6 +70,7 @@ class GuiCompositor final
     Status fill(SurfaceId id, u32 rgba);
     Status fill_rect(SurfaceId id, Rect rect, u32 rgba);
     Status put_pixel(SurfaceId id, u32 x, u32 y, u32 rgba);
+    Status draw_text(SurfaceId id, u32 column, u32 row, std::string_view text, u32 foreground, u32 background);
     Status present();
 
     [[nodiscard]] GuiState state() const
@@ -106,6 +109,7 @@ class GuiCompositor final
     [[nodiscard]] Status ensure_running() const;
     [[nodiscard]] Result<usize> find_surface_index(SurfaceId id) const;
     [[nodiscard]] Status validate_bounds(Rect bounds) const;
+    void draw_cell(Surface &surface, u32 column, u32 row, char value, u32 foreground, u32 background);
     void reset_surfaces();
 
     driver::FramebufferDisplayDriver *display_{nullptr};

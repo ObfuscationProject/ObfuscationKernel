@@ -108,6 +108,35 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
         draw_pointer(left_button);
     }
 
+    static void draw_gui_pixel(u32 logical_width, u32 logical_height, u32 x, u32 y, u32 color)
+    {
+        initialize();
+        if (!ready_ || logical_width == 0 || logical_height == 0 || x >= logical_width || y >= logical_height)
+        {
+            return;
+        }
+        constexpr u32 drawable_height = framebuffer_height - cell_height;
+        const u32 left = (x * framebuffer_width) / logical_width;
+        u32 right = ((x + 1) * framebuffer_width) / logical_width;
+        const u32 top = (y * drawable_height) / logical_height;
+        u32 bottom = ((y + 1) * drawable_height) / logical_height;
+        if (right <= left)
+        {
+            right = left + 1;
+        }
+        if (bottom <= top)
+        {
+            bottom = top + 1;
+        }
+        for (u32 target_y = top; target_y < bottom && target_y < drawable_height; ++target_y)
+        {
+            for (u32 target_x = left; target_x < right && target_x < framebuffer_width; ++target_x)
+            {
+                put_pixel(target_x, target_y, color);
+            }
+        }
+    }
+
   private:
     struct DmaAccess
     {

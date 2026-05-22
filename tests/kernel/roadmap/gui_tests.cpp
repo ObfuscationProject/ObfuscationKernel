@@ -143,6 +143,24 @@ Status test_kernel_gui_is_started(Kernel &kernel)
     return Status::success();
 }
 
+Status test_shell_renders_to_gui(Kernel &kernel)
+{
+    const auto before_renders = kernel.debug_shell().gui_render_count();
+    const auto before_checksum = kernel.gui().compositor().last_present_checksum();
+    auto output = kernel.debug_shell().execute("echo gui-shell");
+    if (!output || output.value() != "gui-shell\n")
+    {
+        return Status::fault("GUI shell command output validation failed");
+    }
+    if (kernel.debug_shell().gui_render_count() <= before_renders || kernel.debug_shell().gui_surface_id() == 0 ||
+        kernel.gui().compositor().last_present_checksum() == 0 ||
+        kernel.gui().compositor().last_present_checksum() == before_checksum)
+    {
+        return Status::fault("debug shell did not render to GUI");
+    }
+    return Status::success();
+}
+
 } // namespace
 
 Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
@@ -156,6 +174,10 @@ Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
         return status;
     }
     if (auto status = test_kernel_gui_is_started(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_shell_renders_to_gui(kernel); !status.ok())
     {
         return status;
     }

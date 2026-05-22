@@ -170,6 +170,12 @@ extern "C" void ok_platform_display_write_char(char value)
     RamFb::write_char(value);
 }
 
+extern "C" void ok_platform_display_gui_pixel(ok::u32 logical_width, ok::u32 logical_height, ok::u32 x, ok::u32 y,
+                                              ok::u32 color)
+{
+    RamFb::draw_gui_pixel(logical_width, logical_height, x, y, color);
+}
+
 extern "C" void ok_platform_display_debug_marker()
 {
     RamFb::draw_debug_marker();

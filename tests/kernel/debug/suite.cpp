@@ -406,6 +406,10 @@ Status Kernel::run_debug_test_suite()
     {
         return Status::fault("debug shell status test failed");
     }
+    if (debug_shell_.gui_render_count() == 0 || debug_shell_.gui_surface_id() == 0)
+    {
+        return Status::fault("debug shell GUI render test failed");
+    }
     auto shell_posix = debug_shell_.execute("posix");
     if (!shell_posix || shell_posix.value().empty())
     {

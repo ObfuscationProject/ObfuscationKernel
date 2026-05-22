@@ -1,5 +1,8 @@
 #include "ok/gui/gui.hpp"
 
+extern "C" void ok_platform_display_gui_pixel(ok::u32 logical_width, ok::u32 logical_height, ok::u32 x, ok::u32 y,
+                                              ok::u32 color) __attribute__((weak));
+
 namespace ok::gui
 {
 namespace
@@ -261,6 +264,89 @@ Status GuiCompositor::put_pixel(SurfaceId id, u32 x, u32 y, u32 rgba)
     return Status::success();
 }
 
+void GuiCompositor::draw_cell(Surface &surface, u32 column, u32 row, char value, u32 foreground, u32 background)
+{
+    const auto origin_x = column * gui_glyph_width;
+    const auto origin_y = row * gui_glyph_height;
+    const auto code = static_cast<u8>(value);
+    for (u32 y = 0; y < gui_glyph_height; ++y)
+    {
+        const auto target_y = origin_y + y;
+        if (target_y >= surface.bounds.height)
+        {
+            continue;
+        }
+        for (u32 x = 0; x < gui_glyph_width; ++x)
+        {
+            const auto target_x = origin_x + x;
+            if (target_x >= surface.bounds.width)
+            {
+                continue;
+            }
+            const auto bit = ((code >> ((x + y) & 7u)) & 1u) != 0;
+            surface.pixels[static_cast<usize>(target_y) * max_gui_surface_width + target_x] =
+                bit || value == '[' || value == ']' ? foreground : background;
+        }
+    }
+}
+
+Status GuiCompositor::draw_text(SurfaceId id, u32 column, u32 row, std::string_view text, u32 foreground,
+                                u32 background)
+{
+    if (auto status = ensure_running(); !status.ok())
+    {
+        return status;
+    }
+    auto index = find_surface_index(id);
+    if (!index)
+    {
+        return index.status();
+    }
+    auto &surface = surfaces_[index.value()];
+    const auto first_column = column;
+    const auto columns = surface.bounds.width / gui_glyph_width;
+    const auto rows = surface.bounds.height / gui_glyph_height;
+    if (column >= columns || row >= rows)
+    {
+        return Status::success();
+    }
+    for (const auto value : text)
+    {
+        if (value == '\f')
+        {
+            for (auto &pixel : surface.pixels)
+            {
+                pixel = background;
+            }
+            column = first_column;
+            row = 0;
+            continue;
+        }
+        if (value == '\n')
+        {
+            column = first_column;
+            ++row;
+            if (row >= rows)
+            {
+                break;
+            }
+            continue;
+        }
+        if (column >= columns)
+        {
+            column = first_column;
+            ++row;
+            if (row >= rows)
+            {
+                break;
+            }
+        }
+        draw_cell(surface, column, row, value, foreground, background);
+        ++column;
+    }
+    return Status::success();
+}
+
 Status GuiCompositor::present()
 {
     if (auto status = ensure_running(); !status.ok())
@@ -303,6 +389,11 @@ Status GuiCompositor::present()
                     !status.ok())
                 {
                     return status;
+                }
+                if (ok_platform_display_gui_pixel != nullptr)
+                {
+                    ok_platform_display_gui_pixel(mode.width, mode.height, static_cast<u32>(target_x),
+                                                  static_cast<u32>(target_y), color);
                 }
             }
         }

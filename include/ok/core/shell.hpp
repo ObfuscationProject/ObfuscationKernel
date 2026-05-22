@@ -3,6 +3,7 @@
 #include "ok/core/fixed.hpp"
 #include "ok/core/types.hpp"
 #include "ok/fs/vfs.hpp"
+#include "ok/gui/gui.hpp"
 
 #include <string_view>
 
@@ -16,12 +17,24 @@ class KernelDebugShell final
   public:
     Status attach(Kernel &kernel);
     Result<std::string_view> execute(std::string_view line);
+    [[nodiscard]] usize gui_render_count() const
+    {
+        return gui_render_count_;
+    }
+    [[nodiscard]] gui::SurfaceId gui_surface_id() const
+    {
+        return gui_surface_id_;
+    }
 
   private:
     Status append(std::string_view text);
     Status append_unsigned(u64 value);
     Status append_node_type(fs::NodeType type);
     Status append_session_user();
+    Status render_to_gui(std::string_view command_line, std::string_view output);
+    Status ensure_gui_surface();
+    Status append_gui_history(std::string_view text);
+    Status redraw_gui_terminal();
     [[nodiscard]] Result<std::string_view> resolve_path(std::string_view path);
     Status dispatch_command(std::string_view command_line);
     Status command_help();
@@ -59,6 +72,9 @@ class KernelDebugShell final
     FixedString<32> session_user_name_{"kernel"};
     FixedString<96> path_buffer_{};
     FixedString<4096> output_{};
+    FixedString<2048> gui_history_{};
+    gui::SurfaceId gui_surface_id_{0};
+    usize gui_render_count_{0};
 };
 
 } // namespace ok
