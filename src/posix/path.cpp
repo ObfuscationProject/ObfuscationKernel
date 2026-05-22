@@ -54,7 +54,7 @@ Status PosixService::mkdir(std::string_view path, u32 mode)
     return mkdirat(at_FDCWD, path, mode);
 }
 
-Status PosixService::mkdirat(Fd dirfd, std::string_view path, u32)
+Status PosixService::mkdirat(Fd dirfd, std::string_view path, u32 mode)
 {
     if (!initialized_ || vfs_ == nullptr)
     {
@@ -65,7 +65,16 @@ Status PosixService::mkdirat(Fd dirfd, std::string_view path, u32)
     {
         return normalized.status();
     }
-    return vfs_->create(normalized.value(), fs::NodeType::directory);
+    if (auto status = vfs_->create(normalized.value(), fs::NodeType::directory); !status.ok())
+    {
+        return status;
+    }
+    const auto directory_mode = mode & ~file_mode_mask_;
+    if (auto status = vfs_->chmod(normalized.value(), directory_mode); !status.ok())
+    {
+        return status;
+    }
+    return vfs_->chown(normalized.value(), current_euid_, current_egid_);
 }
 
 Status PosixService::unlink(std::string_view path)
@@ -122,6 +131,10 @@ Status PosixService::chdir(std::string_view path)
     {
         return Status::not_found("directory not found");
     }
+    if (auto status = fs::require_access(node->metadata(), credentials(), fs::access_execute); !status.ok())
+    {
+        return status;
+    }
     return cwd_.assign(normalized.value());
 }
 
@@ -132,6 +145,10 @@ Status PosixService::fchdir(Fd fd)
         entry->node->metadata().type != fs::NodeType::directory)
     {
         return Status::invalid_argument("file descriptor is not a directory");
+    }
+    if (auto status = fs::require_access(entry->node->metadata(), credentials(), fs::access_execute); !status.ok())
+    {
+        return status;
     }
     return cwd_.assign(entry->path.view());
 }
@@ -148,7 +165,63 @@ Status PosixService::faccessat(Fd dirfd, std::string_view path, u32 mode, u32)
         return Status::invalid_argument("invalid access mode");
     }
     auto metadata = statat(dirfd, path);
-    return metadata ? Status::success() : metadata.status();
+    if (!metadata)
+    {
+        return metadata.status();
+    }
+    return fs::require_access(
+        fs::Metadata{
+            .type = metadata.value().type,
+            .size = metadata.value().size,
+            .mode = metadata.value().mode,
+            .uid = metadata.value().uid,
+            .gid = metadata.value().gid,
+            .link_count = metadata.value().link_count,
+            .block_size = metadata.value().block_size,
+            .blocks = metadata.value().blocks,
+        },
+        credentials(), mode);
+}
+
+Status PosixService::chmod(std::string_view path, u32 mode)
+{
+    if (!initialized_ || vfs_ == nullptr)
+    {
+        return Status::not_initialized("POSIX service not initialized");
+    }
+    auto normalized = normalize_path(path);
+    if (!normalized)
+    {
+        return normalized.status();
+    }
+    auto metadata = vfs_->stat(normalized.value());
+    if (!metadata)
+    {
+        return metadata.status();
+    }
+    if (current_euid_ != 0 && current_euid_ != metadata.value().uid)
+    {
+        return Status::denied("only the owner can chmod a filesystem node");
+    }
+    return vfs_->chmod(normalized.value(), mode);
+}
+
+Status PosixService::chown(std::string_view path, u32 uid, u32 gid)
+{
+    if (!initialized_ || vfs_ == nullptr)
+    {
+        return Status::not_initialized("POSIX service not initialized");
+    }
+    if (current_euid_ != 0)
+    {
+        return Status::denied("only root can chown a filesystem node");
+    }
+    auto normalized = normalize_path(path);
+    if (!normalized)
+    {
+        return normalized.status();
+    }
+    return vfs_->chown(normalized.value(), uid, gid);
 }
 
 Result<FileStatus> PosixService::stat(std::string_view path)
@@ -195,6 +268,10 @@ Result<usize> PosixService::getdents64(Fd fd, std::span<std::byte> out)
         entry->node->metadata().type != fs::NodeType::directory)
     {
         return Status::invalid_argument("file descriptor is not a directory");
+    }
+    if (auto status = fs::require_access(entry->node->metadata(), credentials(), fs::access_read); !status.ok())
+    {
+        return status;
     }
     auto listing = vfs_->list(entry->path.view());
     if (!listing)

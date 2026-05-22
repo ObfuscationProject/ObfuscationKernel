@@ -3,7 +3,8 @@
 namespace ok::sched
 {
 
-ProcessControlBlock::ProcessControlBlock(ProcessId pid, std::string_view name) : pid_(pid)
+ProcessControlBlock::ProcessControlBlock(ProcessId pid, std::string_view name, bool background)
+    : pid_(pid), background_(background)
 {
     static_cast<void>(name_.assign(name));
 }
@@ -70,6 +71,26 @@ Result<ProcessId> Scheduler::create_process(std::string_view name, arch::CpuCont
         return status;
     }
     return pid;
+}
+
+Result<ProcessId> Scheduler::create_background_process(std::string_view name, arch::CpuContext initial_context)
+{
+    auto pid = create_process(name, initial_context);
+    if (!pid)
+    {
+        return pid.status();
+    }
+    auto *process = find(pid.value());
+    if (process == nullptr)
+    {
+        return Status::fault("background process is not visible");
+    }
+    process->set_background(true);
+    if (auto status = set_runnable(pid.value()); !status.ok())
+    {
+        return status;
+    }
+    return pid.value();
 }
 
 Status Scheduler::configure_cpus(usize cpu_count)
@@ -177,6 +198,19 @@ const ProcessControlBlock *Scheduler::find(ProcessId pid) const
         }
     }
     return nullptr;
+}
+
+usize Scheduler::background_process_count() const
+{
+    usize count = 0;
+    for (const auto &process : processes_)
+    {
+        if (process.background())
+        {
+            ++count;
+        }
+    }
+    return count;
 }
 
 } // namespace ok::sched

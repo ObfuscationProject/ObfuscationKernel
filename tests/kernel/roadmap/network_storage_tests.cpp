@@ -1,6 +1,7 @@
 #include "roadmap_tests.hpp"
 
 #include "ok/fs/ext4.hpp"
+#include "ok/fs/fat.hpp"
 #include "ok/fs/storage.hpp"
 #include "ok/syscall/linux.hpp"
 
@@ -29,6 +30,12 @@ void write_le32(std::span<std::byte> out, usize offset, u32 value)
     write_le16(out, offset + 2, static_cast<u16>((value >> 16) & 0xffffu));
 }
 
+void write_le64(std::span<std::byte> out, usize offset, u64 value)
+{
+    write_le32(out, offset, static_cast<u32>(value & 0xffff'ffffull));
+    write_le32(out, offset + 4, static_cast<u32>((value >> 32) & 0xffff'ffffull));
+}
+
 std::array<std::byte, 4096> make_ext4_test_image(bool valid_magic)
 {
     std::array<std::byte, 4096> image{};
@@ -48,6 +55,61 @@ std::array<std::byte, 4096> make_ext4_test_image(bool valid_magic)
         bytes[base + 0x78 + i] = static_cast<std::byte>(name[i]);
     }
     bytes[1024] = std::byte{0x7e};
+    return image;
+}
+
+std::array<std::byte, fs::fat_boot_sector_size> make_fat32_test_image(bool valid_signature)
+{
+    std::array<std::byte, fs::fat_boot_sector_size> image{};
+    auto bytes = std::span<std::byte>(image.data(), image.size());
+    bytes[0] = std::byte{0xeb};
+    bytes[1] = std::byte{0x58};
+    bytes[2] = std::byte{0x90};
+    write_le16(bytes, 0x0b, 512);
+    bytes[0x0d] = std::byte{8};
+    write_le16(bytes, 0x0e, 32);
+    bytes[0x10] = std::byte{2};
+    write_le16(bytes, 0x11, 0);
+    write_le16(bytes, 0x13, 0);
+    write_le16(bytes, 0x16, 0);
+    write_le32(bytes, 0x20, 65536);
+    write_le32(bytes, 0x24, 256);
+    write_le32(bytes, 0x2c, 2);
+    constexpr std::string_view label{"OKFAT32"};
+    for (usize i = 0; i < label.size(); ++i)
+    {
+        bytes[0x47 + i] = static_cast<std::byte>(label[i]);
+    }
+    constexpr std::string_view type{"FAT32   "};
+    for (usize i = 0; i < type.size(); ++i)
+    {
+        bytes[0x52 + i] = static_cast<std::byte>(type[i]);
+    }
+    bytes[510] = valid_signature ? std::byte{0x55} : std::byte{0};
+    bytes[511] = valid_signature ? std::byte{0xaa} : std::byte{0};
+    return image;
+}
+
+std::array<std::byte, fs::fat_boot_sector_size> make_exfat_test_image()
+{
+    std::array<std::byte, fs::fat_boot_sector_size> image{};
+    auto bytes = std::span<std::byte>(image.data(), image.size());
+    constexpr std::string_view name{"EXFAT   "};
+    for (usize i = 0; i < name.size(); ++i)
+    {
+        bytes[3 + i] = static_cast<std::byte>(name[i]);
+    }
+    write_le64(bytes, 0x48, 131072);
+    write_le32(bytes, 0x50, 128);
+    write_le32(bytes, 0x54, 256);
+    write_le32(bytes, 0x58, 384);
+    write_le32(bytes, 0x5c, 1024);
+    write_le32(bytes, 0x60, 2);
+    bytes[0x6c] = std::byte{9};
+    bytes[0x6d] = std::byte{3};
+    bytes[0x6e] = std::byte{1};
+    bytes[510] = std::byte{0x55};
+    bytes[511] = std::byte{0xaa};
     return image;
 }
 
@@ -226,6 +288,11 @@ Status test_socket_table(Kernel &kernel)
 
 Status test_storage(Kernel &kernel)
 {
+    if (kernel.disk_name() != "virtio-blk0")
+    {
+        return Status::fault("QEMU virtio block disk was not selected for driver storage tests");
+    }
+
     fs::BlockCache detached;
     std::array<std::byte, driver::block_sector_size> read_block{};
     if (detached.read_block(0, read_block).code() != StatusCode::not_initialized)
@@ -238,6 +305,7 @@ Status test_storage(Kernel &kernel)
     {
         return status;
     }
+    const auto driver_stats_before = kernel.disk().io_stats();
     std::array<std::byte, driver::block_sector_size> block{};
     block[0] = std::byte{0x5a};
     if (auto status = cache.write_block(4, block); !status.ok())
@@ -252,14 +320,26 @@ Status test_storage(Kernel &kernel)
     {
         return status;
     }
-    if (cache.stats().misses != 1 || cache.stats().hits != 1 || read_block[0] != std::byte{0x5a})
+    const auto cache_stats = cache.stats();
+    if (cache_stats.misses != 1 || cache_stats.hits != 1 || cache_stats.read_requests != 2 ||
+        cache_stats.write_requests != 1 || cache_stats.device_reads != 1 || cache_stats.device_writes != 1 ||
+        cache_stats.bytes_read != driver::block_sector_size * 2 ||
+        cache_stats.bytes_written != driver::block_sector_size || read_block[0] != std::byte{0x5a})
     {
-        return Status::fault("block cache hit/miss validation failed");
+        return Status::fault("block cache hit/miss or IO accounting validation failed");
     }
     if (cache.read_block(kernel.disk().geometry().block_count, read_block).code() != StatusCode::invalid_argument ||
         cache.write_block(kernel.disk().geometry().block_count, block).code() != StatusCode::invalid_argument)
     {
         return Status::fault("out-of-range block access was not rejected");
+    }
+    const auto driver_stats_after = kernel.disk().io_stats();
+    if (driver_stats_after.read_operations <= driver_stats_before.read_operations ||
+        driver_stats_after.write_operations <= driver_stats_before.write_operations ||
+        driver_stats_after.bytes_read <= driver_stats_before.bytes_read ||
+        driver_stats_after.bytes_written <= driver_stats_before.bytes_written)
+    {
+        return Status::fault("block driver IO usage counters did not advance");
     }
 
     std::array<std::byte, driver::block_sector_size> mbr{};
@@ -313,6 +393,51 @@ Status test_storage(Kernel &kernel)
     if (corrupt.mount(corrupt_ext4_image).code() != StatusCode::invalid_argument)
     {
         return Status::fault("corrupted EXT4 superblock was not rejected");
+    }
+
+    auto fat32_image = make_fat32_test_image(true);
+    fs::FatVolume fat32;
+    if (auto status = fat32.mount(fat32_image); !status.ok())
+    {
+        return status;
+    }
+    auto fat32_info = fat32.info();
+    if (!fat32_info || fat32_info.value().variant != fs::FatVariant::fat32 ||
+        fat32_info.value().bytes_per_sector != 512 || fat32_info.value().sectors_per_cluster != 8 ||
+        fat32_info.value().fat_count != 2 || fat32_info.value().root_cluster != 2 ||
+        fat32_info.value().volume_label.view() != "OKFAT32")
+    {
+        return Status::fault("FAT32 boot sector validation failed");
+    }
+    std::array<std::byte, fs::fat_boot_sector_size> fat_sector{};
+    if (auto status = fat32.read_sector(0, fat_sector); !status.ok())
+    {
+        return status;
+    }
+    if (fat_sector[0] != std::byte{0xeb})
+    {
+        return Status::fault("FAT32 sector read validation failed");
+    }
+
+    auto exfat_image = make_exfat_test_image();
+    fs::FatVolume exfat;
+    if (auto status = exfat.mount(exfat_image); !status.ok())
+    {
+        return status;
+    }
+    auto exfat_info = exfat.info();
+    if (!exfat_info || exfat_info.value().variant != fs::FatVariant::exfat ||
+        exfat_info.value().bytes_per_sector != 512 || exfat_info.value().sectors_per_cluster != 8 ||
+        exfat_info.value().fat_count != 1 || exfat_info.value().cluster_count != 1024 ||
+        exfat_info.value().root_cluster != 2)
+    {
+        return Status::fault("exFAT boot sector validation failed");
+    }
+    auto corrupt_fat32_image = make_fat32_test_image(false);
+    fs::FatVolume corrupt_fat;
+    if (corrupt_fat.mount(corrupt_fat32_image).code() != StatusCode::invalid_argument)
+    {
+        return Status::fault("corrupted FAT boot sector was not rejected");
     }
 
     return Status::success();

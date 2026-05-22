@@ -4,6 +4,7 @@
 #include "ok/driver/driver.hpp"
 #include "ok/fs/vfs.hpp"
 #include "ok/sched/scheduler.hpp"
+#include "ok/user/user.hpp"
 
 #include <array>
 #include <span>
@@ -121,6 +122,52 @@ class PosixService final
     {
         return 0;
     }
+    [[nodiscard]] u32 uid() const
+    {
+        return current_uid_;
+    }
+    [[nodiscard]] u32 euid() const
+    {
+        return current_euid_;
+    }
+    [[nodiscard]] u32 gid() const
+    {
+        return current_gid_;
+    }
+    [[nodiscard]] u32 egid() const
+    {
+        return current_egid_;
+    }
+    [[nodiscard]] user::UserId getuid() const
+    {
+        return current_uid_;
+    }
+    [[nodiscard]] user::UserId geteuid() const
+    {
+        return current_euid_;
+    }
+    [[nodiscard]] user::GroupId getgid() const
+    {
+        return current_gid_;
+    }
+    [[nodiscard]] user::GroupId getegid() const
+    {
+        return current_egid_;
+    }
+    [[nodiscard]] fs::Credentials credentials() const
+    {
+        return fs::Credentials{.uid = current_euid_, .gid = current_egid_};
+    }
+    [[nodiscard]] user::Credentials user_credentials() const
+    {
+        return user::Credentials{.uid = current_uid_,
+                                 .gid = current_gid_,
+                                 .euid = current_euid_,
+                                 .egid = current_egid_,
+                                 .kernel_space = current_kernel_space_};
+    }
+    Status set_identity(u32 uid, u32 gid);
+    Status set_credentials(user::Credentials credentials);
     Result<Fd> open(std::string_view path, u32 flags, u32 mode = 0644);
     Result<Fd> openat(Fd dirfd, std::string_view path, u32 flags, u32 mode = 0644);
     Status close(Fd fd);
@@ -143,6 +190,8 @@ class PosixService final
     Status fchdir(Fd fd);
     Status access(std::string_view path, u32 mode);
     Status faccessat(Fd dirfd, std::string_view path, u32 mode, u32 flags = 0);
+    Status chmod(std::string_view path, u32 mode);
+    Status chown(std::string_view path, u32 uid, u32 gid);
     Result<i64> fcntl(Fd fd, u32 command, u64 argument);
     Result<i64> ioctl(Fd fd, u64 request, u64 argument);
     [[nodiscard]] std::string_view getcwd() const
@@ -224,6 +273,11 @@ class PosixService final
     uptr gs_base_{0};
     uptr clear_tid_address_{0};
     u32 file_mode_mask_{0022};
+    u32 current_uid_{fs::default_uid};
+    u32 current_gid_{fs::default_gid};
+    u32 current_euid_{fs::default_uid};
+    u32 current_egid_{fs::default_gid};
+    bool current_kernel_space_{true};
     i32 last_exit_code_{0};
 };
 

@@ -1,0 +1,167 @@
+#include "roadmap_tests.hpp"
+
+#include "ok/gui/gui.hpp"
+
+namespace ok
+{
+namespace
+{
+
+Status test_gui_compositor_draws_surfaces()
+{
+    driver::FramebufferDisplayDriver display;
+    if (auto status = display.probe(); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = display.start(); !status.ok())
+    {
+        return status;
+    }
+
+    gui::GuiCompositor compositor;
+    if (auto status = compositor.start(display); !status.ok())
+    {
+        return status;
+    }
+    const auto before = display.checksum();
+    auto surface = compositor.create_surface(gui::Rect{.x = 4, .y = 5, .width = 24, .height = 12}, "panel");
+    if (!surface)
+    {
+        return surface.status();
+    }
+    if (auto status = compositor.fill(surface.value(), 0xff223344u); !status.ok())
+    {
+        return status;
+    }
+    if (auto status =
+            compositor.fill_rect(surface.value(), gui::Rect{.x = -4, .y = 3, .width = 14, .height = 5}, 0xff66cc88u);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.put_pixel(surface.value(), 7, 7, 0xffffcc66u); !status.ok())
+    {
+        return status;
+    }
+    auto info = compositor.surface_info(surface.value());
+    if (!info || info.value().bounds.width != 24 || info.value().title != "panel")
+    {
+        return Status::fault("GUI surface metadata validation failed");
+    }
+    if (auto status = compositor.present(); !status.ok())
+    {
+        return status;
+    }
+    if (compositor.last_present_checksum() == 0 || compositor.last_present_checksum() == before)
+    {
+        return Status::fault("GUI compositor did not update the framebuffer");
+    }
+    return Status::success();
+}
+
+Status test_gui_module_restarts_after_crash()
+{
+    driver::FramebufferDisplayDriver display;
+    if (auto status = display.start(); !status.ok())
+    {
+        return status;
+    }
+
+    gui::GuiModule module;
+    module.bind_display(display);
+    ModuleManager manager;
+    if (auto status = manager.register_module(module); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = manager.start_all(); !status.ok())
+    {
+        return status;
+    }
+    if (manager.services().query<gui::GuiModule>(gui::gui_service_id) != &module ||
+        module.compositor().state() != gui::GuiState::running)
+    {
+        return Status::fault("GUI module service publication failed");
+    }
+
+    const auto first_generation = module.compositor().generation();
+    auto surface = module.compositor().create_surface(gui::Rect{.x = 1, .y = 1, .width = 10, .height = 8}, "live");
+    if (!surface)
+    {
+        return surface.status();
+    }
+    if (auto status = module.compositor().simulate_crash("roadmap fault"); !status.ok())
+    {
+        return status;
+    }
+    if (module.compositor().create_surface(gui::Rect{.x = 0, .y = 0, .width = 4, .height = 4}, "bad").status().code() !=
+        StatusCode::fault)
+    {
+        return Status::fault("crashed GUI compositor accepted new work");
+    }
+
+    gui::GuiSupervisor supervisor{manager, module};
+    if (auto status = supervisor.tick(); !status.ok())
+    {
+        return status;
+    }
+    if (supervisor.restart_attempts() != 1 || module.state() != ModuleState::started ||
+        module.compositor().state() != gui::GuiState::running || module.compositor().generation() <= first_generation ||
+        module.compositor().surface_count() != 0 || manager.started_count() != 1 ||
+        manager.services().query<gui::GuiModule>(gui::gui_service_id) != &module)
+    {
+        return Status::fault("GUI module restart validation failed");
+    }
+
+    auto recovered = module.compositor().create_surface(gui::Rect{.x = 3, .y = 4, .width = 16, .height = 10}, "new");
+    if (!recovered)
+    {
+        return recovered.status();
+    }
+    if (auto status = module.compositor().fill(recovered.value(), 0xff4477aau); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = module.compositor().present(); !status.ok())
+    {
+        return status;
+    }
+    return module.compositor().last_present_checksum() != 0 ? Status::success()
+                                                            : Status::fault("restarted GUI did not present");
+}
+
+Status test_kernel_gui_is_started(Kernel &kernel)
+{
+    auto &module = kernel.gui();
+    if (module.state() != ModuleState::started || module.compositor().state() != gui::GuiState::running ||
+        module.compositor().last_present_checksum() == 0 ||
+        kernel.kernel_modules().services().query<gui::GuiModule>(gui::gui_service_id) != &module)
+    {
+        return Status::fault("kernel GUI module was not started during boot");
+    }
+    return Status::success();
+}
+
+} // namespace
+
+Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
+{
+    if (auto status = test_gui_compositor_draws_surfaces(); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_gui_module_restarts_after_crash(); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_kernel_gui_is_started(kernel); !status.ok())
+    {
+        return status;
+    }
+
+    report.gui = true;
+    return Status::success();
+}
+
+} // namespace ok

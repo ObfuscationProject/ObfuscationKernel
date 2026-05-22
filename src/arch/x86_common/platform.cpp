@@ -32,6 +32,10 @@ bool right_shift = false;
 bool ps2_mouse_initialized = false;
 ok::u8 ps2_mouse_packet[3]{};
 ok::usize ps2_mouse_packet_index = 0;
+char pending_input[3]{};
+ok::usize pending_input_size = 0;
+ok::usize pending_input_cursor = 0;
+bool ps2_extended_scancode = false;
 
 void outb(ok::u16 port, ok::u8 value)
 {
@@ -183,6 +187,26 @@ char map_scancode(ok::u8 scancode)
         return 0;
     }
     return (left_shift || right_shift) ? shifted[scancode] : normal[scancode];
+}
+
+void queue_escape_sequence(char final)
+{
+    pending_input[0] = 0x1b;
+    pending_input[1] = '[';
+    pending_input[2] = final;
+    pending_input_size = 3;
+    pending_input_cursor = 0;
+}
+
+int pop_pending_input()
+{
+    if (pending_input_cursor >= pending_input_size)
+    {
+        pending_input_size = 0;
+        pending_input_cursor = 0;
+        return -1;
+    }
+    return static_cast<unsigned char>(pending_input[pending_input_cursor++]);
 }
 
 bool ps2_wait_input_clear()
@@ -404,6 +428,10 @@ extern "C" void ok_platform_halt()
 
 extern "C" int ok_platform_input_poll()
 {
+    if (const int pending = pop_pending_input(); pending >= 0)
+    {
+        return pending;
+    }
     poll_ps2_mouse();
     const auto status = inb(keyboard_status_port);
     if ((status & ps2_status_output_full) == 0)
@@ -419,6 +447,26 @@ extern "C" int ok_platform_input_poll()
 
     const bool released = (scancode & 0x80u) != 0;
     const auto key = static_cast<ok::u8>(scancode & 0x7fu);
+    if (scancode == 0xe0)
+    {
+        ps2_extended_scancode = true;
+        return -1;
+    }
+    if (ps2_extended_scancode)
+    {
+        ps2_extended_scancode = false;
+        if (!released && key == 0x48)
+        {
+            queue_escape_sequence('A');
+            return pop_pending_input();
+        }
+        if (!released && key == 0x50)
+        {
+            queue_escape_sequence('B');
+            return pop_pending_input();
+        }
+        return -1;
+    }
     if (key == 0x2a)
     {
         left_shift = !released;

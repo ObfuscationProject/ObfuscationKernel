@@ -53,6 +53,27 @@ u16 elf_machine_for(arch::Architecture architecture)
     return 0;
 }
 
+bool range_end(uptr base, usize length, uptr &end)
+{
+    if (length == 0)
+    {
+        return false;
+    }
+    end = base + static_cast<uptr>(length);
+    return end >= base;
+}
+
+bool ranges_overlap(memory::VmArea lhs, memory::VmArea rhs)
+{
+    uptr lhs_end = 0;
+    uptr rhs_end = 0;
+    if (!range_end(lhs.base, lhs.length, lhs_end) || !range_end(rhs.base, rhs.length, rhs_end))
+    {
+        return true;
+    }
+    return lhs.base < rhs_end && rhs.base < lhs_end;
+}
+
 } // namespace
 
 Status FileDescriptorTable::open_slot(FdLike fd)
@@ -88,6 +109,18 @@ Status MemoryMap::add_area(memory::VmArea area)
     {
         return Status::invalid_argument("memory map area must be non-empty");
     }
+    uptr ignored_end = 0;
+    if (!range_end(area.base, area.length, ignored_end))
+    {
+        return Status::invalid_argument("memory map area wraps address space");
+    }
+    for (const auto &existing : areas_)
+    {
+        if (ranges_overlap(existing, area))
+        {
+            return Status::already_exists("memory map area overlaps an existing area");
+        }
+    }
     return areas_.push_back(area);
 }
 
@@ -113,6 +146,41 @@ Status MemoryMap::replace_with(memory::VmArea area)
 const memory::VmArea *MemoryMap::area(usize index) const
 {
     return index < areas_.size() ? &areas_[index] : nullptr;
+}
+
+bool MemoryMap::contains(uptr address, usize length) const
+{
+    for (const auto &area : areas_)
+    {
+        if (area.contains(address, length))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool MemoryMap::allows_user_access(uptr address, usize length, usize permissions) const
+{
+    for (const auto &area : areas_)
+    {
+        if (area.contains(address, length) && (area.permissions & memory::page_user) != 0 &&
+            (area.permissions & permissions) == permissions)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+Status MemoryMap::require_user_access(uptr address, usize length, usize permissions) const
+{
+    if (!contains(address, length))
+    {
+        return Status::not_found("user address is not mapped in this process");
+    }
+    return allows_user_access(address, length, permissions) ? Status::success()
+                                                            : Status::denied("process memory access denied");
 }
 
 Status WaitQueue::block(ProcessId pid)
@@ -154,7 +222,7 @@ Status Process::configure(ProcessId pid, ProcessId parent, std::string_view name
     parent_pid_ = parent;
     group_ = ProcessGroup{.id = parent == 0 ? pid : parent};
     session_ = Session{.id = group_.id};
-    credentials_ = {};
+    credentials_ = user::kernel_credentials();
     signals_ = {};
     fd_table_ = {};
     memory_map_ = {};
@@ -301,6 +369,7 @@ Result<ProcessId> ProcessManager::create_user_process(std::string_view name, std
         return Status::fault("created user process is not visible");
     }
     process->threads()[0].state = TaskState::runnable;
+    process->set_credentials(user::default_user_credentials());
     if (auto status = process->memory_map().replace_with(memory::VmArea{
             .base = 0x400000,
             .length = 0x2000,
@@ -319,6 +388,10 @@ Result<ThreadId> ProcessManager::create_user_thread(ProcessId pid, arch::CpuCont
     if (process == nullptr)
     {
         return Status::not_found("process not found");
+    }
+    if (context.mode != arch::PrivilegeMode::user)
+    {
+        return Status::invalid_argument("user thread context must use user privilege");
     }
     const auto tid = next_tid_++;
     if (auto status = process->add_thread(tid, context, TaskState::runnable); !status.ok())
@@ -354,6 +427,7 @@ Result<ProcessId> ProcessManager::fork(ProcessId parent)
     {
         return status;
     }
+    child_process->set_credentials(parent_process->credentials());
     if (!parent_process->threads().empty())
     {
         if (auto status =
@@ -405,6 +479,17 @@ Status ProcessManager::execve(ProcessId pid, std::span<const std::byte> elf_imag
     });
     process->threads()[0].state = TaskState::runnable;
     process->set_state(TaskState::runnable);
+    return Status::success();
+}
+
+Status ProcessManager::set_credentials(ProcessId pid, user::Credentials credentials)
+{
+    auto *process = find(pid);
+    if (process == nullptr)
+    {
+        return Status::not_found("process not found");
+    }
+    process->set_credentials(credentials);
     return Status::success();
 }
 

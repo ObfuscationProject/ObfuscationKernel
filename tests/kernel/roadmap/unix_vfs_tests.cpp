@@ -234,6 +234,57 @@ Status verify_file_offsets(Kernel &kernel)
     return Status::success();
 }
 
+Status verify_permissions(Kernel &kernel)
+{
+    auto &posix = kernel.posix();
+    static_cast<void>(posix.set_identity(0, 0));
+    static_cast<void>(posix.unlink("/tmp/vfs-private"));
+
+    auto fd = posix.open("/tmp/vfs-private", posix::o_CREAT | posix::o_RDWR | posix::o_TRUNC, 0600);
+    if (!fd)
+    {
+        return fd.status();
+    }
+    static_cast<void>(posix.close(fd.value()));
+
+    auto root_stat = posix.stat("/tmp/vfs-private");
+    if (!root_stat || (root_stat.value().mode & fs::mode_permission_mask) != 0600u ||
+        root_stat.value().uid != 0 || root_stat.value().gid != 0)
+    {
+        return Status::fault("VFS create mode or ownership validation failed");
+    }
+
+    static_cast<void>(posix.set_identity(1000, 1000));
+    if (posix.open("/tmp/vfs-private", posix::o_RDONLY).status().code() != StatusCode::denied ||
+        posix.access("/tmp/vfs-private", posix::r_OK).code() != StatusCode::denied)
+    {
+        static_cast<void>(posix.set_identity(0, 0));
+        return Status::fault("VFS permission denial validation failed");
+    }
+
+    static_cast<void>(posix.set_identity(0, 0));
+    if (auto status = posix.chmod("/tmp/vfs-private", 0644); !status.ok())
+    {
+        return status;
+    }
+    static_cast<void>(posix.set_identity(1000, 1000));
+    auto readable = posix.open("/tmp/vfs-private", posix::o_RDONLY);
+    if (!readable)
+    {
+        static_cast<void>(posix.set_identity(0, 0));
+        return Status::fault("VFS chmod did not grant world read access");
+    }
+    static_cast<void>(posix.close(readable.value()));
+    if (posix.open("/tmp/vfs-private", posix::o_WRONLY).status().code() != StatusCode::denied)
+    {
+        static_cast<void>(posix.set_identity(0, 0));
+        return Status::fault("VFS chmod unexpectedly granted world write access");
+    }
+
+    static_cast<void>(posix.set_identity(0, 0));
+    return posix.unlink("/tmp/vfs-private");
+}
+
 Status verify_device_nodes()
 {
     fs::DeviceNode null_device{fs::DeviceKind::null};
@@ -384,6 +435,10 @@ Status run_unix_vfs_roadmap_tests(Kernel &kernel, KernelTestReport &report)
         return status;
     }
     if (auto status = verify_file_offsets(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = verify_permissions(kernel); !status.ok())
     {
         return status;
     }

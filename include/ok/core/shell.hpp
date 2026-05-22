@@ -18,13 +18,6 @@ class KernelDebugShell final
     Result<std::string_view> execute(std::string_view line);
 
   private:
-    enum class SessionUser : u8
-    {
-        kernel,
-        root,
-        user,
-    };
-
     Status append(std::string_view text);
     Status append_unsigned(u64 value);
     Status append_node_type(fs::NodeType type);
@@ -63,7 +56,7 @@ class KernelDebugShell final
     Status command_net(std::string_view args);
 
     Kernel *kernel_{nullptr};
-    SessionUser session_user_{SessionUser::kernel};
+    FixedString<32> session_user_name_{"kernel"};
     FixedString<96> path_buffer_{};
     FixedString<4096> output_{};
 };

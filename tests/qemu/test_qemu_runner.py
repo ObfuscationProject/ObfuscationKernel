@@ -116,6 +116,14 @@ class QemuRunnerValidationTests(unittest.TestCase):
                 qemu_test.qemu_command("x86_64", Path("kernel.bin"), "none", True, Path("disk.img"))
         self.assertIn("QEMU executable missing: qemu-system-x86_64", str(error.exception))
 
+    def test_qemu_command_attaches_real_virtio_disk_image(self) -> None:
+        with mock.patch.object(qemu_test.shutil, "which", return_value="/usr/bin/qemu-system-x86_64"):
+            command = qemu_test.qemu_command("x86_64", Path("kernel.bin"), "none", True, Path("disk.img"))
+        self.assertIn("-drive", command)
+        self.assertIn("file=disk.img,format=raw,if=none,id=fsdisk", command)
+        self.assertIn("-device", command)
+        self.assertIn("virtio-blk-pci,drive=fsdisk", command)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -105,16 +105,37 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
     {
         return status;
     }
-    for (auto number : {syscall::Number::getuid, syscall::Number::geteuid, syscall::Number::getgid,
-                        syscall::Number::getegid})
+    if (auto status = add(syscall::Number::getuid, "getuid", [](void *context, const syscall::Request &) {
+            return syscall::Response{.value = static_cast<i64>(static_cast<posix::PosixService *>(context)->getuid()),
+                                     .status = Status::success()};
+        });
+        !status.ok())
     {
-        if (auto status = add(number, "identity", [](void *, const syscall::Request &) {
-                return syscall::Response{.value = 0, .status = Status::success()};
-            });
-            !status.ok())
-        {
-            return status;
-        }
+        return status;
+    }
+    if (auto status = add(syscall::Number::geteuid, "geteuid", [](void *context, const syscall::Request &) {
+            return syscall::Response{.value = static_cast<i64>(static_cast<posix::PosixService *>(context)->geteuid()),
+                                     .status = Status::success()};
+        });
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = add(syscall::Number::getgid, "getgid", [](void *context, const syscall::Request &) {
+            return syscall::Response{.value = static_cast<i64>(static_cast<posix::PosixService *>(context)->getgid()),
+                                     .status = Status::success()};
+        });
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = add(syscall::Number::getegid, "getegid", [](void *context, const syscall::Request &) {
+            return syscall::Response{.value = static_cast<i64>(static_cast<posix::PosixService *>(context)->getegid()),
+                                     .status = Status::success()};
+        });
+        !status.ok())
+    {
+        return status;
     }
 
     if (auto status = add(syscall::Number::read, "read", [](void *context, const syscall::Request &request) {

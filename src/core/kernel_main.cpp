@@ -1,5 +1,8 @@
 #include "ok/arch/arch.hpp"
+#include "ok/core/fixed.hpp"
 #include "ok/core/entry.hpp"
+
+#include <array>
 
 namespace
 {
@@ -38,7 +41,71 @@ void platform_write(std::string_view text)
 [[maybe_unused, noreturn]] void interactive_loop()
 {
     constexpr std::string_view prompt{"ok> "};
+    constexpr ok::usize history_capacity = 16;
     ok::FixedString<128> line;
+    std::array<ok::FixedString<128>, history_capacity> history{};
+    ok::usize history_count = 0;
+    ok::usize history_cursor = 0;
+    ok::u8 escape_state = 0;
+
+    auto erase_line = [&]() {
+        while (!line.empty())
+        {
+            line.pop_back();
+            platform_write("\b");
+        }
+    };
+    auto replace_line = [&](std::string_view value) {
+        erase_line();
+        if (line.assign(value).ok())
+        {
+            platform_write(line.view());
+        }
+    };
+    auto remember_line = [&]() {
+        if (line.empty())
+        {
+            history_cursor = history_count;
+            return;
+        }
+        if (history_count != 0 && history[history_count - 1].view() == line.view())
+        {
+            history_cursor = history_count;
+            return;
+        }
+        if (history_count == history.size())
+        {
+            for (ok::usize i = 1; i < history.size(); ++i)
+            {
+                history[i - 1] = history[i];
+            }
+            --history_count;
+        }
+        static_cast<void>(history[history_count++].assign(line.view()));
+        history_cursor = history_count;
+    };
+    auto history_previous = [&]() {
+        if (history_count == 0 || history_cursor == 0)
+        {
+            return;
+        }
+        --history_cursor;
+        replace_line(history[history_cursor].view());
+    };
+    auto history_next = [&]() {
+        if (history_cursor >= history_count)
+        {
+            return;
+        }
+        ++history_cursor;
+        if (history_cursor == history_count)
+        {
+            erase_line();
+            return;
+        }
+        replace_line(history[history_cursor].view());
+    };
+
     platform_write("\nOK_INTERACTIVE ready shell=oksh input=platform\n");
     platform_write(prompt);
     for (;;)
@@ -47,9 +114,33 @@ void platform_write(std::string_view text)
         if (value >= 0)
         {
             const char ch = static_cast<char>(value);
+            if (escape_state == 1)
+            {
+                escape_state = ch == '[' ? 2 : 0;
+                continue;
+            }
+            if (escape_state == 2)
+            {
+                if (ch == 'A')
+                {
+                    history_previous();
+                }
+                else if (ch == 'B')
+                {
+                    history_next();
+                }
+                escape_state = 0;
+                continue;
+            }
+            if (ch == 0x1b)
+            {
+                escape_state = 1;
+                continue;
+            }
             if (ch == '\r' || ch == '\n')
             {
                 platform_write("\n");
+                remember_line();
                 auto out = ok::ok_debug_shell_execute(line.view());
                 if (out && !out.value().empty())
                 {
@@ -79,6 +170,7 @@ void platform_write(std::string_view text)
                 if (line.append(ch).ok())
                 {
                     platform_write(std::string_view{&ch, 1});
+                    history_cursor = history_count;
                 }
             }
         }

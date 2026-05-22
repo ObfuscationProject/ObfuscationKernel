@@ -5,6 +5,7 @@
 #include "ok/core/types.hpp"
 #include "ok/memory/memory.hpp"
 #include "ok/sched/scheduler.hpp"
+#include "ok/user/user.hpp"
 
 #include <array>
 #include <span>
@@ -28,13 +29,7 @@ enum class TaskState : u8
     exited,
 };
 
-struct Credentials
-{
-    u32 uid{0};
-    u32 gid{0};
-    u32 euid{0};
-    u32 egid{0};
-};
+using Credentials = user::Credentials;
 
 struct SignalState
 {
@@ -76,6 +71,9 @@ class MemoryMap final
     Status add_area(memory::VmArea area);
     Status clone_from(const MemoryMap &source);
     Status replace_with(memory::VmArea area);
+    [[nodiscard]] bool contains(uptr address, usize length) const;
+    [[nodiscard]] bool allows_user_access(uptr address, usize length, usize permissions) const;
+    [[nodiscard]] Status require_user_access(uptr address, usize length, usize permissions) const;
     [[nodiscard]] usize area_count() const
     {
         return areas_.size();
@@ -178,6 +176,14 @@ class Process final
     {
         return credentials_;
     }
+    [[nodiscard]] const Credentials &credentials() const
+    {
+        return credentials_;
+    }
+    void set_credentials(Credentials credentials)
+    {
+        credentials_ = credentials;
+    }
     [[nodiscard]] SignalState &signals()
     {
         return signals_;
@@ -221,6 +227,7 @@ class ProcessManager final
     Result<ThreadId> create_user_thread(ProcessId pid, arch::CpuContext context);
     Result<ProcessId> fork(ProcessId parent);
     Status execve(ProcessId pid, std::span<const std::byte> elf_image, arch::Architecture architecture);
+    Status set_credentials(ProcessId pid, user::Credentials credentials);
     Result<i32> wait4(ProcessId parent, ProcessId child);
     Status exit(ProcessId pid, i32 code);
     Status exit_group(ProcessId pid, i32 code);

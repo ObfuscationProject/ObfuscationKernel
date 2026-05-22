@@ -207,6 +207,10 @@ Status ModuleManager::publish_services(KernelModule &module)
     const auto manifest = module.manifest();
     for (const auto service_id : manifest.exported_services)
     {
+        if (services_.query_raw(service_id) == &module)
+        {
+            continue;
+        }
         if (auto status = services_.register_service(service_id, &module); !status.ok())
         {
             module.fail(status.message());
@@ -214,6 +218,27 @@ Status ModuleManager::publish_services(KernelModule &module)
         }
     }
     return Status::success();
+}
+
+bool ModuleManager::started_order_contains(const KernelModule &module) const
+{
+    for (const auto *started : started_order_)
+    {
+        if (started == &module)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+Status ModuleManager::record_started(KernelModule &module)
+{
+    if (started_order_contains(module))
+    {
+        return Status::success();
+    }
+    return started_order_.push_back(&module);
 }
 
 Status ModuleManager::transition(KernelModule &module, ModuleState next, Status status)
@@ -227,6 +252,42 @@ Status ModuleManager::transition(KernelModule &module, ModuleState next, Status 
     return Status::success();
 }
 
+Status ModuleManager::start_module(KernelModule &module)
+{
+    module.clear_failure();
+    if (auto status = check_dependencies(module); !status.ok())
+    {
+        module.fail(status.message());
+        return status;
+    }
+    if (auto status = transition(module, ModuleState::probed, module.probe()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = transition(module, ModuleState::initialized, module.init(services_)); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = check_required_services(module); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = transition(module, ModuleState::started, module.start(services_)); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = publish_services(module); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = record_started(module); !status.ok())
+    {
+        module.fail(status.message());
+        return status;
+    }
+    return Status::success();
+}
+
 Status ModuleManager::start_all()
 {
     if (auto status = sort_modules(); !status.ok())
@@ -237,34 +298,31 @@ Status ModuleManager::start_all()
     started_order_ = {};
     for (const auto index : sorted_order_)
     {
-        auto &module = *modules_[index];
-        if (auto status = transition(module, ModuleState::probed, module.probe()); !status.ok())
+        if (auto status = start_module(*modules_[index]); !status.ok())
         {
-            return status;
-        }
-        if (auto status = transition(module, ModuleState::initialized, module.init(services_)); !status.ok())
-        {
-            return status;
-        }
-        if (auto status = check_required_services(module); !status.ok())
-        {
-            return status;
-        }
-        if (auto status = transition(module, ModuleState::started, module.start(services_)); !status.ok())
-        {
-            return status;
-        }
-        if (auto status = publish_services(module); !status.ok())
-        {
-            return status;
-        }
-        if (auto status = started_order_.push_back(&module); !status.ok())
-        {
-            module.fail(status.message());
             return status;
         }
     }
     return Status::success();
+}
+
+Status ModuleManager::restart_module(std::string_view name)
+{
+    auto *module = find(name);
+    if (module == nullptr)
+    {
+        return Status::not_found("module is not registered");
+    }
+    if (module->state() == ModuleState::started)
+    {
+        if (auto status = module->stop(); !status.ok())
+        {
+            module->fail(status.message());
+            return status;
+        }
+        module->set_state(ModuleState::stopped);
+    }
+    return start_module(*module);
 }
 
 Status ModuleManager::stop_all()

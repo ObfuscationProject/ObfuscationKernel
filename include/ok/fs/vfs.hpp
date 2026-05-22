@@ -2,6 +2,7 @@
 
 #include "ok/core/fixed.hpp"
 #include "ok/core/types.hpp"
+#include "ok/smp/smp.hpp"
 
 #include <array>
 #include <cstddef>
@@ -44,6 +45,9 @@ inline constexpr u32 mode_permission_mask = 07777u;
 inline constexpr u32 default_uid = 0;
 inline constexpr u32 default_gid = 0;
 inline constexpr u32 metadata_block_size = 512;
+inline constexpr u32 access_execute = 1u;
+inline constexpr u32 access_write = 2u;
+inline constexpr u32 access_read = 4u;
 
 [[nodiscard]] constexpr u32 node_type_mode(NodeType type)
 {
@@ -83,6 +87,15 @@ struct Metadata
     u64 blocks{0};
 };
 
+struct Credentials
+{
+    u32 uid{default_uid};
+    u32 gid{default_gid};
+};
+
+[[nodiscard]] bool has_access(const Metadata &metadata, Credentials credentials, u32 access);
+[[nodiscard]] Status require_access(const Metadata &metadata, Credentials credentials, u32 access);
+
 struct FileBuffer
 {
     std::array<std::byte, max_file_data> data{};
@@ -111,6 +124,8 @@ class Node
     virtual Status write(usize offset, std::span<const std::byte> data) = 0;
     virtual Node *lookup(std::string_view child) = 0;
     virtual Status create(std::string_view name, NodeType type) = 0;
+    virtual Status chmod(u32 mode) = 0;
+    virtual Status chown(u32 uid, u32 gid) = 0;
 };
 
 class RamNode final : public Node
@@ -131,6 +146,8 @@ class RamNode final : public Node
     Status write(usize offset, std::span<const std::byte> data) override;
     Node *lookup(std::string_view child) override;
     Status create(std::string_view name, NodeType type) override;
+    Status chmod(u32 mode) override;
+    Status chown(u32 uid, u32 gid) override;
     [[nodiscard]] Result<DirectoryListing> list() const;
     [[nodiscard]] bool used() const
     {
@@ -148,6 +165,7 @@ class RamNode final : public Node
     FileBuffer *data_{nullptr};
     std::array<RamNode *, max_child_nodes> children_{};
     usize child_count_{0};
+    mutable smp::SpinLock lock_{};
 };
 
 class VirtualFileSystem final
@@ -166,6 +184,8 @@ class VirtualFileSystem final
     Status create(std::string_view path, NodeType type);
     Status unlink(std::string_view path);
     Status rmdir(std::string_view path);
+    Status chmod(std::string_view path, u32 mode);
+    Status chown(std::string_view path, u32 uid, u32 gid);
     Status write_file(std::string_view path, std::span<const std::byte> data);
     Result<FileBuffer> read_file(std::string_view path);
     Result<DirectoryListing> list(std::string_view path);
@@ -173,6 +193,7 @@ class VirtualFileSystem final
     [[nodiscard]] Node *lookup(std::string_view path);
 
   private:
+    [[nodiscard]] Node *lookup_unlocked(std::string_view path);
     [[nodiscard]] RamNode *allocate_node(std::string_view name, NodeType type);
     [[nodiscard]] FileBuffer *allocate_file_buffer(NodeType type);
     void release_file_buffer(FileBuffer *buffer);
@@ -185,6 +206,7 @@ class VirtualFileSystem final
     std::array<bool, max_ram_file_buffers> file_buffer_used_{};
     usize used_nodes_{0};
     RamNode *root_{nullptr};
+    mutable smp::SpinLock lock_{};
 };
 
 } // namespace ok::fs

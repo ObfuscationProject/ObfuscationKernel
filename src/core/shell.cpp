@@ -425,16 +425,7 @@ Status KernelDebugShell::append_node_type(fs::NodeType type)
 
 Status KernelDebugShell::append_session_user()
 {
-    switch (session_user_)
-    {
-    case SessionUser::kernel:
-        return append("kernel");
-    case SessionUser::root:
-        return append("root");
-    case SessionUser::user:
-        return append("user");
-    }
-    return append("unknown");
+    return append(session_user_name_.view());
 }
 
 Result<std::string_view> KernelDebugShell::resolve_path(std::string_view path)

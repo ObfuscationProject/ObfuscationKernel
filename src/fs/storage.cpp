@@ -21,6 +21,7 @@ u32 read_le32(std::span<const std::byte> bytes, usize offset)
 
 Status BlockCache::attach(driver::BlockDevice &device)
 {
+    smp::ScopedSpinLock guard(lock_);
     device_ = &device;
     entries_ = {};
     stats_ = {};
@@ -28,19 +29,29 @@ Status BlockCache::attach(driver::BlockDevice &device)
     return Status::success();
 }
 
+BlockCacheStats BlockCache::stats() const
+{
+    smp::ScopedSpinLock guard(lock_);
+    return stats_;
+}
+
 Status BlockCache::read_block(u64 block, std::span<std::byte> out)
 {
+    smp::ScopedSpinLock guard(lock_);
     if (device_ == nullptr)
     {
         return Status::not_initialized("block cache has no device");
     }
     if (out.size() != driver::block_sector_size)
     {
+        ++stats_.errors;
         return Status::invalid_argument("block cache reads exactly one sector");
     }
+    ++stats_.read_requests;
     const auto geometry = device_->geometry();
     if (block >= geometry.block_count)
     {
+        ++stats_.errors;
         return Status::invalid_argument("block read is out of range");
     }
     for (auto &entry : entries_)
@@ -48,6 +59,7 @@ Status BlockCache::read_block(u64 block, std::span<std::byte> out)
         if (entry.valid && entry.block == block)
         {
             ++stats_.hits;
+            stats_.bytes_read += out.size();
             for (usize i = 0; i < out.size(); ++i)
             {
                 out[i] = entry.data[i];
@@ -59,8 +71,11 @@ Status BlockCache::read_block(u64 block, std::span<std::byte> out)
     auto &victim = entries_[next_victim_++ % entries_.size()];
     if (auto status = device_->read_blocks(block, victim.data); !status.ok())
     {
+        ++stats_.errors;
         return status;
     }
+    ++stats_.device_reads;
+    stats_.bytes_read += out.size();
     victim.valid = true;
     victim.block = block;
     for (usize i = 0; i < out.size(); ++i)
@@ -72,23 +87,30 @@ Status BlockCache::read_block(u64 block, std::span<std::byte> out)
 
 Status BlockCache::write_block(u64 block, std::span<const std::byte> in)
 {
+    smp::ScopedSpinLock guard(lock_);
     if (device_ == nullptr)
     {
         return Status::not_initialized("block cache has no device");
     }
     if (in.size() != driver::block_sector_size)
     {
+        ++stats_.errors;
         return Status::invalid_argument("block cache writes exactly one sector");
     }
+    ++stats_.write_requests;
     const auto geometry = device_->geometry();
     if (block >= geometry.block_count)
     {
+        ++stats_.errors;
         return Status::invalid_argument("block write is out of range");
     }
     if (auto status = device_->write_blocks(block, in); !status.ok())
     {
+        ++stats_.errors;
         return status;
     }
+    ++stats_.device_writes;
+    stats_.bytes_written += in.size();
     for (auto &entry : entries_)
     {
         if (entry.valid && entry.block == block)

@@ -169,6 +169,10 @@ void emit_roadmap_markers(const KernelDebugSink &sink, Kernel &kernel)
     {
         emit(sink, "OK_LINUX_DRIVER_SHIM compile=pass probe=pass mmio=pass alloc=pass remove=pass\n");
     }
+    if (report.gui)
+    {
+        emit(sink, "OK_GUI compositor=pass surface=pass restart=pass\n");
+    }
     if (report.module_load)
     {
         emit(sink, "OK_MODULE_LOAD elf=pass reloc=pass symbols=pass unload=pass\n");
@@ -183,7 +187,7 @@ void emit_roadmap_markers(const KernelDebugSink &sink, Kernel &kernel)
     }
     if (report.block)
     {
-        emit(sink, "OK_BLOCK cache=pass partition=pass bounds=pass\n");
+        emit(sink, "OK_BLOCK disk=virtio cache=pass io=pass part=pass fat32=pass exfat=pass bounds=pass\n");
     }
     if (report.ext4_readonly)
     {
@@ -221,6 +225,7 @@ void emit_roadmap_markers(const KernelDebugSink &sink, Kernel &kernel)
     emit_bool_field(sink, "user", report.user_mode);
     emit_bool_field(sink, "display", report.display);
     emit_bool_field(sink, "gpu", report.gpu);
+    emit_bool_field(sink, "gui", report.gui);
     emit_bool_field(sink, "input", report.input);
     emit_bool_field(sink, "posix", report.posix);
     emit_bool_field(sink, "bus", report.bus);

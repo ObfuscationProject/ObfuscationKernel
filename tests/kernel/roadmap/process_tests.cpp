@@ -3,6 +3,7 @@
 #include "ok/posix/posix.hpp"
 #include "ok/sched/process.hpp"
 #include "ok/syscall/syscall.hpp"
+#include "ok/user/user.hpp"
 
 #include <array>
 #include <span>
@@ -360,6 +361,194 @@ Status verify_userland_smoke(Kernel &kernel, std::span<const std::byte> elf, sch
     return Status::success();
 }
 
+Status verify_user_management_and_isolation(Kernel &kernel, std::span<const std::byte> elf,
+                                            sched::ProcessManager &processes)
+{
+    auto &users = kernel.user_space().users();
+    if (users.user_count() < 3 || users.find_by_name("kernel") == nullptr || users.find_by_name("root") == nullptr ||
+        users.find_by_name("user") == nullptr)
+    {
+        return Status::fault("default user accounts are missing");
+    }
+
+    auto root = users.credentials_for("root");
+    auto normal = users.credentials_for("user");
+    if (!root || !normal || !users.can_switch(user::kernel_credentials(), normal.value()) ||
+        users.can_switch(normal.value(), root.value()))
+    {
+        return Status::fault("user credential switching policy failed");
+    }
+    if (auto status = users.add_user(2000, 2000, "daemon", "/srv/daemon");
+        !status.ok() && status.code() != StatusCode::already_exists)
+    {
+        return status;
+    }
+    auto daemon = users.credentials_for("daemon");
+    if (!daemon)
+    {
+        return daemon.status();
+    }
+
+    auto process = processes.create_user_process("daemon", elf, kernel.arch().architecture());
+    if (!process)
+    {
+        return process.status();
+    }
+    if (auto status = processes.set_credentials(process.value(), daemon.value()); !status.ok())
+    {
+        return status;
+    }
+    auto *daemon_process = processes.find(process.value());
+    if (daemon_process == nullptr || daemon_process->credentials().uid != 2000 ||
+        daemon_process->credentials().euid != 2000)
+    {
+        return Status::fault("process credentials were not applied");
+    }
+
+    auto child = processes.fork(process.value());
+    if (!child)
+    {
+        return child.status();
+    }
+    const auto *child_process = processes.find(child.value());
+    if (child_process == nullptr || child_process->credentials().uid != daemon_process->credentials().uid)
+    {
+        return Status::fault("fork did not inherit process credentials");
+    }
+    const auto child_area_count = child_process->memory_map().area_count();
+
+    if (auto status = daemon_process->memory_map().add_area(memory::VmArea{
+            .base = 0x700000,
+            .length = 0x1000,
+            .permissions = memory::page_read | memory::page_write | memory::page_user,
+        });
+        !status.ok())
+    {
+        return status;
+    }
+    if (!daemon_process->memory_map().allows_user_access(0x700100, 16, memory::page_read) ||
+        !daemon_process->memory_map().allows_user_access(0x700100, 16, memory::page_write))
+    {
+        return Status::fault("user process memory permissions were not honored");
+    }
+    if (daemon_process->memory_map()
+            .add_area(memory::VmArea{
+                .base = 0x700800,
+                .length = 0x1000,
+                .permissions = memory::page_read | memory::page_user,
+            })
+            .code() != StatusCode::already_exists)
+    {
+        return Status::fault("overlapping process memory area was not rejected");
+    }
+    if (auto status = daemon_process->memory_map().add_area(memory::VmArea{
+            .base = 0x900000,
+            .length = 0x1000,
+            .permissions = memory::page_read,
+        });
+        !status.ok())
+    {
+        return status;
+    }
+    if (daemon_process->memory_map().require_user_access(0x900000, 1, memory::page_read).code() != StatusCode::denied)
+    {
+        return Status::fault("kernel-only process mapping allowed user access");
+    }
+    child_process = processes.find(child.value());
+    if (child_process == nullptr || child_process->memory_map().area_count() != child_area_count)
+    {
+        return Status::fault("forked child memory map was not isolated from parent edits");
+    }
+    return Status::success();
+}
+
+Status verify_background_programs_and_posix(Kernel &kernel)
+{
+    auto &ops = arch::arch_operations(kernel.arch().architecture());
+    auto first = kernel.scheduler().create_background_process("bg-a", ops.make_kernel_context(0x3000, 0xa000));
+    auto second = kernel.scheduler().create_background_process("bg-b", ops.make_kernel_context(0x4000, 0xb000));
+    auto third = kernel.scheduler().create_background_process("bg-c", ops.make_kernel_context(0x5000, 0xc000));
+    if (!first || !second || !third || kernel.scheduler().background_process_count() < 3)
+    {
+        return Status::fault("background process creation failed");
+    }
+
+    bool saw_first = false;
+    bool saw_second = false;
+    bool saw_third = false;
+    const auto iterations = kernel.scheduler().process_count() * 2;
+    for (usize i = 0; i < iterations; ++i)
+    {
+        auto selected = kernel.scheduler().schedule_next();
+        if (!selected)
+        {
+            return selected.status();
+        }
+        saw_first = saw_first || selected.value() == first.value();
+        saw_second = saw_second || selected.value() == second.value();
+        saw_third = saw_third || selected.value() == third.value();
+    }
+    if (!saw_first || !saw_second || !saw_third)
+    {
+        return Status::fault("background processes were not scheduled");
+    }
+
+    const auto saved_credentials = kernel.posix().user_credentials();
+    if (auto status = kernel.posix().set_credentials(user::root_credentials()); !status.ok())
+    {
+        return status;
+    }
+    static_cast<void>(kernel.posix().unlink("/tmp/background-posix.txt"));
+    auto fd = kernel.posix().open("/tmp/background-posix.txt", posix::o_CREAT | posix::o_RDWR | posix::o_TRUNC, 0644);
+    if (!fd)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return fd.status();
+    }
+    constexpr std::string_view payload{"background-posix"};
+    auto written = kernel.posix().write(fd.value(), process_test_bytes(payload));
+    if (!written || written.value() != payload.size())
+    {
+        static_cast<void>(kernel.posix().close(fd.value()));
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("background POSIX write failed");
+    }
+    if (auto seek = kernel.posix().seek(fd.value(), 0, posix::SeekWhence::set); !seek)
+    {
+        static_cast<void>(kernel.posix().close(fd.value()));
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return seek.status();
+    }
+    std::array<std::byte, payload.size()> out{};
+    auto read = kernel.posix().read(fd.value(), out);
+    if (!read || read.value() != payload.size())
+    {
+        static_cast<void>(kernel.posix().close(fd.value()));
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("background POSIX read failed");
+    }
+    if (auto status = kernel.posix().close(fd.value()); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    auto dir = kernel.posix().open("/tmp", posix::o_RDONLY | posix::o_DIRECTORY);
+    if (!dir)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return dir.status();
+    }
+    std::array<std::byte, 256> dirents{};
+    auto entries = kernel.posix().getdents64(dir.value(), dirents);
+    static_cast<void>(kernel.posix().close(dir.value()));
+    if (!entries || entries.value() == 0)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("background POSIX getdents64 failed");
+    }
+    return kernel.posix().set_credentials(saved_credentials);
+}
+
 } // namespace
 
 Status run_process_roadmap_tests(Kernel &kernel, KernelTestReport &report)
@@ -384,6 +573,14 @@ Status run_process_roadmap_tests(Kernel &kernel, KernelTestReport &report)
         return status;
     }
     if (auto status = verify_userland_smoke(kernel, elf, processes); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = verify_user_management_and_isolation(kernel, elf, processes); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = verify_background_programs_and_posix(kernel); !status.ok())
     {
         return status;
     }

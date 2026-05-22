@@ -6,9 +6,10 @@ windowed QEMU sessions. It does not provide a separate test executable or hosted
 
 The interactive line editor keeps the prompt outside the editable buffer:
 Backspace/Delete only erase user input, and Ctrl-U clears the current input
-line. The command evaluator follows the Bourne shell subset needed for kernel
-debug work: comments beginning with `#`, command sequences separated by `;`,
-and basic `&&`/`||` conditionals.
+line. Up/Down recall command history in the same style as common Linux shells.
+The command evaluator follows the Bourne shell subset needed for kernel debug
+work: comments beginning with `#`, command sequences separated by `;`, and
+basic `&&`/`||` conditionals.
 
 Supported commands:
 
@@ -21,11 +22,12 @@ Supported commands:
 - `posix`: print POSIX process, cwd, and open-file state.
 - `test`: print the last debug-test coverage result.
 - `echo <text>`: echo input through the kernel output path.
-- `pwd`, `cd <path>`, `ls [path]`, `cat <path>`, `touch <path>`,
+- `pwd`, `cd <path>`, `ls [-a] [-h] [-l] [path]`, `cat <path>`, `touch <path>`,
   `mkdir <path>`, `rm <path>`, `stat <path>`: BusyBox-style file commands over
   the RAM VFS/POSIX layer.
-- `whoami`, `id`, `su kernel|root|user`: switch the debug shell session between
-  the initial kernel context, root, and a normal test user.
+- `whoami`, `id`, `su [user]`: switch the debug shell session through the kernel
+  user manager; privileged sessions may become `kernel`, `root`, `user`, or any
+  account registered by tests/modules.
 - `disk`: print active block-device geometry and SimpleFS mount state.
 - `mkfs [label]`: format the active block device as SimpleFS.
 - `sfs info|ls|touch|write|cat|stat|rm`: operate directly on the SimpleFS flat

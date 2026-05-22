@@ -3,6 +3,7 @@
 #include "ok/core/fixed.hpp"
 #include "ok/driver/driver.hpp"
 #include "ok/fs/vfs.hpp"
+#include "ok/smp/smp.hpp"
 
 #include <array>
 #include <cstddef>
@@ -52,6 +53,8 @@ class SimpleDiskFileSystem final
     [[nodiscard]] Result<SimpleFsDirectoryListing> list_root();
     Status create(std::string_view path, NodeType type);
     Status unlink(std::string_view path);
+    Status chmod(std::string_view path, u32 mode);
+    Status chown(std::string_view path, u32 uid, u32 gid);
     Status write_file(std::string_view path, std::span<const std::byte> data);
     [[nodiscard]] Result<FileBuffer> read_file(std::string_view path);
     [[nodiscard]] Result<Metadata> stat(std::string_view path);
@@ -88,6 +91,7 @@ class SimpleDiskFileSystem final
     driver::BlockDevice *device_{nullptr};
     SimpleFsInfo info_{};
     bool mounted_{false};
+    mutable smp::SpinLock lock_{};
 };
 
 } // namespace ok::fs

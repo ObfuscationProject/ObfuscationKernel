@@ -246,6 +246,22 @@ Status KernelDebugShell::command_posix()
     {
         return status;
     }
+    if (auto status = append(" uid="); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_unsigned(kernel_->posix().getuid()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(" euid="); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_unsigned(kernel_->posix().geteuid()); !status.ok())
+    {
+        return status;
+    }
     return append("\n");
 }
 

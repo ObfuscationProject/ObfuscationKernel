@@ -18,6 +18,7 @@ function add_ok_kernel_sources(include_kernel_main)
     add_files("tests/kernel/roadmap/*.cpp")
     add_files("src/driver/*.cpp")
     add_files("src/fs/*.cpp")
+    add_files("src/gui/*.cpp")
     add_files("src/interrupt/*.cpp")
     add_files("src/ipc/*.cpp")
     add_files("src/memory/*.cpp")
@@ -45,6 +46,7 @@ target("okernel")
         "-fno-use-cxa-atexit",
         "-fno-threadsafe-statics",
         "-frtti",
+        "-O2",
         "-Wall",
         "-Wextra",
         "-Wpedantic",
@@ -81,6 +83,7 @@ target("okernel_image")
         "-fno-pie",
         "-fno-asynchronous-unwind-tables",
         "-frtti",
+        "-O2",
         "-Wall",
         "-Wextra",
         "-Wpedantic",
@@ -148,7 +151,7 @@ target("okernel_image")
         os.execv(ld, {"-Ttext=0x7c00", "--oformat=binary", boot_object, "-o", boot_sector})
 
         local payload_size = os.filesize(payload_bin)
-        local payload_capacity = 576 * 1024
+        local payload_capacity = 38 * 32 * 512
         if payload_size > payload_capacity then
             raise("kernel payload is too large: %d bytes > %d bytes", payload_size, payload_capacity)
         end

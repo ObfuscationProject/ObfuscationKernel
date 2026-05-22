@@ -11,6 +11,7 @@ Status NullBlockDriver::probe()
 Status NullBlockDriver::start()
 {
     started_ = true;
+    stats_ = {};
     return Status::success();
 }
 
@@ -29,8 +30,11 @@ Status NullBlockDriver::read_blocks(u64, std::span<std::byte> out)
 {
     if (!started_)
     {
+        ++stats_.errors;
         return Status::not_initialized("null block driver not started");
     }
+    ++stats_.read_operations;
+    stats_.bytes_read += out.size();
     for (auto &byte : out)
     {
         byte = std::byte{0};
@@ -38,12 +42,15 @@ Status NullBlockDriver::read_blocks(u64, std::span<std::byte> out)
     return Status::success();
 }
 
-Status NullBlockDriver::write_blocks(u64, std::span<const std::byte>)
+Status NullBlockDriver::write_blocks(u64, std::span<const std::byte> in)
 {
     if (!started_)
     {
+        ++stats_.errors;
         return Status::not_initialized("null block driver not started");
     }
+    ++stats_.write_operations;
+    stats_.bytes_written += in.size();
     return Status::success();
 }
 
@@ -65,6 +72,7 @@ Status RamBlockDriver::probe()
 Status RamBlockDriver::start()
 {
     started_ = true;
+    stats_ = {};
     return Status::success();
 }
 
@@ -105,8 +113,11 @@ Status RamBlockDriver::read_blocks(u64 first_block, std::span<std::byte> out)
 {
     if (auto status = check_transfer(first_block, out.size()); !status.ok())
     {
+        ++stats_.errors;
         return status;
     }
+    ++stats_.read_operations;
+    stats_.bytes_read += out.size();
     const auto offset = static_cast<usize>(first_block) * block_sector_size;
     for (usize i = 0; i < out.size(); ++i)
     {
@@ -119,8 +130,11 @@ Status RamBlockDriver::write_blocks(u64 first_block, std::span<const std::byte> 
 {
     if (auto status = check_transfer(first_block, in.size()); !status.ok())
     {
+        ++stats_.errors;
         return status;
     }
+    ++stats_.write_operations;
+    stats_.bytes_written += in.size();
     const auto offset = static_cast<usize>(first_block) * block_sector_size;
     for (usize i = 0; i < in.size(); ++i)
     {
@@ -150,6 +164,7 @@ Status VirtioBlockDriver::probe()
 Status VirtioBlockDriver::start()
 {
     started_ = true;
+    stats_ = {};
     return Status::success();
 }
 
@@ -210,8 +225,11 @@ Status VirtioBlockDriver::read_blocks(u64 first_block, std::span<std::byte> out)
 {
     if (auto status = check_transfer(first_block, out.size()); !status.ok())
     {
+        ++stats_.errors;
         return status;
     }
+    ++stats_.read_operations;
+    stats_.bytes_read += out.size();
     const auto offset = static_cast<usize>(first_block) * block_sector_size;
     for (usize i = 0; i < out.size(); ++i)
     {
@@ -224,8 +242,11 @@ Status VirtioBlockDriver::write_blocks(u64 first_block, std::span<const std::byt
 {
     if (auto status = check_transfer(first_block, in.size()); !status.ok())
     {
+        ++stats_.errors;
         return status;
     }
+    ++stats_.write_operations;
+    stats_.bytes_written += in.size();
     const auto offset = static_cast<usize>(first_block) * block_sector_size;
     for (usize i = 0; i < in.size(); ++i)
     {

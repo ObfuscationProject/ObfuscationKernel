@@ -3,6 +3,41 @@
 namespace ok::fs
 {
 
+bool has_access(const Metadata &metadata, Credentials credentials, u32 access)
+{
+    if ((access & ~(access_read | access_write | access_execute)) != 0)
+    {
+        return false;
+    }
+    if (access == 0)
+    {
+        return true;
+    }
+    if (credentials.uid == 0)
+    {
+        return true;
+    }
+
+    u32 shift = 0;
+    if (credentials.uid == metadata.uid)
+    {
+        shift = 6;
+    }
+    else if (credentials.gid == metadata.gid)
+    {
+        shift = 3;
+    }
+
+    const auto permissions = (metadata.mode >> shift) & 07u;
+    return (permissions & access) == access;
+}
+
+Status require_access(const Metadata &metadata, Credentials credentials, u32 access)
+{
+    return has_access(metadata, credentials, access) ? Status::success()
+                                                     : Status::denied("filesystem permission denied");
+}
+
 Status RamNode::configure(std::string_view name, NodeType type, FileBuffer *data)
 {
     if (auto status = name_.assign(name); !status.ok())
@@ -31,6 +66,7 @@ Status RamNode::configure(std::string_view name, NodeType type, FileBuffer *data
 
 Status RamNode::attach_child(RamNode &child)
 {
+    smp::ScopedSpinLock guard(lock_);
     if (metadata_.type != NodeType::directory)
     {
         return Status::invalid_argument("parent is not a directory");
@@ -49,6 +85,7 @@ Status RamNode::attach_child(RamNode &child)
 
 Status RamNode::detach_child(std::string_view child)
 {
+    smp::ScopedSpinLock guard(lock_);
     if (metadata_.type != NodeType::directory)
     {
         return Status::invalid_argument("parent is not a directory");
@@ -75,6 +112,7 @@ Status RamNode::detach_child(std::string_view child)
 
 Metadata RamNode::metadata() const
 {
+    smp::ScopedSpinLock guard(lock_);
     auto out = metadata_;
     out.blocks = blocks_for_size(out.size);
     return out;
@@ -82,6 +120,7 @@ Metadata RamNode::metadata() const
 
 Result<FileBuffer> RamNode::read(usize offset, usize count) const
 {
+    smp::ScopedSpinLock guard(lock_);
     if (metadata_.type != NodeType::regular && metadata_.type != NodeType::device &&
         metadata_.type != NodeType::symlink)
     {
@@ -108,6 +147,7 @@ Result<FileBuffer> RamNode::read(usize offset, usize count) const
 
 Status RamNode::write(usize offset, std::span<const std::byte> data)
 {
+    smp::ScopedSpinLock guard(lock_);
     if (metadata_.type != NodeType::regular && metadata_.type != NodeType::device &&
         metadata_.type != NodeType::symlink)
     {
@@ -143,6 +183,7 @@ Status RamNode::write(usize offset, std::span<const std::byte> data)
 
 Node *RamNode::lookup(std::string_view child)
 {
+    smp::ScopedSpinLock guard(lock_);
     if (metadata_.type != NodeType::directory)
     {
         return nullptr;
@@ -162,8 +203,24 @@ Status RamNode::create(std::string_view, NodeType)
     return Status::unsupported("create must be routed through VirtualFileSystem");
 }
 
+Status RamNode::chmod(u32 mode)
+{
+    smp::ScopedSpinLock guard(lock_);
+    metadata_.mode = node_type_mode(metadata_.type) | (mode & mode_permission_mask);
+    return Status::success();
+}
+
+Status RamNode::chown(u32 uid, u32 gid)
+{
+    smp::ScopedSpinLock guard(lock_);
+    metadata_.uid = uid;
+    metadata_.gid = gid;
+    return Status::success();
+}
+
 Result<DirectoryListing> RamNode::list() const
 {
+    smp::ScopedSpinLock guard(lock_);
     if (metadata_.type != NodeType::directory)
     {
         return Status::invalid_argument("node is not a directory");
@@ -198,6 +255,7 @@ VirtualFileSystem::VirtualFileSystem()
 
 Status VirtualFileSystem::create(std::string_view path, NodeType type)
 {
+    smp::ScopedSpinLock guard(lock_);
     FixedString<max_path_segment> leaf;
     auto *parent = parent_for(path, leaf);
     if (parent == nullptr || leaf.empty())
@@ -218,6 +276,7 @@ Status VirtualFileSystem::create(std::string_view path, NodeType type)
 
 Status VirtualFileSystem::unlink(std::string_view path)
 {
+    smp::ScopedSpinLock guard(lock_);
     FixedString<max_path_segment> leaf;
     auto *parent = parent_for(path, leaf);
     if (parent == nullptr || leaf.empty())
@@ -238,6 +297,7 @@ Status VirtualFileSystem::unlink(std::string_view path)
 
 Status VirtualFileSystem::rmdir(std::string_view path)
 {
+    smp::ScopedSpinLock guard(lock_);
     FixedString<max_path_segment> leaf;
     auto *parent = parent_for(path, leaf);
     if (parent == nullptr || leaf.empty())
@@ -266,9 +326,32 @@ Status VirtualFileSystem::rmdir(std::string_view path)
     return parent->detach_child(leaf.view());
 }
 
+Status VirtualFileSystem::chmod(std::string_view path, u32 mode)
+{
+    smp::ScopedSpinLock guard(lock_);
+    auto *node = lookup_unlocked(path);
+    if (node == nullptr)
+    {
+        return Status::not_found("path not found");
+    }
+    return node->chmod(mode);
+}
+
+Status VirtualFileSystem::chown(std::string_view path, u32 uid, u32 gid)
+{
+    smp::ScopedSpinLock guard(lock_);
+    auto *node = lookup_unlocked(path);
+    if (node == nullptr)
+    {
+        return Status::not_found("path not found");
+    }
+    return node->chown(uid, gid);
+}
+
 Status VirtualFileSystem::write_file(std::string_view path, std::span<const std::byte> data)
 {
-    auto *node = lookup(path);
+    smp::ScopedSpinLock guard(lock_);
+    auto *node = lookup_unlocked(path);
     if (node == nullptr)
     {
         return Status::not_found("path not found");
@@ -278,7 +361,8 @@ Status VirtualFileSystem::write_file(std::string_view path, std::span<const std:
 
 Result<FileBuffer> VirtualFileSystem::read_file(std::string_view path)
 {
-    auto *node = lookup(path);
+    smp::ScopedSpinLock guard(lock_);
+    auto *node = lookup_unlocked(path);
     if (node == nullptr)
     {
         return Status::not_found("path not found");
@@ -289,7 +373,8 @@ Result<FileBuffer> VirtualFileSystem::read_file(std::string_view path)
 
 Result<DirectoryListing> VirtualFileSystem::list(std::string_view path)
 {
-    auto *node = lookup(path);
+    smp::ScopedSpinLock guard(lock_);
+    auto *node = lookup_unlocked(path);
     if (node == nullptr)
     {
         return Status::not_found("path not found");
@@ -300,7 +385,8 @@ Result<DirectoryListing> VirtualFileSystem::list(std::string_view path)
 
 Result<Metadata> VirtualFileSystem::stat(std::string_view path)
 {
-    auto *node = lookup(path);
+    smp::ScopedSpinLock guard(lock_);
+    auto *node = lookup_unlocked(path);
     if (node == nullptr)
     {
         return Status::not_found("path not found");
@@ -309,6 +395,12 @@ Result<Metadata> VirtualFileSystem::stat(std::string_view path)
 }
 
 Node *VirtualFileSystem::lookup(std::string_view path)
+{
+    smp::ScopedSpinLock guard(lock_);
+    return lookup_unlocked(path);
+}
+
+Node *VirtualFileSystem::lookup_unlocked(std::string_view path)
 {
     if (path.empty() || path == "/")
     {

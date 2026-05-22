@@ -46,7 +46,7 @@ class ProcessControlBlock
 {
   public:
     ProcessControlBlock() = default;
-    ProcessControlBlock(ProcessId pid, std::string_view name);
+    ProcessControlBlock(ProcessId pid, std::string_view name, bool background = false);
 
     [[nodiscard]] ProcessId pid() const
     {
@@ -64,6 +64,14 @@ class ProcessControlBlock
     {
         state_ = state;
     }
+    [[nodiscard]] bool background() const
+    {
+        return background_;
+    }
+    void set_background(bool background)
+    {
+        background_ = background;
+    }
     [[nodiscard]] StaticVector<ThreadControlBlock, max_threads_per_process> &threads()
     {
         return threads_;
@@ -77,6 +85,7 @@ class ProcessControlBlock
     ProcessId pid_{0};
     FixedString<max_process_name> name_{};
     ProcessState state_{ProcessState::created};
+    bool background_{false};
     StaticVector<ThreadControlBlock, max_threads_per_process> threads_{};
 };
 
@@ -114,6 +123,7 @@ class Scheduler final
         return mode_;
     }
     Result<ProcessId> create_process(std::string_view name, arch::CpuContext initial_context);
+    Result<ProcessId> create_background_process(std::string_view name, arch::CpuContext initial_context);
     Status configure_cpus(usize cpu_count);
     Status set_runnable(ProcessId pid);
     Result<ProcessId> schedule_next();
@@ -132,6 +142,7 @@ class Scheduler final
     {
         return processes_.size();
     }
+    [[nodiscard]] usize background_process_count() const;
     [[nodiscard]] ProcessControlBlock *find(ProcessId pid);
     [[nodiscard]] const ProcessControlBlock *find(ProcessId pid) const;
 

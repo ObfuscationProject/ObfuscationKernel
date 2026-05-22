@@ -5,6 +5,7 @@
 #include "ok/driver/driver.hpp"
 #include "ok/fs/simplefs.hpp"
 #include "ok/fs/vfs.hpp"
+#include "ok/gui/gui.hpp"
 #include "ok/interrupt/interrupt.hpp"
 #include "ok/ipc/ipc.hpp"
 #include "ok/memory/memory.hpp"
@@ -54,6 +55,7 @@ struct KernelTestReport
     bool user_mode{false};
     bool display{false};
     bool gpu{false};
+    bool gui{false};
     bool input{false};
     bool posix{false};
     bool bus{false};
@@ -150,6 +152,14 @@ class Kernel final
     {
         return virtio_gpu_driver_;
     }
+    [[nodiscard]] gui::GuiModule &gui()
+    {
+        return gui_module_;
+    }
+    [[nodiscard]] ModuleManager &kernel_modules()
+    {
+        return kernel_modules_;
+    }
     [[nodiscard]] driver::VirtioBlockDriver &virtio_block()
     {
         return virtio_block_driver_;
@@ -230,6 +240,7 @@ class Kernel final
     driver::VirtioBlockDriver virtio_block_driver_{};
     driver::FramebufferDisplayDriver display_driver_{};
     driver::VirtioGpuPciDisplayDriver virtio_gpu_driver_{};
+    gui::GuiModule gui_module_{};
     driver::KeyboardDriver keyboard_driver_{};
     driver::Ps2MouseDriver mouse_driver_{};
     driver::PciBusDriver pci_bus_driver_{};
@@ -242,6 +253,7 @@ class Kernel final
     smp::CpuTopology topology_;
     ipc::IpcRouter ipc_;
     syscall::Table syscalls_;
+    ModuleManager kernel_modules_;
     driver::DriverManager drivers_;
     fs::VirtualFileSystem vfs_;
     fs::SimpleDiskFileSystem simplefs_;

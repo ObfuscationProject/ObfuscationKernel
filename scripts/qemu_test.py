@@ -339,6 +339,7 @@ def write_summary(kernel: Path, arch: str, output: str, qemu_returncode: int, va
         "OK_LINUX_SYSCALLS",
         "OK_DRIVER_ABI",
         "OK_LINUX_DRIVER_SHIM",
+        "OK_GUI",
         "OK_MODULE_LOAD",
         "OK_NETDEV",
         "OK_SOCK",

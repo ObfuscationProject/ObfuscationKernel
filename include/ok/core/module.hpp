@@ -141,6 +141,10 @@ class KernelModule
         state_ = ModuleState::failed;
         failure_message_ = message;
     }
+    void clear_failure()
+    {
+        failure_message_ = {};
+    }
 
     ModuleState state_{ModuleState::created};
     std::string_view failure_message_{};
@@ -151,6 +155,7 @@ class ModuleManager final
   public:
     Status register_module(KernelModule &module);
     Status start_all();
+    Status restart_module(std::string_view name);
     Status stop_all();
     Status shutdown_all();
 
@@ -192,6 +197,9 @@ class ModuleManager final
     Status check_required_services(KernelModule &module) const;
     Status publish_services(KernelModule &module);
     Status transition(KernelModule &module, ModuleState next, Status status);
+    [[nodiscard]] bool started_order_contains(const KernelModule &module) const;
+    Status record_started(KernelModule &module);
+    Status start_module(KernelModule &module);
 
     StaticVector<KernelModule *, max_kernel_modules> modules_;
     StaticVector<usize, max_kernel_modules> sorted_order_;

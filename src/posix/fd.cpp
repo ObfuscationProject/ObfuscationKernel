@@ -17,6 +17,20 @@ bool is_writable(u32 flags)
     return access == o_WRONLY || access == o_RDWR;
 }
 
+u32 access_for_open(u32 flags)
+{
+    u32 access = 0;
+    if (is_readable(flags))
+    {
+        access |= fs::access_read;
+    }
+    if (is_writable(flags))
+    {
+        access |= fs::access_write;
+    }
+    return access;
+}
+
 } // namespace
 
 Result<Fd> PosixService::open(std::string_view path, u32 flags, u32 mode)
@@ -37,6 +51,7 @@ Result<Fd> PosixService::openat(Fd dirfd, std::string_view path, u32 flags, u32 
     }
     const auto normalized = normalized_result.value();
     auto *node = vfs_->lookup(normalized);
+    bool created = false;
     if (node == nullptr)
     {
         if ((flags & o_CREAT) == 0)
@@ -47,14 +62,24 @@ Result<Fd> PosixService::openat(Fd dirfd, std::string_view path, u32 flags, u32 
         {
             return status;
         }
+        const auto create_mode = mode & ~file_mode_mask_;
+        if (auto status = vfs_->chmod(normalized, create_mode); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = vfs_->chown(normalized, current_euid_, current_egid_); !status.ok())
+        {
+            return status;
+        }
         node = vfs_->lookup(normalized);
+        created = true;
     }
     if (node == nullptr)
     {
         return Status::fault("created path is not visible");
     }
 
-    const auto metadata = node->metadata();
+    auto metadata = node->metadata();
     if ((flags & o_DIRECTORY) != 0 && metadata.type != fs::NodeType::directory)
     {
         return Status::invalid_argument("path is not a directory");
@@ -62,6 +87,18 @@ Result<Fd> PosixService::openat(Fd dirfd, std::string_view path, u32 flags, u32 
     if (metadata.type == fs::NodeType::directory && is_writable(flags))
     {
         return Status::invalid_argument("directory is not writable");
+    }
+    u32 required_access = access_for_open(flags);
+    if ((flags & o_TRUNC) != 0)
+    {
+        required_access |= fs::access_write;
+    }
+    if (!created)
+    {
+        if (auto status = fs::require_access(metadata, credentials(), required_access); !status.ok())
+        {
+            return status;
+        }
     }
     if ((flags & o_TRUNC) != 0)
     {
@@ -74,7 +111,7 @@ Result<Fd> PosixService::openat(Fd dirfd, std::string_view path, u32 flags, u32 
         {
             return status;
         }
-        static_cast<void>(mode);
+        metadata = node->metadata();
     }
 
     auto fd = allocate_fd();
@@ -85,7 +122,7 @@ Result<Fd> PosixService::openat(Fd dirfd, std::string_view path, u32 flags, u32 
     auto &entry = files_[static_cast<usize>(fd.value())];
     entry.used = true;
     entry.readable = is_readable(flags);
-    entry.writable = is_writable(flags) || ((flags & o_CREAT) != 0 && metadata.type != fs::NodeType::directory);
+    entry.writable = is_writable(flags);
     entry.console = false;
     entry.close_on_exec = (flags & o_CLOEXEC) != 0;
     entry.flags = flags;

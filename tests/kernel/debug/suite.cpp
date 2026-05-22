@@ -17,6 +17,35 @@ std::span<const std::byte> as_bytes(std::string_view text)
     return {reinterpret_cast<const std::byte *>(text.data()), text.size()};
 }
 
+bool contains_text(std::string_view haystack, std::string_view needle)
+{
+    if (needle.empty())
+    {
+        return true;
+    }
+    if (needle.size() > haystack.size())
+    {
+        return false;
+    }
+    for (usize offset = 0; offset <= haystack.size() - needle.size(); ++offset)
+    {
+        bool matched = true;
+        for (usize i = 0; i < needle.size(); ++i)
+        {
+            if (haystack[offset + i] != needle[i])
+            {
+                matched = false;
+                break;
+            }
+        }
+        if (matched)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 void write_le16(std::span<std::byte> out, usize offset, u16 value)
 {
     out[offset] = static_cast<std::byte>(value & 0xffu);
@@ -200,6 +229,13 @@ Status Kernel::run_debug_test_suite()
         return Status::fault("virtio GPU display debug test failed");
     }
     test_report_.gpu = true;
+    if (gui_module_.compositor().state() != gui::GuiState::running ||
+        gui_module_.compositor().last_present_checksum() == 0 ||
+        kernel_modules_.services().query<gui::GuiModule>(gui::gui_service_id) != &gui_module_)
+    {
+        return Status::fault("kernel GUI debug test failed");
+    }
+    test_report_.gui = true;
 
     if (auto status = keyboard_driver_.feed_scancode(0x23); !status.ok())
     {
@@ -380,6 +416,12 @@ Status Kernel::run_debug_test_suite()
     {
         return Status::fault("debug shell ls test failed");
     }
+    auto shell_ls_flags = debug_shell_.execute("ls -a -lh /tmp");
+    if (!shell_ls_flags || !contains_text(shell_ls_flags.value(), "./") ||
+        !contains_text(shell_ls_flags.value(), "../"))
+    {
+        return Status::fault("debug shell ls flags test failed");
+    }
     auto shell_user = debug_shell_.execute("whoami");
     if (!shell_user || shell_user.value().empty())
     {
@@ -458,6 +500,10 @@ Status Kernel::run_debug_test_suite()
         return status;
     }
     if (auto status = run_driver_abi_roadmap_tests(test_report_); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = run_gui_roadmap_tests(*this, test_report_); !status.ok())
     {
         return status;
     }

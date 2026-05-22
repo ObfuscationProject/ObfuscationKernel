@@ -3,6 +3,7 @@
 #include "ok/core/fixed.hpp"
 #include "ok/core/types.hpp"
 #include "ok/driver/driver.hpp"
+#include "ok/smp/smp.hpp"
 
 #include <array>
 #include <span>
@@ -17,6 +18,13 @@ struct BlockCacheStats
 {
     u64 hits{0};
     u64 misses{0};
+    u64 read_requests{0};
+    u64 write_requests{0};
+    u64 device_reads{0};
+    u64 device_writes{0};
+    u64 bytes_read{0};
+    u64 bytes_written{0};
+    u64 errors{0};
 };
 
 class BlockCache final
@@ -25,10 +33,7 @@ class BlockCache final
     Status attach(driver::BlockDevice &device);
     Status read_block(u64 block, std::span<std::byte> out);
     Status write_block(u64 block, std::span<const std::byte> in);
-    [[nodiscard]] BlockCacheStats stats() const
-    {
-        return stats_;
-    }
+    [[nodiscard]] BlockCacheStats stats() const;
 
   private:
     struct Entry
@@ -42,6 +47,7 @@ class BlockCache final
     std::array<Entry, block_cache_entries> entries_{};
     BlockCacheStats stats_{};
     usize next_victim_{0};
+    mutable smp::SpinLock lock_{};
 };
 
 struct Partition

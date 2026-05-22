@@ -140,6 +140,15 @@ struct BlockGeometry
     bool writable{false};
 };
 
+struct BlockIoStats
+{
+    u64 read_operations{0};
+    u64 write_operations{0};
+    u64 bytes_read{0};
+    u64 bytes_written{0};
+    u64 errors{0};
+};
+
 class BlockDevice
 {
   public:
@@ -147,6 +156,10 @@ class BlockDevice
     [[nodiscard]] virtual BlockGeometry geometry() const = 0;
     virtual Status read_blocks(u64 first_block, std::span<std::byte> out) = 0;
     virtual Status write_blocks(u64 first_block, std::span<const std::byte> in) = 0;
+    [[nodiscard]] virtual BlockIoStats io_stats() const
+    {
+        return {};
+    }
 };
 
 class NullBlockDriver final : public Driver, public BlockDevice
@@ -166,11 +179,16 @@ class NullBlockDriver final : public Driver, public BlockDevice
     [[nodiscard]] BlockGeometry geometry() const override;
     Status read_blocks(u64 first_block, std::span<std::byte> out) override;
     Status write_blocks(u64 first_block, std::span<const std::byte> in) override;
+    [[nodiscard]] BlockIoStats io_stats() const override
+    {
+        return stats_;
+    }
     Status read(uptr, std::span<std::byte> out);
     Status write(uptr, std::span<const std::byte> in);
 
   private:
     bool started_{false};
+    BlockIoStats stats_{};
 };
 
 class RamBlockDriver final : public Driver, public BlockDevice
@@ -190,6 +208,10 @@ class RamBlockDriver final : public Driver, public BlockDevice
     [[nodiscard]] BlockGeometry geometry() const override;
     Status read_blocks(u64 first_block, std::span<std::byte> out) override;
     Status write_blocks(u64 first_block, std::span<const std::byte> in) override;
+    [[nodiscard]] BlockIoStats io_stats() const override
+    {
+        return stats_;
+    }
     Status clear();
 
   private:
@@ -197,6 +219,7 @@ class RamBlockDriver final : public Driver, public BlockDevice
 
     bool started_{false};
     std::array<std::byte, ram_block_storage_size> storage_{};
+    BlockIoStats stats_{};
 };
 
 struct PciDeviceId
@@ -235,6 +258,10 @@ class VirtioBlockDriver final : public Driver, public BlockDevice
     [[nodiscard]] BlockGeometry geometry() const override;
     Status read_blocks(u64 first_block, std::span<std::byte> out) override;
     Status write_blocks(u64 first_block, std::span<const std::byte> in) override;
+    [[nodiscard]] BlockIoStats io_stats() const override
+    {
+        return stats_;
+    }
     Status clear();
     [[nodiscard]] bool bound() const
     {
@@ -248,6 +275,7 @@ class VirtioBlockDriver final : public Driver, public BlockDevice
     bool bound_{false};
     PciDevice device_{};
     std::array<std::byte, virtio_block_storage_size> storage_{};
+    BlockIoStats stats_{};
 };
 
 class PciBusDriver final : public Driver

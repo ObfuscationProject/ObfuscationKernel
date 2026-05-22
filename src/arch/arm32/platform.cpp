@@ -23,6 +23,9 @@ ok::driver::qemu_virt::VirtioInputDevice virtio_mouse;
 bool virtio_left_shift = false;
 bool virtio_right_shift = false;
 bool virtio_mouse_left = false;
+char pending_keyboard_input[3]{};
+ok::usize pending_keyboard_input_size = 0;
+ok::usize pending_keyboard_input_cursor = 0;
 
 volatile ok::u32 &mmio32(ok::uptr address)
 {
@@ -78,8 +81,32 @@ void poll_virtio_mouse()
     }
 }
 
+void queue_keyboard_escape(char final)
+{
+    pending_keyboard_input[0] = 0x1b;
+    pending_keyboard_input[1] = '[';
+    pending_keyboard_input[2] = final;
+    pending_keyboard_input_size = 3;
+    pending_keyboard_input_cursor = 0;
+}
+
+int pop_pending_keyboard_input()
+{
+    if (pending_keyboard_input_cursor >= pending_keyboard_input_size)
+    {
+        pending_keyboard_input_size = 0;
+        pending_keyboard_input_cursor = 0;
+        return -1;
+    }
+    return static_cast<unsigned char>(pending_keyboard_input[pending_keyboard_input_cursor++]);
+}
+
 int poll_virtio_keyboard()
 {
+    if (const int pending = pop_pending_keyboard_input(); pending >= 0)
+    {
+        return pending;
+    }
     virtio_keyboard.initialize(virtio_input_bases, sizeof(virtio_input_bases) / sizeof(virtio_input_bases[0]),
                                ok::driver::qemu_virt::VirtioInputKind::keyboard);
     ok::driver::qemu_virt::VirtioInputEvent event{};
@@ -103,6 +130,16 @@ int poll_virtio_keyboard()
         if (!pressed)
         {
             continue;
+        }
+        if (event.code == ok::driver::qemu_virt::input_key_up)
+        {
+            queue_keyboard_escape('A');
+            return pop_pending_keyboard_input();
+        }
+        if (event.code == ok::driver::qemu_virt::input_key_down)
+        {
+            queue_keyboard_escape('B');
+            return pop_pending_keyboard_input();
         }
         const char value =
             ok::driver::qemu_virt::map_linux_key_code(event.code, virtio_left_shift || virtio_right_shift);

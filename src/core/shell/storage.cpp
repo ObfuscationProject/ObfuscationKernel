@@ -51,6 +51,39 @@ Status KernelDebugShell::command_disk()
     {
         return status;
     }
+    const auto stats = kernel_->disk().io_stats();
+    if (auto status = append(" reads="); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_unsigned(stats.read_operations); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(" writes="); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_unsigned(stats.write_operations); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(" read_bytes="); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_unsigned(stats.bytes_read); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(" write_bytes="); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_unsigned(stats.bytes_written); !status.ok())
+    {
+        return status;
+    }
 
     auto info = kernel_->simplefs().info();
     if (!info)

@@ -41,6 +41,8 @@ Status Kernel::boot(KernelConfig config)
 {
     config.architecture = arch::configured_architecture();
     test_report_ = {};
+    kernel_modules_ = {};
+    static_cast<void>(gui_module_.stop());
     debug_test_points_run_ = 0;
     if (config.memory_region_count == 0)
     {
@@ -166,6 +168,15 @@ Status Kernel::boot(KernelConfig config)
         }
         display_driver_.set_backend(driver::DisplayBackend::virtio_gpu_pci);
     }
+    gui_module_.bind_display(display_driver_);
+    if (auto status = kernel_modules_.register_module(gui_module_); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel_modules_.start_all(); !status.ok())
+    {
+        return status;
+    }
     if (auto status = log_boot_line("[    0.000000] okernel: C++23 kernel debug console online"); !status.ok())
     {
         return status;
@@ -187,7 +198,28 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
-    if (auto status = display_driver_.fill_rect(8, 76, 48, 12, 0xff44aa88u); !status.ok())
+    auto gui_surface = gui_module_.compositor().create_surface(
+        gui::Rect{.x = 8, .y = 76, .width = 48, .height = 12}, "boot");
+    if (!gui_surface)
+    {
+        return gui_surface.status();
+    }
+    if (auto status = gui_module_.compositor().fill(gui_surface.value(), 0xff18343fu); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = gui_module_.compositor().fill_rect(gui_surface.value(),
+                                                         gui::Rect{.x = 4, .y = 4, .width = 40, .height = 5},
+                                                         0xff44aa88u);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = gui_module_.compositor().put_pixel(gui_surface.value(), 2, 2, 0xffffcc66u); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = gui_module_.compositor().present(); !status.ok())
     {
         return status;
     }

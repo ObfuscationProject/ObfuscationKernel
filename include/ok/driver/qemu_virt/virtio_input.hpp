@@ -20,6 +20,8 @@ inline constexpr u16 input_key_enter = 28;
 inline constexpr u16 input_key_a = 30;
 inline constexpr u16 input_key_left_shift = 42;
 inline constexpr u16 input_key_right_shift = 54;
+inline constexpr u16 input_key_up = 103;
+inline constexpr u16 input_key_down = 108;
 inline constexpr u16 input_button_left = 0x110;
 
 enum class VirtioInputKind : u8
