@@ -73,9 +73,10 @@ For `i386` and `x86_64`, the system boot path is:
 The debug test suite then validates one operation from every core module.
 
 For `aarch64`, QEMU loads the ARM64 `Image`-style payload directly with
-`-kernel`; the platform path uses the QEMU virt PL011 UART. For `rv64`, QEMU
-loads the linked ELF at `0x80000000` with `-bios none -kernel`; the platform
-path uses the QEMU virt NS16550 UART.
+`-kernel`; the platform path uses the QEMU virt PL011 UART. `arm32`, `rv64`,
+`rv32`, `loongarch64`, `mips`, `mips64`, and `ppc` use direct ELF `-kernel`
+boot paths with board-specific UART setup. RISC-V uses `-bios none -kernel`;
+MIPS/MIPS64 use Malta; PPC uses ppce500.
 
 ## Architecture-Specific Operations
 

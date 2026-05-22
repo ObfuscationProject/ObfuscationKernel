@@ -96,30 +96,57 @@ OK_ARCH_SPECS = {
         source = "loongarch64",
         toolchain = "ok-loongarch64-elf",
         triple = "loongarch64-elf",
-        capabilities = OK_PROFILE_CAPABILITIES
+        boot_source = "src/arch/loongarch64/boot.S",
+        linker_script = "src/arch/loongarch64/linker.ld",
+        qemu_system = "qemu-system-loongarch64",
+        platform_source = "src/arch/loongarch64/platform.cpp",
+        image_format = "elf",
+        freestanding_cxxflags = {"-msimd=none"},
+        freestanding_asflags = {"-msimd=none"},
+        freestanding_ldflags = {"-msimd=none"},
+        capabilities = OK_BOOTABLE_QEMU_CAPABILITIES
     },
     mips = {
         define = "OK_ARCH_TARGET_MIPS",
         source = "mips",
         toolchain = "ok-mips-elf",
         triple = "mips-elf",
-        freestanding_cxxflags = {"-march=mips32r2"},
-        capabilities = OK_PROFILE_CAPABILITIES
+        boot_source = "src/arch/mips/boot.S",
+        linker_script = "src/arch/mips/linker.ld",
+        qemu_system = "qemu-system-mips",
+        platform_source = "src/arch/mips/platform.cpp",
+        image_format = "elf",
+        freestanding_cxxflags = {"-march=mips32r2", "-G0"},
+        freestanding_asflags = {"-march=mips32r2", "-G0"},
+        freestanding_ldflags = {"-march=mips32r2", "-G0"},
+        capabilities = OK_BOOTABLE_QEMU_CAPABILITIES
     },
     mips64 = {
         define = "OK_ARCH_TARGET_MIPS64",
         source = "mips64",
         toolchain = "ok-mips64-elf",
         triple = "mips64-elf",
-        freestanding_cxxflags = {"-march=mips64r2"},
-        capabilities = OK_PROFILE_CAPABILITIES
+        boot_source = "src/arch/mips64/boot.S",
+        linker_script = "src/arch/mips64/linker.ld",
+        qemu_system = "qemu-system-mips64",
+        platform_source = "src/arch/mips64/platform.cpp",
+        image_format = "elf",
+        freestanding_cxxflags = {"-march=mips64r2", "-mabi=64", "-G0"},
+        freestanding_asflags = {"-march=mips64r2", "-mabi=64", "-G0"},
+        freestanding_ldflags = {"-march=mips64r2", "-mabi=64", "-G0"},
+        capabilities = OK_BOOTABLE_QEMU_CAPABILITIES
     },
     ppc = {
         define = "OK_ARCH_TARGET_PPC",
         source = "ppc",
         toolchain = "ok-ppc-elf",
         triple = "powerpc-eabi",
-        capabilities = OK_PROFILE_CAPABILITIES
+        boot_source = "src/arch/ppc/boot.S",
+        linker_script = "src/arch/ppc/linker.ld",
+        qemu_system = "qemu-system-ppc",
+        platform_source = "src/arch/ppc/platform.cpp",
+        image_format = "elf",
+        capabilities = OK_BOOTABLE_QEMU_CAPABILITIES
     },
 }
 
@@ -251,6 +278,11 @@ function add_ok_freestanding_arch_flags()
     if spec.freestanding_asflags then
         for _, flag in ipairs(spec.freestanding_asflags) do
             add_asflags(flag, {force = true})
+        end
+    end
+    if spec.freestanding_ldflags then
+        for _, flag in ipairs(spec.freestanding_ldflags) do
+            add_ldflags(flag, {force = true})
         end
     end
 end

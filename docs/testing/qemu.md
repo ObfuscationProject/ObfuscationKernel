@@ -38,18 +38,14 @@ xmake qemu-window-matrix
 ```
 
 `profile-matrix` compiles the freestanding `okernel` static profile for every
-supported architecture. `qemu-matrix` only runs architectures with boot image
-support. `qemu-window-matrix` runs the headless window-validation path for every
-architecture: bootable profiles run QEMU, while profiles that do not yet have a
-boot image build `okernel` and emit `QEMU_WINDOW_TEST_SKIP`.
+supported architecture. `qemu-matrix` and `qemu-window-matrix` build and boot
+the debug `okernel_image` target for every supported architecture.
 
 The current bootable QEMU system test targets are `i386`, `x86_64`, `aarch64`,
-`arm32`, `rv64`, and `rv32`. Other architecture profiles can build `okernel`
-and intentionally fail `qemu-test` until that architecture has a complete early
-platform contract and a validated QEMU launch profile.
+`arm32`, `rv64`, `rv32`, `loongarch64`, `mips`, `mips64`, and `ppc`.
 
-`xmake test` always has a freestanding profile test for `okernel`. On
-bootable system targets it also runs the `okernel_image` QEMU boot test.
+`xmake test` always has a freestanding profile test for `okernel` and runs the
+`okernel_image` QEMU boot test for the configured architecture.
 
 Every booted QEMU check also creates a temporary 16 MiB disk image and attaches
 it as `virtio-blk-pci`. The kernel binds that PCI device as `virtio-blk0`, then
@@ -73,16 +69,14 @@ xmake qemu-window-test -a rv32 --no-launch
 xmake qemu-window-test -a ppc --no-launch
 ```
 
-For architectures with a boot image, it builds and runs the same `kernel.bin` in
-QEMU. For profiles that are not boot-image-ready yet (`loongarch64`, `mips`,
-`mips64`, and `ppc`), the task still accepts the architecture, builds the
-freestanding `okernel` profile, and prints a skip marker instead of hiding the
-gap behind an unsupported-task error.
+For every supported architecture, it builds and runs the same `kernel.bin` in
+QEMU.
 
 The visible output comes from the kernel's own ramfb display path on every
-bootable architecture: x86/i386 use fw_cfg I/O ports, while `aarch64`, `arm32`,
-`rv64`, and `rv32` use fw_cfg MMIO, then all draw pixels directly into guest
-RAM.
+bootable architecture with a platform ramfb path: x86/i386 use fw_cfg I/O ports,
+while `aarch64`, `arm32`, `rv64`, `rv32`, and `loongarch64` use fw_cfg MMIO.
+`mips`, `mips64`, and `ppc` boot and validate through serial while the kernel
+still exercises its generic memory framebuffer and GUI compositor state.
 The script captures serial diagnostics and prints the test result only after
 the QEMU window is closed. Use the headless validation form in environments
 without a graphical display:
@@ -114,8 +108,8 @@ debug test points ran and that filesystem, EXT4, user-mode, and display checks
 reported success. The current required coverage fields are `fs`, `simplefs`,
 `ext4`, `user`, `display`, `gpu`, `input`, `posix`, `bus`, `usb`, `net`,
 `shell`, `modes`, and `gui`. The bootable system targets advertise the same
-QEMU capability set, so headless validation requires the same fields for all six
-bootable architectures. Any non-zero exit code or missing marker is a failure.
+QEMU capability set, so headless validation requires the same fields for all
+supported architectures. Any non-zero exit code or missing marker is a failure.
 
 ## CI Coverage
 
@@ -124,5 +118,5 @@ GitHub Actions has one matrix job. For each architecture it:
 1. Builds or restores the matching freestanding GCC/binutils toolchain.
 2. Configures xmake with `-a <arch>`.
 3. Builds `okernel`.
-4. Runs `xmake test`; bootable system targets immediately boot the generated
-   kernel in QEMU, while other targets run the freestanding compile profile.
+4. Runs `xmake test`, which immediately boots the generated kernel in QEMU for
+   the configured architecture.

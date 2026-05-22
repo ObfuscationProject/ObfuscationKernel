@@ -24,6 +24,15 @@ Bootable targets are split from the freestanding `okernel` library. The
 - `rv32`: QEMU virt direct ELF boot at `0x80000000`, bootstrap stack, `.bss`
   clearing, NS16550 UART output, ramfb display, and virtio-mmio keyboard/mouse
   input.
+- `loongarch64`: QEMU virt direct ELF boot at `0x90000000`, bootstrap stack,
+  `.bss` clearing, NS16550 UART output, and ramfb display through fw_cfg MMIO.
+- `mips`: QEMU Malta direct ELF boot at `0x80010000`, bootstrap stack, `.bss`
+  clearing, and ISA COM1 serial through the Malta PCI I/O window.
+- `mips64`: QEMU Malta direct ELF boot at `0xffffffff80010000`, bootstrap
+  stack, `.bss` clearing, 64-bit big-endian ELF output, `MIPS64R2-generic`, and
+  ISA COM1 serial through the Malta PCI I/O window.
+- `ppc`: QEMU ppce500 direct ELF boot at `0x01000000`, bootstrap stack, `.bss`
+  clearing, an early e500 CCSR TLB mapping, and NS16550 serial output.
 
 ## Protocol Notes
 
@@ -36,7 +45,7 @@ Bootable targets are split from the freestanding `okernel` library. The
   the Linux zImage protocol.
 - RISC-V Linux images use a 64-byte header with text offset, image size,
   version, and `RISCV`/`RSC\x05` magic values; image size is mandatory. The
-  current RV64 QEMU test uses the simpler `-bios none -kernel` ELF path so QEMU
+  current RISC-V QEMU tests use the simpler `-bios none -kernel` ELF path so QEMU
   transfers control directly to the kernel entry at the DRAM base.
 - BMIPS DT-aware boot passes `a0 = 0`, `a1 = 0xffffffff`, and `a2 = DTB physical
   pointer`.

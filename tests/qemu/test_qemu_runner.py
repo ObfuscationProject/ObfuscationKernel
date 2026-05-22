@@ -147,6 +147,18 @@ class QemuRunnerValidationTests(unittest.TestCase):
         self.assertIn("virtio-keyboard-device", command)
         self.assertIn("virtio-mouse-device", command)
 
+    def test_qemu_command_boots_new_system_targets_with_kernel_loader(self) -> None:
+        arches = ("loongarch64", "mips", "mips64", "ppc")
+        with mock.patch.object(qemu_test.shutil, "which", side_effect=lambda qemu: f"/usr/bin/{qemu}"):
+            for arch in arches:
+                with self.subTest(arch=arch):
+                    command = qemu_test.qemu_command(arch, Path("kernel.bin"), "none", False, Path("disk.img"))
+                    self.assertIn("-kernel", command)
+                    self.assertIn("kernel.bin", command)
+                    self.assertIn("virtio-blk-pci,drive=fsdisk", command)
+                    if arch == "mips64":
+                        self.assertIn("MIPS64R2-generic", command)
+
 
 if __name__ == "__main__":
     unittest.main()

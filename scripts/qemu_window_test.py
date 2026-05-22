@@ -36,20 +36,13 @@ CAPABILITY_COVERAGE_FIELDS = {
     "net": ("network_loopback",),
 }
 ALL_COVERAGE_FIELDS = BASE_COVERAGE_FIELDS + tuple(CAPABILITY_COVERAGE_FIELDS)
-BOOTABLE_QEMU_ARCHES = ("i386", "x86_64", "aarch64", "arm32", "rv64", "rv32")
+BOOTABLE_QEMU_ARCHES = ("i386", "x86_64", "aarch64", "arm32", "rv64", "rv32", "loongarch64", "mips", "mips64", "ppc")
 BOOTABLE_QEMU_CAPABILITIES = (
     "serial_console", "framebuffer", "keyboard_input", "mouse_input", "pci_bus",
     "virtio_block", "virtio_gpu", "ramfb", "usb_hid", "network_loopback",
 )
-PROFILE_CAPABILITIES = ("serial_console", "network_loopback")
 
 CAPABILITIES_BY_ARCH = {arch: BOOTABLE_QEMU_CAPABILITIES for arch in BOOTABLE_QEMU_ARCHES}
-CAPABILITIES_BY_ARCH.update({
-    "loongarch64": PROFILE_CAPABILITIES,
-    "mips": PROFILE_CAPABILITIES,
-    "mips64": PROFILE_CAPABILITIES,
-    "ppc": PROFILE_CAPABILITIES,
-})
 
 
 def normalize_arch(arch: str) -> str:
@@ -215,6 +208,10 @@ def qemu_command(arch: str, kernel: Path, display: str, disk: Path) -> list[str]
             qemu_path,
             "-M",
             "malta",
+        ]
+        if arch == "mips64":
+            command += ["-cpu", "MIPS64R2-generic"]
+        command += [
             "-m",
             "256M",
             "-kernel",

@@ -21,6 +21,9 @@ QEMU_SYSTEM_BY_ARCH = {
     "rv64": "qemu-system-riscv64",
     "rv32": "qemu-system-riscv32",
     "loongarch64": "qemu-system-loongarch64",
+    "mips": "qemu-system-mips",
+    "mips64": "qemu-system-mips64",
+    "ppc": "qemu-system-ppc",
 }
 
 QEMU_DEBUG_EXIT_SUCCESS = 33
@@ -35,20 +38,13 @@ CAPABILITY_COVERAGE_FIELDS = {
     "net": ("network_loopback",),
 }
 ALL_COVERAGE_FIELDS = BASE_COVERAGE_FIELDS + tuple(CAPABILITY_COVERAGE_FIELDS)
-BOOTABLE_QEMU_ARCHES = ("i386", "x86_64", "aarch64", "arm32", "rv64", "rv32")
+BOOTABLE_QEMU_ARCHES = ("i386", "x86_64", "aarch64", "arm32", "rv64", "rv32", "loongarch64", "mips", "mips64", "ppc")
 BOOTABLE_QEMU_CAPABILITIES = (
     "serial_console", "framebuffer", "keyboard_input", "mouse_input", "pci_bus",
     "virtio_block", "virtio_gpu", "ramfb", "usb_hid", "network_loopback",
 )
-PROFILE_CAPABILITIES = ("serial_console", "network_loopback")
 
 CAPABILITIES_BY_ARCH = {arch: BOOTABLE_QEMU_CAPABILITIES for arch in BOOTABLE_QEMU_ARCHES}
-CAPABILITIES_BY_ARCH.update({
-    "loongarch64": PROFILE_CAPABILITIES,
-    "mips": PROFILE_CAPABILITIES,
-    "mips64": PROFILE_CAPABILITIES,
-    "ppc": PROFILE_CAPABILITIES,
-})
 
 
 class QemuConfigurationError(RuntimeError):
@@ -64,6 +60,7 @@ def normalize_arch(arch: str) -> str:
         "riscv32": "rv32",
         "loong64": "loongarch64",
         "loongarch": "loongarch64",
+        "powerpc": "ppc",
     }
     return aliases.get(arch, arch)
 
@@ -117,6 +114,10 @@ def ramfb_args() -> list[str]:
 
 def virtio_mmio_input_args() -> list[str]:
     return ["-device", "virtio-keyboard-device", "-device", "virtio-mouse-device"]
+
+
+def virtio_pci_input_args() -> list[str]:
+    return ["-device", "virtio-keyboard-pci", "-device", "virtio-mouse-pci"]
 
 
 def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool, disk: Path) -> list[str]:
@@ -189,8 +190,50 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool, disk: 
             "-no-reboot",
             "-display",
             display,
-            "-device",
-            "ramfb",
+        ]
+        command += ramfb_args()
+        command += virtio_pci_input_args()
+        command += virtio_disk_args(disk)
+        return command
+    if arch in ("mips", "mips64"):
+        command = [
+            qemu_path,
+            "-M",
+            "malta",
+        ]
+        if arch == "mips64":
+            command += ["-cpu", "MIPS64R2-generic"]
+        command += [
+            "-m",
+            "256M",
+            "-kernel",
+            str(kernel),
+            "-serial",
+            "stdio",
+            "-monitor",
+            "none",
+            "-no-reboot",
+            "-display",
+            display,
+        ]
+        command += virtio_disk_args(disk)
+        return command
+    if arch == "ppc":
+        command = [
+            qemu_path,
+            "-M",
+            "ppce500",
+            "-m",
+            "256M",
+            "-kernel",
+            str(kernel),
+            "-serial",
+            "stdio",
+            "-monitor",
+            "none",
+            "-no-reboot",
+            "-display",
+            display,
         ]
         command += virtio_disk_args(disk)
         return command

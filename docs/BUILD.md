@@ -80,9 +80,8 @@ toolchain selection lives in `xmake/arch.lua`.
 ## Tests
 
 `xmake test` always validates the current architecture's freestanding `okernel`
-profile. For bootable system targets (`i386`, `x86_64`, `aarch64`, `arm32`,
-`rv64`, and `rv32`) it also builds `okernel_image`, boots the generated
-`kernel.bin` in QEMU, and parses the debug kernel's `OK_*` diagnostic lines:
+profile. It also builds `okernel_image`, boots the generated `kernel.bin` in
+QEMU, and parses the debug kernel's `OK_*` diagnostic lines:
 
 ```sh
 xmake test
@@ -110,9 +109,7 @@ xmake qemu-window-test -a rv64 --no-launch
 
 Use `--no-launch` in headless environments to boot the same kernel image without
 launching a window and print the result through the same validation path. The
-task accepts every configured architecture. Profiles without a boot image build
-the freestanding `okernel` target and emit `QEMU_WINDOW_TEST_SKIP` with
-`reason=boot_image_not_implemented`.
+task accepts every configured architecture.
 
 ## Freestanding Flags
 

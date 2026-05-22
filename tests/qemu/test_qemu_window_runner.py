@@ -49,9 +49,15 @@ def make_output(arch: str, fields: dict[str, str] | None = None) -> str:
 
 
 class QemuWindowRunnerTests(unittest.TestCase):
-    def test_window_validator_uses_profile_only_capabilities(self) -> None:
-        output = make_output("mips", {"display": "", "gpu": "", "input": "", "bus": "", "usb": ""})
+    def test_window_validator_requires_full_coverage_for_new_boot_targets(self) -> None:
+        output = make_output("mips", {"bus": ""})
         ok, detail = qemu_window_test.validate_output("mips", output)
+        self.assertFalse(ok)
+        self.assertIn("bus did not pass", detail)
+
+    def test_window_validator_keeps_unknown_arch_capabilities_optional(self) -> None:
+        output = make_output("profile-only", {"display": "", "gpu": "", "input": "", "bus": "", "usb": ""})
+        ok, detail = qemu_window_test.validate_output("profile-only", output)
         self.assertTrue(ok, detail)
 
     def test_window_validator_requires_gui_base_coverage(self) -> None:
@@ -70,6 +76,8 @@ class QemuWindowRunnerTests(unittest.TestCase):
                     command = qemu_window_test.qemu_command(arch, Path("kernel.bin"), "none", Path("disk.img"))
                     self.assertTrue(command[0].startswith("/usr/bin/qemu-system-"))
                     self.assertIn("-display", command)
+                    if arch == "mips64":
+                        self.assertIn("MIPS64R2-generic", command)
 
 
 if __name__ == "__main__":

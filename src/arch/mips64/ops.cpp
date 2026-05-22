@@ -23,7 +23,13 @@ class Mips64Operations final : public ProfiledArchOperationsBase<Architecture::m
 
     [[nodiscard]] u64 read_cycle_counter() const noexcept override
     {
+#if defined(__mips__)
+        u32 value = 0;
+        asm volatile("mfc0 %0, $9" : "=r"(value));
+        return value == 0 ? 1 : value;
+#else
         return fallback_cycle_counter();
+#endif
     }
 
     void memory_fence() noexcept override

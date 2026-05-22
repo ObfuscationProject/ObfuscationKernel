@@ -10,10 +10,10 @@ local task_arch_specs = {
     arm32 = {triple = "arm-none-eabi", bootable = true},
     rv64 = {triple = "riscv64-elf", bootable = true},
     rv32 = {triple = "riscv32-elf", bootable = true},
-    loongarch64 = {triple = "loongarch64-elf"},
-    mips = {triple = "mips-elf"},
-    mips64 = {triple = "mips64-elf"},
-    ppc = {triple = "powerpc-eabi"},
+    loongarch64 = {triple = "loongarch64-elf", bootable = true},
+    mips = {triple = "mips-elf", bootable = true},
+    mips64 = {triple = "mips64-elf", bootable = true},
+    ppc = {triple = "powerpc-eabi", bootable = true},
 }
 
 local function task_normalize_arch(arch)
@@ -185,7 +185,7 @@ task_end()
 task("qemu-matrix")
     set_menu {
         usage = "xmake qemu-matrix [-m MODE]",
-        description = "Build and run QEMU tests for every architecture with boot image support",
+        description = "Build and run QEMU tests for every supported architecture",
         options = {
             {"m", "check-mode", "kv", nil, "Build mode used for QEMU tests"}
         }
@@ -279,7 +279,7 @@ task_end()
 task("qemu-window-test")
     set_menu {
         usage = "xmake qemu-window-test [-a ARCH]",
-        description = "Show the debug kernel display output in a QEMU graphical window when a boot image exists",
+        description = "Show the debug kernel display output in a QEMU graphical window",
         options = {
             {"a", "profile", "kv", nil, "Temporarily test another architecture"},
             {"m", "check-mode", "kv", nil, "Build mode used for the debug kernel test"},
