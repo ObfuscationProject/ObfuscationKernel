@@ -98,23 +98,27 @@ xmake qemu-window-test
 
 In graphical mode the kernel remains interactive after the debug checks pass:
 keyboard input is handled by the kernel input stack and routed through the debug
-shell, display path, and serial console. The window path uses QEMU `ramfb`
-initialized by the guest through fw_cfg DMA on every bootable architecture.
-Before entering the shell, the kernel draws a colored pixel marker in the
-framebuffer. The ramfb console uses a 960x540 pixel surface with spaced bitmap
-glyph cells and a fixed mouse status line. On `aarch64` and `rv64`, QEMU virtio
-keyboard/mouse devices feed the shell and framebuffer pointer through a
-minimal virtio-mmio input path. The script reports after the QEMU window is
-closed.
+shell, GUI compositor, display path, and serial console. The window path uses
+QEMU `ramfb` initialized by the guest through fw_cfg DMA on every bootable
+architecture. Before entering the shell, the kernel draws a colored pixel marker
+in the framebuffer. The ramfb console uses a 960x540 pixel surface with spaced
+bitmap glyph cells, a GUI-backed `oksh` terminal surface, and a fixed mouse
+status line. On `aarch64`, `arm32`, `rv64`, and `rv32`, QEMU virtio
+keyboard/mouse devices feed the shell and framebuffer pointer through a minimal
+virtio-mmio input path. The script reports after the QEMU window is closed.
+
+The window task accepts every supported architecture. Profiles that do not yet
+have a boot image (`loongarch64`, `mips`, `mips64`, and `ppc`) build the
+freestanding kernel profile and emit an explicit `QEMU_WINDOW_TEST_SKIP` marker.
 
 The test scripts do not contain a kernel `main`. Debug and release builds enter
 through the same `kernel_main`; debug builds enable `OK_ENABLE_TEST_POINTS` and
 emit `OK_*` diagnostics through serial and the kernel display driver. The
-current bootable QEMU system targets are `i386`, `x86_64`, `aarch64`, and
-`rv64`. Other architecture profiles build the freestanding kernel library and
-have architecture-specific operation implementations, with documented Linux boot
-contracts until their platform I/O, linker scripts, and QEMU launch profiles are
-ready to be promoted to `qemu-test`.
+current bootable QEMU system targets are `i386`, `x86_64`, `aarch64`, `arm32`,
+`rv64`, and `rv32`. Other architecture profiles build the freestanding
+kernel library and have architecture-specific operation implementations, with
+documented Linux boot contracts until their platform I/O, linker scripts, and
+QEMU launch profiles are ready to be promoted to `qemu-test`.
 
 ## Architecture Implementations
 
@@ -139,3 +143,4 @@ fixed-capacity kernel containers live in `include/ok/core/fixed.hpp`.
 - [POSIX Roadmap](docs/POSIX.md)
 - [Architecture Notes](docs/arch/)
 - [Module Notes](docs/modules/)
+- [GUI](docs/modules/gui.md)

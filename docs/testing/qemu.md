@@ -34,11 +34,14 @@ Use the matrix tasks when validating architecture coverage from one checkout:
 ```sh
 xmake profile-matrix
 xmake qemu-matrix
+xmake qemu-window-matrix
 ```
 
 `profile-matrix` compiles the freestanding `okernel` static profile for every
 supported architecture. `qemu-matrix` only runs architectures with boot image
-support.
+support. `qemu-window-matrix` runs the headless window-validation path for every
+architecture: bootable profiles run QEMU, while profiles that do not yet have a
+boot image build `okernel` and emit `QEMU_WINDOW_TEST_SKIP`.
 
 The current bootable QEMU system test targets are `i386`, `x86_64`, `aarch64`,
 `arm32`, `rv64`, and `rv32`. Other architecture profiles can build `okernel`
@@ -62,17 +65,24 @@ The windowed task defaults to the current architecture:
 xmake qemu-window-test
 ```
 
-Pass `-a` to run another bootable window profile without permanently switching
-the checkout:
+Pass `-a` to run another architecture without permanently switching the
+checkout:
 
 ```sh
 xmake qemu-window-test -a rv32 --no-launch
+xmake qemu-window-test -a ppc --no-launch
 ```
 
-It builds and runs the same `kernel.bin` in QEMU. The visible output comes from
-the kernel's own ramfb display path on every bootable architecture: x86/i386 use
-fw_cfg I/O ports, while `aarch64`, `arm32`, `rv64`, and `rv32` use fw_cfg MMIO,
-then all draw pixels directly into guest RAM.
+For architectures with a boot image, it builds and runs the same `kernel.bin` in
+QEMU. For profiles that are not boot-image-ready yet (`loongarch64`, `mips`,
+`mips64`, and `ppc`), the task still accepts the architecture, builds the
+freestanding `okernel` profile, and prints a skip marker instead of hiding the
+gap behind an unsupported-task error.
+
+The visible output comes from the kernel's own ramfb display path on every
+bootable architecture: x86/i386 use fw_cfg I/O ports, while `aarch64`, `arm32`,
+`rv64`, and `rv32` use fw_cfg MMIO, then all draw pixels directly into guest
+RAM.
 The script captures serial diagnostics and prints the test result only after
 the QEMU window is closed. Use the headless validation form in environments
 without a graphical display:
@@ -83,11 +93,12 @@ xmake qemu-window-test --no-launch
 
 In graphical window mode the debug kernel does not attach the debug-exit device.
 After `OK_TEST_PASS`, the kernel draws a colored pixel marker in the framebuffer,
-then enters an interactive debug shell and echoes keyboard input through the
-kernel display path and serial console. The framebuffer console uses a 960x540
-pixel mode with spaced bitmap glyph cells and keeps mouse `x`, `y`, and left
-button state on one fixed bottom-row line. Close the QEMU window when you want
-the script to print its final result.
+then enters an interactive debug shell. The shell still writes to serial, but it
+also redraws an `oksh` GUI surface through the restartable GUI compositor. The
+ramfb backend scales the kernel's logical GUI framebuffer into a 960x540 pixel
+surface with spaced bitmap glyph cells and keeps mouse `x`, `y`, and left button
+state on one fixed bottom-row line. Close the QEMU window when you want the
+script to print its final result.
 
 For `aarch64`, `arm32`, `rv64`, and `rv32` window sessions, QEMU attaches
 `virtio-keyboard-device` and `virtio-mouse-device`; the guest consumes their
@@ -102,7 +113,9 @@ The debug kernel must print `OK_MODE debug`, `OK_DEBUG boot=complete`,
 debug test points ran and that filesystem, EXT4, user-mode, and display checks
 reported success. The current required coverage fields are `fs`, `simplefs`,
 `ext4`, `user`, `display`, `gpu`, `input`, `posix`, `bus`, `usb`, `net`,
-`shell`, and `modes`. Any non-zero exit code or missing marker is a failure.
+`shell`, `modes`, and `gui`. The bootable system targets advertise the same
+QEMU capability set, so headless validation requires the same fields for all six
+bootable architectures. Any non-zero exit code or missing marker is a failure.
 
 ## CI Coverage
 

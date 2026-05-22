@@ -26,6 +26,30 @@ QEMU_SYSTEM_BY_ARCH = {
     "ppc": "qemu-system-ppc",
 }
 VIRTUAL_DISK_SIZE = 16 * 1024 * 1024
+BASE_COVERAGE_FIELDS = ("fs", "simplefs", "ext4", "user", "posix", "shell", "modes", "gui")
+CAPABILITY_COVERAGE_FIELDS = {
+    "display": ("framebuffer", "ramfb", "virtio_gpu"),
+    "gpu": ("virtio_gpu",),
+    "input": ("keyboard_input", "mouse_input"),
+    "bus": ("pci_bus",),
+    "usb": ("usb_hid",),
+    "net": ("network_loopback",),
+}
+ALL_COVERAGE_FIELDS = BASE_COVERAGE_FIELDS + tuple(CAPABILITY_COVERAGE_FIELDS)
+BOOTABLE_QEMU_ARCHES = ("i386", "x86_64", "aarch64", "arm32", "rv64", "rv32")
+BOOTABLE_QEMU_CAPABILITIES = (
+    "serial_console", "framebuffer", "keyboard_input", "mouse_input", "pci_bus",
+    "virtio_block", "virtio_gpu", "ramfb", "usb_hid", "network_loopback",
+)
+PROFILE_CAPABILITIES = ("serial_console", "network_loopback")
+
+CAPABILITIES_BY_ARCH = {arch: BOOTABLE_QEMU_CAPABILITIES for arch in BOOTABLE_QEMU_ARCHES}
+CAPABILITIES_BY_ARCH.update({
+    "loongarch64": PROFILE_CAPABILITIES,
+    "mips": PROFILE_CAPABILITIES,
+    "mips64": PROFILE_CAPABILITIES,
+    "ppc": PROFILE_CAPABILITIES,
+})
 
 
 def normalize_arch(arch: str) -> str:
@@ -51,6 +75,19 @@ def parse_fields(line: str) -> dict[str, str]:
     return fields
 
 
+def arch_capabilities(arch: str) -> set[str]:
+    return set(CAPABILITIES_BY_ARCH.get(arch, ()))
+
+
+def required_coverage_fields(arch: str) -> set[str]:
+    capabilities = arch_capabilities(arch)
+    fields = set(BASE_COVERAGE_FIELDS)
+    for field, required_caps in CAPABILITY_COVERAGE_FIELDS.items():
+        if any(capability in capabilities for capability in required_caps):
+            fields.add(field)
+    return fields
+
+
 def validate_output(arch: str, output: str) -> tuple[bool, str]:
     lines = output.splitlines()
     if "OK_MODE debug" not in lines:
@@ -63,11 +100,11 @@ def validate_output(arch: str, output: str) -> tuple[bool, str]:
     fields = parse_fields(pass_lines[-1])
     if fields.get("arch") != arch:
         return False, f"arch mismatch: expected {arch}, got {fields.get('arch')}"
-    if fields.get("net") != "1":
-        return False, "network stack did not pass"
-    for required in ("fs", "simplefs", "ext4", "user", "display", "gpu", "input", "posix", "bus", "usb", "shell", "modes"):
+    for required in sorted(required_coverage_fields(arch)):
         if fields.get(required) != "1":
             return False, f"{required} did not pass"
+    if fields.get("display") == "1" and int(fields.get("display_checksum", "0")) == 0:
+        return False, "display checksum was zero"
     if int(fields.get("debug_test_points", "0")) == 0:
         return False, "debug test points did not run"
     return True, fields.get("debug_test_points", "0")

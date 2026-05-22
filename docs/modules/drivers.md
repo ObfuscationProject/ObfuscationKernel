@@ -16,8 +16,10 @@ Built-in drivers:
 - `FramebufferDisplayDriver`: exposes a simple 32-bit RGBA framebuffer with
   clear, pixel, rectangle, text-line, and checksum operations. Kernel boot writes
   Linux-style startup lines through this driver so `qemu-window-test` can show
-  the same debug output that the QEMU checker validates. The backend tag can be
-  `memory_framebuffer`, `vga_text`, `ramfb`, or `virtio_gpu_pci`.
+  the same debug output that the QEMU checker validates. The GUI compositor also
+  targets this logical framebuffer before platform code scales it to ramfb. The
+  backend tag can be `memory_framebuffer`, `vga_text`, `ramfb`, or
+  `virtio_gpu_pci`.
 - `VirtioGpuPciDisplayDriver`: binds the emulated PCI display device and
   presents the kernel framebuffer through the virtio-gpu-pci path used by QEMU
   window tests.
@@ -54,19 +56,34 @@ The PCIe/USB driver plan keeps discovery separate from transport:
 - Real xHCI MMIO rings, MSI/MSI-X, DMA mapping, and hotplug handling are future
   transport implementations behind the existing driver interfaces.
 
-QEMU tests attach a temporary `virtio-blk-pci` disk on every bootable target.
-QEMU window tests attach `ramfb` on every bootable architecture. The platform
-code initializes ramfb through the QEMU fw_cfg DMA interface and draws into
-guest RAM, so the visible window is a real pixel framebuffer rather than a
-serial console or VGA text surface. The ramfb console currently uses a 960x540
-surface, spaced bitmap glyph rendering, a colored boot marker, and a fixed
-bottom-row mouse position/button monitor. The current driver model still validates
-virtio-gpu enumeration through the internal PCI model; BAR mapping, virtqueues,
-EDID, scanout resource management, and true disk DMA are the next implementation
-steps.
+## Display And GUI
 
-On `aarch64` and `rv64`, graphical keyboard and mouse input is delivered through
-QEMU virtio-mmio input devices. The platform code supports the legacy
-virtio-mmio queue registers used by QEMU `virt` here, maps Linux input key codes
-into shell characters, and moves a small framebuffer pointer for mouse-relative
-events. UART input remains as a fallback for headless serial use.
+The display stack has three layers:
+
+- `FramebufferDisplayDriver` is the portable logical display device used by the
+  kernel and tests. It stores a 160x100 RGBA framebuffer, boot text, and a stable
+  checksum.
+- `ok::gui::GuiCompositor` is the restartable GUI module above the framebuffer.
+  It owns fixed-capacity surfaces, rectangle/pixel/text drawing, and composition.
+  The debug shell renders command history to an `oksh` GUI surface while keeping
+  serial output unchanged.
+- `RamFbConsole` is the QEMU-visible platform backend. It initializes `ramfb`
+  through fw_cfg DMA, owns the 960x540 guest-RAM pixel surface, and scales
+  logical GUI pixels through `ok_platform_display_gui_pixel()`.
+
+QEMU tests attach a temporary `virtio-blk-pci` disk on every bootable target.
+QEMU window tests attach `ramfb` on bootable architectures with a platform ramfb
+path. The visible window is therefore a real pixel framebuffer rather than a
+serial console or VGA text surface. The ramfb console currently uses spaced
+bitmap glyph rendering, a colored boot marker, a GUI shell surface, and a fixed
+bottom-row mouse position/button monitor.
+
+The current driver model still validates virtio-gpu enumeration through the
+internal PCI model; BAR mapping, virtqueues, EDID, scanout resource management,
+and true disk DMA are the next implementation steps.
+
+On `aarch64`, `arm32`, `rv64`, and `rv32`, graphical keyboard and mouse input is
+delivered through QEMU virtio-mmio input devices. The platform code supports the
+legacy virtio-mmio queue registers used by QEMU `virt` here, maps Linux input
+key codes into shell characters, and moves a small framebuffer pointer for
+mouse-relative events. UART input remains as a fallback for headless serial use.

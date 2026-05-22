@@ -25,7 +25,7 @@ QEMU_SYSTEM_BY_ARCH = {
 
 QEMU_DEBUG_EXIT_SUCCESS = 33
 VIRTUAL_DISK_SIZE = 16 * 1024 * 1024
-BASE_COVERAGE_FIELDS = ("fs", "simplefs", "ext4", "user", "posix", "shell", "modes")
+BASE_COVERAGE_FIELDS = ("fs", "simplefs", "ext4", "user", "posix", "shell", "modes", "gui")
 CAPABILITY_COVERAGE_FIELDS = {
     "display": ("framebuffer", "ramfb", "virtio_gpu"),
     "gpu": ("virtio_gpu",),
@@ -35,27 +35,20 @@ CAPABILITY_COVERAGE_FIELDS = {
     "net": ("network_loopback",),
 }
 ALL_COVERAGE_FIELDS = BASE_COVERAGE_FIELDS + tuple(CAPABILITY_COVERAGE_FIELDS)
+BOOTABLE_QEMU_ARCHES = ("i386", "x86_64", "aarch64", "arm32", "rv64", "rv32")
+BOOTABLE_QEMU_CAPABILITIES = (
+    "serial_console", "framebuffer", "keyboard_input", "mouse_input", "pci_bus",
+    "virtio_block", "virtio_gpu", "ramfb", "usb_hid", "network_loopback",
+)
+PROFILE_CAPABILITIES = ("serial_console", "network_loopback")
 
-CAPABILITIES_BY_ARCH = {
-    "i386": (
-        "serial_console", "framebuffer", "keyboard_input", "mouse_input", "pci_bus",
-        "virtio_block", "virtio_gpu", "usb_hid", "network_loopback",
-    ),
-    "x86_64": (
-        "serial_console", "framebuffer", "keyboard_input", "mouse_input", "pci_bus",
-        "virtio_block", "virtio_gpu", "usb_hid", "network_loopback",
-    ),
-    "aarch64": (
-        "serial_console", "framebuffer", "keyboard_input", "mouse_input", "pci_bus",
-        "virtio_block", "ramfb", "usb_hid", "network_loopback",
-    ),
-    "arm32": ("serial_console", "framebuffer", "virtio_block", "ramfb", "network_loopback"),
-    "rv64": (
-        "serial_console", "framebuffer", "keyboard_input", "mouse_input", "pci_bus",
-        "virtio_block", "ramfb", "usb_hid", "network_loopback",
-    ),
-    "rv32": ("serial_console", "framebuffer", "virtio_block", "ramfb", "network_loopback"),
-}
+CAPABILITIES_BY_ARCH = {arch: BOOTABLE_QEMU_CAPABILITIES for arch in BOOTABLE_QEMU_ARCHES}
+CAPABILITIES_BY_ARCH.update({
+    "loongarch64": PROFILE_CAPABILITIES,
+    "mips": PROFILE_CAPABILITIES,
+    "mips64": PROFILE_CAPABILITIES,
+    "ppc": PROFILE_CAPABILITIES,
+})
 
 
 class QemuConfigurationError(RuntimeError):
@@ -118,6 +111,14 @@ def virtio_disk_args(disk: Path) -> list[str]:
     ]
 
 
+def ramfb_args() -> list[str]:
+    return ["-device", "ramfb"]
+
+
+def virtio_mmio_input_args() -> list[str]:
+    return ["-device", "virtio-keyboard-device", "-device", "virtio-mouse-device"]
+
+
 def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool, disk: Path) -> list[str]:
     qemu = QEMU_SYSTEM_BY_ARCH.get(arch)
     if qemu is None:
@@ -145,6 +146,8 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool, disk: 
             "-display",
             display,
         ]
+        command += ramfb_args()
+        command += virtio_mmio_input_args()
         command += virtio_disk_args(disk)
         return command
     if arch in ("rv64", "rv32"):
@@ -166,6 +169,8 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool, disk: 
             "-display",
             display,
         ]
+        command += ramfb_args()
+        command += virtio_mmio_input_args()
         command += virtio_disk_args(disk)
         return command
     if arch == "loongarch64":
@@ -201,9 +206,12 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool, disk: 
         "-monitor",
         "none",
         "-no-reboot",
+        "-vga",
+        "none",
         "-display",
         display,
     ]
+    command += ramfb_args()
     command += virtio_disk_args(disk)
     if debug_exit:
         command += ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]

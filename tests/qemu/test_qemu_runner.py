@@ -38,6 +38,7 @@ def make_output(arch: str, fields: dict[str, str] | None = None, include_display
         "net": "1",
         "shell": "1",
         "modes": "1",
+        "gui": "1",
         "display_checksum": "1234",
     }
     if fields:
@@ -72,20 +73,30 @@ class QemuRunnerValidationTests(unittest.TestCase):
         self.assertEqual(code, 0, stderr)
         self.assertIn("OK_QEMU_NET_TEST arch=x86_64", stdout)
 
+    def test_bootable_arches_require_the_same_capability_coverage(self) -> None:
+        expected = qemu_test.required_coverage_fields("x86_64")
+        for arch in qemu_test.BOOTABLE_QEMU_ARCHES:
+            with self.subTest(arch=arch):
+                self.assertEqual(qemu_test.required_coverage_fields(arch), expected)
+
     def test_missing_required_coverage_field_fails_clearly(self) -> None:
-        output = make_output("x86_64", {"usb": ""})
-        code, _, stderr = self.validate("x86_64", output)
+        output = make_output("arm32", {"usb": ""})
+        code, _, stderr = self.validate("arm32", output)
         self.assertEqual(code, 8)
         self.assertIn("required coverage field: usb", stderr)
 
     def test_absent_capability_coverage_is_reported_as_skip(self) -> None:
-        output = make_output("arm32", {"gpu": "", "input": "", "bus": "", "usb": ""})
-        code, stdout, stderr = self.validate("arm32", output)
+        output = make_output(
+            "profile-only",
+            {"display": "", "gpu": "", "input": "", "bus": "", "usb": "", "net": ""},
+            include_display_text=False,
+        )
+        code, stdout, stderr = self.validate("profile-only", output)
         self.assertEqual(code, 0, stderr)
-        self.assertIn("OK_QEMU_SKIP arch=arm32 coverage=gpu reason=missing_capability", stdout)
-        self.assertIn("OK_QEMU_SKIP arch=arm32 coverage=input reason=missing_capability", stdout)
-        self.assertIn("OK_QEMU_SKIP arch=arm32 coverage=bus reason=missing_capability", stdout)
-        self.assertIn("OK_QEMU_SKIP arch=arm32 coverage=usb reason=missing_capability", stdout)
+        self.assertIn("OK_QEMU_SKIP arch=profile-only coverage=gpu reason=missing_capability", stdout)
+        self.assertIn("OK_QEMU_SKIP arch=profile-only coverage=input reason=missing_capability", stdout)
+        self.assertIn("OK_QEMU_SKIP arch=profile-only coverage=bus reason=missing_capability", stdout)
+        self.assertIn("OK_QEMU_SKIP arch=profile-only coverage=usb reason=missing_capability", stdout)
 
     def test_wrong_arch_marker_fails(self) -> None:
         output = make_output("rv64")
@@ -102,12 +113,16 @@ class QemuRunnerValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             kernel = Path(tmp) / "kernel.bin"
             kernel.write_bytes(b"ok")
-            output = make_output("arm32", {"gpu": "", "input": "", "bus": "", "usb": ""})
-            qemu_test.write_summary(kernel, "arm32", output, 0, 0)
+            output = make_output(
+                "profile-only",
+                {"display": "", "gpu": "", "input": "", "bus": "", "usb": "", "net": ""},
+                include_display_text=False,
+            )
+            qemu_test.write_summary(kernel, "profile-only", output, 0, 0)
             summary = (kernel.parent / "qemu-test-summary.txt").read_text(encoding="utf-8")
         self.assertIn("coverage.gpu=skip", summary)
         self.assertIn("skip.gpu=missing_capability", summary)
-        self.assertIn("coverage.display=pass", summary)
+        self.assertIn("coverage.display=skip", summary)
         self.assertIn("marker.OK_MODULES=present", summary)
 
     def test_missing_qemu_executable_is_explicit(self) -> None:
@@ -123,6 +138,14 @@ class QemuRunnerValidationTests(unittest.TestCase):
         self.assertIn("file=disk.img,format=raw,if=none,id=fsdisk", command)
         self.assertIn("-device", command)
         self.assertIn("virtio-blk-pci,drive=fsdisk", command)
+        self.assertIn("ramfb", command)
+
+    def test_qemu_command_attaches_ramfb_and_input_for_virt_targets(self) -> None:
+        with mock.patch.object(qemu_test.shutil, "which", return_value="/usr/bin/qemu-system-arm"):
+            command = qemu_test.qemu_command("arm32", Path("kernel.bin"), "none", False, Path("disk.img"))
+        self.assertIn("ramfb", command)
+        self.assertIn("virtio-keyboard-device", command)
+        self.assertIn("virtio-mouse-device", command)
 
 
 if __name__ == "__main__":

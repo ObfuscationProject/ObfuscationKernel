@@ -39,4 +39,6 @@ Supported commands:
 
 The shell is intentionally fixed-buffer and freestanding. Windowed QEMU mode
 routes keyboard input into the shell after `OK_TEST_PASS`, then mirrors output
-to serial and the display driver.
+to serial and redraws an `oksh` GUI surface through `GuiCompositor`. The legacy
+display-driver text path is still used for boot logs and `OK_DISPLAY_TEXT`
+diagnostics.

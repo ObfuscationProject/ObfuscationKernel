@@ -11,14 +11,16 @@ Bootable targets are split from the freestanding `okernel` library. The
 - `x86_64`: BIOS disk image, shared x86 boot sector, protected-mode to long-mode
   entry, identity page tables, VGA, COM1 serial, PS/2 keyboard and mouse
   polling.
-- `aarch64`: Linux `Image`-style 64-byte header and QEMU virt PL011 UART
-  platform path. `qemu-system-aarch64` boots the debug image directly with
-  `-kernel` and validates the serial `OK_TEST_PASS` marker.
+- `aarch64`: Linux `Image`-style 64-byte header, QEMU virt PL011 UART, ramfb
+  display, and virtio-mmio keyboard/mouse input. `qemu-system-aarch64` boots the
+  debug image directly with `-kernel` and validates the serial `OK_TEST_PASS`
+  marker.
 - `arm32`: QEMU virt direct ELF boot at `0x40008000`, bootstrap stack, `.bss`
   clearing, PL011 UART output, ramfb display, and virtio-mmio keyboard/mouse
   input.
 - `rv64`: QEMU virt direct ELF boot at `0x80000000`, bootstrap stack, `.bss`
-  clearing, NS16550 UART output, and `qemu-system-riscv64` debug validation.
+  clearing, NS16550 UART output, ramfb display, virtio-mmio keyboard/mouse
+  input, and `qemu-system-riscv64` debug validation.
 - `rv32`: QEMU virt direct ELF boot at `0x80000000`, bootstrap stack, `.bss`
   clearing, NS16550 UART output, ramfb display, and virtio-mmio keyboard/mouse
   input.

@@ -279,7 +279,7 @@ task_end()
 task("qemu-window-test")
     set_menu {
         usage = "xmake qemu-window-test [-a ARCH]",
-        description = "Show the debug kernel display output in a QEMU graphical window",
+        description = "Show the debug kernel display output in a QEMU graphical window when a boot image exists",
         options = {
             {"a", "profile", "kv", nil, "Temporarily test another architecture"},
             {"m", "check-mode", "kv", nil, "Build mode used for the debug kernel test"},
@@ -294,19 +294,27 @@ task("qemu-window-test")
         local current_arch = task_normalize_arch(config.get("arch") or "x86_64")
         local arch = task_normalize_arch(option.get("profile") or current_arch)
         local _, spec = task_require_arch(arch)
-        if not spec.bootable then
-            raise("qemu window test is not implemented for %s yet; build okernel to check the freestanding profile", arch)
-        end
         local mode = option.get("check-mode") or "debug"
         local current_mode = config.get("mode") or "release"
         local reconfigured = current_mode ~= mode or arch ~= current_arch
         if reconfigured then
             os.execv("xmake", {"f", "-c", "-m", mode, "-a", arch})
         end
+        if not spec.bootable then
+            local profile_code = os.execv("xmake", {"-y", "-b", "okernel"}, {try = true})
+            if reconfigured then
+                os.execv("xmake", {"f", "-c", "-m", current_mode, "-a", current_arch})
+            end
+            if profile_code ~= 0 then
+                raise("freestanding profile build failed for %s", arch)
+            end
+            print(string.format("QEMU_WINDOW_TEST_SKIP arch=%s reason=boot_image_not_implemented profile=okernel", arch))
+            return
+        end
         local build_code = os.execv("xmake", {"-y", "-b", "okernel_image"}, {try = true})
         if build_code ~= 0 then
             if reconfigured then
-                os.execv("xmake", {"f", "-c", "-m", current_mode, "-a", arch})
+                os.execv("xmake", {"f", "-c", "-m", current_mode, "-a", current_arch})
             end
             raise("kernel build failed for %s", arch)
         end
@@ -326,6 +334,49 @@ task("qemu-window-test")
         end
         if code ~= 0 then
             raise("qemu window test failed for %s", arch)
+        end
+    end)
+task_end()
+
+task("qemu-window-matrix")
+    set_menu {
+        usage = "xmake qemu-window-matrix [-m MODE]",
+        description = "Run the headless QEMU window validation path for every supported architecture",
+        options = {
+            {"m", "check-mode", "kv", nil, "Build mode used for window validation"},
+            {nil, "display", "kv", "none", "QEMU display backend for bootable profiles"}
+        }
+    }
+    on_run(function ()
+        import("core.base.option")
+        import("core.project.config")
+        config.load()
+
+        local current_arch = task_normalize_arch(config.get("arch") or "x86_64")
+        local current_mode = config.get("mode") or "release"
+        local mode = option.get("check-mode") or "debug"
+        local failed = {}
+
+        for _, arch in ipairs(task_arches) do
+            print(string.format("[qemu-window] checking %s (%s)", arch, mode))
+            os.execv("xmake", {"f", "-c", "-m", mode, "-a", arch})
+            local _, spec = task_require_arch(arch)
+            local code = 0
+            if spec.bootable then
+                code = os.execv("xmake", {"qemu-window-test", "-a", arch, "-m", mode,
+                                          "--display=" .. (option.get("display") or "none"), "--no-launch"},
+                                {try = true})
+            else
+                code = os.execv("xmake", {"qemu-window-test", "-a", arch, "-m", mode, "--no-launch"}, {try = true})
+            end
+            if code ~= 0 then
+                table.insert(failed, arch)
+            end
+        end
+
+        os.execv("xmake", {"f", "-c", "-m", current_mode, "-a", current_arch})
+        if #failed > 0 then
+            raise("QEMU window validation failed for: %s", table.concat(failed, ", "))
         end
     end)
 task_end()

@@ -15,4 +15,6 @@ counter reads, barriers, interrupt masking, and wait/yield behavior.
 - Memory: short-descriptor page tables initially, LPAE later if needed.
 - User mode: CPSR mode switch and exception return into user mode.
 - Syscalls: `svc #0`.
-- QEMU: `qemu-arm` for user-mode debug tests, `qemu-system-arm` for board-level tests.
+- QEMU: `qemu-system-arm -M virt -kernel` boots the linked ELF with PL011 UART,
+  ramfb display, virtio-mmio keyboard/mouse input, and the shared QEMU debug
+  suite.
