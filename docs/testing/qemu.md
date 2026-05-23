@@ -118,8 +118,11 @@ supported architectures. Any non-zero exit code or missing marker is a failure.
 
 GitHub Actions has one matrix job. For each architecture it:
 
-1. Builds or restores the matching freestanding GCC/binutils toolchain.
-2. Configures xmake with `-a <arch>`.
-3. Builds `okernel`.
-4. Runs `xmake test`, which immediately boots the generated kernel in QEMU for
+1. Installs the QEMU packages needed by the matrix: `qemu-system-x86`,
+   `qemu-system-arm`, `qemu-system-mips`, `qemu-system-ppc`, and
+   `qemu-system-misc`.
+2. Builds or restores the matching freestanding GCC/binutils toolchain.
+3. Configures xmake with `-a <arch>`.
+4. Builds `okernel`.
+5. Runs `xmake test`, which immediately boots the generated kernel in QEMU for
    the configured architecture.

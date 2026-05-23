@@ -25,6 +25,19 @@ QEMU_SYSTEM_BY_ARCH = {
     "mips64": "qemu-system-mips64",
     "ppc": "qemu-system-ppc",
 }
+
+UBUNTU_QEMU_PACKAGE_BY_ARCH = {
+    "i386": "qemu-system-x86",
+    "x86_64": "qemu-system-x86",
+    "aarch64": "qemu-system-arm",
+    "arm32": "qemu-system-arm",
+    "rv64": "qemu-system-misc",
+    "rv32": "qemu-system-misc",
+    "loongarch64": "qemu-system-misc",
+    "mips": "qemu-system-mips",
+    "mips64": "qemu-system-mips",
+    "ppc": "qemu-system-ppc",
+}
 VIRTUAL_DISK_SIZE = 16 * 1024 * 1024
 BASE_COVERAGE_FIELDS = ("fs", "simplefs", "ext4", "user", "posix", "shell", "modes", "gui")
 CAPABILITY_COVERAGE_FIELDS = {
@@ -136,7 +149,9 @@ def qemu_command(arch: str, kernel: Path, display: str, disk: Path) -> list[str]
         raise SystemExit(f"qemu-system boot is not implemented for {arch} yet")
     qemu_path = shutil.which(qemu)
     if qemu_path is None:
-        raise SystemExit(f"{qemu} was not found in PATH")
+        package = UBUNTU_QEMU_PACKAGE_BY_ARCH.get(arch)
+        install_hint = f" Install Ubuntu package: {package}." if package else ""
+        raise SystemExit(f"{qemu} was not found in PATH.{install_hint}")
     if arch in ("aarch64", "arm32"):
         command = [
             qemu_path,
