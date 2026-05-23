@@ -87,7 +87,7 @@ void poll_virtio_mouse()
     }
     if (wheel != 0)
     {
-        static_cast<void>(ok::ok_debug_shell_scroll_gui(wheel));
+        static_cast<void>(ok::ok_debug_shell_scroll_gui(-wheel));
     }
 }
 

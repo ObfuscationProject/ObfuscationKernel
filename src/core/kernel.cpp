@@ -168,6 +168,30 @@ Status Kernel::boot(KernelConfig config)
         }
         display_driver_.set_backend(driver::DisplayBackend::virtio_gpu_pci);
     }
+
+    const auto idle_context = arch_->make_kernel_context(0x1000, 0x8000);
+    auto idle = scheduler_.create_process("idle", idle_context);
+    if (!idle)
+    {
+        return idle.status();
+    }
+    if (auto status = scheduler_.set_runnable(idle.value()); !status.ok())
+    {
+        return status;
+    }
+    if (!scheduler_.schedule_next())
+    {
+        return Status::fault("failed to schedule idle process");
+    }
+    if (auto status = topology_.record_schedule(0); !status.ok())
+    {
+        return status;
+    }
+
+    if (auto status = kernel_modules_.bind_kernel_process(scheduler_, *arch_, 0x2000, 0x9000); !status.ok())
+    {
+        return status;
+    }
     gui_module_.bind_display(display_driver_);
     if (auto status = kernel_modules_.register_module(gui_module_); !status.ok())
     {
@@ -251,25 +275,6 @@ Status Kernel::boot(KernelConfig config)
         return status;
     }
     if (auto status = register_builtin_syscalls(posix_); !status.ok())
-    {
-        return status;
-    }
-
-    const auto idle_context = arch_->make_kernel_context(0x1000, 0x8000);
-    auto idle = scheduler_.create_process("idle", idle_context);
-    if (!idle)
-    {
-        return idle.status();
-    }
-    if (auto status = scheduler_.set_runnable(idle.value()); !status.ok())
-    {
-        return status;
-    }
-    if (!scheduler_.schedule_next())
-    {
-        return Status::fault("failed to schedule idle process");
-    }
-    if (auto status = topology_.record_schedule(0); !status.ok())
     {
         return status;
     }

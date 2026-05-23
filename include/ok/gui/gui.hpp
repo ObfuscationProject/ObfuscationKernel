@@ -13,7 +13,7 @@ namespace ok::gui
 
 inline constexpr std::string_view gui_module_name{"kernel-gui"};
 inline constexpr std::string_view gui_service_id{"gui.compositor"};
-inline constexpr usize max_gui_surfaces = 1;
+inline constexpr usize max_gui_surfaces = 4;
 inline constexpr usize max_gui_title = 32;
 inline constexpr usize max_gui_crash_reason = 64;
 inline constexpr u32 max_gui_surface_width = driver::framebuffer_width;
@@ -67,7 +67,10 @@ class GuiCompositor final
     Result<SurfaceId> create_surface(Rect bounds, std::string_view title);
     Status destroy_surface(SurfaceId id);
     Status set_visible(SurfaceId id, bool visible);
+    Status set_title(SurfaceId id, std::string_view title);
     Status move_surface(SurfaceId id, i32 x, i32 y);
+    Status resize_surface(SurfaceId id, Rect bounds);
+    Status raise_surface(SurfaceId id);
     Status fill(SurfaceId id, u32 rgba);
     Status fill_rect(SurfaceId id, Rect rect, u32 rgba);
     Status put_pixel(SurfaceId id, u32 x, u32 y, u32 rgba);
@@ -95,6 +98,8 @@ class GuiCompositor final
         return crash_reason_.view();
     }
     [[nodiscard]] Result<SurfaceInfo> surface_info(SurfaceId id) const;
+    [[nodiscard]] Result<SurfaceId> surface_at(i32 x, i32 y) const;
+    [[nodiscard]] Result<Rect> desktop_bounds() const;
 
   private:
     struct Surface
@@ -111,6 +116,7 @@ class GuiCompositor final
     [[nodiscard]] Result<usize> find_surface_index(SurfaceId id) const;
     [[nodiscard]] Status validate_bounds(Rect bounds) const;
     void draw_cell(Surface &surface, u32 column, u32 row, char value, u32 foreground, u32 background);
+    Status draw_surface(const Surface &surface);
     void reset_surfaces();
 
     driver::FramebufferDisplayDriver *display_{nullptr};

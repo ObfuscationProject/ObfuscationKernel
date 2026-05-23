@@ -376,7 +376,7 @@ void handle_ps2_mouse_byte(ok::u8 value)
         const auto wheel = z >= 8 ? static_cast<ok::i32>(z) - 16 : static_cast<ok::i32>(z);
         if (wheel != 0)
         {
-            static_cast<void>(ok::ok_debug_shell_scroll_gui(wheel));
+            static_cast<void>(ok::ok_debug_shell_scroll_gui(-wheel));
         }
     }
 }

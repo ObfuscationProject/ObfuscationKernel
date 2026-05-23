@@ -17,7 +17,7 @@ or policy boundaries and concepts at compile-time extension points.
 - `include/ok/driver`: driver base class plus console, timer, block, display,
   PCIe, USB, and input drivers.
 - `include/ok/gui`: restartable GUI compositor module and fixed-capacity
-  surface API.
+  surface/window API.
 - `include/ok/fs`: RAM-backed VFS node model.
 - `include/ok/user`: user-mode transition gateway.
 - `include/ok/core`: kernel composition and shared types.
@@ -65,9 +65,10 @@ For `i386` and `x86_64`, the system boot path is:
 1. Select architecture operations from xmake's configured architecture.
 2. Initialize physical memory from a memory map.
 3. Register and start built-in drivers.
-4. Start the restartable GUI compositor module on top of the framebuffer.
-5. Register timer interrupt and baseline syscalls.
-6. Create and schedule the idle process.
+4. Create and schedule the idle process.
+5. Bind `ModuleManager` to the scheduler-backed `kmodd` kernel process and
+   start non-core modules such as the restartable GUI compositor.
+6. Register timer interrupt and baseline syscalls.
 7. Create `/tmp/kernel.log` in the RAM VFS.
 
 The debug test suite then validates one operation from every core module.

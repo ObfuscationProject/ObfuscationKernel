@@ -15,9 +15,10 @@ class DebugModule final : public KernelModule
   public:
     DebugModule(std::string_view name, std::string_view klass, std::span<const ModuleDependency> dependencies,
                 std::span<const std::string_view> exports, std::span<const std::string_view> required_services,
-                u32 priority, usize *start_sequence = nullptr, usize *stop_sequence = nullptr)
+                u32 priority, usize *start_sequence = nullptr, usize *stop_sequence = nullptr,
+                ModuleExecution execution = ModuleExecution::inline_core)
         : name_(name), klass_(klass), dependencies_(dependencies), exports_(exports), requires_(required_services),
-          priority_(priority), start_sequence_(start_sequence), stop_sequence_(stop_sequence)
+          priority_(priority), start_sequence_(start_sequence), stop_sequence_(stop_sequence), execution_(execution)
     {
     }
 
@@ -31,6 +32,7 @@ class DebugModule final : public KernelModule
             .exported_services = exports_,
             .required_services = requires_,
             .built_in = true,
+            .execution = execution_,
             .init_priority = priority_,
         };
     }
@@ -71,6 +73,7 @@ class DebugModule final : public KernelModule
     u32 priority_{0};
     usize *start_sequence_{nullptr};
     usize *stop_sequence_{nullptr};
+    ModuleExecution execution_{ModuleExecution::inline_core};
     usize started_at_{0};
     usize stopped_at_{0};
 };
@@ -179,6 +182,60 @@ Status test_dependency_priority_order()
     if (provider.started_at() == 0 || dependent.started_at() == 0 || provider.started_at() >= dependent.started_at())
     {
         return Status::fault("module init priority overrode dependency order");
+    }
+    return Status::success();
+}
+
+Status test_kernel_process_backed_module()
+{
+    auto &ops = arch::arch_operations(arch::configured_architecture());
+    sched::Scheduler scheduler;
+    if (auto status = scheduler.configure_cpus(1); !status.ok())
+    {
+        return status;
+    }
+
+    DebugModule module{"gui-worker", "gui", {}, {}, {}, 0, nullptr, nullptr, ModuleExecution::kernel_process};
+    ModuleManager manager;
+    if (auto status = manager.register_module(module); !status.ok())
+    {
+        return status;
+    }
+    if (manager.start_all().code() != StatusCode::not_initialized || module.state() != ModuleState::failed)
+    {
+        return Status::fault("kernel-process module started without a module process binding");
+    }
+
+    ModuleManager bound_manager;
+    DebugModule bound_module{"gui-worker", "gui", {}, {}, {}, 0, nullptr, nullptr, ModuleExecution::kernel_process};
+    if (auto status = bound_manager.bind_kernel_process(scheduler, ops, 0x3000, 0xa000); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = bound_manager.register_module(bound_module); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = bound_manager.start_all(); !status.ok())
+    {
+        return status;
+    }
+    const auto pid = bound_manager.kernel_process_pid();
+    auto *process = scheduler.find(pid);
+    if (pid == 0 || process == nullptr || process->name() != kernel_module_process_name || !process->background() ||
+        bound_manager.kernel_process_module_count() != 1 || scheduler.background_process_count() != 1 ||
+        bound_module.state() != ModuleState::started ||
+        module_execution_name(bound_module.manifest().execution) != "kernel-process")
+    {
+        return Status::fault("kernel-process module manager binding failed");
+    }
+    if (auto status = bound_manager.restart_module("gui-worker"); !status.ok())
+    {
+        return status;
+    }
+    if (bound_manager.kernel_process_pid() != pid || bound_manager.kernel_process_module_count() != 1)
+    {
+        return Status::fault("kernel-process module restart did not reuse module process");
     }
     return Status::success();
 }
@@ -295,6 +352,10 @@ Status run_module_roadmap_tests(KernelTestReport &report)
         return status;
     }
     if (auto status = test_dependency_priority_order(); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_kernel_process_backed_module(); !status.ok())
     {
         return status;
     }

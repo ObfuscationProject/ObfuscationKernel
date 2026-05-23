@@ -1,7 +1,9 @@
 #pragma once
 
+#include "ok/arch/arch.hpp"
 #include "ok/core/fixed.hpp"
 #include "ok/core/types.hpp"
+#include "ok/sched/scheduler.hpp"
 
 #include <array>
 #include <span>
@@ -13,6 +15,7 @@ namespace ok
 inline constexpr usize max_kernel_modules = 32;
 inline constexpr usize max_kernel_services = 64;
 inline constexpr usize max_module_name = 48;
+inline constexpr std::string_view kernel_module_process_name{"kmodd"};
 
 struct ModuleId
 {
@@ -46,6 +49,12 @@ enum class ModuleState : u8
     failed,
 };
 
+enum class ModuleExecution : u8
+{
+    inline_core,
+    kernel_process,
+};
+
 struct ModuleManifest
 {
     std::string_view name{};
@@ -55,6 +64,7 @@ struct ModuleManifest
     std::span<const std::string_view> exported_services{};
     std::span<const std::string_view> required_services{};
     bool built_in{true};
+    ModuleExecution execution{ModuleExecution::inline_core};
     u32 init_priority{0};
 };
 
@@ -154,10 +164,12 @@ class ModuleManager final
 {
   public:
     Status register_module(KernelModule &module);
+    Status bind_kernel_process(sched::Scheduler &scheduler, arch::ArchOperations &arch, uptr entry, uptr stack);
     Status start_all();
     Status restart_module(std::string_view name);
     Status stop_all();
     Status shutdown_all();
+    Result<sched::ProcessId> ensure_kernel_process();
 
     [[nodiscard]] KernelModule *find(std::string_view name) const;
     [[nodiscard]] bool has_module(std::string_view name) const
@@ -172,6 +184,14 @@ class ModuleManager final
     [[nodiscard]] usize started_count() const
     {
         return started_order_.size();
+    }
+    [[nodiscard]] sched::ProcessId kernel_process_pid() const
+    {
+        return kernel_process_pid_;
+    }
+    [[nodiscard]] usize kernel_process_module_count() const
+    {
+        return kernel_process_modules_;
     }
     [[nodiscard]] ServiceRegistry &services()
     {
@@ -206,8 +226,15 @@ class ModuleManager final
     StaticVector<KernelModule *, max_kernel_modules> started_order_;
     std::array<VisitState, max_kernel_modules> visit_state_{};
     ServiceRegistry services_;
+    sched::Scheduler *kernel_process_scheduler_{nullptr};
+    arch::ArchOperations *kernel_process_arch_{nullptr};
+    sched::ProcessId kernel_process_pid_{0};
+    uptr kernel_process_entry_{0};
+    uptr kernel_process_stack_{0};
+    usize kernel_process_modules_{0};
 };
 
 [[nodiscard]] std::string_view module_state_name(ModuleState state);
+[[nodiscard]] std::string_view module_execution_name(ModuleExecution execution);
 
 } // namespace ok

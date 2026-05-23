@@ -176,6 +176,20 @@ Status GuiCompositor::set_visible(SurfaceId id, bool visible)
     return Status::success();
 }
 
+Status GuiCompositor::set_title(SurfaceId id, std::string_view title)
+{
+    if (auto status = ensure_running(); !status.ok())
+    {
+        return status;
+    }
+    auto index = find_surface_index(id);
+    if (!index)
+    {
+        return index.status();
+    }
+    return surfaces_[index.value()].title.assign(title);
+}
+
 Status GuiCompositor::move_surface(SurfaceId id, i32 x, i32 y)
 {
     if (auto status = ensure_running(); !status.ok())
@@ -190,6 +204,53 @@ Status GuiCompositor::move_surface(SurfaceId id, i32 x, i32 y)
     auto &surface = surfaces_[index.value()];
     surface.bounds.x = x;
     surface.bounds.y = y;
+    return Status::success();
+}
+
+Status GuiCompositor::resize_surface(SurfaceId id, Rect bounds)
+{
+    if (auto status = ensure_running(); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = validate_bounds(bounds); !status.ok())
+    {
+        return status;
+    }
+    auto index = find_surface_index(id);
+    if (!index)
+    {
+        return index.status();
+    }
+    auto &surface = surfaces_[index.value()];
+    const auto old_bounds = surface.bounds;
+    for (u32 y = 0; y < bounds.height; ++y)
+    {
+        for (u32 x = 0; x < bounds.width; ++x)
+        {
+            if (x >= old_bounds.width || y >= old_bounds.height)
+            {
+                surface.pixels[static_cast<usize>(y) * max_gui_surface_width + x] = default_surface_color;
+            }
+        }
+    }
+    surface.bounds = bounds;
+    return Status::success();
+}
+
+Status GuiCompositor::raise_surface(SurfaceId id)
+{
+    if (auto status = ensure_running(); !status.ok())
+    {
+        return status;
+    }
+    auto index = find_surface_index(id);
+    if (!index)
+    {
+        return index.status();
+    }
+    surfaces_[index.value()].z_index = next_z_index_;
+    ++next_z_index_;
     return Status::success();
 }
 
@@ -353,6 +414,51 @@ Status GuiCompositor::draw_text(SurfaceId id, u32 column, u32 row, std::string_v
     return Status::success();
 }
 
+Status GuiCompositor::draw_surface(const Surface &surface)
+{
+    if (!surface.visible)
+    {
+        return Status::success();
+    }
+    const auto mode = display_->mode();
+    for (u32 y = 0; y < surface.bounds.height; ++y)
+    {
+        const auto target_y = surface.bounds.y + static_cast<i32>(y);
+        if (target_y < 0 || target_y >= static_cast<i32>(mode.height))
+        {
+            continue;
+        }
+        for (u32 x = 0; x < surface.bounds.width; ++x)
+        {
+            const auto target_x = surface.bounds.x + static_cast<i32>(x);
+            if (target_x < 0 || target_x >= static_cast<i32>(mode.width))
+            {
+                continue;
+            }
+            auto color = surface.pixels[static_cast<usize>(y) * max_gui_surface_width + x];
+            if (x == 0 || y == 0 || x + 1 == surface.bounds.width || y + 1 == surface.bounds.height)
+            {
+                color = frame_color;
+            }
+            else if (y == 1)
+            {
+                color = title_color;
+            }
+            if (auto status = display_->put_pixel(static_cast<u32>(target_x), static_cast<u32>(target_y), color);
+                !status.ok())
+            {
+                return status;
+            }
+            if (ok_platform_display_gui_pixel != nullptr)
+            {
+                ok_platform_display_gui_pixel(mode.width, mode.height, static_cast<u32>(target_x),
+                                              static_cast<u32>(target_y), color);
+            }
+        }
+    }
+    return Status::success();
+}
+
 Status GuiCompositor::present()
 {
     if (auto status = ensure_running(); !status.ok())
@@ -376,48 +482,30 @@ Status GuiCompositor::present()
         }
     }
 
-    for (const auto &surface : surfaces_)
+    u32 last_z_index = 0;
+    for (usize drawn = 0; drawn < surfaces_.size(); ++drawn)
     {
-        if (!surface.visible)
+        const Surface *next = nullptr;
+        for (const auto &surface : surfaces_)
         {
-            continue;
-        }
-        for (u32 y = 0; y < surface.bounds.height; ++y)
-        {
-            const auto target_y = surface.bounds.y + static_cast<i32>(y);
-            if (target_y < 0 || target_y >= static_cast<i32>(mode.height))
+            if (!surface.visible || surface.z_index <= last_z_index)
             {
                 continue;
             }
-            for (u32 x = 0; x < surface.bounds.width; ++x)
+            if (next == nullptr || surface.z_index < next->z_index)
             {
-                const auto target_x = surface.bounds.x + static_cast<i32>(x);
-                if (target_x < 0 || target_x >= static_cast<i32>(mode.width))
-                {
-                    continue;
-                }
-                auto color = surface.pixels[static_cast<usize>(y) * max_gui_surface_width + x];
-                if (x == 0 || y == 0 || x + 1 == surface.bounds.width || y + 1 == surface.bounds.height)
-                {
-                    color = frame_color;
-                }
-                else if (y == 1)
-                {
-                    color = title_color;
-                }
-                if (auto status =
-                        display_->put_pixel(static_cast<u32>(target_x), static_cast<u32>(target_y), color);
-                    !status.ok())
-                {
-                    return status;
-                }
-                if (ok_platform_display_gui_pixel != nullptr)
-                {
-                    ok_platform_display_gui_pixel(mode.width, mode.height, static_cast<u32>(target_x),
-                                                  static_cast<u32>(target_y), color);
-                }
+                next = &surface;
             }
         }
+        if (next == nullptr)
+        {
+            break;
+        }
+        if (auto status = draw_surface(*next); !status.ok())
+        {
+            return status;
+        }
+        last_z_index = next->z_index;
     }
 
     last_present_checksum_ = display_->checksum();
@@ -441,6 +529,47 @@ Result<SurfaceInfo> GuiCompositor::surface_info(SurfaceId id) const
     };
 }
 
+Result<SurfaceId> GuiCompositor::surface_at(i32 x, i32 y) const
+{
+    if (auto status = ensure_running(); !status.ok())
+    {
+        return status;
+    }
+    const Surface *top = nullptr;
+    for (const auto &surface : surfaces_)
+    {
+        if (!surface.visible)
+        {
+            continue;
+        }
+        const auto right = surface.bounds.x + static_cast<i32>(surface.bounds.width);
+        const auto bottom = surface.bounds.y + static_cast<i32>(surface.bounds.height);
+        if (x < surface.bounds.x || y < surface.bounds.y || x >= right || y >= bottom)
+        {
+            continue;
+        }
+        if (top == nullptr || surface.z_index > top->z_index)
+        {
+            top = &surface;
+        }
+    }
+    if (top == nullptr)
+    {
+        return Status::not_found("no GUI surface at point");
+    }
+    return top->id;
+}
+
+Result<Rect> GuiCompositor::desktop_bounds() const
+{
+    if (auto status = ensure_running(); !status.ok())
+    {
+        return status;
+    }
+    const auto mode = display_->mode();
+    return Rect{.x = 0, .y = 0, .width = mode.width, .height = mode.height};
+}
+
 ModuleManifest GuiModule::manifest() const
 {
     static constexpr std::array exports{gui_service_id};
@@ -452,6 +581,7 @@ ModuleManifest GuiModule::manifest() const
         .exported_services = exports,
         .required_services = {},
         .built_in = true,
+        .execution = ModuleExecution::kernel_process,
         .init_priority = 75,
     };
 }

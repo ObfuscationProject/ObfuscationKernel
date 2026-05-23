@@ -46,6 +46,43 @@ Status ModuleManager::register_module(KernelModule &module)
     return modules_.push_back(&module);
 }
 
+Status ModuleManager::bind_kernel_process(sched::Scheduler &scheduler, arch::ArchOperations &arch, uptr entry,
+                                          uptr stack)
+{
+    if (entry == 0 || stack == 0)
+    {
+        return Status::invalid_argument("kernel module process context is invalid");
+    }
+    kernel_process_scheduler_ = &scheduler;
+    kernel_process_arch_ = &arch;
+    kernel_process_entry_ = entry;
+    kernel_process_stack_ = stack;
+    kernel_process_pid_ = 0;
+    kernel_process_modules_ = 0;
+    return Status::success();
+}
+
+Result<sched::ProcessId> ModuleManager::ensure_kernel_process()
+{
+    if (kernel_process_pid_ != 0 && kernel_process_scheduler_ != nullptr &&
+        kernel_process_scheduler_->find(kernel_process_pid_) != nullptr)
+    {
+        return kernel_process_pid_;
+    }
+    if (kernel_process_scheduler_ == nullptr || kernel_process_arch_ == nullptr)
+    {
+        return Status::not_initialized("kernel module process is not bound to a scheduler");
+    }
+    const auto context = kernel_process_arch_->make_kernel_context(kernel_process_entry_, kernel_process_stack_);
+    auto process = kernel_process_scheduler_->create_background_process(kernel_module_process_name, context);
+    if (!process)
+    {
+        return process.status();
+    }
+    kernel_process_pid_ = process.value();
+    return kernel_process_pid_;
+}
+
 KernelModule *ModuleManager::find(std::string_view name) const
 {
     for (auto *module : modules_)
@@ -255,6 +292,17 @@ Status ModuleManager::transition(KernelModule &module, ModuleState next, Status 
 Status ModuleManager::start_module(KernelModule &module)
 {
     module.clear_failure();
+    const auto manifest = module.manifest();
+    const bool already_recorded = started_order_contains(module);
+    if (manifest.execution == ModuleExecution::kernel_process)
+    {
+        auto process = ensure_kernel_process();
+        if (!process)
+        {
+            module.fail(process.status().message());
+            return process.status();
+        }
+    }
     if (auto status = check_dependencies(module); !status.ok())
     {
         module.fail(status.message());
@@ -285,6 +333,10 @@ Status ModuleManager::start_module(KernelModule &module)
         module.fail(status.message());
         return status;
     }
+    if (manifest.execution == ModuleExecution::kernel_process && !already_recorded)
+    {
+        ++kernel_process_modules_;
+    }
     return Status::success();
 }
 
@@ -296,6 +348,7 @@ Status ModuleManager::start_all()
     }
 
     started_order_ = {};
+    kernel_process_modules_ = 0;
     for (const auto index : sorted_order_)
     {
         if (auto status = start_module(*modules_[index]); !status.ok())
@@ -368,6 +421,18 @@ std::string_view module_state_name(ModuleState state)
         return "stopped";
     case ModuleState::failed:
         return "failed";
+    }
+    return "unknown";
+}
+
+std::string_view module_execution_name(ModuleExecution execution)
+{
+    switch (execution)
+    {
+    case ModuleExecution::inline_core:
+        return "inline-core";
+    case ModuleExecution::kernel_process:
+        return "kernel-process";
     }
     return "unknown";
 }

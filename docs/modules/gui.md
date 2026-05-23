@@ -8,20 +8,43 @@ run in the freestanding kernel profile without heap allocation.
 
 `ok::gui::GuiModule` is a kernel module named `kernel-gui`. During boot the
 kernel binds it to `FramebufferDisplayDriver`, starts it through
-`ModuleManager`, and publishes the `gui.compositor` service.
+`ModuleManager`, and publishes the `gui.compositor` service. The manifest uses
+`ModuleExecution::kernel_process`, so the module is managed by the scheduler
+visible `kmodd` kernel background process rather than the core boot path.
 
 The module owns `GuiCompositor`, which provides:
 
 - fixed-capacity surfaces with bounds, title, visibility, and z order metadata;
-- fill, rectangle fill, pixel write, and fixed-cell text drawing operations;
+- fill, rectangle fill, pixel write, fixed-cell text drawing, title update,
+  move, resize, visibility, raise, and hit-test operations;
 - composition into the logical kernel framebuffer;
+- desktop bounds and surface metadata queries;
 - a generation counter and last-present checksum for tests;
 - a crash state used to reject new work until a supervisor restarts the module.
 
 `GuiSupervisor` watches the compositor state. If the compositor is marked
 crashed, the supervisor calls `ModuleManager::restart_module("kernel-gui")`.
 Restarting clears volatile surfaces, increments the generation counter, keeps
-the same service registration, and leaves the rest of the kernel running.
+the same service registration, reuses `kmodd`, and leaves the rest of the kernel
+running.
+
+## API Contract
+
+The compositor API is intentionally small and synchronous:
+
+- `create_surface(bounds, title)` allocates one of four fixed backing stores.
+- `set_title`, `move_surface`, `resize_surface`, `set_visible`, and
+  `raise_surface` update surface metadata.
+- `fill`, `fill_rect`, `put_pixel`, and `draw_text` update backing pixels.
+- `surface_at(x, y)` returns the top visible surface at a logical desktop
+  coordinate.
+- `desktop_bounds()` returns the logical framebuffer rectangle.
+- `present()` clears the desktop and composes visible surfaces from low to high
+  z order.
+
+All calls return `Status`/`Result<T>` and use fixed-capacity storage. Resizing a
+surface preserves existing pixels inside the old bounds and initializes newly
+visible pixels with the default surface color.
 
 ## Display Path
 
@@ -60,8 +83,10 @@ surface is available, interactive framebuffer output is owned by the GUI.
 The debug and roadmap tests cover:
 
 - GUI module startup and `gui.compositor` service publication;
-- surface creation, metadata, drawing, and framebuffer checksum updates;
+- surface creation, metadata updates, z ordering, hit testing, drawing, and
+  framebuffer checksum updates;
 - compositor crash rejection and supervisor restart;
+- `kernel-gui` ownership by the `kmodd` kernel background process;
 - shell command output rendering to a GUI surface.
 
 Successful debug runs emit:

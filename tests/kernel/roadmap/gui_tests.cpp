@@ -110,6 +110,97 @@ Status test_gui_text_uses_bitmap_font(Kernel &kernel)
     return compositor.destroy_surface(surface.value());
 }
 
+Status test_gui_surface_management_api(Kernel &kernel)
+{
+    if (auto status = release_shell_surface(kernel); !status.ok())
+    {
+        return status;
+    }
+    auto &compositor = kernel.gui().compositor();
+    auto desktop = compositor.desktop_bounds();
+    if (!desktop || desktop.value().width != driver::framebuffer_width ||
+        desktop.value().height != driver::framebuffer_height)
+    {
+        return Status::fault("GUI desktop bounds query failed");
+    }
+
+    auto back = compositor.create_surface(gui::Rect{.x = 4, .y = 5, .width = 24, .height = 14}, "back");
+    auto front = compositor.create_surface(gui::Rect{.x = 8, .y = 8, .width = 18, .height = 12}, "front");
+    if (!back || !front)
+    {
+        return !back ? back.status() : front.status();
+    }
+    if (auto status = compositor.fill(back.value(), 0xff223344u); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.fill(front.value(), 0xff556677u); !status.ok())
+    {
+        return status;
+    }
+    auto top = compositor.surface_at(9, 9);
+    if (!top || top.value() != front.value())
+    {
+        return Status::fault("GUI surface hit-test did not select top surface");
+    }
+    if (auto status = compositor.raise_surface(back.value()); !status.ok())
+    {
+        return status;
+    }
+    top = compositor.surface_at(9, 9);
+    if (!top || top.value() != back.value())
+    {
+        return Status::fault("GUI raise surface did not update z order");
+    }
+    if (auto status = compositor.set_visible(back.value(), false); !status.ok())
+    {
+        return status;
+    }
+    top = compositor.surface_at(9, 9);
+    if (!top || top.value() != front.value())
+    {
+        return Status::fault("GUI hidden surface still participated in hit-test");
+    }
+    if (auto status = compositor.set_visible(back.value(), true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status =
+            compositor.resize_surface(front.value(), gui::Rect{.x = 30, .y = 24, .width = 20, .height = 16});
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.move_surface(front.value(), 32, 26); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.set_title(front.value(), "front-renamed"); !status.ok())
+    {
+        return status;
+    }
+    auto info = compositor.surface_info(front.value());
+    if (!info || info.value().bounds.x != 32 || info.value().bounds.y != 26 ||
+        info.value().bounds.width != 20 || info.value().bounds.height != 16 ||
+        info.value().title != "front-renamed")
+    {
+        return Status::fault("GUI surface metadata update failed");
+    }
+    if (auto status = compositor.present(); !status.ok())
+    {
+        return status;
+    }
+    if (compositor.last_present_checksum() == 0)
+    {
+        return Status::fault("GUI managed surfaces did not present");
+    }
+    if (auto status = compositor.destroy_surface(front.value()); !status.ok())
+    {
+        return status;
+    }
+    return compositor.destroy_surface(back.value());
+}
+
 Status test_gui_module_restarts_after_crash(Kernel &kernel)
 {
     auto &module = kernel.gui();
@@ -174,7 +265,11 @@ Status test_kernel_gui_is_started(Kernel &kernel)
     auto &module = kernel.gui();
     if (module.state() != ModuleState::started || module.compositor().state() != gui::GuiState::running ||
         module.compositor().last_present_checksum() == 0 ||
-        kernel.kernel_modules().services().query<gui::GuiModule>(gui::gui_service_id) != &module)
+        kernel.kernel_modules().services().query<gui::GuiModule>(gui::gui_service_id) != &module ||
+        module.manifest().execution != ModuleExecution::kernel_process ||
+        kernel.kernel_modules().kernel_process_pid() == 0 ||
+        kernel.scheduler().find(kernel.kernel_modules().kernel_process_pid()) == nullptr ||
+        kernel.kernel_modules().kernel_process_module_count() == 0)
     {
         return Status::fault("kernel GUI module was not started during boot");
     }
@@ -250,6 +345,10 @@ Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
         return status;
     }
     if (auto status = test_gui_text_uses_bitmap_font(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_gui_surface_management_api(kernel); !status.ok())
     {
         return status;
     }
