@@ -17,6 +17,9 @@ class KernelDebugShell final
   public:
     Status attach(Kernel &kernel);
     Result<std::string_view> execute(std::string_view line);
+    Status show_gui();
+    Status set_gui_input(std::string_view line);
+    [[nodiscard]] bool gui_ready();
     [[nodiscard]] usize gui_render_count() const
     {
         return gui_render_count_;
@@ -73,6 +76,7 @@ class KernelDebugShell final
     FixedString<96> path_buffer_{};
     FixedString<4096> output_{};
     FixedString<2048> gui_history_{};
+    FixedString<128> gui_input_line_{};
     gui::SurfaceId gui_surface_id_{0};
     usize gui_render_count_{0};
 };

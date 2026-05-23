@@ -25,6 +25,31 @@ void platform_write(std::string_view text)
     }
 }
 
+void serial_write(std::string_view text)
+{
+    for (const auto value : text)
+    {
+        ok_platform_console_write_char(value);
+    }
+}
+
+void display_write(std::string_view text)
+{
+    for (const auto value : text)
+    {
+        ok_platform_display_write_char(value);
+    }
+}
+
+void shell_write(std::string_view text)
+{
+    serial_write(text);
+    if (!ok::ok_debug_shell_gui_ready())
+    {
+        display_write(text);
+    }
+}
+
 [[maybe_unused]] void debug_write(void *, std::string_view text)
 {
     platform_write(text);
@@ -48,19 +73,24 @@ void platform_write(std::string_view text)
     ok::usize history_cursor = 0;
     ok::u8 escape_state = 0;
 
+    auto refresh_gui_input = [&]() {
+        static_cast<void>(ok::ok_debug_shell_set_gui_input(line.view()));
+    };
     auto erase_line = [&]() {
         while (!line.empty())
         {
             line.pop_back();
-            platform_write("\b");
+            shell_write("\b");
         }
+        refresh_gui_input();
     };
     auto replace_line = [&](std::string_view value) {
         erase_line();
         if (line.assign(value).ok())
         {
-            platform_write(line.view());
+            shell_write(line.view());
         }
+        refresh_gui_input();
     };
     auto remember_line = [&]() {
         if (line.empty())
@@ -106,8 +136,9 @@ void platform_write(std::string_view text)
         replace_line(history[history_cursor].view());
     };
 
-    platform_write("\nOK_INTERACTIVE ready shell=oksh input=platform\n");
-    platform_write(prompt);
+    static_cast<void>(ok::ok_debug_shell_show_gui());
+    shell_write("\nOK_INTERACTIVE ready shell=oksh input=platform\n");
+    shell_write(prompt);
     for (;;)
     {
         const int value = ok_platform_input_poll();
@@ -139,22 +170,24 @@ void platform_write(std::string_view text)
             }
             if (ch == '\r' || ch == '\n')
             {
-                platform_write("\n");
+                shell_write("\n");
                 remember_line();
                 auto out = ok::ok_debug_shell_execute(line.view());
                 if (out && !out.value().empty())
                 {
-                    platform_write(out.value());
+                    shell_write(out.value());
                 }
                 line.clear();
-                platform_write(prompt);
+                shell_write(prompt);
+                refresh_gui_input();
             }
             else if (ch == '\b' || ch == 0x7f)
             {
                 if (!line.empty())
                 {
                     line.pop_back();
-                    platform_write("\b");
+                    shell_write("\b");
+                    refresh_gui_input();
                 }
             }
             else if (ch == 0x15)
@@ -162,15 +195,17 @@ void platform_write(std::string_view text)
                 while (!line.empty())
                 {
                     line.pop_back();
-                    platform_write("\b");
+                    shell_write("\b");
                 }
+                refresh_gui_input();
             }
             else
             {
                 if (line.append(ch).ok())
                 {
-                    platform_write(std::string_view{&ch, 1});
+                    shell_write(std::string_view{&ch, 1});
                     history_cursor = history_count;
+                    refresh_gui_input();
                 }
             }
         }

@@ -121,6 +121,15 @@ template <typename T, usize Capacity> class StaticVector final
     {
         size_ = 0;
     }
+    // Reserves an existing storage slot; the caller must fully initialize it.
+    constexpr Result<T *> push_back_slot()
+    {
+        if (full())
+        {
+            return Status::overflow("static vector capacity exceeded");
+        }
+        return &values_[size_++];
+    }
 
     constexpr Status push_back(const T &value)
     {

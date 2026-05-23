@@ -122,11 +122,18 @@ usize operator_width(std::string_view value, usize index)
     return value[index] == ';' ? 1 : 2;
 }
 
-constexpr gui::Rect shell_gui_bounds{.x = 4, .y = 4, .width = 252, .height = 112};
+constexpr gui::Rect shell_gui_bounds{
+    .x = 0,
+    .y = 0,
+    .width = static_cast<u32>(driver::framebuffer_width),
+    .height = static_cast<u32>(driver::framebuffer_height),
+};
 constexpr u32 shell_gui_background = 0xff061018u;
 constexpr u32 shell_gui_foreground = 0xffd8f3ffu;
 constexpr u32 shell_gui_prompt = 0xfff4d35eu;
-constexpr usize shell_gui_rows = shell_gui_bounds.height / gui::gui_glyph_height - 3;
+constexpr usize shell_gui_total_rows = shell_gui_bounds.height / gui::gui_glyph_height;
+constexpr usize shell_gui_history_rows = shell_gui_total_rows - 4;
+constexpr u32 shell_gui_prompt_row = static_cast<u32>(shell_gui_total_rows - 2);
 constexpr usize shell_gui_history_keep = 1800;
 
 std::string_view tail_lines(std::string_view text, usize max_lines)
@@ -155,6 +162,26 @@ Status KernelDebugShell::attach(Kernel &kernel)
 {
     kernel_ = &kernel;
     return Status::success();
+}
+
+bool KernelDebugShell::gui_ready()
+{
+    return ensure_gui_surface().ok();
+}
+
+Status KernelDebugShell::show_gui()
+{
+    return redraw_gui_terminal();
+}
+
+Status KernelDebugShell::set_gui_input(std::string_view line)
+{
+    gui_input_line_.clear();
+    if (auto status = gui_input_line_.append(line); !status.ok())
+    {
+        return status;
+    }
+    return redraw_gui_terminal();
 }
 
 Result<std::string_view> KernelDebugShell::execute(std::string_view line)
@@ -517,13 +544,25 @@ Status KernelDebugShell::redraw_gui_terminal()
     {
         return status;
     }
-    const auto visible = tail_lines(gui_history_.view(), shell_gui_rows);
+    const auto visible = tail_lines(gui_history_.view(), shell_gui_history_rows);
     if (auto status = compositor.draw_text(gui_surface_id_, 1, 2, visible, shell_gui_foreground, shell_gui_background);
         !status.ok())
     {
         return status;
     }
     if (auto status = compositor.draw_text(gui_surface_id_, 1, 1, "oksh", shell_gui_prompt, shell_gui_background);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.draw_text(gui_surface_id_, 1, shell_gui_prompt_row, "ok> ", shell_gui_prompt,
+                                           shell_gui_background);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.draw_text(gui_surface_id_, 5, shell_gui_prompt_row, gui_input_line_.view(),
+                                           shell_gui_foreground, shell_gui_background);
         !status.ok())
     {
         return status;
@@ -551,6 +590,7 @@ Status KernelDebugShell::render_to_gui(std::string_view command_line, std::strin
     {
         gui_history_.clear();
     }
+    gui_input_line_.clear();
 
     if (auto status = append_gui_history("ok> "); !status.ok())
     {

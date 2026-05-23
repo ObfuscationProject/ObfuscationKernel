@@ -29,7 +29,8 @@ The compositor renders into `FramebufferDisplayDriver`, whose logical mode is
 currently 320x180 RGBA pixels. `present()` also calls the weak platform hook
 `ok_platform_display_gui_pixel()` when a platform provides it. QEMU ramfb
 platforms use that hook to scale logical GUI pixels onto the visible 960x540
-framebuffer.
+framebuffer. Each present starts from a compositor-owned desktop background, so
+legacy boot/debug text is not left behind outside GUI surfaces.
 
 This keeps the module independent from QEMU-specific ramfb details:
 
@@ -46,10 +47,13 @@ surface:
 - the command is appended with an `ok> ` prompt;
 - command output is appended to a bounded history buffer;
 - `clear` output resets the GUI history;
+- the active input line is redrawn by the GUI while the serial console still
+  receives text output;
 - the surface is redrawn with `GuiCompositor::draw_text()` and presented.
 
-The serial console and legacy framebuffer text path are preserved for boot logs
-and automated QEMU validation. The GUI surface is the interactive window view.
+The serial console and legacy framebuffer text path are preserved for boot logs,
+automated QEMU validation, and GUI startup failure fallback. Once the GUI shell
+surface is available, interactive framebuffer output is owned by the GUI.
 
 ## Tests
 

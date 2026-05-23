@@ -24,6 +24,7 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
         }
         cursor_column_ = 0;
         cursor_row_ = 0;
+        gui_active_ = false;
         pointer_drawn_ = false;
         pointer_x_ = framebuffer_width / 2;
         pointer_y_ = framebuffer_height / 2;
@@ -104,7 +105,10 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
         pointer_x_ = clamp_pointer(static_cast<i32>(pointer_x_) + delta_x, framebuffer_width - pointer_width);
         pointer_y_ = clamp_pointer(static_cast<i32>(pointer_y_) + delta_y, framebuffer_height - pointer_height);
         pointer_left_button_ = left_button;
-        draw_mouse_status();
+        if (!gui_active_)
+        {
+            draw_mouse_status();
+        }
         draw_pointer(left_button);
     }
 
@@ -115,11 +119,11 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
         {
             return;
         }
-        constexpr u32 drawable_height = framebuffer_height - cell_height;
+        gui_active_ = true;
         const u32 left = (x * framebuffer_width) / logical_width;
         u32 right = ((x + 1) * framebuffer_width) / logical_width;
-        const u32 top = (y * drawable_height) / logical_height;
-        u32 bottom = ((y + 1) * drawable_height) / logical_height;
+        const u32 top = (y * framebuffer_height) / logical_height;
+        u32 bottom = ((y + 1) * framebuffer_height) / logical_height;
         if (right <= left)
         {
             right = left + 1;
@@ -128,7 +132,7 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
         {
             bottom = top + 1;
         }
-        for (u32 target_y = top; target_y < bottom && target_y < drawable_height; ++target_y)
+        for (u32 target_y = top; target_y < bottom && target_y < framebuffer_height; ++target_y)
         {
             for (u32 target_x = left; target_x < right && target_x < framebuffer_width; ++target_x)
             {
@@ -564,6 +568,7 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
     static inline u32 pointer_y_{framebuffer_height / 2};
     static inline bool pointer_left_button_{false};
     static inline bool pointer_drawn_{false};
+    static inline bool gui_active_{false};
     static inline u32 pointer_saved_[pointer_pixels]{};
     alignas(4096) static inline u32 pixels_[framebuffer_pixels]{};
     alignas(16) static inline volatile DmaAccess dma_access_{};

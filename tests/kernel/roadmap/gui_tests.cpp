@@ -219,6 +219,22 @@ Status test_shell_renders_to_gui(Kernel &kernel)
     {
         return Status::fault("debug shell did not render to GUI");
     }
+    auto surface = kernel.gui().compositor().surface_info(kernel.debug_shell().gui_surface_id());
+    if (!surface || surface.value().bounds.x != 0 || surface.value().bounds.y != 0 ||
+        surface.value().bounds.width != driver::framebuffer_width ||
+        surface.value().bounds.height != driver::framebuffer_height)
+    {
+        return Status::fault("debug shell GUI surface is not maximized");
+    }
+    const auto input_checksum = kernel.gui().compositor().last_present_checksum();
+    if (auto status = kernel.debug_shell().set_gui_input("ps"); !status.ok())
+    {
+        return status;
+    }
+    if (kernel.gui().compositor().last_present_checksum() == input_checksum)
+    {
+        return Status::fault("debug shell GUI input line did not redraw");
+    }
     return Status::success();
 }
 

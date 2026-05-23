@@ -38,7 +38,7 @@ Supported commands:
   loopback stack used by early network-debug work.
 
 The shell is intentionally fixed-buffer and freestanding. Windowed QEMU mode
-routes keyboard input into the shell after `OK_TEST_PASS`, then mirrors output
-to serial and redraws an `oksh` GUI surface through `GuiCompositor`. The legacy
-display-driver text path is still used for boot logs and `OK_DISPLAY_TEXT`
-diagnostics.
+routes keyboard input into the shell after `OK_TEST_PASS`, mirrors output to
+serial, and redraws a maximized `oksh` GUI surface through `GuiCompositor`. The
+legacy display-driver text path is still used for boot logs, `OK_DISPLAY_TEXT`
+diagnostics, and fallback when the GUI cannot be restarted.

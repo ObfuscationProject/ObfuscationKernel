@@ -318,6 +318,32 @@ Result<std::string_view> ok_debug_shell_execute(std::string_view command)
     return kernel.debug_shell().execute(command);
 }
 
+Status ok_debug_shell_show_gui()
+{
+    Kernel &kernel = kernel_instance();
+    if (!kernel.booted())
+    {
+        return Status::not_initialized("kernel is not booted");
+    }
+    return kernel.debug_shell().show_gui();
+}
+
+Status ok_debug_shell_set_gui_input(std::string_view line)
+{
+    Kernel &kernel = kernel_instance();
+    if (!kernel.booted())
+    {
+        return Status::not_initialized("kernel is not booted");
+    }
+    return kernel.debug_shell().set_gui_input(line);
+}
+
+bool ok_debug_shell_gui_ready()
+{
+    Kernel &kernel = kernel_instance();
+    return kernel.booted() && kernel.debug_shell().gui_ready();
+}
+
 extern "C" int ok_kernel_main(const KernelEntryConfig *config)
 {
     if (config == nullptr)

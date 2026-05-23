@@ -65,8 +65,8 @@ The display stack has three layers:
   checksum.
 - `ok::gui::GuiCompositor` is the restartable GUI module above the framebuffer.
   It owns fixed-capacity surfaces, rectangle/pixel/text drawing, and composition.
-  The debug shell renders command history to an `oksh` GUI surface while keeping
-  serial output unchanged.
+  The debug shell renders command history and active input to a maximized `oksh`
+  GUI surface while keeping serial output unchanged.
 - `RamFbConsole` is the QEMU-visible platform backend. It initializes `ramfb`
   through fw_cfg DMA, owns the 960x540 guest-RAM pixel surface, and scales
   logical GUI pixels through `ok_platform_display_gui_pixel()`.
@@ -77,9 +77,8 @@ exposes fw_cfg. The visible window is therefore a real pixel framebuffer rather
 than a serial console or VGA text surface on `i386`, `x86_64`, `aarch64`,
 `arm32`, `rv64`, `rv32`, and `loongarch64`. QEMU Malta and ppce500 do not expose
 fw_cfg/standalone `ramfb`, so `mips`, `mips64`, and `ppc` use the serial VC
-window fallback. The ramfb console currently uses spaced bitmap glyph rendering,
-a colored boot marker, a GUI shell surface, and a fixed bottom-row mouse
-position/button monitor.
+window fallback. The ramfb console uses spaced bitmap glyph rendering for legacy
+boot/debug output, then lets GUI presents take over the full visible framebuffer.
 
 The current driver model still validates virtio-gpu enumeration through the
 internal PCI model; BAR mapping, virtqueues, EDID, scanout resource management,

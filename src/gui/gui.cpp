@@ -8,6 +8,7 @@ namespace ok::gui
 namespace
 {
 
+constexpr u32 desktop_background_color = 0xff061018u;
 constexpr u32 default_surface_color = 0xff18343fu;
 constexpr u32 frame_color = 0xffd8f3ffu;
 constexpr u32 title_color = 0xff44aa88u;
@@ -119,25 +120,28 @@ Result<SurfaceId> GuiCompositor::create_surface(Rect bounds, std::string_view ti
         return Status::overflow("GUI surface table is full");
     }
 
-    Surface surface{};
-    surface.id = next_surface_id_;
-    surface.bounds = bounds;
-    surface.z_index = next_z_index_;
-    surface.visible = true;
-    if (auto status = surface.title.assign(title); !status.ok())
+    auto surface = surfaces_.push_back_slot();
+    if (!surface)
     {
+        return surface.status();
+    }
+
+    auto &slot = *surface.value();
+    slot.id = next_surface_id_;
+    slot.bounds = bounds;
+    slot.z_index = next_z_index_;
+    slot.visible = true;
+    if (auto status = slot.title.assign(title); !status.ok())
+    {
+        static_cast<void>(surfaces_.erase_at(surfaces_.size() - 1));
         return status;
     }
-    for (auto &pixel : surface.pixels)
+    for (auto &pixel : slot.pixels)
     {
         pixel = default_surface_color;
     }
 
-    const auto id = surface.id;
-    if (auto status = surfaces_.push_back(surface); !status.ok())
-    {
-        return status;
-    }
+    const auto id = slot.id;
     ++next_surface_id_;
     ++next_z_index_;
     return id;
@@ -356,6 +360,21 @@ Status GuiCompositor::present()
     }
 
     const auto mode = display_->mode();
+    for (u32 y = 0; y < mode.height; ++y)
+    {
+        for (u32 x = 0; x < mode.width; ++x)
+        {
+            if (auto status = display_->put_pixel(x, y, desktop_background_color); !status.ok())
+            {
+                return status;
+            }
+            if (ok_platform_display_gui_pixel != nullptr)
+            {
+                ok_platform_display_gui_pixel(mode.width, mode.height, x, y, desktop_background_color);
+            }
+        }
+    }
+
     for (const auto &surface : surfaces_)
     {
         if (!surface.visible)
