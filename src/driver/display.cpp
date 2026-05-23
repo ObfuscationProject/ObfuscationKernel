@@ -123,6 +123,19 @@ Status FramebufferDisplayDriver::write_line(std::string_view text)
     return Status::success();
 }
 
+Result<u32> FramebufferDisplayDriver::pixel_at(u32 x, u32 y) const
+{
+    if (!started_)
+    {
+        return Status::not_initialized("framebuffer driver not started");
+    }
+    if (x >= mode_.width || y >= mode_.height)
+    {
+        return Status::invalid_argument("pixel coordinate out of range");
+    }
+    return pixels_[static_cast<usize>(y) * mode_.width + x];
+}
+
 u64 FramebufferDisplayDriver::checksum() const
 {
     u64 value = 1469598103934665603ull;

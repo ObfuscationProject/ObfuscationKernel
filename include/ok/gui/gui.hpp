@@ -3,6 +3,7 @@
 #include "ok/core/fixed.hpp"
 #include "ok/core/module.hpp"
 #include "ok/driver/driver.hpp"
+#include "ok/driver/font.hpp"
 
 #include <array>
 #include <string_view>
@@ -15,11 +16,11 @@ inline constexpr std::string_view gui_service_id{"gui.compositor"};
 inline constexpr usize max_gui_surfaces = 8;
 inline constexpr usize max_gui_title = 32;
 inline constexpr usize max_gui_crash_reason = 64;
-inline constexpr u32 max_gui_surface_width = 96;
-inline constexpr u32 max_gui_surface_height = 56;
+inline constexpr u32 max_gui_surface_width = 128;
+inline constexpr u32 max_gui_surface_height = 72;
 inline constexpr usize max_gui_surface_pixels = max_gui_surface_width * max_gui_surface_height;
-inline constexpr u32 gui_glyph_width = 2;
-inline constexpr u32 gui_glyph_height = 4;
+inline constexpr u32 gui_glyph_width = driver::BitmapFontRenderer::glyph_width;
+inline constexpr u32 gui_glyph_height = driver::BitmapFontRenderer::glyph_height;
 
 using SurfaceId = u16;
 

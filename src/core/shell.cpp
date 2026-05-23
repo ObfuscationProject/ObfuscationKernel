@@ -122,11 +122,11 @@ usize operator_width(std::string_view value, usize index)
     return value[index] == ';' ? 1 : 2;
 }
 
-constexpr gui::Rect shell_gui_bounds{.x = 4, .y = 4, .width = 96, .height = 56};
+constexpr gui::Rect shell_gui_bounds{.x = 4, .y = 4, .width = 124, .height = 72};
 constexpr u32 shell_gui_background = 0xff061018u;
 constexpr u32 shell_gui_foreground = 0xffd8f3ffu;
 constexpr u32 shell_gui_prompt = 0xfff4d35eu;
-constexpr usize shell_gui_rows = shell_gui_bounds.height / gui::gui_glyph_height - 2;
+constexpr usize shell_gui_rows = shell_gui_bounds.height / gui::gui_glyph_height - 3;
 constexpr usize shell_gui_history_keep = 1800;
 
 std::string_view tail_lines(std::string_view text, usize max_lines)
@@ -518,12 +518,12 @@ Status KernelDebugShell::redraw_gui_terminal()
         return status;
     }
     const auto visible = tail_lines(gui_history_.view(), shell_gui_rows);
-    if (auto status = compositor.draw_text(gui_surface_id_, 1, 1, visible, shell_gui_foreground, shell_gui_background);
+    if (auto status = compositor.draw_text(gui_surface_id_, 1, 2, visible, shell_gui_foreground, shell_gui_background);
         !status.ok())
     {
         return status;
     }
-    if (auto status = compositor.draw_text(gui_surface_id_, 1, 0, "oksh", shell_gui_prompt, shell_gui_background);
+    if (auto status = compositor.draw_text(gui_surface_id_, 1, 1, "oksh", shell_gui_prompt, shell_gui_background);
         !status.ok())
     {
         return status;

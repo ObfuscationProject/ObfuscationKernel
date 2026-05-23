@@ -535,6 +535,7 @@ class FramebufferDisplayDriver final : public Driver
     Status put_pixel(u32 x, u32 y, u32 rgba);
     Status fill_rect(u32 x, u32 y, u32 width, u32 height, u32 rgba);
     Status write_line(std::string_view text);
+    [[nodiscard]] Result<u32> pixel_at(u32 x, u32 y) const;
     void set_backend(DisplayBackend backend)
     {
         backend_ = backend;

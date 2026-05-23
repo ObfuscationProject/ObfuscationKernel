@@ -60,6 +60,67 @@ Status test_gui_compositor_draws_surfaces()
     return Status::success();
 }
 
+Status test_gui_text_uses_bitmap_font()
+{
+    driver::FramebufferDisplayDriver display;
+    if (auto status = display.start(); !status.ok())
+    {
+        return status;
+    }
+
+    gui::GuiCompositor compositor;
+    if (auto status = compositor.start(display); !status.ok())
+    {
+        return status;
+    }
+
+    constexpr i32 surface_left = 10;
+    constexpr i32 surface_top = 10;
+    constexpr u32 foreground = 0xffabcdefu;
+    constexpr u32 background = 0xff010203u;
+    auto surface = compositor.create_surface(gui::Rect{.x = surface_left, .y = surface_top, .width = 20, .height = 18},
+                                             "text");
+    if (!surface)
+    {
+        return surface.status();
+    }
+    if (auto status = compositor.fill(surface.value(), background); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.draw_text(surface.value(), 1, 1, "A", foreground, background); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.present(); !status.ok())
+    {
+        return status;
+    }
+
+    const u32 glyph_left = static_cast<u32>(surface_left) + gui::gui_glyph_width;
+    const u32 glyph_top = static_cast<u32>(surface_top) + gui::gui_glyph_height;
+    auto top_left = display.pixel_at(glyph_left, glyph_top);
+    auto top_bar = display.pixel_at(glyph_left + 1, glyph_top);
+    auto crossbar_left = display.pixel_at(glyph_left, glyph_top + 3);
+    if (!top_left)
+    {
+        return top_left.status();
+    }
+    if (!top_bar)
+    {
+        return top_bar.status();
+    }
+    if (!crossbar_left)
+    {
+        return crossbar_left.status();
+    }
+    if (top_left.value() != background || top_bar.value() != foreground || crossbar_left.value() != foreground)
+    {
+        return Status::fault("GUI text did not use bitmap font rows");
+    }
+    return Status::success();
+}
+
 Status test_gui_module_restarts_after_crash()
 {
     driver::FramebufferDisplayDriver display;
@@ -166,6 +227,10 @@ Status test_shell_renders_to_gui(Kernel &kernel)
 Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
 {
     if (auto status = test_gui_compositor_draws_surfaces(); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_gui_text_uses_bitmap_font(); !status.ok())
     {
         return status;
     }

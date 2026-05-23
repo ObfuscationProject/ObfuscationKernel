@@ -268,7 +268,6 @@ void GuiCompositor::draw_cell(Surface &surface, u32 column, u32 row, char value,
 {
     const auto origin_x = column * gui_glyph_width;
     const auto origin_y = row * gui_glyph_height;
-    const auto code = static_cast<u8>(value);
     for (u32 y = 0; y < gui_glyph_height; ++y)
     {
         const auto target_y = origin_y + y;
@@ -276,6 +275,7 @@ void GuiCompositor::draw_cell(Surface &surface, u32 column, u32 row, char value,
         {
             continue;
         }
+        const auto row_bits = driver::BitmapFontRenderer::glyph_row(value, y);
         for (u32 x = 0; x < gui_glyph_width; ++x)
         {
             const auto target_x = origin_x + x;
@@ -283,9 +283,10 @@ void GuiCompositor::draw_cell(Surface &surface, u32 column, u32 row, char value,
             {
                 continue;
             }
-            const auto bit = ((code >> ((x + y) & 7u)) & 1u) != 0;
+            const auto bit =
+                ((row_bits >> (driver::BitmapFontRenderer::glyph_width - 1 - x)) & 1u) != 0;
             surface.pixels[static_cast<usize>(target_y) * max_gui_surface_width + target_x] =
-                bit || value == '[' || value == ']' ? foreground : background;
+                bit ? foreground : background;
         }
     }
 }
