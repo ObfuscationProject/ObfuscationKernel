@@ -169,51 +169,57 @@ Status KernelDebugShell::command_processes(std::string_view)
         return Status::not_initialized("shell has no kernel");
     }
 
-    if (auto status = append("PID TTY STAT THR COMMAND\n"); !status.ok())
+    if (auto status = append("  PID TTY   STAT THR COMMAND\n"); !status.ok())
     {
         return status;
     }
     for (const auto &process : kernel_->scheduler().processes())
     {
-        if (auto status = append_unsigned(process.pid()); !status.ok())
-        {
-            return status;
-        }
-        if (auto status = append(" "); !status.ok())
-        {
-            return status;
-        }
-        if (auto status = append(process_tty_label(process)); !status.ok())
-        {
-            return status;
-        }
-        if (auto status = append(" "); !status.ok())
-        {
-            return status;
-        }
-        if (auto status = append(process_state_label(process.state())); !status.ok())
+        FixedString<4> state;
+        if (auto status = state.append(process_state_label(process.state())); !status.ok())
         {
             return status;
         }
         if (process.pid() == kernel_->scheduler().current_pid())
         {
-            if (auto status = append("+"); !status.ok())
+            if (auto status = state.append("+"); !status.ok())
             {
                 return status;
             }
         }
         if (process.background())
         {
-            if (auto status = append("B"); !status.ok())
+            if (auto status = state.append("B"); !status.ok())
             {
                 return status;
             }
+        }
+
+        if (auto status = append_padded_unsigned(process.pid(), 5); !status.ok())
+        {
+            return status;
         }
         if (auto status = append(" "); !status.ok())
         {
             return status;
         }
-        if (auto status = append_unsigned(process.threads().size()); !status.ok())
+        if (auto status = append_padded(process_tty_label(process), 5); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(" "); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_padded(state.view(), 4); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(" "); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_padded_unsigned(process.threads().size(), 3); !status.ok())
         {
             return status;
         }

@@ -212,6 +212,32 @@ Status test_shell_renders_to_gui(Kernel &kernel)
     {
         return Status::fault("debug shell GUI input line did not redraw");
     }
+    for (usize i = 0; i < 32; ++i)
+    {
+        auto scroll_output = kernel.debug_shell().execute("echo gui-scroll");
+        if (!scroll_output || scroll_output.value() != "gui-scroll\n")
+        {
+            return Status::fault("debug shell scroll history setup failed");
+        }
+    }
+    const auto bottom_checksum = kernel.gui().compositor().last_present_checksum();
+    if (auto status = kernel.debug_shell().scroll_gui_history(1); !status.ok())
+    {
+        return status;
+    }
+    const auto scrolled_checksum = kernel.gui().compositor().last_present_checksum();
+    if (scrolled_checksum == bottom_checksum)
+    {
+        return Status::fault("debug shell GUI scrollback did not redraw");
+    }
+    if (auto status = kernel.debug_shell().scroll_gui_history(-1); !status.ok())
+    {
+        return status;
+    }
+    if (kernel.gui().compositor().last_present_checksum() == scrolled_checksum)
+    {
+        return Status::fault("debug shell GUI scrollback did not return to prompt");
+    }
     return Status::success();
 }
 

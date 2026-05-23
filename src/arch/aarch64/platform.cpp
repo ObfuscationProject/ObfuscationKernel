@@ -1,4 +1,5 @@
 #include "ok/core/types.hpp"
+#include "ok/core/entry.hpp"
 #include "ok/driver/qemu_virt/ramfb.hpp"
 #include "ok/driver/qemu_virt/virtio_input.hpp"
 
@@ -51,6 +52,7 @@ void poll_virtio_mouse()
     ok::driver::qemu_virt::VirtioInputEvent event{};
     ok::i32 dx = 0;
     ok::i32 dy = 0;
+    ok::i32 wheel = 0;
     bool changed = false;
     while (virtio_mouse.poll(event))
     {
@@ -67,6 +69,10 @@ void poll_virtio_mouse()
                 dy += value;
                 changed = true;
             }
+            else if (event.code == ok::driver::qemu_virt::input_relative_wheel)
+            {
+                wheel += value;
+            }
         }
         else if (event.type == ok::driver::qemu_virt::input_event_key &&
                  event.code == ok::driver::qemu_virt::input_button_left)
@@ -78,6 +84,10 @@ void poll_virtio_mouse()
     if (changed)
     {
         RamFb::move_pointer(dx, dy, virtio_mouse_left);
+    }
+    if (wheel != 0)
+    {
+        static_cast<void>(ok::ok_debug_shell_scroll_gui(wheel));
     }
 }
 

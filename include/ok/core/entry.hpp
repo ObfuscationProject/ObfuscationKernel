@@ -46,6 +46,7 @@ Status ok_kernel_entry(const KernelEntryConfig &config, KernelEntryResult *resul
 Result<std::string_view> ok_debug_shell_execute(std::string_view command);
 Status ok_debug_shell_show_gui();
 Status ok_debug_shell_set_gui_input(std::string_view line);
+Status ok_debug_shell_scroll_gui(i32 rows);
 bool ok_debug_shell_gui_ready();
 
 extern "C" int ok_kernel_main(const KernelEntryConfig *config);

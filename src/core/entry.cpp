@@ -338,6 +338,16 @@ Status ok_debug_shell_set_gui_input(std::string_view line)
     return kernel.debug_shell().set_gui_input(line);
 }
 
+Status ok_debug_shell_scroll_gui(i32 rows)
+{
+    Kernel &kernel = kernel_instance();
+    if (!kernel.booted())
+    {
+        return Status::not_initialized("kernel is not booted");
+    }
+    return kernel.debug_shell().scroll_gui_history(rows);
+}
+
 bool ok_debug_shell_gui_ready()
 {
     Kernel &kernel = kernel_instance();

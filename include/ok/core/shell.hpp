@@ -19,6 +19,7 @@ class KernelDebugShell final
     Result<std::string_view> execute(std::string_view line);
     Status show_gui();
     Status set_gui_input(std::string_view line);
+    Status scroll_gui_history(i32 rows);
     [[nodiscard]] bool gui_ready();
     [[nodiscard]] usize gui_render_count() const
     {
@@ -32,6 +33,8 @@ class KernelDebugShell final
   private:
     Status append(std::string_view text);
     Status append_unsigned(u64 value);
+    Status append_padded(std::string_view text, usize width);
+    Status append_padded_unsigned(u64 value, usize width);
     Status append_node_type(fs::NodeType type);
     Status append_session_user();
     Status render_to_gui(std::string_view command_line, std::string_view output);
@@ -79,6 +82,7 @@ class KernelDebugShell final
     FixedString<128> gui_input_line_{};
     gui::SurfaceId gui_surface_id_{0};
     usize gui_render_count_{0};
+    usize gui_scroll_rows_{0};
 };
 
 } // namespace ok

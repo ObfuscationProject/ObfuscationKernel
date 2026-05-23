@@ -1,4 +1,5 @@
 #include "ok/core/types.hpp"
+#include "ok/core/entry.hpp"
 #include "ok/driver/qemu_virt/ramfb.hpp"
 
 namespace
@@ -21,6 +22,8 @@ constexpr ok::u8 ps2_command_write_config = 0x60;
 constexpr ok::u8 ps2_command_enable_aux = 0xa8;
 constexpr ok::u8 ps2_command_write_aux = 0xd4;
 constexpr ok::u8 ps2_mouse_ack = 0xfa;
+constexpr ok::u8 ps2_mouse_get_id = 0xf2;
+constexpr ok::u8 ps2_mouse_set_sample_rate = 0xf3;
 constexpr ok::u8 ps2_mouse_set_defaults = 0xf6;
 constexpr ok::u8 ps2_mouse_enable_streaming = 0xf4;
 using RamFb = ok::driver::qemu_virt::RamFbConsole<fw_cfg_io_base, true>;
@@ -30,8 +33,9 @@ ok::usize vga_column = 0;
 bool left_shift = false;
 bool right_shift = false;
 bool ps2_mouse_initialized = false;
-ok::u8 ps2_mouse_packet[3]{};
+ok::u8 ps2_mouse_packet[4]{};
 ok::usize ps2_mouse_packet_index = 0;
+ok::usize ps2_mouse_packet_size = 3;
 char pending_input[3]{};
 ok::usize pending_input_size = 0;
 ok::usize pending_input_cursor = 0;
@@ -299,6 +303,20 @@ bool ps2_write_mouse(ok::u8 command)
     return ps2_read_byte(ack) && ack == ps2_mouse_ack;
 }
 
+bool ps2_mouse_sample_rate(ok::u8 rate)
+{
+    return ps2_write_mouse(ps2_mouse_set_sample_rate) && ps2_write_mouse(rate);
+}
+
+bool ps2_mouse_id(ok::u8 &id)
+{
+    if (!ps2_write_mouse(ps2_mouse_get_id))
+    {
+        return false;
+    }
+    return ps2_read_byte(id);
+}
+
 void ps2_mouse_init()
 {
     ps2_flush_output();
@@ -313,6 +331,16 @@ void ps2_mouse_init()
     }
 
     static_cast<void>(ps2_write_mouse(ps2_mouse_set_defaults));
+    ok::u8 mouse_id = 0;
+    if (ps2_mouse_sample_rate(200) && ps2_mouse_sample_rate(100) && ps2_mouse_sample_rate(80) &&
+        ps2_mouse_id(mouse_id) && mouse_id == 3)
+    {
+        ps2_mouse_packet_size = 4;
+    }
+    else
+    {
+        ps2_mouse_packet_size = 3;
+    }
     static_cast<void>(ps2_write_mouse(ps2_mouse_enable_streaming));
     ps2_mouse_initialized = true;
     ps2_mouse_packet_index = 0;
@@ -326,7 +354,7 @@ void handle_ps2_mouse_byte(ok::u8 value)
     }
 
     ps2_mouse_packet[ps2_mouse_packet_index++] = value;
-    if (ps2_mouse_packet_index < 3)
+    if (ps2_mouse_packet_index < ps2_mouse_packet_size)
     {
         return;
     }
@@ -342,6 +370,15 @@ void handle_ps2_mouse_byte(ok::u8 value)
     const auto dy = static_cast<ok::i32>(static_cast<ok::i8>(ps2_mouse_packet[2]));
     const bool left_button = (header & 0x01u) != 0;
     RamFb::move_pointer(dx, -dy, left_button);
+    if (ps2_mouse_packet_size == 4)
+    {
+        const auto z = ps2_mouse_packet[3] & 0x0fu;
+        const auto wheel = z >= 8 ? static_cast<ok::i32>(z) - 16 : static_cast<ok::i32>(z);
+        if (wheel != 0)
+        {
+            static_cast<void>(ok::ok_debug_shell_scroll_gui(wheel));
+        }
+    }
 }
 
 void poll_ps2_mouse()

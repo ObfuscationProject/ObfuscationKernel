@@ -16,6 +16,7 @@ inline constexpr u16 input_event_key = 0x01;
 inline constexpr u16 input_event_relative = 0x02;
 inline constexpr u16 input_relative_x = 0x00;
 inline constexpr u16 input_relative_y = 0x01;
+inline constexpr u16 input_relative_wheel = 0x08;
 inline constexpr u16 input_key_enter = 28;
 inline constexpr u16 input_key_a = 30;
 inline constexpr u16 input_key_left_shift = 42;

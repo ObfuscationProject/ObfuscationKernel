@@ -523,7 +523,7 @@ Status verify_background_programs_and_posix(Kernel &kernel)
     }
 
     auto ps = kernel.debug_shell().execute("ps aux");
-    if (!ps || !contains_text(ps.value(), "PID TTY STAT THR COMMAND") || !contains_text(ps.value(), "idle") ||
+    if (!ps || !contains_text(ps.value(), "  PID TTY   STAT THR COMMAND") || !contains_text(ps.value(), "idle") ||
         !contains_text(ps.value(), "bg-a") || !contains_text(ps.value(), "bg-b") ||
         !contains_text(ps.value(), "bg-c"))
     {

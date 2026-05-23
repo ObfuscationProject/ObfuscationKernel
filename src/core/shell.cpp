@@ -134,26 +134,78 @@ constexpr u32 shell_gui_prompt = 0xfff4d35eu;
 constexpr usize shell_gui_total_rows = shell_gui_bounds.height / gui::gui_glyph_height;
 constexpr usize shell_gui_rows = shell_gui_total_rows - 3;
 constexpr usize shell_gui_history_keep = 1800;
+constexpr usize shell_gui_text_columns = (shell_gui_bounds.width / gui::gui_glyph_width) - 1;
+constexpr usize shell_gui_scroll_rows_per_notch = 3;
 
-std::string_view tail_lines(std::string_view text, usize max_lines)
+usize decimal_digits(u64 value)
 {
-    if (max_lines == 0)
+    usize digits = 1;
+    while (value >= 10)
     {
-        return {};
+        value /= 10;
+        ++digits;
     }
-    usize lines = 0;
-    for (usize i = text.size(); i != 0; --i)
+    return digits;
+}
+
+usize visual_line_count(std::string_view text, usize columns)
+{
+    if (text.empty() || columns == 0)
     {
-        if (text[i - 1] == '\n')
+        return 0;
+    }
+    usize row = 0;
+    usize column = 0;
+    for (usize i = 0; i < text.size(); ++i)
+    {
+        if (text[i] == '\n')
         {
-            ++lines;
-            if (lines > max_lines)
+            ++row;
+            column = 0;
+            continue;
+        }
+        if (column >= columns)
+        {
+            ++row;
+            column = 0;
+        }
+        ++column;
+    }
+    return row + 1;
+}
+
+usize visual_line_offset(std::string_view text, usize columns, usize target_row)
+{
+    if (target_row == 0 || columns == 0)
+    {
+        return 0;
+    }
+    usize row = 0;
+    usize column = 0;
+    for (usize i = 0; i < text.size(); ++i)
+    {
+        if (text[i] == '\n')
+        {
+            ++row;
+            column = 0;
+            if (row == target_row)
             {
-                return text.substr(i);
+                return i + 1;
+            }
+            continue;
+        }
+        if (column >= columns)
+        {
+            ++row;
+            column = 0;
+            if (row == target_row)
+            {
+                return i;
             }
         }
+        ++column;
     }
-    return text;
+    return text.size();
 }
 
 } // namespace
@@ -170,15 +222,42 @@ bool KernelDebugShell::gui_ready()
 
 Status KernelDebugShell::show_gui()
 {
+    gui_scroll_rows_ = 0;
     return redraw_gui_terminal();
 }
 
 Status KernelDebugShell::set_gui_input(std::string_view line)
 {
+    gui_scroll_rows_ = 0;
     gui_input_line_.clear();
     if (auto status = gui_input_line_.append(line); !status.ok())
     {
         return status;
+    }
+    return redraw_gui_terminal();
+}
+
+Status KernelDebugShell::scroll_gui_history(i32 rows)
+{
+    if (rows == 0)
+    {
+        return Status::success();
+    }
+    const auto magnitude =
+        rows > 0 ? static_cast<usize>(rows) : static_cast<usize>(-(rows + 1)) + static_cast<usize>(1);
+    const auto amount = magnitude * shell_gui_scroll_rows_per_notch;
+    if (rows > 0)
+    {
+        const auto room = shell_gui_history_keep - gui_scroll_rows_;
+        gui_scroll_rows_ += amount > room ? room : amount;
+    }
+    else if (amount >= gui_scroll_rows_)
+    {
+        gui_scroll_rows_ = 0;
+    }
+    else
+    {
+        gui_scroll_rows_ -= amount;
     }
     return redraw_gui_terminal();
 }
@@ -462,6 +541,35 @@ Status KernelDebugShell::append_unsigned(u64 value)
     return Status::success();
 }
 
+Status KernelDebugShell::append_padded(std::string_view text, usize width)
+{
+    if (auto status = append(text); !status.ok())
+    {
+        return status;
+    }
+    for (usize i = text.size(); i < width; ++i)
+    {
+        if (auto status = append(" "); !status.ok())
+        {
+            return status;
+        }
+    }
+    return Status::success();
+}
+
+Status KernelDebugShell::append_padded_unsigned(u64 value, usize width)
+{
+    const auto digits = decimal_digits(value);
+    for (usize i = digits; i < width; ++i)
+    {
+        if (auto status = append(" "); !status.ok())
+        {
+            return status;
+        }
+    }
+    return append_unsigned(value);
+}
+
 Status KernelDebugShell::append_node_type(fs::NodeType type)
 {
     switch (type)
@@ -557,7 +665,17 @@ Status KernelDebugShell::redraw_gui_terminal()
         return status;
     }
 
-    const auto visible = tail_lines(terminal.view(), shell_gui_rows);
+    const auto total_rows = visual_line_count(terminal.view(), shell_gui_text_columns);
+    const auto max_scroll = total_rows > shell_gui_rows ? total_rows - shell_gui_rows : 0;
+    if (gui_scroll_rows_ > max_scroll)
+    {
+        gui_scroll_rows_ = max_scroll;
+    }
+    const auto first_row = total_rows > shell_gui_rows + gui_scroll_rows_
+                               ? total_rows - shell_gui_rows - gui_scroll_rows_
+                               : 0;
+    const auto visible_start = visual_line_offset(terminal.view(), shell_gui_text_columns, first_row);
+    const auto visible = terminal.view().substr(visible_start);
     if (auto status = compositor.draw_text(gui_surface_id_, 1, 2, visible, shell_gui_foreground, shell_gui_background);
         !status.ok())
     {
@@ -591,6 +709,7 @@ Status KernelDebugShell::render_to_gui(std::string_view command_line, std::strin
     {
         gui_history_.clear();
     }
+    gui_scroll_rows_ = 0;
     gui_input_line_.clear();
 
     if (auto status = append_gui_history("ok> "); !status.ok())

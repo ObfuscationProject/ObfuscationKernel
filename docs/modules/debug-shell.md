@@ -7,6 +7,7 @@ windowed QEMU sessions. It does not provide a separate test executable or hosted
 The interactive line editor keeps the prompt outside the editable buffer:
 Backspace/Delete only erase user input, and Ctrl-U clears the current input
 line. Up/Down recall command history in the same style as common Linux shells.
+In windowed GUI mode, mouse wheel input scrolls the shell's visual scrollback.
 The command evaluator follows the Bourne shell subset needed for kernel debug
 work: comments beginning with `#`, command sequences separated by `;`, and
 basic `&&`/`||` conditionals.

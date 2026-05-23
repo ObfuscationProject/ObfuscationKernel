@@ -139,6 +139,7 @@ void shell_write(std::string_view text)
     static_cast<void>(ok::ok_debug_shell_show_gui());
     shell_write("\nOK_INTERACTIVE ready shell=oksh input=platform\n");
     shell_write(prompt);
+    refresh_gui_input();
     for (;;)
     {
         const int value = ok_platform_input_poll();
