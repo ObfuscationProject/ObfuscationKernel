@@ -122,7 +122,7 @@ usize operator_width(std::string_view value, usize index)
     return value[index] == ';' ? 1 : 2;
 }
 
-constexpr gui::Rect shell_gui_bounds{.x = 4, .y = 4, .width = 124, .height = 72};
+constexpr gui::Rect shell_gui_bounds{.x = 4, .y = 4, .width = 252, .height = 112};
 constexpr u32 shell_gui_background = 0xff061018u;
 constexpr u32 shell_gui_foreground = 0xffd8f3ffu;
 constexpr u32 shell_gui_prompt = 0xfff4d35eu;
@@ -294,7 +294,7 @@ Status KernelDebugShell::dispatch_command(std::string_view command_line)
     }
     else if (command == "ps")
     {
-        return command_processes();
+        return command_processes(args);
     }
     else if (command == "drivers")
     {

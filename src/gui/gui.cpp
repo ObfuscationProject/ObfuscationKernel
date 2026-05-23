@@ -87,7 +87,7 @@ Status GuiCompositor::validate_bounds(Rect bounds) const
 
 void GuiCompositor::reset_surfaces()
 {
-    surfaces_ = {};
+    surfaces_.clear();
     next_surface_id_ = 1;
     next_z_index_ = 1;
 }

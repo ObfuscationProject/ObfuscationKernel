@@ -117,6 +117,10 @@ template <typename T, usize Capacity> class StaticVector final
     {
         return size_ == Capacity;
     }
+    constexpr void clear()
+    {
+        size_ = 0;
+    }
 
     constexpr Status push_back(const T &value)
     {

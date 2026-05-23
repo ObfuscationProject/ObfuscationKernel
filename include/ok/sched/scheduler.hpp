@@ -145,6 +145,10 @@ class Scheduler final
     [[nodiscard]] usize background_process_count() const;
     [[nodiscard]] ProcessControlBlock *find(ProcessId pid);
     [[nodiscard]] const ProcessControlBlock *find(ProcessId pid) const;
+    [[nodiscard]] std::span<const ProcessControlBlock> processes() const
+    {
+        return {processes_.begin(), processes_.size()};
+    }
 
   private:
     SchedulingMode mode_{SchedulingMode::round_robin};

@@ -45,7 +45,7 @@ class KernelDebugShell final
     Status command_uname();
     Status command_status();
     Status command_memory();
-    Status command_processes();
+    Status command_processes(std::string_view args);
     Status command_drivers();
     Status command_filesystem();
     Status command_posix();

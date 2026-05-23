@@ -4,6 +4,32 @@
 
 namespace ok
 {
+namespace
+{
+
+std::string_view process_state_label(sched::ProcessState state)
+{
+    switch (state)
+    {
+    case sched::ProcessState::created:
+        return "N";
+    case sched::ProcessState::runnable:
+    case sched::ProcessState::running:
+        return "R";
+    case sched::ProcessState::blocked:
+        return "S";
+    case sched::ProcessState::exited:
+        return "Z";
+    }
+    return "?";
+}
+
+std::string_view process_tty_label(const sched::ProcessControlBlock &process)
+{
+    return process.background() ? "?" : "tty0";
+}
+
+} // namespace
 
 Status KernelDebugShell::command_help()
 {
@@ -136,29 +162,75 @@ Status KernelDebugShell::command_memory()
     return append("\n");
 }
 
-Status KernelDebugShell::command_processes()
+Status KernelDebugShell::command_processes(std::string_view)
 {
     if (kernel_ == nullptr)
     {
         return Status::not_initialized("shell has no kernel");
     }
-    if (auto status = append("processes="); !status.ok())
+
+    if (auto status = append("PID TTY STAT THR COMMAND\n"); !status.ok())
     {
         return status;
     }
-    if (auto status = append_unsigned(kernel_->scheduler().process_count()); !status.ok())
+    for (const auto &process : kernel_->scheduler().processes())
     {
-        return status;
+        if (auto status = append_unsigned(process.pid()); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(" "); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(process_tty_label(process)); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(" "); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(process_state_label(process.state())); !status.ok())
+        {
+            return status;
+        }
+        if (process.pid() == kernel_->scheduler().current_pid())
+        {
+            if (auto status = append("+"); !status.ok())
+            {
+                return status;
+            }
+        }
+        if (process.background())
+        {
+            if (auto status = append("B"); !status.ok())
+            {
+                return status;
+            }
+        }
+        if (auto status = append(" "); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_unsigned(process.threads().size()); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(" "); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(process.name()); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append("\n"); !status.ok())
+        {
+            return status;
+        }
     }
-    if (auto status = append(" current="); !status.ok())
-    {
-        return status;
-    }
-    if (auto status = append_unsigned(kernel_->scheduler().current_pid()); !status.ok())
-    {
-        return status;
-    }
-    return append("\n");
+    return Status::success();
 }
 
 Status KernelDebugShell::command_drivers()

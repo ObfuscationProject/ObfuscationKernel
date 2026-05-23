@@ -61,7 +61,7 @@ The PCIe/USB driver plan keeps discovery separate from transport:
 The display stack has three layers:
 
 - `FramebufferDisplayDriver` is the portable logical display device used by the
-  kernel and tests. It stores a 160x100 RGBA framebuffer, boot text, and a stable
+  kernel and tests. It stores a 320x180 RGBA framebuffer, boot text, and a stable
   checksum.
 - `ok::gui::GuiCompositor` is the restartable GUI module above the framebuffer.
   It owns fixed-capacity surfaces, rectangle/pixel/text drawing, and composition.

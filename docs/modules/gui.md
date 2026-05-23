@@ -26,7 +26,7 @@ the same service registration, and leaves the rest of the kernel running.
 ## Display Path
 
 The compositor renders into `FramebufferDisplayDriver`, whose logical mode is
-currently 160x100 RGBA pixels. `present()` also calls the weak platform hook
+currently 320x180 RGBA pixels. `present()` also calls the weak platform hook
 `ok_platform_display_gui_pixel()` when a platform provides it. QEMU ramfb
 platforms use that hook to scale logical GUI pixels onto the visible 960x540
 framebuffer.

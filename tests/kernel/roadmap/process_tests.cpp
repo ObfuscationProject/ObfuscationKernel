@@ -18,6 +18,35 @@ std::span<const std::byte> process_test_bytes(std::string_view text)
     return {reinterpret_cast<const std::byte *>(text.data()), text.size()};
 }
 
+bool contains_text(std::string_view haystack, std::string_view needle)
+{
+    if (needle.empty())
+    {
+        return true;
+    }
+    if (needle.size() > haystack.size())
+    {
+        return false;
+    }
+    for (usize offset = 0; offset <= haystack.size() - needle.size(); ++offset)
+    {
+        bool matched = true;
+        for (usize i = 0; i < needle.size(); ++i)
+        {
+            if (haystack[offset + i] != needle[i])
+            {
+                matched = false;
+                break;
+            }
+        }
+        if (matched)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 void write_le16(std::span<std::byte> out, usize offset, u16 value)
 {
     out[offset] = static_cast<std::byte>(value & 0xffu);
@@ -491,6 +520,14 @@ Status verify_background_programs_and_posix(Kernel &kernel)
     if (!saw_first || !saw_second || !saw_third)
     {
         return Status::fault("background processes were not scheduled");
+    }
+
+    auto ps = kernel.debug_shell().execute("ps aux");
+    if (!ps || !contains_text(ps.value(), "PID TTY STAT THR COMMAND") || !contains_text(ps.value(), "idle") ||
+        !contains_text(ps.value(), "bg-a") || !contains_text(ps.value(), "bg-b") ||
+        !contains_text(ps.value(), "bg-c"))
+    {
+        return Status::fault("debug shell ps did not list scheduler processes");
     }
 
     const auto saved_credentials = kernel.posix().user_credentials();
