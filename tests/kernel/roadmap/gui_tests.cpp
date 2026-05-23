@@ -7,24 +7,24 @@ namespace ok
 namespace
 {
 
-Status test_gui_compositor_draws_surfaces()
+Status release_shell_surface(Kernel &kernel)
 {
-    driver::FramebufferDisplayDriver display;
-    if (auto status = display.probe(); !status.ok())
+    const auto id = kernel.debug_shell().gui_surface_id();
+    if (id == 0 || !kernel.gui().compositor().surface_info(id))
     {
-        return status;
+        return Status::success();
     }
-    if (auto status = display.start(); !status.ok())
-    {
-        return status;
-    }
+    return kernel.gui().compositor().destroy_surface(id);
+}
 
-    gui::GuiCompositor compositor;
-    if (auto status = compositor.start(display); !status.ok())
+Status test_gui_compositor_draws_surfaces(Kernel &kernel)
+{
+    if (auto status = release_shell_surface(kernel); !status.ok())
     {
         return status;
     }
-    const auto before = display.checksum();
+    auto &compositor = kernel.gui().compositor();
+    const auto before = kernel.display().checksum();
     auto surface = compositor.create_surface(gui::Rect{.x = 4, .y = 5, .width = 24, .height = 12}, "panel");
     if (!surface)
     {
@@ -57,23 +57,12 @@ Status test_gui_compositor_draws_surfaces()
     {
         return Status::fault("GUI compositor did not update the framebuffer");
     }
-    return Status::success();
+    return compositor.destroy_surface(surface.value());
 }
 
-Status test_gui_text_uses_bitmap_font()
+Status test_gui_text_uses_bitmap_font(Kernel &kernel)
 {
-    driver::FramebufferDisplayDriver display;
-    if (auto status = display.start(); !status.ok())
-    {
-        return status;
-    }
-
-    gui::GuiCompositor compositor;
-    if (auto status = compositor.start(display); !status.ok())
-    {
-        return status;
-    }
-
+    auto &compositor = kernel.gui().compositor();
     constexpr i32 surface_left = 10;
     constexpr i32 surface_top = 10;
     constexpr u32 foreground = 0xffabcdefu;
@@ -99,9 +88,9 @@ Status test_gui_text_uses_bitmap_font()
 
     const u32 glyph_left = static_cast<u32>(surface_left) + gui::gui_glyph_width;
     const u32 glyph_top = static_cast<u32>(surface_top) + gui::gui_glyph_height;
-    auto top_left = display.pixel_at(glyph_left, glyph_top);
-    auto top_bar = display.pixel_at(glyph_left + 1, glyph_top);
-    auto crossbar_left = display.pixel_at(glyph_left, glyph_top + 3);
+    auto top_left = kernel.display().pixel_at(glyph_left, glyph_top);
+    auto top_bar = kernel.display().pixel_at(glyph_left + 1, glyph_top);
+    auto crossbar_left = kernel.display().pixel_at(glyph_left, glyph_top + 3);
     if (!top_left)
     {
         return top_left.status();
@@ -118,28 +107,13 @@ Status test_gui_text_uses_bitmap_font()
     {
         return Status::fault("GUI text did not use bitmap font rows");
     }
-    return Status::success();
+    return compositor.destroy_surface(surface.value());
 }
 
-Status test_gui_module_restarts_after_crash()
+Status test_gui_module_restarts_after_crash(Kernel &kernel)
 {
-    driver::FramebufferDisplayDriver display;
-    if (auto status = display.start(); !status.ok())
-    {
-        return status;
-    }
-
-    gui::GuiModule module;
-    module.bind_display(display);
-    ModuleManager manager;
-    if (auto status = manager.register_module(module); !status.ok())
-    {
-        return status;
-    }
-    if (auto status = manager.start_all(); !status.ok())
-    {
-        return status;
-    }
+    auto &module = kernel.gui();
+    auto &manager = kernel.kernel_modules();
     if (manager.services().query<gui::GuiModule>(gui::gui_service_id) != &module ||
         module.compositor().state() != gui::GuiState::running)
     {
@@ -169,7 +143,7 @@ Status test_gui_module_restarts_after_crash()
     }
     if (supervisor.restart_attempts() != 1 || module.state() != ModuleState::started ||
         module.compositor().state() != gui::GuiState::running || module.compositor().generation() <= first_generation ||
-        module.compositor().surface_count() != 0 || manager.started_count() != 1 ||
+        module.compositor().surface_count() != 0 || manager.started_count() == 0 ||
         manager.services().query<gui::GuiModule>(gui::gui_service_id) != &module)
     {
         return Status::fault("GUI module restart validation failed");
@@ -188,8 +162,11 @@ Status test_gui_module_restarts_after_crash()
     {
         return status;
     }
-    return module.compositor().last_present_checksum() != 0 ? Status::success()
-                                                            : Status::fault("restarted GUI did not present");
+    if (module.compositor().last_present_checksum() == 0)
+    {
+        return Status::fault("restarted GUI did not present");
+    }
+    return module.compositor().destroy_surface(recovered.value());
 }
 
 Status test_kernel_gui_is_started(Kernel &kernel)
@@ -242,15 +219,15 @@ Status test_shell_renders_to_gui(Kernel &kernel)
 
 Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
 {
-    if (auto status = test_gui_compositor_draws_surfaces(); !status.ok())
+    if (auto status = test_gui_compositor_draws_surfaces(kernel); !status.ok())
     {
         return status;
     }
-    if (auto status = test_gui_text_uses_bitmap_font(); !status.ok())
+    if (auto status = test_gui_text_uses_bitmap_font(kernel); !status.ok())
     {
         return status;
     }
-    if (auto status = test_gui_module_restarts_after_crash(); !status.ok())
+    if (auto status = test_gui_module_restarts_after_crash(kernel); !status.ok())
     {
         return status;
     }

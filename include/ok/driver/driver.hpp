@@ -41,8 +41,8 @@ concept KernelDriver = std::derived_from<T, Driver>;
 
 inline constexpr usize max_drivers = 32;
 inline constexpr usize console_buffer_size = 4096;
-inline constexpr usize framebuffer_width = 320;
-inline constexpr usize framebuffer_height = 180;
+inline constexpr usize framebuffer_width = 480;
+inline constexpr usize framebuffer_height = 270;
 inline constexpr usize framebuffer_pixels = framebuffer_width * framebuffer_height;
 inline constexpr usize display_text_columns = 80;
 inline constexpr usize display_text_rows = 25;

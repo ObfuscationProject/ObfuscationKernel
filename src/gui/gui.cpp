@@ -287,8 +287,9 @@ void GuiCompositor::draw_cell(Surface &surface, u32 column, u32 row, char value,
             {
                 continue;
             }
-            const auto bit =
-                ((row_bits >> (driver::BitmapFontRenderer::glyph_width - 1 - x)) & 1u) != 0;
+            const auto bit = x < driver::BitmapFontRenderer::glyph_width &&
+                             y < driver::BitmapFontRenderer::glyph_height &&
+                             ((row_bits >> (driver::BitmapFontRenderer::glyph_width - 1 - x)) & 1u) != 0;
             surface.pixels[static_cast<usize>(target_y) * max_gui_surface_width + target_x] =
                 bit ? foreground : background;
         }

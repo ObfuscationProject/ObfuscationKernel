@@ -13,14 +13,14 @@ namespace ok::gui
 
 inline constexpr std::string_view gui_module_name{"kernel-gui"};
 inline constexpr std::string_view gui_service_id{"gui.compositor"};
-inline constexpr usize max_gui_surfaces = 2;
+inline constexpr usize max_gui_surfaces = 1;
 inline constexpr usize max_gui_title = 32;
 inline constexpr usize max_gui_crash_reason = 64;
 inline constexpr u32 max_gui_surface_width = driver::framebuffer_width;
 inline constexpr u32 max_gui_surface_height = driver::framebuffer_height;
 inline constexpr usize max_gui_surface_pixels = max_gui_surface_width * max_gui_surface_height;
-inline constexpr u32 gui_glyph_width = driver::BitmapFontRenderer::glyph_width;
-inline constexpr u32 gui_glyph_height = driver::BitmapFontRenderer::glyph_height;
+inline constexpr u32 gui_glyph_width = driver::BitmapFontRenderer::glyph_width + 1;
+inline constexpr u32 gui_glyph_height = driver::BitmapFontRenderer::glyph_height + 2;
 
 using SurfaceId = u16;
 

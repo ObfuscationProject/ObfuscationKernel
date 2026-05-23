@@ -230,6 +230,10 @@ Status Kernel::boot(KernelConfig config)
             return status;
         }
     }
+    if (auto status = gui_module_.compositor().destroy_surface(gui_surface.value()); !status.ok())
+    {
+        return status;
+    }
     if (auto status = register_builtin_interrupts(timer_driver_); !status.ok())
     {
         return status;

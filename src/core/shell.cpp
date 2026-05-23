@@ -132,8 +132,7 @@ constexpr u32 shell_gui_background = 0xff061018u;
 constexpr u32 shell_gui_foreground = 0xffd8f3ffu;
 constexpr u32 shell_gui_prompt = 0xfff4d35eu;
 constexpr usize shell_gui_total_rows = shell_gui_bounds.height / gui::gui_glyph_height;
-constexpr usize shell_gui_history_rows = shell_gui_total_rows - 4;
-constexpr u32 shell_gui_prompt_row = static_cast<u32>(shell_gui_total_rows - 2);
+constexpr usize shell_gui_rows = shell_gui_total_rows - 3;
 constexpr usize shell_gui_history_keep = 1800;
 
 std::string_view tail_lines(std::string_view text, usize max_lines)
@@ -544,25 +543,27 @@ Status KernelDebugShell::redraw_gui_terminal()
     {
         return status;
     }
-    const auto visible = tail_lines(gui_history_.view(), shell_gui_history_rows);
+    FixedString<2304> terminal;
+    if (auto status = terminal.append(gui_history_.view()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = terminal.append("ok> "); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = terminal.append(gui_input_line_.view()); !status.ok())
+    {
+        return status;
+    }
+
+    const auto visible = tail_lines(terminal.view(), shell_gui_rows);
     if (auto status = compositor.draw_text(gui_surface_id_, 1, 2, visible, shell_gui_foreground, shell_gui_background);
         !status.ok())
     {
         return status;
     }
     if (auto status = compositor.draw_text(gui_surface_id_, 1, 1, "oksh", shell_gui_prompt, shell_gui_background);
-        !status.ok())
-    {
-        return status;
-    }
-    if (auto status = compositor.draw_text(gui_surface_id_, 1, shell_gui_prompt_row, "ok> ", shell_gui_prompt,
-                                           shell_gui_background);
-        !status.ok())
-    {
-        return status;
-    }
-    if (auto status = compositor.draw_text(gui_surface_id_, 5, shell_gui_prompt_row, gui_input_line_.view(),
-                                           shell_gui_foreground, shell_gui_background);
         !status.ok())
     {
         return status;
