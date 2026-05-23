@@ -43,8 +43,15 @@ BOOTABLE_QEMU_CAPABILITIES = (
     "serial_console", "framebuffer", "keyboard_input", "mouse_input", "pci_bus",
     "virtio_block", "virtio_gpu", "ramfb", "usb_hid", "network_loopback",
 )
+SERIAL_WINDOW_QEMU_ARCHES = ("mips", "mips64", "ppc")
+SERIAL_WINDOW_QEMU_CAPABILITIES = tuple(
+    capability for capability in BOOTABLE_QEMU_CAPABILITIES if capability != "ramfb"
+)
 
-CAPABILITIES_BY_ARCH = {arch: BOOTABLE_QEMU_CAPABILITIES for arch in BOOTABLE_QEMU_ARCHES}
+CAPABILITIES_BY_ARCH = {
+    arch: SERIAL_WINDOW_QEMU_CAPABILITIES if arch in SERIAL_WINDOW_QEMU_ARCHES else BOOTABLE_QEMU_CAPABILITIES
+    for arch in BOOTABLE_QEMU_ARCHES
+}
 
 
 class QemuConfigurationError(RuntimeError):
@@ -121,7 +128,7 @@ def virtio_pci_input_args() -> list[str]:
 
 
 def serial_args(arch: str, display: str) -> list[str]:
-    if arch in ("mips", "mips64", "ppc") and display != "none":
+    if arch in SERIAL_WINDOW_QEMU_ARCHES and display != "none":
         return ["-serial", "vc:80Cx24C", "-serial", "stdio"]
     return ["-serial", "stdio"]
 
@@ -453,6 +460,11 @@ def main() -> int:
         return 2
 
     use_debug_exit = not args.no_debug_exit and arch in ("i386", "x86_64")
+    if args.display != "none" and arch in SERIAL_WINDOW_QEMU_ARCHES:
+        print(
+            f"QEMU_DISPLAY_FALLBACK arch={arch} display=serial-vc reason=machine_has_no_fw_cfg_ramfb",
+            file=sys.stderr,
+        )
     try:
         result = run_kernel(arch, kernel, args.display, use_debug_exit, args.timeout)
     except QemuConfigurationError as error:

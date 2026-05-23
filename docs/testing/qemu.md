@@ -72,11 +72,13 @@ xmake qemu-window-test -a ppc --no-launch
 For every supported architecture, it builds and runs the same `kernel.bin` in
 QEMU.
 
-The visible output comes from the kernel's own ramfb display path on every
-bootable architecture with a platform ramfb path: x86/i386 use fw_cfg I/O ports,
+The visible pixel output comes from the kernel's own ramfb display path on
+architectures whose QEMU machine exposes fw_cfg: x86/i386 use fw_cfg I/O ports,
 while `aarch64`, `arm32`, `rv64`, `rv32`, and `loongarch64` use fw_cfg MMIO.
-`mips`, `mips64`, and `ppc` boot and validate through serial while the kernel
-still exercises its generic memory framebuffer and GUI compositor state.
+`mips`, `mips64`, and `ppc` use QEMU Malta/ppce500 machines without
+fw_cfg/standalone `ramfb`, so their window path falls back to a serial VC while
+the kernel still exercises its generic memory framebuffer and GUI compositor
+state.
 The script captures serial diagnostics and prints the test result only after
 the QEMU window is closed. Use the headless validation form in environments
 without a graphical display:

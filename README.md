@@ -98,19 +98,20 @@ xmake qemu-window-test
 
 In graphical mode the kernel remains interactive after the debug checks pass:
 keyboard input is handled by the kernel input stack and routed through the debug
-shell, GUI compositor, display path, and serial console. The window path uses
-QEMU `ramfb` initialized by the guest through fw_cfg DMA on every bootable
-architecture that exposes a platform ramfb path. Before entering the shell, the
-kernel draws a colored pixel marker in the framebuffer. The ramfb console uses a
-960x540 pixel surface with spaced bitmap glyph cells, a GUI-backed `oksh`
+shell, GUI compositor, display path, and serial console. On `i386`, `x86_64`,
+`aarch64`, `arm32`, `rv64`, `rv32`, and `loongarch64`, the window path uses QEMU
+`ramfb` initialized by the guest through fw_cfg DMA. Before entering the shell,
+the kernel draws a colored pixel marker in the framebuffer. The ramfb console
+uses a 960x540 pixel surface with spaced bitmap glyph cells, a GUI-backed `oksh`
 terminal surface, and a fixed mouse status line. On `aarch64`, `arm32`, `rv64`,
-and `rv32`, QEMU virtio
-keyboard/mouse devices feed the shell and framebuffer pointer through a minimal
-virtio-mmio input path. The script reports after the QEMU window is closed.
+and `rv32`, QEMU virtio keyboard/mouse devices feed the shell and framebuffer
+pointer through a minimal virtio-mmio input path. The script reports after the
+QEMU window is closed.
 
 The window task accepts every supported architecture. `mips`, `mips64`, and
-`ppc` boot and validate through serial while exercising the kernel's generic
-memory framebuffer and GUI compositor state.
+`ppc` use QEMU Malta/ppce500 machines that do not expose fw_cfg/standalone
+`ramfb`, so their graphical window is a serial VC while they still exercise the
+kernel's generic memory framebuffer and GUI compositor state.
 
 The test scripts do not contain a kernel `main`. Debug and release builds enter
 through the same `kernel_main`; debug builds enable `OK_ENABLE_TEST_POINTS` and

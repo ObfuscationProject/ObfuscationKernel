@@ -79,11 +79,26 @@ class QemuWindowRunnerTests(unittest.TestCase):
                     if arch == "mips64":
                         self.assertIn("MIPS64R2-generic", command)
 
+    def test_malta_and_ppce500_profiles_do_not_claim_ramfb(self) -> None:
+        for arch in ("mips", "mips64", "ppc"):
+            with self.subTest(arch=arch):
+                self.assertNotIn("ramfb", qemu_window_test.CAPABILITIES_BY_ARCH[arch])
+                self.assertIn("framebuffer", qemu_window_test.CAPABILITIES_BY_ARCH[arch])
+
     def test_mips_window_command_disables_guest_vga_and_uses_serial_vc(self) -> None:
         with mock.patch.object(qemu_window_test.shutil, "which", return_value="/usr/bin/qemu-system-mips"):
             command = qemu_window_test.qemu_command("mips", Path("kernel.bin"), "gtk", Path("disk.img"))
         self.assertIn("vc:80Cx24C", command)
         self.assertIn("stdio", command)
+        self.assertNotIn("ramfb", command)
+        self.assertEqual(command[command.index("-vga") + 1], "none")
+
+    def test_mips64_window_command_disables_guest_vga_and_uses_serial_vc(self) -> None:
+        with mock.patch.object(qemu_window_test.shutil, "which", return_value="/usr/bin/qemu-system-mips64"):
+            command = qemu_window_test.qemu_command("mips64", Path("kernel.bin"), "gtk", Path("disk.img"))
+        self.assertIn("vc:80Cx24C", command)
+        self.assertIn("stdio", command)
+        self.assertNotIn("ramfb", command)
         self.assertEqual(command[command.index("-vga") + 1], "none")
 
     def test_ppc_window_command_uses_serial_vc(self) -> None:
@@ -91,6 +106,7 @@ class QemuWindowRunnerTests(unittest.TestCase):
             command = qemu_window_test.qemu_command("ppc", Path("kernel.bin"), "gtk", Path("disk.img"))
         self.assertIn("vc:80Cx24C", command)
         self.assertIn("stdio", command)
+        self.assertNotIn("ramfb", command)
 
 
 if __name__ == "__main__":

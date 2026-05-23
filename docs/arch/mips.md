@@ -8,7 +8,8 @@ Implementation:
 - `src/arch/mips/boot.S`: QEMU direct-entry bootstrap stack and `.bss`
   clearing.
 - `src/arch/mips/platform.cpp`: QEMU Malta ISA COM1 serial through the PCI I/O
-  window.
+  window. Malta does not expose fw_cfg/standalone `ramfb`, so the QEMU window
+  path uses serial VC output.
 - `src/arch/mips/linker.ld`: ELF layout for the Malta kernel load address.
 
 Traits:

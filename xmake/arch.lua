@@ -8,6 +8,11 @@ OK_BOOTABLE_QEMU_CAPABILITIES = {
     "virtio_block", "virtio_gpu", "ramfb", "usb_hid", "network_loopback"
 }
 
+OK_SERIAL_WINDOW_QEMU_CAPABILITIES = {
+    "serial_console", "framebuffer", "keyboard_input", "mouse_input", "pci_bus",
+    "virtio_block", "virtio_gpu", "usb_hid", "network_loopback"
+}
+
 OK_PROFILE_CAPABILITIES = {
     "serial_console", "network_loopback"
 }
@@ -119,7 +124,7 @@ OK_ARCH_SPECS = {
         freestanding_cxxflags = {"-march=mips32r2", "-G0"},
         freestanding_asflags = {"-march=mips32r2", "-G0"},
         freestanding_ldflags = {"-march=mips32r2", "-G0"},
-        capabilities = OK_BOOTABLE_QEMU_CAPABILITIES
+        capabilities = OK_SERIAL_WINDOW_QEMU_CAPABILITIES
     },
     mips64 = {
         define = "OK_ARCH_TARGET_MIPS64",
@@ -134,7 +139,7 @@ OK_ARCH_SPECS = {
         freestanding_cxxflags = {"-march=mips64r2", "-mabi=64", "-G0"},
         freestanding_asflags = {"-march=mips64r2", "-mabi=64", "-G0"},
         freestanding_ldflags = {"-march=mips64r2", "-mabi=64", "-G0"},
-        capabilities = OK_BOOTABLE_QEMU_CAPABILITIES
+        capabilities = OK_SERIAL_WINDOW_QEMU_CAPABILITIES
     },
     ppc = {
         define = "OK_ARCH_TARGET_PPC",
@@ -146,7 +151,7 @@ OK_ARCH_SPECS = {
         qemu_system = "qemu-system-ppc",
         platform_source = "src/arch/ppc/platform.cpp",
         image_format = "elf",
-        capabilities = OK_BOOTABLE_QEMU_CAPABILITIES
+        capabilities = OK_SERIAL_WINDOW_QEMU_CAPABILITIES
     },
 }
 

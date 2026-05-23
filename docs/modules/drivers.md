@@ -72,11 +72,14 @@ The display stack has three layers:
   logical GUI pixels through `ok_platform_display_gui_pixel()`.
 
 QEMU tests attach a temporary `virtio-blk-pci` disk on every bootable target.
-QEMU window tests attach `ramfb` on bootable architectures with a platform ramfb
-path. The visible window is therefore a real pixel framebuffer rather than a
-serial console or VGA text surface. The ramfb console currently uses spaced
-bitmap glyph rendering, a colored boot marker, a GUI shell surface, and a fixed
-bottom-row mouse position/button monitor.
+QEMU window tests attach `ramfb` on bootable architectures whose QEMU machine
+exposes fw_cfg. The visible window is therefore a real pixel framebuffer rather
+than a serial console or VGA text surface on `i386`, `x86_64`, `aarch64`,
+`arm32`, `rv64`, `rv32`, and `loongarch64`. QEMU Malta and ppce500 do not expose
+fw_cfg/standalone `ramfb`, so `mips`, `mips64`, and `ppc` use the serial VC
+window fallback. The ramfb console currently uses spaced bitmap glyph rendering,
+a colored boot marker, a GUI shell surface, and a fixed bottom-row mouse
+position/button monitor.
 
 The current driver model still validates virtio-gpu enumeration through the
 internal PCI model; BAR mapping, virtqueues, EDID, scanout resource management,

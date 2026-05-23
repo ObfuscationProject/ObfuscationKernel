@@ -8,6 +8,8 @@ Implementation:
 - `src/arch/ppc/boot.S`: QEMU direct-entry bootstrap stack, `.bss` clearing, and
   e500 CCSR TLB setup.
 - `src/arch/ppc/platform.cpp`: QEMU ppce500 NS16550 serial platform I/O.
+  ppce500 does not expose fw_cfg/standalone `ramfb`, so the QEMU window path
+  uses serial VC output.
 - `src/arch/ppc/linker.ld`: ELF layout for the ppce500 kernel load address.
 
 Traits:

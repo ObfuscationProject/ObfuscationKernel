@@ -79,6 +79,12 @@ class QemuRunnerValidationTests(unittest.TestCase):
             with self.subTest(arch=arch):
                 self.assertEqual(qemu_test.required_coverage_fields(arch), expected)
 
+    def test_malta_and_ppce500_profiles_do_not_claim_ramfb(self) -> None:
+        for arch in ("mips", "mips64", "ppc"):
+            with self.subTest(arch=arch):
+                self.assertNotIn("ramfb", qemu_test.CAPABILITIES_BY_ARCH[arch])
+                self.assertIn("framebuffer", qemu_test.CAPABILITIES_BY_ARCH[arch])
+
     def test_missing_required_coverage_field_fails_clearly(self) -> None:
         output = make_output("arm32", {"usb": ""})
         code, _, stderr = self.validate("arm32", output)
@@ -164,6 +170,15 @@ class QemuRunnerValidationTests(unittest.TestCase):
             command = qemu_test.qemu_command("mips", Path("kernel.bin"), "gtk", False, Path("disk.img"))
         self.assertIn("vc:80Cx24C", command)
         self.assertIn("stdio", command)
+        self.assertNotIn("ramfb", command)
+        self.assertEqual(command[command.index("-vga") + 1], "none")
+
+    def test_mips64_window_display_uses_serial_console_instead_of_ramfb(self) -> None:
+        with mock.patch.object(qemu_test.shutil, "which", return_value="/usr/bin/qemu-system-mips64"):
+            command = qemu_test.qemu_command("mips64", Path("kernel.bin"), "gtk", False, Path("disk.img"))
+        self.assertIn("vc:80Cx24C", command)
+        self.assertIn("stdio", command)
+        self.assertNotIn("ramfb", command)
         self.assertEqual(command[command.index("-vga") + 1], "none")
 
     def test_ppc_window_display_uses_serial_console(self) -> None:
@@ -171,6 +186,7 @@ class QemuRunnerValidationTests(unittest.TestCase):
             command = qemu_test.qemu_command("ppc", Path("kernel.bin"), "gtk", False, Path("disk.img"))
         self.assertIn("vc:80Cx24C", command)
         self.assertIn("stdio", command)
+        self.assertNotIn("ramfb", command)
 
 
 if __name__ == "__main__":
