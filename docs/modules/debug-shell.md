@@ -35,6 +35,8 @@ Supported commands:
   account registered by tests/modules.
 - `users`: list debug-shell-visible users. The `kernel` account is scoped to the
   kernel debug shell.
+- `kill <pid>`: mark a scheduler process exited. Kernel-space processes can only
+  be killed from the `kernel` debug-shell user, and `idle` is protected.
 - `exit`: leave the current debug shell user context, restoring the previous
   session user or dropping the base `kernel` session to `root`.
 - `disk`: print active block-device geometry and SimpleFS mount state.
@@ -52,7 +54,7 @@ The shell is intentionally fixed-buffer and freestanding. Windowed QEMU mode
 routes keyboard input into the shell after `OK_TEST_PASS`, mirrors output to
 serial, and redraws a maximized `oksh` GUI surface through `GuiCompositor`. The
 GUI title strip and terminal body are rendered with separate colors. Showing the
-GUI shell or running `clear` leaves an empty terminal body until input or
-command output is available. The legacy display-driver text path is still used
-for boot logs, `OK_DISPLAY_TEXT` diagnostics, and fallback when the GUI cannot
-be restarted.
+GUI shell or running `clear` resets scrollback while immediately redrawing a
+fresh `ok> ` prompt. The legacy display-driver text path is still used for boot
+logs, `OK_DISPLAY_TEXT` diagnostics, and fallback when the GUI cannot be
+restarted.

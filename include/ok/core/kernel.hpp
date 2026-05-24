@@ -95,6 +95,7 @@ class Kernel final
 
     Status boot(KernelConfig config);
     Status run_debug_test_suite();
+    Status handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button);
 
     [[nodiscard]] bool booted() const
     {
@@ -233,6 +234,7 @@ class Kernel final
     Status run_ext4_test();
 
     bool booted_{false};
+    bool gui_mouse_left_down_{false};
     usize debug_test_points_run_{0};
     KernelTestReport test_report_{};
     KernelConfig config_{};

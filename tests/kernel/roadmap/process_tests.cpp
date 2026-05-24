@@ -47,6 +47,51 @@ bool contains_text(std::string_view haystack, std::string_view needle)
     return false;
 }
 
+Status append_unsigned(FixedString<32> &out, u64 value)
+{
+    constexpr u64 powers[] = {
+        10'000'000'000'000'000'000ull,
+        1'000'000'000'000'000'000ull,
+        100'000'000'000'000'000ull,
+        10'000'000'000'000'000ull,
+        1'000'000'000'000'000ull,
+        100'000'000'000'000ull,
+        10'000'000'000'000ull,
+        1'000'000'000'000ull,
+        100'000'000'000ull,
+        10'000'000'000ull,
+        1'000'000'000ull,
+        100'000'000ull,
+        10'000'000ull,
+        1'000'000ull,
+        100'000ull,
+        10'000ull,
+        1'000ull,
+        100ull,
+        10ull,
+        1ull,
+    };
+    bool started = false;
+    for (const auto power : powers)
+    {
+        u8 digit = 0;
+        while (value >= power)
+        {
+            value -= power;
+            ++digit;
+        }
+        if (digit != 0 || started || power == 1)
+        {
+            if (auto status = out.append(static_cast<char>('0' + digit)); !status.ok())
+            {
+                return status;
+            }
+            started = true;
+        }
+    }
+    return Status::success();
+}
+
 void write_le16(std::span<std::byte> out, usize offset, u16 value)
 {
     out[offset] = static_cast<std::byte>(value & 0xffu);
@@ -530,6 +575,23 @@ Status verify_background_programs_and_posix(Kernel &kernel)
         !contains_text(ps.value(), "bg-b") || !contains_text(ps.value(), "bg-c"))
     {
         return Status::fault("debug shell ps did not list scheduler processes");
+    }
+
+    FixedString<32> kill_command;
+    if (auto status = kill_command.assign("kill "); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_unsigned(kill_command, first.value()); !status.ok())
+    {
+        return status;
+    }
+    auto killed = kernel.debug_shell().execute(kill_command.view());
+    const auto *killed_process = kernel.scheduler().find(first.value());
+    if (!killed || !killed.value().empty() || killed_process == nullptr ||
+        killed_process->state() != sched::ProcessState::exited)
+    {
+        return Status::fault("debug shell kill did not exit a background process");
     }
 
     static_cast<void>(kernel.debug_shell().execute("exit"));

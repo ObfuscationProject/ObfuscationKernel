@@ -84,6 +84,8 @@ class GuiCompositor final
     Status maximize_surface(SurfaceId id);
     Status restore_surface(SurfaceId id);
     Status close_surface(SurfaceId id);
+    Status handle_mouse_delta(i32 delta_x, i32 delta_y, bool left_button);
+    Status set_pointer_position(i32 x, i32 y);
     Status fill(SurfaceId id, u32 rgba);
     Status fill_rect(SurfaceId id, Rect rect, u32 rgba);
     Status put_pixel(SurfaceId id, u32 x, u32 y, u32 rgba);
@@ -118,6 +120,14 @@ class GuiCompositor final
     [[nodiscard]] Result<SurfaceInfo> surface_info(SurfaceId id) const;
     [[nodiscard]] Result<SurfaceId> surface_at(i32 x, i32 y) const;
     [[nodiscard]] Result<Rect> desktop_bounds() const;
+    [[nodiscard]] i32 pointer_x() const
+    {
+        return pointer_x_;
+    }
+    [[nodiscard]] i32 pointer_y() const
+    {
+        return pointer_y_;
+    }
 
   private:
     struct Surface
@@ -148,6 +158,13 @@ class GuiCompositor final
     u64 last_present_checksum_{0};
     usize startup_animation_frames_{0};
     FixedString<max_gui_crash_reason> crash_reason_{};
+    i32 pointer_x_{0};
+    i32 pointer_y_{0};
+    bool left_button_down_{false};
+    SurfaceId dragging_surface_id_{0};
+    SurfaceId resizing_surface_id_{0};
+    i32 drag_offset_x_{0};
+    i32 drag_offset_y_{0};
 };
 
 class KernelFileManager final
@@ -156,6 +173,7 @@ class KernelFileManager final
     Status open(GuiCompositor &compositor, fs::VirtualFileSystem &vfs, std::string_view path);
     Status refresh(GuiCompositor &compositor, fs::VirtualFileSystem &vfs);
     Status close(GuiCompositor &compositor);
+    Status handle_mouse(GuiCompositor &compositor, fs::VirtualFileSystem &vfs, i32 x, i32 y, bool click);
 
     [[nodiscard]] SurfaceId surface_id() const
     {
@@ -176,6 +194,7 @@ class KernelFileManager final
     SurfaceId surface_id_{0};
     FixedString<96> path_{"/"};
     usize render_count_{0};
+    usize selected_entry_{fs::max_child_nodes};
 };
 
 class GuiModule final : public KernelModule, public KernelService

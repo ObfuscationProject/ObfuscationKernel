@@ -29,13 +29,51 @@ std::string_view process_tty_label(const sched::ProcessControlBlock &process)
     return process.background() ? "?" : "tty0";
 }
 
+std::string_view trim_ascii(std::string_view value)
+{
+    while (!value.empty() && (value.front() == ' ' || value.front() == '\t'))
+    {
+        value.remove_prefix(1);
+    }
+    while (!value.empty() && (value.back() == ' ' || value.back() == '\t'))
+    {
+        value.remove_suffix(1);
+    }
+    return value;
+}
+
+bool parse_unsigned(std::string_view value, u64 &out)
+{
+    value = trim_ascii(value);
+    if (value.empty())
+    {
+        return false;
+    }
+    u64 parsed = 0;
+    for (const auto ch : value)
+    {
+        if (ch < '0' || ch > '9')
+        {
+            return false;
+        }
+        const auto digit = static_cast<u64>(ch - '0');
+        if (parsed > ((__UINT64_MAX__ - digit) / 10u))
+        {
+            return false;
+        }
+        parsed = parsed * 10u + digit;
+    }
+    out = parsed;
+    return true;
+}
+
 } // namespace
 
 Status KernelDebugShell::command_help()
 {
     return append(
         "help true false : clear uname status mem ps drivers fs posix test echo pwd cd ls cat touch mkdir rm stat "
-        "chmod chown users whoami id su exit disk mkfs sfs ext4 net fm fileman\n");
+        "chmod chown users kill whoami id su exit disk mkfs sfs ext4 net fm fileman\n");
 }
 
 Status KernelDebugShell::command_true()
@@ -260,6 +298,35 @@ Status KernelDebugShell::command_processes(std::string_view)
         }
     }
     return Status::success();
+}
+
+Status KernelDebugShell::command_kill(std::string_view args)
+{
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+
+    u64 pid = 0;
+    if (!parse_unsigned(args, pid) || pid == 0)
+    {
+        return Status::invalid_argument("kill requires a numeric pid");
+    }
+    auto *process = kernel_->scheduler().find(static_cast<sched::ProcessId>(pid));
+    if (process == nullptr)
+    {
+        return Status::not_found("process not found");
+    }
+    if (process->name() == "idle")
+    {
+        return Status::denied("idle process is protected");
+    }
+    const auto active = kernel_->posix().user_credentials();
+    if (process->credentials().kernel_space && !active.kernel_space)
+    {
+        return Status::denied("only kernel debug user can kill kernel processes");
+    }
+    return kernel_->scheduler().kill_process(static_cast<sched::ProcessId>(pid));
 }
 
 Status KernelDebugShell::command_drivers()

@@ -14,6 +14,18 @@ constexpr u32 frame_color = 0xffd8f3ffu;
 constexpr u32 title_frame_color = 0xff44aa88u;
 constexpr u32 title_color = 0xff12313du;
 constexpr Rect file_manager_bounds{.x = 28, .y = 34, .width = 300, .height = 182};
+constexpr u32 title_hit_height = gui_glyph_height * 2 + 4;
+constexpr u32 resize_hit_size = 8;
+constexpr u32 minimum_surface_width = 40;
+constexpr u32 minimum_surface_height = 28;
+
+enum class WindowControl : u8
+{
+    none,
+    minimize,
+    maximize,
+    close,
+};
 
 [[nodiscard]] i32 min_i32(i32 left, i32 right)
 {
@@ -23,6 +35,32 @@ constexpr Rect file_manager_bounds{.x = 28, .y = 34, .width = 300, .height = 182
 [[nodiscard]] i32 max_i32(i32 left, i32 right)
 {
     return left > right ? left : right;
+}
+
+[[nodiscard]] i32 clamp_i32(i32 value, i32 low, i32 high)
+{
+    if (value < low)
+    {
+        return low;
+    }
+    if (value > high)
+    {
+        return high;
+    }
+    return value;
+}
+
+[[nodiscard]] u32 clamp_u32(u32 value, u32 low, u32 high)
+{
+    if (value < low)
+    {
+        return low;
+    }
+    if (value > high)
+    {
+        return high;
+    }
+    return value;
 }
 
 Status append_decimal(FixedString<96> &out, u64 value)
@@ -86,6 +124,93 @@ Status append_decimal(FixedString<96> &out, u64 value)
     return "node";
 }
 
+[[nodiscard]] WindowControl window_control_at(const SurfaceInfo &surface, i32 local_x, i32 local_y)
+{
+    if (local_x < 0 || local_y < 3 || local_y > 8 || surface.bounds.width < 34)
+    {
+        return WindowControl::none;
+    }
+    const auto right = static_cast<i32>(surface.bounds.width) - local_x;
+    if (right >= 8 && right <= 13)
+    {
+        return WindowControl::close;
+    }
+    if (right >= 17 && right <= 22)
+    {
+        return WindowControl::maximize;
+    }
+    if (right >= 26 && right <= 31)
+    {
+        return WindowControl::minimize;
+    }
+    return WindowControl::none;
+}
+
+[[nodiscard]] bool resize_hit(const SurfaceInfo &surface, i32 local_x, i32 local_y)
+{
+    if (surface.bounds.width < resize_hit_size || surface.bounds.height < resize_hit_size)
+    {
+        return false;
+    }
+    return local_x >= static_cast<i32>(surface.bounds.width - resize_hit_size) &&
+           local_y >= static_cast<i32>(surface.bounds.height - resize_hit_size);
+}
+
+[[nodiscard]] u32 desktop_pixel_color(u32 width, u32 height, u32 x, u32 y)
+{
+    const auto ix = static_cast<i32>(x);
+    const auto iy = static_cast<i32>(y);
+    const auto center_y = static_cast<i32>(height / 2);
+    const auto o_center_x = static_cast<i32>(width / 2) - 86;
+    const auto k_left = static_cast<i32>(width / 2) + 16;
+
+    constexpr i32 outer_radius = 58;
+    constexpr i32 inner_radius = 34;
+    const auto odx = ix - o_center_x;
+    const auto ody = iy - center_y;
+    const auto distance = odx * odx + ody * ody;
+    const bool in_o = distance <= outer_radius * outer_radius && distance >= inner_radius * inner_radius;
+
+    const bool k_stem = ix >= k_left && ix <= k_left + 13 && iy >= center_y - 58 && iy <= center_y + 58;
+    const auto k_mid_x = k_left + 20;
+    const auto k_mid_y = center_y;
+    const bool k_upper = ix >= k_mid_x && ix <= k_mid_x + 80 && iy <= k_mid_y &&
+                         (iy >= k_mid_y - (ix - k_mid_x) - 13) && (iy <= k_mid_y - (ix - k_mid_x) + 13);
+    const bool k_lower = ix >= k_mid_x && ix <= k_mid_x + 80 && iy >= k_mid_y &&
+                         (iy >= k_mid_y + (ix - k_mid_x) - 13) && (iy <= k_mid_y + (ix - k_mid_x) + 13);
+
+    if (in_o || k_stem || k_upper || k_lower)
+    {
+        return ((x + y) % 17u) < 4u ? 0xfff4d35eu : 0xff1d8f83u;
+    }
+    if ((y % 24u) == 0 || (x % 64u) == 0)
+    {
+        return 0xff07151cu;
+    }
+    return desktop_background_color;
+}
+
+Status append_child_path(FixedString<96> &out, std::string_view base, std::string_view child)
+{
+    out.clear();
+    if (base.empty())
+    {
+        base = "/";
+    }
+    if (auto status = out.append(base); !status.ok())
+    {
+        return status;
+    }
+    if (out.view() != "/")
+    {
+        if (auto status = out.append('/'); !status.ok())
+        {
+            return status;
+        }
+    }
+    return out.append(child);
+}
+
 } // namespace
 
 Status GuiCompositor::start(driver::FramebufferDisplayDriver &display)
@@ -98,6 +223,9 @@ Status GuiCompositor::start(driver::FramebufferDisplayDriver &display)
     state_ = GuiState::running;
     crash_reason_.clear();
     reset_surfaces();
+    pointer_x_ = static_cast<i32>(display.mode().width / 2);
+    pointer_y_ = static_cast<i32>(display.mode().height / 2);
+    left_button_down_ = false;
     ++generation_;
     last_present_checksum_ = display_->checksum();
     return Status::success();
@@ -154,6 +282,8 @@ void GuiCompositor::reset_surfaces()
     surfaces_.clear();
     next_surface_id_ = 1;
     next_z_index_ = 1;
+    dragging_surface_id_ = 0;
+    resizing_surface_id_ = 0;
 }
 
 Result<usize> GuiCompositor::find_surface_index(SurfaceId id) const
@@ -397,6 +527,160 @@ Status GuiCompositor::close_surface(SurfaceId id)
     return destroy_surface(id);
 }
 
+Status GuiCompositor::set_pointer_position(i32 x, i32 y)
+{
+    if (auto status = ensure_running(); !status.ok())
+    {
+        return status;
+    }
+    const auto mode = display_->mode();
+    pointer_x_ = clamp_i32(x, 0, static_cast<i32>(mode.width) - 1);
+    pointer_y_ = clamp_i32(y, 0, static_cast<i32>(mode.height) - 1);
+    return Status::success();
+}
+
+Status GuiCompositor::handle_mouse_delta(i32 delta_x, i32 delta_y, bool left_button)
+{
+    if (auto status = ensure_running(); !status.ok())
+    {
+        return status;
+    }
+    const auto mode = display_->mode();
+    pointer_x_ = clamp_i32(pointer_x_ + delta_x, 0, static_cast<i32>(mode.width) - 1);
+    pointer_y_ = clamp_i32(pointer_y_ + delta_y, 0, static_cast<i32>(mode.height) - 1);
+
+    const bool pressed = left_button && !left_button_down_;
+    const bool released = !left_button && left_button_down_;
+    bool changed = false;
+
+    if (released)
+    {
+        dragging_surface_id_ = 0;
+        resizing_surface_id_ = 0;
+    }
+
+    if (pressed)
+    {
+        auto hit = surface_at(pointer_x_, pointer_y_);
+        if (hit)
+        {
+            auto info = surface_info(hit.value());
+            if (!info)
+            {
+                return info.status();
+            }
+            if (auto status = raise_surface(hit.value()); !status.ok())
+            {
+                return status;
+            }
+            changed = true;
+
+            const auto local_x = pointer_x_ - info.value().bounds.x;
+            const auto local_y = pointer_y_ - info.value().bounds.y;
+            switch (window_control_at(info.value(), local_x, local_y))
+            {
+            case WindowControl::close:
+                dragging_surface_id_ = 0;
+                resizing_surface_id_ = 0;
+                if (auto status = close_surface(hit.value()); !status.ok())
+                {
+                    return status;
+                }
+                left_button_down_ = left_button;
+                return present();
+            case WindowControl::maximize:
+                dragging_surface_id_ = 0;
+                resizing_surface_id_ = 0;
+                if (info.value().window_state == WindowState::maximized)
+                {
+                    if (auto status = restore_surface(hit.value()); !status.ok())
+                    {
+                        return status;
+                    }
+                }
+                else
+                {
+                    if (auto status = maximize_surface(hit.value()); !status.ok())
+                    {
+                        return status;
+                    }
+                }
+                left_button_down_ = left_button;
+                return present();
+            case WindowControl::minimize:
+                dragging_surface_id_ = 0;
+                resizing_surface_id_ = 0;
+                if (auto status = minimize_surface(hit.value()); !status.ok())
+                {
+                    return status;
+                }
+                left_button_down_ = left_button;
+                return present();
+            case WindowControl::none:
+                break;
+            }
+
+            if (info.value().window_state == WindowState::normal && resize_hit(info.value(), local_x, local_y))
+            {
+                resizing_surface_id_ = hit.value();
+            }
+            else if (info.value().window_state == WindowState::normal && local_y >= 0 &&
+                     local_y < static_cast<i32>(title_hit_height))
+            {
+                dragging_surface_id_ = hit.value();
+                drag_offset_x_ = local_x;
+                drag_offset_y_ = local_y;
+            }
+        }
+    }
+
+    if (left_button && dragging_surface_id_ != 0)
+    {
+        auto info = surface_info(dragging_surface_id_);
+        if (info)
+        {
+            if (auto status =
+                    move_surface(dragging_surface_id_, pointer_x_ - drag_offset_x_, pointer_y_ - drag_offset_y_);
+                !status.ok())
+            {
+                return status;
+            }
+            changed = true;
+        }
+        else
+        {
+            dragging_surface_id_ = 0;
+        }
+    }
+
+    if (left_button && resizing_surface_id_ != 0)
+    {
+        auto info = surface_info(resizing_surface_id_);
+        if (info)
+        {
+            auto bounds = info.value().bounds;
+            const auto requested_width = static_cast<u32>(max_i32(pointer_x_ - bounds.x + 1,
+                                                                  static_cast<i32>(minimum_surface_width)));
+            const auto requested_height = static_cast<u32>(max_i32(pointer_y_ - bounds.y + 1,
+                                                                   static_cast<i32>(minimum_surface_height)));
+            bounds.width = clamp_u32(requested_width, minimum_surface_width, max_gui_surface_width);
+            bounds.height = clamp_u32(requested_height, minimum_surface_height, max_gui_surface_height);
+            if (auto status = resize_surface(resizing_surface_id_, bounds); !status.ok())
+            {
+                return status;
+            }
+            changed = true;
+        }
+        else
+        {
+            resizing_surface_id_ = 0;
+        }
+    }
+
+    left_button_down_ = left_button;
+    return changed ? present() : Status::success();
+}
+
 Status GuiCompositor::fill(SurfaceId id, u32 rgba)
 {
     if (auto status = ensure_running(); !status.ok())
@@ -630,13 +914,14 @@ Status GuiCompositor::present()
     {
         for (u32 x = 0; x < mode.width; ++x)
         {
-            if (auto status = display_->put_pixel(x, y, desktop_background_color); !status.ok())
+            const auto color = desktop_pixel_color(mode.width, mode.height, x, y);
+            if (auto status = display_->put_pixel(x, y, color); !status.ok())
             {
                 return status;
             }
             if (ok_platform_display_gui_pixel != nullptr)
             {
-                ok_platform_display_gui_pixel(mode.width, mode.height, x, y, desktop_background_color);
+                ok_platform_display_gui_pixel(mode.width, mode.height, x, y, color);
             }
         }
     }
@@ -831,6 +1116,7 @@ Status KernelFileManager::open(GuiCompositor &compositor, fs::VirtualFileSystem 
     {
         return status;
     }
+    selected_entry_ = fs::max_child_nodes;
 
     if (surface_id_ != 0 && !compositor.surface_info(surface_id_))
     {
@@ -874,6 +1160,67 @@ Status KernelFileManager::close(GuiCompositor &compositor)
         return status;
     }
     return compositor.present();
+}
+
+Status KernelFileManager::handle_mouse(GuiCompositor &compositor, fs::VirtualFileSystem &vfs, i32 x, i32 y, bool click)
+{
+    if (!click || surface_id_ == 0)
+    {
+        return Status::success();
+    }
+    auto info = compositor.surface_info(surface_id_);
+    if (!info)
+    {
+        surface_id_ = 0;
+        return Status::success();
+    }
+    const auto &bounds = info.value().bounds;
+    if (x < bounds.x || y < bounds.y || x >= bounds.x + static_cast<i32>(bounds.width) ||
+        y >= bounds.y + static_cast<i32>(bounds.height))
+    {
+        return Status::success();
+    }
+
+    const auto local_x = x - bounds.x;
+    const auto local_y = y - bounds.y;
+    const auto row = static_cast<usize>(local_y / static_cast<i32>(gui_glyph_height));
+    if (local_x >= 2 && local_x < 66 && row >= 4 && row <= 7)
+    {
+        constexpr std::string_view nav_paths[] = {"/", "/dev", "/tmp", "/proc"};
+        const auto next = nav_paths[row - 4];
+        if (vfs.list(next))
+        {
+            return open(compositor, vfs, next);
+        }
+        return Status::success();
+    }
+    if (local_x < 68 || row < 6)
+    {
+        return Status::success();
+    }
+
+    auto listing = vfs.list(path_.view());
+    if (!listing)
+    {
+        return listing.status();
+    }
+    const auto index = row - 6;
+    if (index >= listing.value().count)
+    {
+        return Status::success();
+    }
+    selected_entry_ = index;
+    const auto &entry = listing.value().entries[index];
+    if (entry.metadata.type == fs::NodeType::directory)
+    {
+        FixedString<96> child_path;
+        if (auto status = append_child_path(child_path, path_.view(), entry.name.view()); !status.ok())
+        {
+            return status;
+        }
+        return open(compositor, vfs, child_path.view());
+    }
+    return render(compositor, vfs);
 }
 
 Status KernelFileManager::render(GuiCompositor &compositor, fs::VirtualFileSystem &vfs)
@@ -939,7 +1286,7 @@ Status KernelFileManager::render(GuiCompositor &compositor, fs::VirtualFileSyste
     {
         const auto &entry = listing.value().entries[i];
         const auto row = static_cast<u32>(6 + i);
-        const auto row_color = (i % 2) == 0 ? 0xff111c24u : 0xff0d141cu;
+        const auto row_color = i == selected_entry_ ? 0xff23485au : ((i % 2) == 0 ? 0xff111c24u : 0xff0d141cu);
         if (auto status = compositor.fill_rect(surface_id_, Rect{.x = 68, .y = static_cast<i32>(row * gui_glyph_height),
                                                                   .width = 228, .height = gui_glyph_height},
                                                row_color);

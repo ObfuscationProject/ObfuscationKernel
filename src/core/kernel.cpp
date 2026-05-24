@@ -44,6 +44,7 @@ Status Kernel::boot(KernelConfig config)
     kernel_modules_ = {};
     static_cast<void>(gui_module_.stop());
     debug_test_points_run_ = 0;
+    gui_mouse_left_down_ = false;
     if (config.memory_region_count == 0)
     {
         config.memory_map[0] =
@@ -277,6 +278,36 @@ Status Kernel::boot(KernelConfig config)
     }
 
     booted_ = true;
+    return Status::success();
+}
+
+Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
+{
+    if (!booted_)
+    {
+        return Status::not_initialized("kernel is not booted");
+    }
+    auto &compositor = gui_module_.compositor();
+    if (compositor.state() != gui::GuiState::running)
+    {
+        return Status::not_initialized("GUI compositor is not running");
+    }
+
+    const bool click = left_button && !gui_mouse_left_down_;
+    if (auto status = compositor.handle_mouse_delta(delta_x, delta_y, left_button); !status.ok())
+    {
+        return status;
+    }
+    if (click)
+    {
+        if (auto status =
+                file_manager_.handle_mouse(compositor, vfs_, compositor.pointer_x(), compositor.pointer_y(), true);
+            !status.ok())
+        {
+            return status;
+        }
+    }
+    gui_mouse_left_down_ = left_button;
     return Status::success();
 }
 

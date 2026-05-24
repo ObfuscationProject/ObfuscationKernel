@@ -470,6 +470,10 @@ Status KernelDebugShell::dispatch_command(std::string_view command_line)
     {
         return command_users();
     }
+    else if (command == "kill")
+    {
+        return command_kill(args);
+    }
     else if (command == "whoami")
     {
         return command_whoami();
@@ -701,16 +705,13 @@ Status KernelDebugShell::redraw_gui_terminal()
     {
         return status;
     }
-    if (!gui_input_line_.empty() || !gui_history_.empty())
+    if (auto status = terminal.append("ok> "); !status.ok())
     {
-        if (auto status = terminal.append("ok> "); !status.ok())
-        {
-            return status;
-        }
-        if (auto status = terminal.append(gui_input_line_.view()); !status.ok())
-        {
-            return status;
-        }
+        return status;
+    }
+    if (auto status = terminal.append(gui_input_line_.view()); !status.ok())
+    {
+        return status;
     }
 
     const auto total_rows = visual_line_count(terminal.view(), shell_gui_text_columns);
@@ -758,6 +759,8 @@ Status KernelDebugShell::render_to_gui(std::string_view command_line, std::strin
     if (clears_screen)
     {
         gui_history_.clear();
+        gui_input_line_.clear();
+        gui_scroll_rows_ = 0;
         return redraw_gui_terminal();
     }
     gui_scroll_rows_ = 0;

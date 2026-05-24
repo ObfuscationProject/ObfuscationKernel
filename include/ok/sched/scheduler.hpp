@@ -135,6 +135,7 @@ class Scheduler final
     Result<ProcessId> create_process(std::string_view name, arch::CpuContext initial_context);
     Result<ProcessId> create_background_process(std::string_view name, arch::CpuContext initial_context);
     Status set_credentials(ProcessId pid, user::Credentials credentials);
+    Status kill_process(ProcessId pid);
     Status configure_cpus(usize cpu_count);
     Status set_runnable(ProcessId pid);
     Result<ProcessId> schedule_next();

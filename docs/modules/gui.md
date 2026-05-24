@@ -40,6 +40,9 @@ The compositor API is intentionally small and synchronous:
   `raise_surface` update surface metadata.
 - `minimize_surface`, `maximize_surface`, `restore_surface`, and
   `close_surface` provide Windows-style window state controls.
+- `handle_mouse_delta()` tracks the logical pointer and turns button presses into
+  title-bar drag, bottom-right resize, minimize, maximize/restore, close, raise,
+  and hit-test behavior.
 - `fill`, `fill_rect`, `put_pixel`, and `draw_text` update backing pixels.
 - `surface_at(x, y)` returns the top visible surface at a logical desktop
   coordinate.
@@ -59,8 +62,9 @@ The compositor renders into `FramebufferDisplayDriver`, whose logical mode is
 currently 480x270 RGBA pixels. `present()` also calls the weak platform hook
 `ok_platform_display_gui_pixel()` when a platform provides it. QEMU ramfb
 platforms use that hook to scale logical GUI pixels onto the visible 960x540
-framebuffer. Each present starts from a compositor-owned desktop background, so
-legacy boot/debug text is not left behind outside GUI surfaces.
+framebuffer. Each present starts from a compositor-owned desktop background with
+a large geometric `OK` artwork in kernel mode, so legacy boot/debug text is not
+left behind outside GUI surfaces.
 
 This keeps the module independent from QEMU-specific ramfb details:
 
@@ -76,7 +80,7 @@ surface:
 
 - the command is appended with an `ok> ` prompt;
 - command output is appended to a bounded history buffer;
-- `clear` output resets the GUI history and leaves the terminal body empty;
+- `clear` output resets the GUI history and redraws a clean `ok> ` prompt;
 - the active input line is redrawn by the GUI while the serial console still
   receives text output;
 - the title strip and body use separate colors so the shell window has a
@@ -85,7 +89,10 @@ surface:
 
 The `fm`/`fileman` shell command opens a GUI kernel file manager for a path. It
 renders the VFS directory listing in a separate `kernel-files` surface using the
-same compositor.
+same compositor. Mouse clicks in its left navigation open `/`, `/dev`, `/tmp`,
+or `/proc` when present; clicks in the listing select files and open
+directories. The window itself uses the same drag, resize, minimize, maximize,
+and close handling as other GUI surfaces.
 
 The serial console and legacy framebuffer text path are preserved for boot logs,
 automated QEMU validation, and GUI startup failure fallback. Once the GUI shell
@@ -100,6 +107,7 @@ The debug and roadmap tests cover:
   framebuffer checksum updates;
 - compositor crash rejection and supervisor restart;
 - `kernel-gui` ownership by the `mod:kernel-gui` kernel background process;
+- mouse-driven window drag, resize, close, and GUI file-manager navigation;
 - startup animation and GUI file-manager rendering;
 - shell command output rendering to a GUI surface.
 

@@ -229,6 +229,92 @@ Status test_gui_surface_management_api(Kernel &kernel)
     return compositor.destroy_surface(back.value());
 }
 
+Status test_gui_mouse_interacts_with_windows(Kernel &kernel)
+{
+    if (auto status = release_shell_surface(kernel); !status.ok())
+    {
+        return status;
+    }
+    auto &compositor = kernel.gui().compositor();
+    auto surface = compositor.create_surface(gui::Rect{.x = 60, .y = 60, .width = 80, .height = 50}, "mouse");
+    if (!surface)
+    {
+        return surface.status();
+    }
+    if (auto status = compositor.fill(surface.value(), 0xff1c2f38u); !status.ok())
+    {
+        return status;
+    }
+
+    if (auto status = compositor.set_pointer_position(70, 66); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(0, 0, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(20, 16, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(0, 0, false); !status.ok())
+    {
+        return status;
+    }
+    auto info = compositor.surface_info(surface.value());
+    if (!info || info.value().bounds.x != 80 || info.value().bounds.y != 76)
+    {
+        return Status::fault("GUI mouse drag did not move the window");
+    }
+
+    if (auto status =
+            compositor.set_pointer_position(info.value().bounds.x + static_cast<i32>(info.value().bounds.width) - 2,
+                                            info.value().bounds.y + static_cast<i32>(info.value().bounds.height) - 2);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(0, 0, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(24, 20, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(0, 0, false); !status.ok())
+    {
+        return status;
+    }
+    info = compositor.surface_info(surface.value());
+    if (!info || info.value().bounds.width <= 80 || info.value().bounds.height <= 50)
+    {
+        return Status::fault("GUI mouse resize did not resize the window");
+    }
+
+    if (auto status =
+            compositor.set_pointer_position(info.value().bounds.x + static_cast<i32>(info.value().bounds.width) - 10,
+                                            info.value().bounds.y + 5);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(0, 0, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(0, 0, false); !status.ok())
+    {
+        return status;
+    }
+    if (compositor.surface_info(surface.value()))
+    {
+        return Status::fault("GUI mouse close button did not close the window");
+    }
+    return Status::success();
+}
+
 Status test_gui_module_restarts_after_crash(Kernel &kernel)
 {
     auto &module = kernel.gui();
@@ -309,17 +395,37 @@ Status test_kernel_gui_is_started(Kernel &kernel)
 Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
 {
     auto &manager = kernel.file_manager();
+    auto &compositor = kernel.gui().compositor();
     if (auto status = manager.open(kernel.gui().compositor(), kernel.vfs(), "/"); !status.ok())
     {
         return status;
     }
-    if (manager.surface_id() == 0 || manager.path() != "/" || manager.render_count() == 0 ||
-        !kernel.gui().compositor().surface_info(manager.surface_id()) ||
-        kernel.gui().compositor().last_present_checksum() == 0)
+    auto info = compositor.surface_info(manager.surface_id());
+    if (manager.surface_id() == 0 || manager.path() != "/" || manager.render_count() == 0 || !info ||
+        compositor.last_present_checksum() == 0)
     {
         return Status::fault("GUI file manager did not render the VFS root");
     }
-    return manager.close(kernel.gui().compositor());
+    const auto before_render_count = manager.render_count();
+    const auto nav_x = info.value().bounds.x + 12;
+    const auto nav_y = info.value().bounds.y + static_cast<i32>(gui::gui_glyph_height * 6 + 2);
+    if (auto status = compositor.set_pointer_position(nav_x, nav_y); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, false); !status.ok())
+    {
+        return status;
+    }
+    if (manager.path() != "/tmp" || manager.render_count() <= before_render_count)
+    {
+        return Status::fault("GUI file manager mouse navigation did not open /tmp");
+    }
+    return manager.close(compositor);
 }
 
 Status test_shell_renders_to_gui(Kernel &kernel)
@@ -380,10 +486,25 @@ Status test_shell_renders_to_gui(Kernel &kernel)
         return Status::fault("debug shell GUI scrollback did not return to prompt");
     }
     auto clear_output = kernel.debug_shell().execute("clear");
-    auto prompt_pixel = kernel.display().pixel_at(gui::gui_glyph_width, gui::gui_glyph_height * 3);
-    if (!clear_output || clear_output.value() != "\f" || !prompt_pixel || prompt_pixel.value() != 0xff061018u)
+    bool prompt_visible = false;
+    for (u32 y = gui::gui_glyph_height * 3; y < gui::gui_glyph_height * 4; ++y)
     {
-        return Status::fault("debug shell GUI clear did not leave an empty terminal body");
+        for (u32 x = gui::gui_glyph_width; x < gui::gui_glyph_width * 5; ++x)
+        {
+            auto pixel = kernel.display().pixel_at(x, y);
+            if (!pixel)
+            {
+                return pixel.status();
+            }
+            if (pixel.value() != 0xff061018u)
+            {
+                prompt_visible = true;
+            }
+        }
+    }
+    if (!clear_output || clear_output.value() != "\f" || !prompt_visible)
+    {
+        return Status::fault("debug shell GUI clear did not redraw the prompt");
     }
     return Status::success();
 }
@@ -401,6 +522,10 @@ Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
         return status;
     }
     if (auto status = test_gui_surface_management_api(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_gui_mouse_interacts_with_windows(kernel); !status.ok())
     {
         return status;
     }

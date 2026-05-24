@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ok/core/types.hpp"
+#include "ok/driver/driver.hpp"
 #include "font.hpp"
 
 namespace ok::driver::qemu_virt
@@ -29,6 +30,8 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
         pointer_x_ = framebuffer_width / 2;
         pointer_y_ = framebuffer_height / 2;
         pointer_left_button_ = false;
+        gui_delta_x_remainder_ = 0;
+        gui_delta_y_remainder_ = 0;
         for (auto &pixel : pixels_)
         {
             pixel = background_color;
@@ -110,6 +113,18 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
             draw_mouse_status();
         }
         draw_pointer(left_button);
+    }
+
+    static i32 gui_delta_x(i32 delta_x)
+    {
+        return scale_gui_delta(delta_x, static_cast<i32>(ok::driver::framebuffer_width),
+                               static_cast<i32>(framebuffer_width), gui_delta_x_remainder_);
+    }
+
+    static i32 gui_delta_y(i32 delta_y)
+    {
+        return scale_gui_delta(delta_y, static_cast<i32>(ok::driver::framebuffer_height),
+                               static_cast<i32>(framebuffer_height), gui_delta_y_remainder_);
     }
 
     static void draw_gui_pixel(u32 logical_width, u32 logical_height, u32 x, u32 y, u32 color)
@@ -204,6 +219,18 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
     {
         return static_cast<u32>(a) | (static_cast<u32>(b) << 8) | (static_cast<u32>(c) << 16) |
                (static_cast<u32>(d) << 24);
+    }
+
+    static i32 scale_gui_delta(i32 delta, i32 logical_extent, i32 physical_extent, i32 &remainder)
+    {
+        if (physical_extent <= 0)
+        {
+            return delta;
+        }
+        const auto numerator = delta * logical_extent + remainder;
+        const auto scaled = numerator / physical_extent;
+        remainder = numerator - scaled * physical_extent;
+        return scaled;
     }
 
     static volatile u8 &mmio8(uptr address)
@@ -569,6 +596,8 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
     static inline bool pointer_left_button_{false};
     static inline bool pointer_drawn_{false};
     static inline bool gui_active_{false};
+    static inline i32 gui_delta_x_remainder_{0};
+    static inline i32 gui_delta_y_remainder_{0};
     static inline u32 pointer_saved_[pointer_pixels]{};
     alignas(4096) static inline u32 pixels_[framebuffer_pixels]{};
     alignas(16) static inline volatile DmaAccess dma_access_{};

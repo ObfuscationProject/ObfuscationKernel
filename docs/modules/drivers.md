@@ -73,10 +73,12 @@ The display stack has three layers:
 - `ok::gui::GuiCompositor` is the restartable GUI module above the framebuffer.
   It owns fixed-capacity surfaces, rectangle/pixel/text drawing, and composition.
   It renders a short startup animation during boot and tracks normal,
-  minimized, and maximized surface state. The debug shell renders command
-  history and active input to a maximized `oksh` GUI surface while keeping
-  serial output unchanged, and the `fm`/`fileman` command opens a separate GUI
-  file-manager surface for VFS directory listings.
+  minimized, and maximized surface state. It also consumes platform mouse
+  events for title-bar dragging, bottom-right resizing, and window control
+  buttons. The debug shell renders command history and active input to a
+  maximized `oksh` GUI surface while keeping serial output unchanged, and the
+  `fm`/`fileman` command opens a separate GUI file-manager surface for VFS
+  directory listings and mouse navigation.
 - `RamFbConsole` is the QEMU-visible platform backend. It initializes `ramfb`
   through fw_cfg DMA, owns the 960x540 guest-RAM pixel surface, and scales
   logical GUI pixels through `ok_platform_display_gui_pixel()`.
@@ -97,5 +99,6 @@ and true disk DMA are the next implementation steps.
 On `aarch64`, `arm32`, `rv64`, and `rv32`, graphical keyboard and mouse input is
 delivered through QEMU virtio-mmio input devices. The platform code supports the
 legacy virtio-mmio queue registers used by QEMU `virt` here, maps Linux input
-key codes into shell characters, and moves a small framebuffer pointer for
-mouse-relative events. UART input remains as a fallback for headless serial use.
+key codes into shell characters, forwards scaled logical mouse-relative events
+into the GUI compositor, and then moves a small framebuffer pointer. UART input
+remains as a fallback for headless serial use.

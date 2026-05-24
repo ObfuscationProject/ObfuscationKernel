@@ -83,6 +83,7 @@ void poll_virtio_mouse()
     }
     if (changed)
     {
+        static_cast<void>(ok::ok_gui_mouse_event(RamFb::gui_delta_x(dx), RamFb::gui_delta_y(dy), virtio_mouse_left));
         RamFb::move_pointer(dx, dy, virtio_mouse_left);
     }
     if (wheel != 0)

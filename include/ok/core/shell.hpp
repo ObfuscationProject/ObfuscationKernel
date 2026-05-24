@@ -69,6 +69,7 @@ class KernelDebugShell final
     Status command_chmod(std::string_view args);
     Status command_chown(std::string_view args);
     Status command_users();
+    Status command_kill(std::string_view args);
     Status command_whoami();
     Status command_id();
     Status command_su(std::string_view user);
