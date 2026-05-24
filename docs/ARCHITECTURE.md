@@ -66,9 +66,9 @@ For `i386` and `x86_64`, the system boot path is:
 2. Initialize physical memory from a memory map.
 3. Register and start built-in drivers.
 4. Create and schedule the idle process.
-5. Bind `ModuleManager` so non-core modules run as `mod:<name>` kernel
-   processes such as `mod:kernel-gui`; built-in drivers remain kernel helpers
-   rather than scheduler-visible daemon processes.
+5. Register built-in drivers as scheduler-visible `drv:<name>` daemon
+   processes, then bind `ModuleManager` so non-core modules run as
+   `mod:<name>` kernel processes such as `mod:kernel-gui`.
 6. Register timer interrupt and baseline syscalls.
 7. Create `/tmp/kernel.log` in the RAM VFS.
 

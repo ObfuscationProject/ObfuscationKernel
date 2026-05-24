@@ -20,7 +20,7 @@ Status assign_kernel_process_name(FixedString<sched::max_process_name> &out, std
 bool should_register_driver_process(const Driver &driver)
 {
     static_cast<void>(driver);
-    return false;
+    return true;
 }
 
 } // namespace

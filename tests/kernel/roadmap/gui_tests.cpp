@@ -433,6 +433,15 @@ Status test_gui_mouse_interacts_with_windows(Kernel &kernel)
     {
         return status;
     }
+    const auto close_event = compositor.consume_window_event();
+    if (close_event.kind != gui::WindowEventKind::close_request || close_event.surface_id != surface.value())
+    {
+        return Status::fault("GUI mouse close button did not emit a close request");
+    }
+    if (auto status = compositor.close_surface(surface.value()); !status.ok())
+    {
+        return status;
+    }
     if (compositor.surface_info(surface.value()))
     {
         return Status::fault("GUI mouse close button did not close the window");
@@ -554,6 +563,32 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("GUI file manager process did not keep kernel credentials");
     }
+    const auto resize_render_count = manager.render_count();
+    if (auto status =
+            compositor.set_pointer_position(info.value().bounds.x + static_cast<i32>(info.value().bounds.width) - 20,
+                                            info.value().bounds.y + 5);
+        !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, true); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, false); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    info = compositor.surface_info(manager.surface_id());
+    if (!info || info.value().window_state != gui::WindowState::maximized ||
+        info.value().bounds.width != driver::framebuffer_width || manager.render_count() <= resize_render_count)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("GUI file manager maximize did not resize and redraw");
+    }
     const auto before_render_count = manager.render_count();
     const auto nav_x = info.value().bounds.x + 12;
     const auto nav_y = info.value().bounds.y + static_cast<i32>(gui::gui_glyph_height * 6 + 2);
@@ -598,6 +633,41 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("debug shell kill did not close the GUI file manager process");
     }
+    if (auto status = kernel.open_file_manager("/"); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    info = compositor.surface_info(manager.surface_id());
+    const auto close_pid = manager.process_id();
+    if (!info || close_pid == 0)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("GUI file manager did not reopen for close button test");
+    }
+    if (auto status =
+            compositor.set_pointer_position(info.value().bounds.x + static_cast<i32>(info.value().bounds.width) - 10,
+                                            info.value().bounds.y + 5);
+        !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, true); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, false); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (manager.surface_id() != 0 || manager.process_id() != 0 || kernel.scheduler().find(close_pid) != nullptr)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("GUI file manager close button did not notify and close its process");
+    }
     if (auto status = kernel.close_file_manager(); !status.ok())
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
@@ -633,11 +703,34 @@ Status test_shell_renders_to_gui(Kernel &kernel)
         return Status::fault("debug shell did not render to GUI");
     }
     auto surface = kernel.gui().compositor().surface_info(kernel.debug_shell().gui_surface_id());
-    if (!surface || surface.value().bounds.x != 0 || surface.value().bounds.y != 0 ||
+    if (!surface || (surface.value().bounds.x == 0 && surface.value().bounds.y == 0 &&
+                     surface.value().bounds.width == driver::framebuffer_width &&
+                     surface.value().bounds.height == driver::framebuffer_height))
+    {
+        return Status::fault("debug shell GUI surface should start as a resizable window");
+    }
+    if (auto status =
+            kernel.gui().compositor().set_pointer_position(surface.value().bounds.x +
+                                                               static_cast<i32>(surface.value().bounds.width) - 20,
+                                                           surface.value().bounds.y + 5);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, false); !status.ok())
+    {
+        return status;
+    }
+    surface = kernel.gui().compositor().surface_info(kernel.debug_shell().gui_surface_id());
+    if (!surface || surface.value().window_state != gui::WindowState::maximized ||
         surface.value().bounds.width != driver::framebuffer_width ||
         surface.value().bounds.height != driver::framebuffer_height)
     {
-        return Status::fault("debug shell GUI surface is not maximized");
+        return Status::fault("debug shell GUI maximize button did not resize and redraw");
     }
     const auto input_checksum = kernel.gui().compositor().last_present_checksum();
     if (auto status = kernel.debug_shell().set_gui_input("ps"); !status.ok())

@@ -18,15 +18,13 @@ inline constexpr u16 input_relative_x = 0x00;
 inline constexpr u16 input_relative_y = 0x01;
 inline constexpr u16 input_relative_wheel = 0x08;
 inline constexpr u16 input_key_enter = 28;
-inline constexpr u16 input_key_e = 18;
 inline constexpr u16 input_key_a = 30;
 inline constexpr u16 input_key_left_shift = 42;
 inline constexpr u16 input_key_right_shift = 54;
+inline constexpr u16 input_key_f1 = 59;
 inline constexpr u16 input_key_f12 = 88;
 inline constexpr u16 input_key_up = 103;
 inline constexpr u16 input_key_down = 108;
-inline constexpr u16 input_key_left_meta = 125;
-inline constexpr u16 input_key_right_meta = 126;
 inline constexpr u16 input_button_left = 0x110;
 
 enum class VirtioInputKind : u8

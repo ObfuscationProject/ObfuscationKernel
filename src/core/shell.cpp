@@ -123,21 +123,18 @@ usize operator_width(std::string_view value, usize index)
 }
 
 constexpr gui::Rect shell_gui_bounds{
-    .x = 0,
-    .y = 0,
-    .width = static_cast<u32>(driver::framebuffer_width),
-    .height = static_cast<u32>(driver::framebuffer_height),
+    .x = 24,
+    .y = 22,
+    .width = static_cast<u32>(driver::framebuffer_width - 48),
+    .height = static_cast<u32>(driver::framebuffer_height - 44),
 };
 constexpr u32 shell_gui_background = 0xff061018u;
 constexpr u32 shell_gui_title_background = 0xff12313du;
 constexpr u32 shell_gui_title_border = 0xff44aa88u;
 constexpr u32 shell_gui_foreground = 0xffd8f3ffu;
 constexpr u32 shell_gui_prompt = 0xfff4d35eu;
-constexpr usize shell_gui_total_rows = shell_gui_bounds.height / gui::gui_glyph_height;
 constexpr usize shell_gui_content_row = 3;
-constexpr usize shell_gui_rows = shell_gui_total_rows - shell_gui_content_row - 1;
 constexpr usize shell_gui_history_keep = 1800;
-constexpr usize shell_gui_text_columns = (shell_gui_bounds.width / gui::gui_glyph_width) - 1;
 constexpr usize shell_gui_scroll_rows_per_notch = 3;
 
 usize decimal_digits(u64 value)
@@ -252,6 +249,11 @@ bool KernelDebugShell::owns_process(sched::ProcessId pid) const
     return find_window_by_process(pid).ok();
 }
 
+bool KernelDebugShell::owns_surface(gui::SurfaceId surface) const
+{
+    return find_window_by_surface(surface).ok();
+}
+
 Status KernelDebugShell::close_process_window(sched::ProcessId pid)
 {
     auto index = find_window_by_process(pid);
@@ -260,6 +262,47 @@ Status KernelDebugShell::close_process_window(sched::ProcessId pid)
         return index.status();
     }
     return remove_gui_window(index.value());
+}
+
+Status KernelDebugShell::close_surface_window(gui::SurfaceId surface)
+{
+    auto index = find_window_by_surface(surface);
+    if (!index)
+    {
+        return index.status();
+    }
+    const auto process = gui_windows_[index.value()].process_id;
+    if (kernel_ != nullptr && process != 0 && kernel_->scheduler().find(process) != nullptr)
+    {
+        return kernel_->kill_process(process);
+    }
+    return remove_gui_window(index.value());
+}
+
+Status KernelDebugShell::handle_surface_changed(gui::SurfaceId surface)
+{
+    if (!owns_surface(surface))
+    {
+        return Status::not_found("GUI shell surface not found");
+    }
+    if (surface != gui_surface_id_)
+    {
+        return Status::success();
+    }
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+    auto info = kernel_->gui().compositor().surface_info(surface);
+    if (!info)
+    {
+        return info.status();
+    }
+    if (info.value().window_state == gui::WindowState::minimized)
+    {
+        return kernel_->gui().compositor().present();
+    }
+    return redraw_gui_terminal();
 }
 
 Status KernelDebugShell::record_gui_window()
@@ -403,6 +446,23 @@ Status KernelDebugShell::start_foreground_process(sched::ProcessId pid)
         }
     }
     return Status::success();
+}
+
+Status KernelDebugShell::interrupt_foreground_process()
+{
+    if (foreground_process_id_ == 0)
+    {
+        gui_input_line_.clear();
+        static_cast<void>(append_gui_history("^C\n"));
+        return redraw_gui_terminal();
+    }
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+    const auto pid = foreground_process_id_;
+    static_cast<void>(append_gui_history("^C\n"));
+    return kernel_->kill_process(pid);
 }
 
 void KernelDebugShell::notify_process_exit(sched::ProcessId pid)
@@ -1034,6 +1094,19 @@ Status KernelDebugShell::redraw_gui_terminal()
     }
 
     auto &compositor = kernel_->gui().compositor();
+    auto info = compositor.surface_info(gui_surface_id_);
+    if (!info)
+    {
+        gui_surface_id_ = 0;
+        return info.status();
+    }
+    const auto bounds = info.value().bounds;
+    const auto total_rows = static_cast<usize>(bounds.height / gui::gui_glyph_height);
+    const auto visible_rows =
+        total_rows > shell_gui_content_row + 1 ? total_rows - shell_gui_content_row - 1 : static_cast<usize>(1);
+    const auto text_columns = bounds.width > gui::gui_glyph_width
+                                  ? static_cast<usize>((bounds.width / gui::gui_glyph_width) - 1)
+                                  : static_cast<usize>(1);
     if (auto status = compositor.fill(gui_surface_id_, shell_gui_background); !status.ok())
     {
         return status;
@@ -1041,7 +1114,7 @@ Status KernelDebugShell::redraw_gui_terminal()
     if (auto status = compositor.fill_rect(gui_surface_id_,
                                            gui::Rect{.x = 1,
                                                      .y = 1,
-                                                     .width = shell_gui_bounds.width - 2,
+                                                     .width = bounds.width > 2 ? bounds.width - 2 : 1,
                                                      .height = gui::gui_glyph_height * 2 + 2},
                                            shell_gui_title_background);
         !status.ok())
@@ -1051,7 +1124,7 @@ Status KernelDebugShell::redraw_gui_terminal()
     if (auto status = compositor.fill_rect(gui_surface_id_,
                                            gui::Rect{.x = 1,
                                                      .y = static_cast<i32>(gui::gui_glyph_height * 2 + 3),
-                                                     .width = shell_gui_bounds.width - 2,
+                                                     .width = bounds.width > 2 ? bounds.width - 2 : 1,
                                                      .height = 1},
                                            shell_gui_title_border);
         !status.ok())
@@ -1075,16 +1148,16 @@ Status KernelDebugShell::redraw_gui_terminal()
         }
     }
 
-    const auto total_rows = visual_line_count(terminal.view(), shell_gui_text_columns);
-    const auto max_scroll = total_rows > shell_gui_rows ? total_rows - shell_gui_rows : 0;
+    const auto text_rows = visual_line_count(terminal.view(), text_columns);
+    const auto max_scroll = text_rows > visible_rows ? text_rows - visible_rows : 0;
     if (gui_scroll_rows_ > max_scroll)
     {
         gui_scroll_rows_ = max_scroll;
     }
-    const auto first_row = total_rows > shell_gui_rows + gui_scroll_rows_
-                               ? total_rows - shell_gui_rows - gui_scroll_rows_
+    const auto first_row = text_rows > visible_rows + gui_scroll_rows_
+                               ? text_rows - visible_rows - gui_scroll_rows_
                                : 0;
-    const auto visible_start = visual_line_offset(terminal.view(), shell_gui_text_columns, first_row);
+    const auto visible_start = visual_line_offset(terminal.view(), text_columns, first_row);
     const auto visible = terminal.view().substr(visible_start);
     if (auto status = compositor.draw_text(gui_surface_id_, 1, shell_gui_content_row, visible, shell_gui_foreground,
                                            shell_gui_background);

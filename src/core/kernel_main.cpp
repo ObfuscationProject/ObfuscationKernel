@@ -164,6 +164,19 @@ void shell_write(std::string_view text)
                 static_cast<void>(ok::ok_debug_shell_open_file_manager_shortcut());
                 continue;
             }
+            if (value == 0x03)
+            {
+                shell_write("^C\n");
+                line.clear();
+                escape_state = 0;
+                static_cast<void>(ok::ok_debug_shell_interrupt());
+                if (ok::ok_debug_shell_gui_open() && !ok::ok_debug_shell_has_foreground_process())
+                {
+                    shell_write(prompt);
+                    refresh_gui_input();
+                }
+                continue;
+            }
             if (ok::ok_debug_shell_has_foreground_process())
             {
                 continue;

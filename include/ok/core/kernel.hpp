@@ -235,6 +235,20 @@ class Kernel final
     Status register_builtin_syscalls(posix::PosixService &posix);
     Status log_boot_line(std::string_view line);
     Status run_ext4_test();
+    Status handle_gui_window_event(gui::WindowEvent event);
+    Status handle_gui_close_request(gui::SurfaceId surface);
+    Status handle_gui_surface_changed(gui::SurfaceId surface);
+    Status force_close_gui_surface(gui::SurfaceId surface);
+    Status note_ignored_gui_close(gui::SurfaceId surface);
+    Status show_force_close_prompt(gui::SurfaceId surface);
+    void clear_gui_close_attempt(gui::SurfaceId surface);
+
+    struct GuiCloseAttempt
+    {
+        gui::SurfaceId surface{0};
+        gui::SurfaceId prompt_surface{0};
+        u8 count{0};
+    };
 
     bool booted_{false};
     bool gui_mouse_left_down_{false};
@@ -271,6 +285,7 @@ class Kernel final
     posix::PosixService posix_;
     user::UserSpaceManager user_space_;
     KernelDebugShell debug_shell_;
+    StaticVector<GuiCloseAttempt, gui::max_gui_surfaces> gui_close_attempts_{};
 };
 
 } // namespace ok

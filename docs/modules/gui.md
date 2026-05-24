@@ -35,15 +35,16 @@ multi-frame startup animation before the shell claims the desktop.
 
 The compositor API is intentionally small and synchronous:
 
-- `create_surface(bounds, title)` allocates one of four fixed backing stores.
+- `create_surface(bounds, title)` allocates one of the fixed backing stores.
 - `set_title`, `move_surface`, `resize_surface`, `set_visible`, and
   `raise_surface` update surface metadata.
 - `minimize_surface`, `maximize_surface`, `restore_surface`, and
   `close_surface` provide Windows-style window state controls. Minimized
   surfaces dock as small bottom task buttons so a mouse click can restore them.
 - `handle_mouse_delta()` tracks the logical pointer and turns button presses into
-  title-bar drag, bottom-right resize, minimize, maximize/restore, close, raise,
-  and hit-test behavior.
+  title-bar drag, bottom-right resize, minimize, maximize/restore, close-request
+  events, raise, and hit-test behavior. Kernel-owned surfaces route close
+  requests through their owning process before any forced close.
 - `fill`, `fill_rect`, `put_pixel`, and `draw_text` update backing pixels.
 - `surface_at(x, y)` returns the top visible surface at a logical desktop
   coordinate.
@@ -97,7 +98,7 @@ open directories. The window itself uses the same drag, resize, minimize,
 maximize, and close handling as other GUI surfaces. Each open runs as an
 `fm:<user>` scheduler process with the credentials active at launch, and
 directory reads are checked against those credentials. A shell-launched file
-manager blocks the `oksh` process until it exits, while Win+E opens the file
+manager blocks the `oksh` process until it exits, while F1 opens the file
 manager as a shortcut without blocking the shell.
 
 The serial console and legacy framebuffer text path are preserved for boot logs,

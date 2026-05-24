@@ -48,6 +48,16 @@ enum class WindowState : u8
     maximized,
 };
 
+enum class WindowEventKind : u8
+{
+    none,
+    close_request,
+    resized,
+    minimized,
+    maximized,
+    restored,
+};
+
 struct SurfaceInfo
 {
     SurfaceId id{0};
@@ -56,6 +66,13 @@ struct SurfaceInfo
     bool visible{false};
     WindowState window_state{WindowState::normal};
     std::string_view title{};
+};
+
+struct WindowEvent
+{
+    WindowEventKind kind{WindowEventKind::none};
+    SurfaceId surface_id{0};
+    Rect bounds{};
 };
 
 class GuiCompositor final
@@ -121,6 +138,7 @@ class GuiCompositor final
     [[nodiscard]] Result<SurfaceInfo> surface_info(SurfaceId id) const;
     [[nodiscard]] Result<SurfaceId> surface_at(i32 x, i32 y) const;
     [[nodiscard]] Result<Rect> desktop_bounds() const;
+    [[nodiscard]] WindowEvent consume_window_event();
     [[nodiscard]] i32 pointer_x() const
     {
         return pointer_x_;
@@ -148,6 +166,7 @@ class GuiCompositor final
     [[nodiscard]] Status validate_bounds(Rect bounds) const;
     void draw_cell(Surface &surface, u32 column, u32 row, char value, u32 foreground, u32 background);
     [[nodiscard]] u32 surface_pixel_color(const Surface &surface, u32 x, u32 y) const;
+    void record_window_event(WindowEventKind kind, SurfaceId id);
     void reset_surfaces();
 
     driver::FramebufferDisplayDriver *display_{nullptr};
@@ -164,6 +183,7 @@ class GuiCompositor final
     bool left_button_down_{false};
     SurfaceId dragging_surface_id_{0};
     SurfaceId resizing_surface_id_{0};
+    WindowEvent pending_window_event_{};
     i32 drag_offset_x_{0};
     i32 drag_offset_y_{0};
 };
@@ -176,6 +196,7 @@ class KernelFileManager final
     Status refresh(GuiCompositor &compositor, fs::VirtualFileSystem &vfs);
     Status close(GuiCompositor &compositor);
     void mark_closed();
+    Status handle_surface_changed(GuiCompositor &compositor, fs::VirtualFileSystem &vfs);
     Status handle_mouse(GuiCompositor &compositor, fs::VirtualFileSystem &vfs, i32 x, i32 y, bool click);
 
     [[nodiscard]] SurfaceId surface_id() const

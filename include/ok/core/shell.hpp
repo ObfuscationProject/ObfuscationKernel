@@ -26,8 +26,12 @@ class KernelDebugShell final
     Status reconcile_gui_windows();
     void notify_process_exit(sched::ProcessId pid);
     Status close_process_window(sched::ProcessId pid);
+    Status close_surface_window(gui::SurfaceId surface);
+    Status handle_surface_changed(gui::SurfaceId surface);
     Status start_foreground_process(sched::ProcessId pid);
+    Status interrupt_foreground_process();
     [[nodiscard]] bool owns_process(sched::ProcessId pid) const;
+    [[nodiscard]] bool owns_surface(gui::SurfaceId surface) const;
     [[nodiscard]] bool gui_ready();
     [[nodiscard]] bool gui_open() const
     {

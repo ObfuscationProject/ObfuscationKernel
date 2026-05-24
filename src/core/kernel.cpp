@@ -313,6 +313,14 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
     {
         return status;
     }
+    const auto window_event = compositor.consume_window_event();
+    if (window_event.kind != gui::WindowEventKind::none)
+    {
+        if (auto status = handle_gui_window_event(window_event); !status.ok())
+        {
+            return status;
+        }
+    }
     if (auto status = debug_shell_.reconcile_gui_windows(); !status.ok())
     {
         return status;
@@ -326,7 +334,7 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
         }
         file_manager_.mark_closed();
     }
-    if (click)
+    if (click && window_event.kind == gui::WindowEventKind::none)
     {
         if (auto status =
                 file_manager_.handle_mouse(compositor, vfs_, compositor.pointer_x(), compositor.pointer_y(), true);
@@ -337,6 +345,192 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
     }
     gui_mouse_left_down_ = left_button;
     return Status::success();
+}
+
+Status Kernel::handle_gui_window_event(gui::WindowEvent event)
+{
+    switch (event.kind)
+    {
+    case gui::WindowEventKind::none:
+        return Status::success();
+    case gui::WindowEventKind::close_request:
+        return handle_gui_close_request(event.surface_id);
+    case gui::WindowEventKind::resized:
+    case gui::WindowEventKind::maximized:
+    case gui::WindowEventKind::restored:
+        return handle_gui_surface_changed(event.surface_id);
+    case gui::WindowEventKind::minimized:
+        clear_gui_close_attempt(event.surface_id);
+        if (debug_shell_.owns_surface(event.surface_id))
+        {
+            return debug_shell_.handle_surface_changed(event.surface_id);
+        }
+        if (file_manager_.surface_id() == event.surface_id)
+        {
+            return file_manager_.handle_surface_changed(gui_module_.compositor(), vfs_);
+        }
+        return Status::success();
+    }
+    return Status::success();
+}
+
+Status Kernel::handle_gui_close_request(gui::SurfaceId surface)
+{
+    auto &compositor = gui_module_.compositor();
+    if (!compositor.surface_info(surface))
+    {
+        clear_gui_close_attempt(surface);
+        return Status::success();
+    }
+
+    Status status = Status::success();
+    if (debug_shell_.owns_surface(surface))
+    {
+        status = debug_shell_.close_surface_window(surface);
+    }
+    else if (file_manager_.surface_id() == surface)
+    {
+        status = close_file_manager();
+    }
+    else
+    {
+        status = compositor.close_surface(surface);
+        if (status.ok())
+        {
+            static_cast<void>(compositor.present());
+        }
+    }
+    if (!status.ok() && status.code() != StatusCode::not_found)
+    {
+        return status;
+    }
+    if (!compositor.surface_info(surface))
+    {
+        clear_gui_close_attempt(surface);
+        return Status::success();
+    }
+    return note_ignored_gui_close(surface);
+}
+
+Status Kernel::handle_gui_surface_changed(gui::SurfaceId surface)
+{
+    clear_gui_close_attempt(surface);
+    if (debug_shell_.owns_surface(surface))
+    {
+        return debug_shell_.handle_surface_changed(surface);
+    }
+    if (file_manager_.surface_id() == surface)
+    {
+        return file_manager_.handle_surface_changed(gui_module_.compositor(), vfs_);
+    }
+    return gui_module_.compositor().present();
+}
+
+Status Kernel::force_close_gui_surface(gui::SurfaceId surface)
+{
+    if (debug_shell_.owns_surface(surface))
+    {
+        return debug_shell_.close_surface_window(surface);
+    }
+    if (file_manager_.surface_id() == surface)
+    {
+        return close_file_manager();
+    }
+    auto &compositor = gui_module_.compositor();
+    if (compositor.surface_info(surface))
+    {
+        if (auto status = compositor.close_surface(surface); !status.ok())
+        {
+            return status;
+        }
+        return compositor.present();
+    }
+    return Status::success();
+}
+
+Status Kernel::note_ignored_gui_close(gui::SurfaceId surface)
+{
+    for (auto &attempt : gui_close_attempts_)
+    {
+        if (attempt.surface == surface)
+        {
+            ++attempt.count;
+            if (attempt.count >= 3)
+            {
+                clear_gui_close_attempt(surface);
+                return force_close_gui_surface(surface);
+            }
+            if (attempt.count == 2 && attempt.prompt_surface == 0)
+            {
+                return show_force_close_prompt(surface);
+            }
+            return Status::success();
+        }
+    }
+    return gui_close_attempts_.push_back(GuiCloseAttempt{.surface = surface, .prompt_surface = 0, .count = 1});
+}
+
+Status Kernel::show_force_close_prompt(gui::SurfaceId surface)
+{
+    auto &compositor = gui_module_.compositor();
+    auto desktop = compositor.desktop_bounds();
+    if (!desktop)
+    {
+        return desktop.status();
+    }
+    const gui::Rect bounds{.x = static_cast<i32>(desktop.value().width > 260 ? (desktop.value().width - 260) / 2 : 8),
+                           .y = static_cast<i32>(desktop.value().height > 70 ? (desktop.value().height - 70) / 2 : 8),
+                           .width = desktop.value().width > 260 ? 260u : desktop.value().width,
+                           .height = desktop.value().height > 70 ? 70u : desktop.value().height};
+    auto prompt = compositor.create_surface(bounds, "force-close");
+    if (!prompt)
+    {
+        return prompt.status();
+    }
+    if (auto status = compositor.fill(prompt.value(), 0xff201018u); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.draw_text(prompt.value(), 2, 2, "close ignored", 0xffffcc66u, 0xff201018u);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status =
+            compositor.draw_text(prompt.value(), 2, 4, "click close again to force", 0xffd8f3ffu, 0xff201018u);
+        !status.ok())
+    {
+        return status;
+    }
+    for (auto &attempt : gui_close_attempts_)
+    {
+        if (attempt.surface == surface)
+        {
+            attempt.prompt_surface = prompt.value();
+            break;
+        }
+    }
+    return compositor.present();
+}
+
+void Kernel::clear_gui_close_attempt(gui::SurfaceId surface)
+{
+    auto &compositor = gui_module_.compositor();
+    for (usize i = 0; i < gui_close_attempts_.size();)
+    {
+        if (gui_close_attempts_[i].surface != surface && gui_close_attempts_[i].prompt_surface != surface)
+        {
+            ++i;
+            continue;
+        }
+        const auto prompt = gui_close_attempts_[i].prompt_surface;
+        if (prompt != 0 && prompt != surface && compositor.state() == gui::GuiState::running &&
+            compositor.surface_info(prompt))
+        {
+            static_cast<void>(compositor.destroy_surface(prompt));
+        }
+        static_cast<void>(gui_close_attempts_.erase_at(i));
+    }
 }
 
 Status Kernel::open_file_manager(std::string_view path, bool foreground_shell_child)

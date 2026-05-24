@@ -570,7 +570,8 @@ Status verify_background_programs_and_posix(Kernel &kernel)
     auto ps = kernel.debug_shell().execute("ps aux");
     if (!ps || !contains_text(ps.value(), "  PID USER    TTY   STAT THR COMMAND") ||
         !contains_text(ps.value(), "idle") || !contains_text(ps.value(), "mod:kernel-gui") ||
-        contains_text(ps.value(), "drv:") || !contains_text(ps.value(), "bg-a") ||
+        !contains_text(ps.value(), "drv:simple-framebuffer") || !contains_text(ps.value(), "drv:ram-block0") ||
+        !contains_text(ps.value(), "bg-a") ||
         !contains_text(ps.value(), "bg-b") || !contains_text(ps.value(), "bg-c"))
     {
         return Status::fault("debug shell ps did not list scheduler processes");
@@ -620,9 +621,13 @@ Status verify_background_programs_and_posix(Kernel &kernel)
     {
         return Status::fault("debug shell did not block while foreground file manager was running");
     }
-    if (auto status = kernel.close_file_manager(); !status.ok())
+    if (auto status = kernel.debug_shell().interrupt_foreground_process(); !status.ok())
     {
         return status;
+    }
+    if (kernel.file_manager().process_id() != 0 || kernel.scheduler().find(user_fm_pid) != nullptr)
+    {
+        return Status::fault("debug shell interrupt did not stop the foreground file manager");
     }
     auto resumed_shell = kernel.debug_shell().execute("echo shell-resumed");
     if (!resumed_shell || resumed_shell.value() != "shell-resumed\n")

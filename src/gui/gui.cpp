@@ -26,6 +26,10 @@ constexpr i32 window_maximize_right_min = 17;
 constexpr i32 window_maximize_right_max = 22;
 constexpr i32 window_minimize_right_min = 26;
 constexpr i32 window_minimize_right_max = 31;
+constexpr u32 file_manager_sidebar_width = 64;
+constexpr u32 file_manager_title_height = gui_glyph_height * 2 + 2;
+constexpr usize file_manager_nav_row = 4;
+constexpr usize file_manager_list_row = 6;
 
 enum class WindowControl : u8
 {
@@ -178,6 +182,42 @@ Status append_decimal(FixedString<96> &out, u64 value)
     return Rect{.x = x, .y = y, .width = clipped_width, .height = height};
 }
 
+Status fill_rect_if_non_empty(GuiCompositor &compositor, SurfaceId surface, Rect rect, u32 rgba)
+{
+    if (rect.width == 0 || rect.height == 0)
+    {
+        return Status::success();
+    }
+    return compositor.fill_rect(surface, rect, rgba);
+}
+
+struct FileManagerLayout
+{
+    u32 width{0};
+    u32 height{0};
+    u32 sidebar_width{0};
+    u32 body_x{2};
+    u32 body_width{0};
+    u32 body_height{0};
+    u32 body_y{file_manager_title_height + 2};
+};
+
+[[nodiscard]] FileManagerLayout file_manager_layout(const SurfaceInfo &info)
+{
+    FileManagerLayout layout{.width = info.bounds.width, .height = info.bounds.height};
+    layout.sidebar_width = info.bounds.width >= 140 ? file_manager_sidebar_width : 0;
+    layout.body_x = layout.sidebar_width == 0 ? 2 : layout.sidebar_width + 2;
+    if (info.bounds.width > layout.body_x + 2)
+    {
+        layout.body_width = info.bounds.width - layout.body_x - 2;
+    }
+    if (info.bounds.height > layout.body_y + 2)
+    {
+        layout.body_height = info.bounds.height - layout.body_y - 2;
+    }
+    return layout;
+}
+
 [[nodiscard]] u32 desktop_pixel_color(u32 width, u32 height, u32 x, u32 y)
 {
     const auto ix = static_cast<i32>(x);
@@ -306,6 +346,23 @@ void GuiCompositor::reset_surfaces()
     next_z_index_ = 1;
     dragging_surface_id_ = 0;
     resizing_surface_id_ = 0;
+    pending_window_event_ = {};
+}
+
+void GuiCompositor::record_window_event(WindowEventKind kind, SurfaceId id)
+{
+    pending_window_event_ = WindowEvent{.kind = kind, .surface_id = id};
+    if (auto info = surface_info(id))
+    {
+        pending_window_event_.bounds = info.value().bounds;
+    }
+}
+
+WindowEvent GuiCompositor::consume_window_event()
+{
+    const auto event = pending_window_event_;
+    pending_window_event_ = {};
+    return event;
 }
 
 Result<usize> GuiCompositor::find_surface_index(SurfaceId id) const
@@ -468,6 +525,7 @@ Status GuiCompositor::resize_surface(SurfaceId id, Rect bounds)
     {
         surface.restore_bounds = bounds;
     }
+    record_window_event(WindowEventKind::resized, id);
     return Status::success();
 }
 
@@ -511,7 +569,12 @@ Status GuiCompositor::minimize_surface(SurfaceId id)
     surface.bounds = minimized_bounds_for_index(index.value(), desktop.value());
     surface.visible = true;
     surface.window_state = WindowState::minimized;
-    return raise_surface(id);
+    if (auto status = raise_surface(id); !status.ok())
+    {
+        return status;
+    }
+    record_window_event(WindowEventKind::minimized, id);
+    return Status::success();
 }
 
 Status GuiCompositor::maximize_surface(SurfaceId id)
@@ -538,7 +601,12 @@ Status GuiCompositor::maximize_surface(SurfaceId id)
     surface.bounds = desktop.value();
     surface.visible = true;
     surface.window_state = WindowState::maximized;
-    return raise_surface(id);
+    if (auto status = raise_surface(id); !status.ok())
+    {
+        return status;
+    }
+    record_window_event(WindowEventKind::maximized, id);
+    return Status::success();
 }
 
 Status GuiCompositor::restore_surface(SurfaceId id)
@@ -559,7 +627,12 @@ Status GuiCompositor::restore_surface(SurfaceId id)
     }
     surface.visible = true;
     surface.window_state = WindowState::normal;
-    return raise_surface(id);
+    if (auto status = raise_surface(id); !status.ok())
+    {
+        return status;
+    }
+    record_window_event(WindowEventKind::restored, id);
+    return Status::success();
 }
 
 Status GuiCompositor::close_surface(SurfaceId id)
@@ -634,10 +707,7 @@ Status GuiCompositor::handle_mouse_delta(i32 delta_x, i32 delta_y, bool left_but
             case WindowControl::close:
                 dragging_surface_id_ = 0;
                 resizing_surface_id_ = 0;
-                if (auto status = close_surface(hit.value()); !status.ok())
-                {
-                    return status;
-                }
+                record_window_event(WindowEventKind::close_request, hit.value());
                 left_button_down_ = left_button;
                 return present();
             case WindowControl::maximize:
@@ -1181,6 +1251,25 @@ Status KernelFileManager::refresh(GuiCompositor &compositor, fs::VirtualFileSyst
     return render(compositor, vfs);
 }
 
+Status KernelFileManager::handle_surface_changed(GuiCompositor &compositor, fs::VirtualFileSystem &vfs)
+{
+    if (surface_id_ == 0)
+    {
+        return Status::success();
+    }
+    auto info = compositor.surface_info(surface_id_);
+    if (!info)
+    {
+        mark_closed();
+        return Status::success();
+    }
+    if (info.value().window_state == WindowState::minimized)
+    {
+        return compositor.present();
+    }
+    return render(compositor, vfs);
+}
+
 Status KernelFileManager::close(GuiCompositor &compositor)
 {
     if (surface_id_ == 0)
@@ -1241,17 +1330,19 @@ Status KernelFileManager::handle_mouse(GuiCompositor &compositor, fs::VirtualFil
     const auto local_x = x - bounds.x;
     const auto local_y = y - bounds.y;
     const auto row = static_cast<usize>(local_y / static_cast<i32>(gui_glyph_height));
-    if (local_x >= 2 && local_x < 66 && row >= 4 && row <= 7)
+    const auto layout = file_manager_layout(info.value());
+    if (layout.sidebar_width != 0 && local_x >= 2 && local_x < static_cast<i32>(layout.sidebar_width + 2) &&
+        row >= file_manager_nav_row && row <= file_manager_nav_row + 3)
     {
         constexpr std::string_view nav_paths[] = {"/", "/dev", "/tmp", "/proc"};
-        const auto next = nav_paths[row - 4];
+        const auto next = nav_paths[row - file_manager_nav_row];
         if (require_directory_access(vfs, next).ok())
         {
             return open(compositor, vfs, next, credentials_, process_id_);
         }
         return Status::success();
     }
-    if (local_x < 68 || row < 6)
+    if (local_x < static_cast<i32>(layout.body_x) || row < file_manager_list_row)
     {
         return Status::success();
     }
@@ -1261,7 +1352,7 @@ Status KernelFileManager::handle_mouse(GuiCompositor &compositor, fs::VirtualFil
     {
         return listing.status();
     }
-    const auto index = row - 6;
+    const auto index = row - file_manager_list_row;
     if (index >= listing.value().count)
     {
         return Status::success();
@@ -1291,27 +1382,61 @@ Status KernelFileManager::render(GuiCompositor &compositor, fs::VirtualFileSyste
     {
         return listing.status();
     }
+    auto info = compositor.surface_info(surface_id_);
+    if (!info)
+    {
+        mark_closed();
+        return Status::success();
+    }
+    const auto layout = file_manager_layout(info.value());
 
     if (auto status = compositor.fill(surface_id_, 0xff111820u); !status.ok())
     {
         return status;
     }
-    if (auto status = compositor.fill_rect(surface_id_, Rect{.x = 2, .y = 2, .width = 296, .height = 24}, title_color);
+    if (auto status = fill_rect_if_non_empty(
+            compositor, surface_id_,
+            Rect{.x = 2,
+                 .y = 2,
+                 .width = layout.width > 4 ? layout.width - 4 : 0,
+                 .height = layout.height > 4 ? file_manager_title_height : 0},
+            title_color);
         !status.ok())
     {
         return status;
     }
-    if (auto status = compositor.fill_rect(surface_id_, Rect{.x = 2, .y = 26, .width = 64, .height = 154}, 0xff172331u);
+    if (layout.sidebar_width != 0)
+    {
+        if (auto status = fill_rect_if_non_empty(
+                compositor, surface_id_,
+                Rect{.x = 2,
+                     .y = static_cast<i32>(layout.body_y),
+                     .width = layout.sidebar_width,
+                     .height = layout.body_height},
+                0xff172331u);
+            !status.ok())
+        {
+            return status;
+        }
+    }
+    if (auto status = fill_rect_if_non_empty(
+            compositor, surface_id_,
+            Rect{.x = static_cast<i32>(layout.body_x),
+                 .y = static_cast<i32>(layout.body_y),
+                 .width = layout.body_width,
+                 .height = layout.body_height},
+            0xff0d141cu);
         !status.ok())
     {
         return status;
     }
-    if (auto status = compositor.fill_rect(surface_id_, Rect{.x = 66, .y = 26, .width = 232, .height = 154}, 0xff0d141cu);
-        !status.ok())
-    {
-        return status;
-    }
-    if (auto status = compositor.fill_rect(surface_id_, Rect{.x = 66, .y = 43, .width = 232, .height = 1}, 0xff44aa88u);
+    if (auto status = fill_rect_if_non_empty(
+            compositor, surface_id_,
+            Rect{.x = static_cast<i32>(layout.body_x),
+                 .y = static_cast<i32>((file_manager_nav_row + 1) * gui_glyph_height),
+                 .width = layout.body_width,
+                 .height = 1},
+            0xff44aa88u);
         !status.ok())
     {
         return status;
@@ -1330,27 +1455,39 @@ Status KernelFileManager::render(GuiCompositor &compositor, fs::VirtualFileSyste
     {
         return status;
     }
-    if (auto status = compositor.draw_text(surface_id_, 2, 4, "ROOT\nDEV\nTMP\nPROC", 0xff9fc6d2u, 0xff172331u);
-        !status.ok())
+    if (layout.sidebar_width != 0)
     {
-        return status;
+        if (auto status = compositor.draw_text(surface_id_, 2, file_manager_nav_row, "ROOT\nDEV\nTMP\nPROC",
+                                               0xff9fc6d2u, 0xff172331u);
+            !status.ok())
+        {
+            return status;
+        }
     }
-    if (auto status = compositor.draw_text(surface_id_, 12, 4, "NAME              TYPE SIZE", 0xffffcc66u, 0xff0d141cu);
+    const auto body_column = (layout.body_x + 2) / gui_glyph_width;
+    if (auto status = compositor.draw_text(surface_id_, body_column, file_manager_nav_row,
+                                           "NAME              TYPE SIZE", 0xffffcc66u, 0xff0d141cu);
         !status.ok())
     {
         return status;
     }
 
-    constexpr usize max_visible_entries = 12;
+    const auto surface_rows = layout.height / gui_glyph_height;
+    const auto max_visible_entries =
+        surface_rows > file_manager_list_row ? surface_rows - file_manager_list_row : static_cast<usize>(0);
     const auto count = listing.value().count < max_visible_entries ? listing.value().count : max_visible_entries;
     for (usize i = 0; i < count; ++i)
     {
         const auto &entry = listing.value().entries[i];
-        const auto row = static_cast<u32>(6 + i);
+        const auto row = static_cast<u32>(file_manager_list_row + i);
         const auto row_color = i == selected_entry_ ? 0xff23485au : ((i % 2) == 0 ? 0xff111c24u : 0xff0d141cu);
-        if (auto status = compositor.fill_rect(surface_id_, Rect{.x = 68, .y = static_cast<i32>(row * gui_glyph_height),
-                                                                  .width = 228, .height = gui_glyph_height},
-                                               row_color);
+        if (auto status = fill_rect_if_non_empty(
+                compositor, surface_id_,
+                Rect{.x = static_cast<i32>(layout.body_x + 2),
+                     .y = static_cast<i32>(row * gui_glyph_height),
+                     .width = layout.body_width > 4 ? layout.body_width - 4 : 0,
+                     .height = gui_glyph_height},
+                row_color);
             !status.ok())
         {
             return status;
@@ -1404,7 +1541,8 @@ Status KernelFileManager::render(GuiCompositor &compositor, fs::VirtualFileSyste
         {
             return status;
         }
-        if (auto status = compositor.draw_text(surface_id_, 12, row, line.view(), 0xffd8f3ffu, row_color); !status.ok())
+        if (auto status = compositor.draw_text(surface_id_, body_column, row, line.view(), 0xffd8f3ffu, row_color);
+            !status.ok())
         {
             return status;
         }

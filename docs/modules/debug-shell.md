@@ -6,7 +6,9 @@ windowed QEMU sessions. It does not provide a separate test executable or hosted
 
 The interactive line editor keeps the prompt outside the editable buffer:
 Backspace/Delete only erase user input, and Ctrl-U clears the current input
-line. Up/Down recall command history in the same style as common Linux shells.
+line. Ctrl-C clears the current line or interrupts the foreground GUI child
+process. Up/Down recall command history in the same style as common Linux
+shells.
 In windowed GUI mode, mouse wheel input scrolls the shell's visual scrollback
 with the same direction convention as Windows: wheel up moves toward older
 scrollback, and wheel down returns toward the prompt.
@@ -58,7 +60,7 @@ Supported commands:
   credentials. While that foreground file manager is open, the debug shell
   process is blocked and does not display a fresh prompt until the file manager
   closes.
-- `Win+E`: open or raise the GUI file manager at the current working directory
+- `F1`: open or raise the GUI file manager at the current working directory
   without blocking the shell.
 
 The shell is intentionally fixed-buffer and freestanding. Windowed QEMU mode

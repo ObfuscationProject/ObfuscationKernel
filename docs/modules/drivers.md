@@ -41,11 +41,11 @@ variants. The current x86 boot image uses polling for the early keyboard path;
 the mode field is already part of `KernelConfig` so interrupt-backed drivers can
 be enabled without changing the generic kernel entry.
 
-Built-in drivers run inside the kernel and are not registered as scheduler
-daemon processes. The scheduler-visible kernel background set is reserved for
-the idle process and non-core modules that explicitly request kernel-process
-execution, which keeps `kill` semantics forceful for ordinary user-visible
-processes without exposing driver helpers as killable daemons.
+After boot creates the scheduler idle process, `DriverManager` registers every
+built-in driver as a background kernel daemon process named
+`drv:<driver-name>`. The driver logic still runs in kernel space, but `ps aux`
+can show the specific driver daemon that owns each scheduler process slot when
+the shell is running as `kernel`.
 
 Block storage uses `BlockDevice`, which reports geometry and performs aligned
 sector reads/writes. `NullBlockDriver`, `RamBlockDriver`, and `VirtioBlockDriver`
@@ -75,7 +75,7 @@ The display stack has three layers:
   minimized, and maximized surface state. It also consumes platform mouse
   events for title-bar dragging, bottom-right resizing, and window control
   buttons. The debug shell renders command history and active input to a
-  maximized `oksh` GUI surface while keeping serial output unchanged, and the
+  resizable `oksh` GUI surface while keeping serial output unchanged, and the
   `fm`/`fileman` command opens a separate GUI file-manager surface for VFS
   directory listings and mouse navigation.
 - `RamFbConsole` is the QEMU-visible platform backend. It initializes `ramfb`
@@ -100,5 +100,5 @@ delivered through QEMU virtio-mmio input devices. The platform code supports the
 legacy virtio-mmio queue registers used by QEMU `virt` here, maps Linux input
 key codes into shell characters, forwards scaled logical mouse-relative events
 into the GUI compositor, and then moves a small framebuffer pointer. UART input
-remains as a fallback for headless serial use. F12 reopens the GUI shell after
-it has been closed, and Win+E opens the GUI file manager.
+remains as a fallback for headless serial use. F12 creates a fresh GUI shell
+window, and F1 opens the GUI file manager.
