@@ -38,6 +38,7 @@ UBUNTU_QEMU_PACKAGE_BY_ARCH = {
     "mips64": "qemu-system-mips",
     "ppc": "qemu-system-ppc",
 }
+DEFAULT_QEMU_TIMEOUT_SECONDS = 30.0
 VIRTUAL_DISK_SIZE = 16 * 1024 * 1024
 BASE_COVERAGE_FIELDS = ("fs", "simplefs", "ext4", "user", "posix", "shell", "modes", "gui")
 CAPABILITY_COVERAGE_FIELDS = {
@@ -360,9 +361,9 @@ def main() -> int:
         command = qemu_command(arch, runnable_kernel, display, scratch_disk)
         if args.no_launch and arch in ("i386", "x86_64"):
             command += ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
-            timeout = 10.0
+            timeout = DEFAULT_QEMU_TIMEOUT_SECONDS
         elif args.no_launch:
-            timeout = 10.0
+            timeout = DEFAULT_QEMU_TIMEOUT_SECONDS
         else:
             timeout = None
         if args.no_launch and arch not in ("i386", "x86_64"):

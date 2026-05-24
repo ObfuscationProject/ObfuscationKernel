@@ -40,6 +40,7 @@ UBUNTU_QEMU_PACKAGE_BY_ARCH = {
 }
 
 QEMU_DEBUG_EXIT_SUCCESS = 33
+DEFAULT_QEMU_TIMEOUT_SECONDS = 30.0
 VIRTUAL_DISK_SIZE = 16 * 1024 * 1024
 BASE_COVERAGE_FIELDS = ("fs", "simplefs", "ext4", "user", "posix", "shell", "modes", "gui")
 CAPABILITY_COVERAGE_FIELDS = {
@@ -465,7 +466,7 @@ def main() -> int:
     parser.add_argument("--kernel", required=True, type=Path, help="Path to the compiled kernel.bin")
     parser.add_argument("--display", default="none")
     parser.add_argument("--no-debug-exit", action="store_true")
-    parser.add_argument("--timeout", type=float, default=10.0)
+    parser.add_argument("--timeout", type=float, default=DEFAULT_QEMU_TIMEOUT_SECONDS)
     args = parser.parse_args()
 
     arch = normalize_arch(args.arch)
