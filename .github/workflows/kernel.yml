@@ -14,34 +14,24 @@ jobs:
         include:
           - arch: i386
             triple: i386-elf
-            qemu: i386
           - arch: x86_64
             triple: x86_64-elf
-            qemu: x86_64
           - arch: aarch64
             triple: aarch64-elf
-            qemu: aarch64
           - arch: arm32
             triple: arm-none-eabi
-            qemu: arm
           - arch: rv64
             triple: riscv64-elf
-            qemu: riscv64
           - arch: rv32
             triple: riscv32-elf
-            qemu: riscv32
           - arch: loongarch64
             triple: loongarch64-elf
-            qemu: loongarch64
           - arch: mips
             triple: mips-elf
-            qemu: mips
           - arch: mips64
             triple: mips64-elf
-            qemu: mips64
           - arch: ppc
             triple: powerpc-eabi
-            qemu: ppc
     steps:
       - uses: actions/checkout@v4
       - uses: xmake-io/github-action-setup-xmake@v1
@@ -51,7 +41,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential bison flex texinfo libgmp-dev libmpfr-dev libmpc-dev zlib1g-dev
-          sudo apt-get install -y qemu-system-${{ matrix.arch }}
+          sudo apt-get install -y qemu-system
       - name: Cache cross toolchain
         uses: actions/cache@v4
         with:
