@@ -6,6 +6,7 @@
 #include "ok/gui/gui.hpp"
 #include "ok/user/user.hpp"
 
+#include <array>
 #include <string_view>
 
 namespace ok
@@ -19,8 +20,11 @@ class KernelDebugShell final
     Status attach(Kernel &kernel);
     Result<std::string_view> execute(std::string_view line);
     Status show_gui();
+    Status show_or_focus_gui();
     Status close_gui();
+    Status close_all_gui();
     Status set_gui_input(std::string_view line);
+    Status handle_key(int key);
     Status scroll_gui_history(i32 rows);
     void mark_gui_closed();
     Status reconcile_gui_windows();
@@ -53,6 +57,10 @@ class KernelDebugShell final
     {
         return gui_surface_id_;
     }
+    [[nodiscard]] std::string_view gui_input_line() const
+    {
+        return gui_input_line_.view();
+    }
 
   private:
     Status append(std::string_view text);
@@ -63,6 +71,7 @@ class KernelDebugShell final
     Status append_session_user();
     Status render_to_gui(std::string_view command_line, std::string_view output);
     Status record_gui_window();
+    Status activate_gui_window(usize index);
     Status remove_gui_window(usize index);
     [[nodiscard]] Result<usize> find_window_by_process(sched::ProcessId pid) const;
     [[nodiscard]] Result<usize> find_window_by_surface(gui::SurfaceId surface) const;
@@ -72,6 +81,9 @@ class KernelDebugShell final
     Status append_gui_history_unsigned(u64 value);
     Status redraw_gui_terminal();
     Status refresh_process_credentials();
+    Status remember_gui_input_line();
+    Status recall_gui_history_previous();
+    Status recall_gui_history_next();
     [[nodiscard]] bool foreground_process_running();
     [[nodiscard]] Result<std::string_view> resolve_path(std::string_view path);
     Status dispatch_command(std::string_view command_line);
@@ -131,8 +143,12 @@ class KernelDebugShell final
     sched::ProcessId process_id_{0};
     sched::ProcessId foreground_process_id_{0};
     StaticVector<GuiWindow, gui::max_gui_surfaces> gui_windows_{};
+    std::array<FixedString<128>, 16> gui_input_history_{};
     usize gui_render_count_{0};
     usize gui_scroll_rows_{0};
+    usize gui_input_history_count_{0};
+    usize gui_input_history_cursor_{0};
+    u8 gui_escape_state_{0};
     bool gui_open_{true};
 };
 

@@ -24,6 +24,8 @@ inline constexpr usize max_gui_surface_pixels = max_gui_surface_width * max_gui_
 inline constexpr u32 gui_glyph_width = driver::BitmapFontRenderer::glyph_width + 1;
 inline constexpr u32 gui_glyph_height = driver::BitmapFontRenderer::glyph_height + 2;
 inline constexpr u32 taskbar_height = gui_glyph_height * 2 + 6;
+inline constexpr u32 taskbar_launcher_width = 60;
+inline constexpr u32 taskbar_icon_size = 18;
 
 using SurfaceId = u16;
 
@@ -59,6 +61,13 @@ enum class WindowEventKind : u8
     restored,
 };
 
+enum class TaskbarApp : u8
+{
+    none,
+    debug_shell,
+    file_manager,
+};
+
 struct SurfaceInfo
 {
     SurfaceId id{0};
@@ -67,6 +76,7 @@ struct SurfaceInfo
     bool visible{false};
     bool focused{false};
     WindowState window_state{WindowState::normal};
+    TaskbarApp app{TaskbarApp::none};
     std::string_view title{};
 };
 
@@ -97,6 +107,7 @@ class GuiCompositor final
     Status destroy_surface(SurfaceId id);
     Status set_visible(SurfaceId id, bool visible);
     Status set_title(SurfaceId id, std::string_view title);
+    Status set_surface_app(SurfaceId id, TaskbarApp app);
     Status move_surface(SurfaceId id, i32 x, i32 y);
     Status resize_surface(SurfaceId id, Rect bounds);
     Status raise_surface(SurfaceId id);
@@ -141,6 +152,7 @@ class GuiCompositor final
     [[nodiscard]] Result<SurfaceId> surface_at(i32 x, i32 y) const;
     [[nodiscard]] Result<Rect> desktop_bounds() const;
     [[nodiscard]] WindowEvent consume_window_event();
+    [[nodiscard]] Result<TaskbarApp> taskbar_launcher_at(i32 x, i32 y) const;
     [[nodiscard]] SurfaceId active_surface() const
     {
         return active_surface_id_;
@@ -164,6 +176,7 @@ class GuiCompositor final
         u32 z_index{0};
         bool visible{true};
         WindowState window_state{WindowState::normal};
+        TaskbarApp app{TaskbarApp::none};
         std::array<u32, max_gui_surface_pixels> pixels{};
     };
 
@@ -173,6 +186,8 @@ class GuiCompositor final
     void draw_cell(Surface &surface, u32 column, u32 row, char value, u32 foreground, u32 background);
     [[nodiscard]] u32 surface_pixel_color(const Surface &surface, u32 x, u32 y) const;
     [[nodiscard]] Rect work_area_bounds() const;
+    [[nodiscard]] bool app_window_exists(TaskbarApp app) const;
+    [[nodiscard]] TaskbarApp active_app() const;
     void focus_top_surface();
     void record_window_event(WindowEventKind kind, SurfaceId id);
     void reset_surfaces();
@@ -207,6 +222,7 @@ class KernelFileManager final
     void mark_closed();
     Status handle_surface_changed(GuiCompositor &compositor, fs::VirtualFileSystem &vfs);
     Status handle_mouse(GuiCompositor &compositor, fs::VirtualFileSystem &vfs, i32 x, i32 y, bool click);
+    Status handle_key(GuiCompositor &compositor, fs::VirtualFileSystem &vfs, int key);
 
     [[nodiscard]] SurfaceId surface_id() const
     {
@@ -239,6 +255,7 @@ class KernelFileManager final
     usize selected_entry_{fs::max_child_nodes};
     sched::ProcessId process_id_{0};
     user::Credentials credentials_{user::kernel_credentials()};
+    u8 key_escape_state_{0};
 };
 
 class GuiModule final : public KernelModule, public KernelService

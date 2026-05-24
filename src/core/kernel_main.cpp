@@ -1,8 +1,7 @@
 #include "ok/arch/arch.hpp"
-#include "ok/core/fixed.hpp"
 #include "ok/core/entry.hpp"
 
-#include <array>
+#include <string_view>
 
 namespace
 {
@@ -25,31 +24,6 @@ void platform_write(std::string_view text)
     }
 }
 
-void serial_write(std::string_view text)
-{
-    for (const auto value : text)
-    {
-        ok_platform_console_write_char(value);
-    }
-}
-
-void display_write(std::string_view text)
-{
-    for (const auto value : text)
-    {
-        ok_platform_display_write_char(value);
-    }
-}
-
-void shell_write(std::string_view text)
-{
-    serial_write(text);
-    if (!ok::ok_debug_shell_gui_ready())
-    {
-        display_write(text);
-    }
-}
-
 [[maybe_unused]] void debug_write(void *, std::string_view text)
 {
     platform_write(text);
@@ -65,201 +39,13 @@ void shell_write(std::string_view text)
 
 [[maybe_unused, noreturn]] void interactive_loop()
 {
-    constexpr std::string_view prompt{"ok> "};
-    constexpr ok::usize history_capacity = 16;
-    ok::FixedString<128> line;
-    std::array<ok::FixedString<128>, history_capacity> history{};
-    ok::usize history_count = 0;
-    ok::usize history_cursor = 0;
-    ok::u8 escape_state = 0;
-    bool shell_active = true;
-
-    auto refresh_gui_input = [&]() {
-        if (shell_active)
-        {
-            static_cast<void>(ok::ok_debug_shell_set_gui_input(line.view()));
-        }
-    };
-    auto erase_line = [&]() {
-        while (!line.empty())
-        {
-            line.pop_back();
-            shell_write("\b");
-        }
-        refresh_gui_input();
-    };
-    auto replace_line = [&](std::string_view value) {
-        erase_line();
-        if (line.assign(value).ok())
-        {
-            shell_write(line.view());
-        }
-        refresh_gui_input();
-    };
-    auto remember_line = [&]() {
-        if (line.empty())
-        {
-            history_cursor = history_count;
-            return;
-        }
-        if (history_count != 0 && history[history_count - 1].view() == line.view())
-        {
-            history_cursor = history_count;
-            return;
-        }
-        if (history_count == history.size())
-        {
-            for (ok::usize i = 1; i < history.size(); ++i)
-            {
-                history[i - 1] = history[i];
-            }
-            --history_count;
-        }
-        static_cast<void>(history[history_count++].assign(line.view()));
-        history_cursor = history_count;
-    };
-    auto history_previous = [&]() {
-        if (history_count == 0 || history_cursor == 0)
-        {
-            return;
-        }
-        --history_cursor;
-        replace_line(history[history_cursor].view());
-    };
-    auto history_next = [&]() {
-        if (history_cursor >= history_count)
-        {
-            return;
-        }
-        ++history_cursor;
-        if (history_cursor == history_count)
-        {
-            erase_line();
-            return;
-        }
-        replace_line(history[history_cursor].view());
-    };
-
     static_cast<void>(ok::ok_debug_shell_show_gui());
-    shell_write("\nOK_INTERACTIVE ready shell=oksh input=platform\n");
-    shell_write(prompt);
-    refresh_gui_input();
     for (;;)
     {
         const int value = ok_platform_input_poll();
         if (value >= 0)
         {
-            if (value == ok::ok_input_open_shell)
-            {
-                shell_active = true;
-                line.clear();
-                escape_state = 0;
-                static_cast<void>(ok::ok_debug_shell_show_gui());
-                shell_write(prompt);
-                refresh_gui_input();
-                continue;
-            }
-            if (value == ok::ok_input_open_file_manager)
-            {
-                static_cast<void>(ok::ok_debug_shell_open_file_manager_shortcut());
-                continue;
-            }
-            if (value == 0x03)
-            {
-                shell_write("^C\n");
-                line.clear();
-                escape_state = 0;
-                static_cast<void>(ok::ok_debug_shell_interrupt());
-                if (ok::ok_debug_shell_gui_open() && !ok::ok_debug_shell_has_foreground_process())
-                {
-                    shell_write(prompt);
-                    refresh_gui_input();
-                }
-                continue;
-            }
-            if (ok::ok_debug_shell_has_foreground_process())
-            {
-                continue;
-            }
-            if (!shell_active || !ok::ok_debug_shell_gui_open())
-            {
-                shell_active = false;
-                continue;
-            }
-            const char ch = static_cast<char>(value);
-            if (escape_state == 1)
-            {
-                escape_state = ch == '[' ? 2 : 0;
-                continue;
-            }
-            if (escape_state == 2)
-            {
-                if (ch == 'A')
-                {
-                    history_previous();
-                }
-                else if (ch == 'B')
-                {
-                    history_next();
-                }
-                escape_state = 0;
-                continue;
-            }
-            if (ch == 0x1b)
-            {
-                escape_state = 1;
-                continue;
-            }
-            if (ch == '\r' || ch == '\n')
-            {
-                shell_write("\n");
-                remember_line();
-                auto out = ok::ok_debug_shell_execute(line.view());
-                if (out && !out.value().empty())
-                {
-                    shell_write(out.value());
-                }
-                line.clear();
-                if (ok::ok_debug_shell_gui_open())
-                {
-                    if (!ok::ok_debug_shell_has_foreground_process())
-                    {
-                        shell_write(prompt);
-                        refresh_gui_input();
-                    }
-                }
-                else
-                {
-                    shell_active = false;
-                }
-            }
-            else if (ch == '\b' || ch == 0x7f)
-            {
-                if (!line.empty())
-                {
-                    line.pop_back();
-                    shell_write("\b");
-                    refresh_gui_input();
-                }
-            }
-            else if (ch == 0x15)
-            {
-                while (!line.empty())
-                {
-                    line.pop_back();
-                    shell_write("\b");
-                }
-                refresh_gui_input();
-            }
-            else
-            {
-                if (line.append(ch).ok())
-                {
-                    shell_write(std::string_view{&ch, 1});
-                    history_cursor = history_count;
-                    refresh_gui_input();
-                }
-            }
+            static_cast<void>(ok::ok_gui_key_event(value));
         }
         asm volatile("" ::: "memory");
     }
@@ -298,7 +84,12 @@ extern "C" [[noreturn]] void kernel_main()
     {
         ok_platform_display_debug_marker();
     }
+    if (status.ok())
+    {
+        static_cast<void>(ok::ok_gui_close_debug_surfaces());
+    }
     ok_platform_debug_exit(status.ok() ? 0x10u : 0x11u);
+#else
     if (status.ok())
     {
         interactive_loop();

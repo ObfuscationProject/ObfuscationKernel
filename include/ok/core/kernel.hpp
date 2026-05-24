@@ -96,8 +96,10 @@ class Kernel final
     Status boot(KernelConfig config);
     Status run_debug_test_suite();
     Status handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button);
+    Status handle_gui_key(int key);
     Status open_file_manager(std::string_view path, bool foreground_shell_child = false);
     Status close_file_manager();
+    Status close_debug_gui();
     Status kill_process(sched::ProcessId pid);
     Status supervise_daemons();
 
@@ -243,6 +245,8 @@ class Kernel final
     Status handle_gui_window_event(gui::WindowEvent event);
     Status handle_gui_close_request(gui::SurfaceId surface);
     Status handle_gui_surface_changed(gui::SurfaceId surface);
+    Status handle_gui_taskbar_launcher(gui::TaskbarApp app);
+    Status focus_file_manager();
     Status force_close_gui_surface(gui::SurfaceId surface);
     Status note_ignored_gui_close(gui::SurfaceId surface);
     Status show_force_close_prompt(gui::SurfaceId surface);

@@ -322,6 +322,47 @@ Status KernelDebugShell::record_gui_window()
     return gui_windows_.push_back(GuiWindow{.surface_id = gui_surface_id_, .process_id = process_id_});
 }
 
+Status KernelDebugShell::activate_gui_window(usize index)
+{
+    if (index >= gui_windows_.size())
+    {
+        return Status::invalid_argument("GUI shell window index out of range");
+    }
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+
+    const auto window = gui_windows_[index];
+    auto &compositor = kernel_->gui().compositor();
+    if (window.surface_id == 0 || window.process_id == 0 || !compositor.surface_info(window.surface_id) ||
+        kernel_->scheduler().find(window.process_id) == nullptr)
+    {
+        return Status::not_found("GUI shell window not found");
+    }
+
+    gui_open_ = true;
+    gui_surface_id_ = window.surface_id;
+    process_id_ = window.process_id;
+    auto info = compositor.surface_info(window.surface_id);
+    if (!info)
+    {
+        return info.status();
+    }
+    if (info.value().window_state == gui::WindowState::minimized)
+    {
+        if (auto status = compositor.restore_surface(window.surface_id); !status.ok())
+        {
+            return status;
+        }
+    }
+    else if (auto status = compositor.raise_surface(window.surface_id); !status.ok())
+    {
+        return status;
+    }
+    return redraw_gui_terminal();
+}
+
 Status KernelDebugShell::remove_gui_window(usize index)
 {
     if (index >= gui_windows_.size())
@@ -501,9 +542,34 @@ Status KernelDebugShell::show_gui()
     process_id_ = 0;
     foreground_process_id_ = 0;
     gui_scroll_rows_ = 0;
+    gui_escape_state_ = 0;
+    gui_input_history_count_ = 0;
+    gui_input_history_cursor_ = 0;
     gui_history_.clear();
     gui_input_line_.clear();
     return redraw_gui_terminal();
+}
+
+Status KernelDebugShell::show_or_focus_gui()
+{
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+    auto &compositor = kernel_->gui().compositor();
+    if (compositor.state() == gui::GuiState::running)
+    {
+        for (usize i = 0; i < gui_windows_.size(); ++i)
+        {
+            const auto window = gui_windows_[i];
+            if (window.surface_id != 0 && compositor.surface_info(window.surface_id) && window.process_id != 0 &&
+                kernel_->scheduler().find(window.process_id) != nullptr)
+            {
+                return activate_gui_window(i);
+            }
+        }
+    }
+    return show_gui();
 }
 
 Status KernelDebugShell::close_gui()
@@ -512,6 +578,11 @@ Status KernelDebugShell::close_gui()
     gui_history_.clear();
     gui_input_line_.clear();
     gui_scroll_rows_ = 0;
+    gui_escape_state_ = 0;
+    gui_input_history_count_ = 0;
+    gui_input_history_cursor_ = 0;
+    gui_input_history_count_ = 0;
+    gui_input_history_cursor_ = 0;
     const auto process = process_id_;
     process_id_ = 0;
     foreground_process_id_ = 0;
@@ -542,6 +613,50 @@ Status KernelDebugShell::close_gui()
     return Status::success();
 }
 
+Status KernelDebugShell::close_all_gui()
+{
+    gui_open_ = false;
+    gui_history_.clear();
+    gui_input_line_.clear();
+    gui_scroll_rows_ = 0;
+    gui_escape_state_ = 0;
+
+    if (kernel_ != nullptr)
+    {
+        auto &compositor = kernel_->gui().compositor();
+        for (usize i = gui_windows_.size(); i != 0; --i)
+        {
+            const auto window = gui_windows_[i - 1];
+            if (window.process_id != 0 && kernel_->scheduler().find(window.process_id) != nullptr)
+            {
+                static_cast<void>(kernel_->scheduler().kill_process(window.process_id));
+            }
+            if (window.surface_id != 0 && compositor.state() == gui::GuiState::running &&
+                compositor.surface_info(window.surface_id))
+            {
+                if (auto status = compositor.destroy_surface(window.surface_id); !status.ok())
+                {
+                    return status;
+                }
+            }
+            static_cast<void>(gui_windows_.erase_at(i - 1));
+        }
+        if (compositor.state() == gui::GuiState::running)
+        {
+            static_cast<void>(compositor.present());
+        }
+    }
+    else
+    {
+        gui_windows_.clear();
+    }
+
+    gui_surface_id_ = 0;
+    process_id_ = 0;
+    foreground_process_id_ = 0;
+    return Status::success();
+}
+
 void KernelDebugShell::mark_gui_closed()
 {
     gui_open_ = false;
@@ -551,6 +666,7 @@ void KernelDebugShell::mark_gui_closed()
     gui_history_.clear();
     gui_input_line_.clear();
     gui_scroll_rows_ = 0;
+    gui_escape_state_ = 0;
 }
 
 Status KernelDebugShell::reconcile_gui_windows()
@@ -596,6 +712,140 @@ Status KernelDebugShell::set_gui_input(std::string_view line)
         return status;
     }
     return redraw_gui_terminal();
+}
+
+Status KernelDebugShell::remember_gui_input_line()
+{
+    if (gui_input_line_.empty())
+    {
+        gui_input_history_cursor_ = gui_input_history_count_;
+        return Status::success();
+    }
+    if (gui_input_history_count_ != 0 &&
+        gui_input_history_[gui_input_history_count_ - 1].view() == gui_input_line_.view())
+    {
+        gui_input_history_cursor_ = gui_input_history_count_;
+        return Status::success();
+    }
+    if (gui_input_history_count_ == gui_input_history_.size())
+    {
+        for (usize i = 1; i < gui_input_history_.size(); ++i)
+        {
+            gui_input_history_[i - 1] = gui_input_history_[i];
+        }
+        --gui_input_history_count_;
+    }
+    if (auto status = gui_input_history_[gui_input_history_count_].assign(gui_input_line_.view()); !status.ok())
+    {
+        return status;
+    }
+    ++gui_input_history_count_;
+    gui_input_history_cursor_ = gui_input_history_count_;
+    return Status::success();
+}
+
+Status KernelDebugShell::recall_gui_history_previous()
+{
+    if (gui_input_history_count_ == 0 || gui_input_history_cursor_ == 0)
+    {
+        return Status::success();
+    }
+    --gui_input_history_cursor_;
+    return set_gui_input(gui_input_history_[gui_input_history_cursor_].view());
+}
+
+Status KernelDebugShell::recall_gui_history_next()
+{
+    if (gui_input_history_cursor_ >= gui_input_history_count_)
+    {
+        return Status::success();
+    }
+    ++gui_input_history_cursor_;
+    if (gui_input_history_cursor_ == gui_input_history_count_)
+    {
+        return set_gui_input("");
+    }
+    return set_gui_input(gui_input_history_[gui_input_history_cursor_].view());
+}
+
+Status KernelDebugShell::handle_key(int key)
+{
+    if (!gui_open_)
+    {
+        return Status::success();
+    }
+    if (key == 0x03)
+    {
+        gui_input_line_.clear();
+        gui_escape_state_ = 0;
+        if (foreground_process_id_ != 0)
+        {
+            return interrupt_foreground_process();
+        }
+        return redraw_gui_terminal();
+    }
+    if (foreground_process_running())
+    {
+        return Status::success();
+    }
+    if (key == 0x1b)
+    {
+        gui_escape_state_ = 1;
+        return Status::success();
+    }
+    if (gui_escape_state_ == 1)
+    {
+        gui_escape_state_ = key == '[' ? 2 : 0;
+        return Status::success();
+    }
+    if (gui_escape_state_ == 2)
+    {
+        gui_escape_state_ = 0;
+        if (key == 'A')
+        {
+            return recall_gui_history_previous();
+        }
+        if (key == 'B')
+        {
+            return recall_gui_history_next();
+        }
+        return Status::success();
+    }
+    if (key == '\r' || key == '\n')
+    {
+        FixedString<128> command;
+        if (auto status = command.assign(gui_input_line_.view()); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = remember_gui_input_line(); !status.ok())
+        {
+            return status;
+        }
+        gui_input_line_.clear();
+        auto result = execute(command.view());
+        return result ? Status::success() : result.status();
+    }
+    if (key == '\b' || key == 0x7f)
+    {
+        gui_input_line_.pop_back();
+        return redraw_gui_terminal();
+    }
+    if (key == 0x15)
+    {
+        gui_input_line_.clear();
+        return redraw_gui_terminal();
+    }
+    if (key >= 0x20 && key <= 0x7e)
+    {
+        if (auto status = gui_input_line_.append(static_cast<char>(key)); !status.ok())
+        {
+            return status;
+        }
+        gui_input_history_cursor_ = gui_input_history_count_;
+        return redraw_gui_terminal();
+    }
+    return Status::success();
 }
 
 Status KernelDebugShell::scroll_gui_history(i32 rows)
@@ -1024,6 +1274,10 @@ Status KernelDebugShell::ensure_gui_surface()
         return surface.status();
     }
     gui_surface_id_ = surface.value();
+    if (auto status = compositor.set_surface_app(gui_surface_id_, gui::TaskbarApp::debug_shell); !status.ok())
+    {
+        return status;
+    }
     return record_gui_window();
 }
 

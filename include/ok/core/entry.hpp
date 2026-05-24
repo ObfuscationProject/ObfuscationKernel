@@ -52,6 +52,8 @@ Status ok_debug_shell_open_file_manager_shortcut();
 bool ok_debug_shell_has_foreground_process();
 Status ok_debug_shell_interrupt();
 Status ok_gui_mouse_event(i32 delta_x, i32 delta_y, bool left_button);
+Status ok_gui_key_event(int key);
+Status ok_gui_close_debug_surfaces();
 bool ok_debug_shell_gui_ready();
 bool ok_debug_shell_gui_open();
 

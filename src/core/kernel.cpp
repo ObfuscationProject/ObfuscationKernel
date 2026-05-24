@@ -1,4 +1,5 @@
 #include "ok/core/kernel.hpp"
+#include "ok/core/entry.hpp"
 
 namespace ok
 {
@@ -398,6 +399,20 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
     }
     if (click && window_event.kind == gui::WindowEventKind::none)
     {
+        auto launcher = compositor.taskbar_launcher_at(compositor.pointer_x(), compositor.pointer_y());
+        if (!launcher)
+        {
+            return launcher.status();
+        }
+        if (launcher.value() != gui::TaskbarApp::none)
+        {
+            if (auto status = handle_gui_taskbar_launcher(launcher.value()); !status.ok())
+            {
+                return status;
+            }
+            gui_mouse_left_down_ = left_button;
+            return Status::success();
+        }
         if (auto status =
                 file_manager_.handle_mouse(compositor, vfs_, compositor.pointer_x(), compositor.pointer_y(), true);
             !status.ok())
@@ -406,6 +421,61 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
         }
     }
     gui_mouse_left_down_ = left_button;
+    return Status::success();
+}
+
+Status Kernel::handle_gui_key(int key)
+{
+    if (!booted_)
+    {
+        return Status::not_initialized("kernel is not booted");
+    }
+    auto &compositor = gui_module_.compositor();
+    if (compositor.state() != gui::GuiState::running)
+    {
+        return Status::not_initialized("GUI compositor is not running");
+    }
+
+    if (key == ok_input_open_shell)
+    {
+        return debug_shell_.show_or_focus_gui();
+    }
+    if (key == ok_input_open_file_manager)
+    {
+        if (file_manager_.surface_id() != 0 && compositor.surface_info(file_manager_.surface_id()))
+        {
+            return focus_file_manager();
+        }
+        return open_file_manager(posix_.getcwd(), false);
+    }
+
+    const auto active = compositor.active_surface();
+    if (active != 0 && debug_shell_.owns_surface(active))
+    {
+        return debug_shell_.handle_key(key);
+    }
+    if (active != 0 && file_manager_.surface_id() == active)
+    {
+        return file_manager_.handle_key(compositor, vfs_, key);
+    }
+    return Status::success();
+}
+
+Status Kernel::handle_gui_taskbar_launcher(gui::TaskbarApp app)
+{
+    switch (app)
+    {
+    case gui::TaskbarApp::debug_shell:
+        return debug_shell_.show_or_focus_gui();
+    case gui::TaskbarApp::file_manager:
+        if (file_manager_.surface_id() != 0 && gui_module_.compositor().surface_info(file_manager_.surface_id()))
+        {
+            return focus_file_manager();
+        }
+        return open_file_manager(posix_.getcwd(), false);
+    case gui::TaskbarApp::none:
+        return Status::success();
+    }
     return Status::success();
 }
 
@@ -663,6 +733,55 @@ Status Kernel::close_file_manager()
     {
         static_cast<void>(scheduler_.kill_process(process));
         debug_shell_.notify_process_exit(process);
+    }
+    return Status::success();
+}
+
+Status Kernel::focus_file_manager()
+{
+    auto &compositor = gui_module_.compositor();
+    const auto surface = file_manager_.surface_id();
+    if (surface == 0)
+    {
+        return Status::not_initialized("file manager surface is not open");
+    }
+    auto info = compositor.surface_info(surface);
+    if (!info)
+    {
+        file_manager_.mark_closed();
+        return Status::success();
+    }
+    if (info.value().window_state == gui::WindowState::minimized)
+    {
+        if (auto status = compositor.restore_surface(surface); !status.ok())
+        {
+            return status;
+        }
+    }
+    else if (auto status = compositor.raise_surface(surface); !status.ok())
+    {
+        return status;
+    }
+    return file_manager_.handle_surface_changed(compositor, vfs_);
+}
+
+Status Kernel::close_debug_gui()
+{
+    if (file_manager_.surface_id() != 0 || file_manager_.process_id() != 0)
+    {
+        if (auto status = close_file_manager(); !status.ok())
+        {
+            return status;
+        }
+    }
+    if (auto status = debug_shell_.close_all_gui(); !status.ok())
+    {
+        return status;
+    }
+    auto &compositor = gui_module_.compositor();
+    if (compositor.state() == gui::GuiState::running)
+    {
+        return compositor.present();
     }
     return Status::success();
 }

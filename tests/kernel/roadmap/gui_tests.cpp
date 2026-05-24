@@ -526,6 +526,111 @@ Status test_gui_mouse_interacts_with_windows(Kernel &kernel)
     return Status::success();
 }
 
+Status test_gui_taskbar_launchers_and_focused_keyboard(Kernel &kernel)
+{
+    if (auto status = kernel.debug_shell().close_all_gui(); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.close_file_manager(); !status.ok())
+    {
+        return status;
+    }
+
+    auto &compositor = kernel.gui().compositor();
+    const auto launcher_y = static_cast<i32>(driver::framebuffer_height - gui::taskbar_height + 3 +
+                                             gui::taskbar_icon_size / 2);
+    const auto shell_x = static_cast<i32>(6 + gui::taskbar_icon_size / 2);
+    auto launcher = compositor.taskbar_launcher_at(shell_x, launcher_y);
+    if (!launcher || launcher.value() != gui::TaskbarApp::debug_shell)
+    {
+        return Status::fault("GUI taskbar shell launcher hit-test failed");
+    }
+    if (auto status = compositor.set_pointer_position(shell_x, launcher_y); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, false); !status.ok())
+    {
+        return status;
+    }
+    const auto shell_surface = kernel.debug_shell().gui_surface_id();
+    auto shell_info = compositor.surface_info(shell_surface);
+    if (shell_surface == 0 || !shell_info || shell_info.value().app != gui::TaskbarApp::debug_shell ||
+        !shell_info.value().focused)
+    {
+        return Status::fault("GUI taskbar shell launcher did not open and focus oksh");
+    }
+    const auto surface_count = compositor.surface_count();
+    if (auto status = kernel.handle_gui_mouse(0, 0, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, false); !status.ok())
+    {
+        return status;
+    }
+    if (compositor.surface_count() != surface_count || kernel.debug_shell().gui_surface_id() != shell_surface)
+    {
+        return Status::fault("GUI taskbar shell launcher created a duplicate instead of focusing");
+    }
+
+    const auto files_x = static_cast<i32>(6 + gui::taskbar_icon_size + 6 + gui::taskbar_icon_size / 2);
+    launcher = compositor.taskbar_launcher_at(files_x, launcher_y);
+    if (!launcher || launcher.value() != gui::TaskbarApp::file_manager)
+    {
+        return Status::fault("GUI taskbar file manager launcher hit-test failed");
+    }
+    if (auto status = compositor.set_pointer_position(files_x, launcher_y); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, false); !status.ok())
+    {
+        return status;
+    }
+    auto file_info = compositor.surface_info(kernel.file_manager().surface_id());
+    if (kernel.file_manager().surface_id() == 0 || !file_info ||
+        file_info.value().app != gui::TaskbarApp::file_manager || !file_info.value().focused)
+    {
+        return Status::fault("GUI taskbar file manager launcher did not open and focus fm");
+    }
+
+    if (auto status = kernel.handle_gui_key('x'); !status.ok())
+    {
+        return status;
+    }
+    if (!kernel.debug_shell().gui_input_line().empty())
+    {
+        return Status::fault("GUI keyboard input leaked into unfocused shell");
+    }
+    if (auto status = compositor.raise_surface(shell_surface); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_key('p'); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_key('s'); !status.ok())
+    {
+        return status;
+    }
+    if (kernel.debug_shell().gui_input_line() != "ps")
+    {
+        return Status::fault("GUI focused shell did not receive keyboard input");
+    }
+    return Status::success();
+}
+
 Status test_gui_module_restarts_after_crash(Kernel &kernel)
 {
     auto &module = kernel.gui();
@@ -936,6 +1041,10 @@ Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
         return status;
     }
     if (auto status = test_gui_mouse_interacts_with_windows(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_gui_taskbar_launchers_and_focused_keyboard(kernel); !status.ok())
     {
         return status;
     }

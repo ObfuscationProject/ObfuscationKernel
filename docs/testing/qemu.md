@@ -87,15 +87,13 @@ without a graphical display:
 xmake qemu-window-test --no-launch
 ```
 
-In graphical window mode the debug kernel does not attach the debug-exit device.
-After `OK_TEST_PASS`, the kernel draws a colored pixel marker in the framebuffer,
-then enters an interactive debug shell. The shell still writes to serial, but it
-also redraws a maximized `oksh` GUI surface through the restartable GUI
-compositor. While that GUI surface is available, interactive shell echo/output
-does not write to the legacy framebuffer; if GUI restart fails, the same shell
-falls back to the non-GUI framebuffer path. The ramfb backend scales the
-kernel's logical GUI framebuffer into the full 960x540 pixel surface. Close the
-QEMU window when you want the script to print its final result.
+In graphical debug-test mode the kernel runs the same validation suite, prints
+`OK_TEST_PASS` to the serial console, closes debug GUI surfaces, and then halts
+or exits through the debug-exit path when one is attached. Non-test graphical
+sessions route keyboard input through the focused GUI surface: `oksh` receives
+text only while focused, and the file manager consumes simple navigation keys.
+The ramfb backend scales the kernel's logical GUI framebuffer into the full
+960x540 pixel surface.
 
 For `aarch64`, `arm32`, `rv64`, and `rv32` window sessions, QEMU attaches
 `virtio-keyboard-device` and `virtio-mouse-device`; the guest consumes their

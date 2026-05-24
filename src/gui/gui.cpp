@@ -19,6 +19,12 @@ constexpr u32 taskbar_color = 0xff101820u;
 constexpr u32 taskbar_edge_color = 0xff44aa88u;
 constexpr u32 taskbar_button_color = 0xff1a3140u;
 constexpr u32 active_taskbar_button_color = 0xff24546au;
+constexpr u32 taskbar_launcher_color = 0xff152536u;
+constexpr u32 taskbar_launcher_open_color = 0xff1e4256u;
+constexpr u32 taskbar_launcher_active_color = 0xff276078u;
+constexpr u32 taskbar_icon_foreground = 0xffd8f3ffu;
+constexpr u32 shell_launcher_x = 6;
+constexpr u32 file_manager_launcher_x = shell_launcher_x + taskbar_icon_size + 6;
 constexpr Rect file_manager_bounds{.x = 28, .y = 34, .width = 300, .height = 182};
 constexpr u32 title_hit_height = gui_glyph_height * 2 + 4;
 constexpr u32 resize_hit_size = 8;
@@ -178,7 +184,7 @@ Status append_decimal(FixedString<96> &out, u64 value)
 {
     constexpr u32 width = 112;
     constexpr u32 height = taskbar_height > 4 ? taskbar_height - 4 : taskbar_height;
-    const auto x = static_cast<i32>(4 + (index % max_gui_surfaces) * (width + 4));
+    const auto x = static_cast<i32>(taskbar_launcher_width + 4 + (index % max_gui_surfaces) * (width + 4));
     const auto y = static_cast<i32>(desktop.height > taskbar_height ? desktop.height - taskbar_height + 2 : 0);
     u32 clipped_width = width;
     if (x >= 0 && static_cast<u32>(x) + clipped_width > desktop.width)
@@ -222,6 +228,70 @@ struct FileManagerLayout
         layout.body_height = info.bounds.height - layout.body_y - 2;
     }
     return layout;
+}
+
+[[nodiscard]] bool point_in_rect(u32 x, u32 y, u32 left, u32 top, u32 width, u32 height)
+{
+    return x >= left && y >= top && x < left + width && y < top + height;
+}
+
+[[nodiscard]] bool shell_icon_pixel(u32 local_x, u32 local_y)
+{
+    if (local_x == 3 || local_x == 14 || local_y == 3 || local_y == 14)
+    {
+        return local_x >= 3 && local_x <= 14 && local_y >= 3 && local_y <= 14;
+    }
+    const bool prompt_top = local_x >= 6 && local_x <= 8 && local_y == 7;
+    const bool prompt_mid = local_x >= 8 && local_x <= 10 && local_y == 8;
+    const bool prompt_bottom = local_x >= 6 && local_x <= 8 && local_y == 9;
+    const bool cursor = local_x >= 10 && local_x <= 13 && local_y == 11;
+    return prompt_top || prompt_mid || prompt_bottom || cursor;
+}
+
+[[nodiscard]] bool file_manager_icon_pixel(u32 local_x, u32 local_y)
+{
+    const bool tab = local_x >= 3 && local_x <= 8 && local_y >= 4 && local_y <= 6;
+    const bool body = local_x >= 3 && local_x <= 15 && local_y >= 7 && local_y <= 14;
+    const bool border = (local_y == 7 && local_x >= 3 && local_x <= 15) ||
+                        (local_y == 14 && local_x >= 3 && local_x <= 15) ||
+                        (local_x == 3 && local_y >= 7 && local_y <= 14) ||
+                        (local_x == 15 && local_y >= 7 && local_y <= 14);
+    const bool handle = local_x >= 6 && local_x <= 12 && local_y == 10;
+    return tab || border || handle || (body && ((local_x + local_y) % 7u == 0));
+}
+
+[[nodiscard]] u32 taskbar_launcher_pixel_color(u32 height, u32 x, u32 y, TaskbarApp app, bool open, bool active)
+{
+    const auto taskbar_top = height > taskbar_height ? height - taskbar_height : 0;
+    if (y < taskbar_top + 3 || y >= taskbar_top + 3 + taskbar_icon_size)
+    {
+        return 0;
+    }
+
+    const u32 left = app == TaskbarApp::debug_shell ? shell_launcher_x : file_manager_launcher_x;
+    if (!point_in_rect(x, y, left, taskbar_top + 3, taskbar_icon_size, taskbar_icon_size))
+    {
+        return 0;
+    }
+
+    const auto local_x = x - left;
+    const auto local_y = y - (taskbar_top + 3);
+    u32 color = active ? taskbar_launcher_active_color : (open ? taskbar_launcher_open_color : taskbar_launcher_color);
+    if (local_x == 0 || local_y == 0 || local_x + 1 == taskbar_icon_size || local_y + 1 == taskbar_icon_size)
+    {
+        color = open ? taskbar_edge_color : 0xff40566au;
+    }
+    const bool icon_pixel = app == TaskbarApp::debug_shell ? shell_icon_pixel(local_x, local_y)
+                                                           : file_manager_icon_pixel(local_x, local_y);
+    if (icon_pixel)
+    {
+        color = app == TaskbarApp::debug_shell ? taskbar_icon_foreground : 0xffffcc66u;
+    }
+    if (open && local_y + 2 >= taskbar_icon_size && local_x >= 5 && local_x <= 12)
+    {
+        color = active ? 0xffffcc66u : taskbar_edge_color;
+    }
+    return color;
 }
 
 [[nodiscard]] u32 desktop_pixel_color(u32 width, u32 height, u32 x, u32 y)
@@ -291,6 +361,28 @@ Status append_child_path(FixedString<96> &out, std::string_view base, std::strin
         }
     }
     return out.append(child);
+}
+
+Status assign_parent_path(FixedString<96> &out, std::string_view path)
+{
+    out.clear();
+    if (path.empty() || path == "/")
+    {
+        return out.assign("/");
+    }
+    usize last_slash = 0;
+    for (usize i = 0; i < path.size(); ++i)
+    {
+        if (path[i] == '/')
+        {
+            last_slash = i;
+        }
+    }
+    if (last_slash == 0)
+    {
+        return out.assign("/");
+    }
+    return out.assign(path.substr(0, last_slash));
 }
 
 } // namespace
@@ -377,6 +469,34 @@ Rect GuiCompositor::work_area_bounds() const
     return Rect{.x = 0, .y = 0, .width = mode.width, .height = height};
 }
 
+bool GuiCompositor::app_window_exists(TaskbarApp app) const
+{
+    if (app == TaskbarApp::none)
+    {
+        return false;
+    }
+    for (const auto &surface : surfaces_)
+    {
+        if (surface.app == app)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+TaskbarApp GuiCompositor::active_app() const
+{
+    for (const auto &surface : surfaces_)
+    {
+        if (surface.id == active_surface_id_)
+        {
+            return surface.app;
+        }
+    }
+    return TaskbarApp::none;
+}
+
 void GuiCompositor::focus_top_surface()
 {
     const Surface *top = nullptr;
@@ -408,6 +528,35 @@ WindowEvent GuiCompositor::consume_window_event()
     const auto event = pending_window_event_;
     pending_window_event_ = {};
     return event;
+}
+
+Result<TaskbarApp> GuiCompositor::taskbar_launcher_at(i32 x, i32 y) const
+{
+    if (auto status = ensure_running(); !status.ok())
+    {
+        return status;
+    }
+    if (x < 0 || y < 0)
+    {
+        return TaskbarApp::none;
+    }
+    const auto mode = display_->mode();
+    const auto taskbar_top = mode.height > taskbar_height ? mode.height - taskbar_height : 0;
+    const auto ux = static_cast<u32>(x);
+    const auto uy = static_cast<u32>(y);
+    if (uy < taskbar_top + 3 || uy >= taskbar_top + 3 + taskbar_icon_size)
+    {
+        return TaskbarApp::none;
+    }
+    if (point_in_rect(ux, uy, shell_launcher_x, taskbar_top + 3, taskbar_icon_size, taskbar_icon_size))
+    {
+        return TaskbarApp::debug_shell;
+    }
+    if (point_in_rect(ux, uy, file_manager_launcher_x, taskbar_top + 3, taskbar_icon_size, taskbar_icon_size))
+    {
+        return TaskbarApp::file_manager;
+    }
+    return TaskbarApp::none;
 }
 
 Result<usize> GuiCompositor::find_surface_index(SurfaceId id) const
@@ -538,6 +687,21 @@ Status GuiCompositor::set_title(SurfaceId id, std::string_view title)
         return index.status();
     }
     return surfaces_[index.value()].title.assign(title);
+}
+
+Status GuiCompositor::set_surface_app(SurfaceId id, TaskbarApp app)
+{
+    if (auto status = ensure_running(); !status.ok())
+    {
+        return status;
+    }
+    auto index = find_surface_index(id);
+    if (!index)
+    {
+        return index.status();
+    }
+    surfaces_[index.value()].app = app;
+    return Status::success();
 }
 
 Status GuiCompositor::move_surface(SurfaceId id, i32 x, i32 y)
@@ -1112,11 +1276,28 @@ Status GuiCompositor::present()
 
     const auto mode = display_->mode();
     const auto taskbar_top = mode.height > taskbar_height ? mode.height - taskbar_height : 0;
+    const bool shell_open = app_window_exists(TaskbarApp::debug_shell);
+    const bool files_open = app_window_exists(TaskbarApp::file_manager);
+    const auto focused_app = active_app();
     for (u32 y = 0; y < mode.height; ++y)
     {
         for (u32 x = 0; x < mode.width; ++x)
         {
             auto color = desktop_pixel_color(mode.width, mode.height, x, y);
+            if (const auto shell_color = taskbar_launcher_pixel_color(mode.height, x, y, TaskbarApp::debug_shell,
+                                                                       shell_open,
+                                                                       focused_app == TaskbarApp::debug_shell);
+                shell_color != 0)
+            {
+                color = shell_color;
+            }
+            if (const auto files_color = taskbar_launcher_pixel_color(mode.height, x, y, TaskbarApp::file_manager,
+                                                                       files_open,
+                                                                       focused_app == TaskbarApp::file_manager);
+                files_color != 0)
+            {
+                color = files_color;
+            }
             const Surface *top = nullptr;
             u32 surface_x = 0;
             u32 surface_y = 0;
@@ -1269,6 +1450,7 @@ Result<SurfaceInfo> GuiCompositor::surface_info(SurfaceId id) const
         .visible = surface.visible,
         .focused = surface.id == active_surface_id_,
         .window_state = surface.window_state,
+        .app = surface.app,
         .title = surface.title.view(),
     };
 }
@@ -1351,6 +1533,10 @@ Status KernelFileManager::open(GuiCompositor &compositor, fs::VirtualFileSystem 
             return surface.status();
         }
         surface_id_ = surface.value();
+        if (auto status = compositor.set_surface_app(surface_id_, TaskbarApp::file_manager); !status.ok())
+        {
+            return status;
+        }
     }
     if (auto status = compositor.raise_surface(surface_id_); !status.ok())
     {
@@ -1412,6 +1598,7 @@ void KernelFileManager::mark_closed()
     surface_id_ = 0;
     process_id_ = 0;
     selected_entry_ = fs::max_child_nodes;
+    key_escape_state_ = 0;
 }
 
 Status KernelFileManager::require_directory_access(fs::VirtualFileSystem &vfs, std::string_view path) const
@@ -1490,6 +1677,91 @@ Status KernelFileManager::handle_mouse(GuiCompositor &compositor, fs::VirtualFil
         return open(compositor, vfs, child_path.view(), credentials_, process_id_);
     }
     return render(compositor, vfs);
+}
+
+Status KernelFileManager::handle_key(GuiCompositor &compositor, fs::VirtualFileSystem &vfs, int key)
+{
+    if (surface_id_ == 0)
+    {
+        return Status::success();
+    }
+    if (key == 0x1b)
+    {
+        key_escape_state_ = 1;
+        return Status::success();
+    }
+    if (key_escape_state_ == 1)
+    {
+        key_escape_state_ = key == '[' ? 2 : 0;
+        return Status::success();
+    }
+
+    auto listing = vfs.list(path_.view());
+    if (!listing)
+    {
+        return listing.status();
+    }
+    const auto count = listing.value().count;
+    bool changed = false;
+    if (key_escape_state_ == 2)
+    {
+        key_escape_state_ = 0;
+        if (key == 'A' && count != 0)
+        {
+            if (selected_entry_ == fs::max_child_nodes || selected_entry_ == 0)
+            {
+                selected_entry_ = count - 1;
+            }
+            else
+            {
+                --selected_entry_;
+            }
+            changed = true;
+        }
+        else if (key == 'B' && count != 0)
+        {
+            if (selected_entry_ == fs::max_child_nodes || selected_entry_ + 1 >= count)
+            {
+                selected_entry_ = 0;
+            }
+            else
+            {
+                ++selected_entry_;
+            }
+            changed = true;
+        }
+    }
+    else if ((key == '\r' || key == '\n') && selected_entry_ < count)
+    {
+        const auto &entry = listing.value().entries[selected_entry_];
+        if (entry.metadata.type == fs::NodeType::directory)
+        {
+            FixedString<96> child_path;
+            if (auto status = append_child_path(child_path, path_.view(), entry.name.view()); !status.ok())
+            {
+                return status;
+            }
+            return open(compositor, vfs, child_path.view(), credentials_, process_id_);
+        }
+    }
+    else if (key == '\b' || key == 0x7f)
+    {
+        FixedString<96> parent;
+        if (auto status = assign_parent_path(parent, path_.view()); !status.ok())
+        {
+            return status;
+        }
+        if (parent.view() != path_.view())
+        {
+            return open(compositor, vfs, parent.view(), credentials_, process_id_);
+        }
+    }
+    else
+    {
+        key_escape_state_ = 0;
+    }
+
+    return changed ? render(compositor, vfs) : Status::success();
 }
 
 Status KernelFileManager::render(GuiCompositor &compositor, fs::VirtualFileSystem &vfs)

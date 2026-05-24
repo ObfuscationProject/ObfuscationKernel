@@ -64,9 +64,10 @@ Supported commands:
 - `F1`: open or raise the GUI file manager at the current working directory
   without blocking the shell.
 
-The shell is intentionally fixed-buffer and freestanding. Windowed QEMU mode
-routes keyboard input into the shell after `OK_TEST_PASS`, mirrors output to
-serial, and redraws a maximized `oksh` GUI surface through `GuiCompositor`. The
+The shell is intentionally fixed-buffer and freestanding. Windowed input is
+dispatched through GUI focus: keyboard events reach `oksh` only while a shell
+surface is focused. Debug test builds close their shell/file-manager GUI
+surfaces after `OK_TEST_PASS` instead of dropping into an interactive shell. The
 GUI title strip and terminal body are rendered with separate colors. Showing the
 GUI shell or running `clear` resets scrollback while immediately redrawing a
 fresh `ok> ` prompt. The legacy display-driver text path is still used for boot
