@@ -39,9 +39,12 @@ Supported commands:
   current block device as EXT4.
 - `net status|udp|recv|listen|tcp`: inspect and exercise the IPv4/UDP/TCP
   loopback stack used by early network-debug work.
+- `fm [path]` / `fileman [path]`: open the GUI kernel file manager for a VFS
+  directory.
 
 The shell is intentionally fixed-buffer and freestanding. Windowed QEMU mode
 routes keyboard input into the shell after `OK_TEST_PASS`, mirrors output to
 serial, and redraws a maximized `oksh` GUI surface through `GuiCompositor`. The
-legacy display-driver text path is still used for boot logs, `OK_DISPLAY_TEXT`
+GUI title strip and terminal body are rendered with separate colors. The legacy
+display-driver text path is still used for boot logs, `OK_DISPLAY_TEXT`
 diagnostics, and fallback when the GUI cannot be restarted.

@@ -2,6 +2,21 @@
 
 namespace ok
 {
+namespace
+{
+
+Status assign_module_process_name(FixedString<sched::max_process_name> &out, std::string_view module_name)
+{
+    if (auto status = out.assign(kernel_module_process_prefix); !status.ok())
+    {
+        return status;
+    }
+    constexpr usize max_chars = sched::max_process_name - 1;
+    const auto room = out.size() < max_chars ? max_chars - out.size() : 0;
+    return out.append(module_name.substr(0, room));
+}
+
+} // namespace
 
 Status ServiceRegistry::register_service(std::string_view service_id, void *service)
 {
@@ -59,28 +74,89 @@ Status ModuleManager::bind_kernel_process(sched::Scheduler &scheduler, arch::Arc
     kernel_process_stack_ = stack;
     kernel_process_pid_ = 0;
     kernel_process_modules_ = 0;
+    module_processes_.clear();
     return Status::success();
 }
 
 Result<sched::ProcessId> ModuleManager::ensure_kernel_process()
 {
-    if (kernel_process_pid_ != 0 && kernel_process_scheduler_ != nullptr &&
-        kernel_process_scheduler_->find(kernel_process_pid_) != nullptr)
+    for (const auto &record : module_processes_)
     {
-        return kernel_process_pid_;
+        if (kernel_process_scheduler_ != nullptr && kernel_process_scheduler_->find(record.pid) != nullptr)
+        {
+            return record.pid;
+        }
     }
+    return Status::not_initialized("kernel module process requires a module manifest");
+}
+
+Result<sched::ProcessId> ModuleManager::ensure_kernel_process(KernelModule &module)
+{
+    const auto manifest = module.manifest();
+    ModuleProcessRecord *existing_record = nullptr;
+    for (auto &record : module_processes_)
+    {
+        if (record.module_name.view() != manifest.name)
+        {
+            continue;
+        }
+        existing_record = &record;
+        if (kernel_process_scheduler_ != nullptr && kernel_process_scheduler_->find(record.pid) != nullptr)
+        {
+            kernel_process_pid_ = record.pid;
+            return record.pid;
+        }
+        break;
+    }
+
     if (kernel_process_scheduler_ == nullptr || kernel_process_arch_ == nullptr)
     {
         return Status::not_initialized("kernel module process is not bound to a scheduler");
     }
-    const auto context = kernel_process_arch_->make_kernel_context(kernel_process_entry_, kernel_process_stack_);
-    auto process = kernel_process_scheduler_->create_background_process(kernel_module_process_name, context);
+
+    FixedString<sched::max_process_name> process_name;
+    if (auto status = assign_module_process_name(process_name, manifest.name); !status.ok())
+    {
+        return status;
+    }
+    ModuleProcessRecord new_record{};
+    if (existing_record == nullptr)
+    {
+        if (module_processes_.full())
+        {
+            return Status::overflow("kernel module process table is full");
+        }
+        if (auto status = new_record.module_name.assign(manifest.name); !status.ok())
+        {
+            return status;
+        }
+    }
+    constexpr uptr module_entry_stride = 0x100;
+    constexpr uptr module_stack_stride = 0x1000;
+    const auto slot = module_processes_.size();
+    const auto context = kernel_process_arch_->make_kernel_context(
+        kernel_process_entry_ + static_cast<uptr>(slot) * module_entry_stride,
+        kernel_process_stack_ + static_cast<uptr>(slot) * module_stack_stride);
+    auto process = kernel_process_scheduler_->create_background_process(process_name.view(), context);
     if (!process)
     {
         return process.status();
     }
+
+    if (existing_record != nullptr)
+    {
+        existing_record->pid = process.value();
+        kernel_process_pid_ = existing_record->pid;
+        return existing_record->pid;
+    }
+
+    new_record.pid = process.value();
+    if (auto status = module_processes_.push_back(new_record); !status.ok())
+    {
+        return status;
+    }
     kernel_process_pid_ = process.value();
-    return kernel_process_pid_;
+    return process.value();
 }
 
 KernelModule *ModuleManager::find(std::string_view name) const
@@ -296,7 +372,7 @@ Status ModuleManager::start_module(KernelModule &module)
     const bool already_recorded = started_order_contains(module);
     if (manifest.execution == ModuleExecution::kernel_process)
     {
-        auto process = ensure_kernel_process();
+        auto process = ensure_kernel_process(module);
         if (!process)
         {
             module.fail(process.status().message());

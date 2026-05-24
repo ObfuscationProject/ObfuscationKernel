@@ -129,10 +129,13 @@ constexpr gui::Rect shell_gui_bounds{
     .height = static_cast<u32>(driver::framebuffer_height),
 };
 constexpr u32 shell_gui_background = 0xff061018u;
+constexpr u32 shell_gui_title_background = 0xff12313du;
+constexpr u32 shell_gui_title_border = 0xff44aa88u;
 constexpr u32 shell_gui_foreground = 0xffd8f3ffu;
 constexpr u32 shell_gui_prompt = 0xfff4d35eu;
 constexpr usize shell_gui_total_rows = shell_gui_bounds.height / gui::gui_glyph_height;
-constexpr usize shell_gui_rows = shell_gui_total_rows - 3;
+constexpr usize shell_gui_content_row = 3;
+constexpr usize shell_gui_rows = shell_gui_total_rows - shell_gui_content_row - 1;
 constexpr usize shell_gui_history_keep = 1800;
 constexpr usize shell_gui_text_columns = (shell_gui_bounds.width / gui::gui_glyph_width) - 1;
 constexpr usize shell_gui_scroll_rows_per_notch = 3;
@@ -485,6 +488,10 @@ Status KernelDebugShell::dispatch_command(std::string_view command_line)
     {
         return command_net(args);
     }
+    else if (command == "fm" || command == "fileman")
+    {
+        return command_file_manager(args);
+    }
     else
     {
         return Status::not_found("command not found");
@@ -651,6 +658,26 @@ Status KernelDebugShell::redraw_gui_terminal()
     {
         return status;
     }
+    if (auto status = compositor.fill_rect(gui_surface_id_,
+                                           gui::Rect{.x = 1,
+                                                     .y = 1,
+                                                     .width = shell_gui_bounds.width - 2,
+                                                     .height = gui::gui_glyph_height * 2 + 2},
+                                           shell_gui_title_background);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.fill_rect(gui_surface_id_,
+                                           gui::Rect{.x = 1,
+                                                     .y = static_cast<i32>(gui::gui_glyph_height * 2 + 3),
+                                                     .width = shell_gui_bounds.width - 2,
+                                                     .height = 1},
+                                           shell_gui_title_border);
+        !status.ok())
+    {
+        return status;
+    }
     FixedString<2304> terminal;
     if (auto status = terminal.append(gui_history_.view()); !status.ok())
     {
@@ -676,12 +703,14 @@ Status KernelDebugShell::redraw_gui_terminal()
                                : 0;
     const auto visible_start = visual_line_offset(terminal.view(), shell_gui_text_columns, first_row);
     const auto visible = terminal.view().substr(visible_start);
-    if (auto status = compositor.draw_text(gui_surface_id_, 1, 2, visible, shell_gui_foreground, shell_gui_background);
+    if (auto status = compositor.draw_text(gui_surface_id_, 1, shell_gui_content_row, visible, shell_gui_foreground,
+                                           shell_gui_background);
         !status.ok())
     {
         return status;
     }
-    if (auto status = compositor.draw_text(gui_surface_id_, 1, 1, "oksh", shell_gui_prompt, shell_gui_background);
+    if (auto status =
+            compositor.draw_text(gui_surface_id_, 1, 1, "oksh", shell_gui_prompt, shell_gui_title_background);
         !status.ok())
     {
         return status;

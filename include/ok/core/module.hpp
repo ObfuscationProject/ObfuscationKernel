@@ -15,7 +15,7 @@ namespace ok
 inline constexpr usize max_kernel_modules = 32;
 inline constexpr usize max_kernel_services = 64;
 inline constexpr usize max_module_name = 48;
-inline constexpr std::string_view kernel_module_process_name{"kmodd"};
+inline constexpr std::string_view kernel_module_process_prefix{"mod:"};
 
 struct ModuleId
 {
@@ -203,6 +203,12 @@ class ModuleManager final
     }
 
   private:
+    struct ModuleProcessRecord
+    {
+        FixedString<max_module_name> module_name{};
+        sched::ProcessId pid{0};
+    };
+
     enum class VisitState : u8
     {
         unvisited,
@@ -220,10 +226,12 @@ class ModuleManager final
     [[nodiscard]] bool started_order_contains(const KernelModule &module) const;
     Status record_started(KernelModule &module);
     Status start_module(KernelModule &module);
+    Result<sched::ProcessId> ensure_kernel_process(KernelModule &module);
 
     StaticVector<KernelModule *, max_kernel_modules> modules_;
     StaticVector<usize, max_kernel_modules> sorted_order_;
     StaticVector<KernelModule *, max_kernel_modules> started_order_;
+    StaticVector<ModuleProcessRecord, max_kernel_modules> module_processes_;
     std::array<VisitState, max_kernel_modules> visit_state_{};
     ServiceRegistry services_;
     sched::Scheduler *kernel_process_scheduler_{nullptr};

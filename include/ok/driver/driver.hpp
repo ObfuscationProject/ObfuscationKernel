@@ -1,8 +1,10 @@
 #pragma once
 
+#include "ok/arch/arch.hpp"
 #include "ok/core/concepts.hpp"
 #include "ok/core/fixed.hpp"
 #include "ok/core/types.hpp"
+#include "ok/sched/scheduler.hpp"
 
 #include <array>
 #include <concepts>
@@ -69,14 +71,27 @@ class DriverManager final
     Status add(Driver &driver);
 
     Status start_all();
+    Status bind_kernel_processes(sched::Scheduler &scheduler, arch::ArchOperations &arch, uptr entry_base,
+                                 uptr stack_base);
     [[nodiscard]] Driver *find(Class driver_class);
     [[nodiscard]] usize driver_count() const
     {
         return drivers_.size();
     }
+    [[nodiscard]] usize kernel_process_count() const
+    {
+        return driver_processes_.size();
+    }
 
   private:
+    struct DriverProcessRecord
+    {
+        Driver *driver{nullptr};
+        sched::ProcessId pid{0};
+    };
+
     StaticVector<Driver *, max_drivers> drivers_;
+    StaticVector<DriverProcessRecord, max_drivers> driver_processes_;
 };
 
 class ConsoleDriver final : public Driver

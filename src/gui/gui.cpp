@@ -11,7 +11,9 @@ namespace
 constexpr u32 desktop_background_color = 0xff061018u;
 constexpr u32 default_surface_color = 0xff18343fu;
 constexpr u32 frame_color = 0xffd8f3ffu;
-constexpr u32 title_color = 0xff44aa88u;
+constexpr u32 title_frame_color = 0xff44aa88u;
+constexpr u32 title_color = 0xff12313du;
+constexpr Rect file_manager_bounds{.x = 28, .y = 34, .width = 300, .height = 182};
 
 [[nodiscard]] i32 min_i32(i32 left, i32 right)
 {
@@ -21,6 +23,67 @@ constexpr u32 title_color = 0xff44aa88u;
 [[nodiscard]] i32 max_i32(i32 left, i32 right)
 {
     return left > right ? left : right;
+}
+
+Status append_decimal(FixedString<96> &out, u64 value)
+{
+    constexpr u64 powers[] = {
+        10'000'000'000'000'000'000ull,
+        1'000'000'000'000'000'000ull,
+        100'000'000'000'000'000ull,
+        10'000'000'000'000'000ull,
+        1'000'000'000'000'000ull,
+        100'000'000'000'000ull,
+        10'000'000'000'000ull,
+        1'000'000'000'000ull,
+        100'000'000'000ull,
+        10'000'000'000ull,
+        1'000'000'000ull,
+        100'000'000ull,
+        10'000'000ull,
+        1'000'000ull,
+        100'000ull,
+        10'000ull,
+        1'000ull,
+        100ull,
+        10ull,
+        1ull,
+    };
+    bool started = false;
+    for (const auto power : powers)
+    {
+        u8 digit = 0;
+        while (value >= power)
+        {
+            value -= power;
+            ++digit;
+        }
+        if (digit != 0 || started || power == 1)
+        {
+            if (auto status = out.append(static_cast<char>('0' + digit)); !status.ok())
+            {
+                return status;
+            }
+            started = true;
+        }
+    }
+    return Status::success();
+}
+
+[[nodiscard]] std::string_view node_type_label(fs::NodeType type)
+{
+    switch (type)
+    {
+    case fs::NodeType::directory:
+        return "dir";
+    case fs::NodeType::regular:
+        return "file";
+    case fs::NodeType::device:
+        return "dev";
+    case fs::NodeType::symlink:
+        return "link";
+    }
+    return "node";
 }
 
 } // namespace
@@ -442,7 +505,7 @@ Status GuiCompositor::draw_surface(const Surface &surface)
             }
             else if (y == 1)
             {
-                color = title_color;
+                color = title_frame_color;
             }
             if (auto status = display_->put_pixel(static_cast<u32>(target_x), static_cast<u32>(target_y), color);
                 !status.ok())
@@ -512,6 +575,97 @@ Status GuiCompositor::present()
     return Status::success();
 }
 
+Status GuiCompositor::play_startup_animation()
+{
+    auto desktop = desktop_bounds();
+    if (!desktop)
+    {
+        return desktop.status();
+    }
+
+    auto surface = create_surface(desktop.value(), "okernel");
+    if (!surface)
+    {
+        return surface.status();
+    }
+    const auto id = surface.value();
+
+    constexpr u32 frames = 12;
+    for (u32 frame = 0; frame < frames; ++frame)
+    {
+        if (auto status = fill(id, 0xff071018u); !status.ok())
+        {
+            static_cast<void>(destroy_surface(id));
+            return status;
+        }
+
+        const auto pulse = static_cast<i32>((frame * 17u) % 96u);
+        if (auto status =
+                fill_rect(id, Rect{.x = 0, .y = 0, .width = desktop.value().width, .height = desktop.value().height},
+                          0xff071018u);
+            !status.ok())
+        {
+            static_cast<void>(destroy_surface(id));
+            return status;
+        }
+        if (auto status = fill_rect(id, Rect{.x = 28 + pulse, .y = 46, .width = 116, .height = 9}, 0xff44aa88u);
+            !status.ok())
+        {
+            static_cast<void>(destroy_surface(id));
+            return status;
+        }
+        if (auto status = fill_rect(id, Rect{.x = 328 - pulse, .y = 206, .width = 96, .height = 7}, 0xffffcc66u);
+            !status.ok())
+        {
+            static_cast<void>(destroy_surface(id));
+            return status;
+        }
+        if (auto status = fill_rect(id, Rect{.x = 92, .y = 82, .width = 296, .height = 86}, title_color); !status.ok())
+        {
+            static_cast<void>(destroy_surface(id));
+            return status;
+        }
+        if (auto status = fill_rect(id, Rect{.x = 102, .y = 92, .width = 276, .height = 3}, 0xffd8f3ffu);
+            !status.ok())
+        {
+            static_cast<void>(destroy_surface(id));
+            return status;
+        }
+        if (auto status = fill_rect(id, Rect{.x = 102, .y = 151, .width = 276, .height = 3}, 0xff44aa88u);
+            !status.ok())
+        {
+            static_cast<void>(destroy_surface(id));
+            return status;
+        }
+
+        const auto progress_width = 28u + frame * 20u;
+        if (auto status = fill_rect(id, Rect{.x = 116, .y = 137, .width = progress_width, .height = 6}, 0xffffcc66u);
+            !status.ok())
+        {
+            static_cast<void>(destroy_surface(id));
+            return status;
+        }
+        if (auto status = draw_text(id, 19, 11, "OBFUSCATION KERNEL", 0xffd8f3ffu, title_color); !status.ok())
+        {
+            static_cast<void>(destroy_surface(id));
+            return status;
+        }
+        if (auto status = draw_text(id, 23, 13, "GUI ONLINE", 0xffffcc66u, title_color); !status.ok())
+        {
+            static_cast<void>(destroy_surface(id));
+            return status;
+        }
+        if (auto status = present(); !status.ok())
+        {
+            static_cast<void>(destroy_surface(id));
+            return status;
+        }
+        ++startup_animation_frames_;
+    }
+
+    return destroy_surface(id);
+}
+
 Result<SurfaceInfo> GuiCompositor::surface_info(SurfaceId id) const
 {
     auto index = find_surface_index(id);
@@ -568,6 +722,195 @@ Result<Rect> GuiCompositor::desktop_bounds() const
     }
     const auto mode = display_->mode();
     return Rect{.x = 0, .y = 0, .width = mode.width, .height = mode.height};
+}
+
+Status KernelFileManager::open(GuiCompositor &compositor, fs::VirtualFileSystem &vfs, std::string_view path)
+{
+    if (path.empty())
+    {
+        path = "/";
+    }
+    if (auto status = path_.assign(path); !status.ok())
+    {
+        return status;
+    }
+
+    if (surface_id_ != 0 && !compositor.surface_info(surface_id_))
+    {
+        surface_id_ = 0;
+    }
+    if (surface_id_ == 0)
+    {
+        auto surface = compositor.create_surface(file_manager_bounds, "kernel-files");
+        if (!surface)
+        {
+            return surface.status();
+        }
+        surface_id_ = surface.value();
+    }
+    if (auto status = compositor.raise_surface(surface_id_); !status.ok())
+    {
+        return status;
+    }
+    return render(compositor, vfs);
+}
+
+Status KernelFileManager::refresh(GuiCompositor &compositor, fs::VirtualFileSystem &vfs)
+{
+    if (surface_id_ == 0)
+    {
+        return Status::not_initialized("file manager surface is not open");
+    }
+    return render(compositor, vfs);
+}
+
+Status KernelFileManager::close(GuiCompositor &compositor)
+{
+    if (surface_id_ == 0)
+    {
+        return Status::success();
+    }
+    const auto id = surface_id_;
+    surface_id_ = 0;
+    if (auto status = compositor.destroy_surface(id); !status.ok())
+    {
+        return status;
+    }
+    return compositor.present();
+}
+
+Status KernelFileManager::render(GuiCompositor &compositor, fs::VirtualFileSystem &vfs)
+{
+    auto listing = vfs.list(path_.view());
+    if (!listing)
+    {
+        return listing.status();
+    }
+
+    if (auto status = compositor.fill(surface_id_, 0xff111820u); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.fill_rect(surface_id_, Rect{.x = 2, .y = 2, .width = 296, .height = 24}, title_color);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.fill_rect(surface_id_, Rect{.x = 2, .y = 26, .width = 64, .height = 154}, 0xff172331u);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.fill_rect(surface_id_, Rect{.x = 66, .y = 26, .width = 232, .height = 154}, 0xff0d141cu);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.fill_rect(surface_id_, Rect{.x = 66, .y = 43, .width = 232, .height = 1}, 0xff44aa88u);
+        !status.ok())
+    {
+        return status;
+    }
+
+    FixedString<96> title;
+    if (auto status = title.assign("FILES "); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = title.append(path_.view()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.draw_text(surface_id_, 2, 1, title.view(), 0xffd8f3ffu, title_color); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.draw_text(surface_id_, 2, 4, "ROOT\nDEV\nTMP\nPROC", 0xff9fc6d2u, 0xff172331u);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.draw_text(surface_id_, 12, 4, "NAME              TYPE SIZE", 0xffffcc66u, 0xff0d141cu);
+        !status.ok())
+    {
+        return status;
+    }
+
+    constexpr usize max_visible_entries = 12;
+    const auto count = listing.value().count < max_visible_entries ? listing.value().count : max_visible_entries;
+    for (usize i = 0; i < count; ++i)
+    {
+        const auto &entry = listing.value().entries[i];
+        const auto row = static_cast<u32>(6 + i);
+        const auto row_color = (i % 2) == 0 ? 0xff111c24u : 0xff0d141cu;
+        if (auto status = compositor.fill_rect(surface_id_, Rect{.x = 68, .y = static_cast<i32>(row * gui_glyph_height),
+                                                                  .width = 228, .height = gui_glyph_height},
+                                               row_color);
+            !status.ok())
+        {
+            return status;
+        }
+
+        FixedString<96> line;
+        if (entry.metadata.type == fs::NodeType::directory)
+        {
+            if (auto status = line.assign("[D] "); !status.ok())
+            {
+                return status;
+            }
+        }
+        else
+        {
+            if (auto status = line.assign("[F] "); !status.ok())
+            {
+                return status;
+            }
+        }
+        if (auto status = line.append(entry.name.view()); !status.ok())
+        {
+            return status;
+        }
+        if (entry.metadata.type == fs::NodeType::directory)
+        {
+            if (auto status = line.append("/"); !status.ok())
+            {
+                return status;
+            }
+        }
+        while (line.size() < 22)
+        {
+            if (auto status = line.append(" "); !status.ok())
+            {
+                return status;
+            }
+        }
+        if (auto status = line.append(node_type_label(entry.metadata.type)); !status.ok())
+        {
+            return status;
+        }
+        while (line.size() < 27)
+        {
+            if (auto status = line.append(" "); !status.ok())
+            {
+                return status;
+            }
+        }
+        if (auto status = append_decimal(line, entry.metadata.size); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = compositor.draw_text(surface_id_, 12, row, line.view(), 0xffd8f3ffu, row_color); !status.ok())
+        {
+            return status;
+        }
+    }
+
+    if (auto status = compositor.present(); !status.ok())
+    {
+        return status;
+    }
+    ++render_count_;
+    return Status::success();
 }
 
 ModuleManifest GuiModule::manifest() const

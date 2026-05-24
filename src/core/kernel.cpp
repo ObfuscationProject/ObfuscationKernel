@@ -188,6 +188,11 @@ Status Kernel::boot(KernelConfig config)
         return status;
     }
 
+    if (auto status = drivers_.bind_kernel_processes(scheduler_, *arch_, 0x10000, 0x20000); !status.ok())
+    {
+        return status;
+    }
+
     if (auto status = kernel_modules_.bind_kernel_process(scheduler_, *arch_, 0x2000, 0x9000); !status.ok())
     {
         return status;
@@ -222,28 +227,7 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
-    auto gui_surface = gui_module_.compositor().create_surface(
-        gui::Rect{.x = 8, .y = 76, .width = 48, .height = 12}, "boot");
-    if (!gui_surface)
-    {
-        return gui_surface.status();
-    }
-    if (auto status = gui_module_.compositor().fill(gui_surface.value(), 0xff18343fu); !status.ok())
-    {
-        return status;
-    }
-    if (auto status = gui_module_.compositor().fill_rect(gui_surface.value(),
-                                                         gui::Rect{.x = 4, .y = 4, .width = 40, .height = 5},
-                                                         0xff44aa88u);
-        !status.ok())
-    {
-        return status;
-    }
-    if (auto status = gui_module_.compositor().put_pixel(gui_surface.value(), 2, 2, 0xffffcc66u); !status.ok())
-    {
-        return status;
-    }
-    if (auto status = gui_module_.compositor().present(); !status.ok())
+    if (auto status = gui_module_.compositor().play_startup_animation(); !status.ok())
     {
         return status;
     }
@@ -253,10 +237,6 @@ Status Kernel::boot(KernelConfig config)
         {
             return status;
         }
-    }
-    if (auto status = gui_module_.compositor().destroy_surface(gui_surface.value()); !status.ok())
-    {
-        return status;
     }
     if (auto status = register_builtin_interrupts(timer_driver_); !status.ok())
     {

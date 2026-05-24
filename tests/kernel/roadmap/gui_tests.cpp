@@ -263,17 +263,35 @@ Status test_gui_module_restarts_after_crash(Kernel &kernel)
 Status test_kernel_gui_is_started(Kernel &kernel)
 {
     auto &module = kernel.gui();
+    const auto *process = kernel.scheduler().find(kernel.kernel_modules().kernel_process_pid());
     if (module.state() != ModuleState::started || module.compositor().state() != gui::GuiState::running ||
         module.compositor().last_present_checksum() == 0 ||
+        module.compositor().startup_animation_frames() < 8 ||
         kernel.kernel_modules().services().query<gui::GuiModule>(gui::gui_service_id) != &module ||
         module.manifest().execution != ModuleExecution::kernel_process ||
         kernel.kernel_modules().kernel_process_pid() == 0 ||
-        kernel.scheduler().find(kernel.kernel_modules().kernel_process_pid()) == nullptr ||
+        process == nullptr || process->name() != "mod:kernel-gui" ||
         kernel.kernel_modules().kernel_process_module_count() == 0)
     {
         return Status::fault("kernel GUI module was not started during boot");
     }
     return Status::success();
+}
+
+Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
+{
+    auto &manager = kernel.file_manager();
+    if (auto status = manager.open(kernel.gui().compositor(), kernel.vfs(), "/"); !status.ok())
+    {
+        return status;
+    }
+    if (manager.surface_id() == 0 || manager.path() != "/" || manager.render_count() == 0 ||
+        !kernel.gui().compositor().surface_info(manager.surface_id()) ||
+        kernel.gui().compositor().last_present_checksum() == 0)
+    {
+        return Status::fault("GUI file manager did not render the VFS root");
+    }
+    return manager.close(kernel.gui().compositor());
 }
 
 Status test_shell_renders_to_gui(Kernel &kernel)
@@ -357,6 +375,10 @@ Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
         return status;
     }
     if (auto status = test_kernel_gui_is_started(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_kernel_file_manager_draws_vfs(kernel); !status.ok())
     {
         return status;
     }

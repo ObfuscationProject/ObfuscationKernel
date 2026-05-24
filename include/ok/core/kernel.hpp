@@ -156,6 +156,10 @@ class Kernel final
     {
         return gui_module_;
     }
+    [[nodiscard]] gui::KernelFileManager &file_manager()
+    {
+        return file_manager_;
+    }
     [[nodiscard]] ModuleManager &kernel_modules()
     {
         return kernel_modules_;
@@ -241,6 +245,7 @@ class Kernel final
     driver::FramebufferDisplayDriver display_driver_{};
     driver::VirtioGpuPciDisplayDriver virtio_gpu_driver_{};
     gui::GuiModule gui_module_{};
+    gui::KernelFileManager file_manager_{};
     driver::KeyboardDriver keyboard_driver_{};
     driver::Ps2MouseDriver mouse_driver_{};
     driver::PciBusDriver pci_bus_driver_{};

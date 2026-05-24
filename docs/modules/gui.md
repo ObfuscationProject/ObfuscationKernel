@@ -10,7 +10,7 @@ run in the freestanding kernel profile without heap allocation.
 kernel binds it to `FramebufferDisplayDriver`, starts it through
 `ModuleManager`, and publishes the `gui.compositor` service. The manifest uses
 `ModuleExecution::kernel_process`, so the module is managed by the scheduler
-visible `kmodd` kernel background process rather than the core boot path.
+visible `mod:kernel-gui` background process rather than the core boot path.
 
 The module owns `GuiCompositor`, which provides:
 
@@ -25,8 +25,11 @@ The module owns `GuiCompositor`, which provides:
 `GuiSupervisor` watches the compositor state. If the compositor is marked
 crashed, the supervisor calls `ModuleManager::restart_module("kernel-gui")`.
 Restarting clears volatile surfaces, increments the generation counter, keeps
-the same service registration, reuses `kmodd`, and leaves the rest of the kernel
-running.
+the same service registration, reuses the module process record, and leaves the
+rest of the kernel running.
+
+During boot, `GuiCompositor::play_startup_animation()` presents a short
+multi-frame startup animation before the shell claims the desktop.
 
 ## API Contract
 
@@ -39,6 +42,8 @@ The compositor API is intentionally small and synchronous:
 - `surface_at(x, y)` returns the top visible surface at a logical desktop
   coordinate.
 - `desktop_bounds()` returns the logical framebuffer rectangle.
+- `play_startup_animation()` renders the GUI boot animation and records frame
+  count for tests.
 - `present()` clears the desktop and composes visible surfaces from low to high
   z order.
 
@@ -72,7 +77,13 @@ surface:
 - `clear` output resets the GUI history;
 - the active input line is redrawn by the GUI while the serial console still
   receives text output;
+- the title strip and body use separate colors so the shell window has a
+  distinct header;
 - the surface is redrawn with `GuiCompositor::draw_text()` and presented.
+
+The `fm`/`fileman` shell command opens a GUI kernel file manager for a path. It
+renders the VFS directory listing in a separate `kernel-files` surface using the
+same compositor.
 
 The serial console and legacy framebuffer text path are preserved for boot logs,
 automated QEMU validation, and GUI startup failure fallback. Once the GUI shell
@@ -86,7 +97,8 @@ The debug and roadmap tests cover:
 - surface creation, metadata updates, z ordering, hit testing, drawing, and
   framebuffer checksum updates;
 - compositor crash rejection and supervisor restart;
-- `kernel-gui` ownership by the `kmodd` kernel background process;
+- `kernel-gui` ownership by the `mod:kernel-gui` kernel background process;
+- startup animation and GUI file-manager rendering;
 - shell command output rendering to a GUI surface.
 
 Successful debug runs emit:

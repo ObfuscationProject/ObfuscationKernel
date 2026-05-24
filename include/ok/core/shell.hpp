@@ -73,6 +73,7 @@ class KernelDebugShell final
     Status command_simplefs(std::string_view args);
     Status command_ext4(std::string_view args);
     Status command_net(std::string_view args);
+    Status command_file_manager(std::string_view path);
 
     Kernel *kernel_{nullptr};
     FixedString<32> session_user_name_{"kernel"};

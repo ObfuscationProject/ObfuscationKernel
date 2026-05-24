@@ -439,6 +439,34 @@ Status KernelDebugShell::command_stat(std::string_view path)
     return append("\n");
 }
 
+Status KernelDebugShell::command_file_manager(std::string_view path)
+{
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+
+    auto resolved = resolve_path(path);
+    if (!resolved)
+    {
+        return resolved.status();
+    }
+    if (auto status = kernel_->file_manager().open(kernel_->gui().compositor(), kernel_->vfs(), resolved.value());
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append("file manager: "); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(resolved.value()); !status.ok())
+    {
+        return status;
+    }
+    return append("\n");
+}
+
 Status KernelDebugShell::command_whoami()
 {
     if (auto status = append_session_user(); !status.ok())
