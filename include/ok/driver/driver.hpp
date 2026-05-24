@@ -68,12 +68,21 @@ enum class IoMode : u8
 class DriverManager final
 {
   public:
+    struct DriverProcessRestart
+    {
+        FixedString<sched::max_process_name> process_name{};
+        sched::ProcessId previous_pid{0};
+        sched::ProcessId pid{0};
+    };
+
     Status add(Driver &driver);
 
     Status start_all();
     Status bind_kernel_processes(sched::Scheduler &scheduler, arch::ArchOperations &arch, uptr entry_base,
                                  uptr stack_base);
+    Status supervise_kernel_processes(StaticVector<DriverProcessRestart, max_drivers> &restarts);
     [[nodiscard]] Driver *find(Class driver_class);
+    [[nodiscard]] Result<sched::ProcessId> kernel_process_id(std::string_view driver_name) const;
     [[nodiscard]] usize driver_count() const
     {
         return drivers_.size();
@@ -90,8 +99,16 @@ class DriverManager final
         sched::ProcessId pid{0};
     };
 
+    [[nodiscard]] DriverProcessRecord *find_process_record(Driver &driver);
+    [[nodiscard]] const DriverProcessRecord *find_process_record(const Driver &driver) const;
+    Result<sched::ProcessId> ensure_kernel_process(Driver &driver, usize driver_index);
+
     StaticVector<Driver *, max_drivers> drivers_;
     StaticVector<DriverProcessRecord, max_drivers> driver_processes_;
+    sched::Scheduler *kernel_process_scheduler_{nullptr};
+    arch::ArchOperations *kernel_process_arch_{nullptr};
+    uptr kernel_process_entry_base_{0};
+    uptr kernel_process_stack_base_{0};
 };
 
 class ConsoleDriver final : public Driver

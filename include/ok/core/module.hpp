@@ -163,10 +163,18 @@ class KernelModule
 class ModuleManager final
 {
   public:
+    struct ModuleProcessRestart
+    {
+        FixedString<sched::max_process_name> process_name{};
+        sched::ProcessId previous_pid{0};
+        sched::ProcessId pid{0};
+    };
+
     Status register_module(KernelModule &module);
     Status bind_kernel_process(sched::Scheduler &scheduler, arch::ArchOperations &arch, uptr entry, uptr stack);
     Status start_all();
     Status restart_module(std::string_view name);
+    Status supervise_kernel_processes(StaticVector<ModuleProcessRestart, max_kernel_modules> &restarts);
     Status stop_all();
     Status shutdown_all();
     Result<sched::ProcessId> ensure_kernel_process();

@@ -44,6 +44,56 @@ std::string_view user_label_for(const user::UserSpaceManager &users, user::Crede
     return "user";
 }
 
+std::span<const std::byte> bytes_for(std::string_view text)
+{
+    return {reinterpret_cast<const std::byte *>(text.data()), text.size()};
+}
+
+template <usize Capacity> Status append_unsigned(FixedString<Capacity> &out, u64 value)
+{
+    constexpr u64 powers[] = {
+        10'000'000'000'000'000'000ull,
+        1'000'000'000'000'000'000ull,
+        100'000'000'000'000'000ull,
+        10'000'000'000'000'000ull,
+        1'000'000'000'000'000ull,
+        100'000'000'000'000ull,
+        10'000'000'000'000ull,
+        1'000'000'000'000ull,
+        100'000'000'000ull,
+        10'000'000'000ull,
+        1'000'000'000ull,
+        100'000'000ull,
+        10'000'000ull,
+        1'000'000ull,
+        100'000ull,
+        10'000ull,
+        1'000ull,
+        100ull,
+        10ull,
+        1ull,
+    };
+    bool started = false;
+    for (const auto power : powers)
+    {
+        u8 digit = 0;
+        while (value >= power)
+        {
+            value -= power;
+            ++digit;
+        }
+        if (digit != 0 || started || power == 1)
+        {
+            if (auto status = out.append(static_cast<char>('0' + digit)); !status.ok())
+            {
+                return status;
+            }
+            started = true;
+        }
+    }
+    return Status::success();
+}
+
 } // namespace
 
 Kernel::Kernel() : arch_(&arch::arch_operations(arch::configured_architecture()))
@@ -201,8 +251,16 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
+    if (auto status = ensure_kernel_log_file(); !status.ok())
+    {
+        return status;
+    }
 
     if (auto status = drivers_.bind_kernel_processes(scheduler_, *arch_, 0x10000, 0x20000); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = log_boot_line("[ daemon ] driver: guard armed for built-in driver processes"); !status.ok())
     {
         return status;
     }
@@ -217,6 +275,10 @@ Status Kernel::boot(KernelConfig config)
         return status;
     }
     if (auto status = kernel_modules_.start_all(); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = log_boot_line("[ daemon ] module: guard armed for kernel module processes"); !status.ok())
     {
         return status;
     }
@@ -273,7 +335,7 @@ Status Kernel::boot(KernelConfig config)
         return status;
     }
 
-    if (auto status = vfs_.create("/tmp/kernel.log", fs::NodeType::regular); !status.ok())
+    if (auto status = ensure_kernel_log_file(); !status.ok())
     {
         return status;
     }
@@ -643,7 +705,92 @@ Status Kernel::kill_process(sched::ProcessId pid)
             file_manager_.mark_closed();
         }
     }
+    return supervise_daemons();
+}
+
+Status Kernel::supervise_daemons()
+{
+    StaticVector<driver::DriverManager::DriverProcessRestart, driver::max_drivers> driver_restarts;
+    if (auto status = drivers_.supervise_kernel_processes(driver_restarts); !status.ok())
+    {
+        return status;
+    }
+    for (const auto &restart : driver_restarts)
+    {
+        if (auto status = log_daemon_restart("driver", restart.process_name.view(), restart.previous_pid, restart.pid);
+            !status.ok())
+        {
+            return status;
+        }
+    }
+
+    StaticVector<ModuleManager::ModuleProcessRestart, max_kernel_modules> module_restarts;
+    if (auto status = kernel_modules_.supervise_kernel_processes(module_restarts); !status.ok())
+    {
+        return status;
+    }
+    for (const auto &restart : module_restarts)
+    {
+        if (auto status = log_daemon_restart("module", restart.process_name.view(), restart.previous_pid, restart.pid);
+            !status.ok())
+        {
+            return status;
+        }
+    }
     return Status::success();
+}
+
+Status Kernel::ensure_kernel_log_file()
+{
+    auto stat = vfs_.stat("/tmp/kernel.log");
+    if (stat)
+    {
+        return Status::success();
+    }
+    if (stat.status().code() != StatusCode::not_found)
+    {
+        return stat.status();
+    }
+    return vfs_.create("/tmp/kernel.log", fs::NodeType::regular);
+}
+
+Status Kernel::append_kernel_log_line(std::string_view line)
+{
+    auto file = vfs_.read_file("/tmp/kernel.log");
+    if (!file)
+    {
+        if (file.status().code() == StatusCode::not_found)
+        {
+            return Status::success();
+        }
+        return file.status();
+    }
+
+    FixedString<fs::max_file_data + 1> buffer;
+    for (usize i = 0; i < file.value().size; ++i)
+    {
+        if (auto status = buffer.append(std::to_integer<char>(file.value().data[i])); !status.ok())
+        {
+            return status;
+        }
+    }
+    if (buffer.size() + line.size() + 1 > fs::max_file_data)
+    {
+        buffer.clear();
+        if (auto status = buffer.append("[kernel log truncated]\n"); !status.ok())
+        {
+            return status;
+        }
+    }
+    if (auto status = buffer.append(line); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = buffer.append('\n'); !status.ok())
+    {
+        return status;
+    }
+    return vfs_.write_file("/tmp/kernel.log", bytes_for(buffer.view()));
 }
 
 Status Kernel::log_boot_line(std::string_view line)
@@ -656,7 +803,50 @@ Status Kernel::log_boot_line(std::string_view line)
     {
         return status;
     }
+    if (auto status = append_kernel_log_line(line); !status.ok())
+    {
+        return status;
+    }
     return display_driver_.write_line(line);
+}
+
+Status Kernel::log_daemon_restart(std::string_view kind, std::string_view process_name,
+                                  sched::ProcessId previous_pid, sched::ProcessId pid)
+{
+    FixedString<160> line;
+    if (auto status = line.assign("[ daemon ] "); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = line.append(kind); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = line.append(": restarted "); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = line.append(process_name); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = line.append(" pid="); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_unsigned(line, previous_pid); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = line.append(" -> "); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_unsigned(line, pid); !status.ok())
+    {
+        return status;
+    }
+    return log_boot_line(line.view());
 }
 
 Status Kernel::register_builtin_interrupts(driver::TimerDriver &timer)

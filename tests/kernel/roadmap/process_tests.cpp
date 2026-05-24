@@ -593,6 +593,31 @@ Status verify_background_programs_and_posix(Kernel &kernel)
         return Status::fault("debug shell kill did not remove a background process");
     }
 
+    auto driver_pid = kernel.drivers().kernel_process_id("ram-block0");
+    if (!driver_pid)
+    {
+        return driver_pid.status();
+    }
+    kill_command.clear();
+    if (auto status = kill_command.assign("kill "); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_unsigned(kill_command, driver_pid.value()); !status.ok())
+    {
+        return status;
+    }
+    auto killed_driver = kernel.debug_shell().execute(kill_command.view());
+    auto restarted_driver_pid = kernel.drivers().kernel_process_id("ram-block0");
+    const auto *restarted_driver = restarted_driver_pid ? kernel.scheduler().find(restarted_driver_pid.value()) : nullptr;
+    if (!killed_driver || !killed_driver.value().empty() || kernel.scheduler().find(driver_pid.value()) != nullptr ||
+        !restarted_driver_pid || restarted_driver_pid.value() == driver_pid.value() || restarted_driver == nullptr ||
+        restarted_driver->name() != "drv:ram-block0" ||
+        !contains_text(kernel.console().buffer(), "driver: restarted drv:ram-block0"))
+    {
+        return Status::fault("kernel user kill did not restart and log a driver daemon");
+    }
+
     static_cast<void>(kernel.debug_shell().execute("su root"));
     auto user_ps = kernel.debug_shell().execute("ps aux");
     if (!user_ps || contains_text(user_ps.value(), "drv:") || contains_text(user_ps.value(), "mod:kernel-gui") ||

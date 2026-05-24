@@ -99,6 +99,7 @@ class Kernel final
     Status open_file_manager(std::string_view path, bool foreground_shell_child = false);
     Status close_file_manager();
     Status kill_process(sched::ProcessId pid);
+    Status supervise_daemons();
 
     [[nodiscard]] bool booted() const
     {
@@ -233,7 +234,11 @@ class Kernel final
   private:
     Status register_builtin_interrupts(driver::TimerDriver &timer);
     Status register_builtin_syscalls(posix::PosixService &posix);
+    Status ensure_kernel_log_file();
+    Status append_kernel_log_line(std::string_view line);
     Status log_boot_line(std::string_view line);
+    Status log_daemon_restart(std::string_view kind, std::string_view process_name, sched::ProcessId previous_pid,
+                              sched::ProcessId pid);
     Status run_ext4_test();
     Status handle_gui_window_event(gui::WindowEvent event);
     Status handle_gui_close_request(gui::SurfaceId surface);

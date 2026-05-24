@@ -161,12 +161,11 @@ Status RamNode::write(usize offset, std::span<const std::byte> data)
     {
         return Status::overflow("file data capacity exceeded");
     }
-    if (offset == 0 && data.empty())
+    if (offset == 0)
     {
-        metadata_.size = 0;
-        metadata_.blocks = 0;
-        data_->size = 0;
-        return Status::success();
+        metadata_.size = data.size();
+        metadata_.blocks = blocks_for_size(metadata_.size);
+        data_->size = metadata_.size;
     }
     for (usize i = 0; i < data.size(); ++i)
     {

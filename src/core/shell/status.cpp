@@ -1,7 +1,6 @@
 #include "ok/core/shell.hpp"
 
 #include "ok/core/kernel.hpp"
-#include "ok/core/module.hpp"
 
 namespace ok
 {
@@ -321,10 +320,6 @@ Status KernelDebugShell::command_kill(std::string_view args)
     if (process->name() == "idle")
     {
         return Status::denied("idle process is protected");
-    }
-    if (process->name().starts_with(kernel_module_process_prefix))
-    {
-        return Status::denied("kernel module process is protected");
     }
     const auto active = kernel_->posix().user_credentials();
     if (process->credentials().kernel_space && !active.kernel_space)

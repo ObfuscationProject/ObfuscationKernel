@@ -40,11 +40,14 @@ The compositor API is intentionally small and synchronous:
   `raise_surface` update surface metadata.
 - `minimize_surface`, `maximize_surface`, `restore_surface`, and
   `close_surface` provide Windows-style window state controls. Minimized
-  surfaces dock as small bottom task buttons so a mouse click can restore them.
+  surfaces dock into a persistent bottom taskbar so a mouse click can restore
+  them. Maximized surfaces use the desktop work area above the taskbar.
 - `handle_mouse_delta()` tracks the logical pointer and turns button presses into
   title-bar drag, bottom-right resize, minimize, maximize/restore, close-request
-  events, raise, and hit-test behavior. Kernel-owned surfaces route close
-  requests through their owning process before any forced close.
+  events, raise, focus, and hit-test behavior. The minimize control restores a
+  maximized window to windowed mode before it minimizes a normal window.
+  Kernel-owned surfaces route close requests through their owning process before
+  any forced close.
 - `fill`, `fill_rect`, `put_pixel`, and `draw_text` update backing pixels.
 - `surface_at(x, y)` returns the top visible surface at a logical desktop
   coordinate.

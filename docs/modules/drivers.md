@@ -72,9 +72,11 @@ The display stack has three layers:
 - `ok::gui::GuiCompositor` is the restartable GUI module above the framebuffer.
   It owns fixed-capacity surfaces, rectangle/pixel/text drawing, and composition.
   It renders a short startup animation during boot and tracks normal,
-  minimized, and maximized surface state. It also consumes platform mouse
-  events for title-bar dragging, bottom-right resizing, and window control
-  buttons. The debug shell renders command history and active input to a
+  minimized, maximized, and focused surface state. Minimized surfaces are
+  exposed through the bottom taskbar, while maximized surfaces leave the taskbar
+  visible. It also consumes platform mouse events for title-bar dragging,
+  bottom-right resizing, and window control buttons. The debug shell renders
+  command history and active input to a
   resizable `oksh` GUI surface while keeping serial output unchanged, and the
   `fm`/`fileman` command opens a separate GUI file-manager surface for VFS
   directory listings and mouse navigation.

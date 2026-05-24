@@ -7,6 +7,35 @@ namespace ok
 namespace
 {
 
+bool file_contains(const fs::FileBuffer &file, std::string_view needle)
+{
+    if (needle.empty())
+    {
+        return true;
+    }
+    if (needle.size() > file.size)
+    {
+        return false;
+    }
+    for (usize i = 0; i + needle.size() <= file.size; ++i)
+    {
+        bool match = true;
+        for (usize j = 0; j < needle.size(); ++j)
+        {
+            if (std::to_integer<char>(file.data[i + j]) != needle[j])
+            {
+                match = false;
+                break;
+            }
+        }
+        if (match)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 Status append_unsigned(FixedString<32> &out, u64 value)
 {
     constexpr u64 powers[] = {
@@ -184,7 +213,9 @@ Status test_gui_surface_management_api(Kernel &kernel)
         return status;
     }
     auto top = compositor.surface_at(9, 9);
-    if (!top || top.value() != front.value())
+    auto front_info = compositor.surface_info(front.value());
+    if (!top || top.value() != front.value() || compositor.active_surface() != front.value() || !front_info ||
+        !front_info.value().focused)
     {
         return Status::fault("GUI surface hit-test did not select top surface");
     }
@@ -193,9 +224,11 @@ Status test_gui_surface_management_api(Kernel &kernel)
         return status;
     }
     top = compositor.surface_at(9, 9);
-    if (!top || top.value() != back.value())
+    auto back_info = compositor.surface_info(back.value());
+    if (!top || top.value() != back.value() || compositor.active_surface() != back.value() || !back_info ||
+        !back_info.value().focused)
     {
-        return Status::fault("GUI raise surface did not update z order");
+        return Status::fault("GUI raise surface did not update z order and focus");
     }
     if (auto status = compositor.set_visible(back.value(), false); !status.ok())
     {
@@ -231,7 +264,8 @@ Status test_gui_surface_management_api(Kernel &kernel)
     auto info = compositor.surface_info(front.value());
     if (!info || info.value().window_state != gui::WindowState::maximized ||
         info.value().bounds.width != driver::framebuffer_width ||
-        info.value().bounds.height != driver::framebuffer_height)
+        info.value().bounds.height != driver::framebuffer_height - gui::taskbar_height ||
+        compositor.active_surface() != front.value())
     {
         return Status::fault("GUI maximize surface did not update window state");
     }
@@ -245,9 +279,10 @@ Status test_gui_surface_management_api(Kernel &kernel)
     }
     info = compositor.surface_info(front.value());
     if (!info || !info.value().visible || info.value().window_state != gui::WindowState::minimized ||
-        info.value().bounds.y <= 26)
+        info.value().bounds.y < static_cast<i32>(driver::framebuffer_height - gui::taskbar_height) ||
+        compositor.active_surface() != back.value())
     {
-        return Status::fault("GUI minimize surface did not dock the window");
+        return Status::fault("GUI minimize surface did not dock the window and move focus");
     }
     if (auto status = compositor.restore_surface(front.value()); !status.ok())
     {
@@ -256,7 +291,8 @@ Status test_gui_surface_management_api(Kernel &kernel)
     info = compositor.surface_info(front.value());
     if (!info || info.value().bounds.x != 32 || info.value().bounds.y != 26 ||
         info.value().bounds.width != 20 || info.value().bounds.height != 16 ||
-        info.value().title != "front-renamed" || info.value().window_state != gui::WindowState::normal)
+        info.value().title != "front-renamed" || info.value().window_state != gui::WindowState::normal ||
+        compositor.active_surface() != front.value())
     {
         return Status::fault("GUI surface metadata update failed");
     }
@@ -355,9 +391,50 @@ Status test_gui_mouse_interacts_with_windows(Kernel &kernel)
         return status;
     }
     info = compositor.surface_info(surface.value());
-    if (!info || info.value().window_state != gui::WindowState::maximized)
+    if (!info || info.value().window_state != gui::WindowState::maximized ||
+        info.value().bounds.height != driver::framebuffer_height - gui::taskbar_height)
     {
         return Status::fault("GUI mouse maximize button did not maximize the window");
+    }
+    if (auto status =
+            compositor.set_pointer_position(info.value().bounds.x + static_cast<i32>(info.value().bounds.width) - 28,
+                                            info.value().bounds.y + 5);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(0, 0, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(0, 0, false); !status.ok())
+    {
+        return status;
+    }
+    info = compositor.surface_info(surface.value());
+    if (!info || info.value().window_state != gui::WindowState::normal)
+    {
+        return Status::fault("GUI mouse minimize button did not restore a maximized window");
+    }
+    if (auto status =
+            compositor.set_pointer_position(info.value().bounds.x + static_cast<i32>(info.value().bounds.width) - 20,
+                                            info.value().bounds.y + 5);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(0, 0, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(0, 0, false); !status.ok())
+    {
+        return status;
+    }
+    info = compositor.surface_info(surface.value());
+    if (!info || info.value().window_state != gui::WindowState::maximized)
+    {
+        return Status::fault("GUI mouse maximize button did not maximize after restore");
     }
     if (auto status =
             compositor.set_pointer_position(info.value().bounds.x + static_cast<i32>(info.value().bounds.width) - 20,
@@ -508,6 +585,40 @@ Status test_gui_module_restarts_after_crash(Kernel &kernel)
     return module.compositor().destroy_surface(recovered.value());
 }
 
+Status test_gui_module_daemon_kill_restarts(Kernel &kernel)
+{
+    static_cast<void>(kernel.debug_shell().execute("su kernel"));
+    const auto previous_pid = kernel.kernel_modules().kernel_process_pid();
+    const auto previous_generation = kernel.gui().compositor().generation();
+    if (previous_pid == 0 || kernel.scheduler().find(previous_pid) == nullptr)
+    {
+        return Status::fault("GUI module daemon process missing before kill restart test");
+    }
+
+    FixedString<32> kill_command;
+    if (auto status = kill_command.assign("kill "); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_unsigned(kill_command, previous_pid); !status.ok())
+    {
+        return status;
+    }
+    auto killed = kernel.debug_shell().execute(kill_command.view());
+    const auto restarted_pid = kernel.kernel_modules().kernel_process_pid();
+    const auto *process = kernel.scheduler().find(restarted_pid);
+    auto log = kernel.vfs().read_file("/tmp/kernel.log");
+    if (!killed || !killed.value().empty() || kernel.scheduler().find(previous_pid) != nullptr ||
+        restarted_pid == 0 || restarted_pid == previous_pid || process == nullptr ||
+        process->name() != "mod:kernel-gui" || kernel.gui().compositor().state() != gui::GuiState::running ||
+        kernel.gui().compositor().generation() <= previous_generation || !log ||
+        !file_contains(log.value(), "module: restarted mod:kernel-gui"))
+    {
+        return Status::fault("kernel user kill did not restart and log the GUI module daemon");
+    }
+    return Status::success();
+}
+
 Status test_kernel_gui_is_started(Kernel &kernel)
 {
     auto &module = kernel.gui();
@@ -584,7 +695,9 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
     }
     info = compositor.surface_info(manager.surface_id());
     if (!info || info.value().window_state != gui::WindowState::maximized ||
-        info.value().bounds.width != driver::framebuffer_width || manager.render_count() <= resize_render_count)
+        info.value().bounds.width != driver::framebuffer_width ||
+        info.value().bounds.height != driver::framebuffer_height - gui::taskbar_height ||
+        manager.render_count() <= resize_render_count)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("GUI file manager maximize did not resize and redraw");
@@ -728,7 +841,7 @@ Status test_shell_renders_to_gui(Kernel &kernel)
     surface = kernel.gui().compositor().surface_info(kernel.debug_shell().gui_surface_id());
     if (!surface || surface.value().window_state != gui::WindowState::maximized ||
         surface.value().bounds.width != driver::framebuffer_width ||
-        surface.value().bounds.height != driver::framebuffer_height)
+        surface.value().bounds.height != driver::framebuffer_height - gui::taskbar_height)
     {
         return Status::fault("debug shell GUI maximize button did not resize and redraw");
     }
@@ -827,6 +940,10 @@ Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
         return status;
     }
     if (auto status = test_gui_module_restarts_after_crash(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_gui_module_daemon_kill_restarts(kernel); !status.ok())
     {
         return status;
     }

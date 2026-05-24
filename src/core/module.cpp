@@ -454,6 +454,46 @@ Status ModuleManager::restart_module(std::string_view name)
     return start_module(*module);
 }
 
+Status ModuleManager::supervise_kernel_processes(StaticVector<ModuleProcessRestart, max_kernel_modules> &restarts)
+{
+    restarts.clear();
+    if (kernel_process_scheduler_ == nullptr || kernel_process_arch_ == nullptr)
+    {
+        return Status::not_initialized("kernel module process is not bound to a scheduler");
+    }
+
+    for (usize i = 0; i < module_processes_.size(); ++i)
+    {
+        auto &record = module_processes_[i];
+        if (record.pid != 0 && kernel_process_scheduler_->find(record.pid) != nullptr)
+        {
+            continue;
+        }
+        auto *module = find(record.module_name.view());
+        if (module == nullptr || module->state() != ModuleState::started)
+        {
+            continue;
+        }
+
+        const auto previous_pid = record.pid;
+        if (auto status = restart_module(record.module_name.view()); !status.ok())
+        {
+            return status;
+        }
+
+        ModuleProcessRestart restart{.previous_pid = previous_pid, .pid = record.pid};
+        if (auto status = assign_module_process_name(restart.process_name, record.module_name.view()); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = restarts.push_back(restart); !status.ok())
+        {
+            return status;
+        }
+    }
+    return Status::success();
+}
+
 Status ModuleManager::stop_all()
 {
     for (usize i = started_order_.size(); i != 0; --i)

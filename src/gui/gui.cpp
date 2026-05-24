@@ -12,7 +12,13 @@ constexpr u32 desktop_background_color = 0xff061018u;
 constexpr u32 default_surface_color = 0xff18343fu;
 constexpr u32 frame_color = 0xffd8f3ffu;
 constexpr u32 title_frame_color = 0xff44aa88u;
+constexpr u32 inactive_title_frame_color = 0xff4f6974u;
 constexpr u32 title_color = 0xff12313du;
+constexpr u32 inactive_title_color = 0xff1a2630u;
+constexpr u32 taskbar_color = 0xff101820u;
+constexpr u32 taskbar_edge_color = 0xff44aa88u;
+constexpr u32 taskbar_button_color = 0xff1a3140u;
+constexpr u32 active_taskbar_button_color = 0xff24546au;
 constexpr Rect file_manager_bounds{.x = 28, .y = 34, .width = 300, .height = 182};
 constexpr u32 title_hit_height = gui_glyph_height * 2 + 4;
 constexpr u32 resize_hit_size = 8;
@@ -171,9 +177,9 @@ Status append_decimal(FixedString<96> &out, u64 value)
 [[nodiscard]] Rect minimized_bounds_for_index(usize index, Rect desktop)
 {
     constexpr u32 width = 112;
-    constexpr u32 height = title_hit_height + 4;
+    constexpr u32 height = taskbar_height > 4 ? taskbar_height - 4 : taskbar_height;
     const auto x = static_cast<i32>(4 + (index % max_gui_surfaces) * (width + 4));
-    const auto y = static_cast<i32>(desktop.height > height + 4 ? desktop.height - height - 4 : 0);
+    const auto y = static_cast<i32>(desktop.height > taskbar_height ? desktop.height - taskbar_height + 2 : 0);
     u32 clipped_width = width;
     if (x >= 0 && static_cast<u32>(x) + clipped_width > desktop.width)
     {
@@ -220,6 +226,20 @@ struct FileManagerLayout
 
 [[nodiscard]] u32 desktop_pixel_color(u32 width, u32 height, u32 x, u32 y)
 {
+    const auto taskbar_top = height > taskbar_height ? height - taskbar_height : 0;
+    if (y >= taskbar_top)
+    {
+        if (y == taskbar_top)
+        {
+            return taskbar_edge_color;
+        }
+        if ((x % 48u) == 0)
+        {
+            return 0xff152636u;
+        }
+        return taskbar_color;
+    }
+
     const auto ix = static_cast<i32>(x);
     const auto iy = static_cast<i32>(y);
     const auto center_y = static_cast<i32>(height / 2);
@@ -343,10 +363,35 @@ void GuiCompositor::reset_surfaces()
 {
     surfaces_.clear();
     next_surface_id_ = 1;
+    active_surface_id_ = 0;
     next_z_index_ = 1;
     dragging_surface_id_ = 0;
     resizing_surface_id_ = 0;
     pending_window_event_ = {};
+}
+
+Rect GuiCompositor::work_area_bounds() const
+{
+    const auto mode = display_->mode();
+    const auto height = mode.height > taskbar_height ? mode.height - taskbar_height : mode.height;
+    return Rect{.x = 0, .y = 0, .width = mode.width, .height = height};
+}
+
+void GuiCompositor::focus_top_surface()
+{
+    const Surface *top = nullptr;
+    for (const auto &surface : surfaces_)
+    {
+        if (!surface.visible || surface.window_state == WindowState::minimized)
+        {
+            continue;
+        }
+        if (top == nullptr || surface.z_index > top->z_index)
+        {
+            top = &surface;
+        }
+    }
+    active_surface_id_ = top == nullptr ? SurfaceId{0} : top->id;
 }
 
 void GuiCompositor::record_window_event(WindowEventKind kind, SurfaceId id)
@@ -418,6 +463,7 @@ Result<SurfaceId> GuiCompositor::create_surface(Rect bounds, std::string_view ti
     const auto id = slot.id;
     ++next_surface_id_;
     ++next_z_index_;
+    active_surface_id_ = id;
     return id;
 }
 
@@ -440,7 +486,19 @@ Status GuiCompositor::destroy_surface(SurfaceId id)
     {
         resizing_surface_id_ = 0;
     }
-    return surfaces_.erase_at(index.value());
+    if (active_surface_id_ == id)
+    {
+        active_surface_id_ = 0;
+    }
+    if (auto status = surfaces_.erase_at(index.value()); !status.ok())
+    {
+        return status;
+    }
+    if (active_surface_id_ == 0)
+    {
+        focus_top_surface();
+    }
+    return Status::success();
 }
 
 Status GuiCompositor::set_visible(SurfaceId id, bool visible)
@@ -454,7 +512,17 @@ Status GuiCompositor::set_visible(SurfaceId id, bool visible)
     {
         return index.status();
     }
-    surfaces_[index.value()].visible = visible;
+    auto &surface = surfaces_[index.value()];
+    surface.visible = visible;
+    if (!visible && active_surface_id_ == id)
+    {
+        active_surface_id_ = 0;
+        focus_top_surface();
+    }
+    else if (visible && surface.window_state != WindowState::minimized)
+    {
+        active_surface_id_ = id;
+    }
     return Status::success();
 }
 
@@ -540,8 +608,13 @@ Status GuiCompositor::raise_surface(SurfaceId id)
     {
         return index.status();
     }
-    surfaces_[index.value()].z_index = next_z_index_;
+    auto &surface = surfaces_[index.value()];
+    surface.z_index = next_z_index_;
     ++next_z_index_;
+    if (surface.visible && surface.window_state != WindowState::minimized)
+    {
+        active_surface_id_ = id;
+    }
     return Status::success();
 }
 
@@ -569,9 +642,12 @@ Status GuiCompositor::minimize_surface(SurfaceId id)
     surface.bounds = minimized_bounds_for_index(index.value(), desktop.value());
     surface.visible = true;
     surface.window_state = WindowState::minimized;
-    if (auto status = raise_surface(id); !status.ok())
+    surface.z_index = next_z_index_;
+    ++next_z_index_;
+    if (active_surface_id_ == id)
     {
-        return status;
+        active_surface_id_ = 0;
+        focus_top_surface();
     }
     record_window_event(WindowEventKind::minimized, id);
     return Status::success();
@@ -588,17 +664,12 @@ Status GuiCompositor::maximize_surface(SurfaceId id)
     {
         return index.status();
     }
-    auto desktop = desktop_bounds();
-    if (!desktop)
-    {
-        return desktop.status();
-    }
     auto &surface = surfaces_[index.value()];
     if (surface.window_state == WindowState::normal)
     {
         surface.restore_bounds = surface.bounds;
     }
-    surface.bounds = desktop.value();
+    surface.bounds = work_area_bounds();
     surface.visible = true;
     surface.window_state = WindowState::maximized;
     if (auto status = raise_surface(id); !status.ok())
@@ -732,7 +803,14 @@ Status GuiCompositor::handle_mouse_delta(i32 delta_x, i32 delta_y, bool left_but
             case WindowControl::minimize:
                 dragging_surface_id_ = 0;
                 resizing_surface_id_ = 0;
-                if (auto status = minimize_surface(hit.value()); !status.ok())
+                if (info.value().window_state == WindowState::maximized)
+                {
+                    if (auto status = restore_surface(hit.value()); !status.ok())
+                    {
+                        return status;
+                    }
+                }
+                else if (auto status = minimize_surface(hit.value()); !status.ok())
                 {
                     return status;
                 }
@@ -965,6 +1043,33 @@ Status GuiCompositor::draw_text(SurfaceId id, u32 column, u32 row, std::string_v
 
 u32 GuiCompositor::surface_pixel_color(const Surface &surface, u32 x, u32 y) const
 {
+    if (surface.window_state == WindowState::minimized)
+    {
+        u32 color = surface.id == active_surface_id_ ? active_taskbar_button_color : taskbar_button_color;
+        if (x == 0 || y == 0 || x + 1 == surface.bounds.width || y + 1 == surface.bounds.height)
+        {
+            color = surface.id == active_surface_id_ ? frame_color : inactive_title_frame_color;
+        }
+        else if (y == 1)
+        {
+            color = taskbar_edge_color;
+        }
+        const auto text_x = x >= 8 ? x - 8 : surface.bounds.width;
+        const auto text_y = y >= 7 ? y - 7 : surface.bounds.height;
+        const auto char_index = text_x / gui_glyph_width;
+        const auto glyph_x = text_x % gui_glyph_width;
+        if (char_index < surface.title.size() && glyph_x < driver::BitmapFontRenderer::glyph_width &&
+            text_y < driver::BitmapFontRenderer::glyph_height)
+        {
+            const auto row_bits = driver::BitmapFontRenderer::glyph_row(surface.title.view()[char_index], text_y);
+            if (((row_bits >> (driver::BitmapFontRenderer::glyph_width - 1 - glyph_x)) & 1u) != 0)
+            {
+                color = 0xffd8f3ffu;
+            }
+        }
+        return color;
+    }
+
     auto color = surface.pixels[static_cast<usize>(y) * max_gui_surface_width + x];
     if (x == 0 || y == 0 || x + 1 == surface.bounds.width || y + 1 == surface.bounds.height)
     {
@@ -972,7 +1077,11 @@ u32 GuiCompositor::surface_pixel_color(const Surface &surface, u32 x, u32 y) con
     }
     else if (y == 1)
     {
-        color = title_frame_color;
+        color = surface.id == active_surface_id_ ? title_frame_color : inactive_title_frame_color;
+    }
+    else if (y == 2)
+    {
+        color = surface.id == active_surface_id_ ? title_color : inactive_title_color;
     }
     else if (y >= static_cast<u32>(window_control_top) && y <= static_cast<u32>(window_control_bottom) &&
              surface.bounds.width >= 34)
@@ -1002,6 +1111,7 @@ Status GuiCompositor::present()
     }
 
     const auto mode = display_->mode();
+    const auto taskbar_top = mode.height > taskbar_height ? mode.height - taskbar_height : 0;
     for (u32 y = 0; y < mode.height; ++y)
     {
         for (u32 x = 0; x < mode.width; ++x)
@@ -1013,6 +1123,10 @@ Status GuiCompositor::present()
             for (const auto &surface : surfaces_)
             {
                 if (!surface.visible)
+                {
+                    continue;
+                }
+                if (y >= taskbar_top && surface.window_state != WindowState::minimized)
                 {
                     continue;
                 }
@@ -1153,6 +1267,7 @@ Result<SurfaceInfo> GuiCompositor::surface_info(SurfaceId id) const
         .bounds = surface.bounds,
         .z_index = surface.z_index,
         .visible = surface.visible,
+        .focused = surface.id == active_surface_id_,
         .window_state = surface.window_state,
         .title = surface.title.view(),
     };
@@ -1164,10 +1279,16 @@ Result<SurfaceId> GuiCompositor::surface_at(i32 x, i32 y) const
     {
         return status;
     }
+    const auto mode = display_->mode();
+    const auto taskbar_top = mode.height > taskbar_height ? static_cast<i32>(mode.height - taskbar_height) : 0;
     const Surface *top = nullptr;
     for (const auto &surface : surfaces_)
     {
         if (!surface.visible)
+        {
+            continue;
+        }
+        if (y >= taskbar_top && surface.window_state != WindowState::minimized)
         {
             continue;
         }

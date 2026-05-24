@@ -23,6 +23,7 @@ inline constexpr u32 max_gui_surface_height = driver::framebuffer_height;
 inline constexpr usize max_gui_surface_pixels = max_gui_surface_width * max_gui_surface_height;
 inline constexpr u32 gui_glyph_width = driver::BitmapFontRenderer::glyph_width + 1;
 inline constexpr u32 gui_glyph_height = driver::BitmapFontRenderer::glyph_height + 2;
+inline constexpr u32 taskbar_height = gui_glyph_height * 2 + 6;
 
 using SurfaceId = u16;
 
@@ -64,6 +65,7 @@ struct SurfaceInfo
     Rect bounds{};
     u32 z_index{0};
     bool visible{false};
+    bool focused{false};
     WindowState window_state{WindowState::normal};
     std::string_view title{};
 };
@@ -139,6 +141,10 @@ class GuiCompositor final
     [[nodiscard]] Result<SurfaceId> surface_at(i32 x, i32 y) const;
     [[nodiscard]] Result<Rect> desktop_bounds() const;
     [[nodiscard]] WindowEvent consume_window_event();
+    [[nodiscard]] SurfaceId active_surface() const
+    {
+        return active_surface_id_;
+    }
     [[nodiscard]] i32 pointer_x() const
     {
         return pointer_x_;
@@ -166,6 +172,8 @@ class GuiCompositor final
     [[nodiscard]] Status validate_bounds(Rect bounds) const;
     void draw_cell(Surface &surface, u32 column, u32 row, char value, u32 foreground, u32 background);
     [[nodiscard]] u32 surface_pixel_color(const Surface &surface, u32 x, u32 y) const;
+    [[nodiscard]] Rect work_area_bounds() const;
+    void focus_top_surface();
     void record_window_event(WindowEventKind kind, SurfaceId id);
     void reset_surfaces();
 
@@ -173,6 +181,7 @@ class GuiCompositor final
     StaticVector<Surface, max_gui_surfaces> surfaces_{};
     GuiState state_{GuiState::stopped};
     SurfaceId next_surface_id_{1};
+    SurfaceId active_surface_id_{0};
     u32 next_z_index_{1};
     u64 generation_{0};
     u64 last_present_checksum_{0};

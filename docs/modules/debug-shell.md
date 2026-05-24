@@ -42,8 +42,9 @@ Supported commands:
   kernel debug shell.
 - `kill <pid>`: forcefully remove a scheduler process and tear down owned
   kernel UI surfaces such as `fm:<user>` or `oksh`. Kernel-space processes can
-  only be killed from the `kernel` debug-shell user; `idle` and `mod:*` kernel
-  module processes are protected.
+  only be killed from the `kernel` debug-shell user; `idle` is protected.
+  Killing supervised `drv:*` or `mod:*` daemon processes forces the kernel
+  guards to recreate them and append a restart line to `/tmp/kernel.log`.
 - `exit`: leave the current debug shell user context, restoring the previous
   session user. With no previous user, non-kernel sessions return to `kernel`;
   exiting the base `kernel` session closes the GUI shell surface.
