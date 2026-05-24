@@ -33,7 +33,9 @@ multi-frame startup animation before the shell claims the desktop.
 
 ## API Contract
 
-The compositor API is intentionally small and synchronous:
+The compositor API is intentionally small and synchronous. The base compositor
+types live in `include/ok/gui/compositor.hpp`; `include/ok/gui/gui.hpp` remains
+as a compatibility aggregate for callers that still want all GUI declarations.
 
 - `create_surface(bounds, title)` allocates one of the fixed backing stores.
 - `set_title`, `move_surface`, `resize_surface`, `set_visible`, and
@@ -75,12 +77,11 @@ visible pixels with the default surface color.
 ## Display Path
 
 The compositor renders into `FramebufferDisplayDriver`, whose logical mode is
-currently 480x270 RGBA pixels. `present()` also calls the weak platform hook
-`ok_platform_display_gui_pixel()` when a platform provides it. QEMU ramfb
-platforms use that hook to scale logical GUI pixels onto the visible 960x540
-framebuffer. Each present starts from a compositor-owned desktop background with
-a large geometric `OK` artwork in kernel mode, so legacy boot/debug text is not
-left behind outside GUI surfaces.
+currently 480x270 RGBA pixels. `present()` submits platform-visible pixels back
+through the display driver, and QEMU ramfb platforms scale those logical pixels
+onto the visible 960x540 framebuffer. Each present starts from a
+compositor-owned desktop background with a large geometric `OK` artwork in
+kernel mode, so legacy boot/debug text is not left behind outside GUI surfaces.
 
 This keeps the module independent from QEMU-specific ramfb details:
 
@@ -110,11 +111,13 @@ kernel thread; when it is opened from `root` or another normal user, it is
 created as an isolated user process with its own address-space ID.
 
 The `fm`/`fileman` shell command forks a foreground GUI kernel file manager for
-a path. It renders the VFS directory listing in a separate `kernel-files`
-surface using the same compositor. Mouse clicks in its left navigation open
-`/`, `/dev`, `/tmp`, or `/proc` when present; clicks in the listing select
-files and open directories, with `../` as the first entry outside `/` for parent
-directory navigation. The window itself uses the same drag, resize, minimize,
+a path. The file-manager application interface lives under `ok::apps`, outside
+the compositor API, and renders the VFS directory listing in a separate
+`kernel-files` surface using the same compositor. Mouse clicks in its left
+navigation open `/`, `/dev`, `/tmp`, or `/proc` when present; clicks in the
+listing select files and open directories, with `../` as the first entry outside
+`/` for parent directory navigation. The window itself uses the same drag,
+resize, minimize,
 maximize, and close handling as other GUI surfaces. Each open runs as a separate
 `fm:<user>` scheduler process with the credentials active at launch, and
 directory reads are checked against those credentials. A shell-launched file
@@ -123,7 +126,10 @@ another file manager as a shortcut without blocking the shell.
 
 The serial console and legacy framebuffer text path are preserved for boot logs,
 automated QEMU validation, and GUI startup failure fallback. Once the GUI shell
-surface is available, interactive framebuffer output is owned by the GUI.
+surface is available, interactive framebuffer output is owned by the GUI. The
+compositor writes logical pixels to `FramebufferDisplayDriver`; platform-visible
+pixel submission is delegated back through the display driver instead of calling
+platform hooks from the compositor directly.
 
 ## Tests
 

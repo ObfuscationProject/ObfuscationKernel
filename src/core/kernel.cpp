@@ -920,7 +920,7 @@ Status Kernel::open_file_manager(std::string_view path, bool foreground_shell_ch
         return process.status();
     }
 
-    gui::KernelFileManager manager;
+    apps::KernelFileManager manager;
     if (auto status = manager.open(gui_module_.compositor(), vfs_, path, credentials, process.value()); !status.ok())
     {
         static_cast<void>(manager.close(gui_module_.compositor()));

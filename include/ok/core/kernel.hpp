@@ -1,12 +1,13 @@
 #pragma once
 
+#include "ok/apps/file_manager.hpp"
 #include "ok/arch/arch.hpp"
 #include "ok/core/power.hpp"
 #include "ok/core/shell.hpp"
 #include "ok/driver/driver.hpp"
 #include "ok/fs/simplefs.hpp"
 #include "ok/fs/vfs.hpp"
-#include "ok/gui/gui.hpp"
+#include "ok/gui/module.hpp"
 #include "ok/interrupt/interrupt.hpp"
 #include "ok/ipc/ipc.hpp"
 #include "ok/memory/memory.hpp"
@@ -168,7 +169,7 @@ class Kernel final
     {
         return gui_module_;
     }
-    [[nodiscard]] gui::KernelFileManager &file_manager()
+    [[nodiscard]] apps::KernelFileManager &file_manager()
     {
         if (active_file_manager_index_ < file_managers_.size())
         {
@@ -294,8 +295,8 @@ class Kernel final
     driver::FramebufferDisplayDriver display_driver_{};
     driver::VirtioGpuPciDisplayDriver virtio_gpu_driver_{};
     gui::GuiModule gui_module_{};
-    StaticVector<gui::KernelFileManager, gui::max_gui_surfaces> file_managers_{};
-    gui::KernelFileManager inactive_file_manager_{};
+    StaticVector<apps::KernelFileManager, gui::max_gui_surfaces> file_managers_{};
+    apps::KernelFileManager inactive_file_manager_{};
     usize active_file_manager_index_{gui::max_gui_surfaces};
     driver::KeyboardDriver keyboard_driver_{};
     driver::Ps2MouseDriver mouse_driver_{};

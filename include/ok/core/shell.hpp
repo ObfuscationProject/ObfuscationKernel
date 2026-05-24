@@ -4,7 +4,7 @@
 #include "ok/core/power.hpp"
 #include "ok/core/types.hpp"
 #include "ok/fs/vfs.hpp"
-#include "ok/gui/gui.hpp"
+#include "ok/gui/compositor.hpp"
 #include "ok/user/user.hpp"
 
 #include <array>

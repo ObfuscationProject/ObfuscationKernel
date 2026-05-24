@@ -14,7 +14,8 @@ Built-in drivers:
   through the same `BlockDevice` sector API. QEMU tests attach a temporary
   virtio-blk disk image so filesystem tests run against the virtual-disk path.
 - `FramebufferDisplayDriver`: exposes a simple 32-bit RGBA framebuffer with
-  clear, pixel, rectangle, text-line, and checksum operations. Kernel boot writes
+  clear, pixel, rectangle, GUI-pixel present, text-line, and checksum
+  operations. Kernel boot writes
   Linux-style startup lines through this driver so `qemu-window-test` can show
   the same debug output that the QEMU checker validates. The GUI compositor also
   targets this logical framebuffer before platform code scales it to ramfb. The
@@ -84,7 +85,7 @@ The display stack has three layers:
   directory listings and mouse navigation.
 - `RamFbConsole` is the QEMU-visible platform backend. It initializes `ramfb`
   through fw_cfg DMA, owns the 960x540 guest-RAM pixel surface, and scales
-  logical GUI pixels through `ok_platform_display_gui_pixel()`.
+  logical GUI pixels through the display driver's platform present hook.
 
 QEMU tests attach a temporary `virtio-blk-pci` disk on every bootable target.
 QEMU window tests attach `ramfb` on bootable architectures whose QEMU machine

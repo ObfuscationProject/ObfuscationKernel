@@ -1,6 +1,8 @@
 #include "ok/driver/driver.hpp"
 
 extern "C" void ok_platform_display_write_line(const char *text, ok::usize size) __attribute__((weak));
+extern "C" void ok_platform_display_gui_pixel(ok::u32 logical_width, ok::u32 logical_height, ok::u32 x, ok::u32 y,
+                                              ok::u32 color) __attribute__((weak));
 
 namespace ok::driver
 {
@@ -48,6 +50,23 @@ Status FramebufferDisplayDriver::put_pixel(u32 x, u32 y, u32 rgba)
         return Status::invalid_argument("pixel coordinate out of range");
     }
     pixels_[static_cast<usize>(y) * mode_.width + x] = rgba;
+    return Status::success();
+}
+
+Status FramebufferDisplayDriver::present_gui_pixel(u32 logical_width, u32 logical_height, u32 x, u32 y, u32 rgba)
+{
+    if (!started_)
+    {
+        return Status::not_initialized("framebuffer driver not started");
+    }
+    if (x >= logical_width || y >= logical_height)
+    {
+        return Status::invalid_argument("GUI pixel coordinate out of range");
+    }
+    if (ok_platform_display_gui_pixel != nullptr)
+    {
+        ok_platform_display_gui_pixel(logical_width, logical_height, x, y, rgba);
+    }
     return Status::success();
 }
 
