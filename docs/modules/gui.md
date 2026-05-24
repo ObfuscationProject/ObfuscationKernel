@@ -50,8 +50,9 @@ The compositor API is intentionally small and synchronous:
 - `desktop_bounds()` returns the logical framebuffer rectangle.
 - `play_startup_animation()` renders the GUI boot animation and records frame
   count for tests.
-- `present()` clears the desktop and composes visible surfaces from low to high
-  z order.
+- `present()` composes each final framebuffer pixel from the desktop and the
+  topmost visible surface at that point, avoiding transient desktop clears under
+  windows during mouse-driven redraws.
 
 All calls return `Status`/`Result<T>` and use fixed-capacity storage. Resizing a
 surface preserves existing pixels inside the old bounds and initializes newly

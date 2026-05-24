@@ -37,8 +37,9 @@ Supported commands:
   account registered by tests/modules.
 - `users`: list debug-shell-visible users. The `kernel` account is scoped to the
   kernel debug shell.
-- `kill <pid>`: mark a scheduler process exited. Kernel-space processes can only
-  be killed from the `kernel` debug-shell user, and `idle` is protected.
+- `kill <pid>`: mark a scheduler process exited and tear down owned kernel UI
+  surfaces such as `fm:<user>`. Kernel-space processes can only be killed from
+  the `kernel` debug-shell user, and `idle` is protected.
 - `exit`: leave the current debug shell user context, restoring the previous
   session user. With no previous user, non-kernel sessions return to `kernel`;
   exiting the base `kernel` session closes the GUI shell surface.

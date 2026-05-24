@@ -7,6 +7,51 @@ namespace ok
 namespace
 {
 
+Status append_unsigned(FixedString<32> &out, u64 value)
+{
+    constexpr u64 powers[] = {
+        10'000'000'000'000'000'000ull,
+        1'000'000'000'000'000'000ull,
+        100'000'000'000'000'000ull,
+        10'000'000'000'000'000ull,
+        1'000'000'000'000'000ull,
+        100'000'000'000'000ull,
+        10'000'000'000'000ull,
+        1'000'000'000'000ull,
+        100'000'000'000ull,
+        10'000'000'000ull,
+        1'000'000'000ull,
+        100'000'000ull,
+        10'000'000ull,
+        1'000'000ull,
+        100'000ull,
+        10'000ull,
+        1'000ull,
+        100ull,
+        10ull,
+        1ull,
+    };
+    bool started = false;
+    for (const auto power : powers)
+    {
+        u8 digit = 0;
+        while (value >= power)
+        {
+            value -= power;
+            ++digit;
+        }
+        if (digit != 0 || started || power == 1)
+        {
+            if (auto status = out.append(static_cast<char>('0' + digit)); !status.ok())
+            {
+                return status;
+            }
+            started = true;
+        }
+    }
+    return Status::success();
+}
+
 Status release_shell_surface(Kernel &kernel)
 {
     const auto id = kernel.debug_shell().gui_surface_id();
@@ -531,6 +576,28 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("GUI file manager mouse navigation did not open /tmp");
+    }
+    const auto manager_pid = manager.process_id();
+    const auto manager_surface = manager.surface_id();
+    FixedString<32> kill_command;
+    if (auto status = kill_command.assign("kill "); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (auto status = append_unsigned(kill_command, manager_pid); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    auto killed = kernel.debug_shell().execute(kill_command.view());
+    const auto *killed_process = kernel.scheduler().find(manager_pid);
+    if (!killed || !killed.value().empty() || killed_process == nullptr ||
+        killed_process->state() != sched::ProcessState::exited || manager.surface_id() != 0 ||
+        manager.process_id() != 0 || compositor.surface_info(manager_surface))
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("debug shell kill did not close the GUI file manager process");
     }
     if (auto status = kernel.close_file_manager(); !status.ok())
     {

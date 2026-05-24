@@ -326,7 +326,7 @@ Status KernelDebugShell::command_kill(std::string_view args)
     {
         return Status::denied("only kernel debug user can kill kernel processes");
     }
-    return kernel_->scheduler().kill_process(static_cast<sched::ProcessId>(pid));
+    return kernel_->kill_process(static_cast<sched::ProcessId>(pid));
 }
 
 Status KernelDebugShell::command_drivers()

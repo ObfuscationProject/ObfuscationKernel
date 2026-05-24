@@ -397,6 +397,37 @@ Status Kernel::close_file_manager()
     return Status::success();
 }
 
+Status Kernel::kill_process(sched::ProcessId pid)
+{
+    if (pid == 0)
+    {
+        return Status::invalid_argument("process id must be non-zero");
+    }
+    if (auto status = scheduler_.kill_process(pid); !status.ok())
+    {
+        return status;
+    }
+
+    if (file_manager_.process_id() == pid)
+    {
+        auto &compositor = gui_module_.compositor();
+        const auto surface = file_manager_.surface_id();
+        if (compositor.state() == gui::GuiState::running && surface != 0 && compositor.surface_info(surface))
+        {
+            if (auto status = file_manager_.close(compositor); !status.ok())
+            {
+                file_manager_.mark_closed();
+                return status;
+            }
+        }
+        else
+        {
+            file_manager_.mark_closed();
+        }
+    }
+    return Status::success();
+}
+
 Status Kernel::log_boot_line(std::string_view line)
 {
     if (auto status = console_driver_.write(line); !status.ok())

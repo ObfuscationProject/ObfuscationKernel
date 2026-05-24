@@ -885,65 +885,34 @@ Status GuiCompositor::draw_text(SurfaceId id, u32 column, u32 row, std::string_v
     return Status::success();
 }
 
-Status GuiCompositor::draw_surface(const Surface &surface)
+u32 GuiCompositor::surface_pixel_color(const Surface &surface, u32 x, u32 y) const
 {
-    if (!surface.visible)
+    auto color = surface.pixels[static_cast<usize>(y) * max_gui_surface_width + x];
+    if (x == 0 || y == 0 || x + 1 == surface.bounds.width || y + 1 == surface.bounds.height)
     {
-        return Status::success();
+        color = frame_color;
     }
-    const auto mode = display_->mode();
-    for (u32 y = 0; y < surface.bounds.height; ++y)
+    else if (y == 1)
     {
-        const auto target_y = surface.bounds.y + static_cast<i32>(y);
-        if (target_y < 0 || target_y >= static_cast<i32>(mode.height))
+        color = title_frame_color;
+    }
+    else if (y >= 3 && y <= 8 && surface.bounds.width >= 34)
+    {
+        const auto right = surface.bounds.width - x;
+        if (right >= 8 && right <= 13)
         {
-            continue;
+            color = 0xffd85f5fu;
         }
-        for (u32 x = 0; x < surface.bounds.width; ++x)
+        else if (right >= 17 && right <= 22)
         {
-            const auto target_x = surface.bounds.x + static_cast<i32>(x);
-            if (target_x < 0 || target_x >= static_cast<i32>(mode.width))
-            {
-                continue;
-            }
-            auto color = surface.pixels[static_cast<usize>(y) * max_gui_surface_width + x];
-            if (x == 0 || y == 0 || x + 1 == surface.bounds.width || y + 1 == surface.bounds.height)
-            {
-                color = frame_color;
-            }
-            else if (y == 1)
-            {
-                color = title_frame_color;
-            }
-            else if (y >= 3 && y <= 8 && surface.bounds.width >= 34)
-            {
-                const auto right = surface.bounds.width - x;
-                if (right >= 8 && right <= 13)
-                {
-                    color = 0xffd85f5fu;
-                }
-                else if (right >= 17 && right <= 22)
-                {
-                    color = surface.window_state == WindowState::maximized ? 0xfff4d35eu : 0xff8fd7ffu;
-                }
-                else if (right >= 26 && right <= 31)
-                {
-                    color = 0xff8fbf88u;
-                }
-            }
-            if (auto status = display_->put_pixel(static_cast<u32>(target_x), static_cast<u32>(target_y), color);
-                !status.ok())
-            {
-                return status;
-            }
-            if (ok_platform_display_gui_pixel != nullptr)
-            {
-                ok_platform_display_gui_pixel(mode.width, mode.height, static_cast<u32>(target_x),
-                                              static_cast<u32>(target_y), color);
-            }
+            color = surface.window_state == WindowState::maximized ? 0xfff4d35eu : 0xff8fd7ffu;
+        }
+        else if (right >= 26 && right <= 31)
+        {
+            color = 0xff8fbf88u;
         }
     }
-    return Status::success();
+    return color;
 }
 
 Status GuiCompositor::present()
@@ -958,7 +927,34 @@ Status GuiCompositor::present()
     {
         for (u32 x = 0; x < mode.width; ++x)
         {
-            const auto color = desktop_pixel_color(mode.width, mode.height, x, y);
+            auto color = desktop_pixel_color(mode.width, mode.height, x, y);
+            const Surface *top = nullptr;
+            u32 surface_x = 0;
+            u32 surface_y = 0;
+            for (const auto &surface : surfaces_)
+            {
+                if (!surface.visible)
+                {
+                    continue;
+                }
+                const auto local_x = static_cast<i32>(x) - surface.bounds.x;
+                const auto local_y = static_cast<i32>(y) - surface.bounds.y;
+                if (local_x < 0 || local_y < 0 || local_x >= static_cast<i32>(surface.bounds.width) ||
+                    local_y >= static_cast<i32>(surface.bounds.height))
+                {
+                    continue;
+                }
+                if (top == nullptr || surface.z_index > top->z_index)
+                {
+                    top = &surface;
+                    surface_x = static_cast<u32>(local_x);
+                    surface_y = static_cast<u32>(local_y);
+                }
+            }
+            if (top != nullptr)
+            {
+                color = surface_pixel_color(*top, surface_x, surface_y);
+            }
             if (auto status = display_->put_pixel(x, y, color); !status.ok())
             {
                 return status;
@@ -968,32 +964,6 @@ Status GuiCompositor::present()
                 ok_platform_display_gui_pixel(mode.width, mode.height, x, y, color);
             }
         }
-    }
-
-    u32 last_z_index = 0;
-    for (usize drawn = 0; drawn < surfaces_.size(); ++drawn)
-    {
-        const Surface *next = nullptr;
-        for (const auto &surface : surfaces_)
-        {
-            if (!surface.visible || surface.z_index <= last_z_index)
-            {
-                continue;
-            }
-            if (next == nullptr || surface.z_index < next->z_index)
-            {
-                next = &surface;
-            }
-        }
-        if (next == nullptr)
-        {
-            break;
-        }
-        if (auto status = draw_surface(*next); !status.ok())
-        {
-            return status;
-        }
-        last_z_index = next->z_index;
     }
 
     last_present_checksum_ = display_->checksum();

@@ -147,7 +147,7 @@ class GuiCompositor final
     [[nodiscard]] Result<usize> find_surface_index(SurfaceId id) const;
     [[nodiscard]] Status validate_bounds(Rect bounds) const;
     void draw_cell(Surface &surface, u32 column, u32 row, char value, u32 foreground, u32 background);
-    Status draw_surface(const Surface &surface);
+    [[nodiscard]] u32 surface_pixel_color(const Surface &surface, u32 x, u32 y) const;
     void reset_surfaces();
 
     driver::FramebufferDisplayDriver *display_{nullptr};

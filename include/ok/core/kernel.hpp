@@ -98,6 +98,7 @@ class Kernel final
     Status handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button);
     Status open_file_manager(std::string_view path);
     Status close_file_manager();
+    Status kill_process(sched::ProcessId pid);
 
     [[nodiscard]] bool booted() const
     {
