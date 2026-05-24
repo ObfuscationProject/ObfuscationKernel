@@ -19,9 +19,15 @@ class KernelDebugShell final
     Status attach(Kernel &kernel);
     Result<std::string_view> execute(std::string_view line);
     Status show_gui();
+    Status close_gui();
     Status set_gui_input(std::string_view line);
     Status scroll_gui_history(i32 rows);
+    void mark_gui_closed();
     [[nodiscard]] bool gui_ready();
+    [[nodiscard]] bool gui_open() const
+    {
+        return gui_open_;
+    }
     [[nodiscard]] usize gui_render_count() const
     {
         return gui_render_count_;
@@ -93,6 +99,7 @@ class KernelDebugShell final
     gui::SurfaceId gui_surface_id_{0};
     usize gui_render_count_{0};
     usize gui_scroll_rows_{0};
+    bool gui_open_{true};
 };
 
 } // namespace ok

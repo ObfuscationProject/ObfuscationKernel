@@ -39,7 +39,8 @@ The compositor API is intentionally small and synchronous:
 - `set_title`, `move_surface`, `resize_surface`, `set_visible`, and
   `raise_surface` update surface metadata.
 - `minimize_surface`, `maximize_surface`, `restore_surface`, and
-  `close_surface` provide Windows-style window state controls.
+  `close_surface` provide Windows-style window state controls. Minimized
+  surfaces dock as small bottom task buttons so a mouse click can restore them.
 - `handle_mouse_delta()` tracks the logical pointer and turns button presses into
   title-bar drag, bottom-right resize, minimize, maximize/restore, close, raise,
   and hit-test behavior.
@@ -92,7 +93,9 @@ renders the VFS directory listing in a separate `kernel-files` surface using the
 same compositor. Mouse clicks in its left navigation open `/`, `/dev`, `/tmp`,
 or `/proc` when present; clicks in the listing select files and open
 directories. The window itself uses the same drag, resize, minimize, maximize,
-and close handling as other GUI surfaces.
+and close handling as other GUI surfaces. Each open runs as an `fm:<user>`
+scheduler process with the credentials active at launch, and directory reads are
+checked against those credentials.
 
 The serial console and legacy framebuffer text path are preserved for boot logs,
 automated QEMU validation, and GUI startup failure fallback. Once the GUI shell
@@ -108,6 +111,7 @@ The debug and roadmap tests cover:
 - compositor crash rejection and supervisor restart;
 - `kernel-gui` ownership by the `mod:kernel-gui` kernel background process;
 - mouse-driven window drag, resize, close, and GUI file-manager navigation;
+- file-manager process ownership for `kernel` and non-kernel users;
 - startup animation and GUI file-manager rendering;
 - shell command output rendering to a GUI surface.
 

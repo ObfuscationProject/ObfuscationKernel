@@ -115,6 +115,17 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
         draw_pointer(left_button);
     }
 
+    static void redraw_pointer_after_gui_present()
+    {
+        initialize();
+        if (!ready_)
+        {
+            return;
+        }
+        pointer_drawn_ = false;
+        draw_pointer(pointer_left_button_);
+    }
+
     static i32 gui_delta_x(i32 delta_x)
     {
         return scale_gui_delta(delta_x, static_cast<i32>(ok::driver::framebuffer_width),

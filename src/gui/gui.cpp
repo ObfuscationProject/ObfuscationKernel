@@ -156,6 +156,20 @@ Status append_decimal(FixedString<96> &out, u64 value)
            local_y >= static_cast<i32>(surface.bounds.height - resize_hit_size);
 }
 
+[[nodiscard]] Rect minimized_bounds_for_index(usize index, Rect desktop)
+{
+    constexpr u32 width = 112;
+    constexpr u32 height = title_hit_height + 4;
+    const auto x = static_cast<i32>(4 + (index % max_gui_surfaces) * (width + 4));
+    const auto y = static_cast<i32>(desktop.height > height + 4 ? desktop.height - height - 4 : 0);
+    u32 clipped_width = width;
+    if (x >= 0 && static_cast<u32>(x) + clipped_width > desktop.width)
+    {
+        clipped_width = desktop.width > static_cast<u32>(x) ? desktop.width - static_cast<u32>(x) : width;
+    }
+    return Rect{.x = x, .y = y, .width = clipped_width, .height = height};
+}
+
 [[nodiscard]] u32 desktop_pixel_color(u32 width, u32 height, u32 x, u32 y)
 {
     const auto ix = static_cast<i32>(x);
@@ -353,6 +367,14 @@ Status GuiCompositor::destroy_surface(SurfaceId id)
     {
         return index.status();
     }
+    if (dragging_surface_id_ == id)
+    {
+        dragging_surface_id_ = 0;
+    }
+    if (resizing_surface_id_ == id)
+    {
+        resizing_surface_id_ = 0;
+    }
     return surfaces_.erase_at(index.value());
 }
 
@@ -469,9 +491,19 @@ Status GuiCompositor::minimize_surface(SurfaceId id)
         return index.status();
     }
     auto &surface = surfaces_[index.value()];
-    surface.visible = false;
+    if (surface.window_state == WindowState::normal)
+    {
+        surface.restore_bounds = surface.bounds;
+    }
+    auto desktop = desktop_bounds();
+    if (!desktop)
+    {
+        return desktop.status();
+    }
+    surface.bounds = minimized_bounds_for_index(index.value(), desktop.value());
+    surface.visible = true;
     surface.window_state = WindowState::minimized;
-    return Status::success();
+    return raise_surface(id);
 }
 
 Status GuiCompositor::maximize_surface(SurfaceId id)
@@ -491,7 +523,7 @@ Status GuiCompositor::maximize_surface(SurfaceId id)
         return desktop.status();
     }
     auto &surface = surfaces_[index.value()];
-    if (surface.window_state != WindowState::maximized)
+    if (surface.window_state == WindowState::normal)
     {
         surface.restore_bounds = surface.bounds;
     }
@@ -513,7 +545,7 @@ Status GuiCompositor::restore_surface(SurfaceId id)
         return index.status();
     }
     auto &surface = surfaces_[index.value()];
-    if (surface.window_state == WindowState::maximized)
+    if (surface.window_state == WindowState::maximized || surface.window_state == WindowState::minimized)
     {
         surface.bounds = surface.restore_bounds;
     }
@@ -551,6 +583,7 @@ Status GuiCompositor::handle_mouse_delta(i32 delta_x, i32 delta_y, bool left_but
 
     const bool pressed = left_button && !left_button_down_;
     const bool released = !left_button && left_button_down_;
+    const bool pointer_changed = delta_x != 0 || delta_y != 0 || pressed || released;
     bool changed = false;
 
     if (released)
@@ -577,6 +610,17 @@ Status GuiCompositor::handle_mouse_delta(i32 delta_x, i32 delta_y, bool left_but
 
             const auto local_x = pointer_x_ - info.value().bounds.x;
             const auto local_y = pointer_y_ - info.value().bounds.y;
+            if (info.value().window_state == WindowState::minimized)
+            {
+                dragging_surface_id_ = 0;
+                resizing_surface_id_ = 0;
+                if (auto status = restore_surface(hit.value()); !status.ok())
+                {
+                    return status;
+                }
+                left_button_down_ = left_button;
+                return present();
+            }
             switch (window_control_at(info.value(), local_x, local_y))
             {
             case WindowControl::close:
@@ -678,7 +722,7 @@ Status GuiCompositor::handle_mouse_delta(i32 delta_x, i32 delta_y, bool left_but
     }
 
     left_button_down_ = left_button;
-    return changed ? present() : Status::success();
+    return (changed || pointer_changed) ? present() : Status::success();
 }
 
 Status GuiCompositor::fill(SurfaceId id, u32 rgba)
@@ -1106,11 +1150,18 @@ Result<Rect> GuiCompositor::desktop_bounds() const
     return Rect{.x = 0, .y = 0, .width = mode.width, .height = mode.height};
 }
 
-Status KernelFileManager::open(GuiCompositor &compositor, fs::VirtualFileSystem &vfs, std::string_view path)
+Status KernelFileManager::open(GuiCompositor &compositor, fs::VirtualFileSystem &vfs, std::string_view path,
+                               user::Credentials credentials, sched::ProcessId process_id)
 {
     if (path.empty())
     {
         path = "/";
+    }
+    credentials_ = credentials;
+    process_id_ = process_id;
+    if (auto status = require_directory_access(vfs, path); !status.ok())
+    {
+        return status;
     }
     if (auto status = path_.assign(path); !status.ok())
     {
@@ -1144,6 +1195,10 @@ Status KernelFileManager::refresh(GuiCompositor &compositor, fs::VirtualFileSyst
     {
         return Status::not_initialized("file manager surface is not open");
     }
+    if (auto status = require_directory_access(vfs, path_.view()); !status.ok())
+    {
+        return status;
+    }
     return render(compositor, vfs);
 }
 
@@ -1155,11 +1210,34 @@ Status KernelFileManager::close(GuiCompositor &compositor)
     }
     const auto id = surface_id_;
     surface_id_ = 0;
+    process_id_ = 0;
     if (auto status = compositor.destroy_surface(id); !status.ok())
     {
         return status;
     }
     return compositor.present();
+}
+
+void KernelFileManager::mark_closed()
+{
+    surface_id_ = 0;
+    process_id_ = 0;
+    selected_entry_ = fs::max_child_nodes;
+}
+
+Status KernelFileManager::require_directory_access(fs::VirtualFileSystem &vfs, std::string_view path) const
+{
+    auto metadata = vfs.stat(path);
+    if (!metadata)
+    {
+        return metadata.status();
+    }
+    if (metadata.value().type != fs::NodeType::directory)
+    {
+        return Status::invalid_argument("path is not a directory");
+    }
+    return fs::require_access(metadata.value(), fs::Credentials{.uid = credentials_.euid, .gid = credentials_.egid},
+                              fs::access_read | fs::access_execute);
 }
 
 Status KernelFileManager::handle_mouse(GuiCompositor &compositor, fs::VirtualFileSystem &vfs, i32 x, i32 y, bool click)
@@ -1188,9 +1266,9 @@ Status KernelFileManager::handle_mouse(GuiCompositor &compositor, fs::VirtualFil
     {
         constexpr std::string_view nav_paths[] = {"/", "/dev", "/tmp", "/proc"};
         const auto next = nav_paths[row - 4];
-        if (vfs.list(next))
+        if (require_directory_access(vfs, next).ok())
         {
-            return open(compositor, vfs, next);
+            return open(compositor, vfs, next, credentials_, process_id_);
         }
         return Status::success();
     }
@@ -1218,13 +1296,17 @@ Status KernelFileManager::handle_mouse(GuiCompositor &compositor, fs::VirtualFil
         {
             return status;
         }
-        return open(compositor, vfs, child_path.view());
+        return open(compositor, vfs, child_path.view(), credentials_, process_id_);
     }
     return render(compositor, vfs);
 }
 
 Status KernelFileManager::render(GuiCompositor &compositor, fs::VirtualFileSystem &vfs)
 {
+    if (auto status = require_directory_access(vfs, path_.view()); !status.ok())
+    {
+        return status;
+    }
     auto listing = vfs.list(path_.view());
     if (!listing)
     {

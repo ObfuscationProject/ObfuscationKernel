@@ -5,6 +5,7 @@
 #include "ok/driver/driver.hpp"
 #include "ok/driver/font.hpp"
 #include "ok/fs/vfs.hpp"
+#include "ok/user/user.hpp"
 
 #include <array>
 #include <string_view>
@@ -170,9 +171,11 @@ class GuiCompositor final
 class KernelFileManager final
 {
   public:
-    Status open(GuiCompositor &compositor, fs::VirtualFileSystem &vfs, std::string_view path);
+    Status open(GuiCompositor &compositor, fs::VirtualFileSystem &vfs, std::string_view path,
+                user::Credentials credentials, sched::ProcessId process_id);
     Status refresh(GuiCompositor &compositor, fs::VirtualFileSystem &vfs);
     Status close(GuiCompositor &compositor);
+    void mark_closed();
     Status handle_mouse(GuiCompositor &compositor, fs::VirtualFileSystem &vfs, i32 x, i32 y, bool click);
 
     [[nodiscard]] SurfaceId surface_id() const
@@ -187,14 +190,25 @@ class KernelFileManager final
     {
         return render_count_;
     }
+    [[nodiscard]] sched::ProcessId process_id() const
+    {
+        return process_id_;
+    }
+    [[nodiscard]] const user::Credentials &credentials() const
+    {
+        return credentials_;
+    }
 
   private:
+    [[nodiscard]] Status require_directory_access(fs::VirtualFileSystem &vfs, std::string_view path) const;
     Status render(GuiCompositor &compositor, fs::VirtualFileSystem &vfs);
 
     SurfaceId surface_id_{0};
     FixedString<96> path_{"/"};
     usize render_count_{0};
     usize selected_entry_{fs::max_child_nodes};
+    sched::ProcessId process_id_{0};
+    user::Credentials credentials_{user::kernel_credentials()};
 };
 
 class GuiModule final : public KernelModule, public KernelService

@@ -31,6 +31,19 @@ driver::DisplayBackend display_backend_for_arch(arch::Architecture architecture)
     return driver::DisplayBackend::memory_framebuffer;
 }
 
+std::string_view user_label_for(const user::UserSpaceManager &users, user::Credentials credentials)
+{
+    if (credentials.kernel_space)
+    {
+        return "kernel";
+    }
+    if (const auto *account = users.users().find_by_uid(credentials.euid); account != nullptr)
+    {
+        return account->name.view();
+    }
+    return "user";
+}
+
 } // namespace
 
 Kernel::Kernel() : arch_(&arch::arch_operations(arch::configured_architecture()))
@@ -294,9 +307,24 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
     }
 
     const bool click = left_button && !gui_mouse_left_down_;
+    const auto shell_surface = debug_shell_.gui_surface_id();
+    const auto file_manager_surface = file_manager_.surface_id();
+    const auto file_manager_process = file_manager_.process_id();
     if (auto status = compositor.handle_mouse_delta(delta_x, delta_y, left_button); !status.ok())
     {
         return status;
+    }
+    if (shell_surface != 0 && !compositor.surface_info(shell_surface))
+    {
+        debug_shell_.mark_gui_closed();
+    }
+    if (file_manager_surface != 0 && !compositor.surface_info(file_manager_surface))
+    {
+        if (file_manager_process != 0)
+        {
+            static_cast<void>(scheduler_.kill_process(file_manager_process));
+        }
+        file_manager_.mark_closed();
     }
     if (click)
     {
@@ -308,6 +336,64 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
         }
     }
     gui_mouse_left_down_ = left_button;
+    return Status::success();
+}
+
+Status Kernel::open_file_manager(std::string_view path)
+{
+    if (!booted_)
+    {
+        return Status::not_initialized("kernel is not booted");
+    }
+    const auto credentials = posix_.user_credentials();
+    FixedString<sched::max_process_name> process_name;
+    if (auto status = process_name.assign("fm:"); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = process_name.append(user_label_for(user_space_, credentials)); !status.ok())
+    {
+        return status;
+    }
+
+    const auto process_offset = scheduler_.process_count() * 0x1000;
+    const auto context = arch_->make_kernel_context(0x7000 + process_offset, 0xe000 + process_offset);
+    auto process = scheduler_.create_background_process(process_name.view(), context);
+    if (!process)
+    {
+        return process.status();
+    }
+    if (auto status = scheduler_.set_credentials(process.value(), credentials); !status.ok())
+    {
+        static_cast<void>(scheduler_.kill_process(process.value()));
+        return status;
+    }
+
+    const auto previous_process = file_manager_.process_id();
+    if (auto status = file_manager_.open(gui_module_.compositor(), vfs_, path, credentials, process.value());
+        !status.ok())
+    {
+        static_cast<void>(scheduler_.kill_process(process.value()));
+        return status;
+    }
+    if (previous_process != 0 && previous_process != process.value())
+    {
+        static_cast<void>(scheduler_.kill_process(previous_process));
+    }
+    return Status::success();
+}
+
+Status Kernel::close_file_manager()
+{
+    const auto process = file_manager_.process_id();
+    if (auto status = file_manager_.close(gui_module_.compositor()); !status.ok())
+    {
+        return status;
+    }
+    if (process != 0)
+    {
+        static_cast<void>(scheduler_.kill_process(process));
+    }
     return Status::success();
 }
 

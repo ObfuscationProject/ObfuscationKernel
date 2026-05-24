@@ -83,8 +83,11 @@ void poll_virtio_mouse()
     }
     if (changed)
     {
-        static_cast<void>(ok::ok_gui_mouse_event(RamFb::gui_delta_x(dx), RamFb::gui_delta_y(dy), virtio_mouse_left));
+        const auto gui_dx = RamFb::gui_delta_x(dx);
+        const auto gui_dy = RamFb::gui_delta_y(dy);
         RamFb::move_pointer(dx, dy, virtio_mouse_left);
+        static_cast<void>(ok::ok_gui_mouse_event(gui_dx, gui_dy, virtio_mouse_left));
+        RamFb::redraw_pointer_after_gui_present();
     }
     if (wheel != 0)
     {
@@ -141,6 +144,10 @@ int poll_virtio_keyboard()
         if (!pressed)
         {
             continue;
+        }
+        if (event.code == ok::driver::qemu_virt::input_key_f12)
+        {
+            return ok::ok_input_open_shell;
         }
         if (event.code == ok::driver::qemu_virt::input_key_up)
         {

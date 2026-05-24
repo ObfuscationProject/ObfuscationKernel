@@ -10,6 +10,8 @@ line. Up/Down recall command history in the same style as common Linux shells.
 In windowed GUI mode, mouse wheel input scrolls the shell's visual scrollback
 with the same direction convention as Windows: wheel up moves toward older
 scrollback, and wheel down returns toward the prompt.
+F12 opens the shell surface again after it has been closed; while the active
+session is the `kernel` user this is the kernel debug shell.
 The command evaluator follows the Bourne shell subset needed for kernel debug
 work: comments beginning with `#`, command sequences separated by `;`, and
 basic `&&`/`||` conditionals.
@@ -38,7 +40,8 @@ Supported commands:
 - `kill <pid>`: mark a scheduler process exited. Kernel-space processes can only
   be killed from the `kernel` debug-shell user, and `idle` is protected.
 - `exit`: leave the current debug shell user context, restoring the previous
-  session user or dropping the base `kernel` session to `root`.
+  session user. With no previous user, non-kernel sessions return to `kernel`;
+  exiting the base `kernel` session closes the GUI shell surface.
 - `disk`: print active block-device geometry and SimpleFS mount state.
 - `mkfs [label]`: format the active block device as SimpleFS.
 - `sfs info|ls|touch|write|cat|stat|rm`: operate directly on the SimpleFS flat
@@ -48,7 +51,8 @@ Supported commands:
 - `net status|udp|recv|listen|tcp`: inspect and exercise the IPv4/UDP/TCP
   loopback stack used by early network-debug work.
 - `fm [path]` / `fileman [path]`: open the GUI kernel file manager for a VFS
-  directory.
+  directory as a scheduler-visible `fm:<user>` process using the current
+  credentials.
 
 The shell is intentionally fixed-buffer and freestanding. Windowed QEMU mode
 routes keyboard input into the shell after `OK_TEST_PASS`, mirrors output to

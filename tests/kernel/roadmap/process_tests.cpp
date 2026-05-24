@@ -594,13 +594,33 @@ Status verify_background_programs_and_posix(Kernel &kernel)
         return Status::fault("debug shell kill did not exit a background process");
     }
 
-    static_cast<void>(kernel.debug_shell().execute("exit"));
+    static_cast<void>(kernel.debug_shell().execute("su root"));
     auto user_ps = kernel.debug_shell().execute("ps aux");
     if (!user_ps || contains_text(user_ps.value(), "drv:simple-framebuffer") ||
         contains_text(user_ps.value(), "mod:kernel-gui") || contains_text(user_ps.value(), "idle"))
     {
         return Status::fault("debug shell ps exposed kernel processes outside kernel user");
     }
+    static_cast<void>(kernel.debug_shell().execute("su user"));
+    auto user_fm = kernel.debug_shell().execute("fm /tmp");
+    if (!user_fm)
+    {
+        return Status::fault("GUI file manager command failed for active user");
+    }
+    if (!contains_text(user_fm.value(), "file manager: /tmp"))
+    {
+        return Status::fault("GUI file manager command did not report /tmp");
+    }
+    auto user_fm_ps = kernel.debug_shell().execute("ps aux");
+    if (!user_fm_ps)
+    {
+        return Status::fault("debug shell ps failed after user file manager launch");
+    }
+    if (!contains_text(user_fm_ps.value(), "fm:user"))
+    {
+        return Status::fault("GUI file manager process did not run as active user");
+    }
+    static_cast<void>(kernel.debug_shell().execute("exit"));
     static_cast<void>(kernel.debug_shell().execute("su kernel"));
 
     const auto saved_credentials = kernel.posix().user_credentials();

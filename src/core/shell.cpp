@@ -220,19 +220,58 @@ Status KernelDebugShell::attach(Kernel &kernel)
 
 bool KernelDebugShell::gui_ready()
 {
-    return ensure_gui_surface().ok();
+    return gui_open_ && ensure_gui_surface().ok();
 }
 
 Status KernelDebugShell::show_gui()
 {
+    gui_open_ = true;
     gui_scroll_rows_ = 0;
     gui_history_.clear();
     gui_input_line_.clear();
     return redraw_gui_terminal();
 }
 
+Status KernelDebugShell::close_gui()
+{
+    gui_open_ = false;
+    gui_history_.clear();
+    gui_input_line_.clear();
+    gui_scroll_rows_ = 0;
+    if (kernel_ == nullptr || gui_surface_id_ == 0)
+    {
+        gui_surface_id_ = 0;
+        return Status::success();
+    }
+    const auto id = gui_surface_id_;
+    gui_surface_id_ = 0;
+    auto &compositor = kernel_->gui().compositor();
+    if (compositor.surface_info(id))
+    {
+        if (auto status = compositor.destroy_surface(id); !status.ok())
+        {
+            return status;
+        }
+        return compositor.present();
+    }
+    return Status::success();
+}
+
+void KernelDebugShell::mark_gui_closed()
+{
+    gui_open_ = false;
+    gui_surface_id_ = 0;
+    gui_history_.clear();
+    gui_input_line_.clear();
+    gui_scroll_rows_ = 0;
+}
+
 Status KernelDebugShell::set_gui_input(std::string_view line)
 {
+    if (!gui_open_)
+    {
+        return Status::success();
+    }
     gui_scroll_rows_ = 0;
     gui_input_line_.clear();
     if (auto status = gui_input_line_.append(line); !status.ok())
@@ -244,6 +283,10 @@ Status KernelDebugShell::set_gui_input(std::string_view line)
 
 Status KernelDebugShell::scroll_gui_history(i32 rows)
 {
+    if (!gui_open_)
+    {
+        return Status::success();
+    }
     if (rows == 0)
     {
         return Status::success();
@@ -617,6 +660,10 @@ Status KernelDebugShell::append_node_type(fs::NodeType type)
 
 Status KernelDebugShell::ensure_gui_surface()
 {
+    if (!gui_open_)
+    {
+        return Status::not_initialized("GUI shell is closed");
+    }
     if (kernel_ == nullptr)
     {
         return Status::not_initialized("shell has no kernel");
@@ -747,6 +794,10 @@ Status KernelDebugShell::redraw_gui_terminal()
 
 Status KernelDebugShell::render_to_gui(std::string_view command_line, std::string_view output)
 {
+    if (!gui_open_)
+    {
+        return Status::success();
+    }
     bool clears_screen = false;
     for (const auto value : output)
     {

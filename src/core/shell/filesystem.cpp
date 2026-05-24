@@ -577,8 +577,7 @@ Status KernelDebugShell::command_file_manager(std::string_view path)
     {
         return resolved.status();
     }
-    if (auto status = kernel_->file_manager().open(kernel_->gui().compositor(), kernel_->vfs(), resolved.value());
-        !status.ok())
+    if (auto status = kernel_->open_file_manager(resolved.value()); !status.ok())
     {
         return status;
     }
@@ -719,16 +718,22 @@ Status KernelDebugShell::command_exit(std::string_view args)
         return command_whoami();
     }
 
-    auto root = kernel_->user_space().credentials_for("root");
-    if (!root)
+    const auto active = kernel_->posix().user_credentials();
+    if (active.kernel_space || session_user_name_.view() == "kernel")
     {
-        return root.status();
+        return close_gui();
     }
-    if (auto status = kernel_->posix().set_credentials(root.value()); !status.ok())
+
+    auto kernel = kernel_->user_space().credentials_for("kernel");
+    if (!kernel)
+    {
+        return kernel.status();
+    }
+    if (auto status = kernel_->posix().set_credentials(kernel.value()); !status.ok())
     {
         return status;
     }
-    if (auto status = session_user_name_.assign("root"); !status.ok())
+    if (auto status = session_user_name_.assign("kernel"); !status.ok())
     {
         return status;
     }

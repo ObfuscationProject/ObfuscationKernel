@@ -72,9 +72,13 @@ void shell_write(std::string_view text)
     ok::usize history_count = 0;
     ok::usize history_cursor = 0;
     ok::u8 escape_state = 0;
+    bool shell_active = true;
 
     auto refresh_gui_input = [&]() {
-        static_cast<void>(ok::ok_debug_shell_set_gui_input(line.view()));
+        if (shell_active)
+        {
+            static_cast<void>(ok::ok_debug_shell_set_gui_input(line.view()));
+        }
     };
     auto erase_line = [&]() {
         while (!line.empty())
@@ -145,6 +149,21 @@ void shell_write(std::string_view text)
         const int value = ok_platform_input_poll();
         if (value >= 0)
         {
+            if (value == ok::ok_input_open_shell)
+            {
+                shell_active = true;
+                line.clear();
+                escape_state = 0;
+                static_cast<void>(ok::ok_debug_shell_show_gui());
+                shell_write(prompt);
+                refresh_gui_input();
+                continue;
+            }
+            if (!shell_active || !ok::ok_debug_shell_gui_open())
+            {
+                shell_active = false;
+                continue;
+            }
             const char ch = static_cast<char>(value);
             if (escape_state == 1)
             {
@@ -179,8 +198,15 @@ void shell_write(std::string_view text)
                     shell_write(out.value());
                 }
                 line.clear();
-                shell_write(prompt);
-                refresh_gui_input();
+                if (ok::ok_debug_shell_gui_open())
+                {
+                    shell_write(prompt);
+                    refresh_gui_input();
+                }
+                else
+                {
+                    shell_active = false;
+                }
             }
             else if (ch == '\b' || ch == 0x7f)
             {

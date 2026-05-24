@@ -497,6 +497,21 @@ Status Kernel::run_debug_test_suite()
     {
         return Status::fault("debug shell kernel user restore test failed");
     }
+    shell_exit = debug_shell_.execute("exit");
+    if (!shell_exit || shell_exit.value() != "root\n")
+    {
+        return Status::fault("debug shell nested exit test failed");
+    }
+    shell_exit = debug_shell_.execute("exit");
+    if (!shell_exit || shell_exit.value() != "kernel\n")
+    {
+        return Status::fault("debug shell base exit did not return to kernel");
+    }
+    auto shell_close = debug_shell_.execute("exit");
+    if (!shell_close || !shell_close.value().empty() || debug_shell_.gui_open())
+    {
+        return Status::fault("debug shell final exit did not close the GUI shell");
+    }
     test_report_.shell = true;
 
     if (memory_.translation_mode() != config_.modes.memory || interrupts_.mode() != config_.modes.interrupts ||

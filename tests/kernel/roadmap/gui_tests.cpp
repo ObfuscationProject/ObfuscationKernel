@@ -199,9 +199,10 @@ Status test_gui_surface_management_api(Kernel &kernel)
         return status;
     }
     info = compositor.surface_info(front.value());
-    if (!info || info.value().visible || info.value().window_state != gui::WindowState::minimized)
+    if (!info || !info.value().visible || info.value().window_state != gui::WindowState::minimized ||
+        info.value().bounds.y <= 26)
     {
-        return Status::fault("GUI minimize surface did not hide the window");
+        return Status::fault("GUI minimize surface did not dock the window");
     }
     if (auto status = compositor.restore_surface(front.value()); !status.ok())
     {
@@ -291,6 +292,85 @@ Status test_gui_mouse_interacts_with_windows(Kernel &kernel)
     if (!info || info.value().bounds.width <= 80 || info.value().bounds.height <= 50)
     {
         return Status::fault("GUI mouse resize did not resize the window");
+    }
+
+    if (auto status =
+            compositor.set_pointer_position(info.value().bounds.x + static_cast<i32>(info.value().bounds.width) - 20,
+                                            info.value().bounds.y + 5);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(0, 0, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(0, 0, false); !status.ok())
+    {
+        return status;
+    }
+    info = compositor.surface_info(surface.value());
+    if (!info || info.value().window_state != gui::WindowState::maximized)
+    {
+        return Status::fault("GUI mouse maximize button did not maximize the window");
+    }
+    if (auto status =
+            compositor.set_pointer_position(info.value().bounds.x + static_cast<i32>(info.value().bounds.width) - 20,
+                                            info.value().bounds.y + 5);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(0, 0, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(0, 0, false); !status.ok())
+    {
+        return status;
+    }
+    info = compositor.surface_info(surface.value());
+    if (!info || info.value().window_state != gui::WindowState::normal)
+    {
+        return Status::fault("GUI mouse maximize button did not restore the window");
+    }
+    if (auto status =
+            compositor.set_pointer_position(info.value().bounds.x + static_cast<i32>(info.value().bounds.width) - 28,
+                                            info.value().bounds.y + 5);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(0, 0, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(0, 0, false); !status.ok())
+    {
+        return status;
+    }
+    info = compositor.surface_info(surface.value());
+    if (!info || info.value().window_state != gui::WindowState::minimized)
+    {
+        return Status::fault("GUI mouse minimize button did not minimize the window");
+    }
+    if (auto status = compositor.set_pointer_position(info.value().bounds.x + 8, info.value().bounds.y + 5);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(0, 0, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.handle_mouse_delta(0, 0, false); !status.ok())
+    {
+        return status;
+    }
+    info = compositor.surface_info(surface.value());
+    if (!info || info.value().window_state != gui::WindowState::normal)
+    {
+        return Status::fault("GUI mouse minimized task button did not restore the window");
     }
 
     if (auto status =
@@ -396,40 +476,76 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
 {
     auto &manager = kernel.file_manager();
     auto &compositor = kernel.gui().compositor();
-    if (auto status = manager.open(kernel.gui().compositor(), kernel.vfs(), "/"); !status.ok())
+    const auto saved_credentials = kernel.posix().user_credentials();
+    if (auto status = kernel.posix().set_credentials(user::kernel_credentials()); !status.ok())
     {
         return status;
     }
+    if (auto status = kernel.open_file_manager("/"); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    const auto *process = kernel.scheduler().find(manager.process_id());
     auto info = compositor.surface_info(manager.surface_id());
     if (manager.surface_id() == 0 || manager.path() != "/" || manager.render_count() == 0 || !info ||
         compositor.last_present_checksum() == 0)
     {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("GUI file manager did not render the VFS root");
+    }
+    if (process == nullptr)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("GUI file manager process was not registered");
+    }
+    if (process->name() != "fm:kernel")
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("GUI file manager process was not named for kernel user");
+    }
+    if (!process->credentials().kernel_space)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("GUI file manager process did not keep kernel credentials");
     }
     const auto before_render_count = manager.render_count();
     const auto nav_x = info.value().bounds.x + 12;
     const auto nav_y = info.value().bounds.y + static_cast<i32>(gui::gui_glyph_height * 6 + 2);
     if (auto status = compositor.set_pointer_position(nav_x, nav_y); !status.ok())
     {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return status;
     }
     if (auto status = kernel.handle_gui_mouse(0, 0, true); !status.ok())
     {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return status;
     }
     if (auto status = kernel.handle_gui_mouse(0, 0, false); !status.ok())
     {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return status;
     }
     if (manager.path() != "/tmp" || manager.render_count() <= before_render_count)
     {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("GUI file manager mouse navigation did not open /tmp");
     }
-    return manager.close(compositor);
+    if (auto status = kernel.close_file_manager(); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    return kernel.posix().set_credentials(saved_credentials);
 }
 
 Status test_shell_renders_to_gui(Kernel &kernel)
 {
+    if (auto status = kernel.debug_shell().show_gui(); !status.ok())
+    {
+        return status;
+    }
     const auto before_renders = kernel.debug_shell().gui_render_count();
     const auto before_checksum = kernel.gui().compositor().last_present_checksum();
     auto output = kernel.debug_shell().execute("echo gui-shell");

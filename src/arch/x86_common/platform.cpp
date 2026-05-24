@@ -370,8 +370,11 @@ void handle_ps2_mouse_byte(ok::u8 value)
     const auto dy = static_cast<ok::i32>(static_cast<ok::i8>(ps2_mouse_packet[2]));
     const bool left_button = (header & 0x01u) != 0;
     const auto gui_dy = -dy;
-    static_cast<void>(ok::ok_gui_mouse_event(RamFb::gui_delta_x(dx), RamFb::gui_delta_y(gui_dy), left_button));
+    const auto gui_dx = RamFb::gui_delta_x(dx);
+    const auto scaled_gui_dy = RamFb::gui_delta_y(gui_dy);
     RamFb::move_pointer(dx, gui_dy, left_button);
+    static_cast<void>(ok::ok_gui_mouse_event(gui_dx, scaled_gui_dy, left_button));
+    RamFb::redraw_pointer_after_gui_present();
     if (ps2_mouse_packet_size == 4)
     {
         const auto z = ps2_mouse_packet[3] & 0x0fu;
@@ -525,6 +528,10 @@ extern "C" int ok_platform_input_poll()
     if (released)
     {
         return -1;
+    }
+    if (key == 0x58)
+    {
+        return ok::ok_input_open_shell;
     }
 
     const char value = map_scancode(key);

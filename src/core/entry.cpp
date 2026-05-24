@@ -328,6 +328,16 @@ Status ok_debug_shell_show_gui()
     return kernel.debug_shell().show_gui();
 }
 
+Status ok_debug_shell_close_gui()
+{
+    Kernel &kernel = kernel_instance();
+    if (!kernel.booted())
+    {
+        return Status::not_initialized("kernel is not booted");
+    }
+    return kernel.debug_shell().close_gui();
+}
+
 Status ok_debug_shell_set_gui_input(std::string_view line)
 {
     Kernel &kernel = kernel_instance();
@@ -362,6 +372,12 @@ bool ok_debug_shell_gui_ready()
 {
     Kernel &kernel = kernel_instance();
     return kernel.booted() && kernel.debug_shell().gui_ready();
+}
+
+bool ok_debug_shell_gui_open()
+{
+    Kernel &kernel = kernel_instance();
+    return kernel.booted() && kernel.debug_shell().gui_open();
 }
 
 extern "C" int ok_kernel_main(const KernelEntryConfig *config)

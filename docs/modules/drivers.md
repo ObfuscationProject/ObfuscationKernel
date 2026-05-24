@@ -102,3 +102,5 @@ legacy virtio-mmio queue registers used by QEMU `virt` here, maps Linux input
 key codes into shell characters, forwards scaled logical mouse-relative events
 into the GUI compositor, and then moves a small framebuffer pointer. UART input
 remains as a fallback for headless serial use.
+F12 is reserved as the platform shortcut for reopening the GUI shell after it
+has been closed.
