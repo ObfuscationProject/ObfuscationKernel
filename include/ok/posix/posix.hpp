@@ -252,6 +252,7 @@ class PosixService final
     [[nodiscard]] FileDescriptor *descriptor(Fd fd);
     [[nodiscard]] const FileDescriptor *descriptor(Fd fd) const;
     [[nodiscard]] Result<Fd> allocate_fd(Fd minimum = 3);
+    [[nodiscard]] Status require_parent_directory_access(std::string_view normalized_path, u32 access) const;
     [[nodiscard]] Result<std::string_view> normalize_path(std::string_view path);
     [[nodiscard]] Result<std::string_view> resolve_path(Fd dirfd, std::string_view path);
     [[nodiscard]] Status copy_descriptor(Fd source, Fd target, u32 flags);

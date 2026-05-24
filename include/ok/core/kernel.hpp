@@ -99,6 +99,8 @@ class Kernel final
     Status handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button);
     Status handle_gui_mouse_position(i32 x, i32 y, bool left_button);
     Status handle_gui_key(int key);
+    Result<sched::ProcessId> create_ui_process(std::string_view name, uptr entry, uptr stack_top,
+                                               user::Credentials credentials);
     Status open_file_manager(std::string_view path, bool foreground_shell_child = false);
     Status close_file_manager();
     Status close_debug_gui();
@@ -257,6 +259,7 @@ class Kernel final
     Status handle_gui_close_request(gui::SurfaceId surface);
     Status handle_gui_surface_changed(gui::SurfaceId surface);
     Status handle_gui_taskbar_launcher(gui::TaskbarApp app);
+    Status sync_gui_credentials_from_surface(gui::SurfaceId surface);
     Status reconcile_file_managers();
     Status close_file_manager_at(usize index, bool kill_process, bool notify_shell);
     Status close_all_file_managers();

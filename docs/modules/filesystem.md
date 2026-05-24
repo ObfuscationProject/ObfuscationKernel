@@ -10,14 +10,18 @@ The initial root contains `/dev` and `/tmp`.
 - `ext4_journaled`: reserved mode for journal replay and write support.
 
 The current implementation supports node lookup, creation, read/write, truncate,
-unlink, metadata queries, and POSIX file-descriptor tests through
-`ok::posix::PosixService`. RAM VFS nodes keep Linux-style metadata in one
+unlink, metadata queries, owner/group updates, permission checks, and POSIX
+file-descriptor tests through `ok::posix::PosixService`. RAM VFS nodes keep
+Linux-style metadata in one
 structure: type bits are encoded in `mode`, permission bits remain in the low
 12 bits, and `uid`, `gid`, link count, block size, and allocated block count are
 reported through `stat`. File payload storage is separated from directory/node
 metadata so directory-heavy trees do not reserve a 4 KiB data buffer per node.
-Future work should add mounts, permission enforcement, path normalization, and
-mount routing.
+`open`, `cat`, directory listing, creation, unlink, and directory removal route
+through effective uid/gid access checks; parent directories require write and
+execute permission for creates and removals. `/tmp` is initialized as `01777` so
+normal users can create temporary files. Future work should add mounts, full
+path normalization, and mount routing.
 
 `ok::fs::SimpleDiskFileSystem` is the first block-backed writable filesystem.
 It formats and mounts any `ok::driver::BlockDevice` with 512-byte sectors. The

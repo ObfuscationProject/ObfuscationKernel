@@ -68,6 +68,18 @@ const UserAccount *UserManager::find_by_uid(UserId uid) const
     return nullptr;
 }
 
+const UserAccount *UserManager::find_by_gid(GroupId gid) const
+{
+    for (const auto &account : users_)
+    {
+        if (account.gid == gid && !account.kernel_space)
+        {
+            return &account;
+        }
+    }
+    return nullptr;
+}
+
 Result<Credentials> UserManager::credentials_for(std::string_view name) const
 {
     const auto *account = find_by_name(name);

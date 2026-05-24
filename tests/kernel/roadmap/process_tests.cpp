@@ -637,9 +637,11 @@ Status verify_background_programs_and_posix(Kernel &kernel)
     }
     const auto user_fm_pid = kernel.file_manager().process_id();
     const auto *user_fm_process = kernel.scheduler().find(user_fm_pid);
-    if (user_fm_pid == 0 || user_fm_process == nullptr || user_fm_process->name() != "fm:user")
+    if (user_fm_pid == 0 || user_fm_process == nullptr || user_fm_process->name() != "fm:user" ||
+        user_fm_process->execution() != sched::ProcessExecution::user_process ||
+        user_fm_process->address_space_id() == 0)
     {
-        return Status::fault("GUI file manager process did not run as active user");
+        return Status::fault("GUI file manager process did not run as isolated active user");
     }
     auto blocked_shell = kernel.debug_shell().execute("ps aux");
     if (blocked_shell || blocked_shell.status().code() != StatusCode::would_block)

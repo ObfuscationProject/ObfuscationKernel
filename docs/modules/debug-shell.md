@@ -12,9 +12,10 @@ shells.
 In windowed GUI mode, mouse wheel input scrolls the shell's visual scrollback
 with the same direction convention as Windows: wheel up moves toward older
 scrollback, and wheel down returns toward the prompt.
-F12 creates a fresh GUI shell window; while the active session is the `kernel`
-user this is the kernel debug shell. In GUI mode each visible shell window is
-registered as an `oksh` scheduler process.
+F12 creates a fresh GUI shell window. While the active session is the `kernel`
+user this is a kernel-thread `oksh`; from `root` or another normal user it is a
+normal user process with its own address-space ID. In GUI mode each visible
+shell window is registered as a separate `oksh` scheduler process.
 The command evaluator follows the Bourne shell subset needed for kernel debug
 work: comments beginning with `#`, command sequences separated by `;`, and
 basic `&&`/`||` conditionals.
@@ -32,7 +33,8 @@ Supported commands:
 - `echo <text>`: echo input through the kernel output path.
 - `pwd`, `cd <path>`, `ls [-a] [-h] [-l] [path]`, `cat <path>`, `touch <path>`,
   `mkdir <path>`, `rm <path>`, `stat <path>`: BusyBox-style file commands over
-  the RAM VFS/POSIX layer.
+  the RAM VFS/POSIX layer. Long `ls` output includes owner and group names, so
+  `ls -lha` shows entries in the same `mode links user group size name` shape.
 - `chmod <octal> <path>`, `chown <user> <path>`: manage VFS ownership and
   permissions through POSIX credentials.
 - `whoami`, `id`, `su [user]`: switch the debug shell session through the kernel
@@ -61,11 +63,12 @@ Supported commands:
   current block device as EXT4.
 - `net status|udp|recv|listen|tcp`: inspect and exercise the IPv4/UDP/TCP
   loopback stack used by early network-debug work.
-- `fm [path]` / `fileman [path]`: fork a foreground GUI kernel file manager for
-  a VFS directory as a scheduler-visible `fm:<user>` process using the current
-  credentials. While that foreground file manager is open, the debug shell
-  process is blocked and does not display a fresh prompt until the file manager
-  closes.
+- `fm [path]` / `fileman [path]`: fork a foreground GUI file manager for a VFS
+  directory as a scheduler-visible `fm:<user>` process using the current
+  credentials. Kernel-launched file managers stay kernel threads; root/user
+  launches become isolated user processes. While that foreground file manager is
+  open, the debug shell process is blocked and does not display a fresh prompt
+  until the file manager closes.
 - `F1`: open or raise the GUI file manager at the current working directory
   without blocking the shell.
 

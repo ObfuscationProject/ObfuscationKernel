@@ -58,6 +58,11 @@ Result<Fd> PosixService::openat(Fd dirfd, std::string_view path, u32 flags, u32 
         {
             return Status::not_found("path not found");
         }
+        if (auto status = require_parent_directory_access(normalized, fs::access_write | fs::access_execute);
+            !status.ok())
+        {
+            return status;
+        }
         if (auto status = vfs_->create(normalized, fs::NodeType::regular); !status.ok())
         {
             return status;

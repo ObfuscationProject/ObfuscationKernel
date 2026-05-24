@@ -466,16 +466,17 @@ Status Kernel::handle_gui_key(int key)
     const auto active = compositor.active_surface();
     if (key == ok_input_open_shell)
     {
+        if (auto status = sync_gui_credentials_from_surface(active); !status.ok())
+        {
+            return status;
+        }
         return debug_shell_.show_gui();
     }
     if (key == ok_input_open_file_manager)
     {
-        if (active != 0 && debug_shell_.owns_surface(active))
+        if (auto status = sync_gui_credentials_from_surface(active); !status.ok())
         {
-            if (auto status = debug_shell_.handle_surface_changed(active); !status.ok())
-            {
-                return status;
-            }
+            return status;
         }
         return open_file_manager(posix_.getcwd(), false);
     }
@@ -500,19 +501,37 @@ Status Kernel::handle_gui_taskbar_launcher(gui::TaskbarApp app)
     switch (app)
     {
     case gui::TaskbarApp::debug_shell:
+        if (auto status = sync_gui_credentials_from_surface(gui_module_.compositor().active_surface()); !status.ok())
+        {
+            return status;
+        }
         return debug_shell_.show_gui();
     case gui::TaskbarApp::file_manager:
-        if (const auto active = gui_module_.compositor().active_surface();
-            active != 0 && debug_shell_.owns_surface(active))
+        if (auto status = sync_gui_credentials_from_surface(gui_module_.compositor().active_surface()); !status.ok())
         {
-            if (auto status = debug_shell_.handle_surface_changed(active); !status.ok())
-            {
-                return status;
-            }
+            return status;
         }
         return open_file_manager(posix_.getcwd(), false);
     case gui::TaskbarApp::none:
         return Status::success();
+    }
+    return Status::success();
+}
+
+Status Kernel::sync_gui_credentials_from_surface(gui::SurfaceId surface)
+{
+    if (surface == 0)
+    {
+        return Status::success();
+    }
+    if (debug_shell_.owns_surface(surface))
+    {
+        return debug_shell_.handle_surface_changed(surface);
+    }
+    if (auto manager = find_file_manager_by_surface(surface))
+    {
+        active_file_manager_index_ = manager.value();
+        return posix_.set_credentials(file_managers_[manager.value()].credentials());
     }
     return Status::success();
 }
@@ -705,6 +724,34 @@ void Kernel::clear_gui_close_attempt(gui::SurfaceId surface)
     }
 }
 
+Result<sched::ProcessId> Kernel::create_ui_process(std::string_view name, uptr entry, uptr stack_top,
+                                                   user::Credentials credentials)
+{
+    auto process = credentials.kernel_space
+                       ? scheduler_.create_process(name, arch_->make_kernel_context(entry, stack_top))
+                       : scheduler_.create_user_process(
+                             name, arch_->make_user_context(arch::UserEntry{
+                                       .instruction_pointer = entry,
+                                       .stack_pointer = stack_top,
+                                       .argument = 0,
+                                   }));
+    if (!process)
+    {
+        return process.status();
+    }
+    if (auto status = scheduler_.set_credentials(process.value(), credentials); !status.ok())
+    {
+        static_cast<void>(scheduler_.kill_process(process.value()));
+        return status;
+    }
+    if (auto status = scheduler_.set_runnable(process.value()); !status.ok())
+    {
+        static_cast<void>(scheduler_.kill_process(process.value()));
+        return status;
+    }
+    return process.value();
+}
+
 Result<usize> Kernel::find_file_manager_by_surface(gui::SurfaceId surface) const
 {
     for (usize i = 0; i < file_managers_.size(); ++i)
@@ -867,21 +914,10 @@ Status Kernel::open_file_manager(std::string_view path, bool foreground_shell_ch
     }
 
     const auto process_offset = scheduler_.process_count() * 0x1000;
-    const auto context = arch_->make_kernel_context(0x7000 + process_offset, 0xe000 + process_offset);
-    auto process = scheduler_.create_process(process_name.view(), context);
+    auto process = create_ui_process(process_name.view(), 0x7000 + process_offset, 0xe000 + process_offset, credentials);
     if (!process)
     {
         return process.status();
-    }
-    if (auto status = scheduler_.set_runnable(process.value()); !status.ok())
-    {
-        static_cast<void>(scheduler_.kill_process(process.value()));
-        return status;
-    }
-    if (auto status = scheduler_.set_credentials(process.value(), credentials); !status.ok())
-    {
-        static_cast<void>(scheduler_.kill_process(process.value()));
-        return status;
     }
 
     gui::KernelFileManager manager;

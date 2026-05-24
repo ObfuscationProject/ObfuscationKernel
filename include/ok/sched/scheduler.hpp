@@ -35,6 +35,12 @@ enum class SchedulingMode : u8
     per_cpu_round_robin,
 };
 
+enum class ProcessExecution : u8
+{
+    kernel_thread,
+    user_process,
+};
+
 struct ThreadControlBlock
 {
     ThreadId tid{0};
@@ -73,6 +79,22 @@ class ProcessControlBlock
     {
         background_ = background;
     }
+    [[nodiscard]] ProcessExecution execution() const
+    {
+        return execution_;
+    }
+    void set_execution(ProcessExecution execution)
+    {
+        execution_ = execution;
+    }
+    [[nodiscard]] u64 address_space_id() const
+    {
+        return address_space_id_;
+    }
+    void set_address_space_id(u64 address_space_id)
+    {
+        address_space_id_ = address_space_id;
+    }
     [[nodiscard]] const user::Credentials &credentials() const
     {
         return credentials_;
@@ -95,6 +117,8 @@ class ProcessControlBlock
     FixedString<max_process_name> name_{};
     ProcessState state_{ProcessState::created};
     bool background_{false};
+    ProcessExecution execution_{ProcessExecution::kernel_thread};
+    u64 address_space_id_{0};
     user::Credentials credentials_{user::kernel_credentials()};
     StaticVector<ThreadControlBlock, max_threads_per_process> threads_{};
 };
@@ -133,6 +157,7 @@ class Scheduler final
         return mode_;
     }
     Result<ProcessId> create_process(std::string_view name, arch::CpuContext initial_context);
+    Result<ProcessId> create_user_process(std::string_view name, arch::CpuContext initial_context);
     Result<ProcessId> create_background_process(std::string_view name, arch::CpuContext initial_context);
     Status set_credentials(ProcessId pid, user::Credentials credentials);
     Status kill_process(ProcessId pid);
@@ -169,6 +194,7 @@ class Scheduler final
     StaticVector<ProcessControlBlock, max_processes> processes_{};
     ProcessId next_pid_{1};
     ThreadId next_tid_{1};
+    u64 next_address_space_id_{1};
     ProcessId current_pid_{0};
     usize cpu_count_{1};
     std::array<ProcessId, smp::max_cpus> current_by_cpu_{};

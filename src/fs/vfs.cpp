@@ -249,6 +249,7 @@ VirtualFileSystem::VirtualFileSystem()
     if (root_ != nullptr && tmp != nullptr)
     {
         static_cast<void>(root_->attach_child(*tmp));
+        static_cast<void>(tmp->chmod(01777));
     }
 }
 

@@ -423,7 +423,7 @@ Status Kernel::run_debug_test_suite()
     }
     auto shell_ls_flags = debug_shell_.execute("ls -a -lh /tmp");
     if (!shell_ls_flags || !contains_text(shell_ls_flags.value(), "./") ||
-        !contains_text(shell_ls_flags.value(), "../"))
+        !contains_text(shell_ls_flags.value(), "../") || !contains_text(shell_ls_flags.value(), "root root"))
     {
         return Status::fault("debug shell ls flags test failed");
     }
@@ -445,12 +445,47 @@ Status Kernel::run_debug_test_suite()
     }
     static_cast<void>(debug_shell_.execute("touch /tmp/shell-owned"));
     auto shell_chown = debug_shell_.execute("chown user /tmp/shell-owned");
-    auto shell_chmod = debug_shell_.execute("chmod 600 /tmp/shell-owned");
-    auto shell_owned_stat = debug_shell_.execute("stat /tmp/shell-owned");
-    if (!shell_chown || !shell_chmod || !shell_owned_stat || !contains_text(shell_owned_stat.value(), "uid=1000") ||
-        !contains_text(shell_owned_stat.value(), "mode=33152"))
+    if (!shell_chown || contains_text(shell_chown.value(), "only root"))
     {
-        return Status::fault("debug shell filesystem user-management test failed");
+        return Status::fault("debug shell chown was denied as non-root");
+    }
+    if (contains_text(shell_chown.value(), "shell error"))
+    {
+        return Status::fault("debug shell chown returned an error");
+    }
+
+    auto shell_chmod = debug_shell_.execute("chmod 600 /tmp/shell-owned");
+    if (!shell_chmod || contains_text(shell_chmod.value(), "shell error"))
+    {
+        return Status::fault("debug shell chmod test failed");
+    }
+
+    auto shell_owned_stat = debug_shell_.execute("stat /tmp/shell-owned");
+    if (!shell_owned_stat)
+    {
+        return Status::fault("debug shell owned stat command failed");
+    }
+    if (contains_text(shell_owned_stat.value(), "shell error"))
+    {
+        return Status::fault("debug shell owned stat returned an error");
+    }
+    if (!contains_text(shell_owned_stat.value(), "uid=1000"))
+    {
+        if (contains_text(shell_owned_stat.value(), "uid=0"))
+        {
+            return Status::fault("debug shell owned stat uid stayed root");
+        }
+        return Status::fault("debug shell owned stat uid test failed");
+    }
+    if (!contains_text(shell_owned_stat.value(), "mode=33152"))
+    {
+        return Status::fault("debug shell owned stat mode test failed");
+    }
+
+    auto shell_owned_ls = debug_shell_.execute("ls -lh /tmp");
+    if (!shell_owned_ls || !contains_text(shell_owned_ls.value(), "user user"))
+    {
+        return Status::fault("debug shell owned ls user/group test failed");
     }
     auto shell_sfs_write = debug_shell_.execute("sfs write shell.txt hello");
     if (!shell_sfs_write)

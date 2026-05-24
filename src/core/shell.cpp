@@ -113,6 +113,19 @@ ShellOperator operator_after(std::string_view value, usize index)
     return value[index] == '&' ? ShellOperator::and_if : ShellOperator::or_if;
 }
 
+std::string_view session_user_for_credentials(const user::UserSpaceManager &users, user::Credentials credentials)
+{
+    if (credentials.kernel_space)
+    {
+        return "kernel";
+    }
+    if (const auto *account = users.users().find_by_uid(credentials.euid); account != nullptr)
+    {
+        return account->name.view();
+    }
+    return credentials.euid == user::root_uid ? std::string_view{"root"} : std::string_view{"user"};
+}
+
 usize operator_width(std::string_view value, usize index)
 {
     if (index >= value.size())
@@ -474,7 +487,13 @@ Status KernelDebugShell::load_gui_window_state(usize index)
 
 Status KernelDebugShell::reset_gui_session_state()
 {
-    if (auto status = session_user_name_.assign("kernel"); !status.ok())
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+    const auto credentials = kernel_->posix().user_credentials();
+    if (auto status = session_user_name_.assign(session_user_for_credentials(kernel_->user_space(), credentials));
+        !status.ok())
     {
         return status;
     }
@@ -611,18 +630,13 @@ Status KernelDebugShell::ensure_gui_process()
     }
 
     const auto process_offset = kernel_->scheduler().process_count() * 0x1000;
-    const auto context = kernel_->arch().make_kernel_context(0x6000 + process_offset, 0xd000 + process_offset);
-    auto process = kernel_->scheduler().create_process("oksh", context);
+    auto process = kernel_->create_ui_process("oksh", 0x6000 + process_offset, 0xd000 + process_offset,
+                                             kernel_->posix().user_credentials());
     if (!process)
     {
         return process.status();
     }
     process_id_ = process.value();
-    if (auto status = kernel_->scheduler().set_runnable(process_id_); !status.ok())
-    {
-        process_id_ = 0;
-        return status;
-    }
     return refresh_process_credentials();
 }
 

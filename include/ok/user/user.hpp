@@ -74,6 +74,7 @@ class UserManager final
     Status add_user(UserId uid, GroupId gid, std::string_view name, std::string_view home, bool kernel_space = false);
     [[nodiscard]] const UserAccount *find_by_name(std::string_view name) const;
     [[nodiscard]] const UserAccount *find_by_uid(UserId uid) const;
+    [[nodiscard]] const UserAccount *find_by_gid(GroupId gid) const;
     [[nodiscard]] Result<Credentials> credentials_for(std::string_view name) const;
     [[nodiscard]] bool can_switch(Credentials current, Credentials target) const;
     [[nodiscard]] usize user_count() const

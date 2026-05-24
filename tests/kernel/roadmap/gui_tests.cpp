@@ -823,13 +823,19 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("GUI file manager process was not named for kernel user");
     }
-    if (!process->credentials().kernel_space)
+    if (!process->credentials().kernel_space || process->execution() != sched::ProcessExecution::kernel_thread ||
+        process->address_space_id() != 0)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
-        return Status::fault("GUI file manager process did not keep kernel credentials");
+        return Status::fault("GUI file manager process did not keep kernel-thread credentials");
     }
     const auto first_manager_pid = kernel.file_manager().process_id();
     const auto first_manager_surface = kernel.file_manager().surface_id();
+    if (auto status = kernel.posix().set_credentials(user::root_credentials()); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
     if (auto status = kernel.open_file_manager("/tmp"); !status.ok())
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
@@ -837,15 +843,28 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
     }
     const auto second_manager_pid = kernel.file_manager().process_id();
     const auto second_manager_surface = kernel.file_manager().surface_id();
+    const auto *second_process = kernel.scheduler().find(second_manager_pid);
     if (first_manager_pid == second_manager_pid || first_manager_surface == second_manager_surface ||
         kernel.scheduler().find(first_manager_pid) == nullptr ||
-        kernel.scheduler().find(second_manager_pid) == nullptr ||
-        !compositor.surface_info(first_manager_surface) || !compositor.surface_info(second_manager_surface))
+        second_process == nullptr || !compositor.surface_info(first_manager_surface) ||
+        !compositor.surface_info(second_manager_surface))
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("GUI file manager did not keep multiple windows alive");
     }
+    if (second_process->name() != "fm:root" || second_process->credentials().kernel_space ||
+        second_process->execution() != sched::ProcessExecution::user_process ||
+        second_process->address_space_id() == 0)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("root-launched file manager was not an isolated user process");
+    }
     if (auto status = kernel.close_file_manager(); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (auto status = kernel.posix().set_credentials(user::kernel_credentials()); !status.ok())
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return status;
@@ -1087,11 +1106,13 @@ Status test_shell_renders_to_gui(Kernel &kernel)
     const auto second_shell_pid = kernel.debug_shell().process_id();
     const auto *first_process = kernel.scheduler().find(first_shell_pid);
     const auto *second_process = kernel.scheduler().find(second_shell_pid);
-    if (!second_user || second_user.value() != "kernel\n" || first_process == nullptr ||
+    if (!second_user || second_user.value() != "user\n" || first_process == nullptr ||
         second_process == nullptr || first_process->credentials().euid != user::default_user_uid ||
-        !second_process->credentials().kernel_space)
+        second_process->credentials().euid != user::default_user_uid ||
+        second_process->execution() != sched::ProcessExecution::user_process ||
+        second_process->address_space_id() == 0)
     {
-        return Status::fault("new GUI shell inherited another shell session credentials");
+        return Status::fault("user-launched GUI shell was not an isolated user process");
     }
     if (auto status = kernel.gui().compositor().raise_surface(first_shell_surface); !status.ok())
     {
@@ -1101,10 +1122,10 @@ Status test_shell_renders_to_gui(Kernel &kernel)
     {
         return status;
     }
-    auto restored_first_user = kernel.debug_shell().execute("whoami");
-    if (!restored_first_user || restored_first_user.value() != "user\n")
+    auto restored_first_user = kernel.debug_shell().execute("exit");
+    if (!restored_first_user || restored_first_user.value() != "kernel\n")
     {
-        return Status::fault("GUI shell did not restore its per-window user session");
+        return Status::fault("GUI shell did not restore and exit its per-window user session");
     }
     if (auto status = kernel.gui().compositor().raise_surface(second_shell_surface); !status.ok())
     {
@@ -1115,7 +1136,7 @@ Status test_shell_renders_to_gui(Kernel &kernel)
         return status;
     }
     second_user = kernel.debug_shell().execute("whoami");
-    if (!second_user || second_user.value() != "kernel\n")
+    if (!second_user || second_user.value() != "user\n")
     {
         return Status::fault("GUI shell user switch leaked across windows");
     }
@@ -1165,6 +1186,11 @@ Status test_shell_renders_to_gui(Kernel &kernel)
     if (!clear_output || clear_output.value() != "\f" || !prompt_visible)
     {
         return Status::fault("debug shell GUI clear did not redraw the prompt");
+    }
+    auto reset_user = kernel.debug_shell().execute("exit");
+    if (!reset_user || reset_user.value() != "kernel\n")
+    {
+        return Status::fault("debug shell GUI session did not reset after user process test");
     }
     return Status::success();
 }

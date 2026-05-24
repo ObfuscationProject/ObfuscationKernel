@@ -21,9 +21,12 @@ UI records such as `fm:<user>` to close their surfaces; kernel-space records
 require the `kernel` debug-shell user. Supervised `drv:*` and `mod:*` daemon
 records are recreated after a kernel-user kill, and each restart is logged to
 the console and `/tmp/kernel.log`. Each GUI debug shell registers as its own
-`oksh` process with isolated session credentials. GUI file manager launches
-create distinct `fm:<user>` processes using the credentials active in the debug
-shell at launch time; `fm` launched from the shell blocks only its launching
-`oksh` until the file manager exits.
+`oksh` process with isolated session credentials. UI processes created by the
+`kernel` debug user are recorded as kernel threads with address-space ID 0.
+UI processes created by `root` or another normal user are recorded as
+`user_process` instances with a distinct address-space ID and user-mode context.
+GUI file manager launches create distinct `fm:<user>` processes using the
+credentials active at launch time; `fm` launched from the shell blocks only its
+launching `oksh` until the file manager exits.
 Future work should add priorities, sleeping queues, CPU affinity, and SMP run
 queues.

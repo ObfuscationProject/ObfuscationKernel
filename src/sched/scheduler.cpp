@@ -73,6 +73,23 @@ Result<ProcessId> Scheduler::create_process(std::string_view name, arch::CpuCont
     return pid;
 }
 
+Result<ProcessId> Scheduler::create_user_process(std::string_view name, arch::CpuContext initial_context)
+{
+    auto pid = create_process(name, initial_context);
+    if (!pid)
+    {
+        return pid.status();
+    }
+    auto *process = find(pid.value());
+    if (process == nullptr)
+    {
+        return Status::fault("created user process is not visible");
+    }
+    process->set_execution(ProcessExecution::user_process);
+    process->set_address_space_id(next_address_space_id_++);
+    return pid.value();
+}
+
 Result<ProcessId> Scheduler::create_background_process(std::string_view name, arch::CpuContext initial_context)
 {
     auto pid = create_process(name, initial_context);

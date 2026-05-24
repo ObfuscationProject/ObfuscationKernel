@@ -129,6 +129,19 @@ Status KernelDebugShell::command_ls(std::string_view path)
     {
         return resolved.status();
     }
+    auto root_stat = kernel_->posix().stat(resolved.value());
+    if (!root_stat)
+    {
+        return root_stat.status();
+    }
+    if (root_stat.value().type != fs::NodeType::directory)
+    {
+        return Status::invalid_argument("path is not a directory");
+    }
+    if (auto status = kernel_->posix().access(resolved.value(), posix::r_OK | posix::x_OK); !status.ok())
+    {
+        return status;
+    }
     auto listing = kernel_->vfs().list(resolved.value());
     if (!listing)
     {
@@ -197,6 +210,20 @@ Status KernelDebugShell::command_ls(std::string_view path)
         }
         return append("B");
     };
+    auto append_user_name = [&](u32 uid) -> Status {
+        if (const auto *account = kernel_->user_space().users().find_by_uid(uid); account != nullptr)
+        {
+            return append(account->name.view());
+        }
+        return append_unsigned(uid);
+    };
+    auto append_group_name = [&](u32 gid) -> Status {
+        if (const auto *account = kernel_->user_space().users().find_by_gid(gid); account != nullptr)
+        {
+            return append(account->name.view());
+        }
+        return append_unsigned(gid);
+    };
     auto append_name = [&](std::string_view name, fs::Metadata metadata) -> Status {
         if (auto status = append(name); !status.ok())
         {
@@ -227,7 +254,7 @@ Status KernelDebugShell::command_ls(std::string_view path)
             {
                 return status;
             }
-            if (auto status = append_unsigned(metadata.uid); !status.ok())
+            if (auto status = append_user_name(metadata.uid); !status.ok())
             {
                 return status;
             }
@@ -235,7 +262,7 @@ Status KernelDebugShell::command_ls(std::string_view path)
             {
                 return status;
             }
-            if (auto status = append_unsigned(metadata.gid); !status.ok())
+            if (auto status = append_group_name(metadata.gid); !status.ok())
             {
                 return status;
             }
@@ -261,16 +288,19 @@ Status KernelDebugShell::command_ls(std::string_view path)
 
     if (options.all)
     {
-        auto metadata = kernel_->vfs().stat(resolved.value());
-        if (!metadata)
-        {
-            return metadata.status();
-        }
-        if (auto status = append_entry(".", metadata.value()); !status.ok())
+        const auto metadata = fs::Metadata{.type = root_stat.value().type,
+                                           .size = root_stat.value().size,
+                                           .mode = root_stat.value().mode,
+                                           .uid = root_stat.value().uid,
+                                           .gid = root_stat.value().gid,
+                                           .link_count = root_stat.value().link_count,
+                                           .block_size = root_stat.value().block_size,
+                                           .blocks = root_stat.value().blocks};
+        if (auto status = append_entry(".", metadata); !status.ok())
         {
             return status;
         }
-        if (auto status = append_entry("..", metadata.value()); !status.ok())
+        if (auto status = append_entry("..", metadata); !status.ok())
         {
             return status;
         }
@@ -306,19 +336,26 @@ Status KernelDebugShell::command_cat(std::string_view path)
     {
         return resolved.status();
     }
-    auto file = kernel_->vfs().read_file(resolved.value());
-    if (!file)
+    auto fd = kernel_->posix().open(resolved.value(), posix::o_RDONLY);
+    if (!fd)
     {
-        return file.status();
+        return fd.status();
     }
-    for (usize i = 0; i < file.value().size; ++i)
+    std::array<std::byte, fs::max_file_data> buffer{};
+    auto read = kernel_->posix().read(fd.value(), buffer);
+    static_cast<void>(kernel_->posix().close(fd.value()));
+    if (!read)
     {
-        if (auto status = output_.append(static_cast<char>(file.value().data[i])); !status.ok())
+        return read.status();
+    }
+    for (usize i = 0; i < read.value(); ++i)
+    {
+        if (auto status = output_.append(static_cast<char>(buffer[i])); !status.ok())
         {
             return status;
         }
     }
-    if (file.value().size == 0 || output_.view().back() != '\n')
+    if (read.value() == 0 || output_.view().back() != '\n')
     {
         return append("\n");
     }

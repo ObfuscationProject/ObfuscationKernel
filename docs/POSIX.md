@@ -77,7 +77,9 @@ File descriptors and memory mappings are fixed-capacity kernel objects, not
 hosted runtime handles. Path operations resolve absolute paths, working-directory
 relative paths, and `openat`-style directory-relative paths against the RAM VFS.
 Identity calls are backed by the kernel user manager, and VFS permission checks
-use the effective uid/gid carried by the active POSIX credentials.
+use the effective uid/gid carried by the active POSIX credentials. File opens
+check read/write bits, directory listing checks read permission, and create or
+remove operations require write and execute permission on the parent directory.
 Process, signal, futex, and rseq calls currently use single-process fallback
 semantics unless a richer subsystem exists behind them.
 

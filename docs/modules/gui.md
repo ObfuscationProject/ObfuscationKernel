@@ -104,7 +104,10 @@ surface:
 - the surface is redrawn with `GuiCompositor::draw_text()` and presented.
 Each GUI shell window tracks its own debug user, previous `su` context, input
 line, scrollback, and foreground child process. Switching users in one `oksh`
-does not change the session restored by another `oksh` window.
+does not change the session restored by another `oksh` window. When a shell or
+file manager is opened from a kernel session, its scheduler record stays a
+kernel thread; when it is opened from `root` or another normal user, it is
+created as an isolated user process with its own address-space ID.
 
 The `fm`/`fileman` shell command forks a foreground GUI kernel file manager for
 a path. It renders the VFS directory listing in a separate `kernel-files`
@@ -112,7 +115,7 @@ surface using the same compositor. Mouse clicks in its left navigation open
 `/`, `/dev`, `/tmp`, or `/proc` when present; clicks in the listing select
 files and open directories, with `../` as the first entry outside `/` for parent
 directory navigation. The window itself uses the same drag, resize, minimize,
-maximize, and close handling as other GUI surfaces. Each open runs as an
+maximize, and close handling as other GUI surfaces. Each open runs as a separate
 `fm:<user>` scheduler process with the credentials active at launch, and
 directory reads are checked against those credentials. A shell-launched file
 manager blocks its launching `oksh` process until it exits, while F1 opens
