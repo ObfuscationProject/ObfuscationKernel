@@ -611,14 +611,25 @@ Status verify_background_programs_and_posix(Kernel &kernel)
     {
         return Status::fault("GUI file manager command did not report /tmp");
     }
-    auto user_fm_ps = kernel.debug_shell().execute("ps aux");
-    if (!user_fm_ps)
-    {
-        return Status::fault("debug shell ps failed after user file manager launch");
-    }
-    if (!contains_text(user_fm_ps.value(), "fm:user"))
+    const auto user_fm_pid = kernel.file_manager().process_id();
+    const auto *user_fm_process = kernel.scheduler().find(user_fm_pid);
+    if (user_fm_pid == 0 || user_fm_process == nullptr || user_fm_process->name() != "fm:user")
     {
         return Status::fault("GUI file manager process did not run as active user");
+    }
+    auto blocked_shell = kernel.debug_shell().execute("ps aux");
+    if (!blocked_shell || !contains_text(blocked_shell.value(), "foreground process running pid="))
+    {
+        return Status::fault("debug shell did not block while foreground file manager was running");
+    }
+    if (auto status = kernel.close_file_manager(); !status.ok())
+    {
+        return status;
+    }
+    auto resumed_shell = kernel.debug_shell().execute("echo shell-resumed");
+    if (!resumed_shell || resumed_shell.value() != "shell-resumed\n")
+    {
+        return Status::fault("debug shell did not resume after foreground file manager exited");
     }
     static_cast<void>(kernel.debug_shell().execute("exit"));
     static_cast<void>(kernel.debug_shell().execute("su kernel"));

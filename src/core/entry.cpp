@@ -358,6 +358,16 @@ Status ok_debug_shell_scroll_gui(i32 rows)
     return kernel.debug_shell().scroll_gui_history(rows);
 }
 
+Status ok_debug_shell_open_file_manager_shortcut()
+{
+    Kernel &kernel = kernel_instance();
+    if (!kernel.booted())
+    {
+        return Status::not_initialized("kernel is not booted");
+    }
+    return kernel.open_file_manager(kernel.posix().getcwd(), false);
+}
+
 Status ok_gui_mouse_event(i32 delta_x, i32 delta_y, bool left_button)
 {
     Kernel &kernel = kernel_instance();

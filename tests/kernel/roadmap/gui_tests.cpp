@@ -613,6 +613,13 @@ Status test_shell_renders_to_gui(Kernel &kernel)
     {
         return status;
     }
+    const auto shell_pid = kernel.debug_shell().process_id();
+    const auto *shell_process = kernel.scheduler().find(shell_pid);
+    if (shell_pid == 0 || shell_process == nullptr || shell_process->name() != "oksh" ||
+        shell_process->state() == sched::ProcessState::exited)
+    {
+        return Status::fault("GUI debug shell was not registered as a scheduler process");
+    }
     const auto before_renders = kernel.debug_shell().gui_render_count();
     const auto before_checksum = kernel.gui().compositor().last_present_checksum();
     auto output = kernel.debug_shell().execute("echo gui-shell");

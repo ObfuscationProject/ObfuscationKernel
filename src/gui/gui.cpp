@@ -18,6 +18,14 @@ constexpr u32 title_hit_height = gui_glyph_height * 2 + 4;
 constexpr u32 resize_hit_size = 8;
 constexpr u32 minimum_surface_width = 40;
 constexpr u32 minimum_surface_height = 28;
+constexpr i32 window_control_top = 2;
+constexpr i32 window_control_bottom = static_cast<i32>(title_hit_height) - 3;
+constexpr i32 window_close_right_min = 7;
+constexpr i32 window_close_right_max = 15;
+constexpr i32 window_maximize_right_min = 17;
+constexpr i32 window_maximize_right_max = 23;
+constexpr i32 window_minimize_right_min = 25;
+constexpr i32 window_minimize_right_max = 33;
 
 enum class WindowControl : u8
 {
@@ -126,20 +134,20 @@ Status append_decimal(FixedString<96> &out, u64 value)
 
 [[nodiscard]] WindowControl window_control_at(const SurfaceInfo &surface, i32 local_x, i32 local_y)
 {
-    if (local_x < 0 || local_y < 3 || local_y > 8 || surface.bounds.width < 34)
+    if (local_x < 0 || local_y < window_control_top || local_y > window_control_bottom || surface.bounds.width < 34)
     {
         return WindowControl::none;
     }
     const auto right = static_cast<i32>(surface.bounds.width) - local_x;
-    if (right >= 8 && right <= 13)
+    if (right >= window_close_right_min && right <= window_close_right_max)
     {
         return WindowControl::close;
     }
-    if (right >= 17 && right <= 22)
+    if (right >= window_maximize_right_min && right <= window_maximize_right_max)
     {
         return WindowControl::maximize;
     }
-    if (right >= 26 && right <= 31)
+    if (right >= window_minimize_right_min && right <= window_minimize_right_max)
     {
         return WindowControl::minimize;
     }
@@ -896,18 +904,19 @@ u32 GuiCompositor::surface_pixel_color(const Surface &surface, u32 x, u32 y) con
     {
         color = title_frame_color;
     }
-    else if (y >= 3 && y <= 8 && surface.bounds.width >= 34)
+    else if (y >= static_cast<u32>(window_control_top) && y <= static_cast<u32>(window_control_bottom) &&
+             surface.bounds.width >= 34)
     {
-        const auto right = surface.bounds.width - x;
-        if (right >= 8 && right <= 13)
+        const auto right = static_cast<i32>(surface.bounds.width) - static_cast<i32>(x);
+        if (right >= window_close_right_min && right <= window_close_right_max)
         {
             color = 0xffd85f5fu;
         }
-        else if (right >= 17 && right <= 22)
+        else if (right >= window_maximize_right_min && right <= window_maximize_right_max)
         {
             color = surface.window_state == WindowState::maximized ? 0xfff4d35eu : 0xff8fd7ffu;
         }
-        else if (right >= 26 && right <= 31)
+        else if (right >= window_minimize_right_min && right <= window_minimize_right_max)
         {
             color = 0xff8fbf88u;
         }

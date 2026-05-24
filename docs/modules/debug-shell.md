@@ -11,7 +11,8 @@ In windowed GUI mode, mouse wheel input scrolls the shell's visual scrollback
 with the same direction convention as Windows: wheel up moves toward older
 scrollback, and wheel down returns toward the prompt.
 F12 opens the shell surface again after it has been closed; while the active
-session is the `kernel` user this is the kernel debug shell.
+session is the `kernel` user this is the kernel debug shell. In GUI mode the
+visible shell is also registered as an `oksh` scheduler process.
 The command evaluator follows the Bourne shell subset needed for kernel debug
 work: comments beginning with `#`, command sequences separated by `;`, and
 basic `&&`/`||` conditionals.
@@ -51,9 +52,12 @@ Supported commands:
   current block device as EXT4.
 - `net status|udp|recv|listen|tcp`: inspect and exercise the IPv4/UDP/TCP
   loopback stack used by early network-debug work.
-- `fm [path]` / `fileman [path]`: open the GUI kernel file manager for a VFS
-  directory as a scheduler-visible `fm:<user>` process using the current
-  credentials.
+- `fm [path]` / `fileman [path]`: fork a foreground GUI kernel file manager for
+  a VFS directory as a scheduler-visible `fm:<user>` process using the current
+  credentials. While that foreground file manager is open, the debug shell
+  process is blocked and rejects further commands until the file manager closes.
+- `Win+E`: open or raise the GUI file manager at the current working directory
+  without blocking the shell.
 
 The shell is intentionally fixed-buffer and freestanding. Windowed QEMU mode
 routes keyboard input into the shell after `OK_TEST_PASS`, mirrors output to

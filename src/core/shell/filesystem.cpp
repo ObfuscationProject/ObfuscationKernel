@@ -577,7 +577,7 @@ Status KernelDebugShell::command_file_manager(std::string_view path)
     {
         return resolved.status();
     }
-    if (auto status = kernel_->open_file_manager(resolved.value()); !status.ok())
+    if (auto status = kernel_->open_file_manager(resolved.value(), true); !status.ok())
     {
         return status;
     }
@@ -689,6 +689,10 @@ Status KernelDebugShell::command_su(std::string_view user)
     {
         return status;
     }
+    if (auto status = refresh_process_credentials(); !status.ok())
+    {
+        return status;
+    }
     return command_whoami();
 }
 
@@ -715,6 +719,10 @@ Status KernelDebugShell::command_exit(std::string_view args)
         }
         previous_session_user_name_.clear();
         has_previous_session_ = false;
+        if (auto status = refresh_process_credentials(); !status.ok())
+        {
+            return status;
+        }
         return command_whoami();
     }
 
@@ -734,6 +742,10 @@ Status KernelDebugShell::command_exit(std::string_view args)
         return status;
     }
     if (auto status = session_user_name_.assign("kernel"); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = refresh_process_credentials(); !status.ok())
     {
         return status;
     }

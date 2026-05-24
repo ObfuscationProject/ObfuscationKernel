@@ -23,10 +23,20 @@ class KernelDebugShell final
     Status set_gui_input(std::string_view line);
     Status scroll_gui_history(i32 rows);
     void mark_gui_closed();
+    void notify_process_exit(sched::ProcessId pid);
+    Status block_on_foreground_process(sched::ProcessId pid);
     [[nodiscard]] bool gui_ready();
     [[nodiscard]] bool gui_open() const
     {
         return gui_open_;
+    }
+    [[nodiscard]] sched::ProcessId process_id() const
+    {
+        return process_id_;
+    }
+    [[nodiscard]] sched::ProcessId foreground_process_id() const
+    {
+        return foreground_process_id_;
     }
     [[nodiscard]] usize gui_render_count() const
     {
@@ -45,9 +55,12 @@ class KernelDebugShell final
     Status append_node_type(fs::NodeType type);
     Status append_session_user();
     Status render_to_gui(std::string_view command_line, std::string_view output);
+    Status ensure_gui_process();
     Status ensure_gui_surface();
     Status append_gui_history(std::string_view text);
     Status redraw_gui_terminal();
+    Status refresh_process_credentials();
+    [[nodiscard]] bool foreground_process_running();
     [[nodiscard]] Result<std::string_view> resolve_path(std::string_view path);
     Status dispatch_command(std::string_view command_line);
     Status command_help();
@@ -97,6 +110,8 @@ class KernelDebugShell final
     FixedString<2048> gui_history_{};
     FixedString<128> gui_input_line_{};
     gui::SurfaceId gui_surface_id_{0};
+    sched::ProcessId process_id_{0};
+    sched::ProcessId foreground_process_id_{0};
     usize gui_render_count_{0};
     usize gui_scroll_rows_{0};
     bool gui_open_{true};

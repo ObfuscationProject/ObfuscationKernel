@@ -32,6 +32,8 @@ ok::usize vga_row = 0;
 ok::usize vga_column = 0;
 bool left_shift = false;
 bool right_shift = false;
+bool left_super = false;
+bool right_super = false;
 bool ps2_mouse_initialized = false;
 ok::u8 ps2_mouse_packet[4]{};
 ok::usize ps2_mouse_packet_index = 0;
@@ -503,6 +505,16 @@ extern "C" int ok_platform_input_poll()
     if (ps2_extended_scancode)
     {
         ps2_extended_scancode = false;
+        if (key == 0x5b)
+        {
+            left_super = !released;
+            return -1;
+        }
+        if (key == 0x5c)
+        {
+            right_super = !released;
+            return -1;
+        }
         if (!released && key == 0x48)
         {
             queue_escape_sequence('A');
@@ -532,6 +544,10 @@ extern "C" int ok_platform_input_poll()
     if (key == 0x58)
     {
         return ok::ok_input_open_shell;
+    }
+    if ((left_super || right_super) && key == 0x12)
+    {
+        return ok::ok_input_open_file_manager;
     }
 
     const char value = map_scancode(key);

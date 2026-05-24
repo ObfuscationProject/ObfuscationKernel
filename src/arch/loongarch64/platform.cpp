@@ -21,6 +21,8 @@ VirtioPciInput virtio_keyboard;
 VirtioPciInput virtio_mouse;
 bool virtio_left_shift = false;
 bool virtio_right_shift = false;
+bool virtio_left_super = false;
+bool virtio_right_super = false;
 bool virtio_mouse_left = false;
 char pending_keyboard_input[3]{};
 ok::usize pending_keyboard_input_size = 0;
@@ -137,9 +139,23 @@ int poll_virtio_keyboard()
             virtio_right_shift = pressed;
             continue;
         }
+        if (event.code == ok::driver::qemu_virt::input_key_left_meta)
+        {
+            virtio_left_super = pressed;
+            continue;
+        }
+        if (event.code == ok::driver::qemu_virt::input_key_right_meta)
+        {
+            virtio_right_super = pressed;
+            continue;
+        }
         if (!pressed)
         {
             continue;
+        }
+        if ((virtio_left_super || virtio_right_super) && event.code == ok::driver::qemu_virt::input_key_e)
+        {
+            return ok::ok_input_open_file_manager;
         }
         if (event.code == ok::driver::qemu_virt::input_key_f12)
         {

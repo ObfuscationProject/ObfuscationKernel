@@ -89,14 +89,16 @@ surface:
   distinct header;
 - the surface is redrawn with `GuiCompositor::draw_text()` and presented.
 
-The `fm`/`fileman` shell command opens a GUI kernel file manager for a path. It
-renders the VFS directory listing in a separate `kernel-files` surface using the
-same compositor. Mouse clicks in its left navigation open `/`, `/dev`, `/tmp`,
-or `/proc` when present; clicks in the listing select files and open
-directories. The window itself uses the same drag, resize, minimize, maximize,
-and close handling as other GUI surfaces. Each open runs as an `fm:<user>`
-scheduler process with the credentials active at launch, and directory reads are
-checked against those credentials.
+The `fm`/`fileman` shell command forks a foreground GUI kernel file manager for
+a path. It renders the VFS directory listing in a separate `kernel-files`
+surface using the same compositor. Mouse clicks in its left navigation open `/`,
+`/dev`, `/tmp`, or `/proc` when present; clicks in the listing select files and
+open directories. The window itself uses the same drag, resize, minimize,
+maximize, and close handling as other GUI surfaces. Each open runs as an
+`fm:<user>` scheduler process with the credentials active at launch, and
+directory reads are checked against those credentials. A shell-launched file
+manager blocks the `oksh` process until it exits, while Win+E opens the file
+manager as a shortcut without blocking the shell.
 
 The serial console and legacy framebuffer text path are preserved for boot logs,
 automated QEMU validation, and GUI startup failure fallback. Once the GUI shell
@@ -114,7 +116,8 @@ The debug and roadmap tests cover:
 - mouse-driven window drag, resize, close, and GUI file-manager navigation;
 - file-manager process ownership for `kernel` and non-kernel users;
 - startup animation and GUI file-manager rendering;
-- shell command output rendering to a GUI surface.
+- shell command output rendering to a GUI surface and `oksh` process
+  registration.
 
 Successful debug runs emit:
 

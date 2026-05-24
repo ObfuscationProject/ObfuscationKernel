@@ -159,6 +159,11 @@ void shell_write(std::string_view text)
                 refresh_gui_input();
                 continue;
             }
+            if (value == ok::ok_input_open_file_manager)
+            {
+                static_cast<void>(ok::ok_debug_shell_open_file_manager_shortcut());
+                continue;
+            }
             if (!shell_active || !ok::ok_debug_shell_gui_open())
             {
                 shell_active = false;

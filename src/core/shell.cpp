@@ -223,6 +223,109 @@ bool KernelDebugShell::gui_ready()
     return gui_open_ && ensure_gui_surface().ok();
 }
 
+Status KernelDebugShell::ensure_gui_process()
+{
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+    if (process_id_ != 0)
+    {
+        if (auto *process = kernel_->scheduler().find(process_id_);
+            process != nullptr && process->state() != sched::ProcessState::exited)
+        {
+            return refresh_process_credentials();
+        }
+        process_id_ = 0;
+        foreground_process_id_ = 0;
+    }
+
+    const auto process_offset = kernel_->scheduler().process_count() * 0x1000;
+    const auto context = kernel_->arch().make_kernel_context(0x6000 + process_offset, 0xd000 + process_offset);
+    auto process = kernel_->scheduler().create_process("oksh", context);
+    if (!process)
+    {
+        return process.status();
+    }
+    process_id_ = process.value();
+    if (auto status = kernel_->scheduler().set_runnable(process_id_); !status.ok())
+    {
+        process_id_ = 0;
+        return status;
+    }
+    return refresh_process_credentials();
+}
+
+Status KernelDebugShell::refresh_process_credentials()
+{
+    if (kernel_ == nullptr || process_id_ == 0)
+    {
+        return Status::success();
+    }
+    return kernel_->scheduler().set_credentials(process_id_, kernel_->posix().user_credentials());
+}
+
+bool KernelDebugShell::foreground_process_running()
+{
+    if (foreground_process_id_ == 0 || kernel_ == nullptr)
+    {
+        return false;
+    }
+    auto *process = kernel_->scheduler().find(foreground_process_id_);
+    if (process == nullptr || process->state() == sched::ProcessState::exited)
+    {
+        notify_process_exit(foreground_process_id_);
+        return false;
+    }
+    return true;
+}
+
+Status KernelDebugShell::block_on_foreground_process(sched::ProcessId pid)
+{
+    if (pid == 0 || kernel_ == nullptr || kernel_->scheduler().find(pid) == nullptr)
+    {
+        return Status::not_found("foreground process not found");
+    }
+    if (auto status = ensure_gui_process(); !status.ok())
+    {
+        return status;
+    }
+    foreground_process_id_ = pid;
+    if (process_id_ != 0)
+    {
+        if (auto *process = kernel_->scheduler().find(process_id_); process != nullptr)
+        {
+            process->set_state(sched::ProcessState::blocked);
+            for (auto &thread : process->threads())
+            {
+                thread.state = sched::ProcessState::blocked;
+            }
+        }
+    }
+    return Status::success();
+}
+
+void KernelDebugShell::notify_process_exit(sched::ProcessId pid)
+{
+    if (pid == 0)
+    {
+        return;
+    }
+    if (foreground_process_id_ == pid)
+    {
+        foreground_process_id_ = 0;
+        if (kernel_ != nullptr && process_id_ != 0)
+        {
+            static_cast<void>(kernel_->scheduler().set_runnable(process_id_));
+        }
+    }
+    if (process_id_ == pid)
+    {
+        process_id_ = 0;
+        foreground_process_id_ = 0;
+    }
+}
+
 Status KernelDebugShell::show_gui()
 {
     gui_open_ = true;
@@ -238,6 +341,13 @@ Status KernelDebugShell::close_gui()
     gui_history_.clear();
     gui_input_line_.clear();
     gui_scroll_rows_ = 0;
+    const auto process = process_id_;
+    process_id_ = 0;
+    foreground_process_id_ = 0;
+    if (kernel_ != nullptr && process != 0)
+    {
+        static_cast<void>(kernel_->scheduler().kill_process(process));
+    }
     if (kernel_ == nullptr || gui_surface_id_ == 0)
     {
         gui_surface_id_ = 0;
@@ -316,6 +426,20 @@ Result<std::string_view> KernelDebugShell::execute(std::string_view line)
     auto remaining = trim(strip_comment(line));
     if (remaining.empty())
     {
+        return output_.view();
+    }
+    if (foreground_process_running())
+    {
+        if (auto status = append("foreground process running pid="); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_unsigned(foreground_process_id_); !status.ok())
+        {
+            return status;
+        }
+        static_cast<void>(append("\n"));
+        static_cast<void>(render_to_gui(line, output_.view()));
         return output_.view();
     }
 
@@ -683,6 +807,10 @@ Status KernelDebugShell::ensure_gui_surface()
     if (compositor.state() != gui::GuiState::running)
     {
         return Status::not_initialized("GUI compositor is not running");
+    }
+    if (auto status = ensure_gui_process(); !status.ok())
+    {
+        return status;
     }
     if (gui_surface_id_ != 0)
     {

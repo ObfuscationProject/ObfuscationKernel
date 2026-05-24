@@ -48,11 +48,13 @@ Status ok_debug_shell_show_gui();
 Status ok_debug_shell_close_gui();
 Status ok_debug_shell_set_gui_input(std::string_view line);
 Status ok_debug_shell_scroll_gui(i32 rows);
+Status ok_debug_shell_open_file_manager_shortcut();
 Status ok_gui_mouse_event(i32 delta_x, i32 delta_y, bool left_button);
 bool ok_debug_shell_gui_ready();
 bool ok_debug_shell_gui_open();
 
 inline constexpr int ok_input_open_shell = 0x1001;
+inline constexpr int ok_input_open_file_manager = 0x1002;
 
 extern "C" int ok_kernel_main(const KernelEntryConfig *config);
 
