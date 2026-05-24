@@ -438,7 +438,7 @@ Status Kernel::handle_gui_key(int key)
 
     if (key == ok_input_open_shell)
     {
-        return debug_shell_.show_or_focus_gui();
+        return debug_shell_.show_gui();
     }
     if (key == ok_input_open_file_manager)
     {
@@ -452,7 +452,7 @@ Status Kernel::handle_gui_key(int key)
     const auto active = compositor.active_surface();
     if (active != 0 && debug_shell_.owns_surface(active))
     {
-        return debug_shell_.handle_key(key);
+        return debug_shell_.handle_key(active, key);
     }
     if (active != 0 && file_manager_.surface_id() == active)
     {
@@ -466,7 +466,7 @@ Status Kernel::handle_gui_taskbar_launcher(gui::TaskbarApp app)
     switch (app)
     {
     case gui::TaskbarApp::debug_shell:
-        return debug_shell_.show_or_focus_gui();
+        return debug_shell_.show_gui();
     case gui::TaskbarApp::file_manager:
         if (file_manager_.surface_id() != 0 && gui_module_.compositor().surface_info(file_manager_.surface_id()))
         {

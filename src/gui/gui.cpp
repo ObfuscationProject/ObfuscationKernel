@@ -40,6 +40,7 @@ constexpr i32 window_minimize_right_min = 26;
 constexpr i32 window_minimize_right_max = 31;
 constexpr u32 file_manager_sidebar_width = 64;
 constexpr u32 file_manager_title_height = gui_glyph_height * 2 + 2;
+constexpr usize file_manager_up_row = 3;
 constexpr usize file_manager_nav_row = 4;
 constexpr usize file_manager_list_row = 6;
 
@@ -1616,6 +1617,20 @@ Status KernelFileManager::require_directory_access(fs::VirtualFileSystem &vfs, s
                               fs::access_read | fs::access_execute);
 }
 
+Status KernelFileManager::open_parent(GuiCompositor &compositor, fs::VirtualFileSystem &vfs)
+{
+    FixedString<96> parent;
+    if (auto status = assign_parent_path(parent, path_.view()); !status.ok())
+    {
+        return status;
+    }
+    if (parent.view() == path_.view())
+    {
+        return Status::success();
+    }
+    return open(compositor, vfs, parent.view(), credentials_, process_id_);
+}
+
 Status KernelFileManager::handle_mouse(GuiCompositor &compositor, fs::VirtualFileSystem &vfs, i32 x, i32 y, bool click)
 {
     if (!click || surface_id_ == 0)
@@ -1639,6 +1654,11 @@ Status KernelFileManager::handle_mouse(GuiCompositor &compositor, fs::VirtualFil
     const auto local_y = y - bounds.y;
     const auto row = static_cast<usize>(local_y / static_cast<i32>(gui_glyph_height));
     const auto layout = file_manager_layout(info.value());
+    if (layout.sidebar_width != 0 && local_x >= 2 && local_x < static_cast<i32>(layout.sidebar_width + 2) &&
+        row == file_manager_up_row)
+    {
+        return open_parent(compositor, vfs);
+    }
     if (layout.sidebar_width != 0 && local_x >= 2 && local_x < static_cast<i32>(layout.sidebar_width + 2) &&
         row >= file_manager_nav_row && row <= file_manager_nav_row + 3)
     {
@@ -1744,17 +1764,9 @@ Status KernelFileManager::handle_key(GuiCompositor &compositor, fs::VirtualFileS
             return open(compositor, vfs, child_path.view(), credentials_, process_id_);
         }
     }
-    else if (key == '\b' || key == 0x7f)
+    else if (key == '\b' || key == 0x7f || key == 'u' || key == 'U')
     {
-        FixedString<96> parent;
-        if (auto status = assign_parent_path(parent, path_.view()); !status.ok())
-        {
-            return status;
-        }
-        if (parent.view() != path_.view())
-        {
-            return open(compositor, vfs, parent.view(), credentials_, process_id_);
-        }
+        return open_parent(compositor, vfs);
     }
     else
     {
@@ -1850,7 +1862,7 @@ Status KernelFileManager::render(GuiCompositor &compositor, fs::VirtualFileSyste
     }
     if (layout.sidebar_width != 0)
     {
-        if (auto status = compositor.draw_text(surface_id_, 2, file_manager_nav_row, "ROOT\nDEV\nTMP\nPROC",
+        if (auto status = compositor.draw_text(surface_id_, 2, file_manager_up_row, "UP\nROOT\nDEV\nTMP\nPROC",
                                                0xff9fc6d2u, 0xff172331u);
             !status.ok())
         {

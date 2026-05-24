@@ -1,5 +1,6 @@
 #include "roadmap_tests.hpp"
 
+#include "ok/core/entry.hpp"
 #include "ok/gui/gui.hpp"
 
 namespace ok
@@ -565,6 +566,7 @@ Status test_gui_taskbar_launchers_and_focused_keyboard(Kernel &kernel)
     {
         return Status::fault("GUI taskbar shell launcher did not open and focus oksh");
     }
+    const auto first_shell_pid = kernel.debug_shell().process_id();
     const auto surface_count = compositor.surface_count();
     if (auto status = kernel.handle_gui_mouse(0, 0, true); !status.ok())
     {
@@ -574,9 +576,12 @@ Status test_gui_taskbar_launchers_and_focused_keyboard(Kernel &kernel)
     {
         return status;
     }
-    if (compositor.surface_count() != surface_count || kernel.debug_shell().gui_surface_id() != shell_surface)
+    if (compositor.surface_count() <= surface_count || kernel.debug_shell().gui_surface_id() == shell_surface ||
+        kernel.debug_shell().process_id() == first_shell_pid ||
+        kernel.scheduler().find(first_shell_pid) == nullptr ||
+        kernel.scheduler().find(kernel.debug_shell().process_id()) == nullptr)
     {
-        return Status::fault("GUI taskbar shell launcher created a duplicate instead of focusing");
+        return Status::fault("GUI taskbar shell launcher did not create another oksh window");
     }
 
     const auto files_x = static_cast<i32>(6 + gui::taskbar_icon_size + 6 + gui::taskbar_icon_size / 2);
@@ -830,6 +835,29 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("GUI file manager mouse navigation did not open /tmp");
     }
+    const auto before_parent_render_count = manager.render_count();
+    const auto up_x = info.value().bounds.x + 12;
+    const auto up_y = info.value().bounds.y + static_cast<i32>(gui::gui_glyph_height * 3 + 2);
+    if (auto status = compositor.set_pointer_position(up_x, up_y); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, true); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, false); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (manager.path() != "/" || manager.render_count() <= before_parent_render_count)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("GUI file manager parent navigation did not return to /");
+    }
     const auto manager_pid = manager.process_id();
     const auto manager_surface = manager.surface_id();
     FixedString<32> kill_command;
@@ -962,7 +990,7 @@ Status test_shell_renders_to_gui(Kernel &kernel)
     const auto first_shell_surface = kernel.debug_shell().gui_surface_id();
     const auto first_shell_pid = kernel.debug_shell().process_id();
     const auto surface_count_before_second_shell = kernel.gui().compositor().surface_count();
-    if (auto status = kernel.debug_shell().show_gui(); !status.ok())
+    if (auto status = kernel.handle_gui_key(ok_input_open_shell); !status.ok())
     {
         return status;
     }

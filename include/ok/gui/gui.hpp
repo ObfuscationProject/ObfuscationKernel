@@ -247,6 +247,7 @@ class KernelFileManager final
 
   private:
     [[nodiscard]] Status require_directory_access(fs::VirtualFileSystem &vfs, std::string_view path) const;
+    Status open_parent(GuiCompositor &compositor, fs::VirtualFileSystem &vfs);
     Status render(GuiCompositor &compositor, fs::VirtualFileSystem &vfs);
 
     SurfaceId surface_id_{0};

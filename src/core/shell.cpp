@@ -212,7 +212,25 @@ usize visual_line_offset(std::string_view text, usize columns, usize target_row)
 Status KernelDebugShell::attach(Kernel &kernel)
 {
     kernel_ = &kernel;
-    return Status::success();
+    static_cast<void>(session_user_name_.assign("kernel"));
+    previous_session_user_name_.clear();
+    previous_credentials_ = {};
+    has_previous_session_ = false;
+    path_buffer_.clear();
+    output_.clear();
+    gui_history_.clear();
+    gui_input_line_.clear();
+    gui_surface_id_ = 0;
+    process_id_ = 0;
+    foreground_process_id_ = 0;
+    gui_windows_.clear();
+    gui_render_count_ = 0;
+    gui_scroll_rows_ = 0;
+    gui_input_history_count_ = 0;
+    gui_input_history_cursor_ = 0;
+    gui_escape_state_ = 0;
+    gui_open_ = true;
+    return sync_posix_credentials_to_session();
 }
 
 bool KernelDebugShell::gui_ready()
@@ -281,13 +299,14 @@ Status KernelDebugShell::close_surface_window(gui::SurfaceId surface)
 
 Status KernelDebugShell::handle_surface_changed(gui::SurfaceId surface)
 {
-    if (!owns_surface(surface))
+    auto index = find_window_by_surface(surface);
+    if (!index)
     {
-        return Status::not_found("GUI shell surface not found");
+        return index.status();
     }
-    if (surface != gui_surface_id_)
+    if (auto status = select_gui_window(index.value()); !status.ok())
     {
-        return Status::success();
+        return status;
     }
     if (kernel_ == nullptr)
     {
@@ -322,7 +341,7 @@ Status KernelDebugShell::record_gui_window()
     return gui_windows_.push_back(GuiWindow{.surface_id = gui_surface_id_, .process_id = process_id_});
 }
 
-Status KernelDebugShell::activate_gui_window(usize index)
+Status KernelDebugShell::select_gui_window(usize index)
 {
     if (index >= gui_windows_.size())
     {
@@ -344,6 +363,18 @@ Status KernelDebugShell::activate_gui_window(usize index)
     gui_open_ = true;
     gui_surface_id_ = window.surface_id;
     process_id_ = window.process_id;
+    return sync_posix_credentials_to_session();
+}
+
+Status KernelDebugShell::activate_gui_window(usize index)
+{
+    if (auto status = select_gui_window(index); !status.ok())
+    {
+        return status;
+    }
+
+    const auto window = gui_windows_[index];
+    auto &compositor = kernel_->gui().compositor();
     auto info = compositor.surface_info(window.surface_id);
     if (!info)
     {
@@ -409,6 +440,10 @@ Status KernelDebugShell::ensure_gui_process()
     {
         return Status::not_initialized("shell has no kernel");
     }
+    if (auto status = sync_posix_credentials_to_session(); !status.ok())
+    {
+        return status;
+    }
     if (process_id_ != 0)
     {
         if (auto *process = kernel_->scheduler().find(process_id_);
@@ -447,6 +482,27 @@ Status KernelDebugShell::refresh_process_credentials()
         return Status::success();
     }
     return kernel_->scheduler().set_credentials(process_id_, kernel_->posix().user_credentials());
+}
+
+Status KernelDebugShell::sync_posix_credentials_to_session()
+{
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+    auto target = kernel_->user_space().credentials_for(session_user_name_.view());
+    if (!target)
+    {
+        return target.status();
+    }
+    const auto active = kernel_->posix().user_credentials();
+    const auto desired = target.value();
+    if (active.uid == desired.uid && active.gid == desired.gid && active.euid == desired.euid &&
+        active.egid == desired.egid && active.kernel_space == desired.kernel_space)
+    {
+        return Status::success();
+    }
+    return kernel_->posix().set_credentials(desired);
 }
 
 bool KernelDebugShell::foreground_process_running()
@@ -537,6 +593,10 @@ void KernelDebugShell::notify_process_exit(sched::ProcessId pid)
 
 Status KernelDebugShell::show_gui()
 {
+    if (auto status = reconcile_gui_windows(); !status.ok())
+    {
+        return status;
+    }
     gui_open_ = true;
     gui_surface_id_ = 0;
     process_id_ = 0;
@@ -768,6 +828,23 @@ Status KernelDebugShell::recall_gui_history_next()
     return set_gui_input(gui_input_history_[gui_input_history_cursor_].view());
 }
 
+Status KernelDebugShell::handle_key(gui::SurfaceId surface, int key)
+{
+    auto index = find_window_by_surface(surface);
+    if (!index)
+    {
+        return index.status();
+    }
+    if (surface != gui_surface_id_)
+    {
+        if (auto status = activate_gui_window(index.value()); !status.ok())
+        {
+            return status;
+        }
+    }
+    return handle_key(key);
+}
+
 Status KernelDebugShell::handle_key(int key)
 {
     if (!gui_open_)
@@ -888,6 +965,10 @@ Result<std::string_view> KernelDebugShell::execute(std::string_view line)
     if (foreground_process_running())
     {
         return Status::would_block("foreground process is running");
+    }
+    if (auto status = sync_posix_credentials_to_session(); !status.ok())
+    {
+        return status;
     }
 
     Status last_status = Status::success();

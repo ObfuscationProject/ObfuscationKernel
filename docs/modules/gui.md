@@ -41,9 +41,10 @@ The compositor API is intentionally small and synchronous:
 - `minimize_surface`, `maximize_surface`, `restore_surface`, and
   `close_surface` provide Windows-style window state controls. Minimized
   surfaces dock into a persistent bottom taskbar so a mouse click can restore
-  them. The taskbar also has fixed debug-shell and file-manager launchers that
-  open the app or focus the existing window. Maximized surfaces use the desktop
-  work area above the taskbar.
+  them. The taskbar also has fixed debug-shell and file-manager launchers; the
+  debug-shell launcher opens another `oksh` window, while the file-manager
+  launcher focuses the existing file manager or opens it when none is running.
+  Maximized surfaces use the desktop work area above the taskbar.
 - `handle_mouse_delta()` tracks the logical pointer and turns button presses into
   title-bar drag, bottom-right resize, minimize, maximize/restore, close-request
   events, raise, focus, and hit-test behavior. The minimize control restores a
@@ -104,10 +105,11 @@ surface:
 
 The `fm`/`fileman` shell command forks a foreground GUI kernel file manager for
 a path. It renders the VFS directory listing in a separate `kernel-files`
-surface using the same compositor. Mouse clicks in its left navigation open `/`,
-`/dev`, `/tmp`, or `/proc` when present; clicks in the listing select files and
-open directories. The window itself uses the same drag, resize, minimize,
-maximize, and close handling as other GUI surfaces. Each open runs as an
+surface using the same compositor. Mouse clicks in its left navigation return to
+the parent directory or open `/`, `/dev`, `/tmp`, or `/proc` when present;
+clicks in the listing select files and open directories. The window itself uses
+the same drag, resize, minimize, maximize, and close handling as other GUI
+surfaces. Each open runs as an
 `fm:<user>` scheduler process with the credentials active at launch, and
 directory reads are checked against those credentials. A shell-launched file
 manager blocks the `oksh` process until it exits, while F1 opens the file

@@ -90,8 +90,8 @@ xmake qemu-window-test --no-launch
 In graphical debug-test mode the kernel runs the same validation suite, prints
 `OK_TEST_PASS` to the serial console, closes debug GUI surfaces, and then tries
 the debug-exit path. If the platform returns from debug-exit, the kernel stays
-in the desktop event loop instead of halting, so taskbar launchers and the
-F12/F1 shortcuts can reopen the shell or file manager. Non-test graphical
+in the desktop event loop instead of halting, so the taskbar launchers and the
+F12/F1 shortcuts can open shell or file manager windows again. Non-test graphical
 sessions route keyboard input through the focused GUI surface: `oksh` receives
 text only while focused, and the file manager consumes simple navigation keys.
 The ramfb backend scales the kernel's logical GUI framebuffer into the full

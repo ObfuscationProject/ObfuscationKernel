@@ -26,6 +26,7 @@ class KernelDebugShell final
     Status close_all_gui();
     Status set_gui_input(std::string_view line);
     Status handle_key(int key);
+    Status handle_key(gui::SurfaceId surface, int key);
     Status scroll_gui_history(i32 rows);
     void mark_gui_closed();
     Status reconcile_gui_windows();
@@ -72,12 +73,14 @@ class KernelDebugShell final
     Status append_session_user();
     Status render_to_gui(std::string_view command_line, std::string_view output);
     Status record_gui_window();
+    Status select_gui_window(usize index);
     Status activate_gui_window(usize index);
     Status remove_gui_window(usize index);
     [[nodiscard]] Result<usize> find_window_by_process(sched::ProcessId pid) const;
     [[nodiscard]] Result<usize> find_window_by_surface(gui::SurfaceId surface) const;
     Status ensure_gui_process();
     Status ensure_gui_surface();
+    Status sync_posix_credentials_to_session();
     Status append_gui_history(std::string_view text);
     Status append_gui_history_unsigned(u64 value);
     Status redraw_gui_terminal();

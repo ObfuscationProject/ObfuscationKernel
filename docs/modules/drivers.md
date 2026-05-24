@@ -74,9 +74,10 @@ The display stack has three layers:
   It renders a short startup animation during boot and tracks normal,
   minimized, maximized, and focused surface state. Minimized surfaces are
   exposed through the bottom taskbar, while maximized surfaces leave the taskbar
-  visible. Fixed taskbar launchers open or focus `oksh` and `fm`. It also
-  consumes platform mouse events for title-bar dragging, bottom-right resizing,
-  and window control buttons. Keyboard input is routed to the focused surface.
+  visible. Fixed taskbar launchers open another `oksh`, or open and focus
+  `fm`. It also consumes platform mouse events for title-bar dragging,
+  bottom-right resizing, and window control buttons. Keyboard input is routed to
+  the focused surface.
   The debug shell renders command history and active input to a
   resizable `oksh` GUI surface while keeping serial output unchanged, and the
   `fm`/`fileman` command opens a separate GUI file-manager surface for VFS
