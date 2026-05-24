@@ -235,6 +235,12 @@ struct FileManagerLayout
     return x >= left && y >= top && x < left + width && y < top + height;
 }
 
+[[nodiscard]] bool point_in_gui_rect(i32 x, i32 y, Rect bounds)
+{
+    return x >= bounds.x && y >= bounds.y && x < bounds.x + static_cast<i32>(bounds.width) &&
+           y < bounds.y + static_cast<i32>(bounds.height);
+}
+
 [[nodiscard]] bool shell_icon_pixel(u32 local_x, u32 local_y)
 {
     if (local_x == 3 || local_x == 14 || local_y == 3 || local_y == 14)
@@ -901,6 +907,7 @@ Status GuiCompositor::handle_mouse_delta(i32 delta_x, i32 delta_y, bool left_but
     const auto mode = display_->mode();
     pointer_x_ = clamp_i32(pointer_x_ + delta_x, 0, static_cast<i32>(mode.width) - 1);
     pointer_y_ = clamp_i32(pointer_y_ + delta_y, 0, static_cast<i32>(mode.height) - 1);
+    const auto taskbar_top = mode.height > taskbar_height ? static_cast<i32>(mode.height - taskbar_height) : 0;
 
     const bool pressed = left_button && !left_button_down_;
     const bool released = !left_button && left_button_down_;
@@ -928,6 +935,21 @@ Status GuiCompositor::handle_mouse_delta(i32 delta_x, i32 delta_y, bool left_but
                 return status;
             }
             changed = true;
+
+            if (pointer_y_ >= taskbar_top)
+            {
+                dragging_surface_id_ = 0;
+                resizing_surface_id_ = 0;
+                if (info.value().window_state == WindowState::minimized)
+                {
+                    if (auto status = restore_surface(hit.value()); !status.ok())
+                    {
+                        return status;
+                    }
+                }
+                left_button_down_ = left_button;
+                return present();
+            }
 
             const auto local_x = pointer_x_ - info.value().bounds.x;
             const auto local_y = pointer_y_ - info.value().bounds.y;
@@ -1210,33 +1232,38 @@ Status GuiCompositor::draw_text(SurfaceId id, u32 column, u32 row, std::string_v
     return Status::success();
 }
 
+u32 GuiCompositor::taskbar_surface_pixel_color(const Surface &surface, u32 x, u32 y, u32 width, u32 height) const
+{
+    u32 color = surface.id == active_surface_id_ ? active_taskbar_button_color : taskbar_button_color;
+    if (x == 0 || y == 0 || x + 1 == width || y + 1 == height)
+    {
+        color = surface.id == active_surface_id_ ? frame_color : inactive_title_frame_color;
+    }
+    else if (y == 1)
+    {
+        color = taskbar_edge_color;
+    }
+    const auto text_x = x >= 8 ? x - 8 : width;
+    const auto text_y = y >= 7 ? y - 7 : height;
+    const auto char_index = text_x / gui_glyph_width;
+    const auto glyph_x = text_x % gui_glyph_width;
+    if (char_index < surface.title.size() && glyph_x < driver::BitmapFontRenderer::glyph_width &&
+        text_y < driver::BitmapFontRenderer::glyph_height)
+    {
+        const auto row_bits = driver::BitmapFontRenderer::glyph_row(surface.title.view()[char_index], text_y);
+        if (((row_bits >> (driver::BitmapFontRenderer::glyph_width - 1 - glyph_x)) & 1u) != 0)
+        {
+            color = 0xffd8f3ffu;
+        }
+    }
+    return color;
+}
+
 u32 GuiCompositor::surface_pixel_color(const Surface &surface, u32 x, u32 y) const
 {
     if (surface.window_state == WindowState::minimized)
     {
-        u32 color = surface.id == active_surface_id_ ? active_taskbar_button_color : taskbar_button_color;
-        if (x == 0 || y == 0 || x + 1 == surface.bounds.width || y + 1 == surface.bounds.height)
-        {
-            color = surface.id == active_surface_id_ ? frame_color : inactive_title_frame_color;
-        }
-        else if (y == 1)
-        {
-            color = taskbar_edge_color;
-        }
-        const auto text_x = x >= 8 ? x - 8 : surface.bounds.width;
-        const auto text_y = y >= 7 ? y - 7 : surface.bounds.height;
-        const auto char_index = text_x / gui_glyph_width;
-        const auto glyph_x = text_x % gui_glyph_width;
-        if (char_index < surface.title.size() && glyph_x < driver::BitmapFontRenderer::glyph_width &&
-            text_y < driver::BitmapFontRenderer::glyph_height)
-        {
-            const auto row_bits = driver::BitmapFontRenderer::glyph_row(surface.title.view()[char_index], text_y);
-            if (((row_bits >> (driver::BitmapFontRenderer::glyph_width - 1 - glyph_x)) & 1u) != 0)
-            {
-                color = 0xffd8f3ffu;
-            }
-        }
-        return color;
+        return taskbar_surface_pixel_color(surface, x, y, surface.bounds.width, surface.bounds.height);
     }
 
     auto color = surface.pixels[static_cast<usize>(y) * max_gui_surface_width + x];
@@ -1303,6 +1330,26 @@ Status GuiCompositor::present()
             {
                 color = files_color;
             }
+            if (y >= taskbar_top)
+            {
+                const Rect desktop{.x = 0, .y = 0, .width = mode.width, .height = mode.height};
+                for (usize i = 0; i < surfaces_.size(); ++i)
+                {
+                    const auto &surface = surfaces_[i];
+                    if (!surface.visible)
+                    {
+                        continue;
+                    }
+                    const auto bounds = minimized_bounds_for_index(i, desktop);
+                    if (!point_in_gui_rect(static_cast<i32>(x), static_cast<i32>(y), bounds))
+                    {
+                        continue;
+                    }
+                    color = taskbar_surface_pixel_color(surface, x - static_cast<u32>(bounds.x),
+                                                        y - static_cast<u32>(bounds.y), bounds.width, bounds.height);
+                    break;
+                }
+            }
             const Surface *top = nullptr;
             u32 surface_x = 0;
             u32 surface_y = 0;
@@ -1312,7 +1359,7 @@ Status GuiCompositor::present()
                 {
                     continue;
                 }
-                if (y >= taskbar_top && surface.window_state != WindowState::minimized)
+                if (y >= taskbar_top)
                 {
                     continue;
                 }
@@ -1460,6 +1507,28 @@ Result<SurfaceInfo> GuiCompositor::surface_info(SurfaceId id) const
     };
 }
 
+Result<SurfaceId> GuiCompositor::taskbar_surface_at(i32 x, i32 y) const
+{
+    auto desktop = desktop_bounds();
+    if (!desktop)
+    {
+        return desktop.status();
+    }
+    for (usize i = 0; i < surfaces_.size(); ++i)
+    {
+        const auto &surface = surfaces_[i];
+        if (!surface.visible)
+        {
+            continue;
+        }
+        if (point_in_gui_rect(x, y, minimized_bounds_for_index(i, desktop.value())))
+        {
+            return surface.id;
+        }
+    }
+    return Status::not_found("no GUI taskbar surface at point");
+}
+
 Result<SurfaceId> GuiCompositor::surface_at(i32 x, i32 y) const
 {
     if (auto status = ensure_running(); !status.ok())
@@ -1468,14 +1537,14 @@ Result<SurfaceId> GuiCompositor::surface_at(i32 x, i32 y) const
     }
     const auto mode = display_->mode();
     const auto taskbar_top = mode.height > taskbar_height ? static_cast<i32>(mode.height - taskbar_height) : 0;
+    if (y >= taskbar_top)
+    {
+        return taskbar_surface_at(x, y);
+    }
     const Surface *top = nullptr;
     for (const auto &surface : surfaces_)
     {
         if (!surface.visible)
-        {
-            continue;
-        }
-        if (y >= taskbar_top && surface.window_state != WindowState::minimized)
         {
             continue;
         }

@@ -185,6 +185,8 @@ class GuiCompositor final
     [[nodiscard]] Status validate_bounds(Rect bounds) const;
     void draw_cell(Surface &surface, u32 column, u32 row, char value, u32 foreground, u32 background);
     [[nodiscard]] u32 surface_pixel_color(const Surface &surface, u32 x, u32 y) const;
+    [[nodiscard]] u32 taskbar_surface_pixel_color(const Surface &surface, u32 x, u32 y, u32 width, u32 height) const;
+    [[nodiscard]] Result<SurfaceId> taskbar_surface_at(i32 x, i32 y) const;
     [[nodiscard]] Rect work_area_bounds() const;
     [[nodiscard]] bool app_window_exists(TaskbarApp app) const;
     [[nodiscard]] TaskbarApp active_app() const;

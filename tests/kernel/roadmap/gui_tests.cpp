@@ -213,6 +213,13 @@ Status test_gui_surface_management_api(Kernel &kernel)
     {
         return status;
     }
+    const auto taskbar_y = static_cast<i32>(driver::framebuffer_height - gui::taskbar_height + 5);
+    const auto back_taskbar_x = static_cast<i32>(gui::taskbar_launcher_width + 12);
+    auto taskbar_hit = compositor.surface_at(back_taskbar_x, taskbar_y);
+    if (!taskbar_hit || taskbar_hit.value() != back.value())
+    {
+        return Status::fault("GUI taskbar did not expose an open normal window");
+    }
     auto top = compositor.surface_at(9, 9);
     auto front_info = compositor.surface_info(front.value());
     if (!top || top.value() != front.value() || compositor.active_surface() != front.value() || !front_info ||

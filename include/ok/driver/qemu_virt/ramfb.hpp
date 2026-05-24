@@ -112,7 +112,6 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
         {
             draw_mouse_status();
         }
-        draw_pointer(left_button);
     }
 
     static void redraw_pointer_after_gui_present()
