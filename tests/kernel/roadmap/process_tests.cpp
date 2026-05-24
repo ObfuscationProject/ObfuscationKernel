@@ -569,9 +569,8 @@ Status verify_background_programs_and_posix(Kernel &kernel)
 
     auto ps = kernel.debug_shell().execute("ps aux");
     if (!ps || !contains_text(ps.value(), "  PID USER    TTY   STAT THR COMMAND") ||
-        !contains_text(ps.value(), "idle") ||
-        !contains_text(ps.value(), "drv:simple-framebuffer") || !contains_text(ps.value(), "mod:kernel-gui") ||
-        contains_text(ps.value(), "drv:ram-block0") || !contains_text(ps.value(), "bg-a") ||
+        !contains_text(ps.value(), "idle") || !contains_text(ps.value(), "mod:kernel-gui") ||
+        contains_text(ps.value(), "drv:") || !contains_text(ps.value(), "bg-a") ||
         !contains_text(ps.value(), "bg-b") || !contains_text(ps.value(), "bg-c"))
     {
         return Status::fault("debug shell ps did not list scheduler processes");
@@ -588,16 +587,15 @@ Status verify_background_programs_and_posix(Kernel &kernel)
     }
     auto killed = kernel.debug_shell().execute(kill_command.view());
     const auto *killed_process = kernel.scheduler().find(first.value());
-    if (!killed || !killed.value().empty() || killed_process == nullptr ||
-        killed_process->state() != sched::ProcessState::exited)
+    if (!killed || !killed.value().empty() || killed_process != nullptr)
     {
-        return Status::fault("debug shell kill did not exit a background process");
+        return Status::fault("debug shell kill did not remove a background process");
     }
 
     static_cast<void>(kernel.debug_shell().execute("su root"));
     auto user_ps = kernel.debug_shell().execute("ps aux");
-    if (!user_ps || contains_text(user_ps.value(), "drv:simple-framebuffer") ||
-        contains_text(user_ps.value(), "mod:kernel-gui") || contains_text(user_ps.value(), "idle"))
+    if (!user_ps || contains_text(user_ps.value(), "drv:") || contains_text(user_ps.value(), "mod:kernel-gui") ||
+        contains_text(user_ps.value(), "idle"))
     {
         return Status::fault("debug shell ps exposed kernel processes outside kernel user");
     }
@@ -618,7 +616,7 @@ Status verify_background_programs_and_posix(Kernel &kernel)
         return Status::fault("GUI file manager process did not run as active user");
     }
     auto blocked_shell = kernel.debug_shell().execute("ps aux");
-    if (!blocked_shell || !contains_text(blocked_shell.value(), "foreground process running pid="))
+    if (blocked_shell || blocked_shell.status().code() != StatusCode::would_block)
     {
         return Status::fault("debug shell did not block while foreground file manager was running");
     }

@@ -592,8 +592,7 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
     }
     auto killed = kernel.debug_shell().execute(kill_command.view());
     const auto *killed_process = kernel.scheduler().find(manager_pid);
-    if (!killed || !killed.value().empty() || killed_process == nullptr ||
-        killed_process->state() != sched::ProcessState::exited || manager.surface_id() != 0 ||
+    if (!killed || !killed.value().empty() || killed_process != nullptr || manager.surface_id() != 0 ||
         manager.process_id() != 0 || compositor.surface_info(manager_surface))
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
@@ -648,6 +647,21 @@ Status test_shell_renders_to_gui(Kernel &kernel)
     if (kernel.gui().compositor().last_present_checksum() == input_checksum)
     {
         return Status::fault("debug shell GUI input line did not redraw");
+    }
+    const auto first_shell_surface = kernel.debug_shell().gui_surface_id();
+    const auto first_shell_pid = kernel.debug_shell().process_id();
+    const auto surface_count_before_second_shell = kernel.gui().compositor().surface_count();
+    if (auto status = kernel.debug_shell().show_gui(); !status.ok())
+    {
+        return status;
+    }
+    if (kernel.debug_shell().gui_surface_id() == first_shell_surface ||
+        kernel.debug_shell().process_id() == first_shell_pid ||
+        kernel.gui().compositor().surface_count() <= surface_count_before_second_shell ||
+        kernel.scheduler().find(first_shell_pid) == nullptr ||
+        kernel.scheduler().find(kernel.debug_shell().process_id()) == nullptr)
+    {
+        return Status::fault("F12 did not create a new managed debug shell window");
     }
     for (usize i = 0; i < 32; ++i)
     {

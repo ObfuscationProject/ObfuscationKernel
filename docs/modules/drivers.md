@@ -41,12 +41,11 @@ variants. The current x86 boot image uses polling for the early keyboard path;
 the mode field is already part of `KernelConfig` so interrupt-backed drivers can
 be enabled without changing the generic kernel entry.
 
-After boot creates the scheduler idle process, `DriverManager` also registers
-most built-in drivers as background kernel processes named `drv:<driver-name>`.
-RAM-only block manipulation stays an in-kernel helper and does not get a
-`drv:ram-block0` process. The rest of the driver logic still runs in kernel
-space, but `ps aux` can show the specific driver that owns each kernel process
-slot when the shell is running as `kernel`.
+Built-in drivers run inside the kernel and are not registered as scheduler
+daemon processes. The scheduler-visible kernel background set is reserved for
+the idle process and non-core modules that explicitly request kernel-process
+execution, which keeps `kill` semantics forceful for ordinary user-visible
+processes without exposing driver helpers as killable daemons.
 
 Block storage uses `BlockDevice`, which reports geometry and performs aligned
 sector reads/writes. `NullBlockDriver`, `RamBlockDriver`, and `VirtioBlockDriver`

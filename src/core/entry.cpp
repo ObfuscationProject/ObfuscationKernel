@@ -368,6 +368,26 @@ Status ok_debug_shell_open_file_manager_shortcut()
     return kernel.open_file_manager(kernel.posix().getcwd(), false);
 }
 
+bool ok_debug_shell_has_foreground_process()
+{
+    Kernel &kernel = kernel_instance();
+    if (!kernel.booted())
+    {
+        return false;
+    }
+    const auto pid = kernel.debug_shell().foreground_process_id();
+    if (pid == 0)
+    {
+        return false;
+    }
+    if (kernel.scheduler().find(pid) == nullptr)
+    {
+        kernel.debug_shell().notify_process_exit(pid);
+        return false;
+    }
+    return true;
+}
+
 Status ok_gui_mouse_event(i32 delta_x, i32 delta_y, bool left_button)
 {
     Kernel &kernel = kernel_instance();

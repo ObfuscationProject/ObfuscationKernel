@@ -106,28 +106,31 @@ Status Scheduler::set_credentials(ProcessId pid, user::Credentials credentials)
 
 Status Scheduler::kill_process(ProcessId pid)
 {
-    auto *process = find(pid);
-    if (process == nullptr)
+    for (usize i = 0; i < processes_.size(); ++i)
     {
-        return Status::not_found("process not found");
-    }
-    process->set_state(ProcessState::exited);
-    for (auto &thread : process->threads())
-    {
-        thread.state = ProcessState::exited;
-    }
-    if (current_pid_ == pid)
-    {
-        current_pid_ = 0;
-    }
-    for (auto &current : current_by_cpu_)
-    {
-        if (current == pid)
+        if (processes_[i].pid() != pid)
         {
-            current = 0;
+            continue;
         }
+        processes_[i].set_state(ProcessState::exited);
+        for (auto &thread : processes_[i].threads())
+        {
+            thread.state = ProcessState::exited;
+        }
+        if (current_pid_ == pid)
+        {
+            current_pid_ = 0;
+        }
+        for (auto &current : current_by_cpu_)
+        {
+            if (current == pid)
+            {
+                current = 0;
+            }
+        }
+        return processes_.erase_at(i);
     }
-    return Status::success();
+    return Status::not_found("process not found");
 }
 
 Status Scheduler::configure_cpus(usize cpu_count)

@@ -164,6 +164,10 @@ void shell_write(std::string_view text)
                 static_cast<void>(ok::ok_debug_shell_open_file_manager_shortcut());
                 continue;
             }
+            if (ok::ok_debug_shell_has_foreground_process())
+            {
+                continue;
+            }
             if (!shell_active || !ok::ok_debug_shell_gui_open())
             {
                 shell_active = false;
@@ -205,8 +209,11 @@ void shell_write(std::string_view text)
                 line.clear();
                 if (ok::ok_debug_shell_gui_open())
                 {
-                    shell_write(prompt);
-                    refresh_gui_input();
+                    if (!ok::ok_debug_shell_has_foreground_process())
+                    {
+                        shell_write(prompt);
+                        refresh_gui_input();
+                    }
                 }
                 else
                 {

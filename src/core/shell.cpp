@@ -223,6 +223,102 @@ bool KernelDebugShell::gui_ready()
     return gui_open_ && ensure_gui_surface().ok();
 }
 
+Result<usize> KernelDebugShell::find_window_by_process(sched::ProcessId pid) const
+{
+    for (usize i = 0; i < gui_windows_.size(); ++i)
+    {
+        if (gui_windows_[i].process_id == pid)
+        {
+            return i;
+        }
+    }
+    return Status::not_found("GUI shell process not found");
+}
+
+Result<usize> KernelDebugShell::find_window_by_surface(gui::SurfaceId surface) const
+{
+    for (usize i = 0; i < gui_windows_.size(); ++i)
+    {
+        if (gui_windows_[i].surface_id == surface)
+        {
+            return i;
+        }
+    }
+    return Status::not_found("GUI shell surface not found");
+}
+
+bool KernelDebugShell::owns_process(sched::ProcessId pid) const
+{
+    return find_window_by_process(pid).ok();
+}
+
+Status KernelDebugShell::close_process_window(sched::ProcessId pid)
+{
+    auto index = find_window_by_process(pid);
+    if (!index)
+    {
+        return index.status();
+    }
+    return remove_gui_window(index.value());
+}
+
+Status KernelDebugShell::record_gui_window()
+{
+    if (gui_surface_id_ == 0 || process_id_ == 0)
+    {
+        return Status::success();
+    }
+    for (auto &window : gui_windows_)
+    {
+        if (window.process_id == process_id_)
+        {
+            window.surface_id = gui_surface_id_;
+            return Status::success();
+        }
+    }
+    return gui_windows_.push_back(GuiWindow{.surface_id = gui_surface_id_, .process_id = process_id_});
+}
+
+Status KernelDebugShell::remove_gui_window(usize index)
+{
+    if (index >= gui_windows_.size())
+    {
+        return Status::invalid_argument("GUI shell window index out of range");
+    }
+    const auto window = gui_windows_[index];
+    if (kernel_ != nullptr && window.surface_id != 0)
+    {
+        auto &compositor = kernel_->gui().compositor();
+        if (compositor.state() == gui::GuiState::running && compositor.surface_info(window.surface_id))
+        {
+            if (auto status = compositor.destroy_surface(window.surface_id); !status.ok())
+            {
+                return status;
+            }
+        }
+    }
+    if (window.process_id == process_id_)
+    {
+        gui_surface_id_ = 0;
+        process_id_ = 0;
+        foreground_process_id_ = 0;
+        gui_open_ = false;
+    }
+    if (auto status = gui_windows_.erase_at(index); !status.ok())
+    {
+        return status;
+    }
+    if (kernel_ != nullptr && window.surface_id != 0)
+    {
+        auto &compositor = kernel_->gui().compositor();
+        if (compositor.state() == gui::GuiState::running)
+        {
+            static_cast<void>(compositor.present());
+        }
+    }
+    return Status::success();
+}
+
 Status KernelDebugShell::ensure_gui_process()
 {
     if (kernel_ == nullptr)
@@ -235,6 +331,10 @@ Status KernelDebugShell::ensure_gui_process()
             process != nullptr && process->state() != sched::ProcessState::exited)
         {
             return refresh_process_credentials();
+        }
+        if (auto index = find_window_by_process(process_id_))
+        {
+            static_cast<void>(gui_windows_.erase_at(index.value()));
         }
         process_id_ = 0;
         foreground_process_id_ = 0;
@@ -280,7 +380,7 @@ bool KernelDebugShell::foreground_process_running()
     return true;
 }
 
-Status KernelDebugShell::block_on_foreground_process(sched::ProcessId pid)
+Status KernelDebugShell::start_foreground_process(sched::ProcessId pid)
 {
     if (pid == 0 || kernel_ == nullptr || kernel_->scheduler().find(pid) == nullptr)
     {
@@ -318,17 +418,28 @@ void KernelDebugShell::notify_process_exit(sched::ProcessId pid)
         {
             static_cast<void>(kernel_->scheduler().set_runnable(process_id_));
         }
+        static_cast<void>(append_gui_history("file manager exited pid="));
+        static_cast<void>(append_gui_history_unsigned(pid));
+        static_cast<void>(append_gui_history("\n"));
+        static_cast<void>(redraw_gui_terminal());
     }
     if (process_id_ == pid)
     {
         process_id_ = 0;
         foreground_process_id_ = 0;
     }
+    if (auto index = find_window_by_process(pid))
+    {
+        static_cast<void>(gui_windows_.erase_at(index.value()));
+    }
 }
 
 Status KernelDebugShell::show_gui()
 {
     gui_open_ = true;
+    gui_surface_id_ = 0;
+    process_id_ = 0;
+    foreground_process_id_ = 0;
     gui_scroll_rows_ = 0;
     gui_history_.clear();
     gui_input_line_.clear();
@@ -347,6 +458,10 @@ Status KernelDebugShell::close_gui()
     if (kernel_ != nullptr && process != 0)
     {
         static_cast<void>(kernel_->scheduler().kill_process(process));
+    }
+    if (auto index = find_window_by_process(process))
+    {
+        static_cast<void>(remove_gui_window(index.value()));
     }
     if (kernel_ == nullptr || gui_surface_id_ == 0)
     {
@@ -371,9 +486,41 @@ void KernelDebugShell::mark_gui_closed()
 {
     gui_open_ = false;
     gui_surface_id_ = 0;
+    process_id_ = 0;
+    foreground_process_id_ = 0;
     gui_history_.clear();
     gui_input_line_.clear();
     gui_scroll_rows_ = 0;
+}
+
+Status KernelDebugShell::reconcile_gui_windows()
+{
+    if (kernel_ == nullptr || kernel_->gui().compositor().state() != gui::GuiState::running)
+    {
+        return Status::success();
+    }
+    auto &compositor = kernel_->gui().compositor();
+    for (usize i = 0; i < gui_windows_.size();)
+    {
+        const auto window = gui_windows_[i];
+        const bool surface_alive = window.surface_id != 0 && compositor.surface_info(window.surface_id);
+        const bool process_alive = window.process_id != 0 && kernel_->scheduler().find(window.process_id) != nullptr;
+        if (surface_alive && process_alive)
+        {
+            ++i;
+            continue;
+        }
+        if (process_alive)
+        {
+            static_cast<void>(kernel_->scheduler().kill_process(window.process_id));
+        }
+        if (window.process_id == process_id_)
+        {
+            mark_gui_closed();
+        }
+        static_cast<void>(gui_windows_.erase_at(i));
+    }
+    return Status::success();
 }
 
 Status KernelDebugShell::set_gui_input(std::string_view line)
@@ -430,17 +577,7 @@ Result<std::string_view> KernelDebugShell::execute(std::string_view line)
     }
     if (foreground_process_running())
     {
-        if (auto status = append("foreground process running pid="); !status.ok())
-        {
-            return status;
-        }
-        if (auto status = append_unsigned(foreground_process_id_); !status.ok())
-        {
-            return status;
-        }
-        static_cast<void>(append("\n"));
-        static_cast<void>(render_to_gui(line, output_.view()));
-        return output_.view();
+        return Status::would_block("foreground process is running");
     }
 
     Status last_status = Status::success();
@@ -827,7 +964,7 @@ Status KernelDebugShell::ensure_gui_surface()
         return surface.status();
     }
     gui_surface_id_ = surface.value();
-    return Status::success();
+    return record_gui_window();
 }
 
 Status KernelDebugShell::append_gui_history(std::string_view text)
@@ -841,6 +978,52 @@ Status KernelDebugShell::append_gui_history(std::string_view text)
     static_cast<void>(gui_history_.append("[shell history truncated]\n"));
     const auto tail = text.size() > shell_gui_history_keep ? text.substr(text.size() - shell_gui_history_keep) : text;
     return gui_history_.append(tail);
+}
+
+Status KernelDebugShell::append_gui_history_unsigned(u64 value)
+{
+    constexpr u64 powers[] = {
+        10'000'000'000'000'000'000ull,
+        1'000'000'000'000'000'000ull,
+        100'000'000'000'000'000ull,
+        10'000'000'000'000'000ull,
+        1'000'000'000'000'000ull,
+        100'000'000'000'000ull,
+        10'000'000'000'000ull,
+        1'000'000'000'000ull,
+        100'000'000'000ull,
+        10'000'000'000ull,
+        1'000'000'000ull,
+        100'000'000ull,
+        10'000'000ull,
+        1'000'000ull,
+        100'000ull,
+        10'000ull,
+        1'000ull,
+        100ull,
+        10ull,
+        1ull,
+    };
+    bool started = false;
+    for (const auto power : powers)
+    {
+        u8 digit = 0;
+        while (value >= power)
+        {
+            value -= power;
+            ++digit;
+        }
+        if (digit != 0 || started || power == 1)
+        {
+            char ch = static_cast<char>('0' + digit);
+            if (auto status = append_gui_history(std::string_view{&ch, 1}); !status.ok())
+            {
+                return status;
+            }
+            started = true;
+        }
+    }
+    return Status::success();
 }
 
 Status KernelDebugShell::redraw_gui_terminal()
@@ -880,13 +1063,16 @@ Status KernelDebugShell::redraw_gui_terminal()
     {
         return status;
     }
-    if (auto status = terminal.append("ok> "); !status.ok())
+    if (foreground_process_id_ == 0)
     {
-        return status;
-    }
-    if (auto status = terminal.append(gui_input_line_.view()); !status.ok())
-    {
-        return status;
+        if (auto status = terminal.append("ok> "); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = terminal.append(gui_input_line_.view()); !status.ok())
+        {
+            return status;
+        }
     }
 
     const auto total_rows = visual_line_count(terminal.view(), shell_gui_text_columns);

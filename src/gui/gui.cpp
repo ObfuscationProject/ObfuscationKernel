@@ -18,14 +18,14 @@ constexpr u32 title_hit_height = gui_glyph_height * 2 + 4;
 constexpr u32 resize_hit_size = 8;
 constexpr u32 minimum_surface_width = 40;
 constexpr u32 minimum_surface_height = 28;
-constexpr i32 window_control_top = 2;
-constexpr i32 window_control_bottom = static_cast<i32>(title_hit_height) - 3;
-constexpr i32 window_close_right_min = 7;
-constexpr i32 window_close_right_max = 15;
+constexpr i32 window_control_top = 3;
+constexpr i32 window_control_bottom = 8;
+constexpr i32 window_close_right_min = 8;
+constexpr i32 window_close_right_max = 13;
 constexpr i32 window_maximize_right_min = 17;
-constexpr i32 window_maximize_right_max = 23;
-constexpr i32 window_minimize_right_min = 25;
-constexpr i32 window_minimize_right_max = 33;
+constexpr i32 window_maximize_right_max = 22;
+constexpr i32 window_minimize_right_min = 26;
+constexpr i32 window_minimize_right_max = 31;
 
 enum class WindowControl : u8
 {

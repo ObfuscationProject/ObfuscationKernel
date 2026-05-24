@@ -10,9 +10,9 @@ line. Up/Down recall command history in the same style as common Linux shells.
 In windowed GUI mode, mouse wheel input scrolls the shell's visual scrollback
 with the same direction convention as Windows: wheel up moves toward older
 scrollback, and wheel down returns toward the prompt.
-F12 opens the shell surface again after it has been closed; while the active
-session is the `kernel` user this is the kernel debug shell. In GUI mode the
-visible shell is also registered as an `oksh` scheduler process.
+F12 creates a fresh GUI shell window; while the active session is the `kernel`
+user this is the kernel debug shell. In GUI mode each visible shell window is
+registered as an `oksh` scheduler process.
 The command evaluator follows the Bourne shell subset needed for kernel debug
 work: comments beginning with `#`, command sequences separated by `;`, and
 basic `&&`/`||` conditionals.
@@ -38,9 +38,10 @@ Supported commands:
   account registered by tests/modules.
 - `users`: list debug-shell-visible users. The `kernel` account is scoped to the
   kernel debug shell.
-- `kill <pid>`: mark a scheduler process exited and tear down owned kernel UI
-  surfaces such as `fm:<user>`. Kernel-space processes can only be killed from
-  the `kernel` debug-shell user, and `idle` is protected.
+- `kill <pid>`: forcefully remove a scheduler process and tear down owned
+  kernel UI surfaces such as `fm:<user>` or `oksh`. Kernel-space processes can
+  only be killed from the `kernel` debug-shell user; `idle` and `mod:*` kernel
+  module processes are protected.
 - `exit`: leave the current debug shell user context, restoring the previous
   session user. With no previous user, non-kernel sessions return to `kernel`;
   exiting the base `kernel` session closes the GUI shell surface.
@@ -55,7 +56,8 @@ Supported commands:
 - `fm [path]` / `fileman [path]`: fork a foreground GUI kernel file manager for
   a VFS directory as a scheduler-visible `fm:<user>` process using the current
   credentials. While that foreground file manager is open, the debug shell
-  process is blocked and rejects further commands until the file manager closes.
+  process is blocked and does not display a fresh prompt until the file manager
+  closes.
 - `Win+E`: open or raise the GUI file manager at the current working directory
   without blocking the shell.
 

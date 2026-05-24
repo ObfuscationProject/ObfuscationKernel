@@ -23,8 +23,11 @@ class KernelDebugShell final
     Status set_gui_input(std::string_view line);
     Status scroll_gui_history(i32 rows);
     void mark_gui_closed();
+    Status reconcile_gui_windows();
     void notify_process_exit(sched::ProcessId pid);
-    Status block_on_foreground_process(sched::ProcessId pid);
+    Status close_process_window(sched::ProcessId pid);
+    Status start_foreground_process(sched::ProcessId pid);
+    [[nodiscard]] bool owns_process(sched::ProcessId pid) const;
     [[nodiscard]] bool gui_ready();
     [[nodiscard]] bool gui_open() const
     {
@@ -55,9 +58,14 @@ class KernelDebugShell final
     Status append_node_type(fs::NodeType type);
     Status append_session_user();
     Status render_to_gui(std::string_view command_line, std::string_view output);
+    Status record_gui_window();
+    Status remove_gui_window(usize index);
+    [[nodiscard]] Result<usize> find_window_by_process(sched::ProcessId pid) const;
+    [[nodiscard]] Result<usize> find_window_by_surface(gui::SurfaceId surface) const;
     Status ensure_gui_process();
     Status ensure_gui_surface();
     Status append_gui_history(std::string_view text);
+    Status append_gui_history_unsigned(u64 value);
     Status redraw_gui_terminal();
     Status refresh_process_credentials();
     [[nodiscard]] bool foreground_process_running();
@@ -100,6 +108,12 @@ class KernelDebugShell final
     Status command_net(std::string_view args);
     Status command_file_manager(std::string_view path);
 
+    struct GuiWindow
+    {
+        gui::SurfaceId surface_id{0};
+        sched::ProcessId process_id{0};
+    };
+
     Kernel *kernel_{nullptr};
     FixedString<32> session_user_name_{"kernel"};
     FixedString<32> previous_session_user_name_{};
@@ -112,6 +126,7 @@ class KernelDebugShell final
     gui::SurfaceId gui_surface_id_{0};
     sched::ProcessId process_id_{0};
     sched::ProcessId foreground_process_id_{0};
+    StaticVector<GuiWindow, gui::max_gui_surfaces> gui_windows_{};
     usize gui_render_count_{0};
     usize gui_scroll_rows_{0};
     bool gui_open_{true};

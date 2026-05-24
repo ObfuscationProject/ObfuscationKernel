@@ -307,22 +307,15 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
     }
 
     const bool click = left_button && !gui_mouse_left_down_;
-    const auto shell_surface = debug_shell_.gui_surface_id();
     const auto file_manager_surface = file_manager_.surface_id();
     const auto file_manager_process = file_manager_.process_id();
     if (auto status = compositor.handle_mouse_delta(delta_x, delta_y, left_button); !status.ok())
     {
         return status;
     }
-    if (shell_surface != 0 && !compositor.surface_info(shell_surface))
+    if (auto status = debug_shell_.reconcile_gui_windows(); !status.ok())
     {
-        const auto shell_process = debug_shell_.process_id();
-        if (shell_process != 0)
-        {
-            static_cast<void>(scheduler_.kill_process(shell_process));
-            debug_shell_.notify_process_exit(shell_process);
-        }
-        debug_shell_.mark_gui_closed();
+        return status;
     }
     if (file_manager_surface != 0 && !compositor.surface_info(file_manager_surface))
     {
@@ -365,10 +358,15 @@ Status Kernel::open_file_manager(std::string_view path, bool foreground_shell_ch
 
     const auto process_offset = scheduler_.process_count() * 0x1000;
     const auto context = arch_->make_kernel_context(0x7000 + process_offset, 0xe000 + process_offset);
-    auto process = scheduler_.create_background_process(process_name.view(), context);
+    auto process = scheduler_.create_process(process_name.view(), context);
     if (!process)
     {
         return process.status();
+    }
+    if (auto status = scheduler_.set_runnable(process.value()); !status.ok())
+    {
+        static_cast<void>(scheduler_.kill_process(process.value()));
+        return status;
     }
     if (auto status = scheduler_.set_credentials(process.value(), credentials); !status.ok())
     {
@@ -390,7 +388,7 @@ Status Kernel::open_file_manager(std::string_view path, bool foreground_shell_ch
     }
     if (foreground_shell_child)
     {
-        if (auto status = debug_shell_.block_on_foreground_process(process.value()); !status.ok())
+        if (auto status = debug_shell_.start_foreground_process(process.value()); !status.ok())
         {
             return status;
         }
@@ -419,28 +417,21 @@ Status Kernel::kill_process(sched::ProcessId pid)
     {
         return Status::invalid_argument("process id must be non-zero");
     }
-    const bool shell_process = debug_shell_.process_id() == pid;
+    const bool shell_process = debug_shell_.owns_process(pid);
     const bool file_manager_process = file_manager_.process_id() == pid;
     if (auto status = scheduler_.kill_process(pid); !status.ok())
     {
         return status;
     }
-    debug_shell_.notify_process_exit(pid);
 
     if (shell_process)
     {
-        if (debug_shell_.gui_surface_id() != 0)
+        if (auto status = debug_shell_.close_process_window(pid); !status.ok() && status.code() != StatusCode::not_found)
         {
-            if (auto status = debug_shell_.close_gui(); !status.ok())
-            {
-                return status;
-            }
-        }
-        else
-        {
-            debug_shell_.mark_gui_closed();
+            return status;
         }
     }
+    debug_shell_.notify_process_exit(pid);
     if (file_manager_process)
     {
         auto &compositor = gui_module_.compositor();
