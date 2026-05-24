@@ -370,10 +370,8 @@ void handle_ps2_mouse_byte(ok::u8 value)
     const auto dy = static_cast<ok::i32>(static_cast<ok::i8>(ps2_mouse_packet[2]));
     const bool left_button = (header & 0x01u) != 0;
     const auto gui_dy = -dy;
-    const auto gui_dx = RamFb::gui_delta_x(dx);
-    const auto scaled_gui_dy = RamFb::gui_delta_y(gui_dy);
     RamFb::move_pointer(dx, gui_dy, left_button);
-    static_cast<void>(ok::ok_gui_mouse_event(gui_dx, scaled_gui_dy, left_button));
+    static_cast<void>(ok::ok_gui_mouse_position_event(RamFb::gui_pointer_x(), RamFb::gui_pointer_y(), left_button));
     RamFb::redraw_pointer_after_gui_present();
     if (ps2_mouse_packet_size == 4)
     {

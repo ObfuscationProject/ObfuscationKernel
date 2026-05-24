@@ -408,6 +408,16 @@ Status ok_gui_mouse_event(i32 delta_x, i32 delta_y, bool left_button)
     return kernel.handle_gui_mouse(delta_x, delta_y, left_button);
 }
 
+Status ok_gui_mouse_position_event(i32 x, i32 y, bool left_button)
+{
+    Kernel &kernel = kernel_instance();
+    if (!kernel.booted())
+    {
+        return Status::not_initialized("kernel is not booted");
+    }
+    return kernel.handle_gui_mouse_position(x, y, left_button);
+}
+
 Status ok_gui_key_event(int key)
 {
     Kernel &kernel = kernel_instance();

@@ -527,6 +527,43 @@ Status test_gui_mouse_interacts_with_windows(Kernel &kernel)
     return Status::success();
 }
 
+Status test_kernel_gui_mouse_position_uses_absolute_pointer(Kernel &kernel)
+{
+    if (auto status = release_shell_surface(kernel); !status.ok())
+    {
+        return status;
+    }
+    auto &compositor = kernel.gui().compositor();
+    auto surface = compositor.create_surface(gui::Rect{.x = 100, .y = 40, .width = 96, .height = 48}, "position");
+    if (!surface)
+    {
+        return surface.status();
+    }
+    if (auto status = compositor.fill(surface.value(), 0xff1c2f38u); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.set_pointer_position(0, 0); !status.ok())
+    {
+        return status;
+    }
+    const auto close_x = 100 + 96 - 10;
+    const auto close_y = 40 + 5;
+    if (auto status = kernel.handle_gui_mouse_position(close_x, close_y, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse_position(close_x, close_y, false); !status.ok())
+    {
+        return status;
+    }
+    if (compositor.surface_info(surface.value()))
+    {
+        return Status::fault("kernel GUI absolute mouse position did not hit the window close button");
+    }
+    return Status::success();
+}
+
 Status test_gui_taskbar_launchers_and_focused_keyboard(Kernel &kernel)
 {
     if (auto status = kernel.debug_shell().close_all_gui(); !status.ok())
@@ -1069,6 +1106,10 @@ Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
         return status;
     }
     if (auto status = test_gui_mouse_interacts_with_windows(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_kernel_gui_mouse_position_uses_absolute_pointer(kernel); !status.ok())
     {
         return status;
     }

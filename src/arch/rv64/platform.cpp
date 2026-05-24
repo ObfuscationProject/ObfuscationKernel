@@ -42,6 +42,21 @@ void uart_write_char(char value)
     mmio8(uart_rbr_thr) = static_cast<ok::u8>(value);
 }
 
+void flush_virtio_mouse_motion(ok::i32 &dx, ok::i32 &dy, bool &changed)
+{
+    if (!changed)
+    {
+        return;
+    }
+    RamFb::move_pointer(dx, dy, virtio_mouse_left);
+    static_cast<void>(ok::ok_gui_mouse_position_event(RamFb::gui_pointer_x(), RamFb::gui_pointer_y(),
+                                                      virtio_mouse_left));
+    RamFb::redraw_pointer_after_gui_present();
+    dx = 0;
+    dy = 0;
+    changed = false;
+}
+
 void poll_virtio_mouse()
 {
     virtio_mouse.initialize(virtio_input_bases, sizeof(virtio_input_bases) / sizeof(virtio_input_bases[0]),
@@ -74,18 +89,15 @@ void poll_virtio_mouse()
         else if (event.type == ok::driver::qemu_virt::input_event_key &&
                  event.code == ok::driver::qemu_virt::input_button_left)
         {
+            flush_virtio_mouse_motion(dx, dy, changed);
             virtio_mouse_left = event.value != 0;
-            changed = true;
+            RamFb::move_pointer(0, 0, virtio_mouse_left);
+            static_cast<void>(ok::ok_gui_mouse_position_event(RamFb::gui_pointer_x(), RamFb::gui_pointer_y(),
+                                                              virtio_mouse_left));
+            RamFb::redraw_pointer_after_gui_present();
         }
     }
-    if (changed)
-    {
-        const auto gui_dx = RamFb::gui_delta_x(dx);
-        const auto gui_dy = RamFb::gui_delta_y(dy);
-        RamFb::move_pointer(dx, dy, virtio_mouse_left);
-        static_cast<void>(ok::ok_gui_mouse_event(gui_dx, gui_dy, virtio_mouse_left));
-        RamFb::redraw_pointer_after_gui_present();
-    }
+    flush_virtio_mouse_motion(dx, dy, changed);
     if (wheel != 0)
     {
         static_cast<void>(ok::ok_debug_shell_scroll_gui(-wheel));

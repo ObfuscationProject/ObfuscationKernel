@@ -138,6 +138,18 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
                                static_cast<i32>(framebuffer_height), gui_delta_y_remainder_);
     }
 
+    static i32 gui_pointer_x()
+    {
+        initialize();
+        return static_cast<i32>((static_cast<u64>(pointer_x_) * ok::driver::framebuffer_width) / framebuffer_width);
+    }
+
+    static i32 gui_pointer_y()
+    {
+        initialize();
+        return static_cast<i32>((static_cast<u64>(pointer_y_) * ok::driver::framebuffer_height) / framebuffer_height);
+    }
+
     static void draw_gui_pixel(u32 logical_width, u32 logical_height, u32 x, u32 y, u32 color)
     {
         initialize();

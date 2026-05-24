@@ -430,6 +430,24 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
     return Status::success();
 }
 
+Status Kernel::handle_gui_mouse_position(i32 x, i32 y, bool left_button)
+{
+    if (!booted_)
+    {
+        return Status::not_initialized("kernel is not booted");
+    }
+    auto &compositor = gui_module_.compositor();
+    if (compositor.state() != gui::GuiState::running)
+    {
+        return Status::not_initialized("GUI compositor is not running");
+    }
+    if (auto status = compositor.set_pointer_position(x, y); !status.ok())
+    {
+        return status;
+    }
+    return handle_gui_mouse(0, 0, left_button);
+}
+
 Status Kernel::handle_gui_key(int key)
 {
     if (!booted_)
