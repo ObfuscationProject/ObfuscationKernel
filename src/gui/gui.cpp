@@ -1601,7 +1601,22 @@ Status KernelFileManager::open(GuiCompositor &compositor, fs::VirtualFileSystem 
     }
     if (surface_id_ == 0)
     {
-        auto surface = compositor.create_surface(file_manager_bounds, "kernel-files");
+        auto bounds = file_manager_bounds;
+        const auto offset = static_cast<i32>((compositor.surface_count() % 5) * 18);
+        bounds.x += offset;
+        bounds.y += offset;
+        auto desktop = compositor.desktop_bounds();
+        if (desktop)
+        {
+            const auto max_x =
+                static_cast<i32>(desktop.value().width > bounds.width ? desktop.value().width - bounds.width : 0);
+            const auto work_height = desktop.value().height > taskbar_height ? desktop.value().height - taskbar_height
+                                                                             : desktop.value().height;
+            const auto max_y = static_cast<i32>(work_height > bounds.height ? work_height - bounds.height : 0);
+            bounds.x = bounds.x > max_x ? max_x : bounds.x;
+            bounds.y = bounds.y > max_y ? max_y : bounds.y;
+        }
+        auto surface = compositor.create_surface(bounds, "kernel-files");
         if (!surface)
         {
             return surface.status();
@@ -1660,6 +1675,10 @@ Status KernelFileManager::close(GuiCompositor &compositor)
     const auto id = surface_id_;
     surface_id_ = 0;
     process_id_ = 0;
+    if (!compositor.surface_info(id))
+    {
+        return Status::success();
+    }
     if (auto status = compositor.destroy_surface(id); !status.ok())
     {
         return status;

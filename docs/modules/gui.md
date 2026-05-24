@@ -42,8 +42,8 @@ The compositor API is intentionally small and synchronous:
   `close_surface` provide Windows-style window state controls. Minimized
   surfaces dock into a persistent bottom taskbar so a mouse click can restore
   them. The taskbar also has fixed debug-shell and file-manager launchers; the
-  debug-shell launcher opens another `oksh` window, while the file-manager
-  launcher focuses the existing file manager or opens it when none is running.
+  debug-shell launcher opens another isolated `oksh` window, while the
+  file-manager launcher opens another file-manager window.
   Maximized surfaces use the desktop work area above the taskbar.
 - `handle_mouse_delta()` tracks the logical pointer and turns button presses into
   title-bar drag, bottom-right resize, minimize, maximize/restore, close-request
@@ -102,6 +102,9 @@ surface:
 - the title strip and body use separate colors so the shell window has a
   distinct header;
 - the surface is redrawn with `GuiCompositor::draw_text()` and presented.
+Each GUI shell window tracks its own debug user, previous `su` context, input
+line, scrollback, and foreground child process. Switching users in one `oksh`
+does not change the session restored by another `oksh` window.
 
 The `fm`/`fileman` shell command forks a foreground GUI kernel file manager for
 a path. It renders the VFS directory listing in a separate `kernel-files`
@@ -112,8 +115,8 @@ directory navigation. The window itself uses the same drag, resize, minimize,
 maximize, and close handling as other GUI surfaces. Each open runs as an
 `fm:<user>` scheduler process with the credentials active at launch, and
 directory reads are checked against those credentials. A shell-launched file
-manager blocks the `oksh` process until it exits, while F1 opens the file
-manager as a shortcut without blocking the shell.
+manager blocks its launching `oksh` process until it exits, while F1 opens
+another file manager as a shortcut without blocking the shell.
 
 The serial console and legacy framebuffer text path are preserved for boot logs,
 automated QEMU validation, and GUI startup failure fallback. Once the GUI shell

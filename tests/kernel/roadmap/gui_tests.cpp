@@ -793,7 +793,6 @@ Status test_kernel_gui_is_started(Kernel &kernel)
 
 Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
 {
-    auto &manager = kernel.file_manager();
     auto &compositor = kernel.gui().compositor();
     const auto saved_credentials = kernel.posix().user_credentials();
     if (auto status = kernel.posix().set_credentials(user::kernel_credentials()); !status.ok())
@@ -805,9 +804,10 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return status;
     }
-    const auto *process = kernel.scheduler().find(manager.process_id());
-    auto info = compositor.surface_info(manager.surface_id());
-    if (manager.surface_id() == 0 || manager.path() != "/" || manager.render_count() == 0 || !info ||
+    const auto *process = kernel.scheduler().find(kernel.file_manager().process_id());
+    auto info = compositor.surface_info(kernel.file_manager().surface_id());
+    if (kernel.file_manager().surface_id() == 0 || kernel.file_manager().path() != "/" ||
+        kernel.file_manager().render_count() == 0 || !info ||
         compositor.last_present_checksum() == 0)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
@@ -828,7 +828,35 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("GUI file manager process did not keep kernel credentials");
     }
-    const auto resize_render_count = manager.render_count();
+    const auto first_manager_pid = kernel.file_manager().process_id();
+    const auto first_manager_surface = kernel.file_manager().surface_id();
+    if (auto status = kernel.open_file_manager("/tmp"); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    const auto second_manager_pid = kernel.file_manager().process_id();
+    const auto second_manager_surface = kernel.file_manager().surface_id();
+    if (first_manager_pid == second_manager_pid || first_manager_surface == second_manager_surface ||
+        kernel.scheduler().find(first_manager_pid) == nullptr ||
+        kernel.scheduler().find(second_manager_pid) == nullptr ||
+        !compositor.surface_info(first_manager_surface) || !compositor.surface_info(second_manager_surface))
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("GUI file manager did not keep multiple windows alive");
+    }
+    if (auto status = kernel.close_file_manager(); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (kernel.file_manager().process_id() != first_manager_pid || kernel.file_manager().path() != "/" ||
+        kernel.scheduler().find(first_manager_pid) == nullptr || compositor.surface_info(second_manager_surface))
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("closing active file manager did not preserve the earlier window");
+    }
+    const auto resize_render_count = kernel.file_manager().render_count();
     if (auto status =
             compositor.set_pointer_position(info.value().bounds.x + static_cast<i32>(info.value().bounds.width) - 20,
                                             info.value().bounds.y + 5);
@@ -847,16 +875,16 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return status;
     }
-    info = compositor.surface_info(manager.surface_id());
+    info = compositor.surface_info(kernel.file_manager().surface_id());
     if (!info || info.value().window_state != gui::WindowState::maximized ||
         info.value().bounds.width != driver::framebuffer_width ||
         info.value().bounds.height != driver::framebuffer_height - gui::taskbar_height ||
-        manager.render_count() <= resize_render_count)
+        kernel.file_manager().render_count() <= resize_render_count)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("GUI file manager maximize did not resize and redraw");
     }
-    const auto before_render_count = manager.render_count();
+    const auto before_render_count = kernel.file_manager().render_count();
     const auto nav_x = info.value().bounds.x + 12;
     const auto nav_y = info.value().bounds.y + static_cast<i32>(gui::gui_glyph_height * 6 + 2);
     if (auto status = compositor.set_pointer_position(nav_x, nav_y); !status.ok())
@@ -874,12 +902,12 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return status;
     }
-    if (manager.path() != "/tmp" || manager.render_count() <= before_render_count)
+    if (kernel.file_manager().path() != "/tmp" || kernel.file_manager().render_count() <= before_render_count)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("GUI file manager mouse navigation did not open /tmp");
     }
-    const auto before_parent_render_count = manager.render_count();
+    const auto before_parent_render_count = kernel.file_manager().render_count();
     const auto parent_x = info.value().bounds.x + 80;
     const auto parent_y = info.value().bounds.y + static_cast<i32>(gui::gui_glyph_height * 6 + 2);
     if (auto status = compositor.set_pointer_position(parent_x, parent_y); !status.ok())
@@ -897,13 +925,14 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return status;
     }
-    if (manager.path() != "/" || manager.render_count() <= before_parent_render_count)
+    if (kernel.file_manager().path() != "/" ||
+        kernel.file_manager().render_count() <= before_parent_render_count)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("GUI file manager parent navigation did not return to /");
     }
-    const auto manager_pid = manager.process_id();
-    const auto manager_surface = manager.surface_id();
+    const auto manager_pid = kernel.file_manager().process_id();
+    const auto manager_surface = kernel.file_manager().surface_id();
     FixedString<32> kill_command;
     if (auto status = kill_command.assign("kill "); !status.ok())
     {
@@ -917,8 +946,9 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
     }
     auto killed = kernel.debug_shell().execute(kill_command.view());
     const auto *killed_process = kernel.scheduler().find(manager_pid);
-    if (!killed || !killed.value().empty() || killed_process != nullptr || manager.surface_id() != 0 ||
-        manager.process_id() != 0 || compositor.surface_info(manager_surface))
+    if (!killed || !killed.value().empty() || killed_process != nullptr ||
+        kernel.file_manager().surface_id() != 0 || kernel.file_manager().process_id() != 0 ||
+        compositor.surface_info(manager_surface))
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("debug shell kill did not close the GUI file manager process");
@@ -928,8 +958,8 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return status;
     }
-    info = compositor.surface_info(manager.surface_id());
-    const auto close_pid = manager.process_id();
+    info = compositor.surface_info(kernel.file_manager().surface_id());
+    const auto close_pid = kernel.file_manager().process_id();
     if (!info || close_pid == 0)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
@@ -953,7 +983,8 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return status;
     }
-    if (manager.surface_id() != 0 || manager.process_id() != 0 || kernel.scheduler().find(close_pid) != nullptr)
+    if (kernel.file_manager().surface_id() != 0 || kernel.file_manager().process_id() != 0 ||
+        kernel.scheduler().find(close_pid) != nullptr)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("GUI file manager close button did not notify and close its process");
@@ -1031,6 +1062,11 @@ Status test_shell_renders_to_gui(Kernel &kernel)
     {
         return Status::fault("debug shell GUI input line did not redraw");
     }
+    auto first_user = kernel.debug_shell().execute("su user");
+    if (!first_user || first_user.value() != "user\n")
+    {
+        return Status::fault("debug shell first GUI session did not switch user");
+    }
     const auto first_shell_surface = kernel.debug_shell().gui_surface_id();
     const auto first_shell_pid = kernel.debug_shell().process_id();
     const auto surface_count_before_second_shell = kernel.gui().compositor().surface_count();
@@ -1045,6 +1081,43 @@ Status test_shell_renders_to_gui(Kernel &kernel)
         kernel.scheduler().find(kernel.debug_shell().process_id()) == nullptr)
     {
         return Status::fault("F12 did not create a new managed debug shell window");
+    }
+    auto second_user = kernel.debug_shell().execute("whoami");
+    const auto second_shell_surface = kernel.debug_shell().gui_surface_id();
+    const auto second_shell_pid = kernel.debug_shell().process_id();
+    const auto *first_process = kernel.scheduler().find(first_shell_pid);
+    const auto *second_process = kernel.scheduler().find(second_shell_pid);
+    if (!second_user || second_user.value() != "kernel\n" || first_process == nullptr ||
+        second_process == nullptr || first_process->credentials().euid != user::default_user_uid ||
+        !second_process->credentials().kernel_space)
+    {
+        return Status::fault("new GUI shell inherited another shell session credentials");
+    }
+    if (auto status = kernel.gui().compositor().raise_surface(first_shell_surface); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_key('\r'); !status.ok())
+    {
+        return status;
+    }
+    auto restored_first_user = kernel.debug_shell().execute("whoami");
+    if (!restored_first_user || restored_first_user.value() != "user\n")
+    {
+        return Status::fault("GUI shell did not restore its per-window user session");
+    }
+    if (auto status = kernel.gui().compositor().raise_surface(second_shell_surface); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_key('\r'); !status.ok())
+    {
+        return status;
+    }
+    second_user = kernel.debug_shell().execute("whoami");
+    if (!second_user || second_user.value() != "kernel\n")
+    {
+        return Status::fault("GUI shell user switch leaked across windows");
     }
     for (usize i = 0; i < 32; ++i)
     {

@@ -168,7 +168,11 @@ class Kernel final
     }
     [[nodiscard]] gui::KernelFileManager &file_manager()
     {
-        return file_manager_;
+        if (active_file_manager_index_ < file_managers_.size())
+        {
+            return file_managers_[active_file_manager_index_];
+        }
+        return inactive_file_manager_;
     }
     [[nodiscard]] ModuleManager &kernel_modules()
     {
@@ -253,11 +257,17 @@ class Kernel final
     Status handle_gui_close_request(gui::SurfaceId surface);
     Status handle_gui_surface_changed(gui::SurfaceId surface);
     Status handle_gui_taskbar_launcher(gui::TaskbarApp app);
+    Status reconcile_file_managers();
+    Status close_file_manager_at(usize index, bool kill_process, bool notify_shell);
+    Status close_all_file_managers();
     Status focus_file_manager();
+    Status focus_file_manager_at(usize index);
     Status force_close_gui_surface(gui::SurfaceId surface);
     Status note_ignored_gui_close(gui::SurfaceId surface);
     Status show_force_close_prompt(gui::SurfaceId surface);
     void clear_gui_close_attempt(gui::SurfaceId surface);
+    [[nodiscard]] Result<usize> find_file_manager_by_surface(gui::SurfaceId surface) const;
+    [[nodiscard]] Result<usize> find_file_manager_by_process(sched::ProcessId pid) const;
 
     struct GuiCloseAttempt
     {
@@ -281,7 +291,9 @@ class Kernel final
     driver::FramebufferDisplayDriver display_driver_{};
     driver::VirtioGpuPciDisplayDriver virtio_gpu_driver_{};
     gui::GuiModule gui_module_{};
-    gui::KernelFileManager file_manager_{};
+    StaticVector<gui::KernelFileManager, gui::max_gui_surfaces> file_managers_{};
+    gui::KernelFileManager inactive_file_manager_{};
+    usize active_file_manager_index_{gui::max_gui_surfaces};
     driver::KeyboardDriver keyboard_driver_{};
     driver::Ps2MouseDriver mouse_driver_{};
     driver::PciBusDriver pci_bus_driver_{};

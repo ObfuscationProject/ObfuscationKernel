@@ -74,8 +74,8 @@ The display stack has three layers:
   It renders a short startup animation during boot and tracks normal,
   minimized, maximized, and focused surface state. Minimized surfaces are
   exposed through the bottom taskbar, while maximized surfaces leave the taskbar
-  visible. Fixed taskbar launchers open another `oksh`, or open and focus
-  `fm`. It also consumes platform mouse events for title-bar dragging,
+  visible. Fixed taskbar launchers open another `oksh` or another `fm`. It also
+  consumes platform mouse events for title-bar dragging,
   bottom-right resizing, and window control buttons. Keyboard input is routed to
   the focused surface.
   The debug shell renders command history and active input to a
@@ -105,4 +105,4 @@ legacy virtio-mmio queue registers used by QEMU `virt` here, maps Linux input
 key codes into shell characters, forwards scaled logical mouse-relative events
 into the GUI compositor, and then moves a small framebuffer pointer. UART input
 remains as a fallback for headless serial use. F12 creates a fresh GUI shell
-window, and F1 opens the GUI file manager.
+window, and F1 opens a fresh GUI file manager.

@@ -107,6 +107,10 @@ Status Kernel::boot(KernelConfig config)
     test_report_ = {};
     kernel_modules_ = {};
     static_cast<void>(gui_module_.stop());
+    file_managers_.clear();
+    inactive_file_manager_.mark_closed();
+    active_file_manager_index_ = gui::max_gui_surfaces;
+    gui_close_attempts_.clear();
     debug_test_points_run_ = 0;
     gui_mouse_left_down_ = false;
     if (config.memory_region_count == 0)
@@ -370,8 +374,6 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
     }
 
     const bool click = left_button && !gui_mouse_left_down_;
-    const auto file_manager_surface = file_manager_.surface_id();
-    const auto file_manager_process = file_manager_.process_id();
     if (auto status = compositor.handle_mouse_delta(delta_x, delta_y, left_button); !status.ok())
     {
         gui_mouse_left_down_ = left_button;
@@ -391,14 +393,10 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
         gui_mouse_left_down_ = left_button;
         return status;
     }
-    if (file_manager_surface != 0 && !compositor.surface_info(file_manager_surface))
+    if (auto status = reconcile_file_managers(); !status.ok())
     {
-        if (file_manager_process != 0)
-        {
-            static_cast<void>(scheduler_.kill_process(file_manager_process));
-            debug_shell_.notify_process_exit(file_manager_process);
-        }
-        file_manager_.mark_closed();
+        gui_mouse_left_down_ = left_button;
+        return status;
     }
     if (click && window_event.kind == gui::WindowEventKind::none)
     {
@@ -418,12 +416,17 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
             gui_mouse_left_down_ = left_button;
             return Status::success();
         }
-        if (auto status =
-                file_manager_.handle_mouse(compositor, vfs_, compositor.pointer_x(), compositor.pointer_y(), true);
-            !status.ok())
+        const auto active = compositor.active_surface();
+        if (auto manager = find_file_manager_by_surface(active))
         {
-            gui_mouse_left_down_ = left_button;
-            return status;
+            active_file_manager_index_ = manager.value();
+            if (auto status = file_managers_[manager.value()].handle_mouse(compositor, vfs_, compositor.pointer_x(),
+                                                                            compositor.pointer_y(), true);
+                !status.ok())
+            {
+                gui_mouse_left_down_ = left_button;
+                return status;
+            }
         }
     }
     gui_mouse_left_down_ = left_button;
@@ -460,27 +463,34 @@ Status Kernel::handle_gui_key(int key)
         return Status::not_initialized("GUI compositor is not running");
     }
 
+    const auto active = compositor.active_surface();
     if (key == ok_input_open_shell)
     {
         return debug_shell_.show_gui();
     }
     if (key == ok_input_open_file_manager)
     {
-        if (file_manager_.surface_id() != 0 && compositor.surface_info(file_manager_.surface_id()))
+        if (active != 0 && debug_shell_.owns_surface(active))
         {
-            return focus_file_manager();
+            if (auto status = debug_shell_.handle_surface_changed(active); !status.ok())
+            {
+                return status;
+            }
         }
         return open_file_manager(posix_.getcwd(), false);
     }
 
-    const auto active = compositor.active_surface();
     if (active != 0 && debug_shell_.owns_surface(active))
     {
         return debug_shell_.handle_key(active, key);
     }
-    if (active != 0 && file_manager_.surface_id() == active)
+    if (active != 0)
     {
-        return file_manager_.handle_key(compositor, vfs_, key);
+        if (auto manager = find_file_manager_by_surface(active))
+        {
+            active_file_manager_index_ = manager.value();
+            return file_managers_[manager.value()].handle_key(compositor, vfs_, key);
+        }
     }
     return Status::success();
 }
@@ -492,9 +502,13 @@ Status Kernel::handle_gui_taskbar_launcher(gui::TaskbarApp app)
     case gui::TaskbarApp::debug_shell:
         return debug_shell_.show_gui();
     case gui::TaskbarApp::file_manager:
-        if (file_manager_.surface_id() != 0 && gui_module_.compositor().surface_info(file_manager_.surface_id()))
+        if (const auto active = gui_module_.compositor().active_surface();
+            active != 0 && debug_shell_.owns_surface(active))
         {
-            return focus_file_manager();
+            if (auto status = debug_shell_.handle_surface_changed(active); !status.ok())
+            {
+                return status;
+            }
         }
         return open_file_manager(posix_.getcwd(), false);
     case gui::TaskbarApp::none:
@@ -521,9 +535,10 @@ Status Kernel::handle_gui_window_event(gui::WindowEvent event)
         {
             return debug_shell_.handle_surface_changed(event.surface_id);
         }
-        if (file_manager_.surface_id() == event.surface_id)
+        if (auto manager = find_file_manager_by_surface(event.surface_id))
         {
-            return file_manager_.handle_surface_changed(gui_module_.compositor(), vfs_);
+            active_file_manager_index_ = manager.value();
+            return file_managers_[manager.value()].handle_surface_changed(gui_module_.compositor(), vfs_);
         }
         return Status::success();
     }
@@ -544,9 +559,9 @@ Status Kernel::handle_gui_close_request(gui::SurfaceId surface)
     {
         status = debug_shell_.close_surface_window(surface);
     }
-    else if (file_manager_.surface_id() == surface)
+    else if (auto manager = find_file_manager_by_surface(surface))
     {
-        status = close_file_manager();
+        status = close_file_manager_at(manager.value(), true, true);
     }
     else
     {
@@ -575,9 +590,10 @@ Status Kernel::handle_gui_surface_changed(gui::SurfaceId surface)
     {
         return debug_shell_.handle_surface_changed(surface);
     }
-    if (file_manager_.surface_id() == surface)
+    if (auto manager = find_file_manager_by_surface(surface))
     {
-        return file_manager_.handle_surface_changed(gui_module_.compositor(), vfs_);
+        active_file_manager_index_ = manager.value();
+        return file_managers_[manager.value()].handle_surface_changed(gui_module_.compositor(), vfs_);
     }
     return gui_module_.compositor().present();
 }
@@ -588,9 +604,9 @@ Status Kernel::force_close_gui_surface(gui::SurfaceId surface)
     {
         return debug_shell_.close_surface_window(surface);
     }
-    if (file_manager_.surface_id() == surface)
+    if (auto manager = find_file_manager_by_surface(surface))
     {
-        return close_file_manager();
+        return close_file_manager_at(manager.value(), true, true);
     }
     auto &compositor = gui_module_.compositor();
     if (compositor.surface_info(surface))
@@ -689,11 +705,155 @@ void Kernel::clear_gui_close_attempt(gui::SurfaceId surface)
     }
 }
 
+Result<usize> Kernel::find_file_manager_by_surface(gui::SurfaceId surface) const
+{
+    for (usize i = 0; i < file_managers_.size(); ++i)
+    {
+        if (file_managers_[i].surface_id() == surface)
+        {
+            return i;
+        }
+    }
+    return Status::not_found("file manager surface not found");
+}
+
+Result<usize> Kernel::find_file_manager_by_process(sched::ProcessId pid) const
+{
+    for (usize i = 0; i < file_managers_.size(); ++i)
+    {
+        if (file_managers_[i].process_id() == pid)
+        {
+            return i;
+        }
+    }
+    return Status::not_found("file manager process not found");
+}
+
+Status Kernel::close_file_manager_at(usize index, bool kill_process, bool notify_shell)
+{
+    if (index >= file_managers_.size())
+    {
+        return Status::invalid_argument("file manager window index out of range");
+    }
+    auto &manager = file_managers_[index];
+    const auto process = manager.process_id();
+    const auto surface = manager.surface_id();
+    if (surface != 0)
+    {
+        clear_gui_close_attempt(surface);
+    }
+    if (auto status = manager.close(gui_module_.compositor()); !status.ok() && status.code() != StatusCode::not_found)
+    {
+        manager.mark_closed();
+        return status;
+    }
+    if (kill_process && process != 0 && scheduler_.find(process) != nullptr)
+    {
+        static_cast<void>(scheduler_.kill_process(process));
+    }
+    if (notify_shell && process != 0)
+    {
+        debug_shell_.notify_process_exit(process);
+    }
+    const auto previous_active = active_file_manager_index_;
+    if (auto status = file_managers_.erase_at(index); !status.ok())
+    {
+        return status;
+    }
+    if (file_managers_.empty())
+    {
+        active_file_manager_index_ = gui::max_gui_surfaces;
+    }
+    else if (previous_active == index)
+    {
+        active_file_manager_index_ = index < file_managers_.size() ? index : file_managers_.size() - 1;
+    }
+    else if (previous_active > index)
+    {
+        active_file_manager_index_ = previous_active - 1;
+    }
+    else if (previous_active < file_managers_.size())
+    {
+        active_file_manager_index_ = previous_active;
+    }
+    else
+    {
+        active_file_manager_index_ = file_managers_.size() - 1;
+    }
+    return Status::success();
+}
+
+Status Kernel::close_all_file_managers()
+{
+    for (usize i = file_managers_.size(); i != 0; --i)
+    {
+        if (auto status = close_file_manager_at(i - 1, true, true); !status.ok())
+        {
+            return status;
+        }
+    }
+    inactive_file_manager_.mark_closed();
+    active_file_manager_index_ = gui::max_gui_surfaces;
+    return Status::success();
+}
+
+Status Kernel::reconcile_file_managers()
+{
+    auto &compositor = gui_module_.compositor();
+    for (usize i = 0; i < file_managers_.size();)
+    {
+        const auto surface = file_managers_[i].surface_id();
+        const auto process = file_managers_[i].process_id();
+        const bool surface_alive = surface != 0 && compositor.surface_info(surface);
+        const bool process_alive = process != 0 && scheduler_.find(process) != nullptr;
+        if (surface_alive && process_alive)
+        {
+            ++i;
+            continue;
+        }
+        if (process_alive)
+        {
+            static_cast<void>(scheduler_.kill_process(process));
+        }
+        if (surface_alive)
+        {
+            static_cast<void>(file_managers_[i].close(compositor));
+        }
+        if (process != 0)
+        {
+            debug_shell_.notify_process_exit(process);
+        }
+        const auto removed = i;
+        static_cast<void>(file_managers_.erase_at(i));
+        if (active_file_manager_index_ > removed)
+        {
+            --active_file_manager_index_;
+        }
+    }
+    if (file_managers_.empty())
+    {
+        active_file_manager_index_ = gui::max_gui_surfaces;
+    }
+    else if (active_file_manager_index_ >= file_managers_.size())
+    {
+        active_file_manager_index_ = file_managers_.size() - 1;
+    }
+    return Status::success();
+}
+
 Status Kernel::open_file_manager(std::string_view path, bool foreground_shell_child)
 {
     if (!booted_)
     {
         return Status::not_initialized("kernel is not booted");
+    }
+    if (auto status = reconcile_file_managers(); !status.ok())
+    {
+        return status;
+    }
+    if (file_managers_.full())
+    {
+        return Status::overflow("file manager window table is full");
     }
     const auto credentials = posix_.user_credentials();
     FixedString<sched::max_process_name> process_name;
@@ -724,22 +884,25 @@ Status Kernel::open_file_manager(std::string_view path, bool foreground_shell_ch
         return status;
     }
 
-    const auto previous_process = file_manager_.process_id();
-    if (auto status = file_manager_.open(gui_module_.compositor(), vfs_, path, credentials, process.value());
-        !status.ok())
+    gui::KernelFileManager manager;
+    if (auto status = manager.open(gui_module_.compositor(), vfs_, path, credentials, process.value()); !status.ok())
     {
+        static_cast<void>(manager.close(gui_module_.compositor()));
         static_cast<void>(scheduler_.kill_process(process.value()));
         return status;
     }
-    if (previous_process != 0 && previous_process != process.value())
+    if (auto status = file_managers_.push_back(manager); !status.ok())
     {
-        static_cast<void>(scheduler_.kill_process(previous_process));
-        debug_shell_.notify_process_exit(previous_process);
+        static_cast<void>(manager.close(gui_module_.compositor()));
+        static_cast<void>(scheduler_.kill_process(process.value()));
+        return status;
     }
+    active_file_manager_index_ = file_managers_.size() - 1;
     if (foreground_shell_child)
     {
         if (auto status = debug_shell_.start_foreground_process(process.value()); !status.ok())
         {
+            static_cast<void>(close_file_manager_at(active_file_manager_index_, true, true));
             return status;
         }
     }
@@ -748,23 +911,32 @@ Status Kernel::open_file_manager(std::string_view path, bool foreground_shell_ch
 
 Status Kernel::close_file_manager()
 {
-    const auto process = file_manager_.process_id();
-    if (auto status = file_manager_.close(gui_module_.compositor()); !status.ok())
+    if (active_file_manager_index_ >= file_managers_.size())
     {
-        return status;
+        return Status::success();
     }
-    if (process != 0)
-    {
-        static_cast<void>(scheduler_.kill_process(process));
-        debug_shell_.notify_process_exit(process);
-    }
-    return Status::success();
+    return close_file_manager_at(active_file_manager_index_, true, true);
 }
 
 Status Kernel::focus_file_manager()
 {
+    if (active_file_manager_index_ >= file_managers_.size())
+    {
+        return Status::not_initialized("file manager surface is not open");
+    }
+    return focus_file_manager_at(active_file_manager_index_);
+}
+
+Status Kernel::focus_file_manager_at(usize index)
+{
     auto &compositor = gui_module_.compositor();
-    const auto surface = file_manager_.surface_id();
+    if (index >= file_managers_.size())
+    {
+        return Status::invalid_argument("file manager window index out of range");
+    }
+    active_file_manager_index_ = index;
+    auto &manager = file_managers_[index];
+    const auto surface = manager.surface_id();
     if (surface == 0)
     {
         return Status::not_initialized("file manager surface is not open");
@@ -772,8 +944,7 @@ Status Kernel::focus_file_manager()
     auto info = compositor.surface_info(surface);
     if (!info)
     {
-        file_manager_.mark_closed();
-        return Status::success();
+        return close_file_manager_at(index, true, true);
     }
     if (info.value().window_state == gui::WindowState::minimized)
     {
@@ -786,17 +957,14 @@ Status Kernel::focus_file_manager()
     {
         return status;
     }
-    return file_manager_.handle_surface_changed(compositor, vfs_);
+    return manager.handle_surface_changed(compositor, vfs_);
 }
 
 Status Kernel::close_debug_gui()
 {
-    if (file_manager_.surface_id() != 0 || file_manager_.process_id() != 0)
+    if (auto status = close_all_file_managers(); !status.ok())
     {
-        if (auto status = close_file_manager(); !status.ok())
-        {
-            return status;
-        }
+        return status;
     }
     if (auto status = debug_shell_.close_all_gui(); !status.ok())
     {
@@ -831,7 +999,7 @@ Status Kernel::kill_process(sched::ProcessId pid)
         return Status::invalid_argument("process id must be non-zero");
     }
     const bool shell_process = debug_shell_.owns_process(pid);
-    const bool file_manager_process = file_manager_.process_id() == pid;
+    const auto file_manager_process = find_file_manager_by_process(pid);
     if (auto status = scheduler_.kill_process(pid); !status.ok())
     {
         return status;
@@ -847,19 +1015,10 @@ Status Kernel::kill_process(sched::ProcessId pid)
     debug_shell_.notify_process_exit(pid);
     if (file_manager_process)
     {
-        auto &compositor = gui_module_.compositor();
-        const auto surface = file_manager_.surface_id();
-        if (compositor.state() == gui::GuiState::running && surface != 0 && compositor.surface_info(surface))
+        if (auto status = close_file_manager_at(file_manager_process.value(), false, false);
+            !status.ok() && status.code() != StatusCode::not_found)
         {
-            if (auto status = file_manager_.close(compositor); !status.ok())
-            {
-                file_manager_.mark_closed();
-                return status;
-            }
-        }
-        else
-        {
-            file_manager_.mark_closed();
+            return status;
         }
     }
     return supervise_daemons();

@@ -73,6 +73,9 @@ class KernelDebugShell final
     Status append_session_user();
     Status render_to_gui(std::string_view command_line, std::string_view output);
     Status record_gui_window();
+    Status save_active_gui_window_state();
+    Status load_gui_window_state(usize index);
+    Status reset_gui_session_state();
     Status select_gui_window(usize index);
     Status activate_gui_window(usize index);
     Status remove_gui_window(usize index);
@@ -133,6 +136,18 @@ class KernelDebugShell final
     {
         gui::SurfaceId surface_id{0};
         sched::ProcessId process_id{0};
+        sched::ProcessId foreground_process_id{0};
+        FixedString<32> session_user_name{"kernel"};
+        FixedString<32> previous_session_user_name{};
+        user::Credentials previous_credentials{};
+        bool has_previous_session{false};
+        FixedString<2048> history{};
+        FixedString<128> input_line{};
+        std::array<FixedString<128>, 16> input_history{};
+        usize scroll_rows{0};
+        usize input_history_count{0};
+        usize input_history_cursor{0};
+        u8 escape_state{0};
     };
 
     Kernel *kernel_{nullptr};

@@ -335,10 +335,160 @@ Status KernelDebugShell::record_gui_window()
         if (window.process_id == process_id_)
         {
             window.surface_id = gui_surface_id_;
+            window.foreground_process_id = foreground_process_id_;
+            if (auto status = window.session_user_name.assign(session_user_name_.view()); !status.ok())
+            {
+                return status;
+            }
+            if (auto status = window.previous_session_user_name.assign(previous_session_user_name_.view());
+                !status.ok())
+            {
+                return status;
+            }
+            window.previous_credentials = previous_credentials_;
+            window.has_previous_session = has_previous_session_;
+            if (auto status = window.history.assign(gui_history_.view()); !status.ok())
+            {
+                return status;
+            }
+            if (auto status = window.input_line.assign(gui_input_line_.view()); !status.ok())
+            {
+                return status;
+            }
+            window.input_history = gui_input_history_;
+            window.scroll_rows = gui_scroll_rows_;
+            window.input_history_count = gui_input_history_count_;
+            window.input_history_cursor = gui_input_history_cursor_;
+            window.escape_state = gui_escape_state_;
             return Status::success();
         }
     }
-    return gui_windows_.push_back(GuiWindow{.surface_id = gui_surface_id_, .process_id = process_id_});
+    GuiWindow window{.surface_id = gui_surface_id_, .process_id = process_id_};
+    window.foreground_process_id = foreground_process_id_;
+    if (auto status = window.session_user_name.assign(session_user_name_.view()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = window.previous_session_user_name.assign(previous_session_user_name_.view()); !status.ok())
+    {
+        return status;
+    }
+    window.previous_credentials = previous_credentials_;
+    window.has_previous_session = has_previous_session_;
+    if (auto status = window.history.assign(gui_history_.view()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = window.input_line.assign(gui_input_line_.view()); !status.ok())
+    {
+        return status;
+    }
+    window.input_history = gui_input_history_;
+    window.scroll_rows = gui_scroll_rows_;
+    window.input_history_count = gui_input_history_count_;
+    window.input_history_cursor = gui_input_history_cursor_;
+    window.escape_state = gui_escape_state_;
+    return gui_windows_.push_back(window);
+}
+
+Status KernelDebugShell::save_active_gui_window_state()
+{
+    if (process_id_ == 0)
+    {
+        return Status::success();
+    }
+    auto index = find_window_by_process(process_id_);
+    if (!index)
+    {
+        return Status::success();
+    }
+    auto &window = gui_windows_[index.value()];
+    window.surface_id = gui_surface_id_;
+    window.foreground_process_id = foreground_process_id_;
+    if (auto status = window.session_user_name.assign(session_user_name_.view()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = window.previous_session_user_name.assign(previous_session_user_name_.view()); !status.ok())
+    {
+        return status;
+    }
+    window.previous_credentials = previous_credentials_;
+    window.has_previous_session = has_previous_session_;
+    if (auto status = window.history.assign(gui_history_.view()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = window.input_line.assign(gui_input_line_.view()); !status.ok())
+    {
+        return status;
+    }
+    window.input_history = gui_input_history_;
+    window.scroll_rows = gui_scroll_rows_;
+    window.input_history_count = gui_input_history_count_;
+    window.input_history_cursor = gui_input_history_cursor_;
+    window.escape_state = gui_escape_state_;
+    return Status::success();
+}
+
+Status KernelDebugShell::load_gui_window_state(usize index)
+{
+    if (index >= gui_windows_.size())
+    {
+        return Status::invalid_argument("GUI shell window index out of range");
+    }
+    const auto &window = gui_windows_[index];
+    gui_open_ = true;
+    gui_surface_id_ = window.surface_id;
+    process_id_ = window.process_id;
+    foreground_process_id_ = window.foreground_process_id;
+    if (auto status = session_user_name_.assign(window.session_user_name.view()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = previous_session_user_name_.assign(window.previous_session_user_name.view()); !status.ok())
+    {
+        return status;
+    }
+    previous_credentials_ = window.previous_credentials;
+    has_previous_session_ = window.has_previous_session;
+    if (auto status = gui_history_.assign(window.history.view()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = gui_input_line_.assign(window.input_line.view()); !status.ok())
+    {
+        return status;
+    }
+    gui_input_history_ = window.input_history;
+    gui_scroll_rows_ = window.scroll_rows;
+    gui_input_history_count_ = window.input_history_count;
+    gui_input_history_cursor_ = window.input_history_cursor;
+    gui_escape_state_ = window.escape_state;
+    if (auto status = sync_posix_credentials_to_session(); !status.ok())
+    {
+        return status;
+    }
+    return refresh_process_credentials();
+}
+
+Status KernelDebugShell::reset_gui_session_state()
+{
+    if (auto status = session_user_name_.assign("kernel"); !status.ok())
+    {
+        return status;
+    }
+    previous_session_user_name_.clear();
+    previous_credentials_ = {};
+    has_previous_session_ = false;
+    foreground_process_id_ = 0;
+    gui_history_.clear();
+    gui_input_line_.clear();
+    gui_scroll_rows_ = 0;
+    gui_escape_state_ = 0;
+    gui_input_history_count_ = 0;
+    gui_input_history_cursor_ = 0;
+    return Status::success();
 }
 
 Status KernelDebugShell::select_gui_window(usize index)
@@ -360,10 +510,11 @@ Status KernelDebugShell::select_gui_window(usize index)
         return Status::not_found("GUI shell window not found");
     }
 
-    gui_open_ = true;
-    gui_surface_id_ = window.surface_id;
-    process_id_ = window.process_id;
-    return sync_posix_credentials_to_session();
+    if (auto status = save_active_gui_window_state(); !status.ok())
+    {
+        return status;
+    }
+    return load_gui_window_state(index);
 }
 
 Status KernelDebugShell::activate_gui_window(usize index)
@@ -431,7 +582,7 @@ Status KernelDebugShell::remove_gui_window(usize index)
             static_cast<void>(compositor.present());
         }
     }
-    return Status::success();
+    return save_active_gui_window_state();
 }
 
 Status KernelDebugShell::ensure_gui_process()
@@ -542,7 +693,7 @@ Status KernelDebugShell::start_foreground_process(sched::ProcessId pid)
             }
         }
     }
-    return Status::success();
+    return save_active_gui_window_state();
 }
 
 Status KernelDebugShell::interrupt_foreground_process()
@@ -567,6 +718,17 @@ void KernelDebugShell::notify_process_exit(sched::ProcessId pid)
     if (pid == 0)
     {
         return;
+    }
+    for (auto &window : gui_windows_)
+    {
+        if (window.foreground_process_id == pid)
+        {
+            window.foreground_process_id = 0;
+            if (kernel_ != nullptr && window.process_id != 0)
+            {
+                static_cast<void>(kernel_->scheduler().set_runnable(window.process_id));
+            }
+        }
     }
     if (foreground_process_id_ == pid)
     {
@@ -597,16 +759,17 @@ Status KernelDebugShell::show_gui()
     {
         return status;
     }
+    if (auto status = save_active_gui_window_state(); !status.ok())
+    {
+        return status;
+    }
     gui_open_ = true;
     gui_surface_id_ = 0;
     process_id_ = 0;
-    foreground_process_id_ = 0;
-    gui_scroll_rows_ = 0;
-    gui_escape_state_ = 0;
-    gui_input_history_count_ = 0;
-    gui_input_history_cursor_ = 0;
-    gui_history_.clear();
-    gui_input_line_.clear();
+    if (auto status = reset_gui_session_state(); !status.ok())
+    {
+        return status;
+    }
     return redraw_gui_terminal();
 }
 
@@ -727,6 +890,10 @@ void KernelDebugShell::mark_gui_closed()
     gui_input_line_.clear();
     gui_scroll_rows_ = 0;
     gui_escape_state_ = 0;
+    previous_session_user_name_.clear();
+    previous_credentials_ = {};
+    has_previous_session_ = false;
+    static_cast<void>(session_user_name_.assign("kernel"));
 }
 
 Status KernelDebugShell::reconcile_gui_windows()
@@ -1002,6 +1169,10 @@ Result<std::string_view> KernelDebugShell::execute(std::string_view line)
         gate = next_gate;
     }
     static_cast<void>(render_to_gui(line, output_.view()));
+    if (auto status = save_active_gui_window_state(); !status.ok())
+    {
+        return status;
+    }
     return output_.view();
 }
 
