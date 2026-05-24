@@ -105,11 +105,11 @@ surface:
 
 The `fm`/`fileman` shell command forks a foreground GUI kernel file manager for
 a path. It renders the VFS directory listing in a separate `kernel-files`
-surface using the same compositor. Mouse clicks in its left navigation return to
-the parent directory or open `/`, `/dev`, `/tmp`, or `/proc` when present;
-clicks in the listing select files and open directories. The window itself uses
-the same drag, resize, minimize, maximize, and close handling as other GUI
-surfaces. Each open runs as an
+surface using the same compositor. Mouse clicks in its left navigation open
+`/`, `/dev`, `/tmp`, or `/proc` when present; clicks in the listing select
+files and open directories, with `../` as the first entry outside `/` for parent
+directory navigation. The window itself uses the same drag, resize, minimize,
+maximize, and close handling as other GUI surfaces. Each open runs as an
 `fm:<user>` scheduler process with the credentials active at launch, and
 directory reads are checked against those credentials. A shell-launched file
 manager blocks the `oksh` process until it exits, while F1 opens the file

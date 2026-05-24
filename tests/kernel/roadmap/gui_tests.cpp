@@ -836,9 +836,9 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
         return Status::fault("GUI file manager mouse navigation did not open /tmp");
     }
     const auto before_parent_render_count = manager.render_count();
-    const auto up_x = info.value().bounds.x + 12;
-    const auto up_y = info.value().bounds.y + static_cast<i32>(gui::gui_glyph_height * 3 + 2);
-    if (auto status = compositor.set_pointer_position(up_x, up_y); !status.ok())
+    const auto parent_x = info.value().bounds.x + 80;
+    const auto parent_y = info.value().bounds.y + static_cast<i32>(gui::gui_glyph_height * 6 + 2);
+    if (auto status = compositor.set_pointer_position(parent_x, parent_y); !status.ok())
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return status;

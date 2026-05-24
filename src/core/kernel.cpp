@@ -374,6 +374,7 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
     const auto file_manager_process = file_manager_.process_id();
     if (auto status = compositor.handle_mouse_delta(delta_x, delta_y, left_button); !status.ok())
     {
+        gui_mouse_left_down_ = left_button;
         return status;
     }
     const auto window_event = compositor.consume_window_event();
@@ -381,11 +382,13 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
     {
         if (auto status = handle_gui_window_event(window_event); !status.ok())
         {
+            gui_mouse_left_down_ = left_button;
             return status;
         }
     }
     if (auto status = debug_shell_.reconcile_gui_windows(); !status.ok())
     {
+        gui_mouse_left_down_ = left_button;
         return status;
     }
     if (file_manager_surface != 0 && !compositor.surface_info(file_manager_surface))
@@ -402,12 +405,14 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
         auto launcher = compositor.taskbar_launcher_at(compositor.pointer_x(), compositor.pointer_y());
         if (!launcher)
         {
+            gui_mouse_left_down_ = left_button;
             return launcher.status();
         }
         if (launcher.value() != gui::TaskbarApp::none)
         {
             if (auto status = handle_gui_taskbar_launcher(launcher.value()); !status.ok())
             {
+                gui_mouse_left_down_ = left_button;
                 return status;
             }
             gui_mouse_left_down_ = left_button;
@@ -417,6 +422,7 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
                 file_manager_.handle_mouse(compositor, vfs_, compositor.pointer_x(), compositor.pointer_y(), true);
             !status.ok())
         {
+            gui_mouse_left_down_ = left_button;
             return status;
         }
     }

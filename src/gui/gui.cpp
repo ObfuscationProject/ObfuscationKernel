@@ -40,7 +40,6 @@ constexpr i32 window_minimize_right_min = 26;
 constexpr i32 window_minimize_right_max = 31;
 constexpr u32 file_manager_sidebar_width = 64;
 constexpr u32 file_manager_title_height = gui_glyph_height * 2 + 2;
-constexpr usize file_manager_up_row = 3;
 constexpr usize file_manager_nav_row = 4;
 constexpr usize file_manager_list_row = 6;
 
@@ -384,6 +383,11 @@ Status assign_parent_path(FixedString<96> &out, std::string_view path)
         return out.assign("/");
     }
     return out.assign(path.substr(0, last_slash));
+}
+
+[[nodiscard]] bool has_parent_directory(std::string_view path)
+{
+    return !path.empty() && path != "/";
 }
 
 } // namespace
@@ -1655,11 +1659,6 @@ Status KernelFileManager::handle_mouse(GuiCompositor &compositor, fs::VirtualFil
     const auto row = static_cast<usize>(local_y / static_cast<i32>(gui_glyph_height));
     const auto layout = file_manager_layout(info.value());
     if (layout.sidebar_width != 0 && local_x >= 2 && local_x < static_cast<i32>(layout.sidebar_width + 2) &&
-        row == file_manager_up_row)
-    {
-        return open_parent(compositor, vfs);
-    }
-    if (layout.sidebar_width != 0 && local_x >= 2 && local_x < static_cast<i32>(layout.sidebar_width + 2) &&
         row >= file_manager_nav_row && row <= file_manager_nav_row + 3)
     {
         constexpr std::string_view nav_paths[] = {"/", "/dev", "/tmp", "/proc"};
@@ -1681,12 +1680,18 @@ Status KernelFileManager::handle_mouse(GuiCompositor &compositor, fs::VirtualFil
         return listing.status();
     }
     const auto index = row - file_manager_list_row;
-    if (index >= listing.value().count)
+    const auto parent_entries = has_parent_directory(path_.view()) ? static_cast<usize>(1) : static_cast<usize>(0);
+    const auto logical_count = listing.value().count + parent_entries;
+    if (index >= logical_count)
     {
         return Status::success();
     }
     selected_entry_ = index;
-    const auto &entry = listing.value().entries[index];
+    if (index < parent_entries)
+    {
+        return open_parent(compositor, vfs);
+    }
+    const auto &entry = listing.value().entries[index - parent_entries];
     if (entry.metadata.type == fs::NodeType::directory)
     {
         FixedString<96> child_path;
@@ -1721,7 +1726,8 @@ Status KernelFileManager::handle_key(GuiCompositor &compositor, fs::VirtualFileS
     {
         return listing.status();
     }
-    const auto count = listing.value().count;
+    const auto parent_entries = has_parent_directory(path_.view()) ? static_cast<usize>(1) : static_cast<usize>(0);
+    const auto count = listing.value().count + parent_entries;
     bool changed = false;
     if (key_escape_state_ == 2)
     {
@@ -1753,7 +1759,11 @@ Status KernelFileManager::handle_key(GuiCompositor &compositor, fs::VirtualFileS
     }
     else if ((key == '\r' || key == '\n') && selected_entry_ < count)
     {
-        const auto &entry = listing.value().entries[selected_entry_];
+        if (selected_entry_ < parent_entries)
+        {
+            return open_parent(compositor, vfs);
+        }
+        const auto &entry = listing.value().entries[selected_entry_ - parent_entries];
         if (entry.metadata.type == fs::NodeType::directory)
         {
             FixedString<96> child_path;
@@ -1862,7 +1872,7 @@ Status KernelFileManager::render(GuiCompositor &compositor, fs::VirtualFileSyste
     }
     if (layout.sidebar_width != 0)
     {
-        if (auto status = compositor.draw_text(surface_id_, 2, file_manager_up_row, "UP\nROOT\nDEV\nTMP\nPROC",
+        if (auto status = compositor.draw_text(surface_id_, 2, file_manager_nav_row, "ROOT\nDEV\nTMP\nPROC",
                                                0xff9fc6d2u, 0xff172331u);
             !status.ok())
         {
@@ -1880,10 +1890,11 @@ Status KernelFileManager::render(GuiCompositor &compositor, fs::VirtualFileSyste
     const auto surface_rows = layout.height / gui_glyph_height;
     const auto max_visible_entries =
         surface_rows > file_manager_list_row ? surface_rows - file_manager_list_row : static_cast<usize>(0);
-    const auto count = listing.value().count < max_visible_entries ? listing.value().count : max_visible_entries;
+    const auto parent_entries = has_parent_directory(path_.view()) ? static_cast<usize>(1) : static_cast<usize>(0);
+    const auto logical_count = listing.value().count + parent_entries;
+    const auto count = logical_count < max_visible_entries ? logical_count : max_visible_entries;
     for (usize i = 0; i < count; ++i)
     {
-        const auto &entry = listing.value().entries[i];
         const auto row = static_cast<u32>(file_manager_list_row + i);
         const auto row_color = i == selected_entry_ ? 0xff23485au : ((i % 2) == 0 ? 0xff111c24u : 0xff0d141cu);
         if (auto status = fill_rect_if_non_empty(
@@ -1899,29 +1910,48 @@ Status KernelFileManager::render(GuiCompositor &compositor, fs::VirtualFileSyste
         }
 
         FixedString<96> line;
-        if (entry.metadata.type == fs::NodeType::directory)
+        auto type = fs::NodeType::directory;
+        usize size = 0;
+        if (i < parent_entries)
         {
             if (auto status = line.assign("[D] "); !status.ok())
+            {
+                return status;
+            }
+            if (auto status = line.append("../"); !status.ok())
             {
                 return status;
             }
         }
         else
         {
-            if (auto status = line.assign("[F] "); !status.ok())
+            const auto &entry = listing.value().entries[i - parent_entries];
+            type = entry.metadata.type;
+            size = entry.metadata.size;
+            if (entry.metadata.type == fs::NodeType::directory)
+            {
+                if (auto status = line.assign("[D] "); !status.ok())
+                {
+                    return status;
+                }
+            }
+            else
+            {
+                if (auto status = line.assign("[F] "); !status.ok())
+                {
+                    return status;
+                }
+            }
+            if (auto status = line.append(entry.name.view()); !status.ok())
             {
                 return status;
             }
-        }
-        if (auto status = line.append(entry.name.view()); !status.ok())
-        {
-            return status;
-        }
-        if (entry.metadata.type == fs::NodeType::directory)
-        {
-            if (auto status = line.append("/"); !status.ok())
+            if (entry.metadata.type == fs::NodeType::directory)
             {
-                return status;
+                if (auto status = line.append("/"); !status.ok())
+                {
+                    return status;
+                }
             }
         }
         while (line.size() < 22)
@@ -1931,7 +1961,7 @@ Status KernelFileManager::render(GuiCompositor &compositor, fs::VirtualFileSyste
                 return status;
             }
         }
-        if (auto status = line.append(node_type_label(entry.metadata.type)); !status.ok())
+        if (auto status = line.append(node_type_label(type)); !status.ok())
         {
             return status;
         }
@@ -1942,7 +1972,7 @@ Status KernelFileManager::render(GuiCompositor &compositor, fs::VirtualFileSyste
                 return status;
             }
         }
-        if (auto status = append_decimal(line, entry.metadata.size); !status.ok())
+        if (auto status = append_decimal(line, size); !status.ok())
         {
             return status;
         }
