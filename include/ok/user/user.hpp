@@ -3,9 +3,13 @@
 #include "ok/arch/arch.hpp"
 #include "ok/core/fixed.hpp"
 #include "ok/core/types.hpp"
-#include "ok/sched/scheduler.hpp"
 
 #include <string_view>
+
+namespace ok::sched
+{
+using ProcessId = u64;
+}
 
 namespace ok::user
 {

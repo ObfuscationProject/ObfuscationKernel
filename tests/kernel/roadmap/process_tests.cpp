@@ -523,12 +523,23 @@ Status verify_background_programs_and_posix(Kernel &kernel)
     }
 
     auto ps = kernel.debug_shell().execute("ps aux");
-    if (!ps || !contains_text(ps.value(), "  PID TTY   STAT THR COMMAND") || !contains_text(ps.value(), "idle") ||
+    if (!ps || !contains_text(ps.value(), "  PID USER    TTY   STAT THR COMMAND") ||
+        !contains_text(ps.value(), "idle") ||
         !contains_text(ps.value(), "drv:simple-framebuffer") || !contains_text(ps.value(), "mod:kernel-gui") ||
-        !contains_text(ps.value(), "bg-a") || !contains_text(ps.value(), "bg-b") || !contains_text(ps.value(), "bg-c"))
+        contains_text(ps.value(), "drv:ram-block0") || !contains_text(ps.value(), "bg-a") ||
+        !contains_text(ps.value(), "bg-b") || !contains_text(ps.value(), "bg-c"))
     {
         return Status::fault("debug shell ps did not list scheduler processes");
     }
+
+    static_cast<void>(kernel.debug_shell().execute("exit"));
+    auto user_ps = kernel.debug_shell().execute("ps aux");
+    if (!user_ps || contains_text(user_ps.value(), "drv:simple-framebuffer") ||
+        contains_text(user_ps.value(), "mod:kernel-gui") || contains_text(user_ps.value(), "idle"))
+    {
+        return Status::fault("debug shell ps exposed kernel processes outside kernel user");
+    }
+    static_cast<void>(kernel.debug_shell().execute("su kernel"));
 
     const auto saved_credentials = kernel.posix().user_credentials();
     if (auto status = kernel.posix().set_credentials(user::root_credentials()); !status.ok())

@@ -4,6 +4,7 @@
 #include "ok/core/fixed.hpp"
 #include "ok/core/types.hpp"
 #include "ok/smp/smp.hpp"
+#include "ok/user/user.hpp"
 
 #include <array>
 #include <span>
@@ -72,6 +73,14 @@ class ProcessControlBlock
     {
         background_ = background;
     }
+    [[nodiscard]] const user::Credentials &credentials() const
+    {
+        return credentials_;
+    }
+    void set_credentials(user::Credentials credentials)
+    {
+        credentials_ = credentials;
+    }
     [[nodiscard]] StaticVector<ThreadControlBlock, max_threads_per_process> &threads()
     {
         return threads_;
@@ -86,6 +95,7 @@ class ProcessControlBlock
     FixedString<max_process_name> name_{};
     ProcessState state_{ProcessState::created};
     bool background_{false};
+    user::Credentials credentials_{user::kernel_credentials()};
     StaticVector<ThreadControlBlock, max_threads_per_process> threads_{};
 };
 
@@ -124,6 +134,7 @@ class Scheduler final
     }
     Result<ProcessId> create_process(std::string_view name, arch::CpuContext initial_context);
     Result<ProcessId> create_background_process(std::string_view name, arch::CpuContext initial_context);
+    Status set_credentials(ProcessId pid, user::Credentials credentials);
     Status configure_cpus(usize cpu_count);
     Status set_runnable(ProcessId pid);
     Result<ProcessId> schedule_next();

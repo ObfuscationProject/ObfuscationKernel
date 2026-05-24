@@ -11,6 +11,34 @@ using shell_detail::after_first_word;
 using shell_detail::first_word;
 using shell_detail::trim;
 
+namespace
+{
+
+Result<u32> parse_mode(std::string_view text)
+{
+    text = trim(text);
+    if (text.empty())
+    {
+        return Status::invalid_argument("mode is required");
+    }
+    u32 value = 0;
+    for (const auto ch : text)
+    {
+        if (ch < '0' || ch > '7')
+        {
+            return Status::invalid_argument("mode must be octal");
+        }
+        value = (value << 3) | static_cast<u32>(ch - '0');
+        if (value > 07777u)
+        {
+            return Status::invalid_argument("mode is out of range");
+        }
+    }
+    return value;
+}
+
+} // namespace
+
 Status KernelDebugShell::command_echo(std::string_view text)
 {
     if (auto status = append(text); !status.ok())
@@ -439,6 +467,104 @@ Status KernelDebugShell::command_stat(std::string_view path)
     return append("\n");
 }
 
+Status KernelDebugShell::command_chmod(std::string_view args)
+{
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+    const auto mode_text = first_word(args);
+    const auto path = trim(after_first_word(args));
+    if (mode_text.empty() || path.empty())
+    {
+        return Status::invalid_argument("chmod requires a mode and path");
+    }
+    auto mode = parse_mode(mode_text);
+    if (!mode)
+    {
+        return mode.status();
+    }
+    auto resolved = resolve_path(path);
+    if (!resolved)
+    {
+        return resolved.status();
+    }
+    return kernel_->posix().chmod(resolved.value(), mode.value());
+}
+
+Status KernelDebugShell::command_chown(std::string_view args)
+{
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+    const auto user_name = first_word(args);
+    const auto path = trim(after_first_word(args));
+    if (user_name.empty() || path.empty())
+    {
+        return Status::invalid_argument("chown requires a user and path");
+    }
+    const auto *account = kernel_->user_space().users().find_by_name(user_name);
+    if (account == nullptr || account->kernel_space)
+    {
+        return Status::not_found("filesystem owner user not found");
+    }
+    auto resolved = resolve_path(path);
+    if (!resolved)
+    {
+        return resolved.status();
+    }
+    return kernel_->posix().chown(resolved.value(), account->uid, account->gid);
+}
+
+Status KernelDebugShell::command_users()
+{
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+    for (const auto *name : {"kernel", "root", "user"})
+    {
+        const auto *account = kernel_->user_space().users().find_by_name(name);
+        if (account == nullptr)
+        {
+            continue;
+        }
+        if (auto status = append(account->name.view()); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(" uid="); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_unsigned(account->uid); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(" gid="); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_unsigned(account->gid); !status.ok())
+        {
+            return status;
+        }
+        if (account->kernel_space)
+        {
+            if (auto status = append(" scope=debug-shell"); !status.ok())
+            {
+                return status;
+            }
+        }
+        if (auto status = append("\n"); !status.ok())
+        {
+            return status;
+        }
+    }
+    return Status::success();
+}
+
 Status KernelDebugShell::command_file_manager(std::string_view path)
 {
     if (kernel_ == nullptr)
@@ -550,11 +676,59 @@ Status KernelDebugShell::command_su(std::string_view user)
     {
         return status;
     }
+    previous_credentials_ = kernel_->posix().user_credentials();
+    if (auto status = previous_session_user_name_.assign(session_user_name_.view()); !status.ok())
+    {
+        return status;
+    }
+    has_previous_session_ = true;
     if (auto status = kernel_->posix().set_credentials(active); !status.ok())
     {
         return status;
     }
     if (auto status = session_user_name_.assign(user); !status.ok())
+    {
+        return status;
+    }
+    return command_whoami();
+}
+
+Status KernelDebugShell::command_exit(std::string_view args)
+{
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+    if (!trim(args).empty())
+    {
+        return Status::unsupported("exit does not accept arguments");
+    }
+
+    if (has_previous_session_)
+    {
+        if (auto status = kernel_->posix().set_credentials(previous_credentials_); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = session_user_name_.assign(previous_session_user_name_.view()); !status.ok())
+        {
+            return status;
+        }
+        previous_session_user_name_.clear();
+        has_previous_session_ = false;
+        return command_whoami();
+    }
+
+    auto root = kernel_->user_space().credentials_for("root");
+    if (!root)
+    {
+        return root.status();
+    }
+    if (auto status = kernel_->posix().set_credentials(root.value()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = session_user_name_.assign("root"); !status.ok())
     {
         return status;
     }

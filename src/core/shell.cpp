@@ -226,6 +226,8 @@ bool KernelDebugShell::gui_ready()
 Status KernelDebugShell::show_gui()
 {
     gui_scroll_rows_ = 0;
+    gui_history_.clear();
+    gui_input_line_.clear();
     return redraw_gui_terminal();
 }
 
@@ -456,6 +458,18 @@ Status KernelDebugShell::dispatch_command(std::string_view command_line)
     {
         return command_stat(args);
     }
+    else if (command == "chmod")
+    {
+        return command_chmod(args);
+    }
+    else if (command == "chown")
+    {
+        return command_chown(args);
+    }
+    else if (command == "users")
+    {
+        return command_users();
+    }
     else if (command == "whoami")
     {
         return command_whoami();
@@ -467,6 +481,10 @@ Status KernelDebugShell::dispatch_command(std::string_view command_line)
     else if (command == "su")
     {
         return command_su(args);
+    }
+    else if (command == "exit")
+    {
+        return command_exit(args);
     }
     else if (command == "disk")
     {
@@ -683,13 +701,16 @@ Status KernelDebugShell::redraw_gui_terminal()
     {
         return status;
     }
-    if (auto status = terminal.append("ok> "); !status.ok())
+    if (!gui_input_line_.empty() || !gui_history_.empty())
     {
-        return status;
-    }
-    if (auto status = terminal.append(gui_input_line_.view()); !status.ok())
-    {
-        return status;
+        if (auto status = terminal.append("ok> "); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = terminal.append(gui_input_line_.view()); !status.ok())
+        {
+            return status;
+        }
     }
 
     const auto total_rows = visual_line_count(terminal.view(), shell_gui_text_columns);
@@ -737,6 +758,7 @@ Status KernelDebugShell::render_to_gui(std::string_view command_line, std::strin
     if (clears_screen)
     {
         gui_history_.clear();
+        return redraw_gui_terminal();
     }
     gui_scroll_rows_ = 0;
     gui_input_line_.clear();

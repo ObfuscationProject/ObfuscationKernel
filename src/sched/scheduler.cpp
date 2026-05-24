@@ -93,6 +93,17 @@ Result<ProcessId> Scheduler::create_background_process(std::string_view name, ar
     return pid.value();
 }
 
+Status Scheduler::set_credentials(ProcessId pid, user::Credentials credentials)
+{
+    auto *process = find(pid);
+    if (process == nullptr)
+    {
+        return Status::not_found("process not found");
+    }
+    process->set_credentials(credentials);
+    return Status::success();
+}
+
 Status Scheduler::configure_cpus(usize cpu_count)
 {
     if (cpu_count == 0)

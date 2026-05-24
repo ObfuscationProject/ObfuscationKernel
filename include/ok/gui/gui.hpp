@@ -40,12 +40,20 @@ enum class GuiState : u8
     crashed,
 };
 
+enum class WindowState : u8
+{
+    normal,
+    minimized,
+    maximized,
+};
+
 struct SurfaceInfo
 {
     SurfaceId id{0};
     Rect bounds{};
     u32 z_index{0};
     bool visible{false};
+    WindowState window_state{WindowState::normal};
     std::string_view title{};
 };
 
@@ -72,6 +80,10 @@ class GuiCompositor final
     Status move_surface(SurfaceId id, i32 x, i32 y);
     Status resize_surface(SurfaceId id, Rect bounds);
     Status raise_surface(SurfaceId id);
+    Status minimize_surface(SurfaceId id);
+    Status maximize_surface(SurfaceId id);
+    Status restore_surface(SurfaceId id);
+    Status close_surface(SurfaceId id);
     Status fill(SurfaceId id, u32 rgba);
     Status fill_rect(SurfaceId id, Rect rect, u32 rgba);
     Status put_pixel(SurfaceId id, u32 x, u32 y, u32 rgba);
@@ -113,8 +125,10 @@ class GuiCompositor final
         SurfaceId id{0};
         FixedString<max_gui_title> title{};
         Rect bounds{};
+        Rect restore_bounds{};
         u32 z_index{0};
         bool visible{true};
+        WindowState window_state{WindowState::normal};
         std::array<u32, max_gui_surface_pixels> pixels{};
     };
 

@@ -17,6 +17,11 @@ Status assign_kernel_process_name(FixedString<sched::max_process_name> &out, std
     return out.append(name.substr(0, room));
 }
 
+bool should_register_driver_process(const Driver &driver)
+{
+    return driver.name() != "ram-block0";
+}
+
 } // namespace
 
 Status DriverManager::add(Driver &driver)
@@ -53,6 +58,10 @@ Status DriverManager::bind_kernel_processes(sched::Scheduler &scheduler, arch::A
     for (usize i = 0; i < drivers_.size(); ++i)
     {
         auto *driver = drivers_[i];
+        if (!should_register_driver_process(*driver))
+        {
+            continue;
+        }
         bool already_bound = false;
         for (const auto &record : driver_processes_)
         {

@@ -38,6 +38,8 @@ The compositor API is intentionally small and synchronous:
 - `create_surface(bounds, title)` allocates one of four fixed backing stores.
 - `set_title`, `move_surface`, `resize_surface`, `set_visible`, and
   `raise_surface` update surface metadata.
+- `minimize_surface`, `maximize_surface`, `restore_surface`, and
+  `close_surface` provide Windows-style window state controls.
 - `fill`, `fill_rect`, `put_pixel`, and `draw_text` update backing pixels.
 - `surface_at(x, y)` returns the top visible surface at a logical desktop
   coordinate.
@@ -74,7 +76,7 @@ surface:
 
 - the command is appended with an `ok> ` prompt;
 - command output is appended to a bounded history buffer;
-- `clear` output resets the GUI history;
+- `clear` output resets the GUI history and leaves the terminal body empty;
 - the active input line is redrawn by the GUI while the serial console still
   receives text output;
 - the title strip and body use separate colors so the shell window has a

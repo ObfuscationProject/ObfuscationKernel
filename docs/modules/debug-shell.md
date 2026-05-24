@@ -28,9 +28,15 @@ Supported commands:
 - `pwd`, `cd <path>`, `ls [-a] [-h] [-l] [path]`, `cat <path>`, `touch <path>`,
   `mkdir <path>`, `rm <path>`, `stat <path>`: BusyBox-style file commands over
   the RAM VFS/POSIX layer.
+- `chmod <octal> <path>`, `chown <user> <path>`: manage VFS ownership and
+  permissions through POSIX credentials.
 - `whoami`, `id`, `su [user]`: switch the debug shell session through the kernel
   user manager; privileged sessions may become `kernel`, `root`, `user`, or any
   account registered by tests/modules.
+- `users`: list debug-shell-visible users. The `kernel` account is scoped to the
+  kernel debug shell.
+- `exit`: leave the current debug shell user context, restoring the previous
+  session user or dropping the base `kernel` session to `root`.
 - `disk`: print active block-device geometry and SimpleFS mount state.
 - `mkfs [label]`: format the active block device as SimpleFS.
 - `sfs info|ls|touch|write|cat|stat|rm`: operate directly on the SimpleFS flat
@@ -45,6 +51,8 @@ Supported commands:
 The shell is intentionally fixed-buffer and freestanding. Windowed QEMU mode
 routes keyboard input into the shell after `OK_TEST_PASS`, mirrors output to
 serial, and redraws a maximized `oksh` GUI surface through `GuiCompositor`. The
-GUI title strip and terminal body are rendered with separate colors. The legacy
-display-driver text path is still used for boot logs, `OK_DISPLAY_TEXT`
-diagnostics, and fallback when the GUI cannot be restarted.
+GUI title strip and terminal body are rendered with separate colors. Showing the
+GUI shell or running `clear` leaves an empty terminal body until input or
+command output is available. The legacy display-driver text path is still used
+for boot logs, `OK_DISPLAY_TEXT` diagnostics, and fallback when the GUI cannot
+be restarted.

@@ -192,8 +192,10 @@ Result<SurfaceId> GuiCompositor::create_surface(Rect bounds, std::string_view ti
     auto &slot = *surface.value();
     slot.id = next_surface_id_;
     slot.bounds = bounds;
+    slot.restore_bounds = bounds;
     slot.z_index = next_z_index_;
     slot.visible = true;
+    slot.window_state = WindowState::normal;
     if (auto status = slot.title.assign(title); !status.ok())
     {
         static_cast<void>(surfaces_.erase_at(surfaces_.size() - 1));
@@ -267,6 +269,10 @@ Status GuiCompositor::move_surface(SurfaceId id, i32 x, i32 y)
     auto &surface = surfaces_[index.value()];
     surface.bounds.x = x;
     surface.bounds.y = y;
+    if (surface.window_state == WindowState::normal)
+    {
+        surface.restore_bounds = surface.bounds;
+    }
     return Status::success();
 }
 
@@ -298,6 +304,10 @@ Status GuiCompositor::resize_surface(SurfaceId id, Rect bounds)
         }
     }
     surface.bounds = bounds;
+    if (surface.window_state == WindowState::normal)
+    {
+        surface.restore_bounds = bounds;
+    }
     return Status::success();
 }
 
@@ -315,6 +325,76 @@ Status GuiCompositor::raise_surface(SurfaceId id)
     surfaces_[index.value()].z_index = next_z_index_;
     ++next_z_index_;
     return Status::success();
+}
+
+Status GuiCompositor::minimize_surface(SurfaceId id)
+{
+    if (auto status = ensure_running(); !status.ok())
+    {
+        return status;
+    }
+    auto index = find_surface_index(id);
+    if (!index)
+    {
+        return index.status();
+    }
+    auto &surface = surfaces_[index.value()];
+    surface.visible = false;
+    surface.window_state = WindowState::minimized;
+    return Status::success();
+}
+
+Status GuiCompositor::maximize_surface(SurfaceId id)
+{
+    if (auto status = ensure_running(); !status.ok())
+    {
+        return status;
+    }
+    auto index = find_surface_index(id);
+    if (!index)
+    {
+        return index.status();
+    }
+    auto desktop = desktop_bounds();
+    if (!desktop)
+    {
+        return desktop.status();
+    }
+    auto &surface = surfaces_[index.value()];
+    if (surface.window_state != WindowState::maximized)
+    {
+        surface.restore_bounds = surface.bounds;
+    }
+    surface.bounds = desktop.value();
+    surface.visible = true;
+    surface.window_state = WindowState::maximized;
+    return raise_surface(id);
+}
+
+Status GuiCompositor::restore_surface(SurfaceId id)
+{
+    if (auto status = ensure_running(); !status.ok())
+    {
+        return status;
+    }
+    auto index = find_surface_index(id);
+    if (!index)
+    {
+        return index.status();
+    }
+    auto &surface = surfaces_[index.value()];
+    if (surface.window_state == WindowState::maximized)
+    {
+        surface.bounds = surface.restore_bounds;
+    }
+    surface.visible = true;
+    surface.window_state = WindowState::normal;
+    return raise_surface(id);
+}
+
+Status GuiCompositor::close_surface(SurfaceId id)
+{
+    return destroy_surface(id);
 }
 
 Status GuiCompositor::fill(SurfaceId id, u32 rgba)
@@ -507,6 +587,22 @@ Status GuiCompositor::draw_surface(const Surface &surface)
             {
                 color = title_frame_color;
             }
+            else if (y >= 3 && y <= 8 && surface.bounds.width >= 34)
+            {
+                const auto right = surface.bounds.width - x;
+                if (right >= 8 && right <= 13)
+                {
+                    color = 0xffd85f5fu;
+                }
+                else if (right >= 17 && right <= 22)
+                {
+                    color = surface.window_state == WindowState::maximized ? 0xfff4d35eu : 0xff8fd7ffu;
+                }
+                else if (right >= 26 && right <= 31)
+                {
+                    color = 0xff8fbf88u;
+                }
+            }
             if (auto status = display_->put_pixel(static_cast<u32>(target_x), static_cast<u32>(target_y), color);
                 !status.ok())
             {
@@ -679,6 +775,7 @@ Result<SurfaceInfo> GuiCompositor::surface_info(SurfaceId id) const
         .bounds = surface.bounds,
         .z_index = surface.z_index,
         .visible = surface.visible,
+        .window_state = surface.window_state,
         .title = surface.title.view(),
     };
 }

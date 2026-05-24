@@ -179,10 +179,38 @@ Status test_gui_surface_management_api(Kernel &kernel)
     {
         return status;
     }
+    if (auto status = compositor.maximize_surface(front.value()); !status.ok())
+    {
+        return status;
+    }
     auto info = compositor.surface_info(front.value());
+    if (!info || info.value().window_state != gui::WindowState::maximized ||
+        info.value().bounds.width != driver::framebuffer_width ||
+        info.value().bounds.height != driver::framebuffer_height)
+    {
+        return Status::fault("GUI maximize surface did not update window state");
+    }
+    if (auto status = compositor.restore_surface(front.value()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.minimize_surface(front.value()); !status.ok())
+    {
+        return status;
+    }
+    info = compositor.surface_info(front.value());
+    if (!info || info.value().visible || info.value().window_state != gui::WindowState::minimized)
+    {
+        return Status::fault("GUI minimize surface did not hide the window");
+    }
+    if (auto status = compositor.restore_surface(front.value()); !status.ok())
+    {
+        return status;
+    }
+    info = compositor.surface_info(front.value());
     if (!info || info.value().bounds.x != 32 || info.value().bounds.y != 26 ||
         info.value().bounds.width != 20 || info.value().bounds.height != 16 ||
-        info.value().title != "front-renamed")
+        info.value().title != "front-renamed" || info.value().window_state != gui::WindowState::normal)
     {
         return Status::fault("GUI surface metadata update failed");
     }
@@ -194,7 +222,7 @@ Status test_gui_surface_management_api(Kernel &kernel)
     {
         return Status::fault("GUI managed surfaces did not present");
     }
-    if (auto status = compositor.destroy_surface(front.value()); !status.ok())
+    if (auto status = compositor.close_surface(front.value()); !status.ok())
     {
         return status;
     }
@@ -350,6 +378,12 @@ Status test_shell_renders_to_gui(Kernel &kernel)
     if (kernel.gui().compositor().last_present_checksum() == scrolled_checksum)
     {
         return Status::fault("debug shell GUI scrollback did not return to prompt");
+    }
+    auto clear_output = kernel.debug_shell().execute("clear");
+    auto prompt_pixel = kernel.display().pixel_at(gui::gui_glyph_width, gui::gui_glyph_height * 3);
+    if (!clear_output || clear_output.value() != "\f" || !prompt_pixel || prompt_pixel.value() != 0xff061018u)
+    {
+        return Status::fault("debug shell GUI clear did not leave an empty terminal body");
     }
     return Status::success();
 }

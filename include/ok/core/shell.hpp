@@ -4,6 +4,7 @@
 #include "ok/core/types.hpp"
 #include "ok/fs/vfs.hpp"
 #include "ok/gui/gui.hpp"
+#include "ok/user/user.hpp"
 
 #include <string_view>
 
@@ -65,9 +66,13 @@ class KernelDebugShell final
     Status command_mkdir(std::string_view path);
     Status command_rm(std::string_view path);
     Status command_stat(std::string_view path);
+    Status command_chmod(std::string_view args);
+    Status command_chown(std::string_view args);
+    Status command_users();
     Status command_whoami();
     Status command_id();
     Status command_su(std::string_view user);
+    Status command_exit(std::string_view args);
     Status command_disk();
     Status command_mkfs(std::string_view label);
     Status command_simplefs(std::string_view args);
@@ -77,6 +82,9 @@ class KernelDebugShell final
 
     Kernel *kernel_{nullptr};
     FixedString<32> session_user_name_{"kernel"};
+    FixedString<32> previous_session_user_name_{};
+    user::Credentials previous_credentials_{};
+    bool has_previous_session_{false};
     FixedString<96> path_buffer_{};
     FixedString<4096> output_{};
     FixedString<2048> gui_history_{};

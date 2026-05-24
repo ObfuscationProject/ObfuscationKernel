@@ -437,6 +437,21 @@ Status Kernel::run_debug_test_suite()
     {
         return Status::fault("debug shell su test failed");
     }
+    auto shell_users = debug_shell_.execute("users");
+    if (!shell_users || !contains_text(shell_users.value(), "kernel") || !contains_text(shell_users.value(), "root") ||
+        !contains_text(shell_users.value(), "user"))
+    {
+        return Status::fault("debug shell users test failed");
+    }
+    static_cast<void>(debug_shell_.execute("touch /tmp/shell-owned"));
+    auto shell_chown = debug_shell_.execute("chown user /tmp/shell-owned");
+    auto shell_chmod = debug_shell_.execute("chmod 600 /tmp/shell-owned");
+    auto shell_owned_stat = debug_shell_.execute("stat /tmp/shell-owned");
+    if (!shell_chown || !shell_chmod || !shell_owned_stat || !contains_text(shell_owned_stat.value(), "uid=1000") ||
+        !contains_text(shell_owned_stat.value(), "mode=33152"))
+    {
+        return Status::fault("debug shell filesystem user-management test failed");
+    }
     auto shell_sfs_write = debug_shell_.execute("sfs write shell.txt hello");
     if (!shell_sfs_write)
     {
@@ -471,6 +486,16 @@ Status Kernel::run_debug_test_suite()
     if (!shell_su_kernel || shell_su_kernel.value().empty())
     {
         return Status::fault("debug shell test failed");
+    }
+    auto shell_exit = debug_shell_.execute("exit");
+    if (!shell_exit || shell_exit.value() != "root\n")
+    {
+        return Status::fault("debug shell exit user test failed");
+    }
+    shell_su_kernel = debug_shell_.execute("su kernel");
+    if (!shell_su_kernel || shell_su_kernel.value() != "kernel\n")
+    {
+        return Status::fault("debug shell kernel user restore test failed");
     }
     test_report_.shell = true;
 

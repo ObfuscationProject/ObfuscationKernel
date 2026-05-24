@@ -42,9 +42,11 @@ the mode field is already part of `KernelConfig` so interrupt-backed drivers can
 be enabled without changing the generic kernel entry.
 
 After boot creates the scheduler idle process, `DriverManager` also registers
-each built-in driver as a background kernel process named `drv:<driver-name>`.
-The driver logic still runs in kernel space, but `ps aux` can show the specific
-driver that owns each kernel process slot.
+most built-in drivers as background kernel processes named `drv:<driver-name>`.
+RAM-only block manipulation stays an in-kernel helper and does not get a
+`drv:ram-block0` process. The rest of the driver logic still runs in kernel
+space, but `ps aux` can show the specific driver that owns each kernel process
+slot when the shell is running as `kernel`.
 
 Block storage uses `BlockDevice`, which reports geometry and performs aligned
 sector reads/writes. `NullBlockDriver`, `RamBlockDriver`, and `VirtioBlockDriver`
@@ -70,10 +72,11 @@ The display stack has three layers:
   checksum.
 - `ok::gui::GuiCompositor` is the restartable GUI module above the framebuffer.
   It owns fixed-capacity surfaces, rectangle/pixel/text drawing, and composition.
-  It renders a short startup animation during boot. The debug shell renders
-  command history and active input to a maximized `oksh` GUI surface while
-  keeping serial output unchanged, and the `fm`/`fileman` command opens a
-  separate GUI file-manager surface for VFS directory listings.
+  It renders a short startup animation during boot and tracks normal,
+  minimized, and maximized surface state. The debug shell renders command
+  history and active input to a maximized `oksh` GUI surface while keeping
+  serial output unchanged, and the `fm`/`fileman` command opens a separate GUI
+  file-manager surface for VFS directory listings.
 - `RamFbConsole` is the QEMU-visible platform backend. It initializes `ramfb`
   through fw_cfg DMA, owns the 960x540 guest-RAM pixel surface, and scales
   logical GUI pixels through `ok_platform_display_gui_pixel()`.

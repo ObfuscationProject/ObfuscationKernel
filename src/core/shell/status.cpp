@@ -35,7 +35,7 @@ Status KernelDebugShell::command_help()
 {
     return append(
         "help true false : clear uname status mem ps drivers fs posix test echo pwd cd ls cat touch mkdir rm stat "
-        "whoami id su disk mkfs sfs ext4 net fm fileman\n");
+        "chmod chown users whoami id su exit disk mkfs sfs ext4 net fm fileman\n");
 }
 
 Status KernelDebugShell::command_true()
@@ -169,12 +169,17 @@ Status KernelDebugShell::command_processes(std::string_view)
         return Status::not_initialized("shell has no kernel");
     }
 
-    if (auto status = append("  PID TTY   STAT THR COMMAND\n"); !status.ok())
+    const auto active = kernel_->posix().user_credentials();
+    if (auto status = append("  PID USER    TTY   STAT THR COMMAND\n"); !status.ok())
     {
         return status;
     }
     for (const auto &process : kernel_->scheduler().processes())
     {
+        if (process.credentials().kernel_space && !active.kernel_space)
+        {
+            continue;
+        }
         FixedString<4> state;
         if (auto status = state.append(process_state_label(process.state())); !status.ok())
         {
@@ -196,6 +201,24 @@ Status KernelDebugShell::command_processes(std::string_view)
         }
 
         if (auto status = append_padded_unsigned(process.pid(), 5); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(" "); !status.ok())
+        {
+            return status;
+        }
+        std::string_view user_label = "user";
+        if (process.credentials().kernel_space)
+        {
+            user_label = "kernel";
+        }
+        else if (const auto *account = kernel_->user_space().users().find_by_uid(process.credentials().euid);
+                 account != nullptr)
+        {
+            user_label = account->name.view();
+        }
+        if (auto status = append_padded(user_label, 7); !status.ok())
         {
             return status;
         }
