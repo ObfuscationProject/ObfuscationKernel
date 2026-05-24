@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ok/arch/arch.hpp"
+#include "ok/core/power.hpp"
 #include "ok/core/shell.hpp"
 #include "ok/driver/driver.hpp"
 #include "ok/fs/simplefs.hpp"
@@ -102,6 +103,7 @@ class Kernel final
     Status close_debug_gui();
     Status kill_process(sched::ProcessId pid);
     Status supervise_daemons();
+    Status request_power_action(SystemPowerAction action);
 
     [[nodiscard]] bool booted() const
     {
@@ -232,6 +234,10 @@ class Kernel final
     {
         return debug_shell_;
     }
+    [[nodiscard]] SystemPowerAction power_action() const
+    {
+        return power_action_;
+    }
 
   private:
     Status register_builtin_interrupts(driver::TimerDriver &timer);
@@ -261,6 +267,7 @@ class Kernel final
 
     bool booted_{false};
     bool gui_mouse_left_down_{false};
+    SystemPowerAction power_action_{SystemPowerAction::none};
     usize debug_test_points_run_{0};
     KernelTestReport test_report_{};
     KernelConfig config_{};

@@ -88,12 +88,16 @@ xmake qemu-window-test --no-launch
 ```
 
 In graphical debug-test mode the kernel runs the same validation suite, prints
-`OK_TEST_PASS` to the serial console, closes debug GUI surfaces, and then halts
-or exits through the debug-exit path when one is attached. Non-test graphical
+`OK_TEST_PASS` to the serial console, closes debug GUI surfaces, and then tries
+the debug-exit path. If the platform returns from debug-exit, the kernel stays
+in the desktop event loop instead of halting, so taskbar launchers and the
+F12/F1 shortcuts can reopen the shell or file manager. Non-test graphical
 sessions route keyboard input through the focused GUI surface: `oksh` receives
 text only while focused, and the file manager consumes simple navigation keys.
 The ramfb backend scales the kernel's logical GUI framebuffer into the full
-960x540 pixel surface.
+960x540 pixel surface. Shutdown commands are explicit debug-shell requests:
+`shutdown`/`poweroff` request poweroff, `halt` enters the halt path, and
+`reboot` requests the platform reboot path before falling back to debug-exit.
 
 For `aarch64`, `arm32`, `rv64`, and `rv32` window sessions, QEMU attaches
 `virtio-keyboard-device` and `virtio-mouse-device`; the guest consumes their

@@ -786,6 +786,20 @@ Status Kernel::close_debug_gui()
     return Status::success();
 }
 
+Status Kernel::request_power_action(SystemPowerAction action)
+{
+    if (action == SystemPowerAction::none)
+    {
+        return Status::invalid_argument("power action must not be none");
+    }
+    if (power_action_ != SystemPowerAction::none && power_action_ != action)
+    {
+        return Status::busy("a power action is already pending");
+    }
+    power_action_ = action;
+    return Status::success();
+}
+
 Status Kernel::kill_process(sched::ProcessId pid)
 {
     if (pid == 0)

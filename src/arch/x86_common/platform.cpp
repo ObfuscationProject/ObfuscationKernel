@@ -474,6 +474,11 @@ extern "C" void ok_platform_halt()
     asm volatile("hlt" ::: "memory");
 }
 
+extern "C" void ok_platform_reboot()
+{
+    outb(keyboard_status_port, 0xfe);
+}
+
 extern "C" int ok_platform_input_poll()
 {
     if (const int pending = pop_pending_input(); pending >= 0)

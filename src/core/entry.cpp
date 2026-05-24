@@ -428,6 +428,16 @@ Status ok_gui_close_debug_surfaces()
     return kernel.close_debug_gui();
 }
 
+SystemPowerAction ok_system_power_action()
+{
+    Kernel &kernel = kernel_instance();
+    if (!kernel.booted())
+    {
+        return SystemPowerAction::none;
+    }
+    return kernel.power_action();
+}
+
 bool ok_debug_shell_gui_ready()
 {
     Kernel &kernel = kernel_instance();

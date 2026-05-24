@@ -13,6 +13,7 @@ extern "C" void ok_platform_display_debug_marker() __attribute__((weak));
 extern "C" void ok_platform_display_write_char(char value);
 extern "C" void ok_platform_debug_exit(ok::u32 code);
 extern "C" void ok_platform_halt();
+extern "C" void ok_platform_reboot() __attribute__((weak));
 extern "C" int ok_platform_input_poll();
 
 void platform_write(std::string_view text)
@@ -37,11 +38,31 @@ void platform_write(std::string_view text)
     }
 }
 
-[[maybe_unused, noreturn]] void interactive_loop()
+[[maybe_unused, noreturn]] void desktop_loop(bool show_shell)
 {
-    static_cast<void>(ok::ok_debug_shell_show_gui());
+    if (show_shell)
+    {
+        static_cast<void>(ok::ok_debug_shell_show_gui());
+    }
     for (;;)
     {
+        switch (ok::ok_system_power_action())
+        {
+        case ok::SystemPowerAction::none:
+            break;
+        case ok::SystemPowerAction::reboot:
+            if (ok_platform_reboot != nullptr)
+            {
+                ok_platform_reboot();
+            }
+            ok_platform_debug_exit(0x12u);
+            halt_forever();
+        case ok::SystemPowerAction::halt:
+        case ok::SystemPowerAction::poweroff:
+            ok_platform_debug_exit(0x10u);
+            halt_forever();
+        }
+
         const int value = ok_platform_input_poll();
         if (value >= 0)
         {
@@ -89,10 +110,14 @@ extern "C" [[noreturn]] void kernel_main()
         static_cast<void>(ok::ok_gui_close_debug_surfaces());
     }
     ok_platform_debug_exit(status.ok() ? 0x10u : 0x11u);
+    if (status.ok())
+    {
+        desktop_loop(false);
+    }
 #else
     if (status.ok())
     {
-        interactive_loop();
+        desktop_loop(true);
     }
 #endif
 

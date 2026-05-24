@@ -53,6 +53,10 @@ The compositor API is intentionally small and synchronous:
 - keyboard input is routed by the focused surface: `oksh` receives text when a
   shell window is focused, while the file manager consumes simple navigation keys
   when it is focused.
+- debug-test cleanup closes shell and file-manager surfaces, then leaves the
+  desktop taskbar responsive if the platform debug-exit path returns. This keeps
+  post-test input usable until an explicit `shutdown`, `poweroff`, `halt`, or
+  `reboot` command is requested.
 - `fill`, `fill_rect`, `put_pixel`, and `draw_text` update backing pixels.
 - `surface_at(x, y)` returns the top visible surface at a logical desktop
   coordinate.

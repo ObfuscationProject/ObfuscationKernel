@@ -73,7 +73,7 @@ Status KernelDebugShell::command_help()
 {
     return append(
         "help true false : clear uname status mem ps drivers fs posix test echo pwd cd ls cat touch mkdir rm stat "
-        "chmod chown users kill whoami id su exit disk mkfs sfs ext4 net fm fileman\n");
+        "chmod chown users kill shutdown poweroff halt reboot whoami id su exit disk mkfs sfs ext4 net fm fileman\n");
 }
 
 Status KernelDebugShell::command_true()
@@ -327,6 +327,49 @@ Status KernelDebugShell::command_kill(std::string_view args)
         return Status::denied("only kernel debug user can kill kernel processes");
     }
     return kernel_->kill_process(static_cast<sched::ProcessId>(pid));
+}
+
+Status KernelDebugShell::command_power(SystemPowerAction action, std::string_view args)
+{
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+    const auto active = kernel_->posix().user_credentials();
+    if (!active.kernel_space)
+    {
+        return Status::denied("only kernel debug user can change system power state");
+    }
+    args = trim_ascii(args);
+    if (action == SystemPowerAction::poweroff && (args == "-r" || args == "-r now"))
+    {
+        action = SystemPowerAction::reboot;
+    }
+    else if (action == SystemPowerAction::poweroff && (args == "-h" || args == "-h now"))
+    {
+        args = {};
+    }
+    if (!args.empty() && args != "now")
+    {
+        return Status::unsupported("power command only accepts optional 'now', '-h', '-h now', '-r', or '-r now'");
+    }
+    if (auto status = kernel_->request_power_action(action); !status.ok())
+    {
+        return status;
+    }
+
+    switch (action)
+    {
+    case SystemPowerAction::halt:
+        return append("system halt requested\n");
+    case SystemPowerAction::poweroff:
+        return append("system poweroff requested\n");
+    case SystemPowerAction::reboot:
+        return append("system reboot requested\n");
+    case SystemPowerAction::none:
+        break;
+    }
+    return Status::success();
 }
 
 Status KernelDebugShell::command_drivers()

@@ -1088,6 +1088,18 @@ Status KernelDebugShell::dispatch_command(std::string_view command_line)
     {
         return command_kill(args);
     }
+    else if (command == "shutdown" || command == "poweroff")
+    {
+        return command_power(SystemPowerAction::poweroff, args);
+    }
+    else if (command == "halt")
+    {
+        return command_power(SystemPowerAction::halt, args);
+    }
+    else if (command == "reboot")
+    {
+        return command_power(SystemPowerAction::reboot, args);
+    }
     else if (command == "whoami")
     {
         return command_whoami();

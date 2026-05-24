@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ok/core/fixed.hpp"
+#include "ok/core/power.hpp"
 #include "ok/core/types.hpp"
 #include "ok/fs/vfs.hpp"
 #include "ok/gui/gui.hpp"
@@ -113,6 +114,7 @@ class KernelDebugShell final
     Status command_chown(std::string_view args);
     Status command_users();
     Status command_kill(std::string_view args);
+    Status command_power(SystemPowerAction action, std::string_view args);
     Status command_whoami();
     Status command_id();
     Status command_su(std::string_view user);

@@ -45,6 +45,11 @@ Supported commands:
   only be killed from the `kernel` debug-shell user; `idle` is protected.
   Killing supervised `drv:*` or `mod:*` daemon processes forces the kernel
   guards to recreate them and append a restart line to `/tmp/kernel.log`.
+- `shutdown [now|-h|-h now|-r|-r now]`, `poweroff`, `halt`, `reboot`: request a
+  system power action from the `kernel` debug-shell user. `shutdown` and
+  `poweroff` request poweroff by default, `shutdown -r` requests reboot, and
+  `halt` enters the platform halt path when no debug-exit device consumes the
+  request.
 - `exit`: leave the current debug shell user context, restoring the previous
   session user. With no previous user, non-kernel sessions return to `kernel`;
   exiting the base `kernel` session closes the GUI shell surface.
@@ -67,9 +72,11 @@ Supported commands:
 The shell is intentionally fixed-buffer and freestanding. Windowed input is
 dispatched through GUI focus: keyboard events reach `oksh` only while a shell
 surface is focused. Debug test builds close their shell/file-manager GUI
-surfaces after `OK_TEST_PASS` instead of dropping into an interactive shell. The
-GUI title strip and terminal body are rendered with separate colors. Showing the
-GUI shell or running `clear` resets scrollback while immediately redrawing a
-fresh `ok> ` prompt. The legacy display-driver text path is still used for boot
-logs, `OK_DISPLAY_TEXT` diagnostics, and fallback when the GUI cannot be
-restarted.
+surfaces after `OK_TEST_PASS`, try the debug-exit path, and keep the desktop
+event loop alive if the platform returns from that path. The taskbar launchers
+can then reopen the shell or file manager without leaving stale serial debug
+output attached to the GUI. The GUI title strip and terminal body are rendered
+with separate colors. Showing the GUI shell or running `clear` resets scrollback
+while immediately redrawing a fresh `ok> ` prompt. The legacy display-driver
+text path is still used for boot logs, `OK_DISPLAY_TEXT` diagnostics, and
+fallback when the GUI cannot be restarted.
