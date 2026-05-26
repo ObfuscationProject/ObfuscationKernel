@@ -1,9 +1,11 @@
 # Process Scheduling
 
 `ok::sched::Scheduler` owns process/thread control blocks and delegates process
-selection to `SchedulerPolicy`. The default policy is `RoundRobinPolicy`, now
-priority-aware while preserving round-robin fairness among equal-priority
-runnable processes.
+selection to a plain C++ `SchedulerPolicy` object. Policies are ordinary OOP
+strategy objects, not kernel modules or service registrations; future algorithms
+can derive from the interface and be injected through the constructor or
+`set_policy()`. The default policy is `RoundRobinPolicy`, now priority-aware
+while preserving round-robin fairness among equal-priority runnable processes.
 
 `SchedulingMode` selects the scheduler policy envelope:
 
@@ -19,16 +21,16 @@ thread on each CPU. `cpu_stats(cpu)`, `cpu_usage_percent(cpu)`, and
 `process_usage_percent(pid)` provide the fixed-capacity accounting used by the
 kernel task manager.
 
-External kernel modules should enter scheduling through
-`Scheduler::schedule_module(ModuleScheduleRequest)`. The request applies the
-module process name, initial context, background/user credentials, priority, and
-CPU affinity in one validated operation, so loaders do not need to stitch
+Subsystems that need to create schedulable work should enter through
+`Scheduler::spawn(ScheduleRequest)`. The request applies the process name,
+initial context, background/user credentials, priority, and CPU affinity in one
+validated operation, so later loaders and runtime services do not need to stitch
 together process creation policy by hand.
 
 `DriverManager` registers built-in drivers as `drv:<driver-name>` background
 kernel daemon processes. `ModuleManager` registers non-core modules whose
 manifest uses `ModuleExecution::kernel_process` as `mod:<module-name>`
-background kernel processes through the module scheduling interface. Scheduler
+background kernel processes through the generic spawn interface. Scheduler
 process records now carry credentials;
 kernel-space process records are visible in debug-shell `ps aux` only while the
 shell session is using the `kernel` debug user. The debug shell `kill <pid>`

@@ -1108,6 +1108,50 @@ Status test_kernel_task_manager_draws_usage(Kernel &kernel)
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("task manager GUI did not close its process and surface");
     }
+
+    const auto top_render_before = kernel.debug_shell().gui_render_count();
+    auto top = kernel.debug_shell().execute("top");
+    const auto top_render_after_start = kernel.debug_shell().gui_render_count();
+    const auto top_pid = kernel.debug_shell().foreground_process_id();
+    const auto *top_process = kernel.scheduler().find(top_pid);
+    if (!top || !contains_text(top.value(), "TASK MANAGER") || top_pid == 0 || top_process == nullptr ||
+        top_process->name() != "top" || top_render_after_start <= top_render_before)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("top did not enter a foreground realtime task-manager view");
+    }
+    auto blocked = kernel.debug_shell().execute("echo blocked");
+    if (blocked || blocked.status().code() != StatusCode::would_block)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("top did not keep the shell blocked while realtime view was active");
+    }
+    if (auto status = kernel.debug_shell().tick(); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (kernel.debug_shell().gui_render_count() <= top_render_after_start)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("top did not refresh its realtime display");
+    }
+    if (auto status = kernel.debug_shell().interrupt_foreground_process(); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (kernel.debug_shell().foreground_process_id() != 0 || kernel.scheduler().find(top_pid) != nullptr)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("top did not exit on interrupt");
+    }
+    auto resumed = kernel.debug_shell().execute("echo top-resumed");
+    if (!resumed || resumed.value() != "top-resumed\n")
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("shell did not resume after top was interrupted");
+    }
     return kernel.posix().set_credentials(saved_credentials);
 }
 

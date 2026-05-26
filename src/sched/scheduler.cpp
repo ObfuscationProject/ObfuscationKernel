@@ -186,19 +186,19 @@ Result<ThreadId> Scheduler::create_thread(ProcessId pid, arch::CpuContext initia
     return tid;
 }
 
-Result<ProcessId> Scheduler::schedule_module(ModuleScheduleRequest request)
+Result<ProcessId> Scheduler::spawn(ScheduleRequest request)
 {
     if (request.name.empty())
     {
-        return Status::invalid_argument("module process name is empty");
+        return Status::invalid_argument("scheduled process name is empty");
     }
     if (request.priority > scheduler_max_priority)
     {
-        return Status::invalid_argument("module priority is out of range");
+        return Status::invalid_argument("scheduled process priority is out of range");
     }
     if ((request.cpu_affinity_mask & configured_cpu_mask()) == 0)
     {
-        return Status::invalid_argument("module CPU affinity has no configured CPU");
+        return Status::invalid_argument("scheduled process CPU affinity has no configured CPU");
     }
 
     auto process = request.background ? create_background_process(request.name, request.initial_context)

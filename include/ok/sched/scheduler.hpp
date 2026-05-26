@@ -65,7 +65,7 @@ struct CpuSchedulingStats
     ThreadId current_tid{0};
 };
 
-struct ModuleScheduleRequest
+struct ScheduleRequest
 {
     std::string_view name{};
     arch::CpuContext initial_context{};
@@ -222,6 +222,10 @@ class Scheduler final
     explicit Scheduler(SchedulerPolicy *policy = nullptr);
 
     static SchedulerPolicy &default_round_robin_policy();
+    void set_policy(SchedulerPolicy &policy)
+    {
+        policy_ = &policy;
+    }
 
     void set_mode(SchedulingMode mode)
     {
@@ -235,7 +239,7 @@ class Scheduler final
     Result<ProcessId> create_user_process(std::string_view name, arch::CpuContext initial_context);
     Result<ProcessId> create_background_process(std::string_view name, arch::CpuContext initial_context);
     Result<ThreadId> create_thread(ProcessId pid, arch::CpuContext initial_context);
-    Result<ProcessId> schedule_module(ModuleScheduleRequest request);
+    Result<ProcessId> spawn(ScheduleRequest request);
     Status set_credentials(ProcessId pid, user::Credentials credentials);
     Status set_priority(ProcessId pid, u8 priority);
     Status set_cpu_affinity(ProcessId pid, u16 cpu_affinity_mask);

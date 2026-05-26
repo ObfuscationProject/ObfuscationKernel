@@ -124,12 +124,13 @@ directory reads are checked against those credentials. A shell-launched file
 manager blocks its launching `oksh` process until it exits, while F1 opens
 another file manager as a shortcut without blocking the shell.
 
-The `top`/`taskman` shell command renders the built-in task-manager TUI.
-`taskman gui` opens `ok::apps::KernelTaskManager` in a compositor surface backed
-by its own `tm:<user>` scheduler process, and `taskman close` closes that GUI
-process and surface. Both views read the same scheduler, network, and block
-device counters, showing per-CPU dispatch usage, current PID/TID, process CPU
-share, network byte counters, and disk I/O bytes.
+`taskman` renders a one-shot built-in task-manager TUI snapshot. `top` enters a
+foreground real-time TUI view, refreshing in the GUI shell until the foreground
+process is interrupted. `taskman gui` opens `ok::apps::KernelTaskManager` in a
+compositor surface backed by its own `tm:<user>` scheduler process, and
+`taskman close` closes that GUI process and surface. All views read the same
+scheduler, network, and block device counters, showing per-CPU dispatch usage,
+current PID/TID, process CPU share, network byte counters, and disk I/O bytes.
 
 The serial console and legacy framebuffer text path are preserved for boot logs,
 automated QEMU validation, and GUI startup failure fallback. Once the GUI shell

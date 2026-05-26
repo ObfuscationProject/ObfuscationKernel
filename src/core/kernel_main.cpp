@@ -44,6 +44,7 @@ void platform_write(std::string_view text)
     {
         static_cast<void>(ok::ok_debug_shell_show_gui());
     }
+    ok::u64 ui_tick_counter = 0;
     for (;;)
     {
         switch (ok::ok_system_power_action())
@@ -67,6 +68,11 @@ void platform_write(std::string_view text)
         if (value >= 0)
         {
             static_cast<void>(ok::ok_gui_key_event(value));
+        }
+        ++ui_tick_counter;
+        if ((ui_tick_counter & 0x7ffu) == 0)
+        {
+            static_cast<void>(ok::ok_debug_shell_tick());
         }
         asm volatile("" ::: "memory");
     }

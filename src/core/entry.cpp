@@ -368,6 +368,16 @@ Status ok_debug_shell_open_file_manager_shortcut()
     return kernel.handle_gui_key(ok_input_open_file_manager);
 }
 
+Status ok_debug_shell_tick()
+{
+    Kernel &kernel = kernel_instance();
+    if (!kernel.booted())
+    {
+        return Status::not_initialized("kernel is not booted");
+    }
+    return kernel.debug_shell().tick();
+}
+
 bool ok_debug_shell_has_foreground_process()
 {
     Kernel &kernel = kernel_instance();

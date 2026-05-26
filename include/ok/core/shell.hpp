@@ -28,6 +28,7 @@ class KernelDebugShell final
     Status handle_key(int key);
     Status handle_key(gui::SurfaceId surface, int key);
     Status scroll_gui_history(i32 rows);
+    Status tick();
     void mark_gui_closed();
     Status reconcile_gui_windows();
     void notify_process_exit(sched::ProcessId pid);
@@ -87,6 +88,8 @@ class KernelDebugShell final
     Status append_gui_history(std::string_view text);
     Status append_gui_history_unsigned(u64 value);
     Status redraw_gui_terminal();
+    Status start_realtime_task_manager();
+    Status refresh_realtime_task_manager();
     Status refresh_process_credentials();
     Status remember_gui_input_line();
     Status recall_gui_history_previous();
@@ -132,12 +135,14 @@ class KernelDebugShell final
     Status command_net(std::string_view args);
     Status command_file_manager(std::string_view path);
     Status command_task_manager(std::string_view args);
+    Status command_top(std::string_view args);
 
     struct GuiWindow
     {
         gui::SurfaceId surface_id{0};
         sched::ProcessId process_id{0};
         sched::ProcessId foreground_process_id{0};
+        sched::ProcessId top_process_id{0};
         FixedString<32> session_user_name{"kernel"};
         FixedString<32> previous_session_user_name{};
         user::Credentials previous_credentials{};
@@ -163,6 +168,7 @@ class KernelDebugShell final
     gui::SurfaceId gui_surface_id_{0};
     sched::ProcessId process_id_{0};
     sched::ProcessId foreground_process_id_{0};
+    sched::ProcessId top_process_id_{0};
     StaticVector<GuiWindow, gui::max_gui_surfaces> gui_windows_{};
     std::array<FixedString<128>, 16> gui_input_history_{};
     usize gui_render_count_{0};

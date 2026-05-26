@@ -236,6 +236,7 @@ Status KernelDebugShell::attach(Kernel &kernel)
     gui_surface_id_ = 0;
     process_id_ = 0;
     foreground_process_id_ = 0;
+    top_process_id_ = 0;
     gui_windows_.clear();
     gui_render_count_ = 0;
     gui_scroll_rows_ = 0;
@@ -349,6 +350,7 @@ Status KernelDebugShell::record_gui_window()
         {
             window.surface_id = gui_surface_id_;
             window.foreground_process_id = foreground_process_id_;
+            window.top_process_id = top_process_id_;
             if (auto status = window.session_user_name.assign(session_user_name_.view()); !status.ok())
             {
                 return status;
@@ -378,6 +380,7 @@ Status KernelDebugShell::record_gui_window()
     }
     GuiWindow window{.surface_id = gui_surface_id_, .process_id = process_id_};
     window.foreground_process_id = foreground_process_id_;
+    window.top_process_id = top_process_id_;
     if (auto status = window.session_user_name.assign(session_user_name_.view()); !status.ok())
     {
         return status;
@@ -418,6 +421,7 @@ Status KernelDebugShell::save_active_gui_window_state()
     auto &window = gui_windows_[index.value()];
     window.surface_id = gui_surface_id_;
     window.foreground_process_id = foreground_process_id_;
+    window.top_process_id = top_process_id_;
     if (auto status = window.session_user_name.assign(session_user_name_.view()); !status.ok())
     {
         return status;
@@ -455,6 +459,7 @@ Status KernelDebugShell::load_gui_window_state(usize index)
     gui_surface_id_ = window.surface_id;
     process_id_ = window.process_id;
     foreground_process_id_ = window.foreground_process_id;
+    top_process_id_ = window.top_process_id;
     if (auto status = session_user_name_.assign(window.session_user_name.view()); !status.ok())
     {
         return status;
@@ -501,6 +506,7 @@ Status KernelDebugShell::reset_gui_session_state()
     previous_credentials_ = {};
     has_previous_session_ = false;
     foreground_process_id_ = 0;
+    top_process_id_ = 0;
     gui_history_.clear();
     gui_input_line_.clear();
     gui_scroll_rows_ = 0;
@@ -587,6 +593,7 @@ Status KernelDebugShell::remove_gui_window(usize index)
         gui_surface_id_ = 0;
         process_id_ = 0;
         foreground_process_id_ = 0;
+        top_process_id_ = 0;
         gui_open_ = false;
     }
     if (auto status = gui_windows_.erase_at(index); !status.ok())
@@ -627,6 +634,7 @@ Status KernelDebugShell::ensure_gui_process()
         }
         process_id_ = 0;
         foreground_process_id_ = 0;
+        top_process_id_ = 0;
     }
 
     const auto process_offset = kernel_->scheduler().process_count() * 0x1000;
@@ -738,6 +746,10 @@ void KernelDebugShell::notify_process_exit(sched::ProcessId pid)
         if (window.foreground_process_id == pid)
         {
             window.foreground_process_id = 0;
+            if (window.top_process_id == pid)
+            {
+                window.top_process_id = 0;
+            }
             if (kernel_ != nullptr && window.process_id != 0)
             {
                 static_cast<void>(kernel_->scheduler().set_runnable(window.process_id));
@@ -747,11 +759,15 @@ void KernelDebugShell::notify_process_exit(sched::ProcessId pid)
     if (foreground_process_id_ == pid)
     {
         foreground_process_id_ = 0;
+        if (top_process_id_ == pid)
+        {
+            top_process_id_ = 0;
+        }
         if (kernel_ != nullptr && process_id_ != 0)
         {
             static_cast<void>(kernel_->scheduler().set_runnable(process_id_));
         }
-        static_cast<void>(append_gui_history("file manager exited pid="));
+        static_cast<void>(append_gui_history("process exited pid="));
         static_cast<void>(append_gui_history_unsigned(pid));
         static_cast<void>(append_gui_history("\n"));
         static_cast<void>(redraw_gui_terminal());
@@ -1406,7 +1422,11 @@ Status KernelDebugShell::dispatch_command(std::string_view command_line)
     {
         return command_file_manager(args);
     }
-    else if (command == "top" || command == "taskman")
+    else if (command == "top")
+    {
+        return command_top(args);
+    }
+    else if (command == "taskman")
     {
         return command_task_manager(args);
     }

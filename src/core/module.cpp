@@ -137,7 +137,7 @@ Result<sched::ProcessId> ModuleManager::ensure_kernel_process(KernelModule &modu
     const auto context = kernel_process_arch_->make_kernel_context(
         kernel_process_entry_ + static_cast<uptr>(slot) * module_entry_stride,
         kernel_process_stack_ + static_cast<uptr>(slot) * module_stack_stride);
-    auto process = kernel_process_scheduler_->schedule_module(sched::ModuleScheduleRequest{
+    auto process = kernel_process_scheduler_->spawn(sched::ScheduleRequest{
         .name = process_name.view(),
         .initial_context = context,
         .priority = sched::scheduler_default_priority,

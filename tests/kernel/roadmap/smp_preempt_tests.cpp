@@ -176,8 +176,8 @@ Status test_smp_topology_and_per_cpu_scheduling(Kernel &kernel)
     {
         return Status::fault("CPU affinity did not keep high priority process off CPU1");
     }
-    auto module = advanced.schedule_module(sched::ModuleScheduleRequest{
-        .name = "mod:external",
+    auto module = advanced.spawn(sched::ScheduleRequest{
+        .name = "worker:external",
         .initial_context = ops.make_kernel_context(0x7000, 0xe000),
         .priority = 25,
         .cpu_affinity_mask = 0x2,
@@ -192,7 +192,7 @@ Status test_smp_topology_and_per_cpu_scheduling(Kernel &kernel)
     if (module_process == nullptr || !module_process->background() || module_process->priority() != 25 ||
         module_process->cpu_affinity_mask() != 0x2)
     {
-        return Status::fault("external module scheduler interface did not apply process policy");
+        return Status::fault("generic scheduler spawn interface did not apply process policy");
     }
 
     return Status::success();

@@ -49,6 +49,7 @@ Status ok_debug_shell_close_gui();
 Status ok_debug_shell_set_gui_input(std::string_view line);
 Status ok_debug_shell_scroll_gui(i32 rows);
 Status ok_debug_shell_open_file_manager_shortcut();
+Status ok_debug_shell_tick();
 bool ok_debug_shell_has_foreground_process();
 Status ok_debug_shell_interrupt();
 Status ok_gui_mouse_event(i32 delta_x, i32 delta_y, bool left_button);
