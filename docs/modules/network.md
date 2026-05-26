@@ -9,7 +9,8 @@ Implemented pieces:
 - IPv4 address and checksum helpers.
 - UDP loopback send/receive queues.
 - TCP listen/connect state for loopback debug sessions.
-- Per-protocol counters exposed through the debug shell.
+- Per-protocol packet and byte counters exposed through the debug shell and the
+  task manager.
 
 The stack currently routes only local traffic. Real NIC support should add a
 network driver that feeds Ethernet/IPv4 frames into this stack and transmits

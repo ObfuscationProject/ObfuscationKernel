@@ -37,6 +37,35 @@ bool file_contains(const fs::FileBuffer &file, std::string_view needle)
     return false;
 }
 
+bool contains_text(std::string_view haystack, std::string_view needle)
+{
+    if (needle.empty())
+    {
+        return true;
+    }
+    if (needle.size() > haystack.size())
+    {
+        return false;
+    }
+    for (usize i = 0; i + needle.size() <= haystack.size(); ++i)
+    {
+        bool match = true;
+        for (usize j = 0; j < needle.size(); ++j)
+        {
+            if (haystack[i + j] != needle[j])
+            {
+                match = false;
+                break;
+            }
+        }
+        if (match)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 Status append_unsigned(FixedString<32> &out, u64 value)
 {
     constexpr u64 powers[] = {
@@ -1016,6 +1045,72 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
     return kernel.posix().set_credentials(saved_credentials);
 }
 
+Status test_kernel_task_manager_draws_usage(Kernel &kernel)
+{
+    auto &compositor = kernel.gui().compositor();
+    const auto saved_credentials = kernel.posix().user_credentials();
+    if (auto status = kernel.posix().set_credentials(user::kernel_credentials()); !status.ok())
+    {
+        return status;
+    }
+
+    auto tui = kernel.debug_shell().execute("taskman");
+    if (!tui || !contains_text(tui.value(), "TASK MANAGER") || !contains_text(tui.value(), "CPU") ||
+        !contains_text(tui.value(), "NET") || !contains_text(tui.value(), "DISK"))
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("task manager TUI did not render CPU, network, and disk usage");
+    }
+
+    if (auto status = kernel.open_task_manager(); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    const auto pid = kernel.task_manager().process_id();
+    const auto surface = kernel.task_manager().surface_id();
+    const auto *process = kernel.scheduler().find(pid);
+    auto info = compositor.surface_info(surface);
+    if (surface == 0 || pid == 0 || process == nullptr || process->name() != "tm:kernel" ||
+        kernel.task_manager().render_count() == 0 || !info || compositor.last_present_checksum() == 0)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("task manager GUI did not create a surface and process");
+    }
+
+    const auto before_render_count = kernel.task_manager().render_count();
+    if (auto status = compositor.resize_surface(
+            surface, gui::Rect{.x = info.value().bounds.x, .y = info.value().bounds.y, .width = 340, .height = 188});
+        !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, false); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (kernel.task_manager().render_count() <= before_render_count)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("task manager GUI did not redraw after resize");
+    }
+
+    if (auto status = kernel.close_task_manager(); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (kernel.task_manager().surface_id() != 0 || kernel.task_manager().process_id() != 0 ||
+        kernel.scheduler().find(pid) != nullptr || compositor.surface_info(surface))
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("task manager GUI did not close its process and surface");
+    }
+    return kernel.posix().set_credentials(saved_credentials);
+}
+
 Status test_shell_renders_to_gui(Kernel &kernel)
 {
     if (auto status = kernel.debug_shell().show_gui(); !status.ok())
@@ -1236,6 +1331,10 @@ Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
         return status;
     }
     if (auto status = test_kernel_file_manager_draws_vfs(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_kernel_task_manager_draws_usage(kernel); !status.ok())
     {
         return status;
     }

@@ -1406,6 +1406,10 @@ Status KernelDebugShell::dispatch_command(std::string_view command_line)
     {
         return command_file_manager(args);
     }
+    else if (command == "top" || command == "taskman")
+    {
+        return command_task_manager(args);
+    }
     else
     {
         return Status::not_found("command not found");

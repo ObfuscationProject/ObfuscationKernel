@@ -139,6 +139,7 @@ Result<IcmpEchoReply> NetworkStack::send_icmp_echo(Ipv4Address destination, u16 
     }
 
     ++stats_.ipv4_tx;
+    stats_.bytes_tx += payload.size() + 28;
     if (!is_local(destination))
     {
         ++stats_.dropped;
@@ -146,6 +147,7 @@ Result<IcmpEchoReply> NetworkStack::send_icmp_echo(Ipv4Address destination, u16 
     }
 
     ++stats_.ipv4_rx;
+    stats_.bytes_rx += payload.size() + 28;
     return IcmpEchoReply{
         .source = destination,
         .destination = local_,
@@ -186,6 +188,7 @@ Status NetworkStack::send_udp(UdpEndpoint source, UdpEndpoint destination, std::
 
     ++stats_.ipv4_tx;
     ++stats_.udp_tx;
+    stats_.bytes_tx += payload.size() + 28;
     if (!is_local(destination.address))
     {
         ++stats_.dropped;
@@ -204,6 +207,7 @@ Status NetworkStack::send_udp(UdpEndpoint source, UdpEndpoint destination, std::
     }
     ++stats_.ipv4_rx;
     ++stats_.udp_rx;
+    stats_.bytes_rx += payload.size() + 28;
     return Status::success();
 }
 
@@ -251,6 +255,8 @@ Result<TcpConnection> NetworkStack::connect_tcp(UdpEndpoint remote, u16 local_po
     ++stats_.tcp_connects;
     ++stats_.ipv4_tx;
     ++stats_.ipv4_rx;
+    stats_.bytes_tx += 40;
+    stats_.bytes_rx += 40;
     return TcpConnection{
         .local = UdpEndpoint{.address = local_, .port = local_port},
         .remote = remote,

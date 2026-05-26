@@ -129,6 +129,72 @@ Status test_smp_topology_and_per_cpu_scheduling(Kernel &kernel)
         }
     }
 
+    sched::Scheduler advanced;
+    if (auto status = advanced.configure_cpus(2); !status.ok())
+    {
+        return status;
+    }
+    auto low = advanced.create_process("low-prio", ops.make_kernel_context(0x5000, 0xc000));
+    auto high = advanced.create_process("high-prio", ops.make_kernel_context(0x6000, 0xd000));
+    if (!low || !high)
+    {
+        return Status::fault("advanced scheduler process creation failed");
+    }
+    if (auto status = advanced.set_priority(low.value(), 4); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = advanced.set_priority(high.value(), 24); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = advanced.set_cpu_affinity(high.value(), 0x1); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = advanced.set_runnable(low.value()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = advanced.set_runnable(high.value()); !status.ok())
+    {
+        return status;
+    }
+    auto extra_thread = advanced.create_thread(high.value(), ops.make_kernel_context(0x6100, 0xd800));
+    if (!extra_thread)
+    {
+        return extra_thread.status();
+    }
+    auto high_pick = advanced.schedule_next_on_cpu(0);
+    if (!high_pick || high_pick.value() != high.value() || advanced.current_tid(0) == 0 ||
+        advanced.cpu_usage_percent(0) == 0)
+    {
+        return Status::fault("priority scheduler did not select high priority multi-thread process");
+    }
+    auto low_pick = advanced.schedule_next_on_cpu(1);
+    if (!low_pick || low_pick.value() != low.value())
+    {
+        return Status::fault("CPU affinity did not keep high priority process off CPU1");
+    }
+    auto module = advanced.schedule_module(sched::ModuleScheduleRequest{
+        .name = "mod:external",
+        .initial_context = ops.make_kernel_context(0x7000, 0xe000),
+        .priority = 25,
+        .cpu_affinity_mask = 0x2,
+        .credentials = user::kernel_credentials(),
+        .background = true,
+    });
+    if (!module)
+    {
+        return module.status();
+    }
+    const auto *module_process = advanced.find(module.value());
+    if (module_process == nullptr || !module_process->background() || module_process->priority() != 25 ||
+        module_process->cpu_affinity_mask() != 0x2)
+    {
+        return Status::fault("external module scheduler interface did not apply process policy");
+    }
+
     return Status::success();
 }
 

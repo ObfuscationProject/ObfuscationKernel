@@ -54,6 +54,22 @@ Status KernelDebugShell::command_net(std::string_view args)
         {
             return status;
         }
+        if (auto status = append(" bytes_tx="); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_unsigned(stats.bytes_tx); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(" bytes_rx="); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_unsigned(stats.bytes_rx); !status.ok())
+        {
+            return status;
+        }
         return append("\n");
     }
     if (subcommand == "udp")

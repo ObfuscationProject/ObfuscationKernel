@@ -1,7 +1,9 @@
 # Process Scheduling
 
-`ok::sched::Scheduler` owns process control blocks and delegates policy to
-`SchedulerPolicy`. The default policy is `RoundRobinPolicy`.
+`ok::sched::Scheduler` owns process/thread control blocks and delegates process
+selection to `SchedulerPolicy`. The default policy is `RoundRobinPolicy`, now
+priority-aware while preserving round-robin fairness among equal-priority
+runnable processes.
 
 `SchedulingMode` selects the scheduler policy envelope:
 
@@ -9,11 +11,25 @@
 - `round_robin`: baseline global round-robin dispatch.
 - `per_cpu_round_robin`: SMP-aware current-process tracking per CPU.
 
-The baseline creates an idle process during boot and marks it runnable.
+The baseline creates an idle process during boot and marks it runnable. Process
+records carry priority, CPU affinity, dispatch counters, last CPU, and per-thread
+dispatch accounting. `Scheduler::create_thread()` adds additional runnable
+threads to an existing process, and `current_tid(cpu)` exposes the selected
+thread on each CPU. `cpu_stats(cpu)`, `cpu_usage_percent(cpu)`, and
+`process_usage_percent(pid)` provide the fixed-capacity accounting used by the
+kernel task manager.
+
+External kernel modules should enter scheduling through
+`Scheduler::schedule_module(ModuleScheduleRequest)`. The request applies the
+module process name, initial context, background/user credentials, priority, and
+CPU affinity in one validated operation, so loaders do not need to stitch
+together process creation policy by hand.
+
 `DriverManager` registers built-in drivers as `drv:<driver-name>` background
 kernel daemon processes. `ModuleManager` registers non-core modules whose
 manifest uses `ModuleExecution::kernel_process` as `mod:<module-name>`
-background kernel processes. Scheduler process records now carry credentials;
+background kernel processes through the module scheduling interface. Scheduler
+process records now carry credentials;
 kernel-space process records are visible in debug-shell `ps aux` only while the
 shell session is using the `kernel` debug user. The debug shell `kill <pid>`
 command forcefully removes non-protected process records and asks kernel-owned
@@ -28,5 +44,6 @@ UI processes created by `root` or another normal user are recorded as
 GUI file manager launches create distinct `fm:<user>` processes using the
 credentials active at launch time; `fm` launched from the shell blocks only its
 launching `oksh` until the file manager exits.
-Future work should add priorities, sleeping queues, CPU affinity, and SMP run
-queues.
+Future work should replace the simulated dispatch counters with timer-derived
+runtime deltas and add real SMP run queues once architecture code starts running
+kernel threads concurrently.

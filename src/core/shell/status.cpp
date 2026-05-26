@@ -73,7 +73,8 @@ Status KernelDebugShell::command_help()
 {
     return append(
         "help true false : clear uname status mem ps drivers fs posix test echo pwd cd ls cat touch mkdir rm stat "
-        "chmod chown users kill shutdown poweroff halt reboot whoami id su exit disk mkfs sfs ext4 net fm fileman\n");
+        "chmod chown users kill shutdown poweroff halt reboot whoami id su exit disk mkfs sfs ext4 net fm fileman "
+        "top taskman\n");
 }
 
 Status KernelDebugShell::command_true()

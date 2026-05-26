@@ -131,6 +131,7 @@ class KernelDebugShell final
     Status command_ext4(std::string_view args);
     Status command_net(std::string_view args);
     Status command_file_manager(std::string_view path);
+    Status command_task_manager(std::string_view args);
 
     struct GuiWindow
     {

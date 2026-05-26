@@ -71,6 +71,8 @@ struct NetworkStats
     u64 ipv4_rx{0};
     u64 udp_tx{0};
     u64 udp_rx{0};
+    u64 bytes_tx{0};
+    u64 bytes_rx{0};
     u64 tcp_connects{0};
     u64 dropped{0};
 };

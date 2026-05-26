@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ok/apps/file_manager.hpp"
+#include "ok/apps/task_manager.hpp"
 #include "ok/arch/arch.hpp"
 #include "ok/core/power.hpp"
 #include "ok/core/shell.hpp"
@@ -104,6 +105,8 @@ class Kernel final
                                                user::Credentials credentials);
     Status open_file_manager(std::string_view path, bool foreground_shell_child = false);
     Status close_file_manager();
+    Status open_task_manager();
+    Status close_task_manager();
     Status close_debug_gui();
     Status kill_process(sched::ProcessId pid);
     Status supervise_daemons();
@@ -176,6 +179,10 @@ class Kernel final
             return file_managers_[active_file_manager_index_];
         }
         return inactive_file_manager_;
+    }
+    [[nodiscard]] apps::KernelTaskManager &task_manager()
+    {
+        return task_manager_;
     }
     [[nodiscard]] ModuleManager &kernel_modules()
     {
@@ -262,10 +269,13 @@ class Kernel final
     Status handle_gui_taskbar_launcher(gui::TaskbarApp app);
     Status sync_gui_credentials_from_surface(gui::SurfaceId surface);
     Status reconcile_file_managers();
+    Status reconcile_task_manager();
     Status close_file_manager_at(usize index, bool kill_process, bool notify_shell);
+    Status close_task_manager_window(bool kill_process, bool notify_shell);
     Status close_all_file_managers();
     Status focus_file_manager();
     Status focus_file_manager_at(usize index);
+    Status focus_task_manager();
     Status force_close_gui_surface(gui::SurfaceId surface);
     Status note_ignored_gui_close(gui::SurfaceId surface);
     Status show_force_close_prompt(gui::SurfaceId surface);
@@ -298,6 +308,7 @@ class Kernel final
     StaticVector<apps::KernelFileManager, gui::max_gui_surfaces> file_managers_{};
     apps::KernelFileManager inactive_file_manager_{};
     usize active_file_manager_index_{gui::max_gui_surfaces};
+    apps::KernelTaskManager task_manager_{};
     driver::KeyboardDriver keyboard_driver_{};
     driver::Ps2MouseDriver mouse_driver_{};
     driver::PciBusDriver pci_bus_driver_{};
