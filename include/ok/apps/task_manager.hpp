@@ -19,8 +19,10 @@ class KernelTaskManager final
 {
   public:
     Status open(gui::GuiCompositor &compositor, Kernel &kernel, user::Credentials credentials,
-                sched::ProcessId process_id);
+                sched::ProcessId process_id, std::string_view title = "task-manager");
     Status refresh(gui::GuiCompositor &compositor, Kernel &kernel);
+    Status handle_key(gui::GuiCompositor &compositor, Kernel &kernel, int key);
+    Status scroll_processes(gui::GuiCompositor &compositor, Kernel &kernel, i32 rows);
     Status close(gui::GuiCompositor &compositor);
     void mark_closed();
     Status render_tui(Kernel &kernel, FixedString<4096> &out) const;
@@ -49,6 +51,8 @@ class KernelTaskManager final
     sched::ProcessId process_id_{0};
     user::Credentials credentials_{user::kernel_credentials()};
     usize render_count_{0};
+    usize process_scroll_{0};
+    u8 key_escape_state_{0};
 };
 
 } // namespace apps

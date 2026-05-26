@@ -355,7 +355,7 @@ Status ok_debug_shell_scroll_gui(i32 rows)
     {
         return Status::not_initialized("kernel is not booted");
     }
-    return kernel.debug_shell().scroll_gui_history(rows);
+    return kernel.handle_gui_scroll(rows);
 }
 
 Status ok_debug_shell_open_file_manager_shortcut()
@@ -375,7 +375,7 @@ Status ok_debug_shell_tick()
     {
         return Status::not_initialized("kernel is not booted");
     }
-    return kernel.debug_shell().tick();
+    return kernel.tick();
 }
 
 bool ok_debug_shell_has_foreground_process()

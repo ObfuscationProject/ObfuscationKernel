@@ -9,9 +9,10 @@ Backspace/Delete only erase user input, and Ctrl-U clears the current input
 line. Ctrl-C clears the current line or interrupts the foreground GUI child
 process. Up/Down recall command history in the same style as common Linux
 shells.
-In windowed GUI mode, mouse wheel input scrolls the shell's visual scrollback
-with the same direction convention as Windows: wheel up moves toward older
-scrollback, and wheel down returns toward the prompt.
+In windowed GUI mode, mouse wheel input is routed to the active surface. Shell
+surfaces scroll their visual scrollback with the same direction convention as
+Windows: wheel up moves toward older scrollback, and wheel down returns toward
+the prompt.
 F12 creates a fresh GUI shell window. While the active session is the `kernel`
 user this is a kernel-thread `oksh`; from `root` or another normal user it is a
 normal user process with its own address-space ID. In GUI mode each visible

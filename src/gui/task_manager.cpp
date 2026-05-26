@@ -201,6 +201,19 @@ Status draw_line(GuiCompositor &compositor, SurfaceId surface, u32 row, std::str
     return compositor.draw_text(surface, 2, row, text, foreground, background);
 }
 
+usize visible_process_rows(const gui::SurfaceInfo &info)
+{
+    const auto rows = info.bounds.height / gui_glyph_height;
+    return rows > 15 ? rows - 15 : static_cast<usize>(0);
+}
+
+usize max_process_scroll(Kernel &kernel, const gui::SurfaceInfo &info)
+{
+    const auto visible = visible_process_rows(info);
+    const auto count = kernel.scheduler().process_count();
+    return count > visible ? count - visible : static_cast<usize>(0);
+}
+
 Status fill_rect_if_non_empty(GuiCompositor &compositor, SurfaceId surface, Rect rect, u32 rgba)
 {
     if (rect.width == 0 || rect.height == 0)
@@ -213,7 +226,7 @@ Status fill_rect_if_non_empty(GuiCompositor &compositor, SurfaceId surface, Rect
 } // namespace
 
 Status KernelTaskManager::open(GuiCompositor &compositor, Kernel &kernel, user::Credentials credentials,
-                               sched::ProcessId process_id)
+                               sched::ProcessId process_id, std::string_view title)
 {
     credentials_ = credentials;
     process_id_ = process_id;
@@ -235,12 +248,16 @@ Status KernelTaskManager::open(GuiCompositor &compositor, Kernel &kernel, user::
             bounds.x = bounds.x > max_x ? max_x : bounds.x;
             bounds.y = bounds.y > max_y ? max_y : bounds.y;
         }
-        auto surface = compositor.create_surface(bounds, "task-manager");
+        auto surface = compositor.create_surface(bounds, title);
         if (!surface)
         {
             return surface.status();
         }
         surface_id_ = surface.value();
+    }
+    else if (auto status = compositor.set_title(surface_id_, title); !status.ok())
+    {
+        return status;
     }
     if (auto status = compositor.raise_surface(surface_id_); !status.ok())
     {
@@ -254,6 +271,72 @@ Status KernelTaskManager::refresh(GuiCompositor &compositor, Kernel &kernel)
     if (surface_id_ == 0)
     {
         return Status::not_initialized("task manager surface is not open");
+    }
+    return render(compositor, kernel);
+}
+
+Status KernelTaskManager::handle_key(GuiCompositor &compositor, Kernel &kernel, int key)
+{
+    if (surface_id_ == 0)
+    {
+        return Status::success();
+    }
+    if (key == 0x1b)
+    {
+        key_escape_state_ = 1;
+        return Status::success();
+    }
+    if (key_escape_state_ == 1)
+    {
+        key_escape_state_ = key == '[' ? 2 : 0;
+        return Status::success();
+    }
+    if (key_escape_state_ == 2)
+    {
+        key_escape_state_ = 0;
+        if (key == 'A')
+        {
+            return scroll_processes(compositor, kernel, -1);
+        }
+        if (key == 'B')
+        {
+            return scroll_processes(compositor, kernel, 1);
+        }
+    }
+    return Status::success();
+}
+
+Status KernelTaskManager::scroll_processes(GuiCompositor &compositor, Kernel &kernel, i32 rows)
+{
+    if (surface_id_ == 0 || rows == 0)
+    {
+        return Status::success();
+    }
+    auto info = compositor.surface_info(surface_id_);
+    if (!info)
+    {
+        mark_closed();
+        return Status::success();
+    }
+    const auto max_scroll = max_process_scroll(kernel, info.value());
+    if (process_scroll_ > max_scroll)
+    {
+        process_scroll_ = max_scroll;
+    }
+    const auto magnitude =
+        rows > 0 ? static_cast<usize>(rows) : static_cast<usize>(-(rows + 1)) + static_cast<usize>(1);
+    if (rows > 0)
+    {
+        const auto room = max_scroll - process_scroll_;
+        process_scroll_ += magnitude > room ? room : magnitude;
+    }
+    else if (magnitude >= process_scroll_)
+    {
+        process_scroll_ = 0;
+    }
+    else
+    {
+        process_scroll_ -= magnitude;
     }
     return render(compositor, kernel);
 }
@@ -283,6 +366,8 @@ void KernelTaskManager::mark_closed()
 {
     surface_id_ = 0;
     process_id_ = 0;
+    process_scroll_ = 0;
+    key_escape_state_ = 0;
 }
 
 Status KernelTaskManager::render_tui(Kernel &kernel, FixedString<4096> &out) const
@@ -670,9 +755,25 @@ Status KernelTaskManager::render(GuiCompositor &compositor, Kernel &kernel)
         return status;
     }
     const auto rows = height / gui_glyph_height;
+    const auto visible = visible_process_rows(info.value());
+    const auto max_scroll = max_process_scroll(kernel, info.value());
+    if (process_scroll_ > max_scroll)
+    {
+        process_scroll_ = max_scroll;
+    }
     usize rendered = 0;
+    usize skipped = 0;
     for (const auto &process : scheduler.processes())
     {
+        if (skipped < process_scroll_)
+        {
+            ++skipped;
+            continue;
+        }
+        if (rendered >= visible)
+        {
+            break;
+        }
         const auto row = static_cast<u32>(15 + rendered);
         if (row >= rows)
         {

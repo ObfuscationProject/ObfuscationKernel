@@ -50,6 +50,16 @@ std::span<const std::byte> bytes_for(std::string_view text)
     return {reinterpret_cast<const std::byte *>(text.data()), text.size()};
 }
 
+bool cpu_accepts_work(smp::CpuState state)
+{
+    return state == smp::CpuState::boot || state == smp::CpuState::online;
+}
+
+bool starts_with(std::string_view text, std::string_view prefix)
+{
+    return text.size() >= prefix.size() && text.substr(0, prefix.size()) == prefix;
+}
+
 template <usize Capacity> Status append_unsigned(FixedString<Capacity> &out, u64 value)
 {
     constexpr u64 powers[] = {
@@ -248,6 +258,15 @@ Status Kernel::boot(KernelConfig config)
     if (auto status = scheduler_.set_runnable(idle.value()); !status.ok())
     {
         return status;
+    }
+    for (usize cpu = 1; cpu < topology_.cpu_count(); ++cpu)
+    {
+        const auto cpu_context = arch_->make_kernel_context(0x1000 + static_cast<uptr>(cpu) * 0x100,
+                                                            0x8000 + static_cast<uptr>(cpu) * 0x1000);
+        if (auto thread = scheduler_.create_thread(idle.value(), cpu_context); !thread)
+        {
+            return thread.status();
+        }
     }
     if (!scheduler_.schedule_next())
     {
@@ -457,6 +476,29 @@ Status Kernel::handle_gui_mouse_position(i32 x, i32 y, bool left_button)
     return handle_gui_mouse(0, 0, left_button);
 }
 
+Status Kernel::handle_gui_scroll(i32 rows)
+{
+    if (!booted_)
+    {
+        return Status::not_initialized("kernel is not booted");
+    }
+    auto &compositor = gui_module_.compositor();
+    if (compositor.state() != gui::GuiState::running)
+    {
+        return Status::not_initialized("GUI compositor is not running");
+    }
+    const auto active = compositor.active_surface();
+    if (active != 0 && task_manager_.surface_id() == active)
+    {
+        return task_manager_.scroll_processes(compositor, *this, rows);
+    }
+    if (active != 0 && debug_shell_.owns_surface(active))
+    {
+        return debug_shell_.scroll_gui_history(rows);
+    }
+    return debug_shell_.scroll_gui_history(rows);
+}
+
 Status Kernel::handle_gui_key(int key)
 {
     if (!booted_)
@@ -491,6 +533,15 @@ Status Kernel::handle_gui_key(int key)
     {
         return debug_shell_.handle_key(active, key);
     }
+    if (active != 0 && task_manager_.surface_id() == active)
+    {
+        if (key == 0x03 && task_manager_.process_id() != 0 &&
+            debug_shell_.foreground_process_id() == task_manager_.process_id())
+        {
+            return debug_shell_.interrupt_foreground_process();
+        }
+        return task_manager_.handle_key(compositor, *this, key);
+    }
     if (active != 0)
     {
         if (auto manager = find_file_manager_by_surface(active))
@@ -520,6 +571,48 @@ Status Kernel::handle_gui_taskbar_launcher(gui::TaskbarApp app)
         return open_file_manager(posix_.getcwd(), false);
     case gui::TaskbarApp::none:
         return Status::success();
+    }
+    return Status::success();
+}
+
+Status Kernel::tick()
+{
+    if (!booted_)
+    {
+        return Status::not_initialized("kernel is not booted");
+    }
+
+    for (usize i = 0; i < topology_.cpu_count(); ++i)
+    {
+        const auto cpu = static_cast<smp::CpuId>(i);
+        const auto *info = topology_.cpu(cpu);
+        if (info == nullptr || !cpu_accepts_work(info->state))
+        {
+            continue;
+        }
+        auto selected = scheduler_.schedule_next_on_cpu(cpu);
+        if (!selected)
+        {
+            if (selected.status().code() == StatusCode::would_block)
+            {
+                continue;
+            }
+            return selected.status();
+        }
+        if (auto status = topology_.record_schedule(cpu); !status.ok())
+        {
+            return status;
+        }
+    }
+
+    if (auto status = debug_shell_.tick(); !status.ok())
+    {
+        return status;
+    }
+    if (task_manager_.surface_id() != 0 && task_manager_.process_id() != 0 &&
+        scheduler_.find(task_manager_.process_id()) != nullptr)
+    {
+        return task_manager_.refresh(gui_module_.compositor(), *this);
     }
     return Status::success();
 }
@@ -998,7 +1091,7 @@ Status Kernel::open_file_manager(std::string_view path, bool foreground_shell_ch
     return Status::success();
 }
 
-Status Kernel::open_task_manager()
+Status Kernel::open_task_manager(bool foreground_shell_child, std::string_view program_name)
 {
     if (!booted_)
     {
@@ -1010,12 +1103,33 @@ Status Kernel::open_task_manager()
     }
     if (task_manager_.surface_id() != 0 && task_manager_.process_id() != 0)
     {
-        return focus_task_manager();
+        const auto *existing_process = scheduler_.find(task_manager_.process_id());
+        const bool wants_top = program_name == "top";
+        const bool existing_top = existing_process != nullptr && starts_with(existing_process->name(), "top:");
+        if (existing_process != nullptr && wants_top != existing_top)
+        {
+            if (auto status = close_task_manager_window(true, true); !status.ok())
+            {
+                return status;
+            }
+        }
+        else
+        {
+            if (auto status = focus_task_manager(); !status.ok())
+            {
+                return status;
+            }
+            if (foreground_shell_child)
+            {
+                return debug_shell_.start_foreground_process(task_manager_.process_id());
+            }
+            return Status::success();
+        }
     }
 
     const auto credentials = posix_.user_credentials();
     FixedString<sched::max_process_name> process_name;
-    if (auto status = process_name.assign("tm:"); !status.ok())
+    if (auto status = process_name.assign(program_name == "top" ? "top:" : "tm:"); !status.ok())
     {
         return status;
     }
@@ -1032,11 +1146,20 @@ Status Kernel::open_task_manager()
         return process.status();
     }
 
-    if (auto status = task_manager_.open(gui_module_.compositor(), *this, credentials, process.value()); !status.ok())
+    if (auto status = task_manager_.open(gui_module_.compositor(), *this, credentials, process.value(), program_name);
+        !status.ok())
     {
         static_cast<void>(task_manager_.close(gui_module_.compositor()));
         static_cast<void>(scheduler_.kill_process(process.value()));
         return status;
+    }
+    if (foreground_shell_child)
+    {
+        if (auto status = debug_shell_.start_foreground_process(process.value()); !status.ok())
+        {
+            static_cast<void>(close_task_manager_window(true, true));
+            return status;
+        }
     }
     return Status::success();
 }

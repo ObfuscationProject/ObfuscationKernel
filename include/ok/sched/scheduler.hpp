@@ -277,7 +277,8 @@ class Scheduler final
     [[nodiscard]] u8 process_usage_percent(ProcessId pid) const;
 
   private:
-    [[nodiscard]] Result<ThreadId> pick_next_thread(ProcessControlBlock &process, ThreadId current);
+    [[nodiscard]] bool thread_running_on_other_cpu(ThreadId tid, smp::CpuId cpu) const;
+    [[nodiscard]] Result<ThreadId> pick_next_thread(ProcessControlBlock &process, ThreadId current, smp::CpuId cpu);
     [[nodiscard]] u16 configured_cpu_mask() const;
 
     SchedulingMode mode_{SchedulingMode::round_robin};

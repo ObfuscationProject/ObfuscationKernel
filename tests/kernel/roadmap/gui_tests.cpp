@@ -1109,16 +1109,19 @@ Status test_kernel_task_manager_draws_usage(Kernel &kernel)
         return Status::fault("task manager GUI did not close its process and surface");
     }
 
-    const auto top_render_before = kernel.debug_shell().gui_render_count();
+    const auto top_render_before = kernel.task_manager().render_count();
     auto top = kernel.debug_shell().execute("top");
-    const auto top_render_after_start = kernel.debug_shell().gui_render_count();
+    const auto top_render_after_start = kernel.task_manager().render_count();
     const auto top_pid = kernel.debug_shell().foreground_process_id();
     const auto *top_process = kernel.scheduler().find(top_pid);
-    if (!top || !contains_text(top.value(), "TASK MANAGER") || top_pid == 0 || top_process == nullptr ||
-        top_process->name() != "top" || top_render_after_start <= top_render_before)
+    const auto top_surface = kernel.task_manager().surface_id();
+    auto top_info = compositor.surface_info(top_surface);
+    if (!top || top_pid == 0 || top_pid != kernel.task_manager().process_id() || top_process == nullptr ||
+        top_process->name() != "top:kernel" || top_surface == 0 || !top_info || top_info.value().title != "top" ||
+        top_render_after_start <= top_render_before)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
-        return Status::fault("top did not enter a foreground realtime task-manager view");
+        return Status::fault("top did not enter a foreground task-manager program");
     }
     auto blocked = kernel.debug_shell().execute("echo blocked");
     if (blocked || blocked.status().code() != StatusCode::would_block)
@@ -1126,22 +1129,34 @@ Status test_kernel_task_manager_draws_usage(Kernel &kernel)
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("top did not keep the shell blocked while realtime view was active");
     }
-    if (auto status = kernel.debug_shell().tick(); !status.ok())
+    if (auto status = kernel.tick(); !status.ok())
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return status;
     }
-    if (kernel.debug_shell().gui_render_count() <= top_render_after_start)
+    if (kernel.task_manager().render_count() <= top_render_after_start)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("top did not refresh its realtime display");
     }
-    if (auto status = kernel.debug_shell().interrupt_foreground_process(); !status.ok())
+    const auto after_tick_render_count = kernel.task_manager().render_count();
+    if (auto status = kernel.handle_gui_scroll(1); !status.ok())
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return status;
     }
-    if (kernel.debug_shell().foreground_process_id() != 0 || kernel.scheduler().find(top_pid) != nullptr)
+    if (kernel.task_manager().render_count() <= after_tick_render_count)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("top did not redraw when its process list was scrolled");
+    }
+    if (auto status = kernel.handle_gui_key(0x03); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (kernel.debug_shell().foreground_process_id() != 0 || kernel.task_manager().surface_id() != 0 ||
+        kernel.scheduler().find(top_pid) != nullptr)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("top did not exit on interrupt");

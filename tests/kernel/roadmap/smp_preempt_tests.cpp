@@ -127,6 +127,30 @@ Status test_smp_topology_and_per_cpu_scheduling(Kernel &kernel)
         {
             return Status::fault("per-CPU scheduler state validation failed");
         }
+        for (smp::CpuId previous = 0; previous < cpu; ++previous)
+        {
+            if (scheduler.current_pid(previous) == scheduler.current_pid(cpu))
+            {
+                return Status::fault("per-CPU scheduler placed one single-thread process on multiple CPUs");
+            }
+        }
+    }
+
+    const auto cpu1_dispatches = kernel.scheduler().cpu_stats(1).dispatches;
+    const auto cpu2_dispatches = kernel.scheduler().cpu_stats(2).dispatches;
+    const auto cpu3_dispatches = kernel.scheduler().cpu_stats(3).dispatches;
+    for (usize i = 0; i < 3; ++i)
+    {
+        if (auto status = kernel.tick(); !status.ok())
+        {
+            return status;
+        }
+    }
+    if (kernel.scheduler().cpu_stats(1).dispatches <= cpu1_dispatches ||
+        kernel.scheduler().cpu_stats(2).dispatches <= cpu2_dispatches ||
+        kernel.scheduler().cpu_stats(3).dispatches <= cpu3_dispatches)
+    {
+        return Status::fault("kernel scheduler tick did not dispatch work on secondary CPUs");
     }
 
     sched::Scheduler advanced;

@@ -13,13 +13,15 @@ while preserving round-robin fairness among equal-priority runnable processes.
 - `round_robin`: baseline global round-robin dispatch.
 - `per_cpu_round_robin`: SMP-aware current-process tracking per CPU.
 
-The baseline creates an idle process during boot and marks it runnable. Process
-records carry priority, CPU affinity, dispatch counters, last CPU, and per-thread
-dispatch accounting. `Scheduler::create_thread()` adds additional runnable
-threads to an existing process, and `current_tid(cpu)` exposes the selected
-thread on each CPU. `cpu_stats(cpu)`, `cpu_usage_percent(cpu)`, and
-`process_usage_percent(pid)` provide the fixed-capacity accounting used by the
-kernel task manager.
+The baseline creates an idle process during boot, adds one idle thread per
+configured CPU, and marks it runnable. The kernel tick walks every online CPU and
+calls `schedule_next_on_cpu(cpu)`, so secondary cores advance their own current
+PID/TID and dispatch counters. Process records carry priority, CPU affinity,
+dispatch counters, last CPU, and per-thread dispatch accounting.
+`Scheduler::create_thread()` adds additional runnable threads to an existing
+process, and `current_tid(cpu)` exposes the selected thread on each CPU.
+`cpu_stats(cpu)`, `cpu_usage_percent(cpu)`, and `process_usage_percent(pid)`
+provide the fixed-capacity accounting used by the kernel task manager.
 
 Subsystems that need to create schedulable work should enter through
 `Scheduler::spawn(ScheduleRequest)`. The request applies the process name,

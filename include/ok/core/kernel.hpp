@@ -100,12 +100,14 @@ class Kernel final
     Status run_debug_test_suite();
     Status handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button);
     Status handle_gui_mouse_position(i32 x, i32 y, bool left_button);
+    Status handle_gui_scroll(i32 rows);
     Status handle_gui_key(int key);
+    Status tick();
     Result<sched::ProcessId> create_ui_process(std::string_view name, uptr entry, uptr stack_top,
                                                user::Credentials credentials);
     Status open_file_manager(std::string_view path, bool foreground_shell_child = false);
     Status close_file_manager();
-    Status open_task_manager();
+    Status open_task_manager(bool foreground_shell_child = false, std::string_view program_name = "task-manager");
     Status close_task_manager();
     Status close_debug_gui();
     Status kill_process(sched::ProcessId pid);

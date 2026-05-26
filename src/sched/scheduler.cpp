@@ -5,14 +5,33 @@ namespace ok::sched
 namespace
 {
 
-bool process_runnable(const ProcessControlBlock &process)
+bool process_has_runnable_thread(const ProcessControlBlock &process)
 {
-    return process.state() == ProcessState::runnable || process.state() == ProcessState::running;
+    for (const auto &thread : process.threads())
+    {
+        if (thread.state == ProcessState::runnable)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
-bool process_allowed_on(const ProcessControlBlock &process, smp::CpuId cpu)
+bool process_allowed_on(const ProcessControlBlock &process, smp::CpuId cpu, ProcessId current)
 {
-    return process_runnable(process) && process.can_run_on(cpu);
+    if (!process.can_run_on(cpu))
+    {
+        return false;
+    }
+    if (process.state() == ProcessState::runnable)
+    {
+        return true;
+    }
+    if (process.state() == ProcessState::running)
+    {
+        return process.pid() == current || process_has_runnable_thread(process);
+    }
+    return false;
 }
 
 bool is_idle_process(const ProcessControlBlock &process)
@@ -51,7 +70,7 @@ Result<ProcessId> RoundRobinPolicy::pick_next(std::span<const ProcessControlBloc
     for (usize offset = 0; offset < processes.size(); ++offset)
     {
         const auto &process = processes[(start + offset) % processes.size()];
-        if (!process_allowed_on(process, cpu))
+        if (!process_allowed_on(process, cpu, current))
         {
             continue;
         }
@@ -70,7 +89,7 @@ Result<ProcessId> RoundRobinPolicy::pick_next(std::span<const ProcessControlBloc
     for (usize offset = 0; offset < processes.size(); ++offset)
     {
         const auto &process = processes[(start + offset) % processes.size()];
-        if (process_allowed_on(process, cpu) && process.priority() == best_priority)
+        if (process_allowed_on(process, cpu, current) && process.priority() == best_priority)
         {
             return process.pid();
         }
@@ -397,7 +416,23 @@ Result<ProcessId> Scheduler::schedule_next()
     return schedule_next_on_cpu(0);
 }
 
-Result<ThreadId> Scheduler::pick_next_thread(ProcessControlBlock &process, ThreadId current)
+bool Scheduler::thread_running_on_other_cpu(ThreadId tid, smp::CpuId cpu) const
+{
+    if (tid == 0)
+    {
+        return false;
+    }
+    for (usize i = 0; i < cpu_count_; ++i)
+    {
+        if (i != cpu && current_thread_by_cpu_[i] == tid)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+Result<ThreadId> Scheduler::pick_next_thread(ProcessControlBlock &process, ThreadId current, smp::CpuId cpu)
 {
     auto &threads = process.threads();
     if (threads.empty())
@@ -418,7 +453,8 @@ Result<ThreadId> Scheduler::pick_next_thread(ProcessControlBlock &process, Threa
     for (usize offset = 0; offset < threads.size(); ++offset)
     {
         auto &thread = threads[(start + offset) % threads.size()];
-        if (thread.state == ProcessState::runnable || thread.state == ProcessState::running)
+        if (thread.state == ProcessState::runnable ||
+            (thread.state == ProcessState::running && thread.tid == current && !thread_running_on_other_cpu(thread.tid, cpu)))
         {
             return thread.tid;
         }
@@ -466,7 +502,7 @@ Result<ProcessId> Scheduler::schedule_next_on_cpu(smp::CpuId cpu)
     {
         return Status::not_found("selected process disappeared");
     }
-    auto selected_thread = pick_next_thread(*selected, selected->pid() == previous_pid ? previous_tid : 0);
+    auto selected_thread = pick_next_thread(*selected, selected->pid() == previous_pid ? previous_tid : 0, cpu);
     if (!selected_thread)
     {
         return selected_thread.status();
