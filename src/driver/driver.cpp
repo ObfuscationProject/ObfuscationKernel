@@ -95,11 +95,17 @@ Result<sched::ProcessId> DriverManager::ensure_kernel_process(Driver &driver, us
 
     constexpr uptr entry_stride = 0x100;
     constexpr uptr stack_stride = 0x1000;
-    auto process = kernel_process_scheduler_->create_background_process(
-        process_name.view(),
-        kernel_process_arch_->make_kernel_context(
+    auto process = kernel_process_scheduler_->spawn(sched::ScheduleRequest{
+        .name = process_name.view(),
+        .initial_context = kernel_process_arch_->make_kernel_context(
             kernel_process_entry_base_ + static_cast<uptr>(driver_index) * entry_stride,
-            kernel_process_stack_base_ + static_cast<uptr>(driver_index) * stack_stride));
+            kernel_process_stack_base_ + static_cast<uptr>(driver_index) * stack_stride),
+        .priority = sched::scheduler_default_priority,
+        .cpu_affinity_mask = sched::cpu_affinity_any,
+        .credentials = user::kernel_credentials(),
+        .background = true,
+        .cpu_accounting = sched::ProcessCpuAccounting::passive,
+    });
     if (!process)
     {
         return process.status();

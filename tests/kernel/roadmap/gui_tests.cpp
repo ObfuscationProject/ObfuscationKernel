@@ -813,6 +813,7 @@ Status test_kernel_gui_is_started(Kernel &kernel)
         module.manifest().execution != ModuleExecution::kernel_process ||
         kernel.kernel_modules().kernel_process_pid() == 0 ||
         process == nullptr || process->name() != "mod:kernel-gui" ||
+        process->threads().size() != kernel.scheduler().cpu_count() ||
         kernel.kernel_modules().kernel_process_module_count() == 0)
     {
         return Status::fault("kernel GUI module was not started during boot");

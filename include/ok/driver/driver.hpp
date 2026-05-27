@@ -578,6 +578,19 @@ class FramebufferDisplayDriver final : public Driver
     {
         return backend_;
     }
+    [[nodiscard]] bool uses_cpu_gui_render_workers() const
+    {
+        switch (backend_)
+        {
+        case DisplayBackend::memory_framebuffer:
+        case DisplayBackend::ramfb:
+        case DisplayBackend::virtio_gpu_pci:
+            return true;
+        case DisplayBackend::vga_text:
+            return false;
+        }
+        return true;
+    }
     [[nodiscard]] DisplayMode mode() const
     {
         return mode_;

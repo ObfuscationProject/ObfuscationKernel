@@ -20,8 +20,8 @@ Built-in drivers:
   the same debug output that the QEMU checker validates. The GUI compositor also
   targets this logical framebuffer before the driver delegates frame presentation
   to platform code such as ramfb. The backend tag can be `memory_framebuffer`,
-  `vga_text`, `ramfb`, or
-  `virtio_gpu_pci`.
+  `vga_text`, `ramfb`, or `virtio_gpu_pci`, and the driver reports whether GUI
+  frame composition should use CPU-side render worker threads.
 - `VirtioGpuPciDisplayDriver`: binds the emulated PCI display device and
   presents the kernel framebuffer through the virtio-gpu-pci path used by QEMU
   window tests.
@@ -71,7 +71,9 @@ The display stack has three layers:
 - `FramebufferDisplayDriver` is the portable logical display device used by the
   kernel and tests. It stores a 480x270 RGBA framebuffer, boot text, and a stable
   checksum. GUI presents enter through a frame-level driver API, so the
-  compositor stays independent from the physical display backend.
+  compositor stays independent from the physical display backend. Backends such
+  as ramfb ask the GUI module for per-CPU render workers while still receiving
+  one logical frame through this driver API.
 - `ok::gui::GuiCompositor` is the restartable GUI module above the framebuffer.
   It owns fixed-capacity surfaces, rectangle/pixel/text drawing, and composition.
   It renders a short startup animation during boot and tracks normal,

@@ -45,6 +45,12 @@ enum class ProcessExecution : u8
     user_process,
 };
 
+enum class ProcessCpuAccounting : u8
+{
+    accounted,
+    passive,
+};
+
 struct ThreadControlBlock
 {
     ThreadId tid{0};
@@ -73,6 +79,7 @@ struct ScheduleRequest
     u16 cpu_affinity_mask{cpu_affinity_any};
     user::Credentials credentials{user::kernel_credentials()};
     bool background{true};
+    ProcessCpuAccounting cpu_accounting{ProcessCpuAccounting::accounted};
 };
 
 class ProcessControlBlock
@@ -161,14 +168,30 @@ class ProcessControlBlock
     {
         return cpu_time_ticks_;
     }
+    [[nodiscard]] u64 accounted_cpu_time_ticks() const
+    {
+        return accounted_cpu_time_ticks_;
+    }
     [[nodiscard]] smp::CpuId last_cpu() const
     {
         return last_cpu_;
     }
-    void record_dispatch(smp::CpuId cpu)
+    [[nodiscard]] ProcessCpuAccounting cpu_accounting() const
+    {
+        return cpu_accounting_;
+    }
+    void set_cpu_accounting(ProcessCpuAccounting accounting)
+    {
+        cpu_accounting_ = accounting;
+    }
+    void record_dispatch(smp::CpuId cpu, bool account_cpu)
     {
         ++dispatch_count_;
         ++cpu_time_ticks_;
+        if (account_cpu)
+        {
+            ++accounted_cpu_time_ticks_;
+        }
         last_cpu_ = cpu;
     }
     [[nodiscard]] StaticVector<ThreadControlBlock, max_threads_per_process> &threads()
@@ -192,7 +215,9 @@ class ProcessControlBlock
     u16 cpu_affinity_mask_{cpu_affinity_any};
     u64 dispatch_count_{0};
     u64 cpu_time_ticks_{0};
+    u64 accounted_cpu_time_ticks_{0};
     smp::CpuId last_cpu_{0};
+    ProcessCpuAccounting cpu_accounting_{ProcessCpuAccounting::accounted};
     StaticVector<ThreadControlBlock, max_threads_per_process> threads_{};
 };
 
@@ -243,6 +268,7 @@ class Scheduler final
     Status set_credentials(ProcessId pid, user::Credentials credentials);
     Status set_priority(ProcessId pid, u8 priority);
     Status set_cpu_affinity(ProcessId pid, u16 cpu_affinity_mask);
+    Status set_cpu_accounting(ProcessId pid, ProcessCpuAccounting accounting);
     Status kill_process(ProcessId pid);
     Status configure_cpus(usize cpu_count);
     Status set_runnable(ProcessId pid);
@@ -273,6 +299,7 @@ class Scheduler final
     }
     [[nodiscard]] CpuSchedulingStats cpu_stats(smp::CpuId cpu) const;
     [[nodiscard]] u64 total_dispatches() const;
+    [[nodiscard]] u64 total_accounted_dispatches() const;
     [[nodiscard]] u8 cpu_usage_percent(smp::CpuId cpu) const;
     [[nodiscard]] u8 process_usage_percent(ProcessId pid) const;
 

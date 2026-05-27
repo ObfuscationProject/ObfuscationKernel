@@ -700,6 +700,14 @@ Status Kernel::run_debug_test_suite()
     }
     debug_test_points_run_ = debug_test_points.value();
 
+    if (auto status = close_debug_gui(); !status.ok())
+    {
+        return status;
+    }
+    if (debug_shell_.gui_open() || debug_shell_.gui_surface_id() != 0 || debug_shell_.process_id() != 0)
+    {
+        return Status::fault("debug GUI cleanup left a shell process behind");
+    }
     return Status::success();
 }
 

@@ -90,10 +90,11 @@ xmake qemu-window-test --no-launch
 In graphical debug-test mode the kernel runs the same validation suite, prints
 `OK_TEST_PASS` to the serial console, closes debug GUI surfaces, and then tries
 the debug-exit path. If the platform returns from debug-exit, the kernel stays
-in the desktop event loop instead of halting, so the taskbar launchers and the
-F12/F1 shortcuts can open shell or file manager windows again. Non-test graphical
-sessions route keyboard input through the focused GUI surface: `oksh` receives
-text only while focused, and the file manager consumes simple navigation keys.
+in the desktop event loop instead of halting, but it does not automatically
+spawn a background `oksh`; the taskbar launchers and the F12/F1 shortcuts can
+open shell or file manager windows again. Non-test graphical sessions route
+keyboard input through the focused GUI surface: `oksh` receives text only while
+focused, and the file manager consumes simple navigation keys.
 Because this interactive path still polls QEMU input queues, desktop idle uses
 the platform polling-idle hook rather than `hlt`/`wfi`/`wfe`; those real halt
 instructions remain reserved for explicit halt/poweroff paths.

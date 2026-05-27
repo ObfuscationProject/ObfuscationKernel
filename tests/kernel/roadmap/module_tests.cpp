@@ -16,9 +16,11 @@ class DebugModule final : public KernelModule
     DebugModule(std::string_view name, std::string_view klass, std::span<const ModuleDependency> dependencies,
                 std::span<const std::string_view> exports, std::span<const std::string_view> required_services,
                 u32 priority, usize *start_sequence = nullptr, usize *stop_sequence = nullptr,
-                ModuleExecution execution = ModuleExecution::inline_core)
+                ModuleExecution execution = ModuleExecution::inline_core,
+                ModuleThreading threading = ModuleThreading::single_threaded)
         : name_(name), klass_(klass), dependencies_(dependencies), exports_(exports), requires_(required_services),
-          priority_(priority), start_sequence_(start_sequence), stop_sequence_(stop_sequence), execution_(execution)
+          priority_(priority), start_sequence_(start_sequence), stop_sequence_(stop_sequence), execution_(execution),
+          threading_(threading)
     {
     }
 
@@ -34,6 +36,7 @@ class DebugModule final : public KernelModule
             .built_in = true,
             .execution = execution_,
             .init_priority = priority_,
+            .threading = threading_,
         };
     }
 
@@ -74,6 +77,7 @@ class DebugModule final : public KernelModule
     usize *start_sequence_{nullptr};
     usize *stop_sequence_{nullptr};
     ModuleExecution execution_{ModuleExecution::inline_core};
+    ModuleThreading threading_{ModuleThreading::single_threaded};
     usize started_at_{0};
     usize stopped_at_{0};
 };
@@ -190,7 +194,7 @@ Status test_kernel_process_backed_module()
 {
     auto &ops = arch::arch_operations(arch::configured_architecture());
     sched::Scheduler scheduler;
-    if (auto status = scheduler.configure_cpus(1); !status.ok())
+    if (auto status = scheduler.configure_cpus(4); !status.ok())
     {
         return status;
     }
@@ -207,7 +211,16 @@ Status test_kernel_process_backed_module()
     }
 
     ModuleManager bound_manager;
-    DebugModule bound_module{"gui-worker", "gui", {}, {}, {}, 0, nullptr, nullptr, ModuleExecution::kernel_process};
+    DebugModule bound_module{"gui-worker",
+                             "gui",
+                             {},
+                             {},
+                             {},
+                             0,
+                             nullptr,
+                             nullptr,
+                             ModuleExecution::kernel_process,
+                             ModuleThreading::per_cpu};
     if (auto status = bound_manager.bind_kernel_process(scheduler, ops, 0x3000, 0xa000); !status.ok())
     {
         return status;
@@ -224,7 +237,7 @@ Status test_kernel_process_backed_module()
     auto *process = scheduler.find(pid);
     if (pid == 0 || process == nullptr || process->name() != "mod:gui-worker" || !process->background() ||
         bound_manager.kernel_process_module_count() != 1 || scheduler.background_process_count() != 1 ||
-        bound_module.state() != ModuleState::started ||
+        process->threads().size() != scheduler.cpu_count() || bound_module.state() != ModuleState::started ||
         module_execution_name(bound_module.manifest().execution) != "kernel-process")
     {
         return Status::fault("kernel-process module manager binding failed");

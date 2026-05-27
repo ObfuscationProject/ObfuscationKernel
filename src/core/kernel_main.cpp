@@ -133,7 +133,7 @@ extern "C" [[noreturn]] void kernel_main()
     ok_platform_debug_exit(status.ok() ? 0x10u : 0x11u);
     if (status.ok())
     {
-        desktop_loop(true);
+        desktop_loop(false);
     }
 #else
     if (status.ok())

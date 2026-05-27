@@ -19,9 +19,12 @@ calls `schedule_next_on_cpu(cpu)`, so secondary cores advance their own current
 PID/TID and dispatch counters. Process records carry priority, CPU affinity,
 dispatch counters, last CPU, and per-thread dispatch accounting.
 `Scheduler::create_thread()` adds additional runnable threads to an existing
-process, and `current_tid(cpu)` exposes the selected thread on each CPU.
-`cpu_stats(cpu)`, `cpu_usage_percent(cpu)`, and `process_usage_percent(pid)`
-provide the fixed-capacity accounting used by the kernel task manager.
+process, and `current_tid(cpu)` exposes the selected thread on each CPU. CPU
+accounting is owned by the scheduler rather than by `top`: idle and passive
+kernel daemon records are sampled for scheduling state but are not counted as
+busy work. `cpu_stats(cpu)`, `cpu_usage_percent(cpu)`, and
+`process_usage_percent(pid)` provide the fixed-capacity accounting used by the
+kernel task manager.
 
 Subsystems that need to create schedulable work should enter through
 `Scheduler::spawn(ScheduleRequest)`. The request applies the process name,
@@ -32,7 +35,9 @@ together process creation policy by hand.
 `DriverManager` registers built-in drivers as `drv:<driver-name>` background
 kernel daemon processes. `ModuleManager` registers non-core modules whose
 manifest uses `ModuleExecution::kernel_process` as `mod:<module-name>`
-background kernel processes through the generic spawn interface. Scheduler
+background kernel processes through the generic spawn interface. CPU-rendered
+modules such as `kernel-gui` can request per-CPU worker threads, while passive
+driver/module daemons remain visible without inflating CPU usage. Scheduler
 process records now carry credentials;
 kernel-space process records are visible in debug-shell `ps aux` only while the
 shell session is using the `kernel` debug user. The debug shell `kill <pid>`

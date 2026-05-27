@@ -617,6 +617,8 @@ Status verify_background_programs_and_posix(Kernel &kernel)
     {
         return Status::fault("kernel user kill did not restart and log a driver daemon");
     }
+    static_cast<void>(kernel.scheduler().kill_process(second.value()));
+    static_cast<void>(kernel.scheduler().kill_process(third.value()));
 
     static_cast<void>(kernel.debug_shell().execute("su root"));
     auto user_ps = kernel.debug_shell().execute("ps aux");

@@ -86,10 +86,9 @@ Supported commands:
 The shell is intentionally fixed-buffer and freestanding. Windowed input is
 dispatched through GUI focus: keyboard events reach `oksh` only while a shell
 surface is focused. Debug test builds close their shell/file-manager GUI
-surfaces after `OK_TEST_PASS`, try the debug-exit path, and keep the desktop
-surfaces after `OK_TEST_PASS`, try the debug-exit path, and halt if the platform
-returns from that path. The GUI title strip and terminal body are rendered with
-separate colors. Showing the GUI shell or running `clear` resets scrollback while
-immediately redrawing a fresh `ok> ` prompt. The legacy display-driver text path
-is still used for boot logs, `OK_DISPLAY_TEXT` diagnostics, and fallback when the
-GUI cannot be restarted.
+surfaces after `OK_TEST_PASS`, try the debug-exit path, and leave the post-test
+desktop without a background `oksh` unless the user opens one. The GUI title
+strip and terminal body are rendered with separate colors. Showing the GUI shell
+or running `clear` resets scrollback while immediately redrawing a fresh `ok> `
+prompt. The legacy display-driver text path is still used for boot logs,
+`OK_DISPLAY_TEXT` diagnostics, and fallback when the GUI cannot be restarted.

@@ -219,6 +219,67 @@ Status test_smp_topology_and_per_cpu_scheduling(Kernel &kernel)
         return Status::fault("generic scheduler spawn interface did not apply process policy");
     }
 
+    sched::Scheduler accounting;
+    if (auto status = accounting.configure_cpus(1); !status.ok())
+    {
+        return status;
+    }
+    auto idle = accounting.create_process("idle", ops.make_kernel_context(0x8000, 0xf000));
+    if (!idle)
+    {
+        return idle.status();
+    }
+    if (auto status = accounting.set_runnable(idle.value()); !status.ok())
+    {
+        return status;
+    }
+    auto passive = accounting.spawn(sched::ScheduleRequest{
+        .name = "drv:passive",
+        .initial_context = ops.make_kernel_context(0x9000, 0x10000),
+        .priority = sched::scheduler_default_priority,
+        .cpu_affinity_mask = sched::cpu_affinity_any,
+        .credentials = user::kernel_credentials(),
+        .background = true,
+        .cpu_accounting = sched::ProcessCpuAccounting::passive,
+    });
+    if (!passive)
+    {
+        return passive.status();
+    }
+    for (usize i = 0; i < 4; ++i)
+    {
+        if (!accounting.schedule_next())
+        {
+            return Status::fault("passive CPU accounting scheduler did not dispatch");
+        }
+    }
+    if (accounting.cpu_usage_percent(0) != 0 || accounting.process_usage_percent(idle.value()) != 0 ||
+        accounting.process_usage_percent(passive.value()) != 0)
+    {
+        return Status::fault("idle or passive kernel daemon was counted as CPU work");
+    }
+    auto active = accounting.create_process("active", ops.make_kernel_context(0xa000, 0x11000));
+    if (!active)
+    {
+        return active.status();
+    }
+    if (auto status = accounting.set_runnable(active.value()); !status.ok())
+    {
+        return status;
+    }
+    for (usize i = 0; i < 4; ++i)
+    {
+        if (!accounting.schedule_next())
+        {
+            return Status::fault("active CPU accounting scheduler did not dispatch");
+        }
+    }
+    if (accounting.cpu_usage_percent(0) == 0 || accounting.process_usage_percent(active.value()) == 0 ||
+        accounting.process_usage_percent(passive.value()) != 0)
+    {
+        return Status::fault("active CPU accounting did not isolate passive daemon usage");
+    }
+
     return Status::success();
 }
 

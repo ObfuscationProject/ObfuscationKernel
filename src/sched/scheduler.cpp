@@ -39,6 +39,11 @@ bool is_idle_process(const ProcessControlBlock &process)
     return process.name() == "idle";
 }
 
+bool process_counts_as_cpu_work(const ProcessControlBlock &process)
+{
+    return process.cpu_accounting() == ProcessCpuAccounting::accounted && !is_idle_process(process);
+}
+
 } // namespace
 
 ProcessControlBlock::ProcessControlBlock(ProcessId pid, std::string_view name, bool background)
@@ -249,6 +254,11 @@ Result<ProcessId> Scheduler::spawn(ScheduleRequest request)
         static_cast<void>(kill_process(process.value()));
         return status;
     }
+    if (auto status = set_cpu_accounting(process.value(), request.cpu_accounting); !status.ok())
+    {
+        static_cast<void>(kill_process(process.value()));
+        return status;
+    }
     return process.value();
 }
 
@@ -296,6 +306,17 @@ Status Scheduler::set_cpu_affinity(ProcessId pid, u16 cpu_affinity_mask)
         return Status::not_found("process not found");
     }
     process->set_cpu_affinity_mask(effective_mask);
+    return Status::success();
+}
+
+Status Scheduler::set_cpu_accounting(ProcessId pid, ProcessCpuAccounting accounting)
+{
+    auto *process = find(pid);
+    if (process == nullptr)
+    {
+        return Status::not_found("process not found");
+    }
+    process->set_cpu_accounting(accounting);
     return Status::success();
 }
 
@@ -519,12 +540,13 @@ Result<ProcessId> Scheduler::schedule_next_on_cpu(smp::CpuId cpu)
         }
     }
     selected->set_state(ProcessState::running);
-    selected->record_dispatch(cpu);
+    const bool account_cpu = process_counts_as_cpu_work(*selected);
+    selected->record_dispatch(cpu, account_cpu);
     current_pid_ = selected->pid();
     current_by_cpu_[cpu] = selected->pid();
     current_thread_by_cpu_[cpu] = selected_thread.value();
     ++cpu_stats_[cpu].dispatches;
-    if (!is_idle_process(*selected))
+    if (account_cpu)
     {
         ++cpu_stats_[cpu].busy_dispatches;
     }
@@ -607,6 +629,16 @@ u64 Scheduler::total_dispatches() const
     return total;
 }
 
+u64 Scheduler::total_accounted_dispatches() const
+{
+    u64 total = 0;
+    for (usize i = 0; i < cpu_count_; ++i)
+    {
+        total += cpu_stats_[i].busy_dispatches;
+    }
+    return total;
+}
+
 u8 Scheduler::cpu_usage_percent(smp::CpuId cpu) const
 {
     if (cpu >= cpu_count_ || cpu_stats_[cpu].dispatches == 0)
@@ -628,7 +660,7 @@ u8 Scheduler::process_usage_percent(ProcessId pid) const
     {
         return 0;
     }
-    return static_cast<u8>((process->dispatch_count() * 100u) / total);
+    return static_cast<u8>((process->accounted_cpu_time_ticks() * 100u) / total);
 }
 
 u16 Scheduler::configured_cpu_mask() const

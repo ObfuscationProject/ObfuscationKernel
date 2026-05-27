@@ -55,6 +55,12 @@ enum class ModuleExecution : u8
     kernel_process,
 };
 
+enum class ModuleThreading : u8
+{
+    single_threaded,
+    per_cpu,
+};
+
 struct ModuleManifest
 {
     std::string_view name{};
@@ -66,6 +72,7 @@ struct ModuleManifest
     bool built_in{true};
     ModuleExecution execution{ModuleExecution::inline_core};
     u32 init_priority{0};
+    ModuleThreading threading{ModuleThreading::single_threaded};
 };
 
 class KernelService
@@ -235,6 +242,7 @@ class ModuleManager final
     Status record_started(KernelModule &module);
     Status start_module(KernelModule &module);
     Result<sched::ProcessId> ensure_kernel_process(KernelModule &module);
+    Status ensure_kernel_process_threads(sched::ProcessId pid, ModuleThreading threading, usize slot);
 
     StaticVector<KernelModule *, max_kernel_modules> modules_;
     StaticVector<usize, max_kernel_modules> sorted_order_;

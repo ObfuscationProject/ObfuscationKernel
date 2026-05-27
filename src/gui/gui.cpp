@@ -1426,6 +1426,9 @@ Result<Rect> GuiCompositor::desktop_bounds() const
 ModuleManifest GuiModule::manifest() const
 {
     static constexpr std::array exports{gui_service_id};
+    const auto threading =
+        display_ != nullptr && display_->uses_cpu_gui_render_workers() ? ModuleThreading::per_cpu
+                                                                       : ModuleThreading::single_threaded;
     return ModuleManifest{
         .name = gui_module_name,
         .version = "1",
@@ -1436,6 +1439,7 @@ ModuleManifest GuiModule::manifest() const
         .built_in = true,
         .execution = ModuleExecution::kernel_process,
         .init_priority = 75,
+        .threading = threading,
     };
 }
 

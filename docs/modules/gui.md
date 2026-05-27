@@ -60,10 +60,12 @@ as a compatibility aggregate for callers that still want all GUI declarations.
   wheel-up/previous content, and negative rows mean wheel-down/next content.
   Shell scrollback and task/top process lists translate that shared direction
   through their own offset models.
-- debug-test cleanup closes shell and file-manager surfaces before the
-  post-test desktop loop reopens a fresh shell for graphical QEMU sessions.
-  Headless x86/i386 tests still exit through `isa-debug-exit`, and headless
-  non-x86 runners stop QEMU once they see `OK_TEST_PASS`.
+- debug-test cleanup closes shell, file-manager, and task-monitor surfaces.
+  If a graphical platform stays open after `OK_TEST_PASS`, the desktop starts
+  with no background `oksh`; the taskbar launchers and F12/F1 shortcuts can open
+  new windows on demand. Headless x86/i386 tests still exit through
+  `isa-debug-exit`, and headless non-x86 runners stop QEMU once they see
+  `OK_TEST_PASS`.
 - the desktop event loop is polling-driven while keyboard and mouse IRQ wakeups
   are still simulated, so its idle path uses a lightweight platform relax hook
   instead of `hlt`/`wfi`/`wfe`.
@@ -89,15 +91,20 @@ The compositor does not call QEMU or platform hooks directly: the display driver
 owns frame begin/frame/frame end hooks and falls back to per-pixel presentation
 only when a platform has no frame presenter. QEMU ramfb platforms scale the
 logical frame onto the visible 960x540 framebuffer in their backend code. Each
-present starts from a
-compositor-owned desktop background with a large geometric `OK` artwork in
-kernel mode, so legacy boot/debug text is not left behind outside GUI surfaces.
+present starts from a compositor-owned desktop background with a large geometric
+`OK` artwork in kernel mode, so legacy boot/debug text is not left behind
+outside GUI surfaces.
 
 This keeps the module independent from QEMU-specific ramfb details:
 
 - `FramebufferDisplayDriver` remains the portable kernel display device.
 - `RamFbConsole` owns fw_cfg DMA setup and physical guest-RAM pixels.
 - `GuiCompositor` owns surface state and composition.
+
+The GUI module advertises per-CPU render worker threads when the display driver
+uses CPU-side GUI frame composition, including ramfb. The process still presents
+through `FramebufferDisplayDriver`, so changing the physical backend does not
+require per-application rendering code.
 
 RAMFB also owns the physical mouse pointer overlay. The display frame boundary
 restores the previous pointer before a GUI frame is copied, then redraws it once

@@ -5,6 +5,11 @@ namespace ok
 namespace
 {
 
+constexpr uptr module_entry_stride = 0x100;
+constexpr uptr module_stack_stride = 0x1000;
+constexpr uptr module_thread_entry_stride = 0x10;
+constexpr uptr module_thread_stack_stride = 0x100;
+
 Status assign_module_process_name(FixedString<sched::max_process_name> &out, std::string_view module_name)
 {
     if (auto status = out.assign(kernel_module_process_prefix); !status.ok())
@@ -14,6 +19,19 @@ Status assign_module_process_name(FixedString<sched::max_process_name> &out, std
     constexpr usize max_chars = sched::max_process_name - 1;
     const auto room = out.size() < max_chars ? max_chars - out.size() : 0;
     return out.append(module_name.substr(0, room));
+}
+
+usize module_thread_target(ModuleThreading threading, usize cpu_count)
+{
+    if (threading != ModuleThreading::per_cpu)
+    {
+        return 1;
+    }
+    if (cpu_count == 0)
+    {
+        return 1;
+    }
+    return cpu_count < sched::max_threads_per_process ? cpu_count : sched::max_threads_per_process;
 }
 
 } // namespace
@@ -94,15 +112,23 @@ Result<sched::ProcessId> ModuleManager::ensure_kernel_process(KernelModule &modu
 {
     const auto manifest = module.manifest();
     ModuleProcessRecord *existing_record = nullptr;
-    for (auto &record : module_processes_)
+    usize slot = module_processes_.size();
+    for (usize i = 0; i < module_processes_.size(); ++i)
     {
+        auto &record = module_processes_[i];
         if (record.module_name.view() != manifest.name)
         {
             continue;
         }
         existing_record = &record;
+        slot = i;
         if (kernel_process_scheduler_ != nullptr && kernel_process_scheduler_->find(record.pid) != nullptr)
         {
+            if (auto status = ensure_kernel_process_threads(record.pid, manifest.threading, slot); !status.ok())
+            {
+                module.fail(status.message());
+                return status;
+            }
             kernel_process_pid_ = record.pid;
             return record.pid;
         }
@@ -131,9 +157,6 @@ Result<sched::ProcessId> ModuleManager::ensure_kernel_process(KernelModule &modu
             return status;
         }
     }
-    constexpr uptr module_entry_stride = 0x100;
-    constexpr uptr module_stack_stride = 0x1000;
-    const auto slot = module_processes_.size();
     const auto context = kernel_process_arch_->make_kernel_context(
         kernel_process_entry_ + static_cast<uptr>(slot) * module_entry_stride,
         kernel_process_stack_ + static_cast<uptr>(slot) * module_stack_stride);
@@ -144,10 +167,17 @@ Result<sched::ProcessId> ModuleManager::ensure_kernel_process(KernelModule &modu
         .cpu_affinity_mask = sched::cpu_affinity_any,
         .credentials = user::kernel_credentials(),
         .background = true,
+        .cpu_accounting = sched::ProcessCpuAccounting::passive,
     });
     if (!process)
     {
         return process.status();
+    }
+    if (auto status = ensure_kernel_process_threads(process.value(), manifest.threading, slot); !status.ok())
+    {
+        static_cast<void>(kernel_process_scheduler_->kill_process(process.value()));
+        module.fail(status.message());
+        return status;
     }
 
     if (existing_record != nullptr)
@@ -164,6 +194,41 @@ Result<sched::ProcessId> ModuleManager::ensure_kernel_process(KernelModule &modu
     }
     kernel_process_pid_ = process.value();
     return process.value();
+}
+
+Status ModuleManager::ensure_kernel_process_threads(sched::ProcessId pid, ModuleThreading threading, usize slot)
+{
+    if (kernel_process_scheduler_ == nullptr || kernel_process_arch_ == nullptr)
+    {
+        return Status::not_initialized("kernel module process is not bound to a scheduler");
+    }
+    auto *process = kernel_process_scheduler_->find(pid);
+    if (process == nullptr)
+    {
+        return Status::not_found("kernel module process not found");
+    }
+
+    const auto target = module_thread_target(threading, kernel_process_scheduler_->cpu_count());
+    while (process->threads().size() < target)
+    {
+        const auto worker = process->threads().size();
+        const auto context = kernel_process_arch_->make_kernel_context(
+            kernel_process_entry_ + static_cast<uptr>(slot) * module_entry_stride +
+                static_cast<uptr>(worker) * module_thread_entry_stride,
+            kernel_process_stack_ + static_cast<uptr>(slot) * module_stack_stride +
+                static_cast<uptr>(worker) * module_thread_stack_stride);
+        auto thread = kernel_process_scheduler_->create_thread(pid, context);
+        if (!thread)
+        {
+            return thread.status();
+        }
+        process = kernel_process_scheduler_->find(pid);
+        if (process == nullptr)
+        {
+            return Status::not_found("kernel module process disappeared");
+        }
+    }
+    return Status::success();
 }
 
 KernelModule *ModuleManager::find(std::string_view name) const
