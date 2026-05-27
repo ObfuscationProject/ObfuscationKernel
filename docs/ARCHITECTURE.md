@@ -13,6 +13,8 @@ or policy boundaries and concepts at compile-time extension points.
 - `include/ok/sched`: process/thread model and scheduler policy.
 - `include/ok/ipc`: bounded message channels.
 - `include/ok/syscall`: POSIX-oriented syscall table and handlers.
+- `include/ok/uapi`: C-compatible public ABI constants and native structs for
+  downstream user-space experiments.
 - `include/ok/posix`: bounded POSIX file descriptor and metadata service.
 - `include/ok/driver`: driver base class plus console, timer, block, display,
   PCIe, USB, and input drivers.
@@ -23,7 +25,7 @@ or policy boundaries and concepts at compile-time extension points.
   modules.
 - `include/ok/fs`: RAM-backed VFS node model.
 - `include/ok/user`: user-mode transition gateway.
-- `include/ok/core`: kernel composition and shared types.
+- `include/ok/core`: kernel composition, module management, and shared types.
 - `src/apps`: implementations for kernel applications that run on top of core,
   POSIX, scheduler, VFS, and GUI services.
 
@@ -50,6 +52,14 @@ delivery, syscall dispatch, driver I/O, filesystem, and user-mode transition
 strategy. The current implementation keeps the safe defaults active, but every
 mode is stored in the owning subsystem and covered by the debug test path so
 future implementations can switch behavior without changing the boot contract.
+
+## Public ABI Boundary
+
+Kernel-internal C++ headers are not the downstream user-space ABI. The public
+0.1.x user-space header is `include/ok/uapi/syscall.h`, which freezes syscall
+numbers, errno values, descriptor/memory flags, and a small set of native ABI
+structs. The roadmap tests assert that this C header stays aligned with the
+kernel syscall table and POSIX facade.
 
 ## Boot Flow
 

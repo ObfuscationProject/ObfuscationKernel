@@ -15,6 +15,9 @@ plumbing plus an IPv4/UDP/TCP loopback stack for network-debug bring-up.
 This is not yet a complete production POSIX kernel. The implementation defines
 the ABI, module boundaries, architecture profiles, build flow, and regression
 test harness needed to grow into one without rewriting the project structure.
+For downstream user-space experiments, the public 0.1.x C UAPI starts at
+`include/ok/uapi/syscall.h`; kernel C++ headers remain implementation headers
+unless mirrored there.
 
 ## Supported Architecture Profiles
 
@@ -138,8 +141,11 @@ fixed-capacity kernel containers live in `include/ok/core/fixed.hpp`.
 - [Boot Profiles](docs/BOOT.md)
 - [Testing](docs/testing/qemu.md)
 - [Development Standard](docs/DEVELOPMENT.md)
+- [v0.1.0 Roadmap](docs/ROADMAP.md)
+- [Userland Development](docs/USERLAND.md)
 - [Architecture Overview](docs/ARCHITECTURE.md)
 - [POSIX Roadmap](docs/POSIX.md)
 - [Architecture Notes](docs/arch/)
 - [Module Notes](docs/modules/)
+- [Kernel Modules](docs/modules/modules.md)
 - [GUI](docs/modules/gui.md)

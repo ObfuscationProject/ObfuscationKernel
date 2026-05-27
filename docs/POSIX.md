@@ -8,6 +8,11 @@ complete POSIX implementation yet, but it provides enough real file-descriptor,
 time, identity, and memory-mapping behavior for kernel debug tests, early
 user-mode ABI work, and glibc startup probes.
 
+Downstream code should treat `include/ok/uapi/syscall.h` as the public 0.1.x
+UAPI. Kernel C++ headers under `include/ok/syscall`, `include/ok/posix`, and
+`include/ok/fs` remain implementation headers unless this document says
+otherwise.
+
 ## Implemented Calls
 
 - `getpid`
@@ -47,7 +52,6 @@ user-mode ABI work, and glibc startup probes.
 - `clock_nanosleep`
 - `gettimeofday`
 - `time`
-- `getpid`
 - `getppid`
 - `gettid`
 - `getuid`, `geteuid`, `getgid`, `getegid`
@@ -71,6 +75,12 @@ user-mode ABI work, and glibc startup probes.
 - `exit_group`
 - `umask`
 - `ok_debug`
+
+The syscall table also reserves `clone`, `fork`, `execve`, `wait4`, `kill`,
+`pipe`, `select`, and `poll`. In the current single-process syscall profile
+they are registered as explicit `-ENOSYS` handlers. The internal process manager
+has roadmap coverage for fork/exec/wait state, but those operations are not a
+stable downstream syscall contract yet.
 
 `stdin`, `stdout`, and `stderr` are reserved as descriptors `0`, `1`, and `2`.
 File descriptors and memory mappings are fixed-capacity kernel objects, not

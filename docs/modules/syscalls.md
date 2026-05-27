@@ -3,6 +3,12 @@
 `ok::syscall::Table` maps syscall numbers to handlers. Function-backed handlers
 must satisfy `SyscallCallable`.
 
+The public downstream header is `include/ok/uapi/syscall.h`. It is C-compatible
+and freezes the 0.1.x syscall numbers, errno values, file flags, memory flags,
+and simple native ABI structs used by the Linux-style dispatcher. Kernel C++
+headers are still implementation details unless a symbol is mirrored through
+that UAPI header.
+
 `DispatchMode` records the intended syscall entry profile:
 
 - `trap`: generic architecture trap path.
@@ -28,3 +34,10 @@ Implemented baseline syscall groups:
 The number table reserves common POSIX/Linux-compatible syscall IDs to make the
 future user ABI predictable. File-oriented syscalls currently route into
 `ok::posix::PosixService`, which is backed by the RAM VFS.
+
+`LinuxSyscallAbi` currently implements the x86_64 register convention:
+syscall number in `rax`, arguments in `rdi`, `rsi`, `rdx`, `r10`, `r8`, and
+`r9`, and the return value in `rax`. `LinuxSyscallDispatcher` maps failed
+`Status` values to negative `OK_E*` errno values. Unknown syscalls and reserved
+process/IPC syscalls that are not implemented in the current profile return
+`-OK_ENOSYS`.

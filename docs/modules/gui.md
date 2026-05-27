@@ -8,9 +8,10 @@ run in the freestanding kernel profile without heap allocation.
 
 `ok::gui::GuiModule` is a kernel module named `kernel-gui`. During boot the
 kernel binds it to `FramebufferDisplayDriver`, starts it through
-`ModuleManager`, and publishes the `gui.compositor` service. The manifest uses
-`ModuleExecution::kernel_process`, so the module is managed by the scheduler
-visible `mod:kernel-gui` background process rather than the core boot path.
+`ModuleManager`, and publishes the `gui.compositor` and `gui.desktop` services.
+The manifest uses `ModuleExecution::kernel_process`, so the module is managed by
+the scheduler visible `mod:kernel-gui` background process rather than the core
+boot path.
 
 The module owns `GuiCompositor`, which provides:
 
@@ -30,6 +31,13 @@ rest of the kernel running.
 
 During boot, `GuiCompositor::play_startup_animation()` presents a short
 multi-frame startup animation before the shell claims the desktop.
+
+`GuiDesktopService` is the service boundary intended for future user-facing
+desktop components. It binds to the compositor, exposes the active scanout and
+cursor state, opens/focuses/closes windows, routes keyboard/pointer/scroll
+events, allocates fixed shared buffers, and stores a bounded clipboard string.
+The current backend is `DesktopBackend::kernel_compositor`; the enum leaves a
+`user_service` path for a future user-space window manager.
 
 ## API Contract
 
@@ -75,6 +83,11 @@ as a compatibility aggregate for callers that still want all GUI declarations.
 - `desktop_bounds()` returns the logical framebuffer rectangle.
 - `play_startup_animation()` renders the GUI boot animation and records frame
   count for tests.
+- `GuiDesktopService::allocate_shared_buffer()` exposes bounded shared-buffer
+  slots for future user/service handoff. The service owns the mapping table and
+  returns `Status::overflow` when the table is full.
+- `GuiDesktopService::configure_scanout()` records the active scanout geometry
+  exposed through the module service boundary.
 - `present()` composes each final framebuffer pixel from the desktop and the
   topmost visible surface at that point, avoiding transient desktop clears under
   windows during mouse-driven redraws.
@@ -180,6 +193,8 @@ platform hooks from the compositor directly.
 The debug and roadmap tests cover:
 
 - GUI module startup and `gui.compositor` service publication;
+- `gui.desktop` service publication, scanout, shared buffers, clipboard, cursor,
+  and routed input;
 - surface creation, metadata updates, z ordering, hit testing, drawing, and
   framebuffer checksum updates;
 - compositor crash rejection and supervisor restart;

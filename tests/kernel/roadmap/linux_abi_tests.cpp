@@ -1,12 +1,50 @@
 #include "roadmap_tests.hpp"
 
 #include "ok/syscall/linux.hpp"
+#include "ok/uapi/syscall.h"
 
 #include <array>
+#include <cstddef>
 #include <span>
 
 namespace ok
 {
+static_assert(OK_UAPI_VERSION_MAJOR == 0);
+static_assert(OK_UAPI_VERSION_MINOR == 1);
+static_assert(OK_UAPI_X86_64_SYSCALL == 1);
+static_assert(OK_SYS_READ == static_cast<u64>(syscall::Number::read));
+static_assert(OK_SYS_WRITE == static_cast<u64>(syscall::Number::write));
+static_assert(OK_SYS_OPENAT == static_cast<u64>(syscall::Number::openat));
+static_assert(OK_SYS_MMAP == static_cast<u64>(syscall::Number::mmap));
+static_assert(OK_SYS_ARCH_PRCTL == static_cast<u64>(syscall::Number::arch_prctl));
+static_assert(OK_SYS_GETRANDOM == static_cast<u64>(syscall::Number::getrandom));
+static_assert(OK_SYS_OK_DEBUG == static_cast<u64>(syscall::Number::ok_debug));
+static_assert(OK_EINVAL == syscall::linux_EINVAL);
+static_assert(OK_ENOSYS == syscall::linux_ENOSYS);
+static_assert(OK_EFAULT == syscall::linux_EFAULT);
+static_assert(OK_AT_FDCWD == posix::at_FDCWD);
+static_assert(OK_O_CREAT == posix::o_CREAT);
+static_assert(OK_O_DIRECTORY == posix::o_DIRECTORY);
+static_assert(OK_PROT_READ == posix::prot_READ);
+static_assert(OK_MAP_ANONYMOUS == posix::map_ANONYMOUS);
+static_assert(OK_ARCH_SET_FS == posix::arch_SET_FS);
+static_assert(OK_FUTEX_WAKE == posix::futex_WAKE);
+static_assert(sizeof(ok_timespec) == sizeof(posix::ClockTime));
+static_assert(offsetof(ok_timespec, seconds) == offsetof(posix::ClockTime, seconds));
+static_assert(offsetof(ok_timespec, nanoseconds) == offsetof(posix::ClockTime, nanoseconds));
+static_assert(sizeof(ok_iovec) == sizeof(posix::IoVector));
+static_assert(offsetof(ok_iovec, base) == offsetof(posix::IoVector, base));
+static_assert(offsetof(ok_iovec, length) == offsetof(posix::IoVector, length));
+static_assert(sizeof(ok_stat) == sizeof(posix::FileStatus));
+static_assert(offsetof(ok_stat, size) == offsetof(posix::FileStatus, size));
+static_assert(offsetof(ok_stat, mode) == offsetof(posix::FileStatus, mode));
+static_assert(offsetof(ok_stat, blocks) == offsetof(posix::FileStatus, blocks));
+static_assert(sizeof(ok_rlimit) == sizeof(posix::ResourceLimit));
+static_assert(offsetof(ok_rlimit, current) == offsetof(posix::ResourceLimit, current));
+static_assert(offsetof(ok_rlimit, maximum) == offsetof(posix::ResourceLimit, maximum));
+static_assert(sizeof(ok_sysinfo) == sizeof(posix::SystemInfo));
+static_assert(offsetof(ok_sysinfo, process_count) == offsetof(posix::SystemInfo, process_count));
+
 namespace
 {
 

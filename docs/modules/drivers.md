@@ -43,6 +43,28 @@ variants. The current x86 boot image uses polling for the early keyboard path;
 the mode field is already part of `KernelConfig` so interrupt-backed drivers can
 be enabled without changing the generic kernel entry.
 
+## Driver ABI
+
+`include/ok/driver/abi.hpp` defines the current native driver ABI used by
+roadmap tests and future loadable driver work. It includes:
+
+- `OkDriverManifest`, `OkDevice`, `OkDeviceId`, bus type, device class, and
+  resource descriptors;
+- `OkDriverModule` lifecycle hooks: `match`, `probe`, `attach`, `start`,
+  `suspend`, `resume`, `remove`, and `shutdown`;
+- `OkProbeContext` for device, MMIO, IRQ, resource manager, DMA mapper, and
+  work queue access;
+- runtime primitives for MMIO words, I/O ports, DMA buffers/mappings, work
+  queues, timers, refcounts, mutexes, wait queues, slab allocations, and
+  bounded kernel-thread records;
+- native operation interfaces for block, network, input, and display devices;
+- a Linux PCI compatibility shim with `ioremap`, `kmalloc`, DMA map/unmap,
+  workqueue, IRQ request/free, probe, and remove coverage.
+
+The ABI is still in-kernel and fixed-capacity. It is stable enough for 0.1.x
+driver bring-up tests, but external driver loading, relocation, signing,
+hotplug, real MSI/MSI-X routing, and full DMA isolation are future work.
+
 After boot creates the scheduler idle process, `DriverManager` registers every
 built-in driver as a background kernel daemon process named
 `drv:<driver-name>`. The driver logic still runs in kernel space, but `ps aux`
