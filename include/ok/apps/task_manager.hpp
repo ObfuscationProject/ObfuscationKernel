@@ -50,6 +50,10 @@ class KernelTaskManager final
     {
         return render_count_;
     }
+    [[nodiscard]] usize process_scroll() const
+    {
+        return process_scroll_;
+    }
 
   private:
     Status render(gui::GuiCompositor &compositor, Kernel &kernel);

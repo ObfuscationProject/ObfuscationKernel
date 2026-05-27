@@ -1258,10 +1258,9 @@ Status KernelDebugShell::scroll_gui_history(i32 rows)
     {
         return Status::success();
     }
-    const auto magnitude =
-        rows > 0 ? static_cast<usize>(rows) : static_cast<usize>(-(rows + 1)) + static_cast<usize>(1);
-    const auto amount = magnitude * shell_gui_scroll_rows_per_notch;
-    if (rows > 0)
+    const auto command = gui::scroll_command_from_rows(rows);
+    const auto amount = command.rows * shell_gui_scroll_rows_per_notch;
+    if (command.direction == gui::ScrollDirection::previous)
     {
         const auto room = shell_gui_history_keep - gui_scroll_rows_;
         gui_scroll_rows_ += amount > room ? room : amount;

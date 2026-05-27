@@ -12,9 +12,8 @@ so a shell-launched GUI app can be interrupted even while its own window is
 focused. Up/Down recall command history in the same style as common Linux
 shells.
 In windowed GUI mode, mouse wheel input is routed to the active surface. Shell
-surfaces scroll their visual scrollback with the same direction convention as
-Windows: wheel up moves toward older scrollback, and wheel down returns toward
-the prompt.
+surfaces use the GUI-wide scroll convention: wheel up moves toward older
+scrollback, and wheel down returns toward the prompt.
 F12 creates a fresh GUI shell window. While the active session is the `kernel`
 user this is a kernel-thread `oksh`; from `root` or another normal user it is a
 normal user process with its own address-space ID. In GUI mode each visible

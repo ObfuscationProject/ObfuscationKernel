@@ -56,6 +56,10 @@ as a compatibility aggregate for callers that still want all GUI declarations.
 - keyboard input is routed by the focused surface: `oksh` receives text when a
   shell window is focused, while kernel applications such as the file manager
   and task/top consume their own navigation keys when focused.
+- GUI scroll input uses a single Windows-like convention: positive rows mean
+  wheel-up/previous content, and negative rows mean wheel-down/next content.
+  Shell scrollback and task/top process lists translate that shared direction
+  through their own offset models.
 - debug-test cleanup closes shell and file-manager surfaces before the
   post-test desktop loop reopens a fresh shell for graphical QEMU sessions.
   Headless x86/i386 tests still exit through `isa-debug-exit`, and headless
@@ -146,7 +150,7 @@ GUI process and surface.
 All views read the same scheduler, network, and block device counters, showing
 per-CPU dispatch usage, current PID/TID, process CPU share, network byte
 counters, and disk I/O bytes. Mouse wheel input scrolls the active task-manager
-process list.
+process list with the same GUI-wide wheel direction as shell scrollback.
 
 The serial console and legacy framebuffer text path are preserved for boot logs,
 automated QEMU validation, and GUI startup failure fallback. Once the GUI shell

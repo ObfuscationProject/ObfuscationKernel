@@ -298,11 +298,11 @@ Status KernelTaskManager::handle_key(GuiCompositor &compositor, Kernel &kernel, 
         key_escape_state_ = 0;
         if (key == 'A')
         {
-            return scroll_processes(compositor, kernel, -1);
+            return scroll_processes(compositor, kernel, gui::scroll_rows(gui::ScrollDirection::previous));
         }
         if (key == 'B')
         {
-            return scroll_processes(compositor, kernel, 1);
+            return scroll_processes(compositor, kernel, gui::scroll_rows(gui::ScrollDirection::next));
         }
     }
     return Status::success();
@@ -325,20 +325,19 @@ Status KernelTaskManager::scroll_processes(GuiCompositor &compositor, Kernel &ke
     {
         process_scroll_ = max_scroll;
     }
-    const auto magnitude =
-        rows > 0 ? static_cast<usize>(rows) : static_cast<usize>(-(rows + 1)) + static_cast<usize>(1);
-    if (rows > 0)
+    const auto command = gui::scroll_command_from_rows(rows);
+    if (command.direction == gui::ScrollDirection::next)
     {
         const auto room = max_scroll - process_scroll_;
-        process_scroll_ += magnitude > room ? room : magnitude;
+        process_scroll_ += command.rows > room ? room : command.rows;
     }
-    else if (magnitude >= process_scroll_)
+    else if (command.rows >= process_scroll_)
     {
         process_scroll_ = 0;
     }
     else
     {
-        process_scroll_ -= magnitude;
+        process_scroll_ -= command.rows;
     }
     return render(compositor, kernel);
 }

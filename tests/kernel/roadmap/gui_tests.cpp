@@ -1140,7 +1140,8 @@ Status test_kernel_task_manager_draws_usage(Kernel &kernel)
         return Status::fault("top did not refresh its realtime display");
     }
     const auto after_tick_render_count = kernel.task_manager().render_count();
-    if (auto status = kernel.handle_gui_scroll(1); !status.ok())
+    const auto before_mouse_wheel_scroll = kernel.task_manager().process_scroll();
+    if (auto status = kernel.handle_gui_scroll(gui::scroll_rows(gui::ScrollDirection::next)); !status.ok())
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return status;
@@ -1149,6 +1150,22 @@ Status test_kernel_task_manager_draws_usage(Kernel &kernel)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("top did not redraw when its process list was scrolled");
+    }
+    if (kernel.task_manager().process_scroll() <= before_mouse_wheel_scroll)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("top mouse wheel down did not follow the GUI scroll convention");
+    }
+    const auto after_mouse_wheel_down = kernel.task_manager().process_scroll();
+    if (auto status = kernel.handle_gui_scroll(gui::scroll_rows(gui::ScrollDirection::previous)); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (kernel.task_manager().process_scroll() >= after_mouse_wheel_down)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("top mouse wheel up did not follow the GUI scroll convention");
     }
     if (auto status = kernel.handle_gui_key(0x03); !status.ok())
     {

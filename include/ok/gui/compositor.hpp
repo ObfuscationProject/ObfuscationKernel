@@ -65,6 +65,37 @@ enum class TaskbarApp : u8
     file_manager,
 };
 
+enum class ScrollDirection : u8
+{
+    previous,
+    next,
+};
+
+struct ScrollCommand
+{
+    ScrollDirection direction{ScrollDirection::next};
+    usize rows{0};
+};
+
+[[nodiscard]] constexpr usize scroll_magnitude(i32 rows)
+{
+    return rows > 0 ? static_cast<usize>(rows) : static_cast<usize>(-(rows + 1)) + static_cast<usize>(1);
+}
+
+[[nodiscard]] constexpr ScrollCommand scroll_command_from_rows(i32 rows)
+{
+    return ScrollCommand{
+        .direction = rows > 0 ? ScrollDirection::previous : ScrollDirection::next,
+        .rows = rows == 0 ? static_cast<usize>(0) : scroll_magnitude(rows),
+    };
+}
+
+[[nodiscard]] constexpr i32 scroll_rows(ScrollDirection direction, usize rows = 1)
+{
+    const auto value = static_cast<i32>(rows);
+    return direction == ScrollDirection::previous ? value : -value;
+}
+
 struct SurfaceInfo
 {
     SurfaceId id{0};
