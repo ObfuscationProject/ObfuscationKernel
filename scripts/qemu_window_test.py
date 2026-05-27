@@ -339,6 +339,7 @@ def main() -> int:
     parser.add_argument("--mode", choices=("debug", "release"), default="debug")
     parser.add_argument("--display", default="gtk")
     parser.add_argument("--no-launch", action="store_true", help="Run headless but keep the window-test validation path")
+    parser.add_argument("--normal-gui", action="store_true", help="Launch a non-debug GUI kernel and skip debug markers")
     args = parser.parse_args()
 
     arch = normalize_arch(args.arch)
@@ -370,6 +371,16 @@ def main() -> int:
             result = run_until_marker(command, timeout)
         else:
             result = subprocess.run(command, text=True, capture_output=True, check=False, timeout=timeout)
+    if args.normal_gui:
+        if result.stdout:
+            print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+        if result.returncode == 0:
+            print(f"QEMU_GUI_EXIT arch={arch} kernel={kernel}")
+            return 0
+        print(f"QEMU_GUI_FAIL arch={arch} returncode={result.returncode} kernel={kernel}")
+        return result.returncode
     ok, detail = validate_output(arch, result.stdout)
     if ok:
         print(f"OK_QEMU_NET_TEST arch={arch} udp=pass tcp=pass")

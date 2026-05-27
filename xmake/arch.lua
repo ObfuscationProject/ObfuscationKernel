@@ -297,3 +297,10 @@ function add_ok_debug_test_points()
         add_defines("OK_ENABLE_TEST_POINTS")
     end
 end
+
+function add_ok_kernel_gui_option()
+    add_options("kernel_gui")
+    if has_config("kernel_gui") then
+        add_defines("OK_ENABLE_KERNEL_GUI")
+    end
+end

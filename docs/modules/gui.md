@@ -56,9 +56,10 @@ as a compatibility aggregate for callers that still want all GUI declarations.
 - keyboard input is routed by the focused surface: `oksh` receives text when a
   shell window is focused, while kernel applications such as the file manager
   and task/top consume their own navigation keys when focused.
-- debug-test cleanup closes shell and file-manager surfaces, then enters the
-  platform halt path after trying debug-exit so post-test QEMU sessions do not
-  spin at full CPU if the debug-exit device is absent.
+- debug-test cleanup closes shell and file-manager surfaces before the
+  post-test desktop loop reopens a fresh shell for graphical QEMU sessions.
+  Headless x86/i386 tests still exit through `isa-debug-exit`, and headless
+  non-x86 runners stop QEMU once they see `OK_TEST_PASS`.
 - `fill`, `fill_rect`, `put_pixel`, and `draw_text` update backing pixels.
 - `surface_at(x, y)` returns the top visible surface at a logical desktop
   coordinate.
@@ -161,6 +162,8 @@ The debug and roadmap tests cover:
 - compositor crash rejection and supervisor restart;
 - `kernel-gui` ownership by the `mod:kernel-gui` kernel background process;
 - mouse-driven window drag, resize, close, and GUI file-manager navigation;
+- a post-suite input smoke test that clicks the taskbar shell launcher and uses
+  the file-manager shortcut after the full debug test run;
 - file-manager process ownership for `kernel` and non-kernel users;
 - task-manager TUI/GUI rendering for CPU, network, disk, and process usage;
 - startup animation and GUI file-manager rendering;

@@ -1,4 +1,5 @@
 #include "ok/core/kernel.hpp"
+#include "ok/core/entry.hpp"
 #include "ok/core/test_point.hpp"
 #include "ok/fs/ext4.hpp"
 
@@ -76,6 +77,61 @@ uptr test_mapping_address(arch::Architecture architecture)
         return static_cast<uptr>(0xffff'8000'0000'0000ull);
     }
     return static_cast<uptr>(0xc000'0000u);
+}
+
+Status click_gui(Kernel &kernel, i32 x, i32 y)
+{
+    if (auto status = kernel.handle_gui_mouse_position(x, y, false); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse_position(x, y, true); !status.ok())
+    {
+        return status;
+    }
+    return kernel.handle_gui_mouse_position(x, y, false);
+}
+
+Status test_post_debug_suite_gui_input(Kernel &kernel)
+{
+    if (auto status = kernel.close_debug_gui(); !status.ok())
+    {
+        return status;
+    }
+
+    auto &compositor = kernel.gui().compositor();
+    const auto launcher_y = static_cast<i32>(driver::framebuffer_height - gui::taskbar_height + 3 +
+                                             gui::taskbar_icon_size / 2);
+    const auto shell_x = static_cast<i32>(6 + gui::taskbar_icon_size / 2);
+    if (auto status = click_gui(kernel, shell_x, launcher_y); !status.ok())
+    {
+        return status;
+    }
+    const auto shell_surface = kernel.debug_shell().gui_surface_id();
+    auto shell_info = compositor.surface_info(shell_surface);
+    if (shell_surface == 0 || !shell_info || !shell_info.value().focused ||
+        shell_info.value().app != gui::TaskbarApp::debug_shell)
+    {
+        return Status::fault("post-debug mouse input did not launch a focused GUI shell");
+    }
+
+    if (auto status = kernel.handle_gui_key(ok_input_open_file_manager); !status.ok())
+    {
+        return status;
+    }
+    const auto file_surface = kernel.file_manager().surface_id();
+    auto file_info = compositor.surface_info(file_surface);
+    if (file_surface == 0 || !file_info || !file_info.value().focused ||
+        file_info.value().app != gui::TaskbarApp::file_manager)
+    {
+        return Status::fault("post-debug keyboard shortcut did not launch a focused file manager");
+    }
+
+    if (auto status = kernel.close_file_manager(); !status.ok())
+    {
+        return status;
+    }
+    return kernel.debug_shell().close_all_gui();
 }
 
 } // namespace
@@ -629,6 +685,10 @@ Status Kernel::run_debug_test_suite()
         return status;
     }
     if (auto status = run_smp_irq_preempt_roadmap_tests(*this, test_report_); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_post_debug_suite_gui_input(*this); !status.ok())
     {
         return status;
     }

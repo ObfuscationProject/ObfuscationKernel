@@ -57,6 +57,10 @@ local function task_toolchain_binary(spec, tool)
     return path.join(os.projectdir(), "toolchains", spec.triple, "bin", spec.triple .. "-" .. tool)
 end
 
+local function task_config_bool(value)
+    return value == true or value == "true" or value == "y" or value == "yes" or value == "1"
+end
+
 task("toolchains")
     set_menu {
         usage = "xmake toolchains -a ARCH",
@@ -334,6 +338,66 @@ task("qemu-window-test")
         end
         if code ~= 0 then
             raise("qemu window test failed for %s", arch)
+        end
+    end)
+task_end()
+
+task("qemu-gui")
+    set_menu {
+        usage = "xmake qemu-gui [-a ARCH]",
+        description = "Build a normal-mode kernel GUI image and launch it in a QEMU window",
+        options = {
+            {"a", "profile", "kv", nil, "Temporarily launch another architecture"},
+            {"m", "check-mode", "kv", nil, "Build mode used for the GUI kernel"},
+            {nil, "display", "kv", "gtk", "QEMU display backend"}
+        }
+    }
+    on_run(function ()
+        import("core.base.option")
+        import("core.project.config")
+        config.load()
+
+        local current_arch = task_normalize_arch(config.get("arch") or "x86_64")
+        local current_mode = config.get("mode") or "release"
+        local current_kernel_gui = task_config_bool(config.get("kernel_gui"))
+        local arch = task_normalize_arch(option.get("profile") or current_arch)
+        local _, spec = task_require_arch(arch)
+        local mode = option.get("check-mode") or "release"
+        local reconfigured = current_mode ~= mode or arch ~= current_arch or not current_kernel_gui
+
+        if reconfigured then
+            os.execv("xmake", {"f", "-c", "-m", mode, "-a", arch, "--kernel_gui=y"})
+        end
+        if not spec.bootable then
+            if reconfigured then
+                os.execv("xmake", {"f", "-c", "-m", current_mode, "-a", current_arch,
+                                   "--kernel_gui=" .. (current_kernel_gui and "y" or "n")})
+            end
+            raise("qemu GUI boot is not implemented for %s yet", arch)
+        end
+
+        local build_code = os.execv("xmake", {"-y", "-b", "okernel_image"}, {try = true})
+        local run_code = 0
+        if build_code == 0 then
+            run_code = os.execv("python3", {
+                path.join(os.projectdir(), "scripts", "qemu_window_test.py"),
+                "--arch", arch,
+                "--mode", mode,
+                "--kernel", path.join(os.projectdir(), "build", "linux", arch, mode, "kernel.bin"),
+                "--display", option.get("display") or "gtk",
+                "--normal-gui"
+            }, {try = true})
+        end
+
+        if reconfigured then
+            os.execv("xmake", {"f", "-c", "-m", current_mode, "-a", current_arch,
+                               "--kernel_gui=" .. (current_kernel_gui and "y" or "n")})
+        end
+        if build_code ~= 0 then
+            raise("kernel GUI build failed for %s", arch)
+        end
+        if run_code ~= 0 then
+            raise("qemu GUI launch failed for %s", arch)
         end
     end)
 task_end()

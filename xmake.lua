@@ -4,6 +4,12 @@ set_version("0.1.0")
 add_rules("mode.debug", "mode.release")
 set_languages("c++23")
 
+option("kernel_gui")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Enable the normal-mode kernel GUI desktop")
+option_end()
+
 includes("xmake/arch.lua")
 includes("xmake/toolchains.lua")
 
@@ -56,6 +62,7 @@ target("okernel")
     add_defines("OK_KERNEL_FREESTANDING")
     add_ok_arch_profile()
     add_ok_debug_test_points()
+    add_ok_kernel_gui_option()
     add_tests("profile")
     on_test(function (target)
         print("freestanding profile compiled for " .. target:values("ok.arch"))
@@ -109,6 +116,7 @@ target("okernel_image")
     add_defines("OK_KERNEL_FREESTANDING")
     add_ok_arch_profile()
     add_ok_debug_test_points()
+    add_ok_kernel_gui_option()
     if ok_arch_spec(ok_current_arch()).boot_source ~= nil then
         add_tests("qemu")
     end

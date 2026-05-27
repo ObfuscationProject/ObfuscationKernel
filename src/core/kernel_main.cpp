@@ -124,12 +124,16 @@ extern "C" [[noreturn]] void kernel_main()
     ok_platform_debug_exit(status.ok() ? 0x10u : 0x11u);
     if (status.ok())
     {
-        halt_forever();
+        desktop_loop(true);
     }
 #else
     if (status.ok())
     {
+#if defined(OK_ENABLE_KERNEL_GUI)
         desktop_loop(true);
+#else
+        halt_forever();
+#endif
     }
 #endif
 

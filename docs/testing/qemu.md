@@ -99,6 +99,16 @@ The ramfb backend scales the kernel's logical GUI framebuffer into the full
 `shutdown`/`poweroff` request poweroff, `halt` enters the halt path, and
 `reboot` requests the platform reboot path before falling back to debug-exit.
 
+For non-debug graphical sessions, release mode keeps the GUI desktop behind the
+independent `kernel_gui` build option so ordinary release images stay quiet by
+default. Use the launcher task to build with that option and start a QEMU
+window:
+
+```sh
+xmake qemu-gui
+xmake qemu-gui -a aarch64 --display=gtk
+```
+
 For `aarch64`, `arm32`, `rv64`, and `rv32` window sessions, QEMU attaches
 `virtio-keyboard-device` and `virtio-mouse-device`; the guest consumes their
 legacy virtio-mmio event queues so keyboard input reaches the shell and mouse

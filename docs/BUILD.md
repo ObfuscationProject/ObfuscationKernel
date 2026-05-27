@@ -111,6 +111,20 @@ Use `--no-launch` in headless environments to boot the same kernel image without
 launching a window and print the result through the same validation path. The
 task accepts every configured architecture.
 
+Normal release builds do not enter the kernel GUI desktop by default. Enable the
+independent GUI build option when you want a non-debug graphical session:
+
+```sh
+xmake f -c -m release -a x86_64 --kernel_gui=y
+xmake -y -b okernel_image
+```
+
+The convenience launcher builds with that option and opens a QEMU window:
+
+```sh
+xmake qemu-gui
+```
+
 ## Freestanding Flags
 
 `okernel` is compiled with:
