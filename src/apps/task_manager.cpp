@@ -145,8 +145,9 @@ std::string_view scheduler_mode_label(sched::SchedulingMode mode)
     return "unknown";
 }
 
-template <usize Capacity> Status append_process_line(FixedString<Capacity> &out, const sched::Scheduler &scheduler,
-                                                     const sched::ProcessControlBlock &process)
+template <usize Capacity> Status append_process_line(FixedString<Capacity> &out,
+                                                     const sched::ProcessControlBlock &process,
+                                                     u8 process_usage_percent)
 {
     if (auto status = append_padded_decimal(out, process.pid(), 5); !status.ok())
     {
@@ -164,7 +165,7 @@ template <usize Capacity> Status append_process_line(FixedString<Capacity> &out,
     {
         return status;
     }
-    if (auto status = append_padded_decimal(out, scheduler.process_usage_percent(process.pid()), 3); !status.ok())
+    if (auto status = append_padded_decimal(out, process_usage_percent, 3); !status.ok())
     {
         return status;
     }
@@ -225,6 +226,100 @@ Status fill_rect_if_non_empty(GuiCompositor &compositor, SurfaceId surface, Rect
 
 } // namespace
 
+void KernelTaskManager::update_usage_sample(const sched::Scheduler &scheduler)
+{
+    const auto total_dispatches = scheduler.total_dispatches();
+    const auto total_delta =
+        has_usage_sample_ && total_dispatches >= last_total_dispatches_ ? total_dispatches - last_total_dispatches_
+                                                                        : total_dispatches;
+
+    for (usize i = 0; i < smp::max_cpus; ++i)
+    {
+        cpu_usage_percent_[i] = 0;
+        if (i >= scheduler.cpu_count())
+        {
+            continue;
+        }
+        const auto stats = scheduler.cpu_stats(static_cast<smp::CpuId>(i));
+        const auto total =
+            has_usage_sample_ && stats.dispatches >= last_cpu_dispatches_[i]
+                ? stats.dispatches - last_cpu_dispatches_[i]
+                : stats.dispatches;
+        const auto busy = has_usage_sample_ && stats.busy_dispatches >= last_cpu_busy_dispatches_[i]
+                              ? stats.busy_dispatches - last_cpu_busy_dispatches_[i]
+                              : stats.busy_dispatches;
+        cpu_usage_percent_[i] = total == 0 ? static_cast<u8>(0) : static_cast<u8>((busy * 100u) / total);
+        last_cpu_dispatches_[i] = stats.dispatches;
+        last_cpu_busy_dispatches_[i] = stats.busy_dispatches;
+    }
+
+    process_usage_sample_count_ = 0;
+    for (const auto &process : scheduler.processes())
+    {
+        if (process_usage_sample_count_ >= process_usage_samples_.size())
+        {
+            break;
+        }
+
+        u64 previous_ticks = 0;
+        bool found_previous = false;
+        for (usize i = 0; i < last_process_usage_sample_count_; ++i)
+        {
+            if (last_process_usage_samples_[i].pid == process.pid())
+            {
+                previous_ticks = last_process_usage_samples_[i].accounted_ticks;
+                found_previous = true;
+                break;
+            }
+        }
+        const auto current_ticks = process.accounted_cpu_time_ticks();
+        const auto process_delta = has_usage_sample_ && found_previous && current_ticks >= previous_ticks
+                                       ? current_ticks - previous_ticks
+                                       : current_ticks;
+        const auto usage = total_delta == 0 ? static_cast<u8>(0) : static_cast<u8>((process_delta * 100u) / total_delta);
+        process_usage_samples_[process_usage_sample_count_++] = ProcessUsageSample{
+            .pid = process.pid(),
+            .accounted_ticks = current_ticks,
+            .usage_percent = usage,
+        };
+    }
+
+    for (usize i = 0; i < process_usage_sample_count_; ++i)
+    {
+        last_process_usage_samples_[i] = process_usage_samples_[i];
+    }
+    last_process_usage_sample_count_ = process_usage_sample_count_;
+    last_total_dispatches_ = total_dispatches;
+    has_usage_sample_ = true;
+}
+
+u8 KernelTaskManager::cpu_usage_percent(smp::CpuId cpu) const
+{
+    return cpu < cpu_usage_percent_.size() ? cpu_usage_percent_[cpu] : static_cast<u8>(0);
+}
+
+u8 KernelTaskManager::process_usage_percent(sched::ProcessId pid) const
+{
+    for (usize i = 0; i < process_usage_sample_count_; ++i)
+    {
+        if (process_usage_samples_[i].pid == pid)
+        {
+            return process_usage_samples_[i].usage_percent;
+        }
+    }
+    return 0;
+}
+
+u8 KernelTaskManager::sampled_cpu_usage_percent(smp::CpuId cpu) const
+{
+    return cpu_usage_percent(cpu);
+}
+
+u8 KernelTaskManager::sampled_process_usage_percent(sched::ProcessId pid) const
+{
+    return process_usage_percent(pid);
+}
+
 Status KernelTaskManager::open(GuiCompositor &compositor, Kernel &kernel, user::Credentials credentials,
                                sched::ProcessId process_id, TaskMonitorProgram program)
 {
@@ -258,6 +353,10 @@ Status KernelTaskManager::open(GuiCompositor &compositor, Kernel &kernel, user::
         surface_id_ = surface.value();
     }
     else if (auto status = compositor.set_title(surface_id_, title); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor.set_surface_app(surface_id_, gui::TaskbarApp::task_monitor); !status.ok())
     {
         return status;
     }
@@ -370,6 +469,15 @@ void KernelTaskManager::mark_closed()
     program_ = TaskMonitorProgram::task_manager;
     process_scroll_ = 0;
     key_escape_state_ = 0;
+    last_total_dispatches_ = 0;
+    last_cpu_dispatches_ = {};
+    last_cpu_busy_dispatches_ = {};
+    cpu_usage_percent_ = {};
+    process_usage_samples_ = {};
+    last_process_usage_samples_ = {};
+    process_usage_sample_count_ = 0;
+    last_process_usage_sample_count_ = 0;
+    has_usage_sample_ = false;
 }
 
 Status KernelTaskManager::render_tui(Kernel &kernel, FixedString<4096> &out) const
@@ -563,7 +671,7 @@ Status KernelTaskManager::render_tui(Kernel &kernel, FixedString<4096> &out) con
     }
     for (const auto &process : scheduler.processes())
     {
-        if (auto status = append_process_line(out, scheduler, process); !status.ok())
+        if (auto status = append_process_line(out, process, scheduler.process_usage_percent(process.pid())); !status.ok())
         {
             return status;
         }
@@ -772,6 +880,7 @@ Status KernelTaskManager::render(GuiCompositor &compositor, Kernel &kernel)
     }
 
     auto &scheduler = kernel.scheduler();
+    update_usage_sample(scheduler);
     FixedString<160> summary;
     if (auto status = summary.assign("CPU cores="); !status.ok())
     {
@@ -809,7 +918,7 @@ Status KernelTaskManager::render(GuiCompositor &compositor, Kernel &kernel)
     {
         const auto row = static_cast<u32>(5 + i);
         const auto cpu = static_cast<smp::CpuId>(i);
-        const auto usage = scheduler.cpu_usage_percent(cpu);
+        const auto usage = cpu_usage_percent(cpu);
         FixedString<64> line;
         if (auto status = line.assign("cpu"); !status.ok())
         {
@@ -940,7 +1049,7 @@ Status KernelTaskManager::render(GuiCompositor &compositor, Kernel &kernel)
             break;
         }
         FixedString<160> process_line;
-        if (auto status = append_process_line(process_line, scheduler, process); !status.ok())
+        if (auto status = append_process_line(process_line, process, process_usage_percent(process.pid())); !status.ok())
         {
             return status;
         }

@@ -184,7 +184,11 @@ class Kernel final
     }
     [[nodiscard]] apps::KernelTaskManager &task_manager()
     {
-        return task_manager_;
+        if (active_task_manager_index_ < task_managers_.size())
+        {
+            return task_managers_[active_task_manager_index_];
+        }
+        return inactive_task_manager_;
     }
     [[nodiscard]] ModuleManager &kernel_modules()
     {
@@ -271,19 +275,23 @@ class Kernel final
     Status handle_gui_taskbar_launcher(gui::TaskbarApp app);
     Status sync_gui_credentials_from_surface(gui::SurfaceId surface);
     Status reconcile_file_managers();
-    Status reconcile_task_manager();
+    Status reconcile_task_managers();
     Status close_file_manager_at(usize index, bool kill_process, bool notify_shell);
-    Status close_task_manager_window(bool kill_process, bool notify_shell);
+    Status close_task_manager_at(usize index, bool kill_process, bool notify_shell);
     Status close_all_file_managers();
+    Status close_all_task_managers();
     Status focus_file_manager();
     Status focus_file_manager_at(usize index);
     Status focus_task_manager();
+    Status focus_task_manager_at(usize index);
     Status force_close_gui_surface(gui::SurfaceId surface);
     Status note_ignored_gui_close(gui::SurfaceId surface);
     Status show_force_close_prompt(gui::SurfaceId surface);
     void clear_gui_close_attempt(gui::SurfaceId surface);
     [[nodiscard]] Result<usize> find_file_manager_by_surface(gui::SurfaceId surface) const;
     [[nodiscard]] Result<usize> find_file_manager_by_process(sched::ProcessId pid) const;
+    [[nodiscard]] Result<usize> find_task_manager_by_surface(gui::SurfaceId surface) const;
+    [[nodiscard]] Result<usize> find_task_manager_by_process(sched::ProcessId pid) const;
 
     struct GuiCloseAttempt
     {
@@ -312,7 +320,9 @@ class Kernel final
     StaticVector<apps::KernelFileManager, gui::max_gui_surfaces> file_managers_{};
     apps::KernelFileManager inactive_file_manager_{};
     usize active_file_manager_index_{gui::max_gui_surfaces};
-    apps::KernelTaskManager task_manager_{};
+    StaticVector<apps::KernelTaskManager, gui::max_gui_surfaces> task_managers_{};
+    apps::KernelTaskManager inactive_task_manager_{};
+    usize active_task_manager_index_{gui::max_gui_surfaces};
     driver::KeyboardDriver keyboard_driver_{};
     driver::Ps2MouseDriver mouse_driver_{};
     driver::PciBusDriver pci_bus_driver_{};

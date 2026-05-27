@@ -78,15 +78,18 @@ Supported commands:
   kernel applications in `ok::apps`, not kernel modules.
 - `taskman [tui|gui|close]`: print or open the task-manager application.
 - `top [gui|tui|close]`: run the kernel `top` application. Plain `top` keeps the
-  historical foreground GUI behavior; `top tui` prints a top-style snapshot in
+  historical foreground GUI behavior; each GUI launch creates an independent
+  `top:<user>` monitor window, while `top tui` prints a top-style snapshot in
   the shell.
 - `F1`: open or raise the GUI file manager at the current working directory
   without blocking the shell.
 
 The shell is intentionally fixed-buffer and freestanding. Windowed input is
 dispatched through GUI focus: keyboard events reach `oksh` only while a shell
-surface is focused. Closing a shell window reaps its foreground GUI child first
-so `top` or `fm` cannot outlive the shell that launched it. Debug test builds
+surface is focused. A shell with a foreground GUI child stays runnable for
+terminal-style I/O and status reporting, but new shell commands wait until the
+foreground child exits. Closing a shell window reaps its foreground GUI child
+first so `top` or `fm` cannot outlive the shell that launched it. Debug test builds
 close their shell/file-manager GUI surfaces after `OK_TEST_PASS`, try the
 debug-exit path, assert that no orphan `oksh` process remains, and leave the post-test
 desktop without a background `oksh` unless the user opens one. The GUI title

@@ -5,6 +5,7 @@
 #include "ok/sched/scheduler.hpp"
 #include "ok/user/user.hpp"
 
+#include <array>
 #include <string_view>
 
 namespace ok
@@ -54,8 +55,20 @@ class KernelTaskManager final
     {
         return process_scroll_;
     }
+    [[nodiscard]] u8 sampled_cpu_usage_percent(smp::CpuId cpu) const;
+    [[nodiscard]] u8 sampled_process_usage_percent(sched::ProcessId pid) const;
 
   private:
+    struct ProcessUsageSample
+    {
+        sched::ProcessId pid{0};
+        u64 accounted_ticks{0};
+        u8 usage_percent{0};
+    };
+
+    void update_usage_sample(const sched::Scheduler &scheduler);
+    [[nodiscard]] u8 cpu_usage_percent(smp::CpuId cpu) const;
+    [[nodiscard]] u8 process_usage_percent(sched::ProcessId pid) const;
     Status render(gui::GuiCompositor &compositor, Kernel &kernel);
 
     gui::SurfaceId surface_id_{0};
@@ -64,7 +77,16 @@ class KernelTaskManager final
     TaskMonitorProgram program_{TaskMonitorProgram::task_manager};
     usize render_count_{0};
     usize process_scroll_{0};
+    u64 last_total_dispatches_{0};
+    std::array<u64, smp::max_cpus> last_cpu_dispatches_{};
+    std::array<u64, smp::max_cpus> last_cpu_busy_dispatches_{};
+    std::array<u8, smp::max_cpus> cpu_usage_percent_{};
+    std::array<ProcessUsageSample, sched::max_processes> process_usage_samples_{};
+    std::array<ProcessUsageSample, sched::max_processes> last_process_usage_samples_{};
+    usize process_usage_sample_count_{0};
+    usize last_process_usage_sample_count_{0};
     u8 key_escape_state_{0};
+    bool has_usage_sample_{false};
 };
 
 } // namespace apps

@@ -63,6 +63,7 @@ enum class TaskbarApp : u8
     none,
     debug_shell,
     file_manager,
+    task_monitor,
 };
 
 enum class ScrollDirection : u8

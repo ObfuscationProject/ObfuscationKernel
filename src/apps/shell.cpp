@@ -928,17 +928,6 @@ Status KernelDebugShell::start_foreground_process(sched::ProcessId pid)
         return status;
     }
     foreground_process_id_ = pid;
-    if (process_id_ != 0)
-    {
-        if (auto *process = kernel_->scheduler().find(process_id_); process != nullptr)
-        {
-            process->set_state(sched::ProcessState::blocked);
-            for (auto &thread : process->threads())
-            {
-                thread.state = sched::ProcessState::blocked;
-            }
-        }
-    }
     return save_active_gui_window_state();
 }
 

@@ -146,22 +146,27 @@ navigation. The window itself uses the same drag, resize, minimize,
 maximize, and close handling as other GUI surfaces. Each open runs as a separate
 `fm:<user>` scheduler process with the credentials active at launch, and
 directory reads are checked against those credentials. A shell-launched file
-manager blocks its launching `oksh` process until it exits, while F1 opens
-another file manager as a shortcut without blocking the shell.
+manager keeps new commands waiting in its launching `oksh` until it exits, while
+the shell process itself stays runnable for terminal-style I/O and status
+reporting. F1 opens another file manager as a shortcut without blocking the
+shell command line.
 
 `taskman` and `top` live under `ok::apps` as kernel applications. `taskman tui`
 renders a one-shot task-manager snapshot, `taskman gui` opens a foreground
 `tm:<user>` GUI child, `top tui` renders a top-style snapshot, and `top gui`
-opens a realtime foreground `top:<user>` GUI child. Automatic GUI refresh is
-throttled by the kernel tick so the monitor remains live without repainting on
-every event-loop spin. Ctrl-C interrupts a shell-launched GUI `top` like other
-foreground programs, and closing the launching shell also closes that foreground
-monitor. `taskman close` or `top close` closes the active monitor GUI process
-and surface.
+opens a realtime foreground `top:<user>` GUI child. Each GUI launch creates an
+independent monitor instance, so different shell windows can own different
+`top` windows. Automatic GUI refresh is throttled by the kernel tick so the
+monitor remains live without repainting on every event-loop spin. Ctrl-C
+interrupts a shell-launched GUI `top` like other foreground programs, and
+closing the launching shell also closes that foreground monitor. `taskman close`
+or `top close` closes the active monitor GUI process and surface.
 All views read the same scheduler, network, and block device counters, showing
 per-CPU dispatch usage, current PID/TID, process CPU share, network byte
-counters, and disk I/O bytes. Mouse wheel input scrolls the active task-manager
-process list with the same GUI-wide wheel direction as shell scrollback.
+counters, and disk I/O bytes. GUI monitor CPU percentages are calculated from
+the previous refresh sample for that monitor instead of from boot-time totals.
+Mouse wheel input scrolls the active task-manager process list with the same
+GUI-wide wheel direction as shell scrollback.
 
 The serial console and legacy framebuffer text path are preserved for boot logs,
 automated QEMU validation, and GUI startup failure fallback. Once the GUI shell

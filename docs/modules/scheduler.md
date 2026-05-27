@@ -51,13 +51,16 @@ the console and `/tmp/kernel.log`. Each GUI debug shell registers as its own
 UI processes created by `root` or another normal user are recorded as
 `user_process` instances with a distinct address-space ID and user-mode context.
 GUI file manager launches create distinct `fm:<user>` processes using the
-credentials active at launch time; `fm` launched from the shell blocks only its
-launching `oksh` until the file manager exits.
+credentials active at launch time; `fm` launched from the shell makes only its
+launching `oksh` wait for new commands until the file manager exits, while the
+shell process remains runnable for terminal I/O.
 Task monitor applications follow the same rule: `taskman gui` uses `tm:<user>`
-and `top gui` uses `top:<user>`, while their TUI modes render synchronously in
-the shell without creating module records. GUI monitor auto-refresh is throttled
-by the kernel tick; user-driven redraws such as open, resize, and scroll still
-render immediately.
+and `top gui` uses `top:<user>`, with each GUI launch getting its own scheduler
+process and surface. Their TUI modes render synchronously in the shell without
+creating module records. GUI monitor auto-refresh is throttled by the kernel
+tick; user-driven redraws such as open, resize, and scroll still render
+immediately. The GUI monitor samples scheduler counters per refresh, so displayed
+CPU percentages are interval deltas rather than ever-growing boot averages.
 Future work should replace the simulated dispatch counters with timer-derived
 runtime deltas and add real SMP run queues once architecture code starts running
 kernel threads concurrently.

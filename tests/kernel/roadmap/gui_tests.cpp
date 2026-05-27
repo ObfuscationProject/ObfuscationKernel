@@ -1152,20 +1152,26 @@ Status test_kernel_task_manager_draws_usage(Kernel &kernel)
     const auto top_render_after_start = kernel.task_manager().render_count();
     const auto top_pid = kernel.debug_shell().foreground_process_id();
     const auto *top_process = kernel.scheduler().find(top_pid);
+    const auto *launching_shell_process = kernel.scheduler().find(kernel.debug_shell().process_id());
     const auto top_surface = kernel.task_manager().surface_id();
     auto top_info = compositor.surface_info(top_surface);
     if (!top || top_pid == 0 || top_pid != kernel.task_manager().process_id() || top_process == nullptr ||
         top_process->name() != "top:kernel" || top_surface == 0 || !top_info || top_info.value().title != "top" ||
-        top_render_after_start <= top_render_before)
+        top_info.value().app != gui::TaskbarApp::task_monitor || top_render_after_start <= top_render_before)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("top did not enter a foreground task-manager program");
+    }
+    if (launching_shell_process == nullptr || launching_shell_process->state() == sched::ProcessState::blocked)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("foreground top incorrectly blocked its launching shell process");
     }
     auto blocked = kernel.debug_shell().execute("echo blocked");
     if (blocked || blocked.status().code() != StatusCode::would_block)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
-        return Status::fault("top did not keep the shell blocked while realtime view was active");
+        return Status::fault("top did not keep shell commands waiting while realtime view was active");
     }
     if (auto status = kernel.tick(); !status.ok())
     {
@@ -1176,6 +1182,17 @@ Status test_kernel_task_manager_draws_usage(Kernel &kernel)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("top did not refresh its realtime display");
+    }
+    if (auto status = kernel.task_manager().refresh(compositor, kernel); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (kernel.task_manager().sampled_cpu_usage_percent(0) != 0 ||
+        kernel.task_manager().sampled_process_usage_percent(top_pid) != 0)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("top CPU display used cumulative counters instead of refresh deltas");
     }
     const auto after_tick_render_count = kernel.task_manager().render_count();
     const auto before_mouse_wheel_scroll = kernel.task_manager().process_scroll();
@@ -1232,13 +1249,41 @@ Status test_kernel_task_manager_draws_usage(Kernel &kernel)
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("top relaunch did not attach to the GUI shell foreground");
     }
+    if (auto status = kernel.handle_gui_key(ok_input_open_shell); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    auto second_top = kernel.debug_shell().execute("top");
+    const auto second_shell_pid = kernel.debug_shell().process_id();
+    const auto second_shell_surface = kernel.debug_shell().gui_surface_id();
+    const auto second_top_pid = kernel.debug_shell().foreground_process_id();
+    if (!second_top || second_shell_pid == 0 || second_shell_surface == 0 || second_shell_pid == closing_shell_pid ||
+        second_top_pid == 0 || second_top_pid == closing_top_pid || process_count_named(kernel.scheduler(), "top:kernel") != 2)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("top did not create an independent monitor for a second shell");
+    }
+    if (auto status = kernel.debug_shell().close_surface_window(second_shell_surface); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (kernel.scheduler().find(second_shell_pid) != nullptr || kernel.scheduler().find(second_top_pid) != nullptr ||
+        kernel.scheduler().find(closing_shell_pid) == nullptr || kernel.scheduler().find(closing_top_pid) == nullptr ||
+        process_count_named(kernel.scheduler(), "top:kernel") != 1)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("closing one shell top instance affected another shell's top");
+    }
     if (auto status = kernel.debug_shell().close_surface_window(closing_shell_surface); !status.ok())
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return status;
     }
     if (kernel.scheduler().find(closing_shell_pid) != nullptr || kernel.scheduler().find(closing_top_pid) != nullptr ||
-        kernel.task_manager().surface_id() != 0 || process_count_named(kernel.scheduler(), "oksh") != 0)
+        kernel.task_manager().surface_id() != 0 || process_count_named(kernel.scheduler(), "oksh") != 0 ||
+        process_count_named(kernel.scheduler(), "top:kernel") != 0)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("closing a shell with foreground top left a child or orphan oksh behind");
