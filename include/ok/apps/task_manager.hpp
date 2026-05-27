@@ -15,17 +15,24 @@ class Kernel;
 namespace apps
 {
 
+enum class TaskMonitorProgram : u8
+{
+    task_manager,
+    top,
+};
+
 class KernelTaskManager final
 {
   public:
     Status open(gui::GuiCompositor &compositor, Kernel &kernel, user::Credentials credentials,
-                sched::ProcessId process_id, std::string_view title = "task-manager");
+                sched::ProcessId process_id, TaskMonitorProgram program = TaskMonitorProgram::task_manager);
     Status refresh(gui::GuiCompositor &compositor, Kernel &kernel);
     Status handle_key(gui::GuiCompositor &compositor, Kernel &kernel, int key);
     Status scroll_processes(gui::GuiCompositor &compositor, Kernel &kernel, i32 rows);
     Status close(gui::GuiCompositor &compositor);
     void mark_closed();
     Status render_tui(Kernel &kernel, FixedString<4096> &out) const;
+    Status render_top_tui(Kernel &kernel, FixedString<4096> &out) const;
 
     [[nodiscard]] gui::SurfaceId surface_id() const
     {
@@ -50,6 +57,7 @@ class KernelTaskManager final
     gui::SurfaceId surface_id_{0};
     sched::ProcessId process_id_{0};
     user::Credentials credentials_{user::kernel_credentials()};
+    TaskMonitorProgram program_{TaskMonitorProgram::task_manager};
     usize render_count_{0};
     usize process_scroll_{0};
     u8 key_escape_state_{0};

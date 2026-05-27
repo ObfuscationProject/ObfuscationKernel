@@ -4,7 +4,7 @@
 #include "ok/apps/task_manager.hpp"
 #include "ok/arch/arch.hpp"
 #include "ok/core/power.hpp"
-#include "ok/core/shell.hpp"
+#include "ok/apps/shell.hpp"
 #include "ok/driver/driver.hpp"
 #include "ok/fs/simplefs.hpp"
 #include "ok/fs/vfs.hpp"

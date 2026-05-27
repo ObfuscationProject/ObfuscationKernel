@@ -48,6 +48,9 @@ UI processes created by `root` or another normal user are recorded as
 GUI file manager launches create distinct `fm:<user>` processes using the
 credentials active at launch time; `fm` launched from the shell blocks only its
 launching `oksh` until the file manager exits.
+Task monitor applications follow the same rule: `taskman gui` uses `tm:<user>`
+and `top gui` uses `top:<user>`, while their TUI modes render synchronously in
+the shell without creating module records.
 Future work should replace the simulated dispatch counters with timer-derived
 runtime deltas and add real SMP run queues once architecture code starts running
 kernel threads concurrently.

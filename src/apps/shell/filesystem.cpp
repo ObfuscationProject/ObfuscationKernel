@@ -1,4 +1,4 @@
-#include "ok/core/shell.hpp"
+#include "ok/apps/shell.hpp"
 
 #include "ok/core/kernel.hpp"
 #include "shell_private.hpp"
@@ -41,11 +41,18 @@ Result<u32> parse_mode(std::string_view text)
 
 Status KernelDebugShell::command_echo(std::string_view text)
 {
+    bool newline = true;
+    text = trim(text);
+    if (first_word(text) == "-n")
+    {
+        newline = false;
+        text = after_first_word(text);
+    }
     if (auto status = append(text); !status.ok())
     {
         return status;
     }
-    return append("\n");
+    return newline ? append("\n") : Status::success();
 }
 
 Status KernelDebugShell::command_pwd()
@@ -362,6 +369,79 @@ Status KernelDebugShell::command_cat(std::string_view path)
     return Status::success();
 }
 
+Status KernelDebugShell::command_cp(std::string_view args)
+{
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+    const auto source_path = first_word(args);
+    const auto target_path = trim(after_first_word(args));
+    if (source_path.empty() || target_path.empty())
+    {
+        return Status::invalid_argument("cp requires a source and destination");
+    }
+    auto source = resolve_path(source_path);
+    if (!source)
+    {
+        return source.status();
+    }
+    FixedString<96> resolved_source;
+    if (auto status = resolved_source.assign(source.value()); !status.ok())
+    {
+        return status;
+    }
+    auto target = resolve_path(target_path);
+    if (!target)
+    {
+        return target.status();
+    }
+    FixedString<96> resolved_target;
+    if (auto status = resolved_target.assign(target.value()); !status.ok())
+    {
+        return status;
+    }
+    auto in = kernel_->posix().open(resolved_source.view(), posix::o_RDONLY);
+    if (!in)
+    {
+        return in.status();
+    }
+    std::array<std::byte, fs::max_file_data> buffer{};
+    auto read = kernel_->posix().read(in.value(), buffer);
+    static_cast<void>(kernel_->posix().close(in.value()));
+    if (!read)
+    {
+        return read.status();
+    }
+    auto out = kernel_->posix().open(resolved_target.view(), posix::o_CREAT | posix::o_WRONLY | posix::o_TRUNC);
+    if (!out)
+    {
+        return out.status();
+    }
+    auto written = kernel_->posix().write(out.value(), std::span<const std::byte>{buffer.data(), read.value()});
+    if (!written)
+    {
+        static_cast<void>(kernel_->posix().close(out.value()));
+        return written.status();
+    }
+    return kernel_->posix().close(out.value());
+}
+
+Status KernelDebugShell::command_mv(std::string_view args)
+{
+    const auto source_path = first_word(args);
+    const auto target_path = trim(after_first_word(args));
+    if (source_path.empty() || target_path.empty())
+    {
+        return Status::invalid_argument("mv requires a source and destination");
+    }
+    if (auto status = command_cp(args); !status.ok())
+    {
+        return status;
+    }
+    return command_rm(source_path);
+}
+
 Status KernelDebugShell::command_touch(std::string_view path)
 {
     if (kernel_ == nullptr)
@@ -413,12 +493,45 @@ Status KernelDebugShell::command_rm(std::string_view path)
     {
         return Status::invalid_argument("rm requires a path");
     }
+    path = trim(path);
+    bool remove_directory = false;
+    if (first_word(path) == "-r" || first_word(path) == "-d")
+    {
+        remove_directory = true;
+        path = after_first_word(path);
+    }
+    if (path.empty())
+    {
+        return Status::invalid_argument("rm requires a path");
+    }
     auto resolved = resolve_path(path);
     if (!resolved)
     {
         return resolved.status();
     }
+    if (remove_directory)
+    {
+        return kernel_->posix().rmdir(resolved.value());
+    }
     return kernel_->posix().unlink(resolved.value());
+}
+
+Status KernelDebugShell::command_rmdir(std::string_view path)
+{
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+    if (trim(path).empty())
+    {
+        return Status::invalid_argument("rmdir requires a path");
+    }
+    auto resolved = resolve_path(path);
+    if (!resolved)
+    {
+        return resolved.status();
+    }
+    return kernel_->posix().rmdir(resolved.value());
 }
 
 Status KernelDebugShell::command_stat(std::string_view path)
@@ -607,6 +720,37 @@ Status KernelDebugShell::command_file_manager(std::string_view path)
     if (kernel_ == nullptr)
     {
         return Status::not_initialized("shell has no kernel");
+    }
+
+    const auto mode = first_word(path);
+    if (mode == "close")
+    {
+        return kernel_->close_file_manager();
+    }
+    if (mode == "tui" || mode == "ls" || mode == "status")
+    {
+        auto target = after_first_word(path);
+        auto resolved = resolve_path(target);
+        if (!resolved)
+        {
+            return resolved.status();
+        }
+        FixedString<4096> snapshot;
+        if (auto status = kernel_->file_manager().render_tui(kernel_->vfs(), resolved.value(),
+                                                             kernel_->posix().user_credentials(), snapshot);
+            !status.ok())
+        {
+            return status;
+        }
+        return append(snapshot.view());
+    }
+    if (mode == "gui")
+    {
+        path = after_first_word(path);
+    }
+    else if (!mode.empty() && mode.front() == '-')
+    {
+        return Status::unsupported("fm supports: fm [gui|tui|close] [path]");
     }
 
     auto resolved = resolve_path(path);

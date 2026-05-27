@@ -1,4 +1,4 @@
-#include "ok/core/shell.hpp"
+#include "ok/apps/shell.hpp"
 
 #include "ok/core/kernel.hpp"
 #include "shell_private.hpp"
@@ -7,6 +7,7 @@ namespace ok
 {
 
 using shell_detail::first_word;
+using shell_detail::after_first_word;
 using shell_detail::trim;
 
 Status KernelDebugShell::command_task_manager(std::string_view args)
@@ -44,11 +45,29 @@ Status KernelDebugShell::command_top(std::string_view args)
     {
         return Status::not_initialized("shell has no kernel");
     }
-    if (!trim(args).empty())
+    const auto mode = first_word(args);
+    if (mode == "tui" || mode == "status")
     {
-        return Status::invalid_argument("top does not accept arguments");
+        FixedString<4096> snapshot;
+        if (auto status = kernel_->task_manager().render_top_tui(*kernel_, snapshot); !status.ok())
+        {
+            return status;
+        }
+        return append(snapshot.view());
     }
-    return kernel_->open_task_manager(true, "top");
+    if (mode == "gui" || trim(args).empty())
+    {
+        return kernel_->open_task_manager(true, "top");
+    }
+    if (mode == "close")
+    {
+        return kernel_->close_task_manager();
+    }
+    if (!trim(after_first_word(args)).empty())
+    {
+        return Status::invalid_argument("top supports: top [gui|tui|close]");
+    }
+    return Status::invalid_argument("top supports: top [gui|tui|close]");
 }
 
 Status KernelDebugShell::tick()

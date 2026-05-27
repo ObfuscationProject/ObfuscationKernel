@@ -18,9 +18,14 @@ or policy boundaries and concepts at compile-time extension points.
   PCIe, USB, and input drivers.
 - `include/ok/gui`: restartable GUI compositor module and fixed-capacity
   surface/window API.
+- `include/ok/apps`: kernel-resident applications such as `oksh`, file manager,
+  task manager, and `top`; these are scheduler-visible programs, not kernel
+  modules.
 - `include/ok/fs`: RAM-backed VFS node model.
 - `include/ok/user`: user-mode transition gateway.
 - `include/ok/core`: kernel composition and shared types.
+- `src/apps`: implementations for kernel applications that run on top of core,
+  POSIX, scheduler, VFS, and GUI services.
 
 ## C++ Design Rules
 

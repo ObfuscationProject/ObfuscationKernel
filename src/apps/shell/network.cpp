@@ -1,4 +1,4 @@
-#include "ok/core/shell.hpp"
+#include "ok/apps/shell.hpp"
 
 #include "ok/core/kernel.hpp"
 #include "shell_private.hpp"

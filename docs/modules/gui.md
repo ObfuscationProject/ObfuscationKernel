@@ -54,8 +54,8 @@ as a compatibility aggregate for callers that still want all GUI declarations.
   Kernel-owned surfaces route close requests through their owning process before
   any forced close.
 - keyboard input is routed by the focused surface: `oksh` receives text when a
-  shell window is focused, while the file manager consumes simple navigation keys
-  when it is focused.
+  shell window is focused, while kernel applications such as the file manager
+  and task/top consume their own navigation keys when focused.
 - debug-test cleanup closes shell and file-manager surfaces, then leaves the
   desktop taskbar responsive if the platform debug-exit path returns. This keeps
   post-test input usable until an explicit `shutdown`, `poweroff`, `halt`, or
@@ -110,25 +110,26 @@ file manager is opened from a kernel session, its scheduler record stays a
 kernel thread; when it is opened from `root` or another normal user, it is
 created as an isolated user process with its own address-space ID.
 
-The `fm`/`fileman` shell command forks a foreground GUI kernel file manager for
-a path. The file-manager application interface lives under `ok::apps`, outside
-the compositor API, and renders the VFS directory listing in a separate
+The `fm`/`fileman` shell command runs the kernel file manager for a path. The
+file-manager application interface lives under `ok::apps`, outside the
+compositor API and outside `ModuleManager`, and renders the VFS directory listing in a separate
 `kernel-files` surface using the same compositor. Mouse clicks in its left
 navigation open `/`, `/dev`, `/tmp`, or `/proc` when present; clicks in the
-listing select files and open directories, with `../` as the first entry outside
-`/` for parent directory navigation. The window itself uses the same drag,
-resize, minimize,
+listing select files, open directories, and show details/previews for regular
+files, with `../` as the first entry outside `/` for parent directory
+navigation. The window itself uses the same drag, resize, minimize,
 maximize, and close handling as other GUI surfaces. Each open runs as a separate
 `fm:<user>` scheduler process with the credentials active at launch, and
 directory reads are checked against those credentials. A shell-launched file
 manager blocks its launching `oksh` process until it exits, while F1 opens
 another file manager as a shortcut without blocking the shell.
 
-`taskman` renders a one-shot built-in task-manager TUI snapshot. `top` opens the
-same task-manager GUI as a foreground shell child backed by a `top:<user>`
-scheduler process, so Ctrl-C interrupts it like other shell-launched GUI
-programs. `taskman gui` opens `ok::apps::KernelTaskManager` as a foreground
-`tm:<user>` GUI child, and `taskman close` closes that GUI process and surface.
+`taskman` and `top` live under `ok::apps` as kernel applications. `taskman tui`
+renders a one-shot task-manager snapshot, `taskman gui` opens a foreground
+`tm:<user>` GUI child, `top tui` renders a top-style snapshot, and `top gui`
+opens a realtime foreground `top:<user>` GUI child. Ctrl-C interrupts a
+shell-launched GUI `top` like other foreground programs. `taskman close` or
+`top close` closes the active monitor GUI process and surface.
 All views read the same scheduler, network, and block device counters, showing
 per-CPU dispatch usage, current PID/TID, process CPU share, network byte
 counters, and disk I/O bytes. Mouse wheel input scrolls the active task-manager

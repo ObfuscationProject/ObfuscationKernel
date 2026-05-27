@@ -1146,7 +1146,8 @@ Status Kernel::open_task_manager(bool foreground_shell_child, std::string_view p
         return process.status();
     }
 
-    if (auto status = task_manager_.open(gui_module_.compositor(), *this, credentials, process.value(), program_name);
+    const auto program = program_name == "top" ? apps::TaskMonitorProgram::top : apps::TaskMonitorProgram::task_manager;
+    if (auto status = task_manager_.open(gui_module_.compositor(), *this, credentials, process.value(), program);
         !status.ok())
     {
         static_cast<void>(task_manager_.close(gui_module_.compositor()));

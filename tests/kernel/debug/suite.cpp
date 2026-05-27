@@ -502,6 +502,43 @@ Status Kernel::run_debug_test_suite()
     {
         return Status::fault("debug shell sh operator test failed");
     }
+    auto shell_expand = debug_shell_.execute("export OKWORD=alpha; echo \"$OKWORD $PWD\"");
+    if (!shell_expand || shell_expand.value() != "alpha /\n")
+    {
+        return Status::fault("debug shell quote and variable expansion test failed");
+    }
+    auto shell_pipe = debug_shell_.execute("echo alpha | grep alpha | wc -l");
+    if (!shell_pipe || shell_pipe.value() != "1\n")
+    {
+        return Status::fault("debug shell pipeline test failed");
+    }
+    auto shell_append = debug_shell_.execute("echo first > /tmp/shell-pipe; echo second >> /tmp/shell-pipe; cat /tmp/shell-pipe");
+    if (!shell_append || shell_append.value() != "first\nsecond\n")
+    {
+        return Status::fault("debug shell append redirection test failed");
+    }
+    auto shell_input_redirect = debug_shell_.execute("wc -l < /tmp/shell-pipe");
+    if (!shell_input_redirect || shell_input_redirect.value() != "2\n")
+    {
+        return Status::fault("debug shell input redirection test failed");
+    }
+    auto shell_cp_mv = debug_shell_.execute("cp /tmp/shell-pipe /tmp/shell-copy; mv /tmp/shell-copy /tmp/shell-moved; cat /tmp/shell-moved");
+    if (!shell_cp_mv || shell_cp_mv.value() != "first\nsecond\n")
+    {
+        return Status::fault("debug shell cp/mv test failed");
+    }
+    auto shell_fm_tui = debug_shell_.execute("fm tui /tmp");
+    if (!shell_fm_tui || !contains_text(shell_fm_tui.value(), "FILE MANAGER") ||
+        !contains_text(shell_fm_tui.value(), "shell-pipe"))
+    {
+        return Status::fault("file manager TUI test failed");
+    }
+    auto shell_top_tui = debug_shell_.execute("top tui");
+    if (!shell_top_tui || !contains_text(shell_top_tui.value(), "top -") ||
+        !contains_text(shell_top_tui.value(), "%Cpu"))
+    {
+        return Status::fault("top TUI test failed");
+    }
     auto shell_net_send = debug_shell_.execute("net udp 30002 shell-net");
     if (!shell_net_send)
     {

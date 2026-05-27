@@ -19,7 +19,9 @@ normal user process with its own address-space ID. In GUI mode each visible
 shell window is registered as a separate `oksh` scheduler process.
 The command evaluator follows the Bourne shell subset needed for kernel debug
 work: comments beginning with `#`, command sequences separated by `;`, and
-basic `&&`/`||` conditionals.
+basic `&&`/`||` conditionals. It also handles quotes, backslash escaping,
+`$PWD`/`$USER`/`$?` and exported shell variables, `|` pipelines for built-in
+filters, `<` input redirection, and `>`/`>>` output redirection.
 
 Supported commands:
 
@@ -31,11 +33,15 @@ Supported commands:
 - `fs`: print RAM VFS state for `/tmp/kernel.log`.
 - `posix`: print POSIX process, cwd, and open-file state.
 - `test`: print the last debug-test coverage result.
-- `echo <text>`: echo input through the kernel output path.
+- `echo [-n] <text>`: echo input through the kernel output path.
 - `pwd`, `cd <path>`, `ls [-a] [-h] [-l] [path]`, `cat <path>`, `touch <path>`,
-  `mkdir <path>`, `rm <path>`, `stat <path>`: BusyBox-style file commands over
-  the RAM VFS/POSIX layer. Long `ls` output includes owner and group names, so
-  `ls -lha` shows entries in the same `mode links user group size name` shape.
+  `cp <src> <dst>`, `mv <src> <dst>`, `mkdir <path>`, `rm [-r|-d] <path>`,
+  `rmdir <path>`, `stat <path>`: BusyBox-style file commands over the RAM
+  VFS/POSIX layer. Long `ls` output includes owner and group names, so `ls -lha`
+  shows entries in the same `mode links user group size name` shape.
+- `grep`, `wc`, `head`, `tail`: built-in pipeline/input-redirection filters.
+- `history`, `env`, `export`, `unset`, `type`, `which`: common shell inspection
+  and environment commands.
 - `chmod <octal> <path>`, `chown <user> <path>`: manage VFS ownership and
   permissions through POSIX credentials.
 - `whoami`, `id`, `su [user]`: switch the debug shell session through the kernel
@@ -64,12 +70,15 @@ Supported commands:
   current block device as EXT4.
 - `net status|udp|recv|listen|tcp`: inspect and exercise the IPv4/UDP/TCP
   loopback stack used by early network-debug work.
-- `fm [path]` / `fileman [path]`: fork a foreground GUI file manager for a VFS
-  directory as a scheduler-visible `fm:<user>` process using the current
-  credentials. Kernel-launched file managers stay kernel threads; root/user
-  launches become isolated user processes. While that foreground file manager is
-  open, the debug shell process is blocked and does not display a fresh prompt
-  until the file manager closes.
+- `fm [gui|tui|close] [path]` / `fileman [gui|tui|close] [path]`: run the
+  kernel file manager. GUI mode forks a foreground scheduler-visible
+  `fm:<user>` process using current credentials; TUI mode prints a directory
+  table in the shell; `close` closes the active GUI file manager. These are
+  kernel applications in `ok::apps`, not kernel modules.
+- `taskman [tui|gui|close]`: print or open the task-manager application.
+- `top [gui|tui|close]`: run the kernel `top` application. Plain `top` keeps the
+  historical foreground GUI behavior; `top tui` prints a top-style snapshot in
+  the shell.
 - `F1`: open or raise the GUI file manager at the current working directory
   without blocking the shell.
 

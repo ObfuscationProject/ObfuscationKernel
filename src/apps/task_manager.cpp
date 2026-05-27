@@ -226,10 +226,12 @@ Status fill_rect_if_non_empty(GuiCompositor &compositor, SurfaceId surface, Rect
 } // namespace
 
 Status KernelTaskManager::open(GuiCompositor &compositor, Kernel &kernel, user::Credentials credentials,
-                               sched::ProcessId process_id, std::string_view title)
+                               sched::ProcessId process_id, TaskMonitorProgram program)
 {
     credentials_ = credentials;
     process_id_ = process_id;
+    program_ = program;
+    const auto title = program_ == TaskMonitorProgram::top ? std::string_view{"top"} : std::string_view{"task-manager"};
     if (surface_id_ != 0 && !compositor.surface_info(surface_id_))
     {
         surface_id_ = 0;
@@ -366,6 +368,7 @@ void KernelTaskManager::mark_closed()
 {
     surface_id_ = 0;
     process_id_ = 0;
+    program_ = TaskMonitorProgram::task_manager;
     process_scroll_ = 0;
     key_escape_state_ = 0;
 }
@@ -569,6 +572,163 @@ Status KernelTaskManager::render_tui(Kernel &kernel, FixedString<4096> &out) con
     return Status::success();
 }
 
+Status KernelTaskManager::render_top_tui(Kernel &kernel, FixedString<4096> &out) const
+{
+    out.clear();
+    auto &scheduler = kernel.scheduler();
+    const auto dispatches = scheduler.total_dispatches();
+
+    if (auto status = out.append("top - "); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_decimal(out, scheduler.cpu_count()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = out.append(" cpus, "); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_decimal(out, scheduler.process_count()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = out.append(" tasks, "); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_decimal(out, dispatches); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = out.append(" dispatches\n"); !status.ok())
+    {
+        return status;
+    }
+
+    if (auto status = out.append("%Cpu(s): "); !status.ok())
+    {
+        return status;
+    }
+    for (usize i = 0; i < scheduler.cpu_count(); ++i)
+    {
+        if (i != 0)
+        {
+            if (auto status = out.append("  "); !status.ok())
+            {
+                return status;
+            }
+        }
+        if (auto status = out.append("cpu"); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_decimal(out, i); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = out.append("="); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_percent(out, scheduler.cpu_usage_percent(static_cast<smp::CpuId>(i))); !status.ok())
+        {
+            return status;
+        }
+    }
+    if (auto status = out.append("\nMem: page="); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_decimal(out, kernel.memory().frames().page_size()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = out.append(" free_frames="); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append_decimal(out, kernel.memory().frames().free_frames()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = out.append("\n\n  PID USER    STAT CPU PRI THR COMMAND\n"); !status.ok())
+    {
+        return status;
+    }
+    for (const auto &process : scheduler.processes())
+    {
+        if (auto status = append_padded_decimal(out, process.pid(), 5); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = out.append(' '); !status.ok())
+        {
+            return status;
+        }
+        std::string_view user_label = "user";
+        if (process.credentials().kernel_space)
+        {
+            user_label = "kernel";
+        }
+        else if (const auto *account = kernel.user_space().users().find_by_uid(process.credentials().euid);
+                 account != nullptr)
+        {
+            user_label = account->name.view();
+        }
+        if (auto status = append_padded(out, user_label, 7); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = out.append(' '); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_padded(out, process_state_label(process.state()), 4); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = out.append(' '); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_padded_decimal(out, scheduler.process_usage_percent(process.pid()), 3); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = out.append("% "); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_padded_decimal(out, process.priority(), 3); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = out.append(' '); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_padded_decimal(out, process.threads().size(), 3); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = out.append(' '); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = out.append(process.name()); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = out.append('\n'); !status.ok())
+        {
+            return status;
+        }
+    }
+    return Status::success();
+}
+
 Status KernelTaskManager::render(GuiCompositor &compositor, Kernel &kernel)
 {
     auto info = compositor.surface_info(surface_id_);
@@ -606,7 +766,8 @@ Status KernelTaskManager::render(GuiCompositor &compositor, Kernel &kernel)
         return status;
     }
 
-    if (auto status = draw_line(compositor, surface_id_, 1, "TASK MANAGER", text_color, title_color); !status.ok())
+    const auto title_text = program_ == TaskMonitorProgram::top ? std::string_view{"TOP"} : std::string_view{"TASK MANAGER"};
+    if (auto status = draw_line(compositor, surface_id_, 1, title_text, text_color, title_color); !status.ok())
     {
         return status;
     }

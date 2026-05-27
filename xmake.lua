@@ -9,7 +9,8 @@ includes("xmake/toolchains.lua")
 
 function add_ok_kernel_sources(include_kernel_main)
     add_files("src/core/*.cpp")
-    add_files("src/core/shell/*.cpp")
+    add_files("src/apps/*.cpp")
+    add_files("src/apps/shell/*.cpp")
     if not include_kernel_main then
         remove_files("src/core/kernel_main.cpp")
     end

@@ -1,4 +1,4 @@
-#include "ok/core/shell.hpp"
+#include "ok/apps/shell.hpp"
 
 #include "ok/core/kernel.hpp"
 #include "shell/shell_private.hpp"
@@ -19,6 +19,68 @@ enum class ShellOperator : u8
     and_if,
     or_if,
 };
+
+struct Redirection
+{
+    usize index{0};
+    usize width{0};
+    bool append{false};
+};
+
+template <usize Capacity> Status append_decimal_to(FixedString<Capacity> &out, u64 value)
+{
+    constexpr u64 powers[] = {
+        10'000'000'000'000'000'000ull,
+        1'000'000'000'000'000'000ull,
+        100'000'000'000'000'000ull,
+        10'000'000'000'000'000ull,
+        1'000'000'000'000'000ull,
+        100'000'000'000'000ull,
+        10'000'000'000'000ull,
+        1'000'000'000'000ull,
+        100'000'000'000ull,
+        10'000'000'000ull,
+        1'000'000'000ull,
+        100'000'000ull,
+        10'000'000ull,
+        1'000'000ull,
+        100'000ull,
+        10'000ull,
+        1'000ull,
+        100ull,
+        10ull,
+        1ull,
+    };
+    bool started = false;
+    for (const auto power : powers)
+    {
+        u8 digit = 0;
+        while (value >= power)
+        {
+            value -= power;
+            ++digit;
+        }
+        if (digit != 0 || started || power == 1)
+        {
+            if (auto status = out.append(static_cast<char>('0' + digit)); !status.ok())
+            {
+                return status;
+            }
+            started = true;
+        }
+    }
+    return Status::success();
+}
+
+bool is_shell_name_start(char ch)
+{
+    return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_';
+}
+
+bool is_shell_name_char(char ch)
+{
+    return is_shell_name_start(ch) || (ch >= '0' && ch <= '9');
+}
 
 std::string_view strip_comment(std::string_view value)
 {
@@ -79,13 +141,83 @@ usize find_shell_operator(std::string_view value)
     return value.size();
 }
 
-usize find_output_redirection(std::string_view value)
+usize find_pipe_operator(std::string_view value)
 {
     bool single_quote = false;
     bool double_quote = false;
     for (usize i = 0; i < value.size(); ++i)
     {
         const auto ch = value[i];
+        if (ch == '\\' && !single_quote)
+        {
+            ++i;
+            continue;
+        }
+        if (ch == '\'' && !double_quote)
+        {
+            single_quote = !single_quote;
+            continue;
+        }
+        if (ch == '"' && !single_quote)
+        {
+            double_quote = !double_quote;
+            continue;
+        }
+        if (!single_quote && !double_quote && ch == '|')
+        {
+            if (i + 1 < value.size() && value[i + 1] == '|')
+            {
+                ++i;
+                continue;
+            }
+            return i;
+        }
+    }
+    return value.size();
+}
+
+usize find_input_redirection(std::string_view value)
+{
+    bool single_quote = false;
+    bool double_quote = false;
+    for (usize i = 0; i < value.size(); ++i)
+    {
+        const auto ch = value[i];
+        if (ch == '\\' && !single_quote)
+        {
+            ++i;
+            continue;
+        }
+        if (ch == '\'' && !double_quote)
+        {
+            single_quote = !single_quote;
+            continue;
+        }
+        if (ch == '"' && !single_quote)
+        {
+            double_quote = !double_quote;
+            continue;
+        }
+        if (!single_quote && !double_quote && ch == '<')
+        {
+            return i;
+        }
+    }
+    return value.size();
+}
+
+Redirection find_output_redirection(std::string_view value)
+{
+    bool single_quote = false;
+    bool double_quote = false;
+    for (usize i = 0; i < value.size(); ++i)
+    {
+        const auto ch = value[i];
+        if (ch == '\\' && !single_quote)
+        {
+            ++i;
+            continue;
+        }
         if (ch == '\'' && !double_quote)
         {
             single_quote = !single_quote;
@@ -98,10 +230,11 @@ usize find_output_redirection(std::string_view value)
         }
         if (!single_quote && !double_quote && ch == '>')
         {
-            return i;
+            return Redirection{.index = i, .width = (i + 1 < value.size() && value[i + 1] == '>') ? 2u : 1u,
+                               .append = i + 1 < value.size() && value[i + 1] == '>'};
         }
     }
-    return value.size();
+    return Redirection{.index = value.size()};
 }
 
 ShellOperator operator_after(std::string_view value, usize index)
@@ -237,12 +370,26 @@ Status KernelDebugShell::attach(Kernel &kernel)
     process_id_ = 0;
     foreground_process_id_ = 0;
     gui_windows_.clear();
+    environment_.clear();
     gui_render_count_ = 0;
     gui_scroll_rows_ = 0;
     gui_input_history_count_ = 0;
     gui_input_history_cursor_ = 0;
+    last_status_code_ = 0;
     gui_escape_state_ = 0;
     gui_open_ = true;
+    if (auto status = set_environment_variable("HOME", "/"); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = set_environment_variable("SHELL", "/kernel/apps/oksh"); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = set_environment_variable("PATH", "/kernel/apps:/bin:/sbin"); !status.ok())
+    {
+        return status;
+    }
     return sync_posix_credentials_to_session();
 }
 
@@ -1166,6 +1313,7 @@ Result<std::string_view> KernelDebugShell::execute(std::string_view line)
         if (should_run && !command_line.empty())
         {
             last_status = dispatch_command(command_line);
+            last_status_code_ = last_status.ok() ? 0u : 1u;
             if (!last_status.ok() && !last_status.message().empty())
             {
                 static_cast<void>(append("shell error: "));
@@ -1192,22 +1340,59 @@ Result<std::string_view> KernelDebugShell::execute(std::string_view line)
 
 Status KernelDebugShell::dispatch_command(std::string_view command_line)
 {
-    const auto redirect = find_output_redirection(command_line);
-    if (redirect < command_line.size())
+    return dispatch_command_with_input(command_line, {}, false);
+}
+
+Status KernelDebugShell::dispatch_command_with_input(std::string_view command_line, std::string_view input,
+                                                     bool has_input)
+{
+    const auto pipe = find_pipe_operator(command_line);
+    if (pipe < command_line.size())
     {
-        const auto producer = trim(command_line.substr(0, redirect));
-        const auto target = trim(command_line.substr(redirect + 1));
+        const auto producer = trim(command_line.substr(0, pipe));
+        const auto consumer = trim(command_line.substr(pipe + 1));
+        if (producer.empty() || consumer.empty())
+        {
+            return Status::invalid_argument("pipe requires commands on both sides");
+        }
+
+        const auto output_start = output_.size();
+        const auto producer_status = dispatch_command_with_input(producer, input, has_input);
+        FixedString<4096> piped;
+        if (producer_status.ok())
+        {
+            if (auto status = piped.assign(output_.view().substr(output_start)); !status.ok())
+            {
+                return status;
+            }
+        }
+        while (output_.size() > output_start)
+        {
+            output_.pop_back();
+        }
+        if (!producer_status.ok())
+        {
+            return producer_status;
+        }
+        return dispatch_command_with_input(consumer, piped.view(), true);
+    }
+
+    const auto redirect = find_output_redirection(command_line);
+    if (redirect.index < command_line.size())
+    {
+        const auto producer = trim(command_line.substr(0, redirect.index));
+        const auto target = trim(command_line.substr(redirect.index + redirect.width));
         if (producer.empty() || target.empty())
         {
             return Status::invalid_argument("output redirection requires a command and path");
         }
-        if (find_output_redirection(target) < target.size())
+        if (find_output_redirection(target).index < target.size())
         {
             return Status::invalid_argument("multiple output redirections are not supported");
         }
 
         const auto output_start = output_.size();
-        const auto producer_status = dispatch_command(producer);
+        const auto producer_status = dispatch_command_with_input(producer, input, has_input);
         FixedString<4096> redirected;
         if (producer_status.ok())
         {
@@ -1225,12 +1410,18 @@ Status KernelDebugShell::dispatch_command(std::string_view command_line)
             return producer_status;
         }
 
-        auto resolved = resolve_path(target);
+        FixedString<512> expanded_target;
+        if (auto status = expand_command_line(target, expanded_target); !status.ok())
+        {
+            return status;
+        }
+        auto resolved = resolve_path(expanded_target.view());
         if (!resolved)
         {
             return resolved.status();
         }
-        auto fd = kernel_->posix().open(resolved.value(), posix::o_CREAT | posix::o_WRONLY | posix::o_TRUNC);
+        const auto flags = posix::o_CREAT | posix::o_WRONLY | (redirect.append ? posix::o_APPEND : posix::o_TRUNC);
+        auto fd = kernel_->posix().open(resolved.value(), flags);
         if (!fd)
         {
             return fd.status();
@@ -1244,11 +1435,73 @@ Status KernelDebugShell::dispatch_command(std::string_view command_line)
         return kernel_->posix().close(fd.value());
     }
 
+    const auto input_redirect = find_input_redirection(command_line);
+    if (input_redirect < command_line.size())
+    {
+        const auto consumer = trim(command_line.substr(0, input_redirect));
+        const auto target = trim(command_line.substr(input_redirect + 1));
+        if (consumer.empty() || target.empty())
+        {
+            return Status::invalid_argument("input redirection requires a command and path");
+        }
+        if (find_input_redirection(target) < target.size())
+        {
+            return Status::invalid_argument("multiple input redirections are not supported");
+        }
+
+        FixedString<512> expanded_target;
+        if (auto status = expand_command_line(target, expanded_target); !status.ok())
+        {
+            return status;
+        }
+        auto resolved = resolve_path(expanded_target.view());
+        if (!resolved)
+        {
+            return resolved.status();
+        }
+        auto fd = kernel_->posix().open(resolved.value(), posix::o_RDONLY);
+        if (!fd)
+        {
+            return fd.status();
+        }
+        std::array<std::byte, fs::max_file_data> buffer{};
+        auto read = kernel_->posix().read(fd.value(), buffer);
+        static_cast<void>(kernel_->posix().close(fd.value()));
+        if (!read)
+        {
+            return read.status();
+        }
+        FixedString<4096> redirected_input;
+        for (usize i = 0; i < read.value(); ++i)
+        {
+            if (auto status = redirected_input.append(static_cast<char>(buffer[i])); !status.ok())
+            {
+                return status;
+            }
+        }
+        return dispatch_command_with_input(consumer, redirected_input.view(), true);
+    }
+
+    FixedString<512> expanded;
+    if (auto status = expand_command_line(command_line, expanded); !status.ok())
+    {
+        return status;
+    }
+    command_line = expanded.view();
+
     const auto command = first_word(command_line);
     const auto args = after_first_word(command_line);
     if (command.empty())
     {
         return Status::success();
+    }
+    if (has_input)
+    {
+        auto filter_status = command_filter(command, args, input, true);
+        if (filter_status.ok() || filter_status.code() != StatusCode::not_found)
+        {
+            return filter_status;
+        }
     }
     if (command == "help")
     {
@@ -1322,6 +1575,14 @@ Status KernelDebugShell::dispatch_command(std::string_view command_line)
     {
         return command_cat(args);
     }
+    else if (command == "cp")
+    {
+        return command_cp(args);
+    }
+    else if (command == "mv")
+    {
+        return command_mv(args);
+    }
     else if (command == "touch")
     {
         return command_touch(args);
@@ -1333,6 +1594,10 @@ Status KernelDebugShell::dispatch_command(std::string_view command_line)
     else if (command == "rm")
     {
         return command_rm(args);
+    }
+    else if (command == "rmdir")
+    {
+        return command_rmdir(args);
     }
     else if (command == "stat")
     {
@@ -1414,10 +1679,375 @@ Status KernelDebugShell::dispatch_command(std::string_view command_line)
     {
         return command_task_manager(args);
     }
+    else if (command == "history")
+    {
+        return command_history();
+    }
+    else if (command == "env")
+    {
+        return command_env();
+    }
+    else if (command == "export")
+    {
+        return command_export(args);
+    }
+    else if (command == "unset")
+    {
+        return command_unset(args);
+    }
+    else if (command == "type")
+    {
+        return command_type(args);
+    }
+    else if (command == "which")
+    {
+        return command_which(args);
+    }
+    else if (command == "grep" || command == "wc" || command == "head" || command == "tail")
+    {
+        return command_filter(command, args, input, false);
+    }
     else
     {
         return Status::not_found("command not found");
     }
+}
+
+Status KernelDebugShell::expand_command_line(std::string_view command_line, FixedString<512> &out)
+{
+    out.clear();
+    bool single_quote = false;
+    bool double_quote = false;
+    for (usize i = 0; i < command_line.size(); ++i)
+    {
+        const auto ch = command_line[i];
+        if (ch == '\'' && !double_quote)
+        {
+            single_quote = !single_quote;
+            continue;
+        }
+        if (ch == '"' && !single_quote)
+        {
+            double_quote = !double_quote;
+            continue;
+        }
+        if (ch == '\\' && !single_quote)
+        {
+            if (i + 1 < command_line.size())
+            {
+                ++i;
+                if (auto status = out.append(command_line[i]); !status.ok())
+                {
+                    return status;
+                }
+            }
+            continue;
+        }
+        if (ch == '$' && !single_quote)
+        {
+            if (i + 1 < command_line.size() && command_line[i + 1] == '?')
+            {
+                if (auto status = append_variable_value("?", out); !status.ok())
+                {
+                    return status;
+                }
+                ++i;
+                continue;
+            }
+            if (i + 1 < command_line.size() && is_shell_name_start(command_line[i + 1]))
+            {
+                const auto start = i + 1;
+                usize end = start;
+                while (end < command_line.size() && is_shell_name_char(command_line[end]))
+                {
+                    ++end;
+                }
+                if (auto status = append_variable_value(command_line.substr(start, end - start), out); !status.ok())
+                {
+                    return status;
+                }
+                i = end - 1;
+                continue;
+            }
+        }
+        if (auto status = out.append(ch); !status.ok())
+        {
+            return status;
+        }
+    }
+    if (single_quote || double_quote)
+    {
+        return Status::invalid_argument("unterminated quote");
+    }
+    return Status::success();
+}
+
+Status KernelDebugShell::append_variable_value(std::string_view name, FixedString<512> &out)
+{
+    if (name == "?")
+    {
+        return append_decimal_to(out, last_status_code_);
+    }
+    if (name == "PWD")
+    {
+        return kernel_ == nullptr ? Status::not_initialized("shell has no kernel") : out.append(kernel_->posix().getcwd());
+    }
+    if (name == "USER")
+    {
+        return out.append(session_user_name_.view());
+    }
+    for (const auto &entry : environment_)
+    {
+        if (entry.name.view() == name)
+        {
+            return out.append(entry.value.view());
+        }
+    }
+    return Status::success();
+}
+
+Status KernelDebugShell::set_environment_variable(std::string_view name, std::string_view value)
+{
+    if (name.empty() || !is_shell_name_start(name.front()))
+    {
+        return Status::invalid_argument("environment variable name is invalid");
+    }
+    for (const auto ch : name)
+    {
+        if (!is_shell_name_char(ch))
+        {
+            return Status::invalid_argument("environment variable name is invalid");
+        }
+    }
+    for (auto &entry : environment_)
+    {
+        if (entry.name.view() == name)
+        {
+            return entry.value.assign(value);
+        }
+    }
+    EnvironmentVariable entry;
+    if (auto status = entry.name.assign(name); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = entry.value.assign(value); !status.ok())
+    {
+        return status;
+    }
+    return environment_.push_back(entry);
+}
+
+Status KernelDebugShell::command_filter(std::string_view command, std::string_view args, std::string_view input,
+                                        bool has_input)
+{
+    args = trim(args);
+    if (command == "cat")
+    {
+        if (!has_input)
+        {
+            return Status::not_found("filter not active");
+        }
+        if (!args.empty() && args != "-")
+        {
+            return Status::invalid_argument("cat in a pipeline accepts only stdin");
+        }
+        return append(input);
+    }
+    if (command == "grep")
+    {
+        if (!has_input)
+        {
+            return Status::invalid_argument("grep requires pipeline or input redirection");
+        }
+        const auto pattern = first_word(args);
+        if (pattern.empty())
+        {
+            return Status::invalid_argument("grep requires a pattern");
+        }
+        usize line_start = 0;
+        for (usize i = 0; i <= input.size(); ++i)
+        {
+            if (i != input.size() && input[i] != '\n')
+            {
+                continue;
+            }
+            const auto line = input.substr(line_start, i - line_start);
+            bool found = pattern.empty();
+            if (!found && pattern.size() <= line.size())
+            {
+                for (usize cursor = 0; cursor + pattern.size() <= line.size(); ++cursor)
+                {
+                    if (line.substr(cursor, pattern.size()) == pattern)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if (found)
+            {
+                if (auto status = append(line); !status.ok())
+                {
+                    return status;
+                }
+                if (auto status = append("\n"); !status.ok())
+                {
+                    return status;
+                }
+            }
+            line_start = i + 1;
+        }
+        return Status::success();
+    }
+    if (command == "wc")
+    {
+        if (!has_input)
+        {
+            return Status::invalid_argument("wc requires pipeline or input redirection");
+        }
+        bool only_lines = args == "-l";
+        bool only_bytes = args == "-c";
+        bool only_words = args == "-w";
+        if (!args.empty() && !only_lines && !only_bytes && !only_words)
+        {
+            return Status::unsupported("wc supports -l, -w, or -c");
+        }
+        usize lines = 0;
+        usize words = 0;
+        bool in_word = false;
+        for (const auto ch : input)
+        {
+            if (ch == '\n')
+            {
+                ++lines;
+            }
+            const bool space = ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r';
+            if (space)
+            {
+                in_word = false;
+            }
+            else if (!in_word)
+            {
+                in_word = true;
+                ++words;
+            }
+        }
+        if (only_lines)
+        {
+            if (auto status = append_unsigned(lines); !status.ok())
+            {
+                return status;
+            }
+            return append("\n");
+        }
+        if (only_words)
+        {
+            if (auto status = append_unsigned(words); !status.ok())
+            {
+                return status;
+            }
+            return append("\n");
+        }
+        if (only_bytes)
+        {
+            if (auto status = append_unsigned(input.size()); !status.ok())
+            {
+                return status;
+            }
+            return append("\n");
+        }
+        if (auto status = append_padded_unsigned(lines, 4); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(" "); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_padded_unsigned(words, 4); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append(" "); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = append_unsigned(input.size()); !status.ok())
+        {
+            return status;
+        }
+        return append("\n");
+    }
+    if (command == "head" || command == "tail")
+    {
+        if (!has_input)
+        {
+            return Status::invalid_argument("head/tail require pipeline or input redirection");
+        }
+        usize count = 10;
+        if (!args.empty())
+        {
+            std::string_view number = args;
+            if (first_word(args) == "-n")
+            {
+                number = after_first_word(args);
+            }
+            else if (number.size() > 2 && number[0] == '-' && number[1] == 'n')
+            {
+                number.remove_prefix(2);
+            }
+            auto parsed = shell_detail::parse_unsigned(number);
+            if (!parsed)
+            {
+                return parsed.status();
+            }
+            count = static_cast<usize>(parsed.value());
+        }
+
+        usize total_lines = input.empty() ? 0 : 1;
+        for (const auto ch : input)
+        {
+            if (ch == '\n')
+            {
+                ++total_lines;
+            }
+        }
+        const usize first_line = command == "tail" && total_lines > count ? total_lines - count : 0;
+        usize current_line = 0;
+        usize emitted = 0;
+        usize line_start = 0;
+        for (usize i = 0; i <= input.size(); ++i)
+        {
+            if (i != input.size() && input[i] != '\n')
+            {
+                continue;
+            }
+            if (current_line >= first_line && emitted < count)
+            {
+                if (auto status = append(input.substr(line_start, i - line_start)); !status.ok())
+                {
+                    return status;
+                }
+                if (i < input.size() || !input.empty())
+                {
+                    if (auto status = append("\n"); !status.ok())
+                    {
+                        return status;
+                    }
+                }
+                ++emitted;
+            }
+            ++current_line;
+            line_start = i + 1;
+            if (command == "head" && emitted >= count)
+            {
+                break;
+            }
+        }
+        return Status::success();
+    }
+    return Status::not_found("filter not active");
 }
 
 Status KernelDebugShell::append(std::string_view text)
@@ -1496,6 +2126,11 @@ Status KernelDebugShell::append_padded_unsigned(u64 value, usize width)
             return status;
         }
     }
+    return append_unsigned(value);
+}
+
+Status KernelDebugShell::append_status_code(u32 value)
+{
     return append_unsigned(value);
 }
 
@@ -1788,54 +2423,83 @@ Result<std::string_view> KernelDebugShell::resolve_path(std::string_view path)
         return Status::not_initialized("shell has no kernel");
     }
     path = trim(path);
+    FixedString<96> joined;
     if (path.empty() || path == ".")
     {
-        return kernel_->posix().getcwd();
+        path = kernel_->posix().getcwd();
     }
-    if (path == "..")
+    if (!path.empty() && path.front() != '/')
     {
-        const auto cwd = kernel_->posix().getcwd();
-        if (cwd == "/" || cwd.empty())
-        {
-            return std::string_view{"/"};
-        }
-        path_buffer_.clear();
-        usize end = cwd.size();
-        while (end > 1 && cwd[end - 1] != '/')
-        {
-            --end;
-        }
-        if (end <= 1)
-        {
-            return std::string_view{"/"};
-        }
-        if (auto status = path_buffer_.assign(cwd.substr(0, end - 1)); !status.ok())
+        if (auto status = joined.append(kernel_->posix().getcwd()); !status.ok())
         {
             return status;
         }
-        return path_buffer_.view();
-    }
-    if (path.front() == '/')
-    {
-        return path;
+        if (joined.view() != "/")
+        {
+            if (auto status = joined.append('/'); !status.ok())
+            {
+                return status;
+            }
+        }
+        if (auto status = joined.append(path); !status.ok())
+        {
+            return status;
+        }
+        path = joined.view();
     }
 
     path_buffer_.clear();
-    const auto cwd = kernel_->posix().getcwd();
-    if (auto status = path_buffer_.append(cwd); !status.ok())
+    if (auto status = path_buffer_.append('/'); !status.ok())
     {
         return status;
     }
-    if (path_buffer_.view() != "/")
+    usize cursor = 0;
+    while (cursor < path.size())
+    {
+        while (cursor < path.size() && path[cursor] == '/')
+        {
+            ++cursor;
+        }
+        const auto start = cursor;
+        while (cursor < path.size() && path[cursor] != '/')
+        {
+            ++cursor;
+        }
+        const auto segment = path.substr(start, cursor - start);
+        if (segment.empty() || segment == ".")
+        {
+            continue;
+        }
+        if (segment == "..")
+        {
+            while (path_buffer_.size() > 1 && path_buffer_.view().back() != '/')
+            {
+                path_buffer_.pop_back();
+            }
+            if (path_buffer_.size() > 1)
+            {
+                path_buffer_.pop_back();
+            }
+            continue;
+        }
+        if (path_buffer_.view() != "/")
+        {
+            if (auto status = path_buffer_.append('/'); !status.ok())
+            {
+                return status;
+            }
+        }
+        if (auto status = path_buffer_.append(segment); !status.ok())
+        {
+            return status;
+        }
+    }
+    if (path_buffer_.empty())
     {
         if (auto status = path_buffer_.append('/'); !status.ok())
         {
             return status;
         }
-    }
-    if (auto status = path_buffer_.append(path); !status.ok())
-    {
-        return status;
     }
     return path_buffer_.view();
 }
