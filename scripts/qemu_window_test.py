@@ -297,7 +297,8 @@ def run_until_marker(command: list[str], timeout: float | None) -> subprocess.Co
     process = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout_parts: list[str] = []
     deadline = None if timeout is None else time.monotonic() + timeout
-    marker_seen = False
+    pass_seen = False
+    fail_seen = False
 
     assert process.stdout is not None
     while True:
@@ -310,12 +311,15 @@ def run_until_marker(command: list[str], timeout: float | None) -> subprocess.Co
             if line:
                 stdout_parts.append(line)
                 if line.startswith("OK_TEST_PASS "):
-                    marker_seen = True
+                    pass_seen = True
+                    break
+                if line.startswith("OK_TEST_FAIL "):
+                    fail_seen = True
                     break
         if process.poll() is not None:
             break
 
-    if marker_seen and process.poll() is None:
+    if (pass_seen or fail_seen) and process.poll() is None:
         process.terminate()
     try:
         tail_stdout, stderr = process.communicate(timeout=1.0)
@@ -323,10 +327,10 @@ def run_until_marker(command: list[str], timeout: float | None) -> subprocess.Co
         process.kill()
         tail_stdout, stderr = process.communicate()
     stdout = "".join(stdout_parts) + (tail_stdout or "")
-    returncode = 0 if marker_seen else (process.returncode if process.returncode is not None else 124)
-    if marker_seen:
+    returncode = 0 if pass_seen or fail_seen else (process.returncode if process.returncode is not None else 124)
+    if pass_seen or fail_seen:
         stderr = ""
-    if not marker_seen and returncode == 0 and "OK_TEST_PASS " not in stdout:
+    if not (pass_seen or fail_seen) and returncode == 0 and "OK_TEST_PASS " not in stdout:
         returncode = 124
         stderr = (stderr or "") + "qemu marker timeout\n"
     return subprocess.CompletedProcess(command, returncode, stdout, stderr or "")

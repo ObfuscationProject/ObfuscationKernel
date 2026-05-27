@@ -3,6 +3,8 @@
 #include "ok/interrupt/interrupt.hpp"
 #include "ok/smp/preempt.hpp"
 
+#include <array>
+
 namespace ok
 {
 namespace
@@ -136,9 +138,11 @@ Status test_smp_topology_and_per_cpu_scheduling(Kernel &kernel)
         }
     }
 
-    const auto cpu1_dispatches = kernel.scheduler().cpu_stats(1).dispatches;
-    const auto cpu2_dispatches = kernel.scheduler().cpu_stats(2).dispatches;
-    const auto cpu3_dispatches = kernel.scheduler().cpu_stats(3).dispatches;
+    std::array<u64, smp::max_cpus> dispatches_before{};
+    for (usize cpu = 0; cpu < kernel.scheduler().cpu_count(); ++cpu)
+    {
+        dispatches_before[cpu] = kernel.scheduler().cpu_stats(static_cast<smp::CpuId>(cpu)).dispatches;
+    }
     for (usize i = 0; i < 3; ++i)
     {
         if (auto status = kernel.tick(); !status.ok())
@@ -146,11 +150,12 @@ Status test_smp_topology_and_per_cpu_scheduling(Kernel &kernel)
             return status;
         }
     }
-    if (kernel.scheduler().cpu_stats(1).dispatches <= cpu1_dispatches ||
-        kernel.scheduler().cpu_stats(2).dispatches <= cpu2_dispatches ||
-        kernel.scheduler().cpu_stats(3).dispatches <= cpu3_dispatches)
+    for (usize cpu = 1; cpu < kernel.scheduler().cpu_count(); ++cpu)
     {
-        return Status::fault("kernel scheduler tick did not dispatch work on secondary CPUs");
+        if (kernel.scheduler().cpu_stats(static_cast<smp::CpuId>(cpu)).dispatches <= dispatches_before[cpu])
+        {
+            return Status::fault("kernel scheduler tick did not dispatch work on secondary CPUs");
+        }
     }
 
     sched::Scheduler advanced;

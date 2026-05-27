@@ -115,6 +115,18 @@ class QemuRunnerValidationTests(unittest.TestCase):
         self.assertEqual(code, 12)
         self.assertIn("timed out before OK_TEST_PASS", stderr)
 
+    def test_kernel_test_fail_has_dedicated_reason_before_debug_exit_code(self) -> None:
+        output = "\n".join(
+            [
+                "OK_MODE debug",
+                "OK_DEBUG boot=complete",
+                "OK_TEST_FAIL code=11 message=kernel scheduler tick did not dispatch work on secondary CPUs",
+            ]
+        )
+        code, _, stderr = self.validate("i386", output, returncode=35, debug_exit=True)
+        self.assertEqual(code, 13)
+        self.assertIn("OK_TEST_FAIL code=11", stderr)
+
     def test_summary_records_coverage_status_and_roadmap_markers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             kernel = Path(tmp) / "kernel.bin"
