@@ -27,7 +27,8 @@ class LifecycleFakePciDriver final : public driver::OkDriverModule
 
     Status probe(driver::OkProbeContext &context) override
     {
-        if (context.device == nullptr || context.mmio == nullptr || context.irq == nullptr)
+        if (context.device == nullptr || context.mmio == nullptr || context.irq == nullptr || context.dma == nullptr ||
+            context.workqueue == nullptr)
         {
             return Status::invalid_argument("lifecycle fake probe context is incomplete");
         }
@@ -130,6 +131,76 @@ Status test_driver_abi_helpers()
     return Status::success();
 }
 
+Status test_driver_core_runtime_primitives()
+{
+    driver::OkDmaBuffer buffer{};
+    buffer.size = 128;
+    driver::OkDmaMapper dma;
+    auto mapping = dma.map(buffer, 64, driver::OkDmaDirection::to_device);
+    if (!mapping || !mapping.value().mapped || mapping.value().size != 64 || dma.mapping_count() != 1)
+    {
+        return Status::fault("driver core DMA map validation failed");
+    }
+    auto active_mapping = mapping.value();
+    if (auto status = dma.unmap(active_mapping); !status.ok())
+    {
+        return status;
+    }
+    if (active_mapping.mapped || dma.mapping_count() != 0 ||
+        dma.unmap(active_mapping).code() != StatusCode::invalid_argument)
+    {
+        return Status::fault("driver core DMA unmap validation failed");
+    }
+
+    driver::OkWorkQueue workqueue;
+    if (auto status = workqueue.enqueue(); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = workqueue.enqueue(); !status.ok())
+    {
+        return status;
+    }
+    auto drained = workqueue.drain();
+    if (!drained || drained.value() != 2 || workqueue.queued != 0)
+    {
+        return Status::fault("driver core workqueue validation failed");
+    }
+
+    driver::OkTimer timer;
+    if (!timer.arm(99).ok() || !timer.armed || timer.deadline_ticks != 99 || !timer.cancel().ok() || timer.armed ||
+        timer.cancel().code() != StatusCode::invalid_argument)
+    {
+        return Status::fault("driver core timer validation failed");
+    }
+
+    driver::OkWaitQueue waiters;
+    if (!waiters.wait(7).ok() || !waiters.waiting(7) || waiters.wait(7).code() != StatusCode::already_exists ||
+        !waiters.wake_one().ok() || waiters.waiting(7) || waiters.wake_one().code() != StatusCode::would_block)
+    {
+        return Status::fault("driver core waitqueue validation failed");
+    }
+
+    driver::OkSlabAllocator slab;
+    auto allocation = slab.allocate(32);
+    if (!allocation || slab.allocation_count() != 1 || !slab.free(allocation.value()).ok() ||
+        slab.allocation_count() != 0 || slab.free(allocation.value()).code() != StatusCode::invalid_argument)
+    {
+        return Status::fault("driver core slab validation failed");
+    }
+
+    driver::OkKernelThreadRegistry threads;
+    auto thread = threads.create("virtio-worker");
+    if (!thread || threads.thread_count() != 1 || threads.find(thread.value()) == nullptr ||
+        !threads.find(thread.value())->running || !threads.stop(thread.value()).ok() ||
+        threads.find(thread.value())->running || threads.stop(thread.value()).code() != StatusCode::invalid_argument)
+    {
+        return Status::fault("driver core kthread validation failed");
+    }
+
+    return Status::success();
+}
+
 Status test_driver_resource_manager_and_classes()
 {
     driver::OkResourceManager resources;
@@ -221,7 +292,9 @@ Status test_native_driver_lifecycle()
     driver::OkMmioRegion mmio{};
     mmio.mapped = true;
     driver::OkIrqHandle irq{.vector = 51, .registered = true};
-    driver::OkProbeContext context{.device = &device, .mmio = &mmio, .irq = &irq};
+    driver::OkDmaMapper dma;
+    driver::OkWorkQueue workqueue;
+    driver::OkProbeContext context{.device = &device, .mmio = &mmio, .irq = &irq, .dma = &dma, .workqueue = &workqueue};
     if (!lifecycle.match(device))
     {
         return Status::fault("native driver match validation failed");
@@ -385,6 +458,30 @@ Status test_linux_driver_shim()
         return Status::fault("Linux driver shim allocation validation failed");
     }
 
+    driver::OkDmaBuffer dma_buffer{};
+    dma_buffer.size = 128;
+    auto dma_mapping = shim.dma_map_single(dma_buffer, 64, driver::OkDmaDirection::bidirectional);
+    if (!dma_mapping || !dma_mapping.value().mapped || dma_mapping.value().size != 64)
+    {
+        return Status::fault("Linux driver shim DMA map validation failed");
+    }
+    auto active_mapping = dma_mapping.value();
+    if (!shim.dma_unmap_single(active_mapping).ok() || active_mapping.mapped ||
+        shim.dma_unmap_single(active_mapping).code() != StatusCode::invalid_argument)
+    {
+        return Status::fault("Linux driver shim DMA unmap validation failed");
+    }
+
+    if (!shim.schedule_work().ok() || !shim.schedule_work().ok())
+    {
+        return Status::fault("Linux driver shim work scheduling failed");
+    }
+    auto flushed = shim.flush_work();
+    if (!flushed || flushed.value() != 2)
+    {
+        return Status::fault("Linux driver shim workqueue flush validation failed");
+    }
+
     driver::OkSpinLock spinlock;
     if (!spinlock.try_lock())
     {
@@ -421,6 +518,10 @@ Status run_driver_abi_roadmap_tests(KernelTestReport &report)
         return status;
     }
     if (auto status = test_driver_resource_manager_and_classes(); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_driver_core_runtime_primitives(); !status.ok())
     {
         return status;
     }

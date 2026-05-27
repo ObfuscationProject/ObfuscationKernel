@@ -227,6 +227,105 @@ class ManifestOverrideModule final : public KernelModule
     ModuleManifest manifest_{};
 };
 
+void module_write_le16(std::span<std::byte> out, usize offset, u16 value)
+{
+    out[offset] = static_cast<std::byte>(value & 0xffu);
+    out[offset + 1] = static_cast<std::byte>((value >> 8) & 0xffu);
+}
+
+void module_write_le32(std::span<std::byte> out, usize offset, u32 value)
+{
+    module_write_le16(out, offset, static_cast<u16>(value & 0xffffu));
+    module_write_le16(out, offset + 2, static_cast<u16>((value >> 16) & 0xffffu));
+}
+
+void module_write_le64(std::span<std::byte> out, usize offset, u64 value)
+{
+    module_write_le32(out, offset, static_cast<u32>(value & 0xffff'ffffu));
+    module_write_le32(out, offset + 4, static_cast<u32>((value >> 32) & 0xffff'ffffu));
+}
+
+usize module_put_cstr(std::span<std::byte> out, usize offset, std::string_view value)
+{
+    for (usize i = 0; i < value.size(); ++i)
+    {
+        out[offset + i] = static_cast<std::byte>(value[i]);
+    }
+    out[offset + value.size()] = std::byte{0};
+    return offset + value.size() + 1;
+}
+
+usize module_append_cstr(std::span<std::byte> out, usize &cursor, std::string_view value)
+{
+    const auto offset = cursor;
+    cursor = module_put_cstr(out, cursor, value);
+    return offset;
+}
+
+void module_write_elf64_section(std::span<std::byte> out, usize section_header_offset, u32 name_offset, u32 type,
+                                u64 data_offset, u64 size, u64 entry_size)
+{
+    module_write_le32(out, section_header_offset, name_offset);
+    module_write_le32(out, section_header_offset + 4, type);
+    module_write_le64(out, section_header_offset + 24, data_offset);
+    module_write_le64(out, section_header_offset + 32, size);
+    module_write_le64(out, section_header_offset + 56, entry_size);
+}
+
+std::array<std::byte, 1024> make_fake_linux_ko()
+{
+    std::array<std::byte, 1024> image{};
+    auto bytes = std::span<std::byte>{image.data(), image.size()};
+    bytes[0] = std::byte{0x7f};
+    bytes[1] = std::byte{'E'};
+    bytes[2] = std::byte{'L'};
+    bytes[3] = std::byte{'F'};
+    bytes[4] = std::byte{2};
+    bytes[5] = std::byte{1};
+    module_write_le16(bytes, 16, 1);
+    module_write_le16(bytes, 18, 0x3e);
+    module_write_le64(bytes, 40, 512);
+    module_write_le16(bytes, 52, 64);
+    module_write_le16(bytes, 58, 64);
+    module_write_le16(bytes, 60, 7);
+    module_write_le16(bytes, 62, 6);
+
+    usize modinfo_cursor = 128;
+    module_put_cstr(bytes, modinfo_cursor, "name=virtio_blk");
+    modinfo_cursor += 16;
+    module_put_cstr(bytes, modinfo_cursor, "vermagic=mainline-test SMP");
+    modinfo_cursor += 28;
+    module_put_cstr(bytes, modinfo_cursor, "parm=queue_depth:int");
+    modinfo_cursor += 21;
+    module_put_cstr(bytes, modinfo_cursor, "depends=virtio_pci");
+    modinfo_cursor += 19;
+    module_put_cstr(bytes, modinfo_cursor, "signature=test-sig");
+    modinfo_cursor += 19;
+    module_put_cstr(bytes, modinfo_cursor, "export=virtblk_probe");
+    modinfo_cursor += 21;
+    module_put_cstr(bytes, modinfo_cursor, "import=pci_register_driver");
+    modinfo_cursor += 27;
+    const auto modinfo_size = modinfo_cursor - 128;
+
+    usize shstr_cursor = 384;
+    bytes[shstr_cursor++] = std::byte{0};
+    const auto modinfo_name = module_append_cstr(bytes, shstr_cursor, ".modinfo") - 384;
+    const auto ksymtab_name = module_append_cstr(bytes, shstr_cursor, "__ksymtab") - 384;
+    const auto init_name = module_append_cstr(bytes, shstr_cursor, ".init.text") - 384;
+    const auto exit_name = module_append_cstr(bytes, shstr_cursor, ".exit.text") - 384;
+    const auto rela_name = module_append_cstr(bytes, shstr_cursor, ".rela.text") - 384;
+    const auto shstr_name = module_append_cstr(bytes, shstr_cursor, ".shstrtab") - 384;
+    const auto shstr_size = shstr_cursor - 384;
+
+    module_write_elf64_section(bytes, 512 + 64, static_cast<u32>(modinfo_name), 1, 128, modinfo_size, 0);
+    module_write_elf64_section(bytes, 512 + 64 * 2, static_cast<u32>(ksymtab_name), 1, 256, 16, 0);
+    module_write_elf64_section(bytes, 512 + 64 * 3, static_cast<u32>(init_name), 1, 272, 16, 0);
+    module_write_elf64_section(bytes, 512 + 64 * 4, static_cast<u32>(exit_name), 1, 288, 16, 0);
+    module_write_elf64_section(bytes, 512 + 64 * 5, static_cast<u32>(rela_name), 4, 304, 24, 24);
+    module_write_elf64_section(bytes, 512 + 64 * 6, static_cast<u32>(shstr_name), 3, 384, shstr_size, 0);
+    return image;
+}
+
 Status test_module_abi_contract()
 {
     ManifestOverrideModule wrong_abi{ModuleManifest{
@@ -295,6 +394,88 @@ Status test_module_abi_contract()
     if (no_restart_manager.restart_module("no-restart").code() != StatusCode::denied)
     {
         return Status::fault("module restart policy was not enforced");
+    }
+
+    return Status::success();
+}
+
+Status test_module_image_loader_and_symbol_registry()
+{
+    ModuleImageLoader loader;
+    constexpr std::string_view okmod_text{
+        "OKMOD\n"
+        "name=virtio-net-ok\n"
+        "version=1\n"
+        "vermagic=mainline-tracking\n"
+        "export=virtio_net_probe\n"
+        "require=pci_register_driver\n"
+        "param=queues:int\n"
+        "reloc=0x40\n"
+        "signature=test-signature\n"};
+    auto okmod = loader.parse(std::span<const std::byte>{reinterpret_cast<const std::byte *>(okmod_text.data()),
+                                                         okmod_text.size()},
+                              arch::Architecture::x86_64);
+    if (!okmod || okmod.value().format != ModuleImageFormat::okmod || okmod.value().name.view() != "virtio-net-ok" ||
+        okmod.value().exports.size() != 1 || okmod.value().imports.size() != 1 ||
+        okmod.value().parameters.size() != 1 || !okmod.value().signed_image ||
+        okmod.value().relocation_count != 1)
+    {
+        return Status::fault("okmod image metadata validation failed");
+    }
+
+    ModuleSymbolRegistry symbols;
+    if (auto status = symbols.export_symbol("pci_register_driver", 0xfeed); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = symbols.resolve_imports(okmod.value()); !status.ok())
+    {
+        return status;
+    }
+    if (!okmod.value().imports[0].resolved || okmod.value().imports[0].address != 0xfeed ||
+        symbols.resolve("missing").status().code() != StatusCode::not_found)
+    {
+        return Status::fault("module symbol registry validation failed");
+    }
+
+    auto linux_image = make_fake_linux_ko();
+    auto linux_module = loader.parse_linux_ko(linux_image, arch::Architecture::x86_64);
+    if (!linux_module || linux_module.value().format != ModuleImageFormat::linux_ko ||
+        linux_module.value().name.view() != "virtio_blk" || linux_module.value().architecture != arch::Architecture::x86_64 ||
+        !linux_module.value().relocatable || !linux_module.value().has_modinfo ||
+        !linux_module.value().has_kallsyms || !linux_module.value().has_init || !linux_module.value().has_exit ||
+        !linux_module.value().signed_image || linux_module.value().relocation_count != 1 ||
+        linux_module.value().imports.size() != 1 || linux_module.value().exports.size() != 1 ||
+        linux_module.value().parameters.size() < 2)
+    {
+        return Status::fault("Linux .ko metadata validation failed");
+    }
+
+    LinuxAbiSnapshot snapshot;
+    if (auto status = snapshot.begin("mainline-tracking", true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = snapshot.record_required_symbol("pci_register_driver"); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = snapshot.record_required_symbol("dma_map_single"); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = snapshot.record_implemented_symbol("pci_register_driver"); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = snapshot.record_layout("struct pci_driver", 64, 8); !status.ok())
+    {
+        return status;
+    }
+    if (!snapshot.tracks_mainline() || snapshot.required_symbol_count() != 2 ||
+        snapshot.implemented_symbol_count() != 1 || snapshot.layout_count() != 1 || snapshot.coverage_x100() != 5000)
+    {
+        return Status::fault("Linux mainline ABI snapshot validation failed");
     }
 
     return Status::success();
@@ -479,6 +660,10 @@ Status run_module_roadmap_tests(KernelTestReport &report)
         return status;
     }
     if (auto status = test_module_abi_contract(); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_module_image_loader_and_symbol_registry(); !status.ok())
     {
         return status;
     }

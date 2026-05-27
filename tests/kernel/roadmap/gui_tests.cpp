@@ -1508,6 +1508,67 @@ Status test_gui_desktop_service_boundary(Kernel &kernel)
     {
         return Status::fault("GUI desktop service did not track routed key events");
     }
+    const auto scanout = desktop->scanout();
+    if (!scanout.active || scanout.width != driver::framebuffer_width || scanout.height != driver::framebuffer_height)
+    {
+        return Status::fault("GUI hybrid scanout did not expose the kernel compositor framebuffer");
+    }
+    if (auto status = desktop->configure_scanout(gui::GuiScanout{
+            .width = 960,
+            .height = 540,
+            .pitch = 960 * 4,
+            .bytes_per_pixel = 4,
+        });
+        !status.ok())
+    {
+        return status;
+    }
+    if (!desktop->scanout().active || desktop->scanout().width != 960)
+    {
+        return Status::fault("GUI hybrid scanout reconfiguration failed");
+    }
+    auto shared = desktop->allocate_shared_buffer(128);
+    if (!shared)
+    {
+        return shared.status();
+    }
+    auto shared_buffer = desktop->shared_buffer(shared.value());
+    if (!shared_buffer || !shared_buffer.value()->mapped || shared_buffer.value()->size != 128)
+    {
+        return Status::fault("GUI shared-buffer allocation failed");
+    }
+    shared_buffer.value()->bytes[0] = std::byte{0x5a};
+    if (desktop->shared_buffer_count() != 1 || desktop->shared_buffer(shared.value()).value()->bytes[0] != std::byte{0x5a})
+    {
+        return Status::fault("GUI shared-buffer lookup failed");
+    }
+    if (auto status = desktop->write_clipboard("ok-clipboard"); !status.ok())
+    {
+        return status;
+    }
+    if (desktop->clipboard_text() != "ok-clipboard")
+    {
+        return Status::fault("GUI clipboard ABI validation failed");
+    }
+    if (auto status = desktop->route_input(gui::GuiInputEvent{.kind = gui::GuiInputEventKind::pointer_position,
+                                                              .x = 33,
+                                                              .y = 44});
+        !status.ok())
+    {
+        return status;
+    }
+    if (desktop->cursor().x != 33 || desktop->cursor().y != 44 || desktop->routed_input_count() < 2)
+    {
+        return Status::fault("GUI input ABI route validation failed");
+    }
+    if (auto status = desktop->release_shared_buffer(shared.value()); !status.ok())
+    {
+        return status;
+    }
+    if (desktop->shared_buffer_count() != 0)
+    {
+        return Status::fault("GUI shared-buffer release failed");
+    }
     if (auto status = desktop->focus_window(window.value()); !status.ok())
     {
         return status;

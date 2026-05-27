@@ -134,6 +134,94 @@ Status OkMmioRegion::writel(usize index, u32 value)
     return Status::success();
 }
 
+Status OkWorkQueue::enqueue()
+{
+    if (queued >= max_ok_work_items)
+    {
+        return Status::would_block("workqueue is full");
+    }
+    ++queued;
+    return Status::success();
+}
+
+Result<usize> OkWorkQueue::drain()
+{
+    const auto drained = queued;
+    queued = 0;
+    return drained;
+}
+
+Status OkTimer::arm(u64 deadline)
+{
+    if (deadline == 0)
+    {
+        return Status::invalid_argument("timer deadline is zero");
+    }
+    deadline_ticks = deadline;
+    armed = true;
+    return Status::success();
+}
+
+Status OkTimer::cancel()
+{
+    if (!armed)
+    {
+        return Status::invalid_argument("timer is not armed");
+    }
+    armed = false;
+    deadline_ticks = 0;
+    return Status::success();
+}
+
+Result<OkDmaMapping> OkDmaMapper::map(OkDmaBuffer &buffer, usize size, OkDmaDirection direction)
+{
+    if (size == 0 || size > buffer.bytes.size() || (buffer.size != 0 && size > buffer.size))
+    {
+        return Status::invalid_argument("DMA mapping size is invalid");
+    }
+    for (usize i = 0; i < used_.size(); ++i)
+    {
+        if (used_[i])
+        {
+            continue;
+        }
+        used_[i] = true;
+        ++mapping_count_;
+        mappings_[i] = OkDmaMapping{
+            .device_address = reinterpret_cast<uptr>(buffer.bytes.data()) + static_cast<uptr>(i),
+            .size = size,
+            .direction = direction,
+            .mapped = true,
+        };
+        return mappings_[i];
+    }
+    return Status::overflow("DMA mapping table is full");
+}
+
+Status OkDmaMapper::unmap(OkDmaMapping &mapping)
+{
+    if (!mapping.mapped)
+    {
+        return Status::invalid_argument("DMA mapping is not active");
+    }
+    for (usize i = 0; i < used_.size(); ++i)
+    {
+        if (!used_[i] || mappings_[i].device_address != mapping.device_address)
+        {
+            continue;
+        }
+        used_[i] = false;
+        mappings_[i] = {};
+        if (mapping_count_ > 0)
+        {
+            --mapping_count_;
+        }
+        mapping.mapped = false;
+        return Status::success();
+    }
+    return Status::not_found("DMA mapping was not found");
+}
+
 Status OkMutex::lock()
 {
     if (locked_)
@@ -152,6 +240,138 @@ Status OkMutex::unlock()
     }
     locked_ = false;
     return Status::success();
+}
+
+Status OkWaitQueue::wait(u32 token)
+{
+    for (const auto waiter : waiters_)
+    {
+        if (waiter == token)
+        {
+            return Status::already_exists("wait token is already queued");
+        }
+    }
+    return waiters_.push_back(token);
+}
+
+Status OkWaitQueue::wake_one()
+{
+    if (waiters_.empty())
+    {
+        return Status::would_block("wait queue is empty");
+    }
+    return waiters_.erase_at(0);
+}
+
+Status OkWaitQueue::wake_all()
+{
+    waiters_.clear();
+    return Status::success();
+}
+
+bool OkWaitQueue::waiting(u32 token) const
+{
+    for (const auto waiter : waiters_)
+    {
+        if (waiter == token)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+Result<void *> OkSlabAllocator::allocate(usize size)
+{
+    if (size == 0 || size > slots_[0].size())
+    {
+        return Status::invalid_argument("slab allocation size is invalid");
+    }
+    for (usize i = 0; i < used_.size(); ++i)
+    {
+        if (used_[i])
+        {
+            continue;
+        }
+        used_[i] = true;
+        ++allocation_count_;
+        return static_cast<void *>(slots_[i].data());
+    }
+    return Status::no_memory("slab allocator is full");
+}
+
+Status OkSlabAllocator::free(void *pointer)
+{
+    if (pointer == nullptr)
+    {
+        return Status::invalid_argument("slab free pointer is null");
+    }
+    for (usize i = 0; i < used_.size(); ++i)
+    {
+        if (slots_[i].data() != pointer)
+        {
+            continue;
+        }
+        if (!used_[i])
+        {
+            return Status::invalid_argument("slab allocation is already free");
+        }
+        used_[i] = false;
+        if (allocation_count_ > 0)
+        {
+            --allocation_count_;
+        }
+        return Status::success();
+    }
+    return Status::not_found("slab allocation was not found");
+}
+
+Result<u32> OkKernelThreadRegistry::create(std::string_view name)
+{
+    if (name.empty())
+    {
+        return Status::invalid_argument("kernel thread name is empty");
+    }
+    OkKernelThread thread{.id = next_id_++, .running = true};
+    if (auto status = thread.name.assign(name); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = threads_.push_back(thread); !status.ok())
+    {
+        return status;
+    }
+    return thread.id;
+}
+
+Status OkKernelThreadRegistry::stop(u32 id)
+{
+    for (auto &thread : threads_)
+    {
+        if (thread.id != id)
+        {
+            continue;
+        }
+        if (!thread.running)
+        {
+            return Status::invalid_argument("kernel thread is already stopped");
+        }
+        thread.running = false;
+        return Status::success();
+    }
+    return Status::not_found("kernel thread was not found");
+}
+
+const OkKernelThread *OkKernelThreadRegistry::find(u32 id) const
+{
+    for (const auto &thread : threads_)
+    {
+        if (thread.id == id)
+        {
+            return &thread;
+        }
+    }
+    return nullptr;
 }
 
 bool OkDriverModule::match(const OkDevice &device) const
@@ -247,7 +467,12 @@ Status OkDriverRegistry::bind_all()
             {
                 continue;
             }
-            OkProbeContext context{.device = &device, .mmio = &mmio_, .irq = &irq_, .resources = &resources_};
+            OkProbeContext context{.device = &device,
+                                   .mmio = &mmio_,
+                                   .irq = &irq_,
+                                   .resources = &resources_,
+                                   .dma = &dma_,
+                                   .workqueue = &workqueue_};
             if (auto status = driver->probe(context); !status.ok())
             {
                 return status;
@@ -281,7 +506,12 @@ Status OkDriverRegistry::remove_all()
             {
                 continue;
             }
-            OkProbeContext context{.device = &device, .mmio = &mmio_, .irq = &irq_, .resources = &resources_};
+            OkProbeContext context{.device = &device,
+                                   .mmio = &mmio_,
+                                   .irq = &irq_,
+                                   .resources = &resources_,
+                                   .dma = &dma_,
+                                   .workqueue = &workqueue_};
             if (auto status = driver->remove(context); !status.ok())
             {
                 return status;
@@ -422,6 +652,26 @@ Status LinuxPciShim::kfree(void *pointer)
     }
     heap_used_ = false;
     return Status::success();
+}
+
+Result<OkDmaMapping> LinuxPciShim::dma_map_single(OkDmaBuffer &buffer, usize size, OkDmaDirection direction)
+{
+    return dma_.map(buffer, size, direction);
+}
+
+Status LinuxPciShim::dma_unmap_single(OkDmaMapping &mapping)
+{
+    return dma_.unmap(mapping);
+}
+
+Status LinuxPciShim::schedule_work()
+{
+    return workqueue_.enqueue();
+}
+
+Result<usize> LinuxPciShim::flush_work()
+{
+    return workqueue_.drain();
 }
 
 Status LinuxPciShim::request_irq(OkIrqHandle &handle, u32 vector)

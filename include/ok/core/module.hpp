@@ -15,6 +15,11 @@ namespace ok
 inline constexpr usize max_kernel_modules = 32;
 inline constexpr usize max_kernel_services = 64;
 inline constexpr usize max_module_name = 48;
+inline constexpr usize max_module_symbols = 64;
+inline constexpr usize max_module_relocations = 64;
+inline constexpr usize max_module_parameters = 16;
+inline constexpr usize max_module_text = 128;
+inline constexpr usize max_linux_abi_layouts = 32;
 inline constexpr std::string_view kernel_module_process_prefix{"mod:"};
 inline constexpr u32 kernel_module_abi_version = 1;
 
@@ -88,6 +93,27 @@ enum class ModuleCapability : u8
     handles_gui,
 };
 
+enum class ModuleImageFormat : u8
+{
+    unknown,
+    okmod,
+    linux_ko,
+};
+
+enum class ModuleSymbolBinding : u8
+{
+    imported,
+    exported,
+};
+
+enum class ModuleRelocationKind : u8
+{
+    unknown,
+    absolute,
+    relative,
+    plt,
+};
+
 struct ModuleResourceBudget
 {
     usize max_threads{1};
@@ -100,6 +126,123 @@ struct ModuleResourceBudget
 {
     return 1ull << static_cast<u8>(capability);
 }
+
+struct ModuleSymbol
+{
+    FixedString<max_module_name> name{};
+    uptr address{0};
+    ModuleSymbolBinding binding{ModuleSymbolBinding::imported};
+    bool resolved{false};
+};
+
+struct ModuleRelocation
+{
+    u32 section_index{0};
+    u32 symbol_index{0};
+    uptr offset{0};
+    i64 addend{0};
+    ModuleRelocationKind kind{ModuleRelocationKind::unknown};
+};
+
+struct ModuleParameter
+{
+    FixedString<max_module_name> name{};
+    FixedString<max_module_text> value{};
+};
+
+struct ModuleImageInfo
+{
+    ModuleImageFormat format{ModuleImageFormat::unknown};
+    FixedString<max_module_name> name{};
+    FixedString<max_module_name> version{};
+    FixedString<max_module_text> vermagic{};
+    FixedString<max_module_text> signature{};
+    arch::Architecture architecture{arch::Architecture::x86_64};
+    bool elf64{false};
+    bool relocatable{false};
+    bool has_modinfo{false};
+    bool has_kallsyms{false};
+    bool has_init{false};
+    bool has_exit{false};
+    bool signed_image{false};
+    usize section_count{0};
+    usize relocation_count{0};
+    StaticVector<ModuleSymbol, max_module_symbols> imports{};
+    StaticVector<ModuleSymbol, max_module_symbols> exports{};
+    StaticVector<ModuleRelocation, max_module_relocations> relocations{};
+    StaticVector<ModuleParameter, max_module_parameters> parameters{};
+};
+
+struct LinuxStructLayout
+{
+    FixedString<max_module_name> name{};
+    u32 size{0};
+    u32 field_count{0};
+};
+
+class ModuleSymbolRegistry final
+{
+  public:
+    Status export_symbol(std::string_view name, uptr address);
+    Result<uptr> resolve(std::string_view name) const;
+    Status resolve_imports(ModuleImageInfo &image) const;
+    [[nodiscard]] usize symbol_count() const
+    {
+        return symbols_.size();
+    }
+
+  private:
+    StaticVector<ModuleSymbol, max_module_symbols> symbols_;
+};
+
+class ModuleImageLoader final
+{
+  public:
+    Result<ModuleImageInfo> parse(std::span<const std::byte> image, arch::Architecture fallback_architecture) const;
+    Result<ModuleImageInfo> parse_okmod(std::span<const std::byte> image,
+                                        arch::Architecture fallback_architecture) const;
+    Result<ModuleImageInfo> parse_linux_ko(std::span<const std::byte> image,
+                                           arch::Architecture fallback_architecture) const;
+};
+
+class LinuxAbiSnapshot final
+{
+  public:
+    Status begin(std::string_view baseline, bool tracks_mainline);
+    Status record_required_symbol(std::string_view name);
+    Status record_implemented_symbol(std::string_view name);
+    Status record_layout(std::string_view name, u32 size, u32 field_count);
+    [[nodiscard]] std::string_view baseline() const
+    {
+        return baseline_.view();
+    }
+    [[nodiscard]] bool tracks_mainline() const
+    {
+        return tracks_mainline_;
+    }
+    [[nodiscard]] usize required_symbol_count() const
+    {
+        return required_symbols_.size();
+    }
+    [[nodiscard]] usize implemented_symbol_count() const
+    {
+        return implemented_symbols_.size();
+    }
+    [[nodiscard]] usize layout_count() const
+    {
+        return layouts_.size();
+    }
+    [[nodiscard]] u32 coverage_x100() const;
+
+  private:
+    [[nodiscard]] bool contains(std::span<const ModuleSymbol> symbols, std::string_view name) const;
+
+    FixedString<max_module_text> baseline_{};
+    bool tracks_mainline_{false};
+    StaticVector<ModuleSymbol, max_module_symbols> required_symbols_{};
+    StaticVector<ModuleSymbol, max_module_symbols> implemented_symbols_{};
+    StaticVector<LinuxStructLayout, max_linux_abi_layouts> layouts_{};
+};
 
 struct ModuleManifest
 {

@@ -9,6 +9,347 @@ constexpr uptr module_entry_stride = 0x100;
 constexpr uptr module_stack_stride = 0x1000;
 constexpr uptr module_thread_entry_stride = 0x10;
 constexpr uptr module_thread_stack_stride = 0x100;
+constexpr u32 elf_section_type_rel = 9;
+constexpr u32 elf_section_type_rela = 4;
+
+[[nodiscard]] u8 byte_at(std::span<const std::byte> bytes, usize offset)
+{
+    return offset < bytes.size() ? std::to_integer<u8>(bytes[offset]) : 0;
+}
+
+[[nodiscard]] u64 read_int(std::span<const std::byte> bytes, usize offset, usize width, bool little_endian)
+{
+    if (offset + width > bytes.size())
+    {
+        return 0;
+    }
+    u64 value = 0;
+    for (usize i = 0; i < width; ++i)
+    {
+        const auto index = little_endian ? i : width - 1 - i;
+        value |= static_cast<u64>(byte_at(bytes, offset + index)) << (i * 8u);
+    }
+    return value;
+}
+
+[[nodiscard]] u16 read_u16(std::span<const std::byte> bytes, usize offset, bool little_endian)
+{
+    return static_cast<u16>(read_int(bytes, offset, 2, little_endian));
+}
+
+[[nodiscard]] u32 read_u32(std::span<const std::byte> bytes, usize offset, bool little_endian)
+{
+    return static_cast<u32>(read_int(bytes, offset, 4, little_endian));
+}
+
+[[nodiscard]] u64 read_u64(std::span<const std::byte> bytes, usize offset, bool little_endian)
+{
+    return read_int(bytes, offset, 8, little_endian);
+}
+
+[[nodiscard]] std::string_view bytes_view(std::span<const std::byte> bytes)
+{
+    return {reinterpret_cast<const char *>(bytes.data()), bytes.size()};
+}
+
+[[nodiscard]] bool starts_with(std::string_view value, std::string_view prefix)
+{
+    return value.size() >= prefix.size() && value.substr(0, prefix.size()) == prefix;
+}
+
+[[nodiscard]] bool contains(std::string_view value, std::string_view needle)
+{
+    if (needle.empty())
+    {
+        return true;
+    }
+    if (needle.size() > value.size())
+    {
+        return false;
+    }
+    for (usize offset = 0; offset <= value.size() - needle.size(); ++offset)
+    {
+        if (value.substr(offset, needle.size()) == needle)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] u64 parse_unsigned(std::string_view value)
+{
+    u64 out = 0;
+    usize cursor = 0;
+    u32 base = 10;
+    if (value.size() > 2 && value[0] == '0' && (value[1] == 'x' || value[1] == 'X'))
+    {
+        cursor = 2;
+        base = 16;
+    }
+    for (; cursor < value.size(); ++cursor)
+    {
+        const auto ch = value[cursor];
+        u8 digit = 0;
+        if (ch >= '0' && ch <= '9')
+        {
+            digit = static_cast<u8>(ch - '0');
+        }
+        else if (base == 16 && ch >= 'a' && ch <= 'f')
+        {
+            digit = static_cast<u8>(10 + ch - 'a');
+        }
+        else if (base == 16 && ch >= 'A' && ch <= 'F')
+        {
+            digit = static_cast<u8>(10 + ch - 'A');
+        }
+        else
+        {
+            break;
+        }
+        if (digit >= base)
+        {
+            break;
+        }
+        out = out * base + digit;
+    }
+    return out;
+}
+
+[[nodiscard]] arch::Architecture arch_for_elf_machine(u16 machine, bool elf64, arch::Architecture fallback)
+{
+    switch (machine)
+    {
+    case 0x03:
+        return arch::Architecture::i386;
+    case 0x3e:
+        return arch::Architecture::x86_64;
+    case 0xb7:
+        return arch::Architecture::aarch64;
+    case 0x28:
+        return arch::Architecture::arm32;
+    case 0xf3:
+        return elf64 ? arch::Architecture::rv64 : arch::Architecture::rv32;
+    case 0x102:
+        return arch::Architecture::loongarch64;
+    case 0x08:
+        return elf64 ? arch::Architecture::mips64 : arch::Architecture::mips;
+    case 0x14:
+        return arch::Architecture::ppc;
+    default:
+        return fallback;
+    }
+}
+
+struct ElfSection
+{
+    u32 name_offset{0};
+    u32 type{0};
+    u64 offset{0};
+    u64 size{0};
+    u64 entry_size{0};
+};
+
+[[nodiscard]] Result<ElfSection> read_section(std::span<const std::byte> image, usize header_offset, bool elf64,
+                                              bool little_endian)
+{
+    if (header_offset >= image.size())
+    {
+        return Status::invalid_argument("ELF section header is out of range");
+    }
+    if (elf64)
+    {
+        if (header_offset + 64 > image.size())
+        {
+            return Status::invalid_argument("ELF64 section header is truncated");
+        }
+        return ElfSection{
+            .name_offset = read_u32(image, header_offset, little_endian),
+            .type = read_u32(image, header_offset + 4, little_endian),
+            .offset = read_u64(image, header_offset + 24, little_endian),
+            .size = read_u64(image, header_offset + 32, little_endian),
+            .entry_size = read_u64(image, header_offset + 56, little_endian),
+        };
+    }
+    if (header_offset + 40 > image.size())
+    {
+        return Status::invalid_argument("ELF32 section header is truncated");
+    }
+    return ElfSection{
+        .name_offset = read_u32(image, header_offset, little_endian),
+        .type = read_u32(image, header_offset + 4, little_endian),
+        .offset = read_u32(image, header_offset + 16, little_endian),
+        .size = read_u32(image, header_offset + 20, little_endian),
+        .entry_size = read_u32(image, header_offset + 36, little_endian),
+    };
+}
+
+[[nodiscard]] std::string_view c_string_at(std::span<const std::byte> bytes, usize offset)
+{
+    if (offset >= bytes.size())
+    {
+        return {};
+    }
+    usize size = 0;
+    while (offset + size < bytes.size() && byte_at(bytes, offset + size) != 0)
+    {
+        ++size;
+    }
+    return {reinterpret_cast<const char *>(bytes.data() + offset), size};
+}
+
+Status push_module_symbol(StaticVector<ModuleSymbol, max_module_symbols> &symbols, std::string_view name,
+                          ModuleSymbolBinding binding, uptr address = 0)
+{
+    if (name.empty())
+    {
+        return Status::invalid_argument("module symbol name is empty");
+    }
+    ModuleSymbol symbol{.address = address, .binding = binding, .resolved = address != 0};
+    if (auto status = symbol.name.assign(name); !status.ok())
+    {
+        return status;
+    }
+    return symbols.push_back(symbol);
+}
+
+Status push_module_parameter(ModuleImageInfo &info, std::string_view name, std::string_view value)
+{
+    if (name.empty())
+    {
+        return Status::invalid_argument("module parameter name is empty");
+    }
+    ModuleParameter parameter;
+    if (auto status = parameter.name.assign(name); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = parameter.value.assign(value); !status.ok())
+    {
+        return status;
+    }
+    return info.parameters.push_back(parameter);
+}
+
+Status parse_parameter(ModuleImageInfo &info, std::string_view value)
+{
+    const auto split = value.find(':');
+    if (split == std::string_view::npos)
+    {
+        return push_module_parameter(info, value, {});
+    }
+    return push_module_parameter(info, value.substr(0, split), value.substr(split + 1));
+}
+
+Status parse_modinfo_entry(ModuleImageInfo &info, std::string_view entry)
+{
+    if (entry.empty())
+    {
+        return Status::success();
+    }
+    if (starts_with(entry, "name="))
+    {
+        return info.name.assign(entry.substr(5));
+    }
+    if (starts_with(entry, "version="))
+    {
+        return info.version.assign(entry.substr(8));
+    }
+    if (starts_with(entry, "vermagic="))
+    {
+        return info.vermagic.assign(entry.substr(9));
+    }
+    if (starts_with(entry, "parm="))
+    {
+        return parse_parameter(info, entry.substr(5));
+    }
+    if (starts_with(entry, "depends="))
+    {
+        return push_module_parameter(info, "depends", entry.substr(8));
+    }
+    if (starts_with(entry, "import="))
+    {
+        return push_module_symbol(info.imports, entry.substr(7), ModuleSymbolBinding::imported);
+    }
+    if (starts_with(entry, "export="))
+    {
+        return push_module_symbol(info.exports, entry.substr(7), ModuleSymbolBinding::exported);
+    }
+    if (starts_with(entry, "signature="))
+    {
+        info.signed_image = true;
+        return info.signature.assign(entry.substr(10));
+    }
+    if (starts_with(entry, "sig_id="))
+    {
+        info.signed_image = true;
+        return info.signature.assign(entry.substr(7));
+    }
+    if (contains(entry, "Module signature"))
+    {
+        info.signed_image = true;
+    }
+    return Status::success();
+}
+
+Status parse_modinfo_block(ModuleImageInfo &info, std::span<const std::byte> bytes)
+{
+    usize cursor = 0;
+    while (cursor < bytes.size())
+    {
+        const auto entry = c_string_at(bytes, cursor);
+        if (auto status = parse_modinfo_entry(info, entry); !status.ok())
+        {
+            return status;
+        }
+        cursor += entry.size() + 1;
+    }
+    return Status::success();
+}
+
+Status parse_okmod_line(ModuleImageInfo &info, std::string_view line)
+{
+    if (line.empty() || line == "OKMOD")
+    {
+        return Status::success();
+    }
+    if (starts_with(line, "name="))
+    {
+        return info.name.assign(line.substr(5));
+    }
+    if (starts_with(line, "version="))
+    {
+        return info.version.assign(line.substr(8));
+    }
+    if (starts_with(line, "vermagic="))
+    {
+        return info.vermagic.assign(line.substr(9));
+    }
+    if (starts_with(line, "signature="))
+    {
+        info.signed_image = true;
+        return info.signature.assign(line.substr(10));
+    }
+    if (starts_with(line, "export="))
+    {
+        return push_module_symbol(info.exports, line.substr(7), ModuleSymbolBinding::exported);
+    }
+    if (starts_with(line, "require="))
+    {
+        return push_module_symbol(info.imports, line.substr(8), ModuleSymbolBinding::imported);
+    }
+    if (starts_with(line, "param="))
+    {
+        return parse_parameter(info, line.substr(6));
+    }
+    if (starts_with(line, "reloc="))
+    {
+        ModuleRelocation relocation{.offset = parse_unsigned(line.substr(6)), .kind = ModuleRelocationKind::relative};
+        ++info.relocation_count;
+        return info.relocations.push_back(relocation);
+    }
+    return Status::success();
+}
 
 Status assign_module_process_name(FixedString<sched::max_process_name> &out, std::string_view module_name)
 {
@@ -35,6 +376,315 @@ usize module_thread_target(ModuleThreading threading, usize cpu_count)
 }
 
 } // namespace
+
+Status ModuleSymbolRegistry::export_symbol(std::string_view name, uptr address)
+{
+    if (address == 0)
+    {
+        return Status::invalid_argument("module symbol address is zero");
+    }
+    for (const auto &symbol : symbols_)
+    {
+        if (symbol.name.view() == name)
+        {
+            return Status::already_exists("module symbol already exported");
+        }
+    }
+    return push_module_symbol(symbols_, name, ModuleSymbolBinding::exported, address);
+}
+
+Result<uptr> ModuleSymbolRegistry::resolve(std::string_view name) const
+{
+    for (const auto &symbol : symbols_)
+    {
+        if (symbol.name.view() == name)
+        {
+            return symbol.address;
+        }
+    }
+    return Status::not_found("module symbol is not exported");
+}
+
+Status ModuleSymbolRegistry::resolve_imports(ModuleImageInfo &image) const
+{
+    for (auto &symbol : image.imports)
+    {
+        auto address = resolve(symbol.name.view());
+        if (!address)
+        {
+            symbol.resolved = false;
+            return address.status();
+        }
+        symbol.address = address.value();
+        symbol.resolved = true;
+    }
+    return Status::success();
+}
+
+Result<ModuleImageInfo> ModuleImageLoader::parse(std::span<const std::byte> image,
+                                                 arch::Architecture fallback_architecture) const
+{
+    if (image.size() >= 5 && starts_with(bytes_view(image), "OKMOD"))
+    {
+        return parse_okmod(image, fallback_architecture);
+    }
+    if (image.size() >= 4 && byte_at(image, 0) == 0x7f && byte_at(image, 1) == static_cast<u8>('E') &&
+        byte_at(image, 2) == static_cast<u8>('L') && byte_at(image, 3) == static_cast<u8>('F'))
+    {
+        return parse_linux_ko(image, fallback_architecture);
+    }
+    return Status::invalid_argument("module image format is not recognized");
+}
+
+Result<ModuleImageInfo> ModuleImageLoader::parse_okmod(std::span<const std::byte> image,
+                                                       arch::Architecture fallback_architecture) const
+{
+    const auto text = bytes_view(image);
+    if (!starts_with(text, "OKMOD"))
+    {
+        return Status::invalid_argument("okmod image header is missing");
+    }
+
+    ModuleImageInfo info{
+        .format = ModuleImageFormat::okmod,
+        .architecture = fallback_architecture,
+        .has_modinfo = true,
+    };
+    usize line_start = 0;
+    while (line_start <= text.size())
+    {
+        usize line_end = line_start;
+        while (line_end < text.size() && text[line_end] != '\n')
+        {
+            ++line_end;
+        }
+        auto line = text.substr(line_start, line_end - line_start);
+        if (!line.empty() && line[line.size() - 1] == '\r')
+        {
+            line = line.substr(0, line.size() - 1);
+        }
+        if (auto status = parse_okmod_line(info, line); !status.ok())
+        {
+            return status;
+        }
+        if (line_end == text.size())
+        {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    if (info.name.empty())
+    {
+        return Status::invalid_argument("okmod module name is missing");
+    }
+    return info;
+}
+
+Result<ModuleImageInfo> ModuleImageLoader::parse_linux_ko(std::span<const std::byte> image,
+                                                          arch::Architecture fallback_architecture) const
+{
+    if (image.size() < 52 || byte_at(image, 0) != 0x7f || byte_at(image, 1) != static_cast<u8>('E') ||
+        byte_at(image, 2) != static_cast<u8>('L') || byte_at(image, 3) != static_cast<u8>('F'))
+    {
+        return Status::invalid_argument("Linux module image is not ELF");
+    }
+    const auto elf_class = byte_at(image, 4);
+    const bool elf64 = elf_class == 2;
+    if (!elf64 && elf_class != 1)
+    {
+        return Status::unsupported("ELF class is not supported");
+    }
+    const auto data_encoding = byte_at(image, 5);
+    const bool little_endian = data_encoding != 2;
+    const auto type = read_u16(image, 16, little_endian);
+    const auto machine = read_u16(image, 18, little_endian);
+    const auto section_header_offset =
+        elf64 ? read_u64(image, 40, little_endian) : read_u32(image, 32, little_endian);
+    const auto section_entry_size =
+        elf64 ? read_u16(image, 58, little_endian) : read_u16(image, 46, little_endian);
+    const auto section_count = elf64 ? read_u16(image, 60, little_endian) : read_u16(image, 48, little_endian);
+    const auto section_string_index =
+        elf64 ? read_u16(image, 62, little_endian) : read_u16(image, 50, little_endian);
+
+    if (section_count == 0 || section_entry_size == 0 ||
+        section_header_offset + static_cast<u64>(section_entry_size) * section_count > image.size())
+    {
+        return Status::invalid_argument("ELF section table is invalid");
+    }
+
+    ModuleImageInfo info{
+        .format = ModuleImageFormat::linux_ko,
+        .architecture = arch_for_elf_machine(machine, elf64, fallback_architecture),
+        .elf64 = elf64,
+        .relocatable = type == 1,
+        .section_count = section_count,
+    };
+    static_cast<void>(info.name.assign("linux-ko"));
+
+    ElfSection string_section{};
+    bool has_string_section = false;
+    if (section_string_index < section_count)
+    {
+        auto section = read_section(image, static_cast<usize>(section_header_offset) +
+                                               static_cast<usize>(section_string_index) * section_entry_size,
+                                    elf64, little_endian);
+        if (!section)
+        {
+            return section.status();
+        }
+        string_section = section.value();
+        has_string_section = string_section.offset + string_section.size <= image.size();
+    }
+
+    std::span<const std::byte> section_names{};
+    if (has_string_section)
+    {
+        section_names = image.subspan(static_cast<usize>(string_section.offset), static_cast<usize>(string_section.size));
+    }
+
+    for (usize i = 0; i < section_count; ++i)
+    {
+        auto section = read_section(image, static_cast<usize>(section_header_offset) + i * section_entry_size, elf64,
+                                    little_endian);
+        if (!section)
+        {
+            return section.status();
+        }
+        const auto current = section.value();
+        std::string_view section_name{};
+        if (!section_names.empty())
+        {
+            section_name = c_string_at(section_names, current.name_offset);
+        }
+        if (contains(section_name, "modinfo") && current.offset + current.size <= image.size())
+        {
+            info.has_modinfo = true;
+            if (auto status = parse_modinfo_block(
+                    info, image.subspan(static_cast<usize>(current.offset), static_cast<usize>(current.size)));
+                !status.ok())
+            {
+                return status;
+            }
+        }
+        if (contains(section_name, "ksymtab") || contains(section_name, "kallsyms") ||
+            contains(section_name, "symtab"))
+        {
+            info.has_kallsyms = true;
+        }
+        if (contains(section_name, "init"))
+        {
+            info.has_init = true;
+        }
+        if (contains(section_name, "exit"))
+        {
+            info.has_exit = true;
+        }
+        if (current.type == elf_section_type_rela || current.type == elf_section_type_rel)
+        {
+            info.relocation_count += current.entry_size == 0 ? static_cast<usize>(1)
+                                                             : static_cast<usize>(current.size / current.entry_size);
+            ModuleRelocation relocation{
+                .section_index = static_cast<u32>(i),
+                .offset = static_cast<uptr>(current.offset),
+                .kind = contains(section_name, "plt") ? ModuleRelocationKind::plt : ModuleRelocationKind::relative,
+            };
+            if (!info.relocations.full())
+            {
+                if (auto status = info.relocations.push_back(relocation); !status.ok())
+                {
+                    return status;
+                }
+            }
+        }
+    }
+
+    if (info.vermagic.empty())
+    {
+        if (auto status = info.vermagic.assign("mainline-tracking"); !status.ok())
+        {
+            return status;
+        }
+    }
+    return info;
+}
+
+Status LinuxAbiSnapshot::begin(std::string_view baseline, bool tracks_mainline)
+{
+    if (auto status = baseline_.assign(baseline); !status.ok())
+    {
+        return status;
+    }
+    tracks_mainline_ = tracks_mainline;
+    required_symbols_.clear();
+    implemented_symbols_.clear();
+    layouts_.clear();
+    return Status::success();
+}
+
+Status LinuxAbiSnapshot::record_required_symbol(std::string_view name)
+{
+    if (contains(std::span<const ModuleSymbol>{required_symbols_.begin(), required_symbols_.size()}, name))
+    {
+        return Status::already_exists("required Linux ABI symbol already recorded");
+    }
+    return push_module_symbol(required_symbols_, name, ModuleSymbolBinding::imported);
+}
+
+Status LinuxAbiSnapshot::record_implemented_symbol(std::string_view name)
+{
+    if (contains(std::span<const ModuleSymbol>{implemented_symbols_.begin(), implemented_symbols_.size()}, name))
+    {
+        return Status::already_exists("implemented Linux ABI symbol already recorded");
+    }
+    return push_module_symbol(implemented_symbols_, name, ModuleSymbolBinding::exported, 1);
+}
+
+Status LinuxAbiSnapshot::record_layout(std::string_view name, u32 size, u32 field_count)
+{
+    for (const auto &layout : layouts_)
+    {
+        if (layout.name.view() == name)
+        {
+            return Status::already_exists("Linux ABI layout already recorded");
+        }
+    }
+    LinuxStructLayout layout{.size = size, .field_count = field_count};
+    if (auto status = layout.name.assign(name); !status.ok())
+    {
+        return status;
+    }
+    return layouts_.push_back(layout);
+}
+
+bool LinuxAbiSnapshot::contains(std::span<const ModuleSymbol> symbols, std::string_view name) const
+{
+    for (const auto &symbol : symbols)
+    {
+        if (symbol.name.view() == name)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+u32 LinuxAbiSnapshot::coverage_x100() const
+{
+    if (required_symbols_.empty())
+    {
+        return 10000;
+    }
+    usize covered = 0;
+    for (const auto &symbol : required_symbols_)
+    {
+        if (contains(std::span<const ModuleSymbol>{implemented_symbols_.begin(), implemented_symbols_.size()},
+                     symbol.name.view()))
+        {
+            ++covered;
+        }
+    }
+    return static_cast<u32>((covered * 10000u) / required_symbols_.size());
+}
 
 Status ServiceRegistry::register_service(std::string_view service_id, void *service)
 {

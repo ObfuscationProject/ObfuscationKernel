@@ -17,6 +17,12 @@ inline constexpr usize max_ok_driver_modules = 16;
 inline constexpr usize max_ok_resources = 32;
 inline constexpr usize ok_mmio_words = 64;
 inline constexpr usize ok_dma_buffer_size = 4096;
+inline constexpr usize max_ok_dma_mappings = 16;
+inline constexpr usize max_ok_work_items = 32;
+inline constexpr usize max_ok_slab_allocations = 16;
+inline constexpr usize max_ok_waiters = 16;
+inline constexpr usize max_ok_kernel_threads = 16;
+inline constexpr usize max_ok_thread_name = 48;
 
 enum class OkBusType : u8
 {
@@ -41,6 +47,13 @@ enum class OkResourceKind : u8
     io_port,
     irq,
     dma,
+};
+
+enum class OkDmaDirection : u8
+{
+    to_device,
+    from_device,
+    bidirectional,
 };
 
 struct OkResource
@@ -74,6 +87,14 @@ struct OkDmaBuffer
     usize size{0};
 };
 
+struct OkDmaMapping
+{
+    uptr device_address{0};
+    usize size{0};
+    OkDmaDirection direction{OkDmaDirection::bidirectional};
+    bool mapped{false};
+};
+
 struct OkIrqHandle
 {
     u32 vector{0};
@@ -98,12 +119,34 @@ struct OkIoPortRegion
 struct OkWorkQueue
 {
     usize queued{0};
+
+    Status enqueue();
+    Result<usize> drain();
 };
 
 struct OkTimer
 {
     u64 deadline_ticks{0};
     bool armed{false};
+
+    Status arm(u64 deadline);
+    Status cancel();
+};
+
+class OkDmaMapper final
+{
+  public:
+    Result<OkDmaMapping> map(OkDmaBuffer &buffer, usize size, OkDmaDirection direction);
+    Status unmap(OkDmaMapping &mapping);
+    [[nodiscard]] usize mapping_count() const
+    {
+        return mapping_count_;
+    }
+
+  private:
+    std::array<OkDmaMapping, max_ok_dma_mappings> mappings_{};
+    std::array<bool, max_ok_dma_mappings> used_{};
+    usize mapping_count_{0};
 };
 
 class OkResourceManager final
@@ -164,12 +207,69 @@ class OkMutex final
     bool locked_{false};
 };
 
+class OkWaitQueue final
+{
+  public:
+    Status wait(u32 token);
+    Status wake_one();
+    Status wake_all();
+    [[nodiscard]] bool waiting(u32 token) const;
+    [[nodiscard]] usize waiter_count() const
+    {
+        return waiters_.size();
+    }
+
+  private:
+    StaticVector<u32, max_ok_waiters> waiters_;
+};
+
+class OkSlabAllocator final
+{
+  public:
+    Result<void *> allocate(usize size);
+    Status free(void *pointer);
+    [[nodiscard]] usize allocation_count() const
+    {
+        return allocation_count_;
+    }
+
+  private:
+    std::array<std::array<std::byte, 256>, max_ok_slab_allocations> slots_{};
+    std::array<bool, max_ok_slab_allocations> used_{};
+    usize allocation_count_{0};
+};
+
+struct OkKernelThread
+{
+    u32 id{0};
+    FixedString<max_ok_thread_name> name{};
+    bool running{false};
+};
+
+class OkKernelThreadRegistry final
+{
+  public:
+    Result<u32> create(std::string_view name);
+    Status stop(u32 id);
+    [[nodiscard]] const OkKernelThread *find(u32 id) const;
+    [[nodiscard]] usize thread_count() const
+    {
+        return threads_.size();
+    }
+
+  private:
+    StaticVector<OkKernelThread, max_ok_kernel_threads> threads_;
+    u32 next_id_{1};
+};
+
 struct OkProbeContext
 {
     OkDevice *device{nullptr};
     OkMmioRegion *mmio{nullptr};
     OkIrqHandle *irq{nullptr};
     OkResourceManager *resources{nullptr};
+    OkDmaMapper *dma{nullptr};
+    OkWorkQueue *workqueue{nullptr};
 };
 
 struct OkDriverManifest
@@ -275,6 +375,14 @@ class OkDriverRegistry final
     {
         return resources_;
     }
+    [[nodiscard]] OkDmaMapper &dma()
+    {
+        return dma_;
+    }
+    [[nodiscard]] OkWorkQueue &workqueue()
+    {
+        return workqueue_;
+    }
 
   private:
     StaticVector<OkDevice, max_ok_devices> devices_;
@@ -282,6 +390,8 @@ class OkDriverRegistry final
     OkMmioRegion mmio_{};
     OkIrqHandle irq_{};
     OkResourceManager resources_{};
+    OkDmaMapper dma_{};
+    OkWorkQueue workqueue_{};
     usize bound_count_{0};
 };
 
@@ -315,6 +425,10 @@ class LinuxPciShim final
     Status iounmap(OkMmioRegion *region);
     [[nodiscard]] void *kmalloc(usize size);
     Status kfree(void *pointer);
+    Result<OkDmaMapping> dma_map_single(OkDmaBuffer &buffer, usize size, OkDmaDirection direction);
+    Status dma_unmap_single(OkDmaMapping &mapping);
+    Status schedule_work();
+    Result<usize> flush_work();
     Status request_irq(OkIrqHandle &handle, u32 vector);
     Status free_irq(OkIrqHandle &handle);
     [[nodiscard]] usize probe_count() const
@@ -331,6 +445,8 @@ class LinuxPciShim final
     OkMmioRegion mmio_{};
     std::array<std::byte, 256> heap_{};
     bool heap_used_{false};
+    OkDmaMapper dma_{};
+    OkWorkQueue workqueue_{};
     usize probe_count_{0};
     usize remove_count_{0};
 };
