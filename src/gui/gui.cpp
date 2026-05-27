@@ -1425,10 +1425,17 @@ Result<Rect> GuiCompositor::desktop_bounds() const
 
 ModuleManifest GuiModule::manifest() const
 {
-    static constexpr std::array exports{gui_service_id};
+    static constexpr std::array exports{gui_service_id, gui_desktop_service_id};
     const auto threading =
         display_ != nullptr && display_->uses_cpu_gui_render_workers() ? ModuleThreading::per_cpu
                                                                        : ModuleThreading::single_threaded;
+    u64 capabilities = module_capability_bit(ModuleCapability::exports_services) |
+                       module_capability_bit(ModuleCapability::owns_kernel_process) |
+                       module_capability_bit(ModuleCapability::handles_gui);
+    if (threading == ModuleThreading::per_cpu)
+    {
+        capabilities |= module_capability_bit(ModuleCapability::uses_per_cpu_workers);
+    }
     return ModuleManifest{
         .name = gui_module_name,
         .version = "1",
@@ -1440,7 +1447,26 @@ ModuleManifest GuiModule::manifest() const
         .execution = ModuleExecution::kernel_process,
         .init_priority = 75,
         .threading = threading,
+        .capability_mask = capabilities,
+        .restart_policy = ModuleRestartPolicy::on_failure,
+        .resources = ModuleResourceBudget{.max_threads = sched::max_threads_per_process,
+                                          .max_services = exports.size(),
+                                          .max_memory_pages = max_gui_surfaces,
+                                          .max_handles = max_gui_surfaces},
     };
+}
+
+void *GuiModule::service(std::string_view service_id)
+{
+    if (service_id == gui_service_id)
+    {
+        return &compositor_;
+    }
+    if (service_id == gui_desktop_service_id)
+    {
+        return &desktop_;
+    }
+    return nullptr;
 }
 
 Status GuiModule::start(ServiceRegistry &)
@@ -1449,11 +1475,19 @@ Status GuiModule::start(ServiceRegistry &)
     {
         return Status::not_initialized("GUI module has no display binding");
     }
-    return compositor_.start(*display_);
+    if (auto status = compositor_.start(*display_); !status.ok())
+    {
+        return status;
+    }
+    return desktop_.bind(compositor_);
 }
 
 Status GuiModule::stop()
 {
+    if (auto status = desktop_.unbind(); !status.ok())
+    {
+        return status;
+    }
     return compositor_.stop();
 }
 

@@ -26,6 +26,23 @@ class DebugModule final : public KernelModule
 
     [[nodiscard]] ModuleManifest manifest() const override
     {
+        u64 capabilities = 0;
+        if (!exports_.empty())
+        {
+            capabilities |= module_capability_bit(ModuleCapability::exports_services);
+        }
+        if (!requires_.empty())
+        {
+            capabilities |= module_capability_bit(ModuleCapability::requires_services);
+        }
+        if (execution_ == ModuleExecution::kernel_process)
+        {
+            capabilities |= module_capability_bit(ModuleCapability::owns_kernel_process);
+        }
+        if (threading_ == ModuleThreading::per_cpu)
+        {
+            capabilities |= module_capability_bit(ModuleCapability::uses_per_cpu_workers);
+        }
         return ModuleManifest{
             .name = name_.view(),
             .version = "1",
@@ -37,6 +54,10 @@ class DebugModule final : public KernelModule
             .execution = execution_,
             .init_priority = priority_,
             .threading = threading_,
+            .capability_mask = capabilities,
+            .resources = ModuleResourceBudget{.max_threads = sched::max_threads_per_process,
+                                              .max_services = exports_.size() == 0 ? static_cast<usize>(4)
+                                                                                  : exports_.size()},
         };
     }
 
@@ -187,6 +208,95 @@ Status test_dependency_priority_order()
     {
         return Status::fault("module init priority overrode dependency order");
     }
+    return Status::success();
+}
+
+class ManifestOverrideModule final : public KernelModule
+{
+  public:
+    explicit ManifestOverrideModule(ModuleManifest manifest) : manifest_(manifest)
+    {
+    }
+
+    [[nodiscard]] ModuleManifest manifest() const override
+    {
+        return manifest_;
+    }
+
+  private:
+    ModuleManifest manifest_{};
+};
+
+Status test_module_abi_contract()
+{
+    ManifestOverrideModule wrong_abi{ModuleManifest{
+        .name = "wrong-abi",
+        .version = "1",
+        .module_class = "test",
+        .abi_version = kernel_module_abi_version + 1,
+    }};
+    ModuleManager wrong_abi_manager;
+    if (wrong_abi_manager.register_module(wrong_abi).code() != StatusCode::unsupported ||
+        wrong_abi.state() != ModuleState::failed)
+    {
+        return Status::fault("unsupported module ABI version was not rejected");
+    }
+
+    static constexpr std::array<std::string_view, 1> exports{"bad.service"};
+    ManifestOverrideModule missing_capability{ModuleManifest{
+        .name = "missing-capability",
+        .version = "1",
+        .module_class = "test",
+        .exported_services = exports,
+        .abi_version = kernel_module_abi_version,
+    }};
+    ModuleManager capability_manager;
+    if (capability_manager.register_module(missing_capability).code() != StatusCode::denied ||
+        missing_capability.state() != ModuleState::failed)
+    {
+        return Status::fault("module capability declaration was not enforced");
+    }
+
+    DebugModule restartable{"restartable", "test", {}, {}, {}, 0};
+    ModuleManager restart_manager;
+    if (auto status = restart_manager.register_module(restartable); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = restart_manager.start_all(); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = restart_manager.restart_module("restartable"); !status.ok())
+    {
+        return status;
+    }
+    if (restartable.restart_count() != 1 || restartable.state() != ModuleState::started)
+    {
+        return Status::fault("module restart count or state was not recorded");
+    }
+
+    ManifestOverrideModule no_restart{ModuleManifest{
+        .name = "no-restart",
+        .version = "1",
+        .module_class = "test",
+        .abi_version = kernel_module_abi_version,
+        .restart_policy = ModuleRestartPolicy::never,
+    }};
+    ModuleManager no_restart_manager;
+    if (auto status = no_restart_manager.register_module(no_restart); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = no_restart_manager.start_all(); !status.ok())
+    {
+        return status;
+    }
+    if (no_restart_manager.restart_module("no-restart").code() != StatusCode::denied)
+    {
+        return Status::fault("module restart policy was not enforced");
+    }
+
     return Status::success();
 }
 
@@ -365,6 +475,10 @@ Status run_module_roadmap_tests(KernelTestReport &report)
         return status;
     }
     if (auto status = test_dependency_priority_order(); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_module_abi_contract(); !status.ok())
     {
         return status;
     }

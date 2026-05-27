@@ -130,6 +130,87 @@ Status test_driver_abi_helpers()
     return Status::success();
 }
 
+Status test_driver_resource_manager_and_classes()
+{
+    driver::OkResourceManager resources;
+    if (auto status =
+            resources.add(driver::OkResource{.kind = driver::OkResourceKind::mmio, .base = 0x1000, .length = 0x100});
+        !status.ok())
+    {
+        return status;
+    }
+    if (resources.add(driver::OkResource{.kind = driver::OkResourceKind::mmio, .base = 0x1080, .length = 0x40})
+            .code() != StatusCode::already_exists)
+    {
+        return Status::fault("driver resource manager accepted overlapping MMIO resources");
+    }
+    auto claimed = resources.claim(driver::OkResourceKind::mmio, 0x1000, 0x80);
+    if (!claimed || !claimed.value()->claimed || resources.claimed_count() != 1 ||
+        resources.claim(driver::OkResourceKind::mmio, 0x1000, 0x80).status().code() != StatusCode::busy ||
+        !resources.release(driver::OkResourceKind::mmio, 0x1000).ok() || resources.claimed_count() != 0)
+    {
+        return Status::fault("driver resource claim/release validation failed");
+    }
+
+    driver::OkDevice network_device{
+        .bus = driver::OkBusType::pci,
+        .id = driver::OkDeviceId{.vendor = 0x1af4, .device = 0x1000, .class_code = 0x020000},
+    };
+    if (driver::ok_device_class_for(network_device) != driver::OkDeviceClass::network ||
+        driver::ok_device_class_name(driver::OkDeviceClass::network) != "network")
+    {
+        return Status::fault("driver device class inference failed");
+    }
+
+    struct NetworkOnlyDriver final : public driver::OkDriverModule
+    {
+        [[nodiscard]] driver::OkDriverManifest manifest() const override
+        {
+            static constexpr std::array ids{
+                driver::OkDeviceId{.vendor = 0x1af4, .device = 0x1000, .class_code = 0xffff'ffffu},
+            };
+            return driver::OkDriverManifest{
+                .name = "network-only",
+                .version = "1",
+                .bus = driver::OkBusType::pci,
+                .ids = ids,
+                .device_class = driver::OkDeviceClass::network,
+            };
+        }
+
+        Status probe(driver::OkProbeContext &context) override
+        {
+            if (context.resources == nullptr || context.device == nullptr)
+            {
+                return Status::invalid_argument("network-only driver context is incomplete");
+            }
+            ++probes;
+            return Status::success();
+        }
+
+        usize probes{0};
+    } network_driver;
+
+    driver::OkDriverRegistry registry;
+    if (auto status = registry.register_device(network_device); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = registry.register_driver(network_driver); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = registry.bind_all(); !status.ok())
+    {
+        return status;
+    }
+    if (network_driver.probes != 1 || registry.bound_count() != 1 || registry.resources().resource_count() == 0)
+    {
+        return Status::fault("Linux-style driver class/resource binding failed");
+    }
+    return Status::success();
+}
+
 Status test_native_driver_lifecycle()
 {
     LifecycleFakePciDriver lifecycle;
@@ -336,6 +417,10 @@ Status test_linux_driver_shim()
 Status run_driver_abi_roadmap_tests(KernelTestReport &report)
 {
     if (auto status = test_driver_abi_helpers(); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_driver_resource_manager_and_classes(); !status.ok())
     {
         return status;
     }

@@ -287,7 +287,9 @@ Status Kernel::run_debug_test_suite()
     test_report_.gpu = true;
     if (gui_module_.compositor().state() != gui::GuiState::running ||
         gui_module_.compositor().last_present_checksum() == 0 ||
-        kernel_modules_.services().query<gui::GuiModule>(gui::gui_service_id) != &gui_module_ ||
+        kernel_modules_.services().query<gui::GuiCompositor>(gui::gui_service_id) != &gui_module_.compositor() ||
+        kernel_modules_.services().query<gui::GuiDesktopService>(gui::gui_desktop_service_id) !=
+            &gui_module_.desktop() ||
         kernel_modules_.kernel_process_pid() == 0 || scheduler_.find(kernel_modules_.kernel_process_pid()) == nullptr)
     {
         return Status::fault("kernel GUI debug test failed");

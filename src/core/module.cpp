@@ -75,6 +75,11 @@ Status ModuleManager::register_module(KernelModule &module)
     {
         return Status::already_exists("module already registered");
     }
+    if (auto status = validate_manifest(module); !status.ok())
+    {
+        module.fail(status.message());
+        return status;
+    }
     module.set_state(ModuleState::created);
     return modules_.push_back(&module);
 }
@@ -285,6 +290,46 @@ Status ModuleManager::check_dependencies(KernelModule &module) const
     return Status::success();
 }
 
+Status ModuleManager::validate_manifest(KernelModule &module) const
+{
+    const auto manifest = module.manifest();
+    if (manifest.abi_version != kernel_module_abi_version)
+    {
+        return Status::unsupported("module ABI version is not supported");
+    }
+    if (manifest.resources.max_services != 0 && manifest.exported_services.size() > manifest.resources.max_services)
+    {
+        return Status::overflow("module service export budget exceeded");
+    }
+    const auto worker_budget = manifest.resources.max_threads == 0 ? static_cast<usize>(1) : manifest.resources.max_threads;
+    if (manifest.threading == ModuleThreading::per_cpu && manifest.resources.max_threads != 0 &&
+        kernel_process_scheduler_ != nullptr && kernel_process_scheduler_->cpu_count() > worker_budget)
+    {
+        return Status::overflow("module thread budget is below per-CPU worker count");
+    }
+    if (manifest.execution == ModuleExecution::kernel_process &&
+        (manifest.capability_mask & module_capability_bit(ModuleCapability::owns_kernel_process)) == 0)
+    {
+        return Status::denied("kernel-process module is missing its process capability");
+    }
+    if (!manifest.exported_services.empty() &&
+        (manifest.capability_mask & module_capability_bit(ModuleCapability::exports_services)) == 0)
+    {
+        return Status::denied("service-exporting module is missing its service capability");
+    }
+    if (!manifest.required_services.empty() &&
+        (manifest.capability_mask & module_capability_bit(ModuleCapability::requires_services)) == 0)
+    {
+        return Status::denied("service-consuming module is missing its service capability");
+    }
+    if (manifest.threading == ModuleThreading::per_cpu &&
+        (manifest.capability_mask & module_capability_bit(ModuleCapability::uses_per_cpu_workers)) == 0)
+    {
+        return Status::denied("per-CPU module is missing its worker capability");
+    }
+    return Status::success();
+}
+
 Status ModuleManager::visit(usize index)
 {
     if (index >= modules_.size())
@@ -392,11 +437,17 @@ Status ModuleManager::publish_services(KernelModule &module)
     const auto manifest = module.manifest();
     for (const auto service_id : manifest.exported_services)
     {
-        if (services_.query_raw(service_id) == &module)
+        auto *provider = module.service(service_id);
+        if (provider == nullptr)
+        {
+            module.fail("module service provider is null");
+            return Status::invalid_argument("module service provider is null");
+        }
+        if (services_.query_raw(service_id) == provider)
         {
             continue;
         }
-        if (auto status = services_.register_service(service_id, &module); !status.ok())
+        if (auto status = services_.register_service(service_id, provider); !status.ok())
         {
             module.fail(status.message());
             return status;
@@ -441,6 +492,11 @@ Status ModuleManager::start_module(KernelModule &module)
 {
     module.clear_failure();
     const auto manifest = module.manifest();
+    if (auto status = validate_manifest(module); !status.ok())
+    {
+        module.fail(status.message());
+        return status;
+    }
     const bool already_recorded = started_order_contains(module);
     if (manifest.execution == ModuleExecution::kernel_process)
     {
@@ -514,6 +570,10 @@ Status ModuleManager::restart_module(std::string_view name)
     {
         return Status::not_found("module is not registered");
     }
+    if (module->manifest().restart_policy == ModuleRestartPolicy::never)
+    {
+        return Status::denied("module restart policy forbids restart");
+    }
     if (module->state() == ModuleState::started)
     {
         if (auto status = module->stop(); !status.ok())
@@ -523,7 +583,12 @@ Status ModuleManager::restart_module(std::string_view name)
         }
         module->set_state(ModuleState::stopped);
     }
-    return start_module(*module);
+    if (auto status = start_module(*module); !status.ok())
+    {
+        return status;
+    }
+    ++module->restart_count_;
+    return Status::success();
 }
 
 Status ModuleManager::supervise_kernel_processes(StaticVector<ModuleProcessRestart, max_kernel_modules> &restarts)
@@ -543,6 +608,11 @@ Status ModuleManager::supervise_kernel_processes(StaticVector<ModuleProcessResta
         }
         auto *module = find(record.module_name.view());
         if (module == nullptr || module->state() != ModuleState::started)
+        {
+            continue;
+        }
+        const auto manifest = module->manifest();
+        if (manifest.restart_policy == ModuleRestartPolicy::never || manifest.restart_policy == ModuleRestartPolicy::manual)
         {
             continue;
         }

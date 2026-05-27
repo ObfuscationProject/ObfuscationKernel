@@ -152,6 +152,15 @@ std::array<std::byte, 128> make_test_elf(arch::Architecture architecture)
     write_le64(bytes, 32, 64);
     write_le16(bytes, 54, 56);
     write_le16(bytes, 56, 1);
+    write_le32(bytes, 64, 1);
+    write_le32(bytes, 68, 0x5);
+    write_le64(bytes, 72, 120);
+    write_le64(bytes, 80, 0x400000);
+    write_le64(bytes, 88, 0x400000);
+    write_le64(bytes, 96, 4);
+    write_le64(bytes, 104, 0x2000);
+    write_le64(bytes, 112, 0x1000);
+    bytes[120] = std::byte{0xc3};
     return image;
 }
 
@@ -196,7 +205,10 @@ Status verify_elf_loader(arch::Architecture architecture, std::span<const std::b
     sched::ElfLoader loader;
     auto loaded = loader.load(elf, architecture);
     if (!loaded || loaded.value().entry != 0x400000 || loaded.value().stack_pointer == 0 ||
-        loaded.value().load_segments != 1)
+        loaded.value().load_segments != 1 || loaded.value().segments.size() != 1 ||
+        loaded.value().segments[0].virtual_address != 0x400000 || loaded.value().segments[0].file_size != 4 ||
+        loaded.value().segments[0].memory_size != 0x2000 ||
+        (loaded.value().segments[0].permissions & memory::page_execute) == 0)
     {
         return Status::fault("ELF loader did not expose entry, stack, and segment metadata");
     }

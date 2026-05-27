@@ -18,6 +18,7 @@ inline constexpr usize max_process_threads = 8;
 inline constexpr usize max_process_children = 16;
 inline constexpr usize max_memory_areas = 16;
 inline constexpr usize max_process_fds = 32;
+inline constexpr usize max_elf_load_segments = 8;
 
 enum class TaskState : u8
 {
@@ -207,9 +208,20 @@ class Process final
 
 struct LoadedElf
 {
+    struct Segment
+    {
+        uptr virtual_address{0};
+        usize memory_size{0};
+        usize file_size{0};
+        usize file_offset{0};
+        usize permissions{0};
+    };
+
     uptr entry{0};
     uptr stack_pointer{0};
     usize load_segments{0};
+    StaticVector<Segment, max_elf_load_segments> segments{};
+    bool static_executable{true};
 };
 
 class ElfLoader final

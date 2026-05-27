@@ -16,6 +16,7 @@ inline constexpr usize max_kernel_modules = 32;
 inline constexpr usize max_kernel_services = 64;
 inline constexpr usize max_module_name = 48;
 inline constexpr std::string_view kernel_module_process_prefix{"mod:"};
+inline constexpr u32 kernel_module_abi_version = 1;
 
 struct ModuleId
 {
@@ -61,6 +62,45 @@ enum class ModuleThreading : u8
     per_cpu,
 };
 
+enum class ModuleTrustLevel : u8
+{
+    kernel,
+    privileged,
+    sandboxed,
+};
+
+enum class ModuleRestartPolicy : u8
+{
+    never,
+    manual,
+    on_failure,
+    always,
+};
+
+enum class ModuleCapability : u8
+{
+    exports_services,
+    requires_services,
+    owns_kernel_process,
+    uses_per_cpu_workers,
+    handles_user_abi,
+    handles_driver_abi,
+    handles_gui,
+};
+
+struct ModuleResourceBudget
+{
+    usize max_threads{1};
+    usize max_services{4};
+    usize max_memory_pages{0};
+    usize max_handles{0};
+};
+
+[[nodiscard]] constexpr u64 module_capability_bit(ModuleCapability capability)
+{
+    return 1ull << static_cast<u8>(capability);
+}
+
 struct ModuleManifest
 {
     std::string_view name{};
@@ -73,6 +113,11 @@ struct ModuleManifest
     ModuleExecution execution{ModuleExecution::inline_core};
     u32 init_priority{0};
     ModuleThreading threading{ModuleThreading::single_threaded};
+    u32 abi_version{kernel_module_abi_version};
+    u64 capability_mask{0};
+    ModuleTrustLevel trust{ModuleTrustLevel::kernel};
+    ModuleRestartPolicy restart_policy{ModuleRestartPolicy::manual};
+    ModuleResourceBudget resources{};
 };
 
 class KernelService
@@ -136,6 +181,10 @@ class KernelModule
     {
         return Status::success();
     }
+    [[nodiscard]] virtual void *service(std::string_view)
+    {
+        return this;
+    }
 
     [[nodiscard]] ModuleState state() const
     {
@@ -144,6 +193,10 @@ class KernelModule
     [[nodiscard]] std::string_view failure_message() const
     {
         return failure_message_;
+    }
+    [[nodiscard]] usize restart_count() const
+    {
+        return restart_count_;
     }
 
   private:
@@ -165,6 +218,7 @@ class KernelModule
 
     ModuleState state_{ModuleState::created};
     std::string_view failure_message_{};
+    usize restart_count_{0};
 };
 
 class ModuleManager final
@@ -235,6 +289,7 @@ class ModuleManager final
     Status sort_modules();
     Status visit(usize index);
     Status check_dependencies(KernelModule &module) const;
+    Status validate_manifest(KernelModule &module) const;
     Status check_required_services(KernelModule &module) const;
     Status publish_services(KernelModule &module);
     Status transition(KernelModule &module, ModuleState next, Status status);

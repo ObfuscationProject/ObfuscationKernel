@@ -17,6 +17,16 @@ u16 read_le16(std::span<const std::byte> image, usize offset)
     return static_cast<u16>(byte_at(image, offset) | static_cast<u16>(byte_at(image, offset + 1)) << 8);
 }
 
+u32 read_le32(std::span<const std::byte> image, usize offset)
+{
+    u32 value = 0;
+    for (usize i = 0; i < 4; ++i)
+    {
+        value |= static_cast<u32>(byte_at(image, offset + i)) << (i * 8);
+    }
+    return value;
+}
+
 u64 read_le64(std::span<const std::byte> image, usize offset)
 {
     u64 value = 0;
@@ -72,6 +82,24 @@ bool ranges_overlap(memory::VmArea lhs, memory::VmArea rhs)
         return true;
     }
     return lhs.base < rhs_end && rhs.base < lhs_end;
+}
+
+usize elf_segment_permissions(u32 flags)
+{
+    usize permissions = memory::page_user;
+    if ((flags & 0x4u) != 0)
+    {
+        permissions |= memory::page_read;
+    }
+    if ((flags & 0x2u) != 0)
+    {
+        permissions |= memory::page_write;
+    }
+    if ((flags & 0x1u) != 0)
+    {
+        permissions |= memory::page_execute;
+    }
+    return permissions;
 }
 
 } // namespace
@@ -281,15 +309,65 @@ Result<LoadedElf> ElfLoader::load(std::span<const std::byte> image, arch::Archit
     {
         return Status::invalid_argument("ELF architecture mismatch");
     }
+    const auto type = read_le16(image, 16);
     const auto entry = read_le64(image, 24);
+    const auto phoff = static_cast<usize>(read_le64(image, 32));
     const auto phentsize = read_le16(image, 54);
     const auto phnum = read_le16(image, 56);
     if (phnum == 0 || phentsize == 0)
     {
         return Status::invalid_argument("ELF program headers are missing");
     }
+    if (phoff >= image.size() || phentsize < 56 ||
+        phoff + static_cast<usize>(phentsize) * static_cast<usize>(phnum) > image.size())
+    {
+        return Status::invalid_argument("ELF program header table is out of range");
+    }
     const auto entry_address = entry == 0 ? static_cast<uptr>(0x400000) : static_cast<uptr>(entry);
-    return LoadedElf{.entry = entry_address, .stack_pointer = static_cast<uptr>(0x800000), .load_segments = phnum};
+    LoadedElf loaded{
+        .entry = entry_address,
+        .stack_pointer = static_cast<uptr>(0x800000),
+        .static_executable = type == 2,
+    };
+    for (usize i = 0; i < phnum; ++i)
+    {
+        const auto offset = phoff + i * static_cast<usize>(phentsize);
+        const auto program_type = read_le32(image, offset);
+        if (program_type != 1)
+        {
+            continue;
+        }
+        const auto flags = read_le32(image, offset + 4);
+        const auto file_offset = static_cast<usize>(read_le64(image, offset + 8));
+        const auto virtual_address = static_cast<uptr>(read_le64(image, offset + 16));
+        const auto file_size = static_cast<usize>(read_le64(image, offset + 32));
+        const auto memory_size = static_cast<usize>(read_le64(image, offset + 40));
+        if (memory_size < file_size || file_offset + file_size > image.size())
+        {
+            return Status::invalid_argument("ELF load segment is out of range");
+        }
+        if (loaded.segments.full())
+        {
+            return Status::overflow("ELF load segment table is full");
+        }
+        if (auto status = loaded.segments.push_back(LoadedElf::Segment{
+                .virtual_address = virtual_address,
+                .memory_size = memory_size,
+                .file_size = file_size,
+                .file_offset = file_offset,
+                .permissions = elf_segment_permissions(flags),
+            });
+            !status.ok())
+        {
+            return status;
+        }
+    }
+    if (loaded.segments.empty())
+    {
+        return Status::invalid_argument("ELF image has no loadable segments");
+    }
+    loaded.load_segments = loaded.segments.size();
+    return loaded;
 }
 
 Result<ProcessId> ProcessManager::allocate_process(std::string_view name, ProcessId parent)
@@ -371,13 +449,26 @@ Result<ProcessId> ProcessManager::create_user_process(std::string_view name, std
     process->threads()[0].state = TaskState::runnable;
     process->set_credentials(user::default_user_credentials());
     if (auto status = process->memory_map().replace_with(memory::VmArea{
-            .base = 0x400000,
-            .length = 0x2000,
-            .permissions = memory::page_read | memory::page_execute | memory::page_user,
+            .base = loaded.value().segments[0].virtual_address,
+            .length = loaded.value().segments[0].memory_size,
+            .permissions = loaded.value().segments[0].permissions,
         });
         !status.ok())
     {
         return status;
+    }
+    for (usize i = 1; i < loaded.value().segments.size(); ++i)
+    {
+        const auto &segment = loaded.value().segments[i];
+        if (auto status = process->memory_map().add_area(memory::VmArea{
+                .base = segment.virtual_address,
+                .length = segment.memory_size,
+                .permissions = segment.permissions,
+            });
+            !status.ok())
+        {
+            return status;
+        }
     }
     return pid.value();
 }
@@ -454,13 +545,26 @@ Status ProcessManager::execve(ProcessId pid, std::span<const std::byte> elf_imag
         return loaded.status();
     }
     if (auto status = process->memory_map().replace_with(memory::VmArea{
-            .base = 0x400000,
-            .length = 0x2000,
-            .permissions = memory::page_read | memory::page_execute | memory::page_user,
+            .base = loaded.value().segments[0].virtual_address,
+            .length = loaded.value().segments[0].memory_size,
+            .permissions = loaded.value().segments[0].permissions,
         });
         !status.ok())
     {
         return status;
+    }
+    for (usize i = 1; i < loaded.value().segments.size(); ++i)
+    {
+        const auto &segment = loaded.value().segments[i];
+        if (auto status = process->memory_map().add_area(memory::VmArea{
+                .base = segment.virtual_address,
+                .length = segment.memory_size,
+                .permissions = segment.permissions,
+            });
+            !status.ok())
+        {
+            return status;
+        }
     }
     auto &ops = arch::arch_operations(architecture);
     if (process->threads().empty())

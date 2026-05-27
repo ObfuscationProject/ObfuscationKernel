@@ -2,6 +2,7 @@
 
 #include "ok/core/module.hpp"
 #include "ok/gui/compositor.hpp"
+#include "ok/gui/desktop.hpp"
 
 namespace ok::gui
 {
@@ -25,6 +26,7 @@ class GuiModule final : public KernelModule, public KernelService
     {
         return gui_service_id;
     }
+    [[nodiscard]] void *service(std::string_view service_id) override;
     Status start(ServiceRegistry &) override;
     Status stop() override;
     Status shutdown() override;
@@ -37,10 +39,19 @@ class GuiModule final : public KernelModule, public KernelService
     {
         return compositor_;
     }
+    [[nodiscard]] GuiDesktopService &desktop()
+    {
+        return desktop_;
+    }
+    [[nodiscard]] const GuiDesktopService &desktop() const
+    {
+        return desktop_;
+    }
 
   private:
     driver::FramebufferDisplayDriver *display_{nullptr};
     GuiCompositor compositor_{};
+    GuiDesktopService desktop_{};
 };
 
 class GuiSupervisor final

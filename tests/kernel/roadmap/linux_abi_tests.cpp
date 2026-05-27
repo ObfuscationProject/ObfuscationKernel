@@ -267,6 +267,17 @@ Status verify_linux_futex_random_and_tls(syscall::LinuxSyscallDispatcher &dispat
     {
         return Status::fault("Linux compat process TLS, auxv, or vdso placeholder validation failed");
     }
+
+    syscall::LinuxInitialStackBuilder stack_builder;
+    static constexpr std::array<std::string_view, 2> argv{"hello", "world"};
+    static constexpr std::array<std::string_view, 1> envp{"PATH=/"};
+    auto stack = stack_builder.build(0x800000, argv, envp, process.auxv().entries());
+    if (!stack || stack.value().argc != argv.size() || stack.value().stack_pointer == 0 ||
+        (stack.value().stack_pointer % 16u) != 0 || stack.value().argv_pointer >= stack.value().envp_pointer ||
+        stack.value().envp_pointer >= stack.value().auxv_pointer || stack_builder.words().size() != stack.value().words)
+    {
+        return Status::fault("Linux initial stack layout validation failed");
+    }
     return Status::success();
 }
 

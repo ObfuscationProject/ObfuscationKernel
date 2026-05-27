@@ -740,7 +740,8 @@ Status test_gui_module_restarts_after_crash(Kernel &kernel)
 {
     auto &module = kernel.gui();
     auto &manager = kernel.kernel_modules();
-    if (manager.services().query<gui::GuiModule>(gui::gui_service_id) != &module ||
+    if (manager.services().query<gui::GuiCompositor>(gui::gui_service_id) != &module.compositor() ||
+        manager.services().query<gui::GuiDesktopService>(gui::gui_desktop_service_id) != &module.desktop() ||
         module.compositor().state() != gui::GuiState::running)
     {
         return Status::fault("GUI module service publication failed");
@@ -770,7 +771,8 @@ Status test_gui_module_restarts_after_crash(Kernel &kernel)
     if (supervisor.restart_attempts() != 1 || module.state() != ModuleState::started ||
         module.compositor().state() != gui::GuiState::running || module.compositor().generation() <= first_generation ||
         module.compositor().surface_count() != 0 || manager.started_count() == 0 ||
-        manager.services().query<gui::GuiModule>(gui::gui_service_id) != &module)
+        manager.services().query<gui::GuiCompositor>(gui::gui_service_id) != &module.compositor() ||
+        manager.services().query<gui::GuiDesktopService>(gui::gui_desktop_service_id) != &module.desktop())
     {
         return Status::fault("GUI module restart validation failed");
     }
@@ -836,7 +838,9 @@ Status test_kernel_gui_is_started(Kernel &kernel)
     if (module.state() != ModuleState::started || module.compositor().state() != gui::GuiState::running ||
         module.compositor().last_present_checksum() == 0 ||
         module.compositor().startup_animation_frames() < 8 ||
-        kernel.kernel_modules().services().query<gui::GuiModule>(gui::gui_service_id) != &module ||
+        kernel.kernel_modules().services().query<gui::GuiCompositor>(gui::gui_service_id) != &module.compositor() ||
+        kernel.kernel_modules().services().query<gui::GuiDesktopService>(gui::gui_desktop_service_id) !=
+            &module.desktop() ||
         module.manifest().execution != ModuleExecution::kernel_process ||
         kernel.kernel_modules().kernel_process_pid() == 0 ||
         process == nullptr || process->name() != "mod:kernel-gui" ||
@@ -1470,6 +1474,52 @@ Status test_shell_renders_to_gui(Kernel &kernel)
     return Status::success();
 }
 
+Status test_gui_desktop_service_boundary(Kernel &kernel)
+{
+    auto *desktop =
+        kernel.kernel_modules().services().query<gui::GuiDesktopService>(gui::gui_desktop_service_id);
+    auto *compositor = kernel.kernel_modules().services().query<gui::GuiCompositor>(gui::gui_service_id);
+    if (desktop == nullptr || compositor == nullptr || desktop != &kernel.gui().desktop() ||
+        compositor != &kernel.gui().compositor() || !desktop->bound() ||
+        desktop->backend() != gui::DesktopBackend::kernel_compositor)
+    {
+        return Status::fault("GUI desktop service was not published through the module service boundary");
+    }
+
+    const auto before = desktop->window_count();
+    auto window = desktop->open_window(gui::DesktopWindowRequest{
+        .bounds = gui::Rect{.x = 22, .y = 18, .width = 80, .height = 48},
+        .title = "desktop-api",
+        .app = gui::TaskbarApp::task_monitor,
+    });
+    if (!window)
+    {
+        return window.status();
+    }
+    if (desktop->window_count() != before + 1 || desktop->active_window() != window.value())
+    {
+        return Status::fault("GUI desktop service did not open or focus a window");
+    }
+    if (auto status = desktop->route_key('x'); !status.ok())
+    {
+        return status;
+    }
+    if (desktop->routed_key_count() != 1)
+    {
+        return Status::fault("GUI desktop service did not track routed key events");
+    }
+    if (auto status = desktop->focus_window(window.value()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = desktop->close_window(window.value()); !status.ok())
+    {
+        return status;
+    }
+    return desktop->window_count() == before ? Status::success()
+                                             : Status::fault("GUI desktop service did not close its window");
+}
+
 } // namespace
 
 Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
@@ -1519,6 +1569,10 @@ Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
         return status;
     }
     if (auto status = test_shell_renders_to_gui(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_gui_desktop_service_boundary(kernel); !status.ok())
     {
         return status;
     }

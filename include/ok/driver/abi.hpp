@@ -14,6 +14,7 @@ namespace ok::driver
 
 inline constexpr usize max_ok_devices = 32;
 inline constexpr usize max_ok_driver_modules = 16;
+inline constexpr usize max_ok_resources = 32;
 inline constexpr usize ok_mmio_words = 64;
 inline constexpr usize ok_dma_buffer_size = 4096;
 
@@ -23,6 +24,32 @@ enum class OkBusType : u8
     platform,
     virtio,
     usb,
+};
+
+enum class OkDeviceClass : u8
+{
+    generic,
+    block,
+    network,
+    input,
+    display,
+};
+
+enum class OkResourceKind : u8
+{
+    mmio,
+    io_port,
+    irq,
+    dma,
+};
+
+struct OkResource
+{
+    OkResourceKind kind{OkResourceKind::mmio};
+    uptr base{0};
+    usize length{0};
+    u32 flags{0};
+    bool claimed{false};
 };
 
 struct OkDeviceId
@@ -38,6 +65,7 @@ struct OkDevice
     OkDeviceId id{};
     std::array<uptr, 6> resources{};
     bool attached{false};
+    OkDeviceClass device_class{OkDeviceClass::generic};
 };
 
 struct OkDmaBuffer
@@ -76,6 +104,23 @@ struct OkTimer
 {
     u64 deadline_ticks{0};
     bool armed{false};
+};
+
+class OkResourceManager final
+{
+  public:
+    Status add(OkResource resource);
+    Result<OkResource *> claim(OkResourceKind kind, uptr base, usize length);
+    Status release(OkResourceKind kind, uptr base);
+    [[nodiscard]] usize resource_count() const
+    {
+        return resources_.size();
+    }
+    [[nodiscard]] usize claimed_count() const;
+    [[nodiscard]] const OkResource *find(OkResourceKind kind, uptr base) const;
+
+  private:
+    StaticVector<OkResource, max_ok_resources> resources_;
 };
 
 class OkRefCount final
@@ -124,6 +169,7 @@ struct OkProbeContext
     OkDevice *device{nullptr};
     OkMmioRegion *mmio{nullptr};
     OkIrqHandle *irq{nullptr};
+    OkResourceManager *resources{nullptr};
 };
 
 struct OkDriverManifest
@@ -132,6 +178,48 @@ struct OkDriverManifest
     std::string_view version{};
     OkBusType bus{OkBusType::pci};
     std::span<const OkDeviceId> ids{};
+    OkDeviceClass device_class{OkDeviceClass::generic};
+};
+
+struct OkBlockRequest
+{
+    u64 sector{0};
+    std::span<std::byte> buffer{};
+};
+
+struct OkNetBuffer
+{
+    std::span<std::byte> frame{};
+};
+
+class OkBlockOperations
+{
+  public:
+    virtual ~OkBlockOperations() = default;
+    virtual Result<usize> read(OkBlockRequest request) = 0;
+    virtual Result<usize> write(OkBlockRequest request) = 0;
+};
+
+class OkNetworkOperations
+{
+  public:
+    virtual ~OkNetworkOperations() = default;
+    virtual Status transmit(OkNetBuffer buffer) = 0;
+    virtual Result<usize> receive(OkNetBuffer buffer) = 0;
+};
+
+class OkInputOperations
+{
+  public:
+    virtual ~OkInputOperations() = default;
+    virtual Result<u32> poll_event() = 0;
+};
+
+class OkDisplayOperations
+{
+  public:
+    virtual ~OkDisplayOperations() = default;
+    virtual Status present(std::span<const std::byte> frame) = 0;
 };
 
 struct OkDriverOps
@@ -183,14 +271,22 @@ class OkDriverRegistry final
     {
         return irq_;
     }
+    [[nodiscard]] OkResourceManager &resources()
+    {
+        return resources_;
+    }
 
   private:
     StaticVector<OkDevice, max_ok_devices> devices_;
     StaticVector<OkDriverModule *, max_ok_driver_modules> drivers_;
     OkMmioRegion mmio_{};
     OkIrqHandle irq_{};
+    OkResourceManager resources_{};
     usize bound_count_{0};
 };
+
+[[nodiscard]] OkDeviceClass ok_device_class_for(const OkDevice &device);
+[[nodiscard]] std::string_view ok_device_class_name(OkDeviceClass device_class);
 
 namespace linux_compat
 {

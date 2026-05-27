@@ -4,7 +4,9 @@
 #include "ok/core/types.hpp"
 #include "ok/syscall/syscall.hpp"
 
+#include <array>
 #include <span>
+#include <string_view>
 
 namespace ok::syscall
 {
@@ -73,6 +75,16 @@ struct LinuxAuxvEntry
     u64 value{0};
 };
 
+struct LinuxInitialStack
+{
+    uptr stack_pointer{0};
+    u64 argc{0};
+    u64 argv_pointer{0};
+    u64 envp_pointer{0};
+    u64 auxv_pointer{0};
+    usize words{0};
+};
+
 class LinuxAuxvBuilder final
 {
   public:
@@ -84,6 +96,22 @@ class LinuxAuxvBuilder final
 
   private:
     StaticVector<LinuxAuxvEntry, 16> entries_;
+};
+
+class LinuxInitialStackBuilder final
+{
+  public:
+    Result<LinuxInitialStack> build(uptr stack_top, std::span<const std::string_view> argv,
+                                    std::span<const std::string_view> envp,
+                                    std::span<const LinuxAuxvEntry> auxv);
+    [[nodiscard]] std::span<const u64> words() const
+    {
+        return {words_.begin(), word_count_};
+    }
+
+  private:
+    std::array<u64, 64> words_{};
+    usize word_count_{0};
 };
 
 class LinuxCompatProcess final
