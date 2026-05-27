@@ -579,6 +579,7 @@ Status verify_background_programs_and_posix(Kernel &kernel)
         return Status::fault("background processes were not scheduled");
     }
 
+    static_cast<void>(kernel.debug_shell().execute("su kernel"));
     auto ps = kernel.debug_shell().execute("ps aux");
     if (!ps || !contains_text(ps.value(), "  PID USER    TTY   STAT THR COMMAND") ||
         !contains_text(ps.value(), "idle") || !contains_text(ps.value(), "mod:kernel-gui") ||

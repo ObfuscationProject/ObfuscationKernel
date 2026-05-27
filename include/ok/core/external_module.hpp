@@ -86,8 +86,8 @@ class ExternalGuiDesktopModule final : public KernelModule, public KernelService
     FixedString<max_module_name> service_id_{};
     FixedString<max_loaded_module_path> load_path_{};
     FixedString<max_loaded_gui_text> brand_{"ObfuscationOS"};
-    FixedString<max_loaded_gui_text> title_{"System Status"};
-    FixedString<max_loaded_gui_text> subtitle_{"base desktop online"};
+    FixedString<max_loaded_gui_text> title_{"ObfuscationOS Login"};
+    FixedString<max_loaded_gui_text> subtitle_{"default user root"};
     std::array<ModuleDependency, 1> dependencies_{{ModuleDependency{.name = gui::gui_module_name, .required = true}}};
     std::array<std::string_view, 2> required_services_{{gui::gui_service_id, gui::gui_desktop_service_id}};
     std::array<std::string_view, 1> exported_services_{};

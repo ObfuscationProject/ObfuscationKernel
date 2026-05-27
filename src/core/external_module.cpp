@@ -5,10 +5,10 @@ namespace ok
 namespace
 {
 
-constexpr gui::Rect dashboard_bounds{.x = 34, .y = 28, .width = 328, .height = 164};
-constexpr u32 dashboard_background = 0xff101820u;
-constexpr u32 dashboard_panel = 0xff172331u;
-constexpr u32 dashboard_panel_alt = 0xff203344u;
+constexpr gui::Rect dashboard_bounds{.x = 54, .y = 30, .width = 300, .height = 156};
+constexpr u32 dashboard_background = 0xff08121au;
+constexpr u32 dashboard_panel = 0xff122334u;
+constexpr u32 dashboard_panel_alt = 0xff1d3444u;
 constexpr u32 dashboard_accent = 0xff44aa88u;
 constexpr u32 dashboard_warm = 0xffffcc66u;
 constexpr u32 dashboard_text = 0xffd8f3ffu;
@@ -392,28 +392,20 @@ Status ExternalGuiDesktopModule::render_dashboard()
                                              gui::Rect{.x = 8,
                                                        .y = 18,
                                                        .width = info.value().bounds.width - 16,
-                                                       .height = 48},
+                                                       .height = 44},
                                              dashboard_panel);
         !status.ok())
     {
         return status;
     }
-    if (auto status = compositor_->fill_rect(dashboard_surface_, gui::Rect{.x = 8, .y = 68, .width = 94, .height = 76},
+    if (auto status = compositor_->fill_rect(dashboard_surface_, gui::Rect{.x = 8, .y = 68, .width = 284, .height = 52},
                                              dashboard_panel_alt);
         !status.ok())
     {
         return status;
     }
-    if (auto status =
-            compositor_->fill_rect(dashboard_surface_, gui::Rect{.x = 106, .y = 68, .width = 98, .height = 76},
-                                   dashboard_panel_alt);
-        !status.ok())
-    {
-        return status;
-    }
-    if (auto status =
-            compositor_->fill_rect(dashboard_surface_, gui::Rect{.x = 208, .y = 68, .width = 112, .height = 76},
-                                   dashboard_panel_alt);
+    if (auto status = compositor_->fill_rect(dashboard_surface_, gui::Rect{.x = 8, .y = 124, .width = 284, .height = 20},
+                                             0xff0d1c27u);
         !status.ok())
     {
         return status;
@@ -421,12 +413,12 @@ Status ExternalGuiDesktopModule::render_dashboard()
 
     for (u32 y = 24; y < 54; ++y)
     {
-        for (u32 x = 18; x < 68; ++x)
+        for (u32 x = 18; x < 58; ++x)
         {
-            const auto dx = static_cast<i32>(x) - 43;
+            const auto dx = static_cast<i32>(x) - 38;
             const auto dy = static_cast<i32>(y) - 39;
             const auto distance = dx * dx + dy * dy;
-            if (distance <= 18 * 18 && distance >= 9 * 9)
+            if (distance <= 16 * 16 && distance >= 8 * 8)
             {
                 if (auto status = compositor_->put_pixel(dashboard_surface_, x, y, dashboard_accent); !status.ok())
                 {
@@ -435,13 +427,13 @@ Status ExternalGuiDesktopModule::render_dashboard()
             }
         }
     }
-    if (auto status = compositor_->fill_rect(dashboard_surface_, gui::Rect{.x = 76, .y = 28, .width = 5, .height = 26},
+    if (auto status = compositor_->fill_rect(dashboard_surface_, gui::Rect{.x = 66, .y = 28, .width = 5, .height = 26},
                                              dashboard_warm);
         !status.ok())
     {
         return status;
     }
-    if (auto status = compositor_->fill_rect(dashboard_surface_, gui::Rect{.x = 82, .y = 40, .width = 28, .height = 5},
+    if (auto status = compositor_->fill_rect(dashboard_surface_, gui::Rect{.x = 72, .y = 40, .width = 28, .height = 5},
                                              dashboard_warm);
         !status.ok())
     {
@@ -449,50 +441,74 @@ Status ExternalGuiDesktopModule::render_dashboard()
     }
 
     if (auto status =
-            compositor_->draw_text(dashboard_surface_, 13, 2, brand_.view(), dashboard_text, dashboard_panel);
+            compositor_->draw_text(dashboard_surface_, 12, 2, brand_.view(), dashboard_text, dashboard_panel);
         !status.ok())
     {
         return status;
     }
     if (auto status =
-            compositor_->draw_text(dashboard_surface_, 13, 4, subtitle_.view(), dashboard_muted, dashboard_panel);
+            compositor_->draw_text(dashboard_surface_, 12, 4, subtitle_.view(), dashboard_muted, dashboard_panel);
         !status.ok())
     {
         return status;
     }
 
     FixedString<64> metric;
-    if (auto status = assign_metric(metric, "CPUs online: ", topology_->online_count()); !status.ok())
-    {
-        return status;
-    }
-    if (auto status = compositor_->draw_text(dashboard_surface_, 2, 8, metric.view(), dashboard_text,
+    if (auto status = compositor_->draw_text(dashboard_surface_, 2, 8, "login", dashboard_muted,
                                              dashboard_panel_alt);
         !status.ok())
     {
         return status;
     }
-    if (auto status = assign_metric(metric, "Processes: ", scheduler_->process_count()); !status.ok())
-    {
-        return status;
-    }
-    if (auto status = compositor_->draw_text(dashboard_surface_, 16, 8, metric.view(), dashboard_text,
+    if (auto status = compositor_->draw_text(dashboard_surface_, 12, 8, "root", dashboard_text,
                                              dashboard_panel_alt);
         !status.ok())
     {
         return status;
     }
-    if (auto status = assign_metric(metric, "Background: ", scheduler_->background_process_count()); !status.ok())
-    {
-        return status;
-    }
-    if (auto status = compositor_->draw_text(dashboard_surface_, 29, 8, metric.view(), dashboard_text,
+    if (auto status = compositor_->draw_text(dashboard_surface_, 2, 10, "session", dashboard_muted,
                                              dashboard_panel_alt);
         !status.ok())
     {
         return status;
     }
-    if (auto status = compositor_->draw_text(dashboard_surface_, 2, 12, "Launchers: shell files tasks",
+    if (auto status = compositor_->draw_text(dashboard_surface_, 12, 10, "system gui", dashboard_text,
+                                             dashboard_panel_alt);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = assign_metric(metric, "cpus=", topology_->online_count()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor_->draw_text(dashboard_surface_, 2, 13, metric.view(), dashboard_text,
+                                             0xff0d1c27u);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = assign_metric(metric, "procs=", scheduler_->process_count()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor_->draw_text(dashboard_surface_, 14, 13, metric.view(), dashboard_text,
+                                             0xff0d1c27u);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = assign_metric(metric, "bg=", scheduler_->background_process_count()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor_->draw_text(dashboard_surface_, 27, 13, metric.view(), dashboard_text,
+                                             0xff0d1c27u);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor_->draw_text(dashboard_surface_, 2, 14, "tui: system tui  apps: about prefs notes",
                                              dashboard_muted, dashboard_background);
         !status.ok())
     {

@@ -8,6 +8,8 @@ namespace ok
 namespace
 {
 
+using shell_detail::first_word;
+
 std::string_view process_state_label(sched::ProcessState state)
 {
     switch (state)
@@ -71,7 +73,7 @@ bool parse_unsigned(std::string_view value, u64 &out)
 bool known_shell_command(std::string_view command)
 {
     for (const auto *name :
-         {"help",   "true",   "false",   ":",      "clear", "uname", "status", "mem",   "ps",
+         {"help",   "true",   "false",   ":",      "clear", "uname", "status", "system", "mem",   "ps",
           "drivers", "fs",     "posix",   "test",   "echo",  "pwd",   "cd",     "ls",    "cat",
           "cp",     "mv",     "touch",   "mkdir",  "rm",    "rmdir", "stat",   "chmod", "chown",
           "users",  "kill",   "shutdown", "poweroff", "halt", "reboot", "whoami", "id",    "su",
@@ -92,7 +94,7 @@ bool known_shell_command(std::string_view command)
 Status KernelDebugShell::command_help()
 {
     return append(
-        "help true false : clear uname status mem ps drivers fs posix test echo pwd cd ls cat cp mv touch mkdir rm "
+        "help true false : clear uname status system mem ps drivers fs posix test echo pwd cd ls cat cp mv touch mkdir rm "
         "rmdir stat chmod chown users kill shutdown poweroff halt reboot whoami id su exit disk mkfs sfs ext4 net "
         "fm fileman top taskman history env export unset type which grep wc head tail\n");
 }
@@ -194,6 +196,76 @@ Status KernelDebugShell::command_status()
         return status;
     }
     return append("\n");
+}
+
+Status KernelDebugShell::command_system(std::string_view args)
+{
+    if (kernel_ == nullptr)
+    {
+        return Status::not_initialized("shell has no kernel");
+    }
+    const auto mode = first_word(args);
+    if (!mode.empty() && mode != "tui" && mode != "status")
+    {
+        return Status::unsupported("system supports: system [tui|status]");
+    }
+
+    if (auto status = append("ObfuscationOS mode=tui login="); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(session_user_name_.view()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(" gui="); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(kernel_->loaded_gui_desktop_module() != nullptr ? "system" : "kernel"); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = append(" apps="); !status.ok())
+    {
+        return status;
+    }
+    bool first = true;
+    for (const auto service : {"gui.app.about", "gui.app.prefs", "gui.app.notes"})
+    {
+        const std::string_view service_id{service};
+        if (!kernel_->kernel_modules().services().contains(service_id))
+        {
+            continue;
+        }
+        if (!first)
+        {
+            if (auto status = append(","); !status.ok())
+            {
+                return status;
+            }
+        }
+        if (auto status = append(service_id == "gui.app.about"    ? "about"
+                                 : service_id == "gui.app.prefs" ? "prefs"
+                                                                 : "notes");
+            !status.ok())
+        {
+            return status;
+        }
+        first = false;
+    }
+    if (first)
+    {
+        if (auto status = append("none"); !status.ok())
+        {
+            return status;
+        }
+    }
+    if (auto status = append("\ncommands: fm tui / | top | status | users\n"); !status.ok())
+    {
+        return status;
+    }
+    return Status::success();
 }
 
 Status KernelDebugShell::command_memory()

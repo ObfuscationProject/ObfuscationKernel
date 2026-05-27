@@ -55,8 +55,8 @@ constexpr std::string_view os_system_gui_module_text{
     "param=entry:oop\n"
     "param=class:desktop\n"
     "param=brand:ObfuscationOS\n"
-    "param=title:System Status\n"
-    "param=subtitle:base desktop online\n"
+    "param=title:ObfuscationOS Login\n"
+    "param=subtitle:default user root\n"
     "signature=system-gui-dev\n"};
 
 constexpr std::string_view os_about_app_module_path{"/boot/modules/apps/about.okmod"};
@@ -229,7 +229,7 @@ Status release_boot_gui_surfaces(Kernel &kernel)
     const auto id = kernel.debug_shell().gui_surface_id();
     if (id == 0 || !kernel.gui().compositor().surface_info(id))
     {
-        auto dashboard = find_surface_by_title(kernel, "System Status");
+        auto dashboard = find_surface_by_title(kernel, "ObfuscationOS Login");
         if (dashboard)
         {
             return kernel.gui().compositor().destroy_surface(dashboard.value().id);
@@ -240,7 +240,7 @@ Status release_boot_gui_surfaces(Kernel &kernel)
     {
         return status;
     }
-    auto dashboard = find_surface_by_title(kernel, "System Status");
+    auto dashboard = find_surface_by_title(kernel, "ObfuscationOS Login");
     if (dashboard)
     {
         return kernel.gui().compositor().destroy_surface(dashboard.value().id);
@@ -998,11 +998,12 @@ Status test_system_gui_module_loads_after_boot(Kernel &kernel)
         return Status::fault("system desktop OKMOD package metadata is incomplete");
     }
 
-    auto info = find_surface_by_title(kernel, "System Status");
-    if (!info || info.value().title != "System Status" || info.value().app != gui::TaskbarApp::task_monitor ||
+    auto info = find_surface_by_title(kernel, "ObfuscationOS Login");
+    if (!info || info.value().title != "ObfuscationOS Login" ||
+        info.value().app != gui::TaskbarApp::task_monitor ||
         kernel.gui().compositor().last_present_checksum() == 0)
     {
-        return Status::fault("system desktop module did not open the default status surface");
+        return Status::fault("system desktop module did not open the default root login surface");
     }
 
     const auto taskbar_y = static_cast<i32>(driver::framebuffer_height - gui::taskbar_height + 6);
@@ -1055,6 +1056,28 @@ Status test_system_gui_apps_load_from_rootfs_packages(Kernel &kernel)
     return Status::success();
 }
 
+Status test_system_gui_apps_load_from_distro_fallback_packages(Kernel &kernel)
+{
+    syscall::Request request{.number = syscall::Number::load_module};
+    request.args[0] = reinterpret_cast<u64>("/boot/modules/apps/prefs.okmod");
+    auto response = kernel.syscalls().dispatch(request);
+    auto *registered = kernel.kernel_modules().find("system-prefs");
+    if (!response.status.ok() || response.value != 0 || registered == nullptr ||
+        registered->manifest().built_in || registered->state() != ModuleState::started ||
+        !kernel.kernel_modules().services().contains("gui.app.prefs"))
+    {
+        return Status::fault("system GUI app fallback package was not loaded");
+    }
+
+    auto info = find_surface_by_title(kernel, "System Preferences");
+    if (!info || info.value().title != "System Preferences" ||
+        kernel.gui().compositor().last_present_checksum() == 0)
+    {
+        return Status::fault("system GUI app fallback did not open its app surface");
+    }
+    return Status::success();
+}
+
 Status test_close_debug_gui_restores_system_desktop(Kernel &kernel)
 {
     auto *desktop = kernel.loaded_gui_desktop_module();
@@ -1075,7 +1098,7 @@ Status test_close_debug_gui_restores_system_desktop(Kernel &kernel)
         return status;
     }
 
-    auto info = find_surface_by_title(kernel, "System Status");
+    auto info = find_surface_by_title(kernel, "ObfuscationOS Login");
     if (!info || !info.value().focused || kernel.debug_shell().gui_open())
     {
         return Status::fault("debug GUI cleanup did not restore the system desktop");
@@ -1698,9 +1721,14 @@ Status test_shell_renders_to_gui(Kernel &kernel)
         return Status::fault("debug shell GUI clear did not redraw the prompt");
     }
     auto reset_user = kernel.debug_shell().execute("exit");
-    if (!reset_user || reset_user.value() != "kernel\n")
+    if (!reset_user || !reset_user.value().empty() || kernel.debug_shell().gui_open())
     {
-        return Status::fault("debug shell GUI session did not reset after user process test");
+        return Status::fault("debug shell GUI session did not close after user process test");
+    }
+    auto root_user = kernel.debug_shell().execute("whoami");
+    if (!root_user || root_user.value() != "root\n")
+    {
+        return Status::fault("debug shell GUI session did not reset to the root default");
     }
     return Status::success();
 }
@@ -1857,6 +1885,10 @@ Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
         return status;
     }
     if (auto status = test_system_gui_apps_load_from_rootfs_packages(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_system_gui_apps_load_from_distro_fallback_packages(kernel); !status.ok())
     {
         return status;
     }

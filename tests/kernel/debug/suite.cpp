@@ -496,7 +496,7 @@ Status Kernel::run_debug_test_suite()
         return Status::fault("debug shell su test failed");
     }
     auto shell_users = debug_shell_.execute("users");
-    if (!shell_users || !contains_text(shell_users.value(), "kernel") || !contains_text(shell_users.value(), "root") ||
+    if (!shell_users || contains_text(shell_users.value(), "kernel") || !contains_text(shell_users.value(), "root") ||
         !contains_text(shell_users.value(), "user"))
     {
         return Status::fault("debug shell users test failed");
@@ -612,6 +612,13 @@ Status Kernel::run_debug_test_suite()
     {
         return Status::fault("debug shell ext4 status test failed");
     }
+    auto shell_system_tui = debug_shell_.execute("system tui");
+    if (!shell_system_tui || !contains_text(shell_system_tui.value(), "ObfuscationOS") ||
+        !contains_text(shell_system_tui.value(), "mode=tui") ||
+        !contains_text(shell_system_tui.value(), "login=root"))
+    {
+        return Status::fault("debug shell system TUI test failed");
+    }
     auto shell_su_kernel = debug_shell_.execute("su kernel");
     if (!shell_su_kernel || shell_su_kernel.value().empty())
     {
@@ -631,11 +638,6 @@ Status Kernel::run_debug_test_suite()
     if (!shell_exit || shell_exit.value() != "root\n")
     {
         return Status::fault("debug shell nested exit test failed");
-    }
-    shell_exit = debug_shell_.execute("exit");
-    if (!shell_exit || shell_exit.value() != "kernel\n")
-    {
-        return Status::fault("debug shell base exit did not return to kernel");
     }
     auto shell_close = debug_shell_.execute("exit");
     if (!shell_close || !shell_close.value().empty() || debug_shell_.gui_open())

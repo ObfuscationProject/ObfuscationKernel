@@ -50,6 +50,114 @@ std::span<const std::byte> bytes_for(std::string_view text)
     return {reinterpret_cast<const std::byte *>(text.data()), text.size()};
 }
 
+struct BootGuiModulePackage
+{
+    std::string_view path;
+    std::string_view text;
+};
+
+constexpr std::string_view fallback_system_gui_okmod{
+    "OKMOD\n"
+    "name=system-gui\n"
+    "version=1\n"
+    "vermagic=okernel-cxx-oop\n"
+    "require=gui.compositor\n"
+    "require=gui.desktop\n"
+    "export=gui.system-desktop\n"
+    "param=entry:oop\n"
+    "param=class:desktop\n"
+    "param=brand:ObfuscationOS\n"
+    "param=title:ObfuscationOS Login\n"
+    "param=subtitle:default user root\n"
+    "signature=system-gui-dev\n"};
+
+constexpr std::string_view fallback_about_okmod{
+    "OKMOD\n"
+    "name=system-about\n"
+    "version=1\n"
+    "vermagic=okernel-cxx-oop\n"
+    "require=gui.compositor\n"
+    "require=gui.desktop\n"
+    "require=gui.system-desktop\n"
+    "export=gui.app.about\n"
+    "param=entry:oop\n"
+    "param=class:app\n"
+    "param=title:About ObfuscationOS\n"
+    "param=subtitle:C++ OOP module from rootfs\n"
+    "param=body:Loaded through OK_SYS_LOAD_MODULE\n"
+    "param=x:54\n"
+    "param=y:44\n"
+    "param=accent:gold\n"
+    "signature=system-about-dev\n"};
+
+constexpr std::string_view fallback_prefs_okmod{
+    "OKMOD\n"
+    "name=system-prefs\n"
+    "version=1\n"
+    "vermagic=okernel-cxx-oop\n"
+    "require=gui.compositor\n"
+    "require=gui.desktop\n"
+    "require=gui.system-desktop\n"
+    "export=gui.app.prefs\n"
+    "param=entry:oop\n"
+    "param=class:app\n"
+    "param=title:System Preferences\n"
+    "param=subtitle:display and session sketch\n"
+    "param=body:Palette, input, and desktop state\n"
+    "param=x:118\n"
+    "param=y:84\n"
+    "param=accent:blue\n"
+    "signature=system-prefs-dev\n"};
+
+constexpr std::string_view fallback_notes_okmod{
+    "OKMOD\n"
+    "name=system-notes\n"
+    "version=1\n"
+    "vermagic=okernel-cxx-oop\n"
+    "require=gui.compositor\n"
+    "require=gui.desktop\n"
+    "require=gui.system-desktop\n"
+    "export=gui.app.notes\n"
+    "param=entry:oop\n"
+    "param=class:app\n"
+    "param=title:Notes\n"
+    "param=subtitle:small native GUI scratchpad\n"
+    "param=body:Window surface owned by an OS module\n"
+    "param=x:182\n"
+    "param=y:124\n"
+    "param=accent:rose\n"
+    "signature=system-notes-dev\n"};
+
+constexpr BootGuiModulePackage boot_gui_module_fallbacks[] = {
+    {"/boot/modules/system-gui.okmod", fallback_system_gui_okmod},
+    {"/boot/modules/apps/about.okmod", fallback_about_okmod},
+    {"/boot/modules/apps/prefs.okmod", fallback_prefs_okmod},
+    {"/boot/modules/apps/notes.okmod", fallback_notes_okmod},
+};
+
+Result<fs::FileBuffer> boot_gui_module_fallback(std::string_view path)
+{
+    for (const auto &package : boot_gui_module_fallbacks)
+    {
+        if (package.path != path)
+        {
+            continue;
+        }
+        if (package.text.size() > fs::max_file_data)
+        {
+            return Status::overflow("boot GUI module fallback exceeds file buffer");
+        }
+        fs::FileBuffer file{};
+        for (usize i = 0; i < package.text.size(); ++i)
+        {
+            file.data[i] = static_cast<std::byte>(package.text[i]);
+        }
+        file.size = package.text.size();
+        return file;
+    }
+    return Status::not_found("boot GUI module fallback not found");
+}
+
 Result<FixedString<fs::simplefs_name_capacity>> simplefs_flat_module_path(std::string_view path)
 {
     if (path.empty())
@@ -329,7 +437,7 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
-    if (auto status = log_boot_line("[    0.000000] okernel: C++23 kernel debug console online"); !status.ok())
+    if (auto status = log_boot_line("[    0.000000] obfuscationos: C++23 kernel services online"); !status.ok())
     {
         return status;
     }
@@ -853,14 +961,19 @@ Result<fs::FileBuffer> Kernel::read_external_module_file(std::string_view path)
     }
     if (!simplefs_.mounted())
     {
-        return file.status();
+        return boot_gui_module_fallback(path);
     }
     auto flat_path = simplefs_flat_module_path(path);
     if (!flat_path)
     {
         return flat_path.status();
     }
-    return simplefs_.read_file(flat_path.value().view());
+    auto simplefs_file = simplefs_.read_file(flat_path.value().view());
+    if (simplefs_file || simplefs_file.status().code() != StatusCode::not_found)
+    {
+        return simplefs_file;
+    }
+    return boot_gui_module_fallback(path);
 }
 
 Status Kernel::load_external_gui_desktop_module(std::string_view path, const ModuleImageInfo &image)

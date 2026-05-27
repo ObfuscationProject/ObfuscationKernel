@@ -242,28 +242,29 @@ enum class WindowControl : u8
 
     const auto ix = static_cast<i32>(x);
     const auto iy = static_cast<i32>(y);
-    const auto center_y = static_cast<i32>(height / 2);
-    const auto o_center_x = static_cast<i32>(width / 2) - 86;
-    const auto k_left = static_cast<i32>(width / 2) + 16;
-
-    constexpr i32 outer_radius = 58;
-    constexpr i32 inner_radius = 34;
-    const auto odx = ix - o_center_x;
-    const auto ody = iy - center_y;
-    const auto distance = odx * odx + ody * ody;
-    const bool in_o = distance <= outer_radius * outer_radius && distance >= inner_radius * inner_radius;
-
-    const bool k_stem = ix >= k_left && ix <= k_left + 13 && iy >= center_y - 58 && iy <= center_y + 58;
-    const auto k_mid_x = k_left + 20;
-    const auto k_mid_y = center_y;
-    const bool k_upper = ix >= k_mid_x && ix <= k_mid_x + 80 && iy <= k_mid_y &&
-                         (iy >= k_mid_y - (ix - k_mid_x) - 13) && (iy <= k_mid_y - (ix - k_mid_x) + 13);
-    const bool k_lower = ix >= k_mid_x && ix <= k_mid_x + 80 && iy >= k_mid_y &&
-                         (iy >= k_mid_y + (ix - k_mid_x) - 13) && (iy <= k_mid_y + (ix - k_mid_x) + 13);
-
-    if (in_o || k_stem || k_upper || k_lower)
+    const auto center_x = static_cast<i32>(width / 2);
+    const auto center_y = static_cast<i32>((height - taskbar_height) / 2);
+    const bool hero_panel = ix >= center_x - 132 && ix <= center_x + 132 && iy >= center_y - 54 && iy <= center_y + 54;
+    const bool panel_edge = hero_panel &&
+                            (ix == center_x - 132 || ix == center_x + 132 || iy == center_y - 54 ||
+                             iy == center_y + 54);
+    const bool accent_line = hero_panel && ((ix - (center_x - 132)) + (iy - (center_y - 54))) % 31 == 0;
+    const bool warm_line = hero_panel && ((ix - (center_x - 132)) * 2 - (iy - (center_y - 54))) % 47 == 0;
+    if (panel_edge)
     {
-        return ((x + y) % 17u) < 4u ? 0xfff4d35eu : 0xff1d8f83u;
+        return taskbar_edge_color;
+    }
+    if (accent_line)
+    {
+        return 0xff1d8f83u;
+    }
+    if (warm_line)
+    {
+        return 0xfff4d35eu;
+    }
+    if (hero_panel)
+    {
+        return ((x / 12u + y / 12u) % 2u) == 0 ? 0xff0c1c27u : 0xff102536u;
     }
     if ((y % 24u) == 0 || (x % 64u) == 0)
     {
@@ -1292,7 +1293,7 @@ Status GuiCompositor::play_startup_animation()
         return desktop.status();
     }
 
-    auto surface = create_surface(desktop.value(), "okernel");
+    auto surface = create_surface(desktop.value(), "ObfuscationOS");
     if (!surface)
     {
         return surface.status();
@@ -1354,12 +1355,12 @@ Status GuiCompositor::play_startup_animation()
             static_cast<void>(destroy_surface(id));
             return status;
         }
-        if (auto status = draw_text(id, 19, 11, "OBFUSCATION KERNEL", 0xffd8f3ffu, title_color); !status.ok())
+        if (auto status = draw_text(id, 21, 11, "OBFUSCATIONOS", 0xffd8f3ffu, title_color); !status.ok())
         {
             static_cast<void>(destroy_surface(id));
             return status;
         }
-        if (auto status = draw_text(id, 23, 13, "GUI ONLINE", 0xffffcc66u, title_color); !status.ok())
+        if (auto status = draw_text(id, 22, 13, "SYSTEM GUI", 0xffffcc66u, title_color); !status.ok())
         {
             static_cast<void>(destroy_surface(id));
             return status;

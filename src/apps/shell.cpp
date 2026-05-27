@@ -1628,6 +1628,10 @@ Status KernelDebugShell::dispatch_command_with_input(std::string_view command_li
     {
         return command_status();
     }
+    else if (command == "system")
+    {
+        return command_system(args);
+    }
     else if (command == "mem")
     {
         return command_memory();

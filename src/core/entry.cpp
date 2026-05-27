@@ -452,7 +452,11 @@ Status ok_gui_close_debug_surfaces()
     {
         return Status::not_initialized("kernel is not booted");
     }
-    return kernel.close_debug_gui();
+    if (auto status = kernel.close_debug_gui(); !status.ok())
+    {
+        return status;
+    }
+    return kernel.posix().set_credentials(user::root_credentials());
 }
 
 Status ok_load_boot_gui_modules()
@@ -470,7 +474,11 @@ Status ok_load_boot_gui_modules()
             return status;
         }
     }
-    return kernel.close_debug_gui();
+    if (auto status = kernel.close_debug_gui(); !status.ok())
+    {
+        return status;
+    }
+    return kernel.posix().set_credentials(user::root_credentials());
 }
 
 SystemPowerAction ok_system_power_action()
