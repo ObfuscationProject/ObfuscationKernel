@@ -247,6 +247,11 @@ extern "C" void ok_platform_halt()
     asm volatile("idle 0" ::: "memory");
 }
 
+extern "C" void ok_platform_poll_idle()
+{
+    asm volatile("nop" ::: "memory");
+}
+
 extern "C" int ok_platform_input_poll()
 {
     poll_virtio_mouse();

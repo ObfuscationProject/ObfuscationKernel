@@ -13,6 +13,7 @@ extern "C" void ok_platform_display_debug_marker() __attribute__((weak));
 extern "C" void ok_platform_display_write_char(char value);
 extern "C" void ok_platform_debug_exit(ok::u32 code);
 extern "C" void ok_platform_halt();
+extern "C" void ok_platform_poll_idle() __attribute__((weak));
 extern "C" void ok_platform_reboot() __attribute__((weak));
 extern "C" int ok_platform_input_poll();
 
@@ -35,6 +36,14 @@ void platform_write(std::string_view text)
     for (;;)
     {
         ok_platform_halt();
+    }
+}
+
+void desktop_idle()
+{
+    if (ok_platform_poll_idle != nullptr)
+    {
+        ok_platform_poll_idle();
     }
 }
 
@@ -79,7 +88,7 @@ void platform_write(std::string_view text)
         }
         if (!did_work)
         {
-            ok_platform_halt();
+            desktop_idle();
         }
     }
 }

@@ -514,6 +514,11 @@ extern "C" void ok_platform_halt()
     asm volatile("hlt" ::: "memory");
 }
 
+extern "C" void ok_platform_poll_idle()
+{
+    asm volatile("pause" ::: "memory");
+}
+
 extern "C" void ok_platform_reboot()
 {
     outb(keyboard_status_port, 0xfe);

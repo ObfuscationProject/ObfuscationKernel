@@ -81,6 +81,11 @@ extern "C" void ok_platform_halt()
     asm volatile("nop" ::: "memory");
 }
 
+extern "C" void ok_platform_poll_idle()
+{
+    asm volatile("nop" ::: "memory");
+}
+
 extern "C" int ok_platform_input_poll()
 {
     constexpr ok::uptr uart_lsr = uart_primary_base + 0x05;
