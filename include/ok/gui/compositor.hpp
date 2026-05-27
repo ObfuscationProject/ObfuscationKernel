@@ -21,8 +21,9 @@ inline constexpr usize max_gui_surface_pixels = max_gui_surface_width * max_gui_
 inline constexpr u32 gui_glyph_width = driver::BitmapFontRenderer::glyph_width + 1;
 inline constexpr u32 gui_glyph_height = driver::BitmapFontRenderer::glyph_height + 2;
 inline constexpr u32 taskbar_height = gui_glyph_height * 2 + 6;
-inline constexpr u32 taskbar_launcher_width = 60;
 inline constexpr u32 taskbar_icon_size = 18;
+inline constexpr u32 taskbar_launcher_width = 84;
+inline constexpr u32 task_monitor_launcher_x = 54;
 
 using SurfaceId = u16;
 

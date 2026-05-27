@@ -38,6 +38,84 @@ bool file_contains(const fs::FileBuffer &file, std::string_view needle)
     return false;
 }
 
+std::span<const std::byte> bytes_for(std::string_view text)
+{
+    return {reinterpret_cast<const std::byte *>(text.data()), text.size()};
+}
+
+constexpr std::string_view os_system_gui_module_path{"/boot/modules/system-gui.okmod"};
+constexpr std::string_view os_system_gui_module_text{
+    "OKMOD\n"
+    "name=system-gui\n"
+    "version=1\n"
+    "vermagic=okernel-cxx-oop\n"
+    "require=gui.compositor\n"
+    "require=gui.desktop\n"
+    "export=gui.system-desktop\n"
+    "param=entry:oop\n"
+    "param=class:desktop\n"
+    "param=brand:ObfuscationOS\n"
+    "param=title:System Status\n"
+    "param=subtitle:base desktop online\n"
+    "signature=system-gui-dev\n"};
+
+Status ensure_test_directory(Kernel &kernel, std::string_view path)
+{
+    auto stat = kernel.vfs().stat(path);
+    if (stat)
+    {
+        return stat.value().type == fs::NodeType::directory ? Status::success()
+                                                            : Status::invalid_argument("test path is not a directory");
+    }
+    if (stat.status().code() != StatusCode::not_found)
+    {
+        return stat.status();
+    }
+    return kernel.vfs().create(path, fs::NodeType::directory);
+}
+
+Status stage_os_system_gui_module(Kernel &kernel)
+{
+    if (auto status = ensure_test_directory(kernel, "/boot"); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = ensure_test_directory(kernel, "/boot/modules"); !status.ok())
+    {
+        return status;
+    }
+    auto stat = kernel.vfs().stat(os_system_gui_module_path);
+    if (!stat)
+    {
+        if (stat.status().code() != StatusCode::not_found)
+        {
+            return stat.status();
+        }
+        if (auto status = kernel.vfs().create(os_system_gui_module_path, fs::NodeType::regular); !status.ok())
+        {
+            return status;
+        }
+    }
+    return kernel.vfs().write_file(os_system_gui_module_path, bytes_for(os_system_gui_module_text));
+}
+
+Result<gui::SurfaceInfo> find_surface_by_title(Kernel &kernel, std::string_view title)
+{
+    for (gui::SurfaceId id = 1; id < 64; ++id)
+    {
+        auto info = kernel.gui().compositor().surface_info(id);
+        if (!info)
+        {
+            continue;
+        }
+        if (info.value().title == title)
+        {
+            return info.value();
+        }
+    }
+    return Status::not_found("surface title was not found");
+}
+
 bool contains_text(std::string_view haystack, std::string_view needle)
 {
     if (needle.empty())
@@ -125,19 +203,33 @@ Status append_unsigned(FixedString<32> &out, u64 value)
     return Status::success();
 }
 
-Status release_shell_surface(Kernel &kernel)
+Status release_boot_gui_surfaces(Kernel &kernel)
 {
     const auto id = kernel.debug_shell().gui_surface_id();
     if (id == 0 || !kernel.gui().compositor().surface_info(id))
     {
+        auto dashboard = find_surface_by_title(kernel, "System Status");
+        if (dashboard)
+        {
+            return kernel.gui().compositor().destroy_surface(dashboard.value().id);
+        }
         return Status::success();
     }
-    return kernel.gui().compositor().destroy_surface(id);
+    if (auto status = kernel.gui().compositor().destroy_surface(id); !status.ok())
+    {
+        return status;
+    }
+    auto dashboard = find_surface_by_title(kernel, "System Status");
+    if (dashboard)
+    {
+        return kernel.gui().compositor().destroy_surface(dashboard.value().id);
+    }
+    return Status::success();
 }
 
 Status test_gui_compositor_draws_surfaces(Kernel &kernel)
 {
-    if (auto status = release_shell_surface(kernel); !status.ok())
+    if (auto status = release_boot_gui_surfaces(kernel); !status.ok())
     {
         return status;
     }
@@ -243,7 +335,7 @@ Status test_gui_text_uses_bitmap_font(Kernel &kernel)
 
 Status test_gui_surface_management_api(Kernel &kernel)
 {
-    if (auto status = release_shell_surface(kernel); !status.ok())
+    if (auto status = release_boot_gui_surfaces(kernel); !status.ok())
     {
         return status;
     }
@@ -377,7 +469,7 @@ Status test_gui_surface_management_api(Kernel &kernel)
 
 Status test_gui_mouse_interacts_with_windows(Kernel &kernel)
 {
-    if (auto status = release_shell_surface(kernel); !status.ok())
+    if (auto status = release_boot_gui_surfaces(kernel); !status.ok())
     {
         return status;
     }
@@ -592,7 +684,7 @@ Status test_gui_mouse_interacts_with_windows(Kernel &kernel)
 
 Status test_kernel_gui_mouse_position_uses_absolute_pointer(Kernel &kernel)
 {
-    if (auto status = release_shell_surface(kernel); !status.ok())
+    if (auto status = release_boot_gui_surfaces(kernel); !status.ok())
     {
         return status;
     }
@@ -848,6 +940,55 @@ Status test_kernel_gui_is_started(Kernel &kernel)
         kernel.kernel_modules().kernel_process_module_count() == 0)
     {
         return Status::fault("kernel GUI module was not started during boot");
+    }
+    return Status::success();
+}
+
+Status test_system_gui_module_loads_after_boot(Kernel &kernel)
+{
+    if (kernel.kernel_modules().find("system-gui") != nullptr ||
+        kernel.kernel_modules().services().contains("gui.system-desktop"))
+    {
+        return Status::fault("system GUI module was loaded before the OS loader ran");
+    }
+    if (auto status = stage_os_system_gui_module(kernel); !status.ok())
+    {
+        return status;
+    }
+
+    syscall::Request request{.number = syscall::Number::load_module};
+    request.args[0] = reinterpret_cast<u64>(os_system_gui_module_path.data());
+    auto response = kernel.syscalls().dispatch(request);
+    auto *registered = kernel.kernel_modules().find("system-gui");
+    auto module_file = kernel.vfs().read_file(os_system_gui_module_path);
+    if (!response.status.ok() || response.value != 0 || !module_file || registered == nullptr ||
+        registered->manifest().built_in || registered->state() != ModuleState::started ||
+        !kernel.kernel_modules().services().contains("gui.system-desktop"))
+    {
+        return Status::fault("system GUI module was not loaded by the OS module loader syscall");
+    }
+    if (!file_contains(module_file.value(), "name=system-gui") ||
+        !file_contains(module_file.value(), "require=gui.compositor") ||
+        !file_contains(module_file.value(), "require=gui.desktop") ||
+        !file_contains(module_file.value(), "export=gui.system-desktop") ||
+        !file_contains(module_file.value(), "param=entry:oop") ||
+        !file_contains(module_file.value(), "param=class:desktop"))
+    {
+        return Status::fault("system desktop OKMOD package metadata is incomplete");
+    }
+
+    auto info = find_surface_by_title(kernel, "System Status");
+    if (!info || info.value().title != "System Status" || info.value().app != gui::TaskbarApp::task_monitor ||
+        kernel.gui().compositor().last_present_checksum() == 0)
+    {
+        return Status::fault("system desktop module did not open the default status surface");
+    }
+
+    const auto taskbar_y = static_cast<i32>(driver::framebuffer_height - gui::taskbar_height + 6);
+    auto launcher = kernel.gui().compositor().taskbar_launcher_at(gui::task_monitor_launcher_x + 4, taskbar_y);
+    if (!launcher || launcher.value() != gui::TaskbarApp::task_monitor)
+    {
+        return Status::fault("system desktop did not expose the task monitor launcher");
     }
     return Status::success();
 }
@@ -1618,6 +1759,10 @@ Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
         return status;
     }
     if (auto status = test_kernel_gui_is_started(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_system_gui_module_loads_after_boot(kernel); !status.ok())
     {
         return status;
     }

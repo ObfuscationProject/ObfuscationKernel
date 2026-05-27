@@ -89,6 +89,7 @@ enum class Number : u64
     close_range = 436,
     faccessat2 = 439,
     ok_debug = 1024,
+    load_module = 1025,
 };
 
 enum class DispatchMode : u8

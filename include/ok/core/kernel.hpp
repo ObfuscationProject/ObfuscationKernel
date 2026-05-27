@@ -6,6 +6,7 @@
 #include "ok/core/power.hpp"
 #include "ok/apps/shell.hpp"
 #include "ok/driver/driver.hpp"
+#include "ok/core/external_module.hpp"
 #include "ok/fs/simplefs.hpp"
 #include "ok/fs/vfs.hpp"
 #include "ok/gui/module.hpp"
@@ -112,6 +113,7 @@ class Kernel final
     Status close_debug_gui();
     Status kill_process(sched::ProcessId pid);
     Status supervise_daemons();
+    Status load_external_kernel_module(std::string_view path);
     Status request_power_action(SystemPowerAction action);
 
     [[nodiscard]] bool booted() const
@@ -173,6 +175,10 @@ class Kernel final
     [[nodiscard]] gui::GuiModule &gui()
     {
         return gui_module_;
+    }
+    [[nodiscard]] ExternalGuiDesktopModule *loaded_gui_desktop_module()
+    {
+        return external_gui_desktop_module_.configured() ? &external_gui_desktop_module_ : nullptr;
     }
     [[nodiscard]] apps::KernelFileManager &file_manager()
     {
@@ -317,6 +323,7 @@ class Kernel final
     driver::FramebufferDisplayDriver display_driver_{};
     driver::VirtioGpuPciDisplayDriver virtio_gpu_driver_{};
     gui::GuiModule gui_module_{};
+    ExternalGuiDesktopModule external_gui_desktop_module_{};
     StaticVector<apps::KernelFileManager, gui::max_gui_surfaces> file_managers_{};
     apps::KernelFileManager inactive_file_manager_{};
     usize active_file_manager_index_{gui::max_gui_surfaces};

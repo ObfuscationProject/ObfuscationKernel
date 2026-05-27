@@ -377,6 +377,7 @@ class ModuleManager final
     Status register_module(KernelModule &module);
     Status bind_kernel_process(sched::Scheduler &scheduler, arch::ArchOperations &arch, uptr entry, uptr stack);
     Status start_all();
+    Status start_registered_module(std::string_view name);
     Status restart_module(std::string_view name);
     Status supervise_kernel_processes(StaticVector<ModuleProcessRestart, max_kernel_modules> &restarts);
     Status stop_all();

@@ -29,6 +29,27 @@ Restarting clears volatile surfaces, increments the generation counter, keeps
 the same service registration, reuses the module process record, and leaves the
 rest of the kernel running.
 
+## External Desktop Modules
+
+The kernel GUI core does not directly register the OS system desktop. It exposes
+the compositor and desktop services, then accepts post-boot module load requests
+through the generic external module loader. A desktop module package is read
+from the VFS, parsed as OKMOD, and accepted only when it declares
+`param=entry:oop`, `param=class:desktop`, `gui.compositor` /
+`gui.desktop` imports, and an exported desktop service.
+
+ObfuscationOS supplies its package from the OS repository as
+`modules/system-gui/system-gui.okmod`, stages it to
+`/boot/modules/system-gui.okmod`, and loads it after kernel boot with
+`OK_SYS_LOAD_MODULE` via `/bin/kmodload` or the early `init` fallback. The
+package exports `gui.system-desktop`, opens the default `System Status` window,
+and records the package path used to load it.
+
+The current module loader does not relocate arbitrary external text for this
+path. OKMOD metadata binds a compatible C++ OOP desktop-module ABI, which keeps
+the OS desktop outside direct core registration while preserving a clear
+transition point for future native module linking.
+
 During boot, `GuiCompositor::play_startup_animation()` presents a short
 multi-frame startup animation before the shell claims the desktop.
 
@@ -51,9 +72,10 @@ as a compatibility aggregate for callers that still want all GUI declarations.
 - `minimize_surface`, `maximize_surface`, `restore_surface`, and
   `close_surface` provide Windows-style window state controls. Minimized
   surfaces dock into a persistent bottom taskbar so a mouse click can restore
-  them. The taskbar also has fixed debug-shell and file-manager launchers; the
-  debug-shell launcher opens another isolated `oksh` window, while the
-  file-manager launcher opens another file-manager window.
+  them. The taskbar also has fixed debug-shell, file-manager, and task-monitor
+  launchers; the debug-shell launcher opens another isolated `oksh` window,
+  while the file-manager and task-monitor launchers open their respective
+  kernel applications.
   Maximized surfaces use the desktop work area above the taskbar.
 - `handle_mouse_delta()` tracks the logical pointer and turns button presses into
   title-bar drag, bottom-right resize, minimize, maximize/restore, close-request
@@ -193,6 +215,8 @@ platform hooks from the compositor directly.
 The debug and roadmap tests cover:
 
 - GUI module startup and `gui.compositor` service publication;
+- post-boot OS module-loader validation for the `system-gui` package and
+  `gui.system-desktop` service publication;
 - `gui.desktop` service publication, scanout, shared buffers, clipboard, cursor,
   and routed input;
 - surface creation, metadata updates, z ordering, hit testing, drawing, and

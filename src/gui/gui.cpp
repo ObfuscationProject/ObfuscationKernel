@@ -161,6 +161,19 @@ enum class WindowControl : u8
     return tab || border || handle || (body && ((local_x + local_y) % 7u == 0));
 }
 
+[[nodiscard]] bool task_monitor_icon_pixel(u32 local_x, u32 local_y)
+{
+    const bool frame = (local_x >= 3 && local_x <= 15 && (local_y == 4 || local_y == 14)) ||
+                       (local_y >= 4 && local_y <= 14 && (local_x == 3 || local_x == 15));
+    const bool cpu = local_x >= 6 && local_x <= 8 && local_y >= 9 && local_y <= 13;
+    const bool io = local_x >= 10 && local_x <= 12 && local_y >= 7 && local_y <= 13;
+    const bool pulse = (local_y == 8 && local_x >= 5 && local_x <= 6) ||
+                       (local_y == 10 && local_x >= 7 && local_x <= 8) ||
+                       (local_y == 6 && local_x >= 9 && local_x <= 10) ||
+                       (local_y == 11 && local_x >= 11 && local_x <= 13);
+    return frame || cpu || io || pulse;
+}
+
 [[nodiscard]] u32 taskbar_launcher_pixel_color(u32 height, u32 x, u32 y, TaskbarApp app, bool open, bool active)
 {
     const auto taskbar_top = height > taskbar_height ? height - taskbar_height : 0;
@@ -169,7 +182,15 @@ enum class WindowControl : u8
         return 0;
     }
 
-    const u32 left = app == TaskbarApp::debug_shell ? shell_launcher_x : file_manager_launcher_x;
+    u32 left = shell_launcher_x;
+    if (app == TaskbarApp::file_manager)
+    {
+        left = file_manager_launcher_x;
+    }
+    else if (app == TaskbarApp::task_monitor)
+    {
+        left = task_monitor_launcher_x;
+    }
     if (!point_in_rect(x, y, left, taskbar_top + 3, taskbar_icon_size, taskbar_icon_size))
     {
         return 0;
@@ -182,11 +203,19 @@ enum class WindowControl : u8
     {
         color = open ? taskbar_edge_color : 0xff40566au;
     }
-    const bool icon_pixel = app == TaskbarApp::debug_shell ? shell_icon_pixel(local_x, local_y)
-                                                           : file_manager_icon_pixel(local_x, local_y);
+    bool icon_pixel = shell_icon_pixel(local_x, local_y);
+    if (app == TaskbarApp::file_manager)
+    {
+        icon_pixel = file_manager_icon_pixel(local_x, local_y);
+    }
+    else if (app == TaskbarApp::task_monitor)
+    {
+        icon_pixel = task_monitor_icon_pixel(local_x, local_y);
+    }
     if (icon_pixel)
     {
-        color = app == TaskbarApp::debug_shell ? taskbar_icon_foreground : 0xffffcc66u;
+        color = app == TaskbarApp::debug_shell ? taskbar_icon_foreground
+                                               : (app == TaskbarApp::task_monitor ? 0xff44aa88u : 0xffffcc66u);
     }
     if (open && local_y + 2 >= taskbar_icon_size && local_x >= 5 && local_x <= 12)
     {
@@ -413,6 +442,10 @@ Result<TaskbarApp> GuiCompositor::taskbar_launcher_at(i32 x, i32 y) const
     if (point_in_rect(ux, uy, file_manager_launcher_x, taskbar_top + 3, taskbar_icon_size, taskbar_icon_size))
     {
         return TaskbarApp::file_manager;
+    }
+    if (point_in_rect(ux, uy, task_monitor_launcher_x, taskbar_top + 3, taskbar_icon_size, taskbar_icon_size))
+    {
+        return TaskbarApp::task_monitor;
     }
     return TaskbarApp::none;
 }
@@ -1157,6 +1190,7 @@ Status GuiCompositor::present()
     const auto taskbar_top = mode.height > taskbar_height ? mode.height - taskbar_height : 0;
     const bool shell_open = app_window_exists(TaskbarApp::debug_shell);
     const bool files_open = app_window_exists(TaskbarApp::file_manager);
+    const bool tasks_open = app_window_exists(TaskbarApp::task_monitor);
     const auto focused_app = active_app();
     for (u32 y = 0; y < mode.height; ++y)
     {
@@ -1176,6 +1210,13 @@ Status GuiCompositor::present()
                 files_color != 0)
             {
                 color = files_color;
+            }
+            if (const auto tasks_color = taskbar_launcher_pixel_color(mode.height, x, y, TaskbarApp::task_monitor,
+                                                                       tasks_open,
+                                                                       focused_app == TaskbarApp::task_monitor);
+                tasks_color != 0)
+            {
+                color = tasks_color;
             }
             if (y >= taskbar_top)
             {

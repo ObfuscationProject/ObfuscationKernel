@@ -377,7 +377,6 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
-
     booted_ = true;
     return Status::success();
 }
@@ -577,6 +576,11 @@ Status Kernel::handle_gui_taskbar_launcher(gui::TaskbarApp app)
         }
         return open_file_manager(posix_.getcwd(), false);
     case gui::TaskbarApp::task_monitor:
+        if (auto status = sync_gui_credentials_from_surface(gui_module_.compositor().active_surface()); !status.ok())
+        {
+            return status;
+        }
+        return open_task_manager();
     case gui::TaskbarApp::none:
         return Status::success();
     }
@@ -809,6 +813,46 @@ Status Kernel::note_ignored_gui_close(gui::SurfaceId surface)
         }
     }
     return gui_close_attempts_.push_back(GuiCloseAttempt{.surface = surface, .prompt_surface = 0, .count = 1});
+}
+
+Status Kernel::load_external_kernel_module(std::string_view path)
+{
+    if (arch_ == nullptr)
+    {
+        return Status::not_initialized("kernel architecture is not selected");
+    }
+    auto file = vfs_.read_file(path);
+    if (!file)
+    {
+        return file.status();
+    }
+    ModuleImageLoader loader;
+    auto image = loader.parse(std::span<const std::byte>{file.value().data.data(), file.value().size},
+                              arch_->architecture());
+    if (!image)
+    {
+        return image.status();
+    }
+    auto *module = kernel_modules_.find(image.value().name.view());
+    if (module != nullptr)
+    {
+        return module->state() == ModuleState::started ? Status::success()
+                                                       : kernel_modules_.start_registered_module(image.value().name.view());
+    }
+    external_gui_desktop_module_.bind_metrics(scheduler_, topology_);
+    if (auto status = external_gui_desktop_module_.configure_from_image(path, image.value()); !status.ok())
+    {
+        return status;
+    }
+    module = kernel_modules_.find(external_gui_desktop_module_.module_name());
+    if (module == nullptr)
+    {
+        if (auto status = kernel_modules_.register_module(external_gui_desktop_module_); !status.ok())
+        {
+            return status;
+        }
+    }
+    return kernel_modules_.start_registered_module(external_gui_desktop_module_.module_name());
 }
 
 Status Kernel::show_force_close_prompt(gui::SurfaceId surface)
@@ -1499,6 +1543,16 @@ Status Kernel::supervise_daemons()
     {
         if (auto status = log_daemon_restart("module", restart.process_name.view(), restart.previous_pid, restart.pid);
             !status.ok())
+        {
+            return status;
+        }
+    }
+    auto *desktop = loaded_gui_desktop_module();
+    if (!module_restarts.empty() && desktop != nullptr &&
+        desktop->desktop_state() == ExternalGuiDesktopState::running &&
+        gui_module_.compositor().state() == gui::GuiState::running)
+    {
+        if (auto status = desktop->refresh(); !status.ok())
         {
             return status;
         }
