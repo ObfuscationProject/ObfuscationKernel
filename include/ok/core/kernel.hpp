@@ -296,6 +296,8 @@ class Kernel final
     bool gui_mouse_left_down_{false};
     SystemPowerAction power_action_{SystemPowerAction::none};
     usize debug_test_points_run_{0};
+    u64 kernel_tick_count_{0};
+    u64 task_manager_next_refresh_tick_{0};
     KernelTestReport test_report_{};
     KernelConfig config_{};
     arch::ArchOperations *arch_{nullptr};

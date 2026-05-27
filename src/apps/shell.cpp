@@ -1181,13 +1181,8 @@ Status KernelDebugShell::handle_key(int key)
     }
     if (key == 0x03)
     {
-        gui_input_line_.clear();
         gui_escape_state_ = 0;
-        if (foreground_process_id_ != 0)
-        {
-            return interrupt_foreground_process();
-        }
-        return redraw_gui_terminal();
+        return interrupt_foreground_process();
     }
     if (foreground_process_running())
     {

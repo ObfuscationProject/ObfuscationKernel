@@ -6,8 +6,10 @@ windowed QEMU sessions. It does not provide a separate test executable or hosted
 
 The interactive line editor keeps the prompt outside the editable buffer:
 Backspace/Delete only erase user input, and Ctrl-U clears the current input
-line. Ctrl-C clears the current line or interrupts the foreground GUI child
-process. Up/Down recall command history in the same style as common Linux
+line. Platform keyboard code maps Ctrl-C to ETX (`0x03`), and the kernel routes
+that key to the shell foreground process before normal focused-surface dispatch,
+so a shell-launched GUI app can be interrupted even while its own window is
+focused. Up/Down recall command history in the same style as common Linux
 shells.
 In windowed GUI mode, mouse wheel input is routed to the active surface. Shell
 surfaces scroll their visual scrollback with the same direction convention as
@@ -86,10 +88,9 @@ The shell is intentionally fixed-buffer and freestanding. Windowed input is
 dispatched through GUI focus: keyboard events reach `oksh` only while a shell
 surface is focused. Debug test builds close their shell/file-manager GUI
 surfaces after `OK_TEST_PASS`, try the debug-exit path, and keep the desktop
-event loop alive if the platform returns from that path. The taskbar launchers
-can then reopen the shell or file manager without leaving stale serial debug
-output attached to the GUI. The GUI title strip and terminal body are rendered
-with separate colors. Showing the GUI shell or running `clear` resets scrollback
-while immediately redrawing a fresh `ok> ` prompt. The legacy display-driver
-text path is still used for boot logs, `OK_DISPLAY_TEXT` diagnostics, and
-fallback when the GUI cannot be restarted.
+surfaces after `OK_TEST_PASS`, try the debug-exit path, and halt if the platform
+returns from that path. The GUI title strip and terminal body are rendered with
+separate colors. Showing the GUI shell or running `clear` resets scrollback while
+immediately redrawing a fresh `ok> ` prompt. The legacy display-driver text path
+is still used for boot logs, `OK_DISPLAY_TEXT` diagnostics, and fallback when the
+GUI cannot be restarted.

@@ -56,10 +56,9 @@ as a compatibility aggregate for callers that still want all GUI declarations.
 - keyboard input is routed by the focused surface: `oksh` receives text when a
   shell window is focused, while kernel applications such as the file manager
   and task/top consume their own navigation keys when focused.
-- debug-test cleanup closes shell and file-manager surfaces, then leaves the
-  desktop taskbar responsive if the platform debug-exit path returns. This keeps
-  post-test input usable until an explicit `shutdown`, `poweroff`, `halt`, or
-  `reboot` command is requested.
+- debug-test cleanup closes shell and file-manager surfaces, then enters the
+  platform halt path after trying debug-exit so post-test QEMU sessions do not
+  spin at full CPU if the debug-exit device is absent.
 - `fill`, `fill_rect`, `put_pixel`, and `draw_text` update backing pixels.
 - `surface_at(x, y)` returns the top visible surface at a logical desktop
   coordinate.
@@ -76,10 +75,13 @@ visible pixels with the default surface color.
 
 ## Display Path
 
-The compositor renders into `FramebufferDisplayDriver`, whose logical mode is
-currently 480x270 RGBA pixels. `present()` submits platform-visible pixels back
-through the display driver, and QEMU ramfb platforms scale those logical pixels
-onto the visible 960x540 framebuffer. Each present starts from a
+The compositor renders a complete logical frame and submits it to
+`FramebufferDisplayDriver`, whose logical mode is currently 480x270 RGBA pixels.
+The compositor does not call QEMU or platform hooks directly: the display driver
+owns frame begin/frame/frame end hooks and falls back to per-pixel presentation
+only when a platform has no frame presenter. QEMU ramfb platforms scale the
+logical frame onto the visible 960x540 framebuffer in their backend code. Each
+present starts from a
 compositor-owned desktop background with a large geometric `OK` artwork in
 kernel mode, so legacy boot/debug text is not left behind outside GUI surfaces.
 
@@ -88,6 +90,11 @@ This keeps the module independent from QEMU-specific ramfb details:
 - `FramebufferDisplayDriver` remains the portable kernel display device.
 - `RamFbConsole` owns fw_cfg DMA setup and physical guest-RAM pixels.
 - `GuiCompositor` owns surface state and composition.
+
+RAMFB also owns the physical mouse pointer overlay. The display frame boundary
+restores the previous pointer before a GUI frame is copied, then redraws it once
+after the frame lands. This keeps realtime surfaces such as `top` from flickering
+or erasing the pointer during automatic refreshes.
 
 ## Shell
 
@@ -127,9 +134,11 @@ another file manager as a shortcut without blocking the shell.
 `taskman` and `top` live under `ok::apps` as kernel applications. `taskman tui`
 renders a one-shot task-manager snapshot, `taskman gui` opens a foreground
 `tm:<user>` GUI child, `top tui` renders a top-style snapshot, and `top gui`
-opens a realtime foreground `top:<user>` GUI child. Ctrl-C interrupts a
-shell-launched GUI `top` like other foreground programs. `taskman close` or
-`top close` closes the active monitor GUI process and surface.
+opens a realtime foreground `top:<user>` GUI child. Automatic GUI refresh is
+throttled by the kernel tick so the monitor remains live without repainting on
+every event-loop spin. Ctrl-C interrupts a shell-launched GUI `top` like other
+foreground programs. `taskman close` or `top close` closes the active monitor
+GUI process and surface.
 All views read the same scheduler, network, and block device counters, showing
 per-CPU dispatch usage, current PID/TID, process CPU share, network byte
 counters, and disk I/O bytes. Mouse wheel input scrolls the active task-manager

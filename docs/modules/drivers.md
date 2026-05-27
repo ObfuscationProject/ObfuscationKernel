@@ -14,12 +14,13 @@ Built-in drivers:
   through the same `BlockDevice` sector API. QEMU tests attach a temporary
   virtio-blk disk image so filesystem tests run against the virtual-disk path.
 - `FramebufferDisplayDriver`: exposes a simple 32-bit RGBA framebuffer with
-  clear, pixel, rectangle, GUI-pixel present, text-line, and checksum
-  operations. Kernel boot writes
+  clear, pixel, rectangle, GUI-frame present, GUI-pixel fallback, text-line, and
+  checksum operations. Kernel boot writes
   Linux-style startup lines through this driver so `qemu-window-test` can show
   the same debug output that the QEMU checker validates. The GUI compositor also
-  targets this logical framebuffer before platform code scales it to ramfb. The
-  backend tag can be `memory_framebuffer`, `vga_text`, `ramfb`, or
+  targets this logical framebuffer before the driver delegates frame presentation
+  to platform code such as ramfb. The backend tag can be `memory_framebuffer`,
+  `vga_text`, `ramfb`, or
   `virtio_gpu_pci`.
 - `VirtioGpuPciDisplayDriver`: binds the emulated PCI display device and
   presents the kernel framebuffer through the virtio-gpu-pci path used by QEMU
@@ -69,7 +70,8 @@ The display stack has three layers:
 
 - `FramebufferDisplayDriver` is the portable logical display device used by the
   kernel and tests. It stores a 480x270 RGBA framebuffer, boot text, and a stable
-  checksum.
+  checksum. GUI presents enter through a frame-level driver API, so the
+  compositor stays independent from the physical display backend.
 - `ok::gui::GuiCompositor` is the restartable GUI module above the framebuffer.
   It owns fixed-capacity surfaces, rectangle/pixel/text drawing, and composition.
   It renders a short startup animation during boot and tracks normal,
@@ -84,8 +86,9 @@ The display stack has three layers:
   `fm`/`fileman` command opens a separate GUI file-manager surface for VFS
   directory listings and mouse navigation.
 - `RamFbConsole` is the QEMU-visible platform backend. It initializes `ramfb`
-  through fw_cfg DMA, owns the 960x540 guest-RAM pixel surface, and scales
-  logical GUI pixels through the display driver's platform present hook.
+  through fw_cfg DMA, owns the 960x540 guest-RAM pixel surface, scales logical
+  GUI frames through the display driver's platform present hook, and redraws the
+  hardware-facing pointer once at the end of each GUI frame.
 
 QEMU tests attach a temporary `virtio-blk-pci` disk on every bootable target.
 QEMU window tests attach `ramfb` on bootable architectures whose QEMU machine
@@ -106,4 +109,5 @@ legacy virtio-mmio queue registers used by QEMU `virt` here, maps Linux input
 key codes into shell characters, forwards scaled logical mouse-relative events
 into the GUI compositor, and then moves a small framebuffer pointer. UART input
 remains as a fallback for headless serial use. F12 creates a fresh GUI shell
-window, and F1 opens a fresh GUI file manager.
+window, F1 opens a fresh GUI file manager, and Ctrl-letter combinations map to
+the conventional control characters used by the shell, including Ctrl-C.

@@ -32,6 +32,8 @@ ok::usize vga_row = 0;
 ok::usize vga_column = 0;
 bool left_shift = false;
 bool right_shift = false;
+bool left_control = false;
+bool right_control = false;
 bool ps2_mouse_initialized = false;
 ok::u8 ps2_mouse_packet[4]{};
 ok::usize ps2_mouse_packet_index = 0;
@@ -191,6 +193,30 @@ char map_scancode(ok::u8 scancode)
         return 0;
     }
     return (left_shift || right_shift) ? shifted[scancode] : normal[scancode];
+}
+
+char map_control_scancode(ok::u8 scancode)
+{
+    const char value = map_scancode(scancode);
+    if (value >= 'a' && value <= 'z')
+    {
+        return static_cast<char>(value - 'a' + 1);
+    }
+    if (value >= 'A' && value <= 'Z')
+    {
+        return static_cast<char>(value - 'A' + 1);
+    }
+    switch (value)
+    {
+    case '[':
+        return 0x1b;
+    case '\\':
+        return 0x1c;
+    case ']':
+        return 0x1d;
+    default:
+        return 0;
+    }
 }
 
 void queue_escape_sequence(char final)
@@ -452,6 +478,22 @@ extern "C" void ok_platform_display_gui_pixel(ok::u32 logical_width, ok::u32 log
     RamFb::draw_gui_pixel(logical_width, logical_height, x, y, color);
 }
 
+extern "C" void ok_platform_display_gui_frame_begin(ok::u32, ok::u32)
+{
+    RamFb::begin_gui_frame();
+}
+
+extern "C" void ok_platform_display_gui_frame(ok::u32 logical_width, ok::u32 logical_height, const ok::u32 *pixels,
+                                              ok::usize pixel_count)
+{
+    RamFb::draw_gui_frame(logical_width, logical_height, pixels, pixel_count);
+}
+
+extern "C" void ok_platform_display_gui_frame_end(ok::u32, ok::u32)
+{
+    RamFb::end_gui_frame();
+}
+
 extern "C" void ok_platform_display_debug_marker()
 {
     if (RamFb::available())
@@ -506,6 +548,11 @@ extern "C" int ok_platform_input_poll()
     if (ps2_extended_scancode)
     {
         ps2_extended_scancode = false;
+        if (key == 0x1d)
+        {
+            right_control = !released;
+            return -1;
+        }
         if (!released && key == 0x48)
         {
             queue_escape_sequence('A');
@@ -528,6 +575,11 @@ extern "C" int ok_platform_input_poll()
         right_shift = !released;
         return -1;
     }
+    if (key == 0x1d)
+    {
+        left_control = !released;
+        return -1;
+    }
     if (released)
     {
         return -1;
@@ -541,6 +593,11 @@ extern "C" int ok_platform_input_poll()
         return ok::ok_input_open_shell;
     }
 
+    if (left_control || right_control)
+    {
+        const char value = map_control_scancode(key);
+        return value == 0 ? -1 : static_cast<unsigned char>(value);
+    }
     const char value = map_scancode(key);
     return value == 0 ? -1 : static_cast<unsigned char>(value);
 }

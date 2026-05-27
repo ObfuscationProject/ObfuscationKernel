@@ -50,7 +50,9 @@ credentials active at launch time; `fm` launched from the shell blocks only its
 launching `oksh` until the file manager exits.
 Task monitor applications follow the same rule: `taskman gui` uses `tm:<user>`
 and `top gui` uses `top:<user>`, while their TUI modes render synchronously in
-the shell without creating module records.
+the shell without creating module records. GUI monitor auto-refresh is throttled
+by the kernel tick; user-driven redraws such as open, resize, and scroll still
+render immediately.
 Future work should replace the simulated dispatch counters with timer-derived
 runtime deltas and add real SMP run queues once architecture code starts running
 kernel threads concurrently.

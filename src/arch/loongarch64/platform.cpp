@@ -21,6 +21,8 @@ VirtioPciInput virtio_keyboard;
 VirtioPciInput virtio_mouse;
 bool virtio_left_shift = false;
 bool virtio_right_shift = false;
+bool virtio_left_control = false;
+bool virtio_right_control = false;
 bool virtio_mouse_left = false;
 char pending_keyboard_input[3]{};
 ok::usize pending_keyboard_input_size = 0;
@@ -149,6 +151,16 @@ int poll_virtio_keyboard()
             virtio_right_shift = pressed;
             continue;
         }
+        if (event.code == ok::driver::qemu_virt::input_key_left_ctrl)
+        {
+            virtio_left_control = pressed;
+            continue;
+        }
+        if (event.code == ok::driver::qemu_virt::input_key_right_ctrl)
+        {
+            virtio_right_control = pressed;
+            continue;
+        }
         if (!pressed)
         {
             continue;
@@ -172,7 +184,8 @@ int poll_virtio_keyboard()
             return pop_pending_keyboard_input();
         }
         const char value =
-            ok::driver::qemu_virt::map_linux_key_code(event.code, virtio_left_shift || virtio_right_shift);
+            ok::driver::qemu_virt::map_linux_key_code(event.code, virtio_left_shift || virtio_right_shift,
+                                                      virtio_left_control || virtio_right_control);
         if (value != 0)
         {
             return static_cast<unsigned char>(value);
@@ -204,6 +217,22 @@ extern "C" void ok_platform_display_gui_pixel(ok::u32 logical_width, ok::u32 log
                                               ok::u32 color)
 {
     RamFb::draw_gui_pixel(logical_width, logical_height, x, y, color);
+}
+
+extern "C" void ok_platform_display_gui_frame_begin(ok::u32, ok::u32)
+{
+    RamFb::begin_gui_frame();
+}
+
+extern "C" void ok_platform_display_gui_frame(ok::u32 logical_width, ok::u32 logical_height, const ok::u32 *pixels,
+                                              ok::usize pixel_count)
+{
+    RamFb::draw_gui_frame(logical_width, logical_height, pixels, pixel_count);
+}
+
+extern "C" void ok_platform_display_gui_frame_end(ok::u32, ok::u32)
+{
+    RamFb::end_gui_frame();
 }
 
 extern "C" void ok_platform_display_debug_marker()

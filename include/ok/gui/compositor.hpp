@@ -193,6 +193,7 @@ class GuiCompositor final
 
     driver::FramebufferDisplayDriver *display_{nullptr};
     StaticVector<Surface, max_gui_surfaces> surfaces_{};
+    std::array<u32, max_gui_surface_pixels> frame_pixels_{};
     GuiState state_{GuiState::stopped};
     SurfaceId next_surface_id_{1};
     SurfaceId active_surface_id_{0};

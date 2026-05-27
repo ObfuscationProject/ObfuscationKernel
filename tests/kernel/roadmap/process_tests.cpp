@@ -648,7 +648,7 @@ Status verify_background_programs_and_posix(Kernel &kernel)
     {
         return Status::fault("debug shell did not block while foreground file manager was running");
     }
-    if (auto status = kernel.debug_shell().interrupt_foreground_process(); !status.ok())
+    if (auto status = kernel.handle_gui_key(0x03); !status.ok())
     {
         return status;
     }

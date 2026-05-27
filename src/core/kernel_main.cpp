@@ -65,16 +65,22 @@ void platform_write(std::string_view text)
         }
 
         const int value = ok_platform_input_poll();
+        bool did_work = false;
         if (value >= 0)
         {
             static_cast<void>(ok::ok_gui_key_event(value));
+            did_work = true;
         }
         ++ui_tick_counter;
         if ((ui_tick_counter & 0x7ffu) == 0)
         {
             static_cast<void>(ok::ok_debug_shell_tick());
+            did_work = true;
         }
-        asm volatile("" ::: "memory");
+        if (!did_work)
+        {
+            ok_platform_halt();
+        }
     }
 }
 
@@ -118,7 +124,7 @@ extern "C" [[noreturn]] void kernel_main()
     ok_platform_debug_exit(status.ok() ? 0x10u : 0x11u);
     if (status.ok())
     {
-        desktop_loop(false);
+        halt_forever();
     }
 #else
     if (status.ok())

@@ -1228,17 +1228,17 @@ Status GuiCompositor::present()
             {
                 color = surface_pixel_color(*top, surface_x, surface_y);
             }
-            if (auto status = display_->put_pixel(x, y, color); !status.ok())
-            {
-                return status;
-            }
-            if (auto status = display_->present_gui_pixel(mode.width, mode.height, x, y, color); !status.ok())
-            {
-                return status;
-            }
+            frame_pixels_[static_cast<usize>(y) * mode.width + x] = color;
         }
     }
 
+    if (auto status = display_->present_gui_frame(
+            mode.width, mode.height,
+            std::span<const u32>(frame_pixels_.data(), static_cast<usize>(mode.width) * mode.height));
+        !status.ok())
+    {
+        return status;
+    }
     last_present_checksum_ = display_->checksum();
     return Status::success();
 }

@@ -565,6 +565,7 @@ class FramebufferDisplayDriver final : public Driver
     Status stop() override;
     Status clear(u32 rgba);
     Status put_pixel(u32 x, u32 y, u32 rgba);
+    Status present_gui_frame(u32 logical_width, u32 logical_height, std::span<const u32> rgba);
     Status present_gui_pixel(u32 logical_width, u32 logical_height, u32 x, u32 y, u32 rgba);
     Status fill_rect(u32 x, u32 y, u32 width, u32 height, u32 rgba);
     Status write_line(std::string_view text);

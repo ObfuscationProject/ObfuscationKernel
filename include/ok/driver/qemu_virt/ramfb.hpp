@@ -121,8 +121,56 @@ template <uptr FwCfgBase, bool IoPort = false> class RamFbConsole
         {
             return;
         }
-        pointer_drawn_ = false;
-        draw_pointer(pointer_left_button_);
+        if (!pointer_drawn_)
+        {
+            draw_pointer(pointer_left_button_);
+        }
+    }
+
+    static void begin_gui_frame()
+    {
+        initialize();
+        if (!ready_)
+        {
+            return;
+        }
+        gui_active_ = true;
+        restore_pointer();
+    }
+
+    static void draw_gui_frame(u32 logical_width, u32 logical_height, const u32 *frame, usize pixel_count)
+    {
+        initialize();
+        if (!ready_ || logical_width == 0 || logical_height == 0 || frame == nullptr ||
+            pixel_count < static_cast<usize>(logical_width) * logical_height)
+        {
+            return;
+        }
+        gui_active_ = true;
+        for (u32 target_y = 0; target_y < framebuffer_height; ++target_y)
+        {
+            const auto source_y = static_cast<u32>((static_cast<u64>(target_y) * logical_height) / framebuffer_height);
+            const auto *source_row = frame + static_cast<usize>(source_y) * logical_width;
+            for (u32 target_x = 0; target_x < framebuffer_width; ++target_x)
+            {
+                const auto source_x =
+                    static_cast<u32>((static_cast<u64>(target_x) * logical_width) / framebuffer_width);
+                put_pixel(target_x, target_y, source_row[source_x]);
+            }
+        }
+    }
+
+    static void end_gui_frame()
+    {
+        initialize();
+        if (!ready_)
+        {
+            return;
+        }
+        if (!pointer_drawn_)
+        {
+            draw_pointer(pointer_left_button_);
+        }
     }
 
     static i32 gui_delta_x(i32 delta_x)

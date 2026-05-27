@@ -60,6 +60,8 @@ bool starts_with(std::string_view text, std::string_view prefix)
     return text.size() >= prefix.size() && text.substr(0, prefix.size()) == prefix;
 }
 
+constexpr u64 task_manager_refresh_interval_ticks = 8;
+
 template <usize Capacity> Status append_unsigned(FixedString<Capacity> &out, u64 value)
 {
     constexpr u64 powers[] = {
@@ -123,6 +125,8 @@ Status Kernel::boot(KernelConfig config)
     task_manager_.mark_closed();
     gui_close_attempts_.clear();
     debug_test_points_run_ = 0;
+    kernel_tick_count_ = 0;
+    task_manager_next_refresh_tick_ = 0;
     gui_mouse_left_down_ = false;
     if (config.memory_region_count == 0)
     {
@@ -528,6 +532,10 @@ Status Kernel::handle_gui_key(int key)
         }
         return open_file_manager(posix_.getcwd(), false);
     }
+    if (key == 0x03 && debug_shell_.foreground_process_id() != 0)
+    {
+        return debug_shell_.interrupt_foreground_process();
+    }
 
     if (active != 0 && debug_shell_.owns_surface(active))
     {
@@ -581,6 +589,7 @@ Status Kernel::tick()
     {
         return Status::not_initialized("kernel is not booted");
     }
+    ++kernel_tick_count_;
 
     for (usize i = 0; i < topology_.cpu_count(); ++i)
     {
@@ -612,7 +621,16 @@ Status Kernel::tick()
     if (task_manager_.surface_id() != 0 && task_manager_.process_id() != 0 &&
         scheduler_.find(task_manager_.process_id()) != nullptr)
     {
-        return task_manager_.refresh(gui_module_.compositor(), *this);
+        if (kernel_tick_count_ < task_manager_next_refresh_tick_)
+        {
+            return Status::success();
+        }
+        auto status = task_manager_.refresh(gui_module_.compositor(), *this);
+        if (status.ok())
+        {
+            task_manager_next_refresh_tick_ = kernel_tick_count_ + task_manager_refresh_interval_ticks;
+        }
+        return status;
     }
     return Status::success();
 }
@@ -1154,6 +1172,7 @@ Status Kernel::open_task_manager(bool foreground_shell_child, std::string_view p
         static_cast<void>(scheduler_.kill_process(process.value()));
         return status;
     }
+    task_manager_next_refresh_tick_ = kernel_tick_count_ + 1;
     if (foreground_shell_child)
     {
         if (auto status = debug_shell_.start_foreground_process(process.value()); !status.ok())
@@ -1202,6 +1221,7 @@ Status Kernel::close_task_manager_window(bool kill_process, bool notify_shell)
         debug_shell_.notify_process_exit(process);
     }
     task_manager_.mark_closed();
+    task_manager_next_refresh_tick_ = 0;
     return Status::success();
 }
 

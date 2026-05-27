@@ -18,11 +18,13 @@ inline constexpr u16 input_relative_x = 0x00;
 inline constexpr u16 input_relative_y = 0x01;
 inline constexpr u16 input_relative_wheel = 0x08;
 inline constexpr u16 input_key_enter = 28;
+inline constexpr u16 input_key_left_ctrl = 29;
 inline constexpr u16 input_key_a = 30;
 inline constexpr u16 input_key_left_shift = 42;
 inline constexpr u16 input_key_right_shift = 54;
 inline constexpr u16 input_key_f1 = 59;
 inline constexpr u16 input_key_f12 = 88;
+inline constexpr u16 input_key_right_ctrl = 97;
 inline constexpr u16 input_key_up = 103;
 inline constexpr u16 input_key_down = 108;
 inline constexpr u16 input_button_left = 0x110;
@@ -33,7 +35,7 @@ enum class VirtioInputKind : u8
     mouse,
 };
 
-inline char map_linux_key_code(u16 code, bool shifted)
+inline char map_linux_key_code(u16 code, bool shifted, bool control = false)
 {
     constexpr char normal[] = {
         0, 0, '1', '2', '3', '4', '5', '6', '7', '8',
@@ -54,6 +56,29 @@ inline char map_linux_key_code(u16 code, bool shifted)
     if (code >= sizeof(normal))
     {
         return 0;
+    }
+    if (control)
+    {
+        const auto value = normal[code];
+        if (value >= 'a' && value <= 'z')
+        {
+            return static_cast<char>(value - 'a' + 1);
+        }
+        switch (value)
+        {
+        case '[':
+            return 0x1b;
+        case '\\':
+            return 0x1c;
+        case ']':
+            return 0x1d;
+        case '^':
+            return 0x1e;
+        case '_':
+            return 0x1f;
+        default:
+            return 0;
+        }
     }
     return shifted ? shifted_map[code] : normal[code];
 }

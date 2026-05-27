@@ -1,6 +1,12 @@
 #include "ok/driver/driver.hpp"
 
 extern "C" void ok_platform_display_write_line(const char *text, ok::usize size) __attribute__((weak));
+extern "C" void ok_platform_display_gui_frame_begin(ok::u32 logical_width, ok::u32 logical_height)
+    __attribute__((weak));
+extern "C" void ok_platform_display_gui_frame(ok::u32 logical_width, ok::u32 logical_height, const ok::u32 *pixels,
+                                              ok::usize pixel_count) __attribute__((weak));
+extern "C" void ok_platform_display_gui_frame_end(ok::u32 logical_width, ok::u32 logical_height)
+    __attribute__((weak));
 extern "C" void ok_platform_display_gui_pixel(ok::u32 logical_width, ok::u32 logical_height, ok::u32 x, ok::u32 y,
                                               ok::u32 color) __attribute__((weak));
 
@@ -50,6 +56,55 @@ Status FramebufferDisplayDriver::put_pixel(u32 x, u32 y, u32 rgba)
         return Status::invalid_argument("pixel coordinate out of range");
     }
     pixels_[static_cast<usize>(y) * mode_.width + x] = rgba;
+    return Status::success();
+}
+
+Status FramebufferDisplayDriver::present_gui_frame(u32 logical_width, u32 logical_height, std::span<const u32> rgba)
+{
+    if (!started_)
+    {
+        return Status::not_initialized("framebuffer driver not started");
+    }
+    if (logical_width == 0 || logical_height == 0 || logical_width > mode_.width || logical_height > mode_.height ||
+        rgba.size() < static_cast<usize>(logical_width) * logical_height)
+    {
+        return Status::invalid_argument("GUI frame dimensions out of range");
+    }
+
+    if (ok_platform_display_gui_frame_begin != nullptr)
+    {
+        ok_platform_display_gui_frame_begin(logical_width, logical_height);
+    }
+
+    for (u32 y = 0; y < logical_height; ++y)
+    {
+        for (u32 x = 0; x < logical_width; ++x)
+        {
+            const auto color = rgba[static_cast<usize>(y) * logical_width + x];
+            pixels_[static_cast<usize>(y) * mode_.width + x] = color;
+        }
+    }
+
+    if (ok_platform_display_gui_frame != nullptr)
+    {
+        ok_platform_display_gui_frame(logical_width, logical_height, rgba.data(), rgba.size());
+    }
+    else if (ok_platform_display_gui_pixel != nullptr)
+    {
+        for (u32 y = 0; y < logical_height; ++y)
+        {
+            for (u32 x = 0; x < logical_width; ++x)
+            {
+                ok_platform_display_gui_pixel(logical_width, logical_height, x, y,
+                                              rgba[static_cast<usize>(y) * logical_width + x]);
+            }
+        }
+    }
+
+    if (ok_platform_display_gui_frame_end != nullptr)
+    {
+        ok_platform_display_gui_frame_end(logical_width, logical_height);
+    }
     return Status::success();
 }
 
