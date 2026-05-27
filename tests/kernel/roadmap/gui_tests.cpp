@@ -1,6 +1,7 @@
 #include "roadmap_tests.hpp"
 
 #include "ok/core/entry.hpp"
+#include "ok/driver/font.hpp"
 #include "ok/gui/gui.hpp"
 
 namespace ok
@@ -64,6 +65,19 @@ bool contains_text(std::string_view haystack, std::string_view needle)
         }
     }
     return false;
+}
+
+usize process_count_named(const sched::Scheduler &scheduler, std::string_view name)
+{
+    usize count = 0;
+    for (const auto &process : scheduler.processes())
+    {
+        if (process.name() == name)
+        {
+            ++count;
+        }
+    }
+    return count;
 }
 
 Status append_unsigned(FixedString<32> &out, u64 value)
@@ -210,6 +224,19 @@ Status test_gui_text_uses_bitmap_font(Kernel &kernel)
     if (top_left.value() != background || top_bar.value() != foreground || crossbar_left.value() != foreground)
     {
         return Status::fault("GUI text did not use bitmap font rows");
+    }
+    bool percent_has_own_glyph = false;
+    for (u32 row = 0; row < driver::BitmapFontRenderer::glyph_height; ++row)
+    {
+        if (driver::BitmapFontRenderer::glyph_row('%', row) != driver::BitmapFontRenderer::glyph_row('?', row))
+        {
+            percent_has_own_glyph = true;
+            break;
+        }
+    }
+    if (!percent_has_own_glyph)
+    {
+        return Status::fault("GUI bitmap font renders percent as the fallback glyph");
     }
     return compositor.destroy_surface(surface.value());
 }
@@ -1054,6 +1081,16 @@ Status test_kernel_task_manager_draws_usage(Kernel &kernel)
     {
         return status;
     }
+    if (auto status = kernel.debug_shell().close_all_gui(); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (auto status = kernel.debug_shell().show_gui(); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
 
     auto tui = kernel.debug_shell().execute("taskman");
     if (!tui || !contains_text(tui.value(), "TASK MANAGER") || !contains_text(tui.value(), "CPU") ||
@@ -1184,6 +1221,27 @@ Status test_kernel_task_manager_draws_usage(Kernel &kernel)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return Status::fault("shell did not resume after top was interrupted");
+    }
+    auto top_again = kernel.debug_shell().execute("top");
+    const auto closing_shell_pid = kernel.debug_shell().process_id();
+    const auto closing_shell_surface = kernel.debug_shell().gui_surface_id();
+    const auto closing_top_pid = kernel.debug_shell().foreground_process_id();
+    if (!top_again || closing_shell_pid == 0 || closing_shell_surface == 0 || closing_top_pid == 0 ||
+        closing_top_pid != kernel.task_manager().process_id())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("top relaunch did not attach to the GUI shell foreground");
+    }
+    if (auto status = kernel.debug_shell().close_surface_window(closing_shell_surface); !status.ok())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return status;
+    }
+    if (kernel.scheduler().find(closing_shell_pid) != nullptr || kernel.scheduler().find(closing_top_pid) != nullptr ||
+        kernel.task_manager().surface_id() != 0 || process_count_named(kernel.scheduler(), "oksh") != 0)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("closing a shell with foreground top left a child or orphan oksh behind");
     }
     return kernel.posix().set_credentials(saved_credentials);
 }

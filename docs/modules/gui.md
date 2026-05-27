@@ -130,7 +130,10 @@ line, scrollback, and foreground child process. Switching users in one `oksh`
 does not change the session restored by another `oksh` window. When a shell or
 file manager is opened from a kernel session, its scheduler record stays a
 kernel thread; when it is opened from `root` or another normal user, it is
-created as an isolated user process with its own address-space ID.
+created as an isolated user process with its own address-space ID. Closing an
+`oksh` window tears down its foreground child before the shell record is
+removed, matching the expected terminal/session lifetime for shell-launched
+kernel applications.
 
 The `fm`/`fileman` shell command runs the kernel file manager for a path. The
 file-manager application interface lives under `ok::apps`, outside the
@@ -152,8 +155,9 @@ renders a one-shot task-manager snapshot, `taskman gui` opens a foreground
 opens a realtime foreground `top:<user>` GUI child. Automatic GUI refresh is
 throttled by the kernel tick so the monitor remains live without repainting on
 every event-loop spin. Ctrl-C interrupts a shell-launched GUI `top` like other
-foreground programs. `taskman close` or `top close` closes the active monitor
-GUI process and surface.
+foreground programs, and closing the launching shell also closes that foreground
+monitor. `taskman close` or `top close` closes the active monitor GUI process
+and surface.
 All views read the same scheduler, network, and block device counters, showing
 per-CPU dispatch usage, current PID/TID, process CPU share, network byte
 counters, and disk I/O bytes. Mouse wheel input scrolls the active task-manager

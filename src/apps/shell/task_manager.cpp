@@ -72,7 +72,7 @@ Status KernelDebugShell::command_top(std::string_view args)
 
 Status KernelDebugShell::tick()
 {
-    return Status::success();
+    return reconcile_gui_windows();
 }
 
 } // namespace ok

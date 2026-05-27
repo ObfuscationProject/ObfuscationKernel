@@ -439,7 +439,16 @@ Status KernelDebugShell::close_process_window(sched::ProcessId pid)
     {
         return index.status();
     }
-    return remove_gui_window(index.value());
+    if (auto status = kill_window_foreground_process(index.value()); !status.ok() &&
+                       status.code() != StatusCode::not_found)
+    {
+        return status;
+    }
+    if (auto status = remove_gui_window(index.value()); !status.ok())
+    {
+        return status;
+    }
+    return kill_orphaned_shell_processes();
 }
 
 Status KernelDebugShell::close_surface_window(gui::SurfaceId surface)
@@ -449,12 +458,25 @@ Status KernelDebugShell::close_surface_window(gui::SurfaceId surface)
     {
         return index.status();
     }
+    if (auto status = kill_window_foreground_process(index.value()); !status.ok() &&
+                       status.code() != StatusCode::not_found)
+    {
+        return status;
+    }
     const auto process = gui_windows_[index.value()].process_id;
     if (kernel_ != nullptr && process != 0 && kernel_->scheduler().find(process) != nullptr)
     {
-        return kernel_->kill_process(process);
+        if (auto status = kernel_->kill_process(process); !status.ok())
+        {
+            return status;
+        }
+        return kill_orphaned_shell_processes();
     }
-    return remove_gui_window(index.value());
+    if (auto status = remove_gui_window(index.value()); !status.ok())
+    {
+        return status;
+    }
+    return kill_orphaned_shell_processes();
 }
 
 Status KernelDebugShell::handle_surface_changed(gui::SurfaceId surface)
@@ -717,6 +739,10 @@ Status KernelDebugShell::remove_gui_window(usize index)
     {
         return Status::invalid_argument("GUI shell window index out of range");
     }
+    if (auto status = kill_window_foreground_process(index); !status.ok() && status.code() != StatusCode::not_found)
+    {
+        return status;
+    }
     const auto window = gui_windows_[index];
     if (kernel_ != nullptr && window.surface_id != 0)
     {
@@ -749,6 +775,65 @@ Status KernelDebugShell::remove_gui_window(usize index)
         }
     }
     return save_active_gui_window_state();
+}
+
+Status KernelDebugShell::kill_window_foreground_process(usize index)
+{
+    if (index >= gui_windows_.size())
+    {
+        return Status::invalid_argument("GUI shell window index out of range");
+    }
+    if (kernel_ == nullptr)
+    {
+        return Status::success();
+    }
+
+    const auto child = gui_windows_[index].foreground_process_id;
+    if (child == 0 || child == gui_windows_[index].process_id)
+    {
+        gui_windows_[index].foreground_process_id = 0;
+        return Status::success();
+    }
+    gui_windows_[index].foreground_process_id = 0;
+    if (process_id_ == gui_windows_[index].process_id || foreground_process_id_ == child)
+    {
+        foreground_process_id_ = 0;
+    }
+    if (kernel_->scheduler().find(child) == nullptr)
+    {
+        return Status::success();
+    }
+    return kernel_->kill_process(child);
+}
+
+Status KernelDebugShell::kill_orphaned_shell_processes()
+{
+    if (kernel_ == nullptr)
+    {
+        return Status::success();
+    }
+
+    for (;;)
+    {
+        sched::ProcessId orphan{0};
+        for (const auto &process : kernel_->scheduler().processes())
+        {
+            if (process.name() == "oksh" && !owns_process(process.pid()))
+            {
+                orphan = process.pid();
+                break;
+            }
+        }
+        if (orphan == 0)
+        {
+            return Status::success();
+        }
+        if (auto status = kernel_->scheduler().kill_process(orphan); !status.ok() &&
+                           status.code() != StatusCode::not_found)
+        {
+            return status;
+        }
+    }
 }
 
 Status KernelDebugShell::ensure_gui_process()
@@ -958,6 +1043,19 @@ Status KernelDebugShell::show_or_focus_gui()
 
 Status KernelDebugShell::close_gui()
 {
+    const auto process = process_id_;
+    if (process != 0)
+    {
+        auto window_index = find_window_by_process(process);
+        if (window_index)
+        {
+            if (auto status = kill_window_foreground_process(window_index.value()); !status.ok() &&
+                               status.code() != StatusCode::not_found)
+            {
+                return status;
+            }
+        }
+    }
     gui_open_ = false;
     gui_history_.clear();
     gui_input_line_.clear();
@@ -967,7 +1065,6 @@ Status KernelDebugShell::close_gui()
     gui_input_history_cursor_ = 0;
     gui_input_history_count_ = 0;
     gui_input_history_cursor_ = 0;
-    const auto process = process_id_;
     process_id_ = 0;
     foreground_process_id_ = 0;
     if (kernel_ != nullptr && process != 0)
@@ -978,10 +1075,14 @@ Status KernelDebugShell::close_gui()
     {
         static_cast<void>(remove_gui_window(index.value()));
     }
-    if (kernel_ == nullptr || gui_surface_id_ == 0)
+    if (kernel_ == nullptr)
     {
         gui_surface_id_ = 0;
         return Status::success();
+    }
+    if (gui_surface_id_ == 0)
+    {
+        return kill_orphaned_shell_processes();
     }
     const auto id = gui_surface_id_;
     gui_surface_id_ = 0;
@@ -992,9 +1093,13 @@ Status KernelDebugShell::close_gui()
         {
             return status;
         }
-        return compositor.present();
+        if (auto status = compositor.present(); !status.ok())
+        {
+            return status;
+        }
+        return kill_orphaned_shell_processes();
     }
-    return Status::success();
+    return kill_orphaned_shell_processes();
 }
 
 Status KernelDebugShell::close_all_gui()
@@ -1010,6 +1115,11 @@ Status KernelDebugShell::close_all_gui()
         auto &compositor = kernel_->gui().compositor();
         for (usize i = gui_windows_.size(); i != 0; --i)
         {
+            if (auto status = kill_window_foreground_process(i - 1); !status.ok() &&
+                               status.code() != StatusCode::not_found)
+            {
+                return status;
+            }
             const auto window = gui_windows_[i - 1];
             if (window.process_id != 0 && kernel_->scheduler().find(window.process_id) != nullptr)
             {
@@ -1038,7 +1148,7 @@ Status KernelDebugShell::close_all_gui()
     gui_surface_id_ = 0;
     process_id_ = 0;
     foreground_process_id_ = 0;
-    return Status::success();
+    return kill_orphaned_shell_processes();
 }
 
 void KernelDebugShell::mark_gui_closed()
@@ -1074,6 +1184,10 @@ Status KernelDebugShell::reconcile_gui_windows()
             ++i;
             continue;
         }
+        if (auto status = kill_window_foreground_process(i); !status.ok() && status.code() != StatusCode::not_found)
+        {
+            return status;
+        }
         if (process_alive)
         {
             static_cast<void>(kernel_->scheduler().kill_process(window.process_id));
@@ -1084,7 +1198,7 @@ Status KernelDebugShell::reconcile_gui_windows()
         }
         static_cast<void>(gui_windows_.erase_at(i));
     }
-    return Status::success();
+    return kill_orphaned_shell_processes();
 }
 
 Status KernelDebugShell::set_gui_input(std::string_view line)

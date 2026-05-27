@@ -85,8 +85,10 @@ Supported commands:
 
 The shell is intentionally fixed-buffer and freestanding. Windowed input is
 dispatched through GUI focus: keyboard events reach `oksh` only while a shell
-surface is focused. Debug test builds close their shell/file-manager GUI
-surfaces after `OK_TEST_PASS`, try the debug-exit path, and leave the post-test
+surface is focused. Closing a shell window reaps its foreground GUI child first
+so `top` or `fm` cannot outlive the shell that launched it. Debug test builds
+close their shell/file-manager GUI surfaces after `OK_TEST_PASS`, try the
+debug-exit path, assert that no orphan `oksh` process remains, and leave the post-test
 desktop without a background `oksh` unless the user opens one. The GUI title
 strip and terminal body are rendered with separate colors. Showing the GUI shell
 or running `clear` resets scrollback while immediately redrawing a fresh `ok> `

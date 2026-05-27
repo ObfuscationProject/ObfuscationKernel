@@ -314,6 +314,10 @@ class BitmapFontRenderer final
             constexpr u8 rows[] = {0b00001, 0b00010, 0b00010, 0b00100, 0b01000, 0b01000, 0b10000};
             return rows[row];
         }
+        case '%': {
+            constexpr u8 rows[] = {0b11001, 0b11010, 0b00100, 0b01000, 0b10010, 0b10110, 0b00110};
+            return rows[row];
+        }
         case '\\': {
             constexpr u8 rows[] = {0b10000, 0b01000, 0b01000, 0b00100, 0b00010, 0b00010, 0b00001};
             return rows[row];

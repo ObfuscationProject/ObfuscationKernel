@@ -81,6 +81,8 @@ class KernelDebugShell final
     Status select_gui_window(usize index);
     Status activate_gui_window(usize index);
     Status remove_gui_window(usize index);
+    Status kill_window_foreground_process(usize index);
+    Status kill_orphaned_shell_processes();
     [[nodiscard]] Result<usize> find_window_by_process(sched::ProcessId pid) const;
     [[nodiscard]] Result<usize> find_window_by_surface(gui::SurfaceId surface) const;
     Status ensure_gui_process();

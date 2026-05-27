@@ -708,6 +708,13 @@ Status Kernel::run_debug_test_suite()
     {
         return Status::fault("debug GUI cleanup left a shell process behind");
     }
+    for (const auto &process : scheduler_.processes())
+    {
+        if (process.name() == "oksh")
+        {
+            return Status::fault("debug GUI cleanup left an orphan oksh process behind");
+        }
+    }
     return Status::success();
 }
 
