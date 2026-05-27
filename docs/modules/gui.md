@@ -34,20 +34,23 @@ rest of the kernel running.
 The kernel GUI core does not directly register the OS system desktop. It exposes
 the compositor and desktop services, then accepts post-boot module load requests
 through the generic external module loader. A desktop module package is read
-from the VFS, parsed as OKMOD, and accepted only when it declares
-`param=entry:oop`, `param=class:desktop`, `gui.compositor` /
-`gui.desktop` imports, and an exported desktop service.
+from the VFS or from the mounted SimpleFS rootfs package name, parsed as OKMOD,
+and accepted only when it declares `param=entry:oop`, `param=class:desktop` or
+`param=class:app`, `gui.compositor` / `gui.desktop` imports, and an exported GUI
+service.
 
 ObfuscationOS supplies its package from the OS repository as
 `modules/system-gui/system-gui.okmod`, stages it to
-`/boot/modules/system-gui.okmod`, and loads it after kernel boot with
-`OK_SYS_LOAD_MODULE` via `/bin/kmodload` or the early `init` fallback. The
-package exports `gui.system-desktop`, opens the default `System Status` window,
-and records the package path used to load it.
+`/boot/modules/system-gui.okmod`, stages app packages under
+`/boot/modules/apps`, and loads them after kernel boot with `OK_SYS_LOAD_MODULE`
+via `/bin/kmodload --all` or the early boot fallback. The desktop package
+exports `gui.system-desktop` and opens the default `System Status` window. App
+packages require `gui.system-desktop`, export their own `gui.app.*` service, and
+open ordinary GUI windows such as About, Preferences, and Notes.
 
 The current module loader does not relocate arbitrary external text for this
-path. OKMOD metadata binds a compatible C++ OOP desktop-module ABI, which keeps
-the OS desktop outside direct core registration while preserving a clear
+path. OKMOD metadata binds compatible C++ OOP desktop/app module ABIs, which
+keeps the OS desktop outside direct core registration while preserving a clear
 transition point for future native module linking.
 
 During boot, `GuiCompositor::play_startup_animation()` presents a short

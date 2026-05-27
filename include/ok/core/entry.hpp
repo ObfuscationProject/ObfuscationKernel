@@ -56,6 +56,7 @@ Status ok_gui_mouse_event(i32 delta_x, i32 delta_y, bool left_button);
 Status ok_gui_mouse_position_event(i32 x, i32 y, bool left_button);
 Status ok_gui_key_event(int key);
 Status ok_gui_close_debug_surfaces();
+Status ok_load_boot_gui_modules();
 SystemPowerAction ok_system_power_action();
 bool ok_debug_shell_gui_ready();
 bool ok_debug_shell_gui_open();

@@ -59,6 +59,27 @@ constexpr std::string_view os_system_gui_module_text{
     "param=subtitle:base desktop online\n"
     "signature=system-gui-dev\n"};
 
+constexpr std::string_view os_about_app_module_path{"/boot/modules/apps/about.okmod"};
+constexpr std::string_view os_about_app_module_flat_path{"boot_modules_apps_about.okmod"};
+constexpr std::string_view os_about_app_module_text{
+    "OKMOD\n"
+    "name=system-about\n"
+    "version=1\n"
+    "vermagic=okernel-cxx-oop\n"
+    "require=gui.compositor\n"
+    "require=gui.desktop\n"
+    "require=gui.system-desktop\n"
+    "export=gui.app.about\n"
+    "param=entry:oop\n"
+    "param=class:app\n"
+    "param=title:About ObfuscationOS\n"
+    "param=subtitle:C++ OOP module from rootfs\n"
+    "param=body:Loaded through OK_SYS_LOAD_MODULE\n"
+    "param=x:54\n"
+    "param=y:44\n"
+    "param=accent:gold\n"
+    "signature=system-about-dev\n"};
+
 Status ensure_test_directory(Kernel &kernel, std::string_view path)
 {
     auto stat = kernel.vfs().stat(path);
@@ -993,6 +1014,75 @@ Status test_system_gui_module_loads_after_boot(Kernel &kernel)
     return Status::success();
 }
 
+Status test_system_gui_apps_load_from_rootfs_packages(Kernel &kernel)
+{
+    auto stat = kernel.simplefs().stat(os_about_app_module_flat_path);
+    if (!stat)
+    {
+        if (stat.status().code() != StatusCode::not_found)
+        {
+            return stat.status();
+        }
+        if (auto status = kernel.simplefs().create(os_about_app_module_flat_path, fs::NodeType::regular);
+            !status.ok())
+        {
+            return status;
+        }
+    }
+    if (auto status = kernel.simplefs().write_file(os_about_app_module_flat_path, bytes_for(os_about_app_module_text));
+        !status.ok())
+    {
+        return status;
+    }
+
+    syscall::Request request{.number = syscall::Number::load_module};
+    request.args[0] = reinterpret_cast<u64>(os_about_app_module_path.data());
+    auto response = kernel.syscalls().dispatch(request);
+    auto *registered = kernel.kernel_modules().find("system-about");
+    if (!response.status.ok() || response.value != 0 || registered == nullptr ||
+        registered->manifest().built_in || registered->state() != ModuleState::started ||
+        !kernel.kernel_modules().services().contains("gui.app.about"))
+    {
+        return Status::fault("system GUI app module was not loaded from the rootfs package");
+    }
+
+    auto info = find_surface_by_title(kernel, "About ObfuscationOS");
+    if (!info || info.value().title != "About ObfuscationOS" ||
+        kernel.gui().compositor().last_present_checksum() == 0)
+    {
+        return Status::fault("system GUI app module did not open its app surface");
+    }
+    return Status::success();
+}
+
+Status test_close_debug_gui_restores_system_desktop(Kernel &kernel)
+{
+    auto *desktop = kernel.loaded_gui_desktop_module();
+    if (desktop == nullptr || desktop->dashboard_surface() == 0)
+    {
+        return Status::fault("system desktop module was not available for debug cleanup");
+    }
+    if (auto status = kernel.gui().compositor().destroy_surface(desktop->dashboard_surface()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.debug_shell().show_gui(); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.close_debug_gui(); !status.ok())
+    {
+        return status;
+    }
+
+    auto info = find_surface_by_title(kernel, "System Status");
+    if (!info || !info.value().focused || kernel.debug_shell().gui_open())
+    {
+        return Status::fault("debug GUI cleanup did not restore the system desktop");
+    }
+    return Status::success();
+}
+
 Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
 {
     auto &compositor = kernel.gui().compositor();
@@ -1763,6 +1853,14 @@ Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
         return status;
     }
     if (auto status = test_system_gui_module_loads_after_boot(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_system_gui_apps_load_from_rootfs_packages(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_close_debug_gui_restores_system_desktop(kernel); !status.ok())
     {
         return status;
     }

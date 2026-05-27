@@ -64,12 +64,13 @@ can be measured over time.
 
 The current loader does not relocate or execute arbitrary external module text
 yet. For the C++ OOP transition path, a post-boot loader can call
-`OK_SYS_LOAD_MODULE`; the kernel reads an OKMOD package from the VFS, validates
-its imports/exports plus `entry:oop`, binds it to a compatible C++ module ABI,
-and starts that module through `ModuleManager::start_registered_module()`. This
-is how ObfuscationOS loads its OS-side `system-gui` package from
-`/boot/modules/system-gui.okmod` while the native relocating loader remains on
-the roadmap.
+`OK_SYS_LOAD_MODULE`; the kernel reads an OKMOD package from the VFS or mounted
+SimpleFS rootfs package name, validates its imports/exports plus `entry:oop`,
+binds it to a compatible C++ module ABI, and starts that module through
+`ModuleManager::start_registered_module()`. This is how ObfuscationOS loads its
+OS-side `system-gui` package from `/boot/modules/system-gui.okmod` and GUI app
+packages from `/boot/modules/apps/*.okmod` while the native relocating loader
+remains on the roadmap.
 
 ## Test Coverage
 

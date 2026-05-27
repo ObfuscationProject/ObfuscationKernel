@@ -290,6 +290,10 @@ class Kernel final
     Status focus_file_manager_at(usize index);
     Status focus_task_manager();
     Status focus_task_manager_at(usize index);
+    Result<fs::FileBuffer> read_external_module_file(std::string_view path);
+    Status load_external_gui_desktop_module(std::string_view path, const ModuleImageInfo &image);
+    Status load_external_gui_app_module(std::string_view path, const ModuleImageInfo &image);
+    Status refresh_external_gui_modules(bool focus_desktop);
     Status force_close_gui_surface(gui::SurfaceId surface);
     Status note_ignored_gui_close(gui::SurfaceId surface);
     Status show_force_close_prompt(gui::SurfaceId surface);
@@ -324,6 +328,7 @@ class Kernel final
     driver::VirtioGpuPciDisplayDriver virtio_gpu_driver_{};
     gui::GuiModule gui_module_{};
     ExternalGuiDesktopModule external_gui_desktop_module_{};
+    std::array<ExternalGuiAppModule, max_external_gui_apps> external_gui_app_modules_{};
     StaticVector<apps::KernelFileManager, gui::max_gui_surfaces> file_managers_{};
     apps::KernelFileManager inactive_file_manager_{};
     usize active_file_manager_index_{gui::max_gui_surfaces};

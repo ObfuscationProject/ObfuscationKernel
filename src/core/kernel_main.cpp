@@ -128,6 +128,7 @@ extern "C" [[noreturn]] void kernel_main()
     }
     if (status.ok())
     {
+        static_cast<void>(ok::ok_load_boot_gui_modules());
         static_cast<void>(ok::ok_gui_close_debug_surfaces());
     }
     ok_platform_debug_exit(status.ok() ? 0x10u : 0x11u);
@@ -139,7 +140,9 @@ extern "C" [[noreturn]] void kernel_main()
     if (status.ok())
     {
 #if defined(OK_ENABLE_KERNEL_GUI)
-        desktop_loop(true);
+        const auto gui_status = ok::ok_load_boot_gui_modules();
+        platform_write(gui_status.ok() ? "OK_SYSTEM_GUI boot=complete\n" : "OK_SYSTEM_GUI boot=degraded\n");
+        desktop_loop(false);
 #else
         halt_forever();
 #endif

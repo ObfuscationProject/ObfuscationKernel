@@ -50,6 +50,27 @@ std::span<const std::byte> bytes_for(std::string_view text)
     return {reinterpret_cast<const std::byte *>(text.data()), text.size()};
 }
 
+Result<FixedString<fs::simplefs_name_capacity>> simplefs_flat_module_path(std::string_view path)
+{
+    if (path.empty())
+    {
+        return Status::invalid_argument("module path is empty");
+    }
+    if (path.front() == '/')
+    {
+        path.remove_prefix(1);
+    }
+    FixedString<fs::simplefs_name_capacity> out;
+    for (const auto value : path)
+    {
+        if (auto status = out.append(value == '/' ? '_' : value); !status.ok())
+        {
+            return status;
+        }
+    }
+    return out;
+}
+
 bool cpu_accepts_work(smp::CpuState state)
 {
     return state == smp::CpuState::boot || state == smp::CpuState::online;
@@ -369,11 +390,19 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
-    if (auto status = simplefs_.format(disk(), "okroot"); !status.ok())
+    auto simplefs_status = simplefs_.mount(disk());
+    if (!simplefs_status.ok())
     {
-        return status;
+        if (auto status = simplefs_.format(disk(), "okroot"); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = log_boot_line("[    0.000006] fs: simplefs formatted on block device"); !status.ok())
+        {
+            return status;
+        }
     }
-    if (auto status = log_boot_line("[    0.000006] fs: simplefs formatted on block device"); !status.ok())
+    else if (auto status = log_boot_line("[    0.000006] fs: simplefs mounted from boot block device"); !status.ok())
     {
         return status;
     }
@@ -815,13 +844,80 @@ Status Kernel::note_ignored_gui_close(gui::SurfaceId surface)
     return gui_close_attempts_.push_back(GuiCloseAttempt{.surface = surface, .prompt_surface = 0, .count = 1});
 }
 
+Result<fs::FileBuffer> Kernel::read_external_module_file(std::string_view path)
+{
+    auto file = vfs_.read_file(path);
+    if (file || file.status().code() != StatusCode::not_found)
+    {
+        return file;
+    }
+    if (!simplefs_.mounted())
+    {
+        return file.status();
+    }
+    auto flat_path = simplefs_flat_module_path(path);
+    if (!flat_path)
+    {
+        return flat_path.status();
+    }
+    return simplefs_.read_file(flat_path.value().view());
+}
+
+Status Kernel::load_external_gui_desktop_module(std::string_view path, const ModuleImageInfo &image)
+{
+    external_gui_desktop_module_.bind_metrics(scheduler_, topology_);
+    if (auto status = external_gui_desktop_module_.configure_from_image(path, image); !status.ok())
+    {
+        return status;
+    }
+    auto *module = kernel_modules_.find(external_gui_desktop_module_.module_name());
+    if (module == nullptr)
+    {
+        if (auto status = kernel_modules_.register_module(external_gui_desktop_module_); !status.ok())
+        {
+            return status;
+        }
+    }
+    return kernel_modules_.start_registered_module(external_gui_desktop_module_.module_name());
+}
+
+Status Kernel::load_external_gui_app_module(std::string_view path, const ModuleImageInfo &image)
+{
+    ExternalGuiAppModule *slot = nullptr;
+    for (auto &app : external_gui_app_modules_)
+    {
+        if (!app.configured())
+        {
+            slot = &app;
+            break;
+        }
+    }
+    if (slot == nullptr)
+    {
+        return Status::overflow("external GUI app table is full");
+    }
+    if (auto status = slot->configure_from_image(path, image); !status.ok())
+    {
+        return status;
+    }
+    auto *module = kernel_modules_.find(slot->module_name());
+    if (module == nullptr)
+    {
+        if (auto status = kernel_modules_.register_module(*slot); !status.ok())
+        {
+            return status;
+        }
+    }
+    return kernel_modules_.start_registered_module(slot->module_name());
+}
+
 Status Kernel::load_external_kernel_module(std::string_view path)
 {
     if (arch_ == nullptr)
     {
         return Status::not_initialized("kernel architecture is not selected");
     }
-    auto file = vfs_.read_file(path);
+    auto file = read_external_module_file(path);
     if (!file)
     {
         return file.status();
@@ -839,20 +935,16 @@ Status Kernel::load_external_kernel_module(std::string_view path)
         return module->state() == ModuleState::started ? Status::success()
                                                        : kernel_modules_.start_registered_module(image.value().name.view());
     }
-    external_gui_desktop_module_.bind_metrics(scheduler_, topology_);
-    if (auto status = external_gui_desktop_module_.configure_from_image(path, image.value()); !status.ok())
+    auto desktop_status = load_external_gui_desktop_module(path, image.value());
+    if (desktop_status.ok())
     {
-        return status;
+        return desktop_status;
     }
-    module = kernel_modules_.find(external_gui_desktop_module_.module_name());
-    if (module == nullptr)
+    if (desktop_status.code() != StatusCode::unsupported)
     {
-        if (auto status = kernel_modules_.register_module(external_gui_desktop_module_); !status.ok())
-        {
-            return status;
-        }
+        return desktop_status;
     }
-    return kernel_modules_.start_registered_module(external_gui_desktop_module_.module_name());
+    return load_external_gui_app_module(path, image.value());
 }
 
 Status Kernel::show_force_close_prompt(gui::SurfaceId surface)
@@ -1458,9 +1550,54 @@ Status Kernel::close_debug_gui()
     auto &compositor = gui_module_.compositor();
     if (compositor.state() == gui::GuiState::running)
     {
-        return compositor.present();
+        return refresh_external_gui_modules(true);
     }
     return Status::success();
+}
+
+Status Kernel::refresh_external_gui_modules(bool focus_desktop)
+{
+    auto &compositor = gui_module_.compositor();
+    if (compositor.state() != gui::GuiState::running)
+    {
+        return Status::success();
+    }
+    for (auto &app : external_gui_app_modules_)
+    {
+        if (app.configured() && app.app_state() == ExternalGuiAppState::running)
+        {
+            if (auto status = app.refresh(); !status.ok())
+            {
+                return status;
+            }
+        }
+    }
+    auto *desktop = loaded_gui_desktop_module();
+    if (desktop != nullptr && desktop->desktop_state() == ExternalGuiDesktopState::running)
+    {
+        if (auto status = desktop->refresh(); !status.ok())
+        {
+            return status;
+        }
+        if (focus_desktop && desktop->dashboard_surface() != 0)
+        {
+            if (auto info = compositor.surface_info(desktop->dashboard_surface()))
+            {
+                if (info.value().window_state == gui::WindowState::minimized)
+                {
+                    if (auto status = compositor.restore_surface(desktop->dashboard_surface()); !status.ok())
+                    {
+                        return status;
+                    }
+                }
+                if (auto status = compositor.raise_surface(desktop->dashboard_surface()); !status.ok())
+                {
+                    return status;
+                }
+            }
+        }
+    }
+    return compositor.present();
 }
 
 Status Kernel::request_power_action(SystemPowerAction action)
@@ -1547,12 +1684,9 @@ Status Kernel::supervise_daemons()
             return status;
         }
     }
-    auto *desktop = loaded_gui_desktop_module();
-    if (!module_restarts.empty() && desktop != nullptr &&
-        desktop->desktop_state() == ExternalGuiDesktopState::running &&
-        gui_module_.compositor().state() == gui::GuiState::running)
+    if (!module_restarts.empty())
     {
-        if (auto status = desktop->refresh(); !status.ok())
+        if (auto status = refresh_external_gui_modules(false); !status.ok())
         {
             return status;
         }
