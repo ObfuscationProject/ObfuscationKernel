@@ -29,6 +29,20 @@ enum class ExternalGuiAppState : u8
     running,
 };
 
+enum class ExternalGuiLoginUser : u8
+{
+    root,
+    user,
+};
+
+enum class ExternalGuiDockApp : u8
+{
+    none,
+    about,
+    prefs,
+    notes,
+};
+
 class ExternalGuiDesktopModule final : public KernelModule, public KernelService
 {
   public:
@@ -51,8 +65,10 @@ class ExternalGuiDesktopModule final : public KernelModule, public KernelService
     Status shutdown() override;
     Status refresh();
     Status handle_key(int key);
+    Status handle_pointer_click(i32 x, i32 y);
     Status login_default_user();
-    [[nodiscard]] Result<gui::TaskbarApp> dock_launcher_at(i32 x, i32 y) const;
+    [[nodiscard]] Result<ExternalGuiDockApp> dock_launcher_at(i32 x, i32 y) const;
+    [[nodiscard]] std::string_view selected_login_user_name() const;
 
     [[nodiscard]] bool configured() const
     {
@@ -103,6 +119,7 @@ class ExternalGuiDesktopModule final : public KernelModule, public KernelService
     ExternalGuiDesktopState desktop_state_{ExternalGuiDesktopState::unloaded};
     gui::SurfaceId dashboard_surface_{0};
     usize render_count_{0};
+    ExternalGuiLoginUser selected_login_user_{ExternalGuiLoginUser::root};
 };
 
 class ExternalGuiAppModule final : public KernelModule, public KernelService

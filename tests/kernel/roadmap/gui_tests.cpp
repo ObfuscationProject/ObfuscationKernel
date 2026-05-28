@@ -56,7 +56,7 @@ constexpr std::string_view os_system_gui_module_text{
     "param=class:desktop\n"
     "param=brand:ObfuscationOS\n"
     "param=title:ObfuscationOS Login\n"
-    "param=subtitle:default user root\n"
+    "param=subtitle:choose root or user\n"
     "signature=system-gui-dev\n"};
 
 constexpr std::string_view os_about_app_module_path{"/boot/modules/apps/about.okmod"};
@@ -1025,14 +1025,36 @@ Status test_system_gui_module_loads_after_boot(Kernel &kernel)
     return Status::success();
 }
 
-Status test_system_gui_login_starts_desktop_shell(Kernel &kernel)
+Status test_system_gui_mouse_login_selects_user_and_starts_desktop_shell(Kernel &kernel)
 {
     auto *desktop = kernel.loaded_gui_desktop_module();
     if (desktop == nullptr || desktop->desktop_state() != ExternalGuiDesktopState::greeter)
     {
         return Status::fault("system GUI greeter was not ready before login");
     }
-    if (auto status = kernel.handle_gui_key('\r'); !status.ok())
+
+    constexpr u32 card_width = driver::framebuffer_width > 360 ? 360u : driver::framebuffer_width - 24u;
+    constexpr u32 card_height = 178u;
+    const auto card_x = static_cast<i32>((driver::framebuffer_width - card_width) / 2);
+    const auto card_y = static_cast<i32>((driver::framebuffer_height - card_height) / 2);
+    const auto user_x = card_x + static_cast<i32>(card_width) - 78;
+    const auto user_y = card_y + 96;
+    const auto login_x = card_x + static_cast<i32>(card_width / 2);
+    const auto login_y = card_y + 148;
+
+    if (auto status = kernel.handle_gui_mouse_position(user_x, user_y, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse_position(user_x, user_y, false); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse_position(login_x, login_y, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse_position(login_x, login_y, false); !status.ok())
     {
         return status;
     }
@@ -1041,14 +1063,14 @@ Status test_system_gui_login_starts_desktop_shell(Kernel &kernel)
                                     : Result<gui::SurfaceInfo>{Status::not_found("missing desktop")};
     if (desktop == nullptr || desktop->desktop_state() != ExternalGuiDesktopState::desktop ||
         kernel.gui().compositor().shell_mode() != gui::GuiShellMode::system_shell ||
-        kernel.posix().user_credentials().euid != user::root_uid || !shell ||
+        kernel.posix().user_credentials().euid != user::default_user_uid || !shell ||
         shell.value().title != "ObfuscationOS Desktop" || shell.value().app != gui::TaskbarApp::none ||
         shell.value().chrome != gui::SurfaceChrome::plain ||
         !kernel.kernel_modules().services().contains("gui.app.about") ||
         !kernel.kernel_modules().services().contains("gui.app.prefs") ||
         !kernel.kernel_modules().services().contains("gui.app.notes"))
     {
-        return Status::fault("system GUI login did not start the root desktop shell and app session");
+        return Status::fault("system GUI login did not start the selected-user desktop shell and app session");
     }
     const auto taskbar_y = static_cast<i32>(driver::framebuffer_height - gui::taskbar_height + 6);
     auto launcher = kernel.gui().compositor().taskbar_launcher_at(gui::task_monitor_launcher_x + 4, taskbar_y);
@@ -1060,6 +1082,46 @@ Status test_system_gui_login_starts_desktop_shell(Kernel &kernel)
         !find_surface_by_title(kernel, "System Preferences") || !find_surface_by_title(kernel, "Notes"))
     {
         return Status::fault("system GUI desktop did not show app windows after login");
+    }
+    return kernel.posix().set_credentials(user::root_credentials());
+}
+
+Status test_system_gui_dock_uses_system_app_launchers(Kernel &kernel)
+{
+    auto *desktop = kernel.loaded_gui_desktop_module();
+    if (desktop == nullptr || desktop->desktop_state() != ExternalGuiDesktopState::desktop)
+    {
+        return Status::fault("system GUI desktop was not ready for dock input");
+    }
+    auto about = find_surface_by_title(kernel, "About ObfuscationOS");
+    if (!about)
+    {
+        return Status::fault("system About app was not loaded before dock interaction");
+    }
+
+    const auto shell_surface = kernel.debug_shell().gui_surface_id();
+    const auto files_surface = kernel.file_manager().surface_id();
+    const auto tasks_surface = kernel.task_manager().surface_id();
+    const auto about_x = 32;
+    const auto dock_y = static_cast<i32>(driver::framebuffer_height - 18);
+    if (auto status = kernel.handle_gui_mouse_position(about_x, dock_y, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse_position(about_x, dock_y, false); !status.ok())
+    {
+        return status;
+    }
+
+    auto active = kernel.gui().compositor().surface_info(kernel.gui().compositor().active_surface());
+    if (!active || active.value().title != "About ObfuscationOS")
+    {
+        return Status::fault("system dock did not focus the About app launcher");
+    }
+    if (kernel.debug_shell().gui_surface_id() != shell_surface || kernel.file_manager().surface_id() != files_surface ||
+        kernel.task_manager().surface_id() != tasks_surface)
+    {
+        return Status::fault("system dock opened a kernel GUI app instead of a system app");
     }
     return Status::success();
 }
@@ -1965,7 +2027,11 @@ Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
     {
         return status;
     }
-    if (auto status = test_system_gui_login_starts_desktop_shell(kernel); !status.ok())
+    if (auto status = test_system_gui_mouse_login_selects_user_and_starts_desktop_shell(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_system_gui_dock_uses_system_app_launchers(kernel); !status.ok())
     {
         return status;
     }

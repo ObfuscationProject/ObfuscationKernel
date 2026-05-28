@@ -98,10 +98,18 @@ Status test_post_debug_suite_gui_input(Kernel &kernel)
     {
         return status;
     }
+    if (auto *system_desktop = kernel.loaded_gui_desktop_module(); system_desktop != nullptr)
+    {
+        if (auto status = system_desktop->stop(); !status.ok())
+        {
+            return status;
+        }
+    }
 
     auto &compositor = kernel.gui().compositor();
-    const auto shell_x = static_cast<i32>(5 * gui::gui_glyph_width);
-    const auto shell_y = static_cast<i32>(driver::framebuffer_height - 18);
+    const auto shell_x = static_cast<i32>(6 + gui::taskbar_icon_size / 2);
+    const auto shell_y = static_cast<i32>(driver::framebuffer_height - gui::taskbar_height + 3 +
+                                          gui::taskbar_icon_size / 2);
     if (auto status = click_gui(kernel, shell_x, shell_y); !status.ok())
     {
         return status;

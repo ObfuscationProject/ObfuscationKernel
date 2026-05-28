@@ -68,7 +68,7 @@ constexpr std::string_view fallback_system_gui_okmod{
     "param=class:desktop\n"
     "param=brand:ObfuscationOS\n"
     "param=title:ObfuscationOS Login\n"
-    "param=subtitle:default user root\n"
+    "param=subtitle:choose root or user\n"
     "signature=system-gui-dev\n"};
 
 constexpr std::string_view fallback_about_okmod{
@@ -568,6 +568,26 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
     }
     if (click && window_event.kind == gui::WindowEventKind::none)
     {
+        if (auto *system_desktop = loaded_gui_desktop_module();
+            system_desktop != nullptr && system_desktop->desktop_state() == ExternalGuiDesktopState::greeter)
+        {
+            if (auto status = system_desktop->handle_pointer_click(compositor.pointer_x(), compositor.pointer_y());
+                !status.ok())
+            {
+                gui_mouse_left_down_ = left_button;
+                return status;
+            }
+            if (system_desktop->desktop_state() == ExternalGuiDesktopState::desktop)
+            {
+                if (auto status = start_selected_system_gui_session(*system_desktop); !status.ok())
+                {
+                    gui_mouse_left_down_ = left_button;
+                    return status;
+                }
+            }
+            gui_mouse_left_down_ = left_button;
+            return Status::success();
+        }
         auto launcher = compositor.taskbar_launcher_at(compositor.pointer_x(), compositor.pointer_y());
         if (!launcher)
         {
@@ -589,8 +609,7 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
         }
         const auto active = compositor.active_surface();
         if (auto *system_desktop = loaded_gui_desktop_module();
-            system_desktop != nullptr && system_desktop->desktop_state() == ExternalGuiDesktopState::desktop &&
-            active == system_desktop->dashboard_surface())
+            system_desktop != nullptr && system_desktop->desktop_state() == ExternalGuiDesktopState::desktop)
         {
             auto dock_launcher = system_desktop->dock_launcher_at(compositor.pointer_x(), compositor.pointer_y());
             if (!dock_launcher)
@@ -601,9 +620,9 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
                     return dock_launcher.status();
                 }
             }
-            else if (dock_launcher.value() != gui::TaskbarApp::none)
+            else if (dock_launcher.value() != ExternalGuiDockApp::none)
             {
-                if (auto status = handle_gui_taskbar_launcher(dock_launcher.value()); !status.ok())
+                if (auto status = handle_system_gui_dock_launcher(dock_launcher.value()); !status.ok())
                 {
                     gui_mouse_left_down_ = left_button;
                     return status;
@@ -692,11 +711,7 @@ Status Kernel::handle_gui_key(int key)
         }
         if (system_desktop->desktop_state() == ExternalGuiDesktopState::desktop)
         {
-            if (auto status = posix_.set_credentials(user::root_credentials()); !status.ok())
-            {
-                return status;
-            }
-            return load_system_gui_app_modules();
+            return start_selected_system_gui_session(*system_desktop);
         }
         return Status::success();
     }
@@ -772,6 +787,69 @@ Status Kernel::handle_gui_taskbar_launcher(gui::TaskbarApp app)
         return Status::success();
     }
     return Status::success();
+}
+
+Status Kernel::start_selected_system_gui_session(ExternalGuiDesktopModule &desktop)
+{
+    auto credentials = user_space_.credentials_for(desktop.selected_login_user_name());
+    if (!credentials)
+    {
+        return credentials.status();
+    }
+    if (auto status = posix_.set_credentials(credentials.value()); !status.ok())
+    {
+        return status;
+    }
+    return load_system_gui_app_modules();
+}
+
+Status Kernel::handle_system_gui_dock_launcher(ExternalGuiDockApp app)
+{
+    switch (app)
+    {
+    case ExternalGuiDockApp::about:
+        return focus_external_gui_app("gui.app.about", "/boot/modules/apps/about.okmod");
+    case ExternalGuiDockApp::prefs:
+        return focus_external_gui_app("gui.app.prefs", "/boot/modules/apps/prefs.okmod");
+    case ExternalGuiDockApp::notes:
+        return focus_external_gui_app("gui.app.notes", "/boot/modules/apps/notes.okmod");
+    case ExternalGuiDockApp::none:
+        return Status::success();
+    }
+    return Status::success();
+}
+
+Status Kernel::focus_external_gui_app(std::string_view service_id, std::string_view path)
+{
+    for (usize attempt = 0; attempt < 2; ++attempt)
+    {
+        for (auto &app : external_gui_app_modules_)
+        {
+            if (!app.configured() || app.service_id() != service_id)
+            {
+                continue;
+            }
+            if (auto status = app.refresh(); !status.ok())
+            {
+                return status;
+            }
+            auto info = gui_module_.compositor().surface_info(app.surface());
+            if (!info)
+            {
+                return info.status();
+            }
+            if (auto status = gui_module_.compositor().raise_surface(app.surface()); !status.ok())
+            {
+                return status;
+            }
+            return gui_module_.compositor().present();
+        }
+        if (auto status = load_external_kernel_module(path); !status.ok())
+        {
+            return status;
+        }
+    }
+    return Status::not_found("system GUI app launcher target was not found");
 }
 
 Status Kernel::tick()

@@ -279,6 +279,9 @@ class Kernel final
     Status handle_gui_close_request(gui::SurfaceId surface);
     Status handle_gui_surface_changed(gui::SurfaceId surface);
     Status handle_gui_taskbar_launcher(gui::TaskbarApp app);
+    Status handle_system_gui_dock_launcher(ExternalGuiDockApp app);
+    Status start_selected_system_gui_session(ExternalGuiDesktopModule &desktop);
+    Status focus_external_gui_app(std::string_view service_id, std::string_view path);
     Status sync_gui_credentials_from_surface(gui::SurfaceId surface);
     Status reconcile_file_managers();
     Status reconcile_task_managers();
