@@ -85,9 +85,6 @@ void emit_failure(const KernelDebugSink &sink, Status status)
 
 constexpr std::string_view boot_gui_modules[] = {
     "/boot/modules/system-gui.okmod",
-    "/boot/modules/apps/about.okmod",
-    "/boot/modules/apps/prefs.okmod",
-    "/boot/modules/apps/notes.okmod",
 };
 
 void emit_display_text(const KernelDebugSink &sink, std::string_view text)

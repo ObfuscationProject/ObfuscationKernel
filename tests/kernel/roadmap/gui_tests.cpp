@@ -998,19 +998,68 @@ Status test_system_gui_module_loads_after_boot(Kernel &kernel)
         return Status::fault("system desktop OKMOD package metadata is incomplete");
     }
 
+    auto *desktop = kernel.loaded_gui_desktop_module();
     auto info = find_surface_by_title(kernel, "ObfuscationOS Login");
-    if (!info || info.value().title != "ObfuscationOS Login" ||
-        info.value().app != gui::TaskbarApp::task_monitor ||
+    if (desktop == nullptr || desktop->desktop_state() != ExternalGuiDesktopState::greeter ||
+        kernel.gui().compositor().shell_mode() != gui::GuiShellMode::system_greeter || !info ||
+        info.value().title != "ObfuscationOS Login" || info.value().app != gui::TaskbarApp::none ||
+        info.value().chrome != gui::SurfaceChrome::plain ||
+        info.value().bounds.width != driver::framebuffer_width ||
+        info.value().bounds.height != driver::framebuffer_height ||
         kernel.gui().compositor().last_present_checksum() == 0)
     {
-        return Status::fault("system desktop module did not open the default root login surface");
+        return Status::fault("system GUI did not stop at the pre-desktop root greeter");
     }
 
     const auto taskbar_y = static_cast<i32>(driver::framebuffer_height - gui::taskbar_height + 6);
     auto launcher = kernel.gui().compositor().taskbar_launcher_at(gui::task_monitor_launcher_x + 4, taskbar_y);
-    if (!launcher || launcher.value() != gui::TaskbarApp::task_monitor)
+    if (launcher || launcher.status().code() != StatusCode::not_found)
     {
-        return Status::fault("system desktop did not expose the task monitor launcher");
+        return Status::fault("kernel taskbar was visible before system GUI login");
+    }
+    if (find_surface_by_title(kernel, "About ObfuscationOS") || find_surface_by_title(kernel, "System Preferences") ||
+        find_surface_by_title(kernel, "Notes"))
+    {
+        return Status::fault("system GUI apps were visible before login");
+    }
+    return Status::success();
+}
+
+Status test_system_gui_login_starts_desktop_shell(Kernel &kernel)
+{
+    auto *desktop = kernel.loaded_gui_desktop_module();
+    if (desktop == nullptr || desktop->desktop_state() != ExternalGuiDesktopState::greeter)
+    {
+        return Status::fault("system GUI greeter was not ready before login");
+    }
+    if (auto status = kernel.handle_gui_key('\r'); !status.ok())
+    {
+        return status;
+    }
+    desktop = kernel.loaded_gui_desktop_module();
+    auto shell = desktop != nullptr ? kernel.gui().compositor().surface_info(desktop->dashboard_surface())
+                                    : Result<gui::SurfaceInfo>{Status::not_found("missing desktop")};
+    if (desktop == nullptr || desktop->desktop_state() != ExternalGuiDesktopState::desktop ||
+        kernel.gui().compositor().shell_mode() != gui::GuiShellMode::system_shell ||
+        kernel.posix().user_credentials().euid != user::root_uid || !shell ||
+        shell.value().title != "ObfuscationOS Desktop" || shell.value().app != gui::TaskbarApp::none ||
+        shell.value().chrome != gui::SurfaceChrome::plain ||
+        !kernel.kernel_modules().services().contains("gui.app.about") ||
+        !kernel.kernel_modules().services().contains("gui.app.prefs") ||
+        !kernel.kernel_modules().services().contains("gui.app.notes"))
+    {
+        return Status::fault("system GUI login did not start the root desktop shell and app session");
+    }
+    const auto taskbar_y = static_cast<i32>(driver::framebuffer_height - gui::taskbar_height + 6);
+    auto launcher = kernel.gui().compositor().taskbar_launcher_at(gui::task_monitor_launcher_x + 4, taskbar_y);
+    if (launcher || launcher.status().code() != StatusCode::not_found)
+    {
+        return Status::fault("kernel taskbar was still active after system GUI took desktop ownership");
+    }
+    if (!find_surface_by_title(kernel, "About ObfuscationOS") ||
+        !find_surface_by_title(kernel, "System Preferences") || !find_surface_by_title(kernel, "Notes"))
+    {
+        return Status::fault("system GUI desktop did not show app windows after login");
     }
     return Status::success();
 }
@@ -1098,8 +1147,8 @@ Status test_close_debug_gui_restores_system_desktop(Kernel &kernel)
         return status;
     }
 
-    auto info = find_surface_by_title(kernel, "ObfuscationOS Login");
-    if (!info || !info.value().focused || kernel.debug_shell().gui_open())
+    auto info = find_surface_by_title(kernel, "ObfuscationOS Desktop");
+    if (!info || kernel.debug_shell().gui_open())
     {
         return Status::fault("debug GUI cleanup did not restore the system desktop");
     }
@@ -1210,9 +1259,12 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
         return status;
     }
     info = compositor.surface_info(kernel.file_manager().surface_id());
+    const auto expected_maximized_height = compositor.shell_mode() == gui::GuiShellMode::kernel_shell
+                                               ? driver::framebuffer_height - gui::taskbar_height
+                                               : driver::framebuffer_height;
     if (!info || info.value().window_state != gui::WindowState::maximized ||
         info.value().bounds.width != driver::framebuffer_width ||
-        info.value().bounds.height != driver::framebuffer_height - gui::taskbar_height ||
+        info.value().bounds.height != expected_maximized_height ||
         kernel.file_manager().render_count() <= resize_render_count)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
@@ -1278,14 +1330,40 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return status;
     }
-    auto killed = kernel.debug_shell().execute(kill_command.view());
-    const auto *killed_process = kernel.scheduler().find(manager_pid);
-    if (!killed || !killed.value().empty() || killed_process != nullptr ||
-        kernel.file_manager().surface_id() != 0 || kernel.file_manager().process_id() != 0 ||
-        compositor.surface_info(manager_surface))
+    auto shell_kernel = kernel.debug_shell().execute("su kernel");
+    if (!shell_kernel || !contains_text(shell_kernel.value(), "kernel"))
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
-        return Status::fault("debug shell kill did not close the GUI file manager process");
+        return Status::fault("debug shell did not enter kernel session before killing GUI file manager process");
+    }
+    auto killed = kernel.debug_shell().execute(kill_command.view());
+    static_cast<void>(kernel.debug_shell().execute("exit"));
+    static_cast<void>(kernel.posix().set_credentials(user::kernel_credentials()));
+    const auto *killed_process = kernel.scheduler().find(manager_pid);
+    if (!killed)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return killed.status();
+    }
+    if (!killed.value().empty())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("debug shell kill returned unexpected output for GUI file manager process");
+    }
+    if (killed_process != nullptr)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("debug shell kill did not remove the GUI file manager scheduler process");
+    }
+    if (kernel.file_manager().surface_id() != 0 || kernel.file_manager().process_id() != 0)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("debug shell kill did not clear the active GUI file manager state");
+    }
+    if (compositor.surface_info(manager_surface))
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("debug shell kill did not destroy the GUI file manager surface");
     }
     if (auto status = kernel.open_file_manager("/"); !status.ok())
     {
@@ -1599,9 +1677,12 @@ Status test_shell_renders_to_gui(Kernel &kernel)
         return status;
     }
     surface = kernel.gui().compositor().surface_info(kernel.debug_shell().gui_surface_id());
+    const auto expected_shell_height = kernel.gui().compositor().shell_mode() == gui::GuiShellMode::kernel_shell
+                                           ? driver::framebuffer_height - gui::taskbar_height
+                                           : driver::framebuffer_height;
     if (!surface || surface.value().window_state != gui::WindowState::maximized ||
         surface.value().bounds.width != driver::framebuffer_width ||
-        surface.value().bounds.height != driver::framebuffer_height - gui::taskbar_height)
+        surface.value().bounds.height != expected_shell_height)
     {
         return Status::fault("debug shell GUI maximize button did not resize and redraw");
     }
@@ -1656,7 +1737,7 @@ Status test_shell_renders_to_gui(Kernel &kernel)
         return status;
     }
     auto restored_first_user = kernel.debug_shell().execute("exit");
-    if (!restored_first_user || restored_first_user.value() != "kernel\n")
+    if (!restored_first_user || restored_first_user.value() != "root\n")
     {
         return Status::fault("GUI shell did not restore and exit its per-window user session");
     }
@@ -1881,6 +1962,10 @@ Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
         return status;
     }
     if (auto status = test_system_gui_module_loads_after_boot(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_system_gui_login_starts_desktop_shell(kernel); !status.ok())
     {
         return status;
     }

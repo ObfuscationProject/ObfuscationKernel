@@ -135,6 +135,12 @@ constexpr BootGuiModulePackage boot_gui_module_fallbacks[] = {
     {"/boot/modules/apps/notes.okmod", fallback_notes_okmod},
 };
 
+constexpr std::string_view system_gui_app_module_paths[] = {
+    "/boot/modules/apps/about.okmod",
+    "/boot/modules/apps/prefs.okmod",
+    "/boot/modules/apps/notes.okmod",
+};
+
 Result<fs::FileBuffer> boot_gui_module_fallback(std::string_view path)
 {
     for (const auto &package : boot_gui_module_fallbacks)
@@ -565,10 +571,13 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
         auto launcher = compositor.taskbar_launcher_at(compositor.pointer_x(), compositor.pointer_y());
         if (!launcher)
         {
-            gui_mouse_left_down_ = left_button;
-            return launcher.status();
+            if (launcher.status().code() != StatusCode::not_found)
+            {
+                gui_mouse_left_down_ = left_button;
+                return launcher.status();
+            }
         }
-        if (launcher.value() != gui::TaskbarApp::none)
+        if (launcher && launcher.value() != gui::TaskbarApp::none)
         {
             if (auto status = handle_gui_taskbar_launcher(launcher.value()); !status.ok())
             {
@@ -579,6 +588,30 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
             return Status::success();
         }
         const auto active = compositor.active_surface();
+        if (auto *system_desktop = loaded_gui_desktop_module();
+            system_desktop != nullptr && system_desktop->desktop_state() == ExternalGuiDesktopState::desktop &&
+            active == system_desktop->dashboard_surface())
+        {
+            auto dock_launcher = system_desktop->dock_launcher_at(compositor.pointer_x(), compositor.pointer_y());
+            if (!dock_launcher)
+            {
+                if (dock_launcher.status().code() != StatusCode::not_found)
+                {
+                    gui_mouse_left_down_ = left_button;
+                    return dock_launcher.status();
+                }
+            }
+            else if (dock_launcher.value() != gui::TaskbarApp::none)
+            {
+                if (auto status = handle_gui_taskbar_launcher(dock_launcher.value()); !status.ok())
+                {
+                    gui_mouse_left_down_ = left_button;
+                    return status;
+                }
+                gui_mouse_left_down_ = left_button;
+                return Status::success();
+            }
+        }
         if (auto manager = find_file_manager_by_surface(active))
         {
             active_file_manager_index_ = manager.value();
@@ -650,6 +683,23 @@ Status Kernel::handle_gui_key(int key)
     }
 
     const auto active = compositor.active_surface();
+    if (auto *system_desktop = loaded_gui_desktop_module();
+        system_desktop != nullptr && system_desktop->desktop_state() == ExternalGuiDesktopState::greeter)
+    {
+        if (auto status = system_desktop->handle_key(key); !status.ok())
+        {
+            return status;
+        }
+        if (system_desktop->desktop_state() == ExternalGuiDesktopState::desktop)
+        {
+            if (auto status = posix_.set_credentials(user::root_credentials()); !status.ok())
+            {
+                return status;
+            }
+            return load_system_gui_app_modules();
+        }
+        return Status::success();
+    }
     if (key == ok_input_open_shell)
     {
         if (auto status = sync_gui_credentials_from_surface(active); !status.ok())
@@ -996,6 +1046,11 @@ Status Kernel::load_external_gui_desktop_module(std::string_view path, const Mod
 
 Status Kernel::load_external_gui_app_module(std::string_view path, const ModuleImageInfo &image)
 {
+    if (external_gui_desktop_module_.configured() &&
+        external_gui_desktop_module_.desktop_state() == ExternalGuiDesktopState::greeter)
+    {
+        return Status::would_block("system GUI apps are blocked until login");
+    }
     ExternalGuiAppModule *slot = nullptr;
     for (auto &app : external_gui_app_modules_)
     {
@@ -1022,6 +1077,19 @@ Status Kernel::load_external_gui_app_module(std::string_view path, const ModuleI
         }
     }
     return kernel_modules_.start_registered_module(slot->module_name());
+}
+
+Status Kernel::load_system_gui_app_modules()
+{
+    for (const auto path : system_gui_app_module_paths)
+    {
+        auto status = load_external_kernel_module(path);
+        if (!status.ok() && status.code() != StatusCode::not_found)
+        {
+            return status;
+        }
+    }
+    return refresh_external_gui_modules(false);
 }
 
 Status Kernel::load_external_kernel_module(std::string_view path)
@@ -1675,24 +1743,16 @@ Status Kernel::refresh_external_gui_modules(bool focus_desktop)
     {
         return Status::success();
     }
-    for (auto &app : external_gui_app_modules_)
-    {
-        if (app.configured() && app.app_state() == ExternalGuiAppState::running)
-        {
-            if (auto status = app.refresh(); !status.ok())
-            {
-                return status;
-            }
-        }
-    }
     auto *desktop = loaded_gui_desktop_module();
-    if (desktop != nullptr && desktop->desktop_state() == ExternalGuiDesktopState::running)
+    if (desktop != nullptr && (desktop->desktop_state() == ExternalGuiDesktopState::greeter ||
+                               desktop->desktop_state() == ExternalGuiDesktopState::desktop))
     {
         if (auto status = desktop->refresh(); !status.ok())
         {
             return status;
         }
-        if (focus_desktop && desktop->dashboard_surface() != 0)
+        if (focus_desktop && desktop->desktop_state() == ExternalGuiDesktopState::greeter &&
+            desktop->dashboard_surface() != 0)
         {
             if (auto info = compositor.surface_info(desktop->dashboard_surface()))
             {
@@ -1707,6 +1767,16 @@ Status Kernel::refresh_external_gui_modules(bool focus_desktop)
                 {
                     return status;
                 }
+            }
+        }
+    }
+    for (auto &app : external_gui_app_modules_)
+    {
+        if (app.configured() && app.app_state() == ExternalGuiAppState::running)
+        {
+            if (auto status = app.refresh(); !status.ok())
+            {
+                return status;
             }
         }
     }

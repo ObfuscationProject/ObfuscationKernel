@@ -18,7 +18,8 @@ enum class ExternalGuiDesktopState : u8
 {
     unloaded,
     stopped,
-    running,
+    greeter,
+    desktop,
 };
 
 enum class ExternalGuiAppState : u8
@@ -49,6 +50,9 @@ class ExternalGuiDesktopModule final : public KernelModule, public KernelService
     Status stop() override;
     Status shutdown() override;
     Status refresh();
+    Status handle_key(int key);
+    Status login_default_user();
+    [[nodiscard]] Result<gui::TaskbarApp> dock_launcher_at(i32 x, i32 y) const;
 
     [[nodiscard]] bool configured() const
     {
@@ -76,8 +80,9 @@ class ExternalGuiDesktopModule final : public KernelModule, public KernelService
     }
 
   private:
-    Status open_dashboard();
-    Status render_dashboard();
+    Status open_shell_surface(std::string_view title, gui::GuiShellMode mode);
+    Status render_greeter();
+    Status render_desktop_shell();
     Status assign_parameter(std::string_view name, std::string_view value);
 
     bool configured_{false};

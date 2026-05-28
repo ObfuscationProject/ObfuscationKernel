@@ -293,16 +293,20 @@ Status ExternalGuiDesktopModule::start(ServiceRegistry &services)
     {
         return Status::not_initialized("external GUI desktop metrics are not bound");
     }
-    if (auto status = open_dashboard(); !status.ok())
+    desktop_state_ = ExternalGuiDesktopState::greeter;
+    if (auto status = open_shell_surface(title_.view(), gui::GuiShellMode::system_greeter); !status.ok())
     {
         return status;
     }
-    desktop_state_ = ExternalGuiDesktopState::running;
-    return Status::success();
+    return render_greeter();
 }
 
 Status ExternalGuiDesktopModule::stop()
 {
+    if (compositor_ != nullptr && compositor_->state() == gui::GuiState::running)
+    {
+        static_cast<void>(compositor_->set_shell_mode(gui::GuiShellMode::kernel_shell));
+    }
     if (desktop_ != nullptr && dashboard_surface_ != 0)
     {
         auto status = desktop_->close_window(dashboard_surface_);
@@ -325,98 +329,217 @@ Status ExternalGuiDesktopModule::shutdown()
 
 Status ExternalGuiDesktopModule::refresh()
 {
-    if (desktop_state_ != ExternalGuiDesktopState::running)
+    if (desktop_state_ != ExternalGuiDesktopState::greeter && desktop_state_ != ExternalGuiDesktopState::desktop)
     {
         return Status::not_initialized("external GUI desktop is not running");
     }
     if (dashboard_surface_ == 0)
     {
-        return open_dashboard();
+        return open_shell_surface(desktop_state_ == ExternalGuiDesktopState::greeter ? title_.view()
+                                                                                    : std::string_view{"ObfuscationOS Desktop"},
+                                  desktop_state_ == ExternalGuiDesktopState::greeter
+                                      ? gui::GuiShellMode::system_greeter
+                                      : gui::GuiShellMode::system_shell);
     }
-    auto status = render_dashboard();
+    auto status = desktop_state_ == ExternalGuiDesktopState::greeter ? render_greeter() : render_desktop_shell();
     if (status.code() == StatusCode::not_found)
     {
-        return open_dashboard();
+        dashboard_surface_ = 0;
+        return refresh();
     }
     return status;
 }
 
-Status ExternalGuiDesktopModule::open_dashboard()
+Status ExternalGuiDesktopModule::handle_key(int key)
+{
+    if (desktop_state_ != ExternalGuiDesktopState::greeter)
+    {
+        return Status::success();
+    }
+    return key == '\r' || key == '\n' || key == ' ' ? login_default_user() : Status::success();
+}
+
+Result<gui::TaskbarApp> ExternalGuiDesktopModule::dock_launcher_at(i32 x, i32 y) const
+{
+    if (desktop_state_ != ExternalGuiDesktopState::desktop || compositor_ == nullptr || dashboard_surface_ == 0)
+    {
+        return Status::not_found("system shell dock is not active");
+    }
+    auto info = compositor_->surface_info(dashboard_surface_);
+    if (!info)
+    {
+        return info.status();
+    }
+    const auto bounds = info.value().bounds;
+    if (x < bounds.x || y < bounds.y || x >= bounds.x + static_cast<i32>(bounds.width) ||
+        y >= bounds.y + static_cast<i32>(bounds.height))
+    {
+        return Status::not_found("system shell dock miss");
+    }
+
+    const auto local_x = static_cast<u32>(x - bounds.x);
+    const auto local_y = static_cast<u32>(y - bounds.y);
+    const auto dock_height = bounds.height > 38 ? 38u : bounds.height / 4;
+    const auto dock_top = bounds.height > dock_height ? bounds.height - dock_height : 0;
+    if (local_y < dock_top || local_y >= bounds.height)
+    {
+        return Status::not_found("system shell dock miss");
+    }
+
+    const auto column = local_x / gui::gui_glyph_width;
+    if (column >= 3 && column < 8)
+    {
+        return gui::TaskbarApp::debug_shell;
+    }
+    if (column >= 10 && column < 15)
+    {
+        return gui::TaskbarApp::file_manager;
+    }
+    if (column >= 17 && column < 22)
+    {
+        return gui::TaskbarApp::task_monitor;
+    }
+    return Status::not_found("system shell dock launcher miss");
+}
+
+Status ExternalGuiDesktopModule::login_default_user()
+{
+    if (desktop_state_ == ExternalGuiDesktopState::desktop)
+    {
+        return Status::success();
+    }
+    if (desktop_state_ != ExternalGuiDesktopState::greeter)
+    {
+        return Status::not_initialized("system GUI greeter is not active");
+    }
+    desktop_state_ = ExternalGuiDesktopState::desktop;
+    if (auto status = open_shell_surface("ObfuscationOS Desktop", gui::GuiShellMode::system_shell); !status.ok())
+    {
+        return status;
+    }
+    return render_desktop_shell();
+}
+
+Status ExternalGuiDesktopModule::open_shell_surface(std::string_view title, gui::GuiShellMode mode)
 {
     auto desktop = compositor_->desktop_bounds();
     if (!desktop)
     {
         return desktop.status();
     }
-    auto bounds = dashboard_bounds;
-    if (desktop.value().width > bounds.width)
+    if (auto status = compositor_->set_shell_mode(mode); !status.ok())
     {
-        bounds.x = static_cast<i32>((desktop.value().width - bounds.width) / 2);
+        return status;
     }
-    if (desktop.value().height > bounds.height + gui::taskbar_height)
+    if (dashboard_surface_ != 0)
     {
-        bounds.y = static_cast<i32>((desktop.value().height - gui::taskbar_height - bounds.height) / 2);
+        if (auto status = compositor_->set_title(dashboard_surface_, title); !status.ok() &&
+                          status.code() != StatusCode::not_found)
+        {
+            return status;
+        }
+        if (auto status = compositor_->resize_surface(dashboard_surface_, desktop.value()); !status.ok() &&
+                          status.code() != StatusCode::not_found)
+        {
+            return status;
+        }
+        if (auto status = compositor_->move_surface(dashboard_surface_, 0, 0); !status.ok() &&
+                          status.code() != StatusCode::not_found)
+        {
+            return status;
+        }
+        if (auto status = compositor_->set_surface_chrome(dashboard_surface_, gui::SurfaceChrome::plain);
+            !status.ok() && status.code() != StatusCode::not_found)
+        {
+            return status;
+        }
+        auto info = compositor_->surface_info(dashboard_surface_);
+        if (info)
+        {
+            return compositor_->raise_surface(dashboard_surface_);
+        }
+        dashboard_surface_ = 0;
     }
 
     auto surface = desktop_->open_window(gui::DesktopWindowRequest{
-        .bounds = bounds,
-        .title = title_.view(),
-        .app = gui::TaskbarApp::task_monitor,
+        .bounds = desktop.value(),
+        .title = title,
+        .app = gui::TaskbarApp::none,
     });
     if (!surface)
     {
         return surface.status();
     }
     dashboard_surface_ = surface.value();
-    return render_dashboard();
+    if (auto status = compositor_->set_surface_chrome(dashboard_surface_, gui::SurfaceChrome::plain); !status.ok())
+    {
+        return status;
+    }
+    return compositor_->raise_surface(dashboard_surface_);
 }
 
-Status ExternalGuiDesktopModule::render_dashboard()
+Status ExternalGuiDesktopModule::render_greeter()
 {
     if (dashboard_surface_ == 0)
     {
-        return Status::not_initialized("external GUI desktop dashboard is not open");
+        return Status::not_initialized("external GUI greeter is not open");
     }
     auto info = compositor_->surface_info(dashboard_surface_);
     if (!info)
     {
         dashboard_surface_ = 0;
-        return Status::not_found("external GUI desktop dashboard surface is gone");
+        return Status::not_found("external GUI greeter surface is gone");
     }
 
     if (auto status = compositor_->fill(dashboard_surface_, dashboard_background); !status.ok())
     {
         return status;
     }
+    const auto width = info.value().bounds.width;
+    const auto height = info.value().bounds.height;
+    for (u32 y = 0; y < height; y += 24)
+    {
+        if (auto status = compositor_->fill_rect(dashboard_surface_, gui::Rect{.x = 0, .y = static_cast<i32>(y), .width = width, .height = 1},
+                                                 0xff0d2230u);
+            !status.ok())
+        {
+            return status;
+        }
+    }
+    const u32 card_width = width > 340 ? 340u : width - 16;
+    const u32 card_height = 132;
+    const i32 card_x = static_cast<i32>(width > card_width ? (width - card_width) / 2 : 8);
+    const i32 card_y = static_cast<i32>(height > card_height ? (height - card_height) / 2 : 8);
     if (auto status = compositor_->fill_rect(dashboard_surface_,
-                                             gui::Rect{.x = 8,
-                                                       .y = 18,
-                                                       .width = info.value().bounds.width - 16,
-                                                       .height = 44},
+                                             gui::Rect{.x = card_x, .y = card_y, .width = card_width, .height = card_height},
                                              dashboard_panel);
         !status.ok())
     {
         return status;
     }
-    if (auto status = compositor_->fill_rect(dashboard_surface_, gui::Rect{.x = 8, .y = 68, .width = 284, .height = 52},
+    if (auto status = compositor_->fill_rect(dashboard_surface_,
+                                             gui::Rect{.x = card_x + 14, .y = card_y + 42, .width = card_width - 28, .height = 44},
                                              dashboard_panel_alt);
         !status.ok())
     {
         return status;
     }
-    if (auto status = compositor_->fill_rect(dashboard_surface_, gui::Rect{.x = 8, .y = 124, .width = 284, .height = 20},
-                                             0xff0d1c27u);
+    if (auto status = compositor_->fill_rect(dashboard_surface_,
+                                             gui::Rect{.x = card_x + 14, .y = card_y + 92, .width = card_width - 28, .height = 22},
+                                             dashboard_warm);
         !status.ok())
     {
         return status;
     }
 
-    for (u32 y = 24; y < 54; ++y)
+    const u32 ring_x = static_cast<u32>(card_x + 28);
+    const u32 ring_y = static_cast<u32>(card_y + 16);
+    for (u32 y = ring_y; y < ring_y + 30; ++y)
     {
-        for (u32 x = 18; x < 58; ++x)
+        for (u32 x = ring_x; x < ring_x + 40; ++x)
         {
-            const auto dx = static_cast<i32>(x) - 38;
-            const auto dy = static_cast<i32>(y) - 39;
+            const auto dx = static_cast<i32>(x) - static_cast<i32>(ring_x + 20);
+            const auto dy = static_cast<i32>(y) - static_cast<i32>(ring_y + 15);
             const auto distance = dx * dx + dy * dy;
             if (distance <= 16 * 16 && distance >= 8 * 8)
             {
@@ -427,53 +550,98 @@ Status ExternalGuiDesktopModule::render_dashboard()
             }
         }
     }
-    if (auto status = compositor_->fill_rect(dashboard_surface_, gui::Rect{.x = 66, .y = 28, .width = 5, .height = 26},
-                                             dashboard_warm);
+    if (auto status = compositor_->draw_text(dashboard_surface_, static_cast<u32>((card_x + 82) / gui::gui_glyph_width),
+                                             static_cast<u32>((card_y + 18) / gui::gui_glyph_height), brand_.view(),
+                                             dashboard_text, dashboard_panel);
         !status.ok())
     {
         return status;
     }
-    if (auto status = compositor_->fill_rect(dashboard_surface_, gui::Rect{.x = 72, .y = 40, .width = 28, .height = 5},
-                                             dashboard_warm);
+    if (auto status = compositor_->draw_text(dashboard_surface_, static_cast<u32>((card_x + 28) / gui::gui_glyph_width),
+                                             static_cast<u32>((card_y + 52) / gui::gui_glyph_height), "root",
+                                             dashboard_text, dashboard_panel_alt);
         !status.ok())
     {
         return status;
     }
+    if (auto status = compositor_->draw_text(dashboard_surface_, static_cast<u32>((card_x + 110) / gui::gui_glyph_width),
+                                             static_cast<u32>((card_y + 52) / gui::gui_glyph_height),
+                                             "default administrator", dashboard_muted, dashboard_panel_alt);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor_->draw_text(dashboard_surface_, static_cast<u32>((card_x + 102) / gui::gui_glyph_width),
+                                             static_cast<u32>((card_y + 98) / gui::gui_glyph_height),
+                                             "login", 0xff071018u, dashboard_warm);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor_->present(); !status.ok())
+    {
+        return status;
+    }
+    ++render_count_;
+    return Status::success();
+}
 
-    if (auto status =
-            compositor_->draw_text(dashboard_surface_, 12, 2, brand_.view(), dashboard_text, dashboard_panel);
+Status ExternalGuiDesktopModule::render_desktop_shell()
+{
+    if (dashboard_surface_ == 0)
+    {
+        return Status::not_initialized("external GUI desktop shell is not open");
+    }
+    auto info = compositor_->surface_info(dashboard_surface_);
+    if (!info)
+    {
+        dashboard_surface_ = 0;
+        return Status::not_found("external GUI desktop shell surface is gone");
+    }
+    if (auto status = compositor_->fill(dashboard_surface_, 0xff071018u); !status.ok())
+    {
+        return status;
+    }
+    const auto width = info.value().bounds.width;
+    const auto height = info.value().bounds.height;
+    for (u32 y = 0; y < height; y += 48)
+    {
+        if (auto status = compositor_->fill_rect(dashboard_surface_, gui::Rect{.x = 0, .y = static_cast<i32>(y), .width = width, .height = 1},
+                                                 0xff10283au);
+            !status.ok())
+        {
+            return status;
+        }
+    }
+    const auto dock_height = height > 38 ? 38u : height / 4;
+    if (auto status = compositor_->fill_rect(dashboard_surface_,
+                                             gui::Rect{.x = 0,
+                                                       .y = static_cast<i32>(height > dock_height ? height - dock_height : 0),
+                                                       .width = width,
+                                                       .height = dock_height},
+                                             0xff102233u);
         !status.ok())
     {
         return status;
     }
-    if (auto status =
-            compositor_->draw_text(dashboard_surface_, 12, 4, subtitle_.view(), dashboard_muted, dashboard_panel);
+    if (auto status = compositor_->fill_rect(dashboard_surface_,
+                                             gui::Rect{.x = 0,
+                                                       .y = static_cast<i32>(height > dock_height ? height - dock_height : 0),
+                                                       .width = width,
+                                                       .height = 2},
+                                             dashboard_accent);
         !status.ok())
     {
         return status;
     }
-
     FixedString<64> metric;
-    if (auto status = compositor_->draw_text(dashboard_surface_, 2, 8, "login", dashboard_muted,
-                                             dashboard_panel_alt);
+    if (auto status = compositor_->draw_text(dashboard_surface_, 3, 2, brand_.view(), dashboard_text, 0xff071018u);
         !status.ok())
     {
         return status;
     }
-    if (auto status = compositor_->draw_text(dashboard_surface_, 12, 8, "root", dashboard_text,
-                                             dashboard_panel_alt);
-        !status.ok())
-    {
-        return status;
-    }
-    if (auto status = compositor_->draw_text(dashboard_surface_, 2, 10, "session", dashboard_muted,
-                                             dashboard_panel_alt);
-        !status.ok())
-    {
-        return status;
-    }
-    if (auto status = compositor_->draw_text(dashboard_surface_, 12, 10, "system gui", dashboard_text,
-                                             dashboard_panel_alt);
+    if (auto status = compositor_->draw_text(dashboard_surface_, 3, 4, "desktop shell renderer", dashboard_muted,
+                                             0xff071018u);
         !status.ok())
     {
         return status;
@@ -482,8 +650,7 @@ Status ExternalGuiDesktopModule::render_dashboard()
     {
         return status;
     }
-    if (auto status = compositor_->draw_text(dashboard_surface_, 2, 13, metric.view(), dashboard_text,
-                                             0xff0d1c27u);
+    if (auto status = compositor_->draw_text(dashboard_surface_, 3, 7, metric.view(), dashboard_text, 0xff071018u);
         !status.ok())
     {
         return status;
@@ -492,24 +659,37 @@ Status ExternalGuiDesktopModule::render_dashboard()
     {
         return status;
     }
-    if (auto status = compositor_->draw_text(dashboard_surface_, 14, 13, metric.view(), dashboard_text,
-                                             0xff0d1c27u);
+    if (auto status = compositor_->draw_text(dashboard_surface_, 15, 7, metric.view(), dashboard_text, 0xff071018u);
         !status.ok())
     {
         return status;
     }
-    if (auto status = assign_metric(metric, "bg=", scheduler_->background_process_count()); !status.ok())
-    {
-        return status;
-    }
-    if (auto status = compositor_->draw_text(dashboard_surface_, 27, 13, metric.view(), dashboard_text,
-                                             0xff0d1c27u);
+    if (auto status = compositor_->draw_text(dashboard_surface_, 3,
+                                             static_cast<u32>((height - dock_height + 10) / gui::gui_glyph_height),
+                                             "shell  files  tasks  about  prefs  notes", dashboard_text,
+                                             0xff102233u);
         !status.ok())
     {
         return status;
     }
-    if (auto status = compositor_->draw_text(dashboard_surface_, 2, 14, "tui: system tui  apps: about prefs notes",
-                                             dashboard_muted, dashboard_background);
+    if (auto status = compositor_->fill_rect(dashboard_surface_,
+                                             gui::Rect{.x = static_cast<i32>(width > 190 ? width - 190 : 8),
+                                                       .y = 28,
+                                                       .width = width > 210 ? 170u : width - 16,
+                                                       .height = 78},
+                                             0xff102233u);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor_->draw_text(dashboard_surface_, width > 190 ? (width - 178) / gui::gui_glyph_width : 2,
+                                             4, "session", dashboard_muted, 0xff102233u);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor_->draw_text(dashboard_surface_, width > 190 ? (width - 178) / gui::gui_glyph_width : 2,
+                                             6, "root / system gui", dashboard_text, 0xff102233u);
         !status.ok())
     {
         return status;

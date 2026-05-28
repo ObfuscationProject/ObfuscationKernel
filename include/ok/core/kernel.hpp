@@ -293,6 +293,7 @@ class Kernel final
     Result<fs::FileBuffer> read_external_module_file(std::string_view path);
     Status load_external_gui_desktop_module(std::string_view path, const ModuleImageInfo &image);
     Status load_external_gui_app_module(std::string_view path, const ModuleImageInfo &image);
+    Status load_system_gui_app_modules();
     Status refresh_external_gui_modules(bool focus_desktop);
     Status force_close_gui_surface(gui::SurfaceId surface);
     Status note_ignored_gui_close(gui::SurfaceId surface);

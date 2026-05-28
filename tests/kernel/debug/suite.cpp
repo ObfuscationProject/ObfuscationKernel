@@ -100,10 +100,9 @@ Status test_post_debug_suite_gui_input(Kernel &kernel)
     }
 
     auto &compositor = kernel.gui().compositor();
-    const auto launcher_y = static_cast<i32>(driver::framebuffer_height - gui::taskbar_height + 3 +
-                                             gui::taskbar_icon_size / 2);
-    const auto shell_x = static_cast<i32>(6 + gui::taskbar_icon_size / 2);
-    if (auto status = click_gui(kernel, shell_x, launcher_y); !status.ok())
+    const auto shell_x = static_cast<i32>(5 * gui::gui_glyph_width);
+    const auto shell_y = static_cast<i32>(driver::framebuffer_height - 18);
+    if (auto status = click_gui(kernel, shell_x, shell_y); !status.ok())
     {
         return status;
     }
