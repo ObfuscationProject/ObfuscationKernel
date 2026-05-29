@@ -294,7 +294,7 @@ class Kernel final
     Status focus_task_manager();
     Status focus_task_manager_at(usize index);
     Result<fs::FileBuffer> read_external_module_file(std::string_view path);
-    Result<fs::FileBuffer> read_user_program_file(std::string_view path);
+    Result<usize> read_user_program_file(std::string_view path);
     Status load_external_gui_desktop_module(std::string_view path, const ModuleImageInfo &image);
     Status launch_system_gui_app(ExternalGuiDockApp app);
     Status launch_system_gui_app_session();
@@ -359,6 +359,7 @@ class Kernel final
     driver::DriverManager drivers_;
     fs::VirtualFileSystem vfs_;
     fs::SimpleDiskFileSystem simplefs_;
+    std::array<std::byte, fs::simplefs_max_file_data> user_program_image_{};
     net::NetworkStack network_;
     posix::PosixService posix_;
     user::UserSpaceManager user_space_;

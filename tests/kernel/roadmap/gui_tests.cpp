@@ -87,9 +87,11 @@ u16 elf_machine_for(arch::Architecture architecture)
     return 0x3e;
 }
 
-std::array<std::byte, 128> make_test_elf(arch::Architecture architecture)
+template <usize ImageSize = 128>
+std::array<std::byte, ImageSize> make_test_elf(arch::Architecture architecture)
 {
-    std::array<std::byte, 128> image{};
+    static_assert(ImageSize >= 128);
+    std::array<std::byte, ImageSize> image{};
     auto bytes = std::span<std::byte>(image.data(), image.size());
     bytes[0] = std::byte{0x7f};
     bytes[1] = std::byte{'E'};
@@ -173,27 +175,23 @@ Status stage_os_system_gui_module(Kernel &kernel)
 
 Status stage_system_gui_user_apps(Kernel &kernel)
 {
-    if (auto status = ensure_test_directory(kernel, "/bin"); !status.ok())
-    {
-        return status;
-    }
-    const auto elf = make_test_elf(kernel.arch().architecture());
-    constexpr std::string_view paths[] = {"/bin/oksh", "/bin/settings", "/bin/tasks", "/bin/notes", "/bin/about"};
+    const auto elf = make_test_elf<8192>(kernel.arch().architecture());
+    constexpr std::string_view paths[] = {"/oksh", "/settings", "/tasks", "/notes", "/about"};
     for (const auto path : paths)
     {
-        auto stat = kernel.vfs().stat(path);
+        auto stat = kernel.simplefs().stat(path);
         if (!stat)
         {
             if (stat.status().code() != StatusCode::not_found)
             {
                 return stat.status();
             }
-            if (auto status = kernel.vfs().create(path, fs::NodeType::regular); !status.ok())
+            if (auto status = kernel.simplefs().create(path, fs::NodeType::regular); !status.ok())
             {
                 return status;
             }
         }
-        if (auto status = kernel.vfs().write_file(path, std::span<const std::byte>{elf.data(), elf.size()});
+        if (auto status = kernel.simplefs().write_file(path, std::span<const std::byte>{elf.data(), elf.size()});
             !status.ok())
         {
             return status;

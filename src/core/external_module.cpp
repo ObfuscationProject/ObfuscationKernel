@@ -158,9 +158,83 @@ u32 accent_for(std::string_view value)
 Status draw_text_px(gui::GuiCompositor &compositor, gui::SurfaceId surface, i32 x, i32 y, std::string_view text,
                     u32 foreground, u32 background)
 {
-    const auto column = static_cast<u32>((x > 0 ? x : 0) / static_cast<i32>(gui::gui_glyph_width));
-    const auto row = static_cast<u32>((y > 0 ? y : 0) / static_cast<i32>(gui::gui_glyph_height));
-    return compositor.draw_text(surface, column, row, text, foreground, background);
+    auto info = compositor.surface_info(surface);
+    if (!info)
+    {
+        return info.status();
+    }
+
+    const auto max_x = static_cast<i32>(info.value().bounds.width);
+    const auto max_y = static_cast<i32>(info.value().bounds.height);
+    auto cursor_x = x;
+    auto cursor_y = y;
+    const auto first_x = x;
+    for (const auto value : text)
+    {
+        if (value == '\n')
+        {
+            cursor_x = first_x;
+            cursor_y += static_cast<i32>(gui::gui_glyph_height);
+            continue;
+        }
+        if (cursor_y >= max_y)
+        {
+            break;
+        }
+        if (cursor_x + static_cast<i32>(gui::gui_glyph_width) > 0 &&
+            cursor_y + static_cast<i32>(gui::gui_glyph_height) > 0 && cursor_x < max_x)
+        {
+            const auto cell_left = cursor_x > 0 ? cursor_x : 0;
+            const auto cell_top = cursor_y > 0 ? cursor_y : 0;
+            const auto requested_right = cursor_x + static_cast<i32>(gui::gui_glyph_width);
+            const auto requested_bottom = cursor_y + static_cast<i32>(gui::gui_glyph_height);
+            const auto cell_right = requested_right < max_x ? requested_right : max_x;
+            const auto cell_bottom = requested_bottom < max_y ? requested_bottom : max_y;
+            if (cell_left < cell_right && cell_top < cell_bottom)
+            {
+                if (auto status = compositor.fill_rect(surface,
+                                                       gui::Rect{.x = cell_left,
+                                                                 .y = cell_top,
+                                                                 .width = static_cast<u32>(cell_right - cell_left),
+                                                                 .height = static_cast<u32>(cell_bottom - cell_top)},
+                                                       background);
+                    !status.ok())
+                {
+                    return status;
+                }
+            }
+            for (u32 glyph_y = 0; glyph_y < driver::BitmapFontRenderer::glyph_height; ++glyph_y)
+            {
+                const auto target_y = cursor_y + static_cast<i32>(glyph_y);
+                if (target_y < 0 || target_y >= max_y)
+                {
+                    continue;
+                }
+                const auto row_bits = driver::BitmapFontRenderer::glyph_row(value, glyph_y);
+                for (u32 glyph_x = 0; glyph_x < driver::BitmapFontRenderer::glyph_width; ++glyph_x)
+                {
+                    const auto target_x = cursor_x + static_cast<i32>(glyph_x);
+                    if (target_x < 0 || target_x >= max_x)
+                    {
+                        continue;
+                    }
+                    const bool bit =
+                        ((row_bits >> (driver::BitmapFontRenderer::glyph_width - 1 - glyph_x)) & 1u) != 0;
+                    if (bit)
+                    {
+                        if (auto status = compositor.put_pixel(surface, static_cast<u32>(target_x),
+                                                               static_cast<u32>(target_y), foreground);
+                            !status.ok())
+                        {
+                            return status;
+                        }
+                    }
+                }
+            }
+        }
+        cursor_x += static_cast<i32>(gui::gui_glyph_width);
+    }
+    return Status::success();
 }
 
 Status draw_text_px_clipped(gui::GuiCompositor &compositor, gui::SurfaceId surface, i32 x, i32 y, u32 width,

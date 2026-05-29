@@ -1218,12 +1218,24 @@ Result<fs::FileBuffer> Kernel::read_external_module_file(std::string_view path)
     return boot_gui_module_fallback(path);
 }
 
-Result<fs::FileBuffer> Kernel::read_user_program_file(std::string_view path)
+Result<usize> Kernel::read_user_program_file(std::string_view path)
 {
     auto file = vfs_.read_file(path);
-    if (file || file.status().code() != StatusCode::not_found)
+    if (file)
     {
-        return file;
+        if (file.value().size > user_program_image_.size())
+        {
+            return Status::overflow("user program image exceeds loader buffer");
+        }
+        for (usize i = 0; i < file.value().size; ++i)
+        {
+            user_program_image_[i] = file.value().data[i];
+        }
+        return file.value().size;
+    }
+    if (file.status().code() != StatusCode::not_found)
+    {
+        return file.status();
     }
     if (!simplefs_.mounted())
     {
@@ -1234,7 +1246,8 @@ Result<fs::FileBuffer> Kernel::read_user_program_file(std::string_view path)
     {
         return flat_path.status();
     }
-    return simplefs_.read_file(flat_path.value().view());
+    return simplefs_.read_file_into(
+        flat_path.value().view(), std::span<std::byte>{user_program_image_.data(), user_program_image_.size()});
 }
 
 Status Kernel::load_external_gui_desktop_module(std::string_view path, const ModuleImageInfo &image)
@@ -1267,13 +1280,13 @@ Status Kernel::launch_system_gui_app(ExternalGuiDockApp app)
     {
         return definition.status();
     }
-    auto program = read_user_program_file(definition.value().path);
-    if (!program)
+    auto program_size = read_user_program_file(definition.value().path);
+    if (!program_size)
     {
-        return program.status();
+        return program_size.status();
     }
     sched::ElfLoader loader;
-    auto loaded = loader.load(std::span<const std::byte>{program.value().data.data(), program.value().size},
+    auto loaded = loader.load(std::span<const std::byte>{user_program_image_.data(), program_size.value()},
                               arch_->architecture());
     if (!loaded)
     {

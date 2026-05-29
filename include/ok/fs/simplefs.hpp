@@ -18,6 +18,7 @@ inline constexpr u16 simplefs_version = 1;
 inline constexpr usize simplefs_label_capacity = 17;
 inline constexpr usize simplefs_name_capacity = max_path_segment;
 inline constexpr usize simplefs_max_entries = 32;
+inline constexpr usize simplefs_max_file_data = 64 * 1024;
 inline constexpr usize simplefs_entry_size = 64;
 inline constexpr usize simplefs_table_blocks = 4;
 inline constexpr usize simplefs_data_start_block = 1 + simplefs_table_blocks;
@@ -57,6 +58,7 @@ class SimpleDiskFileSystem final
     Status chown(std::string_view path, u32 uid, u32 gid);
     Status write_file(std::string_view path, std::span<const std::byte> data);
     [[nodiscard]] Result<FileBuffer> read_file(std::string_view path);
+    [[nodiscard]] Result<usize> read_file_into(std::string_view path, std::span<std::byte> out);
     [[nodiscard]] Result<Metadata> stat(std::string_view path);
     [[nodiscard]] bool mounted() const
     {
