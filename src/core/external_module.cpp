@@ -302,6 +302,33 @@ Status fill_outline(gui::GuiCompositor &compositor, gui::SurfaceId surface, gui:
                                 color);
 }
 
+Status draw_dropdown_chevron(gui::GuiCompositor &compositor, gui::SurfaceId surface, gui::Rect button, bool open,
+                             u32 color)
+{
+    const auto center_x = button.x + static_cast<i32>(button.width / 2);
+    const auto center_y = button.y + static_cast<i32>(button.height / 2);
+    constexpr i32 size = 4;
+    for (i32 i = 0; i < size; ++i)
+    {
+        const auto y = open ? center_y + i - 1 : center_y - i + 1;
+        if (auto status = compositor.fill_rect(surface,
+                                               gui::Rect{.x = center_x - i, .y = y, .width = 2, .height = 2},
+                                               color);
+            !status.ok())
+        {
+            return status;
+        }
+        if (auto status = compositor.fill_rect(surface,
+                                               gui::Rect{.x = center_x + i, .y = y, .width = 2, .height = 2},
+                                               color);
+            !status.ok())
+        {
+            return status;
+        }
+    }
+    return Status::success();
+}
+
 gui::Rect fit_bounds(gui::Rect bounds, gui::Rect desktop)
 {
     if (bounds.width > desktop.width)
@@ -794,12 +821,11 @@ Status ExternalGuiDesktopModule::render_greeter()
     {
         return status;
     }
-    if (auto status = compositor_->fill_rect(dashboard_surface_,
-                                             gui::Rect{.x = dropdown.x + static_cast<i32>(dropdown.width) - 26,
-                                                       .y = dropdown.y,
-                                                       .width = 26,
-                                                       .height = dropdown.height},
-                                             0xff25475au);
+    const auto dropdown_button = gui::Rect{.x = dropdown.x + static_cast<i32>(dropdown.width) - 26,
+                                           .y = dropdown.y,
+                                           .width = 26,
+                                           .height = dropdown.height};
+    if (auto status = compositor_->fill_rect(dashboard_surface_, dropdown_button, 0xff25475au);
         !status.ok())
     {
         return status;
@@ -810,9 +836,8 @@ Status ExternalGuiDesktopModule::render_greeter()
     {
         return status;
     }
-    if (auto status = draw_text_px(*compositor_, dashboard_surface_,
-                                   dropdown.x + static_cast<i32>(dropdown.width) - 17, dropdown.y + 6,
-                                   login_dropdown_open_ ? "^" : "v", dashboard_text, 0xff25475au);
+    if (auto status = draw_dropdown_chevron(*compositor_, dashboard_surface_, dropdown_button, login_dropdown_open_,
+                                            dashboard_text);
         !status.ok())
     {
         return status;
@@ -1158,6 +1183,84 @@ Status ExternalGuiAppModule::configure_from_image(std::string_view path, const M
     return Status::success();
 }
 
+Status ExternalGuiAppModule::configure_from_elf(std::string_view app_id, std::string_view path, std::string_view title,
+                                                std::string_view subtitle, std::string_view body,
+                                                std::string_view command, std::string_view line1,
+                                                std::string_view line2, std::string_view line3, gui::Rect bounds,
+                                                std::string_view accent, sched::ProcessId process_id)
+{
+    if (app_id.empty() || path.empty() || process_id == 0)
+    {
+        return Status::invalid_argument("system GUI ELF app descriptor is incomplete");
+    }
+    FixedString<max_module_name> name;
+    if (auto status = name.assign("app-"); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = name.append(app_id); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = name_.assign(name.view()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = version_.assign("elf"); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = service_id_.assign(app_id); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = load_path_.assign(path); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = title_.assign(title.empty() ? app_id : title); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = subtitle_.assign(subtitle); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = body_.assign(body); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = command_.assign(command.empty() ? path : command); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = line1_.assign(line1); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = line2_.assign(line2); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = line3_.assign(line3); !status.ok())
+    {
+        return status;
+    }
+    bounds_ = bounds;
+    accent_ = accent_for(accent);
+    process_id_ = process_id;
+    configured_ = true;
+    app_state_ = ExternalGuiAppState::stopped;
+    surface_ = 0;
+    render_count_ = 0;
+    exported_services_[0] = {};
+    required_services_[0] = {};
+    required_services_[1] = {};
+    required_services_[2] = {};
+    required_service_count_ = 0;
+    return Status::success();
+}
+
 Status ExternalGuiAppModule::assign_parameter(std::string_view name, std::string_view value)
 {
     if (name == "title")
@@ -1269,6 +1372,22 @@ Status ExternalGuiAppModule::start(ServiceRegistry &services)
     return Status::success();
 }
 
+Status ExternalGuiAppModule::start(gui::GuiCompositor &compositor, gui::GuiDesktopService &desktop)
+{
+    if (!configured_)
+    {
+        return Status::not_initialized("system GUI ELF app is not configured");
+    }
+    compositor_ = &compositor;
+    desktop_ = &desktop;
+    if (auto status = open_window(); !status.ok())
+    {
+        return status;
+    }
+    app_state_ = ExternalGuiAppState::running;
+    return Status::success();
+}
+
 Status ExternalGuiAppModule::stop()
 {
     if (desktop_ != nullptr && surface_ != 0)
@@ -1289,6 +1408,37 @@ Status ExternalGuiAppModule::stop()
 Status ExternalGuiAppModule::shutdown()
 {
     return stop();
+}
+
+void ExternalGuiAppModule::reset()
+{
+    configured_ = false;
+    name_.clear();
+    version_.clear();
+    service_id_.clear();
+    load_path_.clear();
+    static_cast<void>(title_.assign("System App"));
+    static_cast<void>(subtitle_.assign("ELF user app"));
+    static_cast<void>(body_.assign("Launched from /bin"));
+    command_.clear();
+    line1_.clear();
+    line2_.clear();
+    line3_.clear();
+    exported_services_[0] = {};
+    required_services_[0] = {};
+    required_services_[1] = {};
+    required_services_[2] = {};
+    required_service_count_ = 0;
+    compositor_ = nullptr;
+    desktop_ = nullptr;
+    scheduler_ = nullptr;
+    topology_ = nullptr;
+    app_state_ = ExternalGuiAppState::unloaded;
+    surface_ = 0;
+    bounds_ = gui::Rect{.x = 72, .y = 64, .width = 276, .height = 112};
+    accent_ = dashboard_warm;
+    process_id_ = 0;
+    render_count_ = 0;
 }
 
 Status ExternalGuiAppModule::refresh()
@@ -1390,7 +1540,8 @@ Status ExternalGuiAppModule::render_window()
     std::string_view line1 = line1_.empty() ? std::string_view{} : line1_.view();
     std::string_view line2 = line2_.empty() ? std::string_view{} : line2_.view();
     std::string_view line3 = line3_.empty() ? std::string_view{} : line3_.view();
-    if (service_id_.view() == "gui.app.tasks" && scheduler_ != nullptr && topology_ != nullptr)
+    if ((service_id_.view() == "tasks" || service_id_.view() == "gui.app.tasks") && scheduler_ != nullptr &&
+        topology_ != nullptr)
     {
         if (auto status = assign_metric(dynamic_line, "processes ", scheduler_->process_count()); !status.ok())
         {
@@ -1407,7 +1558,7 @@ Status ExternalGuiAppModule::render_window()
             return status;
         }
     }
-    if (service_id_.view() == "gui.app.tasks" && topology_ != nullptr)
+    if ((service_id_.view() == "tasks" || service_id_.view() == "gui.app.tasks") && topology_ != nullptr)
     {
         dynamic_line.clear();
         if (auto status = assign_metric(dynamic_line, "cpus online ", topology_->online_count()); !status.ok())

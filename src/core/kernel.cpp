@@ -1,5 +1,6 @@
 #include "ok/core/kernel.hpp"
 #include "ok/core/entry.hpp"
+#include "ok/sched/process.hpp"
 
 namespace ok
 {
@@ -76,142 +77,102 @@ constexpr std::string_view fallback_system_gui_okmod{
     "param=subtitle:choose root or user\n"
     "signature=system-gui-dev\n"};
 
-constexpr std::string_view fallback_about_okmod{
-    "OKMOD\n"
-    "name=system-about\n"
-    "version=1\n"
-    "vermagic=okernel-cxx-oop\n"
-    "require=gui.compositor\n"
-    "require=gui.desktop\n"
-    "require=gui.system-desktop\n"
-    "export=gui.app.about\n"
-    "param=entry:oop\n"
-    "param=class:app\n"
-    "param=title:About ObfuscationOS\n"
-    "param=subtitle:tiny-c app package\n"
-    "param=body:ObfuscationOS userland desktop\n"
-    "param=command:/bin/uname\n"
-    "param=line1:loaded with OK_SYS_LOAD_MODULE\n"
-    "param=line2:rootfs package facade\n"
-    "param=x:300\n"
-    "param=y:168\n"
-    "param=width:336\n"
-    "param=height:154\n"
-    "param=accent:gold\n"
-    "signature=system-about-dev\n"};
-
-constexpr std::string_view fallback_shell_okmod{
-    "OKMOD\n"
-    "name=system-shell\n"
-    "version=1\n"
-    "vermagic=okernel-cxx-oop\n"
-    "require=gui.compositor\n"
-    "require=gui.desktop\n"
-    "require=gui.system-desktop\n"
-    "export=gui.app.shell\n"
-    "param=entry:oop\n"
-    "param=class:app\n"
-    "param=title:Tiny Shell\n"
-    "param=subtitle:tiny-c builtins shell\n"
-    "param=body:oksh is available in /bin\n"
-    "param=command:/bin/oksh\n"
-    "param=line1:help ls cat stat pwd cd\n"
-    "param=line2:whoami uname uptime touch\n"
-    "param=line3:execve is still on the roadmap\n"
-    "param=x:54\n"
-    "param=y:52\n"
-    "param=width:352\n"
-    "param=height:170\n"
-    "param=accent:blue\n"
-    "signature=system-shell-dev\n"};
-
-constexpr std::string_view fallback_settings_okmod{
-    "OKMOD\n"
-    "name=system-settings\n"
-    "version=1\n"
-    "vermagic=okernel-cxx-oop\n"
-    "require=gui.compositor\n"
-    "require=gui.desktop\n"
-    "require=gui.system-desktop\n"
-    "export=gui.app.settings\n"
-    "param=entry:oop\n"
-    "param=class:app\n"
-    "param=title:System Settings\n"
-    "param=subtitle:display and session settings\n"
-    "param=body:Theme, input, and desktop state\n"
-    "param=command:/bin/stat /etc/os-release\n"
-    "param=line1:palette mint / blue / rose\n"
-    "param=line2:pointer and keyboard enabled\n"
-    "param=x:520\n"
-    "param=y:56\n"
-    "param=width:344\n"
-    "param=height:158\n"
-    "param=accent:mint\n"
-    "signature=system-settings-dev\n"};
-
-constexpr std::string_view fallback_tasks_okmod{
-    "OKMOD\n"
-    "name=system-tasks\n"
-    "version=1\n"
-    "vermagic=okernel-cxx-oop\n"
-    "require=gui.compositor\n"
-    "require=gui.desktop\n"
-    "require=gui.system-desktop\n"
-    "export=gui.app.tasks\n"
-    "param=entry:oop\n"
-    "param=class:app\n"
-    "param=title:Task Manager\n"
-    "param=subtitle:system process overview\n"
-    "param=body:Live scheduler snapshot\n"
-    "param=command:/bin/uptime\n"
-    "param=line3:kernel apps stay outside System dock\n"
-    "param=x:64\n"
-    "param=y:282\n"
-    "param=width:346\n"
-    "param=height:150\n"
-    "param=accent:violet\n"
-    "signature=system-tasks-dev\n"};
-
-constexpr std::string_view fallback_notes_okmod{
-    "OKMOD\n"
-    "name=system-notes\n"
-    "version=1\n"
-    "vermagic=okernel-cxx-oop\n"
-    "require=gui.compositor\n"
-    "require=gui.desktop\n"
-    "require=gui.system-desktop\n"
-    "export=gui.app.notes\n"
-    "param=entry:oop\n"
-    "param=class:app\n"
-    "param=title:Notes\n"
-    "param=subtitle:tiny-c notes scratchpad\n"
-    "param=body:Window surface owned by an OS module\n"
-    "param=command:/bin/cat /etc/os-release\n"
-    "param=line1:notes are staged from rootfs\n"
-    "param=line2:CLI tools use libokcrt\n"
-    "param=x:520\n"
-    "param=y:278\n"
-    "param=width:346\n"
-    "param=height:150\n"
-    "param=accent:rose\n"
-    "signature=system-notes-dev\n"};
-
 constexpr BootGuiModulePackage boot_gui_module_fallbacks[] = {
     {"/boot/modules/system-gui.okmod", fallback_system_gui_okmod},
-    {"/boot/modules/apps/shell.okmod", fallback_shell_okmod},
-    {"/boot/modules/apps/settings.okmod", fallback_settings_okmod},
-    {"/boot/modules/apps/tasks.okmod", fallback_tasks_okmod},
-    {"/boot/modules/apps/about.okmod", fallback_about_okmod},
-    {"/boot/modules/apps/notes.okmod", fallback_notes_okmod},
 };
 
-constexpr std::string_view system_gui_app_module_paths[] = {
-    "/boot/modules/apps/shell.okmod",
-    "/boot/modules/apps/settings.okmod",
-    "/boot/modules/apps/tasks.okmod",
-    "/boot/modules/apps/notes.okmod",
-    "/boot/modules/apps/about.okmod",
+struct SystemGuiAppDefinition
+{
+    ExternalGuiDockApp app{ExternalGuiDockApp::none};
+    std::string_view id{};
+    std::string_view path{};
+    std::string_view process_name{};
+    std::string_view title{};
+    std::string_view subtitle{};
+    std::string_view body{};
+    std::string_view command{};
+    std::string_view line1{};
+    std::string_view line2{};
+    std::string_view line3{};
+    gui::Rect bounds{};
+    std::string_view accent{};
 };
+
+constexpr SystemGuiAppDefinition system_gui_apps[] = {
+    {.app = ExternalGuiDockApp::shell,
+     .id = "shell",
+     .path = "/bin/oksh",
+     .process_name = "app:oksh",
+     .title = "Tiny Shell",
+     .subtitle = "tiny-c shell ELF",
+     .body = "Standalone user app",
+     .command = "/bin/oksh",
+     .line1 = "help ls cat stat pwd cd",
+     .line2 = "whoami uname uptime touch",
+     .line3 = "runs as the selected user",
+     .bounds = gui::Rect{.x = 54, .y = 52, .width = 352, .height = 170},
+     .accent = "blue"},
+    {.app = ExternalGuiDockApp::settings,
+     .id = "settings",
+     .path = "/bin/settings",
+     .process_name = "app:settings",
+     .title = "System Settings",
+     .subtitle = "settings ELF",
+     .body = "Display, input, session",
+     .command = "/bin/settings",
+     .line1 = "palette mint / blue / rose",
+     .line2 = "pointer and keyboard enabled",
+     .line3 = "user session controls",
+     .bounds = gui::Rect{.x = 520, .y = 56, .width = 344, .height = 158},
+     .accent = "mint"},
+    {.app = ExternalGuiDockApp::tasks,
+     .id = "tasks",
+     .path = "/bin/tasks",
+     .process_name = "app:tasks",
+     .title = "Task Manager",
+     .subtitle = "task manager ELF",
+     .body = "Live scheduler snapshot",
+     .command = "/bin/tasks",
+     .line3 = "kernel tools stay outside System dock",
+     .bounds = gui::Rect{.x = 64, .y = 282, .width = 346, .height = 150},
+     .accent = "violet"},
+    {.app = ExternalGuiDockApp::notes,
+     .id = "notes",
+     .path = "/bin/notes",
+     .process_name = "app:notes",
+     .title = "Notes",
+     .subtitle = "notes ELF",
+     .body = "Small user scratchpad",
+     .command = "/bin/notes",
+     .line1 = "notes are owned by userland",
+     .line2 = "CLI tools use libokcrt",
+     .bounds = gui::Rect{.x = 520, .y = 278, .width = 346, .height = 150},
+     .accent = "rose"},
+    {.app = ExternalGuiDockApp::about,
+     .id = "about",
+     .path = "/bin/about",
+     .process_name = "app:about",
+     .title = "About ObfuscationOS",
+     .subtitle = "about ELF",
+     .body = "ObfuscationOS user desktop",
+     .command = "/bin/about",
+     .line1 = "standalone tiny-c app",
+     .line2 = "launched from /bin",
+     .bounds = gui::Rect{.x = 300, .y = 168, .width = 336, .height = 154},
+     .accent = "gold"},
+};
+
+Result<SystemGuiAppDefinition> system_gui_app_definition(ExternalGuiDockApp app)
+{
+    for (const auto &definition : system_gui_apps)
+    {
+        if (definition.app == app)
+        {
+            return definition;
+        }
+    }
+    return Status::not_found("system GUI app definition not found");
+}
 
 Result<fs::FileBuffer> boot_gui_module_fallback(std::string_view path)
 {
@@ -236,19 +197,37 @@ Result<fs::FileBuffer> boot_gui_module_fallback(std::string_view path)
     return Status::not_found("boot GUI module fallback not found");
 }
 
-Result<FixedString<fs::simplefs_name_capacity>> simplefs_flat_module_path(std::string_view path)
+Result<FixedString<fs::simplefs_name_capacity>> simplefs_flat_rootfs_path(std::string_view path)
 {
     if (path.empty())
     {
-        return Status::invalid_argument("module path is empty");
+        return Status::invalid_argument("rootfs path is empty");
     }
     if (path.front() == '/')
     {
         path.remove_prefix(1);
     }
     FixedString<fs::simplefs_name_capacity> out;
+    constexpr std::string_view bin_prefix{"bin/"};
+    constexpr std::string_view etc_prefix{"etc/"};
     constexpr std::string_view apps_prefix{"boot/modules/apps/"};
     constexpr std::string_view modules_prefix{"boot/modules/"};
+    if (starts_with(path, bin_prefix))
+    {
+        if (auto status = out.assign(path.substr(bin_prefix.size())); !status.ok())
+        {
+            return status;
+        }
+        return out;
+    }
+    if (starts_with(path, etc_prefix))
+    {
+        if (auto status = out.assign(path.substr(etc_prefix.size())); !status.ok())
+        {
+            return status;
+        }
+        return out;
+    }
     if (starts_with(path, apps_prefix))
     {
         if (auto status = out.append("apps_"); !status.ok())
@@ -282,6 +261,22 @@ Result<FixedString<fs::simplefs_name_capacity>> simplefs_flat_module_path(std::s
 bool cpu_accepts_work(smp::CpuState state)
 {
     return state == smp::CpuState::boot || state == smp::CpuState::online;
+}
+
+bool point_hits_window_close(const gui::SurfaceInfo &surface, i32 x, i32 y)
+{
+    if (surface.chrome != gui::SurfaceChrome::decorated || surface.bounds.width < 34)
+    {
+        return false;
+    }
+    const auto local_x = x - surface.bounds.x;
+    const auto local_y = y - surface.bounds.y;
+    if (local_x < 0 || local_y < 3 || local_y > 8)
+    {
+        return false;
+    }
+    const auto right = static_cast<i32>(surface.bounds.width) - local_x;
+    return right >= 8 && right <= 13;
 }
 
 constexpr u64 task_manager_refresh_interval_ticks = 8;
@@ -702,6 +697,17 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
             return Status::success();
         }
         const auto active = compositor.active_surface();
+        const auto close_hit = compositor.surface_at(compositor.pointer_x(), compositor.pointer_y());
+        const auto close_surface = close_hit ? close_hit.value() : active;
+        if (auto close_info = compositor.surface_info(close_surface);
+            close_info && point_hits_window_close(close_info.value(), compositor.pointer_x(), compositor.pointer_y()))
+        {
+            if (auto app = find_system_gui_app_by_surface(close_surface))
+            {
+                gui_mouse_left_down_ = left_button;
+                return close_system_gui_app_at(app.value(), true);
+            }
+        }
         if (auto *system_desktop = loaded_gui_desktop_module();
             system_desktop != nullptr && system_desktop->desktop_state() == ExternalGuiDesktopState::desktop)
         {
@@ -894,60 +900,48 @@ Status Kernel::start_selected_system_gui_session(ExternalGuiDesktopModule &deskt
     {
         return status;
     }
-    return load_system_gui_app_modules();
+    return launch_system_gui_app_session();
 }
 
 Status Kernel::handle_system_gui_dock_launcher(ExternalGuiDockApp app)
 {
-    switch (app)
-    {
-    case ExternalGuiDockApp::shell:
-        return focus_external_gui_app("gui.app.shell", "/boot/modules/apps/shell.okmod");
-    case ExternalGuiDockApp::settings:
-        return focus_external_gui_app("gui.app.settings", "/boot/modules/apps/settings.okmod");
-    case ExternalGuiDockApp::tasks:
-        return focus_external_gui_app("gui.app.tasks", "/boot/modules/apps/tasks.okmod");
-    case ExternalGuiDockApp::about:
-        return focus_external_gui_app("gui.app.about", "/boot/modules/apps/about.okmod");
-    case ExternalGuiDockApp::notes:
-        return focus_external_gui_app("gui.app.notes", "/boot/modules/apps/notes.okmod");
-    case ExternalGuiDockApp::none:
-        return Status::success();
-    }
-    return Status::success();
+    return app == ExternalGuiDockApp::none ? Status::success() : focus_system_gui_app(app);
 }
 
-Status Kernel::focus_external_gui_app(std::string_view service_id, std::string_view path)
+Status Kernel::focus_system_gui_app(ExternalGuiDockApp app)
 {
-    for (usize attempt = 0; attempt < 2; ++attempt)
+    auto definition = system_gui_app_definition(app);
+    if (!definition)
     {
-        for (auto &app : external_gui_app_modules_)
+        return definition.status();
+    }
+    for (auto &instance : external_gui_app_modules_)
+    {
+        if (!instance.configured() || instance.app_id() != definition.value().id)
         {
-            if (!app.configured() || app.service_id() != service_id)
-            {
-                continue;
-            }
-            if (auto status = app.refresh(); !status.ok())
-            {
-                return status;
-            }
-            auto info = gui_module_.compositor().surface_info(app.surface());
-            if (!info)
-            {
-                return info.status();
-            }
-            if (auto status = gui_module_.compositor().raise_surface(app.surface()); !status.ok())
-            {
-                return status;
-            }
-            return gui_module_.compositor().present();
+            continue;
         }
-        if (auto status = load_external_kernel_module(path); !status.ok())
+        if (instance.process_id() == 0 || scheduler_.find(instance.process_id()) == nullptr)
+        {
+            instance.reset();
+            break;
+        }
+        if (auto status = instance.refresh(); !status.ok())
         {
             return status;
         }
+        auto info = gui_module_.compositor().surface_info(instance.surface());
+        if (!info)
+        {
+            return info.status();
+        }
+        if (auto status = gui_module_.compositor().raise_surface(instance.surface()); !status.ok())
+        {
+            return status;
+        }
+        return gui_module_.compositor().present();
     }
-    return Status::not_found("system GUI app launcher target was not found");
+    return launch_system_gui_app(app);
 }
 
 Status Kernel::tick()
@@ -1032,6 +1026,12 @@ Status Kernel::sync_gui_credentials_from_surface(gui::SurfaceId surface)
         active_task_manager_index_ = monitor.value();
         return posix_.set_credentials(task_managers_[monitor.value()].credentials());
     }
+    if (auto app = find_system_gui_app_by_surface(surface))
+    {
+        const auto process = external_gui_app_modules_[app.value()].process_id();
+        const auto *pcb = scheduler_.find(process);
+        return pcb == nullptr ? Status::success() : posix_.set_credentials(pcb->credentials());
+    }
     return Status::success();
 }
 
@@ -1063,6 +1063,10 @@ Status Kernel::handle_gui_window_event(gui::WindowEvent event)
             active_task_manager_index_ = monitor.value();
             return gui_module_.compositor().present();
         }
+        if (auto app = find_system_gui_app_by_surface(event.surface_id))
+        {
+            return external_gui_app_modules_[app.value()].refresh();
+        }
         return Status::success();
     }
     return Status::success();
@@ -1089,6 +1093,10 @@ Status Kernel::handle_gui_close_request(gui::SurfaceId surface)
     else if (auto monitor = find_task_manager_by_surface(surface))
     {
         status = close_task_manager_at(monitor.value(), true, true);
+    }
+    else if (auto app = find_system_gui_app_by_surface(surface))
+    {
+        status = close_system_gui_app_at(app.value(), true);
     }
     else
     {
@@ -1127,6 +1135,10 @@ Status Kernel::handle_gui_surface_changed(gui::SurfaceId surface)
         active_task_manager_index_ = monitor.value();
         return task_managers_[monitor.value()].refresh(gui_module_.compositor(), *this);
     }
+    if (auto app = find_system_gui_app_by_surface(surface))
+    {
+        return external_gui_app_modules_[app.value()].refresh();
+    }
     return gui_module_.compositor().present();
 }
 
@@ -1143,6 +1155,10 @@ Status Kernel::force_close_gui_surface(gui::SurfaceId surface)
     if (auto monitor = find_task_manager_by_surface(surface))
     {
         return close_task_manager_at(monitor.value(), true, true);
+    }
+    if (auto app = find_system_gui_app_by_surface(surface))
+    {
+        return close_system_gui_app_at(app.value(), true);
     }
     auto &compositor = gui_module_.compositor();
     if (compositor.surface_info(surface))
@@ -1189,7 +1205,7 @@ Result<fs::FileBuffer> Kernel::read_external_module_file(std::string_view path)
     {
         return boot_gui_module_fallback(path);
     }
-    auto flat_path = simplefs_flat_module_path(path);
+    auto flat_path = simplefs_flat_rootfs_path(path);
     if (!flat_path)
     {
         return boot_gui_module_fallback(path);
@@ -1200,6 +1216,25 @@ Result<fs::FileBuffer> Kernel::read_external_module_file(std::string_view path)
         return simplefs_file;
     }
     return boot_gui_module_fallback(path);
+}
+
+Result<fs::FileBuffer> Kernel::read_user_program_file(std::string_view path)
+{
+    auto file = vfs_.read_file(path);
+    if (file || file.status().code() != StatusCode::not_found)
+    {
+        return file;
+    }
+    if (!simplefs_.mounted())
+    {
+        return file.status();
+    }
+    auto flat_path = simplefs_flat_rootfs_path(path);
+    if (!flat_path)
+    {
+        return flat_path.status();
+    }
+    return simplefs_.read_file(flat_path.value().view());
 }
 
 Status Kernel::load_external_gui_desktop_module(std::string_view path, const ModuleImageInfo &image)
@@ -1220,52 +1255,79 @@ Status Kernel::load_external_gui_desktop_module(std::string_view path, const Mod
     return kernel_modules_.start_registered_module(external_gui_desktop_module_.module_name());
 }
 
-Status Kernel::load_external_gui_app_module(std::string_view path, const ModuleImageInfo &image)
+Status Kernel::launch_system_gui_app(ExternalGuiDockApp app)
 {
     if (external_gui_desktop_module_.configured() &&
         external_gui_desktop_module_.desktop_state() == ExternalGuiDesktopState::greeter)
     {
         return Status::would_block("system GUI apps are blocked until login");
     }
-    ExternalGuiAppModule *slot = nullptr;
-    for (auto &app : external_gui_app_modules_)
+    auto definition = system_gui_app_definition(app);
+    if (!definition)
     {
-        if (!app.configured())
+        return definition.status();
+    }
+    auto program = read_user_program_file(definition.value().path);
+    if (!program)
+    {
+        return program.status();
+    }
+    sched::ElfLoader loader;
+    auto loaded = loader.load(std::span<const std::byte>{program.value().data.data(), program.value().size},
+                              arch_->architecture());
+    if (!loaded)
+    {
+        return loaded.status();
+    }
+
+    ExternalGuiAppModule *slot = nullptr;
+    for (auto &instance : external_gui_app_modules_)
+    {
+        if (!instance.configured())
         {
-            slot = &app;
+            slot = &instance;
             break;
         }
     }
     if (slot == nullptr)
     {
-        return Status::overflow("external GUI app table is full");
+        return Status::overflow("system GUI app table is full");
     }
-    slot->bind_metrics(scheduler_, topology_);
-    if (auto status = slot->configure_from_image(path, image); !status.ok())
+
+    const auto credentials = posix_.user_credentials();
+    auto process = create_ui_process(definition.value().process_name, loaded.value().entry, loaded.value().stack_pointer,
+                                     credentials);
+    if (!process)
     {
+        return process.status();
+    }
+
+    slot->bind_metrics(scheduler_, topology_);
+    if (auto status = slot->configure_from_elf(definition.value().id, definition.value().path, definition.value().title,
+                                               definition.value().subtitle, definition.value().body,
+                                               definition.value().command, definition.value().line1,
+                                               definition.value().line2, definition.value().line3,
+                                               definition.value().bounds, definition.value().accent, process.value());
+        !status.ok())
+    {
+        static_cast<void>(scheduler_.kill_process(process.value()));
+        slot->reset();
         return status;
     }
-    auto *module = kernel_modules_.find(slot->module_name());
-    if (module == nullptr)
+    if (auto status = slot->start(gui_module_.compositor(), gui_module_.desktop()); !status.ok())
     {
-        if (auto status = kernel_modules_.register_module(*slot); !status.ok())
-        {
-            return status;
-        }
-    }
-    if (auto status = kernel_modules_.start_registered_module(slot->module_name()); !status.ok())
-    {
+        static_cast<void>(scheduler_.kill_process(process.value()));
+        slot->reset();
         return status;
     }
     return Status::success();
 }
 
-Status Kernel::load_system_gui_app_modules()
+Status Kernel::launch_system_gui_app_session()
 {
-    for (const auto path : system_gui_app_module_paths)
+    for (const auto &definition : system_gui_apps)
     {
-        auto status = load_external_kernel_module(path);
-        if (!status.ok() && status.code() != StatusCode::not_found)
+        if (auto status = focus_system_gui_app(definition.app); !status.ok() && status.code() != StatusCode::not_found)
         {
             return status;
         }
@@ -1306,7 +1368,7 @@ Status Kernel::load_external_kernel_module(std::string_view path)
     {
         return desktop_status;
     }
-    return load_external_gui_app_module(path, image.value());
+    return Status::unsupported("GUI app OKMOD packages are disabled; launch a user ELF app instead");
 }
 
 Status Kernel::show_force_close_prompt(gui::SurfaceId surface)
@@ -1446,6 +1508,60 @@ Result<usize> Kernel::find_task_manager_by_process(sched::ProcessId pid) const
         }
     }
     return Status::not_found("task monitor process not found");
+}
+
+Result<usize> Kernel::find_system_gui_app_by_surface(gui::SurfaceId surface) const
+{
+    for (usize i = 0; i < external_gui_app_modules_.size(); ++i)
+    {
+        if (external_gui_app_modules_[i].configured() && external_gui_app_modules_[i].surface() == surface)
+        {
+            return i;
+        }
+    }
+    return Status::not_found("system GUI app surface not found");
+}
+
+Result<usize> Kernel::find_system_gui_app_by_process(sched::ProcessId pid) const
+{
+    for (usize i = 0; i < external_gui_app_modules_.size(); ++i)
+    {
+        if (external_gui_app_modules_[i].configured() && external_gui_app_modules_[i].process_id() == pid)
+        {
+            return i;
+        }
+    }
+    return Status::not_found("system GUI app process not found");
+}
+
+Status Kernel::close_system_gui_app_at(usize index, bool kill_process)
+{
+    if (index >= external_gui_app_modules_.size() || !external_gui_app_modules_[index].configured())
+    {
+        return Status::invalid_argument("system GUI app index out of range");
+    }
+    auto &app = external_gui_app_modules_[index];
+    const auto process = app.process_id();
+    const auto surface = app.surface();
+    if (surface != 0)
+    {
+        clear_gui_close_attempt(surface);
+    }
+    if (auto status = app.stop(); !status.ok() && status.code() != StatusCode::not_found)
+    {
+        app.reset();
+        return status;
+    }
+    if (kill_process && process != 0 && scheduler_.find(process) != nullptr)
+    {
+        static_cast<void>(scheduler_.kill_process(process));
+    }
+    if (process != 0)
+    {
+        debug_shell_.notify_process_exit(process);
+    }
+    app.reset();
+    return gui_module_.compositor().present();
 }
 
 Status Kernel::close_file_manager_at(usize index, bool kill_process, bool notify_shell)
@@ -1987,6 +2103,7 @@ Status Kernel::kill_process(sched::ProcessId pid)
     const bool shell_process = debug_shell_.owns_process(pid);
     const auto file_manager_process = find_file_manager_by_process(pid);
     const auto task_manager_process = find_task_manager_by_process(pid);
+    const auto system_app_process = find_system_gui_app_by_process(pid);
     if (auto status = scheduler_.kill_process(pid); !status.ok())
     {
         return status;
@@ -2011,6 +2128,14 @@ Status Kernel::kill_process(sched::ProcessId pid)
     if (task_manager_process)
     {
         if (auto status = close_task_manager_at(task_manager_process.value(), false, false);
+            !status.ok() && status.code() != StatusCode::not_found)
+        {
+            return status;
+        }
+    }
+    if (system_app_process)
+    {
+        if (auto status = close_system_gui_app_at(system_app_process.value(), false);
             !status.ok() && status.code() != StatusCode::not_found)
         {
             return status;

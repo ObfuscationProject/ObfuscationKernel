@@ -281,7 +281,7 @@ class Kernel final
     Status handle_gui_taskbar_launcher(gui::TaskbarApp app);
     Status handle_system_gui_dock_launcher(ExternalGuiDockApp app);
     Status start_selected_system_gui_session(ExternalGuiDesktopModule &desktop);
-    Status focus_external_gui_app(std::string_view service_id, std::string_view path);
+    Status focus_system_gui_app(ExternalGuiDockApp app);
     Status sync_gui_credentials_from_surface(gui::SurfaceId surface);
     Status reconcile_file_managers();
     Status reconcile_task_managers();
@@ -294,9 +294,10 @@ class Kernel final
     Status focus_task_manager();
     Status focus_task_manager_at(usize index);
     Result<fs::FileBuffer> read_external_module_file(std::string_view path);
+    Result<fs::FileBuffer> read_user_program_file(std::string_view path);
     Status load_external_gui_desktop_module(std::string_view path, const ModuleImageInfo &image);
-    Status load_external_gui_app_module(std::string_view path, const ModuleImageInfo &image);
-    Status load_system_gui_app_modules();
+    Status launch_system_gui_app(ExternalGuiDockApp app);
+    Status launch_system_gui_app_session();
     Status refresh_external_gui_modules(bool focus_desktop);
     Status force_close_gui_surface(gui::SurfaceId surface);
     Status note_ignored_gui_close(gui::SurfaceId surface);
@@ -306,6 +307,9 @@ class Kernel final
     [[nodiscard]] Result<usize> find_file_manager_by_process(sched::ProcessId pid) const;
     [[nodiscard]] Result<usize> find_task_manager_by_surface(gui::SurfaceId surface) const;
     [[nodiscard]] Result<usize> find_task_manager_by_process(sched::ProcessId pid) const;
+    [[nodiscard]] Result<usize> find_system_gui_app_by_surface(gui::SurfaceId surface) const;
+    [[nodiscard]] Result<usize> find_system_gui_app_by_process(sched::ProcessId pid) const;
+    Status close_system_gui_app_at(usize index, bool kill_process);
 
     struct GuiCloseAttempt
     {

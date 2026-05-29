@@ -68,9 +68,9 @@ yet. For the C++ OOP transition path, a post-boot loader can call
 SimpleFS rootfs package name, validates its imports/exports plus `entry:oop`,
 binds it to a compatible C++ module ABI, and starts that module through
 `ModuleManager::start_registered_module()`. This is how ObfuscationOS loads its
-OS-side `system-gui` package from `/boot/modules/system-gui.okmod` and GUI app
-packages from `/boot/modules/apps/*.okmod` while the native relocating loader
-remains on the roadmap.
+OS-side `system-gui` desktop package from `/boot/modules/system-gui.okmod`.
+System GUI dock apps are user ELF programs staged in `/bin`; they are not loaded
+through the kernel module manager.
 
 ## Test Coverage
 

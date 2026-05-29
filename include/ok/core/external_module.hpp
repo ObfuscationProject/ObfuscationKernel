@@ -135,6 +135,10 @@ class ExternalGuiAppModule final : public KernelModule, public KernelService
     }
 
     Status configure_from_image(std::string_view path, const ModuleImageInfo &image);
+    Status configure_from_elf(std::string_view app_id, std::string_view path, std::string_view title,
+                              std::string_view subtitle, std::string_view body, std::string_view command,
+                              std::string_view line1, std::string_view line2, std::string_view line3,
+                              gui::Rect bounds, std::string_view accent, sched::ProcessId process_id);
 
     [[nodiscard]] ModuleManifest manifest() const override;
     [[nodiscard]] std::string_view service_id() const override
@@ -143,9 +147,11 @@ class ExternalGuiAppModule final : public KernelModule, public KernelService
     }
     [[nodiscard]] void *service(std::string_view service_id) override;
     Status start(ServiceRegistry &services) override;
+    Status start(gui::GuiCompositor &compositor, gui::GuiDesktopService &desktop);
     Status stop() override;
     Status shutdown() override;
     Status refresh();
+    void reset();
 
     [[nodiscard]] bool configured() const
     {
@@ -159,9 +165,17 @@ class ExternalGuiAppModule final : public KernelModule, public KernelService
     {
         return name_.view();
     }
+    [[nodiscard]] std::string_view app_id() const
+    {
+        return service_id_.view();
+    }
     [[nodiscard]] std::string_view load_path() const
     {
         return load_path_.view();
+    }
+    [[nodiscard]] sched::ProcessId process_id() const
+    {
+        return process_id_;
     }
     [[nodiscard]] gui::SurfaceId surface() const
     {
@@ -201,6 +215,7 @@ class ExternalGuiAppModule final : public KernelModule, public KernelService
     gui::SurfaceId surface_{0};
     gui::Rect bounds_{.x = 72, .y = 64, .width = 276, .height = 112};
     u32 accent_{0xffffcc66u};
+    sched::ProcessId process_id_{0};
     usize render_count_{0};
 };
 

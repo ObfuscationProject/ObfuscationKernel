@@ -43,6 +43,78 @@ std::span<const std::byte> bytes_for(std::string_view text)
     return {reinterpret_cast<const std::byte *>(text.data()), text.size()};
 }
 
+void write_le16(std::span<std::byte> out, usize offset, u16 value)
+{
+    out[offset] = static_cast<std::byte>(value & 0xffu);
+    out[offset + 1] = static_cast<std::byte>((value >> 8) & 0xffu);
+}
+
+void write_le32(std::span<std::byte> out, usize offset, u32 value)
+{
+    write_le16(out, offset, static_cast<u16>(value & 0xffffu));
+    write_le16(out, offset + 2, static_cast<u16>((value >> 16) & 0xffffu));
+}
+
+void write_le64(std::span<std::byte> out, usize offset, u64 value)
+{
+    write_le32(out, offset, static_cast<u32>(value & 0xffff'ffffu));
+    write_le32(out, offset + 4, static_cast<u32>((value >> 32) & 0xffff'ffffu));
+}
+
+u16 elf_machine_for(arch::Architecture architecture)
+{
+    switch (architecture)
+    {
+    case arch::Architecture::i386:
+        return 0x03;
+    case arch::Architecture::aarch64:
+        return 0xb7;
+    case arch::Architecture::arm32:
+        return 0x28;
+    case arch::Architecture::rv64:
+    case arch::Architecture::rv32:
+        return 0xf3;
+    case arch::Architecture::mips:
+    case arch::Architecture::mips64:
+        return 0x08;
+    case arch::Architecture::ppc:
+        return 0x14;
+    case arch::Architecture::loongarch64:
+        return 0x102;
+    case arch::Architecture::x86_64:
+        return 0x3e;
+    }
+    return 0x3e;
+}
+
+std::array<std::byte, 128> make_test_elf(arch::Architecture architecture)
+{
+    std::array<std::byte, 128> image{};
+    auto bytes = std::span<std::byte>(image.data(), image.size());
+    bytes[0] = std::byte{0x7f};
+    bytes[1] = std::byte{'E'};
+    bytes[2] = std::byte{'L'};
+    bytes[3] = std::byte{'F'};
+    bytes[4] = std::byte{2};
+    bytes[5] = std::byte{1};
+    write_le16(bytes, 16, 2);
+    write_le16(bytes, 18, elf_machine_for(architecture));
+    write_le64(bytes, 24, 0x400000);
+    write_le64(bytes, 32, 64);
+    write_le16(bytes, 54, 56);
+    write_le16(bytes, 56, 1);
+    write_le32(bytes, 64, 1);
+    write_le32(bytes, 68, 0x5);
+    write_le64(bytes, 72, 120);
+    write_le64(bytes, 80, 0x400000);
+    write_le64(bytes, 88, 0x400000);
+    write_le64(bytes, 96, 4);
+    write_le64(bytes, 104, 0x2000);
+    write_le64(bytes, 112, 0x1000);
+    bytes[120] = std::byte{0xc3};
+    return image;
+}
+
 constexpr std::string_view os_system_gui_module_path{"/boot/modules/system-gui.okmod"};
 constexpr std::string_view os_system_gui_module_text{
     "OKMOD\n"
@@ -58,27 +130,6 @@ constexpr std::string_view os_system_gui_module_text{
     "param=title:ObfuscationOS Login\n"
     "param=subtitle:choose root or user\n"
     "signature=system-gui-dev\n"};
-
-constexpr std::string_view os_about_app_module_path{"/boot/modules/apps/about.okmod"};
-constexpr std::string_view os_about_app_module_flat_path{"apps_about.okmod"};
-constexpr std::string_view os_about_app_module_text{
-    "OKMOD\n"
-    "name=system-about\n"
-    "version=1\n"
-    "vermagic=okernel-cxx-oop\n"
-    "require=gui.compositor\n"
-    "require=gui.desktop\n"
-    "require=gui.system-desktop\n"
-    "export=gui.app.about\n"
-    "param=entry:oop\n"
-    "param=class:app\n"
-    "param=title:About ObfuscationOS\n"
-    "param=subtitle:C++ OOP module from rootfs\n"
-    "param=body:Loaded through OK_SYS_LOAD_MODULE\n"
-    "param=x:54\n"
-    "param=y:44\n"
-    "param=accent:gold\n"
-    "signature=system-about-dev\n"};
 
 Status ensure_test_directory(Kernel &kernel, std::string_view path)
 {
@@ -118,6 +169,37 @@ Status stage_os_system_gui_module(Kernel &kernel)
         }
     }
     return kernel.vfs().write_file(os_system_gui_module_path, bytes_for(os_system_gui_module_text));
+}
+
+Status stage_system_gui_user_apps(Kernel &kernel)
+{
+    if (auto status = ensure_test_directory(kernel, "/bin"); !status.ok())
+    {
+        return status;
+    }
+    const auto elf = make_test_elf(kernel.arch().architecture());
+    constexpr std::string_view paths[] = {"/bin/oksh", "/bin/settings", "/bin/tasks", "/bin/notes", "/bin/about"};
+    for (const auto path : paths)
+    {
+        auto stat = kernel.vfs().stat(path);
+        if (!stat)
+        {
+            if (stat.status().code() != StatusCode::not_found)
+            {
+                return stat.status();
+            }
+            if (auto status = kernel.vfs().create(path, fs::NodeType::regular); !status.ok())
+            {
+                return status;
+            }
+        }
+        if (auto status = kernel.vfs().write_file(path, std::span<const std::byte>{elf.data(), elf.size()});
+            !status.ok())
+        {
+            return status;
+        }
+    }
+    return Status::success();
 }
 
 Result<gui::SurfaceInfo> find_surface_by_title(Kernel &kernel, std::string_view title)
@@ -177,6 +259,18 @@ usize process_count_named(const sched::Scheduler &scheduler, std::string_view na
         }
     }
     return count;
+}
+
+Result<sched::ProcessId> first_process_named(const sched::Scheduler &scheduler, std::string_view name)
+{
+    for (const auto &process : scheduler.processes())
+    {
+        if (process.name() == name)
+        {
+            return process.pid();
+        }
+    }
+    return Status::not_found("process name was not found");
 }
 
 Status append_unsigned(FixedString<32> &out, u64 value)
@@ -1033,6 +1127,10 @@ Status test_system_gui_mouse_login_selects_user_and_starts_desktop_shell(Kernel 
     {
         return Status::fault("system GUI greeter was not ready before login");
     }
+    if (auto status = stage_system_gui_user_apps(kernel); !status.ok())
+    {
+        return status;
+    }
 
     constexpr u32 card_width = driver::framebuffer_width > 360 ? 360u : driver::framebuffer_width - 24u;
     constexpr u32 card_height = 178u;
@@ -1077,13 +1175,18 @@ Status test_system_gui_mouse_login_selects_user_and_starts_desktop_shell(Kernel 
         kernel.posix().user_credentials().euid != user::default_user_uid || !shell ||
         shell.value().title != "ObfuscationOS Desktop" || shell.value().app != gui::TaskbarApp::none ||
         shell.value().chrome != gui::SurfaceChrome::plain ||
-        !kernel.kernel_modules().services().contains("gui.app.shell") ||
-        !kernel.kernel_modules().services().contains("gui.app.settings") ||
-        !kernel.kernel_modules().services().contains("gui.app.tasks") ||
-        !kernel.kernel_modules().services().contains("gui.app.about") ||
-        !kernel.kernel_modules().services().contains("gui.app.notes"))
+        kernel.kernel_modules().services().contains("gui.app.shell") ||
+        kernel.kernel_modules().services().contains("gui.app.settings") ||
+        kernel.kernel_modules().services().contains("gui.app.tasks") ||
+        kernel.kernel_modules().services().contains("gui.app.about") ||
+        kernel.kernel_modules().services().contains("gui.app.notes") ||
+        kernel.kernel_modules().find("system-shell") != nullptr ||
+        kernel.kernel_modules().find("system-settings") != nullptr ||
+        kernel.kernel_modules().find("system-tasks") != nullptr ||
+        kernel.kernel_modules().find("system-about") != nullptr ||
+        kernel.kernel_modules().find("system-notes") != nullptr)
     {
-        return Status::fault("system GUI login did not start the selected-user desktop shell and app session");
+        return Status::fault("system GUI login loaded app modules instead of user ELF apps");
     }
     const auto taskbar_y = static_cast<i32>(driver::framebuffer_height - gui::taskbar_height + 6);
     auto launcher = kernel.gui().compositor().taskbar_launcher_at(gui::task_monitor_launcher_x + 4, taskbar_y);
@@ -1097,6 +1200,21 @@ Status test_system_gui_mouse_login_selects_user_and_starts_desktop_shell(Kernel 
         !find_surface_by_title(kernel, "About ObfuscationOS") || !find_surface_by_title(kernel, "Notes"))
     {
         return Status::fault("system GUI desktop did not show app windows after login");
+    }
+    if (process_count_named(kernel.scheduler(), "app:oksh") != 1 ||
+        process_count_named(kernel.scheduler(), "app:settings") != 1 ||
+        process_count_named(kernel.scheduler(), "app:tasks") != 1 ||
+        process_count_named(kernel.scheduler(), "app:notes") != 1 ||
+        process_count_named(kernel.scheduler(), "app:about") != 1)
+    {
+        return Status::fault("system GUI desktop did not launch one user ELF process per app");
+    }
+    auto oksh = first_process_named(kernel.scheduler(), "app:oksh");
+    const auto *oksh_process = oksh ? kernel.scheduler().find(oksh.value()) : nullptr;
+    if (oksh_process == nullptr || oksh_process->execution() != sched::ProcessExecution::user_process ||
+        oksh_process->credentials().euid != user::default_user_uid || oksh_process->credentials().kernel_space)
+    {
+        return Status::fault("system GUI shell app was not launched as the selected user's ELF process");
     }
     return kernel.posix().set_credentials(user::root_credentials());
 }
@@ -1139,68 +1257,71 @@ Status test_system_gui_dock_uses_system_app_launchers(Kernel &kernel)
     {
         return Status::fault("system dock opened a kernel GUI app instead of a system app");
     }
+    if (process_count_named(kernel.scheduler(), "app:oksh") != 1)
+    {
+        return Status::fault("system dock relaunched or lost the Tiny Shell ELF process while focusing it");
+    }
     return Status::success();
 }
 
-Status test_system_gui_apps_load_from_rootfs_packages(Kernel &kernel)
+Status test_system_gui_apps_are_user_elf_processes(Kernel &kernel)
 {
-    auto stat = kernel.simplefs().stat(os_about_app_module_flat_path);
-    if (!stat)
+    auto settings = first_process_named(kernel.scheduler(), "app:settings");
+    if (!settings)
     {
-        if (stat.status().code() != StatusCode::not_found)
-        {
-            return stat.status();
-        }
-        if (auto status = kernel.simplefs().create(os_about_app_module_flat_path, fs::NodeType::regular);
-            !status.ok())
-        {
-            return status;
-        }
+        return settings.status();
     }
-    if (auto status = kernel.simplefs().write_file(os_about_app_module_flat_path, bytes_for(os_about_app_module_text));
-        !status.ok())
+    const auto settings_dock_x = 157;
+    const auto settings_dock_y = static_cast<i32>(driver::framebuffer_height - 18);
+    if (auto status = kernel.handle_gui_mouse_position(settings_dock_x, settings_dock_y, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse_position(settings_dock_x, settings_dock_y, false); !status.ok())
     {
         return status;
     }
 
-    syscall::Request request{.number = syscall::Number::load_module};
-    request.args[0] = reinterpret_cast<u64>(os_about_app_module_path.data());
-    auto response = kernel.syscalls().dispatch(request);
-    auto *registered = kernel.kernel_modules().find("system-about");
-    if (!response.status.ok() || response.value != 0 || registered == nullptr ||
-        registered->manifest().built_in || registered->state() != ModuleState::started ||
-        !kernel.kernel_modules().services().contains("gui.app.about"))
-    {
-        return Status::fault("system GUI app module was not loaded from the rootfs package");
-    }
-
-    auto info = find_surface_by_title(kernel, "About ObfuscationOS");
-    if (!info || info.value().title != "About ObfuscationOS" ||
-        kernel.gui().compositor().last_present_checksum() == 0)
-    {
-        return Status::fault("system GUI app module did not open its app surface");
-    }
-    return Status::success();
-}
-
-Status test_system_gui_apps_load_from_distro_fallback_packages(Kernel &kernel)
-{
-    syscall::Request request{.number = syscall::Number::load_module};
-    request.args[0] = reinterpret_cast<u64>("/boot/modules/apps/settings.okmod");
-    auto response = kernel.syscalls().dispatch(request);
-    auto *registered = kernel.kernel_modules().find("system-settings");
-    if (!response.status.ok() || response.value != 0 || registered == nullptr ||
-        registered->manifest().built_in || registered->state() != ModuleState::started ||
-        !kernel.kernel_modules().services().contains("gui.app.settings"))
-    {
-        return Status::fault("system GUI app fallback package was not loaded");
-    }
-
     auto info = find_surface_by_title(kernel, "System Settings");
-    if (!info || info.value().title != "System Settings" ||
-        kernel.gui().compositor().last_present_checksum() == 0)
+    const auto *process = kernel.scheduler().find(settings.value());
+    if (!info || process == nullptr || process->execution() != sched::ProcessExecution::user_process ||
+        process->credentials().kernel_space || process->credentials().euid != user::default_user_uid)
     {
-        return Status::fault("system GUI app fallback did not open its app surface");
+        return Status::fault("System Settings was not backed by a selected-user ELF process");
+    }
+    if (kernel.kernel_modules().services().contains("gui.app.settings") ||
+        kernel.kernel_modules().find("system-settings") != nullptr)
+    {
+        return Status::fault("System Settings was still registered as a GUI app module");
+    }
+
+    const auto close_x = info.value().bounds.x + static_cast<i32>(info.value().bounds.width) - 10;
+    const auto close_y = info.value().bounds.y + 5;
+    auto hit = kernel.gui().compositor().surface_at(close_x, close_y);
+    if (!hit || hit.value() != info.value().id)
+    {
+        return Status::fault("System Settings close coordinate did not hit its surface");
+    }
+    if (auto status = kernel.gui().compositor().set_pointer_position(close_x, close_y);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, false); !status.ok())
+    {
+        return status;
+    }
+    if (find_surface_by_title(kernel, "System Settings"))
+    {
+        return Status::fault("closing a System GUI ELF app did not close its surface");
+    }
+    if (kernel.scheduler().find(settings.value()) != nullptr)
+    {
+        return Status::fault("closing a System GUI ELF app did not close its user process");
     }
     return Status::success();
 }
@@ -2051,11 +2172,7 @@ Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
     {
         return status;
     }
-    if (auto status = test_system_gui_apps_load_from_rootfs_packages(kernel); !status.ok())
-    {
-        return status;
-    }
-    if (auto status = test_system_gui_apps_load_from_distro_fallback_packages(kernel); !status.ok())
+    if (auto status = test_system_gui_apps_are_user_elf_processes(kernel); !status.ok())
     {
         return status;
     }

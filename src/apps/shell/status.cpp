@@ -231,10 +231,19 @@ Status KernelDebugShell::command_system(std::string_view args)
         return status;
     }
     bool first = true;
-    for (const auto service : {"gui.app.shell", "gui.app.settings", "gui.app.tasks", "gui.app.notes", "gui.app.about"})
+    for (const auto app : {"app:oksh", "app:settings", "app:tasks", "app:notes", "app:about"})
     {
-        const std::string_view service_id{service};
-        if (!kernel_->kernel_modules().services().contains(service_id))
+        const std::string_view process_name{app};
+        bool running = false;
+        for (const auto &process : kernel_->scheduler().processes())
+        {
+            if (process.name() == process_name)
+            {
+                running = true;
+                break;
+            }
+        }
+        if (!running)
         {
             continue;
         }
@@ -245,11 +254,11 @@ Status KernelDebugShell::command_system(std::string_view args)
                 return status;
             }
         }
-        if (auto status = append(service_id == "gui.app.shell"      ? "shell"
-                                 : service_id == "gui.app.settings" ? "settings"
-                                 : service_id == "gui.app.tasks"    ? "tasks"
-                                 : service_id == "gui.app.notes"    ? "notes"
-                                                                     : "about");
+        if (auto status = append(process_name == "app:oksh"     ? "shell"
+                                 : process_name == "app:settings" ? "settings"
+                                 : process_name == "app:tasks"    ? "tasks"
+                                 : process_name == "app:notes"    ? "notes"
+                                                                  : "about");
             !status.ok())
         {
             return status;
