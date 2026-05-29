@@ -12,7 +12,7 @@ namespace ok::gui
 
 inline constexpr std::string_view gui_module_name{"kernel-gui"};
 inline constexpr std::string_view gui_service_id{"gui.compositor"};
-inline constexpr usize max_gui_surfaces = 8;
+inline constexpr usize max_gui_surfaces = 12;
 inline constexpr usize max_gui_title = 32;
 inline constexpr usize max_gui_crash_reason = 64;
 inline constexpr u32 max_gui_surface_width = driver::framebuffer_width;

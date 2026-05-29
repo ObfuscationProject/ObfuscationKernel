@@ -231,7 +231,7 @@ Status KernelDebugShell::command_system(std::string_view args)
         return status;
     }
     bool first = true;
-    for (const auto service : {"gui.app.about", "gui.app.prefs", "gui.app.notes"})
+    for (const auto service : {"gui.app.shell", "gui.app.settings", "gui.app.tasks", "gui.app.notes", "gui.app.about"})
     {
         const std::string_view service_id{service};
         if (!kernel_->kernel_modules().services().contains(service_id))
@@ -245,9 +245,11 @@ Status KernelDebugShell::command_system(std::string_view args)
                 return status;
             }
         }
-        if (auto status = append(service_id == "gui.app.about"    ? "about"
-                                 : service_id == "gui.app.prefs" ? "prefs"
-                                                                 : "notes");
+        if (auto status = append(service_id == "gui.app.shell"      ? "shell"
+                                 : service_id == "gui.app.settings" ? "settings"
+                                 : service_id == "gui.app.tasks"    ? "tasks"
+                                 : service_id == "gui.app.notes"    ? "notes"
+                                                                     : "about");
             !status.ok())
         {
             return status;

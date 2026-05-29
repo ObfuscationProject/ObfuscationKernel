@@ -11,8 +11,8 @@ namespace ok
 {
 
 inline constexpr usize max_loaded_module_path = 96;
-inline constexpr usize max_loaded_gui_text = 48;
-inline constexpr usize max_external_gui_apps = 6;
+inline constexpr usize max_loaded_gui_text = 64;
+inline constexpr usize max_external_gui_apps = 8;
 
 enum class ExternalGuiDesktopState : u8
 {
@@ -38,8 +38,10 @@ enum class ExternalGuiLoginUser : u8
 enum class ExternalGuiDockApp : u8
 {
     none,
+    shell,
+    settings,
+    tasks,
     about,
-    prefs,
     notes,
 };
 
@@ -120,11 +122,18 @@ class ExternalGuiDesktopModule final : public KernelModule, public KernelService
     gui::SurfaceId dashboard_surface_{0};
     usize render_count_{0};
     ExternalGuiLoginUser selected_login_user_{ExternalGuiLoginUser::root};
+    bool login_dropdown_open_{false};
 };
 
 class ExternalGuiAppModule final : public KernelModule, public KernelService
 {
   public:
+    void bind_metrics(const sched::Scheduler &scheduler, const smp::CpuTopology &topology)
+    {
+        scheduler_ = &scheduler;
+        topology_ = &topology;
+    }
+
     Status configure_from_image(std::string_view path, const ModuleImageInfo &image);
 
     [[nodiscard]] ModuleManifest manifest() const override;
@@ -176,12 +185,18 @@ class ExternalGuiAppModule final : public KernelModule, public KernelService
     FixedString<max_loaded_gui_text> title_{"System App"};
     FixedString<max_loaded_gui_text> subtitle_{"C++ OOP GUI module"};
     FixedString<max_loaded_gui_text> body_{"Loaded from /boot/modules"};
+    FixedString<max_loaded_gui_text> command_{};
+    FixedString<max_loaded_gui_text> line1_{};
+    FixedString<max_loaded_gui_text> line2_{};
+    FixedString<max_loaded_gui_text> line3_{};
     std::array<ModuleDependency, 1> dependencies_{{ModuleDependency{.name = gui::gui_module_name, .required = true}}};
     std::array<std::string_view, 3> required_services_{{gui::gui_service_id, gui::gui_desktop_service_id, {}}};
     usize required_service_count_{2};
     std::array<std::string_view, 1> exported_services_{};
     gui::GuiCompositor *compositor_{nullptr};
     gui::GuiDesktopService *desktop_{nullptr};
+    const sched::Scheduler *scheduler_{nullptr};
+    const smp::CpuTopology *topology_{nullptr};
     ExternalGuiAppState app_state_{ExternalGuiAppState::unloaded};
     gui::SurfaceId surface_{0};
     gui::Rect bounds_{.x = 72, .y = 64, .width = 276, .height = 112};

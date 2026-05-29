@@ -60,7 +60,7 @@ constexpr std::string_view os_system_gui_module_text{
     "signature=system-gui-dev\n"};
 
 constexpr std::string_view os_about_app_module_path{"/boot/modules/apps/about.okmod"};
-constexpr std::string_view os_about_app_module_flat_path{"boot_modules_apps_about.okmod"};
+constexpr std::string_view os_about_app_module_flat_path{"apps_about.okmod"};
 constexpr std::string_view os_about_app_module_text{
     "OKMOD\n"
     "name=system-about\n"
@@ -1017,7 +1017,8 @@ Status test_system_gui_module_loads_after_boot(Kernel &kernel)
     {
         return Status::fault("kernel taskbar was visible before system GUI login");
     }
-    if (find_surface_by_title(kernel, "About ObfuscationOS") || find_surface_by_title(kernel, "System Preferences") ||
+    if (find_surface_by_title(kernel, "Tiny Shell") || find_surface_by_title(kernel, "System Settings") ||
+        find_surface_by_title(kernel, "Task Manager") || find_surface_by_title(kernel, "About ObfuscationOS") ||
         find_surface_by_title(kernel, "Notes"))
     {
         return Status::fault("system GUI apps were visible before login");
@@ -1037,18 +1038,28 @@ Status test_system_gui_mouse_login_selects_user_and_starts_desktop_shell(Kernel 
     constexpr u32 card_height = 178u;
     const auto card_x = static_cast<i32>((driver::framebuffer_width - card_width) / 2);
     const auto card_y = static_cast<i32>((driver::framebuffer_height - card_height) / 2);
-    const auto user_x = card_x + static_cast<i32>(card_width) - 78;
-    const auto user_y = card_y + 96;
+    const auto dropdown_x = card_x + 104;
+    const auto dropdown_y = card_y + 82;
+    const auto user_option_x = dropdown_x;
+    const auto user_option_y = card_y + 116;
     const auto login_x = card_x + static_cast<i32>(card_width / 2);
     const auto login_y = card_y + 148;
 
-    if (auto status = kernel.handle_gui_mouse_position(user_x, user_y, true); !status.ok())
+    if (auto status = kernel.handle_gui_mouse_position(dropdown_x, dropdown_y, true); !status.ok())
     {
-        return status;
+        return Status::fault("system GUI dropdown press failed");
     }
-    if (auto status = kernel.handle_gui_mouse_position(user_x, user_y, false); !status.ok())
+    if (auto status = kernel.handle_gui_mouse_position(dropdown_x, dropdown_y, false); !status.ok())
     {
-        return status;
+        return Status::fault("system GUI dropdown release failed");
+    }
+    if (auto status = kernel.handle_gui_mouse_position(user_option_x, user_option_y, true); !status.ok())
+    {
+        return Status::fault("system GUI dropdown user press failed");
+    }
+    if (auto status = kernel.handle_gui_mouse_position(user_option_x, user_option_y, false); !status.ok())
+    {
+        return Status::fault("system GUI dropdown user release failed");
     }
     if (auto status = kernel.handle_gui_mouse_position(login_x, login_y, true); !status.ok())
     {
@@ -1056,7 +1067,7 @@ Status test_system_gui_mouse_login_selects_user_and_starts_desktop_shell(Kernel 
     }
     if (auto status = kernel.handle_gui_mouse_position(login_x, login_y, false); !status.ok())
     {
-        return status;
+        return Status::fault("system GUI login release failed");
     }
     desktop = kernel.loaded_gui_desktop_module();
     auto shell = desktop != nullptr ? kernel.gui().compositor().surface_info(desktop->dashboard_surface())
@@ -1066,8 +1077,10 @@ Status test_system_gui_mouse_login_selects_user_and_starts_desktop_shell(Kernel 
         kernel.posix().user_credentials().euid != user::default_user_uid || !shell ||
         shell.value().title != "ObfuscationOS Desktop" || shell.value().app != gui::TaskbarApp::none ||
         shell.value().chrome != gui::SurfaceChrome::plain ||
+        !kernel.kernel_modules().services().contains("gui.app.shell") ||
+        !kernel.kernel_modules().services().contains("gui.app.settings") ||
+        !kernel.kernel_modules().services().contains("gui.app.tasks") ||
         !kernel.kernel_modules().services().contains("gui.app.about") ||
-        !kernel.kernel_modules().services().contains("gui.app.prefs") ||
         !kernel.kernel_modules().services().contains("gui.app.notes"))
     {
         return Status::fault("system GUI login did not start the selected-user desktop shell and app session");
@@ -1078,8 +1091,10 @@ Status test_system_gui_mouse_login_selects_user_and_starts_desktop_shell(Kernel 
     {
         return Status::fault("kernel taskbar was still active after system GUI took desktop ownership");
     }
-    if (!find_surface_by_title(kernel, "About ObfuscationOS") ||
-        !find_surface_by_title(kernel, "System Preferences") || !find_surface_by_title(kernel, "Notes"))
+    if (!find_surface_by_title(kernel, "Tiny Shell") ||
+        !find_surface_by_title(kernel, "System Settings") ||
+        !find_surface_by_title(kernel, "Task Manager") ||
+        !find_surface_by_title(kernel, "About ObfuscationOS") || !find_surface_by_title(kernel, "Notes"))
     {
         return Status::fault("system GUI desktop did not show app windows after login");
     }
@@ -1093,30 +1108,31 @@ Status test_system_gui_dock_uses_system_app_launchers(Kernel &kernel)
     {
         return Status::fault("system GUI desktop was not ready for dock input");
     }
-    auto about = find_surface_by_title(kernel, "About ObfuscationOS");
-    if (!about)
+    auto shell_app = find_surface_by_title(kernel, "Tiny Shell");
+    auto task_app = find_surface_by_title(kernel, "Task Manager");
+    if (!shell_app || !task_app)
     {
-        return Status::fault("system About app was not loaded before dock interaction");
+        return Status::fault("system Shell and Task Manager apps were not loaded before dock interaction");
     }
 
     const auto shell_surface = kernel.debug_shell().gui_surface_id();
     const auto files_surface = kernel.file_manager().surface_id();
     const auto tasks_surface = kernel.task_manager().surface_id();
-    const auto about_x = 32;
+    const auto system_shell_x = 32;
     const auto dock_y = static_cast<i32>(driver::framebuffer_height - 18);
-    if (auto status = kernel.handle_gui_mouse_position(about_x, dock_y, true); !status.ok())
+    if (auto status = kernel.handle_gui_mouse_position(system_shell_x, dock_y, true); !status.ok())
     {
         return status;
     }
-    if (auto status = kernel.handle_gui_mouse_position(about_x, dock_y, false); !status.ok())
+    if (auto status = kernel.handle_gui_mouse_position(system_shell_x, dock_y, false); !status.ok())
     {
         return status;
     }
 
     auto active = kernel.gui().compositor().surface_info(kernel.gui().compositor().active_surface());
-    if (!active || active.value().title != "About ObfuscationOS")
+    if (!active || active.value().title != "Tiny Shell")
     {
-        return Status::fault("system dock did not focus the About app launcher");
+        return Status::fault("system dock did not focus the Tiny Shell app launcher");
     }
     if (kernel.debug_shell().gui_surface_id() != shell_surface || kernel.file_manager().surface_id() != files_surface ||
         kernel.task_manager().surface_id() != tasks_surface)
@@ -1170,18 +1186,18 @@ Status test_system_gui_apps_load_from_rootfs_packages(Kernel &kernel)
 Status test_system_gui_apps_load_from_distro_fallback_packages(Kernel &kernel)
 {
     syscall::Request request{.number = syscall::Number::load_module};
-    request.args[0] = reinterpret_cast<u64>("/boot/modules/apps/prefs.okmod");
+    request.args[0] = reinterpret_cast<u64>("/boot/modules/apps/settings.okmod");
     auto response = kernel.syscalls().dispatch(request);
-    auto *registered = kernel.kernel_modules().find("system-prefs");
+    auto *registered = kernel.kernel_modules().find("system-settings");
     if (!response.status.ok() || response.value != 0 || registered == nullptr ||
         registered->manifest().built_in || registered->state() != ModuleState::started ||
-        !kernel.kernel_modules().services().contains("gui.app.prefs"))
+        !kernel.kernel_modules().services().contains("gui.app.settings"))
     {
         return Status::fault("system GUI app fallback package was not loaded");
     }
 
-    auto info = find_surface_by_title(kernel, "System Preferences");
-    if (!info || info.value().title != "System Preferences" ||
+    auto info = find_surface_by_title(kernel, "System Settings");
+    if (!info || info.value().title != "System Settings" ||
         kernel.gui().compositor().last_present_checksum() == 0)
     {
         return Status::fault("system GUI app fallback did not open its app surface");

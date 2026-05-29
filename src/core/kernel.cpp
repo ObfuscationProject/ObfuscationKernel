@@ -50,6 +50,11 @@ std::span<const std::byte> bytes_for(std::string_view text)
     return {reinterpret_cast<const std::byte *>(text.data()), text.size()};
 }
 
+bool starts_with(std::string_view value, std::string_view prefix)
+{
+    return value.size() >= prefix.size() && value.substr(0, prefix.size()) == prefix;
+}
+
 struct BootGuiModulePackage
 {
     std::string_view path;
@@ -83,31 +88,89 @@ constexpr std::string_view fallback_about_okmod{
     "param=entry:oop\n"
     "param=class:app\n"
     "param=title:About ObfuscationOS\n"
-    "param=subtitle:C++ OOP module from rootfs\n"
-    "param=body:Loaded through OK_SYS_LOAD_MODULE\n"
-    "param=x:54\n"
-    "param=y:44\n"
+    "param=subtitle:tiny-c app package\n"
+    "param=body:ObfuscationOS userland desktop\n"
+    "param=command:/bin/uname\n"
+    "param=line1:loaded with OK_SYS_LOAD_MODULE\n"
+    "param=line2:rootfs package facade\n"
+    "param=x:300\n"
+    "param=y:168\n"
+    "param=width:336\n"
+    "param=height:154\n"
     "param=accent:gold\n"
     "signature=system-about-dev\n"};
 
-constexpr std::string_view fallback_prefs_okmod{
+constexpr std::string_view fallback_shell_okmod{
     "OKMOD\n"
-    "name=system-prefs\n"
+    "name=system-shell\n"
     "version=1\n"
     "vermagic=okernel-cxx-oop\n"
     "require=gui.compositor\n"
     "require=gui.desktop\n"
     "require=gui.system-desktop\n"
-    "export=gui.app.prefs\n"
+    "export=gui.app.shell\n"
     "param=entry:oop\n"
     "param=class:app\n"
-    "param=title:System Preferences\n"
-    "param=subtitle:display and session sketch\n"
-    "param=body:Palette, input, and desktop state\n"
-    "param=x:118\n"
-    "param=y:84\n"
+    "param=title:Tiny Shell\n"
+    "param=subtitle:tiny-c builtins shell\n"
+    "param=body:oksh is available in /bin\n"
+    "param=command:/bin/oksh\n"
+    "param=line1:help ls cat stat pwd cd\n"
+    "param=line2:whoami uname uptime touch\n"
+    "param=line3:execve is still on the roadmap\n"
+    "param=x:54\n"
+    "param=y:52\n"
+    "param=width:352\n"
+    "param=height:170\n"
     "param=accent:blue\n"
-    "signature=system-prefs-dev\n"};
+    "signature=system-shell-dev\n"};
+
+constexpr std::string_view fallback_settings_okmod{
+    "OKMOD\n"
+    "name=system-settings\n"
+    "version=1\n"
+    "vermagic=okernel-cxx-oop\n"
+    "require=gui.compositor\n"
+    "require=gui.desktop\n"
+    "require=gui.system-desktop\n"
+    "export=gui.app.settings\n"
+    "param=entry:oop\n"
+    "param=class:app\n"
+    "param=title:System Settings\n"
+    "param=subtitle:display and session settings\n"
+    "param=body:Theme, input, and desktop state\n"
+    "param=command:/bin/stat /etc/os-release\n"
+    "param=line1:palette mint / blue / rose\n"
+    "param=line2:pointer and keyboard enabled\n"
+    "param=x:520\n"
+    "param=y:56\n"
+    "param=width:344\n"
+    "param=height:158\n"
+    "param=accent:mint\n"
+    "signature=system-settings-dev\n"};
+
+constexpr std::string_view fallback_tasks_okmod{
+    "OKMOD\n"
+    "name=system-tasks\n"
+    "version=1\n"
+    "vermagic=okernel-cxx-oop\n"
+    "require=gui.compositor\n"
+    "require=gui.desktop\n"
+    "require=gui.system-desktop\n"
+    "export=gui.app.tasks\n"
+    "param=entry:oop\n"
+    "param=class:app\n"
+    "param=title:Task Manager\n"
+    "param=subtitle:system process overview\n"
+    "param=body:Live scheduler snapshot\n"
+    "param=command:/bin/uptime\n"
+    "param=line3:kernel apps stay outside System dock\n"
+    "param=x:64\n"
+    "param=y:282\n"
+    "param=width:346\n"
+    "param=height:150\n"
+    "param=accent:violet\n"
+    "signature=system-tasks-dev\n"};
 
 constexpr std::string_view fallback_notes_okmod{
     "OKMOD\n"
@@ -121,24 +184,33 @@ constexpr std::string_view fallback_notes_okmod{
     "param=entry:oop\n"
     "param=class:app\n"
     "param=title:Notes\n"
-    "param=subtitle:small native GUI scratchpad\n"
+    "param=subtitle:tiny-c notes scratchpad\n"
     "param=body:Window surface owned by an OS module\n"
-    "param=x:182\n"
-    "param=y:124\n"
+    "param=command:/bin/cat /etc/os-release\n"
+    "param=line1:notes are staged from rootfs\n"
+    "param=line2:CLI tools use libokcrt\n"
+    "param=x:520\n"
+    "param=y:278\n"
+    "param=width:346\n"
+    "param=height:150\n"
     "param=accent:rose\n"
     "signature=system-notes-dev\n"};
 
 constexpr BootGuiModulePackage boot_gui_module_fallbacks[] = {
     {"/boot/modules/system-gui.okmod", fallback_system_gui_okmod},
+    {"/boot/modules/apps/shell.okmod", fallback_shell_okmod},
+    {"/boot/modules/apps/settings.okmod", fallback_settings_okmod},
+    {"/boot/modules/apps/tasks.okmod", fallback_tasks_okmod},
     {"/boot/modules/apps/about.okmod", fallback_about_okmod},
-    {"/boot/modules/apps/prefs.okmod", fallback_prefs_okmod},
     {"/boot/modules/apps/notes.okmod", fallback_notes_okmod},
 };
 
 constexpr std::string_view system_gui_app_module_paths[] = {
-    "/boot/modules/apps/about.okmod",
-    "/boot/modules/apps/prefs.okmod",
+    "/boot/modules/apps/shell.okmod",
+    "/boot/modules/apps/settings.okmod",
+    "/boot/modules/apps/tasks.okmod",
     "/boot/modules/apps/notes.okmod",
+    "/boot/modules/apps/about.okmod",
 };
 
 Result<fs::FileBuffer> boot_gui_module_fallback(std::string_view path)
@@ -175,6 +247,28 @@ Result<FixedString<fs::simplefs_name_capacity>> simplefs_flat_module_path(std::s
         path.remove_prefix(1);
     }
     FixedString<fs::simplefs_name_capacity> out;
+    constexpr std::string_view apps_prefix{"boot/modules/apps/"};
+    constexpr std::string_view modules_prefix{"boot/modules/"};
+    if (starts_with(path, apps_prefix))
+    {
+        if (auto status = out.append("apps_"); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = out.append(path.substr(apps_prefix.size())); !status.ok())
+        {
+            return status;
+        }
+        return out;
+    }
+    if (starts_with(path, modules_prefix))
+    {
+        if (auto status = out.assign(path.substr(modules_prefix.size())); !status.ok())
+        {
+            return status;
+        }
+        return out;
+    }
     for (const auto value : path)
     {
         if (auto status = out.append(value == '/' ? '_' : value); !status.ok())
@@ -807,10 +901,14 @@ Status Kernel::handle_system_gui_dock_launcher(ExternalGuiDockApp app)
 {
     switch (app)
     {
+    case ExternalGuiDockApp::shell:
+        return focus_external_gui_app("gui.app.shell", "/boot/modules/apps/shell.okmod");
+    case ExternalGuiDockApp::settings:
+        return focus_external_gui_app("gui.app.settings", "/boot/modules/apps/settings.okmod");
+    case ExternalGuiDockApp::tasks:
+        return focus_external_gui_app("gui.app.tasks", "/boot/modules/apps/tasks.okmod");
     case ExternalGuiDockApp::about:
         return focus_external_gui_app("gui.app.about", "/boot/modules/apps/about.okmod");
-    case ExternalGuiDockApp::prefs:
-        return focus_external_gui_app("gui.app.prefs", "/boot/modules/apps/prefs.okmod");
     case ExternalGuiDockApp::notes:
         return focus_external_gui_app("gui.app.notes", "/boot/modules/apps/notes.okmod");
     case ExternalGuiDockApp::none:
@@ -1094,7 +1192,7 @@ Result<fs::FileBuffer> Kernel::read_external_module_file(std::string_view path)
     auto flat_path = simplefs_flat_module_path(path);
     if (!flat_path)
     {
-        return flat_path.status();
+        return boot_gui_module_fallback(path);
     }
     auto simplefs_file = simplefs_.read_file(flat_path.value().view());
     if (simplefs_file || simplefs_file.status().code() != StatusCode::not_found)
@@ -1142,6 +1240,7 @@ Status Kernel::load_external_gui_app_module(std::string_view path, const ModuleI
     {
         return Status::overflow("external GUI app table is full");
     }
+    slot->bind_metrics(scheduler_, topology_);
     if (auto status = slot->configure_from_image(path, image); !status.ok())
     {
         return status;
@@ -1154,7 +1253,11 @@ Status Kernel::load_external_gui_app_module(std::string_view path, const ModuleI
             return status;
         }
     }
-    return kernel_modules_.start_registered_module(slot->module_name());
+    if (auto status = kernel_modules_.start_registered_module(slot->module_name()); !status.ok())
+    {
+        return status;
+    }
+    return Status::success();
 }
 
 Status Kernel::load_system_gui_app_modules()

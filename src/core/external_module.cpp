@@ -20,12 +20,13 @@ constexpr u32 app_muted = 0xff9fc6d2u;
 constexpr u32 greeter_card_height = 178;
 constexpr u32 greeter_card_max_width = 360;
 constexpr u32 greeter_card_margin = 24;
-constexpr u32 greeter_choice_height = 36;
+constexpr u32 greeter_dropdown_height = 24;
+constexpr u32 greeter_dropdown_option_height = 18;
 constexpr u32 greeter_login_height = 26;
 constexpr u32 system_dock_height = 44;
-constexpr u32 system_dock_tile_width = 64;
-constexpr u32 system_dock_tile_height = 28;
-constexpr u32 system_dock_tile_gap = 10;
+constexpr u32 system_dock_tile_width = 86;
+constexpr u32 system_dock_tile_height = 30;
+constexpr u32 system_dock_tile_gap = 8;
 constexpr u32 system_dock_tile_left = 20;
 
 template <usize Capacity>
@@ -162,6 +163,38 @@ Status draw_text_px(gui::GuiCompositor &compositor, gui::SurfaceId surface, i32 
     return compositor.draw_text(surface, column, row, text, foreground, background);
 }
 
+Status draw_text_px_clipped(gui::GuiCompositor &compositor, gui::SurfaceId surface, i32 x, i32 y, u32 width,
+                            std::string_view text, u32 foreground, u32 background)
+{
+    const auto max_chars = width / gui::gui_glyph_width;
+    if (max_chars == 0)
+    {
+        return Status::success();
+    }
+    FixedString<max_loaded_gui_text> clipped;
+    const bool ellipsize = max_chars > 3 && text.size() > max_chars;
+    auto limit = ellipsize ? max_chars - 3 : max_chars;
+    if (limit >= max_loaded_gui_text)
+    {
+        limit = ellipsize ? max_loaded_gui_text - 4 : max_loaded_gui_text - 1;
+    }
+    for (usize i = 0; i < text.size() && i < limit; ++i)
+    {
+        if (auto status = clipped.append(text[i]); !status.ok())
+        {
+            return status;
+        }
+    }
+    if (ellipsize)
+    {
+        if (auto status = clipped.append("..."); !status.ok())
+        {
+            return status;
+        }
+    }
+    return draw_text_px(compositor, surface, x, y, clipped.view(), foreground, background);
+}
+
 [[nodiscard]] bool rect_contains(gui::Rect rect, i32 x, i32 y)
 {
     return x >= rect.x && y >= rect.y && x < rect.x + static_cast<i32>(rect.width) &&
@@ -180,26 +213,30 @@ Status draw_text_px(gui::GuiCompositor &compositor, gui::SurfaceId surface, i32 
                      .height = card_height};
 }
 
-[[nodiscard]] u32 greeter_choice_width(gui::Rect card)
+[[nodiscard]] gui::Rect greeter_dropdown_bounds(gui::Rect card)
 {
-    return card.width > 56 ? (card.width - 56) / 2 : card.width / 2;
+    return gui::Rect{.x = card.x + 96,
+                     .y = card.y + 72,
+                     .width = card.width > 120 ? card.width - 120 : card.width,
+                     .height = greeter_dropdown_height};
 }
 
-[[nodiscard]] gui::Rect greeter_root_bounds(gui::Rect card)
+[[nodiscard]] gui::Rect greeter_dropdown_option_bounds(gui::Rect card, usize index)
 {
-    return gui::Rect{.x = card.x + 24,
-                     .y = card.y + 72,
-                     .width = greeter_choice_width(card),
-                     .height = greeter_choice_height};
+    const auto field = greeter_dropdown_bounds(card);
+    return gui::Rect{.x = field.x,
+                     .y = field.y + static_cast<i32>(field.height + index * greeter_dropdown_option_height),
+                     .width = field.width,
+                     .height = greeter_dropdown_option_height};
 }
 
-[[nodiscard]] gui::Rect greeter_user_bounds(gui::Rect card)
+[[nodiscard]] gui::Rect greeter_dropdown_menu_bounds(gui::Rect card)
 {
-    const auto choice_width = greeter_choice_width(card);
-    return gui::Rect{.x = card.x + 32 + static_cast<i32>(choice_width),
-                     .y = card.y + 72,
-                     .width = choice_width,
-                     .height = greeter_choice_height};
+    const auto field = greeter_dropdown_bounds(card);
+    return gui::Rect{.x = field.x,
+                     .y = field.y + static_cast<i32>(field.height),
+                     .width = field.width,
+                     .height = greeter_dropdown_option_height * 2};
 }
 
 [[nodiscard]] gui::Rect greeter_login_bounds(gui::Rect card)
@@ -480,6 +517,12 @@ Status ExternalGuiDesktopModule::handle_key(int key)
     {
         selected_login_user_ = selected_login_user_ == ExternalGuiLoginUser::root ? ExternalGuiLoginUser::user
                                                                                   : ExternalGuiLoginUser::root;
+        login_dropdown_open_ = false;
+        return render_greeter();
+    }
+    if (key == 27)
+    {
+        login_dropdown_open_ = false;
         return render_greeter();
     }
     if (key == '\r' || key == '\n' || key == ' ')
@@ -501,19 +544,33 @@ Status ExternalGuiDesktopModule::handle_pointer_click(i32 x, i32 y)
         return info.status();
     }
     const auto card = greeter_card_bounds(info.value().bounds.width, info.value().bounds.height);
-    if (rect_contains(greeter_root_bounds(card), x, y))
+    const auto field = greeter_dropdown_bounds(card);
+    if (login_dropdown_open_ && rect_contains(greeter_dropdown_option_bounds(card, 0), x, y))
     {
         selected_login_user_ = ExternalGuiLoginUser::root;
+        login_dropdown_open_ = false;
         return render_greeter();
     }
-    if (rect_contains(greeter_user_bounds(card), x, y))
+    if (login_dropdown_open_ && rect_contains(greeter_dropdown_option_bounds(card, 1), x, y))
     {
         selected_login_user_ = ExternalGuiLoginUser::user;
+        login_dropdown_open_ = false;
+        return render_greeter();
+    }
+    if (rect_contains(field, x, y))
+    {
+        login_dropdown_open_ = !login_dropdown_open_;
         return render_greeter();
     }
     if (rect_contains(greeter_login_bounds(card), x, y))
     {
+        login_dropdown_open_ = false;
         return login_default_user();
+    }
+    if (login_dropdown_open_)
+    {
+        login_dropdown_open_ = false;
+        return render_greeter();
     }
     return Status::success();
 }
@@ -553,15 +610,23 @@ Result<ExternalGuiDockApp> ExternalGuiDesktopModule::dock_launcher_at(i32 x, i32
     const auto point_y = static_cast<i32>(local_y);
     if (rect_contains(system_dock_tile_bounds(dock, 0), point_x, point_y))
     {
-        return ExternalGuiDockApp::about;
+        return ExternalGuiDockApp::shell;
     }
     if (rect_contains(system_dock_tile_bounds(dock, 1), point_x, point_y))
     {
-        return ExternalGuiDockApp::prefs;
+        return ExternalGuiDockApp::settings;
     }
     if (rect_contains(system_dock_tile_bounds(dock, 2), point_x, point_y))
     {
+        return ExternalGuiDockApp::tasks;
+    }
+    if (rect_contains(system_dock_tile_bounds(dock, 3), point_x, point_y))
+    {
         return ExternalGuiDockApp::notes;
+    }
+    if (rect_contains(system_dock_tile_bounds(dock, 4), point_x, point_y))
+    {
+        return ExternalGuiDockApp::about;
     }
     return Status::not_found("system shell dock launcher miss");
 }
@@ -577,11 +642,16 @@ Status ExternalGuiDesktopModule::login_default_user()
         return Status::not_initialized("system GUI greeter is not active");
     }
     desktop_state_ = ExternalGuiDesktopState::desktop;
+    login_dropdown_open_ = false;
     if (auto status = open_shell_surface("ObfuscationOS Desktop", gui::GuiShellMode::system_shell); !status.ok())
     {
         return status;
     }
-    return render_desktop_shell();
+    if (auto status = render_desktop_shell(); !status.ok())
+    {
+        return status;
+    }
+    return Status::success();
 }
 
 Status ExternalGuiDesktopModule::open_shell_surface(std::string_view title, gui::GuiShellMode mode)
@@ -682,8 +752,7 @@ Status ExternalGuiDesktopModule::render_greeter()
     }
 
     const auto card = greeter_card_bounds(width, height);
-    const auto root = greeter_root_bounds(card);
-    const auto user = greeter_user_bounds(card);
+    const auto dropdown = greeter_dropdown_bounds(card);
     const auto login = greeter_login_bounds(card);
     if (auto status = compositor_->fill_rect(dashboard_surface_, card, dashboard_panel); !status.ok())
     {
@@ -711,26 +780,39 @@ Status ExternalGuiDesktopModule::render_greeter()
         return status;
     }
 
-    const auto root_selected = selected_login_user_ == ExternalGuiLoginUser::root;
-    const auto user_selected = selected_login_user_ == ExternalGuiLoginUser::user;
-    if (auto status = compositor_->fill_rect(dashboard_surface_, root, root_selected ? 0xfff2c866u : dashboard_panel_alt);
+    if (auto status = draw_text_px(*compositor_, dashboard_surface_, card.x + 24, card.y + 77, "User",
+                                   dashboard_muted, dashboard_panel);
         !status.ok())
     {
         return status;
     }
-    if (auto status = compositor_->fill_rect(dashboard_surface_, user, user_selected ? 0xfff2c866u : dashboard_panel_alt);
+    if (auto status = compositor_->fill_rect(dashboard_surface_, dropdown, dashboard_panel_alt); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = fill_outline(*compositor_, dashboard_surface_, dropdown, dashboard_accent); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor_->fill_rect(dashboard_surface_,
+                                             gui::Rect{.x = dropdown.x + static_cast<i32>(dropdown.width) - 26,
+                                                       .y = dropdown.y,
+                                                       .width = 26,
+                                                       .height = dropdown.height},
+                                             0xff25475au);
         !status.ok())
     {
         return status;
     }
-    if (auto status = fill_outline(*compositor_, dashboard_surface_, root,
-                                   root_selected ? 0xffffe2a0u : 0xff35566au);
+    if (auto status = draw_text_px(*compositor_, dashboard_surface_, dropdown.x + 12, dropdown.y + 6,
+                                   selected_login_user_name(), dashboard_text, dashboard_panel_alt);
         !status.ok())
     {
         return status;
     }
-    if (auto status = fill_outline(*compositor_, dashboard_surface_, user,
-                                   user_selected ? 0xffffe2a0u : 0xff35566au);
+    if (auto status = draw_text_px(*compositor_, dashboard_surface_,
+                                   dropdown.x + static_cast<i32>(dropdown.width) - 17, dropdown.y + 6,
+                                   login_dropdown_open_ ? "^" : "v", dashboard_text, 0xff25475au);
         !status.ok())
     {
         return status;
@@ -768,33 +850,39 @@ Status ExternalGuiDesktopModule::render_greeter()
     {
         return status;
     }
-    if (auto status = draw_text_px(*compositor_, dashboard_surface_, root.x + 14, root.y + 7, "root",
-                                   root_selected ? 0xff071018u : dashboard_text,
-                                   root_selected ? 0xfff2c866u : dashboard_panel_alt);
-        !status.ok())
+    if (login_dropdown_open_)
     {
-        return status;
-    }
-    if (auto status = draw_text_px(*compositor_, dashboard_surface_, root.x + 14, root.y + 21, "admin",
-                                   root_selected ? 0xff2a2209u : dashboard_muted,
-                                   root_selected ? 0xfff2c866u : dashboard_panel_alt);
-        !status.ok())
-    {
-        return status;
-    }
-    if (auto status = draw_text_px(*compositor_, dashboard_surface_, user.x + 14, user.y + 7, "user",
-                                   user_selected ? 0xff071018u : dashboard_text,
-                                   user_selected ? 0xfff2c866u : dashboard_panel_alt);
-        !status.ok())
-    {
-        return status;
-    }
-    if (auto status = draw_text_px(*compositor_, dashboard_surface_, user.x + 14, user.y + 21, "uid 1000",
-                                   user_selected ? 0xff2a2209u : dashboard_muted,
-                                   user_selected ? 0xfff2c866u : dashboard_panel_alt);
-        !status.ok())
-    {
-        return status;
+        const auto menu = greeter_dropdown_menu_bounds(card);
+        if (auto status = compositor_->fill_rect(dashboard_surface_, menu, 0xff203445u); !status.ok())
+        {
+            return status;
+        }
+        if (auto status = fill_outline(*compositor_, dashboard_surface_, menu, 0xff6bbfa6u); !status.ok())
+        {
+            return status;
+        }
+        constexpr std::string_view labels[] = {"root  admin", "user  uid 1000"};
+        for (usize i = 0; i < 2; ++i)
+        {
+            const auto option = greeter_dropdown_option_bounds(card, i);
+            const bool selected = (i == 0 && selected_login_user_ == ExternalGuiLoginUser::root) ||
+                                  (i == 1 && selected_login_user_ == ExternalGuiLoginUser::user);
+            if (selected)
+            {
+                if (auto status = compositor_->fill_rect(dashboard_surface_, option, dashboard_warm); !status.ok())
+                {
+                    return status;
+                }
+            }
+            if (auto status = draw_text_px_clipped(*compositor_, dashboard_surface_, option.x + 10, option.y + 4,
+                                                   option.width > 20 ? option.width - 20 : option.width,
+                                                   labels[i], selected ? 0xff071018u : dashboard_text,
+                                                   selected ? dashboard_warm : 0xff203445u);
+                !status.ok())
+            {
+                return status;
+            }
+        }
     }
     if (auto status = draw_text_px(*compositor_, dashboard_surface_, login.x + static_cast<i32>(login.width / 2) - 28,
                                    login.y + 6, "login", 0xff071018u, dashboard_warm);
@@ -913,7 +1001,7 @@ Status ExternalGuiDesktopModule::render_desktop_shell()
     {
         return status;
     }
-    if (auto status = draw_text_px(*compositor_, dashboard_surface_, 34, 104, "About / Prefs / Notes", dashboard_muted,
+    if (auto status = draw_text_px(*compositor_, dashboard_surface_, 34, 104, "Shell / Settings / Tasks", dashboard_muted,
                                    0xff0f2233u);
         !status.ok())
     {
@@ -953,9 +1041,9 @@ Status ExternalGuiDesktopModule::render_desktop_shell()
         return status;
     }
 
-    constexpr std::string_view labels[] = {"About", "Prefs", "Notes"};
-    constexpr u32 colors[] = {dashboard_warm, 0xff66b7ffu, 0xffff7799u};
-    for (usize i = 0; i < 3; ++i)
+    constexpr std::string_view labels[] = {"Shell", "Settings", "Tasks", "Notes", "About"};
+    constexpr u32 colors[] = {0xff66b7ffu, dashboard_accent, 0xffaa99ffu, 0xffff7799u, dashboard_warm};
+    for (usize i = 0; i < 5; ++i)
     {
         const auto tile = system_dock_tile_bounds(dock, i);
         if (auto status = compositor_->fill_rect(dashboard_surface_, tile, 0xff162b3cu); !status.ok())
@@ -973,8 +1061,9 @@ Status ExternalGuiDesktopModule::render_desktop_shell()
         {
             return status;
         }
-        if (auto status = draw_text_px(*compositor_, dashboard_surface_, tile.x + 20, tile.y + 9, labels[i],
-                                       dashboard_text, 0xff162b3cu);
+        if (auto status = draw_text_px_clipped(*compositor_, dashboard_surface_, tile.x + 20, tile.y + 9,
+                                               tile.width > 26 ? tile.width - 26 : tile.width, labels[i],
+                                               dashboard_text, 0xff162b3cu);
             !status.ok())
         {
             return status;
@@ -1049,7 +1138,11 @@ Status ExternalGuiAppModule::configure_from_image(std::string_view path, const M
     {
         return status;
     }
-    bounds_ = gui::Rect{.x = 72, .y = 64, .width = 276, .height = 112};
+    command_.clear();
+    line1_.clear();
+    line2_.clear();
+    line3_.clear();
+    bounds_ = gui::Rect{.x = 72, .y = 64, .width = 330, .height = 154};
     accent_ = dashboard_warm;
     for (const auto &parameter : image.parameters)
     {
@@ -1078,6 +1171,22 @@ Status ExternalGuiAppModule::assign_parameter(std::string_view name, std::string
     if (name == "body")
     {
         return body_.assign(value);
+    }
+    if (name == "command")
+    {
+        return command_.assign(value);
+    }
+    if (name == "line1")
+    {
+        return line1_.assign(value);
+    }
+    if (name == "line2")
+    {
+        return line2_.assign(value);
+    }
+    if (name == "line3")
+    {
+        return line3_.assign(value);
     }
     if (name == "accent")
     {
@@ -1236,37 +1345,110 @@ Status ExternalGuiAppModule::render_window()
     {
         return status;
     }
+    const auto width = info.value().bounds.width;
+    const auto height = info.value().bounds.height;
+    const auto header = gui::Rect{.x = 10, .y = 18, .width = width > 20 ? width - 20 : width, .height = 34};
+    const auto icon_panel = gui::Rect{.x = 12, .y = 62, .width = 52, .height = 50};
+    const auto text_x = 78;
+    const auto text_width = width > 96 ? width - 96 : width;
     if (auto status = compositor_->fill_rect(surface_,
-                                             gui::Rect{.x = 8,
-                                                       .y = 18,
-                                                       .width = info.value().bounds.width - 16,
-                                                       .height = 38},
+                                             header,
                                              app_panel);
         !status.ok())
     {
         return status;
     }
-    if (auto status = compositor_->fill_rect(surface_, gui::Rect{.x = 8, .y = 60, .width = 44, .height = 36},
-                                             app_panel_alt);
+    if (auto status = fill_outline(*compositor_, surface_, header, 0xff29465au); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = compositor_->fill_rect(surface_, icon_panel, app_panel_alt);
         !status.ok())
     {
         return status;
     }
-    if (auto status = compositor_->fill_rect(surface_, gui::Rect{.x = 18, .y = 68, .width = 24, .height = 20},
+    if (auto status = compositor_->fill_rect(surface_, gui::Rect{.x = 24, .y = 74, .width = 28, .height = 24},
                                              accent_);
         !status.ok())
     {
         return status;
     }
-    if (auto status = compositor_->draw_text(surface_, 2, 2, subtitle_.view(), app_muted, app_panel); !status.ok())
+    if (auto status = draw_text_px_clipped(*compositor_, surface_, 20, 28, header.width > 20 ? header.width - 20 : header.width,
+                                           subtitle_.view(), app_muted, app_panel);
+        !status.ok())
     {
         return status;
     }
-    if (auto status = compositor_->draw_text(surface_, 8, 7, body_.view(), app_text, app_background); !status.ok())
+    if (auto status = draw_text_px_clipped(*compositor_, surface_, text_x, 66, text_width, body_.view(), app_text,
+                                           app_background);
+        !status.ok())
     {
         return status;
     }
-    if (auto status = compositor_->draw_text(surface_, 8, 9, load_path_.view(), app_muted, app_background);
+
+    FixedString<64> dynamic_line;
+    std::string_view line1 = line1_.empty() ? std::string_view{} : line1_.view();
+    std::string_view line2 = line2_.empty() ? std::string_view{} : line2_.view();
+    std::string_view line3 = line3_.empty() ? std::string_view{} : line3_.view();
+    if (service_id_.view() == "gui.app.tasks" && scheduler_ != nullptr && topology_ != nullptr)
+    {
+        if (auto status = assign_metric(dynamic_line, "processes ", scheduler_->process_count()); !status.ok())
+        {
+            return status;
+        }
+        line1 = dynamic_line.view();
+    }
+    if (!line1.empty())
+    {
+        if (auto status = draw_text_px_clipped(*compositor_, surface_, text_x, 84, text_width, line1, app_muted,
+                                               app_background);
+            !status.ok())
+        {
+            return status;
+        }
+    }
+    if (service_id_.view() == "gui.app.tasks" && topology_ != nullptr)
+    {
+        dynamic_line.clear();
+        if (auto status = assign_metric(dynamic_line, "cpus online ", topology_->online_count()); !status.ok())
+        {
+            return status;
+        }
+        line2 = dynamic_line.view();
+    }
+    if (!line2.empty())
+    {
+        if (auto status = draw_text_px_clipped(*compositor_, surface_, text_x, 102, text_width, line2, app_muted,
+                                               app_background);
+            !status.ok())
+        {
+            return status;
+        }
+    }
+    if (!line3.empty())
+    {
+        if (auto status = draw_text_px_clipped(*compositor_, surface_, text_x, 120, text_width, line3, app_muted,
+                                               app_background);
+            !status.ok())
+        {
+            return status;
+        }
+    }
+    if (!command_.empty())
+    {
+        if (auto status = draw_text_px_clipped(*compositor_, surface_, 18,
+                                               height > 36 ? static_cast<i32>(height - 34) : 128,
+                                               width > 36 ? width - 36 : width, command_.view(), 0xfff2c866u,
+                                               app_background);
+            !status.ok())
+        {
+            return status;
+        }
+    }
+    if (auto status = draw_text_px_clipped(*compositor_, surface_, 18,
+                                           height > 18 ? static_cast<i32>(height - 18) : 140,
+                                           width > 36 ? width - 36 : width, load_path_.view(), app_muted,
+                                           app_background);
         !status.ok())
     {
         return status;
