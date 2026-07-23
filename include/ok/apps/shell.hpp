@@ -110,6 +110,7 @@ class KernelDebugShell final
     Status command_clear();
     Status command_uname();
     Status command_status();
+    Status command_system(std::string_view args);
     Status command_memory();
     Status command_processes(std::string_view args);
     Status command_drivers();

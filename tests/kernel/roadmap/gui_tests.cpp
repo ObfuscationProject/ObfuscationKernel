@@ -38,6 +38,185 @@ bool file_contains(const fs::FileBuffer &file, std::string_view needle)
     return false;
 }
 
+std::span<const std::byte> bytes_for(std::string_view text)
+{
+    return {reinterpret_cast<const std::byte *>(text.data()), text.size()};
+}
+
+void write_le16(std::span<std::byte> out, usize offset, u16 value)
+{
+    out[offset] = static_cast<std::byte>(value & 0xffu);
+    out[offset + 1] = static_cast<std::byte>((value >> 8) & 0xffu);
+}
+
+void write_le32(std::span<std::byte> out, usize offset, u32 value)
+{
+    write_le16(out, offset, static_cast<u16>(value & 0xffffu));
+    write_le16(out, offset + 2, static_cast<u16>((value >> 16) & 0xffffu));
+}
+
+void write_le64(std::span<std::byte> out, usize offset, u64 value)
+{
+    write_le32(out, offset, static_cast<u32>(value & 0xffff'ffffu));
+    write_le32(out, offset + 4, static_cast<u32>((value >> 32) & 0xffff'ffffu));
+}
+
+u16 elf_machine_for(arch::Architecture architecture)
+{
+    switch (architecture)
+    {
+    case arch::Architecture::i386:
+        return 0x03;
+    case arch::Architecture::aarch64:
+        return 0xb7;
+    case arch::Architecture::arm32:
+        return 0x28;
+    case arch::Architecture::rv64:
+    case arch::Architecture::rv32:
+        return 0xf3;
+    case arch::Architecture::mips:
+    case arch::Architecture::mips64:
+        return 0x08;
+    case arch::Architecture::ppc:
+        return 0x14;
+    case arch::Architecture::loongarch64:
+        return 0x102;
+    case arch::Architecture::x86_64:
+        return 0x3e;
+    }
+    return 0x3e;
+}
+
+template <usize ImageSize = 128>
+std::array<std::byte, ImageSize> make_test_elf(arch::Architecture architecture)
+{
+    static_assert(ImageSize >= 128);
+    std::array<std::byte, ImageSize> image{};
+    auto bytes = std::span<std::byte>(image.data(), image.size());
+    bytes[0] = std::byte{0x7f};
+    bytes[1] = std::byte{'E'};
+    bytes[2] = std::byte{'L'};
+    bytes[3] = std::byte{'F'};
+    bytes[4] = std::byte{2};
+    bytes[5] = std::byte{1};
+    write_le16(bytes, 16, 2);
+    write_le16(bytes, 18, elf_machine_for(architecture));
+    write_le64(bytes, 24, 0x400000);
+    write_le64(bytes, 32, 64);
+    write_le16(bytes, 54, 56);
+    write_le16(bytes, 56, 1);
+    write_le32(bytes, 64, 1);
+    write_le32(bytes, 68, 0x5);
+    write_le64(bytes, 72, 120);
+    write_le64(bytes, 80, 0x400000);
+    write_le64(bytes, 88, 0x400000);
+    write_le64(bytes, 96, 4);
+    write_le64(bytes, 104, 0x2000);
+    write_le64(bytes, 112, 0x1000);
+    bytes[120] = std::byte{0xc3};
+    return image;
+}
+
+constexpr std::string_view os_system_gui_module_path{"/boot/modules/system-gui.okmod"};
+constexpr std::string_view os_system_gui_module_text{
+    "OKMOD\n"
+    "name=system-gui\n"
+    "version=1\n"
+    "vermagic=okernel-cxx-oop\n"
+    "require=gui.compositor\n"
+    "require=gui.desktop\n"
+    "export=gui.system-desktop\n"
+    "param=entry:oop\n"
+    "param=class:desktop\n"
+    "param=brand:ObfuscationOS\n"
+    "param=title:ObfuscationOS Login\n"
+    "param=subtitle:choose root or user\n"
+    "signature=system-gui-dev\n"};
+
+Status ensure_test_directory(Kernel &kernel, std::string_view path)
+{
+    auto stat = kernel.vfs().stat(path);
+    if (stat)
+    {
+        return stat.value().type == fs::NodeType::directory ? Status::success()
+                                                            : Status::invalid_argument("test path is not a directory");
+    }
+    if (stat.status().code() != StatusCode::not_found)
+    {
+        return stat.status();
+    }
+    return kernel.vfs().create(path, fs::NodeType::directory);
+}
+
+Status stage_os_system_gui_module(Kernel &kernel)
+{
+    if (auto status = ensure_test_directory(kernel, "/boot"); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = ensure_test_directory(kernel, "/boot/modules"); !status.ok())
+    {
+        return status;
+    }
+    auto stat = kernel.vfs().stat(os_system_gui_module_path);
+    if (!stat)
+    {
+        if (stat.status().code() != StatusCode::not_found)
+        {
+            return stat.status();
+        }
+        if (auto status = kernel.vfs().create(os_system_gui_module_path, fs::NodeType::regular); !status.ok())
+        {
+            return status;
+        }
+    }
+    return kernel.vfs().write_file(os_system_gui_module_path, bytes_for(os_system_gui_module_text));
+}
+
+Status stage_system_gui_user_apps(Kernel &kernel)
+{
+    const auto elf = make_test_elf<8192>(kernel.arch().architecture());
+    constexpr std::string_view paths[] = {"/oksh", "/settings", "/tasks", "/notes", "/about"};
+    for (const auto path : paths)
+    {
+        auto stat = kernel.simplefs().stat(path);
+        if (!stat)
+        {
+            if (stat.status().code() != StatusCode::not_found)
+            {
+                return stat.status();
+            }
+            if (auto status = kernel.simplefs().create(path, fs::NodeType::regular); !status.ok())
+            {
+                return status;
+            }
+        }
+        if (auto status = kernel.simplefs().write_file(path, std::span<const std::byte>{elf.data(), elf.size()});
+            !status.ok())
+        {
+            return status;
+        }
+    }
+    return Status::success();
+}
+
+Result<gui::SurfaceInfo> find_surface_by_title(Kernel &kernel, std::string_view title)
+{
+    for (gui::SurfaceId id = 1; id < 64; ++id)
+    {
+        auto info = kernel.gui().compositor().surface_info(id);
+        if (!info)
+        {
+            continue;
+        }
+        if (info.value().title == title)
+        {
+            return info.value();
+        }
+    }
+    return Status::not_found("surface title was not found");
+}
+
 bool contains_text(std::string_view haystack, std::string_view needle)
 {
     if (needle.empty())
@@ -78,6 +257,18 @@ usize process_count_named(const sched::Scheduler &scheduler, std::string_view na
         }
     }
     return count;
+}
+
+Result<sched::ProcessId> first_process_named(const sched::Scheduler &scheduler, std::string_view name)
+{
+    for (const auto &process : scheduler.processes())
+    {
+        if (process.name() == name)
+        {
+            return process.pid();
+        }
+    }
+    return Status::not_found("process name was not found");
 }
 
 Status append_unsigned(FixedString<32> &out, u64 value)
@@ -125,19 +316,33 @@ Status append_unsigned(FixedString<32> &out, u64 value)
     return Status::success();
 }
 
-Status release_shell_surface(Kernel &kernel)
+Status release_boot_gui_surfaces(Kernel &kernel)
 {
     const auto id = kernel.debug_shell().gui_surface_id();
     if (id == 0 || !kernel.gui().compositor().surface_info(id))
     {
+        auto dashboard = find_surface_by_title(kernel, "ObfuscationOS Login");
+        if (dashboard)
+        {
+            return kernel.gui().compositor().destroy_surface(dashboard.value().id);
+        }
         return Status::success();
     }
-    return kernel.gui().compositor().destroy_surface(id);
+    if (auto status = kernel.gui().compositor().destroy_surface(id); !status.ok())
+    {
+        return status;
+    }
+    auto dashboard = find_surface_by_title(kernel, "ObfuscationOS Login");
+    if (dashboard)
+    {
+        return kernel.gui().compositor().destroy_surface(dashboard.value().id);
+    }
+    return Status::success();
 }
 
 Status test_gui_compositor_draws_surfaces(Kernel &kernel)
 {
-    if (auto status = release_shell_surface(kernel); !status.ok())
+    if (auto status = release_boot_gui_surfaces(kernel); !status.ok())
     {
         return status;
     }
@@ -243,7 +448,7 @@ Status test_gui_text_uses_bitmap_font(Kernel &kernel)
 
 Status test_gui_surface_management_api(Kernel &kernel)
 {
-    if (auto status = release_shell_surface(kernel); !status.ok())
+    if (auto status = release_boot_gui_surfaces(kernel); !status.ok())
     {
         return status;
     }
@@ -377,7 +582,7 @@ Status test_gui_surface_management_api(Kernel &kernel)
 
 Status test_gui_mouse_interacts_with_windows(Kernel &kernel)
 {
-    if (auto status = release_shell_surface(kernel); !status.ok())
+    if (auto status = release_boot_gui_surfaces(kernel); !status.ok())
     {
         return status;
     }
@@ -592,7 +797,7 @@ Status test_gui_mouse_interacts_with_windows(Kernel &kernel)
 
 Status test_kernel_gui_mouse_position_uses_absolute_pointer(Kernel &kernel)
 {
-    if (auto status = release_shell_surface(kernel); !status.ok())
+    if (auto status = release_boot_gui_surfaces(kernel); !status.ok())
     {
         return status;
     }
@@ -852,6 +1057,301 @@ Status test_kernel_gui_is_started(Kernel &kernel)
     return Status::success();
 }
 
+Status test_system_gui_module_loads_after_boot(Kernel &kernel)
+{
+    if (kernel.kernel_modules().find("system-gui") != nullptr ||
+        kernel.kernel_modules().services().contains("gui.system-desktop"))
+    {
+        return Status::fault("system GUI module was loaded before the OS loader ran");
+    }
+    if (auto status = stage_os_system_gui_module(kernel); !status.ok())
+    {
+        return status;
+    }
+
+    syscall::Request request{.number = syscall::Number::load_module};
+    request.args[0] = reinterpret_cast<u64>(os_system_gui_module_path.data());
+    auto response = kernel.syscalls().dispatch(request);
+    auto *registered = kernel.kernel_modules().find("system-gui");
+    auto module_file = kernel.vfs().read_file(os_system_gui_module_path);
+    if (!response.status.ok() || response.value != 0 || !module_file || registered == nullptr ||
+        registered->manifest().built_in || registered->state() != ModuleState::started ||
+        !kernel.kernel_modules().services().contains("gui.system-desktop"))
+    {
+        return Status::fault("system GUI module was not loaded by the OS module loader syscall");
+    }
+    if (!file_contains(module_file.value(), "name=system-gui") ||
+        !file_contains(module_file.value(), "require=gui.compositor") ||
+        !file_contains(module_file.value(), "require=gui.desktop") ||
+        !file_contains(module_file.value(), "export=gui.system-desktop") ||
+        !file_contains(module_file.value(), "param=entry:oop") ||
+        !file_contains(module_file.value(), "param=class:desktop"))
+    {
+        return Status::fault("system desktop OKMOD package metadata is incomplete");
+    }
+
+    auto *desktop = kernel.loaded_gui_desktop_module();
+    auto info = find_surface_by_title(kernel, "ObfuscationOS Login");
+    if (desktop == nullptr || desktop->desktop_state() != ExternalGuiDesktopState::greeter ||
+        kernel.gui().compositor().shell_mode() != gui::GuiShellMode::system_greeter || !info ||
+        info.value().title != "ObfuscationOS Login" || info.value().app != gui::TaskbarApp::none ||
+        info.value().chrome != gui::SurfaceChrome::plain ||
+        info.value().bounds.width != driver::framebuffer_width ||
+        info.value().bounds.height != driver::framebuffer_height ||
+        kernel.gui().compositor().last_present_checksum() == 0)
+    {
+        return Status::fault("system GUI did not stop at the pre-desktop root greeter");
+    }
+
+    const auto taskbar_y = static_cast<i32>(driver::framebuffer_height - gui::taskbar_height + 6);
+    auto launcher = kernel.gui().compositor().taskbar_launcher_at(gui::task_monitor_launcher_x + 4, taskbar_y);
+    if (launcher || launcher.status().code() != StatusCode::not_found)
+    {
+        return Status::fault("kernel taskbar was visible before system GUI login");
+    }
+    if (find_surface_by_title(kernel, "Tiny Shell") || find_surface_by_title(kernel, "System Settings") ||
+        find_surface_by_title(kernel, "Task Manager") || find_surface_by_title(kernel, "About ObfuscationOS") ||
+        find_surface_by_title(kernel, "Notes"))
+    {
+        return Status::fault("system GUI apps were visible before login");
+    }
+    return Status::success();
+}
+
+Status test_system_gui_mouse_login_selects_user_and_starts_desktop_shell(Kernel &kernel)
+{
+    auto *desktop = kernel.loaded_gui_desktop_module();
+    if (desktop == nullptr || desktop->desktop_state() != ExternalGuiDesktopState::greeter)
+    {
+        return Status::fault("system GUI greeter was not ready before login");
+    }
+    if (auto status = stage_system_gui_user_apps(kernel); !status.ok())
+    {
+        return status;
+    }
+
+    constexpr u32 card_width = driver::framebuffer_width > 360 ? 360u : driver::framebuffer_width - 24u;
+    constexpr u32 card_height = 178u;
+    const auto card_x = static_cast<i32>((driver::framebuffer_width - card_width) / 2);
+    const auto card_y = static_cast<i32>((driver::framebuffer_height - card_height) / 2);
+    const auto dropdown_x = card_x + 104;
+    const auto dropdown_y = card_y + 82;
+    const auto user_option_x = dropdown_x;
+    const auto user_option_y = card_y + 116;
+    const auto login_x = card_x + static_cast<i32>(card_width / 2);
+    const auto login_y = card_y + 148;
+
+    if (auto status = kernel.handle_gui_mouse_position(dropdown_x, dropdown_y, true); !status.ok())
+    {
+        return Status::fault("system GUI dropdown press failed");
+    }
+    if (auto status = kernel.handle_gui_mouse_position(dropdown_x, dropdown_y, false); !status.ok())
+    {
+        return Status::fault("system GUI dropdown release failed");
+    }
+    if (auto status = kernel.handle_gui_mouse_position(user_option_x, user_option_y, true); !status.ok())
+    {
+        return Status::fault("system GUI dropdown user press failed");
+    }
+    if (auto status = kernel.handle_gui_mouse_position(user_option_x, user_option_y, false); !status.ok())
+    {
+        return Status::fault("system GUI dropdown user release failed");
+    }
+    if (auto status = kernel.handle_gui_mouse_position(login_x, login_y, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse_position(login_x, login_y, false); !status.ok())
+    {
+        return Status::fault("system GUI login release failed");
+    }
+    desktop = kernel.loaded_gui_desktop_module();
+    auto shell = desktop != nullptr ? kernel.gui().compositor().surface_info(desktop->dashboard_surface())
+                                    : Result<gui::SurfaceInfo>{Status::not_found("missing desktop")};
+    if (desktop == nullptr || desktop->desktop_state() != ExternalGuiDesktopState::desktop ||
+        kernel.gui().compositor().shell_mode() != gui::GuiShellMode::system_shell ||
+        kernel.posix().user_credentials().euid != user::default_user_uid || !shell ||
+        shell.value().title != "ObfuscationOS Desktop" || shell.value().app != gui::TaskbarApp::none ||
+        shell.value().chrome != gui::SurfaceChrome::plain ||
+        kernel.kernel_modules().services().contains("gui.app.shell") ||
+        kernel.kernel_modules().services().contains("gui.app.settings") ||
+        kernel.kernel_modules().services().contains("gui.app.tasks") ||
+        kernel.kernel_modules().services().contains("gui.app.about") ||
+        kernel.kernel_modules().services().contains("gui.app.notes") ||
+        kernel.kernel_modules().find("system-shell") != nullptr ||
+        kernel.kernel_modules().find("system-settings") != nullptr ||
+        kernel.kernel_modules().find("system-tasks") != nullptr ||
+        kernel.kernel_modules().find("system-about") != nullptr ||
+        kernel.kernel_modules().find("system-notes") != nullptr)
+    {
+        return Status::fault("system GUI login loaded app modules instead of user ELF apps");
+    }
+    const auto taskbar_y = static_cast<i32>(driver::framebuffer_height - gui::taskbar_height + 6);
+    auto launcher = kernel.gui().compositor().taskbar_launcher_at(gui::task_monitor_launcher_x + 4, taskbar_y);
+    if (launcher || launcher.status().code() != StatusCode::not_found)
+    {
+        return Status::fault("kernel taskbar was still active after system GUI took desktop ownership");
+    }
+    if (!find_surface_by_title(kernel, "Tiny Shell") ||
+        !find_surface_by_title(kernel, "System Settings") ||
+        !find_surface_by_title(kernel, "Task Manager") ||
+        !find_surface_by_title(kernel, "About ObfuscationOS") || !find_surface_by_title(kernel, "Notes"))
+    {
+        return Status::fault("system GUI desktop did not show app windows after login");
+    }
+    if (process_count_named(kernel.scheduler(), "app:oksh") != 1 ||
+        process_count_named(kernel.scheduler(), "app:settings") != 1 ||
+        process_count_named(kernel.scheduler(), "app:tasks") != 1 ||
+        process_count_named(kernel.scheduler(), "app:notes") != 1 ||
+        process_count_named(kernel.scheduler(), "app:about") != 1)
+    {
+        return Status::fault("system GUI desktop did not launch one user ELF process per app");
+    }
+    auto oksh = first_process_named(kernel.scheduler(), "app:oksh");
+    const auto *oksh_process = oksh ? kernel.scheduler().find(oksh.value()) : nullptr;
+    if (oksh_process == nullptr || oksh_process->execution() != sched::ProcessExecution::user_process ||
+        oksh_process->credentials().euid != user::default_user_uid || oksh_process->credentials().kernel_space)
+    {
+        return Status::fault("system GUI shell app was not launched as the selected user's ELF process");
+    }
+    return kernel.posix().set_credentials(user::root_credentials());
+}
+
+Status test_system_gui_dock_uses_system_app_launchers(Kernel &kernel)
+{
+    auto *desktop = kernel.loaded_gui_desktop_module();
+    if (desktop == nullptr || desktop->desktop_state() != ExternalGuiDesktopState::desktop)
+    {
+        return Status::fault("system GUI desktop was not ready for dock input");
+    }
+    auto shell_app = find_surface_by_title(kernel, "Tiny Shell");
+    auto task_app = find_surface_by_title(kernel, "Task Manager");
+    if (!shell_app || !task_app)
+    {
+        return Status::fault("system Shell and Task Manager apps were not loaded before dock interaction");
+    }
+
+    const auto shell_surface = kernel.debug_shell().gui_surface_id();
+    const auto files_surface = kernel.file_manager().surface_id();
+    const auto tasks_surface = kernel.task_manager().surface_id();
+    const auto system_shell_x = 32;
+    const auto dock_y = static_cast<i32>(driver::framebuffer_height - 18);
+    if (auto status = kernel.handle_gui_mouse_position(system_shell_x, dock_y, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse_position(system_shell_x, dock_y, false); !status.ok())
+    {
+        return status;
+    }
+
+    auto active = kernel.gui().compositor().surface_info(kernel.gui().compositor().active_surface());
+    if (!active || active.value().title != "Tiny Shell")
+    {
+        return Status::fault("system dock did not focus the Tiny Shell app launcher");
+    }
+    if (kernel.debug_shell().gui_surface_id() != shell_surface || kernel.file_manager().surface_id() != files_surface ||
+        kernel.task_manager().surface_id() != tasks_surface)
+    {
+        return Status::fault("system dock opened a kernel GUI app instead of a system app");
+    }
+    if (process_count_named(kernel.scheduler(), "app:oksh") != 1)
+    {
+        return Status::fault("system dock relaunched or lost the Tiny Shell ELF process while focusing it");
+    }
+    return Status::success();
+}
+
+Status test_system_gui_apps_are_user_elf_processes(Kernel &kernel)
+{
+    auto settings = first_process_named(kernel.scheduler(), "app:settings");
+    if (!settings)
+    {
+        return settings.status();
+    }
+    const auto settings_dock_x = 157;
+    const auto settings_dock_y = static_cast<i32>(driver::framebuffer_height - 18);
+    if (auto status = kernel.handle_gui_mouse_position(settings_dock_x, settings_dock_y, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse_position(settings_dock_x, settings_dock_y, false); !status.ok())
+    {
+        return status;
+    }
+
+    auto info = find_surface_by_title(kernel, "System Settings");
+    const auto *process = kernel.scheduler().find(settings.value());
+    if (!info || process == nullptr || process->execution() != sched::ProcessExecution::user_process ||
+        process->credentials().kernel_space || process->credentials().euid != user::default_user_uid)
+    {
+        return Status::fault("System Settings was not backed by a selected-user ELF process");
+    }
+    if (kernel.kernel_modules().services().contains("gui.app.settings") ||
+        kernel.kernel_modules().find("system-settings") != nullptr)
+    {
+        return Status::fault("System Settings was still registered as a GUI app module");
+    }
+
+    const auto close_x = info.value().bounds.x + static_cast<i32>(info.value().bounds.width) - 10;
+    const auto close_y = info.value().bounds.y + 5;
+    auto hit = kernel.gui().compositor().surface_at(close_x, close_y);
+    if (!hit || hit.value() != info.value().id)
+    {
+        return Status::fault("System Settings close coordinate did not hit its surface");
+    }
+    if (auto status = kernel.gui().compositor().set_pointer_position(close_x, close_y);
+        !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, true); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.handle_gui_mouse(0, 0, false); !status.ok())
+    {
+        return status;
+    }
+    if (find_surface_by_title(kernel, "System Settings"))
+    {
+        return Status::fault("closing a System GUI ELF app did not close its surface");
+    }
+    if (kernel.scheduler().find(settings.value()) != nullptr)
+    {
+        return Status::fault("closing a System GUI ELF app did not close its user process");
+    }
+    return Status::success();
+}
+
+Status test_close_debug_gui_restores_system_desktop(Kernel &kernel)
+{
+    auto *desktop = kernel.loaded_gui_desktop_module();
+    if (desktop == nullptr || desktop->dashboard_surface() == 0)
+    {
+        return Status::fault("system desktop module was not available for debug cleanup");
+    }
+    if (auto status = kernel.gui().compositor().destroy_surface(desktop->dashboard_surface()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.debug_shell().show_gui(); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = kernel.close_debug_gui(); !status.ok())
+    {
+        return status;
+    }
+
+    auto info = find_surface_by_title(kernel, "ObfuscationOS Desktop");
+    if (!info || kernel.debug_shell().gui_open())
+    {
+        return Status::fault("debug GUI cleanup did not restore the system desktop");
+    }
+    return Status::success();
+}
+
 Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
 {
     auto &compositor = kernel.gui().compositor();
@@ -956,9 +1456,12 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
         return status;
     }
     info = compositor.surface_info(kernel.file_manager().surface_id());
+    const auto expected_maximized_height = compositor.shell_mode() == gui::GuiShellMode::kernel_shell
+                                               ? driver::framebuffer_height - gui::taskbar_height
+                                               : driver::framebuffer_height;
     if (!info || info.value().window_state != gui::WindowState::maximized ||
         info.value().bounds.width != driver::framebuffer_width ||
-        info.value().bounds.height != driver::framebuffer_height - gui::taskbar_height ||
+        info.value().bounds.height != expected_maximized_height ||
         kernel.file_manager().render_count() <= resize_render_count)
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
@@ -1024,14 +1527,40 @@ Status test_kernel_file_manager_draws_vfs(Kernel &kernel)
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
         return status;
     }
-    auto killed = kernel.debug_shell().execute(kill_command.view());
-    const auto *killed_process = kernel.scheduler().find(manager_pid);
-    if (!killed || !killed.value().empty() || killed_process != nullptr ||
-        kernel.file_manager().surface_id() != 0 || kernel.file_manager().process_id() != 0 ||
-        compositor.surface_info(manager_surface))
+    auto shell_kernel = kernel.debug_shell().execute("su kernel");
+    if (!shell_kernel || !contains_text(shell_kernel.value(), "kernel"))
     {
         static_cast<void>(kernel.posix().set_credentials(saved_credentials));
-        return Status::fault("debug shell kill did not close the GUI file manager process");
+        return Status::fault("debug shell did not enter kernel session before killing GUI file manager process");
+    }
+    auto killed = kernel.debug_shell().execute(kill_command.view());
+    static_cast<void>(kernel.debug_shell().execute("exit"));
+    static_cast<void>(kernel.posix().set_credentials(user::kernel_credentials()));
+    const auto *killed_process = kernel.scheduler().find(manager_pid);
+    if (!killed)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return killed.status();
+    }
+    if (!killed.value().empty())
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("debug shell kill returned unexpected output for GUI file manager process");
+    }
+    if (killed_process != nullptr)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("debug shell kill did not remove the GUI file manager scheduler process");
+    }
+    if (kernel.file_manager().surface_id() != 0 || kernel.file_manager().process_id() != 0)
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("debug shell kill did not clear the active GUI file manager state");
+    }
+    if (compositor.surface_info(manager_surface))
+    {
+        static_cast<void>(kernel.posix().set_credentials(saved_credentials));
+        return Status::fault("debug shell kill did not destroy the GUI file manager surface");
     }
     if (auto status = kernel.open_file_manager("/"); !status.ok())
     {
@@ -1345,9 +1874,12 @@ Status test_shell_renders_to_gui(Kernel &kernel)
         return status;
     }
     surface = kernel.gui().compositor().surface_info(kernel.debug_shell().gui_surface_id());
+    const auto expected_shell_height = kernel.gui().compositor().shell_mode() == gui::GuiShellMode::kernel_shell
+                                           ? driver::framebuffer_height - gui::taskbar_height
+                                           : driver::framebuffer_height;
     if (!surface || surface.value().window_state != gui::WindowState::maximized ||
         surface.value().bounds.width != driver::framebuffer_width ||
-        surface.value().bounds.height != driver::framebuffer_height - gui::taskbar_height)
+        surface.value().bounds.height != expected_shell_height)
     {
         return Status::fault("debug shell GUI maximize button did not resize and redraw");
     }
@@ -1402,7 +1934,7 @@ Status test_shell_renders_to_gui(Kernel &kernel)
         return status;
     }
     auto restored_first_user = kernel.debug_shell().execute("exit");
-    if (!restored_first_user || restored_first_user.value() != "kernel\n")
+    if (!restored_first_user || restored_first_user.value() != "root\n")
     {
         return Status::fault("GUI shell did not restore and exit its per-window user session");
     }
@@ -1467,9 +1999,14 @@ Status test_shell_renders_to_gui(Kernel &kernel)
         return Status::fault("debug shell GUI clear did not redraw the prompt");
     }
     auto reset_user = kernel.debug_shell().execute("exit");
-    if (!reset_user || reset_user.value() != "kernel\n")
+    if (!reset_user || !reset_user.value().empty() || kernel.debug_shell().gui_open())
     {
-        return Status::fault("debug shell GUI session did not reset after user process test");
+        return Status::fault("debug shell GUI session did not close after user process test");
+    }
+    auto root_user = kernel.debug_shell().execute("whoami");
+    if (!root_user || root_user.value() != "root\n")
+    {
+        return Status::fault("debug shell GUI session did not reset to the root default");
     }
     return Status::success();
 }
@@ -1618,6 +2155,26 @@ Status run_gui_roadmap_tests(Kernel &kernel, KernelTestReport &report)
         return status;
     }
     if (auto status = test_kernel_gui_is_started(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_system_gui_module_loads_after_boot(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_system_gui_mouse_login_selects_user_and_starts_desktop_shell(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_system_gui_dock_uses_system_app_launchers(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_system_gui_apps_are_user_elf_processes(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_close_debug_gui_restores_system_desktop(kernel); !status.ok())
     {
         return status;
     }

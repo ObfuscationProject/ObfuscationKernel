@@ -680,6 +680,10 @@ Status KernelDebugShell::command_users()
         {
             continue;
         }
+        if (account->kernel_space && session_user_name_.view() != "kernel")
+        {
+            continue;
+        }
         if (auto status = append(account->name.view()); !status.ok())
         {
             return status;
@@ -907,30 +911,21 @@ Status KernelDebugShell::command_exit(std::string_view args)
         return command_whoami();
     }
 
-    const auto active = kernel_->posix().user_credentials();
+    auto active = kernel_->posix().user_credentials();
     if (active.kernel_space || session_user_name_.view() == "kernel")
     {
         return close_gui();
     }
 
-    auto kernel = kernel_->user_space().credentials_for("kernel");
-    if (!kernel)
-    {
-        return kernel.status();
-    }
-    if (auto status = kernel_->posix().set_credentials(kernel.value()); !status.ok())
+    if (auto status = kernel_->posix().set_credentials(user::root_credentials()); !status.ok())
     {
         return status;
     }
-    if (auto status = session_user_name_.assign("kernel"); !status.ok())
+    if (auto status = session_user_name_.assign("root"); !status.ok())
     {
         return status;
     }
-    if (auto status = refresh_process_credentials(); !status.ok())
-    {
-        return status;
-    }
-    return command_whoami();
+    return close_gui();
 }
 
 } // namespace ok

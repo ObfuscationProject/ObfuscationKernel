@@ -12,7 +12,7 @@ namespace ok::gui
 
 inline constexpr std::string_view gui_module_name{"kernel-gui"};
 inline constexpr std::string_view gui_service_id{"gui.compositor"};
-inline constexpr usize max_gui_surfaces = 8;
+inline constexpr usize max_gui_surfaces = 12;
 inline constexpr usize max_gui_title = 32;
 inline constexpr usize max_gui_crash_reason = 64;
 inline constexpr u32 max_gui_surface_width = driver::framebuffer_width;
@@ -21,8 +21,9 @@ inline constexpr usize max_gui_surface_pixels = max_gui_surface_width * max_gui_
 inline constexpr u32 gui_glyph_width = driver::BitmapFontRenderer::glyph_width + 1;
 inline constexpr u32 gui_glyph_height = driver::BitmapFontRenderer::glyph_height + 2;
 inline constexpr u32 taskbar_height = gui_glyph_height * 2 + 6;
-inline constexpr u32 taskbar_launcher_width = 60;
 inline constexpr u32 taskbar_icon_size = 18;
+inline constexpr u32 taskbar_launcher_width = 84;
+inline constexpr u32 task_monitor_launcher_x = 54;
 
 using SurfaceId = u16;
 
@@ -66,6 +67,19 @@ enum class TaskbarApp : u8
     task_monitor,
 };
 
+enum class GuiShellMode : u8
+{
+    kernel_shell,
+    system_greeter,
+    system_shell,
+};
+
+enum class SurfaceChrome : u8
+{
+    decorated,
+    plain,
+};
+
 enum class ScrollDirection : u8
 {
     previous,
@@ -105,6 +119,7 @@ struct SurfaceInfo
     bool visible{false};
     bool focused{false};
     WindowState window_state{WindowState::normal};
+    SurfaceChrome chrome{SurfaceChrome::decorated};
     TaskbarApp app{TaskbarApp::none};
     std::string_view title{};
 };
@@ -137,6 +152,8 @@ class GuiCompositor final
     Status set_visible(SurfaceId id, bool visible);
     Status set_title(SurfaceId id, std::string_view title);
     Status set_surface_app(SurfaceId id, TaskbarApp app);
+    Status set_surface_chrome(SurfaceId id, SurfaceChrome chrome);
+    Status set_shell_mode(GuiShellMode mode);
     Status move_surface(SurfaceId id, i32 x, i32 y);
     Status resize_surface(SurfaceId id, Rect bounds);
     Status raise_surface(SurfaceId id);
@@ -168,6 +185,10 @@ class GuiCompositor final
     [[nodiscard]] u64 last_present_checksum() const
     {
         return last_present_checksum_;
+    }
+    [[nodiscard]] GuiShellMode shell_mode() const
+    {
+        return shell_mode_;
     }
     [[nodiscard]] usize startup_animation_frames() const
     {
@@ -205,6 +226,7 @@ class GuiCompositor final
         u32 z_index{0};
         bool visible{true};
         WindowState window_state{WindowState::normal};
+        SurfaceChrome chrome{SurfaceChrome::decorated};
         TaskbarApp app{TaskbarApp::none};
         std::array<u32, max_gui_surface_pixels> pixels{};
     };
@@ -227,6 +249,7 @@ class GuiCompositor final
     StaticVector<Surface, max_gui_surfaces> surfaces_{};
     std::array<u32, max_gui_surface_pixels> frame_pixels_{};
     GuiState state_{GuiState::stopped};
+    GuiShellMode shell_mode_{GuiShellMode::kernel_shell};
     SurfaceId next_surface_id_{1};
     SurfaceId active_surface_id_{0};
     u32 next_z_index_{1};

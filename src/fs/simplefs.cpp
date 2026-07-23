@@ -301,9 +301,9 @@ Status SimpleDiskFileSystem::write_file(std::string_view path, std::span<const s
     {
         return status;
     }
-    if (data.size() > max_file_data)
+    if (data.size() > simplefs_max_file_data)
     {
-        return Status::overflow("SimpleFS file exceeds fixed kernel buffer size");
+        return Status::overflow("SimpleFS file exceeds maximum file size");
     }
     auto entry_index = find_entry(path);
     if (!entry_index)
@@ -407,6 +407,54 @@ Result<FileBuffer> SimpleDiskFileSystem::read_file(std::string_view path)
         copied += count;
     }
     return out;
+}
+
+Result<usize> SimpleDiskFileSystem::read_file_into(std::string_view path, std::span<std::byte> out)
+{
+    smp::ScopedSpinLock guard(lock_);
+    if (auto status = ensure_mounted(); !status.ok())
+    {
+        return status;
+    }
+    auto entry_index = find_entry(path);
+    if (!entry_index)
+    {
+        return entry_index.status();
+    }
+    auto entry = read_entry(entry_index.value());
+    if (!entry)
+    {
+        return entry.status();
+    }
+    if (entry.value().type != NodeType::regular && entry.value().type != NodeType::device)
+    {
+        return Status::invalid_argument("SimpleFS entry is not readable");
+    }
+    if (entry.value().size > out.size())
+    {
+        return Status::overflow("SimpleFS file exceeds caller buffer size");
+    }
+
+    Block block{};
+    usize copied = 0;
+    const auto size = static_cast<usize>(entry.value().size);
+    for (u32 block_index = 0; block_index < entry.value().block_count && copied < size; ++block_index)
+    {
+        if (auto status = device_->read_blocks(entry.value().start_block + block_index,
+                                               std::span<std::byte>(block.data(), block.size()));
+            !status.ok())
+        {
+            return status;
+        }
+        const auto remaining = size - copied;
+        const auto count = remaining < block.size() ? remaining : block.size();
+        for (usize i = 0; i < count; ++i)
+        {
+            out[copied + i] = block[i];
+        }
+        copied += count;
+    }
+    return copied;
 }
 
 Result<Metadata> SimpleDiskFileSystem::stat(std::string_view path)

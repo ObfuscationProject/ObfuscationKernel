@@ -770,6 +770,16 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
         }
     }
 
+    if (auto status = syscalls_.register_callback(
+            syscall::Number::load_module, "load_module", this, [](void *context, const syscall::Request &request) {
+                return status_response(
+                    static_cast<Kernel *>(context)->load_external_kernel_module(bounded_c_string(request.args[0])));
+            });
+        !status.ok())
+    {
+        return status;
+    }
+
     return syscalls_.register_callback(
         syscall::Number::ok_debug, "ok_debug", nullptr, [](void *, const syscall::Request &request) {
             return syscall::Response{.value = static_cast<i64>(request.args[0]), .status = Status::success()};

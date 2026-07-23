@@ -83,6 +83,10 @@ void emit_failure(const KernelDebugSink &sink, Status status)
     emit(sink, "\n");
 }
 
+constexpr std::string_view boot_gui_modules[] = {
+    "/boot/modules/system-gui.okmod",
+};
+
 void emit_display_text(const KernelDebugSink &sink, std::string_view text)
 {
     usize line_start = 0;
@@ -101,7 +105,7 @@ void emit_display_text(const KernelDebugSink &sink, std::string_view text)
     }
 }
 
-void emit_roadmap_markers(const KernelDebugSink &sink, Kernel &kernel)
+[[maybe_unused]] void emit_roadmap_markers(const KernelDebugSink &sink, Kernel &kernel)
 {
     const auto &report = kernel.test_report();
     if (report.modules)
@@ -445,7 +449,33 @@ Status ok_gui_close_debug_surfaces()
     {
         return Status::not_initialized("kernel is not booted");
     }
-    return kernel.close_debug_gui();
+    if (auto status = kernel.close_debug_gui(); !status.ok())
+    {
+        return status;
+    }
+    return kernel.posix().set_credentials(user::root_credentials());
+}
+
+Status ok_load_boot_gui_modules()
+{
+    Kernel &kernel = kernel_instance();
+    if (!kernel.booted())
+    {
+        return Status::not_initialized("kernel is not booted");
+    }
+    for (const auto path : boot_gui_modules)
+    {
+        auto status = kernel.load_external_kernel_module(path);
+        if (!status.ok() && status.code() != StatusCode::not_found)
+        {
+            return status;
+        }
+    }
+    if (auto status = kernel.close_debug_gui(); !status.ok())
+    {
+        return status;
+    }
+    return kernel.posix().set_credentials(user::root_credentials());
 }
 
 SystemPowerAction ok_system_power_action()

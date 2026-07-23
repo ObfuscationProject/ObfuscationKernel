@@ -101,8 +101,8 @@ struct SystemInfo
 
 struct UnameInfo
 {
-    FixedString<32> sysname{"ObfuscationKernel"};
-    FixedString<32> nodename{"okernel"};
+    FixedString<32> sysname{"ObfuscationOS"};
+    FixedString<32> nodename{"obfuscationos"};
     FixedString<32> release{"0.1.0"};
     FixedString<32> version{"debug"};
     FixedString<32> machine{"unknown"};

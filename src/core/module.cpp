@@ -1213,6 +1213,16 @@ Status ModuleManager::start_all()
     return Status::success();
 }
 
+Status ModuleManager::start_registered_module(std::string_view name)
+{
+    auto *module = find(name);
+    if (module == nullptr)
+    {
+        return Status::not_found("module is not registered");
+    }
+    return start_module(*module);
+}
+
 Status ModuleManager::restart_module(std::string_view name)
 {
     auto *module = find(name);

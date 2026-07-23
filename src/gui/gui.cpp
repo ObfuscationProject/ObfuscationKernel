@@ -161,6 +161,19 @@ enum class WindowControl : u8
     return tab || border || handle || (body && ((local_x + local_y) % 7u == 0));
 }
 
+[[nodiscard]] bool task_monitor_icon_pixel(u32 local_x, u32 local_y)
+{
+    const bool frame = (local_x >= 3 && local_x <= 15 && (local_y == 4 || local_y == 14)) ||
+                       (local_y >= 4 && local_y <= 14 && (local_x == 3 || local_x == 15));
+    const bool cpu = local_x >= 6 && local_x <= 8 && local_y >= 9 && local_y <= 13;
+    const bool io = local_x >= 10 && local_x <= 12 && local_y >= 7 && local_y <= 13;
+    const bool pulse = (local_y == 8 && local_x >= 5 && local_x <= 6) ||
+                       (local_y == 10 && local_x >= 7 && local_x <= 8) ||
+                       (local_y == 6 && local_x >= 9 && local_x <= 10) ||
+                       (local_y == 11 && local_x >= 11 && local_x <= 13);
+    return frame || cpu || io || pulse;
+}
+
 [[nodiscard]] u32 taskbar_launcher_pixel_color(u32 height, u32 x, u32 y, TaskbarApp app, bool open, bool active)
 {
     const auto taskbar_top = height > taskbar_height ? height - taskbar_height : 0;
@@ -169,7 +182,15 @@ enum class WindowControl : u8
         return 0;
     }
 
-    const u32 left = app == TaskbarApp::debug_shell ? shell_launcher_x : file_manager_launcher_x;
+    u32 left = shell_launcher_x;
+    if (app == TaskbarApp::file_manager)
+    {
+        left = file_manager_launcher_x;
+    }
+    else if (app == TaskbarApp::task_monitor)
+    {
+        left = task_monitor_launcher_x;
+    }
     if (!point_in_rect(x, y, left, taskbar_top + 3, taskbar_icon_size, taskbar_icon_size))
     {
         return 0;
@@ -182,11 +203,19 @@ enum class WindowControl : u8
     {
         color = open ? taskbar_edge_color : 0xff40566au;
     }
-    const bool icon_pixel = app == TaskbarApp::debug_shell ? shell_icon_pixel(local_x, local_y)
-                                                           : file_manager_icon_pixel(local_x, local_y);
+    bool icon_pixel = shell_icon_pixel(local_x, local_y);
+    if (app == TaskbarApp::file_manager)
+    {
+        icon_pixel = file_manager_icon_pixel(local_x, local_y);
+    }
+    else if (app == TaskbarApp::task_monitor)
+    {
+        icon_pixel = task_monitor_icon_pixel(local_x, local_y);
+    }
     if (icon_pixel)
     {
-        color = app == TaskbarApp::debug_shell ? taskbar_icon_foreground : 0xffffcc66u;
+        color = app == TaskbarApp::debug_shell ? taskbar_icon_foreground
+                                               : (app == TaskbarApp::task_monitor ? 0xff44aa88u : 0xffffcc66u);
     }
     if (open && local_y + 2 >= taskbar_icon_size && local_x >= 5 && local_x <= 12)
     {
@@ -213,28 +242,29 @@ enum class WindowControl : u8
 
     const auto ix = static_cast<i32>(x);
     const auto iy = static_cast<i32>(y);
-    const auto center_y = static_cast<i32>(height / 2);
-    const auto o_center_x = static_cast<i32>(width / 2) - 86;
-    const auto k_left = static_cast<i32>(width / 2) + 16;
-
-    constexpr i32 outer_radius = 58;
-    constexpr i32 inner_radius = 34;
-    const auto odx = ix - o_center_x;
-    const auto ody = iy - center_y;
-    const auto distance = odx * odx + ody * ody;
-    const bool in_o = distance <= outer_radius * outer_radius && distance >= inner_radius * inner_radius;
-
-    const bool k_stem = ix >= k_left && ix <= k_left + 13 && iy >= center_y - 58 && iy <= center_y + 58;
-    const auto k_mid_x = k_left + 20;
-    const auto k_mid_y = center_y;
-    const bool k_upper = ix >= k_mid_x && ix <= k_mid_x + 80 && iy <= k_mid_y &&
-                         (iy >= k_mid_y - (ix - k_mid_x) - 13) && (iy <= k_mid_y - (ix - k_mid_x) + 13);
-    const bool k_lower = ix >= k_mid_x && ix <= k_mid_x + 80 && iy >= k_mid_y &&
-                         (iy >= k_mid_y + (ix - k_mid_x) - 13) && (iy <= k_mid_y + (ix - k_mid_x) + 13);
-
-    if (in_o || k_stem || k_upper || k_lower)
+    const auto center_x = static_cast<i32>(width / 2);
+    const auto center_y = static_cast<i32>((height - taskbar_height) / 2);
+    const bool hero_panel = ix >= center_x - 132 && ix <= center_x + 132 && iy >= center_y - 54 && iy <= center_y + 54;
+    const bool panel_edge = hero_panel &&
+                            (ix == center_x - 132 || ix == center_x + 132 || iy == center_y - 54 ||
+                             iy == center_y + 54);
+    const bool accent_line = hero_panel && ((ix - (center_x - 132)) + (iy - (center_y - 54))) % 31 == 0;
+    const bool warm_line = hero_panel && ((ix - (center_x - 132)) * 2 - (iy - (center_y - 54))) % 47 == 0;
+    if (panel_edge)
     {
-        return ((x + y) % 17u) < 4u ? 0xfff4d35eu : 0xff1d8f83u;
+        return taskbar_edge_color;
+    }
+    if (accent_line)
+    {
+        return 0xff1d8f83u;
+    }
+    if (warm_line)
+    {
+        return 0xfff4d35eu;
+    }
+    if (hero_panel)
+    {
+        return ((x / 12u + y / 12u) % 2u) == 0 ? 0xff0c1c27u : 0xff102536u;
     }
     if ((y % 24u) == 0 || (x % 64u) == 0)
     {
@@ -312,6 +342,7 @@ Status GuiCompositor::validate_bounds(Rect bounds) const
 void GuiCompositor::reset_surfaces()
 {
     surfaces_.clear();
+    shell_mode_ = GuiShellMode::kernel_shell;
     next_surface_id_ = 1;
     active_surface_id_ = 0;
     next_z_index_ = 1;
@@ -323,7 +354,9 @@ void GuiCompositor::reset_surfaces()
 Rect GuiCompositor::work_area_bounds() const
 {
     const auto mode = display_->mode();
-    const auto height = mode.height > taskbar_height ? mode.height - taskbar_height : mode.height;
+    const auto height = shell_mode_ == GuiShellMode::kernel_shell && mode.height > taskbar_height
+                            ? mode.height - taskbar_height
+                            : mode.height;
     return Rect{.x = 0, .y = 0, .width = mode.width, .height = height};
 }
 
@@ -394,6 +427,10 @@ Result<TaskbarApp> GuiCompositor::taskbar_launcher_at(i32 x, i32 y) const
     {
         return status;
     }
+    if (shell_mode_ != GuiShellMode::kernel_shell)
+    {
+        return Status::not_found("kernel taskbar is not active");
+    }
     if (x < 0 || y < 0)
     {
         return TaskbarApp::none;
@@ -413,6 +450,10 @@ Result<TaskbarApp> GuiCompositor::taskbar_launcher_at(i32 x, i32 y) const
     if (point_in_rect(ux, uy, file_manager_launcher_x, taskbar_top + 3, taskbar_icon_size, taskbar_icon_size))
     {
         return TaskbarApp::file_manager;
+    }
+    if (point_in_rect(ux, uy, task_monitor_launcher_x, taskbar_top + 3, taskbar_icon_size, taskbar_icon_size))
+    {
+        return TaskbarApp::task_monitor;
     }
     return TaskbarApp::none;
 }
@@ -559,6 +600,31 @@ Status GuiCompositor::set_surface_app(SurfaceId id, TaskbarApp app)
         return index.status();
     }
     surfaces_[index.value()].app = app;
+    return Status::success();
+}
+
+Status GuiCompositor::set_surface_chrome(SurfaceId id, SurfaceChrome chrome)
+{
+    if (auto status = ensure_running(); !status.ok())
+    {
+        return status;
+    }
+    auto index = find_surface_index(id);
+    if (!index)
+    {
+        return index.status();
+    }
+    surfaces_[index.value()].chrome = chrome;
+    return Status::success();
+}
+
+Status GuiCompositor::set_shell_mode(GuiShellMode mode)
+{
+    if (auto status = ensure_running(); !status.ok())
+    {
+        return status;
+    }
+    shell_mode_ = mode;
     return Status::success();
 }
 
@@ -754,7 +820,9 @@ Status GuiCompositor::handle_mouse_delta(i32 delta_x, i32 delta_y, bool left_but
     const auto mode = display_->mode();
     pointer_x_ = clamp_i32(pointer_x_ + delta_x, 0, static_cast<i32>(mode.width) - 1);
     pointer_y_ = clamp_i32(pointer_y_ + delta_y, 0, static_cast<i32>(mode.height) - 1);
-    const auto taskbar_top = mode.height > taskbar_height ? static_cast<i32>(mode.height - taskbar_height) : 0;
+    const auto taskbar_top = shell_mode_ == GuiShellMode::kernel_shell && mode.height > taskbar_height
+                                 ? static_cast<i32>(mode.height - taskbar_height)
+                                 : static_cast<i32>(mode.height);
 
     const bool pressed = left_button && !left_button_down_;
     const bool released = !left_button && left_button_down_;
@@ -811,58 +879,63 @@ Status GuiCompositor::handle_mouse_delta(i32 delta_x, i32 delta_y, bool left_but
                 left_button_down_ = left_button;
                 return present();
             }
-            switch (window_control_at(info.value(), local_x, local_y))
+            if (info.value().chrome == SurfaceChrome::decorated)
             {
-            case WindowControl::close:
-                dragging_surface_id_ = 0;
-                resizing_surface_id_ = 0;
-                record_window_event(WindowEventKind::close_request, hit.value());
-                left_button_down_ = left_button;
-                return present();
-            case WindowControl::maximize:
-                dragging_surface_id_ = 0;
-                resizing_surface_id_ = 0;
-                if (info.value().window_state == WindowState::maximized)
+                switch (window_control_at(info.value(), local_x, local_y))
                 {
-                    if (auto status = restore_surface(hit.value()); !status.ok())
+                case WindowControl::close:
+                    dragging_surface_id_ = 0;
+                    resizing_surface_id_ = 0;
+                    record_window_event(WindowEventKind::close_request, hit.value());
+                    left_button_down_ = left_button;
+                    return present();
+                case WindowControl::maximize:
+                    dragging_surface_id_ = 0;
+                    resizing_surface_id_ = 0;
+                    if (info.value().window_state == WindowState::maximized)
+                    {
+                        if (auto status = restore_surface(hit.value()); !status.ok())
+                        {
+                            return status;
+                        }
+                    }
+                    else
+                    {
+                        if (auto status = maximize_surface(hit.value()); !status.ok())
+                        {
+                            return status;
+                        }
+                    }
+                    left_button_down_ = left_button;
+                    return present();
+                case WindowControl::minimize:
+                    dragging_surface_id_ = 0;
+                    resizing_surface_id_ = 0;
+                    if (info.value().window_state == WindowState::maximized)
+                    {
+                        if (auto status = restore_surface(hit.value()); !status.ok())
+                        {
+                            return status;
+                        }
+                    }
+                    else if (auto status = minimize_surface(hit.value()); !status.ok())
                     {
                         return status;
                     }
+                    left_button_down_ = left_button;
+                    return present();
+                case WindowControl::none:
+                    break;
                 }
-                else
-                {
-                    if (auto status = maximize_surface(hit.value()); !status.ok())
-                    {
-                        return status;
-                    }
-                }
-                left_button_down_ = left_button;
-                return present();
-            case WindowControl::minimize:
-                dragging_surface_id_ = 0;
-                resizing_surface_id_ = 0;
-                if (info.value().window_state == WindowState::maximized)
-                {
-                    if (auto status = restore_surface(hit.value()); !status.ok())
-                    {
-                        return status;
-                    }
-                }
-                else if (auto status = minimize_surface(hit.value()); !status.ok())
-                {
-                    return status;
-                }
-                left_button_down_ = left_button;
-                return present();
-            case WindowControl::none:
-                break;
             }
 
-            if (info.value().window_state == WindowState::normal && resize_hit(info.value(), local_x, local_y))
+            if (info.value().chrome == SurfaceChrome::decorated &&
+                info.value().window_state == WindowState::normal && resize_hit(info.value(), local_x, local_y))
             {
                 resizing_surface_id_ = hit.value();
             }
-            else if (info.value().window_state == WindowState::normal && local_y >= 0 &&
+            else if (info.value().chrome == SurfaceChrome::decorated &&
+                     info.value().window_state == WindowState::normal && local_y >= 0 &&
                      local_y < static_cast<i32>(title_hit_height))
             {
                 dragging_surface_id_ = hit.value();
@@ -1108,6 +1181,10 @@ u32 GuiCompositor::taskbar_surface_pixel_color(const Surface &surface, u32 x, u3
 
 u32 GuiCompositor::surface_pixel_color(const Surface &surface, u32 x, u32 y) const
 {
+    if (surface.chrome == SurfaceChrome::plain)
+    {
+        return surface.pixels[static_cast<usize>(y) * max_gui_surface_width + x];
+    }
     if (surface.window_state == WindowState::minimized)
     {
         return taskbar_surface_pixel_color(surface, x, y, surface.bounds.width, surface.bounds.height);
@@ -1154,30 +1231,42 @@ Status GuiCompositor::present()
     }
 
     const auto mode = display_->mode();
-    const auto taskbar_top = mode.height > taskbar_height ? mode.height - taskbar_height : 0;
-    const bool shell_open = app_window_exists(TaskbarApp::debug_shell);
-    const bool files_open = app_window_exists(TaskbarApp::file_manager);
+    const bool kernel_shell = shell_mode_ == GuiShellMode::kernel_shell;
+    const auto taskbar_top = kernel_shell && mode.height > taskbar_height ? mode.height - taskbar_height : mode.height;
+    const bool shell_open = kernel_shell && app_window_exists(TaskbarApp::debug_shell);
+    const bool files_open = kernel_shell && app_window_exists(TaskbarApp::file_manager);
+    const bool tasks_open = kernel_shell && app_window_exists(TaskbarApp::task_monitor);
     const auto focused_app = active_app();
     for (u32 y = 0; y < mode.height; ++y)
     {
         for (u32 x = 0; x < mode.width; ++x)
         {
             auto color = desktop_pixel_color(mode.width, mode.height, x, y);
-            if (const auto shell_color = taskbar_launcher_pixel_color(mode.height, x, y, TaskbarApp::debug_shell,
-                                                                       shell_open,
-                                                                       focused_app == TaskbarApp::debug_shell);
-                shell_color != 0)
+            if (kernel_shell)
             {
-                color = shell_color;
+                if (const auto shell_color = taskbar_launcher_pixel_color(mode.height, x, y, TaskbarApp::debug_shell,
+                                                                           shell_open,
+                                                                           focused_app == TaskbarApp::debug_shell);
+                    shell_color != 0)
+                {
+                    color = shell_color;
+                }
+                if (const auto files_color = taskbar_launcher_pixel_color(mode.height, x, y, TaskbarApp::file_manager,
+                                                                           files_open,
+                                                                           focused_app == TaskbarApp::file_manager);
+                    files_color != 0)
+                {
+                    color = files_color;
+                }
+                if (const auto tasks_color = taskbar_launcher_pixel_color(mode.height, x, y, TaskbarApp::task_monitor,
+                                                                           tasks_open,
+                                                                           focused_app == TaskbarApp::task_monitor);
+                    tasks_color != 0)
+                {
+                    color = tasks_color;
+                }
             }
-            if (const auto files_color = taskbar_launcher_pixel_color(mode.height, x, y, TaskbarApp::file_manager,
-                                                                       files_open,
-                                                                       focused_app == TaskbarApp::file_manager);
-                files_color != 0)
-            {
-                color = files_color;
-            }
-            if (y >= taskbar_top)
+            if (kernel_shell && y >= taskbar_top)
             {
                 const Rect desktop{.x = 0, .y = 0, .width = mode.width, .height = mode.height};
                 for (usize i = 0; i < surfaces_.size(); ++i)
@@ -1206,7 +1295,7 @@ Status GuiCompositor::present()
                 {
                     continue;
                 }
-                if (y >= taskbar_top)
+                if (kernel_shell && y >= taskbar_top)
                 {
                     continue;
                 }
@@ -1251,7 +1340,7 @@ Status GuiCompositor::play_startup_animation()
         return desktop.status();
     }
 
-    auto surface = create_surface(desktop.value(), "okernel");
+    auto surface = create_surface(desktop.value(), "ObfuscationOS");
     if (!surface)
     {
         return surface.status();
@@ -1313,12 +1402,12 @@ Status GuiCompositor::play_startup_animation()
             static_cast<void>(destroy_surface(id));
             return status;
         }
-        if (auto status = draw_text(id, 19, 11, "OBFUSCATION KERNEL", 0xffd8f3ffu, title_color); !status.ok())
+        if (auto status = draw_text(id, 21, 11, "OBFUSCATIONOS", 0xffd8f3ffu, title_color); !status.ok())
         {
             static_cast<void>(destroy_surface(id));
             return status;
         }
-        if (auto status = draw_text(id, 23, 13, "GUI ONLINE", 0xffffcc66u, title_color); !status.ok())
+        if (auto status = draw_text(id, 22, 13, "SYSTEM GUI", 0xffffcc66u, title_color); !status.ok())
         {
             static_cast<void>(destroy_surface(id));
             return status;
@@ -1349,6 +1438,7 @@ Result<SurfaceInfo> GuiCompositor::surface_info(SurfaceId id) const
         .visible = surface.visible,
         .focused = surface.id == active_surface_id_,
         .window_state = surface.window_state,
+        .chrome = surface.chrome,
         .app = surface.app,
         .title = surface.title.view(),
     };
@@ -1383,8 +1473,10 @@ Result<SurfaceId> GuiCompositor::surface_at(i32 x, i32 y) const
         return status;
     }
     const auto mode = display_->mode();
-    const auto taskbar_top = mode.height > taskbar_height ? static_cast<i32>(mode.height - taskbar_height) : 0;
-    if (y >= taskbar_top)
+    const auto taskbar_top = shell_mode_ == GuiShellMode::kernel_shell && mode.height > taskbar_height
+                                 ? static_cast<i32>(mode.height - taskbar_height)
+                                 : static_cast<i32>(mode.height);
+    if (shell_mode_ == GuiShellMode::kernel_shell && y >= taskbar_top)
     {
         return taskbar_surface_at(x, y);
     }
