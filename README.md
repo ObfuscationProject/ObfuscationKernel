@@ -35,8 +35,7 @@ unless mirrored there.
 ## Quick Start
 
 ```sh
-xmake f -c -m debug -a x86_64
-xmake toolchain-check
+xmake f -c -y -m debug -a x86_64
 xmake -y -b okernel
 xmake test
 ```
@@ -50,31 +49,26 @@ OK_TEST_PASS arch=x86_64 ...
 Enable debug test points for the current architecture:
 
 ```sh
-xmake f -c -m debug -a x86_64
+xmake f -c -y -m debug -a x86_64
 xmake qemu-test
-```
-
-Check every configured freestanding toolchain:
-
-```sh
-xmake toolchain-check --all
 ```
 
 ## Cross Toolchains
 
-Build GCC/binutils toolchains into `toolchains/`:
+Freestanding GCC/binutils and the matching QEMU system emulator are provided by
+`systoolchain 0.1.0` from the project-owned `ObfuscationRepo`. The package is
+built from source by default, and its installation validates the compiler,
+binary utilities, and QEMU before the kernel build starts:
 
 ```sh
-xmake toolchains -a x86_64 -j 4
-```
-
-Then configure xmake with the matching architecture. `okernel` selects the
-matching freestanding toolchain automatically:
-
-```sh
-xmake f -c -a x86_64
+xmake f -c -y -a x86_64
 xmake -y -b okernel
 ```
+
+`okernel` and `okernel_image` select that package toolchain only for their
+freestanding targets. QEMU launchers receive the emulator directly from the
+resolved package; machine, CPU, device, disk, and display arguments remain
+owned by this project.
 
 ## QEMU Tests
 

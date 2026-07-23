@@ -13,31 +13,6 @@ import time
 from pathlib import Path
 
 
-QEMU_SYSTEM_BY_ARCH = {
-    "i386": "qemu-system-i386",
-    "x86_64": "qemu-system-x86_64",
-    "aarch64": "qemu-system-aarch64",
-    "arm32": "qemu-system-arm",
-    "rv64": "qemu-system-riscv64",
-    "rv32": "qemu-system-riscv32",
-    "loongarch64": "qemu-system-loongarch64",
-    "mips": "qemu-system-mips",
-    "mips64": "qemu-system-mips64",
-    "ppc": "qemu-system-ppc",
-}
-
-UBUNTU_QEMU_PACKAGE_BY_ARCH = {
-    "i386": "qemu-system-x86",
-    "x86_64": "qemu-system-x86",
-    "aarch64": "qemu-system-arm",
-    "arm32": "qemu-system-arm",
-    "rv64": "qemu-system-misc",
-    "rv32": "qemu-system-misc",
-    "loongarch64": "qemu-system-misc",
-    "mips": "qemu-system-mips",
-    "mips64": "qemu-system-mips",
-    "ppc": "qemu-system-ppc",
-}
 DEFAULT_QEMU_TIMEOUT_SECONDS = 30.0
 VIRTUAL_DISK_SIZE = 16 * 1024 * 1024
 BASE_COVERAGE_FIELDS = ("fs", "simplefs", "ext4", "user", "posix", "shell", "modes", "gui")
@@ -144,15 +119,10 @@ def serial_args(arch: str, display: str) -> list[str]:
     return ["-serial", "stdio"]
 
 
-def qemu_command(arch: str, kernel: Path, display: str, disk: Path) -> list[str]:
-    qemu = QEMU_SYSTEM_BY_ARCH.get(arch)
-    if qemu is None:
+def qemu_command(arch: str, qemu: Path, kernel: Path, display: str, disk: Path) -> list[str]:
+    if arch not in BOOTABLE_QEMU_ARCHES:
         raise SystemExit(f"qemu-system boot is not implemented for {arch} yet")
-    qemu_path = shutil.which(qemu)
-    if qemu_path is None:
-        package = UBUNTU_QEMU_PACKAGE_BY_ARCH.get(arch)
-        install_hint = f" Install Ubuntu package: {package}." if package else ""
-        raise SystemExit(f"{qemu} was not found in PATH.{install_hint}")
+    qemu_path = str(qemu)
     if arch in ("aarch64", "arm32"):
         command = [
             qemu_path,
@@ -340,16 +310,21 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--arch", required=True)
     parser.add_argument("--kernel", required=True, type=Path)
+    parser.add_argument("--qemu", required=True, type=Path, help="SysToolchain QEMU executable")
     parser.add_argument("--mode", choices=("debug", "release"), default="debug")
-    parser.add_argument("--display", default="gtk")
+    parser.add_argument("--display", default="sdl")
     parser.add_argument("--no-launch", action="store_true", help="Run headless but keep the window-test validation path")
     parser.add_argument("--normal-gui", action="store_true", help="Launch a non-debug GUI kernel and skip debug markers")
     args = parser.parse_args()
 
     arch = normalize_arch(args.arch)
     kernel = args.kernel.resolve()
+    qemu = args.qemu.resolve()
     if not kernel.exists():
         print(f"kernel image does not exist: {kernel}", file=sys.stderr)
+        return 2
+    if not qemu.is_file():
+        print(f"SysToolchain QEMU executable does not exist: {qemu}", file=sys.stderr)
         return 2
 
     display = "none" if args.no_launch else args.display
@@ -363,7 +338,7 @@ def main() -> int:
         scratch_disk = Path(tmp) / "fs.img"
         shutil.copyfile(kernel, runnable_kernel)
         create_virtual_disk(scratch_disk)
-        command = qemu_command(arch, runnable_kernel, display, scratch_disk)
+        command = qemu_command(arch, qemu, runnable_kernel, display, scratch_disk)
         if args.no_launch and arch in ("i386", "x86_64"):
             command += ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
             timeout = DEFAULT_QEMU_TIMEOUT_SECONDS

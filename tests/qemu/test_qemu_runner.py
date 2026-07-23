@@ -9,7 +9,6 @@ import io
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -19,6 +18,22 @@ spec = importlib.util.spec_from_file_location("qemu_test", QEMU_TEST)
 assert spec is not None and spec.loader is not None
 qemu_test = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(qemu_test)
+
+
+def systoolchain_qemu(arch: str) -> Path:
+    names = {
+        "i386": "qemu-system-i386",
+        "x86_64": "qemu-system-x86_64",
+        "aarch64": "qemu-system-aarch64",
+        "arm32": "qemu-system-arm",
+        "rv64": "qemu-system-riscv64",
+        "rv32": "qemu-system-riscv32",
+        "loongarch64": "qemu-system-loongarch64",
+        "mips": "qemu-system-mips",
+        "mips64": "qemu-system-mips64",
+        "ppc": "qemu-system-ppc",
+    }
+    return Path("/xmake/packages/s/systoolchain/0.1.0/bin") / names[arch]
 
 
 def make_output(arch: str, fields: dict[str, str] | None = None, include_display_text: bool = True) -> str:
@@ -143,15 +158,17 @@ class QemuRunnerValidationTests(unittest.TestCase):
         self.assertIn("coverage.display=skip", summary)
         self.assertIn("marker.OK_MODULES=present", summary)
 
-    def test_missing_qemu_executable_is_explicit(self) -> None:
-        with mock.patch.object(qemu_test.shutil, "which", return_value=None):
-            with self.assertRaises(qemu_test.QemuConfigurationError) as error:
-                qemu_test.qemu_command("x86_64", Path("kernel.bin"), "none", True, Path("disk.img"))
-        self.assertIn("QEMU executable missing: qemu-system-x86_64", str(error.exception))
+    def test_qemu_command_uses_explicit_systoolchain_executable(self) -> None:
+        qemu = systoolchain_qemu("x86_64")
+        command = qemu_test.qemu_command(
+            "x86_64", qemu, Path("kernel.bin"), "none", True, Path("disk.img")
+        )
+        self.assertEqual(command[0], str(qemu))
 
     def test_qemu_command_attaches_real_virtio_disk_image(self) -> None:
-        with mock.patch.object(qemu_test.shutil, "which", return_value="/usr/bin/qemu-system-x86_64"):
-            command = qemu_test.qemu_command("x86_64", Path("kernel.bin"), "none", True, Path("disk.img"))
+        command = qemu_test.qemu_command(
+            "x86_64", systoolchain_qemu("x86_64"), Path("kernel.bin"), "none", True, Path("disk.img")
+        )
         self.assertIn("-drive", command)
         self.assertIn("file=disk.img,format=raw,if=none,id=fsdisk", command)
         self.assertIn("-device", command)
@@ -159,43 +176,48 @@ class QemuRunnerValidationTests(unittest.TestCase):
         self.assertIn("ramfb", command)
 
     def test_qemu_command_attaches_ramfb_and_input_for_virt_targets(self) -> None:
-        with mock.patch.object(qemu_test.shutil, "which", return_value="/usr/bin/qemu-system-arm"):
-            command = qemu_test.qemu_command("arm32", Path("kernel.bin"), "none", False, Path("disk.img"))
+        command = qemu_test.qemu_command(
+            "arm32", systoolchain_qemu("arm32"), Path("kernel.bin"), "none", False, Path("disk.img")
+        )
         self.assertIn("ramfb", command)
         self.assertIn("virtio-keyboard-device", command)
         self.assertIn("virtio-mouse-device", command)
 
     def test_qemu_command_boots_new_system_targets_with_kernel_loader(self) -> None:
         arches = ("loongarch64", "mips", "mips64", "ppc")
-        with mock.patch.object(qemu_test.shutil, "which", side_effect=lambda qemu: f"/usr/bin/{qemu}"):
-            for arch in arches:
-                with self.subTest(arch=arch):
-                    command = qemu_test.qemu_command(arch, Path("kernel.bin"), "none", False, Path("disk.img"))
-                    self.assertIn("-kernel", command)
-                    self.assertIn("kernel.bin", command)
-                    self.assertIn("virtio-blk-pci,drive=fsdisk", command)
-                    if arch == "mips64":
-                        self.assertIn("MIPS64R2-generic", command)
+        for arch in arches:
+            with self.subTest(arch=arch):
+                command = qemu_test.qemu_command(
+                    arch, systoolchain_qemu(arch), Path("kernel.bin"), "none", False, Path("disk.img")
+                )
+                self.assertIn("-kernel", command)
+                self.assertIn("kernel.bin", command)
+                self.assertIn("virtio-blk-pci,drive=fsdisk", command)
+                if arch == "mips64":
+                    self.assertIn("MIPS64R2-generic", command)
 
     def test_mips_window_display_uses_serial_console_instead_of_guest_vga(self) -> None:
-        with mock.patch.object(qemu_test.shutil, "which", return_value="/usr/bin/qemu-system-mips"):
-            command = qemu_test.qemu_command("mips", Path("kernel.bin"), "gtk", False, Path("disk.img"))
+        command = qemu_test.qemu_command(
+            "mips", systoolchain_qemu("mips"), Path("kernel.bin"), "sdl", False, Path("disk.img")
+        )
         self.assertIn("vc:80Cx24C", command)
         self.assertIn("stdio", command)
         self.assertNotIn("ramfb", command)
         self.assertEqual(command[command.index("-vga") + 1], "none")
 
     def test_mips64_window_display_uses_serial_console_instead_of_ramfb(self) -> None:
-        with mock.patch.object(qemu_test.shutil, "which", return_value="/usr/bin/qemu-system-mips64"):
-            command = qemu_test.qemu_command("mips64", Path("kernel.bin"), "gtk", False, Path("disk.img"))
+        command = qemu_test.qemu_command(
+            "mips64", systoolchain_qemu("mips64"), Path("kernel.bin"), "sdl", False, Path("disk.img")
+        )
         self.assertIn("vc:80Cx24C", command)
         self.assertIn("stdio", command)
         self.assertNotIn("ramfb", command)
         self.assertEqual(command[command.index("-vga") + 1], "none")
 
     def test_ppc_window_display_uses_serial_console(self) -> None:
-        with mock.patch.object(qemu_test.shutil, "which", return_value="/usr/bin/qemu-system-ppc"):
-            command = qemu_test.qemu_command("ppc", Path("kernel.bin"), "gtk", False, Path("disk.img"))
+        command = qemu_test.qemu_command(
+            "ppc", systoolchain_qemu("ppc"), Path("kernel.bin"), "sdl", False, Path("disk.img")
+        )
         self.assertIn("vc:80Cx24C", command)
         self.assertIn("stdio", command)
         self.assertNotIn("ramfb", command)

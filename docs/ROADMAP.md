@@ -99,8 +99,7 @@ Recent commits moved the roadmap in three important directions:
 Before tagging `v0.1.0`, run at minimum:
 
 ```sh
-xmake f -c -m debug -a x86_64
-xmake toolchain-check
+xmake f -c -y -m debug -a x86_64
 xmake -y -b okernel
 xmake test
 xmake qemu-test

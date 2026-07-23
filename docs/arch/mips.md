@@ -23,7 +23,6 @@ Traits:
 Toolchain:
 
 ```sh
-xmake toolchains -a mips
-xmake f -c -m debug -a mips
+xmake f -c -y -m debug -a mips
 xmake qemu-test
 ```

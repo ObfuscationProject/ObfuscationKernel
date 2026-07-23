@@ -21,7 +21,6 @@ OK_ARCH_SPECS = {
     i386 = {
         define = "OK_ARCH_TARGET_I386",
         source = "i386",
-        toolchain = "ok-i386-elf",
         triple = "i386-elf",
         boot_source = "src/arch/i386/boot.S",
         linker_script = "src/arch/i386/linker.ld",
@@ -32,7 +31,6 @@ OK_ARCH_SPECS = {
     x86_64 = {
         define = "OK_ARCH_TARGET_X86_64",
         source = "x86_64",
-        toolchain = "ok-x86_64-elf",
         triple = "x86_64-elf",
         boot_source = "src/arch/x86_64/boot.S",
         linker_script = "src/arch/x86_64/linker.ld",
@@ -44,7 +42,6 @@ OK_ARCH_SPECS = {
     aarch64 = {
         define = "OK_ARCH_TARGET_AARCH64",
         source = "aarch64",
-        toolchain = "ok-aarch64-elf",
         triple = "aarch64-elf",
         boot_source = "src/arch/aarch64/boot.S",
         linker_script = "src/arch/aarch64/linker.ld",
@@ -57,7 +54,6 @@ OK_ARCH_SPECS = {
     arm32 = {
         define = "OK_ARCH_TARGET_ARM32",
         source = "arm32",
-        toolchain = "ok-arm32-elf",
         triple = "arm-none-eabi",
         boot_source = "src/arch/arm32/boot.S",
         linker_script = "src/arch/arm32/linker.ld",
@@ -71,7 +67,6 @@ OK_ARCH_SPECS = {
     rv64 = {
         define = "OK_ARCH_TARGET_RV64",
         source = "rv64",
-        toolchain = "ok-rv64-elf",
         triple = "riscv64-elf",
         boot_source = "src/arch/rv64/boot.S",
         linker_script = "src/arch/rv64/linker.ld",
@@ -85,7 +80,6 @@ OK_ARCH_SPECS = {
     rv32 = {
         define = "OK_ARCH_TARGET_RV32",
         source = "rv32",
-        toolchain = "ok-rv32-elf",
         triple = "riscv32-elf",
         boot_source = "src/arch/rv32/boot.S",
         linker_script = "src/arch/rv32/linker.ld",
@@ -99,7 +93,6 @@ OK_ARCH_SPECS = {
     loongarch64 = {
         define = "OK_ARCH_TARGET_LOONGARCH64",
         source = "loongarch64",
-        toolchain = "ok-loongarch64-elf",
         triple = "loongarch64-elf",
         boot_source = "src/arch/loongarch64/boot.S",
         linker_script = "src/arch/loongarch64/linker.ld",
@@ -114,7 +107,6 @@ OK_ARCH_SPECS = {
     mips = {
         define = "OK_ARCH_TARGET_MIPS",
         source = "mips",
-        toolchain = "ok-mips-elf",
         triple = "mips-elf",
         boot_source = "src/arch/mips/boot.S",
         linker_script = "src/arch/mips/linker.ld",
@@ -129,7 +121,6 @@ OK_ARCH_SPECS = {
     mips64 = {
         define = "OK_ARCH_TARGET_MIPS64",
         source = "mips64",
-        toolchain = "ok-mips64-elf",
         triple = "mips64-elf",
         boot_source = "src/arch/mips64/boot.S",
         linker_script = "src/arch/mips64/linker.ld",
@@ -144,7 +135,6 @@ OK_ARCH_SPECS = {
     ppc = {
         define = "OK_ARCH_TARGET_PPC",
         source = "ppc",
-        toolchain = "ok-ppc-elf",
         triple = "powerpc-eabi",
         boot_source = "src/arch/ppc/boot.S",
         linker_script = "src/arch/ppc/linker.ld",
@@ -202,26 +192,6 @@ function ok_require_arch(arch)
     return normalized, spec
 end
 
-function ok_toolchain_binary(spec, tool)
-    return path.join(os.projectdir(), "toolchains", spec.triple, "bin", spec.triple .. "-" .. tool)
-end
-
-function ok_has_freestanding_toolchain(arch)
-    local _, spec = ok_require_arch(arch)
-    if spec == nil then
-        return false
-    end
-    return os.isfile(ok_toolchain_binary(spec, "g++"))
-end
-
-function ok_require_freestanding_toolchain(arch)
-    local normalized, spec = ok_require_arch(arch)
-    if spec == nil or not ok_has_freestanding_toolchain(normalized) then
-        return false
-    end
-    return true
-end
-
 function add_ok_arch_profile()
     local _, spec = ok_require_arch(ok_current_arch())
     add_defines(spec.define)
@@ -253,24 +223,11 @@ end
 function add_ok_freestanding_toolchain()
     local arch, spec = ok_require_arch(ok_current_arch())
     if spec == nil then
-        spec = OK_ARCH_SPECS.x86_64
+        raise("unsupported kernel arch '%s'; use one of: %s", arch, table.concat(OK_SUPPORTED_ARCHES, ", "))
     end
-    local compiler = ok_toolchain_binary(spec, "g++")
-    local toolchain_dir = path.join(os.projectdir(), "toolchains", spec.triple)
-    if os.isfile(compiler) then
-        set_toolchains(spec.toolchain)
-        add_includedirs(path.join(toolchain_dir, spec.triple, "include"), {public = true})
-        add_includedirs(path.join(toolchain_dir, "include"), {public = true})
-        if os.isdir(toolchain_dir) then
-            add_cxxflags("--sysroot=" .. toolchain_dir, {force = true})
-        end
-    end
-    before_build(function ()
-        if not os.isfile(compiler) then
-            raise("missing freestanding toolchain for %s (%s). Run: xmake toolchains -a %s",
-                  arch, spec.triple, arch)
-        end
-    end)
+    set_values("ok.triple", spec.triple)
+    set_toolchains("cross@systoolchain")
+    add_packages("systoolchain")
 end
 
 function add_ok_freestanding_arch_flags()

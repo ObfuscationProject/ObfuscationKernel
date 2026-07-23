@@ -12,7 +12,7 @@ runner to validate.
 Configure one architecture with xmake's built-in `-a` option:
 
 ```sh
-xmake f -c -m debug -a x86_64
+xmake f -c -y -m debug -a x86_64
 xmake test
 ```
 
@@ -110,7 +110,7 @@ window:
 
 ```sh
 xmake qemu-gui
-xmake qemu-gui -a aarch64 --display=gtk
+xmake qemu-gui -a aarch64 --display=sdl
 ```
 
 For `aarch64`, `arm32`, `rv64`, and `rv32` window sessions, QEMU attaches
@@ -134,11 +134,9 @@ supported architectures. Any non-zero exit code or missing marker is a failure.
 
 GitHub Actions has one matrix job. For each architecture it:
 
-1. Installs the QEMU packages needed by the matrix: `qemu-system-x86`,
-   `qemu-system-arm`, `qemu-system-mips`, `qemu-system-ppc`, and
-   `qemu-system-misc`.
-2. Builds or restores the matching freestanding GCC/binutils toolchain.
-3. Configures xmake with `-a <arch>`.
-4. Builds `okernel`.
-5. Runs `xmake test`, which immediately boots the generated kernel in QEMU for
+1. Builds and resolves the matching `systoolchain` package through xmake; the
+   package supplies both the freestanding compiler and QEMU.
+2. Configures xmake with `-a <arch>`.
+3. Builds `okernel`.
+4. Runs `xmake test`, which immediately boots the generated kernel in QEMU for
    the configured architecture.

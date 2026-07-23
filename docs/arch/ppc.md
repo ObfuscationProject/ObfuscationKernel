@@ -23,8 +23,7 @@ Traits:
 Toolchain:
 
 ```sh
-xmake toolchains -a ppc
-xmake f -c -m debug -a ppc
+xmake f -c -y -m debug -a ppc
 xmake qemu-test
 ```
 

@@ -4,16 +4,16 @@ local task_arches = {
 }
 
 local task_arch_specs = {
-    i386 = {triple = "i386-elf", bootable = true},
-    x86_64 = {triple = "x86_64-elf", bootable = true},
-    aarch64 = {triple = "aarch64-elf", bootable = true},
-    arm32 = {triple = "arm-none-eabi", bootable = true},
-    rv64 = {triple = "riscv64-elf", bootable = true},
-    rv32 = {triple = "riscv32-elf", bootable = true},
-    loongarch64 = {triple = "loongarch64-elf", bootable = true},
-    mips = {triple = "mips-elf", bootable = true},
-    mips64 = {triple = "mips64-elf", bootable = true},
-    ppc = {triple = "powerpc-eabi", bootable = true},
+    i386 = {qemu = "qemu-system-i386", bootable = true},
+    x86_64 = {qemu = "qemu-system-x86_64", bootable = true},
+    aarch64 = {qemu = "qemu-system-aarch64", bootable = true},
+    arm32 = {qemu = "qemu-system-arm", bootable = true},
+    rv64 = {qemu = "qemu-system-riscv64", bootable = true},
+    rv32 = {qemu = "qemu-system-riscv32", bootable = true},
+    loongarch64 = {qemu = "qemu-system-loongarch64", bootable = true},
+    mips = {qemu = "qemu-system-mips", bootable = true},
+    mips64 = {qemu = "qemu-system-mips64", bootable = true},
+    ppc = {qemu = "qemu-system-ppc", bootable = true},
 }
 
 local function task_normalize_arch(arch)
@@ -53,12 +53,16 @@ local function task_require_arch(arch)
     return normalized, spec
 end
 
-local function task_toolchain_binary(spec, tool)
-    return path.join(os.projectdir(), "toolchains", spec.triple, "bin", spec.triple .. "-" .. tool)
-end
-
 local function task_config_bool(value)
     return value == true or value == "true" or value == "y" or value == "yes" or value == "1"
+end
+
+local function task_configure_args(mode, arch, extra)
+    local argv = {"f", "-c", "-y", "-m", mode, "-a", arch}
+    for _, arg in ipairs(extra or {}) do
+        table.insert(argv, arg)
+    end
+    return argv
 end
 
 local function task_xmake(execv, projectdir, args, options)
@@ -76,65 +80,19 @@ local function task_xmake(execv, projectdir, args, options)
     return execv("xmake", argv, options)
 end
 
-task("toolchains")
-    set_menu {
-        usage = "xmake toolchains -a ARCH",
-        description = "Build GCC/binutils cross toolchains into ./toolchains",
-        options = {
-            {"a", "target-arch", "kv", "all", "Architecture: i386/x86_64/aarch64/arm32/rv64/rv32/loongarch64/mips/mips64/ppc/all"},
-            {"j", "jobs", "kv", nil, "Parallel build jobs"}
-        }
-    }
-    on_run(function ()
-        import("core.base.option")
-        local argv = {path.join(os.projectdir(), "scripts", "build-toolchain.sh"), "--arch", option.get("target-arch") or "all"}
-        if option.get("jobs") then
-            table.insert(argv, "--jobs")
-            table.insert(argv, option.get("jobs"))
-        end
-        os.execv("bash", argv)
-    end)
-task_end()
-
-task("toolchain-check")
-    set_menu {
-        usage = "xmake toolchain-check [-a ARCH] [--all]",
-        description = "Check whether required freestanding toolchains are installed",
-        options = {
-            {"a", "profile", "kv", nil, "Architecture to check"},
-            {nil, "all", "k", nil, "Check every supported architecture"}
-        }
-    }
-    on_run(function ()
-        import("core.base.option")
-        import("core.project.config")
-        config.load()
-
-        local arches = {}
-        if option.get("all") then
-            arches = task_arches
-        else
-            table.insert(arches, option.get("profile") or config.get("arch") or "x86_64")
-        end
-
-        local missing = {}
-        for _, arch in ipairs(arches) do
-            local normalized, spec = task_require_arch(arch)
-            local compiler = task_toolchain_binary(spec, "g++")
-            if os.isfile(compiler) then
-                print(string.format("[ok] %s: %s", normalized, compiler))
-            else
-                print(string.format("[missing] %s: %s", normalized, compiler))
-                table.insert(missing, normalized)
-            end
-        end
-
-        if #missing > 0 then
-            raise("missing toolchain(s): %s. Run: xmake toolchains -a %s",
-                  table.concat(missing, ", "), #missing == 1 and missing[1] or "all")
-        end
-    end)
-task_end()
+local function task_systoolchain_qemu(arch)
+    import("core.project.project")
+    local _, spec = task_require_arch(arch)
+    local package = project.required_package("systoolchain")
+    if package == nil then
+        raise("the systoolchain package is not resolved")
+    end
+    local qemu = path.absolute(path.join(package:installdir(), "bin", spec.qemu))
+    if not os.isfile(qemu) then
+        raise("the systoolchain package is missing QEMU: %s", qemu)
+    end
+    return qemu
+end
 
 task("qemu-harness-test")
     set_menu {
@@ -187,14 +145,14 @@ task("profile-matrix")
         for _, arch in ipairs(arches) do
             task_require_arch(arch)
             print(string.format("[profile] building %s (%s)", arch, mode))
-            local config_code = task_xmake(os.execv, os.projectdir(), {"f", "-c", "-m", mode, "-a", arch}, {try = true})
+            local config_code = task_xmake(os.execv, os.projectdir(), task_configure_args(mode, arch), {try = true})
             local build_code = config_code == 0 and task_xmake(os.execv, os.projectdir(), {"-y", "-b", "okernel"}, {try = true}) or config_code
             if build_code ~= 0 then
                 table.insert(failed, arch)
             end
         end
 
-        task_xmake(os.execv, os.projectdir(), {"f", "-c", "-m", current_mode, "-a", current_arch})
+        task_xmake(os.execv, os.projectdir(), task_configure_args(current_mode, current_arch))
         if #failed > 0 then
             raise("profile build failed for: %s", table.concat(failed, ", "))
         end
@@ -223,7 +181,7 @@ task("qemu-matrix")
             local _, spec = task_require_arch(arch)
             if spec.bootable then
                 print(string.format("[qemu] testing %s (%s)", arch, mode))
-                local config_code = task_xmake(os.execv, os.projectdir(), {"f", "-c", "-m", mode, "-a", arch}, {try = true})
+                local config_code = task_xmake(os.execv, os.projectdir(), task_configure_args(mode, arch), {try = true})
                 local build_code = config_code == 0 and task_xmake(os.execv, os.projectdir(), {"-y", "-b", "okernel_image"}, {try = true}) or config_code
                 local test_code = 0
                 if build_code == 0 then
@@ -235,7 +193,7 @@ task("qemu-matrix")
             end
         end
 
-        task_xmake(os.execv, os.projectdir(), {"f", "-c", "-m", current_mode, "-a", current_arch})
+        task_xmake(os.execv, os.projectdir(), task_configure_args(current_mode, current_arch))
         if #failed > 0 then
             raise("QEMU test failed for: %s", table.concat(failed, ", "))
         end
@@ -273,7 +231,7 @@ task("qemu-test")
 
         local reconfigured = requested_arch or current_mode ~= mode
         if reconfigured then
-            task_xmake(os.execv, os.projectdir(), {"f", "-c", "-m", mode, "-a", test_arch})
+            task_xmake(os.execv, os.projectdir(), task_configure_args(mode, test_arch))
         end
 
         local build_code = task_xmake(os.execv, os.projectdir(), {"-y", "-b", "okernel_image"}, {try = true})
@@ -283,7 +241,7 @@ task("qemu-test")
         end
 
         if reconfigured then
-            task_xmake(os.execv, os.projectdir(), {"f", "-c", "-m", current_mode, "-a", current_arch})
+            task_xmake(os.execv, os.projectdir(), task_configure_args(current_mode, current_arch))
         end
 
         if build_code ~= 0 then
@@ -302,7 +260,7 @@ task("qemu-window-test")
         options = {
             {"a", "profile", "kv", nil, "Temporarily test another architecture"},
             {"m", "check-mode", "kv", nil, "Build mode used for the debug kernel test"},
-            {nil, "display", "kv", "gtk", "QEMU display backend"},
+            {nil, "display", "kv", "sdl", "QEMU display backend"},
             {nil, "no-launch", "k", nil, "Generate the demo image without opening QEMU"}
         }
     }
@@ -317,12 +275,12 @@ task("qemu-window-test")
         local current_mode = config.get("mode") or "release"
         local reconfigured = current_mode ~= mode or arch ~= current_arch
         if reconfigured then
-            task_xmake(os.execv, os.projectdir(), {"f", "-c", "-m", mode, "-a", arch})
+            task_xmake(os.execv, os.projectdir(), task_configure_args(mode, arch))
         end
         if not spec.bootable then
             local profile_code = task_xmake(os.execv, os.projectdir(), {"-y", "-b", "okernel"}, {try = true})
             if reconfigured then
-                task_xmake(os.execv, os.projectdir(), {"f", "-c", "-m", current_mode, "-a", current_arch})
+                task_xmake(os.execv, os.projectdir(), task_configure_args(current_mode, current_arch))
             end
             if profile_code ~= 0 then
                 raise("freestanding profile build failed for %s", arch)
@@ -333,7 +291,7 @@ task("qemu-window-test")
         local build_code = task_xmake(os.execv, os.projectdir(), {"-y", "-b", "okernel_image"}, {try = true})
         if build_code ~= 0 then
             if reconfigured then
-                task_xmake(os.execv, os.projectdir(), {"f", "-c", "-m", current_mode, "-a", current_arch})
+                task_xmake(os.execv, os.projectdir(), task_configure_args(current_mode, current_arch))
             end
             raise("kernel build failed for %s", arch)
         end
@@ -342,14 +300,15 @@ task("qemu-window-test")
             "--arch", arch,
             "--mode", mode,
             "--kernel", path.join(os.projectdir(), "build", "linux", arch, mode, "kernel.bin"),
-            "--display", option.get("display") or "gtk"
+            "--qemu", task_systoolchain_qemu(arch),
+            "--display", option.get("display") or "sdl"
         }
         if option.get("no-launch") then
             table.insert(argv, "--no-launch")
         end
         local code = os.execv("python3", argv, {try = true})
         if reconfigured then
-            task_xmake(os.execv, os.projectdir(), {"f", "-c", "-m", current_mode, "-a", current_arch})
+            task_xmake(os.execv, os.projectdir(), task_configure_args(current_mode, current_arch))
         end
         if code ~= 0 then
             raise("qemu window test failed for %s", arch)
@@ -364,7 +323,7 @@ task("qemu-gui")
         options = {
             {"a", "profile", "kv", nil, "Temporarily launch another architecture"},
             {"m", "check-mode", "kv", nil, "Build mode used for the GUI kernel"},
-            {nil, "display", "kv", "gtk", "QEMU display backend"}
+            {nil, "display", "kv", "sdl", "QEMU display backend"}
         }
     }
     on_run(function ()
@@ -381,12 +340,13 @@ task("qemu-gui")
         local reconfigured = current_mode ~= mode or arch ~= current_arch or not current_kernel_gui
 
         if reconfigured then
-            task_xmake(os.execv, os.projectdir(), {"f", "-c", "-m", mode, "-a", arch, "--kernel_gui=y"})
+            task_xmake(os.execv, os.projectdir(), task_configure_args(mode, arch, {"--kernel_gui=y"}))
         end
         if not spec.bootable then
             if reconfigured then
-                task_xmake(os.execv, os.projectdir(), {"f", "-c", "-m", current_mode, "-a", current_arch,
-                            "--kernel_gui=" .. (current_kernel_gui and "y" or "n")})
+                task_xmake(os.execv, os.projectdir(), task_configure_args(current_mode, current_arch, {
+                    "--kernel_gui=" .. (current_kernel_gui and "y" or "n")
+                }))
             end
             raise("qemu GUI boot is not implemented for %s yet", arch)
         end
@@ -399,14 +359,16 @@ task("qemu-gui")
                 "--arch", arch,
                 "--mode", mode,
                 "--kernel", path.join(os.projectdir(), "build", "linux", arch, mode, "kernel.bin"),
-                "--display", option.get("display") or "gtk",
+                "--qemu", task_systoolchain_qemu(arch),
+                "--display", option.get("display") or "sdl",
                 "--normal-gui"
             }, {try = true})
         end
 
         if reconfigured then
-            task_xmake(os.execv, os.projectdir(), {"f", "-c", "-m", current_mode, "-a", current_arch,
-                        "--kernel_gui=" .. (current_kernel_gui and "y" or "n")})
+            task_xmake(os.execv, os.projectdir(), task_configure_args(current_mode, current_arch, {
+                "--kernel_gui=" .. (current_kernel_gui and "y" or "n")
+            }))
         end
         if build_code ~= 0 then
             raise("kernel GUI build failed for %s", arch)
@@ -438,7 +400,7 @@ task("qemu-window-matrix")
 
         for _, arch in ipairs(task_arches) do
             print(string.format("[qemu-window] checking %s (%s)", arch, mode))
-            task_xmake(os.execv, os.projectdir(), {"f", "-c", "-m", mode, "-a", arch})
+            task_xmake(os.execv, os.projectdir(), task_configure_args(mode, arch))
             local _, spec = task_require_arch(arch)
             local code = 0
             if spec.bootable then
@@ -453,7 +415,7 @@ task("qemu-window-matrix")
             end
         end
 
-        task_xmake(os.execv, os.projectdir(), {"f", "-c", "-m", current_mode, "-a", current_arch})
+        task_xmake(os.execv, os.projectdir(), task_configure_args(current_mode, current_arch))
         if #failed > 0 then
             raise("QEMU window validation failed for: %s", table.concat(failed, ", "))
         end

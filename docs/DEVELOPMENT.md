@@ -47,8 +47,7 @@ not emit `OK_MODE debug` and a non-zero `debug_test_points` count.
 Before submitting architecture-sensitive changes, run:
 
 ```sh
-xmake f -c -m debug -a x86_64
-xmake toolchain-check
+xmake f -c -y -m debug -a x86_64
 xmake -y -b okernel
 xmake qemu-test
 ```

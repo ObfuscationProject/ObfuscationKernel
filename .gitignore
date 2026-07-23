@@ -4,6 +4,7 @@ build/
 compile_commands.json
 /.pytest_cache/
 
+# Legacy project-local toolchain outputs (no longer produced by the build).
 toolchains/*
 !toolchains/README.md
 

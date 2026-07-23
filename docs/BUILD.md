@@ -4,11 +4,10 @@ The primary build system is xmake. The project uses xmake's built-in
 architecture setting (`-a/--arch`) as the only architecture selector.
 
 `okernel` is freestanding C++23 and automatically selects the matching
-`ok-*` cross toolchain for the configured xmake architecture. For example:
+`systoolchain` package for the configured xmake architecture. For example:
 
 ```sh
-xmake f -c -m debug -a x86_64
-xmake toolchain-check
+xmake f -c -y -m debug -a x86_64
 xmake -y -b okernel
 ```
 
@@ -49,33 +48,17 @@ because QEMU virt can jump directly to that ELF entry with `-kernel`.
 
 ## Toolchains
 
-Build a missing freestanding GCC/binutils toolchain with:
+Build and resolve the freestanding GCC/binutils/QEMU package for an
+architecture with:
 
 ```sh
-xmake toolchains -a rv64 -j 4
+xmake f -c -y -a rv64
 ```
 
-Check the current architecture toolchain:
-
-```sh
-xmake toolchain-check
-```
-
-Check all supported toolchains:
-
-```sh
-xmake toolchain-check --all
-```
-
-If a required toolchain is missing, the build fails with the command to run, for
-example:
-
-```text
-missing freestanding toolchain for rv64 (riscv64-elf). Run: xmake toolchains -a rv64
-```
-
-The toolchain declarations live in `xmake/toolchains.lua`; the architecture to
-toolchain selection lives in `xmake/arch.lua`.
+SysToolchain is built from source by default. Its package installation validates
+the compiler, binary utilities, and matching QEMU executable. Architecture-to-
+triple and QEMU launch-profile selections remain in `xmake/arch.lua`; xmake
+resolves the installed tools from its package cache.
 
 ## Tests
 
@@ -115,7 +98,7 @@ Normal release builds do not enter the kernel GUI desktop by default. Enable the
 independent GUI build option when you want a non-debug graphical session:
 
 ```sh
-xmake f -c -m release -a x86_64 --kernel_gui=y
+xmake f -c -y -m release -a x86_64 --kernel_gui=y
 xmake -y -b okernel_image
 ```
 

@@ -10,8 +10,29 @@ option("kernel_gui")
     set_description("Enable the normal-mode kernel GUI desktop")
 option_end()
 
+add_repositories("obfuscation-repo https://github.com/ObfuscationProject/ObfuscationRepo.git")
+add_requires("systoolchain 0.1.0", {
+    system = false,
+    configs = {build_from_source = true}
+})
+
 includes("xmake/arch.lua")
-includes("xmake/toolchains.lua")
+
+local function systoolchain_qemu(target, arch)
+    local spec = ok_arch_spec(arch)
+    if spec == nil then
+        raise("QEMU is not configured for %s", arch)
+    end
+    local package = target:pkg("systoolchain")
+    if package == nil then
+        raise("the systoolchain package is not resolved")
+    end
+    local qemu = path.absolute(path.join(package:installdir(), "bin", spec.qemu_system))
+    if not os.isfile(qemu) then
+        raise("the systoolchain package is missing QEMU: %s", qemu)
+    end
+    return qemu
+end
 
 function add_ok_kernel_sources(include_kernel_main)
     add_files("src/core/*.cpp")
@@ -127,20 +148,12 @@ target("okernel_image")
             os.cp(target:targetfile(), kernel_bin)
             return
         end
-        local triples = {
-            i386 = "i386-elf",
-            x86_64 = "x86_64-elf",
-            aarch64 = "aarch64-elf",
-            rv64 = "riscv64-elf"
-        }
-        local triple = triples[arch]
-        if triple == nil then
-            raise("kernel.bin objcopy is not configured for %s", arch)
-        end
-        local toolchain_bin = path.join(os.projectdir(), "toolchains", triple, "bin")
-        local gcc = path.join(toolchain_bin, triple .. "-gcc")
-        local ld = path.join(toolchain_bin, triple .. "-ld")
-        local objcopy = path.join(toolchain_bin, triple .. "-objcopy")
+        local triple = assert(target:values("ok.triple"),
+            "kernel.bin tools are not configured for %s", arch)
+        local gcc = assert(target:tool("cc"), "systoolchain C compiler is unavailable for %s", arch)
+        local objcopy = assert(target:tool("objcopy"), "systoolchain objcopy is unavailable for %s", arch)
+        local ld = path.join(path.directory(objcopy), triple .. "-ld")
+        assert(os.isfile(ld), "systoolchain linker is unavailable: %s", ld)
 
         local payload_bin = path.join(target:targetdir(), "kernel_payload.bin")
         os.execv(objcopy, {"-O", "binary", target:targetfile(), payload_bin})
@@ -171,14 +184,16 @@ target("okernel_image")
         os.execv("python3", {
             path.join(os.projectdir(), "scripts", "qemu_test.py"),
             "--arch", target:values("ok.arch"),
-            "--kernel", path.join(target:targetdir(), "kernel.bin")
+            "--kernel", path.join(target:targetdir(), "kernel.bin"),
+            "--qemu", systoolchain_qemu(target, target:values("ok.arch"))
         })
     end)
     on_test(function (target)
         local code = os.execv("python3", {
             path.join(os.projectdir(), "scripts", "qemu_test.py"),
             "--arch", target:values("ok.arch"),
-            "--kernel", path.join(target:targetdir(), "kernel.bin")
+            "--kernel", path.join(target:targetdir(), "kernel.bin"),
+            "--qemu", systoolchain_qemu(target, target:values("ok.arch"))
         }, {try = true})
         return code == 0
     end)

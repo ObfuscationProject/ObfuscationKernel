@@ -13,32 +13,6 @@ import time
 from pathlib import Path
 
 
-QEMU_SYSTEM_BY_ARCH = {
-    "i386": "qemu-system-i386",
-    "x86_64": "qemu-system-x86_64",
-    "aarch64": "qemu-system-aarch64",
-    "arm32": "qemu-system-arm",
-    "rv64": "qemu-system-riscv64",
-    "rv32": "qemu-system-riscv32",
-    "loongarch64": "qemu-system-loongarch64",
-    "mips": "qemu-system-mips",
-    "mips64": "qemu-system-mips64",
-    "ppc": "qemu-system-ppc",
-}
-
-UBUNTU_QEMU_PACKAGE_BY_ARCH = {
-    "i386": "qemu-system-x86",
-    "x86_64": "qemu-system-x86",
-    "aarch64": "qemu-system-arm",
-    "arm32": "qemu-system-arm",
-    "rv64": "qemu-system-misc",
-    "rv32": "qemu-system-misc",
-    "loongarch64": "qemu-system-misc",
-    "mips": "qemu-system-mips",
-    "mips64": "qemu-system-mips",
-    "ppc": "qemu-system-ppc",
-}
-
 QEMU_DEBUG_EXIT_SUCCESS = 33
 DEFAULT_QEMU_TIMEOUT_SECONDS = 100.0
 VIRTUAL_DISK_SIZE = 16 * 1024 * 1024
@@ -147,15 +121,10 @@ def serial_args(arch: str, display: str) -> list[str]:
     return ["-serial", "stdio"]
 
 
-def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool, disk: Path) -> list[str]:
-    qemu = QEMU_SYSTEM_BY_ARCH.get(arch)
-    if qemu is None:
+def qemu_command(arch: str, qemu: Path, kernel: Path, display: str, debug_exit: bool, disk: Path) -> list[str]:
+    if arch not in BOOTABLE_QEMU_ARCHES:
         raise QemuConfigurationError(f"qemu-system boot is not implemented for {arch} yet")
-    qemu_path = shutil.which(qemu)
-    if qemu_path is None:
-        package = UBUNTU_QEMU_PACKAGE_BY_ARCH.get(arch)
-        install_hint = f" Install Ubuntu package: {package}." if package else ""
-        raise QemuConfigurationError(f"QEMU executable missing: {qemu} was not found in PATH.{install_hint}")
+    qemu_path = str(qemu)
 
     if arch in ("aarch64", "arm32"):
         command = [
@@ -287,13 +256,20 @@ def qemu_command(arch: str, kernel: Path, display: str, debug_exit: bool, disk: 
     return command
 
 
-def run_kernel(arch: str, kernel: Path, display: str, debug_exit: bool, timeout: float | None) -> subprocess.CompletedProcess[str]:
+def run_kernel(
+    arch: str,
+    qemu: Path,
+    kernel: Path,
+    display: str,
+    debug_exit: bool,
+    timeout: float | None,
+) -> subprocess.CompletedProcess[str]:
     with tempfile.TemporaryDirectory(prefix="okernel-qemu-") as tmp:
         runnable_kernel = Path(tmp) / "kernel.bin"
         scratch_disk = Path(tmp) / "fs.img"
         shutil.copyfile(kernel, runnable_kernel)
         create_virtual_disk(scratch_disk)
-        command = qemu_command(arch, runnable_kernel, display, debug_exit, scratch_disk)
+        command = qemu_command(arch, qemu, runnable_kernel, display, debug_exit, scratch_disk)
         if not debug_exit:
             return run_until_marker(command, timeout)
         return subprocess.run(command, text=True, capture_output=True, check=False, timeout=timeout)
@@ -474,6 +450,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--arch", required=True)
     parser.add_argument("--kernel", required=True, type=Path, help="Path to the compiled kernel.bin")
+    parser.add_argument("--qemu", required=True, type=Path, help="SysToolchain QEMU executable")
     parser.add_argument("--display", default="none")
     parser.add_argument("--no-debug-exit", action="store_true")
     parser.add_argument("--timeout", type=float, default=DEFAULT_QEMU_TIMEOUT_SECONDS)
@@ -481,8 +458,12 @@ def main() -> int:
 
     arch = normalize_arch(args.arch)
     kernel = args.kernel.resolve()
+    qemu = args.qemu.resolve()
     if not kernel.exists():
         print(f"kernel image does not exist: {kernel}", file=sys.stderr)
+        return 2
+    if not qemu.is_file():
+        print(f"SysToolchain QEMU executable does not exist: {qemu}", file=sys.stderr)
         return 2
 
     use_debug_exit = not args.no_debug_exit and arch in ("i386", "x86_64")
@@ -492,7 +473,7 @@ def main() -> int:
             file=sys.stderr,
         )
     try:
-        result = run_kernel(arch, kernel, args.display, use_debug_exit, args.timeout)
+        result = run_kernel(arch, qemu, kernel, args.display, use_debug_exit, args.timeout)
     except QemuConfigurationError as error:
         print(str(error), file=sys.stderr)
         write_summary(kernel, arch, "", 127, 11)
