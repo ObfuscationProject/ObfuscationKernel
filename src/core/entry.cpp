@@ -83,10 +83,6 @@ void emit_failure(const KernelDebugSink &sink, Status status)
     emit(sink, "\n");
 }
 
-constexpr std::string_view boot_gui_modules[] = {
-    "/boot/modules/system-gui.okmod",
-};
-
 void emit_display_text(const KernelDebugSink &sink, std::string_view text)
 {
     usize line_start = 0;
@@ -125,19 +121,19 @@ void emit_display_text(const KernelDebugSink &sink, std::string_view text)
     }
     if (report.vm)
     {
-        emit(sink, "OK_VM kernel_map=pass user_map=pass user_copy=pass fault=pass\n");
+        emit(sink, "OK_VM scope=model kernel_map=pass user_map=pass user_copy=pass fault=pass\n");
     }
     if (report.proc)
     {
-        emit(sink, "OK_PROC create=pass schedule=pass exit=pass wait=pass\n");
+        emit(sink, "OK_PROC scope=model create=pass schedule=pass exit=pass wait=pass\n");
     }
     if (report.elf)
     {
-        emit(sink, "OK_ELF load=pass entry=pass stack=pass\n");
+        emit(sink, "OK_ELF scope=model metadata=pass entry=pass stack=pass execution=unsupported\n");
     }
     if (report.userland)
     {
-        emit(sink, "OK_USERLAND hello=pass fd=pass fork=pass exec=pass\n");
+        emit(sink, "OK_USERLAND scope=model service_write=pass fd=pass fork=pass exec=pass execution=unsupported\n");
     }
     if (report.vfs_unix)
     {
@@ -167,11 +163,7 @@ void emit_display_text(const KernelDebugSink &sink, std::string_view text)
     }
     if (report.driver_abi)
     {
-        emit(sink, "OK_DRIVER_ABI native_probe=pass irq=pass mmio=pass remove=pass\n");
-    }
-    if (report.linux_driver_shim)
-    {
-        emit(sink, "OK_LINUX_DRIVER_SHIM compile=pass probe=pass mmio=pass alloc=pass remove=pass\n");
+        emit(sink, "OK_DRIVER_ABI scope=model native_probe=pass irq_model=pass mmio_model=pass remove=pass\n");
     }
     if (report.gui)
     {
@@ -179,7 +171,8 @@ void emit_display_text(const KernelDebugSink &sink, std::string_view text)
     }
     if (report.module_load)
     {
-        emit(sink, "OK_MODULE_LOAD elf=pass reloc=pass symbols=pass unload=pass\n");
+        emit(sink, "OK_MODULE_METADATA scope=model elf_parse=pass relocation_records=pass symbols=pass lifecycle=pass "
+                   "execution=unsupported\n");
     }
     if (report.netdev)
     {
@@ -199,15 +192,17 @@ void emit_display_text(const KernelDebugSink &sink, std::string_view text)
     }
     if (report.smp_roadmap)
     {
-        emit(sink, "OK_SMP cpus=4 online=4 ap_start=pass per_cpu=pass\n");
+        emit(sink, "OK_SMP scope=model topology=pass per_cpu=pass ap_start=unsupported\n");
     }
     if (report.irq_roadmap)
     {
-        emit(sink, "OK_IRQ idt=pass timer=pass syscall=pass page_fault=pass\n");
+        emit(
+            sink,
+            "OK_IRQ scope=model dispatch=pass timer=pass syscall=pass page_fault=pass hardware_delivery=unsupported\n");
     }
     if (report.preempt)
     {
-        emit(sink, "OK_PREEMPT tick=pass switch=pass sleep=pass idle=pass\n");
+        emit(sink, "OK_PREEMPT scope=model tick=pass selection=pass sleep=pass idle=pass context_switch=unsupported\n");
     }
 }
 
@@ -297,6 +292,32 @@ Status ok_kernel_entry(const KernelEntryConfig &config, KernelEntryResult *resul
         return status;
     }
 
+    if (auto status = kernel.close_debug_gui(); !status.ok())
+    {
+        emit_failure(sink, status);
+        if (result != nullptr)
+            result->status = status;
+        return status;
+    }
+
+    if (config.kernel.extension != nullptr)
+    {
+        if (auto status = config.kernel.extension->self_test(kernel); !status.ok())
+        {
+            emit_failure(sink, status);
+            if (result != nullptr)
+                result->status = status;
+            return status;
+        }
+        if (auto status = kernel.start_extension(); !status.ok())
+        {
+            emit_failure(sink, status);
+            if (result != nullptr)
+                result->status = status;
+            return status;
+        }
+        emit(sink, "OK_EXTENSION_TEST scope=model result=pass\n");
+    }
     emit_roadmap_markers(sink, kernel);
     emit(sink, "OK_DEBUG fs=pass user=pass display=pass\n");
     emit_pass(sink, kernel);
@@ -456,28 +477,10 @@ Status ok_gui_close_debug_surfaces()
     return kernel.posix().set_credentials(user::root_credentials());
 }
 
-Status ok_load_boot_gui_modules()
+Status ok_start_boot_extension()
 {
-    Kernel &kernel = kernel_instance();
-    if (!kernel.booted())
-    {
-        return Status::not_initialized("kernel is not booted");
-    }
-    for (const auto path : boot_gui_modules)
-    {
-        auto status = kernel.load_external_kernel_module(path);
-        if (!status.ok() && status.code() != StatusCode::not_found)
-        {
-            return status;
-        }
-    }
-    if (auto status = kernel.close_debug_gui(); !status.ok())
-    {
-        return status;
-    }
-    return kernel.posix().set_credentials(user::root_credentials());
+    return kernel_instance().start_extension();
 }
-
 SystemPowerAction ok_system_power_action()
 {
     Kernel &kernel = kernel_instance();

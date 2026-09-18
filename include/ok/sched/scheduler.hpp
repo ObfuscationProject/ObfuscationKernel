@@ -7,8 +7,11 @@
 #include "ok/user/user.hpp"
 
 #include <array>
+#include <concepts>
 #include <span>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 
 namespace ok::sched
 {
@@ -221,37 +224,34 @@ class ProcessControlBlock
     StaticVector<ThreadControlBlock, max_threads_per_process> threads_{};
 };
 
-class SchedulerPolicy
-{
-  public:
-    virtual ~SchedulerPolicy() = default;
-    [[nodiscard]] virtual std::string_view name() const = 0;
-    virtual Result<ProcessId> pick_next(std::span<const ProcessControlBlock> processes, ProcessId current,
-                                        smp::CpuId cpu) = 0;
-};
+// Policies are kernel build-time choices. The scheduler stores its policy by
+// value so copies cannot retain a pointer into a different scheduler instance.
+template <typename T>
+concept SchedulerPolicy =
+    requires(T &policy, std::span<const ProcessControlBlock> processes, ProcessId current, smp::CpuId cpu) {
+        { policy.pick_next(processes, current, cpu) } -> std::same_as<Result<ProcessId>>;
+    };
 
-class RoundRobinPolicy final : public SchedulerPolicy
+class RoundRobinPolicy final
 {
   public:
-    [[nodiscard]] std::string_view name() const override
+    [[nodiscard]] constexpr std::string_view name() const
     {
         return "round-robin";
     }
-    Result<ProcessId> pick_next(std::span<const ProcessControlBlock> processes, ProcessId current,
-                                smp::CpuId cpu) override;
+    Result<ProcessId> pick_next(std::span<const ProcessControlBlock> processes, ProcessId current, smp::CpuId cpu);
 };
 
-class Scheduler final
+// Nonvirtual shared storage/mechanisms keep each policy instantiation small.
+// Construction and dispatch are protected for use by BasicScheduler.
+class SchedulerState
 {
+  protected:
+    SchedulerState() = default;
+    ~SchedulerState() = default;
+    Result<ProcessId> dispatch_selected(smp::CpuId cpu, Result<ProcessId> next);
+
   public:
-    explicit Scheduler(SchedulerPolicy *policy = nullptr);
-
-    static SchedulerPolicy &default_round_robin_policy();
-    void set_policy(SchedulerPolicy &policy)
-    {
-        policy_ = &policy;
-    }
-
     void set_mode(SchedulingMode mode)
     {
         mode_ = mode;
@@ -273,8 +273,6 @@ class Scheduler final
     Status configure_cpus(usize cpu_count);
     Status set_runnable(ProcessId pid);
     Status block_process(ProcessId pid);
-    Result<ProcessId> schedule_next();
-    Result<ProcessId> schedule_next_on_cpu(smp::CpuId cpu);
 
     [[nodiscard]] ProcessId current_pid() const
     {
@@ -309,8 +307,6 @@ class Scheduler final
     [[nodiscard]] u16 configured_cpu_mask() const;
 
     SchedulingMode mode_{SchedulingMode::round_robin};
-    RoundRobinPolicy owned_round_robin_policy_{};
-    SchedulerPolicy *policy_{nullptr};
     StaticVector<ProcessControlBlock, max_processes> processes_{};
     ProcessId next_pid_{1};
     ThreadId next_tid_{1};
@@ -321,5 +317,43 @@ class Scheduler final
     std::array<ThreadId, smp::max_cpus> current_thread_by_cpu_{};
     std::array<CpuSchedulingStats, smp::max_cpus> cpu_stats_{};
 };
+
+template <SchedulerPolicy Policy = RoundRobinPolicy> class BasicScheduler final : public SchedulerState
+{
+  public:
+    BasicScheduler() = default;
+    explicit BasicScheduler(Policy policy) : policy_(std::move(policy))
+    {
+    }
+
+    void set_policy(Policy policy)
+    {
+        policy_ = std::move(policy);
+    }
+    [[nodiscard]] const Policy &policy() const
+    {
+        return policy_;
+    }
+
+    Result<ProcessId> schedule_next()
+    {
+        return schedule_next_on_cpu(0);
+    }
+    Result<ProcessId> schedule_next_on_cpu(smp::CpuId cpu)
+    {
+        if (cpu >= cpu_count())
+        {
+            return Status::invalid_argument("scheduler cpu id out of range");
+        }
+        return dispatch_selected(cpu, policy_.pick_next(processes(), current_pid(cpu), cpu));
+    }
+
+  private:
+    [[no_unique_address]] Policy policy_{};
+};
+
+using Scheduler = BasicScheduler<RoundRobinPolicy>;
+static_assert(SchedulerPolicy<RoundRobinPolicy>);
+static_assert(!std::is_polymorphic_v<Scheduler>);
 
 } // namespace ok::sched

@@ -7,9 +7,12 @@ The project language, comments, commit messages, and documentation are English.
 - Use C++23.
 - Prefer clear module boundaries over broad global state.
 - Keep RTTI enabled.
-- Use virtual interfaces for runtime hardware, driver, filesystem, and policy
-  variation.
-- Use concepts for compile-time extension contracts.
+- Use concepts/templates and static dispatch for architecture operations,
+  scheduler policy selection and other high-frequency paths.
+- Use virtual interfaces only at runtime device, filesystem and module-service
+  boundaries where implementations can actually change at runtime.
+- Preserve all ten architecture profiles; share mechanisms through typed policies
+  instead of coupling generic code to x86_64.
 - Return `ok::Status` or `ok::Result<T>` from kernel module operations.
 - Keep `okernel` freestanding: no hosted STL containers, heap allocation,
   exceptions, libc calls, or external C++ runtime dependencies.
@@ -26,7 +29,8 @@ Kernel APIs do not throw exceptions. Public module methods return `Status` or
 Each architecture must provide:
 
 - An `ArchTraits` specialization.
-- An `ArchOperations` implementation or adapter.
+- A static `NativeInstructions<Architecture>` backend satisfying the architecture
+  instruction concept; `ArchOperations` selects the configured target at compile time.
 - Interrupt entry and return strategy.
 - User-mode entry strategy.
 - Memory-management constants and page-table model.
@@ -51,3 +55,21 @@ xmake f -c -y -m debug -a x86_64
 xmake -y -b okernel
 xmake qemu-test
 ```
+
+## Repository boundaries
+
+ObfuscationKernel exports an architecture/mode-specific SDK with native headers,
+UAPI, core and boot libraries, linker script, image and manifest. ObfuscationOS
+consumes these artifacts, including when linking its own early-boot extensions.
+Do not introduce an embedded kernel checkout in the OS repository.
+
+Core mechanisms, platform support, native extension interfaces, the basic
+compositor and kernel diagnostics belong here. Distribution desktop/session
+policy, external modules/drivers, Linux driver adapters and ordinary applications
+belong in ObfuscationOS. Extension lifecycle callbacks are not a reason to make
+the kernel depend on a distribution class or application name.
+
+Model tests must identify their scope. Booting a test in QEMU does not turn
+metadata/page-table/scheduler model checks into hardware execution tests. Keep
+real trap delivery, address-space isolation, application execution and module
+relocation as separate acceptance milestones.

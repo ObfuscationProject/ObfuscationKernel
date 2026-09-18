@@ -153,10 +153,9 @@ enum class WindowControl : u8
 {
     const bool tab = local_x >= 3 && local_x <= 8 && local_y >= 4 && local_y <= 6;
     const bool body = local_x >= 3 && local_x <= 15 && local_y >= 7 && local_y <= 14;
-    const bool border = (local_y == 7 && local_x >= 3 && local_x <= 15) ||
-                        (local_y == 14 && local_x >= 3 && local_x <= 15) ||
-                        (local_x == 3 && local_y >= 7 && local_y <= 14) ||
-                        (local_x == 15 && local_y >= 7 && local_y <= 14);
+    const bool border =
+        (local_y == 7 && local_x >= 3 && local_x <= 15) || (local_y == 14 && local_x >= 3 && local_x <= 15) ||
+        (local_x == 3 && local_y >= 7 && local_y <= 14) || (local_x == 15 && local_y >= 7 && local_y <= 14);
     const bool handle = local_x >= 6 && local_x <= 12 && local_y == 10;
     return tab || border || handle || (body && ((local_x + local_y) % 7u == 0));
 }
@@ -167,10 +166,9 @@ enum class WindowControl : u8
                        (local_y >= 4 && local_y <= 14 && (local_x == 3 || local_x == 15));
     const bool cpu = local_x >= 6 && local_x <= 8 && local_y >= 9 && local_y <= 13;
     const bool io = local_x >= 10 && local_x <= 12 && local_y >= 7 && local_y <= 13;
-    const bool pulse = (local_y == 8 && local_x >= 5 && local_x <= 6) ||
-                       (local_y == 10 && local_x >= 7 && local_x <= 8) ||
-                       (local_y == 6 && local_x >= 9 && local_x <= 10) ||
-                       (local_y == 11 && local_x >= 11 && local_x <= 13);
+    const bool pulse =
+        (local_y == 8 && local_x >= 5 && local_x <= 6) || (local_y == 10 && local_x >= 7 && local_x <= 8) ||
+        (local_y == 6 && local_x >= 9 && local_x <= 10) || (local_y == 11 && local_x >= 11 && local_x <= 13);
     return frame || cpu || io || pulse;
 }
 
@@ -245,9 +243,8 @@ enum class WindowControl : u8
     const auto center_x = static_cast<i32>(width / 2);
     const auto center_y = static_cast<i32>((height - taskbar_height) / 2);
     const bool hero_panel = ix >= center_x - 132 && ix <= center_x + 132 && iy >= center_y - 54 && iy <= center_y + 54;
-    const bool panel_edge = hero_panel &&
-                            (ix == center_x - 132 || ix == center_x + 132 || iy == center_y - 54 ||
-                             iy == center_y + 54);
+    const bool panel_edge =
+        hero_panel && (ix == center_x - 132 || ix == center_x + 132 || iy == center_y - 54 || iy == center_y + 54);
     const bool accent_line = hero_panel && ((ix - (center_x - 132)) + (iy - (center_y - 54))) % 31 == 0;
     const bool warm_line = hero_panel && ((ix - (center_x - 132)) * 2 - (iy - (center_y - 54))) % 47 == 0;
     if (panel_edge)
@@ -929,8 +926,8 @@ Status GuiCompositor::handle_mouse_delta(i32 delta_x, i32 delta_y, bool left_but
                 }
             }
 
-            if (info.value().chrome == SurfaceChrome::decorated &&
-                info.value().window_state == WindowState::normal && resize_hit(info.value(), local_x, local_y))
+            if (info.value().chrome == SurfaceChrome::decorated && info.value().window_state == WindowState::normal &&
+                resize_hit(info.value(), local_x, local_y))
             {
                 resizing_surface_id_ = hit.value();
             }
@@ -970,10 +967,10 @@ Status GuiCompositor::handle_mouse_delta(i32 delta_x, i32 delta_y, bool left_but
         if (info)
         {
             auto bounds = info.value().bounds;
-            const auto requested_width = static_cast<u32>(max_i32(pointer_x_ - bounds.x + 1,
-                                                                  static_cast<i32>(minimum_surface_width)));
-            const auto requested_height = static_cast<u32>(max_i32(pointer_y_ - bounds.y + 1,
-                                                                   static_cast<i32>(minimum_surface_height)));
+            const auto requested_width =
+                static_cast<u32>(max_i32(pointer_x_ - bounds.x + 1, static_cast<i32>(minimum_surface_width)));
+            const auto requested_height =
+                static_cast<u32>(max_i32(pointer_y_ - bounds.y + 1, static_cast<i32>(minimum_surface_height)));
             bounds.width = clamp_u32(requested_width, minimum_surface_width, max_gui_surface_width);
             bounds.height = clamp_u32(requested_height, minimum_surface_height, max_gui_surface_height);
             if (auto status = resize_surface(resizing_surface_id_, bounds); !status.ok())
@@ -1244,23 +1241,22 @@ Status GuiCompositor::present()
             auto color = desktop_pixel_color(mode.width, mode.height, x, y);
             if (kernel_shell)
             {
-                if (const auto shell_color = taskbar_launcher_pixel_color(mode.height, x, y, TaskbarApp::debug_shell,
-                                                                           shell_open,
-                                                                           focused_app == TaskbarApp::debug_shell);
+                if (const auto shell_color = taskbar_launcher_pixel_color(
+                        mode.height, x, y, TaskbarApp::debug_shell, shell_open, focused_app == TaskbarApp::debug_shell);
                     shell_color != 0)
                 {
                     color = shell_color;
                 }
-                if (const auto files_color = taskbar_launcher_pixel_color(mode.height, x, y, TaskbarApp::file_manager,
-                                                                           files_open,
-                                                                           focused_app == TaskbarApp::file_manager);
+                if (const auto files_color =
+                        taskbar_launcher_pixel_color(mode.height, x, y, TaskbarApp::file_manager, files_open,
+                                                     focused_app == TaskbarApp::file_manager);
                     files_color != 0)
                 {
                     color = files_color;
                 }
-                if (const auto tasks_color = taskbar_launcher_pixel_color(mode.height, x, y, TaskbarApp::task_monitor,
-                                                                           tasks_open,
-                                                                           focused_app == TaskbarApp::task_monitor);
+                if (const auto tasks_color =
+                        taskbar_launcher_pixel_color(mode.height, x, y, TaskbarApp::task_monitor, tasks_open,
+                                                     focused_app == TaskbarApp::task_monitor);
                     tasks_color != 0)
                 {
                     color = tasks_color;
@@ -1340,7 +1336,7 @@ Status GuiCompositor::play_startup_animation()
         return desktop.status();
     }
 
-    auto surface = create_surface(desktop.value(), "ObfuscationOS");
+    auto surface = create_surface(desktop.value(), "ObfuscationKernel");
     if (!surface)
     {
         return surface.status();
@@ -1382,14 +1378,12 @@ Status GuiCompositor::play_startup_animation()
             static_cast<void>(destroy_surface(id));
             return status;
         }
-        if (auto status = fill_rect(id, Rect{.x = 102, .y = 92, .width = 276, .height = 3}, 0xffd8f3ffu);
-            !status.ok())
+        if (auto status = fill_rect(id, Rect{.x = 102, .y = 92, .width = 276, .height = 3}, 0xffd8f3ffu); !status.ok())
         {
             static_cast<void>(destroy_surface(id));
             return status;
         }
-        if (auto status = fill_rect(id, Rect{.x = 102, .y = 151, .width = 276, .height = 3}, 0xff44aa88u);
-            !status.ok())
+        if (auto status = fill_rect(id, Rect{.x = 102, .y = 151, .width = 276, .height = 3}, 0xff44aa88u); !status.ok())
         {
             static_cast<void>(destroy_surface(id));
             return status;
@@ -1518,9 +1512,9 @@ Result<Rect> GuiCompositor::desktop_bounds() const
 ModuleManifest GuiModule::manifest() const
 {
     static constexpr std::array exports{gui_service_id, gui_desktop_service_id};
-    const auto threading =
-        display_ != nullptr && display_->uses_cpu_gui_render_workers() ? ModuleThreading::per_cpu
-                                                                       : ModuleThreading::single_threaded;
+    const auto threading = display_ != nullptr && display_->uses_cpu_gui_render_workers()
+                               ? ModuleThreading::per_cpu
+                               : ModuleThreading::single_threaded;
     u64 capabilities = module_capability_bit(ModuleCapability::exports_services) |
                        module_capability_bit(ModuleCapability::owns_kernel_process) |
                        module_capability_bit(ModuleCapability::handles_gui);

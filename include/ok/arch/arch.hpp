@@ -1,88 +1,114 @@
 #pragma once
 
-#include "ok/core/types.hpp"
+#include "ok/arch/native.hpp"
+#include "ok/arch/profiles.hpp"
 
-#include <array>
-#include <string_view>
+#include <concepts>
+#include <type_traits>
 
 namespace ok::arch
 {
 
-enum class Architecture : u8
-{
-    i386,
-    x86_64,
-    aarch64,
-    arm32,
-    rv64,
-    rv32,
-    loongarch64,
-    mips,
-    mips64,
-    ppc,
+// Architecture selection is a build-time boundary. Runtime polymorphism belongs
+// at loadable driver/module interfaces, not at every CPU primitive call.
+template <typename T>
+concept ArchitectureInstructions = requires {
+    { T::read_cycle_counter() } noexcept -> std::same_as<u64>;
+    { T::memory_fence() } noexcept -> std::same_as<void>;
+    { T::enable_interrupts() } noexcept -> std::same_as<void>;
+    { T::disable_interrupts() } noexcept -> std::same_as<void>;
+    { T::halt() } noexcept -> std::same_as<void>;
 };
 
-enum class Endianness : u8
-{
-    little,
-    big,
-};
-
-enum class PrivilegeMode : u8
-{
-    kernel,
-    user,
-};
-
-struct CpuContext
-{
-    Architecture architecture{Architecture::x86_64};
-    std::array<uptr, 32> registers{};
-    uptr program_counter{0};
-    uptr stack_pointer{0};
-    uptr status_register{0};
-    PrivilegeMode mode{PrivilegeMode::kernel};
-};
-
-struct TrapFrame
-{
-    u64 vector{0};
-    u64 error_code{0};
-    CpuContext context{};
-};
-
-struct UserEntry
-{
-    uptr instruction_pointer{0};
-    uptr stack_pointer{0};
-    uptr argument{0};
-};
-
-class ArchOperations
+template <Architecture A, ArchitectureInstructions Instructions = detail::NativeInstructions<A>>
+    requires ArchitectureProfile<ArchTraits<A>>
+class ArchitectureOperations final
 {
   public:
-    virtual ~ArchOperations() = default;
+    [[nodiscard]] constexpr std::string_view name() const
+    {
+        return ArchTraits<A>::name;
+    }
+    [[nodiscard]] constexpr Architecture architecture() const
+    {
+        return A;
+    }
+    [[nodiscard]] constexpr usize page_size() const
+    {
+        return ArchTraits<A>::page_size;
+    }
+    [[nodiscard]] constexpr usize register_count() const
+    {
+        return ArchTraits<A>::register_count;
+    }
+    [[nodiscard]] constexpr Endianness endianness() const
+    {
+        return ArchTraits<A>::endianness;
+    }
+    // This remains profile metadata until topology discovery is implemented.
+    [[nodiscard]] constexpr usize hardware_thread_count() const
+    {
+        return ArchTraits<A>::hardware_threads;
+    }
+    [[nodiscard]] constexpr bool supports_user_mode() const
+    {
+        return ArchTraits<A>::has_user_mode;
+    }
+    [[nodiscard]] constexpr std::string_view interrupt_model() const
+    {
+        return ArchTraits<A>::interrupt_model;
+    }
+    [[nodiscard]] constexpr std::string_view syscall_model() const
+    {
+        return ArchTraits<A>::syscall_model;
+    }
+    [[nodiscard]] constexpr std::string_view user_transition_model() const
+    {
+        return ArchTraits<A>::user_transition_model;
+    }
 
-    [[nodiscard]] virtual std::string_view name() const = 0;
-    [[nodiscard]] virtual Architecture architecture() const = 0;
-    [[nodiscard]] virtual usize page_size() const = 0;
-    [[nodiscard]] virtual usize register_count() const = 0;
-    [[nodiscard]] virtual Endianness endianness() const = 0;
-    [[nodiscard]] virtual usize hardware_thread_count() const = 0;
-    [[nodiscard]] virtual bool supports_user_mode() const = 0;
-    [[nodiscard]] virtual std::string_view interrupt_model() const = 0;
-    [[nodiscard]] virtual std::string_view syscall_model() const = 0;
-    [[nodiscard]] virtual std::string_view user_transition_model() const = 0;
-    [[nodiscard]] virtual CpuContext make_kernel_context(uptr entry, uptr stack_top) const = 0;
-    [[nodiscard]] virtual CpuContext make_user_context(UserEntry entry) const = 0;
-    [[nodiscard]] virtual u64 read_cycle_counter() const noexcept = 0;
-    virtual void memory_fence() noexcept = 0;
-    virtual void enable_interrupts() noexcept = 0;
-    virtual void disable_interrupts() noexcept = 0;
-    virtual void halt() noexcept = 0;
+    [[nodiscard]] constexpr CpuContext make_kernel_context(uptr entry, uptr stack_top) const
+    {
+        CpuContext context{};
+        context.architecture = A;
+        context.program_counter = entry;
+        context.stack_pointer = stack_top;
+        context.mode = PrivilegeMode::kernel;
+        return context;
+    }
+
+    [[nodiscard]] constexpr CpuContext make_user_context(UserEntry entry) const
+    {
+        CpuContext context{};
+        context.architecture = A;
+        context.program_counter = entry.instruction_pointer;
+        context.stack_pointer = entry.stack_pointer;
+        context.registers[0] = entry.argument;
+        context.mode = PrivilegeMode::user;
+        return context;
+    }
+
+    [[nodiscard]] u64 read_cycle_counter() const noexcept
+    {
+        return Instructions::read_cycle_counter();
+    }
+    void memory_fence() noexcept
+    {
+        Instructions::memory_fence();
+    }
+    void enable_interrupts() noexcept
+    {
+        Instructions::enable_interrupts();
+    }
+    void disable_interrupts() noexcept
+    {
+        Instructions::disable_interrupts();
+    }
+    void halt() noexcept
+    {
+        Instructions::halt();
+    }
 };
-
-template <Architecture A> struct ArchTraits;
 
 [[nodiscard]] constexpr std::string_view to_string(Architecture architecture)
 {
@@ -157,7 +183,46 @@ template <Architecture A> struct ArchTraits;
     return Architecture::x86_64;
 }
 
-[[nodiscard]] Architecture configured_architecture();
+[[nodiscard]] constexpr Architecture configured_architecture()
+{
+#if defined(OK_ARCH_TARGET_I386)
+    return Architecture::i386;
+#elif defined(OK_ARCH_TARGET_X86_64)
+    return Architecture::x86_64;
+#elif defined(OK_ARCH_TARGET_AARCH64)
+    return Architecture::aarch64;
+#elif defined(OK_ARCH_TARGET_ARM32)
+    return Architecture::arm32;
+#elif defined(OK_ARCH_TARGET_RV64)
+    return Architecture::rv64;
+#elif defined(OK_ARCH_TARGET_RV32)
+    return Architecture::rv32;
+#elif defined(OK_ARCH_TARGET_LOONGARCH64)
+    return Architecture::loongarch64;
+#elif defined(OK_ARCH_TARGET_MIPS)
+    return Architecture::mips;
+#elif defined(OK_ARCH_TARGET_MIPS64)
+    return Architecture::mips64;
+#elif defined(OK_ARCH_TARGET_PPC)
+    return Architecture::ppc;
+#else
+    return Architecture::x86_64;
+#endif
+}
+
+using ArchOperations = ArchitectureOperations<configured_architecture()>;
+static_assert(!std::is_polymorphic_v<ArchOperations>);
+
+[[nodiscard]] constexpr Status validate_architecture(Architecture requested)
+{
+    return requested == configured_architecture()
+               ? Status::success()
+               : Status::unsupported("architecture differs from the compiled kernel target");
+}
+
+[[nodiscard]] ArchOperations &configured_arch_operations();
+// Compatibility accessor: the argument is a required match, never a request to
+// switch instruction sets. Validate untrusted configuration before calling it.
 [[nodiscard]] ArchOperations &arch_operations(Architecture architecture);
 
 } // namespace ok::arch

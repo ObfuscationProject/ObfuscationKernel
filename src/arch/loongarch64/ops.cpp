@@ -2,78 +2,48 @@
 
 namespace ok::arch::detail
 {
-namespace
-{
 
-class LoongArch64Operations final : public ProfiledArchOperationsBase<Architecture::loongarch64>
+u64 NativeInstructions<Architecture::loongarch64>::read_cycle_counter() noexcept
 {
-  public:
-    [[nodiscard]] std::string_view interrupt_model() const override
-    {
-        return "eentry-ecfg";
-    }
-    [[nodiscard]] std::string_view syscall_model() const override
-    {
-        return "syscall";
-    }
-    [[nodiscard]] std::string_view user_transition_model() const override
-    {
-        return "ertn";
-    }
-
-    [[nodiscard]] u64 read_cycle_counter() const noexcept override
-    {
 #if defined(__loongarch__) && defined(__loongarch64)
-        u64 value = 0;
-        asm volatile("rdtime.d %0, $r0" : "=r"(value));
-        return value == 0 ? fallback_cycle_counter() : value;
+    u64 value = 0;
+    asm volatile("rdtime.d %0, $r0" : "=r"(value));
+    return value == 0 ? fallback_cycle_counter() : value;
 #else
-        return fallback_cycle_counter();
+    return fallback_cycle_counter();
 #endif
-    }
+}
 
-    void memory_fence() noexcept override
-    {
-#if defined(__loongarch__)
-        asm volatile("dbar 0" ::: "memory");
-#else
-        compiler_fence();
-#endif
-    }
-
-    void enable_interrupts() noexcept override
-    {
-#if defined(OK_USE_PRIVILEGED_ASM) && defined(__loongarch__)
-        asm volatile("csrxchg $r0, $r0, 0x0" ::: "memory");
-#endif
-        ArchOperationsBase::enable_interrupts();
-    }
-
-    void disable_interrupts() noexcept override
-    {
-#if defined(OK_USE_PRIVILEGED_ASM) && defined(__loongarch__)
-        asm volatile("csrxchg $r0, $r0, 0x0" ::: "memory");
-#endif
-        ArchOperationsBase::disable_interrupts();
-    }
-
-    void halt() noexcept override
-    {
-#if defined(OK_USE_PRIVILEGED_ASM) && defined(__loongarch__)
-        asm volatile("idle 0" ::: "memory");
-#elif defined(__loongarch__)
-        asm volatile("nop" ::: "memory");
-#endif
-        ArchOperationsBase::halt();
-    }
-};
-
-} // namespace
-
-ArchOperations &loongarch64_operations()
+void NativeInstructions<Architecture::loongarch64>::memory_fence() noexcept
 {
-    static LoongArch64Operations operations;
-    return operations;
+#if defined(__loongarch__)
+    asm volatile("dbar 0" ::: "memory");
+#else
+    compiler_fence();
+#endif
+}
+
+void NativeInstructions<Architecture::loongarch64>::enable_interrupts() noexcept
+{
+#if defined(OK_USE_PRIVILEGED_ASM) && defined(__loongarch__)
+    asm volatile("csrxchg $r0, $r0, 0x0" ::: "memory");
+#endif
+}
+
+void NativeInstructions<Architecture::loongarch64>::disable_interrupts() noexcept
+{
+#if defined(OK_USE_PRIVILEGED_ASM) && defined(__loongarch__)
+    asm volatile("csrxchg $r0, $r0, 0x0" ::: "memory");
+#endif
+}
+
+void NativeInstructions<Architecture::loongarch64>::halt() noexcept
+{
+#if defined(OK_USE_PRIVILEGED_ASM) && defined(__loongarch__)
+    asm volatile("idle 0" ::: "memory");
+#elif defined(__loongarch__)
+    asm volatile("nop" ::: "memory");
+#endif
 }
 
 } // namespace ok::arch::detail

@@ -29,27 +29,27 @@ Restarting clears volatile surfaces, increments the generation counter, keeps
 the same service registration, reuses the module process record, and leaves the
 rest of the kernel running.
 
-## External Desktop Modules
+## Distribution Desktop Boundary
 
-The kernel GUI core does not directly register the OS system desktop. It exposes
-the compositor and desktop services, then accepts post-boot module load requests
-through the generic external module loader. A desktop module package is read
-from the VFS or from the mounted SimpleFS rootfs package name, parsed as OKMOD,
-and accepted only when it declares `param=entry:oop`, `param=class:desktop`,
-`gui.compositor` / `gui.desktop` imports, and an exported GUI service.
+The standalone kernel supplies the basic compositor, window services and kernel
+diagnostic applications. It contains no distribution desktop renderer, app list,
+package paths or login policy.
 
-ObfuscationOS supplies its package from the OS repository as
-`modules/system-gui/system-gui.okmod`, stages it to
-`/boot/modules/system-gui.okmod`, and loads it after kernel boot with
-`OK_SYS_LOAD_MODULE` via `/bin/kmodload --all` or the early boot fallback. The
-desktop package exports `gui.system-desktop` and opens the default login and
-desktop surfaces. System dock apps are independent user ELF programs from
-`/bin`, not GUI app modules or `gui.app.*` services.
+A distribution may statically link a component implementing `KernelExtension`
+from the exported Kernel SDK and supply the optional `ok_boot_extension` factory.
+The kernel owns neither the concrete desktop class nor its lifetime: it calls
+synchronous package, input, surface, refresh and process-exit callbacks. The
+extension uses the public compositor and desktop services through composition.
+This C++ interface requires the matching SDK and compiler; it is not a stable
+binary interface for independently relocated modules.
 
-The current module loader does not relocate arbitrary external text for this
-path. OKMOD metadata binds the compatible C++ OOP desktop module ABI, which
-keeps the OS desktop outside direct core registration while preserving a clear
-transition point for future native module linking and user-space GUI drawing.
+ObfuscationOS owns its greeter, session selection, dock, app definitions and
+renderers under `modules/system-gui`. Its OKMOD package configures that statically
+linked implementation. ELF app metadata currently creates scheduler records and
+OS-hosted windows; this does not demonstrate user-space GUI execution or process
+isolation. Runtime native code loading remains unimplemented. Debug OS images
+run the migrated desktop integration model tests after the kernel tests and
+before the success marker; standalone kernel tests contain no desktop policy.
 
 During boot, `GuiCompositor::play_startup_animation()` presents a short
 multi-frame startup animation before the shell claims the desktop.
@@ -137,8 +137,9 @@ This keeps the module independent from QEMU-specific ramfb details:
 - `RamFbConsole` owns fw_cfg DMA setup and physical guest-RAM pixels.
 - `GuiCompositor` owns surface state and composition.
 
-The GUI module advertises per-CPU render worker threads when the display driver
-uses CPU-side GUI frame composition, including ramfb. The process still presents
+The GUI module records per-CPU render worker threads when the display driver
+uses CPU-side GUI frame composition, including ramfb. These are scheduler model
+records, not proof of parallel execution on application processors. The process still presents
 through `FramebufferDisplayDriver`, so changing the physical backend does not
 require per-application rendering code.
 
@@ -166,7 +167,8 @@ line, scrollback, and foreground child process. Switching users in one `oksh`
 does not change the session restored by another `oksh` window. When a shell or
 file manager is opened from a kernel session, its scheduler record stays a
 kernel thread; when it is opened from `root` or another normal user, it is
-created as an isolated user process with its own address-space ID. Closing an
+created as a user-process record with its own address-space ID; hardware
+address-space isolation is not implemented. Closing an
 `oksh` window tears down its foreground child before the shell record is
 removed, matching the expected terminal/session lifetime for shell-launched
 kernel applications.
@@ -216,8 +218,7 @@ platform hooks from the compositor directly.
 The debug and roadmap tests cover:
 
 - GUI module startup and `gui.compositor` service publication;
-- post-boot OS module-loader validation for the `system-gui` package and
-  `gui.system-desktop` service publication;
+- rejection of external package names that collide with built-in modules;
 - `gui.desktop` service publication, scanout, shared buffers, clipboard, cursor,
   and routed input;
 - surface creation, metadata updates, z ordering, hit testing, drawing, and

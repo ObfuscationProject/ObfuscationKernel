@@ -296,8 +296,7 @@ Result<LoadedElf> ElfLoader::load(std::span<const std::byte> image, arch::Archit
     {
         return Status::invalid_argument("ELF image is too small");
     }
-    if (byte_at(image, 0) != 0x7f || byte_at(image, 1) != 'E' || byte_at(image, 2) != 'L' ||
-        byte_at(image, 3) != 'F')
+    if (byte_at(image, 0) != 0x7f || byte_at(image, 1) != 'E' || byte_at(image, 2) != 'L' || byte_at(image, 3) != 'F')
     {
         return Status::invalid_argument("ELF magic is invalid");
     }
@@ -425,6 +424,10 @@ Result<ProcessId> ProcessManager::create_kernel_thread(std::string_view name, ar
 Result<ProcessId> ProcessManager::create_user_process(std::string_view name, std::span<const std::byte> elf_image,
                                                       arch::Architecture architecture)
 {
+    if (auto status = arch::validate_architecture(architecture); !status.ok())
+    {
+        return status;
+    }
     auto loaded = elf_loader_.load(elf_image, architecture);
     if (!loaded)
     {
@@ -534,6 +537,10 @@ Result<ProcessId> ProcessManager::fork(ProcessId parent)
 
 Status ProcessManager::execve(ProcessId pid, std::span<const std::byte> elf_image, arch::Architecture architecture)
 {
+    if (auto status = arch::validate_architecture(architecture); !status.ok())
+    {
+        return status;
+    }
     auto *process = find(pid);
     if (process == nullptr)
     {
@@ -569,11 +576,12 @@ Status ProcessManager::execve(ProcessId pid, std::span<const std::byte> elf_imag
     auto &ops = arch::arch_operations(architecture);
     if (process->threads().empty())
     {
-        return process->add_thread(next_tid_++, ops.make_user_context(arch::UserEntry{
-                                                    .instruction_pointer = loaded.value().entry,
-                                                    .stack_pointer = loaded.value().stack_pointer,
-                                                    .argument = 0,
-                                                }),
+        return process->add_thread(next_tid_++,
+                                   ops.make_user_context(arch::UserEntry{
+                                       .instruction_pointer = loaded.value().entry,
+                                       .stack_pointer = loaded.value().stack_pointer,
+                                       .argument = 0,
+                                   }),
                                    TaskState::runnable);
     }
     process->threads()[0].context = ops.make_user_context(arch::UserEntry{
@@ -654,7 +662,8 @@ Status ProcessManager::reparent_children(ProcessId from, ProcessId to)
         if (process.parent_pid() == from)
         {
             process.set_parent(to);
-            if (auto status = target->add_child(process.pid()); !status.ok() && status.code() != StatusCode::already_exists)
+            if (auto status = target->add_child(process.pid());
+                !status.ok() && status.code() != StatusCode::already_exists)
             {
                 return status;
             }

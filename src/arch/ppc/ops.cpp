@@ -2,70 +2,40 @@
 
 namespace ok::arch::detail
 {
-namespace
-{
 
-class PpcOperations final : public ProfiledArchOperationsBase<Architecture::ppc>
+u64 NativeInstructions<Architecture::ppc>::read_cycle_counter() noexcept
 {
-  public:
-    [[nodiscard]] std::string_view interrupt_model() const override
-    {
-        return "msr-ee-decrementer";
-    }
-    [[nodiscard]] std::string_view syscall_model() const override
-    {
-        return "sc";
-    }
-    [[nodiscard]] std::string_view user_transition_model() const override
-    {
-        return "rfi";
-    }
-
-    [[nodiscard]] u64 read_cycle_counter() const noexcept override
-    {
 #if defined(__powerpc__) || defined(__PPC__)
-        u32 value = 0;
-        asm volatile("mfspr %0, 268" : "=r"(value));
-        return value == 0 ? 1 : value;
+    u32 value = 0;
+    asm volatile("mfspr %0, 268" : "=r"(value));
+    return value == 0 ? 1 : value;
 #else
-        return fallback_cycle_counter();
+    return fallback_cycle_counter();
 #endif
-    }
+}
 
-    void memory_fence() noexcept override
-    {
-#if defined(__powerpc__) || defined(__PPC__)
-        asm volatile("sync\nisync" ::: "memory");
-#else
-        compiler_fence();
-#endif
-    }
-
-    void enable_interrupts() noexcept override
-    {
-        ArchOperationsBase::enable_interrupts();
-    }
-
-    void disable_interrupts() noexcept override
-    {
-        ArchOperationsBase::disable_interrupts();
-    }
-
-    void halt() noexcept override
-    {
-#if defined(__powerpc__) || defined(__PPC__)
-        asm volatile("nop" ::: "memory");
-#endif
-        ArchOperationsBase::halt();
-    }
-};
-
-} // namespace
-
-ArchOperations &ppc_operations()
+void NativeInstructions<Architecture::ppc>::memory_fence() noexcept
 {
-    static PpcOperations operations;
-    return operations;
+#if defined(__powerpc__) || defined(__PPC__)
+    asm volatile("sync\nisync" ::: "memory");
+#else
+    compiler_fence();
+#endif
+}
+
+void NativeInstructions<Architecture::ppc>::enable_interrupts() noexcept
+{
+}
+
+void NativeInstructions<Architecture::ppc>::disable_interrupts() noexcept
+{
+}
+
+void NativeInstructions<Architecture::ppc>::halt() noexcept
+{
+#if defined(__powerpc__) || defined(__PPC__)
+    asm volatile("nop" ::: "memory");
+#endif
 }
 
 } // namespace ok::arch::detail

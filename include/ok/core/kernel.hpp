@@ -1,12 +1,12 @@
 #pragma once
 
 #include "ok/apps/file_manager.hpp"
+#include "ok/apps/shell.hpp"
 #include "ok/apps/task_manager.hpp"
 #include "ok/arch/arch.hpp"
+#include "ok/core/extension.hpp"
 #include "ok/core/power.hpp"
-#include "ok/apps/shell.hpp"
 #include "ok/driver/driver.hpp"
-#include "ok/core/external_module.hpp"
 #include "ok/fs/simplefs.hpp"
 #include "ok/fs/vfs.hpp"
 #include "ok/gui/module.hpp"
@@ -40,11 +40,12 @@ struct KernelModuleModes
 
 struct KernelConfig
 {
-    arch::Architecture architecture{arch::Architecture::x86_64};
+    arch::Architecture architecture{arch::configured_architecture()};
     std::array<memory::MemoryRegion, 8> memory_map{};
     usize memory_region_count{0};
     usize timer_hz{1000};
     KernelModuleModes modes{};
+    KernelExtension *extension{nullptr}; // Optional statically linked distribution extension; caller owns lifetime.
 };
 
 struct KernelTestReport
@@ -79,7 +80,6 @@ struct KernelTestReport
     bool linux_abi{false};
     bool linux_syscalls{false};
     bool driver_abi{false};
-    bool linux_driver_shim{false};
     bool module_load{false};
     bool netdev{false};
     bool sockets{false};
@@ -176,10 +176,11 @@ class Kernel final
     {
         return gui_module_;
     }
-    [[nodiscard]] ExternalGuiDesktopModule *loaded_gui_desktop_module()
+    [[nodiscard]] KernelExtension *extension()
     {
-        return external_gui_desktop_module_.configured() ? &external_gui_desktop_module_ : nullptr;
+        return config_.extension;
     }
+    Status start_extension();
     [[nodiscard]] apps::KernelFileManager &file_manager()
     {
         if (active_file_manager_index_ < file_managers_.size())
@@ -267,6 +268,8 @@ class Kernel final
     }
 
   private:
+    Status refresh_extension(bool focus);
+    Status extension_surface_action(gui::SurfaceId surface, ExtensionSurfaceAction action);
     Status register_builtin_interrupts(driver::TimerDriver &timer);
     Status register_builtin_syscalls(posix::PosixService &posix);
     Status ensure_kernel_log_file();
@@ -279,9 +282,6 @@ class Kernel final
     Status handle_gui_close_request(gui::SurfaceId surface);
     Status handle_gui_surface_changed(gui::SurfaceId surface);
     Status handle_gui_taskbar_launcher(gui::TaskbarApp app);
-    Status handle_system_gui_dock_launcher(ExternalGuiDockApp app);
-    Status start_selected_system_gui_session(ExternalGuiDesktopModule &desktop);
-    Status focus_system_gui_app(ExternalGuiDockApp app);
     Status sync_gui_credentials_from_surface(gui::SurfaceId surface);
     Status reconcile_file_managers();
     Status reconcile_task_managers();
@@ -294,11 +294,6 @@ class Kernel final
     Status focus_task_manager();
     Status focus_task_manager_at(usize index);
     Result<fs::FileBuffer> read_external_module_file(std::string_view path);
-    Result<usize> read_user_program_file(std::string_view path);
-    Status load_external_gui_desktop_module(std::string_view path, const ModuleImageInfo &image);
-    Status launch_system_gui_app(ExternalGuiDockApp app);
-    Status launch_system_gui_app_session();
-    Status refresh_external_gui_modules(bool focus_desktop);
     Status force_close_gui_surface(gui::SurfaceId surface);
     Status note_ignored_gui_close(gui::SurfaceId surface);
     Status show_force_close_prompt(gui::SurfaceId surface);
@@ -307,9 +302,6 @@ class Kernel final
     [[nodiscard]] Result<usize> find_file_manager_by_process(sched::ProcessId pid) const;
     [[nodiscard]] Result<usize> find_task_manager_by_surface(gui::SurfaceId surface) const;
     [[nodiscard]] Result<usize> find_task_manager_by_process(sched::ProcessId pid) const;
-    [[nodiscard]] Result<usize> find_system_gui_app_by_surface(gui::SurfaceId surface) const;
-    [[nodiscard]] Result<usize> find_system_gui_app_by_process(sched::ProcessId pid) const;
-    Status close_system_gui_app_at(usize index, bool kill_process);
 
     struct GuiCloseAttempt
     {
@@ -335,8 +327,6 @@ class Kernel final
     driver::FramebufferDisplayDriver display_driver_{};
     driver::VirtioGpuPciDisplayDriver virtio_gpu_driver_{};
     gui::GuiModule gui_module_{};
-    ExternalGuiDesktopModule external_gui_desktop_module_{};
-    std::array<ExternalGuiAppModule, max_external_gui_apps> external_gui_app_modules_{};
     StaticVector<apps::KernelFileManager, gui::max_gui_surfaces> file_managers_{};
     apps::KernelFileManager inactive_file_manager_{};
     usize active_file_manager_index_{gui::max_gui_surfaces};
@@ -359,7 +349,6 @@ class Kernel final
     driver::DriverManager drivers_;
     fs::VirtualFileSystem vfs_;
     fs::SimpleDiskFileSystem simplefs_;
-    std::array<std::byte, fs::simplefs_max_file_data> user_program_image_{};
     net::NetworkStack network_;
     posix::PosixService posix_;
     user::UserSpaceManager user_space_;

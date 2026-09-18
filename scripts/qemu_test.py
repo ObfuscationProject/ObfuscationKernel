@@ -400,9 +400,8 @@ def write_summary(kernel: Path, arch: str, output: str, qemu_returncode: int, va
         "OK_LINUX_ABI",
         "OK_LINUX_SYSCALLS",
         "OK_DRIVER_ABI",
-        "OK_LINUX_DRIVER_SHIM",
         "OK_GUI",
-        "OK_MODULE_LOAD",
+        "OK_MODULE_METADATA",
         "OK_NETDEV",
         "OK_SOCK",
         "OK_BLOCK",
@@ -414,6 +413,11 @@ def write_summary(kernel: Path, arch: str, output: str, qemu_returncode: int, va
     ]
     marker_status = {
         marker: any(line.startswith(marker + " ") for line in lines)
+        for marker in roadmap_markers
+    }
+    marker_scopes = {
+        marker: next((parse_fields(line).get("scope", "unspecified")
+                      for line in reversed(lines) if line.startswith(marker + " ")), "absent")
         for marker in roadmap_markers
     }
     coverage = coverage_statuses(arch, fields)
@@ -435,6 +439,7 @@ def write_summary(kernel: Path, arch: str, output: str, qemu_returncode: int, va
                 handle.write(f"skip.{field}=missing_capability\n")
         for marker, present in marker_status.items():
             handle.write(f"marker.{marker}={'present' if present else 'missing'}\n")
+            handle.write(f"scope.{marker}={marker_scopes[marker]}\n")
 
 
 def parse_fields(line: str) -> dict[str, str]:

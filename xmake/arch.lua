@@ -199,8 +199,8 @@ end
 
 function add_ok_arch_files()
     local _, spec = ok_require_arch(ok_current_arch())
-    add_files("src/arch/arch.cpp")
-    add_files(path.join("src/arch", spec.source, "ops.cpp"))
+    add_files(path.join(os.projectdir(), "src/arch/arch.cpp"))
+    add_files(path.join(os.projectdir(), "src/arch", spec.source, "ops.cpp"))
 end
 
 function add_ok_boot_files()
@@ -226,8 +226,12 @@ function add_ok_freestanding_toolchain()
         raise("unsupported kernel arch '%s'; use one of: %s", arch, table.concat(OK_SUPPORTED_ARCHES, ", "))
     end
     set_values("ok.triple", spec.triple)
-    set_toolchains("cross@systoolchain")
-    add_packages("systoolchain")
+    if get_config("systoolchain_dir") then
+        set_toolchains("ok-local-cross")
+    else
+        set_toolchains("cross@systoolchain")
+        add_packages("systoolchain")
+    end
 end
 
 function add_ok_freestanding_arch_flags()
@@ -260,4 +264,29 @@ function add_ok_kernel_gui_option()
     if has_config("kernel_gui") then
         add_defines("OK_ENABLE_KERNEL_GUI")
     end
+end
+
+-- Explicit local SDK override; the default continues to use the package.
+if get_config("systoolchain_dir") then
+    toolchain("ok-local-cross")
+        set_kind("standalone")
+        local _, spec = ok_require_arch(ok_current_arch())
+        local bindir = path.join(path.absolute(get_config("systoolchain_dir"), os.projectdir()), "bin")
+        set_bindir(bindir)
+        on_check(function (toolchain)
+            for _, tool in ipairs({"gcc", "g++", "ar", "objcopy"}) do
+                assert(os.isfile(path.join(bindir, spec.triple .. "-" .. tool)),
+                    "local SysToolchain is missing %s-%s in %s", spec.triple, tool, bindir)
+            end
+            assert(os.iorunv(path.join(bindir, spec.triple .. "-gcc"), {"-dumpmachine"}):trim() == spec.triple,
+                "local SysToolchain compiler target mismatch")
+            return true
+        end)
+        set_toolset("cc", path.join(bindir, spec.triple .. "-gcc"))
+        set_toolset("cxx", path.join(bindir, spec.triple .. "-g++"))
+        set_toolset("as", path.join(bindir, spec.triple .. "-gcc"))
+        set_toolset("ld", path.join(bindir, spec.triple .. "-g++"))
+        set_toolset("ar", path.join(bindir, spec.triple .. "-ar"))
+        set_toolset("objcopy", path.join(bindir, spec.triple .. "-objcopy"))
+    toolchain_end()
 end

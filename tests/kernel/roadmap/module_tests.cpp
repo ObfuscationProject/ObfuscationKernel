@@ -55,9 +55,9 @@ class DebugModule final : public KernelModule
             .init_priority = priority_,
             .threading = threading_,
             .capability_mask = capabilities,
-            .resources = ModuleResourceBudget{.max_threads = sched::max_threads_per_process,
-                                              .max_services = exports_.size() == 0 ? static_cast<usize>(4)
-                                                                                  : exports_.size()},
+            .resources =
+                ModuleResourceBudget{.max_threads = sched::max_threads_per_process,
+                                     .max_services = exports_.size() == 0 ? static_cast<usize>(4) : exports_.size()},
         };
     }
 
@@ -402,23 +402,21 @@ Status test_module_abi_contract()
 Status test_module_image_loader_and_symbol_registry()
 {
     ModuleImageLoader loader;
-    constexpr std::string_view okmod_text{
-        "OKMOD\n"
-        "name=virtio-net-ok\n"
-        "version=1\n"
-        "vermagic=mainline-tracking\n"
-        "export=virtio_net_probe\n"
-        "require=pci_register_driver\n"
-        "param=queues:int\n"
-        "reloc=0x40\n"
-        "signature=test-signature\n"};
-    auto okmod = loader.parse(std::span<const std::byte>{reinterpret_cast<const std::byte *>(okmod_text.data()),
-                                                         okmod_text.size()},
-                              arch::Architecture::x86_64);
+    constexpr std::string_view okmod_text{"OKMOD\n"
+                                          "name=virtio-net-ok\n"
+                                          "version=1\n"
+                                          "vermagic=mainline-tracking\n"
+                                          "export=virtio_net_probe\n"
+                                          "require=pci_register_driver\n"
+                                          "param=queues:int\n"
+                                          "reloc=0x40\n"
+                                          "signature=test-signature\n"};
+    auto okmod = loader.parse(
+        std::span<const std::byte>{reinterpret_cast<const std::byte *>(okmod_text.data()), okmod_text.size()},
+        arch::Architecture::x86_64);
     if (!okmod || okmod.value().format != ModuleImageFormat::okmod || okmod.value().name.view() != "virtio-net-ok" ||
         okmod.value().exports.size() != 1 || okmod.value().imports.size() != 1 ||
-        okmod.value().parameters.size() != 1 || !okmod.value().signed_image ||
-        okmod.value().relocation_count != 1)
+        okmod.value().parameters.size() != 1 || !okmod.value().signed_image || okmod.value().relocation_count != 1)
     {
         return Status::fault("okmod image metadata validation failed");
     }
@@ -441,41 +439,14 @@ Status test_module_image_loader_and_symbol_registry()
     auto linux_image = make_fake_linux_ko();
     auto linux_module = loader.parse_linux_ko(linux_image, arch::Architecture::x86_64);
     if (!linux_module || linux_module.value().format != ModuleImageFormat::linux_ko ||
-        linux_module.value().name.view() != "virtio_blk" || linux_module.value().architecture != arch::Architecture::x86_64 ||
-        !linux_module.value().relocatable || !linux_module.value().has_modinfo ||
-        !linux_module.value().has_kallsyms || !linux_module.value().has_init || !linux_module.value().has_exit ||
-        !linux_module.value().signed_image || linux_module.value().relocation_count != 1 ||
-        linux_module.value().imports.size() != 1 || linux_module.value().exports.size() != 1 ||
-        linux_module.value().parameters.size() < 2)
+        linux_module.value().name.view() != "virtio_blk" ||
+        linux_module.value().architecture != arch::Architecture::x86_64 || !linux_module.value().relocatable ||
+        !linux_module.value().has_modinfo || !linux_module.value().has_kallsyms || !linux_module.value().has_init ||
+        !linux_module.value().has_exit || !linux_module.value().signed_image ||
+        linux_module.value().relocation_count != 1 || linux_module.value().imports.size() != 1 ||
+        linux_module.value().exports.size() != 1 || linux_module.value().parameters.size() < 2)
     {
         return Status::fault("Linux .ko metadata validation failed");
-    }
-
-    LinuxAbiSnapshot snapshot;
-    if (auto status = snapshot.begin("mainline-tracking", true); !status.ok())
-    {
-        return status;
-    }
-    if (auto status = snapshot.record_required_symbol("pci_register_driver"); !status.ok())
-    {
-        return status;
-    }
-    if (auto status = snapshot.record_required_symbol("dma_map_single"); !status.ok())
-    {
-        return status;
-    }
-    if (auto status = snapshot.record_implemented_symbol("pci_register_driver"); !status.ok())
-    {
-        return status;
-    }
-    if (auto status = snapshot.record_layout("struct pci_driver", 64, 8); !status.ok())
-    {
-        return status;
-    }
-    if (!snapshot.tracks_mainline() || snapshot.required_symbol_count() != 2 ||
-        snapshot.implemented_symbol_count() != 1 || snapshot.layout_count() != 1 || snapshot.coverage_x100() != 5000)
-    {
-        return Status::fault("Linux mainline ABI snapshot validation failed");
     }
 
     return Status::success();

@@ -58,7 +58,11 @@ local function task_config_bool(value)
 end
 
 local function task_configure_args(mode, arch, extra)
-    local argv = {"f", "-c", "-y", "-m", mode, "-a", arch}
+    import("core.project.config")
+    local argv = {"f", "-y", "-m", mode, "-a", arch}
+    if config.get("systoolchain_dir") then
+        table.insert(argv, "--systoolchain_dir=" .. path.absolute(config.get("systoolchain_dir")))
+    end
     for _, arg in ipairs(extra or {}) do
         table.insert(argv, arg)
     end
@@ -83,6 +87,12 @@ end
 local function task_systoolchain_qemu(arch)
     import("core.project.project")
     local _, spec = task_require_arch(arch)
+    import("core.project.config")
+    if config.get("systoolchain_dir") then
+        local qemu = path.join(path.absolute(config.get("systoolchain_dir")), "bin", spec.qemu)
+        assert(os.isfile(qemu), "local SysToolchain is missing QEMU: %s", qemu)
+        return qemu
+    end
     local package = project.required_package("systoolchain")
     if package == nil then
         raise("the systoolchain package is not resolved")

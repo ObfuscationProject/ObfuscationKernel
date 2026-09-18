@@ -57,9 +57,12 @@ roadmap tests and future loadable driver work. It includes:
 - runtime primitives for MMIO words, I/O ports, DMA buffers/mappings, work
   queues, timers, refcounts, mutexes, wait queues, slab allocations, and
   bounded kernel-thread records;
-- native operation interfaces for block, network, input, and display devices;
-- a Linux PCI compatibility shim with `ioremap`, `kmalloc`, DMA map/unmap,
-  workqueue, IRQ request/free, probe, and remove coverage.
+- native operation interfaces for block, network, input, and display devices.
+
+Linux driver adaptation is owned by ObfuscationOS under `compat/linux`. The
+existing PCI shim and its tests live there as a behavior model, consuming the
+exported native Kernel SDK. The native fake PCI driver is a test fixture under
+`tests/kernel/roadmap`, not part of the public driver interface.
 
 The ABI is still in-kernel and fixed-capacity. It is stable enough for 0.1.x
 driver bring-up tests, but external driver loading, relocation, signing,

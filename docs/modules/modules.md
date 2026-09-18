@@ -58,19 +58,24 @@ restart to the console and `/tmp/kernel.log`.
   relocation counts, init/exit section presence, signatures, and architecture.
 
 `ModuleSymbolRegistry` stores exported kernel symbols and resolves module
-imports. `LinuxAbiSnapshot` records a mainline-tracking baseline, required
-symbols, implemented symbols, and structure layouts so compatibility coverage
-can be measured over time.
+imports. Linux driver requirement baselines, symbol coverage tracking and structure
+layout snapshots belong to the OS compatibility layer, not this kernel module
+mechanism. ObfuscationOS provides them in `compat/linux/include/obos/linux/abi_snapshot.hpp`
+and its own compatibility model tests.
 
-The current loader does not relocate or execute arbitrary external module text
-yet. For the C++ OOP transition path, a post-boot loader can call
-`OK_SYS_LOAD_MODULE`; the kernel reads an OKMOD package from the VFS or mounted
-SimpleFS rootfs package name, validates its imports/exports plus `entry:oop`,
-binds it to a compatible C++ module ABI, and starts that module through
-`ModuleManager::start_registered_module()`. This is how ObfuscationOS loads its
-OS-side `system-gui` desktop package from `/boot/modules/system-gui.okmod`.
-System GUI dock apps are user ELF programs staged in `/bin`; they are not loaded
-through the kernel module manager.
+The parser does not allocate, relocate, verify signatures or execute module text.
+`Kernel::load_external_kernel_module()` rejects executable ELF images explicitly.
+An optional distribution `KernelExtension` may accept an OKMOD configuration
+package and activate a component already statically linked into the image. The
+kernel has no desktop package names or concrete external module types. The OS
+owns package lookup policy, implementations and integration tests, consuming only
+exported SDK artifacts. The optional C factory `ok_boot_extension` selects that
+in-process extension; the C++ callback interface requires the same SDK/toolchain.
+
+`OK_MODULE_METADATA` reports metadata and lifecycle model coverage. In particular,
+relocation records are not applied relocations, signature strings are not verified
+signatures, and metadata parsing does not establish compatibility with a Linux
+kernel release.
 
 ## Test Coverage
 
@@ -82,7 +87,7 @@ Roadmap tests cover:
 - ABI-version and capability enforcement;
 - restart-policy behavior and restart counters;
 - OKMOD and Linux `.ko` metadata parsing;
-- symbol import resolution and Linux ABI coverage snapshots;
+- native symbol import resolution;
 - kernel-process module creation, per-CPU workers, and process reuse after
   restart;
 - the built-in module graph used by the kernel debug suite.

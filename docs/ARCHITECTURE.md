@@ -1,7 +1,8 @@
 # Architecture Overview
 
-The kernel is split into narrow C++23 modules with virtual interfaces at hardware
-or policy boundaries and concepts at compile-time extension points.
+The kernel uses C++23 with build-time architecture and scheduler policies.
+Concepts/templates provide static dispatch on these hot paths. Virtual interfaces
+are reserved for actual runtime device and module-service boundaries.
 
 ## Layers
 
@@ -31,10 +32,13 @@ or policy boundaries and concepts at compile-time extension points.
 
 ## C++ Design Rules
 
-Inheritance is used for runtime polymorphism where implementations are expected
-to differ by machine, bus, device, or policy. Concepts are used for local,
-zero-overhead extension points such as function-backed interrupt handlers,
-syscall handlers, serializable IPC payloads, and driver registration.
+Architecture operations are selected by `ArchitectureOperations<A, Instructions>`
+and the `ArchOperations` alias for the configured build. Each ISA supplies a
+static `NativeInstructions<A>` backend; no architecture vtable is needed.
+Scheduler selection uses a constrained policy template. Dynamic device discovery
+and module services may still use virtual interfaces because their providers are
+selected at runtime. Templates do not by themselves prove performance; validate
+algorithmic costs, allocation, cache behavior and synchronization separately.
 
 RTTI is intentionally enabled so type metadata is available to kernel code.
 Current freestanding code avoids `dynamic_cast` in core paths to keep the ABI
@@ -118,3 +122,38 @@ fences, interrupt control, halt, and early boot entry. The freestanding library
 profile keeps privileged instructions guarded where they must still compile
 under non-system test builds; the bootable kernel target uses the real
 architecture entry files for implemented system targets.
+
+## Distribution boundary
+
+ObfuscationOS is an artifact consumer, not a kernel source container. The
+`kernel-sdk` target exports a self-contained SDK under `build/sdk/<arch>/<mode>`;
+the OS validates the manifest before using headers, libraries and boot artifacts.
+All ten kernel architecture profiles remain supported. The existing OS userland
+profiles remain x86_64, aarch64, rv64 and loongarch64.
+
+The kernel retains the compositor, surface/input services, essential platform
+drivers, native module/driver interfaces and its diagnostic shell. The greeter,
+session policy, system dock and application presentation are OS-owned extensions.
+They are compiled in the OS repository against the exported SDK. The initial
+extension integration is static composition at distribution-image link time; it
+does not claim that arbitrary external ELF modules are relocated at runtime.
+
+Linux driver adaptation and its PCI behavior-model tests also live in
+ObfuscationOS. POSIX APIs, Linux user syscall conventions and Linux driver APIs
+are distinct contracts. Native module metadata parsers do not establish Linux
+module binary compatibility.
+
+## Execution maturity
+
+Boot assembly and platform I/O execute on the target. Runtime user address spaces,
+process scheduling, user-mode entry and several driver primitives are still
+behavior models. In particular, the scheduler selects records but does not yet
+perform hardware register/stack context switches. Keep that distinction visible
+in test output and avoid presenting state-model success as isolation, IRQ
+delivery, AP startup or user ELF execution.
+
+The next mechanism refactor should unify process resource ownership, connect
+thread scheduling to architecture context switches, and implement hardware page
+tables and user trap/return paths through each architecture backend. Preserve
+the architecture matrix while giving each mechanism its own hardware acceptance
+tests.

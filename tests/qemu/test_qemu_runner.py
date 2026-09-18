@@ -158,6 +158,17 @@ class QemuRunnerValidationTests(unittest.TestCase):
         self.assertIn("coverage.display=skip", summary)
         self.assertIn("marker.OK_MODULES=present", summary)
 
+    def test_summary_preserves_model_scope_without_claiming_hardware_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            kernel = Path(tmp) / "kernel.bin"
+            kernel.write_bytes(b"ok")
+            output = make_output("x86_64") + "OK_SMP scope=model topology=pass\n"
+            qemu_test.write_summary(kernel, "x86_64", output, 0, 0)
+            summary = (kernel.parent / "qemu-test-summary.txt").read_text(encoding="utf-8")
+        self.assertIn("scope.OK_SMP=model", summary)
+        self.assertIn("scope.OK_MODULES=unspecified", summary)
+        self.assertIn("scope.OK_IRQ=absent", summary)
+
     def test_qemu_command_uses_explicit_systoolchain_executable(self) -> None:
         qemu = systoolchain_qemu("x86_64")
         command = qemu_test.qemu_command(

@@ -2,79 +2,49 @@
 
 namespace ok::arch::detail
 {
-namespace
+
+u64 NativeInstructions<Architecture::x86_64>::read_cycle_counter() noexcept
 {
+#if defined(__x86_64__)
+    u32 low = 0;
+    u32 high = 0;
+    asm volatile("rdtsc" : "=a"(low), "=d"(high));
+    return (static_cast<u64>(high) << 32) | low;
+#else
+    return fallback_cycle_counter();
+#endif
+}
 
-class X86_64Operations final : public ProfiledArchOperationsBase<Architecture::x86_64>
+void NativeInstructions<Architecture::x86_64>::memory_fence() noexcept
 {
-  public:
-    [[nodiscard]] std::string_view interrupt_model() const override
-    {
-        return "idt-ist-x2apic";
-    }
-    [[nodiscard]] std::string_view syscall_model() const override
-    {
-        return "syscall-sysret";
-    }
-    [[nodiscard]] std::string_view user_transition_model() const override
-    {
-        return "iretq-sysret";
-    }
-
-    [[nodiscard]] u64 read_cycle_counter() const noexcept override
-    {
 #if defined(__x86_64__)
-        u32 low = 0;
-        u32 high = 0;
-        asm volatile("rdtsc" : "=a"(low), "=d"(high));
-        return (static_cast<u64>(high) << 32) | low;
+    asm volatile("mfence" ::: "memory");
 #else
-        return fallback_cycle_counter();
+    compiler_fence();
 #endif
-    }
+}
 
-    void memory_fence() noexcept override
-    {
-#if defined(__x86_64__)
-        asm volatile("mfence" ::: "memory");
-#else
-        compiler_fence();
-#endif
-    }
-
-    void enable_interrupts() noexcept override
-    {
+void NativeInstructions<Architecture::x86_64>::enable_interrupts() noexcept
+{
 #if defined(OK_USE_PRIVILEGED_ASM) && defined(__x86_64__)
-        asm volatile("sti" ::: "memory");
+    asm volatile("sti" ::: "memory");
 #endif
-        ArchOperationsBase::enable_interrupts();
-    }
+}
 
-    void disable_interrupts() noexcept override
-    {
+void NativeInstructions<Architecture::x86_64>::disable_interrupts() noexcept
+{
 #if defined(OK_USE_PRIVILEGED_ASM) && defined(__x86_64__)
-        asm volatile("cli" ::: "memory");
+    asm volatile("cli" ::: "memory");
 #endif
-        ArchOperationsBase::disable_interrupts();
-    }
+}
 
-    void halt() noexcept override
-    {
+void NativeInstructions<Architecture::x86_64>::halt() noexcept
+{
 #if defined(OK_USE_PRIVILEGED_ASM) && defined(__x86_64__)
-        asm volatile("hlt" ::: "memory");
+    asm volatile("hlt" ::: "memory");
 #elif defined(__x86_64__)
-        asm volatile("pause" ::: "memory");
+    asm volatile("pause" ::: "memory");
 #endif
-        ArchOperationsBase::halt();
-    }
-};
-
-} // namespace
-
-ArchOperations &x86_64_operations()
-{
-    static X86_64Operations operations;
-    return operations;
 }
 
 } // namespace ok::arch::detail

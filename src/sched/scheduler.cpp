@@ -103,17 +103,7 @@ Result<ProcessId> RoundRobinPolicy::pick_next(std::span<const ProcessControlBloc
     return Status::would_block("no runnable process");
 }
 
-Scheduler::Scheduler(SchedulerPolicy *policy) : policy_(policy == nullptr ? &owned_round_robin_policy_ : policy)
-{
-}
-
-SchedulerPolicy &Scheduler::default_round_robin_policy()
-{
-    static RoundRobinPolicy policy;
-    return policy;
-}
-
-Result<ProcessId> Scheduler::create_process(std::string_view name, arch::CpuContext initial_context)
+Result<ProcessId> SchedulerState::create_process(std::string_view name, arch::CpuContext initial_context)
 {
     if (processes_.full())
     {
@@ -143,7 +133,7 @@ Result<ProcessId> Scheduler::create_process(std::string_view name, arch::CpuCont
     return pid;
 }
 
-Result<ProcessId> Scheduler::create_user_process(std::string_view name, arch::CpuContext initial_context)
+Result<ProcessId> SchedulerState::create_user_process(std::string_view name, arch::CpuContext initial_context)
 {
     auto pid = create_process(name, initial_context);
     if (!pid)
@@ -160,7 +150,7 @@ Result<ProcessId> Scheduler::create_user_process(std::string_view name, arch::Cp
     return pid.value();
 }
 
-Result<ProcessId> Scheduler::create_background_process(std::string_view name, arch::CpuContext initial_context)
+Result<ProcessId> SchedulerState::create_background_process(std::string_view name, arch::CpuContext initial_context)
 {
     auto pid = create_process(name, initial_context);
     if (!pid)
@@ -180,7 +170,7 @@ Result<ProcessId> Scheduler::create_background_process(std::string_view name, ar
     return pid.value();
 }
 
-Result<ThreadId> Scheduler::create_thread(ProcessId pid, arch::CpuContext initial_context)
+Result<ThreadId> SchedulerState::create_thread(ProcessId pid, arch::CpuContext initial_context)
 {
     auto *process = find(pid);
     if (process == nullptr)
@@ -210,7 +200,7 @@ Result<ThreadId> Scheduler::create_thread(ProcessId pid, arch::CpuContext initia
     return tid;
 }
 
-Result<ProcessId> Scheduler::spawn(ScheduleRequest request)
+Result<ProcessId> SchedulerState::spawn(ScheduleRequest request)
 {
     if (request.name.empty())
     {
@@ -262,7 +252,7 @@ Result<ProcessId> Scheduler::spawn(ScheduleRequest request)
     return process.value();
 }
 
-Status Scheduler::set_credentials(ProcessId pid, user::Credentials credentials)
+Status SchedulerState::set_credentials(ProcessId pid, user::Credentials credentials)
 {
     auto *process = find(pid);
     if (process == nullptr)
@@ -273,7 +263,7 @@ Status Scheduler::set_credentials(ProcessId pid, user::Credentials credentials)
     return Status::success();
 }
 
-Status Scheduler::set_priority(ProcessId pid, u8 priority)
+Status SchedulerState::set_priority(ProcessId pid, u8 priority)
 {
     if (priority > scheduler_max_priority)
     {
@@ -292,7 +282,7 @@ Status Scheduler::set_priority(ProcessId pid, u8 priority)
     return Status::success();
 }
 
-Status Scheduler::set_cpu_affinity(ProcessId pid, u16 cpu_affinity_mask)
+Status SchedulerState::set_cpu_affinity(ProcessId pid, u16 cpu_affinity_mask)
 {
     const auto valid_mask = configured_cpu_mask();
     const auto effective_mask = static_cast<u16>(cpu_affinity_mask & valid_mask);
@@ -309,7 +299,7 @@ Status Scheduler::set_cpu_affinity(ProcessId pid, u16 cpu_affinity_mask)
     return Status::success();
 }
 
-Status Scheduler::set_cpu_accounting(ProcessId pid, ProcessCpuAccounting accounting)
+Status SchedulerState::set_cpu_accounting(ProcessId pid, ProcessCpuAccounting accounting)
 {
     auto *process = find(pid);
     if (process == nullptr)
@@ -320,7 +310,7 @@ Status Scheduler::set_cpu_accounting(ProcessId pid, ProcessCpuAccounting account
     return Status::success();
 }
 
-Status Scheduler::kill_process(ProcessId pid)
+Status SchedulerState::kill_process(ProcessId pid)
 {
     for (usize i = 0; i < processes_.size(); ++i)
     {
@@ -358,7 +348,7 @@ Status Scheduler::kill_process(ProcessId pid)
     return Status::not_found("process not found");
 }
 
-Status Scheduler::configure_cpus(usize cpu_count)
+Status SchedulerState::configure_cpus(usize cpu_count)
 {
     if (cpu_count == 0)
     {
@@ -385,7 +375,7 @@ Status Scheduler::configure_cpus(usize cpu_count)
     return Status::success();
 }
 
-Status Scheduler::set_runnable(ProcessId pid)
+Status SchedulerState::set_runnable(ProcessId pid)
 {
     auto *process = find(pid);
     if (!process)
@@ -400,7 +390,7 @@ Status Scheduler::set_runnable(ProcessId pid)
     return Status::success();
 }
 
-Status Scheduler::block_process(ProcessId pid)
+Status SchedulerState::block_process(ProcessId pid)
 {
     auto *process = find(pid);
     if (!process)
@@ -432,12 +422,7 @@ Status Scheduler::block_process(ProcessId pid)
     return Status::success();
 }
 
-Result<ProcessId> Scheduler::schedule_next()
-{
-    return schedule_next_on_cpu(0);
-}
-
-bool Scheduler::thread_running_on_other_cpu(ThreadId tid, smp::CpuId cpu) const
+bool SchedulerState::thread_running_on_other_cpu(ThreadId tid, smp::CpuId cpu) const
 {
     if (tid == 0)
     {
@@ -453,7 +438,7 @@ bool Scheduler::thread_running_on_other_cpu(ThreadId tid, smp::CpuId cpu) const
     return false;
 }
 
-Result<ThreadId> Scheduler::pick_next_thread(ProcessControlBlock &process, ThreadId current, smp::CpuId cpu)
+Result<ThreadId> SchedulerState::pick_next_thread(ProcessControlBlock &process, ThreadId current, smp::CpuId cpu)
 {
     auto &threads = process.threads();
     if (threads.empty())
@@ -474,8 +459,8 @@ Result<ThreadId> Scheduler::pick_next_thread(ProcessControlBlock &process, Threa
     for (usize offset = 0; offset < threads.size(); ++offset)
     {
         auto &thread = threads[(start + offset) % threads.size()];
-        if (thread.state == ProcessState::runnable ||
-            (thread.state == ProcessState::running && thread.tid == current && !thread_running_on_other_cpu(thread.tid, cpu)))
+        if (thread.state == ProcessState::runnable || (thread.state == ProcessState::running && thread.tid == current &&
+                                                       !thread_running_on_other_cpu(thread.tid, cpu)))
         {
             return thread.tid;
         }
@@ -484,22 +469,14 @@ Result<ThreadId> Scheduler::pick_next_thread(ProcessControlBlock &process, Threa
     return Status::would_block("process has no runnable thread");
 }
 
-Result<ProcessId> Scheduler::schedule_next_on_cpu(smp::CpuId cpu)
+Result<ProcessId> SchedulerState::dispatch_selected(smp::CpuId cpu, Result<ProcessId> next)
 {
-    if (policy_ == nullptr)
-    {
-        policy_ = &owned_round_robin_policy_;
-    }
     if (cpu >= cpu_count_)
     {
         return Status::invalid_argument("scheduler cpu id out of range");
     }
-
     const auto previous_pid = current_by_cpu_[cpu];
     const auto previous_tid = current_thread_by_cpu_[cpu];
-    auto next =
-        policy_->pick_next(std::span<const ProcessControlBlock>(processes_.begin(), processes_.size()), previous_pid,
-                           cpu);
     if (!next)
     {
         return next.status();
@@ -555,7 +532,7 @@ Result<ProcessId> Scheduler::schedule_next_on_cpu(smp::CpuId cpu)
     return current_pid_;
 }
 
-ProcessId Scheduler::current_pid(smp::CpuId cpu) const
+ProcessId SchedulerState::current_pid(smp::CpuId cpu) const
 {
     if (cpu >= cpu_count_)
     {
@@ -564,7 +541,7 @@ ProcessId Scheduler::current_pid(smp::CpuId cpu) const
     return current_by_cpu_[cpu];
 }
 
-ThreadId Scheduler::current_tid(smp::CpuId cpu) const
+ThreadId SchedulerState::current_tid(smp::CpuId cpu) const
 {
     if (cpu >= cpu_count_)
     {
@@ -573,7 +550,7 @@ ThreadId Scheduler::current_tid(smp::CpuId cpu) const
     return current_thread_by_cpu_[cpu];
 }
 
-ProcessControlBlock *Scheduler::find(ProcessId pid)
+ProcessControlBlock *SchedulerState::find(ProcessId pid)
 {
     for (auto &process : processes_)
     {
@@ -585,7 +562,7 @@ ProcessControlBlock *Scheduler::find(ProcessId pid)
     return nullptr;
 }
 
-const ProcessControlBlock *Scheduler::find(ProcessId pid) const
+const ProcessControlBlock *SchedulerState::find(ProcessId pid) const
 {
     for (const auto &process : processes_)
     {
@@ -597,7 +574,7 @@ const ProcessControlBlock *Scheduler::find(ProcessId pid) const
     return nullptr;
 }
 
-usize Scheduler::background_process_count() const
+usize SchedulerState::background_process_count() const
 {
     usize count = 0;
     for (const auto &process : processes_)
@@ -610,7 +587,7 @@ usize Scheduler::background_process_count() const
     return count;
 }
 
-CpuSchedulingStats Scheduler::cpu_stats(smp::CpuId cpu) const
+CpuSchedulingStats SchedulerState::cpu_stats(smp::CpuId cpu) const
 {
     if (cpu >= cpu_count_)
     {
@@ -619,7 +596,7 @@ CpuSchedulingStats Scheduler::cpu_stats(smp::CpuId cpu) const
     return cpu_stats_[cpu];
 }
 
-u64 Scheduler::total_dispatches() const
+u64 SchedulerState::total_dispatches() const
 {
     u64 total = 0;
     for (usize i = 0; i < cpu_count_; ++i)
@@ -629,7 +606,7 @@ u64 Scheduler::total_dispatches() const
     return total;
 }
 
-u64 Scheduler::total_accounted_dispatches() const
+u64 SchedulerState::total_accounted_dispatches() const
 {
     u64 total = 0;
     for (usize i = 0; i < cpu_count_; ++i)
@@ -639,7 +616,7 @@ u64 Scheduler::total_accounted_dispatches() const
     return total;
 }
 
-u8 Scheduler::cpu_usage_percent(smp::CpuId cpu) const
+u8 SchedulerState::cpu_usage_percent(smp::CpuId cpu) const
 {
     if (cpu >= cpu_count_ || cpu_stats_[cpu].dispatches == 0)
     {
@@ -648,7 +625,7 @@ u8 Scheduler::cpu_usage_percent(smp::CpuId cpu) const
     return static_cast<u8>((cpu_stats_[cpu].busy_dispatches * 100u) / cpu_stats_[cpu].dispatches);
 }
 
-u8 Scheduler::process_usage_percent(ProcessId pid) const
+u8 SchedulerState::process_usage_percent(ProcessId pid) const
 {
     const auto total = total_dispatches();
     if (total == 0)
@@ -663,7 +640,7 @@ u8 Scheduler::process_usage_percent(ProcessId pid) const
     return static_cast<u8>((process->accounted_cpu_time_ticks() * 100u) / total);
 }
 
-u16 Scheduler::configured_cpu_mask() const
+u16 SchedulerState::configured_cpu_mask() const
 {
     if (cpu_count_ >= smp::max_cpus)
     {

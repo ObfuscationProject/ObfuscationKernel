@@ -140,3 +140,21 @@ GitHub Actions has one matrix job. For each architecture it:
 3. Builds `okernel`.
 4. Runs `xmake test`, which immediately boots the generated kernel in QEMU for
    the configured architecture.
+
+## Coverage scope
+
+`OK_TEST_PASS` means the debug suite passed after boot; it is not a POSIX or
+hardware-feature certification. `OK_VM`, `OK_PROC`, `OK_ELF`, `OK_USERLAND`,
+`OK_SMP`, `OK_IRQ` and `OK_PREEMPT` identify `scope=model`. Their success covers
+state transitions and metadata, not process MMU isolation, user ELF execution,
+secondary-CPU startup, actual interrupt delivery or context switching.
+
+`OK_MODULE_METADATA` replaces the misleading `OK_MODULE_LOAD` label. The parser
+checks ELF/OKMOD metadata and relocation records without executing relocated
+code. The Python summary preserves each marker's scope instead of promoting a
+model result to hardware coverage.
+
+The OS owns system-desktop integration tests. Run its `distro_image` with the
+matching exported SDK to exercise extension attachment, package dispatch and
+GUI lifecycle; a standalone kernel does not include the OS desktop or Linux
+driver compatibility model.

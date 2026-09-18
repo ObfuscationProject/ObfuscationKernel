@@ -1,5 +1,5 @@
-#include "ok/core/kernel.hpp"
 #include "ok/core/entry.hpp"
+#include "ok/core/kernel.hpp"
 #include "ok/core/test_point.hpp"
 #include "ok/fs/ext4.hpp"
 
@@ -98,18 +98,11 @@ Status test_post_debug_suite_gui_input(Kernel &kernel)
     {
         return status;
     }
-    if (auto *system_desktop = kernel.loaded_gui_desktop_module(); system_desktop != nullptr)
-    {
-        if (auto status = system_desktop->stop(); !status.ok())
-        {
-            return status;
-        }
-    }
 
     auto &compositor = kernel.gui().compositor();
     const auto shell_x = static_cast<i32>(6 + gui::taskbar_icon_size / 2);
-    const auto shell_y = static_cast<i32>(driver::framebuffer_height - gui::taskbar_height + 3 +
-                                          gui::taskbar_icon_size / 2);
+    const auto shell_y =
+        static_cast<i32>(driver::framebuffer_height - gui::taskbar_height + 3 + gui::taskbar_icon_size / 2);
     if (auto status = click_gui(kernel, shell_x, shell_y); !status.ok())
     {
         return status;
@@ -577,7 +570,8 @@ Status Kernel::run_debug_test_suite()
     {
         return Status::fault("debug shell pipeline test failed");
     }
-    auto shell_append = debug_shell_.execute("echo first > /tmp/shell-pipe; echo second >> /tmp/shell-pipe; cat /tmp/shell-pipe");
+    auto shell_append =
+        debug_shell_.execute("echo first > /tmp/shell-pipe; echo second >> /tmp/shell-pipe; cat /tmp/shell-pipe");
     if (!shell_append || shell_append.value() != "first\nsecond\n")
     {
         return Status::fault("debug shell append redirection test failed");
@@ -587,7 +581,8 @@ Status Kernel::run_debug_test_suite()
     {
         return Status::fault("debug shell input redirection test failed");
     }
-    auto shell_cp_mv = debug_shell_.execute("cp /tmp/shell-pipe /tmp/shell-copy; mv /tmp/shell-copy /tmp/shell-moved; cat /tmp/shell-moved");
+    auto shell_cp_mv = debug_shell_.execute(
+        "cp /tmp/shell-pipe /tmp/shell-copy; mv /tmp/shell-copy /tmp/shell-moved; cat /tmp/shell-moved");
     if (!shell_cp_mv || shell_cp_mv.value() != "first\nsecond\n")
     {
         return Status::fault("debug shell cp/mv test failed");
@@ -620,9 +615,8 @@ Status Kernel::run_debug_test_suite()
         return Status::fault("debug shell ext4 status test failed");
     }
     auto shell_system_tui = debug_shell_.execute("system tui");
-    if (!shell_system_tui || !contains_text(shell_system_tui.value(), "ObfuscationOS") ||
-        !contains_text(shell_system_tui.value(), "mode=tui") ||
-        !contains_text(shell_system_tui.value(), "login=root"))
+    if (!shell_system_tui || !contains_text(shell_system_tui.value(), "kernel-console") ||
+        !contains_text(shell_system_tui.value(), "mode=tui") || !contains_text(shell_system_tui.value(), "login=root"))
     {
         return Status::fault("debug shell system TUI test failed");
     }

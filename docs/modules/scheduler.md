@@ -1,13 +1,22 @@
 # Process Scheduling
 
-`ok::sched::Scheduler` owns process/thread control blocks and delegates process
-selection to a plain C++ `SchedulerPolicy` object. Policies are ordinary OOP
-strategy objects, not kernel modules or service registrations; future algorithms
-can derive from the interface and be injected through the constructor or
-`set_policy()`. The default policy is `RoundRobinPolicy`, now priority-aware
-while preserving round-robin fairness among equal-priority runnable processes.
+`ok::sched::Scheduler` is the build-time alias
+`BasicScheduler<RoundRobinPolicy>`. `SchedulerPolicy` is a C++ concept requiring
+`pick_next(processes, current_pid, cpu) -> Result<ProcessId>`. Alternative
+algorithms instantiate `BasicScheduler<OtherPolicy>`; they do not inherit a
+virtual interface. Each scheduler owns its policy by value. `set_policy()`
+replaces policy state of the same concrete type, without switching algorithms
+through a runtime base pointer. The default policy is priority-aware and keeps
+round-robin fairness among equal-priority runnable processes.
 
-`SchedulingMode` selects the scheduler policy envelope:
+`SchedulerState` provides nonvirtual process/thread storage and shared dispatch
+bookkeeping. The template directly invokes its concrete policy and then this
+shared mechanism, avoiding both a vtable call in task selection and duplicated
+storage code for each policy. These remain scheduling **models**: selecting a
+PID/TID does not restore CPU registers, change stacks, or switch address spaces.
+
+`SchedulingMode` currently records the requested scheduling model; it does not
+enable a hardware scheduling mechanism:
 
 - `cooperative`: explicit yield-only scheduling.
 - `round_robin`: baseline global round-robin dispatch.
@@ -15,8 +24,9 @@ while preserving round-robin fairness among equal-priority runnable processes.
 
 The baseline creates an idle process during boot, adds one idle thread per
 configured CPU, and marks it runnable. The kernel tick walks every online CPU and
-calls `schedule_next_on_cpu(cpu)`, so secondary cores advance their own current
-PID/TID and dispatch counters. Process records carry priority, CPU affinity,
+calls `schedule_next_on_cpu(cpu)`, so per-CPU records advance their current
+PID/TID and dispatch counters in the same execution thread. This does not start
+secondary processors. Process records carry priority, CPU affinity,
 dispatch counters, last CPU, and per-thread dispatch accounting.
 `Scheduler::create_thread()` adds additional runnable threads to an existing
 process, and `current_tid(cpu)` exposes the selected thread on each CPU. CPU
@@ -64,3 +74,9 @@ CPU percentages are interval deltas rather than ever-growing boot averages.
 Future work should replace the simulated dispatch counters with timer-derived
 runtime deltas and add real SMP run queues once architecture code starts running
 kernel threads concurrently.
+
+`python3 scripts/test_static_dispatch.py` runs host model tests under all ten
+architecture profile macros. It exercises the default policy and an independent
+stateful policy, priority/affinity, copied policy ownership, invalid CPU IDs,
+and compile-time rejection of a policy with an incompatible signature. These
+tests are not hardware preemption or SMP evidence.

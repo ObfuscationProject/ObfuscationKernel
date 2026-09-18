@@ -10,18 +10,35 @@ option("kernel_gui")
     set_description("Enable the normal-mode kernel GUI desktop")
 option_end()
 
-add_repositories("obfuscation-repo https://github.com/ObfuscationProject/ObfuscationRepo.git")
-add_requires("systoolchain 0.1.0", {
-    system = false,
-    configs = {build_from_source = true}
-})
+option("systoolchain_dir")
+    set_showmenu(true)
+    set_description("Use an existing SysToolchain installation instead of resolving the package")
+option_end()
+
+if not get_config("systoolchain_dir") then
+    add_repositories("obfuscation-repo https://github.com/ObfuscationProject/ObfuscationRepo.git")
+    add_requires("systoolchain 0.1.0", {
+        system = false,
+        configs = {build_from_source = true}
+    })
+end
+
 
 includes("xmake/arch.lua")
 
+local configured_arch_spec = ok_arch_spec(ok_current_arch())
+local configured_toolchain_dir = get_config("systoolchain_dir")
+local configured_mode = get_config("mode") or "release"
+
 local function systoolchain_qemu(target, arch)
-    local spec = ok_arch_spec(arch)
+    local spec = configured_arch_spec
     if spec == nil then
         raise("QEMU is not configured for %s", arch)
+    end
+    if configured_toolchain_dir then
+        local qemu = path.join(path.absolute(configured_toolchain_dir), "bin", spec.qemu_system)
+        assert(os.isfile(qemu), "local SysToolchain is missing QEMU: %s", qemu)
+        return qemu
     end
     local package = target:pkg("systoolchain")
     if package == nil then
@@ -57,6 +74,48 @@ function add_ok_kernel_sources(include_kernel_main)
     add_files("src/syscall/*.cpp")
     add_files("src/user/*.cpp")
     add_ok_arch_files()
+end
+
+local function build_kernel_image(target)
+        local arch = target:values("ok.arch")
+        local kernel_bin = path.join(target:targetdir(), "kernel.bin")
+        if target:values("ok.image_format") == "elf" then
+            os.cp(target:targetfile(), kernel_bin)
+            return
+        end
+        local triple = assert(target:values("ok.triple"),
+            "kernel.bin tools are not configured for %s", arch)
+        local cxx = assert(target:tool("cxx"), "systoolchain C++ compiler is unavailable for %s", arch)
+        local gcc = path.join(path.directory(cxx), triple .. "-gcc")
+        local objcopy = path.join(path.directory(cxx), triple .. "-objcopy")
+        local ld = path.join(path.directory(objcopy), triple .. "-ld")
+        assert(os.isfile(ld), "systoolchain linker is unavailable: %s", ld)
+
+        local payload_bin = path.join(target:targetdir(), "kernel_payload.bin")
+        os.execv(objcopy, {"-O", "binary", target:targetfile(), payload_bin})
+
+        if target:values("ok.image_format") == "linux-image" then
+            os.cp(payload_bin, kernel_bin)
+            return
+        end
+
+        local autogen = path.join(target:autogendir(), "boot")
+        os.mkdir(autogen)
+
+        local boot_object = path.join(autogen, "boot16.o")
+        local boot_sector = path.join(autogen, "boot16.bin")
+        os.execv(gcc, {"-c", path.join(os.projectdir(), "src/arch/x86_64/boot16.S"), "-o", boot_object})
+        os.execv(ld, {"-Ttext=0x7c00", "--oformat=binary", boot_object, "-o", boot_sector})
+        os.cp(boot_sector, path.join(target:targetdir(), "boot16.bin"))
+
+        local payload_size = os.filesize(payload_bin)
+        local payload_capacity = 38 * 32 * 512
+        if payload_size > payload_capacity then
+            raise("kernel payload is too large: %d bytes > %d bytes", payload_size, payload_capacity)
+        end
+        os.cp(boot_sector, kernel_bin)
+        os.execv("truncate", {"-s", tostring(512 + payload_capacity), kernel_bin})
+        os.execv("dd", {"if=" .. payload_bin, "of=" .. kernel_bin, "bs=512", "seek=1", "conv=notrunc", "status=none"})
 end
 
 target("okernel")
@@ -141,45 +200,7 @@ target("okernel_image")
     if ok_arch_spec(ok_current_arch()).boot_source ~= nil then
         add_tests("qemu")
     end
-    after_build(function (target)
-        local arch = target:values("ok.arch")
-        local kernel_bin = path.join(target:targetdir(), "kernel.bin")
-        if target:values("ok.image_format") == "elf" then
-            os.cp(target:targetfile(), kernel_bin)
-            return
-        end
-        local triple = assert(target:values("ok.triple"),
-            "kernel.bin tools are not configured for %s", arch)
-        local gcc = assert(target:tool("cc"), "systoolchain C compiler is unavailable for %s", arch)
-        local objcopy = assert(target:tool("objcopy"), "systoolchain objcopy is unavailable for %s", arch)
-        local ld = path.join(path.directory(objcopy), triple .. "-ld")
-        assert(os.isfile(ld), "systoolchain linker is unavailable: %s", ld)
-
-        local payload_bin = path.join(target:targetdir(), "kernel_payload.bin")
-        os.execv(objcopy, {"-O", "binary", target:targetfile(), payload_bin})
-
-        if target:values("ok.image_format") == "linux-image" then
-            os.cp(payload_bin, kernel_bin)
-            return
-        end
-
-        local autogen = path.join(target:autogendir(), "boot")
-        os.mkdir(autogen)
-
-        local boot_object = path.join(autogen, "boot16.o")
-        local boot_sector = path.join(autogen, "boot16.bin")
-        os.execv(gcc, {"-c", path.join(os.projectdir(), "src/arch/x86_64/boot16.S"), "-o", boot_object})
-        os.execv(ld, {"-Ttext=0x7c00", "--oformat=binary", boot_object, "-o", boot_sector})
-
-        local payload_size = os.filesize(payload_bin)
-        local payload_capacity = 38 * 32 * 512
-        if payload_size > payload_capacity then
-            raise("kernel payload is too large: %d bytes > %d bytes", payload_size, payload_capacity)
-        end
-        os.cp(boot_sector, kernel_bin)
-        os.execv("truncate", {"-s", tostring(512 + payload_capacity), kernel_bin})
-        os.execv("dd", {"if=" .. payload_bin, "of=" .. kernel_bin, "bs=512", "seek=1", "conv=notrunc", "status=none"})
-    end)
+    after_build(build_kernel_image)
     on_run(function (target)
         os.execv("python3", {
             path.join(os.projectdir(), "scripts", "qemu_test.py"),
@@ -196,6 +217,55 @@ target("okernel_image")
             "--qemu", systoolchain_qemu(target, target:values("ok.arch"))
         }, {try = true})
         return code == 0
+    end)
+target_end()
+
+target("kernel-sdk")
+    set_kind("phony")
+    set_default(false)
+    add_deps("okernel_image")
+    on_build(function (target)
+        import("core.project.project")
+        local image = project.target("okernel_image")
+        local core = project.target("okernel")
+        -- Re-derive the distributable image from the exact linked ELF, even
+        -- when an earlier interrupted build left an older kernel.bin behind.
+        build_kernel_image(image)
+        local arch = image:values("ok.arch")
+        local spec = configured_arch_spec
+        local mode = configured_mode
+        local compiler = image:tool("cxx")
+        local argv = {
+            path.join(os.projectdir(), "tools", "export_sdk.py"),
+            "--output", path.join(os.projectdir(), "build", "sdk", arch, mode),
+            "--headers", path.join(os.projectdir(), "include"),
+            "--library", core:targetfile(),
+            "--linker-script", image:values("ok.linker_script"),
+            "--kernel-bin", path.join(image:targetdir(), "kernel.bin"),
+            "--kernel-elf", image:targetfile(),
+            "--compiler", compiler,
+            "--ar", path.join(path.directory(compiler), spec.triple .. "-ar"),
+            "--arch", arch, "--mode", mode, "--triple", spec.triple,
+            "--image-format", image:values("ok.image_format"),
+        }
+        if image:values("ok.image_format") == "bios-disk" then
+            table.insert(argv, "--boot-sector")
+            table.insert(argv, path.join(image:targetdir(), "boot16.bin"))
+        end
+        for _, object in ipairs(image:objectfiles()) do
+            table.insert(argv, "--boot-object")
+            table.insert(argv, object)
+        end
+        for _, flag in ipairs(image:get("cxxflags") or {}) do
+            table.insert(argv, "--cxxflag=" .. flag)
+        end
+        for _, flag in ipairs(spec.freestanding_ldflags or {}) do
+            table.insert(argv, "--ldflag=" .. flag)
+        end
+        for _, define in ipairs(image:get("defines") or {}) do
+            table.insert(argv, "--define=" .. define)
+        end
+        os.execv("python3", argv)
     end)
 target_end()
 

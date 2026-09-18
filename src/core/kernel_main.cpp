@@ -104,6 +104,8 @@ extern "C" void ok_platform_display_write_line(const char *text, ok::usize size)
     ok_platform_display_write_char('\n');
 }
 
+extern "C" ok::KernelExtension *ok_boot_extension() __attribute__((weak));
+
 extern "C" [[noreturn]] void kernel_main()
 {
     ok_platform_console_init();
@@ -111,6 +113,7 @@ extern "C" [[noreturn]] void kernel_main()
 
     ok::KernelEntryConfig config{};
     config.kernel.architecture = ok::arch::configured_architecture();
+    config.kernel.extension = ok_boot_extension != nullptr ? ok_boot_extension() : nullptr;
 
 #if defined(OK_ENABLE_TEST_POINTS)
     config.mode = ok::KernelBootMode::debug;
@@ -119,17 +122,12 @@ extern "C" [[noreturn]] void kernel_main()
     config.mode = ok::KernelBootMode::normal;
 #endif
 
-    [[maybe_unused]] const auto status = ok::ok_kernel_entry(config);
+    [[maybe_unused]] auto status = ok::ok_kernel_entry(config);
 
 #if defined(OK_ENABLE_TEST_POINTS)
     if (status.ok() && ok_platform_display_debug_marker != nullptr)
     {
         ok_platform_display_debug_marker();
-    }
-    if (status.ok())
-    {
-        static_cast<void>(ok::ok_load_boot_gui_modules());
-        static_cast<void>(ok::ok_gui_close_debug_surfaces());
     }
     ok_platform_debug_exit(status.ok() ? 0x10u : 0x11u);
     if (status.ok())
@@ -139,12 +137,19 @@ extern "C" [[noreturn]] void kernel_main()
 #else
     if (status.ok())
     {
+        if (config.kernel.extension != nullptr)
+        {
+            status = ok::ok_start_boot_extension();
+            platform_write(status.ok() ? "OK_BOOT_EXTENSION boot=complete\n" : "OK_BOOT_EXTENSION boot=failed\n");
+            if (!status.ok())
+            {
+                ok_platform_debug_exit(0x11u);
+                halt_forever();
+            }
+            desktop_loop(false);
+        }
 #if defined(OK_ENABLE_KERNEL_GUI)
-        const auto gui_status = ok::ok_load_boot_gui_modules();
-        platform_write(gui_status.ok() ? "OK_SYSTEM_GUI boot=complete\n" : "OK_SYSTEM_GUI boot=degraded\n");
-        desktop_loop(false);
-#else
-        halt_forever();
+        desktop_loop(true);
 #endif
     }
 #endif
@@ -244,7 +249,7 @@ extern "C" int __cxa_atexit(void (*)(void *), void *, void *)
 
 extern "C"
 {
-void *__dso_handle = nullptr;
+    void *__dso_handle = nullptr;
 }
 
 extern "C" int __cxa_guard_acquire(ok::u64 *guard)
@@ -257,7 +262,9 @@ extern "C" void __cxa_guard_release(ok::u64 *guard)
     *guard |= 1u;
 }
 
-extern "C" void __cxa_guard_abort(ok::u64 *) {}
+extern "C" void __cxa_guard_abort(ok::u64 *)
+{
+}
 
 extern "C" void __cxa_pure_virtual()
 {
@@ -274,10 +281,18 @@ namespace std
 
 } // namespace std
 
-void operator delete(void *) noexcept {}
-void operator delete(void *, ok::usize) noexcept {}
-void operator delete[](void *) noexcept {}
-void operator delete[](void *, ok::usize) noexcept {}
+void operator delete(void *) noexcept
+{
+}
+void operator delete(void *, ok::usize) noexcept
+{
+}
+void operator delete[](void *) noexcept
+{
+}
+void operator delete[](void *, ok::usize) noexcept
+{
+}
 
 namespace __cxxabiv1
 {

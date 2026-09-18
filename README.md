@@ -2,7 +2,7 @@
 
 ObfuscationKernel is a C++23 multi-architecture kernel framework built with xmake.
 The current tree is a working foundation: it compiles a reusable kernel library,
-builds a bootable `kernel.bin` for the implemented system target, and runs debug
+builds a bootable `kernel.bin` for all ten system targets, and runs debug
 kernel tests that exercise interrupts, memory management, scheduling, IPC,
 POSIX-oriented syscalls, drivers, VFS, EXT4 parsing, and user-mode transition
 state. The foundation also includes SMP topology state, a VGA-backed display
@@ -118,10 +118,12 @@ current bootable QEMU system targets are `i386`, `x86_64`, `aarch64`, `arm32`,
 
 ## Architecture Implementations
 
-Generic kernel modules call `ok::arch::ArchOperations`. Each supported
-architecture has a concrete implementation under `src/arch/<arch>/ops.cpp`.
-Those files provide architecture-specific interrupt, syscall, user-transition,
-cycle-counter, fence, and control-operation behavior. Inline assembly is guarded
+Generic kernel modules call the compile-time `ok::arch::ArchOperations` alias.
+`ArchitectureOperations<A, Instructions>` uses concepts and static dispatch;
+each architecture supplies `NativeInstructions<A>` under `src/arch/<arch>/ops.cpp`.
+Those files provide architecture-specific cycle counters, fences, interrupt
+control and halt primitives. Profile traits describe syscall and user-transition
+models; those descriptions do not implement hardware trap entry/return. Inline assembly is guarded
 by compiler target macros so profile checks can still run on a normal host
 compiler, while real cross builds compile the matching target assembly.
 
@@ -143,3 +145,24 @@ fixed-capacity kernel containers live in `include/ok/core/fixed.hpp`.
 - [Module Notes](docs/modules/)
 - [Kernel Modules](docs/modules/modules.md)
 - [GUI](docs/modules/gui.md)
+
+## Kernel SDK and distribution boundary
+
+Export a built architecture/mode for downstream ObfuscationOS:
+
+```sh
+xmake f -y -m debug -a x86_64
+xmake -y -b kernel-sdk
+```
+
+`build/sdk/<arch>/<mode>` contains the core and boot archives, native/UAPI
+headers, linker script, standalone image and a checksummed manifest. The OS
+consumes this artifact and compiles its own external modules, desktop and driver
+adapters; it does not embed or rebuild kernel sources. All ten kernel profiles
+remain supported. See [Architecture](docs/ARCHITECTURE.md).
+
+CPU primitives and scheduler policy selection now use templates/static dispatch.
+Run `python3 scripts/test_static_dispatch.py` to validate all ten profile types
+and two scheduling policies on the host. These are explicitly model tests;
+hardware MMU isolation, user execution, true SMP/context switching and arbitrary
+ELF module relocation remain separate implementation milestones.

@@ -73,13 +73,12 @@ bool parse_unsigned(std::string_view value, u64 &out)
 bool known_shell_command(std::string_view command)
 {
     for (const auto *name :
-         {"help",   "true",   "false",   ":",      "clear", "uname", "status", "system", "mem",   "ps",
-          "drivers", "fs",     "posix",   "test",   "echo",  "pwd",   "cd",     "ls",    "cat",
-          "cp",     "mv",     "touch",   "mkdir",  "rm",    "rmdir", "stat",   "chmod", "chown",
-          "users",  "kill",   "shutdown", "poweroff", "halt", "reboot", "whoami", "id",    "su",
-          "exit",   "disk",   "mkfs",    "sfs",    "ext4",  "net",   "fm",     "fileman",
-          "top",    "taskman", "history", "env",    "export", "unset", "type",   "which", "grep",
-          "wc",     "head",   "tail"})
+         {"help",     "true",     "false", ":",      "clear",   "uname", "status",  "system",  "mem",   "ps",
+          "drivers",  "fs",       "posix", "test",   "echo",    "pwd",   "cd",      "ls",      "cat",   "cp",
+          "mv",       "touch",    "mkdir", "rm",     "rmdir",   "stat",  "chmod",   "chown",   "users", "kill",
+          "shutdown", "poweroff", "halt",  "reboot", "whoami",  "id",    "su",      "exit",    "disk",  "mkfs",
+          "sfs",      "ext4",     "net",   "fm",     "fileman", "top",   "taskman", "history", "env",   "export",
+          "unset",    "type",     "which", "grep",   "wc",      "head",  "tail"})
     {
         if (command == name)
         {
@@ -94,7 +93,8 @@ bool known_shell_command(std::string_view command)
 Status KernelDebugShell::command_help()
 {
     return append(
-        "help true false : clear uname status system mem ps drivers fs posix test echo pwd cd ls cat cp mv touch mkdir rm "
+        "help true false : clear uname status system mem ps drivers fs posix test echo pwd cd ls cat cp mv touch mkdir "
+        "rm "
         "rmdir stat chmod chown users kill shutdown poweroff halt reboot whoami id su exit disk mkfs sfs ext4 net "
         "fm fileman top taskman history env export unset type which grep wc head tail\n");
 }
@@ -210,7 +210,7 @@ Status KernelDebugShell::command_system(std::string_view args)
         return Status::unsupported("system supports: system [tui|status]");
     }
 
-    if (auto status = append("ObfuscationOS mode=tui login="); !status.ok())
+    if (auto status = append("kernel-console mode=tui login="); !status.ok())
     {
         return status;
     }
@@ -222,7 +222,7 @@ Status KernelDebugShell::command_system(std::string_view args)
     {
         return status;
     }
-    if (auto status = append(kernel_->loaded_gui_desktop_module() != nullptr ? "system" : "kernel"); !status.ok())
+    if (auto status = append(kernel_->extension() != nullptr ? "extension" : "kernel"); !status.ok())
     {
         return status;
     }
@@ -231,19 +231,10 @@ Status KernelDebugShell::command_system(std::string_view args)
         return status;
     }
     bool first = true;
-    for (const auto app : {"app:oksh", "app:settings", "app:tasks", "app:notes", "app:about"})
+    for (const auto &process : kernel_->scheduler().processes())
     {
-        const std::string_view process_name{app};
-        bool running = false;
-        for (const auto &process : kernel_->scheduler().processes())
-        {
-            if (process.name() == process_name)
-            {
-                running = true;
-                break;
-            }
-        }
-        if (!running)
+        const auto process_name = process.name();
+        if (process_name.size() <= 4 || process_name.substr(0, 4) != "app:")
         {
             continue;
         }
@@ -254,12 +245,7 @@ Status KernelDebugShell::command_system(std::string_view args)
                 return status;
             }
         }
-        if (auto status = append(process_name == "app:oksh"     ? "shell"
-                                 : process_name == "app:settings" ? "settings"
-                                 : process_name == "app:tasks"    ? "tasks"
-                                 : process_name == "app:notes"    ? "notes"
-                                                                  : "about");
-            !status.ok())
+        if (auto status = append(process_name.substr(4)); !status.ok())
         {
             return status;
         }

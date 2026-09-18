@@ -498,13 +498,10 @@ Result<ModuleImageInfo> ModuleImageLoader::parse_linux_ko(std::span<const std::b
     const bool little_endian = data_encoding != 2;
     const auto type = read_u16(image, 16, little_endian);
     const auto machine = read_u16(image, 18, little_endian);
-    const auto section_header_offset =
-        elf64 ? read_u64(image, 40, little_endian) : read_u32(image, 32, little_endian);
-    const auto section_entry_size =
-        elf64 ? read_u16(image, 58, little_endian) : read_u16(image, 46, little_endian);
+    const auto section_header_offset = elf64 ? read_u64(image, 40, little_endian) : read_u32(image, 32, little_endian);
+    const auto section_entry_size = elf64 ? read_u16(image, 58, little_endian) : read_u16(image, 46, little_endian);
     const auto section_count = elf64 ? read_u16(image, 60, little_endian) : read_u16(image, 48, little_endian);
-    const auto section_string_index =
-        elf64 ? read_u16(image, 62, little_endian) : read_u16(image, 50, little_endian);
+    const auto section_string_index = elf64 ? read_u16(image, 62, little_endian) : read_u16(image, 50, little_endian);
 
     if (section_count == 0 || section_entry_size == 0 ||
         section_header_offset + static_cast<u64>(section_entry_size) * section_count > image.size())
@@ -525,8 +522,9 @@ Result<ModuleImageInfo> ModuleImageLoader::parse_linux_ko(std::span<const std::b
     bool has_string_section = false;
     if (section_string_index < section_count)
     {
-        auto section = read_section(image, static_cast<usize>(section_header_offset) +
-                                               static_cast<usize>(section_string_index) * section_entry_size,
+        auto section = read_section(image,
+                                    static_cast<usize>(section_header_offset) +
+                                        static_cast<usize>(section_string_index) * section_entry_size,
                                     elf64, little_endian);
         if (!section)
         {
@@ -539,7 +537,8 @@ Result<ModuleImageInfo> ModuleImageLoader::parse_linux_ko(std::span<const std::b
     std::span<const std::byte> section_names{};
     if (has_string_section)
     {
-        section_names = image.subspan(static_cast<usize>(string_section.offset), static_cast<usize>(string_section.size));
+        section_names =
+            image.subspan(static_cast<usize>(string_section.offset), static_cast<usize>(string_section.size));
     }
 
     for (usize i = 0; i < section_count; ++i)
@@ -566,8 +565,7 @@ Result<ModuleImageInfo> ModuleImageLoader::parse_linux_ko(std::span<const std::b
                 return status;
             }
         }
-        if (contains(section_name, "ksymtab") || contains(section_name, "kallsyms") ||
-            contains(section_name, "symtab"))
+        if (contains(section_name, "ksymtab") || contains(section_name, "kallsyms") || contains(section_name, "symtab"))
         {
             info.has_kallsyms = true;
         }
@@ -581,8 +579,8 @@ Result<ModuleImageInfo> ModuleImageLoader::parse_linux_ko(std::span<const std::b
         }
         if (current.type == elf_section_type_rela || current.type == elf_section_type_rel)
         {
-            info.relocation_count += current.entry_size == 0 ? static_cast<usize>(1)
-                                                             : static_cast<usize>(current.size / current.entry_size);
+            info.relocation_count +=
+                current.entry_size == 0 ? static_cast<usize>(1) : static_cast<usize>(current.size / current.entry_size);
             ModuleRelocation relocation{
                 .section_index = static_cast<u32>(i),
                 .offset = static_cast<uptr>(current.offset),
@@ -606,84 +604,6 @@ Result<ModuleImageInfo> ModuleImageLoader::parse_linux_ko(std::span<const std::b
         }
     }
     return info;
-}
-
-Status LinuxAbiSnapshot::begin(std::string_view baseline, bool tracks_mainline)
-{
-    if (auto status = baseline_.assign(baseline); !status.ok())
-    {
-        return status;
-    }
-    tracks_mainline_ = tracks_mainline;
-    required_symbols_.clear();
-    implemented_symbols_.clear();
-    layouts_.clear();
-    return Status::success();
-}
-
-Status LinuxAbiSnapshot::record_required_symbol(std::string_view name)
-{
-    if (contains(std::span<const ModuleSymbol>{required_symbols_.begin(), required_symbols_.size()}, name))
-    {
-        return Status::already_exists("required Linux ABI symbol already recorded");
-    }
-    return push_module_symbol(required_symbols_, name, ModuleSymbolBinding::imported);
-}
-
-Status LinuxAbiSnapshot::record_implemented_symbol(std::string_view name)
-{
-    if (contains(std::span<const ModuleSymbol>{implemented_symbols_.begin(), implemented_symbols_.size()}, name))
-    {
-        return Status::already_exists("implemented Linux ABI symbol already recorded");
-    }
-    return push_module_symbol(implemented_symbols_, name, ModuleSymbolBinding::exported, 1);
-}
-
-Status LinuxAbiSnapshot::record_layout(std::string_view name, u32 size, u32 field_count)
-{
-    for (const auto &layout : layouts_)
-    {
-        if (layout.name.view() == name)
-        {
-            return Status::already_exists("Linux ABI layout already recorded");
-        }
-    }
-    LinuxStructLayout layout{.size = size, .field_count = field_count};
-    if (auto status = layout.name.assign(name); !status.ok())
-    {
-        return status;
-    }
-    return layouts_.push_back(layout);
-}
-
-bool LinuxAbiSnapshot::contains(std::span<const ModuleSymbol> symbols, std::string_view name) const
-{
-    for (const auto &symbol : symbols)
-    {
-        if (symbol.name.view() == name)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
-u32 LinuxAbiSnapshot::coverage_x100() const
-{
-    if (required_symbols_.empty())
-    {
-        return 10000;
-    }
-    usize covered = 0;
-    for (const auto &symbol : required_symbols_)
-    {
-        if (contains(std::span<const ModuleSymbol>{implemented_symbols_.begin(), implemented_symbols_.size()},
-                     symbol.name.view()))
-        {
-            ++covered;
-        }
-    }
-    return static_cast<u32>((covered * 10000u) / required_symbols_.size());
 }
 
 Status ServiceRegistry::register_service(std::string_view service_id, void *service)
@@ -951,7 +871,8 @@ Status ModuleManager::validate_manifest(KernelModule &module) const
     {
         return Status::overflow("module service export budget exceeded");
     }
-    const auto worker_budget = manifest.resources.max_threads == 0 ? static_cast<usize>(1) : manifest.resources.max_threads;
+    const auto worker_budget =
+        manifest.resources.max_threads == 0 ? static_cast<usize>(1) : manifest.resources.max_threads;
     if (manifest.threading == ModuleThreading::per_cpu && manifest.resources.max_threads != 0 &&
         kernel_process_scheduler_ != nullptr && kernel_process_scheduler_->cpu_count() > worker_budget)
     {
@@ -1272,7 +1193,8 @@ Status ModuleManager::supervise_kernel_processes(StaticVector<ModuleProcessResta
             continue;
         }
         const auto manifest = module->manifest();
-        if (manifest.restart_policy == ModuleRestartPolicy::never || manifest.restart_policy == ModuleRestartPolicy::manual)
+        if (manifest.restart_policy == ModuleRestartPolicy::never ||
+            manifest.restart_policy == ModuleRestartPolicy::manual)
         {
             continue;
         }
