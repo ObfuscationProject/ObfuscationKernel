@@ -14,6 +14,27 @@ _start:
     .long 0
 
 boot_entry:
+    msr daifset, #0xf
+    mrs x0, CurrentEL
+    cmp x0, #0x8
+    b.ne 0f
+    // Linux Image boot permits entry at EL2. Native processes always run under
+    // an EL1 kernel, with the architectural timer and AArch64 execution enabled.
+    mov x0, #(1 << 31)
+    msr hcr_el2, x0
+    mov x0, #3
+    msr cnthctl_el2, x0
+    msr cntvoff_el2, xzr
+    msr cptr_el2, xzr
+    ldr x0, =boot_stack_top
+    msr sp_el1, x0
+    adr x0, 0f
+    msr elr_el2, x0
+    mov x0, #0x3c5
+    msr spsr_el2, x0
+    eret
+0:
+    msr spsel, #1
     ldr x0, =boot_stack_top
     mov sp, x0
 

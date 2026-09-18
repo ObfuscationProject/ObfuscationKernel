@@ -34,6 +34,7 @@ enum class StatusCode : u32
     interrupted,
     fault,
     not_initialized,
+    broken_pipe,
 };
 
 class Status final
@@ -47,6 +48,10 @@ class Status final
     [[nodiscard]] static constexpr Status success()
     {
         return {};
+    }
+    [[nodiscard]] static constexpr Status broken_pipe(std::string_view message = {})
+    {
+        return {StatusCode::broken_pipe, message};
     }
     [[nodiscard]] static constexpr Status invalid_argument(std::string_view message = {})
     {

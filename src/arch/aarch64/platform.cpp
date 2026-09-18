@@ -259,10 +259,11 @@ extern "C" void ok_platform_poll_idle()
 extern "C" int ok_platform_input_poll()
 {
     poll_virtio_mouse();
-    if (const int input = poll_virtio_keyboard(); input >= 0)
-    {
-        return input;
-    }
+    return poll_virtio_keyboard();
+}
+
+extern "C" int ok_platform_console_poll()
+{
     if ((mmio32(uart_fr) & uart_fr_rxfe) != 0)
     {
         return -1;

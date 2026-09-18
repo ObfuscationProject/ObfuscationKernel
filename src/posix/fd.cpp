@@ -67,12 +67,12 @@ Result<Fd> PosixService::openat(Fd dirfd, std::string_view path, u32 flags, u32 
         {
             return status;
         }
-        const auto create_mode = mode & ~file_mode_mask_;
+        const auto create_mode = mode & ~resources().file_mode_mask;
         if (auto status = vfs_->chmod(normalized, create_mode); !status.ok())
         {
             return status;
         }
-        if (auto status = vfs_->chown(normalized, current_euid_, current_egid_); !status.ok())
+        if (auto status = vfs_->chown(normalized, euid(), egid()); !status.ok())
         {
             return status;
         }
@@ -124,52 +124,48 @@ Result<Fd> PosixService::openat(Fd dirfd, std::string_view path, u32 flags, u32 
     {
         return fd.status();
     }
-    auto &entry = files_[static_cast<usize>(fd.value())];
+    FileDescriptor entry{};
     entry.used = true;
     entry.readable = is_readable(flags);
     entry.writable = is_writable(flags);
-    entry.console = false;
-    entry.close_on_exec = (flags & o_CLOEXEC) != 0;
-    entry.flags = flags;
+    entry.flags = flags & ~o_CLOEXEC;
     entry.offset = (flags & o_APPEND) != 0 ? node->metadata().size : 0;
     entry.node = node;
     if (auto status = entry.path.assign(normalized); !status.ok())
-    {
-        entry = {};
         return status;
-    }
+    auto description = scheduler_->allocate_description(entry);
+    if (!description)
+        return description.status();
+    if (auto status =
+            scheduler_->install_descriptor(resources(), fd.value(), description.value(), (flags & o_CLOEXEC) != 0);
+        !status.ok())
+        return status;
     return fd.value();
+}
+
+Result<std::array<Fd, 2>> PosixService::pipe(u32 flags)
+{
+    if (scheduler_ == nullptr)
+        return Status::not_initialized("POSIX service not initialized");
+    if ((flags & ~o_CLOEXEC) != 0)
+        return Status::unsupported("unsupported pipe flags");
+    return scheduler_->create_pipe(resources(), (flags & o_CLOEXEC) != 0);
 }
 
 Status PosixService::close(Fd fd)
 {
-    if (fd >= 0 && fd <= 2)
-    {
-        return Status::success();
-    }
-    auto *entry = descriptor(fd);
-    if (entry == nullptr || !entry->used)
-    {
-        return Status::invalid_argument("bad file descriptor");
-    }
-    *entry = {};
-    return Status::success();
+    return scheduler_ == nullptr ? Status::not_initialized("POSIX service not initialized")
+                                 : scheduler_->close_descriptor(resources(), fd);
 }
 
 Status PosixService::close_range(Fd first, Fd last)
 {
     if (first < 0 || last < first)
-    {
         return Status::invalid_argument("invalid close range");
-    }
-    const auto capped = static_cast<usize>(last) >= files_.size() ? files_.size() - 1 : static_cast<usize>(last);
+    const auto capped = static_cast<usize>(last) >= max_open_files ? max_open_files - 1 : static_cast<usize>(last);
     for (usize fd = static_cast<usize>(first); fd <= capped; ++fd)
-    {
-        if (fd > 2 && files_[fd].used)
-        {
-            files_[fd] = {};
-        }
-    }
+        if (resources().files.contains(static_cast<Fd>(fd)))
+            static_cast<void>(close(static_cast<Fd>(fd)));
     return Status::success();
 }
 
@@ -194,11 +190,7 @@ Result<Fd> PosixService::duplicate(Fd fd, Fd minimum)
 
 Result<Fd> PosixService::duplicate_to(Fd fd, Fd target, u32 flags)
 {
-    if (fd == target)
-    {
-        return target;
-    }
-    if (target < 0 || static_cast<usize>(target) >= files_.size())
+    if (target < 0 || static_cast<usize>(target) >= resources().files.entries().size())
     {
         return Status::invalid_argument("target file descriptor out of range");
     }
@@ -207,10 +199,8 @@ Result<Fd> PosixService::duplicate_to(Fd fd, Fd target, u32 flags)
     {
         return Status::invalid_argument("bad file descriptor");
     }
-    if (auto status = close(target); !status.ok())
-    {
-        return status;
-    }
+    if (fd == target)
+        return target;
     if (auto status = copy_descriptor(fd, target, flags); !status.ok())
     {
         return status;
@@ -225,7 +215,9 @@ Result<usize> PosixService::read(Fd fd, std::span<std::byte> out)
     {
         return Status::invalid_argument("file descriptor is not readable");
     }
-    if (fd == 0)
+    if (entry->pipe != sched::invalid_description)
+        return scheduler_->read_pipe(entry->pipe, out);
+    if (entry->input_console)
     {
         return Status::would_block("stdin has no buffered data");
     }
@@ -254,6 +246,8 @@ Result<usize> PosixService::write(Fd fd, std::span<const std::byte> in)
     {
         return Status::invalid_argument("file descriptor is not writable");
     }
+    if (entry->pipe != sched::invalid_description)
+        return scheduler_->write_pipe(entry->pipe, in);
     if (entry->console)
     {
         const auto *text = reinterpret_cast<const char *>(in.data());
@@ -339,8 +333,8 @@ Result<usize> PosixService::writev(Fd fd, std::span<const IoVector> vectors)
         {
             return total == 0 ? Result<usize>{Status::invalid_argument("writev buffer is null")} : Result<usize>{total};
         }
-        auto result = write(fd, std::span<const std::byte>{reinterpret_cast<const std::byte *>(vector.base),
-                                                           vector.length});
+        auto result =
+            write(fd, std::span<const std::byte>{reinterpret_cast<const std::byte *>(vector.base), vector.length});
         if (!result)
         {
             return total == 0 ? result : Result<usize>{total};
@@ -353,7 +347,8 @@ Result<usize> PosixService::writev(Fd fd, std::span<const IoVector> vectors)
 Result<usize> PosixService::seek(Fd fd, i64 offset, SeekWhence whence)
 {
     auto *entry = descriptor(fd);
-    if (entry == nullptr || !entry->used || entry->console)
+    if (entry == nullptr || !entry->used || entry->console || entry->input_console ||
+        entry->pipe != sched::invalid_description)
     {
         return Status::invalid_argument("file descriptor is not seekable");
     }
@@ -389,15 +384,14 @@ Result<i64> PosixService::fcntl(Fd fd, u32 command, u64 argument)
     }
     switch (command)
     {
-    case f_DUPFD:
-    {
+    case f_DUPFD: {
         auto duplicated = duplicate(fd, static_cast<Fd>(argument));
         return duplicated ? Result<i64>{static_cast<i64>(duplicated.value())} : Result<i64>{duplicated.status()};
     }
     case f_GETFD:
-        return entry->close_on_exec ? fd_CLOEXEC : 0;
+        return resources().files.entry(fd)->close_on_exec ? fd_CLOEXEC : 0;
     case f_SETFD:
-        entry->close_on_exec = (argument & fd_CLOEXEC) != 0;
+        resources().files.entry(fd)->close_on_exec = (argument & fd_CLOEXEC) != 0;
         return 0;
     case f_GETFL:
         return static_cast<i64>(entry->flags);
@@ -426,7 +420,9 @@ Result<FileStatus> PosixService::fstat(Fd fd) const
     {
         return Status::invalid_argument("bad file descriptor");
     }
-    if (entry->console || fd <= 2)
+    if (entry->pipe != sched::invalid_description)
+        return FileStatus{.type = fs::NodeType::device, .mode = fs::mode_fifo | 0600u};
+    if (entry->console || entry->input_console)
     {
         return FileStatus{
             .type = fs::NodeType::device,

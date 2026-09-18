@@ -202,7 +202,7 @@ Status test_memory(TestPointRunner &runner)
 
 Status test_scheduler(TestPointRunner &runner)
 {
-    sched::Scheduler scheduler;
+    static sched::Scheduler scheduler;
     if (auto status = runner.check_status("sched", "configure-cpus", scheduler.configure_cpus(2)); !status.ok())
     {
         return status;

@@ -18,6 +18,8 @@ i64 ErrnoMapper::errno_for(Status status)
     {
     case StatusCode::ok:
         return 0;
+    case StatusCode::broken_pipe:
+        return 32;
     case StatusCode::invalid_argument:
         return linux_EINVAL;
     case StatusCode::no_memory:

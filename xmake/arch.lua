@@ -201,6 +201,12 @@ function add_ok_arch_files()
     local _, spec = ok_require_arch(ok_current_arch())
     add_files(path.join(os.projectdir(), "src/arch/arch.cpp"))
     add_files(path.join(os.projectdir(), "src/arch", spec.source, "ops.cpp"))
+    if os.isfile(path.join(os.projectdir(), "src/arch", spec.source, "execution.cpp")) then
+        add_files(path.join(os.projectdir(), "src/arch", spec.source, "execution.cpp"))
+        add_files(path.join(os.projectdir(), "src/arch", spec.source, "execution.S"))
+    else
+        add_files(path.join(os.projectdir(), "src/arch", "execution_stub.cpp"))
+    end
 end
 
 function add_ok_boot_files()

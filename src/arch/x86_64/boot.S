@@ -18,6 +18,14 @@ _start:
     cli
     mov $boot_stack_top, %esp
 
+    // These NOLOAD tables can lie beyond the BIOS payload's padded extent.
+    // Clear every entry before paging; physical RAM need not start at zero.
+    cld
+    mov $boot_pml4, %edi
+    xor %eax, %eax
+    mov $3072, %ecx
+    rep stosl
+
     mov $boot_pd, %edi
     xor %eax, %eax
     mov $512, %ecx

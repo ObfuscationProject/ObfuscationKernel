@@ -9,13 +9,14 @@ namespace
 extern "C" void ok_platform_console_init();
 extern "C" void ok_platform_console_write_char(char value);
 extern "C" void ok_platform_display_clear();
-extern "C" void ok_platform_display_debug_marker() __attribute__((weak));
 extern "C" void ok_platform_display_write_char(char value);
 extern "C" void ok_platform_debug_exit(ok::u32 code);
 extern "C" void ok_platform_halt();
 extern "C" void ok_platform_poll_idle() __attribute__((weak));
 extern "C" void ok_platform_reboot() __attribute__((weak));
 extern "C" int ok_platform_input_poll();
+extern "C" int ok_platform_console_poll() __attribute__((weak));
+bool native_userland_started{};
 
 void platform_write(std::string_view text)
 {
@@ -28,7 +29,8 @@ void platform_write(std::string_view text)
 
 [[maybe_unused]] void debug_write(void *, std::string_view text)
 {
-    platform_write(text);
+    for (char value : text)
+        ok_platform_console_write_char(value);
 }
 
 [[noreturn]] void halt_forever()
@@ -73,8 +75,18 @@ void desktop_idle()
             halt_forever();
         }
 
-        const int value = ok_platform_input_poll();
+        static_cast<void>(ok::ok_step_userland());
         bool did_work = false;
+        const int serial = ok_platform_console_poll != nullptr ? ok_platform_console_poll() : -1;
+        if (serial >= 0)
+        {
+            if (native_userland_started)
+                ok::ok_userland_input(static_cast<char>(serial == '\r' ? '\n' : serial));
+            else
+                static_cast<void>(ok::ok_gui_key_event(serial));
+            did_work = true;
+        }
+        const int value = ok_platform_input_poll();
         if (value >= 0)
         {
             static_cast<void>(ok::ok_gui_key_event(value));
@@ -105,6 +117,7 @@ extern "C" void ok_platform_display_write_line(const char *text, ok::usize size)
 }
 
 extern "C" ok::KernelExtension *ok_boot_extension() __attribute__((weak));
+extern "C" ok::fs::BootArchive ok_boot_archive() __attribute__((weak));
 
 extern "C" [[noreturn]] void kernel_main()
 {
@@ -123,12 +136,27 @@ extern "C" [[noreturn]] void kernel_main()
 #endif
 
     [[maybe_unused]] auto status = ok::ok_kernel_entry(config);
+    if (status.ok() && ok_boot_archive != nullptr)
+    {
+        auto native = ok::ok_start_userland(ok_boot_archive());
+        if (!native.ok())
+        {
+            platform_write("OK_NATIVE startup=");
+            platform_write(native.message());
+            platform_write("\n");
+            if (native.code() != ok::StatusCode::unsupported)
+                status = native;
+        }
+        else
+        {
+            native_userland_started = true;
+            for (ok::usize i = 0; i < 8192 && ok::ok_step_userland(); ++i)
+            {
+            }
+        }
+    }
 
 #if defined(OK_ENABLE_TEST_POINTS)
-    if (status.ok() && ok_platform_display_debug_marker != nullptr)
-    {
-        ok_platform_display_debug_marker();
-    }
     ok_platform_debug_exit(status.ok() ? 0x10u : 0x11u);
     if (status.ok())
     {
@@ -140,7 +168,9 @@ extern "C" [[noreturn]] void kernel_main()
         if (config.kernel.extension != nullptr)
         {
             status = ok::ok_start_boot_extension();
-            platform_write(status.ok() ? "OK_BOOT_EXTENSION boot=complete\n" : "OK_BOOT_EXTENSION boot=failed\n");
+            for (char value : std::string_view{status.ok() ? "OK_BOOT_EXTENSION boot=complete\n"
+                                                           : "OK_BOOT_EXTENSION boot=failed\n"})
+                ok_platform_console_write_char(value);
             if (!status.ok())
             {
                 ok_platform_debug_exit(0x11u);

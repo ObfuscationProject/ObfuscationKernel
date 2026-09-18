@@ -146,6 +146,9 @@ std::array<std::byte, 128> make_test_elf(arch::Architecture architecture)
     bytes[3] = std::byte{'F'};
     bytes[4] = std::byte{2};
     bytes[5] = std::byte{1};
+    bytes[6] = std::byte{1};
+    write_le32(bytes, 20, 1);
+    write_le16(bytes, 52, 64);
     write_le16(bytes, 16, 2);
     write_le16(bytes, 18, elf_machine_for(architecture));
     write_le64(bytes, 24, 0x400000);
@@ -159,7 +162,7 @@ std::array<std::byte, 128> make_test_elf(arch::Architecture architecture)
     write_le64(bytes, 88, 0x400000);
     write_le64(bytes, 96, 4);
     write_le64(bytes, 104, 0x2000);
-    write_le64(bytes, 112, 0x1000);
+    write_le64(bytes, 112, 1);
     bytes[120] = std::byte{0xc3};
     return image;
 }
@@ -171,7 +174,7 @@ arch::Architecture different_architecture(arch::Architecture architecture)
 
 Status verify_scheduler_runs_two(arch::Architecture architecture)
 {
-    sched::Scheduler scheduler;
+    static sched::Scheduler scheduler;
     if (auto status = scheduler.configure_cpus(1); !status.ok())
     {
         return status;
@@ -375,11 +378,9 @@ Status verify_process_lifecycle(Kernel &kernel, std::span<const std::byte> elf, 
         return Status::fault("wait4 or zombie cleanup failed");
     }
 
-    syscall::Request exit_request{.number = syscall::Number::exit, .caller = user.value(), .args = {0, 0, 0, 0, 0, 0}};
-    auto exit_response = kernel.syscalls().dispatch(exit_request);
-    if (!exit_response.status.ok())
+    if (auto status = processes.exit(user.value(), 0); !status.ok())
     {
-        return Status::fault("user process syscall exit path failed");
+        return Status::fault("user process lifecycle exit failed");
     }
     return Status::success();
 }
@@ -579,13 +580,24 @@ Status verify_background_programs_and_posix(Kernel &kernel)
         return Status::fault("background processes were not scheduled");
     }
 
+    const auto selected_pid = kernel.scheduler().current_pid();
+    const auto *selected_before = kernel.scheduler().find(selected_pid);
+    if (selected_before == nullptr)
+        return Status::fault("scheduler did not retain its selection");
+    const auto selected_credentials = selected_before->credentials();
+    auto switched = kernel.debug_shell().execute("su root");
+    const auto *selected_after = kernel.scheduler().find(selected_pid);
+    if (!switched || selected_after == nullptr ||
+        selected_after->credentials().kernel_space != selected_credentials.kernel_space ||
+        selected_after->credentials().euid != selected_credentials.euid)
+        return Status::fault("diagnostic shell identity rewrote a scheduled process");
+
     static_cast<void>(kernel.debug_shell().execute("su kernel"));
     auto ps = kernel.debug_shell().execute("ps aux");
     if (!ps || !contains_text(ps.value(), "  PID USER    TTY   STAT THR COMMAND") ||
         !contains_text(ps.value(), "idle") || !contains_text(ps.value(), "mod:kernel-gui") ||
         !contains_text(ps.value(), "drv:simple-framebuffer") || !contains_text(ps.value(), "drv:ram-block0") ||
-        !contains_text(ps.value(), "bg-a") ||
-        !contains_text(ps.value(), "bg-b") || !contains_text(ps.value(), "bg-c"))
+        !contains_text(ps.value(), "bg-a") || !contains_text(ps.value(), "bg-b") || !contains_text(ps.value(), "bg-c"))
     {
         return Status::fault("debug shell ps did not list scheduler processes");
     }
@@ -622,7 +634,8 @@ Status verify_background_programs_and_posix(Kernel &kernel)
     }
     auto killed_driver = kernel.debug_shell().execute(kill_command.view());
     auto restarted_driver_pid = kernel.drivers().kernel_process_id("ram-block0");
-    const auto *restarted_driver = restarted_driver_pid ? kernel.scheduler().find(restarted_driver_pid.value()) : nullptr;
+    const auto *restarted_driver =
+        restarted_driver_pid ? kernel.scheduler().find(restarted_driver_pid.value()) : nullptr;
     if (!killed_driver || !killed_driver.value().empty() || kernel.scheduler().find(driver_pid.value()) != nullptr ||
         !restarted_driver_pid || restarted_driver_pid.value() == driver_pid.value() || restarted_driver == nullptr ||
         restarted_driver->name() != "drv:ram-block0" ||
@@ -740,7 +753,8 @@ Status verify_background_programs_and_posix(Kernel &kernel)
 Status run_process_roadmap_tests(Kernel &kernel, KernelTestReport &report)
 {
     auto elf = make_test_elf(kernel.arch().architecture());
-    sched::ProcessManager processes;
+    static sched::Scheduler process_owner;
+    sched::ProcessManager processes(process_owner);
 
     if (auto status = verify_scheduler_runs_two(kernel.arch().architecture()); !status.ok())
     {

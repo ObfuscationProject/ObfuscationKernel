@@ -29,7 +29,9 @@ the constants and native struct layouts match the C++ kernel implementation.
 
 ## Syscall ABI
 
-The implemented public syscall ABI is the x86_64 Linux-style register ABI:
+All four native backends use the common syscall number table. AArch64 uses
+`x8` / `x0..x5`, RV64 uses `a7` / `a0..a5`, and LoongArch uses `a7` / `a0..a5`.
+The x86_64 Linux-style register ABI is:
 
 | Field | Register |
 | --- | --- |
@@ -58,7 +60,9 @@ The following areas are intended to remain stable across 0.1.x:
 
 ## Implemented Syscall Groups
 
-The kernel currently handles:
+The trusted-buffer kernel/model table handles the calls below. Only the checked
+subset listed in [Native execution](NATIVE_EXECUTION.md) is exposed to actual user
+programs; internal model support does not imply native syscall support:
 
 - descriptor I/O: `read`, `write`, `pread64`, `pwrite64`, `readv`, `writev`,
   `close`, `close_range`, `dup`, `dup2`, `dup3`, `fcntl`, and `ioctl`;
@@ -74,11 +78,10 @@ The kernel currently handles:
   `rt_sigaction`, `rt_sigprocmask`, `sched_yield`, `exit`, `exit_group`, and
   `umask`.
 
-`clone`, `fork`, `execve`, `wait4`, `kill`, `pipe`, `select`, and `poll` are
-reserved and registered, but they currently report `-OK_ENOSYS` from the
-single-process syscall profile. The internal process manager has roadmap tests
-for create/fork/exec/wait state; that model is not exposed as a stable syscall
-contract yet.
+The native runtime implements `fork`, `execve`, `wait4` and `pipe` against the
+canonical scheduler resources. `clone`, `kill`, `select` and `poll` remain
+unsupported at the user boundary. The internal trusted-buffer table retains
+its separate model handlers.
 
 ## Native ABI Notes
 
@@ -96,14 +99,9 @@ entries for arbitrary user processes.
 
 ## What Is Still Missing
 
-To make downstream user-space development feel complete rather than merely
-testable, the project still needs:
-
-- a minimal crt0 and linker script for static freestanding user programs;
-- a small libc or syscall wrapper library built on `ok/uapi/syscall.h`;
-- a debug-shell command or loader path that accepts a user ELF from a mounted
-  filesystem and runs it through a real user-mode entry;
-- architecture page tables and trap-return paths for true user/kernel
-  isolation;
-- public ABI translations for Linux-compatible `stat`, `utsname`, directory
-  entries, signals, process creation, and pipes.
+ObfuscationOS now supplies crt0, a static linker script, libc wrappers, `/init`
+and an external-program shell. Four architecture backends execute those programs
+with real protection and timer traps. Remaining work includes general VM and
+allocation, signals, device-backed persistent storage, dynamic linking, a user
+GUI protocol, and full POSIX/Linux ABI behavior. The six other kernel profiles
+retain model/boot support and need native execution backends.

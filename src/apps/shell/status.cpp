@@ -21,6 +21,8 @@ std::string_view process_state_label(sched::ProcessState state)
         return "R";
     case sched::ProcessState::blocked:
         return "S";
+    case sched::ProcessState::zombie:
+        return "Z";
     case sched::ProcessState::exited:
         return "Z";
     }

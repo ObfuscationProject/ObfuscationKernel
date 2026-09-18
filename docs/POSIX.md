@@ -13,7 +13,7 @@ UAPI. Kernel C++ headers under `include/ok/syscall`, `include/ok/posix`, and
 `include/ok/fs` remain implementation headers unless this document says
 otherwise.
 
-## Implemented Calls
+## Trusted-buffer kernel/model calls
 
 - `getpid`
 - `read`
@@ -76,11 +76,12 @@ otherwise.
 - `umask`
 - `ok_debug`
 
-The syscall table also reserves `clone`, `fork`, `execve`, `wait4`, `kill`,
-`pipe`, `select`, and `poll`. In the current single-process syscall profile
-they are registered as explicit `-ENOSYS` handlers. The internal process manager
-has roadmap coverage for fork/exec/wait state, but those operations are not a
-stable downstream syscall contract yet.
+The native runtime adds real `fork`, `execve`, `wait4` and `pipe` over the
+canonical process table, with guarded user copies. Its supported subset is
+narrower than this internal table: model `mmap`, signal or futex behavior is not
+exposed as native implementation. See [Native execution](NATIVE_EXECUTION.md)
+for the exact scope, tests and limits. `clone`, `kill`, `select` and `poll` remain
+unsupported at the native boundary.
 
 `stdin`, `stdout`, and `stderr` are reserved as descriptors `0`, `1`, and `2`.
 File descriptors and memory mappings are fixed-capacity kernel objects, not

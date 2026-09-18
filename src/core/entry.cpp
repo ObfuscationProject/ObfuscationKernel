@@ -1,4 +1,5 @@
 #include "ok/core/entry.hpp"
+#include "ok/user/runtime.hpp"
 
 namespace ok
 {
@@ -480,6 +481,18 @@ Status ok_gui_close_debug_surfaces()
 Status ok_start_boot_extension()
 {
     return kernel_instance().start_extension();
+}
+Status ok_start_userland(fs::BootArchive archive)
+{
+    return user::native::start(kernel_instance(), archive);
+}
+bool ok_step_userland()
+{
+    return user::native::step(kernel_instance());
+}
+void ok_userland_input(char value)
+{
+    user::native::input(value);
 }
 SystemPowerAction ok_system_power_action()
 {

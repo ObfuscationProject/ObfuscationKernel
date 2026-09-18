@@ -2,6 +2,8 @@
 .global _start
 .type _start, @function
 _start:
+    li.d $t0, 1
+    csrwr $t0, 2
     la.local $sp, boot_stack_top
     la.local $t0, _bss_start
     la.local $t1, _bss_end

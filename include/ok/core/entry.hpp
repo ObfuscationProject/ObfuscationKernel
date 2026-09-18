@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ok/core/kernel.hpp"
+#include "ok/fs/archive.hpp"
 
 namespace ok
 {
@@ -57,6 +58,9 @@ Status ok_gui_mouse_position_event(i32 x, i32 y, bool left_button);
 Status ok_gui_key_event(int key);
 Status ok_gui_close_debug_surfaces();
 Status ok_start_boot_extension();
+Status ok_start_userland(fs::BootArchive archive);
+bool ok_step_userland();
+void ok_userland_input(char value);
 SystemPowerAction ok_system_power_action();
 bool ok_debug_shell_gui_ready();
 bool ok_debug_shell_gui_open();

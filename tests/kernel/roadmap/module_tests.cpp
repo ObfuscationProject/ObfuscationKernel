@@ -455,7 +455,7 @@ Status test_module_image_loader_and_symbol_registry()
 Status test_kernel_process_backed_module()
 {
     auto &ops = arch::arch_operations(arch::configured_architecture());
-    sched::Scheduler scheduler;
+    static sched::Scheduler scheduler;
     if (auto status = scheduler.configure_cpus(4); !status.ok())
     {
         return status;

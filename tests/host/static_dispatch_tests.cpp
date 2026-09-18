@@ -130,7 +130,8 @@ void test_architecture_dispatch()
 
 void test_reject_foreign_process_target()
 {
-    sched::ProcessManager processes;
+    static sched::Scheduler process_owner;
+    sched::ProcessManager processes(process_owner);
     const auto other = arch::configured_architecture() == arch::Architecture::x86_64 ? arch::Architecture::aarch64
                                                                                      : arch::Architecture::x86_64;
     check(processes.create_user_process("foreign", {}, other).status().code() == StatusCode::unsupported);

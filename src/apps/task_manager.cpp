@@ -125,6 +125,8 @@ std::string_view process_state_label(sched::ProcessState state)
         return "cpu";
     case sched::ProcessState::blocked:
         return "wait";
+    case sched::ProcessState::zombie:
+        return "zombie";
     case sched::ProcessState::exited:
         return "exit";
     }

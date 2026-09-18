@@ -125,6 +125,7 @@ Result<ProcessId> SchedulerState::create_process(std::string_view name, arch::Cp
     {
         return status;
     }
+    initialize_resources(process.resources());
     const auto pid = process.pid();
     if (auto status = processes_.push_back(process); !status.ok())
     {
@@ -177,7 +178,7 @@ Result<ThreadId> SchedulerState::create_thread(ProcessId pid, arch::CpuContext i
     {
         return Status::not_found("process not found");
     }
-    if (process->state() == ProcessState::exited)
+    if (process->state() == ProcessState::exited || process->state() == ProcessState::zombie)
     {
         return Status::invalid_argument("cannot create a thread for an exited process");
     }
@@ -312,40 +313,13 @@ Status SchedulerState::set_cpu_accounting(ProcessId pid, ProcessCpuAccounting ac
 
 Status SchedulerState::kill_process(ProcessId pid)
 {
-    for (usize i = 0; i < processes_.size(); ++i)
-    {
-        if (processes_[i].pid() != pid)
-        {
-            continue;
-        }
-        processes_[i].set_state(ProcessState::exited);
-        for (auto &thread : processes_[i].threads())
-        {
-            thread.state = ProcessState::exited;
-        }
-        if (current_pid_ == pid)
-        {
-            current_pid_ = 0;
-        }
-        for (usize cpu = 0; cpu < current_by_cpu_.size(); ++cpu)
-        {
-            if (current_by_cpu_[cpu] == pid)
-            {
-                current_by_cpu_[cpu] = 0;
-                current_thread_by_cpu_[cpu] = 0;
-            }
-        }
-        for (auto &stats : cpu_stats_)
-        {
-            if (stats.current_pid == pid)
-            {
-                stats.current_pid = 0;
-                stats.current_tid = 0;
-            }
-        }
-        return processes_.erase_at(i);
-    }
-    return Status::not_found("process not found");
+    auto *process = find(pid);
+    if (process == nullptr)
+        return Status::not_found("process not found");
+    if (process->state() != ProcessState::zombie && process->state() != ProcessState::exited)
+        if (auto status = exit_process(pid, -1); !status.ok())
+            return status;
+    return reap_process(pid);
 }
 
 Status SchedulerState::configure_cpus(usize cpu_count)
@@ -382,6 +356,8 @@ Status SchedulerState::set_runnable(ProcessId pid)
     {
         return Status::not_found("process not found");
     }
+    if (process->state() == ProcessState::zombie || process->state() == ProcessState::exited)
+        return Status::invalid_argument("cannot run an exited process");
     process->set_state(ProcessState::runnable);
     for (auto &thread : process->threads())
     {
@@ -647,6 +623,450 @@ u16 SchedulerState::configured_cpu_mask() const
         return cpu_affinity_any;
     }
     return static_cast<u16>((1u << cpu_count_) - 1u);
+}
+
+SchedulerState::SchedulerState()
+{
+    descriptions_[0] =
+        OpenFileDescription{.used = true, .readable = true, .input_console = true, .path = FixedString<96>{"stdin"}};
+    descriptions_[1] =
+        OpenFileDescription{.used = true, .writable = true, .console = true, .path = FixedString<96>{"stdout"}};
+    descriptions_[2] =
+        OpenFileDescription{.used = true, .writable = true, .console = true, .path = FixedString<96>{"stderr"}};
+    initialize_resources(boot_resources_);
+}
+
+void SchedulerState::initialize_resources(ProcessResources &resources)
+{
+    resources = {};
+    for (i32 fd = 0; fd < 3; ++fd)
+        static_cast<void>(install_descriptor(resources, fd, static_cast<u16>(fd)));
+}
+
+OpenFileDescription *SchedulerState::open_description(u16 id)
+{
+    return id < descriptions_.size() && descriptions_[id].used ? &descriptions_[id] : nullptr;
+}
+const OpenFileDescription *SchedulerState::open_description(u16 id) const
+{
+    return id < descriptions_.size() && descriptions_[id].used ? &descriptions_[id] : nullptr;
+}
+Result<u16> SchedulerState::allocate_description(OpenFileDescription description)
+{
+    for (usize i = 3; i < descriptions_.size(); ++i)
+        if (!descriptions_[i].used)
+        {
+            description.used = true;
+            description.references = 0;
+            descriptions_[i] = description;
+            return static_cast<u16>(i);
+        }
+    return Status::overflow("open file description table full");
+}
+Status SchedulerState::install_descriptor(ProcessResources &resources, i32 fd, u16 description, bool close_on_exec)
+{
+    auto *slot = resources.files.entry(fd);
+    auto *open = open_description(description);
+    if (slot == nullptr || open == nullptr)
+        return Status::invalid_argument("invalid descriptor binding");
+    // Retain first: dup2 may replace the last other reference to this description.
+    ++open->references;
+    if (slot->used)
+        static_cast<void>(close_descriptor(resources, fd));
+    *slot = FileDescriptor{.used = true, .close_on_exec = close_on_exec, .description = description};
+    return Status::success();
+}
+Status SchedulerState::close_descriptor(ProcessResources &resources, i32 fd)
+{
+    auto *slot = resources.files.entry(fd);
+    if (slot == nullptr || !slot->used)
+        return Status::invalid_argument("bad file descriptor");
+    if (auto *open = open_description(slot->description); open != nullptr && open->references != 0)
+    {
+        --open->references;
+        const auto pipe = open->pipe;
+        if (open->references == 0 && slot->description >= 3)
+            *open = {};
+        if (pipe < pipes_.size())
+        {
+            wake_waiters(ThreadWaitReason::pipe_read, pipe);
+            wake_waiters(ThreadWaitReason::pipe_write, pipe);
+            if (!pipe_has_endpoint(pipe, false) && !pipe_has_endpoint(pipe, true))
+                pipes_[pipe] = {};
+        }
+    }
+    *slot = {};
+    return Status::success();
+}
+void SchedulerState::release_resources(ProcessResources &resources)
+{
+    for (i32 fd = 0; fd < static_cast<i32>(max_process_fds); ++fd)
+        if (resources.files.contains(fd))
+            static_cast<void>(close_descriptor(resources, fd));
+    resources.memory = {};
+    resources.mappings = {};
+}
+usize SchedulerState::open_description_count() const
+{
+    usize count = 0;
+    for (const auto &open : descriptions_)
+        if (open.used && open.references != 0)
+            ++count;
+    return count;
+}
+void SchedulerState::clear_current(ProcessId pid)
+{
+    if (current_pid_ == pid)
+        current_pid_ = 0;
+    for (usize cpu = 0; cpu < current_by_cpu_.size(); ++cpu)
+        if (current_by_cpu_[cpu] == pid)
+        {
+            current_by_cpu_[cpu] = 0;
+            current_thread_by_cpu_[cpu] = 0;
+            cpu_stats_[cpu].current_pid = 0;
+            cpu_stats_[cpu].current_tid = 0;
+        }
+}
+Status SchedulerState::activate(ProcessId pid, smp::CpuId cpu)
+{
+    if (cpu >= cpu_count_)
+        return Status::invalid_argument("invalid activation CPU");
+    if (pid == 0)
+    {
+        if (auto *previous = find(current_by_cpu_[cpu]); previous != nullptr)
+        {
+            for (auto &thread : previous->threads())
+                if (thread.tid == current_thread_by_cpu_[cpu] && thread.state == ProcessState::running)
+                    thread.state = ProcessState::runnable;
+            if (previous->state() == ProcessState::running)
+                previous->set_state(ProcessState::runnable);
+        }
+        current_pid_ = 0;
+        current_by_cpu_[cpu] = 0;
+        current_thread_by_cpu_[cpu] = 0;
+        cpu_stats_[cpu].current_pid = 0;
+        cpu_stats_[cpu].current_tid = 0;
+        return Status::success();
+    }
+    auto *process = find(pid);
+    if (process == nullptr)
+        return Status::not_found("process not found");
+    if (process->state() == ProcessState::blocked || process->state() == ProcessState::zombie ||
+        process->state() == ProcessState::exited || !process->can_run_on(cpu))
+        return Status::invalid_argument("process cannot be activated");
+    if (process->state() == ProcessState::created)
+        static_cast<void>(set_runnable(pid));
+    auto selected = dispatch_selected(cpu, pid);
+    return selected ? Status::success() : selected.status();
+}
+Result<ProcessId> SchedulerState::fork_process(ProcessId parent)
+{
+    auto *source = find(parent);
+    if (source == nullptr)
+        return Status::not_found("parent process not found");
+    if (source->state() == ProcessState::zombie || source->state() == ProcessState::exited || source->threads().empty())
+        return Status::invalid_argument("parent process is not alive");
+    if (source->children().full())
+        return Status::overflow("child table full");
+    const ThreadControlBlock *calling_thread = &source->threads()[0];
+    for (const auto &thread : source->threads())
+        if (thread.tid == current_tid(0) && current_pid(0) == parent)
+            calling_thread = &thread;
+    auto child_pid = create_process(source->name(), calling_thread->context);
+    if (!child_pid)
+        return child_pid.status();
+    auto *child = find(child_pid.value());
+    release_resources(child->resources());
+    child->resources() = source->resources();
+    // Native runtime materializes a distinct address space before publishing the child.
+    child->resources().native_space = {};
+    child->resources().native_pages = {};
+    for (const auto &slot : child->fd_table().entries())
+        if (slot.used)
+            if (auto *description = open_description(slot.description))
+                ++description->references;
+    child->set_parent(parent);
+    child->set_credentials(source->credentials());
+    child->set_execution(source->execution());
+    child->set_address_space_id(next_address_space_id_++);
+    child->set_background(source->background());
+    child->set_priority(source->priority());
+    child->set_cpu_affinity_mask(source->cpu_affinity_mask());
+    child->threads()[0].priority = calling_thread->priority;
+    child->threads()[0].tls = calling_thread->tls;
+    child->threads()[0].native_frame = calling_thread->native_frame;
+    child->threads()[0].native_active = false;
+    child->threads()[0].syscall_pending = false;
+    child->threads()[0].tls.clear_tid_address = 0;
+    child->threads()[0].wait_reason = ThreadWaitReason::none;
+    static_cast<void>(source->add_child(child_pid.value()));
+    static_cast<void>(set_runnable(child_pid.value()));
+    return child_pid;
+}
+Status SchedulerState::replace_image(ProcessId pid, arch::CpuContext context, const MemoryMap &memory)
+{
+    if (auto status = arch::validate_architecture(context.architecture); !status.ok())
+        return status;
+    auto *process = find(pid);
+    if (process == nullptr)
+        return Status::not_found("process not found");
+    if (process->state() == ProcessState::zombie || process->state() == ProcessState::exited)
+        return Status::invalid_argument("cannot exec an exited process");
+    if (process->threads().empty())
+        return Status::invalid_argument("process has no thread");
+    for (i32 fd = 0; fd < static_cast<i32>(max_process_fds); ++fd)
+    {
+        const auto *slot = process->fd_table().entry(fd);
+        if (slot->used && slot->close_on_exec)
+            static_cast<void>(close_descriptor(process->resources(), fd));
+    }
+    process->memory_map() = memory;
+    process->resources().mappings = {};
+    process->resources().program_break = process->resources().program_break_base;
+    process->resources().next_mapping_address = 0x2000'0000;
+    process->signals() = {};
+    while (process->threads().size() > 1)
+        static_cast<void>(process->threads().erase_at(1));
+    auto &thread = process->threads()[0];
+    thread.context = context;
+    thread.tls = {};
+    thread.wait_reason = ThreadWaitReason::none;
+    thread.wait_key = 0;
+    thread.state = ProcessState::runnable;
+    process->set_state(ProcessState::runnable);
+    process->set_execution(context.mode == arch::PrivilegeMode::user ? ProcessExecution::user_process
+                                                                     : ProcessExecution::kernel_thread);
+    process->set_address_space_id(next_address_space_id_++);
+    clear_current(pid);
+    return Status::success();
+}
+Status SchedulerState::exit_process(ProcessId pid, i32 code)
+{
+    return finish_process(pid, code, 0);
+}
+Status SchedulerState::terminate_process(ProcessId pid, u8 signal)
+{
+    if (signal == 0 || signal > 127)
+        return Status::invalid_argument("invalid termination signal");
+    return finish_process(pid, 0, signal);
+}
+Status SchedulerState::finish_process(ProcessId pid, i32 code, u8 signal)
+{
+    auto *process = find(pid);
+    if (process == nullptr)
+        return Status::not_found("process not found");
+    if (process->state() == ProcessState::zombie || process->state() == ProcessState::exited)
+        return Status::already_exists("process has already exited");
+    process->set_exit_code(code);
+    process->set_termination_signal(signal);
+    process->set_state(ProcessState::zombie);
+    for (auto &thread : process->threads())
+        thread.state = ProcessState::exited;
+    release_resources(process->resources());
+    // Parent 0 is owned by the service reaper, not a waitable process.
+    static_cast<void>(reparent_children(pid, 0));
+    clear_current(pid);
+    wake_waiters(ThreadWaitReason::child, pid);
+    wake_waiters(ThreadWaitReason::child, 0);
+    return Status::success();
+}
+Result<i32> SchedulerState::wait_process(ProcessId parent, ProcessId child)
+{
+    auto *parent_process = find(parent);
+    auto *process = find(child);
+    if (parent_process == nullptr || process == nullptr || process->parent_pid() != parent)
+        return Status::not_found("wait child not found");
+    if (process->state() != ProcessState::zombie && process->state() != ProcessState::exited)
+    {
+        if (current_pid() == parent)
+            static_cast<void>(block_current(ThreadWaitReason::child, child));
+        return Status::would_block("child has not exited");
+    }
+    const auto code = process->exit_code();
+    if (auto status = reap_process(child); !status.ok())
+        return status;
+    return code;
+}
+Status SchedulerState::reparent_children(ProcessId from, ProcessId to)
+{
+    if (from == to)
+        return Status::invalid_argument("cannot reparent to the same process");
+    auto *target = find(to);
+    auto *source = find(from);
+    if (source == nullptr || (to != 0 && target == nullptr))
+        return Status::not_found("reparent process not found");
+    if (target != nullptr && target->children().size() + source->children().size() > max_process_children)
+        return Status::overflow("reparent child table full");
+    for (const auto child : source->children())
+    {
+        auto *process = find(child);
+        if (process == nullptr)
+            continue;
+        process->set_parent(to);
+        if (target != nullptr)
+            static_cast<void>(target->add_child(child));
+    }
+    source->children().clear();
+    return Status::success();
+}
+Status SchedulerState::reap_process(ProcessId pid)
+{
+    auto *process = find(pid);
+    if (process == nullptr)
+        return Status::not_found("process not found");
+    if (process->state() != ProcessState::zombie && process->state() != ProcessState::exited)
+        return Status::invalid_argument("process is not a zombie");
+    if (process->resources().native_space.root != 0 || !process->resources().native_pages.empty())
+        return Status::busy("native address space must be released before reaping");
+    const auto parent = process->parent_pid();
+    if (auto *owner = find(parent))
+        static_cast<void>(owner->remove_child(pid));
+    static_cast<void>(reparent_children(pid, 0));
+    release_resources(process->resources());
+    clear_current(pid);
+    for (usize i = 0; i < processes_.size(); ++i)
+        if (processes_[i].pid() == pid)
+            return processes_.erase_at(i);
+    return Status::not_found("process not found");
+}
+
+usize SchedulerState::reap_orphans()
+{
+    usize reaped = 0;
+    for (usize i = 0; i < processes_.size();)
+    {
+        const auto &process = processes_[i];
+        if (process.parent_pid() == 0 &&
+            (process.state() == ProcessState::zombie || process.state() == ProcessState::exited) &&
+            reap_process(process.pid()).ok())
+            ++reaped;
+        else
+            ++i;
+    }
+    return reaped;
+}
+
+bool SchedulerState::pipe_has_endpoint(u16 pipe, bool writable) const
+{
+    for (const auto &description : descriptions_)
+        if (description.used && description.references != 0 && description.pipe == pipe &&
+            (writable ? description.writable : description.readable))
+            return true;
+    return false;
+}
+Result<std::array<i32, 2>> SchedulerState::create_pipe(ProcessResources &resources, bool close_on_exec)
+{
+    std::array<i32, 2> fds{};
+    usize count = 0;
+    for (i32 fd = 0; fd < static_cast<i32>(max_process_fds) && count != 2; ++fd)
+        if (!resources.files.contains(fd))
+            fds[count++] = fd;
+    if (count != 2)
+        return Status::overflow("pipe needs two free descriptors");
+    count = 0;
+    for (usize i = 3; i < descriptions_.size(); ++i)
+        if (!descriptions_[i].used)
+            ++count;
+    if (count < 2)
+        return Status::overflow("pipe needs two open descriptions");
+    u16 pipe = invalid_description;
+    for (usize i = 0; i < pipes_.size(); ++i)
+        if (!pipes_[i].used)
+        {
+            pipe = static_cast<u16>(i);
+            break;
+        }
+    if (pipe == invalid_description)
+        return Status::overflow("pipe table full");
+    pipes_[pipe] = PipeBuffer{.used = true};
+    auto reader = allocate_description(OpenFileDescription{.used = true, .readable = true, .pipe = pipe});
+    auto writer = allocate_description(OpenFileDescription{.used = true, .writable = true, .flags = 1, .pipe = pipe});
+    static_cast<void>(install_descriptor(resources, fds[0], reader.value(), close_on_exec));
+    static_cast<void>(install_descriptor(resources, fds[1], writer.value(), close_on_exec));
+    return fds;
+}
+Result<usize> SchedulerState::read_pipe(u16 pipe, std::span<std::byte> out)
+{
+    if (pipe >= pipes_.size() || !pipes_[pipe].used)
+        return Status::invalid_argument("invalid pipe");
+    if (out.empty())
+        return usize{0};
+    auto &buffer = pipes_[pipe];
+    if (buffer.size == 0)
+    {
+        if (!pipe_has_endpoint(pipe, true))
+            return usize{0};
+        static_cast<void>(block_current(ThreadWaitReason::pipe_read, pipe));
+        return Status::would_block("pipe has no buffered data");
+    }
+    const auto count = out.size() < buffer.size ? out.size() : buffer.size;
+    for (usize i = 0; i < count; ++i)
+        out[i] = buffer.data[(buffer.head + i) % pipe_capacity];
+    buffer.head = (buffer.head + count) % pipe_capacity;
+    buffer.size -= count;
+    wake_waiters(ThreadWaitReason::pipe_write, pipe);
+    return count;
+}
+Result<usize> SchedulerState::write_pipe(u16 pipe, std::span<const std::byte> in)
+{
+    if (pipe >= pipes_.size() || !pipes_[pipe].used)
+        return Status::invalid_argument("invalid pipe");
+    if (in.empty())
+        return usize{0};
+    if (!pipe_has_endpoint(pipe, false))
+        return Status::broken_pipe("pipe has no readers");
+    auto &buffer = pipes_[pipe];
+    const auto available = pipe_capacity - buffer.size;
+    if (available == 0 || (in.size() <= pipe_capacity && in.size() > available))
+    {
+        static_cast<void>(block_current(ThreadWaitReason::pipe_write, pipe));
+        return Status::would_block("pipe buffer is full");
+    }
+    const auto count = in.size() < available ? in.size() : available;
+    for (usize i = 0; i < count; ++i)
+        buffer.data[(buffer.head + buffer.size + i) % pipe_capacity] = in[i];
+    buffer.size += count;
+    wake_waiters(ThreadWaitReason::pipe_read, pipe);
+    return count;
+}
+Status SchedulerState::block_current(ThreadWaitReason reason, u64 key)
+{
+    auto *process = find(current_pid());
+    if (process == nullptr)
+        return Status::not_found("no current process to block");
+    auto *current = process->threads().empty() ? nullptr : &process->threads()[0];
+    for (auto &thread : process->threads())
+        if (thread.tid == current_tid(0))
+            current = &thread;
+    if (current == nullptr)
+        return Status::not_found("no current thread to block");
+    current->state = ProcessState::blocked;
+    current->wait_reason = reason;
+    current->wait_key = key;
+    bool runnable = false;
+    for (const auto &thread : process->threads())
+        if (thread.state == ProcessState::runnable || thread.state == ProcessState::running)
+            runnable = true;
+    if (!runnable)
+        process->set_state(ProcessState::blocked);
+    return Status::success();
+}
+void SchedulerState::wake_waiters(ThreadWaitReason reason, u64 key)
+{
+    for (auto &process : processes_)
+    {
+        if (process.state() == ProcessState::zombie || process.state() == ProcessState::exited)
+            continue;
+        for (auto &thread : process.threads())
+            if (thread.state == ProcessState::blocked && thread.wait_reason == reason && thread.wait_key == key)
+            {
+                thread.state = ProcessState::runnable;
+                thread.wait_reason = ThreadWaitReason::none;
+                thread.wait_key = 0;
+                if (process.state() == ProcessState::blocked)
+                    process.set_state(ProcessState::runnable);
+            }
+    }
 }
 
 } // namespace ok::sched

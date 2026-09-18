@@ -1,28 +1,29 @@
 #include "ok/gui/module.hpp"
+#include "ok/gui/paint.hpp"
 
 namespace ok::gui
 {
 namespace
 {
 
-constexpr u32 desktop_background_color = 0xff061018u;
-constexpr u32 default_surface_color = 0xff18343fu;
-constexpr u32 frame_color = 0xffd8f3ffu;
-constexpr u32 title_frame_color = 0xff44aa88u;
-constexpr u32 inactive_title_frame_color = 0xff4f6974u;
-constexpr u32 title_color = 0xff12313du;
-constexpr u32 inactive_title_color = 0xff1a2630u;
-constexpr u32 taskbar_color = 0xff101820u;
-constexpr u32 taskbar_edge_color = 0xff44aa88u;
-constexpr u32 taskbar_button_color = 0xff1a3140u;
-constexpr u32 active_taskbar_button_color = 0xff24546au;
-constexpr u32 taskbar_launcher_color = 0xff152536u;
-constexpr u32 taskbar_launcher_open_color = 0xff1e4256u;
-constexpr u32 taskbar_launcher_active_color = 0xff276078u;
-constexpr u32 taskbar_icon_foreground = 0xffd8f3ffu;
+constexpr u32 desktop_background_color = theme::canvas;
+constexpr u32 default_surface_color = theme::surface;
+constexpr u32 frame_color = theme::border;
+constexpr u32 title_frame_color = theme::accent;
+constexpr u32 inactive_title_frame_color = theme::border;
+constexpr u32 title_color = theme::subtle;
+constexpr u32 inactive_title_color = theme::subtle;
+constexpr u32 taskbar_color = theme::surface;
+constexpr u32 taskbar_edge_color = theme::border;
+constexpr u32 taskbar_button_color = theme::subtle;
+constexpr u32 active_taskbar_button_color = theme::accent_soft;
+constexpr u32 taskbar_launcher_color = theme::surface;
+constexpr u32 taskbar_launcher_open_color = theme::subtle;
+constexpr u32 taskbar_launcher_active_color = theme::accent_soft;
+constexpr u32 taskbar_icon_foreground = theme::accent;
 constexpr u32 shell_launcher_x = 6;
 constexpr u32 file_manager_launcher_x = shell_launcher_x + taskbar_icon_size + 6;
-constexpr u32 title_hit_height = gui_glyph_height * 2 + 4;
+constexpr u32 title_hit_height = theme::title_height;
 constexpr u32 resize_hit_size = 8;
 constexpr u32 minimum_surface_width = 40;
 constexpr u32 minimum_surface_height = 28;
@@ -199,7 +200,7 @@ enum class WindowControl : u8
     u32 color = active ? taskbar_launcher_active_color : (open ? taskbar_launcher_open_color : taskbar_launcher_color);
     if (local_x == 0 || local_y == 0 || local_x + 1 == taskbar_icon_size || local_y + 1 == taskbar_icon_size)
     {
-        color = open ? taskbar_edge_color : 0xff40566au;
+        color = open ? taskbar_edge_color : theme::border;
     }
     bool icon_pixel = shell_icon_pixel(local_x, local_y);
     if (app == TaskbarApp::file_manager)
@@ -222,54 +223,47 @@ enum class WindowControl : u8
     return color;
 }
 
+[[nodiscard]] bool text_pixel(std::string_view text, u32 x, u32 y)
+{
+    if (y >= driver::BitmapFontRenderer::glyph_height)
+        return false;
+    const auto character = x / gui_glyph_width;
+    const auto glyph_x = x % gui_glyph_width;
+    if (character >= text.size() || glyph_x >= driver::BitmapFontRenderer::glyph_width)
+        return false;
+    return ((driver::BitmapFontRenderer::glyph_row(text[character], y) >>
+             (driver::BitmapFontRenderer::glyph_width - 1 - glyph_x)) &
+            1u) != 0;
+}
+
 [[nodiscard]] u32 desktop_pixel_color(u32 width, u32 height, u32 x, u32 y)
 {
     const auto taskbar_top = height > taskbar_height ? height - taskbar_height : 0;
     if (y >= taskbar_top)
+        return y == taskbar_top ? theme::border : theme::surface;
+    if (y < 28)
     {
-        if (y == taskbar_top)
-        {
-            return taskbar_edge_color;
-        }
-        if ((x % 48u) == 0)
-        {
-            return 0xff152636u;
-        }
-        return taskbar_color;
+        if (x >= 16 && y >= 10 && text_pixel("KERNEL WORKSPACE", x - 16, y - 10))
+            return theme::text;
+        if (x >= width - 84 && y >= 10 && text_pixel("DIAGNOSTICS", x - (width - 84), y - 10))
+            return theme::muted;
+        return theme::surface;
     }
-
-    const auto ix = static_cast<i32>(x);
-    const auto iy = static_cast<i32>(y);
-    const auto center_x = static_cast<i32>(width / 2);
-    const auto center_y = static_cast<i32>((height - taskbar_height) / 2);
-    const bool hero_panel = ix >= center_x - 132 && ix <= center_x + 132 && iy >= center_y - 54 && iy <= center_y + 54;
-    const bool panel_edge =
-        hero_panel && (ix == center_x - 132 || ix == center_x + 132 || iy == center_y - 54 || iy == center_y + 54);
-    const bool accent_line = hero_panel && ((ix - (center_x - 132)) + (iy - (center_y - 54))) % 31 == 0;
-    const bool warm_line = hero_panel && ((ix - (center_x - 132)) * 2 - (iy - (center_y - 54))) % 47 == 0;
-    if (panel_edge)
+    const auto left = width > 320 ? (width - 320) / 2 : 0;
+    if (x >= left && x < left + 320 && y >= 76 && y < 176)
     {
-        return taskbar_edge_color;
+        if (y == 76 || y == 175 || x == left || x == left + 319)
+            return theme::border;
+        if (x >= left + 20 && y >= 94 && text_pixel("Kernel diagnostics", x - left - 20, y - 94))
+            return theme::text;
+        if (x >= left + 20 && y >= 116 && text_pixel("Inspect processes, devices and files.", x - left - 20, y - 116))
+            return theme::muted;
+        if (x >= left + 20 && y >= 143 && text_pixel("F12  TERMINAL      F1  FILES", x - left - 20, y - 143))
+            return theme::accent;
+        return theme::surface;
     }
-    if (accent_line)
-    {
-        return 0xff1d8f83u;
-    }
-    if (warm_line)
-    {
-        return 0xfff4d35eu;
-    }
-    if (hero_panel)
-    {
-        return ((x / 12u + y / 12u) % 2u) == 0 ? 0xff0c1c27u : 0xff102536u;
-    }
-    if ((y % 24u) == 0 || (x % 64u) == 0)
-    {
-        return 0xff07151cu;
-    }
-    return desktop_background_color;
+    return theme::canvas;
 }
-
 } // namespace
 
 Status GuiCompositor::start(driver::FramebufferDisplayDriver &display)
@@ -495,6 +489,8 @@ Result<SurfaceId> GuiCompositor::create_surface(Rect bounds, std::string_view ti
     slot.z_index = next_z_index_;
     slot.visible = true;
     slot.window_state = WindowState::normal;
+    slot.chrome = SurfaceChrome::decorated;
+    slot.app = TaskbarApp::none;
     if (auto status = slot.title.assign(title); !status.ok())
     {
         static_cast<void>(surfaces_.erase_at(surfaces_.size() - 1));
@@ -1170,7 +1166,7 @@ u32 GuiCompositor::taskbar_surface_pixel_color(const Surface &surface, u32 x, u3
         const auto row_bits = driver::BitmapFontRenderer::glyph_row(surface.title.view()[char_index], text_y);
         if (((row_bits >> (driver::BitmapFontRenderer::glyph_width - 1 - glyph_x)) & 1u) != 0)
         {
-            color = 0xffd8f3ffu;
+            color = theme::text;
         }
     }
     return color;
@@ -1189,35 +1185,78 @@ u32 GuiCompositor::surface_pixel_color(const Surface &surface, u32 x, u32 y) con
 
     auto color = surface.pixels[static_cast<usize>(y) * max_gui_surface_width + x];
     if (x == 0 || y == 0 || x + 1 == surface.bounds.width || y + 1 == surface.bounds.height)
+        return surface.id == active_surface_id_ ? 0xffb7c8e4u : theme::border;
+    if (surface.bounds.width >= 40 && y < theme::title_height)
     {
-        color = frame_color;
-    }
-    else if (y == 1)
-    {
-        color = surface.id == active_surface_id_ ? title_frame_color : inactive_title_frame_color;
-    }
-    else if (y == 2)
-    {
-        color = surface.id == active_surface_id_ ? title_color : inactive_title_color;
-    }
-    else if (y >= static_cast<u32>(window_control_top) && y <= static_cast<u32>(window_control_bottom) &&
-             surface.bounds.width >= 34)
-    {
-        const auto right = static_cast<i32>(surface.bounds.width) - static_cast<i32>(x);
-        if (right >= window_close_right_min && right <= window_close_right_max)
+        color = surface.id == active_surface_id_ ? theme::surface : theme::subtle;
+        if (y == theme::title_height - 1)
+            return theme::border;
+        if (x >= 8 && x + 38 < surface.bounds.width && y >= 5 && text_pixel(surface.title.view(), x - 8, y - 5))
+            return theme::text;
+        const auto right = surface.bounds.width - x;
+        if (y >= 3 && y <= 8)
         {
-            color = 0xffd85f5fu;
-        }
-        else if (right >= window_maximize_right_min && right <= window_maximize_right_max)
-        {
-            color = surface.window_state == WindowState::maximized ? 0xfff4d35eu : 0xff8fd7ffu;
-        }
-        else if (right >= window_minimize_right_min && right <= window_minimize_right_max)
-        {
-            color = 0xff8fbf88u;
+            if (right >= 8 && right <= 13)
+            {
+                const auto dx = right - 8;
+                const auto dy = y - 3;
+                if (dx == dy || dx + dy == 5)
+                    return theme::muted;
+            }
+            if (right >= 17 && right <= 22 && (y == 3 || y == 8 || right == 17 || right == 22))
+                return theme::muted;
+            if (right >= 26 && right <= 31 && y == 7)
+                return theme::muted;
         }
     }
     return color;
+}
+
+Status GuiCompositor::draw_text_at(SurfaceId id, i32 x, i32 y, std::string_view text, u32 foreground, u32 background,
+                                   u32 width, u32 scale)
+{
+    if (auto status = ensure_running(); !status.ok())
+        return status;
+    if (scale == 0 || scale > 2)
+        return Status::invalid_argument("text scale must be one or two");
+    auto index = find_surface_index(id);
+    if (!index)
+        return index.status();
+    auto &surface = surfaces_[index.value()];
+    const auto start_x = x;
+    const auto right = static_cast<i64>(x) + width;
+    for (char value : text)
+    {
+        if (value == '\n')
+        {
+            x = start_x;
+            y += static_cast<i32>(gui_glyph_height * scale);
+            continue;
+        }
+        if (static_cast<i64>(x) + gui_glyph_width * scale > right)
+            break;
+        for (u32 cy = 0; cy < gui_glyph_height * scale; ++cy)
+        {
+            const auto py = static_cast<i64>(y) + cy;
+            if (py < 0 || py >= surface.bounds.height)
+                continue;
+            const auto bits = cy / scale < driver::BitmapFontRenderer::glyph_height
+                                  ? driver::BitmapFontRenderer::glyph_row(value, cy / scale)
+                                  : 0;
+            for (u32 cx = 0; cx < gui_glyph_width * scale; ++cx)
+            {
+                const auto px = static_cast<i64>(x) + cx;
+                if (px < 0 || px >= surface.bounds.width)
+                    continue;
+                const bool ink = cx / scale < driver::BitmapFontRenderer::glyph_width &&
+                                 ((bits >> (driver::BitmapFontRenderer::glyph_width - 1 - cx / scale)) & 1u);
+                surface.pixels[static_cast<usize>(py) * max_gui_surface_width + static_cast<usize>(px)] =
+                    ink ? foreground : background;
+            }
+        }
+        x += static_cast<i32>(gui_glyph_width * scale);
+    }
+    return Status::success();
 }
 
 Status GuiCompositor::present()
@@ -1330,81 +1369,26 @@ Status GuiCompositor::present()
 
 Status GuiCompositor::play_startup_animation()
 {
-    auto desktop = desktop_bounds();
-    if (!desktop)
-    {
-        return desktop.status();
-    }
-
-    auto surface = create_surface(desktop.value(), "ObfuscationKernel");
+    auto bounds = desktop_bounds();
+    if (!bounds)
+        return bounds.status();
+    auto surface = create_surface(bounds.value(), "Kernel startup");
     if (!surface)
-    {
         return surface.status();
-    }
     const auto id = surface.value();
-
-    constexpr u32 frames = 12;
-    for (u32 frame = 0; frame < frames; ++frame)
+    static_cast<void>(set_surface_chrome(id, SurfaceChrome::plain));
+    for (u32 frame = 0; frame < 12; ++frame)
     {
-        if (auto status = fill(id, 0xff071018u); !status.ok())
+        static_cast<void>(fill(id, theme::canvas));
+        Painter p(*this, id);
+        p.text(126, 98, "ObfuscationKernel", theme::text, theme::canvas, 300, 2);
+        p.text(126, 126, "Starting system services", theme::muted, theme::canvas);
+        p.rect(126, 153, 222, 3, theme::border);
+        p.rect(126, 153, (frame + 1) * 222 / 12, 3, theme::accent);
+        if (!p.status().ok())
         {
             static_cast<void>(destroy_surface(id));
-            return status;
-        }
-
-        const auto pulse = static_cast<i32>((frame * 17u) % 96u);
-        if (auto status =
-                fill_rect(id, Rect{.x = 0, .y = 0, .width = desktop.value().width, .height = desktop.value().height},
-                          0xff071018u);
-            !status.ok())
-        {
-            static_cast<void>(destroy_surface(id));
-            return status;
-        }
-        if (auto status = fill_rect(id, Rect{.x = 28 + pulse, .y = 46, .width = 116, .height = 9}, 0xff44aa88u);
-            !status.ok())
-        {
-            static_cast<void>(destroy_surface(id));
-            return status;
-        }
-        if (auto status = fill_rect(id, Rect{.x = 328 - pulse, .y = 206, .width = 96, .height = 7}, 0xffffcc66u);
-            !status.ok())
-        {
-            static_cast<void>(destroy_surface(id));
-            return status;
-        }
-        if (auto status = fill_rect(id, Rect{.x = 92, .y = 82, .width = 296, .height = 86}, title_color); !status.ok())
-        {
-            static_cast<void>(destroy_surface(id));
-            return status;
-        }
-        if (auto status = fill_rect(id, Rect{.x = 102, .y = 92, .width = 276, .height = 3}, 0xffd8f3ffu); !status.ok())
-        {
-            static_cast<void>(destroy_surface(id));
-            return status;
-        }
-        if (auto status = fill_rect(id, Rect{.x = 102, .y = 151, .width = 276, .height = 3}, 0xff44aa88u); !status.ok())
-        {
-            static_cast<void>(destroy_surface(id));
-            return status;
-        }
-
-        const auto progress_width = 28u + frame * 20u;
-        if (auto status = fill_rect(id, Rect{.x = 116, .y = 137, .width = progress_width, .height = 6}, 0xffffcc66u);
-            !status.ok())
-        {
-            static_cast<void>(destroy_surface(id));
-            return status;
-        }
-        if (auto status = draw_text(id, 21, 11, "OBFUSCATIONOS", 0xffd8f3ffu, title_color); !status.ok())
-        {
-            static_cast<void>(destroy_surface(id));
-            return status;
-        }
-        if (auto status = draw_text(id, 22, 13, "SYSTEM GUI", 0xffffcc66u, title_color); !status.ok())
-        {
-            static_cast<void>(destroy_surface(id));
-            return status;
+            return p.status();
         }
         if (auto status = present(); !status.ok())
         {
@@ -1413,10 +1397,8 @@ Status GuiCompositor::play_startup_animation()
         }
         ++startup_animation_frames_;
     }
-
     return destroy_surface(id);
 }
-
 Result<SurfaceInfo> GuiCompositor::surface_info(SurfaceId id) const
 {
     auto index = find_surface_index(id);

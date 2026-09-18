@@ -120,12 +120,12 @@ Status PosixService::mkdirat(Fd dirfd, std::string_view path, u32 mode)
     {
         return status;
     }
-    const auto directory_mode = mode & ~file_mode_mask_;
+    const auto directory_mode = mode & ~resources().file_mode_mask;
     if (auto status = vfs_->chmod(normalized.value(), directory_mode); !status.ok())
     {
         return status;
     }
-    return vfs_->chown(normalized.value(), current_euid_, current_egid_);
+    return vfs_->chown(normalized.value(), euid(), egid());
 }
 
 Status PosixService::unlink(std::string_view path)
@@ -196,7 +196,7 @@ Status PosixService::chdir(std::string_view path)
     {
         return status;
     }
-    return cwd_.assign(normalized.value());
+    return resources().cwd.assign(normalized.value());
 }
 
 Status PosixService::fchdir(Fd fd)
@@ -211,7 +211,7 @@ Status PosixService::fchdir(Fd fd)
     {
         return status;
     }
-    return cwd_.assign(entry->path.view());
+    return resources().cwd.assign(entry->path.view());
 }
 
 Status PosixService::access(std::string_view path, u32 mode)
@@ -260,7 +260,7 @@ Status PosixService::chmod(std::string_view path, u32 mode)
     {
         return metadata.status();
     }
-    if (current_euid_ != 0 && current_euid_ != metadata.value().uid)
+    if (euid() != 0 && euid() != metadata.value().uid)
     {
         return Status::denied("only the owner can chmod a filesystem node");
     }
@@ -273,7 +273,7 @@ Status PosixService::chown(std::string_view path, u32 uid, u32 gid)
     {
         return Status::not_initialized("POSIX service not initialized");
     }
-    if (current_euid_ != 0)
+    if (euid() != 0)
     {
         return Status::denied("only root can chown a filesystem node");
     }

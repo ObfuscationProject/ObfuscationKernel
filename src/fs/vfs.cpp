@@ -56,11 +56,24 @@ Status RamNode::configure(std::string_view name, NodeType type, FileBuffer *data
     };
     used_ = true;
     data_ = data;
+    readonly_ = false;
+    readonly_data_ = {};
     if (data_ != nullptr)
     {
         *data_ = {};
     }
     child_count_ = 0;
+    return Status::success();
+}
+
+Status RamNode::configure_readonly(std::string_view name, std::span<const std::byte> data, u32 mode)
+{
+    if (auto status = configure(name, NodeType::regular, nullptr); !status.ok())
+        return status;
+    readonly_ = true;
+    readonly_data_ = data;
+    metadata_.size = data.size();
+    metadata_.mode = mode_for(NodeType::regular, mode);
     return Status::success();
 }
 
@@ -130,17 +143,18 @@ Result<FileBuffer> RamNode::read(usize offset, usize count) const
     {
         return Status::invalid_argument("read offset beyond file size");
     }
-    if (data_ == nullptr)
+    if (data_ == nullptr && !readonly_)
     {
         return Status::invalid_argument("node has no file storage");
     }
     const usize available = metadata_.size - offset;
-    const usize length = count < available ? count : available;
+    const usize requested = count < available ? count : available;
+    const usize length = requested < max_file_data ? requested : max_file_data;
     FileBuffer out{};
     out.size = length;
     for (usize i = 0; i < length; ++i)
     {
-        out.data[i] = data_->data[offset + i];
+        out.data[i] = readonly_ ? readonly_data_[offset + i] : data_->data[offset + i];
     }
     return out;
 }
@@ -148,6 +162,8 @@ Result<FileBuffer> RamNode::read(usize offset, usize count) const
 Status RamNode::write(usize offset, std::span<const std::byte> data)
 {
     smp::ScopedSpinLock guard(lock_);
+    if (readonly_)
+        return Status::denied("file has read-only archive backing");
     if (metadata_.type != NodeType::regular && metadata_.type != NodeType::device &&
         metadata_.type != NodeType::symlink)
     {
@@ -157,7 +173,7 @@ Status RamNode::write(usize offset, std::span<const std::byte> data)
     {
         return Status::invalid_argument("node has no file storage");
     }
-    if (offset + data.size() > data_->data.size())
+    if (offset > data_->data.size() || data.size() > data_->data.size() - offset)
     {
         return Status::overflow("file data capacity exceeded");
     }
@@ -272,6 +288,36 @@ Status VirtualFileSystem::create(std::string_view path, NodeType type)
         return Status::overflow("RAM VFS node pool exhausted");
     }
     return parent->attach_child(*node);
+}
+
+Status VirtualFileSystem::create_readonly_file(std::string_view path, std::span<const std::byte> data, u32 mode,
+                                               bool replace)
+{
+    smp::ScopedSpinLock guard(lock_);
+    FixedString<max_path_segment> leaf;
+    auto *parent = parent_for(path, leaf);
+    if (parent == nullptr || leaf.empty())
+        return Status::not_found("archive parent path not found");
+    if (auto *existing = parent->lookup(leaf.view()); existing != nullptr)
+    {
+        if (!replace || existing->metadata().type != NodeType::regular)
+            return Status::already_exists("archive path already exists");
+        auto *node = static_cast<RamNode *>(existing);
+        auto *old_buffer = node->writable_storage();
+        auto status = node->configure_readonly(leaf.view(), data, mode);
+        if (status.ok())
+            release_file_buffer(old_buffer);
+        return status;
+    }
+    if (used_nodes_ >= nodes_.size())
+        return Status::overflow("RAM VFS node pool exhausted");
+    auto &node = nodes_[used_nodes_];
+    if (auto status = node.configure_readonly(leaf.view(), data, mode); !status.ok())
+        return status;
+    if (auto status = parent->attach_child(node); !status.ok())
+        return status;
+    ++used_nodes_;
+    return Status::success();
 }
 
 Status VirtualFileSystem::unlink(std::string_view path)

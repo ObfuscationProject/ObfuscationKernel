@@ -230,7 +230,8 @@ Redirection find_output_redirection(std::string_view value)
         }
         if (!single_quote && !double_quote && ch == '>')
         {
-            return Redirection{.index = i, .width = (i + 1 < value.size() && value[i + 1] == '>') ? 2u : 1u,
+            return Redirection{.index = i,
+                               .width = (i + 1 < value.size() && value[i + 1] == '>') ? 2u : 1u,
                                .append = i + 1 < value.size() && value[i + 1] == '>'};
         }
     }
@@ -439,8 +440,8 @@ Status KernelDebugShell::close_process_window(sched::ProcessId pid)
     {
         return index.status();
     }
-    if (auto status = kill_window_foreground_process(index.value()); !status.ok() &&
-                       status.code() != StatusCode::not_found)
+    if (auto status = kill_window_foreground_process(index.value());
+        !status.ok() && status.code() != StatusCode::not_found)
     {
         return status;
     }
@@ -458,8 +459,8 @@ Status KernelDebugShell::close_surface_window(gui::SurfaceId surface)
     {
         return index.status();
     }
-    if (auto status = kill_window_foreground_process(index.value()); !status.ok() &&
-                       status.code() != StatusCode::not_found)
+    if (auto status = kill_window_foreground_process(index.value());
+        !status.ok() && status.code() != StatusCode::not_found)
     {
         return status;
     }
@@ -828,8 +829,8 @@ Status KernelDebugShell::kill_orphaned_shell_processes()
         {
             return Status::success();
         }
-        if (auto status = kernel_->scheduler().kill_process(orphan); !status.ok() &&
-                           status.code() != StatusCode::not_found)
+        if (auto status = kernel_->scheduler().kill_process(orphan);
+            !status.ok() && status.code() != StatusCode::not_found)
         {
             return status;
         }
@@ -863,7 +864,7 @@ Status KernelDebugShell::ensure_gui_process()
 
     const auto process_offset = kernel_->scheduler().process_count() * 0x1000;
     auto process = kernel_->create_ui_process("oksh", 0x6000 + process_offset, 0xd000 + process_offset,
-                                             kernel_->posix().user_credentials());
+                                              kernel_->posix().user_credentials());
     if (!process)
     {
         return process.status();
@@ -1038,8 +1039,8 @@ Status KernelDebugShell::close_gui()
         auto window_index = find_window_by_process(process);
         if (window_index)
         {
-            if (auto status = kill_window_foreground_process(window_index.value()); !status.ok() &&
-                               status.code() != StatusCode::not_found)
+            if (auto status = kill_window_foreground_process(window_index.value());
+                !status.ok() && status.code() != StatusCode::not_found)
             {
                 return status;
             }
@@ -1104,8 +1105,8 @@ Status KernelDebugShell::close_all_gui()
         auto &compositor = kernel_->gui().compositor();
         for (usize i = gui_windows_.size(); i != 0; --i)
         {
-            if (auto status = kill_window_foreground_process(i - 1); !status.ok() &&
-                               status.code() != StatusCode::not_found)
+            if (auto status = kill_window_foreground_process(i - 1);
+                !status.ok() && status.code() != StatusCode::not_found)
             {
                 return status;
             }
@@ -1382,6 +1383,14 @@ Status KernelDebugShell::scroll_gui_history(i32 rows)
 Result<std::string_view> KernelDebugShell::execute(std::string_view line)
 {
     output_.clear();
+    // Diagnostics run in the kernel service context, not in whichever modeled
+    // task the scheduler most recently selected. Session identity must never
+    // rewrite that task's credentials.
+    if (kernel_ != nullptr)
+    {
+        if (auto status = kernel_->posix().activate(0); !status.ok())
+            return status;
+    }
     auto remaining = trim(strip_comment(line));
     if (remaining.empty())
     {
@@ -1891,7 +1900,8 @@ Status KernelDebugShell::append_variable_value(std::string_view name, FixedStrin
     }
     if (name == "PWD")
     {
-        return kernel_ == nullptr ? Status::not_initialized("shell has no kernel") : out.append(kernel_->posix().getcwd());
+        return kernel_ == nullptr ? Status::not_initialized("shell has no kernel")
+                                  : out.append(kernel_->posix().getcwd());
     }
     if (name == "USER")
     {
@@ -2430,9 +2440,8 @@ Status KernelDebugShell::redraw_gui_terminal()
     {
         gui_scroll_rows_ = max_scroll;
     }
-    const auto first_row = text_rows > visible_rows + gui_scroll_rows_
-                               ? text_rows - visible_rows - gui_scroll_rows_
-                               : 0;
+    const auto first_row =
+        text_rows > visible_rows + gui_scroll_rows_ ? text_rows - visible_rows - gui_scroll_rows_ : 0;
     const auto visible_start = visual_line_offset(terminal.view(), text_columns, first_row);
     const auto visible = terminal.view().substr(visible_start);
     if (auto status = compositor.draw_text(gui_surface_id_, 1, shell_gui_content_row, visible, shell_gui_foreground,
@@ -2441,8 +2450,7 @@ Status KernelDebugShell::redraw_gui_terminal()
     {
         return status;
     }
-    if (auto status =
-            compositor.draw_text(gui_surface_id_, 1, 1, "oksh", shell_gui_prompt, shell_gui_title_background);
+    if (auto status = compositor.draw_text(gui_surface_id_, 1, 1, "oksh", shell_gui_prompt, shell_gui_title_background);
         !status.ok())
     {
         return status;

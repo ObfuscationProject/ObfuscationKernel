@@ -12,27 +12,13 @@ u8 byte_at(std::span<const std::byte> image, usize offset)
     return offset < image.size() ? std::to_integer<u8>(image[offset]) : 0;
 }
 
-u16 read_le16(std::span<const std::byte> image, usize offset)
-{
-    return static_cast<u16>(byte_at(image, offset) | static_cast<u16>(byte_at(image, offset + 1)) << 8);
-}
-
-u32 read_le32(std::span<const std::byte> image, usize offset)
-{
-    u32 value = 0;
-    for (usize i = 0; i < 4; ++i)
-    {
-        value |= static_cast<u32>(byte_at(image, offset + i)) << (i * 8);
-    }
-    return value;
-}
-
-u64 read_le64(std::span<const std::byte> image, usize offset)
+u64 read_integer(std::span<const std::byte> image, usize offset, usize width, bool big_endian)
 {
     u64 value = 0;
-    for (usize i = 0; i < 8; ++i)
+    for (usize i = 0; i < width; ++i)
     {
-        value |= static_cast<u64>(byte_at(image, offset + i)) << (i * 8);
+        const auto shift = (big_endian ? width - 1 - i : i) * 8;
+        value |= static_cast<u64>(byte_at(image, offset + i)) << shift;
     }
     return value;
 }
@@ -106,29 +92,45 @@ usize elf_segment_permissions(u32 flags)
 
 Status FileDescriptorTable::open_slot(FdLike fd)
 {
-    if (fd < 0 || static_cast<usize>(fd) >= open_.size())
-    {
+    auto *slot = entry(fd);
+    if (slot == nullptr)
         return Status::invalid_argument("file descriptor is out of range");
-    }
-    auto &slot = open_[static_cast<usize>(fd)];
-    if (!slot)
-    {
-        slot = true;
-        ++open_count_;
-    }
+    slot->used = true;
     return Status::success();
 }
-
+Status FileDescriptorTable::close_slot(FdLike fd)
+{
+    auto *slot = entry(fd);
+    if (slot == nullptr || !slot->used)
+        return Status::not_found("file descriptor is not open");
+    if (slot->description != invalid_description)
+        return Status::invalid_argument("managed descriptors must be closed by the scheduler");
+    *slot = {};
+    return Status::success();
+}
 Status FileDescriptorTable::clone_from(const FileDescriptorTable &source)
 {
-    open_ = source.open_;
-    open_count_ = source.open_count_;
+    if (this == &source)
+        return Status::success();
+    for (usize i = 0; i < entries_.size(); ++i)
+        if ((entries_[i].used && entries_[i].description != invalid_description) ||
+            (source.entries_[i].used && source.entries_[i].description != invalid_description))
+            return Status::invalid_argument("managed descriptors must be cloned by the scheduler");
+    entries_ = source.entries_;
     return Status::success();
 }
-
 bool FileDescriptorTable::contains(FdLike fd) const
 {
-    return fd >= 0 && static_cast<usize>(fd) < open_.size() && open_[static_cast<usize>(fd)];
+    const auto *slot = entry(fd);
+    return slot != nullptr && slot->used;
+}
+usize FileDescriptorTable::open_count() const
+{
+    usize count = 0;
+    for (const auto &slot : entries_)
+        if (slot.used)
+            ++count;
+    return count;
 }
 
 Status MemoryMap::add_area(memory::VmArea area)
@@ -167,8 +169,11 @@ Status MemoryMap::clone_from(const MemoryMap &source)
 
 Status MemoryMap::replace_with(memory::VmArea area)
 {
-    areas_ = {};
-    return add_area(area);
+    MemoryMap replacement;
+    if (auto status = replacement.add_area(area); !status.ok())
+        return status;
+    areas_ = replacement.areas_;
+    return Status::success();
 }
 
 const memory::VmArea *MemoryMap::area(usize index) const
@@ -244,7 +249,7 @@ bool WaitQueue::blocked(ProcessId pid) const
     return false;
 }
 
-Status Process::configure(ProcessId pid, ProcessId parent, std::string_view name)
+Status ProcessControlBlock::configure(ProcessId pid, ProcessId parent, std::string_view name)
 {
     pid_ = pid;
     parent_pid_ = parent;
@@ -252,21 +257,21 @@ Status Process::configure(ProcessId pid, ProcessId parent, std::string_view name
     session_ = Session{.id = group_.id};
     credentials_ = user::kernel_credentials();
     signals_ = {};
-    fd_table_ = {};
-    memory_map_ = {};
+    resources_ = {};
     threads_ = {};
     children_ = {};
     state_ = TaskState::created;
     exit_code_ = 0;
+    termination_signal_ = 0;
     return name_.assign(name);
 }
 
-Status Process::add_thread(ThreadId tid, arch::CpuContext context, TaskState state)
+Status ProcessControlBlock::add_thread(ThreadId tid, arch::CpuContext context, TaskState state)
 {
-    return threads_.push_back(Thread{.tid = tid, .process = pid_, .state = state, .context = context});
+    return threads_.push_back(ThreadControlBlock{.tid = tid, .owner = pid_, .state = state, .context = context});
 }
 
-Status Process::add_child(ProcessId child)
+Status ProcessControlBlock::add_child(ProcessId child)
 {
     for (const auto pid : children_)
     {
@@ -278,7 +283,7 @@ Status Process::add_child(ProcessId child)
     return children_.push_back(child);
 }
 
-Status Process::remove_child(ProcessId child)
+Status ProcessControlBlock::remove_child(ProcessId child)
 {
     for (usize i = 0; i < children_.size(); ++i)
     {
@@ -293,435 +298,199 @@ Status Process::remove_child(ProcessId child)
 Result<LoadedElf> ElfLoader::load(std::span<const std::byte> image, arch::Architecture architecture) const
 {
     if (image.size() < 64)
-    {
         return Status::invalid_argument("ELF image is too small");
-    }
     if (byte_at(image, 0) != 0x7f || byte_at(image, 1) != 'E' || byte_at(image, 2) != 'L' || byte_at(image, 3) != 'F')
-    {
         return Status::invalid_argument("ELF magic is invalid");
-    }
     if (byte_at(image, 4) != 2)
-    {
         return Status::unsupported("ELF32 loading is not implemented in this profile");
-    }
-    if (read_le16(image, 18) != elf_machine_for(architecture))
-    {
+    const auto encoding = byte_at(image, 5);
+    if (encoding != 1 && encoding != 2)
+        return Status::invalid_argument("ELF byte order is invalid");
+    const bool big_endian = encoding == 2;
+    auto read16 = [&](usize offset) { return read_integer(image, offset, 2, big_endian); };
+    auto read32 = [&](usize offset) { return read_integer(image, offset, 4, big_endian); };
+    auto read64 = [&](usize offset) { return read_integer(image, offset, 8, big_endian); };
+    if (byte_at(image, 6) != 1 || read32(20) != 1 || read16(52) != 64)
+        return Status::invalid_argument("ELF version or header size is invalid");
+    if (read16(18) != elf_machine_for(architecture))
         return Status::invalid_argument("ELF architecture mismatch");
-    }
-    const auto type = read_le16(image, 16);
-    const auto entry = read_le64(image, 24);
-    const auto phoff = static_cast<usize>(read_le64(image, 32));
-    const auto phentsize = read_le16(image, 54);
-    const auto phnum = read_le16(image, 56);
-    if (phnum == 0 || phentsize == 0)
-    {
-        return Status::invalid_argument("ELF program headers are missing");
-    }
-    if (phoff >= image.size() || phentsize < 56 ||
-        phoff + static_cast<usize>(phentsize) * static_cast<usize>(phnum) > image.size())
-    {
+    const auto type = read16(16);
+    if (type != 2 && type != 3)
+        return Status::unsupported("ELF image is not executable");
+    const auto entry = read64(24);
+    const auto phoff64 = read64(32);
+    const auto phentsize = read16(54);
+    const auto phnum = read16(56);
+    constexpr u64 max_address = static_cast<u64>(~uptr{0});
+    if (entry == 0 || entry > max_address)
+        return Status::invalid_argument("ELF entry is invalid");
+    if (phnum == 0 || phentsize < 56 || phoff64 < 64 || phoff64 > image.size() ||
+        phnum > (image.size() - static_cast<usize>(phoff64)) / phentsize)
         return Status::invalid_argument("ELF program header table is out of range");
-    }
-    const auto entry_address = entry == 0 ? static_cast<uptr>(0x400000) : static_cast<uptr>(entry);
-    LoadedElf loaded{
-        .entry = entry_address,
-        .stack_pointer = static_cast<uptr>(0x800000),
-        .static_executable = type == 2,
-    };
+    LoadedElf loaded{.entry = static_cast<uptr>(entry),
+                     .stack_pointer = static_cast<uptr>(0x800000),
+                     .static_executable = type == 2};
+    bool entry_executable = false;
     for (usize i = 0; i < phnum; ++i)
     {
-        const auto offset = phoff + i * static_cast<usize>(phentsize);
-        const auto program_type = read_le32(image, offset);
-        if (program_type != 1)
-        {
+        const auto offset = static_cast<usize>(phoff64) + i * static_cast<usize>(phentsize);
+        if (read32(offset) != 1)
             continue;
-        }
-        const auto flags = read_le32(image, offset + 4);
-        const auto file_offset = static_cast<usize>(read_le64(image, offset + 8));
-        const auto virtual_address = static_cast<uptr>(read_le64(image, offset + 16));
-        const auto file_size = static_cast<usize>(read_le64(image, offset + 32));
-        const auto memory_size = static_cast<usize>(read_le64(image, offset + 40));
-        if (memory_size < file_size || file_offset + file_size > image.size())
-        {
+        const auto flags = static_cast<u32>(read32(offset + 4));
+        const auto file_offset = read64(offset + 8);
+        const auto virtual_address = read64(offset + 16);
+        const auto file_size = read64(offset + 32);
+        const auto memory_size = read64(offset + 40);
+        const auto alignment = read64(offset + 48);
+        if (memory_size < file_size || file_offset > image.size() || file_size > image.size() - file_offset ||
+            virtual_address > max_address || memory_size > max_address - virtual_address)
             return Status::invalid_argument("ELF load segment is out of range");
-        }
-        if (loaded.segments.full())
-        {
-            return Status::overflow("ELF load segment table is full");
-        }
-        if (auto status = loaded.segments.push_back(LoadedElf::Segment{
-                .virtual_address = virtual_address,
-                .memory_size = memory_size,
-                .file_size = file_size,
-                .file_offset = file_offset,
-                .permissions = elf_segment_permissions(flags),
-            });
+        if (alignment > 1 && ((alignment & (alignment - 1)) != 0 ||
+                              (virtual_address & (alignment - 1)) != (file_offset & (alignment - 1))))
+            return Status::invalid_argument("ELF segment alignment is invalid");
+        if (memory_size == 0)
+            continue;
+        const memory::VmArea area{.base = static_cast<uptr>(virtual_address),
+                                  .length = static_cast<usize>(memory_size),
+                                  .permissions = elf_segment_permissions(flags)};
+        for (const auto &segment : loaded.segments)
+            if (ranges_overlap(area, memory::VmArea{.base = segment.virtual_address, .length = segment.memory_size}))
+                return Status::invalid_argument("ELF load segments overlap");
+        if (auto status = loaded.segments.push_back(LoadedElf::Segment{.virtual_address = area.base,
+                                                                       .memory_size = area.length,
+                                                                       .file_size = static_cast<usize>(file_size),
+                                                                       .file_offset = static_cast<usize>(file_offset),
+                                                                       .permissions = area.permissions});
             !status.ok())
-        {
             return status;
-        }
+        if ((flags & 1u) && entry >= virtual_address && entry - virtual_address < memory_size)
+            entry_executable = true;
     }
     if (loaded.segments.empty())
-    {
         return Status::invalid_argument("ELF image has no loadable segments");
-    }
+    if (!entry_executable)
+        return Status::invalid_argument("ELF entry is not in an executable segment");
     loaded.load_segments = loaded.segments.size();
     return loaded;
 }
 
-Result<ProcessId> ProcessManager::allocate_process(std::string_view name, ProcessId parent)
+Result<ProcessId> ProcessManager::create_kernel_thread(std::string_view name, arch::CpuContext context)
 {
-    if (processes_.full())
+    auto pid = scheduler_->create_process(name, context);
+    if (!pid)
+        return pid.status();
+    if (auto status = scheduler_->set_runnable(pid.value()); !status.ok())
     {
-        return Status::overflow("process table capacity exceeded");
-    }
-    Process process;
-    const auto pid = next_pid_++;
-    if (auto status = process.configure(pid, parent, name); !status.ok())
-    {
+        static_cast<void>(scheduler_->kill_process(pid.value()));
         return status;
-    }
-    if (auto status = process.fd_table().open_slot(0); !status.ok())
-    {
-        return status;
-    }
-    static_cast<void>(process.fd_table().open_slot(1));
-    static_cast<void>(process.fd_table().open_slot(2));
-    if (auto status = processes_.push_back(process); !status.ok())
-    {
-        return status;
-    }
-    if (auto *parent_process = find(parent); parent_process != nullptr)
-    {
-        if (auto status = parent_process->add_child(pid); !status.ok())
-        {
-            return status;
-        }
     }
     return pid;
 }
 
-Result<ProcessId> ProcessManager::create_kernel_thread(std::string_view name, arch::CpuContext context)
+namespace
 {
-    auto pid = allocate_process(name, 0);
-    if (!pid)
+Result<MemoryMap> elf_memory_map(const LoadedElf &loaded)
+{
+    MemoryMap map;
+    for (const auto &segment : loaded.segments)
     {
-        return pid.status();
+        if (auto status = map.add_area(memory::VmArea{
+                .base = segment.virtual_address, .length = segment.memory_size, .permissions = segment.permissions});
+            !status.ok())
+            return status;
     }
-    auto *process = find(pid.value());
-    if (process == nullptr)
-    {
-        return Status::fault("created process is not visible");
-    }
-    if (auto status = process->add_thread(next_tid_++, context, TaskState::runnable); !status.ok())
-    {
-        return status;
-    }
-    process->set_state(TaskState::runnable);
-    return pid.value();
+    return map;
 }
+} // namespace
 
 Result<ProcessId> ProcessManager::create_user_process(std::string_view name, std::span<const std::byte> elf_image,
                                                       arch::Architecture architecture)
 {
     if (auto status = arch::validate_architecture(architecture); !status.ok())
-    {
         return status;
-    }
     auto loaded = elf_loader_.load(elf_image, architecture);
     if (!loaded)
-    {
         return loaded.status();
-    }
-    auto &ops = arch::arch_operations(architecture);
-    auto context = ops.make_user_context(arch::UserEntry{
-        .instruction_pointer = loaded.value().entry,
-        .stack_pointer = loaded.value().stack_pointer,
-        .argument = 0,
-    });
-    auto pid = create_kernel_thread(name, context);
+    auto map = elf_memory_map(loaded.value());
+    if (!map)
+        return map.status();
+    const auto context = arch::configured_arch_operations().make_user_context(
+        arch::UserEntry{.instruction_pointer = loaded.value().entry, .stack_pointer = loaded.value().stack_pointer});
+    auto pid = scheduler_->create_user_process(name, context);
     if (!pid)
-    {
         return pid.status();
-    }
     auto *process = find(pid.value());
-    if (process == nullptr)
-    {
-        return Status::fault("created user process is not visible");
-    }
-    process->threads()[0].state = TaskState::runnable;
+    process->memory_map() = map.value();
     process->set_credentials(user::default_user_credentials());
-    if (auto status = process->memory_map().replace_with(memory::VmArea{
-            .base = loaded.value().segments[0].virtual_address,
-            .length = loaded.value().segments[0].memory_size,
-            .permissions = loaded.value().segments[0].permissions,
-        });
-        !status.ok())
-    {
-        return status;
-    }
-    for (usize i = 1; i < loaded.value().segments.size(); ++i)
-    {
-        const auto &segment = loaded.value().segments[i];
-        if (auto status = process->memory_map().add_area(memory::VmArea{
-                .base = segment.virtual_address,
-                .length = segment.memory_size,
-                .permissions = segment.permissions,
-            });
-            !status.ok())
-        {
-            return status;
-        }
-    }
-    return pid.value();
+    static_cast<void>(scheduler_->set_runnable(pid.value()));
+    return pid;
 }
 
 Result<ThreadId> ProcessManager::create_user_thread(ProcessId pid, arch::CpuContext context)
 {
-    auto *process = find(pid);
-    if (process == nullptr)
-    {
-        return Status::not_found("process not found");
-    }
     if (context.mode != arch::PrivilegeMode::user)
-    {
         return Status::invalid_argument("user thread context must use user privilege");
-    }
-    const auto tid = next_tid_++;
-    if (auto status = process->add_thread(tid, context, TaskState::runnable); !status.ok())
-    {
-        return status;
-    }
-    process->set_state(TaskState::runnable);
-    return tid;
+    return scheduler_->create_thread(pid, context);
 }
-
 Result<ProcessId> ProcessManager::fork(ProcessId parent)
 {
-    auto *parent_process = find(parent);
-    if (parent_process == nullptr)
-    {
-        return Status::not_found("parent process not found");
-    }
-    auto child = allocate_process(parent_process->name(), parent);
-    if (!child)
-    {
-        return child.status();
-    }
-    auto *child_process = find(child.value());
-    if (child_process == nullptr)
-    {
-        return Status::fault("forked process is not visible");
-    }
-    if (auto status = child_process->fd_table().clone_from(parent_process->fd_table()); !status.ok())
-    {
-        return status;
-    }
-    if (auto status = child_process->memory_map().clone_from(parent_process->memory_map()); !status.ok())
-    {
-        return status;
-    }
-    child_process->set_credentials(parent_process->credentials());
-    if (!parent_process->threads().empty())
-    {
-        if (auto status =
-                child_process->add_thread(next_tid_++, parent_process->threads()[0].context, TaskState::runnable);
-            !status.ok())
-        {
-            return status;
-        }
-    }
-    child_process->set_state(TaskState::runnable);
-    return child.value();
+    return scheduler_->fork_process(parent);
 }
 
 Status ProcessManager::execve(ProcessId pid, std::span<const std::byte> elf_image, arch::Architecture architecture)
 {
     if (auto status = arch::validate_architecture(architecture); !status.ok())
-    {
         return status;
-    }
-    auto *process = find(pid);
-    if (process == nullptr)
-    {
+    if (find(pid) == nullptr)
         return Status::not_found("process not found");
-    }
     auto loaded = elf_loader_.load(elf_image, architecture);
     if (!loaded)
-    {
         return loaded.status();
-    }
-    if (auto status = process->memory_map().replace_with(memory::VmArea{
-            .base = loaded.value().segments[0].virtual_address,
-            .length = loaded.value().segments[0].memory_size,
-            .permissions = loaded.value().segments[0].permissions,
-        });
-        !status.ok())
-    {
-        return status;
-    }
-    for (usize i = 1; i < loaded.value().segments.size(); ++i)
-    {
-        const auto &segment = loaded.value().segments[i];
-        if (auto status = process->memory_map().add_area(memory::VmArea{
-                .base = segment.virtual_address,
-                .length = segment.memory_size,
-                .permissions = segment.permissions,
-            });
-            !status.ok())
-        {
-            return status;
-        }
-    }
-    auto &ops = arch::arch_operations(architecture);
-    if (process->threads().empty())
-    {
-        return process->add_thread(next_tid_++,
-                                   ops.make_user_context(arch::UserEntry{
-                                       .instruction_pointer = loaded.value().entry,
-                                       .stack_pointer = loaded.value().stack_pointer,
-                                       .argument = 0,
-                                   }),
-                                   TaskState::runnable);
-    }
-    process->threads()[0].context = ops.make_user_context(arch::UserEntry{
-        .instruction_pointer = loaded.value().entry,
-        .stack_pointer = loaded.value().stack_pointer,
-        .argument = 0,
-    });
-    process->threads()[0].state = TaskState::runnable;
-    process->set_state(TaskState::runnable);
-    return Status::success();
+    auto map = elf_memory_map(loaded.value());
+    if (!map)
+        return map.status();
+    const auto context = arch::configured_arch_operations().make_user_context(
+        arch::UserEntry{.instruction_pointer = loaded.value().entry, .stack_pointer = loaded.value().stack_pointer});
+    return scheduler_->replace_image(pid, context, map.value());
 }
-
 Status ProcessManager::set_credentials(ProcessId pid, user::Credentials credentials)
 {
-    auto *process = find(pid);
-    if (process == nullptr)
-    {
-        return Status::not_found("process not found");
-    }
-    process->set_credentials(credentials);
-    return Status::success();
+    return scheduler_->set_credentials(pid, credentials);
 }
-
 Status ProcessManager::exit(ProcessId pid, i32 code)
 {
-    auto *process = find(pid);
-    if (process == nullptr)
-    {
-        return Status::not_found("process not found");
-    }
-    process->set_exit_code(code);
-    process->set_state(TaskState::zombie);
-    for (auto &thread : process->threads())
-    {
-        thread.state = TaskState::exited;
-    }
-    return Status::success();
+    return scheduler_->exit_process(pid, code);
 }
-
 Status ProcessManager::exit_group(ProcessId pid, i32 code)
 {
     return exit(pid, code);
 }
-
 Result<i32> ProcessManager::wait4(ProcessId parent, ProcessId child)
 {
-    auto *parent_process = find(parent);
-    auto *child_process = find(child);
-    if (parent_process == nullptr || child_process == nullptr || child_process->parent_pid() != parent)
-    {
-        return Status::not_found("wait child not found");
-    }
-    if (child_process->state() != TaskState::zombie && child_process->state() != TaskState::exited)
-    {
-        return Status::would_block("child has not exited");
-    }
-    const auto code = child_process->exit_code();
-    if (auto status = parent_process->remove_child(child); !status.ok())
-    {
-        return status;
-    }
-    if (auto status = cleanup_zombie(child); !status.ok())
-    {
-        return status;
-    }
-    return code;
+    return scheduler_->wait_process(parent, child);
 }
-
 Status ProcessManager::reparent_children(ProcessId from, ProcessId to)
 {
-    auto *target = find(to);
-    if (target == nullptr)
-    {
-        return Status::not_found("reparent target not found");
-    }
-    for (auto &process : processes_)
-    {
-        if (process.parent_pid() == from)
-        {
-            process.set_parent(to);
-            if (auto status = target->add_child(process.pid());
-                !status.ok() && status.code() != StatusCode::already_exists)
-            {
-                return status;
-            }
-        }
-    }
-    return Status::success();
+    return scheduler_->reparent_children(from, to);
 }
-
 Status ProcessManager::cleanup_zombie(ProcessId pid)
 {
-    for (usize i = 0; i < processes_.size(); ++i)
-    {
-        if (processes_[i].pid() == pid)
-        {
-            if (processes_[i].state() != TaskState::zombie && processes_[i].state() != TaskState::exited)
-            {
-                return Status::invalid_argument("process is not a zombie");
-            }
-            return processes_.erase_at(i);
-        }
-    }
-    return Status::not_found("process not found");
+    return scheduler_->reap_process(pid);
 }
-
 Process *ProcessManager::find(ProcessId pid)
 {
-    for (auto &process : processes_)
-    {
-        if (process.pid() == pid)
-        {
-            return &process;
-        }
-    }
-    return nullptr;
+    return scheduler_->find(pid);
 }
-
 const Process *ProcessManager::find(ProcessId pid) const
 {
-    for (const auto &process : processes_)
-    {
-        if (process.pid() == pid)
-        {
-            return &process;
-        }
-    }
-    return nullptr;
+    return scheduler_->find(pid);
 }
-
 usize ProcessManager::zombie_count() const
 {
     usize count = 0;
-    for (const auto &process : processes_)
-    {
+    for (const auto &process : scheduler_->processes())
         if (process.state() == TaskState::zombie)
-        {
             ++count;
-        }
-    }
     return count;
 }
 

@@ -3,6 +3,7 @@
 #include "ok/arch/arch.hpp"
 #include "ok/core/fixed.hpp"
 #include "ok/core/types.hpp"
+#include "ok/sched/resources.hpp"
 #include "ok/smp/smp.hpp"
 #include "ok/user/user.hpp"
 
@@ -32,6 +33,7 @@ enum class ProcessState : u8
     runnable,
     running,
     blocked,
+    zombie,
     exited,
 };
 
@@ -60,6 +62,13 @@ struct ThreadControlBlock
     ProcessId owner{0};
     ProcessState state{ProcessState::created};
     arch::CpuContext context{};
+    arch::execution::UserFrame native_frame{};
+    bool native_active{false};
+    bool syscall_pending{false};
+    ThreadLocalState tls{};
+    uptr kernel_stack_top{0};
+    ThreadWaitReason wait_reason{ThreadWaitReason::none};
+    u64 wait_key{0};
     u8 priority{scheduler_default_priority};
     u64 dispatch_count{0};
     u64 cpu_time_ticks{0};
@@ -90,6 +99,72 @@ class ProcessControlBlock
   public:
     ProcessControlBlock() = default;
     ProcessControlBlock(ProcessId pid, std::string_view name, bool background = false);
+    Status configure(ProcessId pid, ProcessId parent, std::string_view name);
+    Status add_thread(ThreadId tid, arch::CpuContext context, ProcessState state);
+    Status add_child(ProcessId child);
+    Status remove_child(ProcessId child);
+    [[nodiscard]] ProcessId parent_pid() const
+    {
+        return parent_pid_;
+    }
+    void set_parent(ProcessId parent)
+    {
+        parent_pid_ = parent;
+    }
+    void set_exit_code(i32 code)
+    {
+        exit_code_ = code;
+        termination_signal_ = 0;
+    }
+    [[nodiscard]] i32 exit_code() const
+    {
+        return exit_code_;
+    }
+    void set_termination_signal(u8 signal)
+    {
+        termination_signal_ = signal;
+    }
+    [[nodiscard]] i32 wait_status() const
+    {
+        return termination_signal_ != 0 ? static_cast<i32>(termination_signal_)
+                                        : static_cast<i32>((static_cast<u32>(exit_code_) & 0xffu) << 8);
+    }
+    [[nodiscard]] auto &children()
+    {
+        return children_;
+    }
+    [[nodiscard]] const auto &children() const
+    {
+        return children_;
+    }
+    [[nodiscard]] FileDescriptorTable &fd_table()
+    {
+        return resources_.files;
+    }
+    [[nodiscard]] const FileDescriptorTable &fd_table() const
+    {
+        return resources_.files;
+    }
+    [[nodiscard]] MemoryMap &memory_map()
+    {
+        return resources_.memory;
+    }
+    [[nodiscard]] const MemoryMap &memory_map() const
+    {
+        return resources_.memory;
+    }
+    [[nodiscard]] ProcessResources &resources()
+    {
+        return resources_;
+    }
+    [[nodiscard]] const ProcessResources &resources() const
+    {
+        return resources_;
+    }
+    [[nodiscard]] SignalState &signals()
+    {
+        return signals_;
+    }
 
     [[nodiscard]] ProcessId pid() const
     {
@@ -208,6 +283,14 @@ class ProcessControlBlock
 
   private:
     ProcessId pid_{0};
+    ProcessId parent_pid_{0};
+    ProcessGroup group_{};
+    Session session_{};
+    SignalState signals_{};
+    ProcessResources resources_{};
+    StaticVector<ProcessId, max_process_children> children_{};
+    i32 exit_code_{0};
+    u8 termination_signal_{0};
     FixedString<max_process_name> name_{};
     ProcessState state_{ProcessState::created};
     bool background_{false};
@@ -247,7 +330,7 @@ class RoundRobinPolicy final
 class SchedulerState
 {
   protected:
-    SchedulerState() = default;
+    SchedulerState();
     ~SchedulerState() = default;
     Result<ProcessId> dispatch_selected(smp::CpuId cpu, Result<ProcessId> next);
 
@@ -270,6 +353,35 @@ class SchedulerState
     Status set_cpu_affinity(ProcessId pid, u16 cpu_affinity_mask);
     Status set_cpu_accounting(ProcessId pid, ProcessCpuAccounting accounting);
     Status kill_process(ProcessId pid);
+    Status activate(ProcessId pid, smp::CpuId cpu = 0);
+    Result<ProcessId> fork_process(ProcessId parent);
+    Status replace_image(ProcessId pid, arch::CpuContext context, const MemoryMap &memory);
+    Status exit_process(ProcessId pid, i32 code);
+    Status terminate_process(ProcessId pid, u8 signal);
+    Result<i32> wait_process(ProcessId parent, ProcessId child);
+    Status reparent_children(ProcessId from, ProcessId to);
+    Status reap_process(ProcessId pid);
+    // Call only at service boundaries: erasing records invalidates PCB/TCB pointers.
+    usize reap_orphans();
+    [[nodiscard]] ProcessResources &boot_resources()
+    {
+        return boot_resources_;
+    }
+    [[nodiscard]] const ProcessResources &boot_resources() const
+    {
+        return boot_resources_;
+    }
+    [[nodiscard]] OpenFileDescription *open_description(u16 id);
+    [[nodiscard]] const OpenFileDescription *open_description(u16 id) const;
+    Result<u16> allocate_description(OpenFileDescription description);
+    Status install_descriptor(ProcessResources &resources, i32 fd, u16 description, bool close_on_exec = false);
+    Status close_descriptor(ProcessResources &resources, i32 fd);
+    [[nodiscard]] usize open_description_count() const;
+    Result<std::array<i32, 2>> create_pipe(ProcessResources &resources, bool close_on_exec = false);
+    Result<usize> read_pipe(u16 pipe, std::span<std::byte> out);
+    Result<usize> write_pipe(u16 pipe, std::span<const std::byte> in);
+    Status block_current(ThreadWaitReason reason, u64 key);
+    void wake_waiters(ThreadWaitReason reason, u64 key);
     Status configure_cpus(usize cpu_count);
     Status set_runnable(ProcessId pid);
     Status block_process(ProcessId pid);
@@ -306,6 +418,14 @@ class SchedulerState
     [[nodiscard]] Result<ThreadId> pick_next_thread(ProcessControlBlock &process, ThreadId current, smp::CpuId cpu);
     [[nodiscard]] u16 configured_cpu_mask() const;
 
+    void initialize_resources(ProcessResources &resources);
+    void release_resources(ProcessResources &resources);
+    void clear_current(ProcessId pid);
+    Status finish_process(ProcessId pid, i32 code, u8 signal);
+    [[nodiscard]] bool pipe_has_endpoint(u16 pipe, bool writable) const;
+    std::array<PipeBuffer, max_process_pipes> pipes_{};
+    std::array<OpenFileDescription, max_open_descriptions> descriptions_{};
+    ProcessResources boot_resources_{};
     SchedulingMode mode_{SchedulingMode::round_robin};
     StaticVector<ProcessControlBlock, max_processes> processes_{};
     ProcessId next_pid_{1};

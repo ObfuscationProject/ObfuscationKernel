@@ -1,6 +1,7 @@
 #include "ok/core/kernel.hpp"
 #include "ok/core/entry.hpp"
 #include "ok/sched/process.hpp"
+#include "ok/user/runtime.hpp"
 
 namespace ok
 {
@@ -404,6 +405,8 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
     {
         return Status::not_initialized("GUI compositor is not running");
     }
+    if (auto status = posix_.activate(0); !status.ok())
+        return status;
 
     const bool click = left_button && !gui_mouse_left_down_;
     if (auto status = compositor.handle_mouse_delta(delta_x, delta_y, left_button); !status.ok())
@@ -511,6 +514,8 @@ Status Kernel::handle_gui_scroll(i32 rows)
     {
         return Status::not_initialized("GUI compositor is not running");
     }
+    if (auto status = posix_.activate(0); !status.ok())
+        return status;
     const auto active = compositor.active_surface();
     if (auto monitor = find_task_manager_by_surface(active))
     {
@@ -535,6 +540,8 @@ Status Kernel::handle_gui_key(int key)
     {
         return Status::not_initialized("GUI compositor is not running");
     }
+    if (auto status = posix_.activate(0); !status.ok())
+        return status;
 
     const auto active = compositor.active_surface();
     if (config_.extension != nullptr)
@@ -650,6 +657,9 @@ Status Kernel::tick()
         }
     }
 
+    // Scheduling records do not make GUI callbacks execute as that process.
+    if (auto status = posix_.activate(0); !status.ok())
+        return status;
     if (auto status = debug_shell_.tick(); !status.ok())
     {
         return status;
@@ -885,16 +895,22 @@ Status Kernel::start_extension()
 {
     if (!booted_)
         return Status::not_initialized("kernel is not booted");
+    if (auto status = posix_.activate(0); !status.ok())
+        return status;
     return config_.extension == nullptr ? gui_module_.compositor().present() : config_.extension->start(*this);
 }
 
 Status Kernel::refresh_extension(bool focus)
 {
+    if (auto status = posix_.activate(0); !status.ok())
+        return status;
     return config_.extension == nullptr ? gui_module_.compositor().present() : config_.extension->refresh(*this, focus);
 }
 
 Status Kernel::extension_surface_action(gui::SurfaceId surface, ExtensionSurfaceAction action)
 {
+    if (auto status = posix_.activate(0); !status.ok())
+        return status;
     return config_.extension == nullptr ? Status::not_found("surface is not extension-owned")
                                         : config_.extension->surface_action(*this, surface, action);
 }
@@ -1557,6 +1573,7 @@ Status Kernel::kill_process(sched::ProcessId pid)
     {
         return Status::invalid_argument("process id must be non-zero");
     }
+    user::native::release_process(*this, pid);
     const bool shell_process = debug_shell_.owns_process(pid);
     const auto file_manager_process = find_file_manager_by_process(pid);
     const auto task_manager_process = find_task_manager_by_process(pid);

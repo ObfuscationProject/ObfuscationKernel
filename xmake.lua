@@ -109,7 +109,7 @@ local function build_kernel_image(target)
         os.cp(boot_sector, path.join(target:targetdir(), "boot16.bin"))
 
         local payload_size = os.filesize(payload_bin)
-        local payload_capacity = 38 * 32 * 512
+        local payload_capacity = 256 * 32 * 512
         if payload_size > payload_capacity then
             raise("kernel payload is too large: %d bytes > %d bytes", payload_size, payload_capacity)
         end

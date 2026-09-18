@@ -15,7 +15,7 @@ namespace ok::fs
 inline constexpr usize max_path_segment = 32;
 inline constexpr usize max_ram_nodes = 128;
 inline constexpr usize max_ram_file_buffers = 32;
-inline constexpr usize max_child_nodes = 16;
+inline constexpr usize max_child_nodes = 64;
 inline constexpr usize max_file_data = 4096;
 
 enum class NodeType : u8
@@ -134,6 +134,7 @@ class RamNode final : public Node
     RamNode() = default;
 
     Status configure(std::string_view name, NodeType type, FileBuffer *data);
+    Status configure_readonly(std::string_view name, std::span<const std::byte> data, u32 mode);
     Status attach_child(RamNode &child);
     Status detach_child(std::string_view child);
 
@@ -149,6 +150,10 @@ class RamNode final : public Node
     Status chmod(u32 mode) override;
     Status chown(u32 uid, u32 gid) override;
     [[nodiscard]] Result<DirectoryListing> list() const;
+    [[nodiscard]] FileBuffer *writable_storage() const
+    {
+        return data_;
+    }
     [[nodiscard]] bool used() const
     {
         return used_;
@@ -163,6 +168,8 @@ class RamNode final : public Node
     FixedString<max_path_segment> name_{};
     Metadata metadata_{};
     FileBuffer *data_{nullptr};
+    std::span<const std::byte> readonly_data_{};
+    bool readonly_{false};
     std::array<RamNode *, max_child_nodes> children_{};
     usize child_count_{0};
     mutable smp::SpinLock lock_{};
@@ -182,6 +189,8 @@ class VirtualFileSystem final
         return mode_;
     }
     Status create(std::string_view path, NodeType type);
+    Status create_readonly_file(std::string_view path, std::span<const std::byte> data, u32 mode = 0555u,
+                                bool replace = false);
     Status unlink(std::string_view path);
     Status rmdir(std::string_view path);
     Status chmod(std::string_view path, u32 mode);

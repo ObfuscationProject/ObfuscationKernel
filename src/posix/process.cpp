@@ -16,8 +16,9 @@ usize align_up(usize value, usize alignment)
 
 ClockTime PosixService::clock_gettime() const
 {
-    const auto ticks = monotonic_ticks_ + (scheduler_ == nullptr ? 0 : scheduler_->process_count());
-    return ClockTime{.seconds = static_cast<i64>(ticks / 1000), .nanoseconds = static_cast<i64>((ticks % 1000) * 1000000)};
+    const auto ticks = monotonic_ticks_;
+    return ClockTime{.seconds = static_cast<i64>(ticks / 1000),
+                     .nanoseconds = static_cast<i64>((ticks % 1000) * 1000000)};
 }
 
 ClockTime PosixService::clock_getres() const
@@ -35,8 +36,8 @@ Status PosixService::nanosleep(ClockTime requested, ClockTime *remaining)
     {
         *remaining = {};
     }
-    monotonic_ticks_ += static_cast<u64>(requested.seconds) * 1000u +
-                        static_cast<u64>((requested.nanoseconds + 999999) / 1000000);
+    monotonic_ticks_ +=
+        static_cast<u64>(requested.seconds) * 1000u + static_cast<u64>((requested.nanoseconds + 999999) / 1000000);
     return Status::success();
 }
 
@@ -74,14 +75,14 @@ Result<uptr> PosixService::brk(uptr address)
 {
     if (address == 0)
     {
-        return program_break_;
+        return resources().program_break;
     }
-    if (address < program_break_base_ || address > program_break_limit_)
+    if (address < resources().program_break_base || address > resources().program_break_limit)
     {
         return Status::no_memory("program break outside user heap window");
     }
-    program_break_ = address;
-    return program_break_;
+    resources().program_break = address;
+    return resources().program_break;
 }
 
 Result<uptr> PosixService::mmap(uptr address, usize length, u32 protection, u32 flags, Fd fd, usize offset)
@@ -99,8 +100,8 @@ Result<uptr> PosixService::mmap(uptr address, usize length, u32 protection, u32 
         }
     }
     const usize mapped_length = align_up(length, page_size);
-    uptr mapped_address = address == 0 ? next_mapping_address_ : address;
-    for (auto &mapping : mappings_)
+    uptr mapped_address = address == 0 ? resources().next_mapping_address : address;
+    for (auto &mapping : resources().mappings)
     {
         if (!mapping.used)
         {
@@ -115,7 +116,7 @@ Result<uptr> PosixService::mmap(uptr address, usize length, u32 protection, u32 
             };
             if (address == 0)
             {
-                next_mapping_address_ = mapped_address + mapped_length + page_size;
+                resources().next_mapping_address = mapped_address + mapped_length + page_size;
             }
             return mapped_address;
         }
@@ -126,7 +127,7 @@ Result<uptr> PosixService::mmap(uptr address, usize length, u32 protection, u32 
 Status PosixService::mprotect(uptr address, usize length, u32 protection)
 {
     const usize mapped_length = align_up(length, page_size);
-    for (auto &mapping : mappings_)
+    for (auto &mapping : resources().mappings)
     {
         if (mapping.used && mapping.address == address && mapping.length >= mapped_length)
         {
@@ -140,7 +141,7 @@ Status PosixService::mprotect(uptr address, usize length, u32 protection)
 Status PosixService::munmap(uptr address, usize length)
 {
     const usize mapped_length = align_up(length, page_size);
-    for (auto &mapping : mappings_)
+    for (auto &mapping : resources().mappings)
     {
         if (mapping.used && mapping.address == address && mapping.length >= mapped_length)
         {
@@ -156,24 +157,24 @@ Result<i64> PosixService::arch_prctl(u32 code, uptr address)
     switch (code)
     {
     case arch_SET_FS:
-        fs_base_ = address;
+        thread_local_state().fs_base = address;
         return 0;
     case arch_SET_GS:
-        gs_base_ = address;
+        thread_local_state().gs_base = address;
         return 0;
     case arch_GET_FS:
         if (address == 0)
         {
             return Status::invalid_argument("arch_prctl output pointer is null");
         }
-        *reinterpret_cast<uptr *>(address) = fs_base_;
+        *reinterpret_cast<uptr *>(address) = thread_local_state().fs_base;
         return 0;
     case arch_GET_GS:
         if (address == 0)
         {
             return Status::invalid_argument("arch_prctl output pointer is null");
         }
-        *reinterpret_cast<uptr *>(address) = gs_base_;
+        *reinterpret_cast<uptr *>(address) = thread_local_state().gs_base;
         return 0;
     default:
         return Status::unsupported("arch_prctl code is not implemented");
@@ -212,12 +213,14 @@ Result<usize> PosixService::getrandom(std::span<std::byte> out)
 
 Status PosixService::set_tid_address(uptr address)
 {
-    clear_tid_address_ = address;
+    thread_local_state().clear_tid_address = address;
     return Status::success();
 }
 
-Status PosixService::set_robust_list(uptr, usize)
+Status PosixService::set_robust_list(uptr head, usize length)
 {
+    thread_local_state().robust_list = head;
+    thread_local_state().robust_list_length = length;
     return Status::success();
 }
 
@@ -238,14 +241,13 @@ Status PosixService::sched_yield()
 
 Status PosixService::exit(i32 code)
 {
-    last_exit_code_ = code;
-    return Status::success();
+    return exit(getpid(), code);
 }
 
 u32 PosixService::umask(u32 mask)
 {
-    const auto previous = file_mode_mask_;
-    file_mode_mask_ = mask & 0777u;
+    const auto previous = resources().file_mode_mask;
+    resources().file_mode_mask = mask & 0777u;
     return previous;
 }
 

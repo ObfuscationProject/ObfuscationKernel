@@ -104,7 +104,7 @@ Status test_smp_topology_and_per_cpu_scheduling(Kernel &kernel)
         }
     }
 
-    sched::Scheduler scheduler;
+    static sched::Scheduler scheduler;
     if (auto status = scheduler.configure_cpus(4); !status.ok())
     {
         return status;
@@ -158,7 +158,7 @@ Status test_smp_topology_and_per_cpu_scheduling(Kernel &kernel)
         }
     }
 
-    sched::Scheduler advanced;
+    static sched::Scheduler advanced;
     if (auto status = advanced.configure_cpus(2); !status.ok())
     {
         return status;
@@ -224,7 +224,7 @@ Status test_smp_topology_and_per_cpu_scheduling(Kernel &kernel)
         return Status::fault("generic scheduler spawn interface did not apply process policy");
     }
 
-    sched::Scheduler accounting;
+    static sched::Scheduler accounting;
     if (auto status = accounting.configure_cpus(1); !status.ok())
     {
         return status;
@@ -372,7 +372,7 @@ Status test_preemption()
 {
     auto &ops = arch::arch_operations(arch::configured_architecture());
 
-    sched::Scheduler idle_scheduler;
+    static sched::Scheduler idle_scheduler;
     if (auto status = idle_scheduler.configure_cpus(1); !status.ok())
     {
         return status;
@@ -392,7 +392,7 @@ Status test_preemption()
         return Status::fault("idle thread scheduling validation failed");
     }
 
-    sched::Scheduler scheduler;
+    static sched::Scheduler scheduler;
     if (auto status = scheduler.configure_cpus(1); !status.ok())
     {
         return status;

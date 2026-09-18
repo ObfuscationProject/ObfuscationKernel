@@ -1,28 +1,60 @@
 # aarch64
 
-The `aarch64` profile models AArch64 EL1 kernel mode and EL0 user mode with 4
-KiB pages.
+The `aarch64` profile has a native EL1/EL0 execution backend for QEMU virt
+with GICv2, in addition to the architecture-neutral model tests.
 
-Implementation:
+## Boot and platform
 
-- `src/arch/aarch64/ops.cpp`: architecture operations.
-- `src/arch/aarch64/boot.S`: Linux `Image`-style 64-byte header, stack setup,
-  `.bss` clearing, and entry into `kernel_main`.
-- `src/arch/aarch64/platform.cpp`: QEMU virt PL011 UART platform I/O.
-- `src/arch/aarch64/linker.ld`: image layout at the QEMU virt ARM64 kernel load
-  address.
+- `boot.S` supplies the Linux `Image` header, accepts EL1 or EL2 boot entry,
+  enters EL1, establishes the kernel stack and clears `.bss`.
+- `platform.cpp` supplies PL011 serial I/O, RAM framebuffer and virtio input.
+- `linker.ld` places the kernel at `0x40080000`.
+- `ops.cpp` provides statically selected architecture instructions.
 
-The profile provides EL1 vector/GIC metadata, `svc` syscall metadata, `eret`
-transition metadata, and guarded AArch64 inline assembly for `cntvct_el0`,
-`dsb`, `isb`, interrupt masking, and wait/yield behavior.
+## Native execution
 
-## Bring-up Plan
+`execution.cpp` and `execution.S` implement `ok::arch::execution`:
 
-- Interrupts: exception vector table and GICv2/GICv3 adapter.
-- Memory: TTBR0 for user space, TTBR1 for kernel space, MAIR/TCR setup.
-- User mode: `eret` from EL1 to EL0.
-- Syscalls: `svc #0` with arguments in `x0` through `x5`.
-- QEMU: `okernel_image` builds a raw ARM64 `Image` payload and
-  `qemu-system-aarch64 -M virt -kernel` validates the debug boot path through
-  PL011 serial output. Device-tree parsing and full EL handoff remain future
-  work.
+- 4 KiB user pages, 39-bit virtual addressing, TTBR0 address-space switching,
+  explicit MAIR/TCR setup and TLB invalidation.
+- User window `[0x10000000, 0x40000000)`, distinct from kernel RAM and device
+  MMIO. Kernel identity mappings remain supervisor-only. User pages enforce
+  read-only and execute-never permissions; writable executable mappings fail.
+- Real EL0 entry using `eret` and synchronous return to the original kernel
+  stack on `svc`, architectural physical timer IRQ 30, or CPU fault.
+- SVC number in `x8`, arguments in `x0` through `x5`, return value in `x0`.
+- Saved `x0` through `x30`, SP, PC, NZCV, all 32 SIMD registers, FPCR/FPSR,
+  TPIDR_EL0 and TPIDRRO_EL0. The shared frame's register slot 31 stores FPCR
+  in its low 32 bits and FPSR in its high 32 bits; `fs_base`/`gs_base` store
+  the two thread-ID registers.
+- Fault classification from ESR_EL1/FAR_EL1, safe user-copy validation across
+  every requested page, and stable generation-checked address-space handles.
+
+The current backend supports one executing CPU and 16 address spaces, each
+with up to 16 sparse level-3 page tables. Application backing pages belong to
+the caller's reserved physical storage; the backend owns page tables only.
+The initial identity layout assumes QEMU virt RAM in `[0x40000000, 0x80000000)`
+and MMIO below `0x10000000`; it does not discover memory from a device tree.
+GICv3, SVE, SMP execution and general physical-page allocation remain future
+work. This is a native mechanism, not a claim of complete POSIX conformance.
+
+## Hardware acceptance test
+
+From the kernel repository:
+
+```sh
+python3 scripts/test_native_aarch64.py --toolchain toolchains/aarch64-elf
+```
+
+The standalone test builds independently of xmake configuration and runs
+QEMU twice, entering at EL1 and EL2. It executes actual EL0 machine code and
+checks SVC registers, TLS, SIMD/FPCR preservation, distinct physical backing
+at the same virtual address, timer preemption of a non-cooperative loop,
+supervisor isolation, read-only/NX/unmapped faults, invalid instructions,
+user-copy bounds and kernel TTBR0 restoration. Successful runs emit
+`OK_NATIVE_TEST_PASS scope=hardware architecture=aarch64`; serial logs are
+written under `build/native-tests/aarch64`.
+
+`xmake qemu-test` separately validates the standalone debug kernel, while the
+OS integration tests validate applications linked against the exported SDK.
+Metadata model tests do not substitute for either execution path.

@@ -4,12 +4,12 @@ ObfuscationKernel is a C++23 multi-architecture kernel framework built with xmak
 The current tree is a working foundation: it compiles a reusable kernel library,
 builds a bootable `kernel.bin` for all ten system targets, and runs debug
 kernel tests that exercise interrupts, memory management, scheduling, IPC,
-POSIX-oriented syscalls, drivers, VFS, EXT4 parsing, and user-mode transition
-state. The foundation also includes SMP topology state, a VGA-backed display
+POSIX-oriented syscalls, drivers, VFS and EXT4 parsing. Native user execution
+on x86_64, aarch64, rv64 and loongarch64 adds real address spaces, traps, timer
+preemption and a minimal fork/exec/wait/pipe runtime. The foundation also includes SMP topology state, a VGA-backed display
 path, PCIe/USB HID driver scaffolding, a kernel debug shell, and a read-only
-EXT4 superblock/block reader. A fixed RAM disk, a QEMU virtio-blk test disk, and
-SimpleFS provide the first block-backed writable filesystem path for early
-disk-management tests, and the debug kernel now includes virtio-gpu/ramfb test
+EXT4 superblock/block reader. A fixed RAM disk and SimpleFS provide writable filesystem model coverage;
+the attached QEMU virtio-blk disk is not yet backed by real block-device I/O, and the debug kernel now includes virtio-gpu/ramfb test
 plumbing plus an IPv4/UDP/TCP loopback stack for network-debug bring-up.
 
 This is not yet a complete production POSIX kernel. The implementation defines
@@ -97,8 +97,8 @@ In graphical mode the kernel remains interactive after the debug checks pass:
 keyboard input is handled by the kernel input stack and routed through the debug
 shell, GUI compositor, display path, and serial console. On `i386`, `x86_64`,
 `aarch64`, `arm32`, `rv64`, `rv32`, and `loongarch64`, the window path uses QEMU
-`ramfb` initialized by the guest through fw_cfg DMA. Before entering the shell,
-the kernel draws a colored pixel marker in the framebuffer. The ramfb console
+`ramfb` initialized by the guest through fw_cfg DMA. The compositor owns the final framebuffer; raw debug markers and test
+logs go to serial so they do not overwrite the diagnostics workspace or OS greeter. The ramfb console
 uses a 960x540 pixel surface with spaced bitmap glyph cells, a GUI-backed `oksh`
 terminal surface, and a fixed mouse status line. On `aarch64`, `arm32`, `rv64`,
 and `rv32`, QEMU virtio keyboard/mouse devices feed the shell and framebuffer
@@ -139,6 +139,8 @@ fixed-capacity kernel containers live in `include/ok/core/fixed.hpp`.
 - [Development Standard](docs/DEVELOPMENT.md)
 - [v0.1.0 Roadmap](docs/ROADMAP.md)
 - [Userland Development](docs/USERLAND.md)
+- [Native execution and acceptance](docs/NATIVE_EXECUTION.md)
+- [Validation snapshot](docs/VALIDATION.md)
 - [Architecture Overview](docs/ARCHITECTURE.md)
 - [POSIX Roadmap](docs/POSIX.md)
 - [Architecture Notes](docs/arch/)
@@ -164,5 +166,6 @@ remain supported. See [Architecture](docs/ARCHITECTURE.md).
 CPU primitives and scheduler policy selection now use templates/static dispatch.
 Run `python3 scripts/test_static_dispatch.py` to validate all ten profile types
 and two scheduling policies on the host. These are explicitly model tests;
-hardware MMU isolation, user execution, true SMP/context switching and arbitrary
-ELF module relocation remain separate implementation milestones.
+native MMU isolation, user execution and timer context switching are verified
+separately on the four distribution profiles. Hardware SMP and arbitrary ELF
+module relocation remain future milestones. See [native coverage](docs/NATIVE_EXECUTION.md).

@@ -118,58 +118,55 @@ class PosixService final
         return initialized_;
     }
     [[nodiscard]] sched::ProcessId getpid() const;
-    [[nodiscard]] sched::ProcessId getppid() const
-    {
-        return 0;
-    }
+    [[nodiscard]] sched::ProcessId getppid() const;
     [[nodiscard]] u32 uid() const
     {
-        return current_uid_;
+        return user_credentials().uid;
     }
     [[nodiscard]] u32 euid() const
     {
-        return current_euid_;
+        return user_credentials().euid;
     }
     [[nodiscard]] u32 gid() const
     {
-        return current_gid_;
+        return user_credentials().gid;
     }
     [[nodiscard]] u32 egid() const
     {
-        return current_egid_;
+        return user_credentials().egid;
     }
     [[nodiscard]] user::UserId getuid() const
     {
-        return current_uid_;
+        return uid();
     }
     [[nodiscard]] user::UserId geteuid() const
     {
-        return current_euid_;
+        return euid();
     }
     [[nodiscard]] user::GroupId getgid() const
     {
-        return current_gid_;
+        return gid();
     }
     [[nodiscard]] user::GroupId getegid() const
     {
-        return current_egid_;
+        return egid();
     }
     [[nodiscard]] fs::Credentials credentials() const
     {
-        return fs::Credentials{.uid = current_euid_, .gid = current_egid_};
+        return fs::Credentials{.uid = euid(), .gid = egid()};
     }
-    [[nodiscard]] user::Credentials user_credentials() const
-    {
-        return user::Credentials{.uid = current_uid_,
-                                 .gid = current_gid_,
-                                 .euid = current_euid_,
-                                 .egid = current_egid_,
-                                 .kernel_space = current_kernel_space_};
-    }
+    [[nodiscard]] user::Credentials user_credentials() const;
+    Status activate(sched::ProcessId pid);
+    Result<sched::ProcessId> fork();
+    Result<sched::ProcessId> fork(sched::ProcessId parent);
+    Status exec(sched::ProcessId pid, arch::CpuContext context, const sched::MemoryMap &memory);
+    Status exit(sched::ProcessId pid, i32 code);
+    Result<i32> wait(sched::ProcessId parent, sched::ProcessId child);
     Status set_identity(u32 uid, u32 gid);
     Status set_credentials(user::Credentials credentials);
     Result<Fd> open(std::string_view path, u32 flags, u32 mode = 0644);
     Result<Fd> openat(Fd dirfd, std::string_view path, u32 flags, u32 mode = 0644);
+    Result<std::array<Fd, 2>> pipe(u32 flags = 0);
     Status close(Fd fd);
     Status close_range(Fd first, Fd last);
     Result<Fd> duplicate(Fd fd, Fd minimum = 0);
@@ -196,7 +193,7 @@ class PosixService final
     Result<i64> ioctl(Fd fd, u64 request, u64 argument);
     [[nodiscard]] std::string_view getcwd() const
     {
-        return cwd_.view();
+        return resources().cwd.view();
     }
     Result<FileStatus> stat(std::string_view path);
     Result<FileStatus> statat(Fd dirfd, std::string_view path, u32 flags = 0);
@@ -221,37 +218,22 @@ class PosixService final
     Status signal_noop();
     Status sched_yield();
     Status exit(i32 code);
+    void advance_clock(u64 milliseconds)
+    {
+        monotonic_ticks_ += milliseconds;
+    }
     [[nodiscard]] u32 umask(u32 mask);
     [[nodiscard]] usize open_file_count() const;
 
   private:
-    struct FileDescriptor
-    {
-        bool used{false};
-        bool readable{false};
-        bool writable{false};
-        bool console{false};
-        bool close_on_exec{false};
-        u32 flags{0};
-        usize offset{0};
-        fs::Node *node{nullptr};
-        FixedString<96> path{};
-    };
-
-    struct MemoryMapping
-    {
-        bool used{false};
-        uptr address{0};
-        usize length{0};
-        u32 protection{prot_NONE};
-        u32 flags{0};
-        Fd fd{-1};
-        usize offset{0};
-    };
-
+    using FileDescriptor = sched::OpenFileDescription;
+    using MemoryMapping = sched::MemoryMapping;
+    [[nodiscard]] sched::ProcessResources &resources();
+    [[nodiscard]] const sched::ProcessResources &resources() const;
+    [[nodiscard]] sched::ThreadLocalState &thread_local_state();
     [[nodiscard]] FileDescriptor *descriptor(Fd fd);
     [[nodiscard]] const FileDescriptor *descriptor(Fd fd) const;
-    [[nodiscard]] Result<Fd> allocate_fd(Fd minimum = 3);
+    [[nodiscard]] Result<Fd> allocate_fd(Fd minimum = 0);
     [[nodiscard]] Status require_parent_directory_access(std::string_view normalized_path, u32 access) const;
     [[nodiscard]] Result<std::string_view> normalize_path(std::string_view path);
     [[nodiscard]] Result<std::string_view> resolve_path(Fd dirfd, std::string_view path);
@@ -260,26 +242,12 @@ class PosixService final
     fs::VirtualFileSystem *vfs_{nullptr};
     driver::ConsoleDriver *console_{nullptr};
     sched::Scheduler *scheduler_{nullptr};
-    std::array<FileDescriptor, max_open_files> files_{};
-    std::array<MemoryMapping, max_memory_mappings> mappings_{};
-    FixedString<96> cwd_{"/"};
+    sched::ProcessResources unbound_resources_{};
+    sched::ThreadLocalState boot_tls_{};
+    user::Credentials boot_credentials_{user::kernel_credentials()};
     FixedString<96> normalized_path_{};
     bool initialized_{false};
     u64 monotonic_ticks_{0};
-    uptr program_break_base_{0x1000'0000};
-    uptr program_break_{0x1000'0000};
-    uptr program_break_limit_{0x1010'0000};
-    uptr next_mapping_address_{0x2000'0000};
-    uptr fs_base_{0};
-    uptr gs_base_{0};
-    uptr clear_tid_address_{0};
-    u32 file_mode_mask_{0022};
-    u32 current_uid_{fs::default_uid};
-    u32 current_gid_{fs::default_gid};
-    u32 current_euid_{fs::default_uid};
-    u32 current_egid_{fs::default_gid};
-    bool current_kernel_space_{true};
-    i32 last_exit_code_{0};
 };
 
 } // namespace ok::posix

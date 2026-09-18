@@ -167,6 +167,8 @@ class GuiCompositor final
     Status fill_rect(SurfaceId id, Rect rect, u32 rgba);
     Status put_pixel(SurfaceId id, u32 x, u32 y, u32 rgba);
     Status draw_text(SurfaceId id, u32 column, u32 row, std::string_view text, u32 foreground, u32 background);
+    Status draw_text_at(SurfaceId id, i32 x, i32 y, std::string_view text, u32 foreground, u32 background,
+                        u32 width = max_gui_surface_width, u32 scale = 1);
     Status present();
     Status play_startup_animation();
 
