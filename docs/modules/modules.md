@@ -12,7 +12,7 @@ Each module exposes a `ModuleManifest` with:
 - dependency, exported-service, and required-service lists;
 - `ModuleExecution`, either `inline_core` or `kernel_process`;
 - `ModuleThreading`, either `single_threaded` or `per_cpu`;
-- `abi_version`, currently `kernel_module_abi_version == 2`;
+- `abi_version`, currently `kernel_module_abi_version == 3`;
 - a capability mask declaring service export/use, kernel-process ownership,
   per-CPU workers, user ABI, driver ABI, or GUI behavior;
 - `ModuleRestartPolicy`;
@@ -24,10 +24,14 @@ cycles, missing required dependencies, missing required services, duplicate
 service publication, capability mismatches, and resource budgets that cannot
 cover the requested execution/threading model.
 
-ABI 2 adds filesystem node lifetime, mutation and synchronization operations and
-block-device flush support. Rebuild native extensions against the matching SDK;
-ABI 1 objects cannot be reused. SDK manifests carry the same ABI generation and
-the OS rejects a mismatched generation before linking.
+ABI 2 added filesystem node lifetime, mutation and synchronization operations
+and block-device flush support. ABI 3 extends the filesystem node virtual
+interface for rename, hard links and directory path reconstruction, and adds
+retained working-directory state to process resources. Rebuild native extensions against the
+matching SDK; ABI 1 and ABI 2 objects cannot be reused. SDK manifests carry the
+same ABI generation, and the OS rejects a mismatched generation before linking.
+This native C++ ABI generation is separate from the public user-space UAPI
+version and the SDK manifest schema.
 
 ## Lifecycle
 

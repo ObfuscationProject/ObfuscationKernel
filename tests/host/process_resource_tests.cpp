@@ -186,6 +186,263 @@ void test_mounted_paths_and_directory_descriptors()
     CHECK(f.posix.close(directory.value()) && f.posix.close(covered.value()));
 }
 
+void test_naming_and_open_file_lifetimes()
+{
+    static Fixture f;
+    CHECK(f.posix.activate(f.create("file-names")));
+    auto left = f.posix.open("/a", posix::o_RDONLY | posix::o_DIRECTORY);
+    auto right = f.posix.open("/b", posix::o_RDONLY | posix::o_DIRECTORY);
+    CHECK(left && right);
+    auto source = f.posix.openat(left.value(), "source", posix::o_CREAT | posix::o_RDWR);
+    auto replaced = f.posix.openat(right.value(), "target", posix::o_CREAT | posix::o_RDWR);
+    CHECK(source && replaced);
+    CHECK(f.posix.write(source.value(), bytes("source")).value() == 6);
+    CHECK(f.posix.write(replaced.value(), bytes("old")).value() == 3);
+    CHECK(f.posix.linkat(left.value(), "source", right.value(), "linked"));
+    CHECK(f.vfs.lookup("/a/source") == f.vfs.lookup("/b/linked"));
+    CHECK(f.posix.fstat(source.value()).value().link_count == 2);
+    CHECK(f.posix.chdir("/a"));
+    CHECK(f.posix.link("source", "../b/relative"));
+    CHECK(f.posix.fstat(source.value()).value().link_count == 3);
+    CHECK(f.posix.renameat(left.value(), "source", right.value(), "target"));
+    CHECK(!f.posix.stat("/a/source"));
+    CHECK(f.vfs.lookup("/b/target") == f.vfs.lookup("/b/linked"));
+    CHECK(f.posix.fstat(replaced.value()).value().link_count == 0);
+    CHECK(f.posix.rename("../b/./relative", "./renamed"));
+    CHECK(f.vfs.lookup("/a/renamed") == f.vfs.lookup("/b/target"));
+    CHECK(!f.vfs.lookup("/b/relative"));
+    CHECK(f.posix.rename("/b/target", "/b/linked"));
+    CHECK(f.posix.stat("/b/target").value().link_count == 3);
+    CHECK(f.posix.stat("/b/linked").value().link_count == 3);
+    std::array<std::byte, 8> output{};
+    CHECK(f.posix.pread(replaced.value(), output, 0).value() == 3);
+    CHECK(std::memcmp(output.data(), "old", 3) == 0);
+    CHECK(f.posix.pwrite(replaced.value(), bytes("OLD"), 0).value() == 3);
+    CHECK(f.posix.unlink("renamed"));
+    CHECK(f.posix.fstat(source.value()).value().link_count == 2);
+    CHECK(f.posix.unlink("/b/target"));
+    CHECK(f.posix.fstat(source.value()).value().link_count == 1);
+    CHECK(f.posix.unlink("/b/linked"));
+    CHECK(f.posix.fstat(source.value()).value().link_count == 0);
+    auto fresh = f.posix.open("/b/target", posix::o_CREAT | posix::o_RDWR);
+    CHECK(fresh && f.posix.write(fresh.value(), bytes("fresh")).value() == 5);
+    CHECK(f.posix.pwrite(source.value(), bytes("S"), 0).value() == 1);
+    CHECK(f.posix.pread(source.value(), output, 0).value() == 6);
+    CHECK(std::memcmp(output.data(), "Source", 6) == 0);
+    CHECK(f.posix.pread(replaced.value(), output, 0).value() == 3);
+    CHECK(std::memcmp(output.data(), "OLD", 3) == 0);
+    CHECK(f.posix.pread(fresh.value(), output, 0).value() == 5);
+    CHECK(std::memcmp(output.data(), "fresh", 5) == 0);
+    CHECK(f.posix.close(source.value()) && f.posix.close(replaced.value()) && f.posix.close(fresh.value()));
+    CHECK(f.posix.close(left.value()) && f.posix.close(right.value()));
+}
+
+void test_naming_errno_and_sticky_permissions()
+{
+    static Fixture f;
+    CHECK(f.posix.activate(f.create("name-permissions")));
+    const auto error = [](Status status) { return syscall::ErrnoMapper::errno_for(status); };
+    CHECK(f.vfs.chmod("/a", 01777) && f.vfs.chmod("/b", 01777));
+    CHECK(f.vfs.create("/a/foreign", fs::NodeType::regular));
+    CHECK(f.vfs.create("/a/own", fs::NodeType::regular));
+    CHECK(f.vfs.create("/b/foreign", fs::NodeType::regular));
+    CHECK(f.vfs.chown("/a/foreign", 2000, 2000));
+    CHECK(f.vfs.chown("/a/own", 1000, 1000));
+    CHECK(f.vfs.chown("/b/foreign", 3000, 3000));
+    CHECK(f.posix.set_identity(1000, 1000));
+    CHECK(error(f.posix.rename("/a/foreign", "/b/new")) == 1);
+    CHECK(error(f.posix.rename("/a/own", "/b/foreign")) == 1);
+    CHECK(f.vfs.lookup("/a/foreign") && f.vfs.lookup("/a/own") && !f.vfs.lookup("/b/new"));
+    CHECK(f.posix.set_identity(2000, 2000));
+    CHECK(f.posix.rename("/a/foreign", "/b/new"));
+    CHECK(f.posix.set_identity(0, 0));
+    CHECK(f.posix.rename("/a/own", "/b/foreign"));
+    CHECK(error(f.posix.link("/a", "/directory-link")) == 1);
+    CHECK(error(f.posix.rename("/data", "/a")) == 21);
+    CHECK(error(f.posix.rename("/a", "/data")) == 20);
+    CHECK(error(f.posix.rename("/data/child", "/a/new")) == 20);
+    CHECK(error(f.posix.link("/data", "/data/child")) == 20);
+    CHECK(f.posix.mkdir("/empty") && f.posix.mkdir("/nonempty"));
+    CHECK(f.vfs.create("/nonempty/child", fs::NodeType::regular));
+    CHECK(error(f.posix.rename("/empty", "/nonempty")) == 39);
+    CHECK(f.vfs.lookup("/empty") && f.vfs.lookup("/nonempty/child"));
+    auto file = f.posix.open("/data", posix::o_RDONLY);
+    CHECK(file);
+    CHECK(error(f.posix.linkat(file.value(), "child", posix::at_FDCWD, "/a/new")) == 20);
+    CHECK(error(f.posix.renameat(-1, "child", posix::at_FDCWD, "/a/new")) == 9);
+    CHECK(error(f.posix.linkat(posix::at_FDCWD, "/data", posix::at_FDCWD, "/a/new", 1)) == 22);
+    CHECK(f.posix.close(file.value()));
+    static fs::VirtualFileSystem mounted;
+    CHECK(f.vfs.mount("/b", *mounted.lookup("/")));
+    CHECK(error(f.posix.link("/data", "/b/link")) == 18);
+    CHECK(error(f.posix.rename("/data", "/b/moved")) == 18);
+    CHECK(f.vfs.lookup("/data") && !mounted.lookup("/link") && !mounted.lookup("/moved"));
+}
+
+void test_directory_mount_identity()
+{
+    static Fixture f;
+    static fs::VirtualFileSystem volume;
+    const auto parent = f.create("mount-identity");
+    CHECK(f.posix.activate(parent));
+    CHECK(f.vfs.create("/a/mount", fs::NodeType::directory));
+    CHECK(f.vfs.create("/b/mount", fs::NodeType::directory));
+    CHECK(f.vfs.create("/a/parent-file", fs::NodeType::regular));
+    CHECK(f.vfs.create("/b/parent-file", fs::NodeType::regular));
+    CHECK(f.vfs.write_file("/a/parent-file", bytes("a")));
+    CHECK(f.vfs.write_file("/b/parent-file", bytes("b")));
+    CHECK(volume.create("/source", fs::NodeType::regular));
+    CHECK(volume.create("/child", fs::NodeType::directory));
+    CHECK(f.vfs.mount("/a/mount", *volume.lookup("/")));
+    CHECK(f.vfs.mount("/b/mount", *volume.lookup("/")));
+    auto first = f.posix.open("/a/mount", posix::o_RDONLY | posix::o_DIRECTORY);
+    auto second = f.posix.open("/b/mount", posix::o_RDONLY | posix::o_DIRECTORY);
+    CHECK(first && second);
+    const auto error = [](Status status) { return syscall::ErrnoMapper::errno_for(status); };
+    CHECK(error(f.posix.link("/a/mount/source", "/b/mount/absolute-link")) == 18);
+    CHECK(error(f.posix.rename("/a/mount/source", "/b/mount/absolute-move")) == 18);
+    CHECK(error(f.posix.linkat(first.value(), "source", second.value(), "relative-link")) == 18);
+    CHECK(error(f.posix.renameat(first.value(), "source", second.value(), "relative-move")) == 18);
+    CHECK(f.posix.fchdir(second.value()) && f.posix.getcwd() == "/b/mount");
+    CHECK(error(f.posix.link("source", "/a/mount/cwd-link")) == 18);
+    CHECK(error(f.posix.rename("source", "/a/mount/cwd-move")) == 18);
+    auto parent_file = f.posix.openat(second.value(), "../parent-file", posix::o_RDONLY);
+    CHECK(parent_file);
+    std::array<std::byte, 1> content{};
+    CHECK(f.posix.read(parent_file.value(), content).value() == 1 && content[0] == std::byte{'b'});
+    CHECK(f.posix.close(parent_file.value()));
+    CHECK(f.posix.chdir("..") && f.posix.getcwd() == "/b");
+    CHECK(f.posix.chdir("/b/mount/child"));
+    auto inherited = f.posix.fork();
+    CHECK(inherited);
+    CHECK(f.posix.rename("/a/mount/child", "/a/mount/moved"));
+    CHECK(f.posix.getcwd() == "/b/mount/moved");
+    CHECK(f.posix.activate(inherited.value()));
+    CHECK(f.posix.getcwd() == "/b/mount/moved");
+    CHECK(f.posix.fchdir(second.value()) && f.posix.getcwd() == "/b/mount");
+    CHECK(f.posix.chdir("moved"));
+    auto covered = f.posix.open(".", posix::o_RDONLY | posix::o_DIRECTORY);
+    CHECK(covered);
+    // Even when the covering mount uses the same Node, the previous handle must
+    // not silently switch mount identities or fall back to the /a alias.
+    CHECK(f.vfs.mount("/b/mount/moved", *volume.lookup("/moved")));
+    CHECK(error(f.posix.current_directory().status()) == 2);
+    CHECK(error(f.posix.openat(covered.value(), ".", posix::o_RDONLY).status()) == 2);
+    CHECK(f.posix.exit(0));
+    CHECK(f.posix.activate(parent));
+    CHECK(error(f.posix.current_directory().status()) == 2);
+    CHECK(f.posix.chdir("/") && f.posix.wait(parent, inherited.value()));
+    CHECK(f.posix.close(first.value()) && f.posix.close(second.value()));
+}
+
+void test_naming_path_search_permissions()
+{
+    static Fixture f;
+    CHECK(f.posix.activate(f.create("name-search")));
+    CHECK(f.posix.mkdir("/private") && f.posix.mkdir("/private/sub"));
+    CHECK(f.vfs.chmod("/private/sub", 0777) && f.vfs.chmod("/a", 0777));
+    CHECK(f.vfs.create("/private/sub/source", fs::NodeType::regular));
+    auto held = f.posix.open("/private/sub", posix::o_RDONLY | posix::o_DIRECTORY);
+    CHECK(held && f.posix.chdir("/private/sub"));
+    CHECK(f.vfs.chmod("/private", 0000));
+    CHECK(f.posix.set_identity(1000, 1000));
+    const auto denied = [](Status status) { return syscall::ErrnoMapper::errno_for(status) == 13; };
+    CHECK(denied(f.posix.link("/private/sub/source", "/a/escaped")));
+    CHECK(denied(f.posix.rename("/private/sub/source", "/a/escaped")));
+    CHECK(denied(f.posix.link("/data", "/private/sub/target")));
+    CHECK(denied(f.posix.rename("/a/../data", "/private/sub/target")));
+    CHECK(denied(f.posix.link("/private/../data", "/a/escaped")));
+    CHECK(!f.vfs.lookup("/a/escaped") && !f.vfs.lookup("/private/sub/target"));
+    CHECK(f.posix.linkat(held.value(), "source", held.value(), "alias"));
+    CHECK(f.posix.rename("alias", "renamed"));
+    CHECK(f.posix.link("renamed", "cwd-link"));
+    CHECK(f.posix.renameat(held.value(), "renamed", held.value(), "moved"));
+    CHECK(f.vfs.lookup("/private/sub/source") == f.vfs.lookup("/private/sub/moved"));
+    CHECK(f.vfs.chmod("/private/sub", 0666));
+    CHECK(denied(f.posix.linkat(held.value(), "source", held.value(), "blocked")));
+    CHECK(denied(f.posix.renameat(held.value(), "source", held.value(), "blocked")));
+    CHECK(f.posix.set_identity(0, 0) && f.posix.chdir("/") && f.posix.close(held.value()));
+}
+
+void test_renamed_and_detached_directory_resources()
+{
+    static Fixture f;
+    const auto parent = f.create("directory-owner");
+    const auto mover = f.create("directory-mover");
+    CHECK(f.posix.activate(parent));
+    CHECK(f.posix.mkdir("/a/tree") && f.posix.mkdir("/a/tree/sub"));
+    CHECK(f.vfs.create("/a/tree/sub/value", fs::NodeType::regular));
+    CHECK(f.vfs.write_file("/a/tree/sub/value", bytes("original")));
+    auto tree = f.posix.open("/a/tree", posix::o_RDONLY | posix::o_DIRECTORY);
+    auto sub = f.posix.open("/a/tree/sub", posix::o_RDONLY | posix::o_DIRECTORY);
+    CHECK(tree && sub);
+    CHECK(f.posix.chdir("/a/./tree/sub/../sub"));
+    CHECK(f.posix.getcwd() == "/a/tree/sub");
+    auto child = f.posix.fork();
+    CHECK(child);
+    CHECK(f.posix.activate(mover));
+    CHECK(f.posix.rename("/a/tree", "/b/renamed"));
+    CHECK(f.posix.mkdir("/a/tree") && f.posix.mkdir("/a/tree/sub"));
+    CHECK(f.vfs.create("/a/tree/sub/value", fs::NodeType::regular));
+    CHECK(f.vfs.write_file("/a/tree/sub/value", bytes("decoy")));
+    CHECK(f.posix.activate(parent));
+    CHECK(f.posix.getcwd() == "/b/renamed/sub");
+    CHECK(f.posix.fchdir(tree.value()) && f.posix.getcwd() == "/b/renamed");
+    CHECK(f.posix.fchdir(sub.value()) && f.posix.getcwd() == "/b/renamed/sub");
+    CHECK(f.posix.chdir("/"));
+    CHECK(f.posix.activate(child.value()));
+    CHECK(f.posix.getcwd() == "/b/renamed/sub");
+    auto inherited = f.posix.openat(sub.value(), "./value", posix::o_RDONLY);
+    auto relative = f.posix.open("../sub/value", posix::o_RDONLY);
+    CHECK(inherited && relative);
+    std::array<std::byte, 16> output{};
+    CHECK(f.posix.read(inherited.value(), output).value() == 8);
+    CHECK(std::memcmp(output.data(), "original", 8) == 0);
+    CHECK(f.posix.read(relative.value(), output).value() == 8);
+    CHECK(std::memcmp(output.data(), "original", 8) == 0);
+    CHECK(f.posix.close(inherited.value()) && f.posix.close(relative.value()));
+    CHECK(f.posix.activate(mover));
+    CHECK(f.posix.rename("/b/renamed", "/a/again"));
+    CHECK(f.posix.activate(child.value()));
+    CHECK(f.posix.getcwd() == "/a/again/sub");
+    CHECK(f.posix.fchdir(tree.value()) && f.posix.getcwd() == "/a/again");
+    CHECK(f.posix.exit(0));
+    CHECK(f.posix.activate(parent));
+    CHECK(f.posix.wait(parent, child.value()));
+    CHECK(f.posix.close(tree.value()) && f.posix.close(sub.value()));
+
+    CHECK(f.posix.mkdir("/old-empty") && f.posix.mkdir("/replacement"));
+    CHECK(f.vfs.create("/replacement/value", fs::NodeType::regular));
+    auto detached = f.posix.open("/old-empty", posix::o_RDONLY | posix::o_DIRECTORY);
+    CHECK(detached);
+    CHECK(f.posix.rename("/replacement", "/old-empty"));
+    const auto error = [](Status status) { return syscall::ErrnoMapper::errno_for(status); };
+    CHECK(error(f.posix.openat(detached.value(), "value", posix::o_RDONLY).status()) == 2);
+    CHECK(error(f.posix.openat(detached.value(), "", posix::o_RDONLY).status()) == 2);
+    CHECK(error(f.posix.stat("").status()) == 2);
+    CHECK(error(f.posix.chdir("")) == 2);
+    CHECK(error(f.posix.openat(detached.value(), "new", posix::o_CREAT | posix::o_RDWR).status()) == 2);
+    CHECK(!f.vfs.lookup("/old-empty/new"));
+    CHECK(f.posix.fchdir(detached.value()));
+    CHECK(error(f.posix.current_directory().status()) == 2 && f.posix.getcwd().empty());
+    CHECK(error(f.posix.open("value", posix::o_RDONLY).status()) == 2);
+    auto absolute = f.posix.openat(detached.value(), "/data", posix::o_RDONLY);
+    CHECK(absolute && f.posix.close(absolute.value()));
+    auto detached_child = f.posix.fork();
+    CHECK(detached_child);
+    CHECK(f.posix.chdir("/") && f.posix.close(detached.value()));
+    CHECK(f.posix.activate(detached_child.value()));
+    CHECK(f.posix.close(detached.value()));
+    CHECK(error(f.posix.current_directory().status()) == 2);
+    CHECK(error(f.posix.open("value", posix::o_RDONLY).status()) == 2);
+    CHECK(f.posix.exit(0));
+    CHECK(f.posix.activate(parent));
+    CHECK(f.posix.wait(parent, detached_child.value()));
+    CHECK(f.posix.getcwd() == "/");
+    auto replacement = f.posix.open("/old-empty/value", posix::o_RDONLY);
+    CHECK(replacement && f.posix.close(replacement.value()));
+}
+
 class RetainedNode final : public fs::Node
 {
   public:
@@ -596,6 +853,11 @@ int main()
     test_unique_owner_and_isolation();
     test_fork_dup_offsets_and_lifetime();
     test_mounted_paths_and_directory_descriptors();
+    test_naming_and_open_file_lifetimes();
+    test_naming_errno_and_sticky_permissions();
+    test_directory_mount_identity();
+    test_naming_path_search_permissions();
+    test_renamed_and_detached_directory_resources();
     test_retained_open_description_lifetime();
     test_positioned_io_and_descriptor_errors();
     test_exec_metadata_and_rollback();
@@ -604,5 +866,5 @@ int main()
     test_exit_status_and_signal_status();
     test_elf_validation_and_failed_exec();
     std::puts("PASS canonical owner, process isolation, shared offsets, exec, exit/wait, pipe wakeup, orphan reaping, "
-              "exit status");
+              "exit status, rename/link lifetimes and retained directories");
 }

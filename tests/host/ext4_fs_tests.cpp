@@ -62,6 +62,124 @@ std::span<const std::byte> bytes(const char *s)
 {
     return {reinterpret_cast<const std::byte *>(s), std::strlen(s)};
 }
+void check_content(fs::Node &node, const char *expected)
+{
+    auto value = node.read(0, fs::max_file_data);
+    CHECK(value && value.value().size == std::strlen(expected));
+    CHECK(std::memcmp(value.value().data.data(), expected, value.value().size) == 0);
+}
+void namespace_mutations(fs::Node &root)
+{
+    CHECK(root.create("namespace", fs::NodeType::directory));
+    auto *parent = root.lookup("namespace");
+    CHECK(parent);
+    CHECK(parent->create("left", fs::NodeType::directory));
+    CHECK(parent->create("right", fs::NodeType::directory));
+    auto *left = parent->lookup("left"), *right = parent->lookup("right");
+    CHECK(left && right);
+    CHECK(left->create("source", fs::NodeType::regular));
+    auto *source = left->lookup("source");
+    CHECK(source && source->retain());
+    CHECK(source->write(0, bytes("source")));
+    CHECK(left->link("alias", *source));
+    CHECK(right->link("remote", *source));
+    CHECK(source->metadata().link_count == 3 && left->lookup("alias") == source);
+    CHECK(left->rename("source", *left, "alias"));
+    CHECK(left->lookup("source") == source && left->lookup("alias") == source);
+    CHECK(right->create("victim", fs::NodeType::regular));
+    auto *victim = right->lookup("victim");
+    CHECK(victim && victim->retain());
+    CHECK(victim->write(0, bytes("victim")));
+    CHECK(left->rename("source", *right, "victim"));
+    CHECK(!left->lookup("source") && right->lookup("victim") == source);
+    CHECK(victim->metadata().link_count == 0 && source->metadata().link_count == 3);
+    check_content(*victim, "victim");
+    CHECK(victim->write(0, bytes("Victim")));
+    check_content(*source, "source");
+    CHECK(left->remove("alias", false));
+    CHECK(source->metadata().link_count == 2);
+    CHECK(right->remove("remote", false));
+    CHECK(source->metadata().link_count == 1);
+    CHECK(right->remove("victim", false));
+    CHECK(source->metadata().link_count == 0);
+    check_content(*source, "source");
+    check_content(*victim, "Victim");
+    CHECK(source->release() && victim->release());
+    CHECK(left->create("durable", fs::NodeType::regular));
+    source = left->lookup("durable");
+    CHECK(source && source->write(0, bytes("persistent aliases")));
+    CHECK(right->link("alias", *source));
+    CHECK(left->rename("durable", *right, "durable"));
+    CHECK(source->metadata().link_count == 2);
+
+    CHECK(left->create("sub", fs::NodeType::directory));
+    auto *sub = left->lookup("sub");
+    CHECK(sub && sub->retain());
+    CHECK(sub->create("child", fs::NodeType::directory));
+    auto *child = sub->lookup("child");
+    CHECK(child && child->retain());
+    CHECK(left->metadata().link_count == 3 && right->metadata().link_count == 2);
+    CHECK(left->rename("sub", *left, "longer-directory-name"));
+    CHECK(left->metadata().link_count == 3);
+    CHECK(left->rename("longer-directory-name", *right, "moved"));
+    CHECK(left->metadata().link_count == 2 && right->metadata().link_count == 3);
+    CHECK(sub->lookup("..") == right);
+    auto path = child->directory_path(root);
+    CHECK(path && path.value().view() == "/namespace/right/moved/child");
+    CHECK(!parent->rename("right", *child, "cycle"));
+    CHECK(parent->lookup("right") == right && right->lookup("moved") == sub);
+    CHECK(left->create("empty", fs::NodeType::directory));
+    auto *empty = left->lookup("empty");
+    CHECK(empty && empty->retain());
+    CHECK(right->rename("moved", *left, "empty"));
+    CHECK(empty->metadata().link_count == 0 && !empty->directory_path(root));
+    CHECK(left->metadata().link_count == 3 && right->metadata().link_count == 2);
+    CHECK(sub->lookup("..") == left);
+    path = child->directory_path(root);
+    CHECK(path && path.value().view() == "/namespace/left/empty/child");
+    CHECK(right->create("nonempty", fs::NodeType::directory));
+    auto *nonempty = right->lookup("nonempty");
+    CHECK(nonempty);
+    CHECK(nonempty->create("file", fs::NodeType::regular));
+    CHECK(left->rename("empty", *right, "nonempty").code() == StatusCode::not_empty);
+    CHECK(left->rename("empty", *right, "durable").code() == StatusCode::not_directory);
+    CHECK(right->rename("durable", *left, "empty").code() == StatusCode::is_directory);
+    CHECK(!right->link("directory-link", *sub));
+    CHECK(!right->link("alias", *source));
+    CHECK(left->lookup("empty") == sub && sub->lookup("child") == child);
+    CHECK(nonempty->remove("file", false));
+    CHECK(right->remove("nonempty", true));
+    CHECK(empty->release());
+    CHECK(child->release());
+    CHECK(sub->release());
+
+    // Replacement within one directory must decrement the parent's link count once.
+    CHECK(right->create("one", fs::NodeType::directory));
+    CHECK(right->create("two", fs::NodeType::directory));
+    CHECK(right->metadata().link_count == 4);
+    CHECK(right->rename("one", *right, "two"));
+    CHECK(right->metadata().link_count == 3);
+    CHECK(right->remove("two", true));
+    CHECK(right->metadata().link_count == 2);
+}
+void namespace_reopened(fs::Node &root)
+{
+    auto *parent = root.lookup("namespace");
+    CHECK(parent);
+    auto *left = parent->lookup("left"), *right = parent->lookup("right");
+    CHECK(left && right);
+    auto *durable = right->lookup("durable");
+    CHECK(durable && right->lookup("alias") == durable);
+    CHECK(durable->metadata().link_count == 2);
+    check_content(*durable, "persistent aliases");
+    CHECK(!left->lookup("durable") && !right->lookup("remote") && !right->lookup("victim"));
+    auto *sub = left->lookup("empty");
+    CHECK(sub && sub->lookup("child"));
+    CHECK(sub->lookup("..") == left && sub->metadata().link_count == 3);
+    CHECK(left->metadata().link_count == 3 && right->metadata().link_count == 2);
+    auto path = sub->lookup("child")->directory_path(root);
+    CHECK(path && path.value().view() == "/namespace/left/empty/child");
+}
 int main(int argc, char **argv)
 {
     CHECK(argc == 3);
@@ -84,6 +202,9 @@ int main(int argc, char **argv)
         CHECK(root->lookup("persist"));
         CHECK(!root->create("forbidden", fs::NodeType::regular));
         CHECK(!root->chmod(0700));
+        auto *directory = root->lookup("persist");
+        CHECK(directory && !root->link("forbidden", *directory->lookup("notes")));
+        CHECK(!directory->rename("notes", *directory, "renamed"));
         std::puts("PASS read-only ext4 mount rejects mutation");
         return 0;
     }
@@ -101,6 +222,7 @@ int main(int argc, char **argv)
         CHECK(result && result.value().size == 1 && result.value().data[0] == std::byte{'!'});
         CHECK(!dir->lookup("gone"));
         CHECK(!dir->lookup("sub"));
+        namespace_reopened(*root);
         std::puts("PASS ext4 reopen: persisted data, size, directory entries");
         return 0;
     }
@@ -153,7 +275,9 @@ int main(int argc, char **argv)
             CHECK(read.value().data[j] == std::byte{0});
         CHECK(dir->remove("reuse", false));
     }
+    namespace_mutations(*root);
     CHECK(file->sync());
     CHECK(filesystem.sync());
-    std::puts("PASS ext4 write: overwrite, holes, zero write, truncate, open unlink, mkdir/rmdir, inode/block reuse");
+    std::puts("PASS ext4 write: overwrite, holes, zero write, truncate, open unlink, mkdir/rmdir, inode/block reuse, "
+              "links, replacement, directory topology");
 }

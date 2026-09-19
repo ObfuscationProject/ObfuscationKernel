@@ -471,6 +471,27 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         }
         return static_cast<i64>(result.value());
     }
+    if (number == N::rename || number == N::link || number == N::renameat || number == N::linkat)
+    {
+        const bool relative = number == N::renameat || number == N::linkat;
+        FixedString<256> source, destination;
+        if (auto status = string_from_user(space, a[relative ? 1 : 0], source); !status.ok())
+            return error(status);
+        if (auto status = string_from_user(space, a[relative ? 3 : 1], destination); !status.ok())
+            return error(status);
+        Status result;
+        if (number == N::rename)
+            result = kernel.posix().rename(source.view(), destination.view());
+        else if (number == N::link)
+            result = kernel.posix().link(source.view(), destination.view());
+        else if (number == N::renameat)
+            result = kernel.posix().renameat(static_cast<i32>(a[0]), source.view(), static_cast<i32>(a[2]),
+                                            destination.view());
+        else
+            result = kernel.posix().linkat(static_cast<i32>(a[0]), source.view(), static_cast<i32>(a[2]),
+                                          destination.view(), static_cast<u32>(a[4]));
+        return result.ok() ? 0 : error(result);
+    }
     if ((number == N::pread64 || number == N::pwrite64) && static_cast<__INTPTR_TYPE__>(a[3]) < 0)
         return -22;
     if ((number == N::truncate || number == N::ftruncate) && static_cast<__INTPTR_TYPE__>(a[1]) < 0)
@@ -680,6 +701,12 @@ Status start(Kernel &kernel, fs::BootArchive archive)
     if (ok_boot_filesystem != nullptr)
         if (auto status = ok_boot_filesystem(kernel.vfs()); !status.ok())
             return status;
+    // Root selection can cover the directory retained by early diagnostics.
+    // Kernel GUI/services must start in the selected root as well as /init.
+    if (auto status = kernel.posix().activate(0); !status.ok())
+        return status;
+    if (auto status = kernel.posix().chdir("/"); !status.ok())
+        return status;
     if (auto status = hw::initialize(); !status.ok())
         return status;
     Arguments arguments;

@@ -285,6 +285,79 @@ Status verify_permissions(Kernel &kernel)
     return posix.unlink("/tmp/vfs-private");
 }
 
+Status verify_naming_and_directory_identity(Kernel &kernel)
+{
+    auto &posix = kernel.posix();
+    FixedString<96> previous_directory;
+    if (auto status = previous_directory.assign(posix.getcwd()); !status.ok())
+        return status;
+    if (!posix.mkdir("/tmp/vfs-names") || !posix.mkdir("/tmp/vfs-names/left") ||
+        !posix.mkdir("/tmp/vfs-names/right"))
+        return Status::fault("VFS naming directory setup failed");
+    auto left = posix.open("/tmp/vfs-names/left", posix::o_RDONLY | posix::o_DIRECTORY);
+    auto right = posix.open("/tmp/vfs-names/right", posix::o_RDONLY | posix::o_DIRECTORY);
+    if (!left || !right)
+        return Status::fault("VFS naming directory descriptors failed");
+    auto source = posix.openat(left.value(), "source", posix::o_CREAT | posix::o_RDWR);
+    auto replaced = posix.openat(right.value(), "target", posix::o_CREAT | posix::o_RDWR);
+    if (!source || !replaced || !posix.write(source.value(), vfs_bytes("new")) ||
+        !posix.write(replaced.value(), vfs_bytes("old")))
+        return Status::fault("VFS naming file setup failed");
+    if (!posix.linkat(left.value(), "source", right.value(), "alias") ||
+        !posix.renameat(left.value(), "source", right.value(), "target"))
+        return Status::fault("VFS separate dirfd link or rename failed");
+    auto source_stat = posix.fstat(source.value());
+    auto replaced_stat = posix.fstat(replaced.value());
+    std::array<std::byte, 3> content{};
+    auto old_read = posix.pread(replaced.value(), content, 0);
+    if (!source_stat || source_stat.value().link_count != 2 || !replaced_stat ||
+        replaced_stat.value().link_count != 0 || !old_read || old_read.value() != 3 ||
+        !vfs_bytes_equal(content, "old"))
+        return Status::fault("VFS replacement lost an open inode");
+    if (!posix.chdir("/tmp/vfs-names") || !posix.unlink("right/target") ||
+        !posix.rename("right/./alias", "left/saved"))
+        return Status::fault("VFS relative source and destination paths interfered");
+    if (posix.link("left", "directory-link").code() != StatusCode::permission)
+        return Status::fault("VFS directory hard link was not rejected");
+    if (!posix.chdir("left/../left") || !posix.rename("/tmp/vfs-names/left", "/tmp/vfs-names/moved") ||
+        posix.getcwd() != "/tmp/vfs-names/moved")
+        return Status::fault("VFS directory rename lost the canonical cwd");
+    auto via_directory = posix.openat(left.value(), "./saved", posix::o_RDONLY);
+    if (!via_directory)
+        return Status::fault("VFS renamed directory descriptor lost its inode");
+    auto new_read = posix.read(via_directory.value(), content);
+    if (!new_read || new_read.value() != 3 || !vfs_bytes_equal(content, "new") ||
+        !posix.close(via_directory.value()))
+        return Status::fault("VFS renamed directory descriptor read failed");
+    if (!posix.chmod("/tmp/vfs-names/moved", 0777) || !posix.chmod("/tmp/vfs-names", 0000) ||
+        !posix.set_identity(1000, 1000))
+        return Status::fault("VFS search permission setup failed");
+    const bool search_checked =
+        posix.link("/tmp/vfs-names/moved/saved", "/tmp/vfs-search-escape").code() == StatusCode::denied &&
+        posix.rename("/tmp/vfs-names/moved/saved", "/tmp/vfs-search-escape").code() == StatusCode::denied &&
+        posix.link("/tmp/vfs-file", "/tmp/vfs-names/moved/hidden").code() == StatusCode::denied &&
+        posix.linkat(left.value(), "saved", left.value(), "search-copy").ok() &&
+        posix.rename("search-copy", "search-moved").ok() && posix.unlink("search-moved").ok();
+    static_cast<void>(posix.set_identity(0, 0));
+    static_cast<void>(posix.chmod("/tmp/vfs-names", 0755));
+    static_cast<void>(posix.chmod("/tmp/vfs-names/moved", 0755));
+    if (!search_checked)
+        return Status::fault("VFS name operations bypassed search permissions or rejected a held directory");
+    if (!posix.link("saved", "alias") || !posix.rename("saved", "alias") ||
+        !posix.stat("saved") || !posix.stat("alias") || !posix.unlink("saved") || !posix.unlink("alias"))
+        return Status::fault("VFS same-inode rename or unlink failed");
+    source_stat = posix.fstat(source.value());
+    new_read = posix.pread(source.value(), content, 0);
+    if (!source_stat || source_stat.value().link_count != 0 || !new_read || new_read.value() != 3 ||
+        !vfs_bytes_equal(content, "new"))
+        return Status::fault("VFS final unlink invalidated an open description");
+    if (!posix.close(source.value()) || !posix.close(replaced.value()) ||
+        !posix.close(left.value()) || !posix.close(right.value()) || !posix.chdir(previous_directory.view()) ||
+        !posix.rmdir("/tmp/vfs-names/moved") || !posix.rmdir("/tmp/vfs-names/right"))
+        return Status::fault("VFS naming cleanup failed");
+    return posix.rmdir("/tmp/vfs-names");
+}
+
 Status verify_device_nodes()
 {
     fs::DeviceNode null_device{fs::DeviceKind::null};
@@ -439,6 +512,10 @@ Status run_unix_vfs_roadmap_tests(Kernel &kernel, KernelTestReport &report)
         return status;
     }
     if (auto status = verify_permissions(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = verify_naming_and_directory_identity(kernel); !status.ok())
     {
         return status;
     }

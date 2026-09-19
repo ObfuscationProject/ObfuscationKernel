@@ -63,6 +63,9 @@ Status RamNode::configure(std::string_view name, NodeType type, FileBuffer *data
         *data_ = {};
     }
     child_count_ = 0;
+    references_ = 0;
+    parent_ = nullptr;
+    children_ = {};
     return Status::success();
 }
 
@@ -77,50 +80,208 @@ Status RamNode::configure_readonly(std::string_view name, std::span<const std::b
     return Status::success();
 }
 
-Status RamNode::attach_child(RamNode &child)
+namespace
+{
+bool valid_component(std::string_view name)
+{
+    return !name.empty() && name != "." && name != ".." && name.size() < max_path_segment &&
+           name.find('/') == std::string_view::npos && name.find('\0') == std::string_view::npos;
+}
+} // namespace
+
+usize RamNode::child_index(std::string_view name) const
+{
+    for (usize i = 0; i < child_count_; ++i)
+        if (children_[i].name.view() == name)
+            return i;
+    return child_count_;
+}
+void RamNode::erase_child(usize index)
+{
+    for (usize i = index; i + 1 < child_count_; ++i)
+        children_[i] = children_[i + 1];
+    children_[--child_count_] = {};
+}
+bool RamNode::reusable() const
+{
+    smp::ScopedSpinLock guard(lock_);
+    return !used_ || (metadata_.link_count == 0 && references_ == 0);
+}
+Status RamNode::retain()
+{
+    smp::ScopedSpinLock guard(lock_);
+    if (!used_ || (!metadata_.link_count && !references_))
+        return Status::not_found("RAM node is unlinked and closed");
+    if (references_ == ~u32{0})
+        return Status::overflow("RAM node reference count exceeded");
+    ++references_;
+    return Status::success();
+}
+Status RamNode::release()
+{
+    smp::ScopedSpinLock guard(lock_);
+    if (!references_)
+        return Status::invalid_argument("RAM node reference count is zero");
+    --references_;
+    // Allocation reclaims unlinked, closed inodes while holding the VFS lock.
+    return Status::success();
+}
+Status RamNode::attach_child(RamNode &child, std::string_view name)
 {
     smp::ScopedSpinLock guard(lock_);
     if (metadata_.type != NodeType::directory)
-    {
-        return Status::invalid_argument("parent is not a directory");
-    }
-    if (child_count_ >= children_.size())
-    {
-        return Status::overflow("directory child capacity exceeded");
-    }
-    children_[child_count_++] = &child;
+        return Status::not_directory("parent is not a directory");
+    if (name.empty())
+        name = child.name();
+    if (!valid_component(name) || &child == this)
+        return Status::invalid_argument("invalid directory entry");
+    if (child_index(name) != child_count_)
+        return Status::already_exists("directory entry exists");
+    if (child_count_ == children_.size())
+        return Status::no_memory("directory child capacity exceeded");
+    static_cast<void>(children_[child_count_].name.assign(name));
+    children_[child_count_++].node = &child;
     if (child.metadata_.type == NodeType::directory)
     {
         ++metadata_.link_count;
+        child.parent_ = this;
     }
     return Status::success();
 }
-
-Status RamNode::detach_child(std::string_view child)
+Status RamNode::detach_child(std::string_view name)
 {
     smp::ScopedSpinLock guard(lock_);
     if (metadata_.type != NodeType::directory)
+        return Status::not_directory("parent is not a directory");
+    const auto index = child_index(name);
+    if (index == child_count_)
+        return Status::not_found("directory child not found");
+    auto &child = *children_[index].node;
     {
-        return Status::invalid_argument("parent is not a directory");
-    }
-    for (usize i = 0; i < child_count_; ++i)
-    {
-        if (children_[i]->name() == child)
+        smp::ScopedSpinLock child_guard(child.lock_);
+        if (child.metadata_.type == NodeType::directory)
         {
-            if (children_[i]->metadata_.type == NodeType::directory && metadata_.link_count > 2)
-            {
-                --metadata_.link_count;
-            }
-            for (usize j = i; j + 1 < child_count_; ++j)
-            {
-                children_[j] = children_[j + 1];
-            }
-            children_[child_count_ - 1] = nullptr;
-            --child_count_;
-            return Status::success();
+            if (child.child_count_)
+                return Status::not_empty("directory is not empty");
+            --metadata_.link_count;
+            child.metadata_.link_count = 0;
+            child.parent_ = nullptr;
+        }
+        else
+            --child.metadata_.link_count;
+    }
+    erase_child(index);
+    return Status::success();
+}
+Status RamNode::link(std::string_view name, Node &target)
+{
+    if (!owner_ || target.filesystem_identity() != owner_)
+        return Status::cross_device("hard link crosses filesystems");
+    auto &inode = static_cast<RamNode &>(target);
+    if (&inode == this || inode.type() == NodeType::directory)
+        return Status::permission("directories cannot be hard linked");
+    if (!valid_component(name))
+        return Status::invalid_argument("invalid hard link name");
+    smp::ScopedSpinLock guard(lock_);
+    smp::ScopedSpinLock inode_guard(inode.lock_);
+    if (metadata_.type != NodeType::directory)
+        return Status::not_directory("destination is not a directory");
+    if (!metadata_.link_count || !inode.metadata_.link_count)
+        return Status::not_found("hard link references an unlinked node");
+    if (child_index(name) != child_count_)
+        return Status::already_exists("hard link name exists");
+    if (inode.metadata_.link_count == ~u32{0})
+        return Status::link_limit("RAM link count exceeded");
+    if (child_count_ == children_.size())
+        return Status::no_memory("directory child capacity exceeded");
+    static_cast<void>(children_[child_count_].name.assign(name));
+    children_[child_count_++].node = &inode;
+    ++inode.metadata_.link_count;
+    return Status::success();
+}
+Status RamNode::rename(std::string_view old_name, Node &destination, std::string_view new_name)
+{
+    if (!owner_ || destination.filesystem_identity() != owner_)
+        return Status::cross_device("rename crosses filesystems");
+    if (!valid_component(old_name) || !valid_component(new_name))
+        return Status::invalid_argument("invalid rename component");
+    auto &new_parent = static_cast<RamNode &>(destination);
+    // Namespace calls are serialized by VirtualFileSystem. Keep both directory
+    // locks ordered for readers while the directory entries change together.
+    RamNode *first = reinterpret_cast<uptr>(this) < reinterpret_cast<uptr>(&new_parent) ? this : &new_parent;
+    RamNode *second = first == this ? &new_parent : this;
+    first->lock_.lock();
+    if (second != first)
+        second->lock_.lock();
+    struct Unlock
+    {
+        RamNode *first, *second;
+        ~Unlock()
+        {
+            if (first != second)
+                second->lock_.unlock();
+            first->lock_.unlock();
+        }
+    } unlock{first, second};
+    if (metadata_.type != NodeType::directory || new_parent.metadata_.type != NodeType::directory)
+        return Status::not_directory("rename parent is not a directory");
+    if (!metadata_.link_count || !new_parent.metadata_.link_count)
+        return Status::not_found("rename parent was removed");
+    auto source_index = child_index(old_name);
+    if (source_index == child_count_)
+        return Status::not_found("rename source is missing");
+    auto *source = children_[source_index].node;
+    auto target_index = new_parent.child_index(new_name);
+    auto *target = target_index == new_parent.child_count_ ? nullptr : new_parent.children_[target_index].node;
+    if (source == target)
+        return Status::success(); // POSIX leaves both names when they name one inode.
+    const bool directory = source->type() == NodeType::directory;
+    if (directory)
+        for (auto *ancestor = &new_parent; ancestor; ancestor = ancestor->parent_)
+            if (ancestor == source)
+                return Status::invalid_argument("cannot move a directory into its descendant");
+    if (target)
+    {
+        if (directory && target->type() != NodeType::directory)
+            return Status::not_directory("directory replacement target is not a directory");
+        if (!directory && target->type() == NodeType::directory)
+            return Status::is_directory("file cannot replace a directory");
+        if (directory && target->child_count_)
+            return Status::not_empty("replacement directory is not empty");
+    }
+    else if (&new_parent != this && new_parent.child_count_ == new_parent.children_.size())
+        return Status::no_memory("destination directory is full");
+    if (target)
+    {
+        smp::ScopedSpinLock target_guard(target->lock_);
+        if (directory)
+        {
+            target->metadata_.link_count = 0;
+            target->parent_ = nullptr;
+            --new_parent.metadata_.link_count;
+        }
+        else
+            --target->metadata_.link_count;
+        new_parent.erase_child(target_index);
+        if (&new_parent == this)
+            source_index = child_index(old_name);
+    }
+    if (&new_parent == this)
+        static_cast<void>(children_[source_index].name.assign(new_name));
+    else
+    {
+        auto &entry = new_parent.children_[new_parent.child_count_++];
+        static_cast<void>(entry.name.assign(new_name));
+        entry.node = source;
+        erase_child(source_index);
+        if (directory)
+        {
+            --metadata_.link_count;
+            ++new_parent.metadata_.link_count;
+            source->parent_ = &new_parent;
         }
     }
-    return Status::not_found("directory child not found");
+    return Status::success();
 }
 
 Metadata RamNode::metadata() const
@@ -208,6 +369,41 @@ Status RamNode::truncate(usize size)
     return Status::success();
 }
 
+Result<FixedString<96>> RamNode::directory_path(const Node &root) const
+{
+    if (root.filesystem_identity() != owner_)
+        return Status::not_found("directory belongs to another filesystem");
+    if (metadata_.type != NodeType::directory)
+        return Status::not_directory("node is not a directory");
+    FixedString<96> suffix;
+    auto *current = this;
+    for (usize depth = 0; depth < max_ram_nodes; ++depth)
+    {
+        if (!current->metadata_.link_count)
+            return Status::not_found("directory has been removed");
+        if (current == &root)
+            return suffix;
+        const auto *parent = current->parent_;
+        if (!parent)
+            return Status::not_found("directory is outside this root");
+        std::string_view name;
+        for (usize i = 0; i < parent->child_count_; ++i)
+            if (parent->children_[i].node == current)
+            {
+                name = parent->children_[i].name.view();
+                break;
+            }
+        if (name.empty())
+            return Status::not_found("directory has no live parent entry");
+        FixedString<96> path;
+        if (!path.append('/').ok() || !path.append(name).ok() || !path.append(suffix.view()).ok())
+            return Status::overflow("directory path exceeds capacity");
+        suffix = path;
+        current = parent;
+    }
+    return Status::invalid_argument("directory ancestry is cyclic");
+}
+
 Node *RamNode::lookup(std::string_view child)
 {
     smp::ScopedSpinLock guard(lock_);
@@ -217,9 +413,9 @@ Node *RamNode::lookup(std::string_view child)
     }
     for (usize i = 0; i < child_count_; ++i)
     {
-        if (children_[i]->name() == child)
+        if (children_[i].name.view() == child)
         {
-            return children_[i];
+            return children_[i].node;
         }
     }
     return nullptr;
@@ -256,11 +452,11 @@ Result<DirectoryListing> RamNode::list() const
     for (usize i = 0; i < child_count_; ++i)
     {
         auto &entry = listing.entries[listing.count++];
-        if (auto status = entry.name.assign(children_[i]->name()); !status.ok())
+        if (auto status = entry.name.assign(children_[i].name.view()); !status.ok())
         {
             return status;
         }
-        entry.metadata = children_[i]->metadata();
+        entry.metadata = children_[i].node->metadata();
     }
     return listing;
 }
@@ -341,7 +537,10 @@ Status VirtualFileSystem::create(std::string_view path, NodeType type)
     {
         return Status::overflow("RAM VFS node pool exhausted");
     }
-    return ram_parent->attach_child(*node);
+    auto status = ram_parent->attach_child(*node);
+    if (!status.ok())
+        node->metadata_.link_count = 0;
+    return status;
 }
 
 Status VirtualFileSystem::create_readonly_file(std::string_view path, std::span<const std::byte> data, u32 mode,
@@ -360,21 +559,84 @@ Status VirtualFileSystem::create_readonly_file(std::string_view path, std::span<
         if (!replace || existing->metadata().type != NodeType::regular)
             return Status::already_exists("archive path already exists");
         auto *node = static_cast<RamNode *>(existing);
+        if (node->references_ || node->metadata_.link_count != 1)
+            return Status::busy("archive replacement requires an unshared closed inode");
         auto *old_buffer = node->writable_storage();
         auto status = node->configure_readonly(leaf.view(), data, mode);
         if (status.ok())
             release_file_buffer(old_buffer);
         return status;
     }
-    if (used_nodes_ >= nodes_.size())
-        return Status::overflow("RAM VFS node pool exhausted");
-    auto &node = nodes_[used_nodes_];
-    if (auto status = node.configure_readonly(leaf.view(), data, mode); !status.ok())
-        return status;
-    if (auto status = ram_parent->attach_child(node); !status.ok())
-        return status;
-    ++used_nodes_;
-    return Status::success();
+    auto *node = allocate_node(leaf.view(), NodeType::regular, true);
+    if (!node)
+        return Status::no_memory("RAM VFS node pool exhausted");
+    auto status = node->configure_readonly(leaf.view(), data, mode);
+    if (status.ok())
+        status = ram_parent->attach_child(*node);
+    if (!status.ok())
+        node->metadata_.link_count = 0;
+    return status;
+}
+
+Status VirtualFileSystem::link(std::string_view oldpath, std::string_view newpath)
+{
+    smp::ScopedSpinLock guard(lock_);
+    usize source_mount{}, destination_mount{};
+    auto *source = lookup_unlocked(oldpath, &source_mount);
+    if (!source)
+        return Status::not_found("hard link source is missing");
+    if (source->metadata().type == NodeType::directory)
+        return Status::permission("directories cannot be hard linked");
+    FixedString<max_path_segment> leaf;
+    auto *parent = parent_for(newpath, leaf, &destination_mount);
+    if (!parent)
+        return Status::not_found("hard link parent is missing");
+    if (parent->metadata().type != NodeType::directory)
+        return Status::not_directory("hard link parent is not a directory");
+    if (newpath.size() > 1 && newpath.back() == '/')
+        return Status::not_directory("hard link destination has a trailing slash");
+    if (source_mount != destination_mount || source->filesystem_identity() != parent->filesystem_identity())
+        return Status::cross_device("hard link crosses mounts");
+    return parent->link(leaf.view(), *source);
+}
+Status VirtualFileSystem::rename(std::string_view oldpath, std::string_view newpath)
+{
+    smp::ScopedSpinLock guard(lock_);
+    FixedString<max_path_segment> old_name, new_name;
+    usize source_mount{}, destination_mount{};
+    auto *old_parent = parent_for(oldpath, old_name, &source_mount);
+    auto *new_parent = parent_for(newpath, new_name, &destination_mount);
+    if (!old_parent || !new_parent)
+        return Status::not_found("rename parent is missing or root has no parent");
+    if (old_parent->metadata().type != NodeType::directory || new_parent->metadata().type != NodeType::directory)
+        return Status::not_directory("rename parent is not a directory");
+    auto *source = old_parent->lookup(old_name.view());
+    if (!source)
+        return Status::not_found("rename source is missing");
+    auto *target = new_parent->lookup(new_name.view());
+    const bool directory = source->metadata().type == NodeType::directory;
+    if (!directory && ((oldpath.size() > 1 && oldpath.back() == '/') || (newpath.size() > 1 && newpath.back() == '/')))
+        return Status::not_directory("file rename path has a trailing slash");
+    if (source_mount != destination_mount || old_parent->filesystem_identity() != new_parent->filesystem_identity())
+        return Status::cross_device("rename crosses mounts");
+    FixedString<256> source_path, target_path;
+    static_cast<void>(lookup_unlocked(oldpath, nullptr, &source_path));
+    if (target)
+        static_cast<void>(lookup_unlocked(newpath, nullptr, &target_path));
+    for (const auto &mount : mounts_)
+    {
+        if (!mount.root)
+            continue;
+        const auto path = mount.path.view();
+        const auto within = [&](std::string_view parent) {
+            return !parent.empty() && path.starts_with(parent) && path.size() > parent.size() &&
+                   path[parent.size()] == '/';
+        };
+        if (mount.covered == source || mount.covered == target || mount.root == source || mount.root == target ||
+            (directory && within(source_path.view())) || (target && within(target_path.view())))
+            return Status::busy("rename of a mount point or its ancestor is unavailable");
+    }
+    return old_parent->rename(old_name.view(), *new_parent, new_name.view());
 }
 
 Status VirtualFileSystem::unlink(std::string_view path)
@@ -502,18 +764,73 @@ Result<Metadata> VirtualFileSystem::stat(std::string_view path)
     return node->metadata();
 }
 
-Node *VirtualFileSystem::lookup(std::string_view path)
+Node *VirtualFileSystem::lookup(std::string_view path, usize *mount_id)
 {
     smp::ScopedSpinLock guard(lock_);
-    return lookup_unlocked(path);
+    return lookup_unlocked(path, mount_id);
 }
 
-Node *VirtualFileSystem::lookup_unlocked(std::string_view path)
+Result<FixedString<96>> VirtualFileSystem::directory_path(Node &directory, usize mount_id)
+{
+    smp::ScopedSpinLock guard(lock_);
+    if (directory.metadata().type != NodeType::directory)
+        return Status::not_directory("node is not a directory");
+    auto from_root = [&](Node &root, std::string_view prefix, usize expected_mount) -> Result<FixedString<96>> {
+        auto relative = directory.directory_path(root);
+        if (!relative)
+            return relative.status();
+        FixedString<96> path;
+        if (prefix != "/" && !path.assign(prefix).ok())
+            return Status::overflow("directory path exceeds capacity");
+        if (!path.append(relative.value().view()).ok())
+            return Status::overflow("directory path exceeds capacity");
+        if (path.empty())
+            static_cast<void>(path.assign("/"));
+        // A newer mount can cover this root or one of its descendants.
+        usize actual_mount = automatic_mount_id;
+        if (lookup_unlocked(path.view(), &actual_mount) != &directory || actual_mount != expected_mount)
+            return Status::not_found("directory is covered or unreachable");
+        return path;
+    };
+    if (mount_id != automatic_mount_id)
+    {
+        if (mount_id == 0)
+            return from_root(*root_, "/", 0);
+        if (mount_id > mounts_.size() || !mounts_[mount_id - 1].root)
+            return Status::not_found("directory mount is unavailable");
+        const auto &mount = mounts_[mount_id - 1];
+        return from_root(*mount.root, mount.path.view(), mount_id);
+    }
+    auto result = from_root(*root_, "/", 0);
+    if (result)
+        return result;
+    for (usize i = 0; i < mounts_.size(); ++i)
+        if (const auto &mount = mounts_[i]; mount.root)
+        {
+            auto candidate = from_root(*mount.root, mount.path.view(), i + 1);
+            if (candidate)
+                return candidate;
+            if (candidate.status().code() != StatusCode::not_found &&
+                candidate.status().code() != StatusCode::unsupported)
+                result = candidate;
+        }
+    return result.status().code() == StatusCode::unsupported
+               ? Status::not_found("directory is not reachable in the namespace")
+               : result;
+}
+
+Node *VirtualFileSystem::lookup_unlocked(std::string_view path, usize *mount_id, FixedString<256> *resolved_path)
 {
     Node *current = root_;
-    for (const auto &mount : mounts_)
-        if (mount.root && mount.path.view() == "/")
-            current = mount.root;
+    usize current_mount = 0;
+    for (usize i = 0; i < mounts_.size(); ++i)
+        if (mounts_[i].root && mounts_[i].path.view() == "/")
+        {
+            current = mounts_[i].root;
+            current_mount = i + 1;
+        }
+    std::array<usize, max_child_nodes + 1> mount_stack{};
+    mount_stack[0] = current_mount;
     std::array<Node *, max_child_nodes + 1> stack{};
     std::array<usize, max_child_nodes> starts{};
     std::array<char, 256> canonical{};
@@ -534,6 +851,7 @@ Node *VirtualFileSystem::lookup_unlocked(std::string_view path)
             {
                 length = starts[--depth];
                 current = stack[depth];
+                current_mount = mount_stack[depth];
             }
             continue;
         }
@@ -547,33 +865,45 @@ Node *VirtualFileSystem::lookup_unlocked(std::string_view path)
         for (char c : segment)
             canonical[length++] = c;
         const std::string_view resolved(canonical.data(), length);
-        for (const auto &mount : mounts_)
-            if (mount.root && mount.path.view() == resolved)
-                current = mount.root;
+        for (usize i = 0; i < mounts_.size(); ++i)
+            if (mounts_[i].root && mounts_[i].path.view() == resolved)
+            {
+                current = mounts_[i].root;
+                current_mount = i + 1;
+            }
         stack[++depth] = current;
+        mount_stack[depth] = current_mount;
     }
+    if (path.size() > 1 && path.back() == '/' && (!current || current->metadata().type != NodeType::directory))
+        return nullptr;
+    if (mount_id)
+        *mount_id = current_mount;
+    if (resolved_path)
+        static_cast<void>(
+            resolved_path->assign(length ? std::string_view(canonical.data(), length) : std::string_view("/")));
     return current;
 }
 
-RamNode *VirtualFileSystem::allocate_node(std::string_view name, NodeType type)
+RamNode *VirtualFileSystem::allocate_node(std::string_view name, NodeType type, bool readonly)
 {
-    if (used_nodes_ >= nodes_.size())
+    for (auto &node : nodes_)
     {
-        return nullptr;
+        if (!node.reusable())
+            continue;
+        release_file_buffer(node.data_);
+        node.data_ = nullptr;
+        auto *buffer = readonly ? nullptr : allocate_file_buffer(type);
+        if (!readonly && type != NodeType::directory && !buffer)
+            return nullptr;
+        if (!node.configure(name, type, buffer).ok())
+        {
+            release_file_buffer(buffer);
+            return nullptr;
+        }
+        node.owner_ = this;
+        return &node;
     }
-    auto *buffer = allocate_file_buffer(type);
-    if ((type == NodeType::regular || type == NodeType::device || type == NodeType::symlink) && buffer == nullptr)
-    {
-        return nullptr;
-    }
-    auto &node = nodes_[used_nodes_++];
-    if (!node.configure(name, type, buffer).ok())
-    {
-        release_file_buffer(buffer);
-        --used_nodes_;
-        return nullptr;
-    }
-    return &node;
+    return nullptr;
 }
 
 FileBuffer *VirtualFileSystem::allocate_file_buffer(NodeType type)
@@ -591,6 +921,16 @@ FileBuffer *VirtualFileSystem::allocate_file_buffer(NodeType type)
             return &file_buffers_[i];
         }
     }
+    // A reusable directory slot may precede an unlinked file slot. Reclaim
+    // closed file storage independently so inode order cannot cause false ENOSPC.
+    for (auto &node : nodes_)
+        if (node.data_ && node.reusable())
+        {
+            auto *buffer = node.data_;
+            node.data_ = nullptr;
+            *buffer = {};
+            return buffer; // Its pool slot remains allocated to the new inode.
+        }
     return nullptr;
 }
 
@@ -611,7 +951,7 @@ void VirtualFileSystem::release_file_buffer(FileBuffer *buffer)
     }
 }
 
-Node *VirtualFileSystem::parent_for(std::string_view path, FixedString<max_path_segment> &leaf)
+Node *VirtualFileSystem::parent_for(std::string_view path, FixedString<max_path_segment> &leaf, usize *mount_id)
 {
     while (path.size() > 1 && path.back() == '/')
         path.remove_suffix(1);
@@ -619,7 +959,7 @@ Node *VirtualFileSystem::parent_for(std::string_view path, FixedString<max_path_
     const auto name = slash == std::string_view::npos ? path : path.substr(slash + 1);
     if (name.empty() || name == "." || name == ".." || !leaf.assign(name).ok())
         return nullptr;
-    return lookup_unlocked(slash == std::string_view::npos || slash == 0 ? "/" : path.substr(0, slash));
+    return lookup_unlocked(slash == std::string_view::npos || slash == 0 ? "/" : path.substr(0, slash), mount_id);
 }
 
 bool VirtualFileSystem::next_segment(std::string_view path, usize &cursor, std::string_view &segment)

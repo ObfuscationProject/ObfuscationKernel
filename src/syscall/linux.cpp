@@ -16,6 +16,20 @@ i64 ErrnoMapper::errno_for(Status status)
 {
     switch (status.code())
     {
+    case StatusCode::cross_device:
+        return 18;
+    case StatusCode::not_directory:
+        return 20;
+    case StatusCode::is_directory:
+        return 21;
+    case StatusCode::not_empty:
+        return 39;
+    case StatusCode::link_limit:
+        return 31;
+    case StatusCode::no_space:
+        return 28;
+    case StatusCode::permission:
+        return 1;
     case StatusCode::ok:
         return 0;
     case StatusCode::bad_descriptor:
@@ -33,6 +47,7 @@ i64 ErrnoMapper::errno_for(Status status)
     case StatusCode::already_exists:
         return linux_EEXIST;
     case StatusCode::busy:
+        return 16;
     case StatusCode::would_block:
         return linux_EAGAIN;
     case StatusCode::denied:

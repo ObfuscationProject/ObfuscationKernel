@@ -23,13 +23,13 @@ remain separate goals.
   collection, EOF/EPIPE and shared file offsets.
 - POSIX file operations: RAM and mounted nodes support path lookup, metadata,
   permissions and directories. Native scalar/vectored and positioned I/O,
-  truncate/ftruncate and fsync/fdatasync have bounded checked user copies.
+  truncate/ftruncate, fsync/fdatasync, rename/renameat and link/linkat have bounded
+  checked user copies. Directory objects retain cwd/dirfd identity across rename.
   Internal model handlers for memory, signals and futexes remain distinct from
   the supported native syscall subset.
 - Persistent storage: generic VFS mount routing and the bounded ext4 writer
   provide hierarchical files through real `BlockDevice` services. OS-owned
-  Virtio transports support seven profiles: i386, x86_64, arm32, aarch64, rv32,
-  rv64 and loongarch64. Ext4 is non-journalled and requires offline recovery
+  Virtio transports support all ten architecture profiles. Ext4 is non-journalled and requires offline recovery
   after interrupted mutation; [storage notes](modules/ext4-storage.md) define
   supported feature bits and limits.
 - Driver and module boundaries: native interfaces provide resources, MMIO,
@@ -47,9 +47,8 @@ remain separate goals.
 - POSIX process/runtime behavior: add signals, threads/clone, process groups,
   sessions, calibrated clocks, blocking sleeps and select/poll. Full POSIX
   conformance needs broader semantic and user-space integration tests.
-- Storage: add MIPS/MIPS64/PPC PCI host bridge transports, interrupt-driven I/O,
-  broader ext4 allocation/directory support, and journal recovery. Current
-  filesystems lack rename, hard-link creation and symlink traversal. Physical
+- Storage: add interrupt-driven I/O, broader ext4 allocation/directory support,
+  symlink traversal and journal recovery. Physical
   discovery, noncoherent DMA and storage synchronization across CPUs remain
   separate bring-up work.
 - Hardware SMP: bring up secondary CPUs and concurrent run queues; modeled
@@ -88,5 +87,5 @@ separately because debug test points are disabled there. Use
 `xmake qemu-window-test --no-launch` for headless window-command validation.
 
 For filesystem changes, run the hosted ext4 mutation/reopen/e2fsck suite and
-the OS's real Virtio block and two-boot ext4 persistence tests on the seven
+the OS's real Virtio block and two-boot ext4 persistence tests on all ten
 supported transports. These QEMU tests do not replace physical-machine testing.

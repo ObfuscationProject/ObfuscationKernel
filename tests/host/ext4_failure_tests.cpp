@@ -121,16 +121,48 @@ Status mutate(fs::Ext4FileSystem &filesystem, fs::Node &file, int operation)
         auto *directory = filesystem.root()->lookup("persist");
         return directory ? directory->remove("notes", false) : Status::fault("directory read failed");
     }
-    default:
+    case 4:
         return filesystem.sync();
+    case 5:
+        return filesystem.root()->link("failure-link", file);
+    case 6: {
+        auto *directory = filesystem.root()->lookup("persist");
+        return directory ? directory->rename("notes", *directory, "longer-new-name")
+                         : Status::fault("directory read failed");
+    }
+    case 7: {
+        auto *directory = filesystem.root()->lookup("persist");
+        return directory ? directory->rename("notes", *filesystem.root(), "replace-file")
+                         : Status::fault("directory read failed");
+    }
+    case 8: {
+        auto *directory = filesystem.root()->lookup("persist");
+        return directory ? filesystem.root()->rename("move-dir", *directory, "new-directory")
+                         : Status::fault("directory read failed");
+    }
+    default: {
+        auto *directory = filesystem.root()->lookup("persist");
+        return directory ? filesystem.root()->rename("move-dir", *directory, "replace-dir")
+                         : Status::fault("directory read failed");
+    }
     }
 }
 void injected_failures(const Bytes &baseline)
 {
+    FaultDevice prepared(baseline);
+    fs::Ext4FileSystem setup;
+    CHECK(setup.mount(prepared));
+    CHECK(setup.root()->create("replace-file", fs::NodeType::regular));
+    CHECK(setup.root()->lookup("replace-file")->write(0, text("replacement data")));
+    CHECK(setup.root()->create("move-dir", fs::NodeType::directory));
+    CHECK(setup.root()->lookup("move-dir")->create("child", fs::NodeType::regular));
+    CHECK(setup.root()->lookup("persist")->create("replace-dir", fs::NodeType::directory));
+    CHECK(setup.sync());
+    const auto &namespace_baseline = prepared.durable;
     usize checked = 0;
-    for (int operation = 0; operation < 5; ++operation)
+    for (int operation = 0; operation < 10; ++operation)
     {
-        FaultDevice good(baseline);
+        FaultDevice good(namespace_baseline);
         fs::Ext4FileSystem good_fs;
         CHECK(good_fs.mount(good));
         auto *good_file = notes(good_fs);
@@ -142,7 +174,7 @@ void injected_failures(const Bytes &baseline)
         for (usize failure = 1; failure <= operations; ++failure)
             for (bool partial : {false, true})
             {
-                FaultDevice disk(baseline);
+                FaultDevice disk(namespace_baseline);
                 fs::Ext4FileSystem filesystem;
                 CHECK(filesystem.mount(disk));
                 auto *file = notes(filesystem);
@@ -162,6 +194,51 @@ void injected_failures(const Bytes &baseline)
             }
     }
     std::printf("PASS %zu injected ext4 read/write/flush failures: dirty marker and sticky quarantine\n", checked);
+}
+void namespace_extent_limit(const Bytes &baseline)
+{
+    FaultDevice disk(baseline);
+    fs::Ext4FileSystem filesystem;
+    CHECK(filesystem.mount(disk));
+    auto *root = filesystem.root();
+    CHECK(root->create("capacity", fs::NodeType::directory));
+    auto *directory = root->lookup("capacity");
+    auto *source = notes(filesystem);
+    CHECK(directory && source);
+    u64 previous_blocks = 0;
+    unsigned blockers = 0, links = 0;
+    bool exhausted = false;
+    for (unsigned i = 0; i < 1024; ++i)
+    {
+        const auto blocks = directory->metadata().blocks;
+        if (blocks != previous_blocks)
+        {
+            // Interleave real file blocks so directory growth needs separate extents.
+            char blocker[32];
+            std::snprintf(blocker, sizeof(blocker), "blocker-%u", blockers++);
+            CHECK(root->create(blocker, fs::NodeType::regular));
+            CHECK(root->lookup(blocker)->write(0, text("occupied")));
+            previous_blocks = blocks;
+        }
+        char name[32];
+        std::snprintf(name, sizeof(name), "%031u", i);
+        auto status = directory->link(name, *source);
+        if (!status.ok())
+        {
+            CHECK(status.code() == StatusCode::overflow);
+            CHECK(!directory->lookup(name));
+            exhausted = true;
+            break;
+        }
+        ++links;
+    }
+    CHECK(exhausted && links > 0 && source->metadata().link_count == links + 1);
+    // Allocation and rollback wrote metadata before hitting the inline-extent
+    // limit. Never mark such an interrupted multi-step namespace change clean.
+    CHECK(!filesystem.sync());
+    CHECK(read16(disk.cache, 1082) == 0 && read16(disk.durable, 1082) == 0);
+    CHECK(!root->create("after-capacity", fs::NodeType::regular));
+    std::puts("PASS ext4 namespace extent-capacity failure preserves source links and quarantines partial mutation");
 }
 void malformed_metadata(const Bytes &baseline)
 {
@@ -312,6 +389,7 @@ int main(int argc, char **argv)
     CHECK(std::fread(baseline.data(), 1, baseline.size(), file) == baseline.size());
     std::fclose(file);
     injected_failures(baseline);
+    namespace_extent_limit(baseline);
     malformed_metadata(baseline);
     ownership(baseline);
     cached_lifetime(baseline);

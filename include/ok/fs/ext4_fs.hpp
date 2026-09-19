@@ -20,6 +20,13 @@ class Ext4Node final : public Node
     Status sync() override;
     Status retain() override;
     Status release() override;
+    const void *filesystem_identity() const override
+    {
+        return fs_;
+    }
+    Status link(std::string_view name, Node &target) override;
+    Status rename(std::string_view old_name, Node &new_parent, std::string_view new_name) override;
+    Result<FixedString<96>> directory_path(const Node &root) const override;
     Node *lookup(std::string_view child) override;
     Status create(std::string_view name, NodeType type) override;
     Status remove(std::string_view name, bool directory) override;
@@ -74,6 +81,24 @@ class Ext4FileSystem final
     Result<Location> find(const Inode &directory, std::string_view name) const;
     Result<u32> child(const Inode &directory, std::string_view name) const;
     Status insert(u32 parent, Inode &directory, std::string_view name, u32 ino, bool dir);
+    Status replace_entry(const Inode &directory, std::string_view name, u32 ino, bool is_directory);
+    Result<bool> empty_directory(const Inode &directory) const;
+    Result<FixedString<max_path_segment>> child_name(const Inode &directory, u32 ino) const;
+    Status validate_move(u32 source, u32 destination_parent) const;
+    struct NamespaceMutation
+    {
+        explicit NamespaceMutation(Ext4FileSystem &value) : fs(value), writes(value.write_sequence_)
+        {
+        }
+        ~NamespaceMutation()
+        {
+            if (!committed && fs.write_sequence_ != writes)
+                fs.failed_ = true;
+        }
+        Ext4FileSystem &fs;
+        u64 writes;
+        bool committed{false};
+    };
     Status zero_tail(const Inode &inode);
     Status resize(u32 ino, Inode &inode, usize size);
     Status destroy(u32 ino);
@@ -81,6 +106,7 @@ class Ext4FileSystem final
     Metadata metadata(const Inode &inode) const;
     Status writable(const Inode &inode) const;
     driver::BlockDevice *device_{nullptr};
+    u64 write_sequence_{0};
     bool mounted_{false};
     bool writable_{false};
     bool dirty_{false};

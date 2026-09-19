@@ -47,6 +47,8 @@ Status PosixService::require_parent_directory_access(std::string_view normalized
     {
         return Status::invalid_argument("path is not normalized");
     }
+    while (normalized_path.size() > 1 && normalized_path.back() == '/')
+        normalized_path.remove_suffix(1);
     if (normalized_path == "/")
     {
         return Status::invalid_argument("root has no parent directory");
@@ -78,9 +80,59 @@ Status PosixService::require_parent_directory_access(std::string_view normalized
     }
     if (metadata.value().type != fs::NodeType::directory)
     {
-        return Status::not_found("parent directory not found");
+        return Status::not_directory("parent is not a directory");
     }
     return fs::require_access(metadata.value(), credentials(), access);
+}
+
+Status PosixService::require_path_search(Fd dirfd, std::string_view path)
+{
+    FixedString<256> prefix;
+    if (path.front() == '/')
+        static_cast<void>(prefix.assign("/"));
+    else if (dirfd == at_FDCWD)
+    {
+        auto cwd = current_directory();
+        if (!cwd)
+            return cwd.status();
+        static_cast<void>(prefix.assign(cwd.value()));
+    }
+    else
+    {
+        auto *entry = descriptor(dirfd);
+        if (!entry || !entry->node)
+            return Status::bad_descriptor("bad directory file descriptor");
+        auto base = vfs_->directory_path(*entry->node, entry->mount_id);
+        if (!base)
+            return base.status();
+        static_cast<void>(prefix.assign(base.value().view()));
+    }
+    // Search starts at the supplied directory, not at its ancestors. An already
+    // held cwd/dirfd remains usable if an ancestor later loses search permission.
+    usize cursor = 0;
+    while (cursor < path.size())
+    {
+        while (cursor < path.size() && path[cursor] == '/')
+            ++cursor;
+        if (cursor == path.size())
+            break;
+        auto parent = vfs_->stat(prefix.view());
+        if (!parent)
+            return parent.status();
+        if (parent.value().type != fs::NodeType::directory)
+            return Status::not_directory("path component is not a directory");
+        if (auto status = fs::require_access(parent.value(), credentials(), fs::access_execute); !status.ok())
+            return status;
+        const auto begin = cursor;
+        while (cursor < path.size() && path[cursor] != '/')
+            ++cursor;
+        if (prefix.view() != "/")
+            if (auto status = prefix.append('/'); !status.ok())
+                return status;
+        if (auto status = prefix.append(path.substr(begin, cursor - begin)); !status.ok())
+            return status;
+    }
+    return Status::success();
 }
 
 Status PosixService::mkdir(std::string_view path, u32 mode)
@@ -114,6 +166,99 @@ Status PosixService::mkdirat(Fd dirfd, std::string_view path, u32 mode)
         return status;
     }
     return vfs_->chown(normalized.value(), euid(), egid());
+}
+
+Status PosixService::link(std::string_view oldpath, std::string_view newpath)
+{
+    return linkat(at_FDCWD, oldpath, at_FDCWD, newpath);
+}
+
+Status PosixService::linkat(Fd olddirfd, std::string_view oldpath, Fd newdirfd, std::string_view newpath, u32 flags)
+{
+    if (!initialized_ || !vfs_)
+        return Status::not_initialized("POSIX service not initialized");
+    if (flags)
+        return Status::invalid_argument("linkat flags are unsupported");
+    if (oldpath.empty() || newpath.empty())
+        return Status::not_found("empty link path");
+    if (auto status = require_path_search(olddirfd, oldpath); !status.ok())
+        return status;
+    if (auto status = require_path_search(newdirfd, newpath); !status.ok())
+        return status;
+    auto old_resolved = resolve_path(olddirfd, oldpath);
+    if (!old_resolved)
+        return old_resolved.status();
+    // resolve_path uses one scratch buffer. Preserve the first path before
+    // resolving a relative destination, including when both dirfds differ.
+    FixedString<256> source;
+    if (auto status = source.assign(old_resolved.value()); !status.ok())
+        return status;
+    auto new_resolved = resolve_path(newdirfd, newpath);
+    if (!new_resolved)
+        return new_resolved.status();
+    if (auto status = require_parent_directory_access(source.view(), fs::access_execute); !status.ok())
+        return status;
+    if (auto status = require_parent_directory_access(new_resolved.value(), fs::access_write | fs::access_execute);
+        !status.ok())
+        return status;
+    auto *node = vfs_->lookup(source.view());
+    if (!node)
+        return Status::not_found("link source not found");
+    if (node->metadata().type == fs::NodeType::directory)
+        return Status::permission("directory hard links are forbidden");
+    return vfs_->link(source.view(), new_resolved.value());
+}
+
+Status PosixService::rename(std::string_view oldpath, std::string_view newpath)
+{
+    return renameat(at_FDCWD, oldpath, at_FDCWD, newpath);
+}
+
+Status PosixService::renameat(Fd olddirfd, std::string_view oldpath, Fd newdirfd, std::string_view newpath)
+{
+    if (!initialized_ || !vfs_)
+        return Status::not_initialized("POSIX service not initialized");
+    if (oldpath.empty() || newpath.empty())
+        return Status::not_found("empty rename path");
+    if (auto status = require_path_search(olddirfd, oldpath); !status.ok())
+        return status;
+    if (auto status = require_path_search(newdirfd, newpath); !status.ok())
+        return status;
+    auto old_resolved = resolve_path(olddirfd, oldpath);
+    if (!old_resolved)
+        return old_resolved.status();
+    FixedString<256> source;
+    if (auto status = source.assign(old_resolved.value()); !status.ok())
+        return status;
+    auto new_resolved = resolve_path(newdirfd, newpath);
+    if (!new_resolved)
+        return new_resolved.status();
+    if (auto status = require_parent_directory_access(source.view(), fs::access_write | fs::access_execute);
+        !status.ok())
+        return status;
+    if (auto status = require_parent_directory_access(new_resolved.value(), fs::access_write | fs::access_execute);
+        !status.ok())
+        return status;
+    const auto sticky_access = [&](std::string_view path) -> Status {
+        while (path.size() > 1 && path.back() == '/')
+            path.remove_suffix(1);
+        auto *node = vfs_->lookup(path);
+        if (!node || euid() == 0)
+            return Status::success();
+        const auto slash = path.find_last_of('/');
+        auto *parent = vfs_->lookup(slash == 0 ? "/" : path.substr(0, slash));
+        if (!parent)
+            return Status::not_found("rename parent not found");
+        const auto metadata = parent->metadata();
+        if ((metadata.mode & 01000u) && euid() != metadata.uid && euid() != node->metadata().uid)
+            return Status::permission("sticky directory protects another owner's file");
+        return Status::success();
+    };
+    if (auto status = sticky_access(source.view()); !status.ok())
+        return status;
+    if (auto status = sticky_access(new_resolved.value()); !status.ok())
+        return status;
+    return vfs_->rename(source.view(), new_resolved.value());
 }
 
 Status PosixService::unlink(std::string_view path)
@@ -175,7 +320,8 @@ Status PosixService::chdir(std::string_view path)
     {
         return normalized.status();
     }
-    auto *node = vfs_->lookup(normalized.value());
+    usize mount_id = 0;
+    auto *node = vfs_->lookup(normalized.value(), &mount_id);
     if (node == nullptr || node->metadata().type != fs::NodeType::directory)
     {
         return Status::not_found("directory not found");
@@ -184,22 +330,54 @@ Status PosixService::chdir(std::string_view path)
     {
         return status;
     }
-    return resources().cwd.assign(normalized.value());
+    auto canonical = vfs_->directory_path(*node, mount_id);
+    if (!canonical)
+        return canonical.status();
+    if (auto status = node->retain(); !status.ok())
+        return status;
+    auto &owned = resources();
+    if (owned.cwd_node)
+        static_cast<void>(owned.cwd_node->release());
+    owned.cwd_node = node;
+    owned.cwd_mount_id = mount_id;
+    return owned.cwd.assign(canonical.value().view());
+}
+
+Result<std::string_view> PosixService::current_directory()
+{
+    auto &owned = resources();
+    if (!owned.cwd_node)
+        return owned.cwd.view();
+    auto path = vfs_->directory_path(*owned.cwd_node, owned.cwd_mount_id);
+    if (!path)
+        return path.status();
+    if (auto status = owned.cwd.assign(path.value().view()); !status.ok())
+        return status;
+    return owned.cwd.view();
 }
 
 Status PosixService::fchdir(Fd fd)
 {
     auto *entry = descriptor(fd);
-    if (entry == nullptr || !entry->used || entry->node == nullptr ||
-        entry->node->metadata().type != fs::NodeType::directory)
-    {
-        return Status::invalid_argument("file descriptor is not a directory");
-    }
+    if (entry == nullptr || !entry->used || entry->node == nullptr)
+        return Status::bad_descriptor("bad directory file descriptor");
+    if (entry->node->metadata().type != fs::NodeType::directory)
+        return Status::not_directory("file descriptor is not a directory");
     if (auto status = fs::require_access(entry->node->metadata(), credentials(), fs::access_execute); !status.ok())
     {
         return status;
     }
-    return resources().cwd.assign(entry->path.view());
+    if (auto status = entry->node->retain(); !status.ok())
+        return status;
+    auto &owned = resources();
+    if (owned.cwd_node)
+        static_cast<void>(owned.cwd_node->release());
+    owned.cwd_node = entry->node;
+    owned.cwd_mount_id = entry->mount_id;
+    // A detached directory is still a valid descriptor, but getcwd and relative
+    // operations must fail rather than resolve through a replacement pathname.
+    owned.cwd.clear();
+    return Status::success();
 }
 
 Status PosixService::access(std::string_view path, u32 mode)

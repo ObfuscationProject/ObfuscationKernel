@@ -363,6 +363,33 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
         return status;
     }
 
+    if (auto status = add(syscall::Number::rename, "rename", [](void *context, const syscall::Request &request) {
+            return status_response(static_cast<posix::PosixService *>(context)->rename(
+                bounded_c_string(request.args[0]), bounded_c_string(request.args[1])));
+        });
+        !status.ok())
+        return status;
+    if (auto status = add(syscall::Number::link, "link", [](void *context, const syscall::Request &request) {
+            return status_response(static_cast<posix::PosixService *>(context)->link(
+                bounded_c_string(request.args[0]), bounded_c_string(request.args[1])));
+        });
+        !status.ok())
+        return status;
+    if (auto status = add(syscall::Number::renameat, "renameat", [](void *context, const syscall::Request &request) {
+            return status_response(static_cast<posix::PosixService *>(context)->renameat(
+                static_cast<posix::Fd>(request.args[0]), bounded_c_string(request.args[1]),
+                static_cast<posix::Fd>(request.args[2]), bounded_c_string(request.args[3])));
+        });
+        !status.ok())
+        return status;
+    if (auto status = add(syscall::Number::linkat, "linkat", [](void *context, const syscall::Request &request) {
+            return status_response(static_cast<posix::PosixService *>(context)->linkat(
+                static_cast<posix::Fd>(request.args[0]), bounded_c_string(request.args[1]),
+                static_cast<posix::Fd>(request.args[2]), bounded_c_string(request.args[3]),
+                static_cast<u32>(request.args[4])));
+        });
+        !status.ok())
+        return status;
     if (auto status = add(syscall::Number::mkdir, "mkdir", [](void *context, const syscall::Request &request) {
             return status_response(static_cast<posix::PosixService *>(context)->mkdir(
                 bounded_c_string(request.args[0]), static_cast<u32>(request.args[1])));
@@ -422,7 +449,10 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
         return status;
     }
     if (auto status = add(syscall::Number::getcwd, "getcwd", [](void *context, const syscall::Request &request) {
-            auto cwd = static_cast<posix::PosixService *>(context)->getcwd();
+            auto current = static_cast<posix::PosixService *>(context)->current_directory();
+            if (!current)
+                return syscall::Response{.value = -1, .status = current.status()};
+            auto cwd = current.value();
             auto *out = reinterpret_cast<char *>(request.args[0]);
             const auto capacity = static_cast<usize>(request.args[1]);
             if (out == nullptr || capacity <= cwd.size())

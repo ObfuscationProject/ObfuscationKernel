@@ -122,14 +122,17 @@ Result<std::string_view> PosixService::normalize_path(std::string_view path)
 {
     if (path.empty())
     {
-        return resources().cwd.view();
+        return Status::not_found("empty pathname");
     }
     if (path[0] == '/')
     {
         return path;
     }
+    auto cwd = current_directory();
+    if (!cwd)
+        return cwd.status();
     normalized_path_.clear();
-    if (auto status = normalized_path_.append(resources().cwd.view()); !status.ok())
+    if (auto status = normalized_path_.append(cwd.value()); !status.ok())
     {
         return status;
     }
@@ -151,29 +154,22 @@ Result<std::string_view> PosixService::resolve_path(Fd dirfd, std::string_view p
 {
     if (path.empty())
     {
-        if (dirfd == at_FDCWD)
-        {
-            return resources().cwd.view();
-        }
-        auto *entry = descriptor(dirfd);
-        if (entry == nullptr || !entry->used)
-        {
-            return Status::invalid_argument("bad directory file descriptor");
-        }
-        return entry->path.view();
+        return Status::not_found("empty pathname");
     }
     if (path[0] == '/' || dirfd == at_FDCWD)
     {
         return normalize_path(path);
     }
     auto *entry = descriptor(dirfd);
-    if (entry == nullptr || !entry->used || entry->node == nullptr ||
-        entry->node->metadata().type != fs::NodeType::directory)
-    {
-        return Status::invalid_argument("bad directory file descriptor");
-    }
+    if (entry == nullptr || !entry->used || entry->node == nullptr)
+        return Status::bad_descriptor("bad directory file descriptor");
+    if (entry->node->metadata().type != fs::NodeType::directory)
+        return Status::not_directory("file descriptor is not a directory");
+    auto directory = vfs_->directory_path(*entry->node, entry->mount_id);
+    if (!directory)
+        return directory.status();
     normalized_path_.clear();
-    if (auto status = normalized_path_.append(entry->path.view()); !status.ok())
+    if (auto status = normalized_path_.append(directory.value().view()); !status.ok())
     {
         return status;
     }

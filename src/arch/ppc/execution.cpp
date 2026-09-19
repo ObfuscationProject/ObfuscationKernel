@@ -18,7 +18,7 @@ struct Space
 std::array<Space, max_address_spaces> spaces{};
 bool initialized{};
 bool executing{};
-u32 next_tlb = 2;
+u32 next_tlb = 3;
 extern "C" void ok_ppc_execution_enter(UserFrame *, Trap *);
 extern "C" const u8 ok_ppc_vectors[];
 extern "C" void ok_platform_console_write_char(char);
@@ -53,14 +53,14 @@ void write_tlb(u32 index, u32 mas1, u32 mas2, u32 mas3, u32 mas7 = 0)
 }
 void invalidate_user_tlb()
 {
-    for (u32 i = 2; i < 16; ++i)
+    for (u32 i = 3; i < 16; ++i)
         write_tlb(i, 0, 0, 0);
-    next_tlb = 2;
+    next_tlb = 3;
 }
 void load_page(const PageMapping &page)
 {
     // TLB1 is a fully associative hardware cache. Software refills misses from
-    // the current address space; only slots 2..15 can contain user mappings.
+    // the current address space; only slots 3..15 can contain user mappings.
     u32 permissions = 0x03; // SR, UR.
     if ((page.flags & page_write) != 0)
         permissions |= 0x0c; // SW, UW.
@@ -68,7 +68,7 @@ void load_page(const PageMapping &page)
         permissions |= 0x30; // SX, UX.
     write_tlb(next_tlb, 0x80000100, page.virtual_address, page.physical_address | permissions);
     if (++next_tlb == 16)
-        next_tlb = 2;
+        next_tlb = 3;
 }
 template <u32 Spr> u32 read_spr()
 {

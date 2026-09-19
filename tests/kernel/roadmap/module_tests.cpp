@@ -328,17 +328,20 @@ std::array<std::byte, 1024> make_fake_linux_ko()
 
 Status test_module_abi_contract()
 {
-    ManifestOverrideModule wrong_abi{ModuleManifest{
-        .name = "wrong-abi",
-        .version = "1",
-        .module_class = "test",
-        .abi_version = kernel_module_abi_version + 1,
-    }};
-    ModuleManager wrong_abi_manager;
-    if (wrong_abi_manager.register_module(wrong_abi).code() != StatusCode::unsupported ||
-        wrong_abi.state() != ModuleState::failed)
+    for (const u32 version : std::array<u32, 3>{1, 2, kernel_module_abi_version + 1})
     {
-        return Status::fault("unsupported module ABI version was not rejected");
+        ManifestOverrideModule wrong_abi{ModuleManifest{
+            .name = "wrong-abi",
+            .version = "1",
+            .module_class = "test",
+            .abi_version = version,
+        }};
+        ModuleManager wrong_abi_manager;
+        if (wrong_abi_manager.register_module(wrong_abi).code() != StatusCode::unsupported ||
+            wrong_abi.state() != ModuleState::failed || wrong_abi_manager.module_count() != 0)
+        {
+            return Status::fault("unsupported module ABI version was not rejected");
+        }
     }
 
     static constexpr std::array<std::string_view, 1> exports{"bad.service"};

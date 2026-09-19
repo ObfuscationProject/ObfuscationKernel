@@ -34,7 +34,7 @@ def export(args: argparse.Namespace) -> None:
             raise ValueError(f"compiler target {compiler_target} != {args.triple}")
         compiler_version = subprocess.check_output([str(args.compiler), "-dumpfullversion"], text=True).strip()
         manifest = {
-            "schema": 1, "kernel_version": args.version, "abi_version": 2,
+            "schema": 1, "kernel_version": args.version, "abi_version": 3,
             "arch": args.arch, "mode": args.mode, "triple": args.triple,
             "image_format": args.image_format, "kernel_gui": "OK_ENABLE_KERNEL_GUI" in args.define, "compiler": {"family": "gcc", "version": compiler_version},
             "cxxflags": args.cxxflag, "asflags": args.asflag, "ldflags": args.ldflag, "defines": args.define,

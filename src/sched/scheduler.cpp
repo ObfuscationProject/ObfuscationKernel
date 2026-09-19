@@ -714,6 +714,9 @@ void SchedulerState::release_resources(ProcessResources &resources)
             static_cast<void>(close_descriptor(resources, fd));
     resources.memory = {};
     resources.mappings = {};
+    if (resources.cwd_node)
+        static_cast<void>(resources.cwd_node->release());
+    resources.cwd_node = nullptr;
 }
 usize SchedulerState::open_description_count() const
 {
@@ -781,9 +784,16 @@ Result<ProcessId> SchedulerState::fork_process(ProcessId parent)
     for (const auto &thread : source->threads())
         if (thread.tid == current_tid(0) && current_pid(0) == parent)
             calling_thread = &thread;
+    if (source->resources().cwd_node)
+        if (auto status = source->resources().cwd_node->retain(); !status.ok())
+            return status;
     auto child_pid = create_process(source->name(), calling_thread->context);
     if (!child_pid)
+    {
+        if (source->resources().cwd_node)
+            static_cast<void>(source->resources().cwd_node->release());
         return child_pid.status();
+    }
     auto *child = find(child_pid.value());
     release_resources(child->resources());
     child->resources() = source->resources();

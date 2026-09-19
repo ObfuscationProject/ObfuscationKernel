@@ -52,6 +52,7 @@ struct OpenFileDescription
     usize references{0};
     u16 pipe{invalid_description};
     fs::Node *node{nullptr};
+    usize mount_id{0};
     FixedString<96> path{};
 };
 
@@ -124,6 +125,8 @@ struct ProcessResources
     MemoryMap memory{};
     std::array<MemoryMapping, 32> mappings{};
     FixedString<96> cwd{"/"};
+    fs::Node *cwd_node{nullptr};
+    usize cwd_mount_id{0};
     uptr program_break_base{0x1000'0000};
     uptr program_break{0x1000'0000};
     uptr program_break_limit{0x1010'0000};

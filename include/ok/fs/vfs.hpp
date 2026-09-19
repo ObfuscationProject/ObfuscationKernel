@@ -115,6 +115,8 @@ struct DirectoryListing
     usize count{0};
 };
 
+class VirtualFileSystem;
+
 class Node
 {
   public:
@@ -147,6 +149,23 @@ class Node
     {
         return Status::unsupported("remove unavailable");
     }
+    [[nodiscard]] virtual const void *filesystem_identity() const
+    {
+        return nullptr;
+    }
+    virtual Status link(std::string_view, Node &)
+    {
+        return Status::unsupported("hard links unavailable");
+    }
+    virtual Status rename(std::string_view, Node &, std::string_view)
+    {
+        return Status::unsupported("rename unavailable");
+    }
+    // Path relative to a filesystem directory root, rebuilt from live entries.
+    virtual Result<FixedString<96>> directory_path(const Node &) const
+    {
+        return Status::unsupported("directory path reconstruction unavailable");
+    }
     virtual Node *lookup(std::string_view child) = 0;
     virtual Status create(std::string_view name, NodeType type) = 0;
     virtual Status chmod(u32 mode) = 0;
@@ -160,7 +179,7 @@ class RamNode final : public Node
 
     Status configure(std::string_view name, NodeType type, FileBuffer *data);
     Status configure_readonly(std::string_view name, std::span<const std::byte> data, u32 mode);
-    Status attach_child(RamNode &child);
+    Status attach_child(RamNode &child, std::string_view name = {});
     Status detach_child(std::string_view child);
 
     [[nodiscard]] std::string_view name() const override
@@ -171,6 +190,15 @@ class RamNode final : public Node
     Result<FileBuffer> read(usize offset, usize count) const override;
     Status write(usize offset, std::span<const std::byte> data) override;
     Status truncate(usize size) override;
+    Status retain() override;
+    Status release() override;
+    const void *filesystem_identity() const override
+    {
+        return owner_;
+    }
+    Status link(std::string_view name, Node &target) override;
+    Status rename(std::string_view old_name, Node &new_parent, std::string_view new_name) override;
+    Result<FixedString<96>> directory_path(const Node &root) const override;
     Node *lookup(std::string_view child) override;
     Status create(std::string_view name, NodeType type) override;
     Status chmod(u32 mode) override;
@@ -190,13 +218,25 @@ class RamNode final : public Node
     }
 
   private:
+    friend class VirtualFileSystem;
+    [[nodiscard]] bool reusable() const;
+    [[nodiscard]] usize child_index(std::string_view name) const;
+    void erase_child(usize index);
+    struct Child
+    {
+        FixedString<max_path_segment> name{};
+        RamNode *node{nullptr};
+    };
+    VirtualFileSystem *owner_{nullptr};
+    RamNode *parent_{nullptr};
+    u32 references_{0};
     bool used_{false};
     FixedString<max_path_segment> name_{};
     Metadata metadata_{};
     FileBuffer *data_{nullptr};
     std::span<const std::byte> readonly_data_{};
     bool readonly_{false};
-    std::array<RamNode *, max_child_nodes> children_{};
+    std::array<Child, max_child_nodes> children_{};
     usize child_count_{0};
     mutable smp::SpinLock lock_{};
 };
@@ -218,6 +258,8 @@ class VirtualFileSystem final
     Status create(std::string_view path, NodeType type);
     Status create_readonly_file(std::string_view path, std::span<const std::byte> data, u32 mode = 0555u,
                                 bool replace = false);
+    Status link(std::string_view oldpath, std::string_view newpath);
+    Status rename(std::string_view oldpath, std::string_view newpath);
     Status unlink(std::string_view path);
     Status rmdir(std::string_view path);
     Status chmod(std::string_view path, u32 mode);
@@ -226,14 +268,20 @@ class VirtualFileSystem final
     Result<FileBuffer> read_file(std::string_view path);
     Result<DirectoryListing> list(std::string_view path);
     Result<Metadata> stat(std::string_view path);
-    [[nodiscard]] Node *lookup(std::string_view path);
+    [[nodiscard]] Node *lookup(std::string_view path, usize *mount_id = nullptr);
+    // Zero is the underlying RAM namespace; mounted roots have stable nonzero IDs.
+    // Automatic selection is for inspection only. Directory handles retain an ID.
+    static constexpr usize automatic_mount_id = ~usize{0};
+    Result<FixedString<96>> directory_path(Node &directory, usize mount_id = automatic_mount_id);
 
   private:
-    [[nodiscard]] Node *lookup_unlocked(std::string_view path);
-    [[nodiscard]] RamNode *allocate_node(std::string_view name, NodeType type);
+    [[nodiscard]] Node *lookup_unlocked(std::string_view path, usize *mount_id = nullptr,
+                                        FixedString<256> *canonical = nullptr);
+    [[nodiscard]] RamNode *allocate_node(std::string_view name, NodeType type, bool readonly = false);
     [[nodiscard]] FileBuffer *allocate_file_buffer(NodeType type);
     void release_file_buffer(FileBuffer *buffer);
-    [[nodiscard]] Node *parent_for(std::string_view path, FixedString<max_path_segment> &leaf);
+    [[nodiscard]] Node *parent_for(std::string_view path, FixedString<max_path_segment> &leaf,
+                                   usize *mount_id = nullptr);
     [[nodiscard]] static bool next_segment(std::string_view path, usize &cursor, std::string_view &segment);
 
     [[nodiscard]] RamNode *ram_node(Node *node);
@@ -248,7 +296,6 @@ class VirtualFileSystem final
     std::array<RamNode, max_ram_nodes> nodes_{};
     std::array<FileBuffer, max_ram_file_buffers> file_buffers_{};
     std::array<bool, max_ram_file_buffers> file_buffer_used_{};
-    usize used_nodes_{0};
     RamNode *root_{nullptr};
     mutable smp::SpinLock lock_{};
 };

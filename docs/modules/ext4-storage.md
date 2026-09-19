@@ -2,7 +2,7 @@
 
 `Ext4FileSystem` is a kernel filesystem mechanism over the runtime `BlockDevice`
 service boundary. `Ext4Node` integrates lookup, listing, permissions, creation,
-read/write, truncate, unlink/rmdir and synchronization with the generic VFS mount
+read/write, truncate, unlink/rmdir, rename, hard links and synchronization with the generic VFS mount
 namespace. The OS owns Virtio transport drivers, image creation and root selection.
 The old `Ext4Volume` metadata reader and RAM-backed block models remain separate.
 
@@ -20,8 +20,7 @@ The initial writer deliberately supports a bounded, non-journalled ext4 subset:
 - 128 cached nodes, 31-byte component names, 64-entry directory listing buffers.
 
 Journal/JBD2 replay, metadata checksums, 64-bit group descriptors, indexed
-directories, bigalloc, inline data, symlink traversal, rename and hard-link
-creation are not implemented. Unsupported feature bits are rejected before any
+directories, bigalloc, inline data and symlink traversal are not implemented. Unsupported feature bits are rejected before any
 write. The default modern `mke2fs -t ext4` feature set is therefore not writable
 by this implementation. ObfuscationOS `tools/mkext4.py` produces the supported
 format explicitly, with initialized inode tables and no journal.
@@ -31,7 +30,16 @@ format explicitly, with initialized inode tables and no journal.
 Block and inode allocation update bitmaps and free counts. Unlink removes the
 name immediately; an open inode remains available until its last description
 closes, then its blocks and inode are returned to the allocator. Directory
-creation/removal updates link counts and group directory counters.
+creation/removal updates link counts and group directory counters. Hard links
+share the same inode and retain it until the last name and open reference are
+released. Rename handles files, directories, replacement, same-inode no-ops and
+cross-parent `..` updates. VFS rejects cross-mount moves and mount-point changes;
+directory moves reject cycles and non-empty replacement targets.
+
+Namespace mutation is serialized by the VFS lock. If a multi-write rename/link
+fails after changing metadata, the mount is quarantined and cannot be marked
+clean by a later sync. This preserves failure detection, not rollback or power-loss
+atomicity.
 
 Before the first mutation, the filesystem clears the superblock clean bit and
 flushes it. Synchronization flushes data/metadata, then marks the volume clean
@@ -49,13 +57,18 @@ mount formats a disk, and errors do not trigger automatic repair.
 `python3 scripts/test_ext4_fs.py` builds a hosted file-backed block adapter,
 mutates/reopens images at all three block sizes and checks each with `e2fsck -fn`.
 It covers overwrite, zero write, holes, truncate, open-unlink lifetime,
-mkdir/rmdir and repeated allocation/free. A separate hosted cache/durable-disk
-model injects 636 read, partial-write and flush failures across the three block
-sizes. It also checks malformed metadata, pinned/unlinked node lifetime and
+mkdir/rmdir, rename, hard links, directory topology and repeated allocation/free. A separate hosted cache/durable-disk
+model injects 1,776 read, partial-write and flush failures across the three block
+sizes, including link, file/directory rename and replacement. Logical extent-capacity
+failures also verify quarantine after a partial namespace change. It also checks malformed metadata, pinned/unlinked node lifetime and
 32-bit owner IDs. These are failure models, not physical power-loss tests.
 
 The separate OS `scripts/test_persistent_ext4.py` boots a real Virtio disk,
-loads `/init` and applications from ext4, writes a note through native syscalls,
-flushes, restarts QEMU on the same image, reads the note, and cross-checks the
-contents with `debugfs` and `e2fsck`. Its `scope=hardware` means QEMU guest
+loads `/init` and applications from ext4, writes a note, renames files/directories and creates hard links through native
+syscalls, flushes, restarts QEMU on the same image, reads each surviving name,
+and cross-checks contents, inode identities and link counts with `debugfs` and `e2fsck`. Its `scope=hardware` means QEMU guest
 execution; physical machines and hardware SMP have not been validated.
+
+Run `python3 scripts/test_vfs_namespace.py` for RAM namespace, reference lifetime,
+mount isolation and capacity coverage; `python3 scripts/test_process_resources.py`
+checks POSIX permissions and retained cwd/dirfd behavior on all ten host profiles.

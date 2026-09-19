@@ -39,6 +39,9 @@ otherwise.
 - `mkdirat`
 - `unlink`
 - `unlinkat`
+- `rmdir`
+- `rename`, `renameat`
+- `link`, `linkat`
 - `chdir`
 - `fchdir`
 - `getcwd`
@@ -140,3 +143,29 @@ The positioned-I/O and synchronization entry points distinguish bad descriptors
 (`EBADF`), nonseekable streams (`ESPIPE` for positioned I/O), and unsupported
 synchronization targets (`EINVAL`). These cases are checked by the userland
 acceptance program and the host process-resource model tests.
+
+## Namespace operations
+
+`rename`/`renameat` and `link`/`linkat` operate on RAM and writable ext4 mounts.
+Both user pathname arguments are copied before mutation. Directory-relative
+calls support independent source/destination dirfds and `AT_FDCWD`. A hard link
+shares inode contents and link counts; directory hard links are rejected.
+Renaming two names of the same inode succeeds without removing either name.
+Replacing a file keeps its old open descriptions usable until final close.
+Directory rename supports cross-parent moves and empty-directory replacement,
+and rejects ancestry cycles. Cross-mount operations return `EXDEV`.
+
+Cwd and directory descriptors retain directory objects and their mount identity, so relative operations,
+`fchdir` and `getcwd` follow a renamed directory, including after fork. Two mounts
+of one filesystem remain distinct for `..` traversal and cross-mount checks. Removed,
+replaced or mount-covered directories cannot be reconstructed in the current
+namespace: `getcwd` and relative path operations return `ENOENT` instead of
+resolving a reused pathname. Descriptor reads still use the retained object.
+Paths remain bounded to 95 bytes when reconstructed. Resolving paths within
+detached directories and symbolic-link traversal remain future work.
+
+Rename requires write/search access to both parents and honors sticky-directory
+ownership. Both naming calls check search permission on every traversed directory,
+starting at root for absolute paths or the held cwd/dirfd for relative paths. `linkat` currently accepts only flags zero; symlink-follow and empty-path
+extensions are rejected with `EINVAL`. The native acceptance covers these calls
+on all profiles, with hosted tests for permissions and failure semantics.

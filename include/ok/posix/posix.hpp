@@ -183,6 +183,10 @@ class PosixService final
     Result<usize> seek(Fd fd, i64 offset, SeekWhence whence);
     Status mkdir(std::string_view path, u32 mode = 0755);
     Status mkdirat(Fd dirfd, std::string_view path, u32 mode = 0755);
+    Status link(std::string_view oldpath, std::string_view newpath);
+    Status linkat(Fd olddirfd, std::string_view oldpath, Fd newdirfd, std::string_view newpath, u32 flags = 0);
+    Status rename(std::string_view oldpath, std::string_view newpath);
+    Status renameat(Fd olddirfd, std::string_view oldpath, Fd newdirfd, std::string_view newpath);
     Status unlink(std::string_view path);
     Status unlinkat(Fd dirfd, std::string_view path, u32 flags = 0);
     Status rmdir(std::string_view path);
@@ -194,9 +198,11 @@ class PosixService final
     Status chown(std::string_view path, u32 uid, u32 gid);
     Result<i64> fcntl(Fd fd, u32 command, u64 argument);
     Result<i64> ioctl(Fd fd, u64 request, u64 argument);
-    [[nodiscard]] std::string_view getcwd() const
+    [[nodiscard]] Result<std::string_view> current_directory();
+    [[nodiscard]] std::string_view getcwd()
     {
-        return resources().cwd.view();
+        auto path = current_directory();
+        return path ? path.value() : std::string_view{};
     }
     Result<FileStatus> stat(std::string_view path);
     Result<FileStatus> statat(Fd dirfd, std::string_view path, u32 flags = 0);
@@ -238,6 +244,7 @@ class PosixService final
     [[nodiscard]] const FileDescriptor *descriptor(Fd fd) const;
     [[nodiscard]] Result<Fd> allocate_fd(Fd minimum = 0);
     [[nodiscard]] Status require_parent_directory_access(std::string_view normalized_path, u32 access) const;
+    [[nodiscard]] Status require_path_search(Fd dirfd, std::string_view path);
     [[nodiscard]] Result<std::string_view> normalize_path(std::string_view path);
     [[nodiscard]] Result<std::string_view> resolve_path(Fd dirfd, std::string_view path);
     [[nodiscard]] Status copy_descriptor(Fd source, Fd target, u32 flags);

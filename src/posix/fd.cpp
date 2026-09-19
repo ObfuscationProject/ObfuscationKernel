@@ -50,7 +50,8 @@ Result<Fd> PosixService::openat(Fd dirfd, std::string_view path, u32 flags, u32 
         return normalized_result.status();
     }
     const auto normalized = normalized_result.value();
-    auto *node = vfs_->lookup(normalized);
+    usize mount_id = 0;
+    auto *node = vfs_->lookup(normalized, &mount_id);
     bool created = false;
     if (node == nullptr)
     {
@@ -76,7 +77,7 @@ Result<Fd> PosixService::openat(Fd dirfd, std::string_view path, u32 flags, u32 
         {
             return status;
         }
-        node = vfs_->lookup(normalized);
+        node = vfs_->lookup(normalized, &mount_id);
         created = true;
     }
     if (node == nullptr)
@@ -130,6 +131,7 @@ Result<Fd> PosixService::openat(Fd dirfd, std::string_view path, u32 flags, u32 
     entry.flags = flags & ~o_CLOEXEC;
     entry.offset = (flags & o_APPEND) != 0 ? node->metadata().size : 0;
     entry.node = node;
+    entry.mount_id = mount_id;
     if (auto status = entry.path.assign(normalized); !status.ok())
         return status;
     auto description = scheduler_->allocate_description(entry);

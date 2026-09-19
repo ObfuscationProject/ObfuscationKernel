@@ -38,6 +38,13 @@ enum class StatusCode : u32
     bad_descriptor,
     not_seekable,
     io_error,
+    cross_device,
+    not_directory,
+    is_directory,
+    not_empty,
+    link_limit,
+    no_space,
+    permission,
 };
 
 class Status final
@@ -67,6 +74,34 @@ class Status final
     [[nodiscard]] static constexpr Status io_error(std::string_view message = {})
     {
         return {StatusCode::io_error, message};
+    }
+    [[nodiscard]] static constexpr Status cross_device(std::string_view message = {})
+    {
+        return {StatusCode::cross_device, message};
+    }
+    [[nodiscard]] static constexpr Status not_directory(std::string_view message = {})
+    {
+        return {StatusCode::not_directory, message};
+    }
+    [[nodiscard]] static constexpr Status is_directory(std::string_view message = {})
+    {
+        return {StatusCode::is_directory, message};
+    }
+    [[nodiscard]] static constexpr Status not_empty(std::string_view message = {})
+    {
+        return {StatusCode::not_empty, message};
+    }
+    [[nodiscard]] static constexpr Status link_limit(std::string_view message = {})
+    {
+        return {StatusCode::link_limit, message};
+    }
+    [[nodiscard]] static constexpr Status no_space(std::string_view message = {})
+    {
+        return {StatusCode::no_space, message};
+    }
+    [[nodiscard]] static constexpr Status permission(std::string_view message = {})
+    {
+        return {StatusCode::permission, message};
     }
     [[nodiscard]] static constexpr Status invalid_argument(std::string_view message = {})
     {

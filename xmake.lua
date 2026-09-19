@@ -37,7 +37,9 @@ local function systoolchain_qemu(target, arch)
     end
     if configured_toolchain_dir then
         local qemu = path.join(path.absolute(configured_toolchain_dir), "bin", spec.qemu_system)
-        assert(os.isfile(qemu), "local SysToolchain is missing QEMU: %s", qemu)
+        if not os.isfile(qemu) then
+            raise("local SysToolchain is missing QEMU: %s", qemu)
+        end
         return qemu
     end
     local package = target:pkg("systoolchain")

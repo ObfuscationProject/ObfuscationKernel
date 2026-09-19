@@ -102,6 +102,19 @@ int main()
     const auto *blocked = kernel.scheduler().find(pid);
     CHECK(blocked->state() == sched::ProcessState::blocked &&
           blocked->threads()[0].wait_reason == sched::ThreadWaitReason::child && blocked->threads()[0].wait_key == 77);
+    static fs::VirtualFileSystem selected_root;
+    CHECK(selected_root.create("/selected", fs::NodeType::regular));
+    CHECK(kernel.posix().set_identity(0, 0) && kernel.posix().chdir("/"));
+    auto covered = kernel.posix().open("/", posix::o_RDONLY | posix::o_DIRECTORY);
+    CHECK(covered && kernel.vfs().mount("/", *selected_root.lookup("/")));
+    CHECK(kernel.posix().current_directory().status().code() == StatusCode::not_found);
+    CHECK(kernel.posix().chdir("/"));
+    auto pwd = kernel.debug_shell().execute("pwd");
+    CHECK(pwd && pwd.value() == "/\n");
+    auto selected = kernel.posix().open("selected", posix::o_RDONLY);
+    CHECK(selected && kernel.posix().close(selected.value()));
+    CHECK(kernel.posix().openat(covered.value(), "selected", posix::o_RDONLY).status().code() == StatusCode::not_found);
+    CHECK(kernel.posix().close(covered.value()));
     std::puts(
-        "PASS kernel services: GUI callbacks, window events, tick and idle native step preserve process identity");
+        "PASS kernel services: GUI callbacks, window events, tick, native step identity and selected-root cwd");
 }

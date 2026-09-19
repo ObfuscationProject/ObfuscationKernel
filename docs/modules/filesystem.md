@@ -11,9 +11,15 @@ drivers, disk-image creation and root-selection policy.
 The mount table holds eight roots. Lookup normalizes `.` and `..` before
 selecting the longest matching mount path, so `/mount/../tmp` resolves through
 the parent namespace. Lookup, creation, directory listing, removal, metadata,
-read/write, truncate and sync delegate to the selected filesystem's nodes.
+read/write, truncate, rename, hard links and sync delegate to the selected filesystem's nodes.
 Mounted nodes are not cast to `RamNode`. Unmount and user-facing mount syscalls
 are not implemented.
+
+Retained directory handles carry the mount identity as well as the node. This
+keeps separate mounts of one filesystem distinct when reconstructing cwd/dirfd
+paths, resolving `..` and rejecting cross-mount rename/link operations. Boot
+root selection explicitly rebinds the kernel service cwd to the selected root;
+ordinary covered directory handles remain unreachable by pathname.
 
 `FileSystemMode` records the configured stack rather than performing a mount:
 
@@ -40,15 +46,14 @@ have no persistent backing; ext4 issues device FLUSH.
 
 `ok::fs::Ext4FileSystem` mounts clean supported ext4 volumes through
 `ok::driver::BlockDevice`. It supports extent-backed regular files and linear
-directories, create/read/write/truncate/unlink, mkdir/rmdir, chmod/chown,
+directories, create/read/write/truncate/unlink, rename/link, mkdir/rmdir, chmod/chown,
 directory enumeration and synchronization. Unlinked open inodes remain alive
 until the last open-file description closes.
 
 The initial writer accepts 1/2/4 KiB blocks, 128/256-byte inodes and at most
 32 block groups. Extent reads support trees up to depth three; mutations require
 inline extents with at most four physical runs. Journals, metadata checksums,
-64-bit group descriptors, indexed directories, symlink traversal, rename and
-hard-link creation are unsupported. Mount rejects unsupported features before
+64-bit group descriptors, indexed directories and symlink traversal are unsupported. Mount rejects unsupported features before
 writes. See [Device-backed ext4](ext4-storage.md) for the complete format and
 capacity limits.
 
@@ -58,8 +63,7 @@ Interrupted mutation requires offline `e2fsck` before a writable mount; the
 implementation does not provide journal recovery or crash-atomic updates.
 
 ObfuscationOS supplies real Virtio disk transports for i386, x86_64, arm32,
-aarch64, rv32, rv64 and loongarch64. MIPS/MIPS64/PPC currently use the archive
-root and need PCI host bridge transport support. Device and reboot-persistence
+aarch64, rv32, rv64, loongarch64, mips, mips64 and ppc. Device and reboot-persistence
 acceptance use actual QEMU guest I/O, with separate hosted filesystem tests;
 physical hardware and hardware SMP storage have not been validated.
 
