@@ -9,7 +9,7 @@ namespace ok::arch::execution
 {
 
 inline constexpr usize page_size = 4096;
-#if defined(__aarch64__)
+#if defined(__aarch64__) || defined(__arm__)
 // QEMU virt places kernel RAM at 1 GiB; keep user mappings below it and above
 // the platform's MMIO aperture. Each native backend owns its virtual layout.
 inline constexpr uptr user_begin = 0x10000000;

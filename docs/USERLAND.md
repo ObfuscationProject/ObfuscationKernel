@@ -29,23 +29,26 @@ the constants and native struct layouts match the C++ kernel implementation.
 
 ## Syscall ABI
 
-All four native backends use the common syscall number table. AArch64 uses
-`x8` / `x0..x5`, RV64 uses `a7` / `a0..a5`, and LoongArch uses `a7` / `a0..a5`.
-The x86_64 Linux-style register ABI is:
+All ten native backends use the common syscall number table. The register
+contract is:
 
-| Field | Register |
-| --- | --- |
-| syscall number | `rax` |
-| arg0 | `rdi` |
-| arg1 | `rsi` |
-| arg2 | `rdx` |
-| arg3 | `r10` |
-| arg4 | `r8` |
-| arg5 | `r9` |
-| return | `rax` |
+| Profile | Entry instruction | Number | Arguments 0–5 | Result |
+| --- | --- | --- | --- | --- |
+| i386 | `int 0x80` | `eax` | `ebx`, `ecx`, `edx`, `esi`, `edi`, `ebp` | `eax` |
+| x86_64 | `syscall` | `rax` | `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9` | `rax` |
+| aarch64 | `svc #0` | `x8` | `x0..x5` | `x0` |
+| arm32 | `svc #0` | `r7` | `r0..r5` | `r0` |
+| rv64, rv32 | `ecall` | `a7` | `a0..a5` | `a0` |
+| loongarch64 | `syscall 0` | `a7` | `a0..a5` | `a0` |
+| mips | `syscall` | `v0` | `a0..a3`, `t0`, `t1` | `v0` |
+| mips64 | `syscall` | `v0` | `a0..a5` | `v0` |
+| ppc | `sc` | `r0` | `r3..r8` | `r3` |
 
 Successful calls return a non-negative value. Failed calls return `-OK_E*`.
 Unknown or intentionally unsupported calls return `-OK_ENOSYS`.
+This is the Obfuscation UAPI, not the platform-specific Linux ABI. In
+particular, MIPS does not signal errors through `a3`, and PPC does not use
+`CR0.SO`. The OS libc shim converts negative syscall results into `errno`.
 
 ## Stable For 0.1.x
 
@@ -65,7 +68,8 @@ subset listed in [Native execution](NATIVE_EXECUTION.md) is exposed to actual us
 programs; internal model support does not imply native syscall support:
 
 - descriptor I/O: `read`, `write`, `pread64`, `pwrite64`, `readv`, `writev`,
-  `close`, `close_range`, `dup`, `dup2`, `dup3`, `fcntl`, and `ioctl`;
+  `lseek`, `fsync`, `fdatasync`, `truncate`, `ftruncate`, `close`, `close_range`,
+  `dup`, `dup2`, `dup3`, `fcntl`, and `ioctl`;
 - paths and metadata: `open`, `openat`, `creat`, `stat`, `lstat`, `fstat`,
   `newfstatat`, `mkdir`, `mkdirat`, `unlink`, `unlinkat`, `rmdir`, `chdir`,
   `fchdir`, `getcwd`, `access`, `faccessat`, `faccessat2`, `getdents`, and
@@ -93,15 +97,31 @@ its separate model handlers.
 `struct utsname`. Downstream code should prefer `OK_UAPI_VERSION_*` for feature
 checks until a public `ok_utsname` layout is frozen.
 
-The current `mmap` path allocates bounded kernel memory-map records and is
-sufficient for startup probes. It does not yet install architecture page-table
-entries for arbitrary user processes.
+Pointers, syscall arguments and the OS shim's `off_t` follow the native word
+size; fixed-width UAPI integers remain the declared width on ELF32 and ELF64.
+Vectored I/O accepts at most 16 checked native-word `ok_iovec` entries and a
+4096-byte total transfer. Positioned I/O leaves the shared descriptor offset
+unchanged. `fsync` and `fdatasync` synchronize mounted ext4 through device FLUSH;
+RAM files have no persistent backing.
+
+The trusted-buffer `mmap` handler allocates bounded kernel memory-map records.
+The native boundary returns `ENOSYS` for `mmap`, `mprotect`, `munmap` and `brk`;
+its real architecture mappings currently serve the static ELF loader and fork.
 
 ## What Is Still Missing
 
-ObfuscationOS now supplies crt0, a static linker script, libc wrappers, `/init`
-and an external-program shell. Four architecture backends execute those programs
-with real protection and timer traps. Remaining work includes general VM and
-allocation, signals, device-backed persistent storage, dynamic linking, a user
-GUI protocol, and full POSIX/Linux ABI behavior. The six other kernel profiles
-retain model/boot support and need native execution backends.
+ObfuscationOS supplies crt0, static linker scripts, libc wrappers, `/init` and
+an external-program shell for all ten profiles. Native execution, address-space
+switching and timer traps are exercised in QEMU; physical hardware validation
+is separate. The retained MIPS CPUs lack hardware NX, and execution uses the
+boot CPU rather than hardware SMP. See [Native execution](NATIVE_EXECUTION.md)
+for platform limits.
+
+Persistent ext4 roots use real Virtio disks on i386, x86_64, arm32, aarch64,
+rv32, rv64 and loongarch64. MIPS, MIPS64 and PPC still need block transports;
+they execute userland from the boot archive. The supported ext4 subset has no
+journal and requires offline recovery after an interrupted mutation.
+
+Remaining work includes general VM and allocation, signals, threads, calibrated
+clocks and blocking sleeps, sockets and broader device interfaces, dynamic
+linking, a user GUI protocol, and full POSIX/Linux ABI behavior.

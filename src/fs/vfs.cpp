@@ -139,10 +139,8 @@ Result<FileBuffer> RamNode::read(usize offset, usize count) const
     {
         return Status::invalid_argument("node is not readable");
     }
-    if (offset > metadata_.size)
-    {
-        return Status::invalid_argument("read offset beyond file size");
-    }
+    if (offset >= metadata_.size)
+        return FileBuffer{};
     if (data_ == nullptr && !readonly_)
     {
         return Status::invalid_argument("node has no file storage");
@@ -177,12 +175,10 @@ Status RamNode::write(usize offset, std::span<const std::byte> data)
     {
         return Status::overflow("file data capacity exceeded");
     }
-    if (offset == 0)
-    {
-        metadata_.size = data.size();
-        metadata_.blocks = blocks_for_size(metadata_.size);
-        data_->size = metadata_.size;
-    }
+    if (data.empty())
+        return Status::success();
+    for (usize i = metadata_.size; i < offset; ++i)
+        data_->data[i] = std::byte{0};
     for (usize i = 0; i < data.size(); ++i)
     {
         data_->data[offset + i] = data[i];
@@ -193,6 +189,22 @@ Status RamNode::write(usize offset, std::span<const std::byte> data)
         metadata_.blocks = blocks_for_size(metadata_.size);
         data_->size = metadata_.size;
     }
+    return Status::success();
+}
+
+Status RamNode::truncate(usize size)
+{
+    smp::ScopedSpinLock guard(lock_);
+    if (readonly_)
+        return Status::denied("read-only file");
+    if (data_ == nullptr || metadata_.type == NodeType::directory)
+        return Status::invalid_argument("node is not a file");
+    if (size > max_file_data)
+        return Status::overflow("RAM file capacity exceeded");
+    for (usize i = metadata_.size; i < size; ++i)
+        data_->data[i] = std::byte{0};
+    data_->size = metadata_.size = size;
+    metadata_.blocks = blocks_for_size(size);
     return Status::success();
 }
 
@@ -269,6 +281,45 @@ VirtualFileSystem::VirtualFileSystem()
     }
 }
 
+RamNode *VirtualFileSystem::ram_node(Node *node)
+{
+    for (auto &candidate : nodes_)
+        if (&candidate == node)
+            return &candidate;
+    return nullptr;
+}
+
+Status VirtualFileSystem::mount(std::string_view path, Node &root)
+{
+    smp::ScopedSpinLock guard(lock_);
+    if (path.empty() || path.front() != '/' || (path.size() > 1 && path.back() == '/') ||
+        root.metadata().type != NodeType::directory)
+        return Status::invalid_argument("invalid mount root");
+    usize cursor = 0;
+    std::string_view segment;
+    while (next_segment(path, cursor, segment))
+        if (segment == "." || segment == "..")
+            return Status::invalid_argument("mount path must be canonical");
+    if (path.find("//") != std::string_view::npos)
+        return Status::invalid_argument("mount path must be canonical");
+    auto *covered = lookup_unlocked(path);
+    if (!covered || covered->metadata().type != NodeType::directory)
+        return Status::not_found("mount point is not a directory");
+    for (auto &entry : mounts_)
+        if (entry.root && entry.path.view() == path)
+            return Status::busy("mount point is already mounted");
+    for (auto &entry : mounts_)
+        if (!entry.root)
+        {
+            if (auto status = entry.path.assign(path); !status.ok())
+                return status;
+            entry.root = &root;
+            entry.covered = covered;
+            return Status::success();
+        }
+    return Status::no_memory("mount table full");
+}
+
 Status VirtualFileSystem::create(std::string_view path, NodeType type)
 {
     smp::ScopedSpinLock guard(lock_);
@@ -282,12 +333,15 @@ Status VirtualFileSystem::create(std::string_view path, NodeType type)
     {
         return Status::already_exists("node already exists");
     }
+    auto *ram_parent = ram_node(parent);
+    if (!ram_parent)
+        return parent->create(leaf.view(), type);
     auto *node = allocate_node(leaf.view(), type);
     if (node == nullptr)
     {
         return Status::overflow("RAM VFS node pool exhausted");
     }
-    return parent->attach_child(*node);
+    return ram_parent->attach_child(*node);
 }
 
 Status VirtualFileSystem::create_readonly_file(std::string_view path, std::span<const std::byte> data, u32 mode,
@@ -298,6 +352,9 @@ Status VirtualFileSystem::create_readonly_file(std::string_view path, std::span<
     auto *parent = parent_for(path, leaf);
     if (parent == nullptr || leaf.empty())
         return Status::not_found("archive parent path not found");
+    auto *ram_parent = ram_node(parent);
+    if (!ram_parent)
+        return Status::denied("archive requires RAM backing");
     if (auto *existing = parent->lookup(leaf.view()); existing != nullptr)
     {
         if (!replace || existing->metadata().type != NodeType::regular)
@@ -314,7 +371,7 @@ Status VirtualFileSystem::create_readonly_file(std::string_view path, std::span<
     auto &node = nodes_[used_nodes_];
     if (auto status = node.configure_readonly(leaf.view(), data, mode); !status.ok())
         return status;
-    if (auto status = parent->attach_child(node); !status.ok())
+    if (auto status = ram_parent->attach_child(node); !status.ok())
         return status;
     ++used_nodes_;
     return Status::success();
@@ -338,7 +395,8 @@ Status VirtualFileSystem::unlink(std::string_view path)
     {
         return Status::invalid_argument("cannot unlink directory");
     }
-    return parent->detach_child(leaf.view());
+    auto *ram_parent = ram_node(parent);
+    return ram_parent ? ram_parent->detach_child(leaf.view()) : parent->remove(leaf.view(), false);
 }
 
 Status VirtualFileSystem::rmdir(std::string_view path)
@@ -359,8 +417,10 @@ Status VirtualFileSystem::rmdir(std::string_view path)
     {
         return Status::invalid_argument("path is not a directory");
     }
-    auto *ram_node = static_cast<RamNode *>(node);
-    auto listing = ram_node->list();
+    for (const auto &mount : mounts_)
+        if (mount.root && mount.covered == node)
+            return Status::busy("directory is a mount point");
+    auto listing = node->list();
     if (!listing)
     {
         return listing.status();
@@ -369,7 +429,8 @@ Status VirtualFileSystem::rmdir(std::string_view path)
     {
         return Status::busy("directory is not empty");
     }
-    return parent->detach_child(leaf.view());
+    auto *ram_parent = ram_node(parent);
+    return ram_parent ? ram_parent->detach_child(leaf.view()) : parent->remove(leaf.view(), true);
 }
 
 Status VirtualFileSystem::chmod(std::string_view path, u32 mode)
@@ -402,6 +463,8 @@ Status VirtualFileSystem::write_file(std::string_view path, std::span<const std:
     {
         return Status::not_found("path not found");
     }
+    if (auto status = node->truncate(0); !status.ok())
+        return status;
     return node->write(0, data);
 }
 
@@ -425,8 +488,7 @@ Result<DirectoryListing> VirtualFileSystem::list(std::string_view path)
     {
         return Status::not_found("path not found");
     }
-    auto *ram_node = static_cast<RamNode *>(node);
-    return ram_node->list();
+    return node->list();
 }
 
 Result<Metadata> VirtualFileSystem::stat(std::string_view path)
@@ -448,44 +510,47 @@ Node *VirtualFileSystem::lookup(std::string_view path)
 
 Node *VirtualFileSystem::lookup_unlocked(std::string_view path)
 {
-    if (path.empty() || path == "/")
-    {
-        return root_;
-    }
-    RamNode *current = root_;
-    std::array<RamNode *, max_child_nodes + 1> stack{};
-    usize depth = 0;
-    if (current != nullptr)
-    {
-        stack[depth++] = current;
-    }
-    usize cursor = 0;
+    Node *current = root_;
+    for (const auto &mount : mounts_)
+        if (mount.root && mount.path.view() == "/")
+            current = mount.root;
+    std::array<Node *, max_child_nodes + 1> stack{};
+    std::array<usize, max_child_nodes> starts{};
+    std::array<char, 256> canonical{};
+    stack[0] = current;
+    usize length = 0, depth = 0, cursor = 0;
     std::string_view segment;
     while (next_segment(path, cursor, segment))
     {
+        // Resolve every component before '..'; missing files and regular files
+        // cannot be skipped by lexical normalization, including across mounts.
+        if (!current || current->metadata().type != NodeType::directory)
+            return nullptr;
         if (segment == ".")
-        {
             continue;
-        }
         if (segment == "..")
         {
-            if (depth > 1)
+            if (depth)
             {
-                --depth;
-                current = stack[depth - 1];
+                length = starts[--depth];
+                current = stack[depth];
             }
             continue;
         }
-        auto *next = current == nullptr ? nullptr : current->lookup(segment);
-        current = static_cast<RamNode *>(next);
-        if (current == nullptr)
-        {
+        if (depth == starts.size() || segment.size() + 1 > canonical.size() - length)
             return nullptr;
-        }
-        if (depth < stack.size())
-        {
-            stack[depth++] = current;
-        }
+        current = current->lookup(segment);
+        if (!current)
+            return nullptr;
+        starts[depth] = length;
+        canonical[length++] = '/';
+        for (char c : segment)
+            canonical[length++] = c;
+        const std::string_view resolved(canonical.data(), length);
+        for (const auto &mount : mounts_)
+            if (mount.root && mount.path.view() == resolved)
+                current = mount.root;
+        stack[++depth] = current;
     }
     return current;
 }
@@ -546,36 +611,15 @@ void VirtualFileSystem::release_file_buffer(FileBuffer *buffer)
     }
 }
 
-RamNode *VirtualFileSystem::parent_for(std::string_view path, FixedString<max_path_segment> &leaf)
+Node *VirtualFileSystem::parent_for(std::string_view path, FixedString<max_path_segment> &leaf)
 {
-    if (path.empty() || path == "/")
-    {
+    while (path.size() > 1 && path.back() == '/')
+        path.remove_suffix(1);
+    const auto slash = path.find_last_of('/');
+    const auto name = slash == std::string_view::npos ? path : path.substr(slash + 1);
+    if (name.empty() || name == "." || name == ".." || !leaf.assign(name).ok())
         return nullptr;
-    }
-
-    RamNode *current = root_;
-    usize cursor = 0;
-    std::string_view segment;
-    std::string_view previous;
-    while (next_segment(path, cursor, segment))
-    {
-        previous = segment;
-        const usize saved = cursor;
-        std::string_view probe;
-        if (!next_segment(path, cursor, probe))
-        {
-            static_cast<void>(leaf.assign(previous));
-            return current;
-        }
-        cursor = saved;
-        auto *next = current == nullptr ? nullptr : current->lookup(segment);
-        current = static_cast<RamNode *>(next);
-        if (current == nullptr)
-        {
-            return nullptr;
-        }
-    }
-    return nullptr;
+    return lookup_unlocked(slash == std::string_view::npos || slash == 0 ? "/" : path.substr(0, slash));
 }
 
 bool VirtualFileSystem::next_segment(std::string_view path, usize &cursor, std::string_view &segment)

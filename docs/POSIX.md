@@ -3,7 +3,7 @@
 The syscall namespace uses POSIX/Linux-compatible numbers for common calls such
 as `read`, `write`, `open`, `close`, `getpid`, `fork`, `execve`, and `exit`.
 
-The current kernel exposes a bounded POSIX service over the RAM VFS. It is not a
+The current kernel exposes a bounded POSIX service over RAM and mounted ext4 nodes. It is not a
 complete POSIX implementation yet, but it provides enough real file-descriptor,
 time, identity, and memory-mapping behavior for kernel debug tests, early
 user-mode ABI work, and glibc startup probes.
@@ -31,6 +31,8 @@ otherwise.
 - `lseek`
 - `pread64`
 - `pwrite64`
+- `fsync`, `fdatasync`
+- `truncate`, `ftruncate`
 - `readv`
 - `writev`
 - `mkdir`
@@ -86,7 +88,7 @@ unsupported at the native boundary.
 `stdin`, `stdout`, and `stderr` are reserved as descriptors `0`, `1`, and `2`.
 File descriptors and memory mappings are fixed-capacity kernel objects, not
 hosted runtime handles. Path operations resolve absolute paths, working-directory
-relative paths, and `openat`-style directory-relative paths against the RAM VFS.
+relative paths, and `openat`-style directory-relative paths against the mounted VFS namespace.
 Identity calls are backed by the kernel user manager, and VFS permission checks
 use the effective uid/gid carried by the active POSIX credentials. File opens
 check read/write bits, directory listing checks read permission, and create or
@@ -108,6 +110,33 @@ semantics unless a richer subsystem exists behind them.
 
 New syscall handlers should return `ok::syscall::Response`, must preserve
 negative error semantics at the user boundary, and should map internal
-`ok::StatusCode` values to stable POSIX `errno` values when the libc/user ABI
-layer is added. The POSIX service itself should remain freestanding and should
+`ok::StatusCode` values to stable POSIX `errno` values consumed by the OS libc
+shim. The POSIX service itself should remain freestanding and should
 use fixed-capacity kernel containers.
+
+## File semantics and native ABI
+
+Overwriting byte zero preserves the remaining file, zero-length writes leave size
+unchanged, reads beyond EOF return zero, and truncate extension returns zero-filled
+bytes. Positioned I/O preserves the shared open-file offset and `pwrite` uses its
+explicit position even with `O_APPEND`. Native vectored calls validate the whole
+iovec array and copy through one bounded kernel buffer. Ext4 retains unlinked open
+inodes until the last open-file description closes. `fsync`/`fdatasync` reach the
+real device FLUSH operation; RAM nodes synchronize trivially.
+
+The common syscall numbering is project UAPI, not each platform's Linux ABI.
+ELF32 profiles use 32-bit pointers and native `off_t`; `int64_t` and `uint64_t`
+remain 64-bit on every profile. See the OS libc shim for exported POSIX wrappers.
+`getdents64` uses fixed 64-bit inode/offset fields and native byte order, including
+on 32-bit and big-endian targets. Directory reads retain their opened node when
+the mount namespace changes; mounted directories cannot be removed with `rmdir`.
+
+`getdents64` records keep 64-bit inode/offset fields on both ILP32 and LP64;
+integer fields use the native process byte order, and the record-length/name
+offsets are 16/19 bytes. Directory descriptors retain the opened node across
+mount changes. Mounted directories cannot be removed while mounted.
+
+The positioned-I/O and synchronization entry points distinguish bad descriptors
+(`EBADF`), nonseekable streams (`ESPIPE` for positioned I/O), and unsupported
+synchronization targets (`EINVAL`). These cases are checked by the userland
+acceptance program and the host process-resource model tests.

@@ -297,12 +297,16 @@ Status ProcessControlBlock::remove_child(ProcessId child)
 
 Result<LoadedElf> ElfLoader::load(std::span<const std::byte> image, arch::Architecture architecture) const
 {
-    if (image.size() < 64)
+    if (image.size() < 52)
         return Status::invalid_argument("ELF image is too small");
     if (byte_at(image, 0) != 0x7f || byte_at(image, 1) != 'E' || byte_at(image, 2) != 'L' || byte_at(image, 3) != 'F')
         return Status::invalid_argument("ELF magic is invalid");
-    if (byte_at(image, 4) != 2)
-        return Status::unsupported("ELF32 loading is not implemented in this profile");
+    const bool elf64 = byte_at(image, 4) == 2;
+    if (!elf64 && byte_at(image, 4) != 1)
+        return Status::invalid_argument("ELF class is invalid");
+    const usize header_size = elf64 ? 64 : 52;
+    if (image.size() < header_size)
+        return Status::invalid_argument("ELF header is truncated");
     const auto encoding = byte_at(image, 5);
     if (encoding != 1 && encoding != 2)
         return Status::invalid_argument("ELF byte order is invalid");
@@ -310,21 +314,21 @@ Result<LoadedElf> ElfLoader::load(std::span<const std::byte> image, arch::Archit
     auto read16 = [&](usize offset) { return read_integer(image, offset, 2, big_endian); };
     auto read32 = [&](usize offset) { return read_integer(image, offset, 4, big_endian); };
     auto read64 = [&](usize offset) { return read_integer(image, offset, 8, big_endian); };
-    if (byte_at(image, 6) != 1 || read32(20) != 1 || read16(52) != 64)
+    if (byte_at(image, 6) != 1 || read32(20) != 1 || read16(elf64 ? 52 : 40) != header_size)
         return Status::invalid_argument("ELF version or header size is invalid");
     if (read16(18) != elf_machine_for(architecture))
         return Status::invalid_argument("ELF architecture mismatch");
     const auto type = read16(16);
     if (type != 2 && type != 3)
         return Status::unsupported("ELF image is not executable");
-    const auto entry = read64(24);
-    const auto phoff64 = read64(32);
-    const auto phentsize = read16(54);
-    const auto phnum = read16(56);
+    const auto entry = elf64 ? read64(24) : read32(24);
+    const auto phoff64 = elf64 ? read64(32) : read32(28);
+    const auto phentsize = read16(elf64 ? 54 : 42);
+    const auto phnum = read16(elf64 ? 56 : 44);
     constexpr u64 max_address = static_cast<u64>(~uptr{0});
     if (entry == 0 || entry > max_address)
         return Status::invalid_argument("ELF entry is invalid");
-    if (phnum == 0 || phentsize < 56 || phoff64 < 64 || phoff64 > image.size() ||
+    if (phnum == 0 || phentsize < (elf64 ? 56u : 32u) || phoff64 < header_size || phoff64 > image.size() ||
         phnum > (image.size() - static_cast<usize>(phoff64)) / phentsize)
         return Status::invalid_argument("ELF program header table is out of range");
     LoadedElf loaded{.entry = static_cast<uptr>(entry),
@@ -336,12 +340,12 @@ Result<LoadedElf> ElfLoader::load(std::span<const std::byte> image, arch::Archit
         const auto offset = static_cast<usize>(phoff64) + i * static_cast<usize>(phentsize);
         if (read32(offset) != 1)
             continue;
-        const auto flags = static_cast<u32>(read32(offset + 4));
-        const auto file_offset = read64(offset + 8);
-        const auto virtual_address = read64(offset + 16);
-        const auto file_size = read64(offset + 32);
-        const auto memory_size = read64(offset + 40);
-        const auto alignment = read64(offset + 48);
+        const auto flags = static_cast<u32>(read32(offset + (elf64 ? 4 : 24)));
+        const auto file_offset = elf64 ? read64(offset + 8) : read32(offset + 4);
+        const auto virtual_address = elf64 ? read64(offset + 16) : read32(offset + 8);
+        const auto file_size = elf64 ? read64(offset + 32) : read32(offset + 16);
+        const auto memory_size = elf64 ? read64(offset + 40) : read32(offset + 20);
+        const auto alignment = elf64 ? read64(offset + 48) : read32(offset + 28);
         if (memory_size < file_size || file_offset > image.size() || file_size > image.size() - file_offset ||
             virtual_address > max_address || memory_size > max_address - virtual_address)
             return Status::invalid_argument("ELF load segment is out of range");

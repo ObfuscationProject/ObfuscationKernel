@@ -168,6 +168,20 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
     {
         return status;
     }
+    for (const auto number : {syscall::Number::fsync, syscall::Number::fdatasync})
+        if (auto status = add(number, "fsync", [](void *context, const syscall::Request &request) {
+                auto status = static_cast<posix::PosixService *>(context)->fsync(static_cast<posix::Fd>(request.args[0]));
+                return syscall::Response{.value = status.ok() ? 0 : -1, .status = status};
+            }); !status.ok()) return status;
+    if (auto status = add(syscall::Number::ftruncate, "ftruncate", [](void *context, const syscall::Request &request) {
+            auto status = static_cast<posix::PosixService *>(context)->ftruncate(static_cast<posix::Fd>(request.args[0]), static_cast<usize>(request.args[1]));
+            return syscall::Response{.value = status.ok() ? 0 : -1, .status = status};
+        }); !status.ok()) return status;
+    if (auto status = add(syscall::Number::truncate, "truncate", [](void *context, const syscall::Request &request) {
+            auto status = static_cast<posix::PosixService *>(context)->truncate(bounded_c_string(request.args[0]), static_cast<usize>(request.args[1]));
+            return syscall::Response{.value = status.ok() ? 0 : -1, .status = status};
+        }); !status.ok()) return status;
+
     if (auto status = add(syscall::Number::pread64, "pread64", [](void *context, const syscall::Request &request) {
             auto *buffer = reinterpret_cast<std::byte *>(request.args[1]);
             auto result = static_cast<posix::PosixService *>(context)->pread(

@@ -1,110 +1,92 @@
 # v0.1.0 Roadmap
 
-The `0.1.0` version line is a developer-preview kernel contract for downstream
-user-space experiments. It is not a production POSIX kernel yet. A stable
-`v0.1.0` release should mean that users can build tiny static programs against a
-documented syscall/UAPI surface, boot the debug kernel in QEMU, inspect failures
-through the shell and GUI, and rely on regression tests to catch ABI drift.
+The `0.1.0` line is a developer-preview kernel contract for downstream
+user-space experiments. A release should build tiny static programs against a
+documented UAPI, boot them in QEMU, expose useful diagnostics, and preserve
+regression coverage. Full POSIX conformance and production hardware support
+remain separate goals.
 
-## Release Contract
+## Current Foundations
 
-The current release contract is:
+- Build and ownership: xmake builds freestanding C++23 for `i386`, `x86_64`,
+  `aarch64`, `arm32`, `rv64`, `rv32`, `loongarch64`, `mips`, `mips64` and `ppc`.
+  Architecture/mode-specific SDK artifacts let ObfuscationOS link its own
+  extensions without embedding or recompiling kernel sources.
+- Native userland: all ten profiles have static ELF execution, real privilege
+  transitions, address-space switching, timer preemption and guarded user
+  copies. ObfuscationOS supplies crt0, libc wrappers, `/init`, an external-program
+  shell and system applications. These paths are exercised in QEMU; see
+  [Native execution](NATIVE_EXECUTION.md) for each CPU's protection limitations.
+- Process resources: the scheduler owns canonical process/thread state,
+  address spaces, descriptor tables and open-file descriptions. Native fork,
+  execve, wait4 and pipes use these resources, with fault containment, orphan
+  collection, EOF/EPIPE and shared file offsets.
+- POSIX file operations: RAM and mounted nodes support path lookup, metadata,
+  permissions and directories. Native scalar/vectored and positioned I/O,
+  truncate/ftruncate and fsync/fdatasync have bounded checked user copies.
+  Internal model handlers for memory, signals and futexes remain distinct from
+  the supported native syscall subset.
+- Persistent storage: generic VFS mount routing and the bounded ext4 writer
+  provide hierarchical files through real `BlockDevice` services. OS-owned
+  Virtio transports support seven profiles: i386, x86_64, arm32, aarch64, rv32,
+  rv64 and loongarch64. Ext4 is non-journalled and requires offline recovery
+  after interrupted mutation; [storage notes](modules/ext4-storage.md) define
+  supported feature bits and limits.
+- Driver and module boundaries: native interfaces provide resources, MMIO,
+  IRQ, DMA, wait/work queues, timers and lifecycle services. Model checks cover
+  ABI/capability/resource contracts and OKMOD metadata. OS-owned Linux driver
+  adaptation and module composition remain separate from runtime code loading.
+- GUI: the kernel owns the basic compositor and diagnostics; ObfuscationOS owns
+  desktop/session policy and system app views. The current desktop extension
+  executes in the kernel; GUI views are not isolated user programs.
 
-- bootable QEMU images for every configured architecture profile;
-- a frozen public C UAPI header for syscall numbers, errno values, flags, and
-  simple native ABI structs under `include/ok/uapi/`;
-- x86_64 Linux-style syscall dispatch with six register arguments and negative
-  errno returns;
-- RAM-VFS-backed file, directory, permission, clock, identity, memory-map, TLS,
-  futex, random, and process-exit syscall smoke coverage;
-- scheduler-visible kernel, driver, module, shell, file-manager, task-manager,
-  and user-process records;
-- documented debug-shell workflows for storage, networking, process inspection,
-  GUI surfaces, and power actions;
-- roadmap tests that boot through `kernel_main` and emit `OK_TEST_PASS` with
-  module, VM, process, VFS, Linux ABI, driver ABI, GUI, storage, networking, SMP,
-  interrupt, and preemption markers.
+## Next Milestones
 
-## Implemented Foundations
-
-- Build and boot: xmake builds `okernel` and `okernel_image`; QEMU runners cover
-  `i386`, `x86_64`, `aarch64`, `arm32`, `rv64`, `rv32`, `loongarch64`, `mips`,
-  `mips64`, and `ppc`.
-- User-space ABI: syscall numbers match the Linux x86_64 table where the kernel
-  has handlers; `ok/uapi/syscall.h` is the public downstream header for 0.1.x.
-- POSIX facade: the current service supports bounded descriptors, VFS-relative
-  paths, directory reads, metadata, credentials, clocks, `brk`, `mmap`,
-  `mprotect`, `munmap`, TLS setup, futex no-op/wake behavior, `getrandom`, and
-  process exit.
-- Process model: tests cover ELF metadata loading, simulated user-mode entry,
-  process create/fork/exec/wait/exit state, credentials, address-space IDs, and
-  shell-launched GUI user-process isolation.
-- Storage: RAM VFS has Unix-style metadata and permissions; SimpleFS gives a
-  block-backed writable path; EXT4 can validate superblocks and read raw blocks.
-- Drivers: built-in drivers become `drv:*` scheduler-visible daemons; the
-  native driver ABI includes resources, MMIO, IRQ, DMA mappings, wait queues,
-  work queues, timers, slab allocation, and kernel-thread registry primitives.
-- Modules: `ModuleManager` validates ABI version, capability masks, dependency
-  order, required services, resource budgets, restart policies, kernel-process
-  execution, OKMOD metadata, Linux `.ko` metadata, and Linux ABI snapshots.
-- GUI: `kernel-gui` is a restartable module process exposing `gui.compositor`
-  and `gui.desktop`; the desktop service now covers windows, scanout, cursor,
-  shared buffers, clipboard, and routed input.
-
-## Remaining Blockers For A Stable Downstream v0.1.0
-
-- Real user execution: architecture trap-return paths and hardware page tables
-  still need to replace the simulated user-mode gateway before arbitrary
-  downstream binaries can be run as isolated ring/user-mode programs.
-- Userland SDK: there is now a public UAPI header, but a tiny libc/sysroot,
-  crt0, linker script, and example static programs are still needed.
-- ABI structs: `stat`, `uname`, and some resource structs are native
-  ObfuscationKernel layouts, not Linux libc layouts. The native layouts are
-  documented for 0.1.x, but a compatibility translation layer is still needed
-  before stock Linux binaries can be treated as supported.
-- Process syscalls: the scheduler and process manager can model fork/exec/wait,
-  but `clone`, `fork`, `execve`, `wait4`, `kill`, `pipe`, `select`, and `poll`
-  are still explicit `-ENOSYS` syscall handlers in the single-process profile.
-- Persistent mounts: SimpleFS is flat and block-backed, while EXT4 remains
-  read-only at the block/superblock layer. VFS mount routing and writable
-  hierarchical disk filesystems remain open.
-- Networking: the debug loopback stack is useful for bring-up, but socket
-  syscalls and real NIC transmit/receive paths are not v0.1.0-stable.
-- Runtime scheduling: CPU accounting and per-CPU state are covered, but true
-  concurrent SMP run queues, timer-derived runtime accounting, and preemptive
-  user scheduling are still roadmap items.
-- External modules and drivers: module and driver ABIs are covered by metadata
-  and shim tests, but loading, relocating, signing, and isolating third-party
-  modules at runtime is not complete.
-
-## Recent Roadmap Changes
-
-Recent commits moved the roadmap in three important directions:
-
-- `491038b` and `a1421ca` added module ABI/resource enforcement, OKMOD/Linux
-  `.ko` metadata parsing, Linux ABI snapshots, driver runtime primitives, and
-  the GUI desktop service boundary. Documentation is now covered by
-  `docs/modules/modules.md`, `docs/modules/drivers.md`,
-  `docs/modules/gui.md`, and `docs/USERLAND.md`.
-- `224c8be`, `f47c1fe`, and `a8d9134` stabilized scheduler-visible GUI
-  applications, task-manager CPU/process sampling, GUI shell cleanup, kernel
-  daemon restart behavior, and per-CPU accounting. The corresponding behavior is
-  documented in the scheduler, GUI, debug-shell, QEMU, and driver module notes.
-- `21d0804`, `53d0776`, and `263124b` added GUI scroll conventions, polling
-  idle hooks, non-debug GUI builds, and QEMU window launcher behavior. Those are
-  covered by the GUI, debug-shell, testing, and build docs.
+- User VM: replace fixed backing-pool limits with general physical allocation,
+  checked native `mmap`/`mprotect`/`munmap`/`brk`, and eventually copy-on-write.
+- POSIX process/runtime behavior: add signals, threads/clone, process groups,
+  sessions, calibrated clocks, blocking sleeps and select/poll. Full POSIX
+  conformance needs broader semantic and user-space integration tests.
+- Storage: add MIPS/MIPS64/PPC PCI host bridge transports, interrupt-driven I/O,
+  broader ext4 allocation/directory support, and journal recovery. Current
+  filesystems lack rename, hard-link creation and symlink traversal. Physical
+  discovery, noncoherent DMA and storage synchronization across CPUs remain
+  separate bring-up work.
+- Hardware SMP: bring up secondary CPUs and concurrent run queues; modeled
+  topology and single-CPU timer preemption do not establish SMP execution.
+- ABI compatibility: native `stat`, `uname` and resource layouts and common
+  syscall numbering are not each platform's Linux binary ABI. Broader libc,
+  dynamic linking and compatibility translation require explicit contracts.
+- Networking/devices: implement real NIC data paths, socket syscalls and a
+  richer device/TTY interface beyond the existing debug loopback model.
+- Runtime extensions: implement relocations, loading and lifecycle enforcement
+  for external native code. Metadata validation and static composition alone
+  are not runtime kernel-module loading or third-party driver isolation.
+- User GUI: define an IPC/shared-buffer protocol and move desktop applications
+  into isolated user processes while retaining the kernel's basic diagnostics.
 
 ## Release Gate
 
-Before tagging `v0.1.0`, run at minimum:
+Keep model tests, standalone kernel boot, native execution and persistence as
+separate acceptance results. [Validation](VALIDATION.md) records the current
+evidence; a debug marker alone does not establish every hardware behavior.
+
+For each architecture, configure the matching toolchain and run at least:
 
 ```sh
 xmake f -c -y -m debug -a x86_64
 xmake -y -b okernel
 xmake test
 xmake qemu-test
+xmake -y -b kernel-sdk
 ```
 
-For an architecture-sensitive release candidate, repeat `xmake qemu-test -a
-<arch>` for every bootable profile listed in `README.md`, and run
-`xmake qemu-window-test --no-launch` where the environment is headless.
+Repeat with all ten profiles for architecture-sensitive changes. Run the
+independent native probes and matching OS SDK-consumer/native userland checks
+described in [Native execution](NATIVE_EXECUTION.md). Validate release builds
+separately because debug test points are disabled there. Use
+`xmake qemu-window-test --no-launch` for headless window-command validation.
+
+For filesystem changes, run the hosted ext4 mutation/reopen/e2fsck suite and
+the OS's real Virtio block and two-boot ext4 persistence tests on the seven
+supported transports. These QEMU tests do not replace physical-machine testing.

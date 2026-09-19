@@ -1,4 +1,5 @@
 #include "ok/sched/scheduler.hpp"
+#include "ok/fs/vfs.hpp"
 
 namespace ok::sched
 {
@@ -669,6 +670,9 @@ Status SchedulerState::install_descriptor(ProcessResources &resources, i32 fd, u
     auto *open = open_description(description);
     if (slot == nullptr || open == nullptr)
         return Status::invalid_argument("invalid descriptor binding");
+    if (open->references == 0 && open->node)
+        if (auto status = open->node->retain(); !status.ok())
+            return status;
     // Retain first: dup2 may replace the last other reference to this description.
     ++open->references;
     if (slot->used)
@@ -678,6 +682,7 @@ Status SchedulerState::install_descriptor(ProcessResources &resources, i32 fd, u
 }
 Status SchedulerState::close_descriptor(ProcessResources &resources, i32 fd)
 {
+    Status result = Status::success();
     auto *slot = resources.files.entry(fd);
     if (slot == nullptr || !slot->used)
         return Status::invalid_argument("bad file descriptor");
@@ -686,7 +691,11 @@ Status SchedulerState::close_descriptor(ProcessResources &resources, i32 fd)
         --open->references;
         const auto pipe = open->pipe;
         if (open->references == 0 && slot->description >= 3)
+        {
+            if (open->node)
+                result = open->node->release();
             *open = {};
+        }
         if (pipe < pipes_.size())
         {
             wake_waiters(ThreadWaitReason::pipe_read, pipe);
@@ -696,7 +705,7 @@ Status SchedulerState::close_descriptor(ProcessResources &resources, i32 fd)
         }
     }
     *slot = {};
-    return Status::success();
+    return result;
 }
 void SchedulerState::release_resources(ProcessResources &resources)
 {

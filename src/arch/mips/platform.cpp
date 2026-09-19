@@ -88,6 +88,11 @@ extern "C" void ok_platform_poll_idle()
 
 extern "C" int ok_platform_input_poll()
 {
+    return -1;
+}
+
+extern "C" int ok_platform_console_poll()
+{
     constexpr ok::uptr uart_lsr = uart_primary_base + 0x05;
     if ((mmio8(uart_lsr) & uart_lsr_data_ready) == 0)
     {

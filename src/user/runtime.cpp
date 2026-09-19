@@ -4,6 +4,8 @@
 #include "ok/sched/process.hpp"
 #include "ok/syscall/linux.hpp"
 
+extern "C" ok::Status ok_boot_filesystem(ok::fs::VirtualFileSystem &) __attribute__((weak));
+
 namespace ok::user::native
 {
 namespace
@@ -118,6 +120,10 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
         copy_bytes(elf_buffer.data() + offset, bytes.value().data.data(), bytes.value().size);
         offset += bytes.value().size;
     }
+    constexpr u8 native_encoding = __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ ? 2 : 1;
+    if (metadata.size < 16 || std::to_integer<u8>(elf_buffer[4]) != (sizeof(uptr) == 8 ? 2 : 1) ||
+        std::to_integer<u8>(elf_buffer[5]) != native_encoding)
+        return Status::invalid_argument("ELF class or byte order does not match the native ABI");
     auto elf = sched::ElfLoader{}.load({elf_buffer.data(), metadata.size}, kernel.arch().architecture());
     if (!elf)
         return elf.status();
@@ -355,7 +361,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         if (a[1] != 0 && !hw::user_range(space, a[1], sizeof(i32), true))
             return -14;
         sched::ProcessId child_pid = static_cast<sched::ProcessId>(a[0]);
-        if (static_cast<i64>(a[0]) == -1)
+        if (static_cast<i32>(a[0]) == -1)
         {
             child_pid = 0;
             for (auto child : process->children())
@@ -382,7 +388,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
             if (result.status().code() == StatusCode::would_block)
             {
                 complete = false;
-                if (static_cast<i64>(a[0]) == -1)
+                if (static_cast<i32>(a[0]) == -1)
                     process->threads()[0].wait_key = 0;
             }
             return error(result.status());
@@ -403,9 +409,77 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         static_cast<void>(hw::copy_to_user(space, a[0], fds.value().data(), sizeof(i32) * 2));
         return 0;
     }
+    if (number == N::readv || number == N::writev)
+    {
+        struct Vector { uptr base; usize length; };
+        std::array<Vector, 16> vectors{};
+        if (a[2] > vectors.size()) return -22;
+        if (!hw::copy_from_user(space, vectors.data(), a[1], a[2] * sizeof(Vector))) return -14;
+        const auto *slot = process->fd_table().entry(static_cast<i32>(a[0]));
+        auto *description = slot && slot->used ? kernel.scheduler().open_description(slot->description) : nullptr;
+        const bool writing = number == N::writev;
+        if (!description || !(writing ? description->writable : description->readable)) return -9;
+        usize total = 0;
+        for (usize i = 0; i < a[2]; ++i)
+        {
+            if (vectors[i].length > static_cast<usize>(__INTPTR_MAX__) - total) return -22;
+            total += vectors[i].length;
+            if (!hw::user_range(space, vectors[i].base, vectors[i].length, !writing)) return -14;
+        }
+        if (!total) return 0;
+        std::array<std::byte, 4096> data{};
+        if (total > data.size()) total = data.size();
+        usize position = 0;
+        if (writing)
+            for (usize i = 0; i < a[2] && position < total; ++i)
+            {
+                auto length = vectors[i].length < total - position ? vectors[i].length : total - position;
+                if (!hw::copy_from_user(space, data.data() + position, vectors[i].base, length)) return -14;
+                position += length;
+            }
+        Result<usize> result = usize{0};
+        if (writing && description->console)
+        {
+            emit({reinterpret_cast<const char *>(data.data()), total});
+            result = kernel.posix().write(static_cast<i32>(a[0]), {data.data(), total});
+        }
+        else if (!writing && description->input_console)
+        {
+            usize count = 0;
+            while (count < total && input_read != input_write)
+                data[count++] = static_cast<std::byte>(input_buffer[input_read++ % input_buffer.size()]);
+            result = count ? Result<usize>{count} : Result<usize>{Status::would_block()};
+        }
+        else if (writing)
+            result = kernel.posix().write(static_cast<i32>(a[0]), {data.data(), total});
+        else
+            result = kernel.posix().read(static_cast<i32>(a[0]), {data.data(), total});
+        if (!result)
+        {
+            if (result.status().code() == StatusCode::would_block) complete = false;
+            return error(result.status());
+        }
+        if (!writing)
+        {
+            position = 0;
+            for (usize i = 0; i < a[2] && position < result.value(); ++i)
+            {
+                auto length = vectors[i].length < result.value() - position ? vectors[i].length : result.value() - position;
+                if (!hw::copy_to_user(space, vectors[i].base, data.data() + position, length)) return -14;
+                position += length;
+            }
+        }
+        return static_cast<i64>(result.value());
+    }
+    if ((number == N::pread64 || number == N::pwrite64) && static_cast<__INTPTR_TYPE__>(a[3]) < 0)
+        return -22;
+    if ((number == N::truncate || number == N::ftruncate) && static_cast<__INTPTR_TYPE__>(a[1]) < 0)
+        return -22;
     syscall::Request request{.number = number, .caller = pid};
     for (usize i = 0; i < 6; ++i)
         request.args[i] = a[i];
+    if (number == N::lseek)
+        request.args[1] = static_cast<u64>(static_cast<__INTPTR_TYPE__>(a[1]));
     alignas(16) std::array<std::byte, 4096> buffer{};
     FixedString<256> path;
     int path_arg = -1, output_arg = -1, input_arg = -1;
@@ -428,6 +502,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         input_size = a[2] < buffer.size() ? a[2] : buffer.size();
         request.args[2] = input_size;
         break;
+    case N::truncate:
     case N::open:
     case N::creat:
     case N::mkdir:
@@ -509,6 +584,9 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         request.args[1] = output_size;
         variable_output = true;
         break;
+    case N::fsync:
+    case N::fdatasync:
+    case N::ftruncate:
     case N::close:
     case N::close_range:
     case N::dup:
@@ -599,6 +677,9 @@ Status start(Kernel &kernel, fs::BootArchive archive)
         return Status::invalid_argument("missing boot archive");
     if (auto status = fs::mount_archive(kernel.vfs(), {archive.data, archive.size}); !status.ok())
         return status;
+    if (ok_boot_filesystem != nullptr)
+        if (auto status = ok_boot_filesystem(kernel.vfs()); !status.ok())
+            return status;
     if (auto status = hw::initialize(); !status.ok())
         return status;
     Arguments arguments;

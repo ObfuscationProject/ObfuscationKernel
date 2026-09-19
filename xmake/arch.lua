@@ -26,6 +26,7 @@ OK_ARCH_SPECS = {
         linker_script = "src/arch/i386/linker.ld",
         qemu_system = "qemu-system-i386",
         platform_source = "src/arch/x86_common/platform.cpp",
+        freestanding_cxxflags = {"-mno-sse", "-mno-sse2"},
         capabilities = OK_BOOTABLE_QEMU_CAPABILITIES
     },
     x86_64 = {
@@ -140,6 +141,9 @@ OK_ARCH_SPECS = {
         linker_script = "src/arch/ppc/linker.ld",
         qemu_system = "qemu-system-ppc",
         platform_source = "src/arch/ppc/platform.cpp",
+        freestanding_cxxflags = {"-msoft-float", "-msdata=none"},
+        freestanding_asflags = {"-msoft-float", "-msdata=none"},
+        freestanding_ldflags = {"-msoft-float", "-msdata=none"},
         image_format = "elf",
         capabilities = OK_SERIAL_WINDOW_QEMU_CAPABILITIES
     },

@@ -31,6 +31,7 @@ enum class FileSystemMode : u8
     ram_only,
     ext4_read_only,
     ext4_journaled,
+    ext4_read_write,
 };
 
 inline constexpr u32 mode_type_mask = 0170000u;
@@ -122,6 +123,30 @@ class Node
     [[nodiscard]] virtual Metadata metadata() const = 0;
     virtual Result<FileBuffer> read(usize offset, usize count) const = 0;
     virtual Status write(usize offset, std::span<const std::byte> data) = 0;
+    virtual Status truncate(usize)
+    {
+        return Status::unsupported("truncate unavailable");
+    }
+    virtual Status sync()
+    {
+        return Status::success();
+    }
+    virtual Status retain()
+    {
+        return Status::success();
+    }
+    virtual Status release()
+    {
+        return Status::success();
+    }
+    virtual Result<DirectoryListing> list() const
+    {
+        return Status::unsupported("directory listing unavailable");
+    }
+    virtual Status remove(std::string_view, bool)
+    {
+        return Status::unsupported("remove unavailable");
+    }
     virtual Node *lookup(std::string_view child) = 0;
     virtual Status create(std::string_view name, NodeType type) = 0;
     virtual Status chmod(u32 mode) = 0;
@@ -145,11 +170,12 @@ class RamNode final : public Node
     [[nodiscard]] Metadata metadata() const override;
     Result<FileBuffer> read(usize offset, usize count) const override;
     Status write(usize offset, std::span<const std::byte> data) override;
+    Status truncate(usize size) override;
     Node *lookup(std::string_view child) override;
     Status create(std::string_view name, NodeType type) override;
     Status chmod(u32 mode) override;
     Status chown(u32 uid, u32 gid) override;
-    [[nodiscard]] Result<DirectoryListing> list() const;
+    [[nodiscard]] Result<DirectoryListing> list() const override;
     [[nodiscard]] FileBuffer *writable_storage() const
     {
         return data_;
@@ -188,6 +214,7 @@ class VirtualFileSystem final
     {
         return mode_;
     }
+    Status mount(std::string_view path, Node &root);
     Status create(std::string_view path, NodeType type);
     Status create_readonly_file(std::string_view path, std::span<const std::byte> data, u32 mode = 0555u,
                                 bool replace = false);
@@ -206,9 +233,17 @@ class VirtualFileSystem final
     [[nodiscard]] RamNode *allocate_node(std::string_view name, NodeType type);
     [[nodiscard]] FileBuffer *allocate_file_buffer(NodeType type);
     void release_file_buffer(FileBuffer *buffer);
-    [[nodiscard]] RamNode *parent_for(std::string_view path, FixedString<max_path_segment> &leaf);
+    [[nodiscard]] Node *parent_for(std::string_view path, FixedString<max_path_segment> &leaf);
     [[nodiscard]] static bool next_segment(std::string_view path, usize &cursor, std::string_view &segment);
 
+    [[nodiscard]] RamNode *ram_node(Node *node);
+    struct Mount
+    {
+        FixedString<256> path{};
+        Node *root{nullptr};
+        Node *covered{nullptr};
+    };
+    std::array<Mount, 8> mounts_{};
     FileSystemMode mode_{FileSystemMode::ram_only};
     std::array<RamNode, max_ram_nodes> nodes_{};
     std::array<FileBuffer, max_ram_file_buffers> file_buffers_{};

@@ -3,6 +3,12 @@
 .global _start
 .type _start, @function
 _start:
+    # The freestanding O32 ABI permits paired floating-point registers.
+    mfc0 $t0, $12
+    li $t1, 0x20000000
+    or $t0, $t0, $t1
+    mtc0 $t0, $12
+    ehb
     la $sp, boot_stack_top
     la $t0, _bss_start
     la $t1, _bss_end

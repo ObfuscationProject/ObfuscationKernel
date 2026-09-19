@@ -1,7 +1,9 @@
 #include "ok/posix/posix.hpp"
 #include "ok/sched/process.hpp"
+#include "ok/syscall/linux.hpp"
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <type_traits>
 
@@ -142,6 +144,177 @@ void test_fork_dup_offsets_and_lifetime()
     auto redirected = f.posix.open("/data", posix::o_RDONLY);
     CHECK(redirected && redirected.value() == 0);
     CHECK(f.posix.read(0, out).value() == 2 && out[0] == std::byte{'a'});
+}
+
+void test_mounted_paths_and_directory_descriptors()
+{
+    static Fixture f;
+    static fs::VirtualFileSystem mounted;
+    static fs::VirtualFileSystem nested;
+    CHECK(mounted.create("/inside", fs::NodeType::regular));
+    CHECK(mounted.create("/nested", fs::NodeType::directory));
+    CHECK(nested.create("/deep", fs::NodeType::regular));
+    const auto pid = f.create("mounts");
+    CHECK(f.posix.activate(pid));
+    auto covered = f.posix.open("/a", posix::o_RDONLY | posix::o_DIRECTORY);
+    CHECK(covered);
+    CHECK(!f.vfs.mount("/./a", *mounted.lookup("/")));
+    CHECK(f.vfs.mount("/a", *mounted.lookup("/")));
+    CHECK(f.vfs.lookup("/a/inside") == mounted.lookup("/inside"));
+    CHECK(f.vfs.lookup("/a/../data") == f.vfs.lookup("/data"));
+    CHECK(!f.vfs.lookup("/missing/../data"));
+    CHECK(!f.vfs.lookup("/data/../a"));
+    CHECK(f.vfs.mount("/a/nested", *nested.lookup("/")));
+    CHECK(f.vfs.lookup("/a/nested/deep") == nested.lookup("/deep"));
+    CHECK(f.vfs.lookup("/a/nested/../inside") == mounted.lookup("/inside"));
+    CHECK(f.vfs.rmdir("/a").code() == StatusCode::busy);
+    CHECK(f.vfs.rmdir("/a/nested").code() == StatusCode::busy);
+    std::array<std::byte, 512> output{};
+    // Opening before a mount keeps the covered directory, not its old path.
+    CHECK(f.posix.getdents64(covered.value(), output).value() == 0);
+    auto directory = f.posix.open("/a", posix::o_RDONLY | posix::o_DIRECTORY);
+    CHECK(directory);
+    auto count = f.posix.getdents64(directory.value(), output);
+    CHECK(count && count.value() >= 24);
+    u64 ino, offset;
+    u16 reclen;
+    std::memcpy(&ino, output.data(), sizeof(ino));
+    std::memcpy(&offset, output.data() + 8, sizeof(offset));
+    std::memcpy(&reclen, output.data() + 16, sizeof(reclen));
+    CHECK(ino == 1 && offset == 1 && reclen == 24);
+    CHECK(std::memcmp(output.data() + 19, "dev", 4) == 0);
+    CHECK(f.posix.close(directory.value()) && f.posix.close(covered.value()));
+}
+
+class RetainedNode final : public fs::Node
+{
+  public:
+    explicit RetainedNode(fs::Node &backing) : backing_(backing)
+    {
+    }
+    usize retained{}, released{};
+    std::string_view name() const override
+    {
+        return backing_.name();
+    }
+    fs::Metadata metadata() const override
+    {
+        return backing_.metadata();
+    }
+    Result<fs::FileBuffer> read(usize offset, usize count) const override
+    {
+        return backing_.read(offset, count);
+    }
+    Status write(usize offset, std::span<const std::byte> data) override
+    {
+        return backing_.write(offset, data);
+    }
+    Status retain() override
+    {
+        ++retained;
+        return Status::success();
+    }
+    Status release() override
+    {
+        ++released;
+        return Status::success();
+    }
+    Node *lookup(std::string_view name) override
+    {
+        return backing_.lookup(name);
+    }
+    Status create(std::string_view name, fs::NodeType type) override
+    {
+        return backing_.create(name, type);
+    }
+    Status chmod(u32 mode) override
+    {
+        return backing_.chmod(mode);
+    }
+    Status chown(u32 uid, u32 gid) override
+    {
+        return backing_.chown(uid, gid);
+    }
+
+  private:
+    fs::Node &backing_;
+};
+
+void test_retained_open_description_lifetime()
+{
+    static Fixture f;
+    static RetainedNode node(*f.vfs.lookup("/data"));
+    const auto parent = f.create("retained-description");
+    CHECK(f.posix.activate(parent));
+    sched::OpenFileDescription description{};
+    description.node = &node;
+    description.readable = description.writable = true;
+    auto id = f.scheduler.allocate_description(description);
+    CHECK(id);
+    CHECK(f.scheduler.install_descriptor(f.scheduler.find(parent)->resources(), 3, id.value()));
+    CHECK(node.retained == 1 && node.released == 0);
+    auto duplicate = f.posix.duplicate(3);
+    CHECK(duplicate);
+    auto child = f.posix.fork();
+    CHECK(child);
+    CHECK(node.retained == 1);
+    CHECK(f.posix.unlink("/data") && !f.vfs.lookup("/data"));
+    CHECK(f.posix.close(3) && f.posix.close(duplicate.value()));
+    CHECK(node.released == 0);
+    CHECK(f.posix.activate(child.value()));
+    CHECK(f.posix.close(3));
+    CHECK(node.released == 0);
+    std::array<std::byte, 2> output{};
+    CHECK(f.posix.pread(duplicate.value(), output, 0).value() == 2 && output[0] == std::byte{'a'});
+    CHECK(f.posix.exit(0));
+    CHECK(node.retained == 1 && node.released == 1);
+    CHECK(f.posix.activate(parent));
+    CHECK(f.posix.wait(parent, child.value()));
+}
+
+void test_positioned_io_and_descriptor_errors()
+{
+    static Fixture f;
+    const auto pid = f.create("positioned-io");
+    CHECK(f.posix.activate(pid));
+    std::array<std::byte, 4> output{};
+    const auto errno_for = [](Status status) { return syscall::ErrnoMapper::errno_for(status); };
+    CHECK(errno_for(Status::io_error("device failure")) == 5);
+    CHECK(errno_for(Status::fault("invalid user pointer")) == 14);
+    CHECK(errno_for(f.posix.fsync(-1)) == 9);
+    CHECK(errno_for(f.posix.ftruncate(-1, 0)) == 9);
+    CHECK(errno_for(f.posix.pread(-1, output, 0).status()) == 9);
+    CHECK(errno_for(f.posix.pwrite(-1, bytes("x"), 0).status()) == 9);
+    auto read_only = f.posix.open("/data", posix::o_RDONLY);
+    CHECK(read_only);
+    CHECK(errno_for(f.posix.ftruncate(read_only.value(), 0)) == 9);
+    CHECK(errno_for(f.posix.pwrite(read_only.value(), bytes("x"), 0).status()) == 9);
+    CHECK(f.posix.fsync(read_only.value()));
+    auto pipe = f.posix.pipe();
+    CHECK(pipe);
+    CHECK(errno_for(f.posix.pread(pipe.value()[0], output, 0).status()) == 29);
+    CHECK(errno_for(f.posix.pwrite(pipe.value()[1], bytes("x"), 0).status()) == 29);
+    CHECK(errno_for(f.posix.fsync(pipe.value()[1])) == 22);
+    std::array<std::byte, sched::pipe_capacity + 1> large{};
+    const posix::IoVector vectors[] = {{reinterpret_cast<uptr>(large.data()), large.size()},
+                                       {reinterpret_cast<uptr>(large.data()), 1}};
+    CHECK(f.posix.writev(pipe.value()[1], vectors).value() == sched::pipe_capacity);
+    CHECK(f.scheduler.find(pid)->state() != sched::ProcessState::blocked);
+    CHECK(f.posix.read(pipe.value()[0], large).value() == sched::pipe_capacity);
+    auto fd = f.posix.open("/data", posix::o_RDWR | posix::o_APPEND);
+    CHECK(fd);
+    CHECK(f.posix.seek(fd.value(), 2, posix::SeekWhence::set));
+    CHECK(f.posix.pwrite(fd.value(), bytes("Z"), 0).value() == 1);
+    CHECK(f.posix.pread(fd.value(), output, 0).value() == 4 && output[0] == std::byte{'Z'});
+    CHECK(f.posix.seek(fd.value(), 0, posix::SeekWhence::current).value() == 2);
+    CHECK(f.posix.ftruncate(fd.value(), 0));
+    CHECK(f.posix.fstat(fd.value()).value().blocks == 0);
+    CHECK(f.posix.ftruncate(fd.value(), 1000));
+    CHECK(f.posix.fstat(fd.value()).value().blocks == 2);
+    CHECK(f.posix.seek(fd.value(), 0, posix::SeekWhence::current).value() == 2);
+    CHECK(f.posix.pread(fd.value(), output, 999).value() == 1 && output[0] == std::byte{0});
+    CHECK(f.posix.close(fd.value()) && f.posix.close(read_only.value()));
+    CHECK(f.posix.close(pipe.value()[0]) && f.posix.close(pipe.value()[1]));
 }
 
 void test_exec_metadata_and_rollback()
@@ -376,6 +549,27 @@ void test_elf_validation_and_failed_exec()
     reset();
     set(112, 8, 3);
     CHECK(!loader.load(image, architecture));
+    for (bool big : {false, true})
+    {
+        reset(big);
+        image[4] = std::byte{1};
+        set(24, 4, 0x400000, big);
+        set(28, 4, 52, big);
+        set(40, 2, 52, big);
+        set(42, 2, 32, big);
+        set(44, 2, 1, big);
+        set(52, 4, 1, big);
+        set(56, 4, 176, big);
+        set(60, 4, 0x400000, big);
+        set(68, 4, 4, big);
+        set(72, 4, 4096, big);
+        set(76, 4, 5, big);
+        set(80, 4, 1, big);
+        auto elf32 = loader.load(image, architecture);
+        CHECK(elf32 && elf32.value().entry == 0x400000 && elf32.value().segments[0].file_offset == 176);
+        set(56, 4, 0xfffffff0, big);
+        CHECK(!loader.load(image, architecture));
+    }
     static Fixture f;
     sched::ProcessManager manager(f.scheduler);
     const auto pid = f.create("invalid-exec");
@@ -401,6 +595,9 @@ int main()
 {
     test_unique_owner_and_isolation();
     test_fork_dup_offsets_and_lifetime();
+    test_mounted_paths_and_directory_descriptors();
+    test_retained_open_description_lifetime();
+    test_positioned_io_and_descriptor_errors();
     test_exec_metadata_and_rollback();
     test_pipe_wait_and_wakeup();
     test_orphan_reaping_and_native_ownership();

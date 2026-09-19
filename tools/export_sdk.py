@@ -34,10 +34,10 @@ def export(args: argparse.Namespace) -> None:
             raise ValueError(f"compiler target {compiler_target} != {args.triple}")
         compiler_version = subprocess.check_output([str(args.compiler), "-dumpfullversion"], text=True).strip()
         manifest = {
-            "schema": 1, "kernel_version": args.version, "abi_version": 1,
+            "schema": 1, "kernel_version": args.version, "abi_version": 2,
             "arch": args.arch, "mode": args.mode, "triple": args.triple,
             "image_format": args.image_format, "kernel_gui": "OK_ENABLE_KERNEL_GUI" in args.define, "compiler": {"family": "gcc", "version": compiler_version},
-            "cxxflags": args.cxxflag, "ldflags": args.ldflag, "defines": args.define,
+            "cxxflags": args.cxxflag, "asflags": args.asflag, "ldflags": args.ldflag, "defines": args.define,
             "files": {},
         }
         for artifact in sorted(stage.rglob("*")):
@@ -71,7 +71,7 @@ def main() -> None:
     parser.add_argument("--version", default="0.1.0")
     parser.add_argument("--boot-sector", type=Path)
     parser.add_argument("--boot-object", type=Path, action="append", required=True)
-    for name in ("cxxflag", "ldflag", "define"):
+    for name in ("cxxflag", "asflag", "ldflag", "define"):
         parser.add_argument("--" + name, action="append", default=[])
     export(parser.parse_args())
 

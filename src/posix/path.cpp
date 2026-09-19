@@ -28,23 +28,11 @@ u8 dirent_type(fs::NodeType type)
     return 0;
 }
 
-void write_u16(std::span<std::byte> out, usize offset, u16 value)
+template <typename T> void write_native(std::span<std::byte> out, usize offset, T value)
 {
-    out[offset] = static_cast<std::byte>(value & 0xffu);
-    out[offset + 1] = static_cast<std::byte>((value >> 8) & 0xffu);
-}
-
-void write_u64(std::span<std::byte> out, usize offset, u64 value)
-{
+    const auto *bytes = reinterpret_cast<const std::byte *>(&value);
     for (usize i = 0; i < sizeof(value); ++i)
-    {
-        out[offset + i] = static_cast<std::byte>((value >> (i * 8)) & 0xffu);
-    }
-}
-
-void write_i64(std::span<std::byte> out, usize offset, i64 value)
-{
-    write_u64(out, offset, static_cast<u64>(value));
+        out[offset + i] = bytes[i];
 }
 
 } // namespace
@@ -334,7 +322,7 @@ Result<usize> PosixService::getdents64(Fd fd, std::span<std::byte> out)
     {
         return status;
     }
-    auto listing = vfs_->list(entry->path.view());
+    auto listing = entry->node->list();
     if (!listing)
     {
         return listing.status();
@@ -351,9 +339,9 @@ Result<usize> PosixService::getdents64(Fd fd, std::span<std::byte> out)
         {
             break;
         }
-        write_u64(out, written + 0, static_cast<u64>(index + 1));
-        write_i64(out, written + 8, static_cast<i64>(index + 1));
-        write_u16(out, written + 16, static_cast<u16>(reclen));
+        write_native(out, written + 0, static_cast<u64>(index + 1));
+        write_native(out, written + 8, static_cast<i64>(index + 1));
+        write_native(out, written + 16, static_cast<u16>(reclen));
         out[written + 18] = static_cast<std::byte>(dirent_type(source.metadata.type));
         for (usize i = 0; i < name.size(); ++i)
         {

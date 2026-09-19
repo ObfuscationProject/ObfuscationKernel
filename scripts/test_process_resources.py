@@ -15,7 +15,7 @@ def main():
     parser.add_argument("--cxx", default=os.environ.get("CXX", "g++"))
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    sources = ["tests/host/process_resource_tests.cpp", "src/sched/scheduler.cpp", "src/sched/process.cpp", "src/posix/posix.cpp", "src/posix/fd.cpp", "src/posix/path.cpp", "src/posix/process.cpp", "src/fs/vfs.cpp", "src/driver/driver.cpp", "src/smp/smp.cpp", "src/arch/arch.cpp"]
+    sources = ["tests/host/process_resource_tests.cpp", "src/sched/scheduler.cpp", "src/sched/process.cpp", "src/posix/posix.cpp", "src/posix/fd.cpp", "src/posix/path.cpp", "src/posix/process.cpp", "src/fs/vfs.cpp", "src/driver/driver.cpp", "src/smp/smp.cpp", "src/arch/arch.cpp", "src/syscall/linux.cpp"]
     with tempfile.TemporaryDirectory(prefix="ok-process-resources-") as directory:
         for arch in ARCHITECTURES if args.arch == "all" else (args.arch,):
             output = Path(directory) / arch

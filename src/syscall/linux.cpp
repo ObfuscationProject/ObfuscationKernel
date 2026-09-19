@@ -18,6 +18,10 @@ i64 ErrnoMapper::errno_for(Status status)
     {
     case StatusCode::ok:
         return 0;
+    case StatusCode::bad_descriptor:
+        return linux_EBADF;
+    case StatusCode::not_seekable:
+        return linux_ESPIPE;
     case StatusCode::broken_pipe:
         return 32;
     case StatusCode::invalid_argument:
@@ -42,6 +46,7 @@ i64 ErrnoMapper::errno_for(Status status)
     case StatusCode::interrupted:
         return linux_EAGAIN;
     case StatusCode::not_initialized:
+    case StatusCode::io_error:
         return linux_EIO;
     }
     return linux_EIO;

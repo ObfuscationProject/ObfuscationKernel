@@ -4,13 +4,15 @@ ObfuscationKernel is a C++23 multi-architecture kernel framework built with xmak
 The current tree is a working foundation: it compiles a reusable kernel library,
 builds a bootable `kernel.bin` for all ten system targets, and runs debug
 kernel tests that exercise interrupts, memory management, scheduling, IPC,
-POSIX-oriented syscalls, drivers, VFS and EXT4 parsing. Native user execution
-on x86_64, aarch64, rv64 and loongarch64 adds real address spaces, traps, timer
-preemption and a minimal fork/exec/wait/pipe runtime. The foundation also includes SMP topology state, a VGA-backed display
-path, PCIe/USB HID driver scaffolding, a kernel debug shell, and a read-only
-EXT4 superblock/block reader. A fixed RAM disk and SimpleFS provide writable filesystem model coverage;
-the attached QEMU virtio-blk disk is not yet backed by real block-device I/O, and the debug kernel now includes virtio-gpu/ramfb test
-plumbing plus an IPv4/UDP/TCP loopback stack for network-debug bring-up.
+POSIX-oriented syscalls, drivers and VFS. All ten profiles have native user
+execution, real address spaces, traps, timer preemption and fork/exec/wait/pipe.
+Core ext4 support includes a bounded non-journalled read/write filesystem;
+ObfuscationOS supplies real external Virtio block drivers and disk-root policy.
+The standalone RAM disk and SimpleFS/Virtio models remain separate from real
+media. Other foundations include SMP topology models, kernel diagnostics GUI,
+ramfb/input integration and an IPv4/UDP/TCP loopback stack. See
+[Native execution](docs/NATIVE_EXECUTION.md) and [ext4 storage](docs/modules/ext4-storage.md)
+for QEMU execution coverage and remaining limits.
 
 This is not yet a complete production POSIX kernel. The implementation defines
 the ABI, module boundaries, architecture profiles, build flow, and regression
@@ -123,7 +125,8 @@ Generic kernel modules call the compile-time `ok::arch::ArchOperations` alias.
 each architecture supplies `NativeInstructions<A>` under `src/arch/<arch>/ops.cpp`.
 Those files provide architecture-specific cycle counters, fences, interrupt
 control and halt primitives. Profile traits describe syscall and user-transition
-models; those descriptions do not implement hardware trap entry/return. Inline assembly is guarded
+models; native execution backends separately implement hardware trap entry/return.
+Inline assembly is guarded
 by compiler target macros so profile checks can still run on a normal host
 compiler, while real cross builds compile the matching target assembly.
 
@@ -166,6 +169,8 @@ remain supported. See [Architecture](docs/ARCHITECTURE.md).
 CPU primitives and scheduler policy selection now use templates/static dispatch.
 Run `python3 scripts/test_static_dispatch.py` to validate all ten profile types
 and two scheduling policies on the host. These are explicitly model tests;
-native MMU isolation, user execution and timer context switching are verified
-separately on the four distribution profiles. Hardware SMP and arbitrary ELF
-module relocation remain future milestones. See [native coverage](docs/NATIVE_EXECUTION.md).
+native address-space protection, user execution and timer context switching
+have separate QEMU acceptance on all ten distribution profiles. The retained
+MIPS CPUs lack hardware NX; see [native coverage](docs/NATIVE_EXECUTION.md) for
+platform limits. Physical-machine validation, hardware SMP and arbitrary ELF
+module relocation remain future milestones.

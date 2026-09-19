@@ -111,8 +111,7 @@ Result<Fd> PosixService::openat(Fd dirfd, std::string_view path, u32 flags, u32 
         {
             return Status::invalid_argument("cannot truncate non-regular file");
         }
-        std::span<const std::byte> empty{};
-        if (auto status = node->write(0, empty); !status.ok())
+        if (auto status = node->truncate(0); !status.ok())
         {
             return status;
         }
@@ -273,32 +272,58 @@ Result<usize> PosixService::write(Fd fd, std::span<const std::byte> in)
     return in.size();
 }
 
+Status PosixService::fsync(Fd fd)
+{
+    auto *entry = descriptor(fd);
+    if (!entry || !entry->used)
+        return Status::bad_descriptor("bad file descriptor");
+    if (!entry->node)
+        return Status::invalid_argument("file descriptor does not support synchronization");
+    return entry->node->sync();
+}
+Status PosixService::ftruncate(Fd fd, usize size)
+{
+    auto *entry = descriptor(fd);
+    if (!entry || !entry->used || !entry->writable)
+        return Status::bad_descriptor("file descriptor is not writable");
+    if (!entry->node)
+        return Status::invalid_argument("file descriptor cannot be truncated");
+    return entry->node->truncate(size);
+}
+Status PosixService::truncate(std::string_view path, usize size)
+{
+    auto fd = open(path, o_WRONLY);
+    if (!fd)
+        return fd.status();
+    const auto status = ftruncate(fd.value(), size);
+    static_cast<void>(close(fd.value()));
+    return status;
+}
 Result<usize> PosixService::pread(Fd fd, std::span<std::byte> out, usize offset)
 {
     auto *entry = descriptor(fd);
-    if (entry == nullptr || !entry->used)
-    {
-        return Status::invalid_argument("bad file descriptor");
-    }
-    const auto saved = entry->offset;
-    entry->offset = offset;
-    auto result = read(fd, out);
-    entry->offset = saved;
-    return result;
+    if (!entry || !entry->used || !entry->readable)
+        return Status::bad_descriptor("file descriptor is not readable");
+    if (!entry->node || entry->pipe != sched::invalid_description || entry->input_console)
+        return Status::not_seekable("file descriptor is not seekable");
+    auto result = entry->node->read(offset, out.size());
+    if (!result)
+        return result.status();
+    const auto count = result.value().size < out.size() ? result.value().size : out.size();
+    for (usize i = 0; i < count; ++i)
+        out[i] = result.value().data[i];
+    return count;
 }
-
 Result<usize> PosixService::pwrite(Fd fd, std::span<const std::byte> in, usize offset)
 {
     auto *entry = descriptor(fd);
-    if (entry == nullptr || !entry->used)
-    {
-        return Status::invalid_argument("bad file descriptor");
-    }
-    const auto saved = entry->offset;
-    entry->offset = offset;
-    auto result = write(fd, in);
-    entry->offset = saved;
-    return result;
+    if (!entry || !entry->used || !entry->writable)
+        return Status::bad_descriptor("file descriptor is not writable");
+    if (!entry->node || entry->pipe != sched::invalid_description || entry->console)
+        return Status::not_seekable("file descriptor is not seekable");
+    if (auto status = entry->node->write(offset, in); !status.ok())
+        return status;
+    return in.size();
 }
 
 Result<usize> PosixService::readv(Fd fd, std::span<const IoVector> vectors)
@@ -340,6 +365,8 @@ Result<usize> PosixService::writev(Fd fd, std::span<const IoVector> vectors)
             return total == 0 ? result : Result<usize>{total};
         }
         total += result.value();
+        if (result.value() != vector.length)
+            break;
     }
     return total;
 }
@@ -365,12 +392,18 @@ Result<usize> PosixService::seek(Fd fd, i64 offset, SeekWhence whence)
     case SeekWhence::end:
         base = static_cast<i64>(metadata.size);
         break;
+    default:
+        return Status::invalid_argument("invalid seek origin");
     }
+    if (offset > 0 && base > __INT64_MAX__ - offset)
+        return Status::overflow("seek offset overflow");
     const i64 next = base + offset;
     if (next < 0)
     {
         return Status::invalid_argument("negative seek offset");
     }
+    if (static_cast<u64>(next) > static_cast<u64>(__INTPTR_MAX__))
+        return Status::overflow("seek offset exceeds native off_t");
     entry->offset = static_cast<usize>(next);
     return entry->offset;
 }

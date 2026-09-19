@@ -2,18 +2,27 @@
 
 ## Scope
 
-The kernel retains ten architecture profiles and standalone boot tests. Actual
-user execution is implemented on the four current distribution architectures:
+The kernel and distribution retain ten architecture profiles. All ten have
+native user execution backends and OS crt/syscall implementations:
 
 | Profile | User privilege / translation | Preemption source |
 | --- | --- | --- |
+| i386 | CPL3 / PAE with NX, QEMU `-cpu max` | PIC/PIT |
 | x86_64 | CPL3 / four-level paging | PIC/PIT |
 | aarch64 | EL0 / TTBR0, 4 KiB pages | GICv2 physical timer |
+| arm32 | USR / ARMv7 short descriptors | GICv2 physical timer |
 | rv64 | U-mode / Sv39, M-mode kernel | CLINT machine timer |
+| rv32 | U-mode / Sv32, M-mode kernel | CLINT machine timer |
 | loongarch64 | PLV3 / software-filled TLB | CPU timer |
+| mips | User KSU / software-filled TLB, 24Kf | CP0 Count/Compare |
+| mips64 | User KSU / software-filled TLB, MIPS64R2-generic | CP0 Count/Compare |
+| ppc | BookE PR / software-filled TLB, e500v2 | DEC |
 
-`i386`, `arm32`, `rv32`, `mips`, `mips64` and `ppc` keep their boot, platform and
-model coverage; their native execution API explicitly reports unsupported.
+The i386 profile requires a modern 32-bit CPU with PAE, NX and FXSR; it does not
+claim original 80386 hardware compatibility. The retained MIPS CPUs do not
+implement RI/XI: writable/executable mappings are rejected by policy, but they
+cannot provide hardware NX. PPC uses the existing BookE/SPE CPU and a soft-float
+C ABI, preserving the real SPE context. See the individual architecture notes.
 Hardware execution below means actual privileged/user instructions under QEMU,
 not validation on physical machines. The backends execute on the boot CPU;
 modeled CPU topology is not hardware SMP.
@@ -43,7 +52,7 @@ Children of an exiting process are reparented to the kernel service reaper
 boundaries. Ordinary exit codes retain their low eight bits; fault termination
 is represented separately as a signal status.
 
-The loader accepts static, architecture-matching ET_EXEC files with separate
+The loader accepts static ELF32/ELF64 ET_EXEC files with the native class, byte order and architecture with separate
 read/execute and writable segments. It builds argc/argv/envp and a small auxiliary
 vector on an aligned user stack with a guard page. W+X segments, malformed ranges,
 non-executable entry points and oversized images are rejected. Current bounds:
@@ -61,18 +70,23 @@ the SDK boot hook exposes it to the kernel's generic readonly archive mounter.
 the shell directly. OS crt0, libc wrappers, applications and linker layout remain
 in the OS repository.
 
-The current virtio block object is RAM-backed modeling. The attached QEMU disk
-and offline SimpleFS/EXT4 packaging checks do not prove real device-backed rootfs
-I/O. Executable bytes currently come from the immutable embedded archive; writable
-VFS files and Notes are temporary and disappear on reboot.
+The standalone kernel's RAM-backed Virtio model remains isolated from real media.
+ObfuscationOS owns a real Virtio block driver and an optional boot filesystem hook.
+A supported clean ext4 image replaces the archive root before `/init` is loaded;
+executables and subsequent file I/O then come from the attached block device.
+Missing devices and non-ext4 disks retain the archive rescue root. An invalid or
+unsupported ext4 volume fails startup without formatting or modifying the disk.
+See [ext4 storage](modules/ext4-storage.md) for the bounded writer and recovery policy.
 
 ## Supported native syscall subset
 
 The native boundary supports fork, execve, wait4, pipe, exit/exit_group; scalar
-file I/O, descriptor duplication/closing and the implemented fcntl operations;
+and vectored file I/O, positioned reads/writes, fsync/fdatasync, truncate/ftruncate, descriptor duplication/closing and the implemented fcntl operations;
 path lookup/creation/removal, metadata and directory enumeration; cwd, identity,
 umask, uname, sysinfo, getrlimit, clock reads, getrandom and sched_yield.
-Transfers are capped at 4096 bytes per call and may return short counts.
+Transfers are capped at 4096 bytes per call and may return short counts. Vectored
+I/O accepts up to 16 checked native-word iovecs; offsets and pointer fields follow
+the target word size, while fixed-width UAPI integers retain their declared width.
 The code's whitelist is authoritative. The syscall numbers are this project's
 common UAPI (based on x86_64 Linux numbering), including on the other CPUs;
 this is not Linux binary compatibility.
@@ -93,6 +107,12 @@ python3 scripts/test_native_x86_64.py --toolchain ../SysToolchain/build/local-sd
 python3 scripts/test_native_aarch64.py --toolchain toolchains/aarch64-elf
 python3 scripts/test_native_rv64.py
 python3 scripts/test_native_loongarch64.py
+python3 scripts/test_native_i386.py --toolchain toolchains/i386-elf
+python3 scripts/test_native_arm32.py
+python3 scripts/test_native_rv32.py
+python3 scripts/test_native_mips.py --arch mips
+python3 scripts/test_native_mips.py --arch mips64
+python3 scripts/test_native_ppc.py --toolchain toolchains/powerpc-eabi
 ```
 
 These exercise real syscall/return, timer interruption, address-space switching,
@@ -115,7 +135,8 @@ python3 scripts/qemu_distro.py --arch x86_64 --qemu /usr/bin/qemu-system-x86_64 
 `--require-native` requires all of the desktop completion marker, native timer
 preemption, and userland acceptance. `OK_POSIX scope=hardware` covers real
 fork/exec/wait, fork isolation, pipe transfer/EOF/EPIPE, invalid user buffers,
-readonly buffers and contained user faults. `OK_USERLAND scope=hardware` covers
+readonly buffers and contained user faults, orphan collection and exit status,
+overwrite/EOF semantics, positioned/vectored I/O, truncate and synchronization. `OK_USERLAND scope=hardware` covers
 init and an external-program pipeline. Standalone `qemu_test.py`/`xmake qemu-test`
 separately exercises the complete debug kernel model suite on all ten profiles.
 

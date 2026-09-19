@@ -35,6 +35,9 @@ enum class StatusCode : u32
     fault,
     not_initialized,
     broken_pipe,
+    bad_descriptor,
+    not_seekable,
+    io_error,
 };
 
 class Status final
@@ -52,6 +55,18 @@ class Status final
     [[nodiscard]] static constexpr Status broken_pipe(std::string_view message = {})
     {
         return {StatusCode::broken_pipe, message};
+    }
+    [[nodiscard]] static constexpr Status bad_descriptor(std::string_view message = {})
+    {
+        return {StatusCode::bad_descriptor, message};
+    }
+    [[nodiscard]] static constexpr Status not_seekable(std::string_view message = {})
+    {
+        return {StatusCode::not_seekable, message};
+    }
+    [[nodiscard]] static constexpr Status io_error(std::string_view message = {})
+    {
+        return {StatusCode::io_error, message};
     }
     [[nodiscard]] static constexpr Status invalid_argument(std::string_view message = {})
     {

@@ -1,6 +1,7 @@
 # mips64
 
-The `mips64` profile models a 64-bit big-endian MIPS kernel target.
+The `mips64` profile boots a 64-bit big-endian MIPS kernel and runs native n64
+user instructions on QEMU Malta with `MIPS64R2-generic`.
 
 Implementation:
 
@@ -12,6 +13,9 @@ Implementation:
   path uses serial VC output.
 - `src/arch/mips64/linker.ld`: 64-bit big-endian ELF layout for the Malta kernel
   load address.
+- `src/arch/mips64/execution.cpp` and `execution.S`: KSU user execution through
+  the shared MIPS backend, including software TLB refill, CP0 timer preemption,
+  syscall/fault return and complete ABI register state.
 
 Traits:
 
@@ -26,7 +30,12 @@ Toolchain:
 ```sh
 xmake f -c -y -m debug -a mips64
 xmake qemu-test
+python3 scripts/test_native_mips.py --arch mips64
 ```
 
 QEMU uses `qemu-system-mips64 -M malta -cpu MIPS64R2-generic -kernel` to match
 the `-march=mips64r2 -mabi=64` freestanding build.
+
+The hardware lacks NX. User/kernel and read-only isolation are verified; code
+can still execute from a readable data page. See [native execution details and
+limits](mips-native.md) for the syscall ABI, TLS emulation and hardware probes.

@@ -173,6 +173,9 @@ class PosixService final
     Result<Fd> duplicate_to(Fd fd, Fd target, u32 flags = 0);
     Result<usize> read(Fd fd, std::span<std::byte> out);
     Result<usize> write(Fd fd, std::span<const std::byte> in);
+    Status fsync(Fd fd);
+    Status ftruncate(Fd fd, usize size);
+    Status truncate(std::string_view path, usize size);
     Result<usize> pread(Fd fd, std::span<std::byte> out, usize offset);
     Result<usize> pwrite(Fd fd, std::span<const std::byte> in, usize offset);
     Result<usize> readv(Fd fd, std::span<const IoVector> vectors);

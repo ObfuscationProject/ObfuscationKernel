@@ -259,6 +259,9 @@ target("kernel-sdk")
         for _, flag in ipairs(image:get("cxxflags") or {}) do
             table.insert(argv, "--cxxflag=" .. flag)
         end
+        for _, flag in ipairs(image:get("asflags") or {}) do
+            table.insert(argv, "--asflag=" .. flag)
+        end
         for _, flag in ipairs(spec.freestanding_ldflags or {}) do
             table.insert(argv, "--ldflag=" .. flag)
         end

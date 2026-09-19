@@ -3,6 +3,12 @@
 .global _start
 .type _start, @function
 _start:
+    # Enable n64 floating-point state before entering compiled C++.
+    mfc0 $t0, $12
+    li $t1, 0x24000080
+    or $t0, $t0, $t1
+    mtc0 $t0, $12
+    ehb
     dla $sp, boot_stack_top
     dla $t0, _bss_start
     dla $t1, _bss_end

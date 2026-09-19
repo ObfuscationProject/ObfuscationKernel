@@ -20,7 +20,7 @@ inline constexpr usize max_module_relocations = 64;
 inline constexpr usize max_module_parameters = 16;
 inline constexpr usize max_module_text = 128;
 inline constexpr std::string_view kernel_module_process_prefix{"mod:"};
-inline constexpr u32 kernel_module_abi_version = 1;
+inline constexpr u32 kernel_module_abi_version = 2;
 
 struct ModuleId
 {

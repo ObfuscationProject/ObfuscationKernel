@@ -188,6 +188,7 @@ class BlockDevice
     [[nodiscard]] virtual BlockGeometry geometry() const = 0;
     virtual Status read_blocks(u64 first_block, std::span<std::byte> out) = 0;
     virtual Status write_blocks(u64 first_block, std::span<const std::byte> in) = 0;
+    virtual Status flush() { return Status::unsupported("block flush unavailable"); }
     [[nodiscard]] virtual BlockIoStats io_stats() const
     {
         return {};
