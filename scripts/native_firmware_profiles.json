@@ -79,6 +79,7 @@
     "cxxflags": [
       "-mno-outline-atomics",
       "-mgeneral-regs-only",
+      "-mstrict-align",
       "-ffreestanding",
       "-fno-exceptions",
       "-fno-stack-protector",
@@ -115,6 +116,7 @@
     "cxxflags": [
       "-march=armv7-a",
       "-marm",
+      "-mno-unaligned-access",
       "-ffreestanding",
       "-fno-exceptions",
       "-fno-stack-protector",

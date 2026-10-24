@@ -49,7 +49,9 @@ OK_ARCH_SPECS = {
         qemu_system = "qemu-system-aarch64",
         platform_source = "src/arch/aarch64/platform.cpp",
         image_format = "linux-image",
-        freestanding_cxxflags = {"-mno-outline-atomics", "-mgeneral-regs-only"},
+        -- Kernel code runs with the MMU off, where every data access is Device
+        -- memory and an unaligned access faults (QEMU 9+ enforces this too).
+        freestanding_cxxflags = {"-mno-outline-atomics", "-mgeneral-regs-only", "-mstrict-align"},
         capabilities = OK_BOOTABLE_QEMU_CAPABILITIES
     },
     arm32 = {
@@ -61,7 +63,9 @@ OK_ARCH_SPECS = {
         qemu_system = "qemu-system-arm",
         platform_source = "src/arch/arm32/platform.cpp",
         image_format = "arm32-linux-image",
-        freestanding_cxxflags = {"-march=armv7-a", "-marm"},
+        -- Kernel code runs with the MMU off (Device memory), where unaligned
+        -- accesses fault; stop GCC from merging or splitting into them.
+        freestanding_cxxflags = {"-march=armv7-a", "-marm", "-mno-unaligned-access"},
         freestanding_asflags = {"-march=armv7-a", "-marm"},
         capabilities = OK_BOOTABLE_QEMU_CAPABILITIES
     },
