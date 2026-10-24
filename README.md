@@ -58,9 +58,11 @@ xmake qemu-test
 ## Cross Toolchains
 
 Freestanding GCC/binutils and the matching QEMU system emulator are provided by
-`systoolchain 0.1.0` from the project-owned `ObfuscationRepo`. The package is
-built from source by default, and its installation validates the compiler,
-binary utilities, and QEMU before the kernel build starts:
+`systoolchain 0.1.0` from the project-owned `ObfuscationRepo`. The package
+downloads the checksum-verified SysToolchain release archive (the packaged QEMU
+needs the host GLib, Pixman and SDL2 shared libraries), and its installation
+validates the compiler, binary utilities, and QEMU before the kernel build
+starts:
 
 ```sh
 xmake f -c -y -a x86_64

@@ -55,8 +55,11 @@ architecture with:
 xmake f -c -y -a rv64
 ```
 
-SysToolchain is built from source by default. Its package installation validates
-the compiler, binary utilities, and matching QEMU executable. Architecture-to-
+The package downloads the SysToolchain release archive for the target and
+verifies its `.sha256`; `build_from_source = true` is the fallback for hosts
+without a published archive. The packaged QEMU needs the host GLib, Pixman and
+SDL2 shared libraries. Package installation validates the compiler, binary
+utilities, and matching QEMU executable. Architecture-to-
 triple and QEMU launch-profile selections remain in `xmake/arch.lua`; xmake
 resolves the installed tools from its package cache.
 

@@ -30,8 +30,15 @@ sequence and dependency graph are in the umbrella repository `PLAN.md`.
 
 - Landed five weeks of uncommitted work as ten subsystem commits; tag
   `sdk-abi74-uapi0.16`.
-- CI caches the SysToolchain package per architecture and exports the SDK
+- CI resolves SysToolchain from its release archives (`build_from_source` is
+  the fallback), caches the installed package per architecture, installs the
+  QEMU runtime libraries, times jobs out after 90 minutes and exports the SDK
   artifact after `xmake test`.
+- Arm kernel code is compiled with `-mstrict-align` (aarch64) and
+  `-mno-unaligned-access` (arm32). It runs with the MMU off, where every data
+  access is Device memory and an unaligned access faults; QEMU 8.2 tolerated
+  that, the pinned QEMU 10.2.0 does not, and both profiles stopped at boot
+  until the change. All ten profiles pass `xmake test` on the packaged QEMU.
 - 87 per-slice notes moved to `docs/qualification/` with links rewritten; module
   ABI history moved to the end of `docs/modules/modules.md`; ten-profile userland
   statement fixed in `ARCHITECTURE.md`.

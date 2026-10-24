@@ -5,13 +5,13 @@ on:
   pull_request:
   workflow_dispatch:
 
-# SysToolchain is resolved as an xmake package. Until SysToolchain publishes
-# release archives it is built from source, so the package cache is keyed on
-# the toolchain version and architecture and the source build happens once per
-# key instead of once per run.
+# SysToolchain is resolved as an xmake package from its GitHub release archives;
+# the installed package is cached per toolchain version and architecture. The
+# packaged QEMU links the host GLib, Pixman and SDL2 shared libraries.
 jobs:
   build-and-test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -31,6 +31,10 @@ jobs:
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
           xmake-version: latest
+      - name: Install QEMU runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-0t64 libpixman-1-0 libsdl2-2.0-0
       - name: Cache SysToolchain package
         uses: actions/cache@v4
         with:
