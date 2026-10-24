@@ -85,7 +85,14 @@
 .global ok_ppc_execution_enter
 .type ok_ppc_execution_enter,@function
 ok_ppc_execution_enter:
-    stwu 1,-736(1)
+    mr 12,1
+    cmpwi 5,0
+    beq .Lservice_stack
+    mr 1,5
+.Lservice_stack:
+    stwu 1,-752(1)
+    stw 12,736(1)
+    stw 12,0(1)
     stmw 0,16(1)
     mflr 0
     stw 0,144(1)
@@ -313,6 +320,7 @@ ok_ppc_trap_common:
     mfspr 0,61
     stw 0,12(12)
     mfspr 1,273
+    stw 1,16(12)
     addi 12,1,176
     RESTORE_SPE 12
     mfspr 1,273
@@ -360,8 +368,7 @@ ok_ppc_trap_common:
     lwz 29,132(1)
     lwz 30,136(1)
     lwz 31,140(1)
-    lwz 1,20(1)
-    addi 1,1,736
+    lwz 1,736(1)
     blr
 
 ok_ppc_kernel_fault:

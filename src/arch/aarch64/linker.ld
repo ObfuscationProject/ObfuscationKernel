@@ -20,6 +20,10 @@ SECTIONS
     .data ALIGN(4K) :
     {
         *(.data*)
+        /* Keep file-backed runtime data inside the advertised Linux Image extent. */
+        *(.got*)
+        *(.init_array*)
+        *(.fini_array*)
     }
 
     _kernel_file_end = .;

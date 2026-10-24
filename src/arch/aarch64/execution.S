@@ -154,7 +154,7 @@ ok_arm_user_trap:
     stp x28, x29, [x1, #224]
     str x30, [x1, #240]
     mov x10, x0
-    ldp x2, x3, [sp], #16
+    ldp x2, x3, [sp]
     stp x2, x3, [x1, #0]
     mrs x2, fpcr
     mrs x3, fpsr
@@ -181,6 +181,7 @@ ok_arm_user_trap:
     msr fpcr, x2
     msr fpsr, x3
     mov x0, x10
+    mov x1, sp
     bl ok_arm_execution_trap
     ldr x0, =ok_arm_execution_resume_sp
     ldr x0, [x0]

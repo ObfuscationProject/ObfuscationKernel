@@ -13,6 +13,7 @@ _start:
     addi t0, t0, 4
     j 1b
 2:
+    call ok_boot_capture
     call kernel_main
 3:
     wfi
@@ -21,6 +22,10 @@ _start:
 
 .section .bootstrap_bss, "aw", @nobits
 .align 12
+.global ok_service_stack_lower
+ok_service_stack_lower:
 boot_stack:
     .skip 1048576
+.global ok_service_stack_top
+ok_service_stack_top:
 boot_stack_top:

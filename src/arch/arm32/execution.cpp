@@ -1,11 +1,12 @@
 #include "ok/arch/execution.hpp"
+#include "ok/arch/arm32/fp_state.hpp"
 #include <cstddef>
 
 namespace ok::arch::execution
 {
 namespace
 {
-constexpr usize max_pages = 128;
+constexpr usize max_pages = max_native_mappings;
 constexpr usize max_leaf_tables = 16;
 struct alignas(16384) RootTable
 {
@@ -20,7 +21,7 @@ struct Space
     bool used{false};
     u32 generation{0};
     usize count{0}, leaves{0};
-    std::array<PageMapping, max_pages> mappings{};
+    MappingView mappings{};
     RootTable root;
     std::array<LeafTable, max_leaf_tables> leaf;
 };
@@ -89,15 +90,17 @@ const PageMapping *mapping(const Space &space, uptr address)
 {
     const auto page = address & ~(page_size - 1);
     for (usize i = 0; i < space.count; ++i)
-        if (space.mappings[i].virtual_address == page)
+        if (space.mappings[i].flags && space.mappings[i].virtual_address == page)
             return &space.mappings[i];
     return nullptr;
 }
-extern "C" void ok_arm32_enter_native(UserFrame *frame, uptr table, Trap *trap);
+extern "C" void ok_arm32_enter_native(UserFrame *frame, uptr table, Trap *trap, uptr stack_top);
 static_assert(offsetof(UserFrame, pc) == 128);
 static_assert(offsetof(UserFrame, sp) == 132);
 static_assert(offsetof(UserFrame, flags) == 136);
 static_assert(offsetof(UserFrame, fp_state) == 160);
+static_assert(offsetof(UserFrame, fp_state) + Arm32FpState::fpexc_offset == 420);
+static_assert(offsetof(Trap, kernel_stack_pointer) == 16);
 static_assert(offsetof(Trap, vector) == 4);
 static_assert(offsetof(Trap, error_code) == 8);
 static_assert(offsetof(Trap, fault_address) == 12);
@@ -107,6 +110,30 @@ bool supported() noexcept
 {
     return true;
 }
+OwnershipReport ownership_report() noexcept
+{
+    OwnershipReport report{};
+    report.executing = entering;
+    for (const auto &space : spaces)
+    {
+        const bool retained = space.count != 0 || !space.mappings.empty() || !space.mappings.valid();
+        if (space.used || retained) ++report.address_spaces;
+        if (space.used)
+        {
+            if (!space.generation || !space.count || space.count != space.mappings.size() ||
+                !space.mappings.valid())
+                report.failure = Status::io_error("native backend has an inconsistent mapping owner");
+        }
+        else if (retained)
+            report.failure = Status::io_error("native backend has an orphan mapping owner");
+        if (space.used && space.leaves > max_leaf_tables)
+            report.failure = Status::io_error("native backend leaf-table ownership exceeds capacity");
+    }
+    if (!initialized && (report.address_spaces || report.executing))
+        report.failure = Status::io_error("uninitialized native backend retains owners");
+    return report;
+}
+
 Status initialize()
 {
     if (initialized)
@@ -119,18 +146,18 @@ Status initialize()
     initialized = true;
     return Status::success();
 }
-Result<AddressSpace> create_space(std::span<const PageMapping> mappings)
+Result<AddressSpace> create_space(MappingView mappings)
 {
     if (!initialized)
         return Status::not_initialized("native execution is not initialized");
-    if (mappings.empty() || mappings.size() > max_pages)
+    if (!mappings.valid() || mappings.empty() || mappings.size() > max_pages)
         return Status::invalid_argument("invalid user page count");
     for (usize i = 0; i < mappings.size(); ++i)
     {
         const auto &page = mappings[i];
         if (page.virtual_address < user_begin || page.virtual_address >= user_end ||
             (page.virtual_address & (page_size - 1)) != 0 || page.physical_address == 0 ||
-            (page.physical_address & (page_size - 1)) != 0 || (page.flags & page_read) == 0 ||
+            (page.physical_address & (page_size - 1)) != 0 || (page.flags != 0 && (page.flags & page_read) == 0) ||
             (page.flags & (page_write | page_execute)) == (page_write | page_execute) ||
             (page.flags & ~(page_read | page_write | page_execute)) != 0 ||
             ((page.flags & page_write) && !(page.flags & page_read)))
@@ -149,6 +176,7 @@ Result<AddressSpace> create_space(std::span<const PageMapping> mappings)
     for (auto &table : space.leaf)
         table.entries.fill(0);
     space.count = 0;
+    space.mappings = {};
     space.leaves = 0;
     // Identity-map platform MMIO and kernel RAM as privileged-only sections.
     for (usize i = 0; i < 256; ++i)
@@ -157,6 +185,7 @@ Result<AddressSpace> create_space(std::span<const PageMapping> mappings)
         space.root.entries[i] = static_cast<u32>(i << 20) | 0x1402u;
     for (const auto &page : mappings)
     {
+        if (!page.flags) continue; // PROT_NONE has no user translation.
         auto &root_entry = space.root.entries[page.virtual_address >> 20];
         if (root_entry == 0)
         {
@@ -173,8 +202,9 @@ Result<AddressSpace> create_space(std::span<const PageMapping> mappings)
         if (!(page.flags & page_execute))
             flags |= 1u;
         leaf->entries[(page.virtual_address >> 12) & 255u] = page.physical_address | flags;
-        space.mappings[space.count++] = page;
     }
+    space.mappings = mappings;
+    space.count = mappings.size();
     if (++space.generation == 0)
         ++space.generation;
     space.used = true;
@@ -191,6 +221,7 @@ Status destroy_space(AddressSpace &space)
         return Status::invalid_argument("stale native address space");
     stored->used = false;
     stored->count = 0;
+    stored->mappings = {};
     space = {};
     return Status::success();
 }
@@ -201,28 +232,51 @@ UserFrame initial_frame(uptr entry, uptr stack)
     frame.flags = (entry & 1) ? 0x30 : 0x10;
     frame.sp = stack;
     frame.registers[13] = stack;
+    Arm32FpState::set_fpexc(frame, Arm32FpState::enabled);
     return frame;
 }
-Result<Trap> enter(AddressSpace &space, UserFrame &frame)
+static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack_top)
 {
     auto *stored = lookup(space);
     if (!initialized || stored == nullptr)
         return Status::not_initialized("native address space is unavailable");
     if (entering)
         return Status::busy("nested native entry is unsupported");
+    if (!Arm32FpState::admitted(frame))
+        return Status::unsupported("ARM32 pending VFP exception state is not supported");
     const auto *entry = mapping(*stored, frame.pc);
     if (entry == nullptr || !(entry->flags & page_execute) || (frame.pc & ((frame.flags & 0x20) ? 1u : 3u)) != 0 ||
         frame.sp <= user_begin || frame.sp > user_end || !user_range(space, frame.sp - 1, 1, true))
         return Status::invalid_argument("invalid user entry frame");
+    uptr saved_mask;
+    asm volatile("mrs %0, cpsr; cpsid if" : "=r"(saved_mask) : : "memory");
     entering = true;
     Trap trap{};
     frame.registers[13] = frame.sp;
     const auto timer = arm_timer();
-    ok_arm32_enter_native(&frame, space.root, &trap);
+    ok_arm32_enter_native(&frame, space.root, &trap, stack_top);
     restore_timer(timer);
     entering = false;
+    asm volatile("msr cpsr_c, %0" : : "r"(saved_mask) : "memory", "cc");
     return trap;
 }
+
+Result<Trap> enter(AddressSpace &space, UserFrame &frame)
+{
+    return enter_impl(space, frame, 0);
+}
+Result<Trap> enter_owned(AddressSpace &space, UserFrame &frame, const KernelEntryStackView &stack)
+{
+    if (!stack.valid() || (stack.lower() & 15) || (stack.top() & 15) ||
+        stack.top() <= stack.lower() || stack.top() - stack.lower() < 4096)
+        return Status::invalid_argument("native entry requires a live owned kernel stack");
+    auto result = enter_impl(space, frame, stack.top());
+    if (result && result.value().kernel_stack_pointer &&
+        (result.value().kernel_stack_pointer < stack.lower() || result.value().kernel_stack_pointer >= stack.top()))
+        return Status::fault("privileged capture escaped the owned kernel stack");
+    return result;
+}
+
 Syscall syscall(const UserFrame &frame)
 {
     Syscall call{.number = frame.registers[7]};

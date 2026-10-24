@@ -196,6 +196,22 @@ bool supported() noexcept
     return true;
 }
 
+OwnershipReport ownership_report() noexcept
+{
+    OwnershipReport report{};
+    report.executing = executing || ok_i386_execution_active_frame != nullptr || ok_i386_execution_resume_esp != 0;
+    for (const auto &space : spaces)
+    {
+        if (!space.allocated) continue;
+        ++report.address_spaces;
+        if (!space.generation || space.tables_used > table_count)
+            report.failure = Status::io_error("native backend has an inconsistent table owner");
+    }
+    if (!initialized && (report.address_spaces || report.executing))
+        report.failure = Status::io_error("uninitialized native backend retains owners");
+    return report;
+}
+
 Status initialize()
 {
     if (initialized)
@@ -279,10 +295,12 @@ Status initialize()
     return Status::success();
 }
 
-Result<AddressSpace> create_space(std::span<const PageMapping> mappings)
+Result<AddressSpace> create_space(MappingView mappings)
 {
     if (!initialized)
         return Status::not_initialized("native execution backend is not initialized");
+    if (!mappings.valid() || mappings.empty() || mappings.size() > max_native_mappings)
+        return Status::invalid_argument("invalid native mapping count");
     usize slot = 0;
     while (slot < max_address_spaces && spaces[slot].allocated)
         ++slot;
@@ -294,14 +312,20 @@ Result<AddressSpace> create_space(std::span<const PageMapping> mappings)
     value.generation = generation == 0 ? 1 : generation;
     value.pdpt.entries[0] = kernel_pdpt[0];
     value.pdpt.entries[1] = reinterpret_cast<uptr>(&value.directory) | present;
-    for (const auto &mapping : mappings)
+    for (usize index = 0; index < mappings.size(); ++index)
     {
+        const auto &mapping = mappings[index];
         if (mapping.virtual_address < user_begin || mapping.virtual_address >= user_end ||
             (mapping.virtual_address & (page_size - 1)) != 0 || mapping.physical_address < page_size ||
             mapping.physical_address >= user_begin || (mapping.physical_address & (page_size - 1)) != 0 ||
-            (mapping.flags & page_read) == 0 || (mapping.flags & ~(page_read | page_write | page_execute)) != 0 ||
+            (mapping.flags != 0 && (mapping.flags & page_read) == 0) ||
+            (mapping.flags & ~(page_read | page_write | page_execute)) != 0 ||
             (mapping.flags & (page_write | page_execute)) == (page_write | page_execute))
             return Status::invalid_argument("invalid native user-page mapping or writable executable page");
+        for (usize previous = 0; previous < index; ++previous)
+            if (mappings[previous].virtual_address == mapping.virtual_address)
+                return Status::already_exists("duplicate native user-page mapping");
+        if (mapping.flags == 0) continue; // PROT_NONE owns backing without a PTE.
         auto &directory_entry = value.directory.entries[(mapping.virtual_address >> 21) & 511];
         if ((directory_entry & present) == 0)
         {
@@ -416,7 +440,7 @@ Status copy_to_user(const AddressSpace &space, uptr destination, const void *sou
     return Status::success();
 }
 
-Result<Trap> enter(AddressSpace &space, UserFrame &frame)
+static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack_top)
 {
     if (!initialized || storage(space) == nullptr)
         return Status::not_initialized("native address space is unavailable");
@@ -443,6 +467,10 @@ Result<Trap> enter(AddressSpace &space, UserFrame &frame)
         (frame.gs_base != 0 && (frame.gs_base < user_begin || frame.gs_base >= user_end)))
         return Status::fault("user TLS base lies outside the native user window");
     frame.flags = (frame.flags & 0x250fd5u) | 0x202u;
+    uptr saved_mask;
+    asm volatile("pushfl; pop %0; cli" : "=r"(saved_mask) : : "memory");
+    const auto old_stack_top = tss.esp0;
+    if (stack_top) tss.esp0 = stack_top;
     const auto old_root = read_cr3();
     const auto old_master = inb(0x21);
     const auto old_slave = inb(0xa1);
@@ -459,7 +487,26 @@ Result<Trap> enter(AddressSpace &space, UserFrame &frame)
     outb(0xa1, old_slave);
     executing = false;
     ok_i386_execution_active_frame = nullptr;
+    tss.esp0 = old_stack_top;
+    ok_i386_execution_resume_esp = 0;
+    asm volatile("push %0; popfl" : : "r"(saved_mask) : "memory", "cc");
     return last_trap;
+}
+
+Result<Trap> enter(AddressSpace &space, UserFrame &frame)
+{
+    return enter_impl(space, frame, 0);
+}
+Result<Trap> enter_owned(AddressSpace &space, UserFrame &frame, const KernelEntryStackView &stack)
+{
+    if (!stack.valid() || (stack.lower() & 15) || (stack.top() & 15) ||
+        stack.top() <= stack.lower() || stack.top() - stack.lower() < 4096)
+        return Status::invalid_argument("native entry requires a live owned kernel stack");
+    auto result = enter_impl(space, frame, stack.top());
+    if (result && result.value().kernel_stack_pointer &&
+        (result.value().kernel_stack_pointer < stack.lower() || result.value().kernel_stack_pointer >= stack.top()))
+        return Status::fault("privileged capture escaped the owned kernel stack");
+    return result;
 }
 
 extern "C" void ok_i386_execution_trap(const SavedTrap *saved)
@@ -478,7 +525,7 @@ extern "C" void ok_i386_execution_trap(const SavedTrap *saved)
                  : saved->vector == 32 ? TrapKind::timer
                  : saved->vector == 14 ? TrapKind::page_fault
                                        : TrapKind::exception,
-                 static_cast<u32>(saved->vector), saved->error, fault_address};
+                 static_cast<u32>(saved->vector), saved->error, fault_address, reinterpret_cast<uptr>(saved)};
     acknowledge_irq(saved->vector);
 }
 

@@ -7,7 +7,11 @@
 .global ok_arm32_enter_native
 .type ok_arm32_enter_native,%function
 ok_arm32_enter_native:
-    sub sp, sp, #208
+    mov r12, sp
+    cmp r3, #0
+    movne sp, r3
+    sub sp, sp, #224
+    str r12, [sp, #208]
     stmia sp, {r4-r11}
     str lr, [sp, #32]
     mrs r3, cpsr
@@ -44,21 +48,21 @@ ok_arm32_enter_native:
     str lr, [r4, #92]
     mrs r3, spsr
     str r3, [r4, #96]
-    ldr sp, =ok_arm32_trap_stack_top
+    mov sp, r4
     cps #0x13
     cps #23
     str sp, [r4, #100]
     str lr, [r4, #104]
     mrs r3, spsr
     str r3, [r4, #108]
-    ldr sp, =ok_arm32_trap_stack_top
+    mov sp, r4
     cps #0x13
     cps #27
     str sp, [r4, #112]
     str lr, [r4, #116]
     mrs r3, spsr
     str r3, [r4, #120]
-    ldr sp, =ok_arm32_trap_stack_top
+    mov sp, r4
     cps #0x13
     ldr r3, [sp, #64]
     orr r3, r3, #0x00f00000
@@ -99,11 +103,19 @@ ok_arm32_enter_native:
     mcr p15, 0, r3, c13, c0, 2
     ldr r3, [r4, #144]
     mcr p15, 0, r3, c13, c0, 3
+    ldr r3, [r4, #420] // Checked canonical user FPEXC, independent of kernel state.
+    vmsr fpexc, r3
     add r3, r4, #160
     vldmia r3!, {d0-d15}
     vldmia r3!, {d16-d31}
     ldr r3, [r4, #416]
     vmsr fpscr, r3
+#ifdef OK_ARM32_FP_CAPTURE_TEST_POISON
+    // Standalone capture-sensitivity fixture only. Hardware already holds the
+    // admitted value; a real trap must overwrite this poisoned saved slot.
+    mvn r3, #0
+    str r3, [r4, #420]
+#endif
     add r3, r4, #52
     ldmia r3, {sp, lr}^
     nop
@@ -207,12 +219,17 @@ ok_arm32_capture:
     str r5, [r4, #140]
     mrc p15, 0, r5, c13, c0, 3
     str r5, [r4, #144]
+    vmrs r5, fpexc
+    str r5, [r4, #420] // Capture actual user FPEXC before any kernel normalization.
+    mov r5, #0x40000000
+    vmsr fpexc, r5
     add r5, r4, #160
     vstmia r5!, {d0-d15}
     vstmia r5!, {d16-d31}
     vmrs r5, fpscr
     str r5, [r4, #416]
     ldr r7, [r12, #128]
+    str sp, [r7, #16]
     strb r0, [r7]
     str r1, [r7, #4]
     mov r5, #0
@@ -303,7 +320,10 @@ ok_arm32_return:
     ldr r3, [sp, #36]
     ldmia sp, {r4-r11}
     msr cpsr_cxsf, r3
-    add sp, sp, #208
+    ldr sp, [sp, #208]
+    ldr r12, =ok_arm32_kernel_sp
+    mov r3, #0
+    str r3, [r12]
     bx lr
 ok_arm32_kernel_fault:
     cpsid if

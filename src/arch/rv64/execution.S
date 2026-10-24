@@ -5,7 +5,12 @@
 .global ok_rv64_enter_native
 .type ok_rv64_enter_native,@function
 ok_rv64_enter_native:
-    addi sp, sp, -368
+    mv t0, sp
+    beqz a3, .Lservice_stack
+    mv sp, a3
+.Lservice_stack:
+    addi sp, sp, -384
+    sd t0, 368(sp)
     sd ra, 0(sp)
     sd s0, 8(sp)
     sd s1, 16(sp)
@@ -282,6 +287,7 @@ ok_rv64_native_trap:
     li t3, 2
 5:
     sb t3, 0(t1)
+    sd sp, 24(t1)
     csrw mie, zero
     li t0, 0x2004000
     ld t1, 192(sp)
@@ -342,7 +348,7 @@ ok_rv64_native_trap:
     csrw mie, t0
     ld t0, 120(sp)
     csrw mstatus, t0
-    addi sp, sp, 368
+    ld sp, 368(sp)
     ret
 ok_rv64_native_kernel_fault:
     csrw mie, zero

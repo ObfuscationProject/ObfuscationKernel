@@ -16,6 +16,7 @@ multiboot_header:
 .type _start, @function
 _start:
     cli
+    mov %eax, %esi
     mov $boot_stack_top, %esp
     xor %ebp, %ebp
 
@@ -26,6 +27,12 @@ _start:
     cld
     rep stosb
 
+    push $0
+    push $0
+    push %ebx
+    push %esi
+    call ok_boot_capture
+    add $16, %esp
     call kernel_main
 1:
     hlt
@@ -33,6 +40,10 @@ _start:
 
 .section .bootstrap_bss, "aw", @nobits
 .align 16
+.global ok_service_stack_lower
+ok_service_stack_lower:
 boot_stack:
     .skip 1048576
+.global ok_service_stack_top
+ok_service_stack_top:
 boot_stack_top:

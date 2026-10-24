@@ -10,7 +10,7 @@ static_assert(offsetof(UserFrame, sp) == 264);
 static_assert(offsetof(UserFrame, fp_state) == 304);
 struct Space
 {
-    std::array<PageMapping, 128> pages{};
+    MappingView pages{};
     usize count{};
     u32 generation{};
     bool used{};
@@ -42,7 +42,7 @@ Space *lookup(const AddressSpace &space)
 const PageMapping *page_at(const Space &space, uptr address)
 {
     for (usize i = 0; i < space.count; ++i)
-        if (space.pages[i].virtual_address == (address & ~(page_size - 1)))
+        if (space.pages[i].flags && space.pages[i].virtual_address == (address & ~(page_size - 1)))
             return &space.pages[i];
     return nullptr;
 }
@@ -65,7 +65,7 @@ void fill_tlb(const Space &space, uptr address)
 } // namespace
 extern "C"
 {
-    void ok_loong_execution_enter(UserFrame *);
+    void ok_loong_execution_enter(UserFrame *, uptr);
     void ok_loong_execution_vector();
     void ok_loong_execution_refill();
     UserFrame *ok_loong_execution_active_frame{};
@@ -75,6 +75,28 @@ bool supported() noexcept
 {
     return true;
 }
+OwnershipReport ownership_report() noexcept
+{
+    OwnershipReport report{};
+    report.executing = executing || ok_loong_execution_active_frame != nullptr || ok_loong_execution_resume_sp != 0;
+    for (const auto &space : spaces)
+    {
+        const bool retained = space.count != 0 || !space.pages.empty() || !space.pages.valid();
+        if (space.used || retained) ++report.address_spaces;
+        if (space.used)
+        {
+            if (!space.generation || !space.count || space.count != space.pages.size() ||
+                !space.pages.valid())
+                report.failure = Status::io_error("native backend has an inconsistent mapping owner");
+        }
+        else if (retained)
+            report.failure = Status::io_error("native backend has an orphan mapping owner");
+    }
+    if (!initialized && (report.address_spaces || report.executing))
+        report.failure = Status::io_error("uninitialized native backend retains owners");
+    return report;
+}
+
 Status initialize()
 {
     if (initialized)
@@ -101,18 +123,18 @@ Status initialize()
     initialized = true;
     return Status::success();
 }
-Result<AddressSpace> create_space(std::span<const PageMapping> mappings)
+Result<AddressSpace> create_space(MappingView mappings)
 {
     if (!initialized)
         return Status::not_initialized("native execution is not initialized");
-    if (mappings.empty() || mappings.size() > 128)
+    if (!mappings.valid() || mappings.empty() || mappings.size() > max_native_mappings)
         return Status::invalid_argument("invalid mapping count");
     for (usize i = 0; i < mappings.size(); ++i)
     {
         const auto &page = mappings[i];
         if (page.virtual_address < user_begin || page.virtual_address >= user_end || (page.virtual_address & 4095) ||
             (page.physical_address & 4095) || page.physical_address == 0 || page.physical_address >= (uptr{1} << 48) ||
-            !(page.flags & page_read) || (page.flags & ~7) ||
+            (page.flags != 0 && !(page.flags & page_read)) || (page.flags & ~7) ||
             (page.flags & (page_write | page_execute)) == (page_write | page_execute))
             return Status::invalid_argument("invalid native mapping");
         for (usize j = 0; j < i; ++j)
@@ -128,8 +150,7 @@ Result<AddressSpace> create_space(std::span<const PageMapping> mappings)
         if (++space.generation == 0)
             ++space.generation;
         space.count = mappings.size();
-        for (usize i = 0; i < mappings.size(); ++i)
-            space.pages[i] = mappings[i];
+        space.pages = mappings;
         return AddressSpace{reinterpret_cast<uptr>(&space), slot, space.generation};
     }
     return Status::no_memory("native address space pool exhausted");
@@ -143,6 +164,7 @@ Status destroy_space(AddressSpace &space)
         return Status::busy("native execution is active");
     storage->used = false;
     storage->count = 0;
+    storage->pages = {};
     space = {};
     return Status::success();
 }
@@ -230,7 +252,7 @@ Status copy_to_user(const AddressSpace &space, uptr destination, const void *sou
     }
     return Status::success();
 }
-Result<Trap> enter(AddressSpace &space, UserFrame &frame)
+static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack_top)
 {
     auto *storage = lookup(space);
     if (!storage || executing || frame.pc < user_begin || frame.pc >= user_end || frame.sp <= user_begin ||
@@ -250,7 +272,7 @@ Result<Trap> enter(AddressSpace &space, UserFrame &frame)
     for (;;)
     {
         refill = false;
-        ok_loong_execution_enter(&frame);
+        ok_loong_execution_enter(&frame, stack_top);
         if (!refill)
             break;
         auto *page = page_at(*storage, last_trap.fault_address);
@@ -258,7 +280,7 @@ Result<Trap> enter(AddressSpace &space, UserFrame &frame)
             break;
         if (last_trap.fault_address == frame.pc && !(page->flags & page_execute))
         {
-            last_trap = {TrapKind::page_fault, 6, 0, frame.pc};
+            last_trap = {TrapKind::page_fault, 6, 0, frame.pc, last_trap.kernel_stack_pointer};
             break;
         }
         fill_tlb(*storage, last_trap.fault_address);
@@ -266,10 +288,28 @@ Result<Trap> enter(AddressSpace &space, UserFrame &frame)
     write_csr<0x41>(0);
     write_csr<0x44>(1);
     ok_loong_execution_active_frame = nullptr;
+    ok_loong_execution_resume_sp = 0;
     executing = false;
     write_csr<0>(saved_crmd);
     return last_trap;
 }
+
+Result<Trap> enter(AddressSpace &space, UserFrame &frame)
+{
+    return enter_impl(space, frame, 0);
+}
+Result<Trap> enter_owned(AddressSpace &space, UserFrame &frame, const KernelEntryStackView &stack)
+{
+    if (!stack.valid() || (stack.lower() & 15) || (stack.top() & 15) ||
+        stack.top() <= stack.lower() || stack.top() - stack.lower() < 4096)
+        return Status::invalid_argument("native entry requires a live owned kernel stack");
+    auto result = enter_impl(space, frame, stack.top());
+    if (result && result.value().kernel_stack_pointer &&
+        (result.value().kernel_stack_pointer < stack.lower() || result.value().kernel_stack_pointer >= stack.top()))
+        return Status::fault("privileged capture escaped the owned kernel stack");
+    return result;
+}
+
 extern "C" void ok_loong_execution_trap(uptr is_refill)
 {
     const uptr previous_mode = is_refill ? read_csr<0x8f>() : read_csr<1>();
@@ -293,6 +333,8 @@ extern "C" void ok_loong_execution_trap(uptr is_refill)
     frame.pc = is_refill ? (read_csr<0x8a>() & ~uptr(3)) : read_csr<6>();
     frame.sp = frame.registers[3];
     frame.fs_base = frame.registers[2];
+    uptr capture_sp;
+    asm volatile("move %0, $sp" : "=r"(capture_sp));
     if (is_refill)
     {
         refill = true;
@@ -308,5 +350,6 @@ extern "C" void ok_loong_execution_trap(uptr is_refill)
     }
     else
         last_trap = {code >= 1 && code <= 8 ? TrapKind::page_fault : TrapKind::exception, code, status, read_csr<7>()};
+    last_trap.kernel_stack_pointer = capture_sp;
 }
 } // namespace ok::arch::execution

@@ -6,11 +6,15 @@ bool supported() noexcept
 {
     return false;
 }
+OwnershipReport ownership_report() noexcept
+{
+    return {Status::unsupported("native execution ownership is not implemented for this architecture"), 0, false};
+}
 Status initialize()
 {
     return Status::unsupported("native user execution is not implemented for this architecture");
 }
-Result<AddressSpace> create_space(std::span<const PageMapping>)
+Result<AddressSpace> create_space(MappingView)
 {
     return initialize();
 }
@@ -19,6 +23,10 @@ Status destroy_space(AddressSpace &)
     return initialize();
 }
 Result<Trap> enter(AddressSpace &, UserFrame &)
+{
+    return initialize();
+}
+Result<Trap> enter_owned(AddressSpace &, UserFrame &, const KernelEntryStackView &)
 {
     return initialize();
 }

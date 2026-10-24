@@ -1,16 +1,22 @@
+
+#include "ok/user/native_signal_config.hpp"
 #include "ok/arch/execution.hpp"
 #include <cstddef>
+#if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__powerpc__) || defined(__PPC__)) && __SIZEOF_POINTER__ == 4 && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#define OK_PPC32_PRIVATE_BACKEND 1
+#include "ok/arch/ppc32_private_signal.hpp"
+#endif
 
 namespace ok::arch::execution
 {
 namespace
 {
-constexpr usize max_pages = 256;
+constexpr usize max_pages = max_native_mappings;
 constexpr uptr ram_end = 0x10000000;
 constexpr uptr msr_user = 0x0200c000; // SPE, EE, PR; no unavailable classic FPU.
 struct Space
 {
-    std::array<PageMapping, max_pages> mappings{};
+    MappingView mappings{};
     usize count{};
     u32 generation{};
     bool allocated{};
@@ -19,11 +25,12 @@ std::array<Space, max_address_spaces> spaces{};
 bool initialized{};
 bool executing{};
 u32 next_tlb = 3;
-extern "C" void ok_ppc_execution_enter(UserFrame *, Trap *);
+extern "C" void ok_ppc_execution_enter(UserFrame *, Trap *, uptr);
 extern "C" const u8 ok_ppc_vectors[];
 extern "C" void ok_platform_console_write_char(char);
 static_assert(offsetof(UserFrame, pc) == 128 && offsetof(UserFrame, sp) == 132);
 static_assert(offsetof(UserFrame, flags) == 136 && offsetof(UserFrame, fp_state) == 160);
+static_assert(offsetof(Trap, kernel_stack_pointer) == 16);
 static_assert(offsetof(Trap, vector) == 4 && offsetof(Trap, error_code) == 8 && offsetof(Trap, fault_address) == 12);
 
 Space *storage(const AddressSpace &space)
@@ -39,7 +46,7 @@ const PageMapping *mapping(const Space &space, uptr address)
 {
     const auto page = address & ~(page_size - 1);
     for (usize i = 0; i < space.count; ++i)
-        if (space.mappings[i].virtual_address == page)
+        if (space.mappings[i].flags && space.mappings[i].virtual_address == page)
             return &space.mappings[i];
     return nullptr;
 }
@@ -85,15 +92,76 @@ template <u32 Vector> void set_vector(uptr base)
     write_spr<400 + Vector>(base & 0xffff);
 }
 } // namespace
+#ifdef OK_PPC32_PRIVATE_BACKEND
+namespace ppc32_private::detail
+{
+struct BackendAccess final
+{
+    static Tracker tracker;
+    static Facts measured;
+    static Trap raw;
+    static void initialize_completed() noexcept
+    {
+        measured={};
+        if(!initialized) {tracker.invalidate();return;}
+        measured.pvr=read_spr<287>();
+        asm volatile("mfmsr %0":"=r"(measured.msr));
+        if(measured.pvr==0x80210022)
+        { measured.spefscr=read_spr<512>();measured.spefscr_read=true; }
+        tracker.qualify_initialized(measured);
+    }
+    static void invalidate() noexcept {tracker.invalidate();raw={};}
+    static void capture(const UserFrame &frame,AddressSpace space,const KernelEntryStackView &view) noexcept
+    {tracker.publish_owned(frame,space,view,raw);}
+};
+Tracker BackendAccess::tracker{};
+Facts BackendAccess::measured{};
+Trap BackendAccess::raw{};
+}
+namespace ppc32_private
+{
+Capability capability() noexcept {return detail::BackendAccess::tracker.capability();}
+Observation observation(const UserFrame &frame) noexcept {return detail::BackendAccess::tracker.query(frame);}
+Facts facts() noexcept {return detail::BackendAccess::measured;}
+bool address_space_live(AddressSpace space) noexcept {return storage(space)!=nullptr;}
+}
+#endif
 
 bool supported() noexcept
 {
     return true;
 }
+OwnershipReport ownership_report() noexcept
+{
+    OwnershipReport report{};
+    report.executing = executing;
+    for (const auto &space : spaces)
+    {
+        const bool retained = space.count != 0 || !space.mappings.empty() || !space.mappings.valid();
+        if (space.allocated || retained) ++report.address_spaces;
+        if (space.allocated)
+        {
+            if (!space.generation || !space.count || space.count != space.mappings.size() ||
+                !space.mappings.valid())
+                report.failure = Status::io_error("native backend has an inconsistent mapping owner");
+        }
+        else if (retained)
+            report.failure = Status::io_error("native backend has an orphan mapping owner");
+    }
+    if (!initialized && (report.address_spaces || report.executing))
+        report.failure = Status::io_error("uninitialized native backend retains owners");
+    return report;
+}
+
 Status initialize()
 {
     if (initialized)
+    {
+#ifdef OK_PPC32_PRIVATE_BACKEND
+        ppc32_private::detail::BackendAccess::initialize_completed();
+#endif
         return Status::success();
+    }
     if ((read_spr<287>() >> 16) != 0x8021)
         return Status::unsupported("PPC native backend requires the ppce500 e500v2 CPU");
     uptr msr;
@@ -102,7 +170,7 @@ Status initialize()
         return Status::unsupported("PPC native initialization requires supervisor TS0 with interrupts masked");
     // QEMU's initial RAM mapping grants user access. Replace it before any
     // PR=1 transition, retaining the 256 MiB supervisor identity map.
-    write_tlb(0, 0xc0000800, 0, 0x15);
+    write_tlb(0, 0xc0000900, 0, 0x15);
     invalidate_user_tlb();
     const auto vectors = reinterpret_cast<uptr>(ok_ppc_vectors);
     write_spr<63>(vectors & 0xffff0000);
@@ -128,13 +196,16 @@ Status initialize()
     write_spr<529>((vectors + 17 * 32) & 0xffff); // SPE data exception.
     write_spr<530>((vectors + 18 * 32) & 0xffff); // SPE round exception.
     initialized = true;
+#ifdef OK_PPC32_PRIVATE_BACKEND
+    ppc32_private::detail::BackendAccess::initialize_completed();
+#endif
     return Status::success();
 }
-Result<AddressSpace> create_space(std::span<const PageMapping> mappings)
+Result<AddressSpace> create_space(MappingView mappings)
 {
     if (!initialized)
         return Status::not_initialized("native execution backend is not initialized");
-    if (mappings.empty() || mappings.size() > max_pages)
+    if (!mappings.valid() || mappings.empty() || mappings.size() > max_pages)
         return Status::invalid_argument("invalid PPC native page count");
     for (usize i = 0; i < mappings.size(); ++i)
     {
@@ -142,7 +213,7 @@ Result<AddressSpace> create_space(std::span<const PageMapping> mappings)
         if (page.virtual_address < user_begin || page.virtual_address >= user_end ||
             (page.virtual_address & (page_size - 1)) != 0 || page.physical_address < page_size ||
             page.physical_address >= ram_end || (page.physical_address & (page_size - 1)) != 0 ||
-            (page.flags & page_read) == 0 || (page.flags & ~(page_read | page_write | page_execute)) != 0 ||
+            (page.flags != 0 && (page.flags & page_read) == 0) || (page.flags & ~(page_read | page_write | page_execute)) != 0 ||
             (page.flags & (page_write | page_execute)) == (page_write | page_execute))
             return Status::invalid_argument("invalid PPC native mapping or writable executable page");
         for (usize j = 0; j < i; ++j)
@@ -157,10 +228,8 @@ Result<AddressSpace> create_space(std::span<const PageMapping> mappings)
     auto &value = spaces[slot];
     if (++value.generation == 0)
         ++value.generation;
-    value.count = mappings.size();
     for (usize i = 0; i < mappings.size(); ++i)
     {
-        value.mappings[i] = mappings[i];
         if ((mappings[i].flags & page_execute) != 0)
         {
             // The caller populated code using data stores through a physical
@@ -175,6 +244,8 @@ Result<AddressSpace> create_space(std::span<const PageMapping> mappings)
             asm volatile("sync; isync" : : : "memory");
         }
     }
+    value.mappings = mappings;
+    value.count = mappings.size();
     value.allocated = true;
     return AddressSpace{reinterpret_cast<uptr>(&value), static_cast<u32>(slot), value.generation};
 }
@@ -186,6 +257,8 @@ Status destroy_space(AddressSpace &space)
     if (executing)
         return Status::busy("cannot destroy an executing address space");
     value->allocated = false;
+    value->mappings = {};
+    value->count = 0;
     space = {};
     return Status::success();
 }
@@ -260,7 +333,7 @@ Status copy_to_user(const AddressSpace &space, uptr destination, const void *sou
     }
     return Status::success();
 }
-Result<Trap> enter(AddressSpace &space, UserFrame &frame)
+static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack_top)
 {
     const auto *value = storage(space);
     if (!initialized || value == nullptr)
@@ -288,7 +361,7 @@ Result<Trap> enter(AddressSpace &space, UserFrame &frame)
     Trap trap{};
     for (;;)
     {
-        ok_ppc_execution_enter(&frame, &trap);
+        ok_ppc_execution_enter(&frame, &trap, stack_top);
         if (trap.vector != 13 && trap.vector != 14)
             break;
         const auto fault = trap.vector == 14 ? frame.pc : trap.fault_address;
@@ -316,8 +389,37 @@ Result<Trap> enter(AddressSpace &space, UserFrame &frame)
                 : (trap.vector == 2 || trap.vector == 3 || trap.vector == 13 || trap.vector == 14)
                     ? TrapKind::page_fault
                     : TrapKind::exception;
+#ifdef OK_PPC32_PRIVATE_BACKEND
+    ppc32_private::detail::BackendAccess::raw=trap;
+#endif
     if (trap.vector == 3 || trap.vector == 14)
         trap.fault_address = frame.pc;
     return trap;
 }
+
+Result<Trap> enter(AddressSpace &space, UserFrame &frame)
+{
+#ifdef OK_PPC32_PRIVATE_BACKEND
+    ppc32_private::detail::BackendAccess::invalidate();
+#endif
+    return enter_impl(space, frame, 0);
+}
+Result<Trap> enter_owned(AddressSpace &space, UserFrame &frame, const KernelEntryStackView &stack)
+{
+#ifdef OK_PPC32_PRIVATE_BACKEND
+    ppc32_private::detail::BackendAccess::invalidate();
+#endif
+    if (!stack.valid() || (stack.lower() & 15) || (stack.top() & 15) ||
+        stack.top() <= stack.lower() || stack.top() - stack.lower() < 4096)
+        return Status::invalid_argument("native entry requires a live owned kernel stack");
+    auto result = enter_impl(space, frame, stack.top());
+    if (result && result.value().kernel_stack_pointer &&
+        (result.value().kernel_stack_pointer < stack.lower() || result.value().kernel_stack_pointer >= stack.top()))
+        return Status::fault("privileged capture escaped the owned kernel stack");
+#ifdef OK_PPC32_PRIVATE_BACKEND
+    if(result) ppc32_private::detail::BackendAccess::capture(frame,space,stack);
+#endif
+    return result;
+}
+
 } // namespace ok::arch::execution

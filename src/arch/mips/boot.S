@@ -21,6 +21,9 @@ _start:
     b 1b
     nop
 2:
+    addiu $sp, $sp, -32
+    jal ok_boot_capture
+    nop
     jal kernel_main
     nop
 3:
@@ -29,6 +32,10 @@ _start:
 
 .section .bootstrap_bss, "aw", @nobits
 .align 12
+.global ok_service_stack_lower
+ok_service_stack_lower:
 boot_stack:
     .skip 1048576
+.global ok_service_stack_top
+ok_service_stack_top:
 boot_stack_top:

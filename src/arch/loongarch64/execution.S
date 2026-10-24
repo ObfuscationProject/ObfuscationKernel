@@ -105,7 +105,12 @@
 .endm
 .global ok_loong_execution_enter
 ok_loong_execution_enter:
-    addi.d $sp, $sp, -416
+    move $t0, $sp
+    beqz $a1, .Lservice_stack
+    move $sp, $a1
+.Lservice_stack:
+    addi.d $sp, $sp, -432
+    st.d $t0, $sp, 416
     st.d $r1, $sp, 0
     st.d $r2, $sp, 8
     st.d $r22, $sp, 16
@@ -290,7 +295,7 @@ ok_loong_execution_refill:
     csrwr $t0, 0x30
     ld.d $t0, $sp, 104
     csrwr $t0, 0x31
-    addi.d $sp, $sp, 416
+    ld.d $sp, $sp, 416
     jr $ra
 
 .Lkernel_fault:

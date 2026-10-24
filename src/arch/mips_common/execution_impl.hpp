@@ -1,5 +1,16 @@
+
+#include "ok/user/native_signal_config.hpp"
 #include "ok/arch/execution.hpp"
 #include <cstddef>
+#if defined(OK_NATIVE_SIGNAL_RUNTIME) && defined(__mips64)
+#define OK_PRIVATE_MIPS64_N64_ADMISSION 1
+#include "ok/arch/mips64_n64_private_signal.hpp"
+namespace ok::arch::execution::mips64_n64_private::detail { struct BackendAccess final { Tracker tracker{}; }; }
+#endif
+#if defined(OK_NATIVE_SIGNAL_RUNTIME) && !defined(__mips64)
+#define OK_PRIVATE_MIPS_O32_ADMISSION 1
+#include "ok/arch/mips_o32_private_signal.hpp"
+#endif
 
 namespace ok::arch::execution
 {
@@ -9,7 +20,7 @@ static_assert(offsetof(UserFrame, pc) == sizeof(uptr) * 32);
 static_assert(offsetof(UserFrame, fp_state) == (sizeof(uptr) == 8 ? 304 : 160));
 struct Space
 {
-    std::array<PageMapping, 128> pages{};
+    MappingView pages{};
     usize count{};
     u32 generation{};
     bool used{};
@@ -17,6 +28,14 @@ struct Space
 std::array<Space, max_address_spaces> spaces{};
 bool initialized{}, executing{};
 u32 tlb_entries{};
+#ifdef OK_PRIVATE_MIPS_O32_ADMISSION
+mips_o32_private::CaptureTracker private_signal_capture{};
+mips_o32_private::Facts private_signal_facts{};
+#endif
+#ifdef OK_PRIVATE_MIPS64_N64_ADMISSION
+mips64_n64_private::detail::BackendAccess private_n64_backend{};
+mips64_n64_private::Facts private_n64_facts{};
+#endif
 constexpr uptr segment_mask = ~uptr(0x1fffffff);
 constexpr uptr kseg0 = static_cast<uptr>(static_cast<__INTPTR_TYPE__>(-2147483648LL));
 constexpr uptr kseg1 = static_cast<uptr>(static_cast<__INTPTR_TYPE__>(-1610612736LL));
@@ -51,7 +70,7 @@ Space *lookup(const AddressSpace &space)
 const PageMapping *page_at(const Space &space, uptr address)
 {
     for (usize i = 0; i < space.count; ++i)
-        if (space.pages[i].virtual_address == (address & ~(page_size - 1)))
+        if (space.pages[i].flags && space.pages[i].virtual_address == (address & ~(page_size - 1)))
             return &space.pages[i];
     return nullptr;
 }
@@ -97,6 +116,12 @@ bool continuation(const Space &space, const UserFrame &frame, uptr cause, uptr &
     u32 branch;
     if (!instruction(space, frame.pc, branch))
         return false;
+    #ifdef OK_PRIVATE_MIPS_O32_ADMISSION
+    if (!mips_o32_private::delay_operands_admitted(branch)) return false;
+#endif
+#ifdef OK_PRIVATE_MIPS64_N64_ADMISSION
+    if (!mips64_n64_private::delay_operands_admitted(branch)) return false;
+#endif
     const u32 op = branch >> 26, rs = (branch >> 21) & 31, rt = (branch >> 16) & 31;
     const auto left = static_cast<__INTPTR_TYPE__>(frame.registers[rs]);
     bool take;
@@ -163,20 +188,96 @@ void synchronize_code(const Space &space)
 } // namespace
 extern "C"
 {
-    void ok_mips_execution_enter(UserFrame *);
+    void ok_mips_execution_enter(UserFrame *, uptr);
     void ok_mips_execution_vectors();
     UserFrame *ok_mips_execution_active_frame{};
     uptr ok_mips_execution_resume_sp{};
     uptr ok_mips_execution_cause{}, ok_mips_execution_bad_address{};
 }
+#ifdef OK_PRIVATE_MIPS_O32_ADMISSION
+mips_o32_private::Capability mips_o32_private::capability() noexcept
+{ return private_signal_capture.capability(); }
+mips_o32_private::Observation mips_o32_private::observation(const UserFrame &frame) noexcept
+{ return private_signal_capture.query(frame); }
+mips_o32_private::Facts mips_o32_private::facts() noexcept
+{ return private_signal_facts; }
+#endif
+#ifdef OK_PRIVATE_MIPS64_N64_ADMISSION
+mips64_n64_private::Capability mips64_n64_private::capability() noexcept
+{ return private_n64_backend.tracker.capability(); }
+mips64_n64_private::Observation mips64_n64_private::observation(const UserFrame &frame) noexcept
+{ return private_n64_backend.tracker.query(frame); }
+mips64_n64_private::Facts mips64_n64_private::facts() noexcept
+{ return private_n64_facts; }
+#endif
 bool supported() noexcept
 {
     return true;
 }
+OwnershipReport ownership_report() noexcept
+{
+    OwnershipReport report{};
+    report.executing = executing || ok_mips_execution_active_frame != nullptr || ok_mips_execution_resume_sp != 0;
+    for (const auto &space : spaces)
+    {
+        const bool retained = space.count != 0 || !space.pages.empty() || !space.pages.valid();
+        if (space.used || retained) ++report.address_spaces;
+        if (space.used)
+        {
+            if (!space.generation || !space.count || space.count != space.pages.size() ||
+                !space.pages.valid())
+                report.failure = Status::io_error("native backend has an inconsistent mapping owner");
+        }
+        else if (retained)
+            report.failure = Status::io_error("native backend has an orphan mapping owner");
+    }
+    if (!initialized && (report.address_spaces || report.executing))
+        report.failure = Status::io_error("uninitialized native backend retains owners");
+    return report;
+}
+
 Status initialize()
 {
     if (initialized)
         return Status::success();
+    #ifdef OK_PRIVATE_MIPS_O32_ADMISSION
+    private_signal_facts = {};
+    auto &facts = private_signal_facts;
+    facts.prid = static_cast<u32>(read_cp0<15>());
+    facts.config0 = static_cast<u32>(read_cp0<16>());
+    if (facts.config0 & 0x80000000u) {
+        facts.has_config1 = true; facts.config1 = static_cast<u32>(read_cp0<16, 1>());
+        if (facts.config1 & 0x80000000u) {
+            facts.has_config2 = true; facts.config2 = static_cast<u32>(read_cp0<16, 2>());
+            if (facts.config2 & 0x80000000u) {
+                facts.has_config3 = true; facts.config3 = static_cast<u32>(read_cp0<16, 3>());
+            }
+        }
+    }
+    // Config3.M must be zero for this exact profile; no absent select is read.
+    if (!mips_o32_private::platform(facts))
+        return Status::unsupported("private o32 signals require qualified 24Kf platform readback");
+#endif
+#ifdef OK_PRIVATE_MIPS64_N64_ADMISSION
+    private_n64_facts={};
+    auto &n64=private_n64_facts;
+    n64.prid=static_cast<u32>(read_cp0<15>());n64.config0=static_cast<u32>(read_cp0<16>());
+    if(n64.config0&0x80000000u) {
+        n64.has_config1=true;n64.config1=static_cast<u32>(read_cp0<16,1>());
+        if(n64.config1&0x80000000u) {
+            n64.has_config2=true;n64.config2=static_cast<u32>(read_cp0<16,2>());
+            if(n64.config2&0x80000000u) {
+                n64.has_config3=true;n64.config3=static_cast<u32>(read_cp0<16,3>());
+                if(n64.config3&0x80000000u) {
+                    n64.has_config4=true;n64.config4=static_cast<u32>(read_cp0<16,4>());
+                    if(n64.config4&0x80000000u) {n64.has_config5=true;n64.config5=static_cast<u32>(read_cp0<16,5>());}
+                }
+            }
+        }
+    }
+    if(!mips64_n64_private::platform(n64))
+        return Status::unsupported("private n64 signals require the qualified generic platform");
+#endif
     const auto config = read_cp0<16, 1>();
     if (!(config & 1))
         return Status::unsupported("native MIPS execution requires an FPU");
@@ -191,6 +292,25 @@ Status initialize()
     status &= ~uptr(0x04000000); // O32 uses paired 32-bit floating-point registers.
 #endif
     write_cp0<12>(status);
+#ifdef OK_PRIVATE_MIPS_O32_ADMISSION
+    facts.status = static_cast<u32>(read_cp0<12>());
+    // Reject a failed CU1/FR0 write before any FPU instruction is attempted.
+    if (facts.status != 0x20000000u)
+        return Status::unsupported("private o32 signals require eager FR0 Status readback");
+    asm volatile("cfc1 %0, $0" : "=r"(facts.fir));
+    asm volatile("ctc1 $0, $31; ehb; cfc1 %0, $31" : "=r"(facts.fcsr) :: "memory");
+    if (!private_signal_capture.qualify(facts))
+        return Status::unsupported("private o32 signals require legacy scalar FPU readback");
+#endif
+#ifdef OK_PRIVATE_MIPS64_N64_ADMISSION
+    n64.status=static_cast<u32>(read_cp0<12>());
+    if(n64.status!=0x24000080u)
+        return Status::unsupported("private n64 signals require live CU1 FR1 KX readback");
+    asm volatile("cfc1 %0,$0":"=r"(n64.fir));
+    asm volatile("cfc1 %0,$31":"=r"(n64.fcsr));
+    if(!private_n64_backend.tracker.qualify(n64))
+        return Status::unsupported("private n64 signals require clean legacy scalar FP state");
+#endif
     write_cp0<15, 1>(reinterpret_cast<uptr>(&ok_mips_execution_vectors));
     write_cp0<13>(read_cp0<13>() & ~uptr(1u << 23)); // General interrupt vector.
     write_cp0<6>(0);
@@ -199,18 +319,18 @@ Status initialize()
     initialized = true;
     return Status::success();
 }
-Result<AddressSpace> create_space(std::span<const PageMapping> mappings)
+Result<AddressSpace> create_space(MappingView mappings)
 {
     if (!initialized)
         return Status::not_initialized("native execution is not initialized");
-    if (mappings.empty() || mappings.size() > 128)
+    if (!mappings.valid() || mappings.empty() || mappings.size() > max_native_mappings)
         return Status::invalid_argument("invalid mapping count");
     for (usize i = 0; i < mappings.size(); ++i)
     {
         const auto &page = mappings[i];
         const auto segment = page.physical_address & segment_mask;
         if (page.virtual_address < user_begin || page.virtual_address >= user_end || (page.virtual_address & 4095) ||
-            (page.physical_address & 4095) || (segment != kseg0 && segment != kseg1) || !(page.flags & page_read) ||
+            (page.physical_address & 4095) || (segment != kseg0 && segment != kseg1) || (page.flags != 0 && !(page.flags & page_read)) ||
             (page.flags & ~7) || (page.flags & (page_write | page_execute)) == (page_write | page_execute))
             return Status::invalid_argument("invalid native mapping");
         for (usize j = 0; j < i; ++j)
@@ -226,14 +346,16 @@ Result<AddressSpace> create_space(std::span<const PageMapping> mappings)
         if (++space.generation == 0)
             ++space.generation;
         space.count = mappings.size();
-        for (usize i = 0; i < mappings.size(); ++i)
-            space.pages[i] = mappings[i];
+        space.pages = mappings;
         return AddressSpace{reinterpret_cast<uptr>(&space), slot, space.generation};
     }
     return Status::no_memory("native address space pool exhausted");
 }
 Status destroy_space(AddressSpace &space)
 {
+#ifdef OK_PRIVATE_MIPS64_N64_ADMISSION
+    private_n64_backend.tracker.invalidate();
+#endif
     auto *storage = lookup(space);
     if (!storage)
         return Status::invalid_argument("stale native address space");
@@ -241,6 +363,7 @@ Status destroy_space(AddressSpace &space)
         return Status::busy("native execution is active");
     storage->used = false;
     storage->count = 0;
+    storage->pages = {};
     space = {};
     return Status::success();
 }
@@ -250,6 +373,14 @@ UserFrame initial_frame(uptr pc, uptr sp)
     frame.pc = pc;
     frame.sp = sp;
     frame.registers[29] = sp;
+#ifdef OK_PRIVATE_MIPS64_N64_ADMISSION
+    // Prospective fixed entry state; readiness still needs an explicit initial hook.
+    if(private_n64_backend.tracker.capability().admitted()) frame.flags=mips64_n64_private::user_status;
+#endif
+#ifdef OK_PRIVATE_MIPS_O32_ADMISSION
+    // Prospective fixed entry state, not a hardware trap capture.
+    if (private_signal_capture.capability().admitted()) frame.flags = mips_o32_private::user_status;
+#endif
     return frame;
 }
 Syscall syscall(const UserFrame &frame)
@@ -327,8 +458,14 @@ Status copy_to_user(const AddressSpace &space, uptr destination, const void *sou
     }
     return Status::success();
 }
-Result<Trap> enter(AddressSpace &space, UserFrame &frame)
+static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack_top)
 {
+#ifdef OK_PRIVATE_MIPS64_N64_ADMISSION
+    private_n64_backend.tracker.invalidate();
+#endif
+#ifdef OK_PRIVATE_MIPS_O32_ADMISSION
+    private_signal_capture.invalidate();
+#endif
     auto *storage = lookup(space);
     if (!storage || executing || frame.pc < user_begin || frame.pc >= user_end || (frame.pc & 3) ||
         frame.sp <= user_begin || frame.sp > user_end || (frame.sp & 7) || !user_range(space, frame.sp - 1, 1, true))
@@ -345,11 +482,11 @@ Result<Trap> enter(AddressSpace &space, UserFrame &frame)
     Trap result;
     for (;;)
     {
-        ok_mips_execution_enter(&frame);
+        ok_mips_execution_enter(&frame, stack_top);
         const auto cause = ok_mips_execution_cause;
         const u32 exception = (cause >> 2) & 31;
         const auto address = ok_mips_execution_bad_address;
-        result = Trap{TrapKind::exception, exception, cause, 0};
+        result = Trap{TrapKind::exception, exception, cause, 0, ok_mips_execution_resume_sp};
         if (exception == 0 && (cause & 0x8000))
         {
             result.kind = TrapKind::timer;
@@ -390,10 +527,48 @@ Result<Trap> enter(AddressSpace &space, UserFrame &frame)
     write_cp0<11>(0);
     flush_tlb();
     ok_mips_execution_active_frame = nullptr;
+    ok_mips_execution_resume_sp = 0;
     executing = false;
     write_cp0<12>(saved_status);
+#ifdef OK_PRIVATE_MIPS_O32_ADMISSION
+    using K = mips_o32_private::CaptureKind;
+    private_signal_capture.publish(frame, result.kind == TrapKind::syscall ? K::syscall_normalized :
+        result.kind == TrapKind::timer ? ((result.error_code & 0x80000000u) ? K::timer_bd : K::timer_non_bd) : K::unverified);
+#endif
     return result;
 }
+
+Result<Trap> enter(AddressSpace &space, UserFrame &frame)
+{
+    return enter_impl(space, frame, 0);
+}
+Result<Trap> enter_owned(AddressSpace &space, UserFrame &frame, const KernelEntryStackView &stack)
+{
+#ifdef OK_PRIVATE_MIPS64_N64_ADMISSION
+    private_n64_backend.tracker.invalidate();
+#endif
+#ifdef OK_PRIVATE_MIPS_O32_ADMISSION
+    private_signal_capture.invalidate();
+#endif
+    if (!stack.valid() || (stack.lower() & 15) || (stack.top() & 15) ||
+        stack.top() <= stack.lower() || stack.top() - stack.lower() < 4096)
+        return Status::invalid_argument("native entry requires a live owned kernel stack");
+    auto result = enter_impl(space, frame, stack.top());
+    if (result && result.value().kernel_stack_pointer &&
+        (result.value().kernel_stack_pointer < stack.lower() || result.value().kernel_stack_pointer >= stack.top()))
+        {
+#ifdef OK_PRIVATE_MIPS_O32_ADMISSION
+        private_signal_capture.invalidate();
+#endif
+        return Status::fault("privileged capture escaped the owned kernel stack");
+    }
+#ifdef OK_PRIVATE_MIPS64_N64_ADMISSION
+    // Only a real capture inside the still-active minted view can issue proof.
+    if(result) private_n64_backend.tracker.publish_owned(frame,space,stack,result.value());
+#endif
+    return result;
+}
+
 extern "C" [[noreturn]] void ok_mips_execution_kernel_fault()
 {
     constexpr uptr uart = kseg1 + 0x180003f8;

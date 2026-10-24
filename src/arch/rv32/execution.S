@@ -5,7 +5,12 @@
 .global ok_rv32_enter_native
 .type ok_rv32_enter_native,@function
 ok_rv32_enter_native:
-    addi sp, sp, -240
+    mv t0, sp
+    beqz a3, .Lservice_stack
+    mv sp, a3
+.Lservice_stack:
+    addi sp, sp, -256
+    sw t0, 240(sp)
     sw ra, 0(sp)
     sw s0, 4(sp)
     sw s1, 8(sp)
@@ -292,6 +297,7 @@ ok_rv32_native_trap:
     li t3, 2
 5:
     sb t3, 0(t1)
+    sw sp, 16(t1)
     csrw mie, zero
     li t0, 0x2004000
     li t1, -1
@@ -355,7 +361,7 @@ ok_rv32_native_trap:
     csrw mie, t0
     lw t0, 60(sp)
     csrw mstatus, t0
-    addi sp, sp, 240
+    lw sp, 240(sp)
     ret
 ok_rv32_native_kernel_fault:
     csrw mie, zero

@@ -2,6 +2,25 @@
 .global _start
 .type _start, @function
 _start:
+    mr 28, 3
+    mr 29, 6
+    mr 30, 7
+    /* Cover the complete linked image before using its NOLOAD boot stack.
+       QEMU's ePAPR entry TLB maps only the first 64 MiB. */
+    lis 6, 0x1000
+    mtspr 624, 6
+    lis 6, 0xc000
+    ori 6, 6, 0x0900
+    mtspr 625, 6
+    li 6, 0
+    mtspr 626, 6
+    li 6, 0x0015
+    mtspr 627, 6
+    li 6, 0
+    mtspr 944, 6
+    tlbwe
+    isync
+
     /* Map ppce500 CCSR MMIO: EA 0xe0000000 -> PA 0xfe0000000. */
     lis 6, 0x1001
     mtspr 624, 6
@@ -19,11 +38,12 @@ _start:
     tlbwe
     isync
 
-    /* Keep PCI MMIO in a supervisor-only, cache-inhibited TLB1 slot. */
+    /* Map the complete 256 MiB PCI window in a supervisor-only,
+       cache-inhibited TLB1 slot. */
     lis 6, 0x1002
     mtspr 624, 6
     lis 6, 0xc000
-    ori 6, 6, 0x0800
+    ori 6, 6, 0x0900
     mtspr 625, 6
     lis 6, 0xc000
     ori 6, 6, 0x000a
@@ -72,12 +92,22 @@ _start:
     addi 3, 3, 4
     b 1b
 2:
+    mr 3, 28
+    mr 4, 29
+    mr 5, 30
+    li 6, 0
+    addi 1, 1, -32
+    bl ok_boot_capture
     bl kernel_main
 3:
     b 3b
 
 .section .bootstrap_bss, "aw", @nobits
 .align 12
+.global ok_service_stack_lower
+ok_service_stack_lower:
 boot_stack:
     .skip 1048576
+.global ok_service_stack_top
+ok_service_stack_top:
 boot_stack_top:

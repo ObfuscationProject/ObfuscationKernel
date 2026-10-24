@@ -13,6 +13,7 @@ _start:
     addi.d $t0, $t0, 8
     b 1b
 2:
+    bl ok_boot_capture
     bl kernel_main
 3:
     idle 0
@@ -20,6 +21,10 @@ _start:
 
 .section .bootstrap_bss, "aw", @nobits
 .align 12
+.global ok_service_stack_lower
+ok_service_stack_lower:
 boot_stack:
     .skip 1048576
+.global ok_service_stack_top
+ok_service_stack_top:
 boot_stack_top:

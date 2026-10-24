@@ -16,6 +16,7 @@ multiboot_header:
 .type _start, @function
 _start:
     cli
+    mov %eax, %esi
     mov $boot_stack_top, %esp
 
     // These NOLOAD tables can lie beyond the BIOS payload's padded extent.
@@ -85,6 +86,11 @@ long_mode_entry:
     xor %eax, %eax
     rep stosb
 
+    mov %esi, %edi
+    mov %ebx, %esi
+    xor %edx, %edx
+    xor %ecx, %ecx
+    call ok_boot_capture
     call kernel_main
 2:
     hlt
@@ -109,6 +115,10 @@ boot_pdpt:
 boot_pd:
     .skip 4096
 .align 16
+.global ok_service_stack_lower
+ok_service_stack_lower:
 boot_stack:
     .skip 1048576
+.global ok_service_stack_top
+ok_service_stack_top:
 boot_stack_top:

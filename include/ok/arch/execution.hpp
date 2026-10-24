@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ok/core/types.hpp"
+#include "ok/arch/kernel_entry_stack.hpp"
 
 #include <array>
 #include <span>
@@ -36,12 +37,85 @@ struct PageMapping
     u8 flags{page_read};
 };
 
+inline constexpr usize max_native_mappings = 1024;
+// A backend may retain this read-only directory while its address-space slot
+// exists. The pointed-to records live in page-pool metadata blocks; moving the
+// owner never moves those blocks. Zero-flag records retain backing for PROT_NONE
+// but must not acquire a user translation.
+struct MappingView
+{
+    static constexpr usize records_per_chunk = page_size / sizeof(PageMapping);
+    static constexpr usize max_chunks =
+        (max_native_mappings + records_per_chunk - 1) / records_per_chunk;
+    std::array<std::span<const PageMapping>, max_chunks> chunks{};
+    usize count{};
+
+    constexpr MappingView() = default;
+    constexpr MappingView(std::span<const PageMapping> contiguous) : count(contiguous.size())
+    {
+        chunks[0] = contiguous;
+    }
+    constexpr MappingView(const PageMapping *data, usize size) : MappingView(std::span<const PageMapping>{data, size}) {}
+    template <usize N> constexpr MappingView(const std::array<PageMapping, N> &data)
+        : MappingView(data.data(), N) {}
+    template <usize N> constexpr MappingView(const PageMapping (&data)[N])
+        : MappingView(data, N) {}
+    [[nodiscard]] constexpr usize size() const { return count; }
+    [[nodiscard]] constexpr bool empty() const { return count == 0; }
+    // Validate the public directory before a backend indexes it. Subtracting
+    // from count avoids overflow even when a caller supplies a huge span.
+    [[nodiscard]] constexpr bool valid() const
+    {
+        if (count > max_native_mappings) return false;
+        usize total = 0;
+        for (const auto chunk : chunks)
+        {
+            if (chunk.size() && !chunk.data()) return false;
+            if (chunk.size() > count - total) return false;
+            total += chunk.size();
+        }
+        return total == count;
+    }
+    [[nodiscard]] constexpr const PageMapping &operator[](usize index) const
+    {
+        for (const auto chunk : chunks)
+        {
+            if (index < chunk.size()) return chunk[index];
+            index -= chunk.size();
+        }
+        __builtin_unreachable();
+    }
+    struct Iterator
+    {
+        const MappingView *view{};
+        usize index{};
+        [[nodiscard]] constexpr const PageMapping &operator*() const { return (*view)[index]; }
+        constexpr Iterator &operator++() { ++index; return *this; }
+        [[nodiscard]] constexpr bool operator!=(Iterator other) const { return index != other.index; }
+    };
+    [[nodiscard]] constexpr Iterator begin() const { return {this, 0}; }
+    [[nodiscard]] constexpr Iterator end() const { return {this, count}; }
+};
+
 struct AddressSpace
 {
     uptr root{0};
     u32 slot{0};
     u32 generation{0};
 };
+
+// Serialized boot-CPU snapshot of backend slots, independent of process records.
+// Includes allocated slots whose handles were never published to a process.
+// Static kernel tables and inactive reusable bytes are excluded. These backends
+// retire synchronously; runtime page/pin/quarantine owners are reported separately.
+struct OwnershipReport
+{
+    Status failure{};
+    usize address_spaces{};
+    bool executing{};
+};
+
+[[nodiscard]] OwnershipReport ownership_report() noexcept;
 
 // Register slots are architecture-private; use syscall()/set_return_value().
 // A complete copy preserves a suspended user thread, including FP/SIMD and TLS.
@@ -77,17 +151,20 @@ struct Trap
     u32 vector{0};
     uptr error_code{0};
     uptr fault_address{0};
+    uptr kernel_stack_pointer{0};
 };
 
 [[nodiscard]] bool supported() noexcept;
 Status initialize();
-Result<AddressSpace> create_space(std::span<const PageMapping> mappings);
+Result<AddressSpace> create_space(MappingView mappings);
 Status destroy_space(AddressSpace &space);
 
 // Execute at user privilege until a real syscall, hardware timer interrupt or
 // CPU exception. Return to the original kernel call stack with the boot address
 // space restored. The caller owns scheduling, syscall policy and process exit.
+// The unowned entry is retained only for standalone diagnostic fixtures.
 Result<Trap> enter(AddressSpace &space, UserFrame &frame);
+Result<Trap> enter_owned(AddressSpace &space, UserFrame &frame, const KernelEntryStackView &stack);
 [[nodiscard]] UserFrame initial_frame(uptr entry, uptr stack);
 [[nodiscard]] Syscall syscall(const UserFrame &frame);
 void set_return_value(UserFrame &frame, i64 value);

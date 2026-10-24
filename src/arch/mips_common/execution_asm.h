@@ -171,7 +171,13 @@
 .global ok_mips_execution_enter
 .type ok_mips_execution_enter, @function
 ok_mips_execution_enter:
-    ADD $29, $29, -FRAME_SIZE
+    move $8, $29
+    beqz $5, .Lservice_stack
+    nop
+    move $29, $5
+.Lservice_stack:
+    ADD $29, $29, -(FRAME_SIZE+16)
+    STORE $8, FRAME_SIZE($29)
     STORE $16, 16*PTR($29)
     STORE $17, 17*PTR($29)
     STORE $18, 18*PTR($29)
@@ -305,7 +311,7 @@ ok_mips_execution_vectors:
     LOAD $28, 28*PTR($29)
     LOAD $30, 30*PTR($29)
     LOAD $31, 31*PTR($29)
-    ADD $29, $29, FRAME_SIZE
+    LOAD $29, FRAME_SIZE($29)
     jr $31
     nop
 .Lkernel_fault:

@@ -14,6 +14,10 @@ _start:
     .long 0
 
 boot_entry:
+    mov x20, x0
+    mov x21, x1
+    mov x22, x2
+    mov x23, x3
     msr daifset, #0xf
     mrs x0, CurrentEL
     cmp x0, #0x8
@@ -47,6 +51,11 @@ boot_entry:
     str x2, [x0], #8
     b 1b
 2:
+    mov x0, x20
+    mov x1, x21
+    mov x2, x22
+    mov x3, x23
+    bl ok_boot_capture
     bl kernel_main
 3:
     wfe
@@ -54,6 +63,10 @@ boot_entry:
 
 .section .bootstrap_bss, "aw", %nobits
 .align 12
+.global ok_service_stack_lower
+ok_service_stack_lower:
 boot_stack:
     .skip 1048576
+.global ok_service_stack_top
+ok_service_stack_top:
 boot_stack_top:

@@ -134,6 +134,22 @@ bool supported() noexcept
     return true;
 }
 
+OwnershipReport ownership_report() noexcept
+{
+    OwnershipReport report{};
+    report.executing = executing || ok_arm_execution_active_frame != nullptr || ok_arm_execution_resume_sp != 0;
+    for (const auto &space : spaces)
+    {
+        if (!space.allocated) continue;
+        ++report.address_spaces;
+        if (!space.generation || space.tables_used > table_count)
+            report.failure = Status::io_error("native backend has an inconsistent table owner");
+    }
+    if (!initialized && (report.address_spaces || report.executing))
+        report.failure = Status::io_error("uninitialized native backend retains owners");
+    return report;
+}
+
 Status initialize()
 {
     if (initialized)
@@ -181,10 +197,12 @@ Status initialize()
     return Status::success();
 }
 
-Result<AddressSpace> create_space(std::span<const PageMapping> mappings)
+Result<AddressSpace> create_space(MappingView mappings)
 {
     if (!initialized)
         return Status::not_initialized("native execution backend is not initialized");
+    if (!mappings.valid() || mappings.empty() || mappings.size() > max_native_mappings)
+        return Status::invalid_argument("invalid native mapping count");
     usize slot = 0;
     while (slot < max_address_spaces && spaces[slot].allocated)
         ++slot;
@@ -195,14 +213,20 @@ Result<AddressSpace> create_space(std::span<const PageMapping> mappings)
     value = {};
     value.generation = generation == 0 ? 1 : generation;
     populate_kernel(value.root, value.directory);
-    for (const auto &mapping : mappings)
+    for (usize index = 0; index < mappings.size(); ++index)
     {
+        const auto &mapping = mappings[index];
         if (mapping.virtual_address < user_begin || mapping.virtual_address >= user_end ||
             (mapping.virtual_address & (page_size - 1)) != 0 || mapping.physical_address < ram_begin ||
             mapping.physical_address >= ram_end || (mapping.physical_address & (page_size - 1)) != 0 ||
-            (mapping.flags & page_read) == 0 || (mapping.flags & ~(page_read | page_write | page_execute)) != 0 ||
+            (mapping.flags != 0 && (mapping.flags & page_read) == 0) ||
+            (mapping.flags & ~(page_read | page_write | page_execute)) != 0 ||
             (mapping.flags & (page_write | page_execute)) == (page_write | page_execute))
             return Status::invalid_argument("invalid native user-page mapping or writable executable page");
+        for (usize previous = 0; previous < index; ++previous)
+            if (mappings[previous].virtual_address == mapping.virtual_address)
+                return Status::already_exists("duplicate native user-page mapping");
+        if (mapping.flags == 0) continue; // PROT_NONE owns backing without a PTE.
         auto &directory_entry = value.directory.entries[(mapping.virtual_address >> 21) & 511];
         if ((directory_entry & valid) == 0)
         {
@@ -309,7 +333,7 @@ Status copy_to_user(const AddressSpace &space, uptr destination, const void *sou
     return Status::success();
 }
 
-Result<Trap> enter(AddressSpace &space, UserFrame &frame)
+static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack_top)
 {
     if (!initialized || storage(space) == nullptr)
         return Status::not_initialized("native address space is unavailable");
@@ -325,6 +349,8 @@ Result<Trap> enter(AddressSpace &space, UserFrame &frame)
     frame.flags &= 0xf0000000; // Preserve NZCV only; always EL0t with IRQs enabled.
     u64 saved_mask;
     asm volatile("mrs %0, daif; msr daifset, #0xf" : "=r"(saved_mask) : : "memory");
+    const auto old_stack_top = ok_arm_execution_stack_top;
+    if (stack_top) ok_arm_execution_stack_top = stack_top;
     executing = true;
     select_root(space.root);
     asm volatile("msr cntp_tval_el0, %0; msr cntp_ctl_el0, %1; isb" : : "r"(timer_period), "r"(u64{1}) : "memory");
@@ -333,11 +359,29 @@ Result<Trap> enter(AddressSpace &space, UserFrame &frame)
     select_root(reinterpret_cast<uptr>(&kernel_root));
     executing = false;
     ok_arm_execution_active_frame = nullptr;
+    ok_arm_execution_resume_sp = 0;
+    ok_arm_execution_stack_top = old_stack_top;
     asm volatile("msr daif, %0" : : "r"(saved_mask) : "memory");
     return last_trap;
 }
 
-extern "C" void ok_arm_execution_trap(u64 vector)
+Result<Trap> enter(AddressSpace &space, UserFrame &frame)
+{
+    return enter_impl(space, frame, 0);
+}
+Result<Trap> enter_owned(AddressSpace &space, UserFrame &frame, const KernelEntryStackView &stack)
+{
+    if (!stack.valid() || (stack.lower() & 15) || (stack.top() & 15) ||
+        stack.top() <= stack.lower() || stack.top() - stack.lower() < 4096)
+        return Status::invalid_argument("native entry requires a live owned kernel stack");
+    auto result = enter_impl(space, frame, stack.top());
+    if (result && result.value().kernel_stack_pointer &&
+        (result.value().kernel_stack_pointer < stack.lower() || result.value().kernel_stack_pointer >= stack.top()))
+        return Status::fault("privileged capture escaped the owned kernel stack");
+    return result;
+}
+
+extern "C" void ok_arm_execution_trap(u64 vector, uptr capture_sp)
 {
     u64 syndrome, fault_address;
     asm volatile("mrs %0, esr_el1; mrs %1, far_el1" : "=r"(syndrome), "=r"(fault_address));
@@ -348,7 +392,7 @@ extern "C" void ok_arm_execution_trap(u64 vector)
         asm volatile("msr cntp_ctl_el0, xzr; isb" : : : "memory");
         if (irq < 1020)
             mmio(gic_cpu + 0x10) = acknowledge;
-        last_trap = {irq == timer_irq ? TrapKind::timer : TrapKind::exception, irq, 0, 0};
+        last_trap = {irq == timer_irq ? TrapKind::timer : TrapKind::exception, irq, 0, 0, capture_sp};
         return;
     }
     const auto exception_class = (syndrome >> 26) & 0x3f;
@@ -356,7 +400,7 @@ extern "C" void ok_arm_execution_trap(u64 vector)
     last_trap = {vector == 8 && exception_class == 0x15 ? TrapKind::syscall
                  : page_fault                           ? TrapKind::page_fault
                                                         : TrapKind::exception,
-                 static_cast<u32>(exception_class), syndrome, page_fault ? fault_address : 0};
+                 static_cast<u32>(exception_class), syndrome, page_fault ? fault_address : 0, capture_sp};
 }
 
 extern "C" [[noreturn]] void ok_arm_execution_kernel_fault(u64 vector)
