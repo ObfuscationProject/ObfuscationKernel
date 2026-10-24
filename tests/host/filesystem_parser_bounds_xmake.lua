@@ -1,0 +1,18 @@
+set_project("filesystem-parser-bounds")
+set_languages("c++23")
+option("sanitizers")
+    set_default(false)
+    set_showmenu(true)
+option_end()
+target("filesystem-parser-bounds")
+    set_kind("binary")
+    set_targetdir("artifacts")
+    add_includedirs("include", "tests/host")
+    add_defines("OK_ARCH_TARGET_X86_64")
+    add_files("tests/host/filesystem_parser_bounds.cpp", "tests/host/ext4_realtime_model.cpp", "src/fs/ext4.cpp", "src/fs/ext4_fs.cpp")
+    add_cxxflags("-O1", "-g", "-Wall", "-Wextra", "-Werror", "-fno-exceptions", {force=true})
+    if has_config("sanitizers") then
+        add_cxxflags("-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", {force=true})
+        add_ldflags("-fsanitize=address,undefined", "-no-pie", {force=true})
+    end
+target_end()

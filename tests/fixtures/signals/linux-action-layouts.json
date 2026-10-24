@@ -1,0 +1,82 @@
+{
+  "i386": {
+    "bytes": 20,
+    "handler_offset": 0,
+    "flags_offset": 4,
+    "restorer_offset_or_999": 8,
+    "mask_offset": 12,
+    "flags_bytes": 4
+  },
+  "x86_64": {
+    "bytes": 32,
+    "handler_offset": 0,
+    "flags_offset": 8,
+    "restorer_offset_or_999": 16,
+    "mask_offset": 24,
+    "flags_bytes": 8
+  },
+  "arm32": {
+    "bytes": 20,
+    "handler_offset": 0,
+    "flags_offset": 4,
+    "restorer_offset_or_999": 8,
+    "mask_offset": 12,
+    "flags_bytes": 4
+  },
+  "aarch64": {
+    "bytes": 32,
+    "handler_offset": 0,
+    "flags_offset": 8,
+    "restorer_offset_or_999": 16,
+    "mask_offset": 24,
+    "flags_bytes": 8
+  },
+  "rv32": {
+    "bytes": 16,
+    "handler_offset": 0,
+    "flags_offset": 4,
+    "restorer_offset_or_999": 999,
+    "mask_offset": 8,
+    "flags_bytes": 4
+  },
+  "rv64": {
+    "bytes": 24,
+    "handler_offset": 0,
+    "flags_offset": 8,
+    "restorer_offset_or_999": 999,
+    "mask_offset": 16,
+    "flags_bytes": 8
+  },
+  "mips": {
+    "bytes": 24,
+    "handler_offset": 4,
+    "flags_offset": 0,
+    "restorer_offset_or_999": 999,
+    "mask_offset": 8,
+    "flags_bytes": 4
+  },
+  "mips64": {
+    "bytes": 32,
+    "handler_offset": 8,
+    "flags_offset": 0,
+    "restorer_offset_or_999": 999,
+    "mask_offset": 16,
+    "flags_bytes": 4
+  },
+  "ppc": {
+    "bytes": 20,
+    "handler_offset": 0,
+    "flags_offset": 4,
+    "restorer_offset_or_999": 8,
+    "mask_offset": 12,
+    "flags_bytes": 4
+  },
+  "loongarch64": {
+    "bytes": 24,
+    "handler_offset": 0,
+    "flags_offset": 8,
+    "restorer_offset_or_999": 999,
+    "mask_offset": 16,
+    "flags_bytes": 8
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "architecture": "arm32",
+  "recipe": "QEMU virt cortex-a15 512M arm32-linux-image",
+  "scope": "retained actual QEMU serial; fixture tests only parse evidence",
+  "serial_sha256": "821420d715d8087a0393df011c83bac531dbb986d7d7beef1e63281d3f72228a",
+  "source_run": "/tmp/obfuscation-arm32-firmware-stage/native-frames-arm32-v2/arm32/serial.log",
+  "result_sha256": "66df7f9e9efb079d764108c413b097dba4b7de59147d132d8c949070e1d57328",
+  "historical_direct_elf_fixture": "arm32.txt"
+}

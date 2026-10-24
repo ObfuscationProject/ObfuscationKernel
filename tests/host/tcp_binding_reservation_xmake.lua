@@ -1,0 +1,33 @@
+set_project("tcp-binding-reservation-private")
+set_languages("cxx23")
+add_rules("mode.debug", "mode.release")
+local source = os.getenv("TCP_BINDING_SOURCE")
+local cxx = os.getenv("TCP_BINDING_CXX")
+local cc = os.getenv("TCP_BINDING_CC")
+local kind = os.getenv("TCP_BINDING_KIND")
+toolchain("tcp-binding-selected")
+    set_kind("standalone")
+    on_check(function ()
+        assert(source and os.isdir(source) and os.isfile(cxx) and os.isfile(cc), "explicit source/compiler required")
+        assert(kind == "hosted" or kind == "sanitized", "explicit qualification kind required")
+        return true
+    end)
+    on_load(function (toolchain)
+        toolchain:set("toolset", "cxx", cxx)
+        toolchain:set("toolset", "cc", cc)
+        toolchain:set("toolset", "ld", cxx)
+    end)
+toolchain_end()
+for _, name in ipairs({"tcp-binding-reservation", "tcp-transport", "tcp-endpoints"}) do
+    target(name)
+        set_kind("binary")
+        set_toolchains("tcp-binding-selected")
+        add_includedirs(path.join(source, "include"))
+        add_cxxflags("-std=c++23", "-Wall", "-Wextra", "-Werror", "-fno-exceptions", {force = true})
+        add_files(path.join(source, "tests/host", name:gsub("-", "_") .. "_tests.cpp"))
+        if kind == "sanitized" then
+            add_cxxflags("-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", {force = true})
+            add_ldflags("-fsanitize=address,undefined", "-no-pie", {force = true})
+        end
+    target_end()
+end

@@ -4,6 +4,7 @@
 #include "ok/sched/process.hpp"
 #include "ok/syscall/syscall.hpp"
 #include "ok/user/user.hpp"
+#include "ok/user/credential_change.hpp"
 
 #include <array>
 #include <span>
@@ -306,7 +307,14 @@ Status verify_process_lifecycle(Kernel &kernel, std::span<const std::byte> elf, 
     {
         return Status::fault("user process ELF load failed");
     }
-    if (auto status = user_process->fd_table().open_slot(7); !status.ok())
+    const auto *input = user_process->fd_table().entry(0);
+    if (!input)
+    {
+        return Status::fault("process lifecycle lacks canonical stdin descriptor");
+    }
+    const auto shared_description = input->description;
+    if (auto status = processes.scheduler().install_descriptor(user_process->resources(), 7, shared_description);
+        !status.ok())
     {
         return status;
     }
@@ -320,6 +328,12 @@ Status verify_process_lifecycle(Kernel &kernel, std::span<const std::byte> elf, 
         return status;
     }
 
+    const auto references_before_fork = processes.scheduler().open_description(shared_description)->references;
+    usize inherited_references{};
+    for (const auto &slot : user_process->fd_table().entries())
+    {
+        inherited_references += slot.used && slot.description == shared_description;
+    }
     auto child = processes.fork(user.value());
     if (!child)
     {
@@ -328,7 +342,10 @@ Status verify_process_lifecycle(Kernel &kernel, std::span<const std::byte> elf, 
     const auto *child_process = processes.find(child.value());
     if (child_process == nullptr || !child_process->fd_table().contains(7) ||
         child_process->fd_table().open_count() != user_process->fd_table().open_count() ||
-        child_process->memory_map().area_count() != user_process->memory_map().area_count())
+        child_process->memory_map().area_count() != user_process->memory_map().area_count() ||
+        child_process->fd_table().entry(7)->description != shared_description ||
+        processes.scheduler().open_description(shared_description)->references !=
+            references_before_fork + inherited_references)
     {
         return Status::fault("fork did not duplicate FD table and memory map metadata");
     }
@@ -376,6 +393,10 @@ Status verify_process_lifecycle(Kernel &kernel, std::span<const std::byte> elf, 
     if (!waited || waited.value() != 17 || processes.zombie_count() != 0 || processes.find(child.value()) != nullptr)
     {
         return Status::fault("wait4 or zombie cleanup failed");
+    }
+    if (processes.scheduler().open_description(shared_description)->references != references_before_fork)
+    {
+        return Status::fault("process lifecycle did not release inherited canonical description references");
     }
 
     if (auto status = processes.exit(user.value(), 0); !status.ok())
@@ -460,11 +481,27 @@ Status verify_user_management_and_isolation(Kernel &kernel, std::span<const std:
 
     auto root = users.credentials_for("root");
     auto normal = users.credentials_for("user");
-    if (!root || !normal || !users.can_switch(user::kernel_credentials(), normal.value()) ||
+    if (!root || !normal || root.value().suid != 0 || root.value().sgid != 0 ||
+        normal.value().suid != 1000 || normal.value().sgid != 1000 ||
+        !users.can_switch(user::kernel_credentials(), normal.value()) ||
         users.can_switch(normal.value(), root.value()))
     {
         return Status::fault("user credential switching policy failed");
     }
+    // Reach the same saved-ID policy used by native Linux adapter calls.
+    auto dropped = user::change_credentials(root.value(),
+        {user::IdDomain::user, user::IdChange::real_effective_saved, 1000, 1000, 0});
+    if (!dropped || dropped.value().uid != 1000 || dropped.value().euid != 1000 || dropped.value().suid != 0)
+        return Status::fault("reversible saved UID drop failed");
+    auto restored = user::change_credentials(dropped.value(),
+        {user::IdDomain::user, user::IdChange::single, 0});
+    if (!restored || restored.value().euid != 0 || restored.value().uid != 1000)
+        return Status::fault("saved UID restoration failed");
+    auto permanent = user::change_credentials(restored.value(),
+        {user::IdDomain::user, user::IdChange::single, 1000});
+    if (!permanent || permanent.value().suid != 1000 ||
+        user::change_credentials(permanent.value(), {user::IdDomain::user, user::IdChange::single, 0}))
+        return Status::fault("permanent saved UID drop failed");
     if (auto status = users.add_user(2000, 2000, "daemon", "/srv/daemon");
         !status.ok() && status.code() != StatusCode::already_exists)
     {
@@ -487,7 +524,8 @@ Status verify_user_management_and_isolation(Kernel &kernel, std::span<const std:
     }
     auto *daemon_process = processes.find(process.value());
     if (daemon_process == nullptr || daemon_process->credentials().uid != 2000 ||
-        daemon_process->credentials().euid != 2000)
+        daemon_process->credentials().euid != 2000 || daemon_process->credentials().suid != 2000 ||
+        daemon_process->credentials().sgid != 2000)
     {
         return Status::fault("process credentials were not applied");
     }
@@ -498,7 +536,9 @@ Status verify_user_management_and_isolation(Kernel &kernel, std::span<const std:
         return child.status();
     }
     const auto *child_process = processes.find(child.value());
-    if (child_process == nullptr || child_process->credentials().uid != daemon_process->credentials().uid)
+    if (child_process == nullptr || child_process->credentials().uid != daemon_process->credentials().uid ||
+        child_process->credentials().suid != daemon_process->credentials().suid ||
+        child_process->credentials().sgid != daemon_process->credentials().sgid)
     {
         return Status::fault("fork did not inherit process credentials");
     }
@@ -593,6 +633,27 @@ Status verify_background_programs_and_posix(Kernel &kernel)
         return Status::fault("diagnostic shell identity rewrote a scheduled process");
 
     static_cast<void>(kernel.debug_shell().execute("su kernel"));
+    // Session synchronization must replace stale saved root IDs even when all
+    // original credential fields already match the selected normal account.
+    if (!kernel.debug_shell().execute("su user"))
+        return Status::fault("saved-ID session regression could not select user");
+    auto stale_saved = kernel.posix().user_credentials();
+    const auto normal_uid = stale_saved.euid;
+    const auto normal_gid = stale_saved.egid;
+    if (normal_uid == 0 || normal_gid == 0)
+        return Status::fault("saved-ID session regression requires nonroot account");
+    stale_saved.suid = 0;
+    stale_saved.sgid = 0;
+    if (auto status = kernel.posix().set_credentials(stale_saved); !status.ok())
+        return status;
+    if (!kernel.debug_shell().execute("whoami") ||
+        kernel.posix().user_credentials().suid != normal_uid ||
+        kernel.posix().user_credentials().sgid != normal_gid ||
+        user::change_credentials(kernel.posix().user_credentials(),
+            {user::IdDomain::user, user::IdChange::single, 0}))
+        return Status::fault("shell session retained stale saved root identity");
+    if (!kernel.debug_shell().execute("exit"))
+        return Status::fault("saved-ID session regression could not restore kernel");
     auto ps = kernel.debug_shell().execute("ps aux");
     if (!ps || !contains_text(ps.value(), "  PID USER    TTY   STAT THR COMMAND") ||
         !contains_text(ps.value(), "idle") || !contains_text(ps.value(), "mod:kernel-gui") ||

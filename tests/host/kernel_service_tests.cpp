@@ -1,4 +1,5 @@
 #include "ok/core/kernel.hpp"
+#include "ok/arch/execution.hpp"
 #include "ok/user/runtime.hpp"
 #include <cstdio>
 #include <cstdlib>
@@ -50,6 +51,14 @@ class ServiceExtension final : public KernelExtension
 
 int main()
 {
+    arch::execution::AddressSpace stub_space{.root = 0x1234, .slot = 7, .generation = 9};
+    auto stub_frame = arch::execution::initial_frame(0x400000, 0x800000);
+    const arch::execution::KernelEntryStackView stub_stack;
+    CHECK(!arch::execution::supported());
+    CHECK(arch::execution::enter(stub_space, stub_frame).status().code() == StatusCode::unsupported);
+    CHECK(arch::execution::enter_owned(stub_space, stub_frame, stub_stack).status().code() == StatusCode::unsupported);
+    CHECK(stub_space.root == 0x1234 && stub_space.slot == 7 && stub_space.generation == 9);
+    CHECK(stub_frame.pc == 0x400000 && stub_frame.sp == 0x800000 && !stub_stack.valid());
     static Kernel kernel;
     static ServiceExtension extension;
     CHECK(kernel.boot({.extension = &extension}));

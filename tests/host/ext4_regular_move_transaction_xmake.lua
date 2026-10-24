@@ -1,0 +1,23 @@
+-- Hosted in-memory journal/writer models only; no SDK or image targets.
+set_project("ext4-cross-parent-regular-move-transaction-model")
+set_languages("c++23")
+add_rules("mode.release")
+local kernel = os.getenv("OK_REGULAR_MOVE_KERNEL_SOURCE")
+if not kernel then raise("exact selected private Kernel source required") end
+toolchain("regular-move-transaction-host-gcc")
+    set_kind("standalone")
+    set_toolset("cxx", "/usr/bin/g++")
+    set_toolset("cc", "/usr/bin/gcc")
+    set_toolset("ld", "/usr/bin/g++")
+    set_toolset("ar", "/usr/bin/ar")
+toolchain_end()
+set_toolchains("regular-move-transaction-host-gcc")
+target("cross-parent-regular-move-transaction-model")
+    set_kind("binary")
+    add_defines("OK_ARCH_TARGET_X86_64")
+    add_includedirs(path.join(kernel, "include"))
+    add_files(path.join(kernel, "tests/host/ext4_regular_move_transaction_tests.cpp"),
+              path.join(kernel, "src/fs/ext4_recovery.cpp"))
+    add_cxxflags("-O2", "-Wall", "-Wextra", "-Werror", "-fno-exceptions", "-fno-pie", {force=true})
+    add_ldflags("-no-pie", {force=true})
+target_end()

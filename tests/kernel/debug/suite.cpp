@@ -2,6 +2,16 @@
 #include "ok/core/kernel.hpp"
 #include "ok/core/test_point.hpp"
 #include "ok/fs/ext4.hpp"
+#include "ok/fs/ext4_recovery.hpp"
+#include "ok/fs/ext4_replay_view.hpp"
+#include "ok/fs/ext4_completion.hpp"
+#include "ok/fs/ext4_metadata_transaction.hpp"
+#include "ok/block/sessions.hpp"
+#include "ok/fs/metadata_buffers.hpp"
+#include "ok/fs/ext4_owned_transaction.hpp"
+#include "../points/file_attribute_checks.hpp"
+#include "../points/directory_checks.hpp"
+#include <new>
 
 #include "../roadmap/roadmap_tests.hpp"
 
@@ -377,6 +387,15 @@ Status Kernel::run_debug_test_suite()
     }
     test_report_.net = true;
 
+    const auto original_mask = posix_.umask(01077);
+    auto masked_fd = posix_.open("/tmp/mask-model", posix::o_CREAT | posix::o_EXCL | posix::o_RDWR, 0666);
+    const auto stored_mask = posix_.umask(original_mask);
+    if (!masked_fd || stored_mask != 0077)
+        return Status::fault("common creation mask setup failed");
+    auto masked_stat = posix_.fstat(masked_fd.value());
+    if (!masked_stat || (masked_stat.value().mode & 0777) != 0600 ||
+        !posix_.close(masked_fd.value()) || !posix_.unlink("/tmp/mask-model"))
+        return Status::fault("common creation mask mode or lifetime failed");
     auto fd = posix_.open("/tmp/posix.txt", posix::o_CREAT | posix::o_RDWR | posix::o_TRUNC);
     if (!fd)
     {
@@ -775,6 +794,122 @@ Status Kernel::run_ext4_test()
     {
         return status;
     }
+    // Boot-reached admission model; real-device recovery is a separate test.
+    class RecoveryModelDevice final : public driver::BlockDevice
+    {
+      public:
+        driver::BlockGeometry geometry() const override { return {4, 512, false}; }
+        Status read_blocks(u64, std::span<std::byte> out) override
+        {
+            ++reads;
+            for (auto &byte : out)
+                byte = std::byte{0};
+            return Status::success();
+        }
+        Status write_blocks(u64, std::span<const std::byte>) override
+        {
+            ++mutations;
+            return Status::fault("recovery admission wrote its model device");
+        }
+        Status flush() override
+        {
+            ++mutations;
+            return Status::fault("recovery admission flushed its model device");
+        }
+        usize reads{}, mutations{};
+    } recovery_device;
+    fs::Ext4RecoveryBinding binding;
+    if (binding.inspect(recovery_device, {0, 4}).code() != StatusCode::unsupported || binding.info() ||
+        recovery_device.reads != 1 || recovery_device.mutations ||
+        binding.inspect(recovery_device, {0, 4}).code() != StatusCode::already_exists)
+        return Status::fault("ext4 recovery binding rejection model failed");
+    fs::Ext4ReplayPreview<> preview;
+    if (preview.open(recovery_device, {0, 4}).code() != StatusCode::unsupported || preview.ready() ||
+        preview.report().phase != fs::Ext4PreviewPhase::failed || recovery_device.reads != 2 ||
+        recovery_device.mutations || preview.open(recovery_device, {0, 4}).code() != StatusCode::already_exists)
+        return Status::fault("ext4 replay preview rejection model failed");
+    alignas(fs::Ext4RecoveryCompletion<>) static std::array<std::byte, sizeof(fs::Ext4RecoveryCompletion<>)> completion_storage{};
+    auto &completion = *::new (completion_storage.data()) fs::Ext4RecoveryCompletion<>;
+    if (completion.run(recovery_device, {0, 4}).code() != StatusCode::denied || completion.report().complete() ||
+        completion.report().failed_phase != fs::Ext4CompletionPhase::validating || recovery_device.reads != 2 ||
+        recovery_device.mutations || completion.run(recovery_device, {0, 4}).code() != StatusCode::already_exists)
+        return Status::fault("ext4 recovery completion rejection model failed");
+    alignas(fs::Ext4MetadataTransaction) static std::array<std::byte, sizeof(fs::Ext4MetadataTransaction)> transaction_storage{};
+    auto &transaction = *::new (transaction_storage.data()) fs::Ext4MetadataTransaction;
+    if (transaction.commit(recovery_device, {0, 4}, {}).code() != StatusCode::denied || transaction.report().published() ||
+        transaction.report().failed_phase != fs::Ext4TransactionPhase::validating || recovery_device.reads != 2 ||
+        recovery_device.mutations || transaction.commit(recovery_device, {0, 4}, {}).code() != StatusCode::already_exists)
+        return Status::fault("ext4 metadata transaction rejection model failed");
+    block::BlockSessions<1> sessions;
+    block::BlockSessions<1>::Session session, alias;
+    const auto registration = sessions.register_device(recovery_device, 1);
+    if (!registration || !sessions.acquire(registration.value(), {0, 4}, block::SessionAccess::readonly, session) ||
+        sessions.acquire(registration.value(), {0, 4}, block::SessionAccess::readonly, alias).code() != StatusCode::busy ||
+        session.flush().code() != StatusCode::denied || !session.close() ||
+        !sessions.detach(registration.value()) || recovery_device.reads != 2 || recovery_device.mutations)
+        return Status::fault("exclusive block session ownership model failed");
+    using MetadataBuffers = fs::MetadataBuffers<1, 1024, 1>;
+    alignas(MetadataBuffers) static std::array<std::byte, sizeof(MetadataBuffers)> metadata_storage{};
+    auto &metadata = *::new (metadata_storage.data()) MetadataBuffers;
+    const auto metadata_registration = sessions.register_device(recovery_device, 1);
+    if (!metadata_registration || !metadata.open(sessions, metadata_registration.value(), {0, 4}, block::SessionAccess::readonly))
+        return Status::fault("metadata buffer session model failed");
+    {
+        MetadataBuffers::Pin first, duplicate;
+        if (!metadata.pin(0, first) || !metadata.pin(0, duplicate) ||
+            first.report().value().read_pins != 2 || recovery_device.reads != 3 || recovery_device.mutations ||
+            metadata.close().code() != StatusCode::busy || !first.release() || !duplicate.release())
+            return Status::fault("canonical metadata buffer pin model failed");
+    }
+    if (!metadata.close() || !sessions.detach(metadata_registration.value()))
+        return Status::fault("canonical metadata buffer retirement model failed");
+    metadata.~MetadataBuffers();
+    using OwnedTransaction = fs::Ext4OwnedTransaction<1>;
+    alignas(OwnedTransaction) static std::array<std::byte, sizeof(OwnedTransaction)> owned_storage{};
+    auto &owned = *::new (owned_storage.data()) OwnedTransaction;
+    const auto owned_registration = sessions.register_device(recovery_device, 1);
+    if (!owned_registration || owned.open(sessions, owned_registration.value(), {0, 4}).code() != StatusCode::denied ||
+        owned.report().phase != fs::Ext4OwnedPhase::closed || !sessions.detach(owned_registration.value()) ||
+        recovery_device.reads != 3 || recovery_device.mutations)
+        return Status::fault("owned ext4 readonly admission model failed");
+    const fs::Ext4CreateUpdate unsupported_create{2, 1700000111, 123456789, "empty",
+        {fs::NodeType::regular, 0600, 1000, 1001}};
+    if (owned.prepare_create(unsupported_create).code() != StatusCode::unsupported ||
+        owned.report().phase != fs::Ext4OwnedPhase::closed || recovery_device.mutations)
+        return Status::fault("owned create participant capacity rejection model failed");
+    static fs::Ext4NextDataBlock next_image{};
+    const fs::Ext4NextDataUpdate next_update{14, 1024, 1043, 1700000111, 123456789};
+    if (owned.prepare_next_data(next_update, 1031, next_image).code() != StatusCode::unsupported ||
+        owned.report().phase != fs::Ext4OwnedPhase::closed || recovery_device.mutations)
+        return Status::fault("owned next data participant capacity rejection model failed");
+    owned.~OwnedTransaction();
+    static std::array<fs::Ext4CreateBlock, 6> create_sources{};
+    static fs::Ext4CreatePlan create_plan{};
+    const fs::Ext4CreateSource create_source{13, 0, 10, 11, 20,
+        create_sources[0], create_sources[1], create_sources[2],
+        create_sources[3], create_sources[4], create_sources[5]};
+    static fs::Ext4RecoveryInfo empty_binding{};
+    auto invalid_create = unsupported_create;
+    invalid_create.nanoseconds = 1000000000;
+    if (fs::Ext4CreatePlanner::plan(empty_binding, invalid_create, create_source, create_plan).code() !=
+            StatusCode::invalid_argument || create_plan.count ||
+        fs::Ext4CreatePlanner::plan(empty_binding, unsupported_create, create_source, create_plan).code() !=
+            StatusCode::unsupported || create_plan.count || recovery_device.mutations)
+        return Status::fault("empty create planner no-write rejection model failed");
+    // Boot-reached planner/capacity rejection models; these do not execute
+    // a data allocation or qualify transport and persistence ordering.
+    static fs::Ext4NextDataPlan next_plan{};
+    const fs::Ext4NextDataSource next_source{0, 10, 11,
+        create_sources[0], create_sources[1], create_sources[2], create_sources[3]};
+    auto invalid_next = next_update;
+    invalid_next.old_size = 0;
+    if (fs::Ext4NextDataPlanner::plan(empty_binding, invalid_next, next_source, next_plan).code() !=
+            StatusCode::invalid_argument || next_plan.count ||
+        fs::Ext4NextDataPlanner::plan(empty_binding, next_update, next_source, next_plan).code() !=
+            StatusCode::unsupported || next_plan.count || recovery_device.mutations)
+        return Status::fault("next data planner no-write rejection model failed");
+    if (auto status = tests::check_file_attributes(); !status) return status;
+    if (auto status = tests::check_directory_codec<abi::linux_user::configured_native_profile()>(); !status) return status;
     return simplefs_.format(block_device, "okroot");
 }
 

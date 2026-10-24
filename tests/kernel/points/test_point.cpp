@@ -4,6 +4,27 @@
 #include "ok/fs/ext4.hpp"
 
 #if defined(OK_ENABLE_TEST_POINTS)
+#include "frame_allocator_checks.hpp"
+#include "runtime_frames_checks.hpp"
+#include "deadline_checks.hpp"
+#include "futex_wake_operation_checks.hpp"
+#include "wait_registration_checks.hpp"
+#include "realtime_checks.hpp"
+#include "native_credentials_checks.hpp"
+#include "process_sessions_checks.hpp"
+#include "archive_directory_checks.hpp"
+#include "console_input_checks.hpp"
+#include "console_control_checks.hpp"
+#include "persistent_sync_checks.hpp"
+#include "checked_ownership_checks.hpp"
+#include "shutdown_checks.hpp"
+#include "pipe_vector_checks.hpp"
+#include "unix_socketpair_checks.hpp"
+#include "native_pty_checks.hpp"
+#include "unix_path_checks.hpp"
+#include "guarded_read_checks.hpp"
+#include "mount_retention_checks.hpp"
+#include "mount_snapshot_checks.hpp"
 #include <array>
 #include <span>
 #endif
@@ -173,7 +194,15 @@ Status test_interrupts(TestPointRunner &runner)
 
 Status test_memory(TestPointRunner &runner)
 {
-    memory::MemoryManager manager;
+    if (auto status = runner.check_status("memory", "frame-bookkeeping", check_frame_allocator()); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = runner.check_status("memory", "qualified-runtime-frames-model", check_qualified_runtime_frames()); !status.ok())
+    {
+        return status;
+    }
+    static memory::MemoryManager manager;
     const std::array regions{
         memory::MemoryRegion{.base = 0x1000, .size = 0x10000, .type = memory::RegionType::usable},
     };
@@ -202,6 +231,10 @@ Status test_memory(TestPointRunner &runner)
 
 Status test_scheduler(TestPointRunner &runner)
 {
+    if (auto status = runner.check_status("sched", "wait-registration-model", tests::check_wait_registration()); !status.ok())
+        return status;
+    if (auto status = runner.check_status("sched", "deadline-ownership", tests::check_deadline_wait()); !status.ok())
+        return status;
     static sched::Scheduler scheduler;
     if (auto status = runner.check_status("sched", "configure-cpus", scheduler.configure_cpus(2)); !status.ok())
     {
@@ -371,7 +404,11 @@ Status test_filesystem(TestPointRunner &runner)
         return status;
     }
     auto read = vfs.read_file("/tmp/debug.txt");
-    return runner.check("fs", "read", read.ok() && read.value().size == text.size(), "VFS read failed");
+    if (auto status = runner.check("fs", "read", read.ok() && read.value().size == text.size(), "VFS read failed");
+        !status.ok())
+        return status;
+    return runner.check_status("boot-archive-directory", "exact-root-metadata-model",
+                               tests::check_archive_directory_metadata_model(vfs));
 }
 
 Status test_ext4(TestPointRunner &runner)
@@ -459,6 +496,49 @@ Status test_kernel_services(TestPointRunner &runner, Kernel &kernel)
 Result<usize> run_kernel_test_points(Kernel &kernel)
 {
     TestPointRunner runner;
+    if (auto status = runner.check_status("native-power", "wire-no-init-refusal-model", tests::check_native_power_wire_refusal_model(kernel)); !status.ok())
+        return status;
+    if (auto status = runner.check_status("shutdown", "unsupported-refusal-model", tests::check_shutdown_refusal_model(kernel)); !status.ok())
+        return status;
+    if (auto status = runner.check_status("persistent-sync", "volatile-refusal-model", tests::check_persistent_sync_refusal_model(kernel)); !status.ok())
+        return status;
+    if (auto status = runner.check_status("checked-ownership", "root-policy-refusal-model", tests::check_checked_ownership_model(kernel)); !status.ok())
+        return status;
+    if (auto status = runner.check_status("console-input", "lease-authority-model", tests::check_console_input_lease_model()); !status.ok())
+        return status;
+    if (auto status = runner.check_status("console-control", "scalar-copy-wire-model", tests::check_console_control_wire_model()); !status.ok())
+        return status;
+
+    if (auto status = runner.check_status("futex-wake-operation", "algorithm-model", tests::check_futex_wake_operation_algorithm()); !status.ok())
+        return status;
+
+    if (auto status = runner.check_status("block", "guarded-read-model", tests::check_guarded_read_model()); !status.ok())
+        return status;
+
+    if (auto status = runner.check_status("mount", "retention-refusal-model", tests::check_mount_retention_refusal_model()); !status.ok())
+        return status;
+    if (auto status = runner.check_status("mount", "snapshot-observation-model", tests::check_mount_snapshot_model()); !status.ok())
+        return status;
+
+    if (auto status = runner.check_status("pipe-vector", "metadata-model", tests::check_pipe_vector_metadata()); !status.ok())
+        return status;
+
+    if (auto status = runner.check_status("unix-pathname", "OFD-namespace-ownership-model", tests::check_unix_path_ownership_model()); !status.ok())
+        return status;
+    if (auto status = runner.check_status("unix-socketpair", "OFD-ownership-model", tests::check_unix_socketpair_ownership(kernel.scheduler())); !status.ok())
+        return status;
+    if (auto status = runner.check_status("native-pty", "scheduler-OFD-ownership-model", tests::check_native_pty_ownership_model(kernel.scheduler())); !status.ok())
+        return status;
+    if (auto status = runner.check_status("pipe-write-fragment", "scheduler-model", tests::check_pipe_write_fragment(kernel.scheduler())); !status.ok())
+        return status;
+
+    if (auto status = runner.check_status("realtime", "epoch-model", tests::check_realtime_model()); !status.ok())
+        return status;
+
+    if (auto status = runner.check_status("native-credentials", "PCB-copy-model", tests::check_native_credentials_model()); !status.ok())
+        return status;
+    if (auto status = runner.check_status("process-sessions", "scheduler-lifecycle-model", tests::check_process_sessions_model(kernel.scheduler())); !status.ok())
+        return status;
 
     if (auto status = test_architecture_profiles(runner); !status.ok())
     {

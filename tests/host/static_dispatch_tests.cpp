@@ -3,6 +3,7 @@
 #include "ok/sched/scheduler.hpp"
 
 #include <type_traits>
+#include <memory>
 
 namespace
 {
@@ -49,6 +50,8 @@ static_assert(sched::SchedulerPolicy<NewestRunnablePolicy>);
 static_assert(!sched::SchedulerPolicy<InvalidPolicy>);
 static_assert(!std::is_polymorphic_v<sched::RoundRobinPolicy>);
 static_assert(!std::is_polymorphic_v<sched::BasicScheduler<NewestRunnablePolicy>>);
+static_assert(!std::is_copy_constructible_v<sched::BasicScheduler<NewestRunnablePolicy>>);
+static_assert(!std::is_copy_assignable_v<sched::BasicScheduler<NewestRunnablePolicy>>);
 static_assert(std::is_same_v<sched::Scheduler, sched::BasicScheduler<sched::RoundRobinPolicy>>);
 
 struct RecordingInstructions
@@ -153,7 +156,8 @@ sched::ProcessId add_task(sched::BasicScheduler<Policy> &scheduler, std::string_
 
 void test_default_policy()
 {
-    sched::Scheduler scheduler;
+    auto owner = std::make_unique<sched::Scheduler>();
+    auto &scheduler = *owner;
     check(scheduler.configure_cpus(2).ok());
     const auto first = add_task(scheduler, "first");
     const auto second = add_task(scheduler, "second");
@@ -173,24 +177,32 @@ void test_default_policy()
 
 void test_alternate_policy_and_ownership()
 {
-    sched::BasicScheduler<NewestRunnablePolicy> original;
+    auto original_owner = std::make_unique<sched::BasicScheduler<NewestRunnablePolicy>>();
+    auto independent_owner = std::make_unique<sched::BasicScheduler<NewestRunnablePolicy>>();
+    auto &original = *original_owner;
+    auto &independent = *independent_owner;
     const auto first = add_task(original, "first");
     const auto second = add_task(original, "second");
     check(original.schedule_next().value() == second);
     check(original.policy().selections == 1);
 
-    auto copied = original;
-    check(copied.block_process(second).ok());
-    check(copied.schedule_next().value() == first);
-    check(copied.policy().selections == 2);
+    check(add_task(independent, "first") == first);
+    check(add_task(independent, "second") == second);
+    check(independent.schedule_next().value() == second);
+    check(independent.policy().selections == 1);
+    check(independent.find(first) != original.find(first));
+    check(independent.find(second) != original.find(second));
+    check(independent.block_process(second).ok());
+    check(independent.schedule_next().value() == first);
+    check(independent.policy().selections == 2);
     check(original.policy().selections == 1);
     check(original.current_pid() == second);
     check(original.find(second)->state() == sched::ProcessState::running);
-    check(copied.schedule_next_on_cpu(1).status().code() == StatusCode::invalid_argument);
-    check(copied.policy().selections == 2);
-    check(copied.block_process(first).ok());
-    check(copied.schedule_next().status().code() == StatusCode::would_block);
-    check(copied.current_pid() == 0);
+    check(independent.schedule_next_on_cpu(1).status().code() == StatusCode::invalid_argument);
+    check(independent.policy().selections == 2);
+    check(independent.block_process(first).ok());
+    check(independent.schedule_next().status().code() == StatusCode::would_block);
+    check(independent.current_pid() == 0);
 }
 
 } // namespace

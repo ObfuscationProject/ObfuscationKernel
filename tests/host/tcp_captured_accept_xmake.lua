@@ -1,0 +1,38 @@
+set_project("tcp-captured-accept-leaf")
+set_languages("cxx23")
+add_rules("mode.debug", "mode.release")
+set_policy("build.ccache", false)
+local source = os.getenv("TCP_CAPTURED_ACCEPT_SOURCE")
+local cxx = os.getenv("TCP_CAPTURED_ACCEPT_CXX")
+local cc = os.getenv("TCP_CAPTURED_ACCEPT_CC")
+local kind = os.getenv("TCP_CAPTURED_ACCEPT_KIND")
+toolchain("tcp-captured-accept-selected")
+    set_kind("standalone")
+    on_check(function ()
+        assert(source and os.isdir(source), "explicit captured-accept source required")
+        assert(kind == "hosted" or kind == "sanitized", "hosted origin integration required")
+        assert(cxx and cc and os.isfile(cxx) and os.isfile(cc), "exact selected compiler required")
+        return true
+    end)
+    on_load(function (toolchain)
+        toolchain:set("toolset", "cxx", cxx)
+        toolchain:set("toolset", "cc", cc)
+        toolchain:set("toolset", "ld", cxx)
+    end)
+toolchain_end()
+target("tcp-captured-accept")
+    set_kind("binary")
+    set_toolchains("tcp-captured-accept-selected")
+    add_includedirs(path.join(source, "include"))
+    add_defines("OK_ARCH_TARGET_X86_64")
+    for _, unit in ipairs({"tests/host/tcp_captured_accept_tests.cpp", "src/sched/scheduler.cpp", "src/sched/process.cpp",
+                          "src/arch/arch.cpp", "src/arch/x86_64/ops.cpp", "src/net/native_udp.cpp", "src/memory/memory.cpp"}) do
+        add_files(path.join(source, unit))
+    end
+    add_cxxflags("-Wall", "-Wextra", "-Wpedantic", "-Werror", "-fno-exceptions", "-ffunction-sections", "-fdata-sections", {force = true})
+    add_ldflags("-Wl,--gc-sections", {force = true})
+    if kind == "sanitized" then
+        add_cxxflags("-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", {force = true})
+        add_ldflags("-fsanitize=address,undefined", "-no-pie", {force = true})
+    end
+target_end()

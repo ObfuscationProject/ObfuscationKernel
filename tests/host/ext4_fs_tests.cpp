@@ -1,7 +1,9 @@
+#include "ext4_realtime_model.hpp"
 #include "ok/fs/ext4_fs.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <unistd.h>
 #define CHECK(x)                                                                                                       \
     do                                                                                                                 \
@@ -67,6 +69,90 @@ void check_content(fs::Node &node, const char *expected)
     auto value = node.read(0, fs::max_file_data);
     CHECK(value && value.value().size == std::strlen(expected));
     CHECK(std::memcmp(value.value().data.data(), expected, value.value().size) == 0);
+}
+void symlink_content(fs::Node &parent, const char *name, usize length, char fill, bool owned = false)
+{
+    auto *link = parent.lookup(name);
+    CHECK(link && link->metadata().type == fs::NodeType::symlink);
+    const auto metadata = link->metadata();
+    CHECK(metadata.size == length && metadata.mode == (fs::mode_symlink | 0777));
+    CHECK(metadata.blocks == (length < 60 ? 0 : metadata.block_size / 512));
+    if (owned)
+        CHECK(metadata.uid == 0x12345678 && metadata.gid == 0x87654321);
+    const std::string target(length, fill);
+    check_content(*link, target.c_str());
+    auto part = link->read(length - 1, 16);
+    CHECK(part && part.value().size == 1 && part.value().data[0] == std::byte(fill));
+    part = link->read(0, 1);
+    CHECK(part && part.value().size == 1 && part.value().data[0] == std::byte(fill));
+    part = link->read(length, 1);
+    CHECK(part && part.value().size == 0);
+    CHECK(!link->write(0, bytes("overwrite")) && !link->truncate(0));
+}
+void symlinks(fs::Node &root, bool write)
+{
+    const auto block_size = root.metadata().block_size;
+    for (const auto length : {usize{1}, usize{59}, usize{60}, usize{255}, usize{block_size - 1}})
+    {
+        char name[24];
+        std::snprintf(name, sizeof(name), "s%zu", length);
+        const std::string target(length, 's');
+        if (write)
+            CHECK(root.create_symlink(name, target, 0x12345678, 0x87654321));
+        symlink_content(root, name, length, 's', true);
+    }
+    symlink_content(root, "upstream59", 59, 'u');
+    symlink_content(root, "upstream60", 60, 'u');
+    symlink_content(root, "upstreammax", block_size - 1, 'u');
+    symlink_content(root, "legacy60", 60, 'l');
+    if (!write)
+    {
+        CHECK(!root.lookup("legacy-drop"));
+        auto *persistent = root.lookup("symlink-renamed");
+        CHECK(persistent && root.lookup("symlink-alias") == persistent && persistent->metadata().link_count == 2);
+        check_content(*persistent, "../persist/notes");
+        return;
+    }
+    CHECK(!root.create_symlink("s1", "exists", 0, 0));
+    CHECK(!root.create_symlink("empty", "", 0, 0));
+    CHECK(!root.create_symlink("nul", std::string_view("a\0b", 3), 0, 0));
+    CHECK(!root.create_symlink("oversized", std::string(block_size, 'x'), 0, 0));
+    CHECK(root.create_symlink("symlink-original", "../persist/notes", 0, 0));
+    auto *source = root.lookup("symlink-original");
+    CHECK(source && root.link("symlink-alias", *source));
+    CHECK(root.rename("symlink-original", root, "symlink-renamed"));
+    CHECK(!root.lookup("symlink-original") && source->metadata().link_count == 2);
+    for (const auto length : {usize{59}, usize{60}})
+    {
+        const std::string target(length, 't');
+        CHECK(root.create_symlink("temporary-link", target, 0, 0));
+        auto *victim = root.lookup("temporary-link");
+        CHECK(victim && victim->retain());
+        CHECK(root.create_symlink("replacement-link", "replacement", 0, 0));
+        CHECK(root.rename("replacement-link", root, "temporary-link"));
+        CHECK(victim->metadata().link_count == 0);
+        check_content(*victim, target.c_str());
+        check_content(*root.lookup("temporary-link"), "replacement");
+        CHECK(victim->release() && root.remove("temporary-link", false));
+        // Symlink replacement of a regular file and the reverse release the
+        // correct allocation representation without following either target.
+        CHECK(root.create_symlink("temporary-link", target, 0, 0));
+        CHECK(root.create("replacement-file", fs::NodeType::regular));
+        CHECK(root.rename("replacement-file", root, "temporary-link"));
+        CHECK(root.lookup("temporary-link")->metadata().type == fs::NodeType::regular);
+        CHECK(root.create_symlink("replacement-link", target, 0, 0));
+        CHECK(root.rename("replacement-link", root, "temporary-link"));
+        CHECK(root.remove("temporary-link", false));
+    }
+    auto *legacy = root.lookup("legacy60");
+    CHECK(legacy && root.link("legacy-alias", *legacy));
+    CHECK(root.rename("legacy-alias", root, "legacy-renamed"));
+    CHECK(root.remove("legacy-renamed", false) && legacy->metadata().link_count == 1);
+    symlink_content(root, "legacy-drop", 60, 'l');
+    auto *legacy_drop = root.lookup("legacy-drop");
+    CHECK(legacy_drop && legacy_drop->retain() && root.remove("legacy-drop", false));
+    check_content(*legacy_drop, std::string(60, 'l').c_str());
+    CHECK(legacy_drop->release());
 }
 void namespace_mutations(fs::Node &root)
 {
@@ -182,6 +268,8 @@ void namespace_reopened(fs::Node &root)
 }
 int main(int argc, char **argv)
 {
+    testing::ext4_clock::reset();
+    struct LegacyClockGuard { ~LegacyClockGuard() { CHECK(testing::ext4_clock::calls() == 0); } } legacy_clock_guard;
     CHECK(argc == 3);
     FileDevice disk(argv[1]);
     fs::Ext4FileSystem filesystem;
@@ -201,6 +289,8 @@ int main(int argc, char **argv)
     {
         CHECK(root->lookup("persist"));
         CHECK(!root->create("forbidden", fs::NodeType::regular));
+        CHECK(!root->create_symlink("forbidden", "target", 0, 0));
+        symlinks(*root, false);
         CHECK(!root->chmod(0700));
         auto *directory = root->lookup("persist");
         CHECK(directory && !root->link("forbidden", *directory->lookup("notes")));
@@ -223,6 +313,7 @@ int main(int argc, char **argv)
         CHECK(!dir->lookup("gone"));
         CHECK(!dir->lookup("sub"));
         namespace_reopened(*root);
+        symlinks(*root, false);
         std::puts("PASS ext4 reopen: persisted data, size, directory entries");
         return 0;
     }
@@ -264,8 +355,9 @@ int main(int argc, char **argv)
     for (int i = 0; i < 150; ++i)
     {
         CHECK(dir->create("reuse", fs::NodeType::regular));
-        auto *n = dir->lookup("reuse");
-        CHECK(n);
+        auto retained = dir->lookup_child_retained("reuse");
+        CHECK(retained);
+        auto *n = retained.value();
         CHECK(n->write(0, bytes("old")));
         CHECK(n->truncate(1));
         CHECK(n->truncate(64));
@@ -274,10 +366,12 @@ int main(int argc, char **argv)
         for (usize j = 0; j < 63; ++j)
             CHECK(read.value().data[j] == std::byte{0});
         CHECK(dir->remove("reuse", false));
+        CHECK(n->release());
     }
     namespace_mutations(*root);
+    symlinks(*root, true);
     CHECK(file->sync());
     CHECK(filesystem.sync());
     std::puts("PASS ext4 write: overwrite, holes, zero write, truncate, open unlink, mkdir/rmdir, inode/block reuse, "
-              "links, replacement, directory topology");
+              "links, replacement, directory topology, inline/extent/direct-block symlinks");
 }

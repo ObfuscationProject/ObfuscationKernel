@@ -108,8 +108,9 @@ extern "C" [[noreturn]] void kernel_main()
     emit("LOONG_NATIVE stage=copies\n");
     u64 value = 123, copied = 0;
     check(hw::copy_to_user(space, hw::user_begin + 4096, &value, sizeof(value)).ok(), "copy to");
-    mappings[1].physical_address = reinterpret_cast<uptr>(other.data());
-    auto second = hw::create_space(mappings);
+    auto second_mappings = mappings;
+    second_mappings[1].physical_address = reinterpret_cast<uptr>(other.data());
+    auto second = hw::create_space(second_mappings);
     check(second.ok(), "second space");
     check(hw::copy_from_user(second.value(), &copied, hw::user_begin + 4096, sizeof(copied)).ok() && copied == 0,
           "isolation");

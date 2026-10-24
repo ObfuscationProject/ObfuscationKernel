@@ -162,6 +162,27 @@ Status verify_directories(Kernel &kernel)
     return posix.rmdir("/tmp/vfs-nonempty");
 }
 
+Status verify_initial_attributes(fs::VirtualFileSystem &vfs)
+{
+    // Kernel-resident namespace coverage, distinct from the musl syscall gate.
+    if (auto status = vfs.create({}, "/tmp/vfs-group", fs::NodeType::directory, 02777, 19, 0x87654321); !status)
+        return status;
+    if (auto status = vfs.create({}, "/tmp/vfs-group/child", fs::NodeType::directory, 01750, 0xf1234567, 18); !status)
+        return status;
+    if (auto status = vfs.create({}, "/tmp/vfs-group/file", fs::NodeType::regular, 0640, 0xf1234567, 18); !status)
+        return status;
+    auto child = vfs.stat("/tmp/vfs-group/child"), file = vfs.stat("/tmp/vfs-group/file");
+    if (!child || !file || child.value().mode != (fs::mode_directory | 03750) ||
+        file.value().mode != (fs::mode_regular | 0640) || child.value().uid != 0xf1234567 ||
+        file.value().uid != 0xf1234567 || child.value().gid != 0x87654321 || file.value().gid != 0x87654321)
+        return Status::fault("VFS initial mode and ownership inheritance failed");
+    if (auto status = vfs.unlink("/tmp/vfs-group/file"); !status)
+        return status;
+    if (auto status = vfs.rmdir("/tmp/vfs-group/child"); !status)
+        return status;
+    return vfs.rmdir("/tmp/vfs-group");
+}
+
 Status verify_paths_and_symlinks(fs::VirtualFileSystem &vfs)
 {
     static_cast<void>(vfs.rmdir("/tmp/vfs-dot"));
@@ -175,22 +196,16 @@ Status verify_paths_and_symlinks(fs::VirtualFileSystem &vfs)
     }
 
     static_cast<void>(vfs.unlink("/tmp/vfs-link"));
-    if (auto status = vfs.create("/tmp/vfs-link", fs::NodeType::symlink); !status.ok())
-    {
-        return status;
-    }
     constexpr std::string_view target{"/tmp/vfs-file"};
-    if (auto status = vfs.write_file("/tmp/vfs-link", vfs_bytes(target)); !status.ok())
-    {
+    if (auto status = vfs.create({}, "/tmp/vfs-link", fs::NodeType::symlink, 0777, 0, 0, target); !status.ok())
         return status;
-    }
-    auto link = vfs.read_file("/tmp/vfs-link");
-    auto metadata = vfs.stat("/tmp/vfs-link");
-    if (!link || !vfs_buffer_equals(link.value(), target) || !metadata ||
-        (metadata.value().mode & fs::mode_type_mask) != fs::mode_symlink)
-    {
-        return Status::fault("VFS symlink create/read validation failed");
-    }
+    auto link = vfs.resolve({}, "/tmp/vfs-link", fs::FinalComponent::no_follow);
+    if (!link || link.value().node()->metadata().type != fs::NodeType::symlink)
+        return Status::fault("VFS no-follow symlink validation failed");
+    auto contents = link.value().node()->read(0, target.size());
+    if (!contents || !vfs_buffer_equals(contents.value(), target) ||
+        vfs.lookup("/tmp/vfs-link") != vfs.lookup(target))
+        return Status::fault("VFS symlink traversal validation failed");
     return vfs.rmdir("/tmp/vfs-dot");
 }
 
@@ -263,6 +278,16 @@ Status verify_permissions(Kernel &kernel)
     }
 
     static_cast<void>(posix.set_identity(0, 0));
+    if (posix.access("/tmp/vfs-private", posix::x_OK).code() != StatusCode::denied)
+        return Status::fault("VFS root access execute-bit validation failed");
+    static_cast<void>(posix.set_credentials({.uid = 1000, .gid = 1000, .euid = 0, .egid = 0}));
+    const bool access_ids_valid =
+        posix.access("/tmp/vfs-private", posix::r_OK).code() == StatusCode::denied &&
+        posix.faccessat(posix::at_FDCWD, "/tmp/vfs-private", posix::r_OK, posix::at_EACCESS) &&
+        posix.faccessat(posix::at_FDCWD, "/tmp/vfs-private", posix::f_OK, 0x800u).code() == StatusCode::invalid_argument;
+    static_cast<void>(posix.set_identity(0, 0));
+    if (!access_ids_valid)
+        return Status::fault("VFS access real/effective-ID and flag validation failed");
     if (auto status = posix.chmod("/tmp/vfs-private", 0644); !status.ok())
     {
         return status;
@@ -500,6 +525,10 @@ Status run_unix_vfs_roadmap_tests(Kernel &kernel, KernelTestReport &report)
         return status;
     }
     if (auto status = verify_directories(kernel); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = verify_initial_attributes(kernel.vfs()); !status.ok())
     {
         return status;
     }

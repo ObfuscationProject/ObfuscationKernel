@@ -28,8 +28,8 @@ std::span<const std::byte> bytes(std::string_view value)
 
 struct Fixture
 {
-    sched::Scheduler scheduler;
     fs::VirtualFileSystem vfs;
+    sched::Scheduler scheduler;
     driver::ConsoleDriver console;
     posix::PosixService posix;
     Fixture()
@@ -41,6 +41,10 @@ struct Fixture
         CHECK(vfs.create("/data", fs::NodeType::regular));
         CHECK(vfs.chmod("/data", 0666));
         CHECK(vfs.write_file("/data", bytes("abcdefghij")));
+    }
+    ~Fixture()
+    {
+        static_cast<void>(scheduler.drain_all_resources());
     }
     sched::ProcessId create(std::string_view name)
     {
@@ -327,7 +331,11 @@ void test_directory_mount_identity()
     // not silently switch mount identities or fall back to the /a alias.
     CHECK(f.vfs.mount("/b/mount/moved", *volume.lookup("/moved")));
     CHECK(error(f.posix.current_directory().status()) == 2);
-    CHECK(error(f.posix.openat(covered.value(), ".", posix::o_RDONLY).status()) == 2);
+    auto still_covered = f.posix.openat(covered.value(), ".", posix::o_RDONLY);
+    CHECK(still_covered);
+    CHECK(f.posix.fchdir(still_covered.value()));
+    CHECK(error(f.posix.current_directory().status()) == 2);
+    CHECK(f.posix.close(still_covered.value()));
     CHECK(f.posix.exit(0));
     CHECK(f.posix.activate(parent));
     CHECK(error(f.posix.current_directory().status()) == 2);
@@ -450,6 +458,7 @@ class RetainedNode final : public fs::Node
     {
     }
     usize retained{}, released{};
+    Status retain_status{};
     std::string_view name() const override
     {
         return backing_.name();
@@ -468,6 +477,8 @@ class RetainedNode final : public fs::Node
     }
     Status retain() override
     {
+        if (!retain_status)
+            return retain_status;
         ++retained;
         return Status::success();
     }
@@ -677,6 +688,14 @@ void test_orphan_reaping_and_native_ownership()
     }
     const auto orphan = f.create("native-backing-guard");
     auto &resources = f.scheduler.find(orphan)->resources();
+    alignas(4096) static std::array<std::byte, 4096> metadata_backing{};
+    static memory::FrameAllocator metadata_frames;
+    static user::native::NativePagePool metadata_pool;
+    const memory::MemoryRegion metadata_region{reinterpret_cast<uptr>(metadata_backing.data()),
+        metadata_backing.size(), memory::RegionType::usable};
+    CHECK(metadata_frames.initialize({&metadata_region, 1}, 4096));
+    CHECK(metadata_pool.activate(metadata_frames, user::native::NativePagePool::Source::linker_reserved, 1));
+    CHECK(resources.native_pages.reserve(metadata_pool, 1));
     resources.native_space.root = 0x1000;
     CHECK(resources.native_pages.push_back({0x40000000, 0x2000, arch::execution::page_read}));
     CHECK(f.posix.exit(orphan, 0));
@@ -706,7 +725,13 @@ void test_exit_status_and_signal_status()
     auto child = f.posix.fork(parent);
     CHECK(child);
     CHECK(!f.scheduler.terminate_process(child.value(), 0));
-    CHECK(!f.scheduler.terminate_process(child.value(), 128));
+    // The common completion path accepts the MIPS signal-128 identity, while
+    // the legacy raw wait word cannot distinguish it from the core bit.
+    CHECK(f.scheduler.terminate_process(child.value(), 128));
+    CHECK(f.scheduler.find(child.value())->wait_status() == 128);
+    CHECK(f.posix.wait(parent, child.value()));
+    child = f.posix.fork(parent);
+    CHECK(child);
     CHECK(f.posix.activate(parent));
     CHECK(f.posix.wait(parent, child.value()).status().code() == StatusCode::would_block);
     CHECK(f.scheduler.terminate_process(child.value(), 11));
@@ -777,6 +802,21 @@ void test_elf_validation_and_failed_exec()
     sched::ElfLoader loader;
     reset();
     CHECK(loader.load(image, architecture));
+    for (bool big : {false, true})
+    {
+        reset(big);
+        set(72, 8, 1024 * 1024, big);
+        CHECK(loader.load_prefix({image.data(), 120}, 1024 * 1024 + 4, architecture));
+        CHECK(!loader.load(image, architecture));
+        CHECK(!loader.load_prefix({image.data(), 119}, 1024 * 1024 + 4, architecture));
+        CHECK(!loader.load_prefix({image.data(), 120}, 1024 * 1024 + 3, architecture));
+        CHECK(!loader.load_prefix(image, 100, architecture));
+        reset(big);
+        set(56, 2, 2, big);
+        set(120, 4, 3, big);
+        auto dynamic = loader.load(image, architecture);
+        CHECK(dynamic && !dynamic.value().static_executable);
+    }
     reset(true);
     CHECK(loader.load(image, architecture));
     reset();
@@ -848,8 +888,354 @@ void test_elf_validation_and_failed_exec()
     CHECK(f.scheduler.process_count() == 1);
 }
 
+void test_unified_path_resolver()
+{
+    static Fixture f;
+    CHECK(f.posix.activate(f.create("path-resolver")));
+    const auto error = [](Status status) { return syscall::ErrnoMapper::errno_for(status); };
+    CHECK(f.posix.mkdir("/a/tree"));
+    CHECK(f.posix.chdir("/a/tree"));
+    auto held = f.posix.open(".", posix::o_RDONLY | posix::o_DIRECTORY);
+    CHECK(held);
+    CHECK(f.posix.symlinkat("../../data", held.value(), "relative"));
+    CHECK(f.posix.symlinkat("/data", held.value(), "absolute"));
+    CHECK(f.posix.symlinkat("/a/tree", posix::at_FDCWD, "/directory-link"));
+    CHECK(f.posix.stat("relative").value().type == fs::NodeType::regular);
+    CHECK(f.posix.statat(held.value(), "relative", posix::at_SYMLINK_NOFOLLOW).value().type == fs::NodeType::symlink);
+    CHECK(f.posix.statat(held.value(), "", posix::at_EMPTY_PATH));
+    CHECK(f.posix.statat(held.value(), "", posix::at_EMPTY_PATH | 0x80000000u).status().code() ==
+          StatusCode::invalid_argument);
+    std::array<std::byte, 4> target{};
+    CHECK(f.posix.readlinkat(held.value(), "relative", target).value() == target.size());
+    CHECK(std::memcmp(target.data(), "../.", target.size()) == 0);
+    CHECK(error(f.posix.open("relative", posix::o_RDONLY | posix::o_NOFOLLOW).status()) == 40);
+    CHECK(error(f.posix.open("relative", posix::o_CREAT | posix::o_EXCL).status()) == 17);
+    CHECK(error(f.posix.stat("relative/").status()) == 20);
+    CHECK(error(f.posix.stat("/missing/../data").status()) == 2);
+    CHECK(error(f.posix.stat("/data/../data").status()) == 20);
+    CHECK(f.posix.stat("/directory-link/").value().type == fs::NodeType::directory);
+    CHECK(f.posix.symlinkat("new-file", held.value(), "dangling"));
+    auto created = f.posix.open("dangling", posix::o_CREAT | posix::o_RDWR);
+    CHECK(created && f.posix.close(created.value()));
+    CHECK(f.posix.stat("new-file") && f.posix.statat(held.value(), "dangling", posix::at_SYMLINK_NOFOLLOW));
+    CHECK(f.posix.symlinkat("missing-directory/child", held.value(), "broken-parent"));
+    CHECK(error(f.posix.open("broken-parent", posix::o_CREAT | posix::o_RDWR).status()) == 2);
+    CHECK(!f.posix.stat("missing-directory"));
+    CHECK(f.posix.symlinkat("trailing-target/", held.value(), "trailing-link"));
+    CHECK(error(f.posix.open("trailing-link", posix::o_CREAT | posix::o_RDWR).status()) == 20);
+    CHECK(!f.posix.stat("trailing-target"));
+    CHECK(!f.posix.unlink(".") && !f.posix.rename(".", "bad") && !f.posix.mkdir("."));
+    CHECK(f.posix.stat(".").value().type == fs::NodeType::directory);
+    CHECK(f.posix.symlinkat("cycle-b", held.value(), "cycle-a"));
+    CHECK(f.posix.symlinkat("cycle-a", held.value(), "cycle-b"));
+    CHECK(error(f.posix.stat("cycle-a").status()) == 40);
+    CHECK(f.posix.link("relative", "hard-link"));
+    CHECK(f.posix.statat(held.value(), "hard-link", posix::at_SYMLINK_NOFOLLOW).value().link_count == 2);
+    CHECK(f.posix.rename("hard-link", "renamed-link"));
+    CHECK(f.posix.unlink("renamed-link"));
+    CHECK(f.posix.stat("/data") && f.posix.statat(held.value(), "relative", posix::at_SYMLINK_NOFOLLOW).value().link_count == 1);
+    CHECK(f.posix.rename("/a/tree", "/b/moved"));
+    CHECK(f.posix.getcwd() == "/b/moved");
+    CHECK(f.posix.stat("relative") && f.posix.statat(held.value(), "absolute"));
+    CHECK(f.posix.mkdir("/a/tree"));
+    CHECK(f.posix.symlinkat("/missing", posix::at_FDCWD, "/a/tree/absolute"));
+    CHECK(f.posix.statat(held.value(), "absolute"));
+
+    CHECK(f.vfs.chmod("/b", 0700));
+    CHECK(f.vfs.chmod("/b/moved", 0777));
+    CHECK(f.posix.set_identity(1000, 1000));
+    CHECK(f.posix.stat("absolute")); // Already held start does not recheck /b.
+    CHECK(error(f.posix.stat("/b/moved/absolute").status()) == 13);
+    CHECK(error(f.posix.stat("relative").status()) == 13); // Dot-dot consumes /b search permission.
+    CHECK(f.posix.mkdirat(held.value(), "allowed"));
+    CHECK(f.vfs.chmod("/b/moved", 0666));
+    CHECK(error(f.posix.stat(".").status()) == 13);
+    CHECK(error(f.posix.open("absolute", posix::o_RDONLY).status()) == 13);
+    CHECK(error(f.posix.mkdir("blocked")) == 13);
+    CHECK(error(f.posix.unlink("absolute")) == 13);
+    CHECK(error(f.posix.chmod("absolute", 0600)) == 13);
+    CHECK(error(f.posix.chdir(".")) == 13);
+    CHECK(f.posix.set_identity(0, 0));
+    CHECK(f.posix.chdir("/") && f.posix.close(held.value()));
+}
+
+void test_deadline_lifecycle()
+{
+    static Fixture f;
+    const auto pid = f.create("deadline-owner");
+    CHECK(f.posix.activate(pid));
+    auto &thread = f.scheduler.find(pid)->threads()[0];
+    auto generation = thread.native_deadline.arm(10, 1, 0, false);
+    CHECK(generation);
+    CHECK(f.scheduler.block_current(sched::ThreadWaitReason::deadline, generation.value()));
+    CHECK(thread.state == sched::ProcessState::blocked);
+    auto context = arch::configured_arch_operations().make_user_context({0x400000, 0x800000, 0});
+    CHECK(f.scheduler.replace_image(pid, context, f.scheduler.find(pid)->memory_map()));
+    CHECK(!thread.native_deadline.armed());
+    CHECK(!thread.native_deadline.complete(2000000000, generation.value()));
+    CHECK(f.posix.activate(pid));
+    auto next = thread.native_deadline.arm(0, 2, 0, false);
+    CHECK(next && next.value() != generation.value());
+    CHECK(f.scheduler.block_current(sched::ThreadWaitReason::deadline, next.value()));
+    CHECK(f.scheduler.terminate_process(pid, 9));
+    CHECK(!thread.native_deadline.armed() && thread.state == sched::ProcessState::exited);
+    f.scheduler.wake_waiters(sched::ThreadWaitReason::deadline, next.value());
+    CHECK(thread.state == sched::ProcessState::exited);
+    CHECK(!thread.native_deadline.complete(3000000000, next.value()));
+}
+
+void test_open_admission_and_errors()
+{
+    static Fixture f;
+    const auto pid = f.create("open-admission");
+    CHECK(f.posix.activate(pid));
+    CHECK(f.posix.set_identity(0, 0));
+    for (usize i = 3; i < sched::max_process_fds; ++i)
+        CHECK(f.posix.duplicate(0));
+    auto failure = f.posix.open("/blocked-by-fd", posix::o_WRONLY | posix::o_CREAT | posix::o_TRUNC);
+    CHECK(!failure && failure.status().code() == StatusCode::process_file_limit);
+    CHECK(syscall::ErrnoMapper::errno_for(failure.status()) == 24);
+    CHECK(f.posix.stat("/blocked-by-fd").status().code() == StatusCode::not_found);
+    CHECK(f.posix.open("/data", posix::o_WRONLY | posix::o_TRUNC).status().code() == StatusCode::process_file_limit);
+    CHECK(f.posix.stat("/data").value().size == 10);
+    for (usize i = 3; i < sched::max_process_fds; ++i)
+        CHECK(f.posix.close(static_cast<i32>(i)));
+    CHECK(f.scheduler.open_description_count() == 3);
+    StaticVector<u16, sched::max_open_descriptions> held;
+    while (true)
+    {
+        auto reserved = f.scheduler.allocate_description({});
+        if (!reserved)
+        {
+            CHECK(reserved.status().code() == StatusCode::system_file_limit);
+            break;
+        }
+        CHECK(f.scheduler.retain_description(reserved.value()));
+        CHECK(held.push_back(reserved.value()));
+    }
+    failure = f.posix.open("/blocked-by-system", posix::o_WRONLY | posix::o_CREAT | posix::o_TRUNC);
+    CHECK(!failure && failure.status().code() == StatusCode::system_file_limit);
+    CHECK(syscall::ErrnoMapper::errno_for(failure.status()) == 23);
+    CHECK(f.posix.stat("/blocked-by-system").status().code() == StatusCode::not_found);
+    CHECK(f.posix.open("/data", posix::o_WRONLY | posix::o_TRUNC).status().code() == StatusCode::system_file_limit);
+    CHECK(f.posix.stat("/data").value().size == 10);
+    for (const auto id : held)
+        CHECK(f.scheduler.release_description(id));
+    for (usize attempt = 0; attempt < 1000; ++attempt)
+        CHECK(f.posix.open("/missing", posix::o_RDONLY).status().code() == StatusCode::not_found);
+    CHECK(f.scheduler.open_description_count() == 3);
+    CHECK(f.posix.open("/data", posix::o_DIRECTORY).status().code() == StatusCode::not_directory);
+    CHECK(f.posix.open("/a", posix::o_WRONLY).status().code() == StatusCode::is_directory);
+    CHECK(f.posix.open("/a", posix::o_RDONLY | posix::o_CREAT).status().code() == StatusCode::is_directory);
+    CHECK(f.posix.open("/a", posix::o_RDONLY | posix::o_TRUNC).status().code() == StatusCode::is_directory);
+    CHECK(f.posix.open("/data", 0x80000000u | posix::o_TRUNC).status().code() == StatusCode::invalid_argument);
+    CHECK(f.posix.open("/invalid-access", 3 | posix::o_CREAT).status().code() == StatusCode::invalid_argument);
+    CHECK(f.posix.stat("/invalid-access").status().code() == StatusCode::not_found);
+    CHECK(f.posix.open("/invalid-directory", posix::o_DIRECTORY | posix::o_CREAT).status().code() ==
+          StatusCode::invalid_argument);
+    CHECK(f.posix.stat("/invalid-directory").status().code() == StatusCode::not_found);
+    CHECK(f.posix.stat("/data").value().size == 10);
+    CHECK(f.scheduler.open_description_count() == 3);
+    auto success = f.posix.open("/valid-new", posix::o_WRONLY | posix::o_CREAT | posix::o_TRUNC);
+    CHECK(success && f.scheduler.open_description_count() == 4);
+    CHECK(f.posix.write(success.value(), bytes("admitted")).value() == 8);
+    CHECK(f.posix.close(success.value()));
+    CHECK(f.posix.stat("/valid-new").value().size == 8 && f.scheduler.open_description_count() == 3);
+    auto append_read = f.posix.open("/data", posix::o_RDONLY | posix::o_APPEND);
+    CHECK(append_read);
+    std::array<std::byte, 12> output{};
+    CHECK(f.posix.seek(append_read.value(), 0, posix::SeekWhence::current).value() == 0);
+    CHECK(f.posix.read(append_read.value(), {output.data(), 2}).value() == 2);
+    CHECK(output[0] == std::byte{'a'} && output[1] == std::byte{'b'});
+    CHECK(f.posix.close(append_read.value()));
+    auto append_update = f.posix.open("/data", posix::o_RDWR | posix::o_APPEND);
+    CHECK(append_update);
+    CHECK(f.posix.read(append_update.value(), {output.data(), 2}).value() == 2);
+    CHECK(output[0] == std::byte{'a'} && output[1] == std::byte{'b'});
+    CHECK(f.posix.write(append_update.value(), bytes("XY")).value() == 2);
+    CHECK(f.posix.seek(append_update.value(), 0, posix::SeekWhence::current).value() == 12);
+    CHECK(f.posix.pread(append_update.value(), output, 0).value() == 12);
+    CHECK(std::memcmp(output.data(), "abcdefghijXY", 12) == 0);
+    CHECK(f.posix.close(append_update.value()));
+    CHECK(f.scheduler.open_description_count() == 3);
+    std::puts("PASS hosted append open: initial read offset zero, append write follows read at current EOF");
+    std::puts(
+        "PASS hosted open admission: EMFILE/ENFILE without create/truncate, pin cleanup, directory and flag errors");
+}
+
+
+void test_fork_capacity_and_tid_identity()
+{
+    static Fixture f;
+    const auto parent = f.create("fork-capacity");
+    CHECK(f.posix.activate(parent));
+    const auto leader_tid = f.scheduler.current_tid(0);
+    CHECK(f.posix.gettid() == leader_tid && f.posix.getpid() == parent);
+    // Deliberately advance the TID sequence independently of process IDs.
+    auto another_thread = f.scheduler.create_thread(parent,
+        arch::configured_arch_operations().make_user_context({0x400000, 0x800000, 0}));
+    CHECK(another_thread && another_thread.value() != leader_tid);
+    auto fd = f.posix.open("/data", posix::o_RDONLY);
+    CHECK(fd);
+    auto *entry = f.scheduler.find(parent)->fd_table().entry(fd.value());
+    const auto description = entry->description;
+    const auto base_refs = f.scheduler.open_description(description)->references;
+    static RetainedNode cwd(*f.vfs.lookup("/a"));
+    CHECK(cwd.retain());
+    auto &resources = f.scheduler.find(parent)->resources();
+    auto *original_cwd = resources.cwd_node;
+    resources.cwd_node = &cwd;
+    cwd.retain_status = Status::overflow("injected cwd reference overflow");
+    const auto failed_pin = f.posix.fork(parent);
+    CHECK(!failed_pin && failed_pin.status().code() == StatusCode::overflow);
+    CHECK(syscall::ErrnoMapper::errno_for(failed_pin.status()) == 75);
+    CHECK(cwd.retained == 1 && cwd.released == 0 && f.scheduler.process_count() == 1);
+    CHECK(f.scheduler.open_description(description)->references == base_refs);
+    resources.cwd_node = original_cwd;
+    cwd.retain_status = Status::success();
+    CHECK(cwd.release());
+    std::array<sched::ProcessId, sched::max_processes> children{};
+    usize count = 0;
+    while (count < children.size())
+    {
+        auto child = f.posix.fork(parent);
+        if (!child)
+        {
+            CHECK(child.status().code() == StatusCode::would_block);
+            CHECK(syscall::ErrnoMapper::errno_for(child.status()) == 11);
+            break;
+        }
+        children[count++] = child.value();
+    }
+    CHECK(count > 0 && count < children.size());
+    // The process table now bounds the child list so PID 1 can adopt every
+    // surviving user process when a service parent exits.
+    CHECK(count == sched::max_processes - 1);
+    CHECK(f.scheduler.open_description(description)->references == base_refs + count);
+    const auto total = f.scheduler.process_count();
+    for (usize attempt = 0; attempt < 4; ++attempt)
+    {
+        CHECK(f.posix.fork(parent).status().code() == StatusCode::would_block);
+        CHECK(f.scheduler.process_count() == total);
+        CHECK(f.scheduler.open_description(description)->references == base_refs + count);
+    }
+    for (usize i = 0; i < count; ++i)
+    {
+        CHECK(f.posix.exit(children[i], 19));
+        CHECK(f.posix.wait(parent, children[i]).value() == 19);
+    }
+    CHECK(f.scheduler.process_count() == 1 && f.scheduler.open_description(description)->references == base_refs);
+    auto reused = f.posix.fork(parent);
+    CHECK(reused && f.posix.activate(reused.value()));
+    CHECK(f.posix.gettid() == f.scheduler.find(reused.value())->threads()[0].tid);
+    CHECK(f.posix.gettid() == f.posix.getpid());
+    CHECK(f.posix.exit(reused.value(), 23) && f.posix.activate(parent));
+    CHECK(f.posix.wait(parent, reused.value()).value() == 23);
+    CHECK(f.posix.close(fd.value()));
+    // Fill the common process table without consuming the parent's child list.
+    std::array<sched::ProcessId, sched::max_processes> fillers{};
+    count = 0;
+    while (f.scheduler.process_count() < sched::max_processes)
+        fillers[count++] = f.create("table-filler");
+    CHECK(f.scheduler.find(parent)->children().empty());
+    CHECK(f.posix.fork(parent).status().code() == StatusCode::would_block);
+    CHECK(f.scheduler.create_process("other", {}).status().code() == StatusCode::overflow);
+    CHECK(syscall::ErrnoMapper::errno_for(Status::overflow("unrelated")) == 75);
+    for (usize i = 0; i < count; ++i)
+        CHECK(f.posix.exit(fillers[i], 0));
+    // Reaping orphans is an existing separate scheduler path.
+    for (usize i = 0; i < count; ++i)
+        CHECK(f.scheduler.reap_process(fillers[i]));
+    CHECK(f.scheduler.process_count() == 1);
+    reused = f.posix.fork(parent);
+    CHECK(reused && f.posix.exit(reused.value(), 0));
+    CHECK(f.posix.wait(parent, reused.value()));
+    std::puts("PASS hosted fork capacity: EAGAIN, unchanged unrelated EOVERFLOW, descriptor accounting, reap/retry and true TID");
+}
+
+void test_unix_socketpair_lifetime_and_streams()
+{
+    static Fixture f;
+    const auto parent = f.create("unix-parent");
+    CHECK(f.posix.activate(parent));
+    const auto baseline = f.scheduler.open_description_count();
+    auto pair = f.posix.unix_socketpair(posix::o_NONBLOCK | posix::o_CLOEXEC);
+    CHECK(pair && pair.value()[0] == 3 && pair.value()[1] == 4);
+    CHECK(f.scheduler.open_description_count() == baseline + 2);
+    CHECK((f.posix.fstat(3).value().mode & fs::mode_type_mask) == fs::mode_socket);
+    CHECK(f.posix.fcntl(3, posix::f_GETFD, 0).value() == posix::fd_CLOEXEC);
+    CHECK(f.posix.fcntl(4, posix::f_GETFL, 0).value() == (posix::o_RDWR | posix::o_NONBLOCK));
+    std::array<std::byte, 4> out{};
+    CHECK(f.posix.read(3, out).status().code() == StatusCode::would_block);
+    CHECK(f.posix.write(3, bytes("left")).value() == 4);
+    CHECK(f.posix.write(4, bytes("rght")).value() == 4);
+    CHECK(f.posix.read(3, out).value() == 4 && out[0] == std::byte{'r'});
+    CHECK(f.posix.read(4, out).value() == 4 && out[0] == std::byte{'l'});
+    static std::array<std::byte, sched::pipe_capacity> full{};
+    CHECK(f.posix.write(3, full).value() == full.size());
+    CHECK(f.posix.write(3, bytes("x")).status().code() == StatusCode::would_block);
+    CHECK(f.posix.read(4, {out.data(), 1}).value() == 1);
+    CHECK(f.posix.write(3, bytes("xy")).value() == 1); // Stream writes may make partial progress.
+    auto duplicate = f.posix.duplicate(3);
+    CHECK(duplicate && duplicate.value() == 5);
+    auto child = f.posix.fork();
+    CHECK(child);
+    CHECK(f.posix.close(3) && f.posix.close(4) && f.posix.close(5));
+    CHECK(f.scheduler.open_description_count() == baseline + 2);
+    CHECK(f.posix.activate(child.value()));
+    CHECK(f.posix.read(3, {out.data(), 1}).status().code() == StatusCode::would_block);
+    CHECK(f.posix.close(3) && f.posix.close(5));
+    CHECK(f.posix.write(4, bytes("x")).status().code() == StatusCode::broken_pipe);
+    CHECK(f.posix.write(4, bytes("")).value() == 0);
+    auto ready = f.posix.ready_events(4, posix::ReadyEvents::readable | posix::ReadyEvents::writable);
+    CHECK(ready && (ready.value().events & posix::ReadyEvents::readable) != posix::ReadyEvents::none);
+    CHECK((ready.value().events & posix::ReadyEvents::hangup) != posix::ReadyEvents::none);
+    CHECK((ready.value().events & posix::ReadyEvents::error) != posix::ReadyEvents::none);
+    CHECK(f.posix.read(4, full).value() == full.size());
+    CHECK(full.back() == std::byte{'x'});
+    CHECK(f.posix.read(4, {out.data(), 1}).value() == 0);
+    CHECK(f.posix.close(4));
+    CHECK(f.scheduler.open_description_count() == baseline);
+    auto closed_peer = f.posix.unix_socketpair(posix::o_NONBLOCK);
+    CHECK(closed_peer);
+    const auto right = closed_peer.value()[1];
+    const auto id = f.scheduler.find(child.value())->resources().files.entry(right)->description;
+    CHECK(f.posix.close(closed_peer.value()[0]));
+    const auto requested = posix::ReadyEvents::readable | posix::ReadyEvents::writable;
+    for (usize iteration = 0; iteration < 2; ++iteration)
+    {
+        auto linux = f.posix.poll_description<posix::ReadinessPolicy::linux>(id, requested);
+        CHECK(linux);
+        CHECK((linux.value().events & posix::ReadyEvents::readable) != posix::ReadyEvents::none);
+        CHECK((linux.value().events & posix::ReadyEvents::writable) != posix::ReadyEvents::none);
+        CHECK((linux.value().events & posix::ReadyEvents::hangup) != posix::ReadyEvents::none);
+        CHECK((linux.value().events & posix::ReadyEvents::error) == posix::ReadyEvents::none);
+        CHECK(f.posix.read(right, out).value() == 0);
+    }
+    CHECK(f.posix.close(right));
+    CHECK(f.scheduler.open_description_count() == baseline);
+    CHECK(f.posix.exit(child.value(), 0));
+    CHECK(f.posix.activate(parent) && f.posix.wait(parent, child.value()));
+
+    // Both buffer reservations and both OFDs must roll back at a process limit.
+    std::array<i32, 28> held{};
+    for (auto &fd : held) { auto added = f.posix.duplicate(1); CHECK(added); fd = added.value(); }
+    CHECK(f.posix.unix_socketpair().status().code() == StatusCode::process_file_limit);
+    CHECK(f.scheduler.open_description_count() == baseline);
+    for (auto fd : held) CHECK(f.posix.close(fd));
+    CHECK(f.posix.unix_socketpair());
+    CHECK(f.posix.close(3) && f.posix.close(4));
+    CHECK(f.scheduler.open_description_count() == baseline);
+    std::puts("PASS hosted AF_UNIX streams: duplex, partial/EAGAIN/EPIPE, dup/fork, EOF ownership and rollback");
+}
+
 int main()
 {
+    test_unix_socketpair_lifetime_and_streams();
+    test_fork_capacity_and_tid_identity();
+    test_open_admission_and_errors();
+    test_deadline_lifecycle();
+    test_unified_path_resolver();
     test_unique_owner_and_isolation();
     test_fork_dup_offsets_and_lifetime();
     test_mounted_paths_and_directory_descriptors();

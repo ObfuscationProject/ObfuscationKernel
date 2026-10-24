@@ -1,9 +1,10 @@
 #include "ok/arch/execution.hpp"
+#include "ok/arch/arm32/fp_state.hpp"
 namespace hw = ok::arch::execution;
 using namespace ok;
 extern "C" const std::byte ok_arm32_probe_begin[], ok_arm32_probe_timer[], ok_arm32_probe_write_fault[],
     ok_arm32_probe_kernel_fault[], ok_arm32_probe_execute_fault[], ok_arm32_probe_float[], ok_arm32_probe_memory[],
-    ok_arm32_probe_thumb[], ok_arm32_probe_end[];
+    ok_arm32_probe_thumb[], ok_arm32_probe_fp_arm[], ok_arm32_probe_fp_thumb[], ok_arm32_probe_end[];
 namespace
 {
 alignas(4096) std::array<std::byte, 4096> code{}, stack{}, other_stack{};
@@ -38,8 +39,12 @@ uptr entry(const std::byte *label)
 Result<hw::Trap> run_until_event(hw::AddressSpace &space, hw::UserFrame &frame)
 {
     auto result = hw::enter(space, frame);
+    if (result) check(hw::Arm32FpState::admitted(frame), "actual user FPEXC capture");
     for (usize retry = 0; result && result.value().kind == hw::TrapKind::timer && retry < 32; ++retry)
+    {
         result = hw::enter(space, frame);
+        if (result) check(hw::Arm32FpState::admitted(frame), "actual timer FPEXC capture");
+    }
     return result;
 }
 } // namespace
@@ -99,9 +104,11 @@ extern "C" [[noreturn]] void kernel_main()
     emit("ARM32_NATIVE syscall=pass return=pass tls=pass thumb=pass\n");
     frame = hw::initial_frame(entry(ok_arm32_probe_timer), hw::user_begin + 0x2000 - 16);
     trap = hw::enter(space, frame);
+    check(hw::Arm32FpState::admitted(frame), "timer FPEXC");
     check(trap && trap.value().kind == hw::TrapKind::timer && frame.registers[4] != 0, "timer");
     const auto count = frame.registers[4];
     trap = hw::enter(space, frame);
+    check(hw::Arm32FpState::admitted(frame), "resumed timer FPEXC");
     check(trap && trap.value().kind == hw::TrapKind::timer && frame.registers[4] > count, "timer resume");
     emit("ARM32_NATIVE timer=pass context=pass\n");
     frame = hw::initial_frame(entry(ok_arm32_probe_write_fault), hw::user_begin + 0x2000 - 16);
@@ -135,6 +142,38 @@ extern "C" [[noreturn]] void kernel_main()
     u32 kernel_fp_low = 0, kernel_fp_high = 0;
     asm volatile("vmov %0, %1, d8" : "=r"(kernel_fp_low), "=r"(kernel_fp_high));
     check(kernel_fp_low == 0xabcdef && kernel_fp_high == 0x12345678, "kernel callee-saved FP");
+    for (const auto *target : {ok_arm32_probe_fp_arm, ok_arm32_probe_fp_thumb})
+    {
+        const bool thumb = target == ok_arm32_probe_fp_thumb;
+        frame = hw::initial_frame(entry(target) | (thumb ? 1u : 0u), hw::user_begin + 0x2000 - 16);
+        check(hw::Arm32FpState::admitted(frame), "initial canonical FPEXC");
+        const u32 rejected[] = {0, 0x80000000, 0x50000000, 0xc0000000, 0x40000001};
+        for (u32 state : rejected)
+        {
+            auto invalid_frame = frame;
+            hw::Arm32FpState::set_fpexc(invalid_frame, state);
+            check(!hw::enter(space, invalid_frame) && invalid_frame.pc == frame.pc &&
+                      hw::Arm32FpState::fpexc(invalid_frame) == state,
+                  "reject unsupported VFP exception state before entry");
+        }
+        trap = run_until_event(space, frame);
+        check(trap && trap.value().kind == hw::TrapKind::syscall && hw::syscall(frame).number == 71,
+              "ARM/Thumb FP capture syscall");
+        check(frame.fp_state[0] == 0x11 && frame.fp_state[120] == 0x22 &&
+                  frame.fp_state[128] == 0x33 && frame.fp_state[248] == 0x44 &&
+                  frame.fp_state[258] == 0x40 && hw::Arm32FpState::admitted(frame),
+              "ARM/Thumb D-bank FPSCR and FPEXC capture");
+        trap = run_until_event(space, frame);
+        check(trap && trap.value().kind == hw::TrapKind::syscall && hw::syscall(frame).number == 72 &&
+                  frame.registers[0] == 0x11 && frame.registers[1] == 0x22 &&
+                  frame.registers[2] == 0x33 && frame.registers[3] == 0x44 &&
+                  frame.registers[4] == 0x00400000 && bool(frame.flags & 0x20) == thumb,
+              "ARM/Thumb actual D-bank FPSCR restore");
+    }
+    u32 restored_kernel_fpexc{};
+    asm volatile("vmrs %0, fpexc" : "=r"(restored_kernel_fpexc));
+    check(restored_kernel_fpexc == enabled_fpexc, "kernel FPEXC restore");
+    emit("ARM32_NATIVE user_fpexc=pass arm_fp=pass thumb_fp=pass invalid_fp=10 kernel_fpexc=pass\n");
     asm volatile("vmsr fpexc, %0\nmcr p15, 0, %1, c1, c0, 2\nisb" ::"r"(kernel_fpexc), "r"(kernel_cpacr) : "memory");
     emit("ARM32_NATIVE protection=pass fp=pass\n");
     auto other_pages = pages;

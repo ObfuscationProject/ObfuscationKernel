@@ -6,6 +6,7 @@
 .balign 16
 .global ok_arm32_probe_begin, ok_arm32_probe_timer, ok_arm32_probe_write_fault
 .global ok_arm32_probe_thumb
+.global ok_arm32_probe_fp_arm, ok_arm32_probe_fp_thumb
 .global ok_arm32_probe_execute_fault
 .global ok_arm32_probe_kernel_fault, ok_arm32_probe_float, ok_arm32_probe_memory, ok_arm32_probe_end
 ok_arm32_probe_begin:
@@ -70,6 +71,36 @@ ok_arm32_probe_thumb:
     movs r7, #70
     svc #0
     b .
+.macro fp_roundtrip
+    mov r0, #0x11
+    mov r1, #0
+    vmov d0, r0, r1
+    mov r0, #0x22
+    vmov d15, r0, r1
+    mov r0, #0x33
+    vmov d16, r0, r1
+    mov r0, #0x44
+    vmov d31, r0, r1
+    mov r0, #0x00400000
+    vmsr fpscr, r0
+    mov r7, #71
+    svc #0
+    vmov r0, r5, d0
+    vmov r1, r5, d15
+    vmov r2, r5, d16
+    vmov r3, r5, d31
+    vmrs r4, fpscr
+    mov r7, #72
+    svc #0
+    b .
+.endm
+.balign 2
+ok_arm32_probe_fp_thumb:
+    fp_roundtrip
+.arm
+.balign 4
+ok_arm32_probe_fp_arm:
+    fp_roundtrip
 .balign 4
 ok_arm32_probe_end:
 .section .note.GNU-stack,"",%progbits

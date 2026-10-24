@@ -3,6 +3,7 @@
 .global ok_native_user_begin, ok_native_user_end
 .global ok_native_user_kernel_read, ok_native_user_readonly_write
 .global ok_native_user_nx, ok_native_user_unmapped, ok_native_user_invalid
+.global ok_native_user_dense
 ok_native_user_begin:
     movabs $0x1122334455667788, %rbx
     movabs $0x8877665544332211, %r12
@@ -37,5 +38,17 @@ ok_native_user_unmapped:
     ud2
 ok_native_user_invalid:
     ud2
+ok_native_user_dense:
+    movabs $0x41000000, %rdi
+    mov $192, %ecx
+1:
+    mov %cl, (%rdi)
+    add $4096, %rdi
+    dec %ecx
+    jnz 1b
+    mov $0x3456, %eax
+    syscall
+2:
+    jmp 2b
 ok_native_user_end:
 .section .note.GNU-stack,"",@progbits

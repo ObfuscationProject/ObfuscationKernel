@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -75,6 +76,32 @@ def make_output(arch: str, fields: dict[str, str] | None = None, include_display
 
 
 class QemuRunnerValidationTests(unittest.TestCase):
+    def test_marker_in_single_burst_is_consumed_before_child_exits(self) -> None:
+        result = qemu_test.run_until_marker([sys.executable, "-c",
+            "import os,time;os.write(1,b'boot line\\nOK_TEST_PASS arch=arm32\\n');time.sleep(5)"], 0.3)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("OK_TEST_PASS arch=arm32\n", result.stdout)
+
+    def test_partial_marker_does_not_block_timeout_or_count_as_success(self) -> None:
+        result = qemu_test.run_until_marker([sys.executable, "-c",
+            "import os,time;os.write(1,b'OK_TEST_PASS arch=arm32');time.sleep(5)"], 0.2)
+        self.assertEqual(result.returncode, 124)
+        self.assertEqual(result.stdout, "OK_TEST_PASS arch=arm32")
+
+    def test_split_fail_marker_is_reassembled(self) -> None:
+        result = qemu_test.run_until_marker([sys.executable, "-c",
+            "import os,time;os.write(1,b'OK_TEST_FA');time.sleep(.03);"
+            "os.write(1,b'IL code=11\\n');time.sleep(5)"], 0.3)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("OK_TEST_FAIL code=11\n", result.stdout)
+
+    def test_stderr_pressure_does_not_block_stdout_marker(self) -> None:
+        result = qemu_test.run_until_marker([sys.executable, "-c",
+            "import os,time;os.write(2,b'x'*131072);"
+            "os.write(1,b'OK_TEST_PASS arch=arm32\\n');time.sleep(5)"], 0.5)
+        self.assertEqual(result.returncode, 0, result.stderr[-200:])
+        self.assertIn("OK_TEST_PASS arch=arm32\n", result.stdout)
+
     def validate(self, arch: str, output: str, returncode: int = 0, debug_exit: bool = False) -> tuple[int, str, str]:
         stdout = io.StringIO()
         stderr = io.StringIO()

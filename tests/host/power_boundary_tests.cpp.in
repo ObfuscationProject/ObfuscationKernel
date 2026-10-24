@@ -1,0 +1,215 @@
+// Hosted execution of the actual desktop_loop source with platform stubs.
+// This verifies rejection of the legacy enum boundary, not hardware shutdown.
+#include <array>
+#include <cstdint>
+#include <iostream>
+#include <string_view>
+#include <string>
+
+namespace ok
+{
+using u32 = std::uint32_t;
+using u64 = std::uint64_t;
+enum class SystemPowerAction : std::uint8_t
+{
+    none,
+    halt,
+    poweroff,
+    reboot
+};
+struct Status
+{
+    bool success;
+    bool ok() const { return success; }
+    std::string_view message() const { return "injected-runtime-failure"; }
+};
+struct NativeShutdownBoundary {};
+struct PowerResult
+{
+    bool success;
+    SystemPowerAction action;
+    explicit operator bool() const { return success; }
+    Status status() const { return {false}; }
+    SystemPowerAction value() const { return action; }
+};
+} // namespace ok
+
+namespace
+{
+enum class Stop { idle, halt, terminal };
+enum class Queued { none, entry_halt, entry_reboot, entry_failure, post_halt, post_reboot, post_failure };
+struct Observation
+{
+    unsigned power_queries{};
+    unsigned reboot{};
+    unsigned debug_exits{};
+    ok::u32 debug_code{};
+    unsigned halts{};
+    unsigned idle{};
+    unsigned network{};
+    unsigned userland{};
+    unsigned gui{};
+    unsigned boundary{};
+    unsigned terminal{};
+    unsigned status_queries{};
+    unsigned console_polls{};
+    unsigned input_polls{};
+    unsigned key_events{};
+    unsigned ticks{};
+    ok::SystemPowerAction terminal_action{};
+    std::string output{};
+};
+Observation observation;
+ok::SystemPowerAction forced_action{};
+bool runtime_ok{true};
+bool native_userland_started{};
+Queued queued{};
+} // namespace
+
+namespace ok
+{
+SystemPowerAction ok_system_power_action()
+{
+    ++observation.power_queries;
+    return forced_action;
+}
+int ok_debug_shell_show_gui() { ++observation.gui; return 0; }
+int ok_poll_network() { ++observation.network; return 0; }
+int ok_step_userland() { ++observation.userland; return 0; }
+Status ok_userland_status() { ++observation.status_queries; return {runtime_ok}; }
+void ok_userland_input(char) {}
+int ok_gui_key_event(int) { ++observation.key_events; return 0; }
+int ok_debug_shell_tick() { ++observation.ticks; return 0; }
+PowerResult ok_advance_native_shutdown(const NativeShutdownBoundary &)
+{
+    const auto point = ++observation.boundary;
+    if ((point == 1 && queued == Queued::entry_halt) ||
+        (point == 2 && queued == Queued::post_halt)) return {true, SystemPowerAction::halt};
+    if ((point == 1 && queued == Queued::entry_reboot) ||
+        (point == 2 && queued == Queued::post_reboot)) return {true, SystemPowerAction::reboot};
+    if ((point == 1 && queued == Queued::entry_failure) ||
+        (point == 2 && queued == Queued::post_failure)) return {false, SystemPowerAction::none};
+    return {true, SystemPowerAction::none};
+}
+namespace arch
+{
+[[noreturn]] void terminal_power_action(SystemPowerAction action)
+{
+    ++observation.terminal;
+    observation.terminal_action = action;
+    throw Stop::terminal;
+}
+} // namespace arch
+} // namespace ok
+
+namespace
+{
+void platform_write(std::string_view text) { observation.output += text; }
+void ok_platform_debug_exit(ok::u32 code)
+{
+    ++observation.debug_exits;
+    observation.debug_code = code;
+}
+void reboot_stub() { ++observation.reboot; }
+[[maybe_unused]] void (*ok_platform_reboot)() = reboot_stub;
+[[noreturn]] void halt_forever()
+{
+    ++observation.halts;
+    throw Stop::halt;
+}
+void desktop_idle() { ++observation.idle; throw Stop::idle; }
+int console_poll() { ++observation.console_polls; return -1; }
+int (*ok_platform_console_poll)() = console_poll;
+int ok_platform_input_poll() { ++observation.input_polls; return -1; }
+} // namespace
+
+namespace ok::detail
+{
+@DESKTOP_LOOP@
+} // namespace ok::detail
+
+namespace
+{
+bool run_case(ok::SystemPowerAction action, bool healthy, bool show_shell)
+{
+    observation = {};
+    forced_action = action;
+    runtime_ok = healthy;
+    queued = Queued::none;
+    try
+    {
+        ok::detail::desktop_loop(show_shell);
+    }
+    catch (Stop stop)
+    {
+        if (stop != (healthy ? Stop::idle : Stop::halt)) return false;
+    }
+    if (observation.power_queries != 0 || observation.reboot != 0 ||
+        observation.network != 1 || observation.userland != 1 ||
+        observation.gui != static_cast<unsigned>(show_shell) || observation.boundary != 2 ||
+        observation.terminal != 0) return false;
+    if (healthy)
+        return observation.debug_exits == 0 && observation.halts == 0 && observation.idle == 1;
+    return observation.debug_exits == 1 && observation.debug_code == 0x11u &&
+           observation.halts == 1 && observation.idle == 0;
+}
+
+bool run_queued(Queued request, bool healthy, bool show_shell)
+{
+    observation = {};
+    queued = request;
+    runtime_ok = healthy;
+    try
+    {
+        ok::detail::desktop_loop(show_shell);
+    }
+    catch (Stop stop)
+    {
+        if (stop != Stop::terminal) return false;
+    }
+    const bool entry = request == Queued::entry_halt || request == Queued::entry_reboot || request == Queued::entry_failure;
+    const bool failure = request == Queued::entry_failure || request == Queued::post_failure;
+    const bool reboot = request == Queued::entry_reboot || request == Queued::post_reboot;
+    return observation.boundary == (entry ? 1u : 2u) &&
+           observation.network == (entry ? 0u : 1u) && observation.userland == (entry ? 0u : 1u) &&
+           observation.gui == static_cast<unsigned>(show_shell) &&
+           observation.terminal == 1 && observation.terminal_action ==
+               (failure ? ok::SystemPowerAction::none : reboot ? ok::SystemPowerAction::reboot : ok::SystemPowerAction::halt) &&
+           observation.output == (failure ? "OK_SHUTDOWN failed=injected-runtime-failure\n" :
+                                 reboot ? "OK_SHUTDOWN clean=1 action=reboot\n" : "OK_SHUTDOWN clean=1 action=halt\n") &&
+           observation.power_queries == 0 && observation.reboot == 0 && observation.debug_exits == 0 &&
+           observation.halts == 0 && observation.idle == 0 && observation.status_queries == 0 &&
+           observation.console_polls == 0 && observation.input_polls == 0 &&
+           observation.key_events == 0 && observation.ticks == 0;
+}
+} // namespace
+
+int main()
+{
+    constexpr std::array actions{
+        ok::SystemPowerAction::none,
+        ok::SystemPowerAction::halt,
+        ok::SystemPowerAction::poweroff,
+        ok::SystemPowerAction::reboot,
+        static_cast<ok::SystemPowerAction>(0x7f),
+        static_cast<ok::SystemPowerAction>(0xff)
+    };
+    for (const auto action : actions)
+        for (const auto healthy : {false, true})
+            for (const auto show_shell : {false, true})
+                if (!run_case(action, healthy, show_shell))
+                {
+                    std::cerr << "hosted desktop power boundary failed\n";
+                    return 1;
+                }
+    for (const auto request : {Queued::entry_halt, Queued::entry_reboot, Queued::entry_failure,
+                               Queued::post_halt, Queued::post_reboot, Queued::post_failure})
+        for (const auto healthy : {false, true})
+            for (const auto show_shell : {false, true})
+                if (!run_queued(request, healthy, show_shell))
+                {
+                    std::cerr << "hosted queued shutdown boundary failed\n";
+                    return 1;
+                }
+    std::cout << "hosted desktop power boundary: legacy=24 queued=24 passed; no platform execution claim\n";
+}

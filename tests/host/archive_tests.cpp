@@ -1,6 +1,7 @@
 #include "ok/fs/archive.hpp"
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <string>
 #include <vector>
 using namespace ok;
@@ -149,10 +150,190 @@ void test_malformed_archive()
     fs::VirtualFileSystem empty;
     CHECK(fs::mount_archive(empty, header(0)));
 }
+
+void directory_mode(fs::VirtualFileSystem &vfs, std::string_view path, u32 permissions)
+{
+    const auto metadata = vfs.stat(path);
+    CHECK(metadata);
+    CHECK(metadata.value().type == fs::NodeType::directory);
+    CHECK(metadata.value().mode == (fs::mode_directory | permissions));
+    CHECK(metadata.value().uid == 0 && metadata.value().gid == 0);
+}
+
+void test_exact_directory_metadata()
+{
+    auto owner = std::make_unique<fs::VirtualFileSystem>();
+    auto &vfs = *owner;
+    auto blob = header(7);
+    record(blob, "/tmp", {}, fs::mode_directory | 01777);
+    record(blob, "/private", {}, fs::mode_directory | 0700);
+    record(blob, "/zero", {}, fs::mode_directory);
+    record(blob, "/group", {}, fs::mode_directory | 02777);
+    record(blob, "/group/plain", {}, fs::mode_directory | 0750);
+    record(blob, "/group/inherited", {}, fs::mode_directory | 02770);
+    record(blob, "/group/program", {}, fs::mode_regular | 0755);
+    CHECK(fs::mount_archive(vfs, blob));
+    directory_mode(vfs, "/tmp", 01777);
+    directory_mode(vfs, "/private", 0700);
+    directory_mode(vfs, "/zero", 0);
+    directory_mode(vfs, "/group", 02777);
+    // Import final metadata instead of inheriting the parent's SGID bit.
+    directory_mode(vfs, "/group/plain", 0750);
+    directory_mode(vfs, "/group/inherited", 02770);
+    auto program = vfs.stat("/group/program");
+    CHECK(program && program.value().mode == (fs::mode_regular | 0755));
+    CHECK(program.value().uid == 0 && program.value().gid == 0);
+    CHECK(fs::mount_archive(vfs, blob));
+}
+
+void test_existing_directory_collisions()
+{
+    auto owner = std::make_unique<fs::VirtualFileSystem>();
+    auto &vfs = *owner;
+    auto old_tmp = header(1);
+    record(old_tmp, "/tmp", {}, fs::mode_directory | 0777);
+    CHECK(!fs::mount_archive(vfs, old_tmp));
+    directory_mode(vfs, "/tmp", 01777);
+    CHECK(vfs.create("/existing", fs::NodeType::directory));
+    CHECK(vfs.import_archive_directory("/existing", 0755));
+    CHECK(!vfs.import_archive_directory("/existing", 0700));
+    directory_mode(vfs, "/existing", 0755);
+    for (const auto [uid, gid] : std::array<std::array<u32, 2>, 2>{{{1000, 0}, {0, 1000}}})
+    {
+        CHECK(vfs.chown("/existing", uid, gid));
+        CHECK(!vfs.import_archive_directory("/existing", 0755));
+        CHECK(!vfs.import_archive_directory("/existing/child", 0755));
+        auto unchanged = vfs.stat("/existing");
+        CHECK(unchanged && unchanged.value().uid == uid && unchanged.value().gid == gid);
+        CHECK(unchanged.value().mode == (fs::mode_directory | 0755));
+        CHECK(vfs.lookup("/existing/child") == nullptr);
+    }
+    CHECK(vfs.chown("/existing", 0, 0));
+    CHECK(vfs.create("/file", fs::NodeType::regular));
+    const std::array<std::byte, 1> payload{std::byte{42}};
+    CHECK(vfs.write_file("/file", payload));
+    CHECK(!vfs.import_archive_directory("/file", 0755));
+    CHECK(!vfs.import_archive_directory("/file/child", 0755));
+    CHECK(vfs.read_file("/file").value().data[0] == payload[0]);
+    CHECK(vfs.create({}, "/alias", fs::NodeType::symlink, 0777, 0, 0, "/existing"));
+    CHECK(!vfs.import_archive_directory("/alias", 0755));
+    CHECK(!vfs.import_archive_directory("/alias/child", 0755));
+    CHECK(vfs.lookup("/existing/child") == nullptr);
+    directory_mode(vfs, "/existing", 0755);
+    CHECK(vfs.chown("/", 1000, 0));
+    CHECK(!vfs.import_archive_directory("/root-owned", 0755));
+    CHECK(vfs.lookup("/root-owned") == nullptr);
+}
+
+class ArchiveProvider final : public fs::Node
+{
+  public:
+    mutable usize calls{}, reentrant_checks{};
+    usize mutations{};
+    fs::VirtualFileSystem *reenter{};
+    std::string_view name() const override { ++calls; return "archive-provider"; }
+    fs::Metadata metadata() const override
+    {
+        ++calls;
+        if (reenter)
+        {
+            CHECK(reenter->import_archive_directory("/nested", 0755).code() == StatusCode::busy);
+            ++reentrant_checks;
+        }
+        return {.type = fs::NodeType::directory, .mode = fs::mode_directory | 0755};
+    }
+    fs::Node *lookup(std::string_view) override { ++calls; return nullptr; }
+    Result<fs::FileBuffer> read(usize, usize) const override { ++calls; return fs::FileBuffer{}; }
+    Status write(usize, std::span<const std::byte>) override { ++calls; ++mutations; return {}; }
+    Status create(std::string_view, fs::NodeType) override { ++calls; ++mutations; return {}; }
+    Status chmod(u32) override { ++calls; ++mutations; return {}; }
+    Status chown(u32, u32) override { ++calls; ++mutations; return {}; }
+    Result<fs::DirectoryListing> list(fs::DirectoryReadIntent) const override
+    { ++calls; return fs::DirectoryListing{}; }
+};
+
+void test_mounted_directory_boundary()
+{
+    ArchiveProvider provider;
+    auto owner = std::make_unique<fs::VirtualFileSystem>();
+    auto &vfs = *owner;
+    CHECK(vfs.create("/mount", fs::NodeType::directory));
+    CHECK(vfs.mount("/mount", provider));
+    provider.calls = 0;
+    CHECK(!vfs.import_archive_directory("/mount", 0755));
+    CHECK(!vfs.import_archive_directory("/mount/child", 0755));
+    CHECK(provider.calls == 0 && provider.mutations == 0);
+    provider.reenter = &vfs;
+    CHECK(vfs.stat("/mount"));
+    CHECK(provider.reentrant_checks > 0 && provider.mutations == 0);
+    CHECK(vfs.lookup("/nested") == nullptr);
+    provider.reenter = nullptr;
+
+    auto other = std::make_unique<fs::VirtualFileSystem>();
+    CHECK(other->create("/cover", fs::NodeType::directory));
+    auto overlay = other->mount_ram_owned("/cover");
+    CHECK(overlay);
+    CHECK(!other->import_archive_directory("/cover", 0755));
+    CHECK(!other->import_archive_directory("/cover/new", 0755));
+    CHECK(other->lookup("/cover/new") == nullptr);
+    CHECK(other->detach(overlay.value()));
+    CHECK(other->import_archive_directory("/cover/new", 0700));
+    directory_mode(*other, "/cover/new", 0700);
+
+    auto covered_root = std::make_unique<fs::VirtualFileSystem>();
+    CHECK(covered_root->mount("/", provider));
+    provider.calls = 0;
+    CHECK(!covered_root->import_archive_directory("/child", 0755));
+    CHECK(provider.calls == 0 && provider.mutations == 0);
+}
+
+void test_foreign_ram_directory_boundary()
+{
+    fs::RamNode foreign;
+    CHECK(foreign.configure("foreign", fs::NodeType::directory, nullptr));
+    auto owner = std::make_unique<fs::VirtualFileSystem>();
+    auto *root = static_cast<fs::RamNode *>(owner->lookup("/"));
+    CHECK(root && root->attach_child(foreign));
+    CHECK(!owner->import_archive_directory("/foreign", 0755));
+    CHECK(!owner->import_archive_directory("/foreign/new", 0755));
+    CHECK(foreign.lookup("new") == nullptr);
+    CHECK(foreign.metadata().mode == (fs::mode_directory | 0755));
+}
+
+void test_archive_mode_validation_precedes_import()
+{
+    for (const u32 mode : {fs::mode_directory | 04755, fs::mode_directory | 01000000000u,
+                          fs::mode_regular | 01755, fs::mode_regular | 02755, fs::mode_regular | 04755,
+                          fs::mode_regular | 07755, fs::mode_regular | 01000000000u})
+    {
+        auto owner = std::make_unique<fs::VirtualFileSystem>();
+        auto blob = header(3);
+        record(blob, "/accepted", {}, fs::mode_directory | 0755);
+        record(blob, "/accepted/program", {}, fs::mode_regular | 0755);
+        record(blob, "/invalid", {}, mode);
+        CHECK(!fs::mount_archive(*owner, blob));
+        CHECK(owner->lookup("/accepted") == nullptr);
+        directory_mode(*owner, "/tmp", 01777);
+    }
+    auto owner = std::make_unique<fs::VirtualFileSystem>();
+    for (const std::string &path : std::vector<std::string>{"relative", "/", "/bin/", "/../child", "/./child",
+                                                          "/bin//child", "/" + std::string(32, 'a'),
+                                                          std::string("/bin\0/child", 11)})
+        CHECK(!owner->import_archive_directory(path, 0755));
+    for (const u32 mode : {04000u, 010000u, 01000000000u})
+        CHECK(!owner->import_archive_directory("/invalid", mode));
+    CHECK(owner->lookup("/invalid") == nullptr);
+}
+
 int main()
 {
     test_large_readonly_files();
     test_archive_does_not_use_writable_file_pool();
     test_malformed_archive();
-    std::puts("PASS archive: large reads, immutable backing, file-pool independence, malformed input rejection");
+    test_exact_directory_metadata();
+    test_existing_directory_collisions();
+    test_mounted_directory_boundary();
+    test_foreign_ram_directory_boundary();
+    test_archive_mode_validation_precedes_import();
+    std::puts("PASS archive: immutable backing, bounded parsing, exact root directory metadata, protected collisions");
 }

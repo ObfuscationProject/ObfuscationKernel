@@ -1,0 +1,42 @@
+{
+  "i386": {
+    "size": 28,
+    "load_offset": 7
+  },
+  "x86_64": {
+    "size": 29,
+    "load_offset": 8
+  },
+  "aarch64": {
+    "size": 40,
+    "load_offset": 12
+  },
+  "arm32": {
+    "size": 40,
+    "load_offset": 12
+  },
+  "rv64": {
+    "size": 36,
+    "load_offset": 8
+  },
+  "rv32": {
+    "size": 36,
+    "load_offset": 8
+  },
+  "loongarch64": {
+    "size": 36,
+    "load_offset": 8
+  },
+  "mips": {
+    "size": 44,
+    "load_offset": 12
+  },
+  "mips64": {
+    "size": 44,
+    "load_offset": 12
+  },
+  "ppc": {
+    "size": 40,
+    "load_offset": 12
+  }
+}

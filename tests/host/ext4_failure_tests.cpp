@@ -1,7 +1,9 @@
+#include "ext4_realtime_model.hpp"
 #include "ok/fs/ext4_fs.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #define CHECK(x)                                                                                                       \
@@ -140,11 +142,29 @@ Status mutate(fs::Ext4FileSystem &filesystem, fs::Node &file, int operation)
         return directory ? filesystem.root()->rename("move-dir", *directory, "new-directory")
                          : Status::fault("directory read failed");
     }
-    default: {
+    case 9: {
         auto *directory = filesystem.root()->lookup("persist");
         return directory ? filesystem.root()->rename("move-dir", *directory, "replace-dir")
                          : Status::fault("directory read failed");
     }
+    case 10:
+        return filesystem.root()->create_symlink("failure-symlink", "../persist/notes", 0x12345678, 0x87654321);
+    case 11:
+        return filesystem.root()->create_symlink("failure-symlink", std::string(60, 'x'), 0, 0);
+    case 12: {
+        auto *source = filesystem.root()->lookup("s59");
+        return source ? filesystem.root()->link("failure-symlink", *source) : Status::fault("link read failed");
+    }
+    case 13:
+        return filesystem.root()->rename("s59", *filesystem.root(), "replace-file");
+    case 14:
+        return filesystem.root()->remove("s59", false);
+    case 15:
+        return filesystem.root()->remove("s60", false);
+    case 16:
+        return filesystem.root()->remove("legacy60", false);
+    default:
+        return filesystem.root()->rename("s60", *filesystem.root(), "s59");
     }
 }
 void injected_failures(const Bytes &baseline)
@@ -160,7 +180,7 @@ void injected_failures(const Bytes &baseline)
     CHECK(setup.sync());
     const auto &namespace_baseline = prepared.durable;
     usize checked = 0;
-    for (int operation = 0; operation < 10; ++operation)
+    for (int operation = 0; operation < 18; ++operation)
     {
         FaultDevice good(namespace_baseline);
         fs::Ext4FileSystem good_fs;
@@ -312,6 +332,122 @@ void malformed_metadata(const Bytes &baseline)
     CHECK(invalid_inode.writes == 0);
     std::puts("PASS malformed ext4 group, extent, directory and inode metadata rejected before mutation");
 }
+usize named_inode(const Bytes &image, std::string_view name)
+{
+    const u32 block_size = 1024u << read32(image, 1048);
+    const usize descriptors = (read32(image, 1044) + 1) * block_size;
+    const auto inode_size = read16(image, 1112);
+    const usize root_inode = read32(image, descriptors + 8) * block_size + inode_size;
+    for (u16 extent = 0; extent < read16(image, root_inode + 42); ++extent)
+        for (u16 block = 0; block < read16(image, root_inode + 56 + extent * 12); ++block)
+        {
+            const usize begin = (read32(image, root_inode + 60 + extent * 12) + block) * block_size;
+            for (usize entry = begin; entry < begin + block_size; entry += read16(image, entry + 4))
+            {
+                const auto size = std::to_integer<u8>(image[entry + 6]);
+                if (read32(image, entry) && std::string_view(reinterpret_cast<const char *>(image.data() + entry + 8), size) == name)
+                {
+                    const auto index = read32(image, entry) - 1;
+                    return read32(image, descriptors + (index / read32(image, 1064)) * 32 + 8) * block_size +
+                           (index % read32(image, 1064)) * inode_size;
+                }
+            }
+        }
+    CHECK(false);
+    return 0;
+}
+void malformed_symlinks(const Bytes &baseline)
+{
+    const u32 block_size = 1024u << read32(baseline, 1048);
+    const usize descriptors = (read32(baseline, 1044) + 1) * block_size;
+    const auto short_inode = named_inode(baseline, "s59"), long_inode = named_inode(baseline, "s60");
+    const auto legacy_inode = named_inode(baseline, "legacy60");
+    for (int corruption = 0; corruption < 17; ++corruption)
+    {
+        auto image = baseline;
+        const char *name = corruption < 4 ? "s59" : corruption < 15 ? "s60" : "legacy60";
+        switch (corruption)
+        {
+        case 0: write32(image, short_inode + 4, 60); break;
+        case 1: write32(image, short_inode + 32, 0x80000); break;
+        case 2: image[short_inode + 99] = std::byte{'x'}; break; // Missing trailing NUL.
+        case 3: image[short_inode + 43] = std::byte{0}; break; // Embedded NUL.
+        case 4: write32(image, long_inode + 32, 0x10000000); break; // Inline-data flag.
+        case 5: write32(image, long_inode + 104, 1); break; // External attributes.
+        case 6: write16(image, long_inode + 116, 1); break; // High block accounting.
+        case 7: write32(image, long_inode + 4, block_size); break;
+        case 8: write32(image, long_inode + 28, block_size / 512 + 1); break;
+        case 9: write16(image, long_inode + 42, 0); break; // Hole.
+        case 10: write32(image, long_inode + 52, 1); break;
+        case 11: write16(image, long_inode + 56, 0x8001); break; // Unwritten extent.
+        case 12: write16(image, long_inode + 58, 1); break;
+        case 13: write32(image, long_inode + 60, read32(image, descriptors)); break; // Allocation bitmap.
+        case 14: image[read32(image, long_inode + 60) * block_size + 60] = std::byte{'x'}; break;
+        case 15: write32(image, legacy_inode + 44, 1); break; // Second direct block.
+        case 16: write32(image, legacy_inode + 40, read32(image, descriptors + 8)); break; // Inode table.
+        }
+        FaultDevice disk(image);
+        fs::Ext4FileSystem filesystem;
+        CHECK(filesystem.mount(disk));
+        auto *node = filesystem.root()->lookup(name);
+        CHECK(node && !node->read(0, 4096));
+        CHECK(!node->write(0, text("unsafe")) && !node->truncate(0));
+        CHECK(!filesystem.root()->remove(name, false));
+        CHECK(disk.writes == 0 && disk.cache == image);
+    }
+    std::puts("PASS malformed inline, extent and direct-block symlinks reject unsafe layouts without writes");
+}
+void symlink_capacity(const Bytes &baseline)
+{
+    auto full = baseline;
+    const u32 block_size = 1024u << read32(full, 1048), first = read32(full, 1044);
+    const auto per_group = read32(full, 1056), blocks = read32(full, 1028);
+    const auto groups = (blocks - first - 1) / per_group + 1;
+    const usize descriptors = (first + 1) * block_size;
+    // Resource-exhaustion model: reserve every data block in allocation
+    // metadata. This synthetic image is not an offline-fsck fixture.
+    write32(full, 1036, 0);
+    for (u32 group = 0; group < groups; ++group)
+    {
+        const auto bitmap = read32(full, descriptors + group * 32) * block_size;
+        for (u32 i = 0; i < block_size; ++i)
+            full[bitmap + i] = std::byte{0xff};
+        write16(full, descriptors + group * 32 + 12, 0);
+    }
+    FaultDevice disk(full);
+    fs::Ext4FileSystem filesystem;
+    CHECK(filesystem.mount(disk));
+    disk.arm(~usize{0}, false);
+    CHECK(filesystem.root()->create_symlink("no-blocks", std::string(60, 'x'), 0, 0).code() == StatusCode::no_memory);
+    const auto calls = disk.trace.size();
+    CHECK(!filesystem.root()->lookup("no-blocks"));
+    CHECK(read32(disk.cache, 1040) == read32(full, 1040));
+    for (u32 group = 0; group < groups; ++group)
+    {
+        const auto descriptor = descriptors + group * 32;
+        CHECK(read16(disk.cache, descriptor + 14) == read16(full, descriptor + 14));
+        const auto bitmap = read32(full, descriptor + 4) * block_size;
+        CHECK(std::memcmp(disk.cache.data() + bitmap, full.data() + bitmap, block_size) == 0);
+    }
+    CHECK(filesystem.sync() && read16(disk.durable, 1082) == 1);
+    CHECK(filesystem.root()->create_symlink("fits-inline", "target", 0, 0));
+    CHECK(filesystem.root()->remove("fits-inline", false) && filesystem.sync());
+    for (usize failure = 1; failure <= calls; ++failure)
+        for (bool partial : {false, true})
+        {
+            FaultDevice faulty(full);
+            fs::Ext4FileSystem instance;
+            CHECK(instance.mount(faulty));
+            faulty.arm(failure, partial);
+            CHECK(!instance.root()->create_symlink("no-blocks", std::string(60, 'x'), 0, 0));
+            CHECK(faulty.triggered);
+            const auto writes = faulty.writes;
+            CHECK(!instance.sync());
+            CHECK(!instance.root()->create_symlink("after-failure", "target", 0, 0));
+            CHECK(writes == faulty.writes);
+        }
+    std::printf("PASS ext4 symlink allocation rollback restores inode counts/bitmap; %zu rollback I/O faults quarantine\n", calls * 2);
+}
 void ownership(const Bytes &baseline)
 {
     auto image = baseline;
@@ -353,10 +489,13 @@ void cached_lifetime(const Bytes &baseline)
     for (unsigned i = 0; i < 150; ++i)
     {
         CHECK(root->create("other", fs::NodeType::regular));
-        auto *other = root->lookup("other");
-        CHECK(other && other != pinned);
+        auto retained = root->lookup_child_retained("other");
+        CHECK(retained);
+        auto *other = retained.value();
+        CHECK(other != pinned);
         CHECK(other->write(0, text("unrelated")));
         CHECK(root->remove("other", false));
+        CHECK(other->release());
     }
     auto read = pinned->read(0, 32);
     CHECK(read && read.value().size == 16);
@@ -380,6 +519,8 @@ void cached_lifetime(const Bytes &baseline)
 }
 int main(int argc, char **argv)
 {
+    testing::ext4_clock::reset();
+    struct LegacyClockGuard { ~LegacyClockGuard() { CHECK(testing::ext4_clock::calls() == 0); } } legacy_clock_guard;
     CHECK(argc == 2);
     auto *file = std::fopen(argv[1], "rb");
     CHECK(file);
@@ -391,6 +532,8 @@ int main(int argc, char **argv)
     injected_failures(baseline);
     namespace_extent_limit(baseline);
     malformed_metadata(baseline);
+    malformed_symlinks(baseline);
+    symlink_capacity(baseline);
     ownership(baseline);
     cached_lifetime(baseline);
 }

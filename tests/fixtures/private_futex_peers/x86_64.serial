@@ -1,0 +1,26 @@
+OK_PRIVATE_FUTEX_PEERS phase=setup scope=actual-user threads=4 shared_space=1 clone=0 pthread=0 smp=0
+OK_PRIVATE_FUTEX_TRAP tid=58 role=1 op=128 address=0x0000000040010008 value=7
+OK_PRIVATE_FUTEX_TRAP tid=57 role=0 op=128 address=0x0000000040010008 value=7
+OK_PRIVATE_FUTEX_TRAP tid=59 role=2 op=128 address=0x0000000040010008 value=7
+OK_PRIVATE_FUTEX_PEERS phase=admitted round=0 waiters=3
+OK_PRIVATE_FUTEX_TRAP tid=60 role=3 op=129 address=0x0000000040010008 value=0
+OK_PRIVATE_FUTEX_TRAP tid=58 role=1 op=128 address=0x000000004001000c value=0
+OK_PRIVATE_FUTEX_TRAP tid=60 role=3 op=129 address=0x0000000040010008 value=1
+OK_PRIVATE_FUTEX_TRAP tid=57 role=0 op=128 address=0x000000004001000c value=0
+OK_PRIVATE_FUTEX_TRAP tid=60 role=3 op=129 address=0x0000000040010008 value=4294967295
+OK_PRIVATE_FUTEX_TRAP tid=59 role=2 op=128 address=0x000000004001000c value=0
+OK_PRIVATE_FUTEX_TRAP tid=60 role=3 op=128 address=0x000000004001000c value=0
+OK_PRIVATE_FUTEX_PEERS phase=round-complete round=0 results=0,0,0 wakes=1,1,1 changed_word=99
+OK_PRIVATE_FUTEX_TRAP tid=57 role=0 op=128 address=0x0000000040010008 value=7
+OK_PRIVATE_FUTEX_TRAP tid=58 role=1 op=128 address=0x0000000040010008 value=7
+OK_PRIVATE_FUTEX_TRAP tid=59 role=2 op=128 address=0x0000000040010008 value=7
+OK_PRIVATE_FUTEX_PEERS phase=admitted round=1 waiters=3
+OK_PRIVATE_FUTEX_TRAP tid=60 role=3 op=129 address=0x0000000040010008 value=0
+OK_PRIVATE_FUTEX_TRAP tid=57 role=0 op=128 address=0x000000004001000c value=0
+OK_PRIVATE_FUTEX_TRAP tid=60 role=3 op=129 address=0x0000000040010008 value=1
+OK_PRIVATE_FUTEX_TRAP tid=58 role=1 op=128 address=0x000000004001000c value=0
+OK_PRIVATE_FUTEX_TRAP tid=60 role=3 op=129 address=0x0000000040010008 value=4294967295
+OK_PRIVATE_FUTEX_TRAP tid=59 role=2 op=128 address=0x000000004001000c value=0
+OK_PRIVATE_FUTEX_TRAP tid=60 role=3 op=128 address=0x000000004001000c value=0
+OK_PRIVATE_FUTEX_PEERS phase=round-complete round=1 results=0,0,0 wakes=1,1,1 changed_word=99
+OK_PRIVATE_FUTEX_PEERS status=pass version=1 scope=actual-user rounds=2 waiters=6 wakes=6 parks=8 controls=4 threads=4 remaining_objects=0 clone=0 pthread=0 smp=0 physical=0

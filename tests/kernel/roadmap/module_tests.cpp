@@ -328,7 +328,43 @@ std::array<std::byte, 1024> make_fake_linux_ko()
 
 Status test_module_abi_contract()
 {
-    for (const u32 version : std::array<u32, 3>{1, 2, kernel_module_abi_version + 1})
+    static_assert(kernel_module_abi_version == 74,
+                  "the retired ABI controls require the coherent ABI74 header");
+    // This exercises compiled ModuleManifest admission by the real manager.
+    // It does not load a binary module or parse an external metadata record.
+    {
+        ManifestOverrideModule previous_abi{ModuleManifest{
+            .name = "previous-abi64",
+            .version = "1",
+            .module_class = "test",
+            .abi_version = 64,
+        }};
+        ModuleManager admission_manager;
+        if (previous_abi.manifest().abi_version != 64 ||
+            admission_manager.register_module(previous_abi).code() != StatusCode::unsupported ||
+            previous_abi.state() != ModuleState::failed || admission_manager.module_count() != 0 ||
+            admission_manager.started_count() != 0 || admission_manager.find("previous-abi64") != nullptr)
+        {
+            return Status::fault("compiled previous ABI64 module was not refused before registration");
+        }
+        ManifestOverrideModule current_abi{ModuleManifest{
+            .name = "current-abi74",
+            .version = "1",
+            .module_class = "test",
+            .abi_version = kernel_module_abi_version,
+        }};
+        if (auto status = admission_manager.register_module(current_abi); !status.ok())
+        {
+            return status;
+        }
+        if (current_abi.state() != ModuleState::created || admission_manager.module_count() != 1 ||
+            admission_manager.started_count() != 0 || admission_manager.find("current-abi74") != &current_abi ||
+            admission_manager.find("previous-abi64") != nullptr || previous_abi.state() != ModuleState::failed)
+        {
+            return Status::fault("compiled current ABI74 module admission control failed");
+        }
+    }
+    for (const u32 version : std::array<u32, 14>{1, 2, 49, 51, 65, 66, 67, 68, 69, 70, 71, 72, 73, kernel_module_abi_version + 1})
     {
         ManifestOverrideModule wrong_abi{ModuleManifest{
             .name = "wrong-abi",

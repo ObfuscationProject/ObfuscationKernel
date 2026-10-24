@@ -8,6 +8,7 @@ extern "C"
     extern const u8 ok_native_user_begin[], ok_native_user_end[];
     extern const u8 ok_native_user_kernel_read[], ok_native_user_readonly_write[];
     extern const u8 ok_native_user_nx[], ok_native_user_unmapped[], ok_native_user_invalid[];
+    extern const u8 ok_native_user_dense[];
 }
 namespace
 {
@@ -16,6 +17,12 @@ alignas(4096) u8 data_a[4096]{};
 alignas(4096) u8 data_b[4096]{};
 alignas(4096) u8 stack_a[4096]{};
 alignas(4096) u8 stack_b[4096]{};
+constexpr usize dense_pages = 192;
+constexpr uptr dense_va = native::user_begin + 0x01000000;
+alignas(4096) u8 dense_data[dense_pages][4096]{};
+alignas(4096) u8 dense_replacement[4096]{};
+std::array<native::PageMapping, dense_pages + 2> dense_mappings{};
+std::array<native::PageMapping, dense_pages + 1> sparse_mappings{};
 constexpr uptr code_va = native::user_begin;
 constexpr uptr data_va = native::user_begin + 8192;
 constexpr uptr stack_va = native::user_end - 4096;
@@ -179,6 +186,55 @@ extern "C" [[noreturn]] void kernel_main()
     require(native::destroy_space(space_a).ok() && native::destroy_space(space_b).ok(),
             "release native address spaces");
     require(!native::user_range(space_a, data_va, 1), "stale address-space handle rejected");
+    dense_mappings[0] = {code_va, reinterpret_cast<uptr>(code), native::page_read | native::page_execute};
+    for (usize i = 0; i < dense_pages; ++i)
+        dense_mappings[i + 1] = {dense_va + i * 4096, reinterpret_cast<uptr>(dense_data[i]),
+                                 native::page_read | native::page_write};
+    dense_mappings[dense_pages + 1] =
+        {stack_va, reinterpret_cast<uptr>(stack_a), native::page_read | native::page_write};
+    auto dense_result = native::create_space(dense_mappings);
+    require(dense_result.ok(), "create more than 128 hardware user mappings");
+    auto dense_space = dense_result.value();
+    auto dense_frame = native::initial_frame(code_va + static_cast<uptr>(ok_native_user_dense - ok_native_user_begin),
+                                            native::user_end);
+    trap = next_non_timer(dense_space, dense_frame);
+    require(trap.kind == native::TrapKind::syscall && native::syscall(dense_frame).number == 0x3456,
+            "ring-3 loop touched 192 pages");
+    for (usize i = 0; i < dense_pages; ++i)
+        require(dense_data[i][0] == static_cast<u8>(dense_pages - i) && dense_data[i][1] == 0,
+                "ring-3 page bytes and zero fill");
+    print("OK_NATIVE_DENSE pages=192 touch=pass zero=pass\n");
+
+    require(native::destroy_space(dense_space).ok(), "retire dense table before protection change");
+    dense_mappings[101].flags = 0;
+    dense_result = native::create_space(dense_mappings);
+    require(dense_result.ok(), "create PROT_NONE dense table");
+    dense_space = dense_result.value();
+    require(!native::user_range(dense_space, dense_va + 100 * 4096, 1) &&
+            dense_data[100][0] == static_cast<u8>(dense_pages - 100), "PROT_NONE has no user translation");
+    require(native::destroy_space(dense_space).ok(), "retire protected table");
+    dense_mappings[101].flags = native::page_read | native::page_write;
+    for (usize src = 0, dst = 0; src < dense_mappings.size(); ++src)
+        if (src != 101) sparse_mappings[dst++] = dense_mappings[src];
+    auto sparse_result = native::create_space(sparse_mappings);
+    require(sparse_result.ok(), "create sparse dense table");
+    auto sparse_space = sparse_result.value();
+    require(!native::user_range(sparse_space, dense_va + 100 * 4096, 1), "unmapped page has no user translation");
+    require(native::destroy_space(sparse_space).ok(), "retire sparse table");
+    dense_mappings[101].physical_address = reinterpret_cast<uptr>(dense_replacement);
+    dense_result = native::create_space(dense_mappings);
+    require(dense_result.ok(), "remap zeroed replacement page");
+    dense_space = dense_result.value();
+    require(native::user_range(dense_space, dense_va + 100 * 4096, 1, true) && dense_replacement[0] == 0,
+            "remap restores writable zero page");
+    std::array<native::PageMapping, 17> scattered{};
+    for (usize i = 0; i < scattered.size(); ++i)
+        scattered[i] = {native::user_begin + i * 0x200000, reinterpret_cast<uptr>(dense_data[i]),
+                        native::page_read};
+    require(!native::create_space(scattered) && native::user_range(dense_space, dense_va, 1) &&
+            dense_data[0][0] == static_cast<u8>(dense_pages), "failed table growth preserves old bytes");
+    require(native::destroy_space(dense_space).ok(), "retire remapped dense table");
+    print("OK_NATIVE_DENSE none=pass unmap=pass remap=pass failure=pass\n");
     print("OK_NATIVE_TEST_PASS scope=hardware architecture=x86_64\n");
     finish(true);
 }

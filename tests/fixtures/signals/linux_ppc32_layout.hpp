@@ -1,0 +1,51 @@
+#pragma once
+#include <cstddef>
+namespace linux_ppc32_oracle {
+inline constexpr std::size_t spefscr_defined_bits = 4282384255;
+inline constexpr std::size_t word_bytes = 4;
+inline constexpr std::size_t sigcontext_bytes = 32;
+inline constexpr std::size_t mcontext_bytes = 992;
+inline constexpr std::size_t ucontext_bytes = 1184;
+inline constexpr std::size_t legacy_frame_bytes = 1248;
+inline constexpr std::size_t rt_frame_bytes = 1536;
+inline constexpr std::size_t frame_alignment = 16;
+inline constexpr std::size_t abi_gap_bytes = 224;
+inline constexpr std::size_t handler_gap = 64;
+inline constexpr std::size_t legacy_context = 32;
+inline constexpr std::size_t rt_info = 0;
+inline constexpr std::size_t rt_uc = 128;
+inline constexpr std::size_t rt_context = 320;
+inline constexpr std::size_t uc_stack = 8;
+inline constexpr std::size_t uc_regs = 48;
+inline constexpr std::size_t uc_mask = 52;
+inline constexpr std::size_t uc_context = 192;
+inline constexpr std::size_t sc_mask_low = 24;
+inline constexpr std::size_t sc_mask_high = 12;
+inline constexpr std::size_t sc_regs = 28;
+inline constexpr std::size_t sc_signal = 16;
+inline constexpr std::size_t sc_handler = 20;
+inline constexpr std::size_t mc_fp = 192;
+inline constexpr std::size_t mc_pad = 456;
+inline constexpr std::size_t mc_vregs = 464;
+inline constexpr std::size_t classic_fp_bytes = 264;
+inline constexpr std::size_t spe_words = 34;
+inline constexpr std::size_t greg_words = 48;
+inline constexpr std::size_t pt_regs_bytes = 176;
+inline constexpr std::size_t pt_nip = 32;
+inline constexpr std::size_t pt_msr = 33;
+inline constexpr std::size_t pt_orig_r3 = 34;
+inline constexpr std::size_t pt_ctr = 35;
+inline constexpr std::size_t pt_link = 36;
+inline constexpr std::size_t pt_xer = 37;
+inline constexpr std::size_t pt_cr = 38;
+inline constexpr std::size_t pt_mq = 39;
+inline constexpr std::size_t pt_trap = 40;
+inline constexpr std::size_t pt_dar = 41;
+inline constexpr std::size_t pt_dsisr = 42;
+inline constexpr std::size_t pt_result = 43;
+inline constexpr std::size_t info_bytes = 128;
+inline constexpr std::size_t info_pid = 12;
+inline constexpr std::size_t info_uid = 16;
+inline constexpr std::size_t action_bytes = 20;
+inline constexpr std::size_t action_mask = 12;
+}

@@ -1,0 +1,4 @@
+FIRMWARE_RAW captured=0x0000000000000001 values=0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 
+FIRMWARE_RESULT reason=source_absent status=0x0000000000000003 reads=0x0000000000000000 allocator=unqualified
+FIRMWARE_DONE scope=actual-qemu-boot
+qemu-system-loongarch64: terminating on signal 15 from pid 11 (python3)

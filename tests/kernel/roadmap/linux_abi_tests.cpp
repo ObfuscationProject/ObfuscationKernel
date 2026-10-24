@@ -1,6 +1,11 @@
 #include "roadmap_tests.hpp"
 
 #include "ok/syscall/linux.hpp"
+#include "ok/abi/linux_sleep.hpp"
+#include "ok/abi/linux_stat.hpp"
+#include "ok/abi/linux_native.hpp"
+#include "ok/time/realtime_clock.hpp"
+#include "ok/user/clock_set.hpp"
 #include "ok/uapi/syscall.h"
 
 #include <array>
@@ -10,14 +15,25 @@
 namespace ok
 {
 static_assert(OK_UAPI_VERSION_MAJOR == 0);
-static_assert(OK_UAPI_VERSION_MINOR == 1);
+static_assert(OK_UAPI_VERSION_MINOR == 16);
 static_assert(OK_UAPI_X86_64_SYSCALL == 1);
 static_assert(OK_SYS_READ == static_cast<u64>(syscall::Number::read));
 static_assert(OK_SYS_WRITE == static_cast<u64>(syscall::Number::write));
 static_assert(OK_SYS_OPENAT == static_cast<u64>(syscall::Number::openat));
+static_assert(OK_SYS_SYMLINK == static_cast<u64>(syscall::Number::symlink));
+static_assert(OK_SYS_SYMLINKAT == static_cast<u64>(syscall::Number::symlinkat));
+static_assert(OK_SYS_READLINK == static_cast<u64>(syscall::Number::readlink));
+static_assert(OK_SYS_READLINKAT == static_cast<u64>(syscall::Number::readlinkat));
 static_assert(OK_SYS_MMAP == static_cast<u64>(syscall::Number::mmap));
 static_assert(OK_SYS_ARCH_PRCTL == static_cast<u64>(syscall::Number::arch_prctl));
+static_assert(OK_SYS_CLOCK_SETTIME == static_cast<u64>(syscall::Number::clock_settime));
+static_assert(OK_SYS_FSTAT_V2 == static_cast<u64>(syscall::Number::fstat_v2));
+static_assert(OK_SYS_NEWFSTATAT_V2 == static_cast<u64>(syscall::Number::newfstatat_v2));
 static_assert(OK_SYS_GETRANDOM == static_cast<u64>(syscall::Number::getrandom));
+static_assert(OK_SYS_CONSOLE_CLAIM == static_cast<u64>(syscall::Number::console_claim));
+static_assert(OK_SYS_CONSOLE_REVOKE == static_cast<u64>(syscall::Number::console_revoke));
+static_assert(OK_SYS_CONSOLE_FLUSH == static_cast<u64>(syscall::Number::console_flush));
+static_assert(OK_SYS_SYNC_PERSISTENT == static_cast<u64>(syscall::Number::sync_persistent));
 static_assert(OK_SYS_OK_DEBUG == static_cast<u64>(syscall::Number::ok_debug));
 static_assert(OK_EINVAL == syscall::linux_EINVAL);
 static_assert(OK_ENOSYS == syscall::linux_ENOSYS);
@@ -35,7 +51,7 @@ static_assert(offsetof(ok_timespec, nanoseconds) == offsetof(posix::ClockTime, n
 static_assert(sizeof(ok_iovec) == sizeof(posix::IoVector));
 static_assert(offsetof(ok_iovec, base) == offsetof(posix::IoVector, base));
 static_assert(offsetof(ok_iovec, length) == offsetof(posix::IoVector, length));
-static_assert(sizeof(ok_stat) == sizeof(posix::FileStatus));
+static_assert(sizeof(ok_stat) == offsetof(posix::FileStatus, attributes));
 static_assert(offsetof(ok_stat, size) == offsetof(posix::FileStatus, size));
 static_assert(offsetof(ok_stat, mode) == offsetof(posix::FileStatus, mode));
 static_assert(offsetof(ok_stat, blocks) == offsetof(posix::FileStatus, blocks));
@@ -95,8 +111,96 @@ Status expect_errno(Status status, i64 expected)
                                                                : Status::fault("Linux errno mapping validation failed");
 }
 
+Status verify_linux_stat_projection()
+{
+    // Kernel debug codec model only. Guest syscall and provider qualification
+    // have separate OS-owned execution/image tests.
+    namespace lu = abi::linux_user;
+    using Codec = lu::StatCodec<lu::configured_native_profile()>;
+    posix::FileStatus metadata{};
+    metadata.type = fs::NodeType::regular;
+    metadata.mode = fs::mode_for(fs::NodeType::regular, 0644);
+    metadata.size = 33;
+    metadata.link_count = 0; // A held unlinked inode remains representable.
+    metadata.block_size = 1024;
+    metadata.blocks = 2;
+    auto &attributes = metadata.attributes;
+    attributes.inode = 27;
+    attributes.device = {0, 9};
+    for (auto field : {fs::Attribute::inode, fs::Attribute::device, fs::Attribute::access_time,
+                      fs::Attribute::modification_time, fs::Attribute::change_time, fs::Attribute::blocks512})
+        attributes.mark(field);
+    attributes.access = {-1, 999999999, fs::TimestampSource::readonly_ext4};
+    attributes.modification = {2208988800, 1234, fs::TimestampSource::readonly_ext4};
+    attributes.change = {0, 0, fs::TimestampSource::readonly_ext4};
+    std::array<u8, 256> bytes{};
+    const auto encoded = Codec::encode(metadata, lu::StatLayout::statx, bytes);
+    if (!encoded || encoded.value() != bytes.size())
+        return Status::fault("Linux statx debug projection failed");
+    for (usize index = 144; index < bytes.size(); ++index)
+        if (bytes[index] != 0)
+            return Status::fault("Linux statx reserved bytes are not zero");
+    auto reject_without_output = [&](StatusCode expected) {
+        bytes.fill(0xa5);
+        const auto result = Codec::encode(metadata, lu::StatLayout::statx, bytes);
+        if (result || result.status().code() != expected)
+            return false;
+        for (const auto value : bytes)
+            if (value != 0xa5)
+                return false;
+        return true;
+    };
+    attributes.device = {};
+    if (!reject_without_output(StatusCode::unsupported))
+        return Status::fault("Linux statx zero device admission failed");
+    attributes.device = {0, 9};
+    metadata.blocks = 0x8000000000000000ull;
+    if (!reject_without_output(StatusCode::overflow))
+        return Status::fault("Linux statx signed libc block bound failed");
+    metadata.blocks = 2;
+    attributes.valid &= ~static_cast<u32>(fs::Attribute::blocks512);
+    if (!reject_without_output(StatusCode::unsupported))
+        return Status::fault("Linux statx allocation qualification failed");
+    attributes.mark(fs::Attribute::blocks512);
+    if constexpr (Codec::has_kernel_stat)
+    {
+        const auto size = Codec::size(lu::StatLayout::kernel_stat);
+        const auto legacy = Codec::encode(metadata, lu::StatLayout::kernel_stat, {bytes.data(), size});
+        if (!legacy || legacy.value() != size)
+            return Status::fault("Linux kernel-stat debug projection failed");
+    }
+    return Status::success();
+}
+
 Status verify_linux_abi_decode_and_errno()
 {
+    // Local clock state only: debug models must never set the live boot clock.
+    time::RealtimeClock local_clock;
+    static_cast<void>(local_clock.reject_boot(Status::unsupported("model has no RTC")));
+    if (!local_clock.set({100, 9}, {1000, 1}, 1))
+        return Status::fault("software clock model publication failed");
+    const auto first = local_clock.read({1017, 1});
+    if (!first || first.value().value != time::EpochTime{100, 26} ||
+        first.value().origin != time::RealtimeOrigin::administrator_software ||
+        local_clock.boot_info().state != time::AnchorState::unavailable ||
+        !local_clock.set({90, 0}, {1020, 1}, 1) || local_clock.info().wall_generation != 2)
+        return Status::fault("software clock model provenance or backwards step failed");
+    if (local_clock.read({1021, 2}) || local_clock.set({200, 0}, {1022, 1}, 1))
+        return Status::fault("software clock model revived after continuity loss");
+    usize samples = 0, commits = 0;
+    const auto denied = user::set_realtime_checked(
+        {100, 0}, user::default_user_credentials(),
+        [&]() -> Result<time::MonotonicPoint> { ++samples; return time::MonotonicPoint{1000, 1}; },
+        [&](time::EpochTime, time::MonotonicPoint) { ++commits; return Status::success(); });
+    if (denied.code() != StatusCode::permission || samples || commits)
+        return Status::fault("software clock model permission ordering failed");
+    // Deadline arithmetic is a model gate; actual sleeping is a separate guest test.
+    namespace lu = abi::linux_user;
+    if (lu::linux_sleep_deadline(42, {1, 2}, false) != 1000000044 ||
+        lu::linux_sleep_deadline(42, {0, 0}, true) != 0 ||
+        lu::linux_sleep_deadline(42, {9223372036LL, 0}, false) != lu::ktime_maximum ||
+        lu::linux_sleep_deadline(lu::ktime_maximum - 1, {0, 2}, false) != lu::ktime_maximum)
+        return Status::fault("Linux bounded sleep deadline model failed");
     syscall::LinuxSyscallAbi abi;
     const auto frame = linux_frame(syscall::Number::mmap, std::array<u64, 6>{1, 2, 3, 4, 5, 6});
     const auto request = abi.decode_x86_64(frame, 99);
@@ -210,6 +314,48 @@ Status verify_linux_file_io(Kernel &kernel, syscall::LinuxSyscallDispatcher &dis
     return Status::success();
 }
 
+// Native table record projection; this does not enable Linux stat wire layouts.
+Status verify_native_stat_projection(Kernel &kernel, sched::ProcessId caller)
+{
+    constexpr char path[] = "/tmp/linux-openat";
+    auto opened = kernel.posix().open(path, posix::o_RDONLY);
+    if (!opened) return opened.status();
+    Status result;
+    for (auto number : {syscall::Number::stat, syscall::Number::lstat, syscall::Number::fstat, syscall::Number::newfstatat})
+    {
+        struct Output { ok_stat value{}; std::array<u8, 128> guard{}; } output;
+        output.guard.fill(0xa5);
+        auto *raw = reinterpret_cast<u8 *>(&output.value);
+        for (usize i = 0; i < sizeof(ok_stat); ++i) raw[i] = 0xa5;
+        syscall::Request request{.number = number, .caller = caller};
+        if (number == syscall::Number::newfstatat)
+            request.args = {static_cast<u64>(static_cast<i64>(posix::at_FDCWD)), reinterpret_cast<uptr>(path), reinterpret_cast<uptr>(&output.value), 0, 0, 0};
+        else
+            request.args = {number == syscall::Number::fstat ? static_cast<u64>(opened.value()) : reinterpret_cast<uptr>(path), reinterpret_cast<uptr>(&output.value), 0, 0, 0, 0};
+        auto response = kernel.syscalls().dispatch(request);
+        if (!response.status || response.value || output.value.size != 10 ||
+            output.value.type != static_cast<u8>(fs::NodeType::regular) || output.value.link_count != 1)
+            result = Status::fault("native stat projection changed existing fields");
+
+        std::array<bool, sizeof(ok_stat)> fields{};
+        auto field = [&](usize offset, usize size) { for (usize i = 0; i < size; ++i) fields[offset + i] = true; };
+        field(offsetof(ok_stat, type), sizeof(output.value.type));
+        field(offsetof(ok_stat, size), sizeof(output.value.size));
+        field(offsetof(ok_stat, mode), sizeof(output.value.mode));
+        field(offsetof(ok_stat, uid), sizeof(output.value.uid));
+        field(offsetof(ok_stat, gid), sizeof(output.value.gid));
+        field(offsetof(ok_stat, link_count), sizeof(output.value.link_count));
+        field(offsetof(ok_stat, block_size), sizeof(output.value.block_size));
+        field(offsetof(ok_stat, blocks), sizeof(output.value.blocks));
+        for (usize i = 0; i < sizeof(ok_stat); ++i)
+            if (!fields[i] && raw[i]) result = Status::fault("native stat exposed unspecified padding");
+        for (auto byte : output.guard)
+            if (byte != 0xa5) result = Status::fault("native stat wrote beyond unchanged UAPI record");
+    }
+    auto closed = kernel.posix().close(opened.value());
+    return result ? closed : result;
+}
+
 Status verify_linux_getdents(syscall::LinuxSyscallDispatcher &dispatcher, sched::ProcessId caller)
 {
     constexpr char root[] = "/";
@@ -264,11 +410,13 @@ Status verify_linux_time(syscall::LinuxSyscallDispatcher &dispatcher, sched::Pro
 {
     posix::ClockTime now{};
     const auto clock = linux_dispatch(dispatcher, caller, syscall::Number::clock_gettime,
-                                      std::array<u64, 6>{0, reinterpret_cast<uptr>(&now), 0, 0, 0, 0});
-    i64 seconds = 0;
+                                      std::array<u64, 6>{1, reinterpret_cast<uptr>(&now), 0, 0, 0, 0});
+    i64 seconds = 123;
     const auto time = linux_dispatch(dispatcher, caller, syscall::Number::time,
                                      std::array<u64, 6>{reinterpret_cast<uptr>(&seconds), 0, 0, 0, 0, 0});
-    if (clock != 0 || time < 0 || seconds != time || now.nanoseconds < 0)
+    // Standalone trusted-model tests run before the native runtime's one-time
+    // RTC acquisition. They must not publish boot-relative time as UTC.
+    if (clock != 0 || time != -5 || seconds != 123 || now.nanoseconds < 0)
     {
         return Status::fault("Linux time syscall smoke test failed");
     }
@@ -282,6 +430,7 @@ Status verify_linux_futex_random_and_tls(syscall::LinuxSyscallDispatcher &dispat
         linux_dispatch(dispatcher, caller, syscall::Number::futex,
                        std::array<u64, 6>{reinterpret_cast<uptr>(&futex_word), posix::futex_WAKE, 1, 0, 0, 0});
     std::array<std::byte, 8> random{};
+    random.fill(std::byte{0xa5});
     const auto random_bytes =
         linux_dispatch(dispatcher, caller, syscall::Number::getrandom,
                        std::array<u64, 6>{reinterpret_cast<uptr>(random.data()), random.size(), 0, 0, 0, 0});
@@ -291,8 +440,10 @@ Status verify_linux_futex_random_and_tls(syscall::LinuxSyscallDispatcher &dispat
     const auto get_fs =
         linux_dispatch(dispatcher, caller, syscall::Number::arch_prctl,
                        std::array<u64, 6>{posix::arch_GET_FS, reinterpret_cast<uptr>(&fs_base), 0, 0, 0, 0});
-    if (futex != 0 || random_bytes != static_cast<i64>(random.size()) || set_fs != 0 || get_fs != 0 ||
-        fs_base != 0x7000)
+    bool untouched = true;
+    for (auto byte : random) untouched &= byte == std::byte{0xa5};
+    if (futex != 0 || random_bytes != -syscall::linux_EAGAIN || !untouched ||
+        set_fs != 0 || get_fs != 0 || fs_base != 0x7000)
     {
         return Status::fault("Linux futex, random, or TLS syscall smoke test failed");
     }
@@ -326,6 +477,9 @@ Status run_linux_abi_roadmap_tests(Kernel &kernel, KernelTestReport &report)
     syscall::LinuxSyscallDispatcher dispatcher{&kernel.syscalls()};
     const auto caller = kernel.scheduler().current_pid();
 
+    if (auto status = verify_linux_stat_projection(); !status.ok())
+        return status;
+
     if (auto status = verify_linux_abi_decode_and_errno(); !status.ok())
     {
         return status;
@@ -339,6 +493,10 @@ Status run_linux_abi_roadmap_tests(Kernel &kernel, KernelTestReport &report)
         return status;
     }
     if (auto status = verify_linux_file_io(kernel, dispatcher, caller); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = verify_native_stat_projection(kernel, caller); !status.ok())
     {
         return status;
     }
