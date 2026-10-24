@@ -50,6 +50,25 @@ Status InterruptDispatcher::dispatch(arch::TrapFrame &frame)
     return status;
 }
 
+Status InterruptDispatcher::dispatch_vector(Vector vector, arch::TrapFrame &frame)
+{
+    if (vector >= max_vectors)
+    {
+        return Status::invalid_argument("interrupt vector out of range");
+    }
+    auto &entry = handlers_[vector];
+    if (entry.handler == nullptr && entry.callback == nullptr)
+    {
+        return Status::not_found("unhandled interrupt vector");
+    }
+    auto status = entry.handler != nullptr ? entry.handler->handle(frame) : entry.callback(entry.context, frame);
+    if (status.ok())
+    {
+        ++handled_counts_[vector];
+    }
+    return status;
+}
+
 usize InterruptDispatcher::handled_count(Vector vector) const
 {
     if (vector >= max_vectors)

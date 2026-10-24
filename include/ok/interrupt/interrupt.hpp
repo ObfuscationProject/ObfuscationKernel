@@ -49,6 +49,8 @@ class InterruptDispatcher final
     Status register_handler(Vector vector, InterruptHandler &handler);
     Status register_callback(Vector vector, std::string_view name, void *context, Callback callback);
     Status dispatch(arch::TrapFrame &frame);
+    // Dispatch to an explicit vector; used by IrqRouter after the chip acknowledged a line.
+    Status dispatch_vector(Vector vector, arch::TrapFrame &frame);
 
     [[nodiscard]] usize handled_count(Vector vector) const;
     [[nodiscard]] bool has_handler(Vector vector) const;
