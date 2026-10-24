@@ -1,5 +1,6 @@
 #include "ok/core/entry.hpp"
 #include "ok/user/runtime.hpp"
+#include "ok/core/native_shutdown.hpp"
 
 namespace ok
 {
@@ -486,9 +487,21 @@ Status ok_start_userland(fs::BootArchive archive)
 {
     return user::native::start(kernel_instance(), archive);
 }
+Result<SystemPowerAction> ok_advance_native_shutdown(const NativeShutdownBoundary &boundary)
+{
+    return advance_native_shutdown(kernel_instance(), boundary);
+}
 bool ok_step_userland()
 {
     return user::native::step(kernel_instance());
+}
+Status ok_poll_network()
+{
+    return kernel_instance().poll_network();
+}
+Status ok_userland_status()
+{
+    return user::native::runtime_status();
 }
 void ok_userland_input(char value)
 {

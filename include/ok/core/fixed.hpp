@@ -121,6 +121,14 @@ template <typename T, usize Capacity> class StaticVector final
     {
         size_ = 0;
     }
+    constexpr Status pop_back()
+    {
+        if (!size_)
+            return Status::invalid_argument("static vector is empty");
+        --size_;
+        values_[size_] = T{};
+        return Status::success();
+    }
     // Reserves an existing storage slot; the caller must fully initialize it.
     constexpr Result<T *> push_back_slot()
     {

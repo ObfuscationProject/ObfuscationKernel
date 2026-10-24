@@ -1,5 +1,8 @@
 #include "ok/arch/arch.hpp"
 #include "ok/core/entry.hpp"
+#include "ok/core/native_shutdown.hpp"
+#include "ok/arch/terminal_power.hpp"
+#include "ok/user/runtime.hpp"
 
 #include <string_view>
 
@@ -13,7 +16,6 @@ extern "C" void ok_platform_display_write_char(char value);
 extern "C" void ok_platform_debug_exit(ok::u32 code);
 extern "C" void ok_platform_halt();
 extern "C" void ok_platform_poll_idle() __attribute__((weak));
-extern "C" void ok_platform_reboot() __attribute__((weak));
 extern "C" int ok_platform_input_poll();
 extern "C" int ok_platform_console_poll() __attribute__((weak));
 bool native_userland_started{};
@@ -49,33 +51,55 @@ void desktop_idle()
     }
 }
 
+} // namespace
+
+namespace ok::detail
+{
 [[maybe_unused, noreturn]] void desktop_loop(bool show_shell)
 {
     if (show_shell)
     {
         static_cast<void>(ok::ok_debug_shell_show_gui());
     }
+    const auto shutdown_boundary = [] {
+        NativeShutdownBoundary boundary;
+        auto action = ok_advance_native_shutdown(boundary);
+        if (!action)
+        {
+            platform_write("OK_SHUTDOWN failed=");
+            platform_write(action.status().message());
+            platform_write("\n");
+            arch::terminal_power_action(SystemPowerAction::none);
+        }
+        if (action.value() != SystemPowerAction::none)
+        {
+            if (action.value() == SystemPowerAction::halt)
+                platform_write("OK_SHUTDOWN clean=1 action=halt\n");
+            else if (action.value() == SystemPowerAction::reboot)
+                platform_write("OK_SHUTDOWN clean=1 action=reboot\n");
+            else if (action.value() == SystemPowerAction::poweroff)
+                platform_write("OK_SHUTDOWN clean=1 action=poweroff\n");
+            else
+                arch::terminal_power_action(SystemPowerAction::none);
+            arch::terminal_power_action(action.value());
+        }
+    };
     ok::u64 ui_tick_counter = 0;
     for (;;)
     {
-        switch (ok::ok_system_power_action())
+        shutdown_boundary();
+        // Retain link failure in the executor; unrelated tasks keep running.
+        static_cast<void>(ok::ok_poll_network());
+        static_cast<void>(ok::ok_step_userland());
+        shutdown_boundary();
+        if (!ok::ok_userland_status().ok())
         {
-        case ok::SystemPowerAction::none:
-            break;
-        case ok::SystemPowerAction::reboot:
-            if (ok_platform_reboot != nullptr)
-            {
-                ok_platform_reboot();
-            }
-            ok_platform_debug_exit(0x12u);
-            halt_forever();
-        case ok::SystemPowerAction::halt:
-        case ok::SystemPowerAction::poweroff:
-            ok_platform_debug_exit(0x10u);
+            platform_write("OK_TEST_FAIL native-runtime=");
+            platform_write(ok::ok_userland_status().message());
+            platform_write("\n");
+            ok_platform_debug_exit(0x11u);
             halt_forever();
         }
-
-        static_cast<void>(ok::ok_step_userland());
         bool did_work = false;
         const int serial = ok_platform_console_poll != nullptr ? ok_platform_console_poll() : -1;
         if (serial >= 0)
@@ -135,7 +159,8 @@ extern "C" [[noreturn]] void kernel_main()
     config.mode = ok::KernelBootMode::normal;
 #endif
 
-    [[maybe_unused]] auto status = ok::ok_kernel_entry(config);
+    [[maybe_unused]] auto status = ok::user::native::prepare_memory();
+    if (status.ok()) status = ok::ok_kernel_entry(config);
     if (status.ok() && ok_boot_archive != nullptr)
     {
         auto native = ok::ok_start_userland(ok_boot_archive());
@@ -150,19 +175,25 @@ extern "C" [[noreturn]] void kernel_main()
         else
         {
             native_userland_started = true;
-            for (ok::usize i = 0; i < 8192 && ok::ok_step_userland(); ++i)
-            {
-            }
         }
     }
 
 #if defined(OK_ENABLE_TEST_POINTS)
+    // Native userland is driven with console/input and GUI services. It may
+    // contain persistent runnable tasks or deadlines, so never drain it first.
+    if (status.ok() && native_userland_started)
+        ok::detail::desktop_loop(false);
     ok_platform_debug_exit(status.ok() ? 0x10u : 0x11u);
     if (status.ok())
     {
-        desktop_loop(false);
+        ok::detail::desktop_loop(false);
     }
 #else
+    // Core initialization observation precedes extension/session startup.
+    // This uses the existing startup status and writes only to the console.
+    debug_write(nullptr, "OK_KERNEL_BOOT scope=kernel mode=release arch=");
+    debug_write(nullptr, ok::arch::ArchOperations{}.name());
+    debug_write(nullptr, status.ok() ? " status=ready\n" : " status=failed\n");
     if (status.ok())
     {
         if (config.kernel.extension != nullptr)
@@ -176,10 +207,10 @@ extern "C" [[noreturn]] void kernel_main()
                 ok_platform_debug_exit(0x11u);
                 halt_forever();
             }
-            desktop_loop(false);
+            ok::detail::desktop_loop(false);
         }
 #if defined(OK_ENABLE_KERNEL_GUI)
-        desktop_loop(true);
+        ok::detail::desktop_loop(true);
 #endif
     }
 #endif

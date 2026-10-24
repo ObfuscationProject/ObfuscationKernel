@@ -1,4 +1,7 @@
 #include "ok/core/kernel.hpp"
+#include "ok/posix/native_stat.hpp"
+#include "ok/time/public_clock.hpp"
+#include "ok/user/clock_set.hpp"
 
 namespace ok
 {
@@ -97,8 +100,22 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
     {
         return status;
     }
+    for (const auto number : {syscall::Number::getpgid, syscall::Number::getsid,
+                              syscall::Number::getpgrp, syscall::Number::setsid, syscall::Number::setpgid})
+        if (auto status = add(number, "process-session", [](void *context, const syscall::Request &request) {
+                auto &service = *static_cast<posix::PosixService *>(context);
+                if (request.number == syscall::Number::setpgid)
+                    return status_response(service.setpgid(static_cast<i32>(request.args[0]),
+                                                          static_cast<i32>(request.args[1])));
+                const auto pid = static_cast<i32>(request.args[0]);
+                auto result = request.number == syscall::Number::setsid ? service.setsid()
+                    : request.number == syscall::Number::getsid ? service.getsid(pid)
+                    : service.getpgid(request.number == syscall::Number::getpgrp ? 0 : pid);
+                return syscall::Response{.value = result ? static_cast<i64>(result.value()) : -1,
+                    .status = result ? Status::success() : result.status()};
+            }); !status.ok()) return status;
     if (auto status = add(syscall::Number::gettid, "gettid", [](void *context, const syscall::Request &) {
-            return syscall::Response{.value = static_cast<i64>(static_cast<posix::PosixService *>(context)->getpid()),
+            return syscall::Response{.value = static_cast<i64>(static_cast<posix::PosixService *>(context)->gettid()),
                                      .status = Status::success()};
         });
         !status.ok())
@@ -173,6 +190,15 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
                 auto status = static_cast<posix::PosixService *>(context)->fsync(static_cast<posix::Fd>(request.args[0]));
                 return syscall::Response{.value = status.ok() ? 0 : -1, .status = status};
             }); !status.ok()) return status;
+    if (auto status = add(syscall::Number::sync_persistent, "sync_persistent", [](void *context, const syscall::Request &request) {
+            for (usize index = 1; index < request.args.size(); ++index)
+                if (request.args[index])
+                    return syscall::Response{.value = -1, .status = Status::invalid_argument("persistent sync unused arguments")};
+            if (request.args[0] > 0x7fffffffU)
+                return syscall::Response{.value = -1, .status = Status::bad_descriptor("persistent sync fd range")};
+            auto status = static_cast<posix::PosixService *>(context)->sync_persistent(static_cast<posix::Fd>(request.args[0]));
+            return syscall::Response{.value = status.ok() ? 0 : -1, .status = status};
+        }); !status.ok()) return status;
     if (auto status = add(syscall::Number::ftruncate, "ftruncate", [](void *context, const syscall::Request &request) {
             auto status = static_cast<posix::PosixService *>(context)->ftruncate(static_cast<posix::Fd>(request.args[0]), static_cast<usize>(request.args[1]));
             return syscall::Response{.value = status.ok() ? 0 : -1, .status = status};
@@ -315,7 +341,7 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
             auto result = static_cast<posix::PosixService *>(context)->stat(bounded_c_string(request.args[0]));
             if (result && request.args[1] != 0)
             {
-                *reinterpret_cast<posix::FileStatus *>(request.args[1]) = result.value();
+                posix::write_native_file_status(reinterpret_cast<void *>(request.args[1]), result.value());
             }
             return syscall::Response{.value = result ? 0 : -1, .status = result ? Status::success() : result.status()};
         });
@@ -324,10 +350,11 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
         return status;
     }
     if (auto status = add(syscall::Number::lstat, "lstat", [](void *context, const syscall::Request &request) {
-            auto result = static_cast<posix::PosixService *>(context)->stat(bounded_c_string(request.args[0]));
+            auto result = static_cast<posix::PosixService *>(context)->statat(
+                posix::at_FDCWD, bounded_c_string(request.args[0]), posix::at_SYMLINK_NOFOLLOW);
             if (result && request.args[1] != 0)
             {
-                *reinterpret_cast<posix::FileStatus *>(request.args[1]) = result.value();
+                posix::write_native_file_status(reinterpret_cast<void *>(request.args[1]), result.value());
             }
             return syscall::Response{.value = result ? 0 : -1, .status = result ? Status::success() : result.status()};
         });
@@ -340,7 +367,7 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
                 static_cast<posix::PosixService *>(context)->fstat(static_cast<posix::Fd>(request.args[0]));
             if (result && request.args[1] != 0)
             {
-                *reinterpret_cast<posix::FileStatus *>(request.args[1]) = result.value();
+                posix::write_native_file_status(reinterpret_cast<void *>(request.args[1]), result.value());
             }
             return syscall::Response{.value = result ? 0 : -1, .status = result ? Status::success() : result.status()};
         });
@@ -354,7 +381,7 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
                 static_cast<u32>(request.args[3]));
             if (result && request.args[2] != 0)
             {
-                *reinterpret_cast<posix::FileStatus *>(request.args[2]) = result.value();
+                posix::write_native_file_status(reinterpret_cast<void *>(request.args[2]), result.value());
             }
             return syscall::Response{.value = result ? 0 : -1, .status = result ? Status::success() : result.status()};
         });
@@ -362,6 +389,21 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
     {
         return status;
     }
+
+    if (auto status = add(syscall::Number::fstat_v2, "fstat-v2", [](void *context, const syscall::Request &request) {
+            auto result = static_cast<posix::PosixService *>(context)->fstat(static_cast<posix::Fd>(request.args[0]));
+            if (result && request.args[1] != 0)
+                posix::write_native_file_status_v2(reinterpret_cast<void *>(request.args[1]), result.value());
+            return syscall::Response{.value = result ? 0 : -1, .status = result ? Status::success() : result.status()};
+        }); !status.ok()) return status;
+    if (auto status = add(syscall::Number::newfstatat_v2, "newfstatat-v2", [](void *context, const syscall::Request &request) {
+            auto result = static_cast<posix::PosixService *>(context)->statat(
+                static_cast<posix::Fd>(request.args[0]), bounded_c_string(request.args[1]),
+                static_cast<u32>(request.args[3]));
+            if (result && request.args[2] != 0)
+                posix::write_native_file_status_v2(reinterpret_cast<void *>(request.args[2]), result.value());
+            return syscall::Response{.value = result ? 0 : -1, .status = result ? Status::success() : result.status()};
+        }); !status.ok()) return status;
 
     if (auto status = add(syscall::Number::rename, "rename", [](void *context, const syscall::Request &request) {
             return status_response(static_cast<posix::PosixService *>(context)->rename(
@@ -389,6 +431,29 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
                 static_cast<u32>(request.args[4])));
         });
         !status.ok())
+        return status;
+    if (auto status = add(syscall::Number::symlink, "symlink", [](void *context, const syscall::Request &request) {
+            return status_response(static_cast<posix::PosixService *>(context)->symlinkat(
+                bounded_c_string(request.args[0]), posix::at_FDCWD, bounded_c_string(request.args[1])));
+        }); !status.ok())
+        return status;
+    if (auto status = add(syscall::Number::symlinkat, "symlinkat", [](void *context, const syscall::Request &request) {
+            return status_response(static_cast<posix::PosixService *>(context)->symlinkat(
+                bounded_c_string(request.args[0]), static_cast<posix::Fd>(request.args[1]),
+                bounded_c_string(request.args[2])));
+        }); !status.ok())
+        return status;
+    if (auto status = add(syscall::Number::readlink, "readlink", [](void *context, const syscall::Request &request) {
+            return size_response(static_cast<posix::PosixService *>(context)->readlinkat(
+                posix::at_FDCWD, bounded_c_string(request.args[0]),
+                {reinterpret_cast<std::byte *>(request.args[1]), static_cast<usize>(request.args[2])}));
+        }); !status.ok())
+        return status;
+    if (auto status = add(syscall::Number::readlinkat, "readlinkat", [](void *context, const syscall::Request &request) {
+            return size_response(static_cast<posix::PosixService *>(context)->readlinkat(
+                static_cast<posix::Fd>(request.args[0]), bounded_c_string(request.args[1]),
+                {reinterpret_cast<std::byte *>(request.args[2]), static_cast<usize>(request.args[3])}));
+        }); !status.ok())
         return status;
     if (auto status = add(syscall::Number::mkdir, "mkdir", [](void *context, const syscall::Request &request) {
             return status_response(static_cast<posix::PosixService *>(context)->mkdir(
@@ -566,15 +631,44 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
         return status;
     }
 
+    if (auto status = add(syscall::Number::clock_settime, "clock_settime",
+                          [](void *context, const syscall::Request &request) {
+                              if (request.args[0] != 0)
+                                  return status_response(Status::invalid_argument("clock has no setter"));
+                              if (request.args[1] == 0)
+                                  return status_response(Status::fault("clock request is null"));
+                              const auto value = *reinterpret_cast<const posix::ClockTime *>(request.args[1]);
+                              return status_response(user::set_realtime_checked(
+                                  {value.seconds, value.nanoseconds},
+                                  static_cast<posix::PosixService *>(context)->user_credentials(),
+                                  [] { return arch::monotonic_sample(); },
+                                  [](time::EpochTime epoch, time::MonotonicPoint point) {
+                                      return arch::set_realtime(epoch, point);
+                                  }));
+                          });
+        !status.ok())
+    {
+        return status;
+    }
     if (auto status = add(syscall::Number::clock_gettime, "clock_gettime",
                           [](void *context, const syscall::Request &request) {
+                              if (request.args[0] > 1)
+                                  return status_response(Status::invalid_argument("unknown clock identity"));
                               if (request.args[1] == 0)
                               {
                                   return syscall::Response{.value = -1,
                                                            .status = Status::invalid_argument("clock buffer is null")};
                               }
-                              *reinterpret_cast<posix::ClockTime *>(request.args[1]) =
-                                  static_cast<posix::PosixService *>(context)->clock_gettime();
+                              posix::ClockTime value{};
+                              if (request.args[0] == 0)
+                              {
+                                  auto now = time::public_clock(0);
+                                  if (!now) return status_response(now.status());
+                                  value = {now.value().seconds, now.value().nanoseconds};
+                              }
+                              else
+                                  value = static_cast<posix::PosixService *>(context)->clock_gettime();
+                              *reinterpret_cast<posix::ClockTime *>(request.args[1]) = value;
                               return syscall::Response{.value = 0, .status = Status::success()};
                           });
         !status.ok())
@@ -583,10 +677,20 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
     }
     if (auto status = add(syscall::Number::clock_getres, "clock_getres",
                           [](void *context, const syscall::Request &request) {
+                              if (request.args[0] > 1)
+                                  return status_response(Status::invalid_argument("unknown clock identity"));
                               if (request.args[1] != 0)
                               {
-                                  *reinterpret_cast<posix::ClockTime *>(request.args[1]) =
-                                      static_cast<posix::PosixService *>(context)->clock_getres();
+                                  posix::ClockTime value{};
+                                  if (request.args[0] == 0)
+                                  {
+                                      auto now = time::public_clock(0, true);
+                                      if (!now) return status_response(now.status());
+                                      value = {now.value().seconds, now.value().nanoseconds};
+                                  }
+                                  else
+                                      value = static_cast<posix::PosixService *>(context)->clock_getres();
+                                  *reinterpret_cast<posix::ClockTime *>(request.args[1]) = value;
                               }
                               return syscall::Response{.value = 0, .status = Status::success()};
                           });
@@ -609,6 +713,8 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
     }
     if (auto status = add(syscall::Number::clock_nanosleep, "clock_nanosleep",
                           [](void *context, const syscall::Request &request) {
+                              if (request.args[0] > 1 || request.args[1] != 0)
+                                  return status_response(Status::invalid_argument("unsupported model sleep clock/flags"));
                               if (request.args[2] == 0)
                               {
                                   return syscall::Response{
@@ -623,8 +729,12 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
     {
         return status;
     }
-    if (auto status = add(syscall::Number::time, "time", [](void *context, const syscall::Request &request) {
-            const auto now = static_cast<posix::PosixService *>(context)->clock_gettime().seconds;
+    if (auto status = add(syscall::Number::time, "time", [](void *, const syscall::Request &request) {
+            auto epoch = time::public_clock(0);
+            if (!epoch) return status_response(epoch.status());
+            auto seconds = time::native_time_seconds<sizeof(uptr)>(epoch.value());
+            if (!seconds) return status_response(seconds.status());
+            const auto now = seconds.value();
             if (request.args[0] != 0)
             {
                 *reinterpret_cast<i64 *>(request.args[0]) = now;
@@ -636,7 +746,7 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
         return status;
     }
     if (auto status = add(syscall::Number::gettimeofday, "gettimeofday",
-                          [](void *context, const syscall::Request &request) {
+                          [](void *, const syscall::Request &request) {
                               struct TimeVal
                               {
                                   i64 seconds;
@@ -644,9 +754,10 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
                               };
                               if (request.args[0] != 0)
                               {
-                                  const auto now = static_cast<posix::PosixService *>(context)->clock_gettime();
+                                  auto now = time::public_clock(0);
+                                  if (!now) return status_response(now.status());
                                   *reinterpret_cast<TimeVal *>(request.args[0]) =
-                                      TimeVal{.seconds = now.seconds, .microseconds = now.nanoseconds / 1000};
+                                      TimeVal{.seconds = now.value().seconds, .microseconds = now.value().nanoseconds / 1000};
                               }
                               return syscall::Response{.value = 0, .status = Status::success()};
                           });
@@ -728,8 +839,11 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
         return status;
     }
     if (auto status = add(syscall::Number::getrandom, "getrandom", [](void *context, const syscall::Request &request) {
+            if (request.args[2] >> 32)
+                return size_response(Result<usize>{Status::invalid_argument("unsupported getrandom flags")});
             return size_response(static_cast<posix::PosixService *>(context)->getrandom(
-                std::span<std::byte>{reinterpret_cast<std::byte *>(request.args[0]), static_cast<usize>(request.args[1])}));
+                std::span<std::byte>{reinterpret_cast<std::byte *>(request.args[0]), static_cast<usize>(request.args[1])},
+                static_cast<u32>(request.args[2])));
         });
         !status.ok())
     {

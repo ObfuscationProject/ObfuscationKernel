@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <concepts>
 #include <optional>
 #include <string_view>
 #include <utility>
@@ -45,11 +46,22 @@ enum class StatusCode : u32
     link_limit,
     no_space,
     permission,
+    too_many_symlinks,
+    process_file_limit,
+    system_file_limit,
+    name_too_long,
+    message_size,
+    no_process,
+    not_terminal,
 };
 
 class Status final
 {
   public:
+    [[nodiscard]] static constexpr Status not_terminal(std::string_view message = {})
+    {
+        return {StatusCode::not_terminal, message};
+    }
     constexpr Status() = default;
     constexpr Status(StatusCode code, std::string_view message = {}) : code_(code), message_(message)
     {
@@ -91,6 +103,26 @@ class Status final
     {
         return {StatusCode::not_empty, message};
     }
+    [[nodiscard]] static constexpr Status too_many_symlinks(std::string_view message = {})
+    {
+        return {StatusCode::too_many_symlinks, message};
+    }
+    [[nodiscard]] static constexpr Status name_too_long(std::string_view message = {})
+    {
+        return {StatusCode::name_too_long, message};
+    }
+    [[nodiscard]] static constexpr Status message_size(std::string_view message = {})
+    {
+        return {StatusCode::message_size, message};
+    }
+    [[nodiscard]] static constexpr Status process_file_limit(std::string_view message = {})
+    {
+        return {StatusCode::process_file_limit, message};
+    }
+    [[nodiscard]] static constexpr Status system_file_limit(std::string_view message = {})
+    {
+        return {StatusCode::system_file_limit, message};
+    }
     [[nodiscard]] static constexpr Status link_limit(std::string_view message = {})
     {
         return {StatusCode::link_limit, message};
@@ -106,6 +138,10 @@ class Status final
     [[nodiscard]] static constexpr Status invalid_argument(std::string_view message = {})
     {
         return {StatusCode::invalid_argument, message};
+    }
+    [[nodiscard]] static constexpr Status no_process(std::string_view message = {})
+    {
+        return {StatusCode::no_process, message};
     }
     [[nodiscard]] static constexpr Status no_memory(std::string_view message = {})
     {
@@ -177,6 +213,10 @@ class Status final
 template <typename T> class Result final
 {
   public:
+    explicit Result(std::in_place_t) requires std::default_initializable<T>
+        : value_(std::in_place), status_(Status::success())
+    {
+    }
     Result(T value) : value_(std::move(value)), status_(Status::success())
     {
     }

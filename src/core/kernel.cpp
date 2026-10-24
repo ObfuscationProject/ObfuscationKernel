@@ -1,7 +1,12 @@
 #include "ok/core/kernel.hpp"
+#include "ok/arch/terminal_power.hpp"
 #include "ok/core/entry.hpp"
+#include "ok/net/native_udp_sdk_profile.hpp"
+#include "ok/user/native_futex_wake_operation_sdk_profile.hpp"
+#include "ok/arch/clock.hpp"
 #include "ok/sched/process.hpp"
 #include "ok/user/runtime.hpp"
+#include "../user/native_lifecycle.hpp"
 
 namespace ok
 {
@@ -106,15 +111,60 @@ template <usize Capacity> Status append_unsigned(FixedString<Capacity> &out, u64
 
 } // namespace
 
-Kernel::Kernel() : arch_(&arch::arch_operations(arch::configured_architecture()))
+namespace
 {
+// Construction and all network operations are serialized on the boot CPU.
+// Identity zero is terminal; a retired identity is never returned again.
+net::tcp::TableIdentity allocate_tcp_identity()
+{
+    static u64 last{};
+    return {last == ~u64{0} ? 0 : ++last};
+}
+}
+
+Kernel::Kernel() : arch_(&arch::arch_operations(arch::configured_architecture())),
+    native_tcp_(allocate_tcp_identity()), native_tcp_operations_(scheduler_, native_tcp_),
+    native_tcp_waits_(scheduler_, native_tcp_)
+{
+    static_cast<void>(scheduler_.set_native_udp_service(native_udp_));
+    static_cast<void>(scheduler_.set_native_tcp_service(native_tcp_));
+    static_cast<void>(native_udp_executor_.use_shared_link());
+}
+
+Kernel::~Kernel()
+{
+    // Fallible shutdown uses the scheduler report explicitly. This fallback
+    // retires resource edges while VFS nodes and UDP services still exist.
+    static_cast<void>(scheduler_.drain_all_resources());
 }
 
 Status Kernel::boot(KernelConfig config)
 {
+    if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
+    if (booted_) return Status::already_exists("kernel instance is already booted");
+    if (native_udp_executor_.activated())
+        return Status::busy("native UDP executor cannot be reset after link activation");
+    if (native_udp_.configured() || !native_udp_.status())
+        return Status::busy("native UDP readiness owner cannot be reset after configuration or retirement");
+    if (native_udp_.active_sockets())
+        return Status::busy("native UDP endpoints must be retired before boot reset");
+    const auto protocol = native_tcp_.endpoints().pools();
+    if (native_tcp_clock_generation_ || native_tcp_.active_streams() || native_tcp_waits_.records() ||
+        protocol.connections || protocol.listeners || protocol.prepared || protocol.retired)
+        return Status::busy("native TCP owners and protocol state prohibit boot reset");
+    if (auto status = scheduler_.set_native_udp_service(native_udp_); !status.ok())
+        return status;
+    if (auto status = scheduler_.set_native_tcp_service(native_tcp_); !status)
+        return status;
+    if (auto status = native_tcp_.endpoints().status(); !status) return status;
+    if (auto status = native_tcp_waits_.status(); !status) return status;
     if (auto status = arch::validate_architecture(config.architecture); !status.ok())
     {
         return status;
+    }
+    if (config.memory_region_count > config.memory_map.size())
+    {
+        return Status::invalid_argument("kernel memory map exceeds its region capacity");
     }
     test_report_ = {};
     kernel_modules_ = {};
@@ -132,6 +182,8 @@ Status Kernel::boot(KernelConfig config)
     gui_mouse_left_down_ = false;
     if (config.memory_region_count == 0)
     {
+        // Bring-up bookkeeping only: native RAM discovery must replace this map
+        // before these frames can back hardware mappings or device DMA.
         config.memory_map[0] =
             memory::MemoryRegion{.base = 0x0010'0000, .size = 64 * 1024 * 1024, .type = memory::RegionType::usable};
         config.memory_region_count = 1;
@@ -396,6 +448,7 @@ Status Kernel::boot(KernelConfig config)
 
 Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
 {
+    if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
     if (!booted_)
     {
         return Status::not_initialized("kernel is not booted");
@@ -487,6 +540,7 @@ Status Kernel::handle_gui_mouse(i32 delta_x, i32 delta_y, bool left_button)
 
 Status Kernel::handle_gui_mouse_position(i32 x, i32 y, bool left_button)
 {
+    if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
     if (!booted_)
     {
         return Status::not_initialized("kernel is not booted");
@@ -505,6 +559,7 @@ Status Kernel::handle_gui_mouse_position(i32 x, i32 y, bool left_button)
 
 Status Kernel::handle_gui_scroll(i32 rows)
 {
+    if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
     if (!booted_)
     {
         return Status::not_initialized("kernel is not booted");
@@ -531,6 +586,7 @@ Status Kernel::handle_gui_scroll(i32 rows)
 
 Status Kernel::handle_gui_key(int key)
 {
+    if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
     if (!booted_)
     {
         return Status::not_initialized("kernel is not booted");
@@ -626,8 +682,127 @@ Status Kernel::handle_gui_taskbar_launcher(gui::TaskbarApp app)
     return Status::success();
 }
 
+Status Kernel::poll_network()
+{
+    if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
+    if (network_poll_active_) return Status::busy("Ethernet poll is not reentrant");
+    struct PollScope
+    {
+        bool &active;
+        explicit PollScope(bool &value) : active(value) { active = true; }
+        ~PollScope() { active = false; }
+    } scope{network_poll_active_};
+    const auto observer = native_udp_executor_.state();
+    if (observer.failed)
+        return retire_native_link(Status{observer.failure_cause, "UDP shared link observer is retired"});
+    const auto existing = native_ethernet_executor_.state();
+    if (existing.retired)
+        return retire_native_link(Status{existing.cause, "common Ethernet link is retired"});
+    if (!native_udp_.configured()) return Status::success();
+    u64 now = native_tcp_.now();
+    if (native_tcp_clock_generation_)
+    {
+        auto sampled = native_tcp_now();
+        if (!sampled) return sampled.status();
+        now = sampled.value();
+    }
+    struct Transport
+    {
+        Kernel &kernel;
+        Result<net::NativeUdpTransmitState> reap(usize budget)
+        {
+            auto *extension = kernel.extension();
+            return extension ? extension->network_poll_transmit(kernel, budget)
+                : Result<net::NativeUdpTransmitState>{Status::unsupported("native UDP extension is absent")};
+        }
+        Result<usize> receive(std::span<std::byte> frame)
+        {
+            return kernel.extension()->network_receive(kernel, frame);
+        }
+        Status try_transmit(std::span<const std::byte> frame)
+        {
+            return kernel.extension()->network_try_transmit(kernel, frame);
+        }
+    } transport{*this};
+    struct Iss
+    {
+        Kernel &kernel;
+        Result<u32> operator()(net::tcp::Endpoint local, net::tcp::Endpoint peer)
+        { return kernel.native_tcp_iss(local, peer); }
+    } iss{*this};
+    const auto result = native_ethernet_executor_.poll(native_tcp_, native_udp_, native_tcp_waits_, transport, iss, now);
+    const auto state = native_ethernet_executor_.state();
+    const auto observed = native_udp_executor_.observe_shared_link(state.credit, state.controls, state.dropped_control,
+        state.retired ? Status{state.cause, "common Ethernet link is retired"} : Status{});
+    if (!observed)
+    {
+        const auto failure = native_udp_executor_.state();
+        return retire_native_link(failure.failed
+            ? Status{failure.failure_cause, "UDP shared link observer is retired"} : observed);
+    }
+    return result;
+}
+
+Status Kernel::retire_native_link(Status cause)
+{
+    // Repeated clock/poll failures preserve the original terminal owner/cause.
+    const auto existing = native_ethernet_executor_.state();
+    const auto observer = native_udp_executor_.state();
+    if (existing.retired) cause = Status{existing.cause, "common Ethernet link was already retired"};
+    else if (observer.failed) cause = Status{observer.failure_cause, "UDP shared link observer was already retired"};
+    if (cause) cause = Status::io_error("common Ethernet link retirement requires a failure cause");
+    const auto retired = existing.retired ? Status::io_error("TCP Ethernet executor is retired")
+        : native_ethernet_executor_.retire(native_tcp_, native_tcp_waits_, cause);
+    const auto state = native_ethernet_executor_.state();
+    const auto observed = native_udp_executor_.observe_shared_link(0, 0, state.dropped_control, cause);
+    return !observed ? observed : retired;
+}
+
+Result<u64> Kernel::native_tcp_now()
+{
+    auto sampled = arch::monotonic_sample();
+    if (!sampled) return retire_native_link(sampled.status());
+    const auto point = sampled.value();
+    const u64 now = point.nanoseconds / 1000000;
+    if (!point.generation || (native_tcp_clock_generation_ && point.generation != native_tcp_clock_generation_) ||
+        point.nanoseconds < native_tcp_last_nanoseconds_ || now < native_tcp_.now())
+        return retire_native_link(Status::io_error("TCP monotonic clock continuity was lost"));
+    native_tcp_clock_generation_ = point.generation;
+    native_tcp_last_nanoseconds_ = point.nanoseconds;
+    return now;
+}
+
+Status Kernel::activate_native_tcp()
+{
+    if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
+    if (auto status = native_udp_executor_.status(); !status) return status;
+    if (auto status = native_tcp_.endpoints().status(); !status) return status;
+    if (!native_udp_.configured())
+    {
+        auto *active = extension();
+        if (!active) return Status::unsupported("TCP network extension is absent");
+        auto link = active->network_link(*this); if (!link) return link.status();
+        if (auto status = native_udp_.configure(link.value()); !status) return status;
+    }
+    auto now = native_tcp_now();
+    return now ? Status{} : now.status();
+}
+
+Result<u32> Kernel::native_tcp_iss(net::tcp::Endpoint local, net::tcp::Endpoint peer)
+{
+    static_cast<void>(local); static_cast<void>(peer);
+    std::array<std::byte, 4> bytes{};
+    auto acquired = posix_.getrandom(bytes);
+    if (!acquired) return acquired.status();
+    if (acquired.value() != bytes.size()) return Status::would_block("TCP ISS entropy acquisition was incomplete");
+    u32 value{};
+    for (const auto byte : bytes) value = (value << 8) | std::to_integer<u8>(byte);
+    return value;
+}
+
 Status Kernel::tick()
 {
+    if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
     if (!booted_)
     {
         return Status::not_initialized("kernel is not booted");
@@ -893,6 +1068,7 @@ Result<fs::FileBuffer> Kernel::read_external_module_file(std::string_view path)
 }
 Status Kernel::start_extension()
 {
+    if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
     if (!booted_)
         return Status::not_initialized("kernel is not booted");
     if (auto status = posix_.activate(0); !status.ok())
@@ -902,6 +1078,7 @@ Status Kernel::start_extension()
 
 Status Kernel::refresh_extension(bool focus)
 {
+    if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
     if (auto status = posix_.activate(0); !status.ok())
         return status;
     return config_.extension == nullptr ? gui_module_.compositor().present() : config_.extension->refresh(*this, focus);
@@ -909,6 +1086,7 @@ Status Kernel::refresh_extension(bool focus)
 
 Status Kernel::extension_surface_action(gui::SurfaceId surface, ExtensionSurfaceAction action)
 {
+    if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
     if (auto status = posix_.activate(0); !status.ok())
         return status;
     return config_.extension == nullptr ? Status::not_found("surface is not extension-owned")
@@ -917,6 +1095,7 @@ Status Kernel::extension_surface_action(gui::SurfaceId surface, ExtensionSurface
 
 Status Kernel::load_external_kernel_module(std::string_view path)
 {
+    if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
     if (arch_ == nullptr)
     {
         return Status::not_initialized("kernel architecture is not selected");
@@ -1010,6 +1189,7 @@ void Kernel::clear_gui_close_attempt(gui::SurfaceId surface)
 Result<sched::ProcessId> Kernel::create_ui_process(std::string_view name, uptr entry, uptr stack_top,
                                                    user::Credentials credentials)
 {
+    if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
     auto process = credentials.kernel_space
                        ? scheduler_.create_process(name, arch_->make_kernel_context(entry, stack_top))
                        : scheduler_.create_user_process(name, arch_->make_user_context(arch::UserEntry{
@@ -1241,6 +1421,7 @@ Status Kernel::reconcile_task_managers()
 
 Status Kernel::open_file_manager(std::string_view path, bool foreground_shell_child)
 {
+    if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
     if (!booted_)
     {
         return Status::not_initialized("kernel is not booted");
@@ -1299,6 +1480,7 @@ Status Kernel::open_file_manager(std::string_view path, bool foreground_shell_ch
 
 Status Kernel::open_task_manager(bool foreground_shell_child, std::string_view program_name)
 {
+    if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
     if (!booted_)
     {
         return Status::not_initialized("kernel is not booted");
@@ -1546,7 +1728,7 @@ Status Kernel::close_debug_gui()
         return status;
     }
     auto &compositor = gui_module_.compositor();
-    if (compositor.state() == gui::GuiState::running)
+    if (!shutdown_admission_closed_ && compositor.state() == gui::GuiState::running)
     {
         return refresh_extension(true);
     }
@@ -1555,16 +1737,11 @@ Status Kernel::close_debug_gui()
 
 Status Kernel::request_power_action(SystemPowerAction action)
 {
-    if (action == SystemPowerAction::none)
-    {
-        return Status::invalid_argument("power action must not be none");
-    }
-    if (power_action_ != SystemPowerAction::none && power_action_ != action)
-    {
-        return Status::busy("a power action is already pending");
-    }
-    power_action_ = action;
-    return Status::success();
+    if (action != SystemPowerAction::halt && action != SystemPowerAction::poweroff &&
+        action != SystemPowerAction::reboot)
+        return Status::invalid_argument("invalid power action");
+    // The native shutdown adapter must prove retirement and storage sealing.
+    return Status::unsupported("synchronized shutdown is not available");
 }
 
 Status Kernel::kill_process(sched::ProcessId pid)
@@ -1573,13 +1750,37 @@ Status Kernel::kill_process(sched::ProcessId pid)
     {
         return Status::invalid_argument("process id must be non-zero");
     }
-    user::native::release_process(*this, pid);
+    const auto *process = scheduler_.find(pid);
+    bool native_resources = process && (process->resources().native_space.root ||
+                                       !process->resources().native_pages.empty());
+    if (process)
+        for (const auto &thread : process->threads())
+            native_resources |= thread.native_active || thread.entry_stack.pool || thread.kernel_stack_top;
+    const bool native_linux = process && process->resources().personality == sched::UserPersonality::linux &&
+        process->state() != sched::ProcessState::created;
+    const bool native_owner = process && process->execution() == sched::ProcessExecution::user_process &&
+        process->state() != sched::ProcessState::created && native_resources;
     const bool shell_process = debug_shell_.owns_process(pid);
     const auto file_manager_process = find_file_manager_by_process(pid);
     const auto task_manager_process = find_task_manager_by_process(pid);
-    if (auto status = scheduler_.kill_process(pid); !status.ok())
+    if (native_linux || native_owner)
     {
-        return status;
+        if (auto status = user::native::terminate_native_process(*this, pid, 9); !status) return status;
+        // Native administrative cleanup retains its immediate-erase policy,
+        // after the checked completion has rebound adopted child lineage.
+        if (!native_linux)
+            if (auto status = scheduler_.reap_process(pid); !status) return status;
+    }
+    else
+    {
+        if (native_resources)
+        {
+            // A failed native service must not block unrelated GUI/model tasks.
+            // Native owners still require checked cleanup before immediate erase.
+            user::native::release_process(*this, pid);
+            if (auto status = user::native::runtime_status(); !status) return status;
+        }
+        if (auto status = scheduler_.kill_process(pid); !status) return status;
     }
 
     if (shell_process)
@@ -1607,18 +1808,19 @@ Status Kernel::kill_process(sched::ProcessId pid)
             return status;
         }
     }
-    if (config_.extension != nullptr)
+    if (!shutdown_admission_closed_ && config_.extension != nullptr)
     {
         if (auto status = config_.extension->process_exited(*this, pid); !status.ok())
         {
             return status;
         }
     }
-    return supervise_daemons();
+    return shutdown_admission_closed_ ? Status{} : supervise_daemons();
 }
 
 Status Kernel::supervise_daemons()
 {
+    if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
     StaticVector<driver::DriverManager::DriverProcessRestart, driver::max_drivers> driver_restarts;
     if (auto status = drivers_.supervise_kernel_processes(driver_restarts); !status.ok())
     {
@@ -1771,6 +1973,60 @@ Status Kernel::register_builtin_interrupts(driver::TimerDriver &timer)
         static_cast<driver::TimerDriver *>(context)->tick();
         return Status::success();
     });
+}
+
+Status Kernel::shutdown_preflight_producers()
+{
+    if (!booted_) return Status::not_initialized("shutdown kernel is not booted");
+    if (shutdown_admission_closed_ || network_poll_active_)
+        return Status::busy("kernel producer boundary is unavailable");
+    // The current qualified path has no live external network/DMA owner.
+    const auto tcp = native_tcp_.endpoints().pools();
+    if (native_udp_.configured() || native_udp_.active_sockets() || native_udp_executor_.activated() ||
+        native_tcp_clock_generation_ || native_tcp_.active_streams() || native_tcp_waits_.records() ||
+        tcp.connections || tcp.listeners || tcp.prepared || tcp.retired)
+        return Status::unsupported("active network producers are not shutdown-qualified");
+    driver::Driver *const expected[]{&console_driver_, &timer_driver_, &null_block_driver_,
+        &ram_block_driver_, &virtio_block_driver_, &display_driver_, &virtio_gpu_driver_,
+        &keyboard_driver_, &mouse_driver_, &pci_bus_driver_, &usb_xhci_driver_,
+        &usb_keyboard_driver_, &usb_mouse_driver_};
+    if (auto status = drivers_.shutdown_preflight(expected); !status) return status;
+    if (auto status = kernel_modules_.shutdown_preflight(); !status) return status;
+    return extension() ? extension()->shutdown_preflight(*this) : Status{};
+}
+Status Kernel::shutdown_close_admission()
+{
+    if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission was already closed");
+    // Qualified execution is serialized on the boot CPU. Stop asynchronous
+    // interrupt delivery before any owner is consumed; polled storage remains.
+    if (auto status = arch::close_shutdown_interrupt_admission(); !status) return status;
+    shutdown_admission_closed_ = true;
+    if (auto status = drivers_.close_shutdown_admission(); !status) return status;
+    if (auto status = kernel_modules_.close_shutdown_admission(); !status) return status;
+    return scheduler_.close_shutdown_admission();
+}
+Status Kernel::shutdown_stop_producers()
+{
+    if (!shutdown_admission_closed_ || shutdown_stop_started_)
+        return Status::denied("kernel producer retirement is not admitted");
+    shutdown_stop_started_ = true;
+    if (auto *active = extension())
+        if (auto status = active->shutdown_stop_producers(*this); !status) return status;
+    if (auto status = close_debug_gui(); !status) return status;
+    // Stop each registered module once. shutdown_all would call stop again in
+    // current modules, which cannot be used as a second cleanup attempt.
+    if (auto status = kernel_modules_.stop_all(); !status) return status;
+    if (auto status = drivers_.stop_shutdown_producers(); !status) return status;
+    shutdown_producers_stopped_ = true;
+    return {};
+}
+Status Kernel::shutdown_verify_producers_stopped() const
+{
+    if (!shutdown_admission_closed_ || !shutdown_producers_stopped_ || network_poll_active_)
+        return Status::busy("kernel producers have not retired");
+    if (!scheduler_.shutdown_admission_closed())
+        return Status::busy("scheduler admission remains open");
+    return {};
 }
 
 } // namespace ok

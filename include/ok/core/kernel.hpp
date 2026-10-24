@@ -14,6 +14,9 @@
 #include "ok/ipc/ipc.hpp"
 #include "ok/memory/memory.hpp"
 #include "ok/net/net.hpp"
+#include "ok/net/native_udp.hpp"
+#include "ok/net/native_tcp_ethernet.hpp"
+#include "ok/net/tcp_stream_checked.hpp"
 #include "ok/posix/posix.hpp"
 #include "ok/sched/scheduler.hpp"
 #include "ok/smp/smp.hpp"
@@ -96,6 +99,7 @@ class Kernel final
 {
   public:
     Kernel();
+    ~Kernel();
 
     Status boot(KernelConfig config);
     Status run_debug_test_suite();
@@ -104,6 +108,10 @@ class Kernel final
     Status handle_gui_scroll(i32 rows);
     Status handle_gui_key(int key);
     Status tick();
+    Status poll_network();
+    Status activate_native_tcp();
+    Result<u64> native_tcp_now();
+    Result<u32> native_tcp_iss(net::tcp::Endpoint local, net::tcp::Endpoint peer);
     Result<sched::ProcessId> create_ui_process(std::string_view name, uptr entry, uptr stack_top,
                                                user::Credentials credentials);
     Status open_file_manager(std::string_view path, bool foreground_shell_child = false);
@@ -115,6 +123,10 @@ class Kernel final
     Status supervise_daemons();
     Status load_external_kernel_module(std::string_view path);
     Status request_power_action(SystemPowerAction action);
+    Status shutdown_preflight_producers();
+    Status shutdown_close_admission();
+    Status shutdown_stop_producers();
+    [[nodiscard]] Status shutdown_verify_producers_stopped() const;
 
     [[nodiscard]] bool booted() const
     {
@@ -250,6 +262,12 @@ class Kernel final
     {
         return network_;
     }
+    [[nodiscard]] net::NativeUdpService &native_udp() { return native_udp_; }
+    [[nodiscard]] const net::NativeUdpExecutor &native_udp_executor() const { return native_udp_executor_; }
+    [[nodiscard]] net::NativeTcpStreamService &native_tcp() { return native_tcp_; }
+    [[nodiscard]] net::TcpStreamOperations &native_tcp_operations() { return native_tcp_operations_; }
+    [[nodiscard]] net::TcpStreamWaits &native_tcp_waits() { return native_tcp_waits_; }
+    [[nodiscard]] const net::NativeTcpEthernetExecutor &native_ethernet_executor() const { return native_ethernet_executor_; }
     [[nodiscard]] posix::PosixService &posix()
     {
         return posix_;
@@ -268,6 +286,7 @@ class Kernel final
     }
 
   private:
+    Status retire_native_link(Status cause);
     Status refresh_extension(bool focus);
     Status extension_surface_action(gui::SurfaceId surface, ExtensionSurfaceAction action);
     Status register_builtin_interrupts(driver::TimerDriver &timer);
@@ -315,6 +334,12 @@ class Kernel final
     SystemPowerAction power_action_{SystemPowerAction::none};
     usize debug_test_points_run_{0};
     u64 kernel_tick_count_{0};
+    u64 native_tcp_clock_generation_{};
+    u64 native_tcp_last_nanoseconds_{};
+    bool network_poll_active_{};
+    bool shutdown_admission_closed_{};
+    bool shutdown_stop_started_{};
+    bool shutdown_producers_stopped_{};
     u64 task_manager_next_refresh_tick_{0};
     KernelTestReport test_report_{};
     KernelConfig config_{};
@@ -341,15 +366,22 @@ class Kernel final
     driver::UsbHidMouseDriver usb_mouse_driver_{};
     interrupt::InterruptDispatcher interrupts_;
     memory::MemoryManager memory_;
-    sched::Scheduler scheduler_;
     smp::CpuTopology topology_;
     ipc::IpcRouter ipc_;
     syscall::Table syscalls_;
+    // Backing storage and UDP endpoints outlive scheduler resource drainage.
+    fs::SimpleDiskFileSystem simplefs_;
+    fs::VirtualFileSystem vfs_;
+    net::NetworkStack network_;
+    net::NativeUdpService native_udp_;
+    net::NativeUdpExecutor native_udp_executor_;
+    net::NativeTcpStreamService native_tcp_;
+    sched::Scheduler scheduler_;
+    net::TcpStreamOperations native_tcp_operations_;
+    net::TcpStreamWaits native_tcp_waits_;
+    net::NativeTcpEthernetExecutor native_ethernet_executor_;
     ModuleManager kernel_modules_;
     driver::DriverManager drivers_;
-    fs::VirtualFileSystem vfs_;
-    fs::SimpleDiskFileSystem simplefs_;
-    net::NetworkStack network_;
     posix::PosixService posix_;
     user::UserSpaceManager user_space_;
     KernelDebugShell debug_shell_;

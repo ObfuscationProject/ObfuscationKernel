@@ -20,7 +20,8 @@ inline constexpr usize max_module_relocations = 64;
 inline constexpr usize max_module_parameters = 16;
 inline constexpr usize max_module_text = 128;
 inline constexpr std::string_view kernel_module_process_prefix{"mod:"};
-inline constexpr u32 kernel_module_abi_version = 3;
+// Development cohort for bounded native raw PTY ownership; native userland uses UAPI 0.16.0.
+inline constexpr u32 kernel_module_abi_version = 74;
 
 struct ModuleId
 {
@@ -277,6 +278,10 @@ class KernelModule
     {
         return Status::success();
     }
+    [[nodiscard]] virtual Status shutdown_preflight() const
+    {
+        return Status::unsupported("module producer retirement is unqualified");
+    }
     [[nodiscard]] virtual void *service(std::string_view)
     {
         return this;
@@ -335,6 +340,8 @@ class ModuleManager final
     Status supervise_kernel_processes(StaticVector<ModuleProcessRestart, max_kernel_modules> &restarts);
     Status stop_all();
     Status shutdown_all();
+    [[nodiscard]] Status shutdown_preflight() const;
+    Status close_shutdown_admission();
     Result<sched::ProcessId> ensure_kernel_process();
 
     [[nodiscard]] KernelModule *find(std::string_view name) const;
@@ -408,6 +415,7 @@ class ModuleManager final
     uptr kernel_process_entry_{0};
     uptr kernel_process_stack_{0};
     usize kernel_process_modules_{0};
+    bool shutdown_admission_closed_{};
 };
 
 [[nodiscard]] std::string_view module_state_name(ModuleState state);

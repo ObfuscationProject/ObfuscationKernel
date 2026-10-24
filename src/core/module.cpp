@@ -636,6 +636,7 @@ void *ServiceRegistry::query_raw(std::string_view service_id) const
 
 Status ModuleManager::register_module(KernelModule &module)
 {
+    if (shutdown_admission_closed_) return Status::denied("module shutdown admission is closed");
     const auto manifest = module.manifest();
     if (manifest.name.empty())
     {
@@ -657,6 +658,7 @@ Status ModuleManager::register_module(KernelModule &module)
 Status ModuleManager::bind_kernel_process(sched::Scheduler &scheduler, arch::ArchOperations &arch, uptr entry,
                                           uptr stack)
 {
+    if (shutdown_admission_closed_) return Status::denied("module shutdown admission is closed");
     if (entry == 0 || stack == 0)
     {
         return Status::invalid_argument("kernel module process context is invalid");
@@ -1061,6 +1063,7 @@ Status ModuleManager::transition(KernelModule &module, ModuleState next, Status 
 
 Status ModuleManager::start_module(KernelModule &module)
 {
+    if (shutdown_admission_closed_) return Status::denied("module shutdown admission is closed");
     module.clear_failure();
     const auto manifest = module.manifest();
     if (auto status = validate_manifest(module); !status.ok())
@@ -1117,6 +1120,7 @@ Status ModuleManager::start_module(KernelModule &module)
 
 Status ModuleManager::start_all()
 {
+    if (shutdown_admission_closed_) return Status::denied("module shutdown admission is closed");
     if (auto status = sort_modules(); !status.ok())
     {
         return status;
@@ -1136,6 +1140,7 @@ Status ModuleManager::start_all()
 
 Status ModuleManager::start_registered_module(std::string_view name)
 {
+    if (shutdown_admission_closed_) return Status::denied("module shutdown admission is closed");
     auto *module = find(name);
     if (module == nullptr)
     {
@@ -1146,6 +1151,7 @@ Status ModuleManager::start_registered_module(std::string_view name)
 
 Status ModuleManager::restart_module(std::string_view name)
 {
+    if (shutdown_admission_closed_) return Status::denied("module shutdown admission is closed");
     auto *module = find(name);
     if (module == nullptr)
     {
@@ -1174,6 +1180,7 @@ Status ModuleManager::restart_module(std::string_view name)
 
 Status ModuleManager::supervise_kernel_processes(StaticVector<ModuleProcessRestart, max_kernel_modules> &restarts)
 {
+    if (shutdown_admission_closed_) return Status::denied("module shutdown admission is closed");
     restarts.clear();
     if (kernel_process_scheduler_ == nullptr || kernel_process_arch_ == nullptr)
     {
@@ -1275,6 +1282,24 @@ std::string_view module_execution_name(ModuleExecution execution)
         return "kernel-process";
     }
     return "unknown";
+}
+
+Status ModuleManager::shutdown_preflight() const
+{
+    if (shutdown_admission_closed_) return Status::denied("module shutdown admission is closed");
+    for (auto *module : modules_)
+    {
+        if (!module || module->state() == ModuleState::failed)
+            return Status::io_error("failed module prevents clean producer retirement");
+        if (auto status = module->shutdown_preflight(); !status) return status;
+    }
+    return {};
+}
+Status ModuleManager::close_shutdown_admission()
+{
+    if (shutdown_admission_closed_) return Status::denied("module shutdown admission was already closed");
+    shutdown_admission_closed_ = true;
+    return {};
 }
 
 } // namespace ok
