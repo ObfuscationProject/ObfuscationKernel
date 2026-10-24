@@ -4,6 +4,30 @@ set_version("0.1.0")
 add_rules("mode.debug", "mode.release")
 set_languages("c++23")
 
+option("private_futex_peer_fixture")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Opt-in debug harness for the raw private futex peer ELF")
+option_end()
+
+option("native_pc8042_reboot")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Opt in to the bounded x86_64 PC/8042 terminal reset backend")
+option_end()
+
+option("native_qemu_piix4_poweroff")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Opt in to the bounded x86_64 QEMU PIIX4 PM terminal poweroff backend")
+option_end()
+
+option("private_signal_delivery_fixture")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Opt-in Debug diagnostics for the ordinary ten-profile native signal runtime")
+option_end()
+
 option("kernel_gui")
     set_default(false)
     set_showmenu(true)
@@ -13,6 +37,11 @@ option_end()
 option("systoolchain_dir")
     set_showmenu(true)
     set_description("Use an existing SysToolchain installation instead of resolving the package")
+option_end()
+
+option("qemu_binary")
+    set_showmenu(true)
+    set_description("Explicit QEMU system executable for the configured architecture")
 option_end()
 
 if not get_config("systoolchain_dir") then
@@ -26,14 +55,44 @@ end
 
 includes("xmake/arch.lua")
 
+rule("ok-native-pc8042-reboot")
+    on_load(function (target)
+        assert(target:values("ok.arch") == "x86_64", "native_pc8042_reboot requires x86_64")
+    end)
+rule_end()
+
+local function add_ok_terminal_reboot_policy()
+    if get_config("native_pc8042_reboot") then
+        add_rules("ok-native-pc8042-reboot")
+        add_defines("OK_NATIVE_PC8042_REBOOT=1")
+    end
+end
+
+rule("ok-native-qemu-piix4-poweroff")
+    on_load(function (target)
+        assert(target:values("ok.arch") == "x86_64", "native_qemu_piix4_poweroff requires x86_64")
+    end)
+rule_end()
+
+local function add_ok_terminal_poweroff_policy()
+    if get_config("native_qemu_piix4_poweroff") then
+        add_rules("ok-native-qemu-piix4-poweroff")
+        add_defines("OK_NATIVE_QEMU_PIIX4_POWEROFF=1")
+    end
+end
+
 local configured_arch_spec = ok_arch_spec(ok_current_arch())
 local configured_toolchain_dir = get_config("systoolchain_dir")
+local configured_qemu_binary = get_config("qemu_binary")
 local configured_mode = get_config("mode") or "release"
 
 local function systoolchain_qemu(target, arch)
     local spec = configured_arch_spec
     if spec == nil then
         raise("QEMU is not configured for %s", arch)
+    end
+    if configured_qemu_binary then
+        return path.absolute(configured_qemu_binary)
     end
     if configured_toolchain_dir then
         local qemu = path.join(path.absolute(configured_toolchain_dir), "bin", spec.qemu_system)
@@ -54,6 +113,7 @@ local function systoolchain_qemu(target, arch)
 end
 
 function add_ok_kernel_sources(include_kernel_main)
+    add_files("src/boot/raw_handoff.cpp", "src/boot/fdt.cpp")
     add_files("src/core/*.cpp")
     add_files("src/apps/*.cpp")
     add_files("src/apps/shell/*.cpp")
@@ -80,8 +140,11 @@ end
 
 local function build_kernel_image(target)
         local arch = target:values("ok.arch")
+        local image_format = target:values("ok.image_format")
+        assert((arch == "arm32") == (image_format == "arm32-linux-image"),
+            "arm32 requires the ARM-only arm32-linux-image format")
         local kernel_bin = path.join(target:targetdir(), "kernel.bin")
-        if target:values("ok.image_format") == "elf" then
+        if image_format == "elf" then
             os.cp(target:targetfile(), kernel_bin)
             return
         end
@@ -96,10 +159,19 @@ local function build_kernel_image(target)
         local payload_bin = path.join(target:targetdir(), "kernel_payload.bin")
         os.execv(objcopy, {"-O", "binary", target:targetfile(), payload_bin})
 
-        if target:values("ok.image_format") == "linux-image" then
+        if image_format == "arm32-linux-image" then
+            os.execv("python3", {
+                path.join(os.projectdir(), "tools", "export_sdk.py"), "validate-image",
+                "--arch", arch, "--image-format", image_format, "--kernel-bin", payload_bin
+            })
             os.cp(payload_bin, kernel_bin)
             return
         end
+        if image_format == "linux-image" then
+            os.cp(payload_bin, kernel_bin)
+            return
+        end
+        assert(image_format == "bios-disk", "unsupported kernel image format: %s", image_format)
 
         local autogen = path.join(target:autogendir(), "boot")
         os.mkdir(autogen)
@@ -111,7 +183,7 @@ local function build_kernel_image(target)
         os.cp(boot_sector, path.join(target:targetdir(), "boot16.bin"))
 
         local payload_size = os.filesize(payload_bin)
-        local payload_capacity = 256 * 32 * 512
+        local payload_capacity = 512 * 32 * 512
         if payload_size > payload_capacity then
             raise("kernel payload is too large: %d bytes > %d bytes", payload_size, payload_capacity)
         end
@@ -142,8 +214,28 @@ target("okernel")
         {force = true}
     )
     add_defines("OK_KERNEL_FREESTANDING")
+    add_defines("OK_NATIVE_SIGNAL_RUNTIME")
+    if ok_current_arch() == "mips64" then
+        -- Signal admission precedes compiled hard-float C++ in both modes.
+        add_asflags("-DOK_NATIVE_SIGNAL_RUNTIME", {force = true})
+    end
     add_ok_arch_profile()
+    add_ok_terminal_reboot_policy()
+    add_ok_terminal_poweroff_policy()
     add_ok_debug_test_points()
+    if get_config("private_futex_peer_fixture") and is_mode("debug") then
+        add_defines("OK_PRIVATE_FUTEX_PEER_FIXTURE")
+    end
+    if get_config("private_signal_delivery_fixture") then
+        on_load(function (target)
+            assert(is_mode("debug") and (target:values("ok.arch") == "i386" or target:values("ok.arch") == "x86_64" or target:values("ok.arch") == "aarch64" or target:values("ok.arch") == "arm32" or target:values("ok.arch") == "rv32" or target:values("ok.arch") == "rv64" or target:values("ok.arch") == "loongarch64" or target:values("ok.arch") == "mips" or target:values("ok.arch") == "mips64" or target:values("ok.arch") == "ppc"), "signal delivery fixture requires i386/x86_64/AArch64/ARM32/RV32/RV64/LoongArch64/MIPS o32/MIPS64 n64/PPC32 Debug")
+        end)
+        add_defines("OK_PRIVATE_SIGNAL_DELIVERY_FIXTURE")
+        if ok_current_arch() == "mips64" and is_mode("debug") then
+            -- n64 admission must reach assembly before hard-float C++ boot.
+            add_asflags("-DOK_PRIVATE_SIGNAL_DELIVERY_FIXTURE", "-DOK_ENABLE_TEST_POINTS", {force = true})
+        end
+    end
     add_ok_kernel_gui_option()
     add_tests("profile")
     on_test(function (target)
@@ -196,8 +288,28 @@ target("okernel_image")
     end)
     add_syslinks("gcc")
     add_defines("OK_KERNEL_FREESTANDING")
+    add_defines("OK_NATIVE_SIGNAL_RUNTIME")
+    if ok_current_arch() == "mips64" then
+        -- Signal admission precedes compiled hard-float C++ in both modes.
+        add_asflags("-DOK_NATIVE_SIGNAL_RUNTIME", {force = true})
+    end
     add_ok_arch_profile()
+    add_ok_terminal_reboot_policy()
+    add_ok_terminal_poweroff_policy()
     add_ok_debug_test_points()
+    if get_config("private_futex_peer_fixture") and is_mode("debug") then
+        add_defines("OK_PRIVATE_FUTEX_PEER_FIXTURE")
+    end
+    if get_config("private_signal_delivery_fixture") then
+        on_load(function (target)
+            assert(is_mode("debug") and (target:values("ok.arch") == "i386" or target:values("ok.arch") == "x86_64" or target:values("ok.arch") == "aarch64" or target:values("ok.arch") == "arm32" or target:values("ok.arch") == "rv32" or target:values("ok.arch") == "rv64" or target:values("ok.arch") == "loongarch64" or target:values("ok.arch") == "mips" or target:values("ok.arch") == "mips64" or target:values("ok.arch") == "ppc"), "signal delivery fixture requires i386/x86_64/AArch64/ARM32/RV32/RV64/LoongArch64/MIPS o32/MIPS64 n64/PPC32 Debug")
+        end)
+        add_defines("OK_PRIVATE_SIGNAL_DELIVERY_FIXTURE")
+        if ok_current_arch() == "mips64" and is_mode("debug") then
+            -- n64 admission must reach assembly before hard-float C++ boot.
+            add_asflags("-DOK_PRIVATE_SIGNAL_DELIVERY_FIXTURE", "-DOK_ENABLE_TEST_POINTS", {force = true})
+        end
+    end
     add_ok_kernel_gui_option()
     if ok_arch_spec(ok_current_arch()).boot_source ~= nil then
         add_tests("qemu")
@@ -238,6 +350,7 @@ target("kernel-sdk")
         local mode = configured_mode
         local compiler = image:tool("cxx")
         local argv = {
+            "-B",
             path.join(os.projectdir(), "tools", "export_sdk.py"),
             "--output", path.join(os.projectdir(), "build", "sdk", arch, mode),
             "--headers", path.join(os.projectdir(), "include"),

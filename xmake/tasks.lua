@@ -63,6 +63,9 @@ local function task_configure_args(mode, arch, extra)
     if config.get("systoolchain_dir") then
         table.insert(argv, "--systoolchain_dir=" .. path.absolute(config.get("systoolchain_dir")))
     end
+    if config.get("qemu_binary") then
+        table.insert(argv, "--qemu_binary=" .. path.absolute(config.get("qemu_binary")))
+    end
     for _, arg in ipairs(extra or {}) do
         table.insert(argv, arg)
     end
@@ -88,6 +91,9 @@ local function task_systoolchain_qemu(arch)
     import("core.project.project")
     local _, spec = task_require_arch(arch)
     import("core.project.config")
+    if config.get("qemu_binary") then
+        return path.absolute(config.get("qemu_binary"))
+    end
     if config.get("systoolchain_dir") then
         local qemu = path.join(path.absolute(config.get("systoolchain_dir")), "bin", spec.qemu)
         assert(os.isfile(qemu), "local SysToolchain is missing QEMU: %s", qemu)
@@ -103,6 +109,30 @@ local function task_systoolchain_qemu(arch)
     end
     return qemu
 end
+
+task("network-wire-test")
+    set_menu {
+        usage = "xmake network-wire-test --output=DIR [--sanitize] [--toolchain-root=DIR]",
+        description = "Run hosted Ethernet/ARP/IPv4/UDP byte tests and optional all-ten freestanding object checks",
+        options = {
+            {nil, "output", "kv", nil, "New directory for retained model receipts"},
+            {nil, "sanitize", "k", nil, "Use ASan and UBSan for hosted byte tests"},
+            {nil, "toolchain-root", "kv", nil, "Explicit directory containing all ten target toolchains"}
+        }
+    }
+    on_run(function ()
+        import("core.base.option")
+        local output = option.get("output")
+        assert(output, "network-wire-test requires --output=DIR")
+        local argv = {"-B", path.join(os.projectdir(), "scripts", "test_network_wire.py"), "--output", path.absolute(output)}
+        if option.get("sanitize") then table.insert(argv, "--sanitize") end
+        if option.get("toolchain-root") then
+            table.insert(argv, "--toolchain-root")
+            table.insert(argv, path.absolute(option.get("toolchain-root")))
+        end
+        os.execv("python3", argv, {envs = {PYTHONDONTWRITEBYTECODE = "1"}})
+    end)
+task_end()
 
 task("qemu-harness-test")
     set_menu {
@@ -429,5 +459,19 @@ task("qemu-window-matrix")
         if #failed > 0 then
             raise("QEMU window validation failed for: %s", table.concat(failed, ", "))
         end
+    end)
+task_end()
+
+task("sdk-receipt-model-test")
+    set_menu {
+        usage = "xmake sdk-receipt-model-test",
+        description = "Run hosted SDK archive receipt and publication error models; no real ar or compiler"
+    }
+    on_run(function ()
+        os.execv("python3", {
+            "-B",
+            path.join(os.projectdir(), "tests", "host", "sdk_boot_archive_receipt_tests.py"),
+            "--exporter", path.join(os.projectdir(), "tools", "export_sdk.py")
+        }, {envs = {PYTHONDONTWRITEBYTECODE = "1"}})
     end)
 task_end()

@@ -60,7 +60,7 @@ OK_ARCH_SPECS = {
         linker_script = "src/arch/arm32/linker.ld",
         qemu_system = "qemu-system-arm",
         platform_source = "src/arch/arm32/platform.cpp",
-        image_format = "elf",
+        image_format = "arm32-linux-image",
         freestanding_cxxflags = {"-march=armv7-a", "-marm"},
         freestanding_asflags = {"-march=armv7-a", "-marm"},
         capabilities = OK_BOOTABLE_QEMU_CAPABILITIES
@@ -204,6 +204,9 @@ end
 function add_ok_arch_files()
     local _, spec = ok_require_arch(ok_current_arch())
     add_files(path.join(os.projectdir(), "src/arch/arch.cpp"))
+    add_files(path.join(os.projectdir(), "src/arch/clock.cpp"))
+    add_files(path.join(os.projectdir(), "src/arch/realtime.cpp"))
+    add_files(path.join(os.projectdir(), "src/arch/terminal_power.cpp"))
     add_files(path.join(os.projectdir(), "src/arch", spec.source, "ops.cpp"))
     if os.isfile(path.join(os.projectdir(), "src/arch", spec.source, "execution.cpp")) then
         add_files(path.join(os.projectdir(), "src/arch", spec.source, "execution.cpp"))
