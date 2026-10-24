@@ -13,13 +13,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arch", choices=("all", *ARCHITECTURES), default="all")
     parser.add_argument("--cxx", default=os.environ.get("CXX", "g++"))
+    parser.add_argument("--sanitize", action="store_true")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    sources = ["tests/host/process_resource_tests.cpp", "src/sched/scheduler.cpp", "src/sched/process.cpp", "src/posix/posix.cpp", "src/posix/fd.cpp", "src/posix/path.cpp", "src/posix/process.cpp", "src/fs/vfs.cpp", "src/driver/driver.cpp", "src/smp/smp.cpp", "src/arch/arch.cpp", "src/syscall/linux.cpp"]
+    sources = ["tests/host/process_resource_tests.cpp", "src/sched/scheduler.cpp", "src/sched/process.cpp", "src/memory/memory.cpp", "src/net/native_udp.cpp", "src/posix/posix.cpp", "src/posix/fd.cpp", "src/posix/path.cpp", "src/posix/process.cpp", "src/fs/vfs.cpp", "src/driver/driver.cpp", "src/smp/smp.cpp", "src/arch/arch.cpp", "src/syscall/linux.cpp"]
     with tempfile.TemporaryDirectory(prefix="ok-process-resources-") as directory:
         for arch in ARCHITECTURES if args.arch == "all" else (args.arch,):
             output = Path(directory) / arch
-            command = [*shlex.split(args.cxx), "-std=c++23", "-O2", "-Wall", "-Wextra", "-Wpedantic", "-Werror", "-ffunction-sections", "-fdata-sections", "-Wl,--gc-sections", f"-I{root / 'include'}", f"-DOK_ARCH_TARGET_{arch.upper()}", *(str(root / name) for name in sources), str(root / f"src/arch/{arch}/ops.cpp"), "-o", str(output)]
+            command = [*shlex.split(args.cxx), "-std=c++23", "-O1" if args.sanitize else "-O2", "-Wall", "-Wextra", "-Wpedantic", "-Werror", "-ffunction-sections", "-fdata-sections", "-Wl,--gc-sections", *(["-fsanitize=address,undefined", "-fno-omit-frame-pointer"] if args.sanitize else []), f"-I{root / 'include'}", f"-DOK_ARCH_TARGET_{arch.upper()}", *(str(root / name) for name in sources), str(root / f"src/arch/{arch}/ops.cpp"), "-o", str(output)]
             subprocess.run(command, check=True)
             subprocess.run([str(output)], check=True)
             print(f"PASS {arch}: process resource model", flush=True)

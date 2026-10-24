@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import select
 import shutil
 import subprocess
@@ -276,46 +277,53 @@ def run_kernel(
 
 
 def run_until_marker(command: list[str], timeout: float | None) -> subprocess.CompletedProcess[str]:
-    process = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout_parts: list[str] = []
+    # Never mix select(fd) with buffered readline(): one read can prefetch the
+    # final marker while the kernel descriptor is empty for the rest of boot.
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+    stdout = bytearray()
+    stderr = bytearray()
+    assert process.stdout is not None and process.stderr is not None
+    streams = {process.stdout: stdout, process.stderr: stderr}
     deadline = None if timeout is None else time.monotonic() + timeout
-    pass_seen = False
-    fail_seen = False
-
-    assert process.stdout is not None
-    while True:
+    parsed = 0
+    pass_seen = fail_seen = False
+    timed_out = False
+    while streams and not (pass_seen or fail_seen):
         if deadline is not None and time.monotonic() >= deadline:
+            timed_out = True
             break
         wait = 0.1 if deadline is None else max(0.0, min(0.1, deadline - time.monotonic()))
-        ready, _, _ = select.select([process.stdout], [], [], wait)
-        if ready:
-            line = process.stdout.readline()
-            if line:
-                stdout_parts.append(line)
-                if line.startswith("OK_TEST_PASS "):
-                    pass_seen = True
-                    break
-                if line.startswith("OK_TEST_FAIL "):
-                    fail_seen = True
-                    break
-        if process.poll() is not None:
-            break
+        ready, _, _ = select.select(list(streams), [], [], wait)
+        for stream in ready:
+            chunk = os.read(stream.fileno(), 65536)
+            if not chunk:
+                del streams[stream]
+                continue
+            streams[stream].extend(chunk)
+        while (end := stdout.find(b"\n", parsed)) >= 0:
+            line = stdout[parsed:end]
+            parsed = end + 1
+            pass_seen |= line.startswith(b"OK_TEST_PASS ")
+            fail_seen |= line.startswith(b"OK_TEST_FAIL ")
 
-    if (pass_seen or fail_seen) and process.poll() is None:
+    if process.poll() is None:
         process.terminate()
     try:
-        tail_stdout, stderr = process.communicate(timeout=1.0)
+        tail_stdout, tail_stderr = process.communicate(timeout=1.0)
     except subprocess.TimeoutExpired:
         process.kill()
-        tail_stdout, stderr = process.communicate()
-    stdout = "".join(stdout_parts) + (tail_stdout or "")
-    returncode = 0 if pass_seen or fail_seen else (process.returncode if process.returncode is not None else 124)
+        tail_stdout, tail_stderr = process.communicate()
+    stdout.extend(tail_stdout or b"")
+    stderr.extend(tail_stderr or b"")
+    returncode = 0 if pass_seen or fail_seen else (124 if timed_out else process.returncode)
     if pass_seen or fail_seen:
-        stderr = ""
-    if not (pass_seen or fail_seen) and returncode == 0 and "OK_TEST_PASS " not in stdout:
+        stderr.clear()
+    if not (pass_seen or fail_seen) and returncode == 0:
         returncode = 124
-        stderr = (stderr or "") + "qemu marker timeout\n"
-    return subprocess.CompletedProcess(command, returncode, stdout, stderr or "")
+    if returncode == 124:
+        stderr.extend(b"qemu marker timeout\n")
+    return subprocess.CompletedProcess(command, returncode, stdout.decode(errors="replace"),
+                                       stderr.decode(errors="replace"))
 
 
 def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: bool) -> int:

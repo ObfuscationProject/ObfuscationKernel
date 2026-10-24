@@ -29,7 +29,7 @@ def main() -> int:
         cxx.append("-DOK_NATIVE_NX_BRANCH=1")
     if args.kernel_fault:
         cxx.append("-DOK_NATIVE_KERNEL_FAULT=1")
-    sources = ["src/arch/loongarch64/boot.S", "src/arch/loongarch64/execution.cpp",
+    sources = ["src/boot/raw_handoff.cpp", "src/arch/loongarch64/boot.S", "src/arch/loongarch64/execution.cpp",
                "src/arch/loongarch64/execution.S", "tests/native/loongarch64_execution_test.cpp",
                "tests/native/loongarch64_execution_user.S"]
     objects = []

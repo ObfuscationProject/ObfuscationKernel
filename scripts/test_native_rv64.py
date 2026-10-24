@@ -19,7 +19,7 @@ def main() -> int:
     common = ["-mcmodel=medany", "-msmall-data-limit=0"]
     cxx = ["-std=c++23", "-O2", "-ffreestanding", "-fno-builtin", "-fno-exceptions", "-fno-stack-protector", "-Wall", "-Wextra", "-Wpedantic", "-Werror", "-I", str(root / "include")]
     objects = []
-    sources = [("boot", "src/arch/rv64/boot.S"), ("execution", "src/arch/rv64/execution.cpp"), ("bridge", "src/arch/rv64/execution.S"), ("user", "tests/native/rv64_execution_user.S"), ("test", "tests/native/rv64_execution_test.cpp")]
+    sources = [("boot", "src/arch/rv64/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/rv64/execution.cpp"), ("bridge", "src/arch/rv64/execution.S"), ("user", "tests/native/rv64_execution_user.S"), ("test", "tests/native/rv64_execution_test.cpp")]
     for name, source in sources:
         target = output / f"{name}.o"
         subprocess.run([str(compiler), *common, *(cxx if source.endswith(".cpp") else []), "-c", str(root / source), "-o", str(target)], check=True)

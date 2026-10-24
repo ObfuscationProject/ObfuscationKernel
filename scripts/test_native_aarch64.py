@@ -27,7 +27,7 @@ def main() -> int:
              "-mgeneral-regs-only", "-mno-outline-atomics", "-Wall", "-Wextra", "-Werror",
              "-I", str(project / "include")]
     objects = []
-    for name, source in (("boot", "src/arch/aarch64/boot.S"), ("execution", "src/arch/aarch64/execution.cpp"),
+    for name, source in (("boot", "src/arch/aarch64/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/aarch64/execution.cpp"),
                          ("entry", "src/arch/aarch64/execution.S"), ("user", "tests/native/aarch64_execution_user.S"),
                          ("test", "tests/native/aarch64_execution_test.cpp")):
         target = out / (name + ".o")

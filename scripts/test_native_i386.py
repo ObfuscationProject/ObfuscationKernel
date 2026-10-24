@@ -29,7 +29,7 @@ def main() -> int:
     if args.kernel_fault:
         flags.append("-DOK_NATIVE_TEST_KERNEL_FAULT=1")
     objects = []
-    for name, source in (("boot", "src/arch/i386/boot.S"), ("execution", "src/arch/i386/execution.cpp"),
+    for name, source in (("boot", "src/arch/i386/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/i386/execution.cpp"),
                          ("entry", "src/arch/i386/execution.S"), ("user", "tests/native/i386_execution_user.S"),
                          ("test", "tests/native/i386_execution_test.cpp")):
         target = out / (name + ".o")
@@ -44,7 +44,7 @@ def main() -> int:
     boot_object, boot_sector = out/"boot16.o", out/"boot16.bin"
     subprocess.run([gcc, "-c", str(project/"src/arch/x86_64/boot16.S"), "-o", str(boot_object)], check=True)
     subprocess.run([ld, "-Ttext=0x7c00", "--oformat=binary", str(boot_object), "-o", str(boot_sector)], check=True)
-    capacity = 256 * 32 * 512
+    capacity = 512 * 32 * 512
     data = payload.read_bytes()
     if len(data) > capacity:
         raise RuntimeError("native test payload exceeds BIOS capacity")

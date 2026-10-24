@@ -1,0 +1,383 @@
+{
+  "i386": {
+    "triple": "i386-elf",
+    "compiler": {
+      "family": "gcc",
+      "version": "14.2.0"
+    },
+    "cxxflags": [
+      "-mno-sse",
+      "-mno-sse2",
+      "-ffreestanding",
+      "-fno-exceptions",
+      "-fno-stack-protector",
+      "-fno-use-cxa-atexit",
+      "-fno-threadsafe-statics",
+      "-fno-pic",
+      "-fno-pie",
+      "-fno-asynchronous-unwind-tables",
+      "-frtti",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic"
+    ],
+    "asflags": [
+      "-ffreestanding",
+      "-fno-pic",
+      "-fno-pie"
+    ],
+    "ldflags": [],
+    "defines": [
+      "OK_KERNEL_FREESTANDING",
+      "OK_ARCH_TARGET_I386",
+      "OK_ENABLE_TEST_POINTS"
+    ],
+    "image_format": "bios-disk"
+  },
+  "x86_64": {
+    "triple": "x86_64-elf",
+    "compiler": {
+      "family": "gcc",
+      "version": "14.2.0"
+    },
+    "cxxflags": [
+      "-mno-red-zone",
+      "-ffreestanding",
+      "-fno-exceptions",
+      "-fno-stack-protector",
+      "-fno-use-cxa-atexit",
+      "-fno-threadsafe-statics",
+      "-fno-pic",
+      "-fno-pie",
+      "-fno-asynchronous-unwind-tables",
+      "-frtti",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic"
+    ],
+    "asflags": [
+      "-ffreestanding",
+      "-fno-pic",
+      "-fno-pie"
+    ],
+    "ldflags": [],
+    "defines": [
+      "OK_KERNEL_FREESTANDING",
+      "OK_ARCH_TARGET_X86_64",
+      "OK_ENABLE_TEST_POINTS"
+    ],
+    "image_format": "bios-disk"
+  },
+  "aarch64": {
+    "triple": "aarch64-elf",
+    "compiler": {
+      "family": "gcc",
+      "version": "14.2.0"
+    },
+    "cxxflags": [
+      "-mno-outline-atomics",
+      "-mgeneral-regs-only",
+      "-ffreestanding",
+      "-fno-exceptions",
+      "-fno-stack-protector",
+      "-fno-use-cxa-atexit",
+      "-fno-threadsafe-statics",
+      "-fno-pic",
+      "-fno-pie",
+      "-fno-asynchronous-unwind-tables",
+      "-frtti",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic"
+    ],
+    "asflags": [
+      "-ffreestanding",
+      "-fno-pic",
+      "-fno-pie"
+    ],
+    "ldflags": [],
+    "defines": [
+      "OK_KERNEL_FREESTANDING",
+      "OK_ARCH_TARGET_AARCH64",
+      "OK_ENABLE_TEST_POINTS"
+    ],
+    "image_format": "linux-image"
+  },
+  "arm32": {
+    "triple": "arm-none-eabi",
+    "compiler": {
+      "family": "gcc",
+      "version": "14.2.0"
+    },
+    "cxxflags": [
+      "-march=armv7-a",
+      "-marm",
+      "-ffreestanding",
+      "-fno-exceptions",
+      "-fno-stack-protector",
+      "-fno-use-cxa-atexit",
+      "-fno-threadsafe-statics",
+      "-fno-pic",
+      "-fno-pie",
+      "-fno-asynchronous-unwind-tables",
+      "-frtti",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic"
+    ],
+    "asflags": [
+      "-march=armv7-a",
+      "-marm",
+      "-ffreestanding",
+      "-fno-pic",
+      "-fno-pie"
+    ],
+    "ldflags": [],
+    "defines": [
+      "OK_KERNEL_FREESTANDING",
+      "OK_ARCH_TARGET_ARM32",
+      "OK_ENABLE_TEST_POINTS"
+    ],
+    "image_format": "arm32-linux-image"
+  },
+  "rv64": {
+    "triple": "riscv64-elf",
+    "compiler": {
+      "family": "gcc",
+      "version": "14.2.0"
+    },
+    "cxxflags": [
+      "-mcmodel=medany",
+      "-ffreestanding",
+      "-fno-exceptions",
+      "-fno-stack-protector",
+      "-fno-use-cxa-atexit",
+      "-fno-threadsafe-statics",
+      "-fno-pic",
+      "-fno-pie",
+      "-fno-asynchronous-unwind-tables",
+      "-frtti",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic"
+    ],
+    "asflags": [
+      "-mcmodel=medany",
+      "-ffreestanding",
+      "-fno-pic",
+      "-fno-pie"
+    ],
+    "ldflags": [],
+    "defines": [
+      "OK_KERNEL_FREESTANDING",
+      "OK_ARCH_TARGET_RV64",
+      "OK_ENABLE_TEST_POINTS"
+    ],
+    "image_format": "elf"
+  },
+  "rv32": {
+    "triple": "riscv32-elf",
+    "compiler": {
+      "family": "gcc",
+      "version": "14.2.0"
+    },
+    "cxxflags": [
+      "-mcmodel=medany",
+      "-ffreestanding",
+      "-fno-exceptions",
+      "-fno-stack-protector",
+      "-fno-use-cxa-atexit",
+      "-fno-threadsafe-statics",
+      "-fno-pic",
+      "-fno-pie",
+      "-fno-asynchronous-unwind-tables",
+      "-frtti",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic"
+    ],
+    "asflags": [
+      "-mcmodel=medany",
+      "-ffreestanding",
+      "-fno-pic",
+      "-fno-pie"
+    ],
+    "ldflags": [],
+    "defines": [
+      "OK_KERNEL_FREESTANDING",
+      "OK_ARCH_TARGET_RV32",
+      "OK_ENABLE_TEST_POINTS"
+    ],
+    "image_format": "elf"
+  },
+  "loongarch64": {
+    "triple": "loongarch64-elf",
+    "compiler": {
+      "family": "gcc",
+      "version": "14.2.0"
+    },
+    "cxxflags": [
+      "-msimd=none",
+      "-ffreestanding",
+      "-fno-exceptions",
+      "-fno-stack-protector",
+      "-fno-use-cxa-atexit",
+      "-fno-threadsafe-statics",
+      "-fno-pic",
+      "-fno-pie",
+      "-fno-asynchronous-unwind-tables",
+      "-frtti",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic"
+    ],
+    "asflags": [
+      "-msimd=none",
+      "-ffreestanding",
+      "-fno-pic",
+      "-fno-pie"
+    ],
+    "ldflags": [
+      "-msimd=none"
+    ],
+    "defines": [
+      "OK_KERNEL_FREESTANDING",
+      "OK_ARCH_TARGET_LOONGARCH64",
+      "OK_ENABLE_TEST_POINTS"
+    ],
+    "image_format": "elf"
+  },
+  "mips": {
+    "triple": "mips-elf",
+    "compiler": {
+      "family": "gcc",
+      "version": "14.2.0"
+    },
+    "cxxflags": [
+      "-march=mips32r2",
+      "-G0",
+      "-ffreestanding",
+      "-fno-exceptions",
+      "-fno-stack-protector",
+      "-fno-use-cxa-atexit",
+      "-fno-threadsafe-statics",
+      "-fno-pic",
+      "-fno-pie",
+      "-fno-asynchronous-unwind-tables",
+      "-frtti",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic"
+    ],
+    "asflags": [
+      "-march=mips32r2",
+      "-G0",
+      "-ffreestanding",
+      "-fno-pic",
+      "-fno-pie"
+    ],
+    "ldflags": [
+      "-march=mips32r2",
+      "-G0"
+    ],
+    "defines": [
+      "OK_KERNEL_FREESTANDING",
+      "OK_ARCH_TARGET_MIPS",
+      "OK_ENABLE_TEST_POINTS"
+    ],
+    "image_format": "elf"
+  },
+  "mips64": {
+    "triple": "mips64-elf",
+    "compiler": {
+      "family": "gcc",
+      "version": "14.2.0"
+    },
+    "cxxflags": [
+      "-march=mips64r2",
+      "-mabi=64",
+      "-G0",
+      "-ffreestanding",
+      "-fno-exceptions",
+      "-fno-stack-protector",
+      "-fno-use-cxa-atexit",
+      "-fno-threadsafe-statics",
+      "-fno-pic",
+      "-fno-pie",
+      "-fno-asynchronous-unwind-tables",
+      "-frtti",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic"
+    ],
+    "asflags": [
+      "-march=mips64r2",
+      "-mabi=64",
+      "-G0",
+      "-ffreestanding",
+      "-fno-pic",
+      "-fno-pie"
+    ],
+    "ldflags": [
+      "-march=mips64r2",
+      "-mabi=64",
+      "-G0"
+    ],
+    "defines": [
+      "OK_KERNEL_FREESTANDING",
+      "OK_ARCH_TARGET_MIPS64",
+      "OK_ENABLE_TEST_POINTS"
+    ],
+    "image_format": "elf"
+  },
+  "ppc": {
+    "triple": "powerpc-eabi",
+    "compiler": {
+      "family": "gcc",
+      "version": "14.2.0"
+    },
+    "cxxflags": [
+      "-msoft-float",
+      "-msdata=none",
+      "-ffreestanding",
+      "-fno-exceptions",
+      "-fno-stack-protector",
+      "-fno-use-cxa-atexit",
+      "-fno-threadsafe-statics",
+      "-fno-pic",
+      "-fno-pie",
+      "-fno-asynchronous-unwind-tables",
+      "-frtti",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic"
+    ],
+    "asflags": [
+      "-msoft-float",
+      "-msdata=none",
+      "-ffreestanding",
+      "-fno-pic",
+      "-fno-pie"
+    ],
+    "ldflags": [
+      "-msoft-float",
+      "-msdata=none"
+    ],
+    "defines": [
+      "OK_KERNEL_FREESTANDING",
+      "OK_ARCH_TARGET_PPC",
+      "OK_ENABLE_TEST_POINTS"
+    ],
+    "image_format": "elf"
+  }
+}

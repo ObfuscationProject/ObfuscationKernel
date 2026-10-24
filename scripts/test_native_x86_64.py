@@ -28,7 +28,7 @@ def main() -> int:
              "-fno-stack-protector", "-fno-use-cxa-atexit", "-fno-threadsafe-statics", "-fno-pic", "-fno-pie",
              "-Wall", "-Wextra", "-Werror", "-I", str(project / "include")]
     objects = []
-    for name, source in (("boot", "src/arch/x86_64/boot.S"), ("execution", "src/arch/x86_64/execution.cpp"),
+    for name, source in (("boot", "src/arch/x86_64/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/x86_64/execution.cpp"),
                          ("entry", "src/arch/x86_64/execution.S"), ("user", "tests/native/x86_64_execution_user.S"),
                          ("test", "tests/native/x86_64_execution_test.cpp")):
         target = out / (name + ".o")
@@ -55,7 +55,7 @@ def main() -> int:
     boot_object, boot_sector = out/"boot16.o", out/"boot16.bin"
     subprocess.run([gcc, "-c", str(project/"src/arch/x86_64/boot16.S"), "-o", str(boot_object)], check=True)
     subprocess.run([ld, "-Ttext=0x7c00", "--oformat=binary", str(boot_object), "-o", str(boot_sector)], check=True)
-    capacity = 256 * 32 * 512
+    capacity = 512 * 32 * 512
     data = payload.read_bytes()
     if len(data) > capacity:
         raise RuntimeError("native test payload exceeds BIOS capacity")
