@@ -27,7 +27,7 @@ are reserved for actual runtime device and module-service boundaries.
 - `include/ok/fs`: RAM-backed VFS node model.
 - `include/ok/user`: user-mode transition gateway.
 - `include/ok/core`: kernel composition, module management, and shared types.
-- `src/apps`: implementations for kernel applications that run on top of core,
+- `src/rescue`: kernel-resident rescue diagnostics (debug shell, file manager, task manager) that run on top of core,
   POSIX, scheduler, VFS, and GUI services.
 
 ## C++ Design Rules

@@ -65,7 +65,7 @@ Exit gate
 
 Paired OS worktree: `chore/sdk75-consumer`. Depends on: P0.
 
-Scaffold on branch `feat/mm-general` (hosted tests pass, nothing wired into boot):
+Scaffold (merged to main from `feat/mm-general`) (hosted tests pass, nothing wired into boot):
 - `include/ok/memory/physical_map.hpp`, `src/memory/physical_map.cpp`: `PhysicalMemoryMap`
   collects E820/FDT/board/linker regions, subtracts reservations, yields sorted
   page-aligned usable ranges; `product_grade()` rejects synthetic maps.
@@ -95,7 +95,7 @@ Exit gate: no polling loop remains in the kernel block/net/input paths on ten
 profiles; clock drift test against QEMU wall time; timer interrupt latency
 measured. Depends on WT1.1 (allocator for work items).
 
-Scaffold on branch `feat/irq-wait-time` (hosted tests pass):
+Scaffold (merged to main from `feat/irq-wait-time`) (hosted tests pass):
 - `include/ok/interrupt/irq_chip.hpp`: `IrqChip` concept (initialize, configure,
   mask, unmask, acknowledge, end_of_interrupt), `ModelIrqChip`, `IrqRouter<Chip>`
   binding lines to dispatcher vectors; `InterruptDispatcher::dispatch_vector`.
@@ -116,7 +116,7 @@ is the generated starting map. Tests under `tests/host/ext4_*` move with the
 headers; hosted ext4 suites and the OS two-boot persistence test must produce
 identical results. Can run in parallel with WT1.1; align the ABI bump at merge.
 
-Scaffold on branch `refactor/ext4-layout`:
+Scaffold (merged to main from `refactor/ext4-layout`):
 - `include/ok/fs/ext4/{layout,extent,dir,alloc,txn,journal,recovery,mount}.hpp`
   facades own the 87 slice headers (one owner each); `include/ok/fs/ext4/README.md`.
 - `scripts/check_ext4_layout.py` enforces ownership and reports include-order
@@ -134,7 +134,7 @@ file manager and task manager to `src/rescue/`, built only with `kernel_gui`.
 Appendix B and C list the files. No behavior change; release image size must
 not grow.
 
-Scaffold on branch `refactor/user-runtime-split`:
+Scaffold (merged to main from `refactor/user-runtime-split`):
 - `src/apps/` moved to `src/rescue/` with `src/rescue/README.md`; `xmake.lua`
   and `tests/host/native_pty/xmake.lua` updated; headers stay under `include/ok/apps`.
 - `src/user/README.md` unit map; `scripts/check_runtime_split.py` ratchet
@@ -187,7 +187,7 @@ vsync events, input event queue, seat lease. Move ramfb, virtio-gpu, PS/2 and
 USB HID drivers out of the kernel to OS drivers; keep a text rescue GUI. Paired
 OS worktree `feat/display-input-drivers`. Depends on WT1.1, WT2.5.
 
-Scaffold on branch `feat/display-input-uapi`:
+Scaffold (merged to main from `feat/display-input-uapi`):
 - `include/ok/uapi/display.h`, `include/ok/uapi/input.h`: versioned fixed-width
   records for modes, dumb buffers, present/vblank events, input events, device
   info and seat leases; reserved ioctl numbers; `OK_*_UAPI_VERSION` are 0 until
@@ -260,13 +260,13 @@ Total ext4/JBD2 headers mapped: 107. Unrelated headers kept as they are: `archiv
 `include/ok/user/` has 88 headers; the 30 `native_signal_{delivery,frame,return}_<arch>.hpp`
 headers collapse into one `include/ok/arch/<arch>/signal.hpp` per architecture.
 
-## Appendix C: kernel-resident applications (now `src/rescue/` on `refactor/user-runtime-split`)
+## Appendix C: kernel-resident applications now under `src/rescue/`
 
-- `src/apps/file_manager.cpp` (928 lines)
-- `src/apps/shell/filesystem.cpp` (934 lines)
-- `src/apps/shell/network.cpp` (165 lines)
-- `src/apps/shell/status.cpp` (747 lines)
-- `src/apps/shell/storage.cpp` (350 lines)
-- `src/apps/shell/task_manager.cpp` (78 lines)
-- `src/apps/shell.cpp` (2619 lines)
-- `src/apps/task_manager.cpp` (1088 lines)
+- `src/rescue/file_manager.cpp` (928 lines)
+- `src/rescue/shell/filesystem.cpp` (934 lines)
+- `src/rescue/shell/network.cpp` (165 lines)
+- `src/rescue/shell/status.cpp` (747 lines)
+- `src/rescue/shell/storage.cpp` (350 lines)
+- `src/rescue/shell/task_manager.cpp` (78 lines)
+- `src/rescue/shell.cpp` (2619 lines)
+- `src/rescue/task_manager.cpp` (1088 lines)
