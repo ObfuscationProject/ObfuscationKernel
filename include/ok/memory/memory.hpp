@@ -32,13 +32,18 @@ struct MemoryRegion
     RegionType type{RegionType::reserved};
 };
 
+class FrameAllocator;
+
 struct PhysicalFrame
 {
     uptr address{0};
     usize index{0};
+    const FrameAllocator *owner{nullptr};
+    u64 generation{0};
 };
 
 inline constexpr usize max_physical_frames = 16384;
+inline constexpr usize max_physical_frame_ranges = 64;
 inline constexpr usize max_virtual_mappings = 256;
 inline constexpr usize vm_test_page_size = 4096;
 inline constexpr usize max_user_pages = 32;
@@ -53,6 +58,7 @@ enum PagePermission : usize
     page_device = 1u << 5,
     page_no_cache = 1u << 6,
     page_copy_on_write = 1u << 7,
+    page_shared = 1u << 8,
 };
 
 struct PageTableEntry
@@ -116,7 +122,7 @@ template <typename T> struct UserSlice
     }
 };
 
-class FrameAllocator final
+class FrameAllocator final : private NonCopyable
 {
   public:
     Status initialize(std::span<const MemoryRegion> regions, usize page_size);
@@ -129,17 +135,28 @@ class FrameAllocator final
     }
     [[nodiscard]] usize total_frames() const
     {
-        return frame_used_.size();
+        return frame_count_;
     }
     [[nodiscard]] usize free_frames() const;
 
   private:
-    uptr base_{0};
+    struct FrameRange
+    {
+        uptr base{0};
+        usize first_index{0};
+        usize count{0};
+    };
+
+    [[nodiscard]] uptr address_for(usize index) const;
+
     usize page_size_{4096};
     usize frame_count_{0};
     usize used_count_{0};
     usize next_free_hint_{0};
-    std::array<bool, max_physical_frames> frame_used_{};
+    usize range_count_{0};
+    u64 next_generation_{1};
+    std::array<FrameRange, max_physical_frame_ranges> ranges_{};
+    std::array<u64, max_physical_frames> generations_{};
 };
 
 class AddressSpace

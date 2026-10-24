@@ -41,6 +41,10 @@ class ElfLoader final
 {
   public:
     Result<LoadedElf> load(std::span<const std::byte> image, arch::Architecture architecture) const;
+    // The prefix must contain the ELF header and complete program-header table.
+    // Segment extents are validated against the independent complete file size.
+    Result<LoadedElf> load_prefix(std::span<const std::byte> prefix, usize file_bytes,
+                                  arch::Architecture architecture) const;
 };
 
 class ProcessManager final
@@ -59,7 +63,7 @@ class ProcessManager final
     Result<ProcessId> create_user_process(std::string_view name, std::span<const std::byte> elf_image,
                                           arch::Architecture architecture);
     Result<ThreadId> create_user_thread(ProcessId pid, arch::CpuContext context);
-    Result<ProcessId> fork(ProcessId parent);
+    Result<ProcessId> fork(ProcessId parent, bool publish = true);
     Status execve(ProcessId pid, std::span<const std::byte> elf_image, arch::Architecture architecture);
     Status set_credentials(ProcessId pid, user::Credentials credentials);
     Result<i32> wait4(ProcessId parent, ProcessId child);

@@ -1,7 +1,11 @@
 #pragma once
 #include "ok/arch/execution.hpp"
+#include "ok/sched/raw_pty_transport.hpp"
+#include "ok/net/tcp_stream_handle.hpp"
 #include "ok/core/fixed.hpp"
 #include "ok/memory/memory.hpp"
+#include "ok/user/native_mapping_pages.hpp"
+#include "ok/user/native_shared_file_handle.hpp"
 #include <array>
 namespace ok::fs
 {
@@ -9,7 +13,8 @@ class Node;
 }
 namespace ok::sched
 {
-inline constexpr usize max_process_children = 16;
+// A single surviving init may own every other process in the bounded table.
+inline constexpr usize max_process_children = 64;
 inline constexpr usize max_memory_areas = 16;
 inline constexpr usize max_process_fds = 32;
 inline constexpr usize max_elf_load_segments = 8;
@@ -33,27 +38,71 @@ struct Session
 inline constexpr usize max_open_descriptions = 256;
 inline constexpr u16 invalid_description = 0xffffu;
 
+inline constexpr usize max_unix_endpoints = 32;
+inline constexpr usize max_unix_backlog = 4;
+struct UnixEndpointHandle
+{
+    u16 slot{invalid_description};
+    u64 generation{};
+    [[nodiscard]] explicit operator bool() const { return slot < max_unix_endpoints && generation; }
+    bool operator==(const UnixEndpointHandle &) const = default;
+};
+struct UnixPeerCredentials
+{
+    u64 pid{};
+    u32 uid{}, gid{};
+    bool operator==(const UnixPeerCredentials &) const = default;
+};
+struct UnixSocketReadiness
+{
+    bool listening{}, readable{}, writable{}, hangup{}, error{};
+};
+
 struct FileDescriptor
 {
     bool used{false};
+    u64 reservation{0}; // Private receive admission; zero is an available or published slot.
     bool close_on_exec{false};
     u16 description{invalid_description};
+    u64 installation{0}; // Shared scheduler token; close/reinstall never inherits authority.
 };
 
 struct OpenFileDescription
 {
     bool used{false};
+    u64 reservation{0}; // Unpublished canonical description, owned by one prepared operation.
     bool readable{false};
     bool writable{false};
     bool console{false};
     bool input_console{false};
+    bool large_file{false}; // Size policy admitted when opening the description.
     u32 flags{0};
     usize offset{0};
     usize references{0};
+    usize unix_queue_references{0}; // Included in references, but never an external collection root.
     u16 pipe{invalid_description};
+    // AF_UNIX stream endpoints receive from pipe and transmit to unix_write_pipe.
+    u16 unix_write_pipe{invalid_description};
+    private_pty::Handle pty_endpoint{}; // One canonical typed PTY endpoint; never console/pipe/UNIX backing.
+    UnixEndpointHandle unix_endpoint{}; // One pathname endpoint owner per canonical OFD.
+    u32 native_udp_handle{0}; // Zero is not a UDP socket; final OFD release retires the handle.
+    net::TcpStreamHandle native_tcp_handle{}; // One stream owner per shared OFD.
+    user::native::SharedFileHandle native_shared_file{}; // One volatile file owner per canonical OFD.
     fs::Node *node{nullptr};
     usize mount_id{0};
     FixedString<96> path{};
+};
+
+// Diagnostic counters saturate; they never grant or discharge a provider hold.
+struct ResourceDrainReport
+{
+    Status first_failure{};
+    usize operations{}, descriptors_consumed{}, cwd_consumed{}, failed_releases{};
+    usize descriptions_remaining{}, reservations_remaining{};
+    i32 first_failed_fd{-1};
+    u16 first_failed_description{invalid_description};
+    usize first_failed_mount_id{};
+    bool first_failed_cwd{}, active{};
 };
 
 class FileDescriptorTable final
@@ -117,10 +166,19 @@ struct MemoryMapping
     usize offset{0};
 };
 
+enum class UserPersonality : u8
+{
+    native,
+    linux
+};
+
 struct ProcessResources
 {
+    usize unix_receive_operations{}; // Prepared UNIX receives/accepts prevent resource retirement.
+    usize prepared_descriptor_operations{}; // PID-resolved TCP admission shares descriptor tokens with UNIX receive.
+    UserPersonality personality{UserPersonality::native};
     arch::execution::AddressSpace native_space{};
-    StaticVector<arch::execution::PageMapping, 128> native_pages{};
+    user::native::MappingPages native_pages{};
     FileDescriptorTable files{};
     MemoryMap memory{};
     std::array<MemoryMapping, 32> mappings{};
@@ -136,19 +194,40 @@ struct ProcessResources
 
 inline constexpr usize max_process_pipes = 16;
 inline constexpr usize pipe_capacity = 4096;
+inline constexpr usize max_unix_rights = 8;
+inline constexpr usize max_unix_records = 8;
+struct UnixRightsRecord
+{
+    bool used{};
+    usize start{}, end{}, count{};
+    std::array<u16, max_unix_rights> descriptions{};
+};
 struct PipeBuffer
 {
     bool used{false};
+    u64 revision{1};
     usize head{0};
     usize size{0};
     std::array<std::byte, pipe_capacity> data{};
+    std::array<UnixRightsRecord, max_unix_records> rights{};
 };
 enum class ThreadWaitReason : u8
 {
     none,
     child,
     pipe_read,
-    pipe_write
+    pipe_write,
+    deadline,
+    console_read,
+    poll,
+    futex,
+    signal_suspend = 8,
+    signal_wait = 9,
+    vfs_operation = 10,
+    udp_receive = 11,
+    tcp_stream = 12,
+    pty_read = 13,
+    pty_write = 14
 };
 
 struct ThreadLocalState
@@ -156,6 +235,7 @@ struct ThreadLocalState
     uptr fs_base{0};
     uptr gs_base{0};
     uptr clear_tid_address{0};
+    uptr set_tid_address{0};
     uptr robust_list{0};
     usize robust_list_length{0};
 };

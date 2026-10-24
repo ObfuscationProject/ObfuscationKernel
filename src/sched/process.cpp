@@ -93,7 +93,7 @@ usize elf_segment_permissions(u32 flags)
 Status FileDescriptorTable::open_slot(FdLike fd)
 {
     auto *slot = entry(fd);
-    if (slot == nullptr)
+    if (slot == nullptr || slot->reservation)
         return Status::invalid_argument("file descriptor is out of range");
     slot->used = true;
     return Status::success();
@@ -113,7 +113,8 @@ Status FileDescriptorTable::clone_from(const FileDescriptorTable &source)
     if (this == &source)
         return Status::success();
     for (usize i = 0; i < entries_.size(); ++i)
-        if ((entries_[i].used && entries_[i].description != invalid_description) ||
+        if (entries_[i].reservation || source.entries_[i].reservation ||
+            (entries_[i].used && entries_[i].description != invalid_description) ||
             (source.entries_[i].used && source.entries_[i].description != invalid_description))
             return Status::invalid_argument("managed descriptors must be cloned by the scheduler");
     entries_ = source.entries_;
@@ -122,7 +123,7 @@ Status FileDescriptorTable::clone_from(const FileDescriptorTable &source)
 bool FileDescriptorTable::contains(FdLike fd) const
 {
     const auto *slot = entry(fd);
-    return slot != nullptr && slot->used;
+    return slot != nullptr && (slot->used || slot->reservation);
 }
 usize FileDescriptorTable::open_count() const
 {
@@ -252,9 +253,13 @@ bool WaitQueue::blocked(ProcessId pid) const
 Status ProcessControlBlock::configure(ProcessId pid, ProcessId parent, std::string_view name)
 {
     pid_ = pid;
+    console_epoch_ = 0;
     parent_pid_ = parent;
-    group_ = ProcessGroup{.id = parent == 0 ? pid : parent};
-    session_ = Session{.id = group_.id};
+    // Standalone creation starts an independent session. Fork inherits the
+    // actual parent's membership at the scheduler publication boundary.
+    group_ = ProcessGroup{.id = pid};
+    session_ = Session{.id = pid};
+    has_execed_ = false;
     credentials_ = user::kernel_credentials();
     signals_ = {};
     resources_ = {};
@@ -297,6 +302,14 @@ Status ProcessControlBlock::remove_child(ProcessId child)
 
 Result<LoadedElf> ElfLoader::load(std::span<const std::byte> image, arch::Architecture architecture) const
 {
+    return load_prefix(image, image.size(), architecture);
+}
+
+Result<LoadedElf> ElfLoader::load_prefix(std::span<const std::byte> image, usize file_bytes,
+                                        arch::Architecture architecture) const
+{
+    if (image.size() > file_bytes)
+        return Status::invalid_argument("ELF prefix exceeds file size");
     if (image.size() < 52)
         return Status::invalid_argument("ELF image is too small");
     if (byte_at(image, 0) != 0x7f || byte_at(image, 1) != 'E' || byte_at(image, 2) != 'L' || byte_at(image, 3) != 'F')
@@ -338,6 +351,8 @@ Result<LoadedElf> ElfLoader::load(std::span<const std::byte> image, arch::Archit
     for (usize i = 0; i < phnum; ++i)
     {
         const auto offset = static_cast<usize>(phoff64) + i * static_cast<usize>(phentsize);
+        if (read32(offset) == 2 || read32(offset) == 3)
+            loaded.static_executable = false;
         if (read32(offset) != 1)
             continue;
         const auto flags = static_cast<u32>(read32(offset + (elf64 ? 4 : 24)));
@@ -346,7 +361,7 @@ Result<LoadedElf> ElfLoader::load(std::span<const std::byte> image, arch::Archit
         const auto file_size = elf64 ? read64(offset + 32) : read32(offset + 16);
         const auto memory_size = elf64 ? read64(offset + 40) : read32(offset + 20);
         const auto alignment = elf64 ? read64(offset + 48) : read32(offset + 28);
-        if (memory_size < file_size || file_offset > image.size() || file_size > image.size() - file_offset ||
+        if (memory_size < file_size || file_offset > file_bytes || file_size > file_bytes - file_offset ||
             virtual_address > max_address || memory_size > max_address - virtual_address)
             return Status::invalid_argument("ELF load segment is out of range");
         if (alignment > 1 && ((alignment & (alignment - 1)) != 0 ||
@@ -436,9 +451,9 @@ Result<ThreadId> ProcessManager::create_user_thread(ProcessId pid, arch::CpuCont
         return Status::invalid_argument("user thread context must use user privilege");
     return scheduler_->create_thread(pid, context);
 }
-Result<ProcessId> ProcessManager::fork(ProcessId parent)
+Result<ProcessId> ProcessManager::fork(ProcessId parent, bool publish)
 {
-    return scheduler_->fork_process(parent);
+    return scheduler_->fork_process(parent, publish);
 }
 
 Status ProcessManager::execve(ProcessId pid, std::span<const std::byte> elf_image, arch::Architecture architecture)

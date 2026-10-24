@@ -5,103 +5,173 @@ namespace ok::memory
 
 Status FrameAllocator::initialize(std::span<const MemoryRegion> regions, usize page_size)
 {
-    if (page_size == 0)
+    if (used_count_ != 0)
     {
-        return Status::invalid_argument("page size must be non-zero");
+        return Status::busy("physical frames are still owned");
+    }
+    if (page_size == 0 || (page_size & (page_size - 1)) != 0)
+    {
+        return Status::invalid_argument("page size must be a power of two");
     }
 
-    page_size_ = page_size;
-    uptr lowest = 0;
-    uptr highest = 0;
-    bool found = false;
-
+    constexpr uptr address_limit = ~uptr{0};
+    uptr cursor = address_limit;
     for (const auto &region : regions)
     {
-        if (region.type != RegionType::usable || region.size < page_size_)
+        if (region.size > address_limit - region.base)
         {
-            continue;
+            return Status::overflow("physical memory region wraps the address space");
         }
-        const uptr start = (region.base + page_size_ - 1) / page_size_ * page_size_;
-        const uptr end = (region.base + region.size) / page_size_ * page_size_;
-        if (start >= end)
+        if (region.size != 0 && region.base < cursor)
         {
-            continue;
+            cursor = region.base;
         }
-        if (!found || start < lowest)
-        {
-            lowest = start;
-        }
-        if (end > highest)
-        {
-            highest = end;
-        }
-        found = true;
     }
 
-    if (!found)
-    {
-        return Status::no_memory("no usable physical memory region");
-    }
-
-    base_ = lowest;
-    const usize frame_count = (highest - lowest) / page_size_;
-    if (frame_count > max_physical_frames)
-    {
-        return Status::overflow("physical frame table capacity exceeded");
-    }
-    frame_count_ = frame_count;
-    used_count_ = frame_count_;
-    next_free_hint_ = 0;
-    for (usize i = 0; i < frame_count_; ++i)
-    {
-        frame_used_[i] = true;
-    }
-
-    for (const auto &region : regions)
-    {
-        if (region.type != RegionType::usable)
+    std::array<FrameRange, max_physical_frame_ranges> candidate_ranges{};
+    usize candidate_range_count = 0;
+    usize candidate_frame_count = 0;
+    auto append_range = [&](uptr start, uptr end) -> Status {
+        const usize adjustment = (page_size - (start % page_size)) % page_size;
+        if (adjustment >= end - start)
         {
-            continue;
+            return Status::success();
         }
-        const uptr start = (region.base + page_size_ - 1) / page_size_ * page_size_;
-        const uptr end = (region.base + region.size) / page_size_ * page_size_;
-        for (uptr address = start; address < end; address += page_size_)
+        start += adjustment;
+        end -= end % page_size;
+        if (end <= start)
         {
-            const usize index = (address - base_) / page_size_;
-            if (index < frame_count_)
+            return Status::success();
+        }
+        const usize count = (end - start) / page_size;
+        if (count > max_physical_frames - candidate_frame_count)
+        {
+            return Status::overflow("bootstrap physical frame capacity exceeded");
+        }
+        if (candidate_range_count == candidate_ranges.size())
+        {
+            return Status::overflow("bootstrap physical range capacity exceeded");
+        }
+        candidate_ranges[candidate_range_count++] =
+            FrameRange{.base = start, .first_index = candidate_frame_count, .count = count};
+        candidate_frame_count += count;
+        return Status::success();
+    };
+
+    // Sweep byte boundaries before page alignment: reservations always win and
+    // adjacent usable fragments may together cover a complete physical page.
+    bool in_usable_run = false;
+    uptr run_start = 0;
+    while (true)
+    {
+        bool usable = false;
+        bool reserved = false;
+        bool next_found = false;
+        uptr next = address_limit;
+        for (const auto &region : regions)
+        {
+            if (region.size == 0)
             {
-                if (frame_used_[index])
+                continue;
+            }
+            const uptr end = region.base + region.size;
+            if (region.base <= cursor && cursor < end)
+            {
+                usable |= region.type == RegionType::usable;
+                reserved |= region.type != RegionType::usable;
+            }
+            for (const uptr boundary : {region.base, end})
+            {
+                if (boundary > cursor && (!next_found || boundary < next))
                 {
-                    frame_used_[index] = false;
-                    --used_count_;
-                    if (index < next_free_hint_)
-                    {
-                        next_free_hint_ = index;
-                    }
+                    next = boundary;
+                    next_found = true;
                 }
             }
         }
+        if (!next_found)
+        {
+            break;
+        }
+        if (usable && !reserved)
+        {
+            if (!in_usable_run)
+            {
+                run_start = cursor;
+                in_usable_run = true;
+            }
+        }
+        else if (in_usable_run)
+        {
+            if (auto status = append_range(run_start, cursor); !status.ok())
+            {
+                return status;
+            }
+            in_usable_run = false;
+        }
+        cursor = next;
+    }
+    if (in_usable_run)
+    {
+        if (auto status = append_range(run_start, cursor); !status.ok())
+        {
+            return status;
+        }
+    }
+    if (candidate_frame_count == 0)
+    {
+        return Status::no_memory("no complete usable physical frames");
     }
 
+    ranges_ = candidate_ranges;
+    range_count_ = candidate_range_count;
+    frame_count_ = candidate_frame_count;
+    page_size_ = page_size;
+    next_free_hint_ = 0;
+    generations_.fill(0);
+    // Preserve the sequence across reinitialization so old handles stay stale.
     return Status::success();
+}
+
+uptr FrameAllocator::address_for(usize index) const
+{
+    for (usize i = 0; i < range_count_; ++i)
+    {
+        const auto &range = ranges_[i];
+        if (index >= range.first_index && index - range.first_index < range.count)
+        {
+            return range.base + (index - range.first_index) * page_size_;
+        }
+    }
+    return 0;
 }
 
 Result<PhysicalFrame> FrameAllocator::allocate()
 {
+    if (frame_count_ == 0)
+    {
+        return Status::not_initialized("physical frame allocator is not initialized");
+    }
     if (used_count_ >= frame_count_)
     {
         return Status::no_memory("physical frame allocator exhausted");
+    }
+    if (next_generation_ == 0)
+    {
+        return Status::overflow("physical frame ownership sequence exhausted");
     }
 
     for (usize offset = 0; offset < frame_count_; ++offset)
     {
         const usize index = (next_free_hint_ + offset) % frame_count_;
-        if (!frame_used_[index])
+        if (generations_[index] == 0)
         {
-            frame_used_[index] = true;
+            const u64 generation = next_generation_++;
+            generations_[index] = generation;
             ++used_count_;
             next_free_hint_ = (index + 1) % frame_count_;
-            return PhysicalFrame{.address = base_ + index * page_size_, .index = index};
+            return PhysicalFrame{
+                .address = address_for(index), .index = index, .owner = this, .generation = generation};
         }
     }
     return Status::no_memory("physical frame allocator exhausted");
@@ -109,15 +179,12 @@ Result<PhysicalFrame> FrameAllocator::allocate()
 
 Status FrameAllocator::release(PhysicalFrame frame)
 {
-    if (frame.index >= frame_count_)
+    if (frame.owner != this || frame.index >= frame_count_ || frame.generation == 0 ||
+        generations_[frame.index] != frame.generation || address_for(frame.index) != frame.address)
     {
-        return Status::invalid_argument("physical frame index out of range");
+        return Status::invalid_argument("physical frame ownership handle is invalid or stale");
     }
-    if (!frame_used_[frame.index])
-    {
-        return Status::invalid_argument("physical frame already free");
-    }
-    frame_used_[frame.index] = false;
+    generations_[frame.index] = 0;
     --used_count_;
     if (frame.index < next_free_hint_)
     {
