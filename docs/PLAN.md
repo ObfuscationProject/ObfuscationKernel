@@ -65,6 +65,19 @@ Exit gate
 
 Paired OS worktree: `chore/sdk75-consumer`. Depends on: P0.
 
+Scaffold on branch `feat/mm-general` (hosted tests pass, nothing wired into boot):
+- `include/ok/memory/physical_map.hpp`, `src/memory/physical_map.cpp`: `PhysicalMemoryMap`
+  collects E820/FDT/board/linker regions, subtracts reservations, yields sorted
+  page-aligned usable ranges; `product_grade()` rejects synthetic maps.
+- `include/ok/memory/runtime_frames.hpp`, `src/memory/runtime_frames.cpp`:
+  `RuntimeFrameAllocator` sizes bitmap and generation metadata from the map at
+  initialisation (`metadata_bytes_required()`), charges `ChargeAccount` quotas,
+  rejects foreign/stale/mismatched handles.
+- `include/ok/memory/charges.hpp`: per-owner page charges with limit and peak.
+- `tests/host/runtime_frames_tests.cpp`, `scripts/test_runtime_frames.py` (plain and sanitised).
+Next: feed real maps from `kernel_main` per architecture, carve the metadata
+region from discovered RAM, replace `FrameAllocator` users, then slab and COW.
+
 ### WT1.2 `feat/irq-wait-time` (L, ABI)
 
 Scope
@@ -82,6 +95,18 @@ Exit gate: no polling loop remains in the kernel block/net/input paths on ten
 profiles; clock drift test against QEMU wall time; timer interrupt latency
 measured. Depends on WT1.1 (allocator for work items).
 
+Scaffold on branch `feat/irq-wait-time` (hosted tests pass):
+- `include/ok/interrupt/irq_chip.hpp`: `IrqChip` concept (initialize, configure,
+  mask, unmask, acknowledge, end_of_interrupt), `ModelIrqChip`, `IrqRouter<Chip>`
+  binding lines to dispatcher vectors; `InterruptDispatcher::dispatch_vector`.
+- `include/ok/sched/wait_queue.hpp`: `WaitQueue<N>` over `WaitRegistration` with
+  prepare / recheck / cancel / wake_one / wake_all and wake-source counters.
+- `include/ok/time/clocksource.hpp`: `ClockSource` concept, `ModelClockSource`,
+  `CalibratedClock<Source>` (nanoseconds without 128-bit arithmetic, deadlines).
+- `tests/host/irq_wait_time_tests.cpp`, `scripts/test_irq_wait_time.py`.
+Next: one `src/arch/<arch>/irq_chip.cpp` per profile, virtio completion through
+the router, wait queues in pipes/block/net, counter-backed `clock_gettime`.
+
 ### WT1.3 `refactor/ext4-layout` (M, header set changes)
 
 Scope: consolidate the 102 `include/ok/fs` ext4/JBD2 headers into
@@ -90,6 +115,14 @@ with private `.inc` files under `src/fs/ext4/`. No behavior change. Appendix A
 is the generated starting map. Tests under `tests/host/ext4_*` move with the
 headers; hosted ext4 suites and the OS two-boot persistence test must produce
 identical results. Can run in parallel with WT1.1; align the ABI bump at merge.
+
+Scaffold on branch `refactor/ext4-layout`:
+- `include/ok/fs/ext4/{layout,extent,dir,alloc,txn,journal,recovery,mount}.hpp`
+  facades own the 87 slice headers (one owner each); `include/ok/fs/ext4/README.md`.
+- `scripts/check_ext4_layout.py` enforces ownership and reports include-order
+  dependent slices (`ext4_regular_move_completion.hpp` today; `--strict` fails on it).
+Next: switch `src/fs/*.cpp` and tests to the facades, fold slices in, move the 20
+`.inc` partials under `src/fs/ext4/`.
 
 ### WT1.4 `refactor/user-runtime-split` (M)
 
@@ -100,6 +133,14 @@ one `include/ok/arch/<arch>/signal.hpp` each; move the kernel-resident shell,
 file manager and task manager to `src/rescue/`, built only with `kernel_gui`.
 Appendix B and C list the files. No behavior change; release image size must
 not grow.
+
+Scaffold on branch `refactor/user-runtime-split`:
+- `src/apps/` moved to `src/rescue/` with `src/rescue/README.md`; `xmake.lua`
+  and `tests/host/native_pty/xmake.lua` updated; headers stay under `include/ok/apps`.
+- `src/user/README.md` unit map; `scripts/check_runtime_split.py` ratchet
+  (5,876 lines / 101 includes) that fails when `runtime.cpp` grows.
+Next: extract `loader.cpp` first (ELF admission and stack setup have the fewest
+cross-dependencies), lower the ratchet, repeat per unit.
 
 ## P2: platform and protocols
 
@@ -145,6 +186,16 @@ objects are live. Paired OS worktree `feat/drivers-as-modules`. Depends on WT1.1
 vsync events, input event queue, seat lease. Move ramfb, virtio-gpu, PS/2 and
 USB HID drivers out of the kernel to OS drivers; keep a text rescue GUI. Paired
 OS worktree `feat/display-input-drivers`. Depends on WT1.1, WT2.5.
+
+Scaffold on branch `feat/display-input-uapi`:
+- `include/ok/uapi/display.h`, `include/ok/uapi/input.h`: versioned fixed-width
+  records for modes, dumb buffers, present/vblank events, input events, device
+  info and seat leases; reserved ioctl numbers; `OK_*_UAPI_VERSION` are 0 until
+  the first native handler lands.
+- `tests/host/display_input_uapi_layout.c` (freestanding, LP64 and ILP32),
+  `tests/host/display_input_uapi_tests.cpp`, `scripts/test_display_input_uapi.py`.
+Next: kernel display mechanism (`ok::display` buffer objects over the general
+allocator), `/dev/display0` and `/dev/input/eventN` descriptors, seat lease owner.
 
 ## P3 and later
 
@@ -209,7 +260,7 @@ Total ext4/JBD2 headers mapped: 107. Unrelated headers kept as they are: `archiv
 `include/ok/user/` has 88 headers; the 30 `native_signal_{delivery,frame,return}_<arch>.hpp`
 headers collapse into one `include/ok/arch/<arch>/signal.hpp` per architecture.
 
-## Appendix C: kernel-resident applications moving to `src/rescue/`
+## Appendix C: kernel-resident applications (now `src/rescue/` on `refactor/user-runtime-split`)
 
 - `src/apps/file_manager.cpp` (928 lines)
 - `src/apps/shell/filesystem.cpp` (934 lines)
