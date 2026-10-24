@@ -81,6 +81,9 @@ class DriverManager final
     Status bind_kernel_processes(sched::Scheduler &scheduler, arch::ArchOperations &arch, uptr entry_base,
                                  uptr stack_base);
     Status supervise_kernel_processes(StaticVector<DriverProcessRestart, max_drivers> &restarts);
+    [[nodiscard]] Status shutdown_preflight(std::span<Driver *const> expected) const;
+    Status close_shutdown_admission();
+    Status stop_shutdown_producers();
     [[nodiscard]] Driver *find(Class driver_class);
     [[nodiscard]] Result<sched::ProcessId> kernel_process_id(std::string_view driver_name) const;
     [[nodiscard]] usize driver_count() const
@@ -109,6 +112,8 @@ class DriverManager final
     arch::ArchOperations *kernel_process_arch_{nullptr};
     uptr kernel_process_entry_base_{0};
     uptr kernel_process_stack_base_{0};
+    bool shutdown_admission_closed_{};
+    bool shutdown_stop_started_{};
 };
 
 class ConsoleDriver final : public Driver

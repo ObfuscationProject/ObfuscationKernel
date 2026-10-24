@@ -174,6 +174,9 @@ Status KernelDebugShell::command_ls(std::string_view path)
         case fs::NodeType::symlink:
             type = 'l';
             break;
+        case fs::NodeType::socket:
+            type = 's';
+            break;
         }
         if (auto status = append_char(type); !status.ok())
         {

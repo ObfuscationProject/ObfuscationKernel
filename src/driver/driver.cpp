@@ -27,11 +27,13 @@ bool should_register_driver_process(const Driver &driver)
 
 Status DriverManager::add(Driver &driver)
 {
+    if (shutdown_admission_closed_) return Status::denied("driver shutdown admission is closed");
     return drivers_.push_back(&driver);
 }
 
 Status DriverManager::start_all()
 {
+    if (shutdown_admission_closed_) return Status::denied("driver shutdown admission is closed");
     for (auto *driver : drivers_)
     {
         if (auto status = driver->probe(); !status.ok())
@@ -72,6 +74,7 @@ const DriverManager::DriverProcessRecord *DriverManager::find_process_record(con
 
 Result<sched::ProcessId> DriverManager::ensure_kernel_process(Driver &driver, usize driver_index)
 {
+    if (shutdown_admission_closed_) return Status::denied("driver shutdown admission is closed");
     if (!should_register_driver_process(driver))
     {
         return Status::invalid_argument("driver does not use a kernel process");
@@ -127,6 +130,7 @@ Result<sched::ProcessId> DriverManager::ensure_kernel_process(Driver &driver, us
 Status DriverManager::bind_kernel_processes(sched::Scheduler &scheduler, arch::ArchOperations &arch, uptr entry_base,
                                             uptr stack_base)
 {
+    if (shutdown_admission_closed_) return Status::denied("driver shutdown admission is closed");
     if (entry_base == 0 || stack_base == 0)
     {
         return Status::invalid_argument("driver kernel process context is invalid");
@@ -153,6 +157,7 @@ Status DriverManager::bind_kernel_processes(sched::Scheduler &scheduler, arch::A
 
 Status DriverManager::supervise_kernel_processes(StaticVector<DriverProcessRestart, max_drivers> &restarts)
 {
+    if (shutdown_admission_closed_) return Status::denied("driver shutdown admission is closed");
     restarts.clear();
     if (kernel_process_scheduler_ == nullptr || kernel_process_arch_ == nullptr)
     {
@@ -269,6 +274,42 @@ Status TimerDriver::stop()
 {
     started_ = false;
     return Status::success();
+}
+
+Status DriverManager::shutdown_preflight(std::span<Driver *const> expected) const
+{
+    if (shutdown_admission_closed_) return Status::denied("driver shutdown admission is closed");
+    if (expected.size() != drivers_.size())
+        return Status::unsupported("driver shutdown inventory differs");
+    for (usize i = 0; i < expected.size(); ++i)
+    {
+        if (!expected[i] || expected[i] != drivers_[i])
+            return Status::unsupported("driver shutdown inventory has a foreign owner");
+        for (usize j = 0; j < i; ++j)
+            if (expected[i] == expected[j]) return Status::unsupported("duplicate shutdown driver");
+    }
+    return {};
+}
+Status DriverManager::close_shutdown_admission()
+{
+    if (shutdown_admission_closed_) return Status::denied("driver shutdown admission was already closed");
+    shutdown_admission_closed_ = true;
+    return {};
+}
+Status DriverManager::stop_shutdown_producers()
+{
+    if (!shutdown_admission_closed_ || shutdown_stop_started_)
+        return Status::denied("driver producer retirement is not admitted");
+    shutdown_stop_started_ = true;
+    for (usize i = drivers_.size(); i != 0; --i)
+    {
+        auto &driver = *drivers_[i - 1];
+        // Retain storage transport and the console through the final seal.
+        if (driver.driver_class() == Class::console || driver.driver_class() == Class::block ||
+            driver.driver_class() == Class::bus) continue;
+        if (auto status = driver.stop(); !status) return status;
+    }
+    return {};
 }
 
 } // namespace ok::driver

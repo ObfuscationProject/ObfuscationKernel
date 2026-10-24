@@ -96,6 +96,8 @@ template <usize Capacity> Status append_padded(FixedString<Capacity> &out, std::
         return "dev";
     case fs::NodeType::symlink:
         return "link";
+    case fs::NodeType::socket:
+        return "socket";
     }
     return "node";
 }

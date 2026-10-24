@@ -29,6 +29,7 @@ class GuiModule final : public KernelModule, public KernelService
     [[nodiscard]] void *service(std::string_view service_id) override;
     Status start(ServiceRegistry &) override;
     Status stop() override;
+    Status shutdown_preflight() const override { return {}; }
     Status shutdown() override;
 
     [[nodiscard]] GuiCompositor &compositor()

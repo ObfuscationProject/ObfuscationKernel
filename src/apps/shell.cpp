@@ -896,7 +896,8 @@ Status KernelDebugShell::sync_posix_credentials_to_session()
     const auto active = kernel_->posix().user_credentials();
     const auto desired = target.value();
     if (active.uid == desired.uid && active.gid == desired.gid && active.euid == desired.euid &&
-        active.egid == desired.egid && active.kernel_space == desired.kernel_space)
+        active.egid == desired.egid && active.kernel_space == desired.kernel_space &&
+        active.suid == desired.suid && active.sgid == desired.sgid)
     {
         return Status::success();
     }
@@ -2257,6 +2258,8 @@ Status KernelDebugShell::append_node_type(fs::NodeType type)
         return append("dev");
     case fs::NodeType::symlink:
         return append("link");
+    case fs::NodeType::socket:
+        return append("socket");
     }
     return append("unknown");
 }
