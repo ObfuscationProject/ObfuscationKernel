@@ -15,7 +15,7 @@ Bootable targets are split from the freestanding `okernel` library. The
   display, and virtio-mmio keyboard/mouse input. `qemu-system-aarch64` boots the
   debug image directly with `-kernel` and validates the serial `OK_TEST_PASS`
   marker.
-- `arm32`: QEMU virt direct ELF boot at `0x40008000`, bootstrap stack, `.bss`
+- `arm32`: QEMU virt ARM Linux-header raw image at `0x40010000`, bootstrap stack, `.bss`
   clearing, PL011 UART output, ramfb display, and virtio-mmio keyboard/mouse
   input.
 - `rv64`: QEMU virt direct ELF boot at `0x80000000`, bootstrap stack, `.bss`

@@ -1,0 +1,18 @@
+{
+  "linux_version": "6.13.4",
+  "source_role": "Wire-format/checksum/revoke semantics; not a claim of Linux recovery compatibility",
+  "files": {
+    "include/linux/jbd2.h": "a166557488181a92abec73ac387023be029101bb2e7b3620a01a8130786b308d",
+    "fs/jbd2/journal.c": "58e7fd346ebc07cc86ea159e81b39d50c142ac18884e1f5ea7fa9d571fd3ae20",
+    "fs/jbd2/commit.c": "745448177aef864d5430741a798ef6762104c32b23edc5f7e378a730eed5e74b",
+    "fs/jbd2/revoke.c": "a3f87e197f52d492b7cef66a8eba5b7ec271373a497468af335964de4cd76f17",
+    "fs/jbd2/recovery.c": "6a63499463f792f6301c093e93b393b63cc921c3b6956ff3fc884fb2b4beab40",
+    "Documentation/filesystems/ext4/journal.rst": "ae23e8ec62ae06fac5a14226a1bdaa4d1b7276aaeefd1c25a1ce1d98739bbbf2"
+  },
+  "fixture": {
+    "path": "tests/fixtures/jbd2_v3.bin",
+    "sha256": "450112408455a043f9e9bfa6e90401d23f781ca6400845c0ffad8272771462d3",
+    "kind": "synthetic-host-model",
+    "checksum_oracle": "e2fsprogs 1.47.0 ext2fs_crc32c_le"
+  }
+}

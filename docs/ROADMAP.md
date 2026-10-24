@@ -6,6 +6,12 @@ documented UAPI, boot them in QEMU, expose useful diagnostics, and preserve
 regression coverage. Full POSIX conformance and production hardware support
 remain separate goals.
 
+The cross-repository
+[complete workstation implementation plan](../../ObfuscationOS/docs/plans/README.md)
+details the proposed longer-term POSIX.1-2024/musl, ext4, networking, services and
+user desktop target, with ten-architecture dependencies and acceptance gates.
+It does not change the current support claims or development contract below.
+
 ## Current Foundations
 
 - Build and ownership: xmake builds freestanding C++23 for `i386`, `x86_64`,

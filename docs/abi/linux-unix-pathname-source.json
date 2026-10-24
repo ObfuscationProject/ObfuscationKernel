@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "archive_sha256": "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4",
+  "musl_version": "1.2.5",
+  "source_file_sha256": {
+    "include/sys/socket.h": "1e6f196e7ae112b3295078b45e705b7f69ae2a1ade7f3b72522f66fb695eda65",
+    "include/sys/un.h": "186fe17ae60beb1c76395f0642bfd6ec126793987d39b04e94662be8f581cb70",
+    "arch/mips/bits/socket.h": "9e3dd20c79191f0d1796a97afd3ee0dd95f1c43213033cc11984d9a4ae1fbd1a",
+    "arch/mips64/bits/socket.h": "5cf0d72b9e44a62a70b7d53a6cd2edb01e998e5b10bba7527c5c3c013bddcb61",
+    "arch/powerpc/bits/socket.h": "992c3e16060b5723279a283ffa8611890e92fc4cf031e8eecaf1de8c657a0259",
+    "arch/generic/bits/socket.h": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "scope": "All-ten target-endian direct pathname stream codecs; source inspection is not syscall execution",
+  "constants": {
+    "include/sys/socket.h": [
+      "struct ucred {",
+      "#define SO_PASSCRED     16",
+      "#define SO_PEERCRED     17",
+      "#ifndef SOL_SOCKET",
+      "#define SOL_SOCKET      1"
+    ],
+    "include/sys/un.h": [
+      "\tchar sun_path[108];",
+      "#define SUN_LEN(s) (2+strlen((s)->sun_path))"
+    ],
+    "arch/mips/bits/socket.h": [
+      "#define SOL_SOCKET     65535",
+      "#define SO_PASSCRED     17",
+      "#define SO_PEERCRED     18"
+    ],
+    "arch/mips64/bits/socket.h": [
+      "#define SOL_SOCKET     65535",
+      "#define SO_PASSCRED     17",
+      "#define SO_PEERCRED     18"
+    ],
+    "arch/powerpc/bits/socket.h": [
+      "#define SO_PASSCRED     20",
+      "#define SO_PEERCRED     21"
+    ],
+    "arch/generic/bits/socket.h": []
+  }
+}

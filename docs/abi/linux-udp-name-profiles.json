@@ -1,0 +1,757 @@
+{
+  "all_ten_and_four_supplied_preserved": true,
+  "inventory_capsule": {
+    "directory": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01",
+    "freeze_sha256": "f04f85532d34c58f6acdc3214ea3543b76599241c9403f682f1506c9bd53d0f4",
+    "result_sha256": "5f65a493c493fc42711d5d701dcdf478aaa14fbaaabc286c1ae1ef93ab9acf04"
+  },
+  "inventory_only_not_execution": true,
+  "profile_order": [
+    "i386",
+    "x86_64",
+    "aarch64",
+    "arm32",
+    "rv64",
+    "rv32",
+    "loongarch64",
+    "mips",
+    "mips64",
+    "ppc"
+  ],
+  "profiles": [
+    {
+      "architecture": "i386",
+      "getsockname": {
+        "linux": {
+          "definition": {
+            "line": 382,
+            "source": "linux/arch/x86/entry/syscalls/syscall_32.tbl",
+            "table_row": "367\ti386\tgetsockname\t\tsys_getsockname"
+          },
+          "value": 367
+        },
+        "musl": {
+          "definition": {
+            "expression": "367",
+            "line": 367,
+            "source": "musl/arch/i386/bits/syscall.h.in"
+          },
+          "value": 367
+        }
+      },
+      "selection": {
+        "number_base": 0,
+        "path": "linux/arch/x86/entry/syscalls/syscall_32.tbl",
+        "selected_abi_rows": [
+          "i386"
+        ]
+      },
+      "socketcall": {
+        "definition": {
+          "expression": "102",
+          "line": 103,
+          "source": "musl/arch/i386/bits/syscall.h.in"
+        },
+        "value": 102
+      },
+      "supplied_musl": false
+    },
+    {
+      "architecture": "x86_64",
+      "getsockname": {
+        "linux": {
+          "definition": {
+            "line": 63,
+            "source": "linux/arch/x86/entry/syscalls/syscall_64.tbl",
+            "table_row": "51\tcommon\tgetsockname\t\tsys_getsockname"
+          },
+          "value": 51
+        },
+        "musl": {
+          "definition": {
+            "expression": "51",
+            "line": 52,
+            "source": "musl/arch/x86_64/bits/syscall.h.in"
+          },
+          "value": 51
+        }
+      },
+      "selection": {
+        "number_base": 0,
+        "path": "linux/arch/x86/entry/syscalls/syscall_64.tbl",
+        "selected_abi_rows": [
+          "64",
+          "common"
+        ]
+      },
+      "socketcall": {
+        "definition": null,
+        "value": null
+      },
+      "supplied_musl": true
+    },
+    {
+      "architecture": "aarch64",
+      "getsockname": {
+        "linux": {
+          "definition": {
+            "expression": "204",
+            "line": 534,
+            "source": "linux/include/uapi/asm-generic/unistd.h"
+          },
+          "value": 204
+        },
+        "musl": {
+          "definition": {
+            "expression": "204",
+            "line": 205,
+            "source": "musl/arch/aarch64/bits/syscall.h.in"
+          },
+          "value": 204
+        }
+      },
+      "selection": {
+        "path": "linux/include/uapi/asm-generic/unistd.h",
+        "selection": "asm-generic native profile; no compat/x32/OABI/N32 personality"
+      },
+      "socketcall": {
+        "definition": null,
+        "value": null
+      },
+      "supplied_musl": true
+    },
+    {
+      "architecture": "arm32",
+      "getsockname": {
+        "linux": {
+          "definition": {
+            "line": 304,
+            "source": "linux/arch/arm/tools/syscall.tbl",
+            "table_row": "286\tcommon\tgetsockname\t\tsys_getsockname"
+          },
+          "value": 286
+        },
+        "musl": {
+          "definition": {
+            "expression": "286",
+            "line": 243,
+            "source": "musl/arch/arm/bits/syscall.h.in"
+          },
+          "value": 286
+        }
+      },
+      "selection": {
+        "number_base": 0,
+        "path": "linux/arch/arm/tools/syscall.tbl",
+        "selected_abi_rows": [
+          "common",
+          "eabi"
+        ]
+      },
+      "socketcall": {
+        "definition": null,
+        "value": null
+      },
+      "supplied_musl": false
+    },
+    {
+      "architecture": "rv64",
+      "getsockname": {
+        "linux": {
+          "definition": {
+            "expression": "204",
+            "line": 534,
+            "source": "linux/include/uapi/asm-generic/unistd.h"
+          },
+          "value": 204
+        },
+        "musl": {
+          "definition": {
+            "expression": "204",
+            "line": 204,
+            "source": "musl/arch/riscv64/bits/syscall.h.in"
+          },
+          "value": 204
+        }
+      },
+      "selection": {
+        "path": "linux/include/uapi/asm-generic/unistd.h",
+        "selection": "asm-generic native profile; no compat/x32/OABI/N32 personality"
+      },
+      "socketcall": {
+        "definition": null,
+        "value": null
+      },
+      "supplied_musl": true
+    },
+    {
+      "architecture": "rv32",
+      "getsockname": {
+        "linux": {
+          "definition": {
+            "expression": "204",
+            "line": 534,
+            "source": "linux/include/uapi/asm-generic/unistd.h"
+          },
+          "value": 204
+        },
+        "musl": {
+          "definition": {
+            "expression": "204",
+            "line": 179,
+            "source": "musl/arch/riscv32/bits/syscall.h.in"
+          },
+          "value": 204
+        }
+      },
+      "selection": {
+        "path": "linux/include/uapi/asm-generic/unistd.h",
+        "selection": "asm-generic native profile; no compat/x32/OABI/N32 personality"
+      },
+      "socketcall": {
+        "definition": null,
+        "value": null
+      },
+      "supplied_musl": false
+    },
+    {
+      "architecture": "loongarch64",
+      "getsockname": {
+        "linux": {
+          "definition": {
+            "expression": "204",
+            "line": 534,
+            "source": "linux/include/uapi/asm-generic/unistd.h"
+          },
+          "value": 204
+        },
+        "musl": {
+          "definition": {
+            "expression": "204",
+            "line": 200,
+            "source": "musl/arch/loongarch64/bits/syscall.h.in"
+          },
+          "value": 204
+        }
+      },
+      "selection": {
+        "path": "linux/include/uapi/asm-generic/unistd.h",
+        "selection": "asm-generic native profile; no compat/x32/OABI/N32 personality"
+      },
+      "socketcall": {
+        "definition": null,
+        "value": null
+      },
+      "supplied_musl": true
+    },
+    {
+      "architecture": "mips",
+      "getsockname": {
+        "linux": {
+          "definition": {
+            "line": 186,
+            "source": "linux/arch/mips/kernel/syscalls/syscall_o32.tbl",
+            "table_row": "172\to32\tgetsockname\t\t\tsys_getsockname"
+          },
+          "value": 4172
+        },
+        "musl": {
+          "definition": {
+            "expression": "4172",
+            "line": 173,
+            "source": "musl/arch/mips/bits/syscall.h.in"
+          },
+          "value": 4172
+        }
+      },
+      "selection": {
+        "number_base": 4000,
+        "path": "linux/arch/mips/kernel/syscalls/syscall_o32.tbl",
+        "selected_abi_rows": [
+          "o32"
+        ]
+      },
+      "socketcall": {
+        "definition": {
+          "expression": "4102",
+          "line": 103,
+          "source": "musl/arch/mips/bits/syscall.h.in"
+        },
+        "value": 4102
+      },
+      "supplied_musl": false
+    },
+    {
+      "architecture": "mips64",
+      "getsockname": {
+        "linux": {
+          "definition": {
+            "line": 60,
+            "source": "linux/arch/mips/kernel/syscalls/syscall_n64.tbl",
+            "table_row": "50\tn64\tgetsockname\t\t\tsys_getsockname"
+          },
+          "value": 5050
+        },
+        "musl": {
+          "definition": {
+            "expression": "5050",
+            "line": 51,
+            "source": "musl/arch/mips64/bits/syscall.h.in"
+          },
+          "value": 5050
+        }
+      },
+      "selection": {
+        "number_base": 5000,
+        "path": "linux/arch/mips/kernel/syscalls/syscall_n64.tbl",
+        "selected_abi_rows": [
+          "n64"
+        ]
+      },
+      "socketcall": {
+        "definition": null,
+        "value": null
+      },
+      "supplied_musl": false
+    },
+    {
+      "architecture": "ppc",
+      "getsockname": {
+        "linux": {
+          "definition": {
+            "line": 431,
+            "source": "linux/arch/powerpc/kernel/syscalls/syscall.tbl",
+            "table_row": "331\tcommon\tgetsockname\t\t\tsys_getsockname"
+          },
+          "value": 331
+        },
+        "musl": {
+          "definition": {
+            "expression": "331",
+            "line": 330,
+            "source": "musl/arch/powerpc/bits/syscall.h.in"
+          },
+          "value": 331
+        }
+      },
+      "selection": {
+        "number_base": 0,
+        "path": "linux/arch/powerpc/kernel/syscalls/syscall.tbl",
+        "selected_abi_rows": [
+          "32",
+          "common",
+          "nospu"
+        ]
+      },
+      "socketcall": {
+        "definition": {
+          "expression": "102",
+          "line": 103,
+          "source": "musl/arch/powerpc/bits/syscall.h.in"
+        },
+        "value": 102
+      },
+      "supplied_musl": false
+    }
+  ],
+  "reference_pins": {
+    "linux/arch/arm/tools/syscall.tbl": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "c4215bb0014258fd803b5893efe91df5f0869ab61c2342006c031670d37777f3"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/arch/arm/tools/syscall.tbl"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "c4215bb0014258fd803b5893efe91df5f0869ab61c2342006c031670d37777f3"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/linux/arch/arm/tools/syscall.tbl"
+      }
+    },
+    "linux/arch/mips/kernel/syscalls/syscall_n64.tbl": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "bf0c900b3e72efcb62d4fd72a6921f378beb28cc195863b26d55f2ceb870f878"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/arch/mips/kernel/syscalls/syscall_n64.tbl"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "bf0c900b3e72efcb62d4fd72a6921f378beb28cc195863b26d55f2ceb870f878"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/linux/arch/mips/kernel/syscalls/syscall_n64.tbl"
+      }
+    },
+    "linux/arch/mips/kernel/syscalls/syscall_o32.tbl": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "13155835b2fc295a8600db8f550d014f1b42077dea31b62623a5d58990f0b5fc"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/arch/mips/kernel/syscalls/syscall_o32.tbl"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "13155835b2fc295a8600db8f550d014f1b42077dea31b62623a5d58990f0b5fc"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/linux/arch/mips/kernel/syscalls/syscall_o32.tbl"
+      }
+    },
+    "linux/arch/powerpc/kernel/syscalls/syscall.tbl": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "a5d68da8130f4f27b811bce4b1249412d26ae683eb1f61cb763f566a0fdd421b"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/arch/powerpc/kernel/syscalls/syscall.tbl"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "a5d68da8130f4f27b811bce4b1249412d26ae683eb1f61cb763f566a0fdd421b"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/linux/arch/powerpc/kernel/syscalls/syscall.tbl"
+      }
+    },
+    "linux/arch/x86/entry/syscalls/syscall_32.tbl": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "b91a30a3e950f0692834d2edc4b8bf1c51cee0f8eec722358eade65a7026785d"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/arch/x86/entry/syscalls/syscall_32.tbl"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "b91a30a3e950f0692834d2edc4b8bf1c51cee0f8eec722358eade65a7026785d"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/linux/arch/x86/entry/syscalls/syscall_32.tbl"
+      }
+    },
+    "linux/arch/x86/entry/syscalls/syscall_64.tbl": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "a25d490b97e98fa2ad7912f229555e1c8f0e5ba70960f508ae4c324b2439aa04"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/arch/x86/entry/syscalls/syscall_64.tbl"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "a25d490b97e98fa2ad7912f229555e1c8f0e5ba70960f508ae4c324b2439aa04"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/linux/arch/x86/entry/syscalls/syscall_64.tbl"
+      }
+    },
+    "linux/include/uapi/asm-generic/unistd.h": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "53b1df8caee4a4c2ff37d0ec895e22663a0e61b188de61b98f025709ba6c8e18"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/include/uapi/asm-generic/unistd.h"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "53b1df8caee4a4c2ff37d0ec895e22663a0e61b188de61b98f025709ba6c8e18"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/linux/include/uapi/asm-generic/unistd.h"
+      }
+    },
+    "linux/include/uapi/linux/net.h": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "7a3044c1910301b969d43b181208e702d6c6174f2aa07fbc0789020078fcd3de"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/include/uapi/linux/net.h"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "7a3044c1910301b969d43b181208e702d6c6174f2aa07fbc0789020078fcd3de"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/linux/include/uapi/linux/net.h"
+      }
+    },
+    "linux/net/ipv4/af_inet.c": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "a03e0d0ad662b80134ee589abc7ad8495780c211d5c6124d3e4433fa966b4912"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/net/ipv4/af_inet.c"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "a03e0d0ad662b80134ee589abc7ad8495780c211d5c6124d3e4433fa966b4912"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/linux/net/ipv4/af_inet.c"
+      }
+    },
+    "linux/net/socket.c": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "0906834849da611f872a2c49e4b45f896021032e58c876ec186728e088f72cd9"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/net/socket.c"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "0906834849da611f872a2c49e4b45f896021032e58c876ec186728e088f72cd9"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/linux/net/socket.c"
+      }
+    },
+    "musl/arch/aarch64/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "7b20fe57bf92c6b3cf800d4f83998419e92e19a88ead2d57c89c5725e0cfb816"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/aarch64/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "7b20fe57bf92c6b3cf800d4f83998419e92e19a88ead2d57c89c5725e0cfb816"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/musl/arch/aarch64/bits/syscall.h.in"
+      }
+    },
+    "musl/arch/arm/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "efa3b140a8393cc7adbaabf8517a133ad510c9f6b94462353fdaa7c82816e3f2"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/arm/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "efa3b140a8393cc7adbaabf8517a133ad510c9f6b94462353fdaa7c82816e3f2"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/musl/arch/arm/bits/syscall.h.in"
+      }
+    },
+    "musl/arch/i386/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "ca07aaf8e249ae47d65bcb41999035fc3d0543b8304649ddff5fef7e490a315a"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/i386/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "ca07aaf8e249ae47d65bcb41999035fc3d0543b8304649ddff5fef7e490a315a"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/musl/arch/i386/bits/syscall.h.in"
+      }
+    },
+    "musl/arch/loongarch64/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "0e928dbb7831f1282ce38318e41d835a86dbad7583ad009997ae85f1b0d4ed48"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/loongarch64/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "0e928dbb7831f1282ce38318e41d835a86dbad7583ad009997ae85f1b0d4ed48"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/musl/arch/loongarch64/bits/syscall.h.in"
+      }
+    },
+    "musl/arch/mips/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "b7be028c3eb942433a711d6d9d86bbbdebe14c5c09da82bdeaedcd073ff79687"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/mips/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "b7be028c3eb942433a711d6d9d86bbbdebe14c5c09da82bdeaedcd073ff79687"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/musl/arch/mips/bits/syscall.h.in"
+      }
+    },
+    "musl/arch/mips64/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "6fdf8dbe97ac3b0de5d06ccbb043f6ffd327d7cb3b30f20e467fa4fbea593cda"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/mips64/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "6fdf8dbe97ac3b0de5d06ccbb043f6ffd327d7cb3b30f20e467fa4fbea593cda"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/musl/arch/mips64/bits/syscall.h.in"
+      }
+    },
+    "musl/arch/powerpc/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "db3e9eea4493056d7a96f3958dda826650f1c17b1da2270a01fa9def294b39b7"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/powerpc/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "db3e9eea4493056d7a96f3958dda826650f1c17b1da2270a01fa9def294b39b7"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/musl/arch/powerpc/bits/syscall.h.in"
+      }
+    },
+    "musl/arch/riscv32/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "fe7b8310adf4e69268591dbd8dd260b6f7dae8a027f2609b2300305bc460b863"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/riscv32/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "fe7b8310adf4e69268591dbd8dd260b6f7dae8a027f2609b2300305bc460b863"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/musl/arch/riscv32/bits/syscall.h.in"
+      }
+    },
+    "musl/arch/riscv64/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "60d25e2a66b17577b2f436f6db603ac70ab3d9623f7be2aa1b4ed24043cd3ffd"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/riscv64/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "60d25e2a66b17577b2f436f6db603ac70ab3d9623f7be2aa1b4ed24043cd3ffd"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/musl/arch/riscv64/bits/syscall.h.in"
+      }
+    },
+    "musl/arch/x86_64/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "c29e9cb15ff393eda50c320a6d96bb1132191251f8e079148a0646165bb8cabd"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/x86_64/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "c29e9cb15ff393eda50c320a6d96bb1132191251f8e079148a0646165bb8cabd"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/musl/arch/x86_64/bits/syscall.h.in"
+      }
+    },
+    "musl/src/internal/syscall.h": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "2719e9deac186faab6faaa305fb09df7da2c8e16e6c3354a61ab2309bd5041b0"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/src/internal/syscall.h"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "2719e9deac186faab6faaa305fb09df7da2c8e16e6c3354a61ab2309bd5041b0"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s5-sockname-v1/inventory-attempt-01/reference-source/musl/src/internal/syscall.h"
+      }
+    }
+  },
+  "schema": 1,
+  "semantic_anchors": [
+    {
+      "excerpt": "static int move_addr_to_user(struct sockaddr_storage *kaddr, int klen,\n\t\t\t     void __user *uaddr, int __user *ulen)\n{\n\tint err;\n\tint len;\n\n\tBUG_ON(klen > sizeof(struct sockaddr_storage));\n\terr = get_user(len, ulen);\n\tif (err)\n\t\treturn err;\n\tif (len > klen)\n\t\tlen = klen;\n\tif (len < 0)\n\t\treturn -EINVAL;\n\tif (len) {\n\t\tif (audit_sockaddr(klen, kaddr))\n\t\t\treturn -ENOMEM;\n\t\tif (copy_to_user(uaddr, kaddr, len))\n\t\t\treturn -EFAULT;\n\t}\n\t/*\n\t *      \"fromlen shall refer to the value before truncation..\"\n\t *                      1003.1g\n\t */\n\treturn __put_user(klen, ulen);\n}\n\nstatic struct kmem_cache *sock_inode_cachep __ro_after_init;\n\nstatic struct inode *sock_alloc_inode(struct super_block *sb)\n",
+      "first_line": 274,
+      "last_line": 303,
+      "meaning": "signed_capacity_prefix_then_actual_length",
+      "required": "return __put_user(klen, ulen);",
+      "source": "linux/net/socket.c"
+    },
+    {
+      "excerpt": "int __sys_getsockname(int fd, struct sockaddr __user *usockaddr,\n\t\t      int __user *usockaddr_len)\n{\n\tstruct socket *sock;\n\tstruct sockaddr_storage address;\n\tCLASS(fd, f)(fd);\n\tint err;\n\n\tif (fd_empty(f))\n\t\treturn -EBADF;\n\tsock = sock_from_file(fd_file(f));\n\tif (unlikely(!sock))\n\t\treturn -ENOTSOCK;\n\n\terr = security_socket_getsockname(sock);\n\tif (err)\n\t\treturn err;\n\n\terr = READ_ONCE(sock->ops)->getname(sock, (struct sockaddr *)&address, 0);\n\tif (err < 0)\n\t\treturn err;\n\n\t/* \"err\" is actually length in this case */\n\treturn move_addr_to_user(&address, err, usockaddr, usockaddr_len);\n}\n\nSYSCALL_DEFINE3(getsockname, int, fd, struct sockaddr __user *, usockaddr,\n\t\tint __user *, usockaddr_len)\n{\n\treturn __sys_getsockname(fd, usockaddr, usockaddr_len);\n}\n",
+      "first_line": 2088,
+      "last_line": 2118,
+      "meaning": "descriptor_and_socket_before_output",
+      "required": "return move_addr_to_user(&address, err, usockaddr, usockaddr_len);",
+      "source": "linux/net/socket.c"
+    },
+    {
+      "excerpt": "int inet_getname(struct socket *sock, struct sockaddr *uaddr,\n\t\t int peer)\n{\n\tstruct sock *sk\t\t= sock->sk;\n\tstruct inet_sock *inet\t= inet_sk(sk);\n\tDECLARE_SOCKADDR(struct sockaddr_in *, sin, uaddr);\n\tint sin_addr_len = sizeof(*sin);\n\n\tsin->sin_family = AF_INET;\n\tlock_sock(sk);\n\tif (peer) {\n\t\tif (!inet->inet_dport ||\n\t\t    (((1 << sk->sk_state) & (TCPF_CLOSE | TCPF_SYN_SENT)) &&\n\t\t     peer == 1)) {\n\t\t\trelease_sock(sk);\n\t\t\treturn -ENOTCONN;\n\t\t}\n\t\tsin->sin_port = inet->inet_dport;\n\t\tsin->sin_addr.s_addr = inet->inet_daddr;\n\t\tBPF_CGROUP_RUN_SA_PROG(sk, (struct sockaddr *)sin, &sin_addr_len,\n\t\t\t\t       CGROUP_INET4_GETPEERNAME);\n\t} else {\n\t\t__be32 addr = inet->inet_rcv_saddr;\n\t\tif (!addr)\n\t\t\taddr = inet->inet_saddr;\n\t\tsin->sin_port = inet->inet_sport;\n\t\tsin->sin_addr.s_addr = addr;\n\t\tBPF_CGROUP_RUN_SA_PROG(sk, (struct sockaddr *)sin, &sin_addr_len,\n\t\t\t\t       CGROUP_INET4_GETSOCKNAME);\n\t}\n\trelease_sock(sk);\n\tmemset(sin->sin_zero, 0, sizeof(sin->sin_zero));\n\treturn sin_addr_len;\n}\nEXPORT_SYMBOL(inet_getname);\n",
+      "first_line": 795,
+      "last_line": 829,
+      "meaning": "canonical_local_binding_and_zero_padding",
+      "required": "memset(sin->sin_zero, 0, sizeof(sin->sin_zero));",
+      "source": "linux/net/ipv4/af_inet.c"
+    },
+    {
+      "excerpt": "#ifdef __ARCH_WANT_SYS_SOCKETCALL\n/* Argument list sizes for sys_socketcall */\n#define AL(x) ((x) * sizeof(unsigned long))\nstatic const unsigned char nargs[21] = {\n\tAL(0), AL(3), AL(3), AL(3), AL(2), AL(3),\n\tAL(3), AL(3), AL(4), AL(4), AL(4), AL(6),\n\tAL(6), AL(2), AL(5), AL(5), AL(3), AL(3),\n\tAL(4), AL(5), AL(4)\n};\n\n#undef AL\n\n/*\n",
+      "first_line": 3052,
+      "last_line": 3064,
+      "meaning": "socketcall_three_name_arguments",
+      "required": "AL(3)",
+      "source": "linux/net/socket.c"
+    },
+    {
+      "excerpt": "\tcase SYS_GETSOCKNAME:\n\t\terr =\n\t\t    __sys_getsockname(a0, (struct sockaddr __user *)a1,\n\t\t\t\t      (int __user *)a[2]);\n\t\tbreak;\n",
+      "first_line": 3115,
+      "last_line": 3119,
+      "meaning": "socketcall_local_name_dispatch",
+      "required": "__sys_getsockname",
+      "source": "linux/net/socket.c"
+    }
+  ],
+  "socketcall_selector": {
+    "arguments": 3,
+    "linux": {
+      "definition": {
+        "expression": "6",
+        "line": 32,
+        "source": "linux/include/uapi/linux/net.h"
+      },
+      "value": 6
+    },
+    "musl": {
+      "definition": {
+        "expression": "6",
+        "line": 333,
+        "source": "musl/src/internal/syscall.h"
+      },
+      "value": 6
+    }
+  }
+}

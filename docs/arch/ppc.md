@@ -27,9 +27,16 @@ xmake f -c -y -m debug -a ppc
 xmake qemu-test
 ```
 
+If a local cross-toolchain directory contains the compiler but no QEMU binary,
+configure the explicit host executable with
+`--qemu_binary=/usr/bin/qemu-system-ppc` alongside `--systoolchain_dir`.
+The QEMU harness still validates the executable path and the PPC boot markers.
+
 QEMU uses `qemu-system-ppc -M ppce500 -kernel`. Early boot maps effective
 `0xe0000000` to physical `0xfe0000000` so the CCSR serial window is reachable
-before C++ platform output starts.
+before C++ platform output starts. Boot also replaces QEMU's 64 MiB RAM TLB
+entry with a 256 MiB supervisor mapping before clearing BSS or using the linked
+boot stack. BookE MAS1 TSIZE 8 encodes 64 MiB; TSIZE 9 encodes 256 MiB.
 
 ## Native execution on e500v2
 
@@ -67,6 +74,7 @@ Run the independent hardware probes without changing xmake configuration:
 ```sh
 python3 scripts/test_native_ppc.py --toolchain toolchains/powerpc-eabi
 python3 scripts/test_native_ppc.py --toolchain toolchains/powerpc-eabi --kernel-fault
+python3 scripts/test_ppc_tlb.py --qemu /usr/bin/qemu-system-ppc --kernel build/linux/ppc/debug/kernel.bin
 ```
 
 The normal probe checks PR=1, syscalls and continuation, separate address spaces,

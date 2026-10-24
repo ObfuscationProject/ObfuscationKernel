@@ -159,10 +159,13 @@ Cwd and directory descriptors retain directory objects and their mount identity,
 `fchdir` and `getcwd` follow a renamed directory, including after fork. Two mounts
 of one filesystem remain distinct for `..` traversal and cross-mount checks. Removed,
 replaced or mount-covered directories cannot be reconstructed in the current
-namespace: `getcwd` and relative path operations return `ENOENT` instead of
-resolving a reused pathname. Descriptor reads still use the retained object.
-Paths remain bounded to 95 bytes when reconstructed. Resolving paths within
-detached directories and symbolic-link traversal remain future work.
+namespace: `getcwd` returns `ENOENT`. Relative path operations start at the held
+object, including `.` in a removed directory and entries beneath a covered
+directory. They never resolve a reused pathname. New entries in detached RAM
+directories are rejected. Paths remain bounded to 95 bytes when reconstructed.
+The common [resolver](PATH_RESOLUTION.md) supports 255-byte paths and up to
+40 symbolic-link expansions; RAM link creation/readlink and no-follow operations
+are implemented, while ext4 link representation remains outstanding.
 
 Rename requires write/search access to both parents and honors sticky-directory
 ownership. Both naming calls check search permission on every traversed directory,

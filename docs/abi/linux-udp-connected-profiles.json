@@ -1,0 +1,1551 @@
+{
+  "all_ten_and_four_supplied_preserved": true,
+  "default_send_zero_wire_compatibility_gap_explicit": true,
+  "inventory_capsule": {
+    "directory": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02",
+    "freeze_sha256": "151bd9ab0e8e505db7e32cc500c24c0b2a3664bc4503289e9a82e35ee5c46694",
+    "result_sha256": "b8362195cf9e3d7004723d3204cd5a135e21c977c954c26af39feece3216efc3"
+  },
+  "inventory_only_not_execution": true,
+  "profile_order": [
+    "i386",
+    "x86_64",
+    "aarch64",
+    "arm32",
+    "rv64",
+    "rv32",
+    "loongarch64",
+    "mips",
+    "mips64",
+    "ppc"
+  ],
+  "profiles": [
+    {
+      "ENOTCONN": {
+        "linux": {
+          "definition": {
+            "expression": "107",
+            "line": 90,
+            "source": "linux/include/uapi/asm-generic/errno.h"
+          },
+          "value": 107
+        },
+        "musl": {
+          "definition": {
+            "expression": "107",
+            "line": 108,
+            "source": "musl/arch/generic/bits/errno.h"
+          },
+          "value": 107
+        }
+      },
+      "architecture": "i386",
+      "selection": {
+        "number_base": 0,
+        "path": "linux/arch/x86/entry/syscalls/syscall_32.tbl",
+        "selected_abi_rows": [
+          "i386"
+        ]
+      },
+      "supplied_musl": false,
+      "syscalls": {
+        "connect": {
+          "linux": {
+            "definition": {
+              "line": 377,
+              "source": "linux/arch/x86/entry/syscalls/syscall_32.tbl",
+              "table_row": "362\ti386\tconnect\t\t\tsys_connect"
+            },
+            "value": 362
+          },
+          "musl": {
+            "definition": {
+              "expression": "362",
+              "line": 362,
+              "source": "musl/arch/i386/bits/syscall.h.in"
+            },
+            "value": 362
+          }
+        },
+        "getpeername": {
+          "linux": {
+            "definition": {
+              "line": 383,
+              "source": "linux/arch/x86/entry/syscalls/syscall_32.tbl",
+              "table_row": "368\ti386\tgetpeername\t\tsys_getpeername"
+            },
+            "value": 368
+          },
+          "musl": {
+            "definition": {
+              "expression": "368",
+              "line": 368,
+              "source": "musl/arch/i386/bits/syscall.h.in"
+            },
+            "value": 368
+          }
+        },
+        "socketcall": {
+          "linux": {
+            "definition": {
+              "line": 117,
+              "source": "linux/arch/x86/entry/syscalls/syscall_32.tbl",
+              "table_row": "102\ti386\tsocketcall\t\tsys_socketcall\t\t\tcompat_sys_socketcall"
+            },
+            "value": 102
+          },
+          "musl": {
+            "definition": {
+              "expression": "102",
+              "line": 103,
+              "source": "musl/arch/i386/bits/syscall.h.in"
+            },
+            "value": 102
+          }
+        }
+      }
+    },
+    {
+      "ENOTCONN": {
+        "linux": {
+          "definition": {
+            "expression": "107",
+            "line": 90,
+            "source": "linux/include/uapi/asm-generic/errno.h"
+          },
+          "value": 107
+        },
+        "musl": {
+          "definition": {
+            "expression": "107",
+            "line": 108,
+            "source": "musl/arch/generic/bits/errno.h"
+          },
+          "value": 107
+        }
+      },
+      "architecture": "x86_64",
+      "selection": {
+        "number_base": 0,
+        "path": "linux/arch/x86/entry/syscalls/syscall_64.tbl",
+        "selected_abi_rows": [
+          "64",
+          "common"
+        ]
+      },
+      "supplied_musl": true,
+      "syscalls": {
+        "connect": {
+          "linux": {
+            "definition": {
+              "line": 54,
+              "source": "linux/arch/x86/entry/syscalls/syscall_64.tbl",
+              "table_row": "42\tcommon\tconnect\t\t\tsys_connect"
+            },
+            "value": 42
+          },
+          "musl": {
+            "definition": {
+              "expression": "42",
+              "line": 43,
+              "source": "musl/arch/x86_64/bits/syscall.h.in"
+            },
+            "value": 42
+          }
+        },
+        "getpeername": {
+          "linux": {
+            "definition": {
+              "line": 64,
+              "source": "linux/arch/x86/entry/syscalls/syscall_64.tbl",
+              "table_row": "52\tcommon\tgetpeername\t\tsys_getpeername"
+            },
+            "value": 52
+          },
+          "musl": {
+            "definition": {
+              "expression": "52",
+              "line": 53,
+              "source": "musl/arch/x86_64/bits/syscall.h.in"
+            },
+            "value": 52
+          }
+        },
+        "socketcall": {
+          "linux": {
+            "definition": null,
+            "value": null
+          },
+          "musl": {
+            "definition": null,
+            "value": null
+          }
+        }
+      }
+    },
+    {
+      "ENOTCONN": {
+        "linux": {
+          "definition": {
+            "expression": "107",
+            "line": 90,
+            "source": "linux/include/uapi/asm-generic/errno.h"
+          },
+          "value": 107
+        },
+        "musl": {
+          "definition": {
+            "expression": "107",
+            "line": 108,
+            "source": "musl/arch/generic/bits/errno.h"
+          },
+          "value": 107
+        }
+      },
+      "architecture": "aarch64",
+      "selection": {
+        "path": "linux/include/uapi/asm-generic/unistd.h",
+        "selection": "asm-generic native profile; no compat/x32/OABI/N32 personality"
+      },
+      "supplied_musl": true,
+      "syscalls": {
+        "connect": {
+          "linux": {
+            "definition": {
+              "expression": "203",
+              "line": 532,
+              "source": "linux/include/uapi/asm-generic/unistd.h"
+            },
+            "value": 203
+          },
+          "musl": {
+            "definition": {
+              "expression": "203",
+              "line": 204,
+              "source": "musl/arch/aarch64/bits/syscall.h.in"
+            },
+            "value": 203
+          }
+        },
+        "getpeername": {
+          "linux": {
+            "definition": {
+              "expression": "205",
+              "line": 536,
+              "source": "linux/include/uapi/asm-generic/unistd.h"
+            },
+            "value": 205
+          },
+          "musl": {
+            "definition": {
+              "expression": "205",
+              "line": 206,
+              "source": "musl/arch/aarch64/bits/syscall.h.in"
+            },
+            "value": 205
+          }
+        },
+        "socketcall": {
+          "linux": {
+            "definition": null,
+            "value": null
+          },
+          "musl": {
+            "definition": null,
+            "value": null
+          }
+        }
+      }
+    },
+    {
+      "ENOTCONN": {
+        "linux": {
+          "definition": {
+            "expression": "107",
+            "line": 90,
+            "source": "linux/include/uapi/asm-generic/errno.h"
+          },
+          "value": 107
+        },
+        "musl": {
+          "definition": {
+            "expression": "107",
+            "line": 108,
+            "source": "musl/arch/generic/bits/errno.h"
+          },
+          "value": 107
+        }
+      },
+      "architecture": "arm32",
+      "selection": {
+        "number_base": 0,
+        "path": "linux/arch/arm/tools/syscall.tbl",
+        "selected_abi_rows": [
+          "common",
+          "eabi"
+        ]
+      },
+      "supplied_musl": false,
+      "syscalls": {
+        "connect": {
+          "linux": {
+            "definition": {
+              "line": 301,
+              "source": "linux/arch/arm/tools/syscall.tbl",
+              "table_row": "283\tcommon\tconnect\t\t\tsys_connect\t\tsys_oabi_connect"
+            },
+            "value": 283
+          },
+          "musl": {
+            "definition": {
+              "expression": "283",
+              "line": 240,
+              "source": "musl/arch/arm/bits/syscall.h.in"
+            },
+            "value": 283
+          }
+        },
+        "getpeername": {
+          "linux": {
+            "definition": {
+              "line": 305,
+              "source": "linux/arch/arm/tools/syscall.tbl",
+              "table_row": "287\tcommon\tgetpeername\t\tsys_getpeername"
+            },
+            "value": 287
+          },
+          "musl": {
+            "definition": {
+              "expression": "287",
+              "line": 244,
+              "source": "musl/arch/arm/bits/syscall.h.in"
+            },
+            "value": 287
+          }
+        },
+        "socketcall": {
+          "linux": {
+            "definition": null,
+            "value": null
+          },
+          "musl": {
+            "definition": null,
+            "value": null
+          }
+        }
+      }
+    },
+    {
+      "ENOTCONN": {
+        "linux": {
+          "definition": {
+            "expression": "107",
+            "line": 90,
+            "source": "linux/include/uapi/asm-generic/errno.h"
+          },
+          "value": 107
+        },
+        "musl": {
+          "definition": {
+            "expression": "107",
+            "line": 108,
+            "source": "musl/arch/generic/bits/errno.h"
+          },
+          "value": 107
+        }
+      },
+      "architecture": "rv64",
+      "selection": {
+        "path": "linux/include/uapi/asm-generic/unistd.h",
+        "selection": "asm-generic native profile; no compat/x32/OABI/N32 personality"
+      },
+      "supplied_musl": true,
+      "syscalls": {
+        "connect": {
+          "linux": {
+            "definition": {
+              "expression": "203",
+              "line": 532,
+              "source": "linux/include/uapi/asm-generic/unistd.h"
+            },
+            "value": 203
+          },
+          "musl": {
+            "definition": {
+              "expression": "203",
+              "line": 203,
+              "source": "musl/arch/riscv64/bits/syscall.h.in"
+            },
+            "value": 203
+          }
+        },
+        "getpeername": {
+          "linux": {
+            "definition": {
+              "expression": "205",
+              "line": 536,
+              "source": "linux/include/uapi/asm-generic/unistd.h"
+            },
+            "value": 205
+          },
+          "musl": {
+            "definition": {
+              "expression": "205",
+              "line": 205,
+              "source": "musl/arch/riscv64/bits/syscall.h.in"
+            },
+            "value": 205
+          }
+        },
+        "socketcall": {
+          "linux": {
+            "definition": null,
+            "value": null
+          },
+          "musl": {
+            "definition": null,
+            "value": null
+          }
+        }
+      }
+    },
+    {
+      "ENOTCONN": {
+        "linux": {
+          "definition": {
+            "expression": "107",
+            "line": 90,
+            "source": "linux/include/uapi/asm-generic/errno.h"
+          },
+          "value": 107
+        },
+        "musl": {
+          "definition": {
+            "expression": "107",
+            "line": 108,
+            "source": "musl/arch/generic/bits/errno.h"
+          },
+          "value": 107
+        }
+      },
+      "architecture": "rv32",
+      "selection": {
+        "path": "linux/include/uapi/asm-generic/unistd.h",
+        "selection": "asm-generic native profile; no compat/x32/OABI/N32 personality"
+      },
+      "supplied_musl": false,
+      "syscalls": {
+        "connect": {
+          "linux": {
+            "definition": {
+              "expression": "203",
+              "line": 532,
+              "source": "linux/include/uapi/asm-generic/unistd.h"
+            },
+            "value": 203
+          },
+          "musl": {
+            "definition": {
+              "expression": "203",
+              "line": 178,
+              "source": "musl/arch/riscv32/bits/syscall.h.in"
+            },
+            "value": 203
+          }
+        },
+        "getpeername": {
+          "linux": {
+            "definition": {
+              "expression": "205",
+              "line": 536,
+              "source": "linux/include/uapi/asm-generic/unistd.h"
+            },
+            "value": 205
+          },
+          "musl": {
+            "definition": {
+              "expression": "205",
+              "line": 180,
+              "source": "musl/arch/riscv32/bits/syscall.h.in"
+            },
+            "value": 205
+          }
+        },
+        "socketcall": {
+          "linux": {
+            "definition": null,
+            "value": null
+          },
+          "musl": {
+            "definition": null,
+            "value": null
+          }
+        }
+      }
+    },
+    {
+      "ENOTCONN": {
+        "linux": {
+          "definition": {
+            "expression": "107",
+            "line": 90,
+            "source": "linux/include/uapi/asm-generic/errno.h"
+          },
+          "value": 107
+        },
+        "musl": {
+          "definition": {
+            "expression": "107",
+            "line": 108,
+            "source": "musl/arch/generic/bits/errno.h"
+          },
+          "value": 107
+        }
+      },
+      "architecture": "loongarch64",
+      "selection": {
+        "path": "linux/include/uapi/asm-generic/unistd.h",
+        "selection": "asm-generic native profile; no compat/x32/OABI/N32 personality"
+      },
+      "supplied_musl": true,
+      "syscalls": {
+        "connect": {
+          "linux": {
+            "definition": {
+              "expression": "203",
+              "line": 532,
+              "source": "linux/include/uapi/asm-generic/unistd.h"
+            },
+            "value": 203
+          },
+          "musl": {
+            "definition": {
+              "expression": "203",
+              "line": 199,
+              "source": "musl/arch/loongarch64/bits/syscall.h.in"
+            },
+            "value": 203
+          }
+        },
+        "getpeername": {
+          "linux": {
+            "definition": {
+              "expression": "205",
+              "line": 536,
+              "source": "linux/include/uapi/asm-generic/unistd.h"
+            },
+            "value": 205
+          },
+          "musl": {
+            "definition": {
+              "expression": "205",
+              "line": 201,
+              "source": "musl/arch/loongarch64/bits/syscall.h.in"
+            },
+            "value": 205
+          }
+        },
+        "socketcall": {
+          "linux": {
+            "definition": null,
+            "value": null
+          },
+          "musl": {
+            "definition": null,
+            "value": null
+          }
+        }
+      }
+    },
+    {
+      "ENOTCONN": {
+        "linux": {
+          "definition": {
+            "expression": "134",
+            "line": 89,
+            "source": "linux/arch/mips/include/uapi/asm/errno.h"
+          },
+          "value": 134
+        },
+        "musl": {
+          "definition": {
+            "expression": "134",
+            "line": 107,
+            "source": "musl/arch/mips/bits/errno.h"
+          },
+          "value": 134
+        }
+      },
+      "architecture": "mips",
+      "selection": {
+        "number_base": 4000,
+        "path": "linux/arch/mips/kernel/syscalls/syscall_o32.tbl",
+        "selected_abi_rows": [
+          "o32"
+        ]
+      },
+      "supplied_musl": false,
+      "syscalls": {
+        "connect": {
+          "linux": {
+            "definition": {
+              "line": 184,
+              "source": "linux/arch/mips/kernel/syscalls/syscall_o32.tbl",
+              "table_row": "170\to32\tconnect\t\t\t\tsys_connect"
+            },
+            "value": 4170
+          },
+          "musl": {
+            "definition": {
+              "expression": "4170",
+              "line": 171,
+              "source": "musl/arch/mips/bits/syscall.h.in"
+            },
+            "value": 4170
+          }
+        },
+        "getpeername": {
+          "linux": {
+            "definition": {
+              "line": 185,
+              "source": "linux/arch/mips/kernel/syscalls/syscall_o32.tbl",
+              "table_row": "171\to32\tgetpeername\t\t\tsys_getpeername"
+            },
+            "value": 4171
+          },
+          "musl": {
+            "definition": {
+              "expression": "4171",
+              "line": 172,
+              "source": "musl/arch/mips/bits/syscall.h.in"
+            },
+            "value": 4171
+          }
+        },
+        "socketcall": {
+          "linux": {
+            "definition": {
+              "line": 116,
+              "source": "linux/arch/mips/kernel/syscalls/syscall_o32.tbl",
+              "table_row": "102\to32\tsocketcall\t\t\tsys_socketcall\t\t\tcompat_sys_socketcall"
+            },
+            "value": 4102
+          },
+          "musl": {
+            "definition": {
+              "expression": "4102",
+              "line": 103,
+              "source": "musl/arch/mips/bits/syscall.h.in"
+            },
+            "value": 4102
+          }
+        }
+      }
+    },
+    {
+      "ENOTCONN": {
+        "linux": {
+          "definition": {
+            "expression": "134",
+            "line": 89,
+            "source": "linux/arch/mips/include/uapi/asm/errno.h"
+          },
+          "value": 134
+        },
+        "musl": {
+          "definition": {
+            "expression": "134",
+            "line": 107,
+            "source": "musl/arch/mips64/bits/errno.h"
+          },
+          "value": 134
+        }
+      },
+      "architecture": "mips64",
+      "selection": {
+        "number_base": 5000,
+        "path": "linux/arch/mips/kernel/syscalls/syscall_n64.tbl",
+        "selected_abi_rows": [
+          "n64"
+        ]
+      },
+      "supplied_musl": false,
+      "syscalls": {
+        "connect": {
+          "linux": {
+            "definition": {
+              "line": 51,
+              "source": "linux/arch/mips/kernel/syscalls/syscall_n64.tbl",
+              "table_row": "41\tn64\tconnect\t\t\t\tsys_connect"
+            },
+            "value": 5041
+          },
+          "musl": {
+            "definition": {
+              "expression": "5041",
+              "line": 42,
+              "source": "musl/arch/mips64/bits/syscall.h.in"
+            },
+            "value": 5041
+          }
+        },
+        "getpeername": {
+          "linux": {
+            "definition": {
+              "line": 61,
+              "source": "linux/arch/mips/kernel/syscalls/syscall_n64.tbl",
+              "table_row": "51\tn64\tgetpeername\t\t\tsys_getpeername"
+            },
+            "value": 5051
+          },
+          "musl": {
+            "definition": {
+              "expression": "5051",
+              "line": 52,
+              "source": "musl/arch/mips64/bits/syscall.h.in"
+            },
+            "value": 5051
+          }
+        },
+        "socketcall": {
+          "linux": {
+            "definition": null,
+            "value": null
+          },
+          "musl": {
+            "definition": null,
+            "value": null
+          }
+        }
+      }
+    },
+    {
+      "ENOTCONN": {
+        "linux": {
+          "definition": {
+            "expression": "107",
+            "line": 90,
+            "source": "linux/include/uapi/asm-generic/errno.h"
+          },
+          "value": 107
+        },
+        "musl": {
+          "definition": {
+            "expression": "107",
+            "line": 108,
+            "source": "musl/arch/powerpc/bits/errno.h"
+          },
+          "value": 107
+        }
+      },
+      "architecture": "ppc",
+      "selection": {
+        "number_base": 0,
+        "path": "linux/arch/powerpc/kernel/syscalls/syscall.tbl",
+        "selected_abi_rows": [
+          "32",
+          "common",
+          "nospu"
+        ]
+      },
+      "supplied_musl": false,
+      "syscalls": {
+        "connect": {
+          "linux": {
+            "definition": {
+              "line": 428,
+              "source": "linux/arch/powerpc/kernel/syscalls/syscall.tbl",
+              "table_row": "328\tcommon\tconnect\t\t\t\tsys_connect"
+            },
+            "value": 328
+          },
+          "musl": {
+            "definition": {
+              "expression": "328",
+              "line": 327,
+              "source": "musl/arch/powerpc/bits/syscall.h.in"
+            },
+            "value": 328
+          }
+        },
+        "getpeername": {
+          "linux": {
+            "definition": {
+              "line": 432,
+              "source": "linux/arch/powerpc/kernel/syscalls/syscall.tbl",
+              "table_row": "332\tcommon\tgetpeername\t\t\tsys_getpeername"
+            },
+            "value": 332
+          },
+          "musl": {
+            "definition": {
+              "expression": "332",
+              "line": 331,
+              "source": "musl/arch/powerpc/bits/syscall.h.in"
+            },
+            "value": 332
+          }
+        },
+        "socketcall": {
+          "linux": {
+            "definition": {
+              "line": 139,
+              "source": "linux/arch/powerpc/kernel/syscalls/syscall.tbl",
+              "table_row": "102\tcommon\tsocketcall\t\t\tsys_socketcall\t\t\tcompat_sys_socketcall"
+            },
+            "value": 102
+          },
+          "musl": {
+            "definition": {
+              "expression": "102",
+              "line": 103,
+              "source": "musl/arch/powerpc/bits/syscall.h.in"
+            },
+            "value": 102
+          }
+        }
+      }
+    }
+  ],
+  "reference_pins": {
+    "linux/arch/arm/tools/syscall.tbl": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "c4215bb0014258fd803b5893efe91df5f0869ab61c2342006c031670d37777f3"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/arch/arm/tools/syscall.tbl"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "c4215bb0014258fd803b5893efe91df5f0869ab61c2342006c031670d37777f3"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 71125589
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/linux/arch/arm/tools/syscall.tbl"
+      }
+    },
+    "linux/arch/mips/include/uapi/asm/errno.h": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "d76ac01b386c49168449b7d4b043d2826869ace2beb62ec6f296157c93c0a4ea"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/reference-supplement-attempt-01/linux/arch/mips/include/uapi/asm/errno.h"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "d76ac01b386c49168449b7d4b043d2826869ace2beb62ec6f296157c93c0a4ea"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 73550421
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/linux/arch/mips/include/uapi/asm/errno.h"
+      }
+    },
+    "linux/arch/mips/kernel/syscalls/syscall_n64.tbl": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "bf0c900b3e72efcb62d4fd72a6921f378beb28cc195863b26d55f2ceb870f878"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/arch/mips/kernel/syscalls/syscall_n64.tbl"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "bf0c900b3e72efcb62d4fd72a6921f378beb28cc195863b26d55f2ceb870f878"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 74926677
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/linux/arch/mips/kernel/syscalls/syscall_n64.tbl"
+      }
+    },
+    "linux/arch/mips/kernel/syscalls/syscall_o32.tbl": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "13155835b2fc295a8600db8f550d014f1b42077dea31b62623a5d58990f0b5fc"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/arch/mips/kernel/syscalls/syscall_o32.tbl"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "13155835b2fc295a8600db8f550d014f1b42077dea31b62623a5d58990f0b5fc"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 74926678
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/linux/arch/mips/kernel/syscalls/syscall_o32.tbl"
+      }
+    },
+    "linux/arch/powerpc/kernel/syscalls/syscall.tbl": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "a5d68da8130f4f27b811bce4b1249412d26ae683eb1f61cb763f566a0fdd421b"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/arch/powerpc/kernel/syscalls/syscall.tbl"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "a5d68da8130f4f27b811bce4b1249412d26ae683eb1f61cb763f566a0fdd421b"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 91441749
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/linux/arch/powerpc/kernel/syscalls/syscall.tbl"
+      }
+    },
+    "linux/arch/x86/entry/syscalls/syscall_32.tbl": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "b91a30a3e950f0692834d2edc4b8bf1c51cee0f8eec722358eade65a7026785d"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/arch/x86/entry/syscalls/syscall_32.tbl"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "b91a30a3e950f0692834d2edc4b8bf1c51cee0f8eec722358eade65a7026785d"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 96750165
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/linux/arch/x86/entry/syscalls/syscall_32.tbl"
+      }
+    },
+    "linux/arch/x86/entry/syscalls/syscall_64.tbl": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "a25d490b97e98fa2ad7912f229555e1c8f0e5ba70960f508ae4c324b2439aa04"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/arch/x86/entry/syscalls/syscall_64.tbl"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "a25d490b97e98fa2ad7912f229555e1c8f0e5ba70960f508ae4c324b2439aa04"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 96750166
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/linux/arch/x86/entry/syscalls/syscall_64.tbl"
+      }
+    },
+    "linux/include/uapi/asm-generic/errno-base.h": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "2c148e92b8318deeb767fabd60822113e575ee664ff09a1873aed8f7a495793c"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/reference-supplement-attempt-01/linux/include/uapi/asm-generic/errno-base.h"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "2c148e92b8318deeb767fabd60822113e575ee664ff09a1873aed8f7a495793c"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 100616789
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/linux/include/uapi/asm-generic/errno-base.h"
+      }
+    },
+    "linux/include/uapi/asm-generic/errno.h": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "fb7b5a504015f3a9074c641e7371b250d867d751d90e4a22a8ac17fced3d50af"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/reference-supplement-attempt-01/linux/include/uapi/asm-generic/errno.h"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "fb7b5a504015f3a9074c641e7371b250d867d751d90e4a22a8ac17fced3d50af"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 100616790
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/linux/include/uapi/asm-generic/errno.h"
+      }
+    },
+    "linux/include/uapi/asm-generic/unistd.h": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "53b1df8caee4a4c2ff37d0ec895e22663a0e61b188de61b98f025709ba6c8e18"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/include/uapi/asm-generic/unistd.h"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "53b1df8caee4a4c2ff37d0ec895e22663a0e61b188de61b98f025709ba6c8e18"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 100616791
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/linux/include/uapi/asm-generic/unistd.h"
+      }
+    },
+    "linux/include/uapi/linux/net.h": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "7a3044c1910301b969d43b181208e702d6c6174f2aa07fbc0789020078fcd3de"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/include/uapi/linux/net.h"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "7a3044c1910301b969d43b181208e702d6c6174f2aa07fbc0789020078fcd3de"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 101206613
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/linux/include/uapi/linux/net.h"
+      }
+    },
+    "linux/net/ipv4/af_inet.c": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "a03e0d0ad662b80134ee589abc7ad8495780c211d5c6124d3e4433fa966b4912"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/net/ipv4/af_inet.c"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "a03e0d0ad662b80134ee589abc7ad8495780c211d5c6124d3e4433fa966b4912"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 101861973
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/linux/net/ipv4/af_inet.c"
+      }
+    },
+    "linux/net/ipv4/datagram.c": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "dd94ffdb88e0371b5b9696e72dfcebac4456429b2afbc9b75e356701063d5ca4"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/net/ipv4/datagram.c"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "dd94ffdb88e0371b5b9696e72dfcebac4456429b2afbc9b75e356701063d5ca4"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 101861974
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/linux/net/ipv4/datagram.c"
+      }
+    },
+    "linux/net/ipv4/udp.c": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "07f34f0ea947867b987dd24fa94a053d0b758cadd716a6226e325fc66b4ce510"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/net/ipv4/udp.c"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "07f34f0ea947867b987dd24fa94a053d0b758cadd716a6226e325fc66b4ce510"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 101861975
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/linux/net/ipv4/udp.c"
+      }
+    },
+    "linux/net/socket.c": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "0906834849da611f872a2c49e4b45f896021032e58c876ec186728e088f72cd9"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/linux/net/socket.c"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "0906834849da611f872a2c49e4b45f896021032e58c876ec186728e088f72cd9"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 101665365
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/linux/net/socket.c"
+      }
+    },
+    "musl/arch/aarch64/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "7b20fe57bf92c6b3cf800d4f83998419e92e19a88ead2d57c89c5725e0cfb816"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/aarch64/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "7b20fe57bf92c6b3cf800d4f83998419e92e19a88ead2d57c89c5725e0cfb816"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 109529685
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/musl/arch/aarch64/bits/syscall.h.in"
+      }
+    },
+    "musl/arch/arm/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "efa3b140a8393cc7adbaabf8517a133ad510c9f6b94462353fdaa7c82816e3f2"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/arm/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "efa3b140a8393cc7adbaabf8517a133ad510c9f6b94462353fdaa7c82816e3f2"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 111299157
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/musl/arch/arm/bits/syscall.h.in"
+      }
+    },
+    "musl/arch/generic/bits/errno.h": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "1760adb5572357ae1fa93625bd501e975c1ba03fdb3f97fc4fce46398772ae7b"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/generic/bits/errno.h"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "1760adb5572357ae1fa93625bd501e975c1ba03fdb3f97fc4fce46398772ae7b"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 112525621
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/musl/arch/generic/bits/errno.h"
+      }
+    },
+    "musl/arch/i386/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "ca07aaf8e249ae47d65bcb41999035fc3d0543b8304649ddff5fef7e490a315a"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/i386/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "ca07aaf8e249ae47d65bcb41999035fc3d0543b8304649ddff5fef7e490a315a"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 112525624
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/musl/arch/i386/bits/syscall.h.in"
+      }
+    },
+    "musl/arch/loongarch64/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "0e928dbb7831f1282ce38318e41d835a86dbad7583ad009997ae85f1b0d4ed48"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/loongarch64/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "0e928dbb7831f1282ce38318e41d835a86dbad7583ad009997ae85f1b0d4ed48"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 112525627
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/musl/arch/loongarch64/bits/syscall.h.in"
+      }
+    },
+    "musl/arch/mips/bits/errno.h": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "8bfc6e94af0fc24c77a15462165f1c056c0331c19099957465df6d3a8dd69040"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/mips/bits/errno.h"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "8bfc6e94af0fc24c77a15462165f1c056c0331c19099957465df6d3a8dd69040"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 112525630
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/musl/arch/mips/bits/errno.h"
+      }
+    },
+    "musl/arch/mips/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "b7be028c3eb942433a711d6d9d86bbbdebe14c5c09da82bdeaedcd073ff79687"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/mips/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "b7be028c3eb942433a711d6d9d86bbbdebe14c5c09da82bdeaedcd073ff79687"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 112525631
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/musl/arch/mips/bits/syscall.h.in"
+      }
+    },
+    "musl/arch/mips64/bits/errno.h": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "8bfc6e94af0fc24c77a15462165f1c056c0331c19099957465df6d3a8dd69040"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/mips64/bits/errno.h"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "8bfc6e94af0fc24c77a15462165f1c056c0331c19099957465df6d3a8dd69040"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 112525634
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/musl/arch/mips64/bits/errno.h"
+      }
+    },
+    "musl/arch/mips64/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "6fdf8dbe97ac3b0de5d06ccbb043f6ffd327d7cb3b30f20e467fa4fbea593cda"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/mips64/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "6fdf8dbe97ac3b0de5d06ccbb043f6ffd327d7cb3b30f20e467fa4fbea593cda"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 112525635
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/musl/arch/mips64/bits/syscall.h.in"
+      }
+    },
+    "musl/arch/powerpc/bits/errno.h": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "c38fe2c4264d4cfdd597ee8f64afe25476959d936d5a4fa06d82dff478426352"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/powerpc/bits/errno.h"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "c38fe2c4264d4cfdd597ee8f64afe25476959d936d5a4fa06d82dff478426352"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 112525638
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/musl/arch/powerpc/bits/errno.h"
+      }
+    },
+    "musl/arch/powerpc/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "db3e9eea4493056d7a96f3958dda826650f1c17b1da2270a01fa9def294b39b7"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/powerpc/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "db3e9eea4493056d7a96f3958dda826650f1c17b1da2270a01fa9def294b39b7"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 112525639
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/musl/arch/powerpc/bits/syscall.h.in"
+      }
+    },
+    "musl/arch/riscv32/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "fe7b8310adf4e69268591dbd8dd260b6f7dae8a027f2609b2300305bc460b863"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/riscv32/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "fe7b8310adf4e69268591dbd8dd260b6f7dae8a027f2609b2300305bc460b863"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 112525642
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/musl/arch/riscv32/bits/syscall.h.in"
+      }
+    },
+    "musl/arch/riscv64/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "60d25e2a66b17577b2f436f6db603ac70ab3d9623f7be2aa1b4ed24043cd3ffd"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/riscv64/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "60d25e2a66b17577b2f436f6db603ac70ab3d9623f7be2aa1b4ed24043cd3ffd"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 112525645
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/musl/arch/riscv64/bits/syscall.h.in"
+      }
+    },
+    "musl/arch/x86_64/bits/syscall.h.in": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "c29e9cb15ff393eda50c320a6d96bb1132191251f8e079148a0646165bb8cabd"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/arch/x86_64/bits/syscall.h.in"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "c29e9cb15ff393eda50c320a6d96bb1132191251f8e079148a0646165bb8cabd"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 112525648
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/musl/arch/x86_64/bits/syscall.h.in"
+      }
+    },
+    "musl/src/internal/syscall.h": {
+      "original": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "2719e9deac186faab6faaa305fb09df7da2c8e16e6c3354a61ab2309bd5041b0"
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/m6-linux-udp-socket-adapter-design-v1/references-attempt-01/musl/src/internal/syscall.h"
+      },
+      "retained": {
+        "entry": {
+          "mode": "0o664",
+          "sha256": "2719e9deac186faab6faaa305fb09df7da2c8e16e6c3354a61ab2309bd5041b0"
+        },
+        "identity": {
+          "device": 2096,
+          "inode": 112525651
+        },
+        "path": "/media/data1/Project/System/ObfuscationProject/build/prototypes/sdk54-linux-udp-s6-connected-v1/design-inventory-attempt-02/reference-source/musl/src/internal/syscall.h"
+      }
+    }
+  },
+  "schema": 1,
+  "semantic_anchors": [
+    {
+      "excerpt": "int move_addr_to_kernel(void __user *uaddr, int ulen, struct sockaddr_storage *kaddr)\n{\n\tif (ulen < 0 || ulen > sizeof(struct sockaddr_storage))\n\t\treturn -EINVAL;\n\tif (ulen == 0)\n\t\treturn 0;\n\tif (copy_from_user(kaddr, uaddr, ulen))\n\t\treturn -EFAULT;\n\treturn audit_sockaddr(ulen, kaddr);\n}\n",
+      "first_line": 246,
+      "last_line": 255,
+      "meaning": "bounded_address_copy",
+      "required": "ulen > sizeof(struct sockaddr_storage)",
+      "source": "linux/net/socket.c"
+    },
+    {
+      "excerpt": "static int move_addr_to_user(struct sockaddr_storage *kaddr, int klen,\n\t\t\t     void __user *uaddr, int __user *ulen)\n{\n\tint err;\n\tint len;\n\n\tBUG_ON(klen > sizeof(struct sockaddr_storage));\n\terr = get_user(len, ulen);\n\tif (err)\n\t\treturn err;\n\tif (len > klen)\n\t\tlen = klen;\n\tif (len < 0)\n\t\treturn -EINVAL;\n\tif (len) {\n\t\tif (audit_sockaddr(klen, kaddr))\n\t\t\treturn -ENOMEM;\n\t\tif (copy_to_user(uaddr, kaddr, len))\n\t\t\treturn -EFAULT;\n\t}\n\t/*\n\t *      \"fromlen shall refer to the value before truncation..\"\n\t *                      1003.1g\n\t */\n\treturn __put_user(klen, ulen);\n}\n\nstatic struct kmem_cache *sock_inode_cachep __ro_after_init;\n\nstatic struct inode *sock_alloc_inode(struct super_block *sb)\n",
+      "first_line": 274,
+      "last_line": 303,
+      "meaning": "signed_capacity_prefix_then_actual",
+      "required": "return __put_user(klen, ulen);",
+      "source": "linux/net/socket.c"
+    },
+    {
+      "excerpt": "int __sys_connect_file(struct file *file, struct sockaddr_storage *address,\n\t\t       int addrlen, int file_flags)\n{\n\tstruct socket *sock;\n\tint err;\n\n\tsock = sock_from_file(file);\n\tif (!sock) {\n\t\terr = -ENOTSOCK;\n\t\tgoto out;\n\t}\n\n\terr =\n\t    security_socket_connect(sock, (struct sockaddr *)address, addrlen);\n\tif (err)\n\t\tgoto out;\n\n\terr = READ_ONCE(sock->ops)->connect(sock, (struct sockaddr *)address,\n\t\t\t\taddrlen, sock->file->f_flags | file_flags);\nout:\n\treturn err;\n}\n\nint __sys_connect(int fd, struct sockaddr __user *uservaddr, int addrlen)\n{\n\tstruct sockaddr_storage address;\n\tCLASS(fd, f)(fd);\n\tint ret;\n\n\tif (fd_empty(f))\n\t\treturn -EBADF;\n\n\tret = move_addr_to_kernel(uservaddr, addrlen, &address);\n\tif (ret)\n\t\treturn ret;\n\n\treturn __sys_connect_file(fd_file(f), &address, addrlen, 0);\n}\n\nSYSCALL_DEFINE3(connect, int, fd, struct sockaddr __user *, uservaddr,\n\t\tint, addrlen)\n{\n\treturn __sys_connect(fd, uservaddr, addrlen);\n",
+      "first_line": 2038,
+      "last_line": 2080,
+      "meaning": "fd_then_copy_then_socket_type",
+      "required": "return __sys_connect_file(fd_file(f), &address, addrlen, 0);",
+      "source": "linux/net/socket.c"
+    },
+    {
+      "excerpt": "int __sys_getpeername(int fd, struct sockaddr __user *usockaddr,\n\t\t      int __user *usockaddr_len)\n{\n\tstruct socket *sock;\n\tstruct sockaddr_storage address;\n\tCLASS(fd, f)(fd);\n\tint err;\n\n\tif (fd_empty(f))\n\t\treturn -EBADF;\n\tsock = sock_from_file(fd_file(f));\n\tif (unlikely(!sock))\n\t\treturn -ENOTSOCK;\n\n\terr = security_socket_getpeername(sock);\n\tif (err)\n\t\treturn err;\n\n\terr = READ_ONCE(sock->ops)->getname(sock, (struct sockaddr *)&address, 1);\n\tif (err < 0)\n\t\treturn err;\n\n\t/* \"err\" is actually length in this case */\n\treturn move_addr_to_user(&address, err, usockaddr, usockaddr_len);\n",
+      "first_line": 2125,
+      "last_line": 2148,
+      "meaning": "peer_before_output_copy",
+      "required": "return move_addr_to_user(&address, err, usockaddr, usockaddr_len);",
+      "source": "linux/net/socket.c"
+    },
+    {
+      "excerpt": "static int inet_autobind(struct sock *sk)\n{\n\tstruct inet_sock *inet;\n\t/* We may need to bind the socket. */\n\tlock_sock(sk);\n\tinet = inet_sk(sk);\n\tif (!inet->inet_num) {\n\t\tif (sk->sk_prot->get_port(sk, 0)) {\n\t\t\trelease_sock(sk);\n\t\t\treturn -EAGAIN;\n\t\t}\n\t\tinet->inet_sport = htons(inet->inet_num);\n\t}\n\trelease_sock(sk);\n\treturn 0;\n}\n",
+      "first_line": 174,
+      "last_line": 189,
+      "meaning": "autobind_changes_port_without_replacing_local_address",
+      "required": "inet->inet_sport = htons(inet->inet_num);",
+      "source": "linux/net/ipv4/af_inet.c"
+    },
+    {
+      "excerpt": "\t/* Check these errors (active socket, double bind). */\n\terr = -EINVAL;\n\tif (sk->sk_state != TCP_CLOSE || inet->inet_num)\n\t\tgoto out_release_sock;\n\n\tinet->inet_rcv_saddr = inet->inet_saddr = addr->sin_addr.s_addr;\n\tif (chk_addr_ret == RTN_MULTICAST || chk_addr_ret == RTN_BROADCAST)\n\t\tinet->inet_saddr = 0;  /* Use device */\n\n\t/* Make sure we are allowed to bind here. */\n\tif (snum || !(inet_test_bit(BIND_ADDRESS_NO_PORT, sk) ||\n\t\t      (flags & BIND_FORCE_ADDRESS_NO_PORT))) {\n\t\terr = sk->sk_prot->get_port(sk, snum);\n\t\tif (err) {\n\t\t\tinet->inet_saddr = inet->inet_rcv_saddr = 0;\n\t\t\tgoto out_release_sock;\n\t\t}\n\t\tif (!(flags & BIND_FROM_BPF)) {\n\t\t\terr = BPF_CGROUP_RUN_PROG_INET4_POST_BIND(sk);\n\t\t\tif (err) {\n\t\t\t\tinet->inet_saddr = inet->inet_rcv_saddr = 0;\n\t\t\t\tif (sk->sk_prot->put_port)\n\t\t\t\t\tsk->sk_prot->put_port(sk);\n\t\t\t\tgoto out_release_sock;\n\t\t\t}\n\t\t}\n\t}\n\n\tif (inet->inet_rcv_saddr)\n\t\tsk->sk_userlocks |= SOCK_BINDADDR_LOCK;\n\tif (snum)\n\t\tsk->sk_userlocks |= SOCK_BINDPORT_LOCK;\n\tinet->inet_sport = htons(inet->inet_num);\n\tinet->inet_daddr = 0;\n\tinet->inet_dport = 0;\n",
+      "first_line": 524,
+      "last_line": 558,
+      "meaning": "explicit_address_and_nonzero_port_locks",
+      "required": "sk->sk_userlocks |= SOCK_BINDPORT_LOCK;",
+      "source": "linux/net/ipv4/af_inet.c"
+    },
+    {
+      "excerpt": "int inet_dgram_connect(struct socket *sock, struct sockaddr *uaddr,\n\t\t       int addr_len, int flags)\n{\n\tstruct sock *sk = sock->sk;\n\tconst struct proto *prot;\n\tint err;\n\n\tif (addr_len < sizeof(uaddr->sa_family))\n\t\treturn -EINVAL;\n\n\t/* IPV6_ADDRFORM can change sk->sk_prot under us. */\n\tprot = READ_ONCE(sk->sk_prot);\n\n\tif (uaddr->sa_family == AF_UNSPEC)\n\t\treturn prot->disconnect(sk, flags);\n\n\tif (BPF_CGROUP_PRE_CONNECT_ENABLED(sk)) {\n\t\terr = prot->pre_connect(sk, uaddr, addr_len);\n\t\tif (err)\n\t\t\treturn err;\n\t}\n\n\tif (data_race(!inet_sk(sk)->inet_num) && inet_autobind(sk))\n\t\treturn -EAGAIN;\n\treturn prot->connect(sk, uaddr, addr_len);\n}\nEXPORT_SYMBOL(inet_dgram_connect);\n",
+      "first_line": 568,
+      "last_line": 594,
+      "meaning": "family_minimum_disconnect_before_autobind",
+      "required": "if (data_race(!inet_sk(sk)->inet_num) && inet_autobind(sk))",
+      "source": "linux/net/ipv4/af_inet.c"
+    },
+    {
+      "excerpt": "int __ip4_datagram_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)\n{\n\tstruct inet_sock *inet = inet_sk(sk);\n\tstruct sockaddr_in *usin = (struct sockaddr_in *) uaddr;\n\tstruct flowi4 *fl4;\n\tstruct rtable *rt;\n\t__be32 saddr;\n\tint oif;\n\tint err;\n\n\n\tif (addr_len < sizeof(*usin))\n\t\treturn -EINVAL;\n\n\tif (usin->sin_family != AF_INET)\n\t\treturn -EAFNOSUPPORT;\n\n\tsk_dst_reset(sk);\n\n\toif = sk->sk_bound_dev_if;\n\tsaddr = inet->inet_saddr;\n\tif (ipv4_is_multicast(usin->sin_addr.s_addr)) {\n\t\tif (!oif || netif_index_is_l3_master(sock_net(sk), oif))\n\t\t\toif = READ_ONCE(inet->mc_index);\n\t\tif (!saddr)\n\t\t\tsaddr = READ_ONCE(inet->mc_addr);\n\t} else if (!oif) {\n\t\toif = READ_ONCE(inet->uc_index);\n\t}\n\tfl4 = &inet->cork.fl.u.ip4;\n\trt = ip_route_connect(fl4, usin->sin_addr.s_addr, saddr, oif,\n\t\t\t      sk->sk_protocol, inet->inet_sport,\n\t\t\t      usin->sin_port, sk);\n\tif (IS_ERR(rt)) {\n\t\terr = PTR_ERR(rt);\n\t\tif (err == -ENETUNREACH)\n\t\t\tIP_INC_STATS(sock_net(sk), IPSTATS_MIB_OUTNOROUTES);\n\t\tgoto out;\n\t}\n\n\tif ((rt->rt_flags & RTCF_BROADCAST) && !sock_flag(sk, SOCK_BROADCAST)) {\n\t\tip_rt_put(rt);\n\t\terr = -EACCES;\n\t\tgoto out;\n\t}\n\n\t/* Update addresses before rehashing */\n\tinet->inet_daddr = fl4->daddr;\n\tinet->inet_dport = usin->sin_port;\n\tif (!inet->inet_saddr)\n\t\tinet->inet_saddr = fl4->saddr;\n\tif (!inet->inet_rcv_saddr) {\n\t\tinet->inet_rcv_saddr = fl4->saddr;\n\t\tif (sk->sk_prot->rehash)\n\t\t\tsk->sk_prot->rehash(sk);\n\t}\n\treuseport_has_conns_set(sk);\n\tsk->sk_state = TCP_ESTABLISHED;\n\tsk_set_txhash(sk);\n\tatomic_set(&inet->inet_id, get_random_u16());\n\n\tsk_dst_set(sk, &rt->dst);\n\terr = 0;\nout:\n\treturn err;\n}\nEXPORT_SYMBOL(__ip4_datagram_connect);\n\n",
+      "first_line": 19,
+      "last_line": 86,
+      "meaning": "association_after_route_and_local_source_selection",
+      "required": "inet->inet_dport = usin->sin_port;",
+      "source": "linux/net/ipv4/datagram.c"
+    },
+    {
+      "excerpt": "int inet_getname(struct socket *sock, struct sockaddr *uaddr,\n\t\t int peer)\n{\n\tstruct sock *sk\t\t= sock->sk;\n\tstruct inet_sock *inet\t= inet_sk(sk);\n\tDECLARE_SOCKADDR(struct sockaddr_in *, sin, uaddr);\n\tint sin_addr_len = sizeof(*sin);\n\n\tsin->sin_family = AF_INET;\n\tlock_sock(sk);\n\tif (peer) {\n\t\tif (!inet->inet_dport ||\n\t\t    (((1 << sk->sk_state) & (TCPF_CLOSE | TCPF_SYN_SENT)) &&\n\t\t     peer == 1)) {\n\t\t\trelease_sock(sk);\n\t\t\treturn -ENOTCONN;\n\t\t}\n\t\tsin->sin_port = inet->inet_dport;\n\t\tsin->sin_addr.s_addr = inet->inet_daddr;\n\t\tBPF_CGROUP_RUN_SA_PROG(sk, (struct sockaddr *)sin, &sin_addr_len,\n\t\t\t\t       CGROUP_INET4_GETPEERNAME);\n\t} else {\n\t\t__be32 addr = inet->inet_rcv_saddr;\n\t\tif (!addr)\n\t\t\taddr = inet->inet_saddr;\n\t\tsin->sin_port = inet->inet_sport;\n\t\tsin->sin_addr.s_addr = addr;\n\t\tBPF_CGROUP_RUN_SA_PROG(sk, (struct sockaddr *)sin, &sin_addr_len,\n\t\t\t\t       CGROUP_INET4_GETSOCKNAME);\n\t}\n\trelease_sock(sk);\n\tmemset(sin->sin_zero, 0, sizeof(sin->sin_zero));\n\treturn sin_addr_len;\n}\nEXPORT_SYMBOL(inet_getname);\n",
+      "first_line": 795,
+      "last_line": 829,
+      "meaning": "peer_not_connected_and_local_name_padding",
+      "required": "return -ENOTCONN;",
+      "source": "linux/net/ipv4/af_inet.c"
+    },
+    {
+      "excerpt": "\t\tif (msg->msg_namelen < sizeof(*usin))\n\t\t\treturn -EINVAL;\n\t\tif (usin->sin_family != AF_INET) {\n\t\t\tif (usin->sin_family != AF_UNSPEC)\n\t\t\t\treturn -EAFNOSUPPORT;\n\t\t}\n\n\t\tdaddr = usin->sin_addr.s_addr;\n\t\tdport = usin->sin_port;\n\t\tif (dport == 0)\n\t\t\treturn -EINVAL;\n\t} else {\n\t\tif (sk->sk_state != TCP_ESTABLISHED)\n\t\t\treturn -EDESTADDRREQ;\n\t\tdaddr = inet->inet_daddr;\n\t\tdport = inet->inet_dport;\n\t\t/* Open fast path for connected socket.\n\t\t   Route will not be used, if at least one option is set.\n\t\t */\n\t\tconnected = 1;\n\t}\n\n\tipcm_init_sk(&ipc, inet);\n\tipc.gso_size = READ_ONCE(up->gso_size);\n\n\tif (msg->msg_controllen) {\n\t\terr = udp_cmsg_send(sk, msg, &ipc.gso_size);\n\t\tif (err > 0) {\n",
+      "first_line": 1327,
+      "last_line": 1354,
+      "meaning": "explicit_destination_overrides_default",
+      "required": "if (sk->sk_state != TCP_ESTABLISHED)",
+      "source": "linux/net/ipv4/udp.c"
+    },
+    {
+      "excerpt": "\tint score;\n\tstruct inet_sock *inet;\n\tbool dev_match;\n\n\tif (!net_eq(sock_net(sk), net) ||\n\t    udp_sk(sk)->udp_port_hash != hnum ||\n\t    ipv6_only_sock(sk))\n\t\treturn -1;\n\n\tif (sk->sk_rcv_saddr != daddr)\n\t\treturn -1;\n\n\tscore = (sk->sk_family == PF_INET) ? 2 : 1;\n\n\tinet = inet_sk(sk);\n\tif (inet->inet_daddr) {\n\t\tif (inet->inet_daddr != saddr)\n\t\t\treturn -1;\n\t\tscore += 4;\n\t}\n\n\tif (inet->inet_dport) {\n\t\tif (inet->inet_dport != sport)\n\t\t\treturn -1;\n\t\tscore += 4;\n\t}\n\n\tdev_match = udp_sk_bound_dev_eq(net, sk->sk_bound_dev_if,\n\t\t\t\t\tdif, sdif);\n\tif (!dev_match)\n\t\treturn -1;\n\tif (sk->sk_bound_dev_if)\n\t\tscore += 4;\n",
+      "first_line": 374,
+      "last_line": 406,
+      "meaning": "peer_address_and_port_ingress_filter",
+      "required": "if (inet->inet_dport != sport)",
+      "source": "linux/net/ipv4/udp.c"
+    },
+    {
+      "excerpt": "int __udp_disconnect(struct sock *sk, int flags)\n{\n\tstruct inet_sock *inet = inet_sk(sk);\n\t/*\n\t *\t1003.1g - break association.\n\t */\n\n\tsk->sk_state = TCP_CLOSE;\n\tinet->inet_daddr = 0;\n\tinet->inet_dport = 0;\n\tsock_rps_reset_rxhash(sk);\n\tsk->sk_bound_dev_if = 0;\n\tif (!(sk->sk_userlocks & SOCK_BINDADDR_LOCK)) {\n\t\tinet_reset_saddr(sk);\n\t\tif (sk->sk_prot->rehash &&\n\t\t    (sk->sk_userlocks & SOCK_BINDPORT_LOCK))\n\t\t\tsk->sk_prot->rehash(sk);\n\t}\n\n\tif (!(sk->sk_userlocks & SOCK_BINDPORT_LOCK)) {\n\t\tsk->sk_prot->unhash(sk);\n\t\tinet->inet_sport = 0;\n\t}\n\tsk_dst_reset(sk);\n\treturn 0;\n}\nEXPORT_SYMBOL(__udp_disconnect);\n\nint udp_disconnect(struct sock *sk, int flags)\n{\n\tlock_sock(sk);\n\t__udp_disconnect(sk, flags);\n\trelease_sock(sk);\n\treturn 0;\n}\nEXPORT_SYMBOL(udp_disconnect);\n",
+      "first_line": 2154,
+      "last_line": 2189,
+      "meaning": "disconnect_binding_provenance_without_queue_purge",
+      "required": "if (!(sk->sk_userlocks & SOCK_BINDPORT_LOCK))",
+      "source": "linux/net/ipv4/udp.c"
+    }
+  ],
+  "socketcall_selectors": {
+    "connect": {
+      "argument_words": 3,
+      "linux": {
+        "definition": {
+          "expression": "3",
+          "line": 29,
+          "source": "linux/include/uapi/linux/net.h"
+        },
+        "value": 3
+      },
+      "musl": {
+        "definition": {
+          "expression": "3",
+          "line": 330,
+          "source": "musl/src/internal/syscall.h"
+        },
+        "value": 3
+      }
+    },
+    "getpeername": {
+      "argument_words": 3,
+      "linux": {
+        "definition": {
+          "expression": "7",
+          "line": 33,
+          "source": "linux/include/uapi/linux/net.h"
+        },
+        "value": 7
+      },
+      "musl": {
+        "definition": {
+          "expression": "7",
+          "line": 334,
+          "source": "musl/src/internal/syscall.h"
+        },
+        "value": 7
+      }
+    }
+  }
+}

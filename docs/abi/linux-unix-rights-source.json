@@ -1,0 +1,26 @@
+{
+  "archive_sha256": "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4",
+  "musl_version": "1.2.5",
+  "schema_version": 1,
+  "scope": "Bounded immediate UNIX stream SCM_RIGHTS byte codec; source inspection is not trap execution",
+  "source_file_sha256": {
+    "arch/aarch64/bits/syscall.h.in": "7b20fe57bf92c6b3cf800d4f83998419e92e19a88ead2d57c89c5725e0cfb816",
+    "arch/arm/bits/syscall.h.in": "efa3b140a8393cc7adbaabf8517a133ad510c9f6b94462353fdaa7c82816e3f2",
+    "arch/generic/bits/socket.h": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "arch/i386/bits/syscall.h.in": "ca07aaf8e249ae47d65bcb41999035fc3d0543b8304649ddff5fef7e490a315a",
+    "arch/loongarch64/bits/syscall.h.in": "0e928dbb7831f1282ce38318e41d835a86dbad7583ad009997ae85f1b0d4ed48",
+    "arch/mips/bits/socket.h": "9e3dd20c79191f0d1796a97afd3ee0dd95f1c43213033cc11984d9a4ae1fbd1a",
+    "arch/mips/bits/syscall.h.in": "b7be028c3eb942433a711d6d9d86bbbdebe14c5c09da82bdeaedcd073ff79687",
+    "arch/mips64/bits/socket.h": "5cf0d72b9e44a62a70b7d53a6cd2edb01e998e5b10bba7527c5c3c013bddcb61",
+    "arch/mips64/bits/syscall.h.in": "6fdf8dbe97ac3b0de5d06ccbb043f6ffd327d7cb3b30f20e467fa4fbea593cda",
+    "arch/powerpc/bits/socket.h": "992c3e16060b5723279a283ffa8611890e92fc4cf031e8eecaf1de8c657a0259",
+    "arch/powerpc/bits/syscall.h.in": "db3e9eea4493056d7a96f3958dda826650f1c17b1da2270a01fa9def294b39b7",
+    "arch/riscv32/bits/syscall.h.in": "fe7b8310adf4e69268591dbd8dd260b6f7dae8a027f2609b2300305bc460b863",
+    "arch/riscv64/bits/syscall.h.in": "60d25e2a66b17577b2f436f6db603ac70ab3d9623f7be2aa1b4ed24043cd3ffd",
+    "arch/x86_64/bits/syscall.h.in": "c29e9cb15ff393eda50c320a6d96bb1132191251f8e079148a0646165bb8cabd",
+    "include/sys/socket.h": "1e6f196e7ae112b3295078b45e705b7f69ae2a1ade7f3b72522f66fb695eda65",
+    "src/internal/syscall.h": "2719e9deac186faab6faaa305fb09df7da2c8e16e6c3354a61ab2309bd5041b0",
+    "src/network/recvmsg.c": "9e7ac58c94be6f875c1d302957327bdcc2aeaeebfdd3d08ddffef6236be19bd4",
+    "src/network/sendmsg.c": "5ca63a4b163d41d6111c67fc5894046361d9e59f1da16cdff147f1e6ea24e62e"
+  }
+}

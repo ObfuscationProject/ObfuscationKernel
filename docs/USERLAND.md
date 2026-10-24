@@ -89,6 +89,11 @@ its separate model handlers.
 
 ## Native ABI Notes
 
+Native real/effective/saved UID/GID setters and getters are separately
+advertised by the strict SDK credential capability. See
+[Native process credentials](NATIVE_CREDENTIALS.md) for authorization, the
+single-live-thread restriction and the checked-copy contract.
+
 `ok_stat` is the native 0.1.x metadata layout. Its `type` field uses
 `OK_NODE_*`, while `mode` carries Unix-style type and permission bits such as
 `OK_MODE_REGULAR`, `OK_MODE_DIRECTORY`, and `OK_MODE_PERMISSION_MASK`.
@@ -105,8 +110,10 @@ unchanged. `fsync` and `fdatasync` synchronize mounted ext4 through device FLUSH
 RAM files have no persistent backing.
 
 The trusted-buffer `mmap` handler allocates bounded kernel memory-map records.
-The native boundary returns `ENOSYS` for `mmap`, `mprotect`, `munmap` and `brk`;
-its real architecture mappings currently serve the static ELF loader and fork.
+The native boundary independently implements private anonymous `mmap`,
+`mprotect` and partial `munmap` through real architecture mappings. It retains
+the static ELF loader and eager fork; `brk` remains unavailable. See
+[native VM](NATIVE_VM.md) for the supported protections and resource bounds.
 
 ## What Is Still Missing
 

@@ -14,8 +14,9 @@ The project language, comments, commit messages, and documentation are English.
 - Preserve all ten architecture profiles; share mechanisms through typed policies
   instead of coupling generic code to x86_64.
 - Return `ok::Status` or `ok::Result<T>` from kernel module operations.
-- Keep `okernel` freestanding: no hosted STL containers, heap allocation,
-  exceptions, libc calls, or external C++ runtime dependencies.
+- Keep `okernel` freestanding: no hosted STL containers, hosted heap allocation,
+  exceptions, libc calls, or external C++ runtime dependencies. Kernel-owned
+  physical/page/object allocation is permitted under the contract below.
 - Keep comments short and reserved for non-obvious behavior.
 - Do not introduce architecture-specific code into generic modules.
 
@@ -23,6 +24,30 @@ The project language, comments, commit messages, and documentation are English.
 
 Kernel APIs do not throw exceptions. Public module methods return `Status` or
 `Result<T>`. A caller must check the result before dereferencing values.
+
+## Kernel allocation contract
+
+Kernel-owned allocation must be fallible and return `Status`/`Result`; do not
+introduce implicit `new`, hosted allocation or exceptions. Each allocator must
+define its owner, accounting limit, allocation context and reclamation condition.
+Check sizes, alignment and capacity before publishing an allocation. Capacity
+failure must leave existing owners and accounting intact; never silently truncate
+a supplied physical memory map. Reservations override usable RAM declarations.
+
+The initial `FrameAllocator` is bounded bootstrap bookkeeping for at most 16,384
+eligible pages in 64 disjoint ranges. Its fixed metadata lives in its owning
+kernel object. It has no blocking, reclaim or interrupt/SMP synchronization;
+calls require a single serialized boot/model context. This capacity is its only
+current quota, not a per-process memory-pressure policy. Ownership handles carry
+the allocator identity and a generation; callers must retire all mappings,
+references and I/O pins before release. Bookkeeping does not prove those external
+lifetimes have ended. The allocator must outlive its handles and cannot be copied
+or moved. Reinitialization requires all frames to be released.
+
+Production page/object allocation still requires boot RAM and reservation
+discovery, runtime-sized metadata, explicit allocation contexts and charges,
+reclaim/reserves and OOM policy, and synchronized reference/TLB/DMA retirement.
+The default boot memory map and software VM/slab tests do not meet those gates.
 
 ## Architecture Work
 

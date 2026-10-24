@@ -1,7 +1,7 @@
 # arm32
 
 The profile boots the standalone kernel on QEMU `virt` with the existing
-`cortex-a15` CPU and an ELF entry at `0x40008000`. The build uses little-endian
+`cortex-a15` CPU and an `arm32-linux-image` entry at `0x40010000`. The build uses little-endian
 ARMv7-A, ARM instruction mode and the soft-float C/C++ ABI. Native execution
 requires the CPU's VFP/NEON register bank, generic timer and GICv2.
 
@@ -79,3 +79,24 @@ POSIX completeness, device IRQ delivery or arbitrary board compatibility.
 
 The boot platform separately provides PL011 UART, ramfb output and virtio-mmio
 keyboard/mouse support.
+
+## Firmware image contract
+
+SDK 13 supplies an uncompressed ARM raw image with Linux zImage magic at offset
+0x24, linked start at 0x28 and exact emitted file end at 0x2c. The initial ARM
+branch must land after the 48-byte header within the payload. The producer and
+OS consumer both validate format/architecture association, branch, magic and
+exact file length. The complete linked memory end is independently reserved and
+must fit below `0x50000000`. The ELF remains a diagnostic artifact; directly
+launching it supplies no FDT and fails process-memory admission.
+
+QEMU's 512 MiB recipe supplies r0=0, r1=0xffffffff and r2 FDT. Entry state and
+bounded strict FDT parsing precede qualification; r3 is retained but unspecified.
+The 64 KiB boot prefix, complete image/NOLOAD and full FDT storage are reserved.
+Actual user-frame eligibility is restricted to the 256 MiB supervisor RAM map.
+The isolated execution test still launches its diagnostic ELF deliberately; it
+has no process allocator or firmware admission and is not a firmware test.
+
+Unsupported CPSR.E or SCTLR.EE endian state is rejected in assembly before stack,
+BSS and capture stores. The exported predicate and receipt consumers recheck
+both bits; permissible I-cache state remains unchanged.
