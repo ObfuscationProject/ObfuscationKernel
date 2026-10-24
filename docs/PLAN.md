@@ -209,13 +209,13 @@ Total ext4/JBD2 headers mapped: 107. Unrelated headers kept as they are: `archiv
 `include/ok/user/` has 88 headers; the 30 `native_signal_{delivery,frame,return}_<arch>.hpp`
 headers collapse into one `include/ok/arch/<arch>/signal.hpp` per architecture.
 
-## Appendix C: kernel-resident applications moving to `src/rescue/`
+## Appendix C: kernel-resident applications now under `src/rescue/`
 
-- `src/apps/file_manager.cpp` (928 lines)
-- `src/apps/shell/filesystem.cpp` (934 lines)
-- `src/apps/shell/network.cpp` (165 lines)
-- `src/apps/shell/status.cpp` (747 lines)
-- `src/apps/shell/storage.cpp` (350 lines)
-- `src/apps/shell/task_manager.cpp` (78 lines)
-- `src/apps/shell.cpp` (2619 lines)
-- `src/apps/task_manager.cpp` (1088 lines)
+- `src/rescue/file_manager.cpp` (928 lines)
+- `src/rescue/shell/filesystem.cpp` (934 lines)
+- `src/rescue/shell/network.cpp` (165 lines)
+- `src/rescue/shell/status.cpp` (747 lines)
+- `src/rescue/shell/storage.cpp` (350 lines)
+- `src/rescue/shell/task_manager.cpp` (78 lines)
+- `src/rescue/shell.cpp` (2619 lines)
+- `src/rescue/task_manager.cpp` (1088 lines)

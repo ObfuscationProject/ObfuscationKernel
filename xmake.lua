@@ -115,8 +115,8 @@ end
 function add_ok_kernel_sources(include_kernel_main)
     add_files("src/boot/raw_handoff.cpp", "src/boot/fdt.cpp")
     add_files("src/core/*.cpp")
-    add_files("src/apps/*.cpp")
-    add_files("src/apps/shell/*.cpp")
+    add_files("src/rescue/*.cpp")
+    add_files("src/rescue/shell/*.cpp")
     if not include_kernel_main then
         remove_files("src/core/kernel_main.cpp")
     end

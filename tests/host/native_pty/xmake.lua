@@ -63,9 +63,9 @@ if has_config("runtime_tests") then
         -- dispatch harness; it deliberately excludes the realtime model shim.
         for _, source in ipairs({
             "src/core/kernel.cpp", "src/core/kernel_syscalls.cpp", "src/core/module.cpp", "src/core/native_shutdown.cpp",
-            "src/apps/file_manager.cpp", "src/apps/shell/filesystem.cpp", "src/apps/shell/network.cpp",
-            "src/apps/shell/status.cpp", "src/apps/shell/storage.cpp", "src/apps/shell/task_manager.cpp",
-            "src/apps/shell.cpp", "src/apps/task_manager.cpp", "src/driver/abi.cpp", "src/driver/block.cpp",
+            "src/rescue/file_manager.cpp", "src/rescue/shell/filesystem.cpp", "src/rescue/shell/network.cpp",
+            "src/rescue/shell/status.cpp", "src/rescue/shell/storage.cpp", "src/rescue/shell/task_manager.cpp",
+            "src/rescue/shell.cpp", "src/rescue/task_manager.cpp", "src/driver/abi.cpp", "src/driver/block.cpp",
             "src/driver/bus_input.cpp", "src/driver/display.cpp", "src/driver/driver.cpp", "src/fs/archive.cpp",
             "src/fs/ext4.cpp", "src/fs/ext4_fs.cpp", "src/fs/ext4_recovery.cpp", "src/fs/fat.cpp", "src/fs/simplefs.cpp",
             "src/fs/storage.cpp", "src/fs/unix.cpp", "src/fs/vfs.cpp", "src/gui/desktop.cpp", "src/gui/gui.cpp",
