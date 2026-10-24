@@ -55,7 +55,7 @@ activate a hardware address space. Architecture page-table operations should use
 constrained templates/static dispatch rather than a virtual interface solely to
 share hot-path implementation.
 
-The native user runtime also provides a [bounded anonymous VM slice](../NATIVE_VM.md)
+The native user runtime also provides a [bounded anonymous VM slice](../qualification/NATIVE_VM.md)
 using its separate linker-reserved backing arena. Its hardware mappings and
 acceptance tests are distinct from this module's software VM models.
 

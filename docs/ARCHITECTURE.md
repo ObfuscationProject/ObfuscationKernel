@@ -128,8 +128,8 @@ architecture entry files for implemented system targets.
 ObfuscationOS is an artifact consumer, not a kernel source container. The
 `kernel-sdk` target exports a self-contained SDK under `build/sdk/<arch>/<mode>`;
 the OS validates the manifest before using headers, libraries and boot artifacts.
-All ten kernel architecture profiles remain supported. The existing OS userland
-profiles remain x86_64, aarch64, rv64 and loongarch64.
+All ten kernel architecture profiles remain supported, and ObfuscationOS supplies
+userland for the same ten profiles.
 
 The kernel retains the compositor, surface/input services, essential platform
 drivers, native module/driver interfaces and its diagnostic shell. The greeter,

@@ -10,7 +10,7 @@ namespace ok::arch
 // Runtime initializes the one-time anchor before exposing checked public clocks.
 // Current IRQ/NMI handlers must not call these services; the boot-CPU main loop
 // owns the full monotonic-sample-through-read/commit interval. This is not a
-// universal IRQ-masked or SMP-safe interface. See docs/REALTIME_SETTING.md.
+// universal IRQ-masked or SMP-safe interface. See docs/qualification/REALTIME_SETTING.md.
 [[nodiscard]] Result<time::EpochReading> read_epoch_source();
 Status initialize_realtime();
 [[nodiscard]] Result<time::EpochTime> realtime();

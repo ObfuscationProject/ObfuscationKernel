@@ -136,6 +136,7 @@ fixed-capacity kernel containers live in `include/ok/core/fixed.hpp`.
 
 ## Documentation
 
+- [Implementation plan (worktrees)](docs/PLAN.md)
 - [Build](docs/BUILD.md)
 - [Boot Profiles](docs/BOOT.md)
 - [Testing](docs/testing/qemu.md)
@@ -148,6 +149,7 @@ fixed-capacity kernel containers live in `include/ok/core/fixed.hpp`.
 - [POSIX Roadmap](docs/POSIX.md)
 - [Architecture Notes](docs/arch/)
 - [Module Notes](docs/modules/)
+- [Qualification notes](docs/qualification/README.md)
 - [Kernel Modules](docs/modules/modules.md)
 - [GUI](docs/modules/gui.md)
 

@@ -33,7 +33,7 @@ modeled CPU topology is not hardware SMP.
 address-space handle and backing-page list; each thread owns the saved integer,
 floating-point and TLS state. See [process resources](modules/process-resources.md).
 The native runtime in `src/user/runtime.cpp` selects runnable native threads from
-that table, calls the architecture-selected `execution::enter_owned` with an active [entry stack lease](NATIVE_ENTRY_STACKS.md), and handles the
+that table, calls the architecture-selected `execution::enter_owned` with an active [entry stack lease](qualification/NATIVE_ENTRY_STACKS.md), and handles the
 returned syscall, timer or fault. There is no virtual call in architecture entry
 or a duplicate native process table. The existing scheduler policy remains a
 constrained template; native dispatch currently uses a simple bounded round-robin
@@ -95,7 +95,7 @@ Private and shared anonymous `mmap`, eager private file `mmap`, `mprotect` and
 partial `munmap` now modify native page tables. Shared anonymous frames survive
 fork by reference; private pages use eager copies. Protection faults and
 transactional failure rollback remain supported.
-See [bounded native VM](NATIVE_VM.md) for supported flags and fixed limits.
+See [bounded native VM](qualification/NATIVE_VM.md) for supported flags and fixed limits.
 The [object pathname resolver](PATH_RESOLUTION.md) also serves cwd-relative exec,
 RAM symbolic links and search checks; ext4 symbolic-link creation is unsupported.
 

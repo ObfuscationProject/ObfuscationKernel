@@ -33,7 +33,7 @@ identity is attached by checked VFS/POSIX composition, not fabricated by a Node.
 
 The default writable ext4 policy does not maintain timestamps; its times are unavailable
 from mount time, including before the first mutation. SDK20 adds an explicit
-opt-in [maintained policy](../MAINTAINED_EXT4_TIMESTAMPS.md), qualified by separate
+opt-in [maintained policy](../qualification/MAINTAINED_EXT4_TIMESTAMPS.md), qualified by separate
 event/fault, native/musl and Linux interoperability gates. RAM and archive-v1 have no
 epoch source and also leave times unavailable. Pipe and console records remain
 explicitly incomplete because they have no qualified identity providers in this
@@ -41,7 +41,7 @@ slice. Existing native block accounting remains unchanged and is not thereby
 qualified as Linux `st_blocks`.
 
 The checked active realtime service and administrative software selection are
-documented in [REALTIME_SETTING.md](../REALTIME_SETTING.md). Availability of that
+documented in [REALTIME_SETTING.md](../qualification/REALTIME_SETTING.md). Availability of that
 clock does not itself qualify a provider's event history. musl can consume statx BASIC fields without
 checking the validity mask, so partial metadata does not authorize successful
 Linux stat-family responses.

@@ -15,3 +15,11 @@
   metadata/state checks.
 - Follow docs/DEVELOPMENT.md. Move tests with moved code and validate standalone
   kernel boot plus OS SDK consumption when changing the integration boundary.
+- Qualification receipts go to the ObfuscationEvidence repository, never into
+  this working tree. Per-slice notes live under docs/qualification/; subsystem
+  documents under docs/modules/ describe current behavior.
+- Work is organised as worktrees described in docs/PLAN.md. A worktree that
+  changes exported headers bumps the module ABI once at merge and has a paired
+  ObfuscationOS worktree that consumes the new SDK.
+- Kernel-resident applications (debug shell, file manager, task manager) are
+  rescue diagnostics behind kernel_gui, not product features.

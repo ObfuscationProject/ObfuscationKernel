@@ -12,47 +12,25 @@ Each module exposes a `ModuleManifest` with:
 - dependency, exported-service, and required-service lists;
 - `ModuleExecution`, either `inline_core` or `kernel_process`;
 - `ModuleThreading`, either `single_threaded` or `per_cpu`;
-- `abi_version`, currently `kernel_module_abi_version == 69`;
+- `abi_version`, currently `kernel_module_abi_version == 74`;
 - a capability mask declaring service export/use, kernel-process ownership,
   per-CPU workers, user ABI, driver ABI, or GUI behavior;
 - `ModuleRestartPolicy`;
 - `ModuleResourceBudget` for maximum threads, services, memory pages, and
   handles.
 
-ABI69 is the development cohort for the shutdown lifecycle and exported object
-layout changes. Rebuild native modules and distribution extensions with its exact
-SDK. ABI68 binaries are incompatible. Native UAPI0.10.0 adds original-init scalar
-power PREPARE/COMMIT; its queued acknowledgement does not certify clean shutdown.
+The current contract is module ABI 74 with public UAPI 0.16.0 and SDK manifest
+schema 1. The exporter writes the same generation into every SDK manifest, and
+the OS consumer rejects a mismatched generation before linking. Rebuild native
+extensions against the exact architecture/mode/compiler SDK; older generations
+cannot be reused. The native C++ ABI generation, the public user-space UAPI
+version and the manifest schema are three separate contracts. The generation
+history is recorded at the end of this document.
 
 The manager rejects unsupported ABI versions, duplicate module names, dependency
 cycles, missing required dependencies, missing required services, duplicate
 service publication, capability mismatches, and resource budgets that cannot
 cover the requested execution/threading model.
-
-ABI 2 added filesystem node lifetime, mutation and synchronization operations
-and block-device flush support. ABI 3 extends the filesystem node virtual
-interface for rename, hard links and directory path reconstruction, and adds
-retained working-directory state to process resources. ABI 4 adds object-based
-pathname resolution and changes physical-frame ownership/accounting layouts.
-ABI 9 added fallible VFS metadata and child-lookup virtual slots; ABI 8 supplied
-owned boot-register capture. ABI 10 added retained large-file descriptor state
-and atomic CLOEXEC duplication. ABI 11 changed the exported Linux ProfileData
-layout for pipe/seek; ABI 12 added sleep and ABI 13 added poll/open. Current
-ABI 14 adds positional/select operations, select wait outputs and qualified
-filesystem attribute records. The native UAPI remains0.4.0 through checked,
-deterministic field projection. Rebuild native extensions against
-the matching SDK; older generations cannot be reused. SDK manifests carry the
-same ABI generation, and the OS rejects a mismatched generation before linking.
-This native C++ ABI generation is separate from the public user-space UAPI
-version and the SDK manifest schema.
-
-The private ABI57 successor adds the AF_UNIX outbound buffer to the canonical
-open-file description while preserving TCP ownership. Exported module, ext4,
-UDP and TCP markers and the SDK manifest must all declare57; the exporter
-and OS consumer reject stale56 and future generations. Its public UAPI is
-0.7.0 and manifest schema1. Rebuild every native extension from the exact
-architecture/mode/compiler SDK. Prior executed ABI generations remain
-historical evidence, and metadata checks do not qualify runtime code loading.
 
 ## Lifecycle
 
@@ -127,6 +105,41 @@ Roadmap tests cover:
 - kernel-process module creation, per-CPU workers, and process reuse after
   restart;
 - the built-in module graph used by the kernel debug suite.
+
+## ABI history
+
+Earlier generations, kept for readers of archived qualification records. None of
+them can consume a current SDK.
+
+ABI69 is the development cohort for the shutdown lifecycle and exported object
+layout changes. Rebuild native modules and distribution extensions with its exact
+SDK. ABI68 binaries are incompatible. Native UAPI0.10.0 adds original-init scalar
+power PREPARE/COMMIT; its queued acknowledgement does not certify clean shutdown.
+
+ABI 2 added filesystem node lifetime, mutation and synchronization operations
+and block-device flush support. ABI 3 extends the filesystem node virtual
+interface for rename, hard links and directory path reconstruction, and adds
+retained working-directory state to process resources. ABI 4 adds object-based
+pathname resolution and changes physical-frame ownership/accounting layouts.
+ABI 9 added fallible VFS metadata and child-lookup virtual slots; ABI 8 supplied
+owned boot-register capture. ABI 10 added retained large-file descriptor state
+and atomic CLOEXEC duplication. ABI 11 changed the exported Linux ProfileData
+layout for pipe/seek; ABI 12 added sleep and ABI 13 added poll/open. Current
+ABI 14 adds positional/select operations, select wait outputs and qualified
+filesystem attribute records. The native UAPI remains0.4.0 through checked,
+deterministic field projection. Rebuild native extensions against
+the matching SDK; older generations cannot be reused. SDK manifests carry the
+same ABI generation, and the OS rejects a mismatched generation before linking.
+This native C++ ABI generation is separate from the public user-space UAPI
+version and the SDK manifest schema.
+
+The private ABI57 successor adds the AF_UNIX outbound buffer to the canonical
+open-file description while preserving TCP ownership. Exported module, ext4,
+UDP and TCP markers and the SDK manifest must all declare57; the exporter
+and OS consumer reject stale56 and future generations. Its public UAPI is
+0.7.0 and manifest schema1. Rebuild every native extension from the exact
+architecture/mode/compiler SDK. Prior executed ABI generations remain
+historical evidence, and metadata checks do not qualify runtime code loading.
 
 ABI58 adds bounded UNIX stream rights records, move-only prepared receive reservations and canonical queue-reference accounting. It retains the earlier TCP, UDP and mounted ext4 mechanisms. Immediate native/Linux message adapters and hosted models do not establish blocking/general SCM_RIGHTS or an isolated desktop. SDK export and the OS consumer require matching ABI58 markers.
 

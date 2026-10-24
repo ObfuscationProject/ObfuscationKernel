@@ -62,8 +62,9 @@ applications without claiming modeled CPU slots are executing hardware cores.
 - Native execution and storage currently use the boot CPU; physical-board DMA,
   IOMMU, noncoherent cache maintenance and hardware SMP are unvalidated.
 - The retained MIPS CPUs lack hardware NX. LoongArch's strict branch-to-NX probe
-  hits a recursive emulator fault on QEMU 8.2.2; the entry guard passes and NX
-  bits remain set. See the architecture documents for exact limits.
+  hit a recursive emulator fault on the QEMU 8.2.2 used for that probe; the entry
+  guard passes and NX bits remain set. SysToolchain now pins QEMU 10.2.0, and the
+  probe has not been rerun on it. See the architecture documents for exact limits.
 - GUI application views remain OS-owned prelinked extensions. A user-mode GUI
   protocol and runtime ELF module relocation/loading are still future work.
 - General VM allocation, signals, native threads, calibrated clocks/sleeps,

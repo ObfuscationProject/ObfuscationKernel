@@ -91,7 +91,7 @@ its separate model handlers.
 
 Native real/effective/saved UID/GID setters and getters are separately
 advertised by the strict SDK credential capability. See
-[Native process credentials](NATIVE_CREDENTIALS.md) for authorization, the
+[Native process credentials](qualification/NATIVE_CREDENTIALS.md) for authorization, the
 single-live-thread restriction and the checked-copy contract.
 
 `ok_stat` is the native 0.1.x metadata layout. Its `type` field uses
@@ -113,7 +113,7 @@ The trusted-buffer `mmap` handler allocates bounded kernel memory-map records.
 The native boundary independently implements private anonymous `mmap`,
 `mprotect` and partial `munmap` through real architecture mappings. It retains
 the static ELF loader and eager fork; `brk` remains unavailable. See
-[native VM](NATIVE_VM.md) for the supported protections and resource bounds.
+[native VM](qualification/NATIVE_VM.md) for the supported protections and resource bounds.
 
 ## What Is Still Missing
 
