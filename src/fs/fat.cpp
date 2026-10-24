@@ -36,11 +36,6 @@ bool bytes_equal(std::span<const std::byte> data, usize offset, std::string_view
     return true;
 }
 
-bool valid_sector_size(u32 value)
-{
-    return value == 512 || value == 1024 || value == 2048 || value == 4096;
-}
-
 bool valid_power_of_two(u32 value)
 {
     return value != 0 && (value & (value - 1)) == 0;
@@ -63,6 +58,8 @@ Status copy_sector(std::span<std::byte> out, std::span<const std::byte> in)
 
 Status FatVolume::mount(std::span<const std::byte> image)
 {
+    if (mounted_)
+        return Status::busy("FAT volume already mounted");
     if (image.size() < fat_boot_sector_size)
     {
         return Status::invalid_argument("short FAT image");
@@ -72,6 +69,8 @@ Status FatVolume::mount(std::span<const std::byte> image)
         return status;
     }
 
+    if (info_.total_sectors > image.size() / fat_boot_sector_size)
+        return Status::invalid_argument("FAT volume exceeds image");
     image_ = image;
     device_ = nullptr;
     mounted_ = true;
@@ -80,6 +79,8 @@ Status FatVolume::mount(std::span<const std::byte> image)
 
 Status FatVolume::mount(driver::BlockDevice &device)
 {
+    if (mounted_)
+        return Status::busy("FAT volume already mounted");
     const auto geometry = device.geometry();
     if (geometry.block_size != driver::block_sector_size)
     {
@@ -100,6 +101,8 @@ Status FatVolume::mount(driver::BlockDevice &device)
         return status;
     }
 
+    if (info_.total_sectors > geometry.block_count)
+        return Status::invalid_argument("FAT volume exceeds block device");
     image_ = {};
     device_ = &device;
     mounted_ = true;
@@ -136,8 +139,8 @@ Status FatVolume::parse_fat32(std::span<const std::byte> sector)
     const auto sectors_per_fat32 = read_le32(sector, 0x24);
     const auto root_cluster = read_le32(sector, 0x2c);
 
-    if (!valid_sector_size(bytes_per_sector) || !valid_power_of_two(sectors_per_cluster) || reserved == 0 ||
-        fats == 0 || root_entries != 0 || sectors_per_fat16 != 0 || sectors_per_fat32 == 0 ||
+    if (bytes_per_sector != fat_boot_sector_size || !valid_power_of_two(sectors_per_cluster) || reserved == 0 ||
+        (fats != 1 && fats != 2) || root_entries != 0 || sectors_per_fat16 != 0 || sectors_per_fat32 == 0 ||
         root_cluster < 2)
     {
         return Status::invalid_argument("bad FAT32 fields");
@@ -148,6 +151,11 @@ Status FatVolume::parse_fat32(std::span<const std::byte> sector)
         return Status::invalid_argument("bad FAT32 sector counts");
     }
 
+    const u64 heap = reserved + static_cast<u64>(fats) * sectors_per_fat32;
+    const u64 clusters = (total_sectors - heap) / sectors_per_cluster;
+    if (!clusters || clusters > 0x0fffffedu || static_cast<u64>(root_cluster) >= clusters + 2 ||
+        clusters + 2 > static_cast<u64>(sectors_per_fat32) * bytes_per_sector / 4 || total16 || read_le16(sector, 0x2a))
+        return Status::invalid_argument("invalid FAT32 cluster geometry");
     info_ = FatMountInfo{};
     info_.variant = FatVariant::fat32;
     info_.bytes_per_sector = bytes_per_sector;
@@ -157,9 +165,8 @@ Status FatVolume::parse_fat32(std::span<const std::byte> sector)
     info_.total_sectors = total_sectors;
     info_.sectors_per_fat = sectors_per_fat32;
     info_.fat_offset = reserved;
-    info_.cluster_heap_offset = reserved + fats * sectors_per_fat32;
-    info_.cluster_count =
-        static_cast<u32>((total_sectors - info_.cluster_heap_offset) / sectors_per_cluster);
+    info_.cluster_heap_offset = static_cast<u32>(heap);
+    info_.cluster_count = static_cast<u32>((total_sectors - info_.cluster_heap_offset) / sectors_per_cluster);
     info_.root_cluster = root_cluster;
 
     const auto *label = reinterpret_cast<const char *>(sector.data() + 0x47);
@@ -184,16 +191,18 @@ Status FatVolume::parse_exfat(std::span<const std::byte> sector)
     const auto sectors_per_cluster_shift = std::to_integer<u8>(sector[0x6d]);
     const auto fats = std::to_integer<u8>(sector[0x6e]);
 
-    if (bytes_per_sector_shift < 9 || bytes_per_sector_shift > 12 || sectors_per_cluster_shift > 25 ||
-        fats == 0 || fat_offset == 0 || fat_length == 0 || cluster_heap_offset == 0 || cluster_count == 0 ||
-        root_cluster < 2 || total_sectors == 0)
+    if (bytes_per_sector_shift != 9 || sectors_per_cluster_shift > 16 || (fats != 1 && fats != 2) || fat_offset == 0 ||
+        fat_length == 0 || cluster_heap_offset == 0 || cluster_count == 0 || root_cluster < 2 || total_sectors == 0)
     {
         return Status::invalid_argument("bad exFAT fields");
     }
 
     const auto bytes_per_sector = 1u << bytes_per_sector_shift;
     const auto sectors_per_cluster = 1u << sectors_per_cluster_shift;
-    if (cluster_heap_offset + static_cast<u64>(cluster_count) * sectors_per_cluster > total_sectors)
+    if (cluster_count > 0xfffffff5u || static_cast<u64>(root_cluster) >= static_cast<u64>(cluster_count) + 2 ||
+        fat_offset < 24 || fat_offset + static_cast<u64>(fat_length) * fats > cluster_heap_offset ||
+        static_cast<u64>(cluster_count) + 2 > static_cast<u64>(fat_length) * bytes_per_sector / 4 ||
+        cluster_heap_offset + static_cast<u64>(cluster_count) * sectors_per_cluster > total_sectors)
     {
         return Status::invalid_argument("bad exFAT cluster heap");
     }
@@ -233,15 +242,17 @@ Status FatVolume::read_sector(u64 sector, std::span<std::byte> out) const
     {
         return Status::invalid_argument("bad FAT read size");
     }
+    if (sector >= info_.total_sectors)
+        return Status::invalid_argument("FAT sector outside volume");
     if (device_ != nullptr)
     {
         return device_->read_blocks(sector, out);
     }
-    const auto offset = static_cast<usize>(sector) * fat_boot_sector_size;
-    if (offset + fat_boot_sector_size > image_.size())
+    if (sector >= image_.size() / fat_boot_sector_size)
     {
         return Status::invalid_argument("FAT read out of range");
     }
+    const auto offset = static_cast<usize>(sector) * fat_boot_sector_size;
     return copy_sector(out, image_.subspan(offset, fat_boot_sector_size));
 }
 

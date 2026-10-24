@@ -33,11 +33,17 @@ Status Ext4Volume::mount(std::span<const std::byte> image)
         return Status::invalid_argument("image is too small for an ext4 superblock");
     }
 
-    if (auto status = parse_superblock(image.subspan(ext4_superblock_offset, 1024)); !status.ok())
+    Ext4Volume candidate;
+    if (auto status = candidate.parse_superblock(image.subspan(ext4_superblock_offset, 1024)); !status.ok())
     {
         return status;
     }
+    if (candidate.info_.block_count_low > image.size() / candidate.info_.block_size)
+    {
+        return Status::invalid_argument("ext4 filesystem exceeds the backing image");
+    }
 
+    info_ = candidate.info_;
     image_ = image;
     device_ = nullptr;
     mounted_ = true;
@@ -55,18 +61,26 @@ Status Ext4Volume::mount(driver::BlockDevice &device)
     {
         return Status::invalid_argument("block device is too small for an ext4 superblock");
     }
+    Ext4Volume candidate;
     if (auto status = device.read_blocks(ext4_superblock_offset / driver::block_sector_size,
-                                         std::span<std::byte>(superblock_.data(), superblock_.size()));
+                                         candidate.superblock_);
         !status.ok())
     {
         return status;
     }
-    if (auto status = parse_superblock(std::span<const std::byte>(superblock_.data(), superblock_.size()));
+    if (auto status = candidate.parse_superblock(candidate.superblock_);
         !status.ok())
     {
         return status;
+    }
+    if (candidate.info_.block_count_low >
+        geometry.block_count / (candidate.info_.block_size / driver::block_sector_size))
+    {
+        return Status::invalid_argument("ext4 filesystem exceeds the backing device");
     }
 
+    info_ = candidate.info_;
+    superblock_ = candidate.superblock_;
     image_ = {};
     device_ = &device;
     mounted_ = true;
@@ -85,7 +99,7 @@ Status Ext4Volume::parse_superblock(std::span<const std::byte> superblock)
     }
 
     const auto log_block_size = read_le32(superblock, 0x18);
-    if (log_block_size > 16)
+    if (log_block_size > 6)
     {
         return Status::invalid_argument("ext4 block size exponent is invalid");
     }
@@ -97,6 +111,15 @@ Status Ext4Volume::parse_superblock(std::span<const std::byte> superblock)
     info_.block_size = 1024u << log_block_size;
     info_.inode_size = read_le16(superblock, 0x58);
     info_.has_extents = (read_le32(superblock, 0x60) & 0x40u) != 0;
+    if ((read_le32(superblock, 0x60) & 0x80u) || read_le32(superblock, 0x150))
+    {
+        return Status::unsupported("ext4 diagnostic volume requires 32-bit block counts");
+    }
+    if (!info_.block_count_low || info_.free_block_count_low > info_.block_count_low ||
+        static_cast<u64>(info_.block_count_low) * info_.block_size < ext4_superblock_offset + 1024)
+    {
+        return Status::invalid_argument("ext4 block counts are invalid");
+    }
 
     const auto *label = reinterpret_cast<const char *>(superblock.data() + 0x78);
     usize label_size = 0;
@@ -130,20 +153,31 @@ Status Ext4Volume::read_block(u64 block, std::span<std::byte> out) const
     {
         return Status::invalid_argument("output buffer is smaller than ext4 block size");
     }
-    const auto offset = static_cast<usize>(block) * info_.block_size;
+    if (block >= info_.block_count_low)
+    {
+        return Status::invalid_argument("ext4 block read is out of range");
+    }
     if (device_ != nullptr)
     {
         if ((info_.block_size % driver::block_sector_size) != 0)
         {
             return Status::unsupported("ext4 block size is not sector aligned");
         }
-        const auto sector = static_cast<u64>(offset / driver::block_sector_size);
+        const auto sectors_per_block = info_.block_size / driver::block_sector_size;
+        const auto geometry = device_->geometry();
+        if (geometry.block_size != driver::block_sector_size ||
+            block >= geometry.block_count / sectors_per_block)
+        {
+            return Status::invalid_argument("ext4 block read exceeds the backing device");
+        }
+        const auto sector = block * sectors_per_block;
         return device_->read_blocks(sector, out.first(info_.block_size));
     }
-    if (offset + info_.block_size > image_.size())
+    if (block >= image_.size() / info_.block_size)
     {
         return Status::invalid_argument("ext4 block read is out of range");
     }
+    const auto offset = static_cast<usize>(block) * info_.block_size;
     copy_bytes(out.first(info_.block_size), image_.subspan(offset, info_.block_size));
     return Status::success();
 }

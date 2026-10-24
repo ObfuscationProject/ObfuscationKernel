@@ -1,4 +1,8 @@
+#include "ok/fs/mode_policy.hpp"
 #include "ok/fs/ext4_fs.hpp"
+#include "ok/fs/ext4_times.hpp"
+#include "ok/arch/realtime.hpp"
+#include "ok/fs/ext4_blocks.hpp"
 
 namespace ok::fs
 {
@@ -28,6 +32,11 @@ u32 file_size(const std::byte *p)
 }
 constexpr u32 extents_flag = 0x80000;
 constexpr u16 extent_magic = 0xf30a;
+constexpr usize fast_symlink_capacity = 60;
+u8 directory_type(NodeType type)
+{
+    return type == NodeType::directory ? 2 : type == NodeType::symlink ? 7 : 1;
+}
 u16 aligned_entry(usize length)
 {
     return static_cast<u16>((8 + length + 3) & ~usize{3});
@@ -49,13 +58,197 @@ bool power_of(u32 value, u32 base)
 }
 } // namespace
 
+Status Ext4FileSystem::begin_operation(const Ext4Node *node, bool mounting)
+{
+    smp::ScopedSpinLock guard(identity_lock_);
+    if (operation_active_) return Status::busy("ext4 backend operation is active");
+    if (mounting)
+    {
+        if (mounted_) return Status::busy("ext4 already published; cache reinitialization is forbidden");
+    }
+    else
+    {
+        if (!mounted_) return Status::not_initialized("ext4 unmounted");
+        if (node && (node->fs_ != this ||
+            (node->phase_ != Ext4Node::Phase::linked &&
+             !(node->phase_ == Ext4Node::Phase::detached && node->references_))))
+            return Status::not_found("ext4 node identity is no longer live");
+    }
+    operation_active_ = true;
+    return {};
+}
+Status Ext4FileSystem::drain_detached()
+{
+    for (;;)
+    {
+        u32 number{};
+        {
+            smp::ScopedSpinLock guard(identity_lock_);
+            if (!operation_active_) return Status::fault("ext4 cleanup lacks operation admission");
+            for (const auto &node : nodes_)
+                if (node.phase_ == Ext4Node::Phase::detached && !node.references_)
+                { number = node.ino_; break; }
+        }
+        if (!number) return {};
+        if (failed_) return Status::io_error("ext4 I/O failed; cleanup is quarantined");
+        if (auto status = destroy(number); !status)
+        {
+            smp::ScopedSpinLock guard(identity_lock_);
+            failed_ = true;
+            return status;
+        }
+    }
+}
+Status Ext4FileSystem::finish_operation()
+{
+    for (;;)
+    {
+        const auto status = drain_detached();
+        smp::ScopedSpinLock guard(identity_lock_);
+        if (!status)
+        {
+            operation_active_ = false;
+            return status;
+        }
+        bool ready{};
+        for (const auto &node : nodes_)
+            if (node.phase_ == Ext4Node::Phase::detached && !node.references_) ready = true;
+        if (ready) continue;
+        // Release cannot add a ready orphan between this check and flag clear.
+        operation_active_ = false;
+        return {};
+    }
+}
+void Ext4FileSystem::detach(Ext4Node &node)
+{
+    smp::ScopedSpinLock guard(identity_lock_);
+    node.phase_ = Ext4Node::Phase::detached;
+}
+bool Ext4FileSystem::owns(const Node &target) const
+{
+    // Node owner is fixed before publication. Identity state is checked under
+    // the same memory lock, so a forged filesystem_identity cannot justify a cast.
+    smp::ScopedSpinLock guard(identity_lock_);
+    for (const auto &node : nodes_)
+        if (&node == &target)
+            return node.phase_ == Ext4Node::Phase::linked ||
+                   (node.phase_ == Ext4Node::Phase::detached && node.references_);
+    return false;
+}
+Node *Ext4FileSystem::root()
+{
+    smp::ScopedSpinLock guard(identity_lock_);
+    if (!mounted_ || nodes_[0].phase_ != Ext4Node::Phase::linked) return nullptr;
+    nodes_[0].borrowed_identity_exposed_ = true;
+    return &nodes_[0];
+}
+Status Ext4FileSystem::mount(driver::BlockDevice &device, Ext4MountOptions options)
+{ return operation(nullptr, [&] { return mount_active(device, options); }, true); }
+Status Ext4FileSystem::sync()
+{ return operation(nullptr, [&] { return sync_active(); }); }
+Result<Metadata> Ext4Node::query_metadata() const
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return query_metadata_active(); });
+}
+Result<FileBuffer> Ext4Node::read(usize offset, usize count) const
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return read_active(offset, count); });
+}
+Status Ext4Node::write(usize offset, std::span<const std::byte> input)
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return write_active(offset, input); });
+}
+Status Ext4Node::truncate(usize size)
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return truncate_active(size); });
+}
+Result<Node *> Ext4Node::lookup_child(std::string_view name)
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return lookup_active(name, false, true); });
+}
+Result<Node *> Ext4Node::lookup_child_retained(std::string_view name)
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return lookup_active(name, true, false); }, false, true);
+}
+Result<Node *> Ext4Node::create_child(std::string_view name, const InitialNodeAttributes &attributes)
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return create_active(name, attributes, false); });
+}
+Result<Node *> Ext4Node::create_child_retained(std::string_view name, const InitialNodeAttributes &attributes)
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return create_active(name, attributes, true); }, false, true);
+}
+Status Ext4Node::create_symlink(std::string_view name, std::string_view target, u32 uid, u32 gid)
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return create_symlink_active(name, target, uid, gid); });
+}
+Status Ext4Node::link(std::string_view name, Node &target)
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return link_active(name, target); });
+}
+Status Ext4Node::rename(std::string_view old_name, Node &target, std::string_view new_name)
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return rename_active(old_name, target, new_name); });
+}
+Result<FixedString<96>> Ext4Node::directory_path(const Node &root) const
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return directory_path_active(root); });
+}
+Status Ext4Node::remove(std::string_view name, bool directory)
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return remove_active(name, directory); });
+}
+Status Ext4Node::chmod(u32 mode)
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return chmod_active(mode); });
+}
+ModeChangeResult Ext4Node::change_mode(u32 mode, user::Credentials caller)
+{
+    if (!fs_) return ModeChangeResult::failure(Status::not_found("ext4 node has no owner"));
+    return fs_->operation(this, [&] { return change_mode_active(mode, caller); });
+}
+Status Ext4Node::chown(u32 uid, u32 gid)
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return chown_active(uid, gid); });
+}
+Result<DirectoryListing> Ext4Node::list(DirectoryReadIntent intent) const
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return list_active(intent); });
+}
+
 Status Ext4FileSystem::mount(driver::BlockDevice &device, bool writable)
 {
+    return mount(device, Ext4MountOptions{writable, Ext4TimestampPolicy::unqualified});
+}
+Status Ext4FileSystem::mount_active(driver::BlockDevice &device, Ext4MountOptions options)
+{
+    const bool writable = options.writable;
+    if ((options.timestamps != Ext4TimestampPolicy::unqualified &&
+         options.timestamps != Ext4TimestampPolicy::maintained) ||
+        (options.timestamps == Ext4TimestampPolicy::maintained && !writable))
+        return Status::invalid_argument("maintained ext4 requires an explicit writable mount");
     if (mounted_)
         return Status::busy("ext4 already mounted");
     device_ = nullptr;
     failed_ = dirty_ = writable_ = false;
     write_sequence_ = 0;
+    timestamps_ = options.timestamps;
     const auto geometry = device.geometry();
     if (geometry.block_size != 512 || geometry.block_count < 8)
         return Status::unsupported("ext4 requires 512-byte sectors");
@@ -126,10 +319,186 @@ Status Ext4FileSystem::mount(driver::BlockDevice &device, bool writable)
     auto root_inode = inode(2);
     if (!root_inode || (r16(root_inode.value().data()) & mode_type_mask) != mode_directory)
         return io_status(corrupt());
-    nodes_[0].fs_ = this;
-    nodes_[0].ino_ = 2;
-    static_cast<void>(nodes_[0].name_.assign("/"));
-    mounted_ = true;
+    if (maintained())
+    {
+        if (auto status = this->writable(root_inode.value()); !status)
+            return status;
+        TimestampEvent event;
+        const TimestampTarget target{&root_inode.value(), Ext4TimestampFields::all};
+        if (auto status = prepare_event(event, {&target, 1}); !status)
+            return status;
+    }
+    {
+        smp::ScopedSpinLock guard(identity_lock_);
+        for (auto &node : nodes_) node.fs_ = this;
+        nodes_[0].ino_ = 2;
+        nodes_[0].phase_ = Ext4Node::Phase::linked;
+        static_cast<void>(nodes_[0].name_.assign("/"));
+        mounted_ = true;
+    }
+    return Status::success();
+}
+Status Ext4FileSystem::validate_times(const Inode &record) const
+{
+    FileAttributes attributes;
+    return io_status(decode_ext4_times(std::span<const std::byte>{record}.first(inode_size_), attributes));
+}
+Status Ext4FileSystem::apply_event(const TimestampEvent &event, Inode &record,
+                                  Ext4TimestampFields fields) const
+{
+    if (!event.active)
+        return Status::success();
+    return encode_ext4_times(std::span<std::byte>{record}.first(inode_size_), fields,
+                             event.sample.value.seconds, event.sample.value.nanoseconds);
+}
+Status Ext4FileSystem::prepare_event(TimestampEvent &event, std::span<const TimestampTarget> targets)
+{
+    event = {};
+    if (!maintained())
+        return Status::success();
+    if (failed_)
+        return Status::io_error("maintained ext4 is quarantined");
+    if (!writable_ || targets.empty() || targets.size() > 4)
+        return Status::invalid_argument("invalid maintained ext4 event");
+    std::array<Inode, 4> staged{};
+    for (usize i = 0; i < targets.size(); ++i)
+    {
+        if (!targets[i].initialized)
+            if (auto status = validate_times(*targets[i].record); !status)
+                return status;
+        staged[i] = *targets[i].record;
+    }
+    auto sample = arch::realtime_sample();
+    if (!sample)
+        return Status::io_error("maintained ext4 requires an active realtime clock");
+    const auto &value = sample.value();
+    if (value.value.nanoseconds >= time::nanoseconds_per_second || !value.wall_generation ||
+        !value.monotonic.generation || (value.origin != time::RealtimeOrigin::boot_rtc &&
+                                       value.origin != time::RealtimeOrigin::administrator_software))
+        return Status::io_error("invalid active realtime sample");
+    event.sample = value;
+    event.active = true;
+    for (usize i = 0; i < targets.size(); ++i)
+        if (auto status = apply_event(event, staged[i], targets[i].fields); !status)
+        {
+            event.active = false;
+            return status;
+        }
+    for (usize i = 0; i < targets.size(); ++i)
+        *targets[i].record = staged[i];
+    return Status::success();
+}
+Status Ext4FileSystem::access_event(u32 ino, Inode &record)
+{
+    if (!maintained())
+        return Status::success();
+    if (auto status = writable(record); !status)
+        return status;
+    TimestampEvent event;
+    const TimestampTarget target{&record, Ext4TimestampFields::access};
+    if (auto status = prepare_event(event, {&target, 1}); !status)
+        return status;
+    NamespaceMutation mutation(*this);
+    if (auto status = save_inode(ino, record); !status)
+        return status;
+    mutation.committed = true;
+    return Status::success();
+}
+Result<u32> Ext4FileSystem::available_number(bool is_inode, u32 after) const
+{
+    for (u32 group = 0; group < groups_; ++group)
+    {
+        Block buffer{};
+        if (auto status = read_block(first_data_ + 1, buffer); !status)
+            return status;
+        const auto *descriptor = buffer.data() + group * 32;
+        if (!r16(descriptor + (is_inode ? 14 : 12)))
+            continue;
+        const auto bitmap = r32(descriptor + (is_inode ? 4 : 0));
+        if (auto status = read_block(bitmap, buffer); !status)
+            return status;
+        const auto per = is_inode ? inodes_per_group_ : blocks_per_group_;
+        const auto base = is_inode ? group * per + 1 : first_data_ + group * per;
+        const auto total = is_inode ? inodes_ + 1 : blocks_;
+        for (u32 bit = 0; bit < per && base + bit < total; ++bit)
+        {
+            const auto number = base + bit;
+            if (number <= after || (is_inode && number < first_inode_))
+                continue;
+            if (std::to_integer<u8>(buffer[bit / 8]) & (1u << (bit % 8)))
+                continue;
+            if (!is_inode && !data_block(number))
+                return io_status(corrupt());
+            return number;
+        }
+    }
+    return Status::no_memory("ext4 allocation exhausted");
+}
+Result<u32> Ext4FileSystem::preflight_insert(const Inode &directory, std::string_view name, u32 after)
+{
+    const auto size = file_size(directory.data());
+    if (size % block_size_)
+        return io_status(corrupt());
+    for (u32 logical = 0; logical < size / block_size_; ++logical)
+    {
+        auto physical = map(directory, logical);
+        if (!physical)
+            return physical.status();
+        if (!physical.value())
+            return io_status(corrupt());
+        Block block{};
+        if (auto status = read_block(physical.value(), block); !status)
+            return status;
+        for (u32 offset = 0; offset < block_size_;)
+        {
+            if (block_size_ - offset < 8)
+                return io_status(corrupt());
+            const auto *entry = block.data() + offset;
+            const auto length = r16(entry + 4);
+            const auto name_length = std::to_integer<u8>(entry[6]);
+            if (length < 8 || length % 4 || length > block_size_ - offset || name_length > length - 8)
+                return io_status(corrupt());
+            const auto used = r32(entry) ? aligned_entry(name_length) : 0;
+            if (length - used >= aligned_entry(name.size()))
+                return u32{0};
+            offset += length;
+        }
+    }
+    if (size > 0xffffffffu - block_size_)
+        return Status::no_space("ext4 directory size capacity exceeded");
+    auto available = available_number(false, after);
+    if (!available)
+        return available.status();
+    auto staged = directory;
+    if (auto status = append(staged, size / block_size_, available.value()); !status)
+        return status;
+    return available.value();
+}
+Status Ext4FileSystem::preflight_write(const Inode &record, usize offset, usize count)
+{
+    auto staged = record;
+    u32 after = 0;
+    for (usize done = 0; done < count;)
+    {
+        const auto position = offset + done;
+        const auto logical = static_cast<u32>(position / block_size_);
+        auto physical = map(staged, logical);
+        if (!physical)
+            return physical.status();
+        if (!physical.value())
+        {
+            auto available = available_number(false, after);
+            if (!available)
+                return available.status();
+            after = available.value();
+            if (auto status = append(staged, logical, after); !status)
+                return status;
+        }
+        const auto remaining = block_size_ - position % block_size_;
+        done += remaining < count - done ? remaining : count - done;
+        if (offset + done > file_size(staged.data()))
+            w32(staged.data() + 4, static_cast<u32>(offset + done));
+    }
     return Status::success();
 }
 Status Ext4FileSystem::io_status(Status status) const
@@ -173,8 +542,9 @@ void Ext4FileSystem::restore_dirty_marker(std::array<std::byte, 1024> &super)
     static_cast<void>(device_->write_blocks(2, super));
     static_cast<void>(device_->flush());
 }
-Status Ext4FileSystem::sync()
+Status Ext4FileSystem::sync_active()
 {
+    if (auto status = drain_detached(); !status) return status;
     if (failed_)
         return Status::io_error("ext4 I/O failed; offline fsck required");
     if (!device_)
@@ -185,15 +555,11 @@ Status Ext4FileSystem::sync()
         return Status::success();
     // An unlinked open inode remains allocated. Keep the volume unclean until
     // its last description closes, so an interrupted session requires fsck.
-    for (const auto &node : nodes_)
-        if (node.ino_ && node.references_)
-        {
-            auto data = inode(node.ino_);
-            if (!data)
-                return data.status();
-            if (!r16(data.value().data() + 26))
-                return Status::success();
-        }
+    {
+        smp::ScopedSpinLock guard(identity_lock_);
+        for (const auto &node : nodes_)
+            if (node.phase_ == Ext4Node::Phase::detached) return Status::success();
+    }
     std::array<std::byte, 1024> super{};
     if (auto status = io_status(device_->read_blocks(2, super)); !status.ok())
         return status;
@@ -254,6 +620,8 @@ Status Ext4FileSystem::write_block(u32 block, const Block &data)
 }
 Result<Ext4FileSystem::Inode> Ext4FileSystem::inode(u32 ino) const
 {
+    if (maintained() && failed_)
+        return Status::io_error("maintained ext4 is quarantined");
     if (!ino || ino > inodes_)
         return io_status(corrupt());
     const auto group = (ino - 1) / inodes_per_group_;
@@ -269,6 +637,9 @@ Result<Ext4FileSystem::Inode> Ext4FileSystem::inode(u32 ino) const
         out[i] = buffer[offset % block_size_ + i];
     if (r32(out.data() + 108))
         return Status::unsupported("ext4 files above 4 GiB are unsupported");
+    if (maintained())
+        if (auto status = validate_times(out); !status)
+            return status;
     return out;
 }
 Status Ext4FileSystem::save_inode(u32 ino, const Inode &data)
@@ -348,12 +719,87 @@ Result<u32> Ext4FileSystem::map(const Inode &node, u32 logical) const
     }
     return io_status(corrupt());
 }
+Result<u32> Ext4FileSystem::symlink_block(const Inode &node) const
+{
+    const auto *p = node.data();
+    const auto size = file_size(p), flags = r32(p + 32), sectors = r32(p + 28);
+    if ((r16(p) & mode_type_mask) != mode_symlink)
+        return Status::invalid_argument("not a symbolic link");
+    // Inline pathname bytes are never interpreted as block pointers. The
+    // supported subset has no EA blocks, encryption or inline-data inodes.
+    if ((flags != 0 && flags != extents_flag) || r32(p + 104) || r16(p + 116) || r16(p + 118))
+        return Status::unsupported("unsupported ext4 symbolic link layout");
+    if (!size || size >= block_size_)
+        return io_status(corrupt());
+    if (!sectors)
+    {
+        if (flags || size >= fast_symlink_capacity)
+            return io_status(corrupt());
+        return u32{0};
+    }
+    if (sectors != block_size_ / 512)
+        return io_status(corrupt());
+    u32 physical;
+    if (flags == extents_flag)
+    {
+        // Linux stores a block symlink in one initialized logical block.
+        if (r16(p + 40) != extent_magic || r16(p + 42) != 1 || r16(p + 44) != 4 || r16(p + 46) ||
+            r32(p + 52) || r16(p + 56) != 1 || r16(p + 58))
+            return io_status(corrupt());
+        physical = r32(p + 60);
+    }
+    else
+    {
+        // Accept the canonical legacy one-direct-block symlink, without
+        // introducing indirect block support for ordinary files.
+        physical = r32(p + 40);
+        for (usize offset = 44; offset < 100; offset += 4)
+            if (r32(p + offset))
+                return io_status(corrupt());
+    }
+    if (!data_block(physical))
+        return io_status(corrupt());
+    return physical;
+}
+Result<FileBuffer> Ext4FileSystem::read_symlink(const Inode &node, usize offset, usize count) const
+{
+    auto physical = symlink_block(node);
+    if (!physical)
+        return physical.status();
+    Block block{};
+    const std::byte *target = node.data() + 40;
+    if (physical.value())
+    {
+        if (auto status = read_block(physical.value(), block); !status.ok())
+            return status;
+        target = block.data();
+    }
+    const auto size = file_size(node.data());
+    if (target[size] != std::byte{0})
+        return io_status(corrupt());
+    for (usize i = 0; i < size; ++i)
+        if (target[i] == std::byte{0})
+            return io_status(corrupt());
+    FileBuffer result{};
+    if (offset >= size)
+        return result;
+    if (count > size - offset)
+        count = size - offset;
+    if (count > result.data.size())
+        count = result.data.size();
+    for (usize i = 0; i < count; ++i)
+        result.data[i] = target[offset + i];
+    result.size = count;
+    return result;
+}
 Status Ext4FileSystem::writable(const Inode &node) const
 {
     if (failed_)
         return Status::io_error("ext4 I/O or metadata failure; further writes disabled");
     if (!writable_)
         return Status::denied("ext4 mounted read-only");
+    if ((r16(node.data()) & mode_type_mask) == mode_symlink)
+        return symlink_block(node).status();
     if (r32(node.data() + 32) != extents_flag || r16(node.data() + 40) != extent_magic || r16(node.data() + 46) != 0 ||
         r16(node.data() + 42) > 4 || r16(node.data() + 44) != 4 || r32(node.data() + 104) || r16(node.data() + 116))
         return Status::unsupported("ext4 write requires inline plain extents");
@@ -551,6 +997,8 @@ Result<Ext4FileSystem::Location> Ext4FileSystem::find(const Inode &directory, st
             return status;
         for (u32 offset = 0; offset < block_size_;)
         {
+            if (block_size_ - offset < 8)
+                return io_status(corrupt());
             const auto *e = data.data() + offset;
             const auto length = r16(e + 4);
             const auto namelen = std::to_integer<u8>(e[6]);
@@ -573,7 +1021,7 @@ Result<u32> Ext4FileSystem::child(const Inode &directory, std::string_view name)
         return status;
     return r32(buffer.data() + location.value().offset);
 }
-Status Ext4FileSystem::insert(u32 parent, Inode &directory, std::string_view name, u32 ino, bool dir)
+Status Ext4FileSystem::insert(u32 parent, Inode &directory, std::string_view name, u32 ino, NodeType type)
 {
     const auto needed = aligned_entry(name.size());
     const auto count = file_size(directory.data()) / block_size_;
@@ -589,7 +1037,8 @@ Status Ext4FileSystem::insert(u32 parent, Inode &directory, std::string_view nam
             physical = allocation.value();
             if (auto status = append(directory, logical, physical); !status.ok())
             {
-                static_cast<void>(free_number(physical, false));
+                if (!failed_)
+                    static_cast<void>(free_number(physical, false));
                 return status;
             }
             w16(data.data() + 4, static_cast<u16>(block_size_));
@@ -606,6 +1055,8 @@ Status Ext4FileSystem::insert(u32 parent, Inode &directory, std::string_view nam
         }
         for (u32 offset = 0; offset < block_size_;)
         {
+            if (block_size_ - offset < 8)
+                return io_status(corrupt());
             auto *entry = data.data() + offset;
             const auto length = r16(entry + 4);
             const auto namelen = std::to_integer<u8>(entry[6]);
@@ -622,12 +1073,12 @@ Status Ext4FileSystem::insert(u32 parent, Inode &directory, std::string_view nam
                 w32(entry, ino);
                 w16(entry + 4, length - used);
                 entry[6] = std::byte(name.size());
-                entry[7] = std::byte(dir ? 2 : 1);
+                entry[7] = std::byte(directory_type(type));
                 for (usize i = 0; i < name.size(); ++i)
                     entry[8 + i] = std::byte(name[i]);
                 if (auto status = write_block(physical, data); !status.ok())
                     return status;
-                if (dir)
+                if (type == NodeType::directory)
                     w16(directory.data() + 26, r16(directory.data() + 26) + 1);
                 return save_inode(parent, directory);
             }
@@ -654,6 +1105,8 @@ Status Ext4FileSystem::zero_tail(const Inode &node)
     return write_block(block.value(), data);
 }
 
+// Storage-only helper: public truncate stages its event; orphan reclamation
+// must not acquire another clock or invent a truncation event.
 Status Ext4FileSystem::resize(u32 ino, Inode &node, usize size)
 {
     if (auto status = writable(node); !status.ok())
@@ -711,43 +1164,73 @@ Status Ext4FileSystem::resize(u32 ino, Inode &node, usize size)
 }
 Status Ext4FileSystem::destroy(u32 ino)
 {
+    Ext4Node *victim{};
+    {
+        smp::ScopedSpinLock guard(identity_lock_);
+        if (!operation_active_ || ino < first_inode_)
+            return Status::busy("ext4 destruction requires admission and a nonreserved inode");
+        for (auto &node : nodes_)
+            if (node.ino_ == ino && node.phase_ == Ext4Node::Phase::detached) { victim = &node; break; }
+        if (!victim) return Status::not_found("ext4 detached identity is absent");
+        if (victim->references_) return Status::busy("ext4 detached inode remains held");
+        victim->phase_ = Ext4Node::Phase::retiring;
+    }
     auto data = inode(ino);
     if (!data)
         return data.status();
+    if (r16(data.value().data() + 26)) return io_status(corrupt());
+    NamespaceMutation mutation(*this, maintained());
     const bool directory = (r16(data.value().data()) & mode_type_mask) == mode_directory;
-    if (auto status = resize(ino, data.value(), 0); !status.ok())
+    if ((r16(data.value().data()) & mode_type_mask) == mode_symlink)
+    {
+        if (auto status = writable(data.value()); !status.ok())
+            return status;
+        auto block = symlink_block(data.value());
+        if (!block)
+            return block.status();
+        if (block.value())
+            if (auto status = free_number(block.value(), false); !status.ok())
+                return status;
+    }
+    else if (auto status = resize(ino, data.value(), 0); !status.ok())
         return status;
     data.value() = {}; // Clear the released inode, including ext4 orphan linkage.
     if (auto status = save_inode(ino, data.value()); !status.ok())
         return status;
     if (auto status = free_number(ino, true, directory); !status.ok())
         return status;
-    for (auto &node : nodes_)
-        if (node.ino_ == ino)
+    {
+        smp::ScopedSpinLock guard(identity_lock_);
+        if (victim->borrowed_identity_exposed_) victim->phase_ = Ext4Node::Phase::tombstone;
+        else
         {
-            node.ino_ = 0;
-            node.fs_ = nullptr;
+            victim->ino_ = 0;
+            victim->name_ = {};
+            victim->phase_ = Ext4Node::Phase::vacant;
         }
+    }
+    mutation.committed = true;
     return Status::success();
 }
 Ext4Node *Ext4FileSystem::node(u32 ino, std::string_view name)
 {
+    smp::ScopedSpinLock guard(identity_lock_);
     if (!ino || ino > inodes_)
     {
         failed_ = true;
         return nullptr;
     }
     for (auto &node : nodes_)
-        if (node.ino_ == ino)
+        if (node.ino_ == ino && node.phase_ == Ext4Node::Phase::linked)
             return &node;
     for (auto &node : nodes_)
-        if (!node.ino_)
+        if (node.phase_ == Ext4Node::Phase::vacant && !node.borrowed_identity_exposed_ && !node.references_)
         {
             if (!node.name_.assign(name).ok())
                 return nullptr;
-            node.fs_ = this;
             node.ino_ = ino;
             node.references_ = 0;
+            node.phase_ = Ext4Node::Phase::linked;
             return &node;
         }
     return nullptr;
@@ -756,7 +1239,8 @@ Metadata Ext4FileSystem::metadata(const Inode &node) const
 {
     const auto *p = node.data();
     const auto mode = r16(p);
-    return Metadata{.type = (mode & mode_type_mask) == mode_directory ? NodeType::directory : NodeType::regular,
+    return Metadata{.type = (mode & mode_type_mask) == mode_directory ? NodeType::directory
+                          : (mode & mode_type_mask) == mode_symlink ? NodeType::symlink : NodeType::regular,
                     .size = file_size(p),
                     .mode = mode,
                     .uid = r16(p + 2) | (static_cast<u32>(r16(p + 120)) << 16),
@@ -767,25 +1251,61 @@ Metadata Ext4FileSystem::metadata(const Inode &node) const
 }
 Metadata Ext4Node::metadata() const
 {
-    if (!fs_ || !ino_)
-        return {};
-    auto data = fs_->inode(ino_);
-    return data ? fs_->metadata(data.value()) : Metadata{};
+    const auto result = query_metadata();
+    return result ? result.value() : Metadata{};
 }
-Result<FileBuffer> Ext4Node::read(usize offset, usize count) const
+Result<Metadata> Ext4Node::query_metadata_active() const
 {
     if (!fs_ || !ino_)
         return Status::not_found("ext4 node was removed");
     auto data = fs_->inode(ino_);
     if (!data)
         return data.status();
+    auto metadata = fs_->metadata(data.value());
+    metadata.attributes.inode = ino_;
+    metadata.attributes.mark(Attribute::inode);
+    auto allocation = ext4_allocated_blocks512(std::span<const std::byte>{data.value()}.first(fs_->inode_size_),
+                                               fs_->block_size_, fs_->blocks_,
+                                               [&](u32 start, u32 count) { return fs_->data_range(start, count); });
+    if (allocation)
+    {
+        metadata.blocks = allocation.value();
+        metadata.attributes.mark(Attribute::blocks512);
+    }
+    else if (allocation.status().code() != StatusCode::unsupported)
+        return fs_->io_status(allocation.status());
+    if (!fs_->writable_ || fs_->maintained())
+        if (auto status = decode_ext4_times(std::span<const std::byte>{data.value()}.first(fs_->inode_size_),
+                                            metadata.attributes); !status)
+            return fs_->io_status(status);
+    if (fs_->maintained())
+        metadata.attributes.access.source = metadata.attributes.modification.source =
+            metadata.attributes.change.source = TimestampSource::maintained_ext4;
+    return metadata;
+}
+Result<FileBuffer> Ext4Node::read_active(usize offset, usize count) const
+{
+    if (!fs_ || !ino_)
+        return Status::not_found("ext4 node was removed");
+    auto data = fs_->inode(ino_);
+    if (!data)
+        return data.status();
+    if ((r16(data.value().data()) & mode_type_mask) == mode_symlink)
+    {
+        auto output = fs_->read_symlink(data.value(), offset, count);
+        if (!output)
+            return output.status();
+        if (count)
+            if (auto status = fs_->access_event(ino_, data.value()); !status)
+                return status;
+        return output;
+    }
     if ((r16(data.value().data()) & mode_type_mask) != mode_regular)
         return Status::invalid_argument("not a regular file");
     const auto size = file_size(data.value().data());
     FileBuffer out{};
-    if (offset >= size)
-        return out;
-    count = count < size - offset ? count : size - offset;
+    const bool accessed = count != 0;
+    count = offset >= size ? 0 : (count < size - offset ? count : size - offset);
     count = count < out.data.size() ? count : out.data.size();
     while (out.size < count)
     {
@@ -805,9 +1325,12 @@ Result<FileBuffer> Ext4Node::read(usize offset, usize count) const
             out.data[out.size + i] = buffer[within + i];
         out.size += length;
     }
+    if (accessed)
+        if (auto status = fs_->access_event(ino_, data.value()); !status)
+            return status;
     return out;
 }
-Status Ext4Node::write(usize offset, std::span<const std::byte> input)
+Status Ext4Node::write_active(usize offset, std::span<const std::byte> input)
 {
     if (!fs_ || !ino_)
         return Status::not_found("ext4 node was removed");
@@ -823,6 +1346,15 @@ Status Ext4Node::write(usize offset, std::span<const std::byte> input)
         return Status::overflow("ext4 file too large");
     if (input.empty())
         return Status::success();
+    if (fs_->maintained())
+        if (auto status = fs_->preflight_write(node, offset, input.size()); !status)
+            return status;
+    Ext4FileSystem::TimestampEvent event;
+    const Ext4FileSystem::TimestampTarget target{&node,
+        Ext4TimestampFields::modification | Ext4TimestampFields::change};
+    if (auto status = fs_->prepare_event(event, {&target, 1}); !status)
+        return status;
+    Ext4FileSystem::NamespaceMutation mutation(*fs_, fs_->maintained());
     if (offset > file_size(node.data()))
         if (auto status = fs_->zero_tail(node); !status.ok())
             return status;
@@ -844,7 +1376,8 @@ Status Ext4Node::write(usize offset, std::span<const std::byte> input)
             physical = allocation.value();
             if (auto status = fs_->append(node, logical, physical); !status.ok())
             {
-                static_cast<void>(fs_->free_number(physical, false));
+                if (!fs_->failed_)
+                    static_cast<void>(fs_->free_number(physical, false));
                 return status;
             }
         }
@@ -864,9 +1397,10 @@ Status Ext4Node::write(usize offset, std::span<const std::byte> input)
         if (auto status = fs_->save_inode(ino_, node); !status.ok())
             return status;
     }
+    mutation.committed = true;
     return Status::success();
 }
-Status Ext4Node::truncate(usize size)
+Status Ext4Node::truncate_active(usize size)
 {
     if (!fs_ || !ino_)
         return Status::not_found("ext4 node was removed");
@@ -875,56 +1409,118 @@ Status Ext4Node::truncate(usize size)
         return data.status();
     if ((r16(data.value().data()) & mode_type_mask) != mode_regular)
         return Status::invalid_argument("not a regular file");
-    return fs_->resize(ino_, data.value(), size);
+    if (auto status = fs_->writable(data.value()); !status)
+        return status;
+    if (size > 0xffffffffu)
+        return Status::overflow("ext4 file too large");
+    Ext4FileSystem::TimestampEvent event;
+    const Ext4FileSystem::TimestampTarget target{&data.value(),
+        Ext4TimestampFields::modification | Ext4TimestampFields::change};
+    if (auto status = fs_->prepare_event(event, {&target, 1}); !status)
+        return status;
+    Ext4FileSystem::NamespaceMutation mutation(*fs_, fs_->maintained());
+    if (auto status = fs_->resize(ino_, data.value(), size); !status)
+        return status;
+    mutation.committed = true;
+    return Status::success();
 }
 Status Ext4Node::sync()
 {
-    if (!fs_ || !ino_)
-        return Status::not_found("ext4 node was removed");
-    return fs_->sync();
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return fs_->sync_active(); });
 }
-Status Ext4Node::retain()
+Status Ext4Node::retain_locked()
 {
-    if (!fs_ || !ino_)
-        return Status::not_found("ext4 node was removed");
+    if (phase_ != Phase::linked && !(phase_ == Phase::detached && references_))
+        return Status::not_found("ext4 node identity is no longer retainable");
     if (references_ == ~u32{0})
         return Status::overflow("ext4 node reference count exceeded");
     ++references_;
     return Status::success();
 }
+Status Ext4Node::retain()
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    smp::ScopedSpinLock guard(fs_->identity_lock_);
+    return retain_locked();
+}
+Status Ext4Node::expose_locked()
+{
+    if (phase_ != Phase::linked && !(phase_ == Phase::detached && references_))
+        return Status::not_found("ext4 node identity cannot be exposed");
+    borrowed_identity_exposed_ = true;
+    return {};
+}
+Status Ext4Node::expose_borrowed_identity()
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    smp::ScopedSpinLock guard(fs_->identity_lock_);
+    return expose_locked();
+}
 Status Ext4Node::release()
 {
-    if (!fs_ || !ino_)
-        return Status::not_found("ext4 node was removed");
-    if (!references_)
-        return Status::invalid_argument("ext4 unbalanced release");
-    --references_;
-    auto data = fs_->inode(ino_);
-    if (!data)
-        return data.status();
-    return !references_ && !r16(data.value().data() + 26) ? fs_->destroy(ino_) : Status::success();
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    {
+        smp::ScopedSpinLock guard(fs_->identity_lock_);
+        if (!references_) return Status::invalid_argument("ext4 unbalanced release");
+        --references_; // Consumed even if later cleanup fails.
+        if (references_ || phase_ != Phase::detached || fs_->operation_active_) return {};
+        fs_->operation_active_ = true;
+    }
+    return fs_->finish_operation();
 }
 Node *Ext4Node::lookup(std::string_view name)
 {
-    if (!fs_ || !ino_)
-        return nullptr;
-    auto data = fs_->inode(ino_);
-    if (!data)
-        return nullptr;
-    auto found = fs_->child(data.value(), name);
-    return found ? fs_->node(found.value(), name) : nullptr;
+    const auto result = lookup_child(name);
+    return result ? result.value() : nullptr;
 }
-Status Ext4Node::create(std::string_view name, NodeType type)
+Result<Node *> Ext4Node::lookup_active(std::string_view name, bool retained, bool exposed)
 {
     if (!fs_ || !ino_)
         return Status::not_found("ext4 node was removed");
-    if (!valid_name(name) || (type != NodeType::regular && type != NodeType::directory))
+    auto data = fs_->inode(ino_);
+    if (!data)
+        return data.status();
+    auto found = fs_->child(data.value(), name);
+    if (!found)
+        return found.status();
+    if (!found.value() || found.value() > fs_->inodes_)
+        return fs_->io_status(corrupt());
+    auto *node = fs_->node(found.value(), name);
+    if (!node)
+        return Status::no_memory("ext4 node cache capacity exceeded");
+    {
+        smp::ScopedSpinLock guard(fs_->identity_lock_);
+        if (retained)
+        { if (auto status = node->retain_locked(); !status) return status; }
+        if (exposed)
+        { if (auto status = node->expose_locked(); !status) return status; }
+    }
+    return static_cast<Node *>(node);
+}
+Status Ext4Node::create(std::string_view name, NodeType type)
+{
+    auto result = create_child_retained(name, {type, type == NodeType::directory ? 0755u : 0644u,
+                                             default_uid, default_gid});
+    return result ? result.value()->release() : result.status();
+}
+Result<Node *> Ext4Node::create_active(std::string_view name, const InitialNodeAttributes &attributes, bool retained)
+{
+    if (!fs_ || !ino_)
+        return Status::not_found("ext4 node was removed");
+    const auto type = attributes.type;
+    if (!valid_name(name) || (type != NodeType::regular && type != NodeType::directory) ||
+        (attributes.mode & ~mode_permission_mask))
         return Status::invalid_argument("unsupported ext4 node");
     auto parent = fs_->inode(ino_);
     if (!parent)
         return parent.status();
+    if ((r16(parent.value().data()) & mode_type_mask) != mode_directory)
+        return Status::not_directory("ext4 creation parent is not a directory");
     if (auto status = fs_->writable(parent.value()); !status.ok())
         return status;
+    if (!r16(parent.value().data() + 26))
+        return Status::not_found("ext4 creation parent is unlinked");
     auto exists = fs_->child(parent.value(), name);
     if (exists)
         return Status::already_exists("ext4 node exists");
@@ -932,28 +1528,152 @@ Status Ext4Node::create(std::string_view name, NodeType type)
         return exists.status();
     const bool directory = type == NodeType::directory;
     if (directory && r16(parent.value().data() + 26) == 65535)
-        return Status::overflow("ext4 directory link count exceeded");
-    auto allocated = fs_->allocate(true, directory);
-    if (!allocated)
-        return allocated.status();
-    const auto ino = allocated.value();
+        return Status::link_limit("ext4 directory link count exceeded");
+
+    // Namespace calls are serialized. Reserve the stable result before any
+    // allocation; a successful publication must not need another lookup.
+    Ext4Node *result = nullptr;
+    {
+        smp::ScopedSpinLock guard(fs_->identity_lock_);
+        for (auto &candidate : fs_->nodes_)
+            if (candidate.phase_ == Phase::vacant && !candidate.borrowed_identity_exposed_ && !candidate.references_)
+            { result = &candidate; break; }
+        if (!result) return Status::no_memory("ext4 node cache capacity exceeded");
+        if (auto status = result->name_.assign(name); !status) return status;
+    }
+
+    // Read-only insertion planning distinguishes logical capacity failures
+    // from uncertain publication. The old insert helper also allocates, and
+    // therefore cannot provide that boundary to this operation.
+    Ext4FileSystem::Block entry_block{};
+    const auto needed = aligned_entry(name.size());
+    const auto parent_blocks = file_size(parent.value().data()) / fs_->block_size_;
+    u32 entry_physical = 0;
+    u16 entry_offset = 0, entry_length = 0, entry_used = 0;
+    for (u32 logical = 0; logical < parent_blocks && !entry_physical; ++logical)
+    {
+        auto physical = fs_->map(parent.value(), logical);
+        if (!physical)
+            return physical.status();
+        if (!physical.value())
+            return fs_->io_status(corrupt());
+        if (auto status = fs_->read_block(physical.value(), entry_block); !status.ok())
+            return status;
+        for (u32 offset = 0; offset < fs_->block_size_;)
+        {
+            if (fs_->block_size_ - offset < 8)
+                return fs_->io_status(corrupt());
+            const auto *entry = entry_block.data() + offset;
+            const auto length = r16(entry + 4);
+            const auto namelen = std::to_integer<u8>(entry[6]);
+            if (length < 8 || length % 4 || length > fs_->block_size_ - offset || namelen > length - 8)
+                return fs_->io_status(corrupt());
+            const auto used = r32(entry) ? aligned_entry(namelen) : 0;
+            if (length - used >= needed)
+            {
+                entry_physical = physical.value();
+                entry_offset = static_cast<u16>(offset);
+                entry_length = length;
+                entry_used = used;
+                break;
+            }
+            offset += length;
+        }
+    }
+    const bool grow_parent = !entry_physical;
+    if (grow_parent && parent_blocks >= 0xffffffffu / fs_->block_size_)
+        return Status::no_space("ext4 directory size capacity exceeded");
+
     Ext4FileSystem::Inode data{};
-    w16(data.data(), static_cast<u16>(mode_for(type, directory ? 0755 : 0644)));
+    w16(data.data(), static_cast<u16>(mode_for(type, attributes.mode)));
+    w16(data.data() + 2, static_cast<u16>(attributes.uid));
+    w16(data.data() + 24, static_cast<u16>(attributes.gid));
+    w16(data.data() + 120, static_cast<u16>(attributes.uid >> 16));
+    w16(data.data() + 122, static_cast<u16>(attributes.gid >> 16));
     w16(data.data() + 26, directory ? 2 : 1);
     w32(data.data() + 32, extents_flag);
     w16(data.data() + 40, extent_magic);
     w16(data.data() + 44, 4);
+    if (fs_->maintained())
+    {
+        if (fs_->inode_size_ == 256)
+            w16(data.data() + 128, 16);
+        auto available_inode = fs_->available_number(true);
+        if (!available_inode)
+            return available_inode.status().code() == StatusCode::no_memory
+                ? Status::no_space(available_inode.status().message()) : available_inode.status();
+        u32 after = 0;
+        if (directory)
+        {
+            auto available = fs_->available_number(false);
+            if (!available)
+                return available.status().code() == StatusCode::no_memory
+                    ? Status::no_space(available.status().message()) : available.status();
+            after = available.value();
+        }
+        auto insertion = fs_->preflight_insert(parent.value(), name, after);
+        if (!insertion)
+            return insertion.status().code() == StatusCode::no_memory || insertion.status().code() == StatusCode::overflow
+                ? Status::no_space(insertion.status().message()) : insertion.status();
+    }
+    Ext4FileSystem::TimestampEvent event;
+    const Ext4FileSystem::TimestampTarget times[]{
+        {&parent.value(), Ext4TimestampFields::modification | Ext4TimestampFields::change},
+        {&data, Ext4TimestampFields::all, true}};
+    if (auto status = fs_->prepare_event(event, times); !status)
+        return status;
+
+    Ext4FileSystem::NamespaceMutation mutation(*fs_);
+    const auto storage_status = [](Status status) {
+        return status.code() == StatusCode::no_memory ? Status::no_space(status.message()) : status;
+    };
+    auto allocated = fs_->allocate(true, directory);
+    if (!allocated)
+        return storage_status(allocated.status());
+    const auto ino = allocated.value();
+    u32 child_block = 0, parent_block = 0;
+    auto rollback = [&](Status cause) {
+        // No parent entry has been attempted here. Only successful logical
+        // rollback may leave this mount writable; failed I/O forbids cleanup.
+        if (fs_->failed_)
+            return cause;
+        if (parent_block)
+            if (auto status = fs_->free_number(parent_block, false); !status.ok())
+                return status;
+        if (child_block)
+            if (auto status = fs_->free_number(child_block, false); !status.ok())
+                return status;
+        if (auto status = fs_->free_number(ino, true, directory); !status.ok())
+            return status;
+        mutation.committed = true;
+        return storage_status(cause);
+    };
     if (directory)
     {
         auto allocation = fs_->allocate(false);
         if (!allocation)
-        {
-            static_cast<void>(fs_->free_number(ino, true, true));
-            return allocation.status();
-        }
-        if (auto status = fs_->append(data, 0, allocation.value()); !status.ok())
-            return status;
+            return rollback(allocation.status());
+        child_block = allocation.value();
+        if (auto status = fs_->append(data, 0, child_block); !status.ok())
+            return rollback(status);
         w32(data.data() + 4, fs_->block_size_);
+    }
+    if (grow_parent)
+    {
+        auto allocation = fs_->allocate(false);
+        if (!allocation)
+            return rollback(allocation.status());
+        parent_block = allocation.value();
+        if (auto status = fs_->append(parent.value(), parent_blocks, parent_block); !status.ok())
+            return rollback(status.code() == StatusCode::overflow
+                                ? Status::no_space("ext4 directory extent capacity exceeded") : status);
+        w32(parent.value().data() + 4, (parent_blocks + 1) * fs_->block_size_);
+        entry_physical = parent_block;
+        entry_block = {};
+        entry_length = static_cast<u16>(fs_->block_size_);
+    }
+    if (directory)
+    {
         Ext4FileSystem::Block block{};
         w32(block.data(), ino);
         w16(block.data() + 4, 12);
@@ -965,19 +1685,152 @@ Status Ext4Node::create(std::string_view name, NodeType type)
         block[18] = std::byte{2};
         block[19] = std::byte{2};
         block[20] = block[21] = std::byte{'.'};
-        if (auto status = fs_->write_block(allocation.value(), block); !status.ok())
+        if (auto status = fs_->write_block(child_block, block); !status.ok())
             return status;
     }
     if (auto status = fs_->save_inode(ino, data); !status.ok())
         return status;
-    if (auto status = fs_->insert(ino_, parent.value(), name, ino, directory); !status.ok())
+
+    auto *entry = entry_block.data() + entry_offset;
+    if (entry_used)
     {
-        static_cast<void>(fs_->destroy(ino));
-        return status;
+        w16(entry + 4, entry_used);
+        entry += entry_used;
     }
+    w32(entry, ino);
+    w16(entry + 4, entry_length - entry_used);
+    entry[6] = std::byte(name.size());
+    entry[7] = std::byte(directory_type(type));
+    for (usize i = 0; i < name.size(); ++i)
+        entry[8 + i] = std::byte(name[i]);
+    // From this point even a failed write may have published the child. Keep
+    // its allocations and enter write-failed state rather than freeing them.
+    if (auto status = fs_->write_block(entry_physical, entry_block); !status.ok())
+        return status;
+    if (directory)
+        w16(parent.value().data() + 26, r16(parent.value().data() + 26) + 1);
+    if (auto status = fs_->save_inode(ino_, parent.value()); !status.ok())
+        return status;
+    {
+        smp::ScopedSpinLock guard(fs_->identity_lock_);
+        result->ino_ = ino;
+        result->phase_ = Phase::linked;
+        if (retained)
+        { if (auto status = result->retain_locked(); !status) return fs_->io_status(status); }
+        else
+        { if (auto status = result->expose_locked(); !status) return fs_->io_status(status); }
+    }
+    mutation.committed = true;
+    return static_cast<Node *>(result);
+}
+Status Ext4Node::create_symlink_active(std::string_view name, std::string_view target, u32 uid, u32 gid)
+{
+    if (!fs_ || !ino_)
+        return Status::not_found("ext4 node was removed");
+    if (!valid_name(name) || target.empty() || target.find('\0') != std::string_view::npos)
+        return Status::invalid_argument("invalid symbolic link");
+    if (target.size() >= fs_->block_size_)
+        return Status::overflow("ext4 symbolic link target exceeds one block");
+    auto parent = fs_->inode(ino_);
+    if (!parent)
+        return parent.status();
+    if ((r16(parent.value().data()) & mode_type_mask) != mode_directory)
+        return Status::not_directory("symbolic link parent is not a directory");
+    if (auto status = fs_->writable(parent.value()); !status.ok())
+        return status;
+    if (!r16(parent.value().data() + 26))
+        return Status::not_found("symbolic link parent is unlinked");
+    auto existing = fs_->child(parent.value(), name);
+    if (existing)
+        return Status::already_exists("symbolic link name exists");
+    if (existing.status().code() != StatusCode::not_found)
+        return existing.status();
+    Ext4FileSystem::Inode data{};
+    w16(data.data(), static_cast<u16>(mode_symlink | 0777));
+    w16(data.data() + 2, static_cast<u16>(uid));
+    w16(data.data() + 24, static_cast<u16>(gid));
+    w16(data.data() + 120, static_cast<u16>(uid >> 16));
+    w16(data.data() + 122, static_cast<u16>(gid >> 16));
+    w16(data.data() + 26, 1);
+    w32(data.data() + 4, static_cast<u32>(target.size()));
+    if (fs_->maintained())
+    {
+        if (fs_->inode_size_ == 256)
+            w16(data.data() + 128, 16);
+        auto available_inode = fs_->available_number(true);
+        if (!available_inode)
+            return available_inode.status();
+        u32 after = 0;
+        if (target.size() >= fast_symlink_capacity)
+        {
+            auto available = fs_->available_number(false);
+            if (!available)
+                return available.status();
+            after = available.value();
+        }
+        auto insertion = fs_->preflight_insert(parent.value(), name, after);
+        if (!insertion)
+            return insertion.status();
+    }
+    Ext4FileSystem::TimestampEvent event;
+    const Ext4FileSystem::TimestampTarget times[]{
+        {&parent.value(), Ext4TimestampFields::modification | Ext4TimestampFields::change},
+        {&data, Ext4TimestampFields::all, true}};
+    if (auto status = fs_->prepare_event(event, times); !status)
+        return status;
+    Ext4FileSystem::NamespaceMutation mutation(*fs_);
+    auto allocation = fs_->allocate(true);
+    if (!allocation)
+        return allocation.status();
+    const auto ino = allocation.value();
+    u32 physical = 0;
+    auto rollback = [&](Status cause) {
+        // Before publication, ordinary capacity failures can return their own
+        // allocations. An I/O failure has an uncertain disk state: stop writing.
+        if (fs_->failed_)
+            return cause;
+        if (physical)
+            if (auto status = fs_->free_number(physical, false); !status.ok())
+                return status;
+        if (auto status = fs_->save_inode(ino, {}); !status.ok())
+            return status;
+        if (auto status = fs_->free_number(ino, true); !status.ok())
+            return status;
+        mutation.committed = true;
+        return cause;
+    };
+    if (target.size() < fast_symlink_capacity)
+    {
+        for (usize i = 0; i < target.size(); ++i)
+            data[40 + i] = std::byte(target[i]);
+    }
+    else
+    {
+        auto block = fs_->allocate(false);
+        if (!block)
+            return rollback(block.status());
+        physical = block.value();
+        w32(data.data() + 28, fs_->block_size_ / 512);
+        w32(data.data() + 32, extents_flag);
+        w16(data.data() + 40, extent_magic);
+        w16(data.data() + 42, 1);
+        w16(data.data() + 44, 4);
+        w16(data.data() + 56, 1);
+        w32(data.data() + 60, physical);
+        Ext4FileSystem::Block contents{};
+        for (usize i = 0; i < target.size(); ++i)
+            contents[i] = std::byte(target[i]);
+        if (auto status = fs_->write_block(physical, contents); !status.ok())
+            return status;
+    }
+    if (auto status = fs_->save_inode(ino, data); !status.ok())
+        return status;
+    if (auto status = fs_->insert(ino_, parent.value(), name, ino, NodeType::symlink); !status.ok())
+        return rollback(status);
+    mutation.committed = true;
     return Status::success();
 }
-Status Ext4FileSystem::replace_entry(const Inode &directory, std::string_view name, u32 ino, bool is_directory)
+Status Ext4FileSystem::replace_entry(const Inode &directory, std::string_view name, u32 ino, NodeType type)
 {
     auto location = find(directory, name);
     if (!location)
@@ -988,7 +1841,7 @@ Status Ext4FileSystem::replace_entry(const Inode &directory, std::string_view na
     auto *entry = block.data() + location.value().offset;
     w32(entry, ino);
     if (ino)
-        entry[7] = std::byte(is_directory ? 2 : 1);
+        entry[7] = std::byte(directory_type(type));
     return write_block(location.value().block, block);
 }
 Result<bool> Ext4FileSystem::empty_directory(const Inode &directory) const
@@ -1010,6 +1863,8 @@ Result<bool> Ext4FileSystem::empty_directory(const Inode &directory) const
             return status;
         for (u32 offset = 0; offset < block_size_;)
         {
+            if (block_size_ - offset < 8)
+                return io_status(corrupt());
             const auto *entry = block.data() + offset;
             const auto length = r16(entry + 4);
             const auto name_length = std::to_integer<u8>(entry[6]);
@@ -1040,6 +1895,8 @@ Result<FixedString<max_path_segment>> Ext4FileSystem::child_name(const Inode &di
             return status;
         for (u32 offset = 0; offset < block_size_;)
         {
+            if (block_size_ - offset < 8)
+                return io_status(corrupt());
             const auto *entry = block.data() + offset;
             const auto length = r16(entry + 4);
             const auto name_length = std::to_integer<u8>(entry[6]);
@@ -1058,9 +1915,9 @@ Result<FixedString<max_path_segment>> Ext4FileSystem::child_name(const Inode &di
     }
     return Status::not_found("directory has no live parent entry");
 }
-Result<FixedString<96>> Ext4Node::directory_path(const Node &root) const
+Result<FixedString<96>> Ext4Node::directory_path_active(const Node &root) const
 {
-    if (!fs_ || !ino_ || root.filesystem_identity() != fs_)
+    if (!fs_ || !ino_ || !fs_->owns(root))
         return Status::not_found("directory belongs to another filesystem");
     const auto root_ino = static_cast<const Ext4Node &>(root).ino_;
     FixedString<96> suffix;
@@ -1120,11 +1977,11 @@ Status Ext4FileSystem::validate_move(u32 source, u32 destination_parent) const
     }
     return io_status(corrupt());
 }
-Status Ext4Node::link(std::string_view name, Node &target)
+Status Ext4Node::link_active(std::string_view name, Node &target)
 {
     if (!fs_ || !ino_)
         return Status::not_found("ext4 node was removed");
-    if (target.filesystem_identity() != fs_)
+    if (!fs_->owns(target))
         return Status::cross_device("hard link crosses filesystems");
     if (!valid_name(name))
         return Status::invalid_argument("invalid hard link name");
@@ -1132,16 +1989,17 @@ Status Ext4Node::link(std::string_view name, Node &target)
     if (!source.ino_)
         return Status::not_found("hard link source was removed");
     auto parent = fs_->inode(ino_);
-    auto data = fs_->inode(source.ino_);
     if (!parent)
         return parent.status();
+    auto data = fs_->inode(source.ino_);
     if (!data)
         return data.status();
     if ((r16(parent.value().data()) & mode_type_mask) != mode_directory)
         return Status::not_directory("hard link destination is not a directory");
     if ((r16(data.value().data()) & mode_type_mask) == mode_directory)
         return Status::permission("directories cannot be hard linked");
-    if ((r16(data.value().data()) & mode_type_mask) != mode_regular)
+    const auto source_type = r16(data.value().data()) & mode_type_mask;
+    if (source_type != mode_regular && source_type != mode_symlink)
         return Status::unsupported("hard link source type is unsupported");
     if (auto status = fs_->writable(parent.value()); !status.ok())
         return status;
@@ -1157,8 +2015,20 @@ Status Ext4Node::link(std::string_view name, Node &target)
         return Status::already_exists("hard link name exists");
     if (existing.status().code() != StatusCode::not_found)
         return existing.status();
+    if (fs_->maintained())
+    {
+        auto insertion = fs_->preflight_insert(parent.value(), name);
+        if (!insertion)
+            return insertion.status();
+    }
+    Ext4FileSystem::TimestampEvent event;
+    const Ext4FileSystem::TimestampTarget times[]{
+        {&parent.value(), Ext4TimestampFields::modification | Ext4TimestampFields::change},
+        {&data.value(), Ext4TimestampFields::change}};
+    if (auto status = fs_->prepare_event(event, times); !status)
+        return status;
     Ext4FileSystem::NamespaceMutation mutation(*fs_);
-    if (auto status = fs_->insert(ino_, parent.value(), name, source.ino_, false); !status.ok())
+    if (auto status = fs_->insert(ino_, parent.value(), name, source.ino_, fs_->metadata(data.value()).type); !status.ok())
         return status;
     w16(data.value().data() + 26, links + 1);
     if (auto status = fs_->save_inode(source.ino_, data.value()); !status.ok())
@@ -1166,20 +2036,21 @@ Status Ext4Node::link(std::string_view name, Node &target)
     mutation.committed = true;
     return Status::success();
 }
-Status Ext4Node::rename(std::string_view old_name, Node &destination, std::string_view new_name)
+Status Ext4Node::rename_active(std::string_view old_name, Node &destination, std::string_view new_name)
 {
     if (!fs_ || !ino_)
         return Status::not_found("ext4 node was removed");
-    if (destination.filesystem_identity() != fs_)
+    if (!fs_->owns(destination))
         return Status::cross_device("rename crosses filesystems");
     if (!valid_name(old_name) || !valid_name(new_name))
         return Status::invalid_argument("invalid rename component");
     auto &new_parent = static_cast<Ext4Node &>(destination);
     if (!new_parent.ino_)
         return Status::not_found("rename destination was removed");
-    auto from = fs_->inode(ino_), to = fs_->inode(new_parent.ino_);
+    auto from = fs_->inode(ino_);
     if (!from)
         return from.status();
+    auto to = fs_->inode(new_parent.ino_);
     if (!to)
         return to.status();
     if ((r16(from.value().data()) & mode_type_mask) != mode_directory ||
@@ -1203,7 +2074,7 @@ Status Ext4Node::rename(std::string_view old_name, Node &destination, std::strin
         return status;
     const auto type = r16(source.value().data()) & mode_type_mask;
     const bool directory = type == mode_directory;
-    if (!directory && type != mode_regular)
+    if (!directory && type != mode_regular && type != mode_symlink)
         return Status::unsupported("rename source type unsupported");
     if (!r16(source.value().data() + 26))
         return fs_->io_status(corrupt());
@@ -1237,8 +2108,15 @@ Status Ext4Node::rename(std::string_view old_name, Node &destination, std::strin
                 return empty.status();
             if (!empty.value())
                 return Status::not_empty("replacement directory is not empty");
-            auto dot = fs_->child(target, "."), dotdot = fs_->child(target, "..");
-            if (!dot || !dotdot || dot.value() != target_number.value() || dotdot.value() != new_parent.ino_ ||
+            auto dot = fs_->child(target, ".");
+            if (!dot)
+                return dot.status().code() == StatusCode::not_found ? fs_->io_status(corrupt()) : dot.status();
+            if (dot.value() != target_number.value())
+                return fs_->io_status(corrupt());
+            auto dotdot = fs_->child(target, "..");
+            if (!dotdot)
+                return dotdot.status().code() == StatusCode::not_found ? fs_->io_status(corrupt()) : dotdot.status();
+            if (dotdot.value() != new_parent.ino_ ||
                 links != 2 || r16(to.value().data() + 26) < 3)
                 return fs_->io_status(corrupt());
         }
@@ -1248,8 +2126,15 @@ Status Ext4Node::rename(std::string_view old_name, Node &destination, std::strin
     }
     if (directory)
     {
-        auto dot = fs_->child(source.value(), "."), dotdot = fs_->child(source.value(), "..");
-        if (!dot || !dotdot || dot.value() != source_number.value() || dotdot.value() != ino_ ||
+        auto dot = fs_->child(source.value(), ".");
+        if (!dot)
+            return dot.status().code() == StatusCode::not_found ? fs_->io_status(corrupt()) : dot.status();
+        if (dot.value() != source_number.value())
+            return fs_->io_status(corrupt());
+        auto dotdot = fs_->child(source.value(), "..");
+        if (!dotdot)
+            return dotdot.status().code() == StatusCode::not_found ? fs_->io_status(corrupt()) : dotdot.status();
+        if (dotdot.value() != ino_ ||
             r16(source.value().data() + 26) < 2 || r16(from.value().data() + 26) < 3)
             return fs_->io_status(corrupt());
         if (auto status = fs_->validate_move(source_number.value(), new_parent.ino_); !status.ok())
@@ -1257,13 +2142,32 @@ Status Ext4Node::rename(std::string_view old_name, Node &destination, std::strin
         if (!target_number && r16(to.value().data() + 26) == 65535)
             return Status::link_limit("destination directory link count exceeded");
     }
+    if (fs_->maintained() && !target_number)
+    {
+        auto insertion = fs_->preflight_insert(to.value(), new_name);
+        if (!insertion)
+            return insertion.status();
+    }
+    Ext4FileSystem::TimestampEvent event;
+    std::array<Ext4FileSystem::TimestampTarget, 4> times{};
+    usize time_count = 0;
+    times[time_count++] = {&from.value(), Ext4TimestampFields::modification | Ext4TimestampFields::change};
+    if (ino_ != new_parent.ino_)
+        times[time_count++] = {&to.value(), Ext4TimestampFields::modification | Ext4TimestampFields::change};
+    times[time_count++] = {&source.value(), Ext4TimestampFields::change};
+    if (victim)
+        times[time_count++] = {&target, Ext4TimestampFields::change};
+    if (auto status = fs_->prepare_event(event, {times.data(), time_count}); !status)
+        return status;
+    if (ino_ == new_parent.ino_)
+        to.value() = from.value();
     Ext4FileSystem::NamespaceMutation mutation(*fs_);
     if (target_number)
     {
-        if (auto status = fs_->replace_entry(to.value(), new_name, source_number.value(), directory); !status.ok())
+        if (auto status = fs_->replace_entry(to.value(), new_name, source_number.value(), fs_->metadata(source.value()).type); !status.ok())
             return status;
     }
-    else if (auto status = fs_->insert(new_parent.ino_, to.value(), new_name, source_number.value(), directory);
+    else if (auto status = fs_->insert(new_parent.ino_, to.value(), new_name, source_number.value(), fs_->metadata(source.value()).type);
              !status.ok())
         return status;
     // Inserting into the same directory may split the old source record or
@@ -1271,15 +2175,29 @@ Status Ext4Node::rename(std::string_view old_name, Node &destination, std::strin
     from = fs_->inode(ino_);
     if (!from)
         return from.status();
-    if (auto status = fs_->replace_entry(from.value(), old_name, 0, false); !status.ok())
+    if (auto status = fs_->apply_event(event, from.value(),
+            Ext4TimestampFields::modification | Ext4TimestampFields::change); !status)
+        return status;
+    if (auto status = fs_->replace_entry(from.value(), old_name, 0, NodeType::regular); !status.ok())
         return status;
     if (directory)
     {
         if (ino_ != new_parent.ino_)
-            if (auto status = fs_->replace_entry(source.value(), "..", new_parent.ino_, true); !status.ok())
+            if (auto status = fs_->replace_entry(source.value(), "..", new_parent.ino_, NodeType::directory); !status.ok())
                 return status;
         w16(from.value().data() + 26, r16(from.value().data() + 26) - 1);
+    }
+    if (directory || fs_->maintained())
         if (auto status = fs_->save_inode(ino_, from.value()); !status.ok())
+            return status;
+    if (fs_->maintained())
+    {
+        // An insertion already saved the destination; replacement must save its
+        // planned M/C explicitly. Distinct parents cannot alias this reload.
+        if (ino_ != new_parent.ino_ && target_number)
+            if (auto status = fs_->save_inode(new_parent.ino_, to.value()); !status)
+                return status;
+        if (auto status = fs_->save_inode(source_number.value(), source.value()); !status)
             return status;
     }
     if (victim)
@@ -1287,15 +2205,13 @@ Status Ext4Node::rename(std::string_view old_name, Node &destination, std::strin
         w16(target.data() + 26, directory ? 0 : r16(target.data() + 26) - 1);
         if (auto status = fs_->save_inode(victim->ino_, target); !status.ok())
             return status;
-        if (!victim->references_ && !r16(target.data() + 26))
-            if (auto status = fs_->destroy(victim->ino_); !status.ok())
-                return status;
+        if (!r16(target.data() + 26)) fs_->detach(*victim);
     }
     mutation.committed = true;
     return Status::success();
 }
 
-Status Ext4Node::remove(std::string_view name, bool directory)
+Status Ext4Node::remove_active(std::string_view name, bool directory)
 {
     if (!fs_ || !ino_)
         return Status::not_found("ext4 node was removed");
@@ -1309,9 +2225,10 @@ Status Ext4Node::remove(std::string_view name, bool directory)
     auto location = fs_->find(parent.value(), name);
     if (!location)
         return location.status();
-    auto *victim = static_cast<Ext4Node *>(lookup(name));
-    if (!victim)
-        return Status::no_memory("ext4 node cache full");
+    auto found_victim = lookup_active(name, false, false);
+    if (!found_victim)
+        return found_victim.status();
+    auto *victim = static_cast<Ext4Node *>(found_victim.value());
     auto data = fs_->inode(victim->ino_);
     if (!data)
         return data.status();
@@ -1321,7 +2238,7 @@ Status Ext4Node::remove(std::string_view name, bool directory)
         return Status::invalid_argument("removal type mismatch");
     if (directory)
     {
-        auto listing = victim->list();
+        auto listing = victim->list_active(DirectoryReadIntent::inspection);
         if (!listing)
             return listing.status();
         if (listing.value().count)
@@ -1333,6 +2250,13 @@ Status Ext4Node::remove(std::string_view name, bool directory)
     Ext4FileSystem::Block block{};
     if (auto status = fs_->read_block(location.value().block, block); !status.ok())
         return status;
+    Ext4FileSystem::TimestampEvent event;
+    const Ext4FileSystem::TimestampTarget times[]{
+        {&parent.value(), Ext4TimestampFields::modification | Ext4TimestampFields::change},
+        {&data.value(), Ext4TimestampFields::change}};
+    if (auto status = fs_->prepare_event(event, times); !status)
+        return status;
+    Ext4FileSystem::NamespaceMutation mutation(*fs_, fs_->maintained());
     w32(block.data() + location.value().offset, 0);
     if (auto status = fs_->write_block(location.value().block, block); !status.ok())
         return status;
@@ -1340,40 +2264,93 @@ Status Ext4Node::remove(std::string_view name, bool directory)
     if (auto status = fs_->save_inode(victim->ino_, data.value()); !status.ok())
         return status;
     if (directory)
-    {
         w16(parent.value().data() + 26, r16(parent.value().data() + 26) - 1);
+    if (directory || fs_->maintained())
         if (auto status = fs_->save_inode(ino_, parent.value()); !status.ok())
             return status;
-    }
-    if (!victim->references_ && !r16(data.value().data() + 26))
-        return fs_->destroy(victim->ino_);
+    if (!r16(data.value().data() + 26)) fs_->detach(*victim);
+    mutation.committed = true;
     return Status::success();
 }
-Status Ext4Node::chmod(u32 mode)
+Status Ext4FileSystem::apply_mode(u32 ino, Inode &record, u32 mode)
 {
-    if (!fs_ || !ino_)
-        return Status::not_found("ext4 node was removed");
-    auto data = fs_->inode(ino_);
-    if (!data)
-        return data.status();
-    w16(data.value().data(),
-        static_cast<u16>((r16(data.value().data()) & mode_type_mask) | (mode & mode_permission_mask)));
-    return fs_->save_inode(ino_, data.value());
+    TimestampEvent event;
+    const TimestampTarget target{&record, Ext4TimestampFields::change};
+    if (auto status = prepare_event(event, {&target, 1}); !status)
+        return status;
+    NamespaceMutation mutation(*this, maintained());
+    w16(record.data(),
+        static_cast<u16>((r16(record.data()) & mode_type_mask) | (mode & mode_permission_mask)));
+    if (auto status = save_inode(ino, record); !status)
+        return status;
+    mutation.committed = true;
+    return Status::success();
 }
-Status Ext4Node::chown(u32 uid, u32 gid)
+Status Ext4Node::chmod_active(u32 mode)
 {
     if (!fs_ || !ino_)
         return Status::not_found("ext4 node was removed");
     auto data = fs_->inode(ino_);
     if (!data)
         return data.status();
+    if (fs_->maintained())
+        if (auto status = fs_->writable(data.value()); !status)
+            return status;
+    return fs_->apply_mode(ino_, data.value(), mode);
+}
+ModeChangeResult Ext4Node::change_mode_active(u32 mode, user::Credentials caller)
+{
+    if (!fs_ || !ino_)
+        return ModeChangeResult::failure(Status::not_found("ext4 node was removed"));
+    if (!fs_->writable_)
+        return ModeChangeResult::read_only();
+    if (!fs_->maintained())
+        return ModeChangeResult::unavailable();
+    auto data = fs_->inode(ino_);
+    if (!data)
+        return data.status().code() == StatusCode::unsupported ? ModeChangeResult::unavailable()
+                                                               : ModeChangeResult::failure(data.status());
+    const auto type = r16(data.value().data()) & mode_type_mask;
+    if (type != mode_regular && type != mode_directory)
+        return ModeChangeResult::unavailable();
+    if (auto status = fs_->writable(data.value()); !status)
+        return status.code() == StatusCode::unsupported ? ModeChangeResult::unavailable()
+                                                        : ModeChangeResult::failure(status);
+    const auto metadata = fs_->metadata(data.value());
+    const auto decision = mode_change_policy(metadata.uid, metadata.gid, mode, caller);
+    if (!decision.authorized)
+        return ModeChangeResult::failure(Status::permission("only root or the inode owner can change mode"));
+    // The admitted boot-CPU context is serialized. Authority and ctime staging
+    // use this one inode record; this is not a concurrent inode-lock guarantee.
+    auto status = fs_->apply_mode(ino_, data.value(), decision.permissions);
+    return status.code() == StatusCode::unsupported ? ModeChangeResult::unavailable()
+                                                    : ModeChangeResult::failure(status);
+}
+Status Ext4Node::chown_active(u32 uid, u32 gid)
+{
+    if (!fs_ || !ino_)
+        return Status::not_found("ext4 node was removed");
+    auto data = fs_->inode(ino_);
+    if (!data)
+        return data.status();
+    if (fs_->maintained())
+        if (auto status = fs_->writable(data.value()); !status)
+            return status;
+    Ext4FileSystem::TimestampEvent event;
+    const Ext4FileSystem::TimestampTarget target{&data.value(), Ext4TimestampFields::change};
+    if (auto status = fs_->prepare_event(event, {&target, 1}); !status)
+        return status;
+    Ext4FileSystem::NamespaceMutation mutation(*fs_, fs_->maintained());
     w16(data.value().data() + 2, static_cast<u16>(uid));
     w16(data.value().data() + 24, static_cast<u16>(gid));
     w16(data.value().data() + 120, static_cast<u16>(uid >> 16));
     w16(data.value().data() + 122, static_cast<u16>(gid >> 16));
-    return fs_->save_inode(ino_, data.value());
+    if (auto status = fs_->save_inode(ino_, data.value()); !status)
+        return status;
+    mutation.committed = true;
+    return Status::success();
 }
-Result<DirectoryListing> Ext4Node::list() const
+Result<DirectoryListing> Ext4Node::list_active(DirectoryReadIntent intent) const
 {
     if (!fs_ || !ino_)
         return Status::not_found("ext4 node was removed");
@@ -1396,6 +2373,8 @@ Result<DirectoryListing> Ext4Node::list() const
             return status;
         for (u32 offset = 0; offset < fs_->block_size_;)
         {
+            if (fs_->block_size_ - offset < 8)
+                return fs_->io_status(corrupt());
             const auto *entry = buffer.data() + offset;
             const auto length = r16(entry + 4);
             const auto namelen = std::to_integer<u8>(entry[6]);
@@ -1414,10 +2393,24 @@ Result<DirectoryListing> Ext4Node::list() const
                 if (auto status = target.name.assign(name); !status.ok())
                     return status;
                 target.metadata = fs_->metadata(child_inode.value());
+                target.metadata.attributes.inode = number;
+                target.metadata.attributes.mark(Attribute::inode);
+                if (fs_->maintained())
+                {
+                    if (auto status = decode_ext4_times(
+                            std::span<const std::byte>{child_inode.value()}.first(fs_->inode_size_),
+                            target.metadata.attributes); !status)
+                        return fs_->io_status(status);
+                    target.metadata.attributes.access.source = target.metadata.attributes.modification.source =
+                        target.metadata.attributes.change.source = TimestampSource::maintained_ext4;
+                }
             }
             offset += length;
         }
     }
+    if (intent == DirectoryReadIntent::access)
+        if (auto status = fs_->access_event(ino_, data.value()); !status)
+            return status;
     return out;
 }
 } // namespace ok::fs

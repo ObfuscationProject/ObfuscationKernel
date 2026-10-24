@@ -49,8 +49,10 @@ Status mount_archive(VirtualFileSystem &vfs, std::span<const std::byte> archive)
             const usize data_size = read32(archive, offset + 4);
             const u32 mode = read32(archive, offset + 8);
             const auto kind = mode & mode_type_mask;
+            const u32 permissions = kind == mode_directory ? boot_archive_directory_mode_mask
+                                                           : boot_archive_regular_mode_mask;
             if (read32(archive, offset + 12) != 0 || (kind != mode_directory && kind != mode_regular) ||
-                (kind == mode_directory && data_size != 0))
+                (mode & ~(mode_type_mask | permissions)) || (kind == mode_directory && data_size != 0))
                 return Status::invalid_argument("invalid archive record type");
             offset += 16;
             if (path_size > archive.size() - offset)
@@ -65,12 +67,7 @@ Status mount_archive(VirtualFileSystem &vfs, std::span<const std::byte> archive)
             {
                 if (kind == mode_directory)
                 {
-                    if (auto *existing = vfs.lookup(path); existing != nullptr)
-                    {
-                        if (existing->metadata().type != NodeType::directory)
-                            return Status::already_exists("archive directory collision");
-                    }
-                    else if (auto status = vfs.create(path, NodeType::directory); !status.ok())
+                    if (auto status = vfs.import_archive_directory(path, mode & permissions); !status.ok())
                         return status;
                 }
                 else if (auto status = vfs.create_readonly_file(path, archive.subspan(offset, data_size), mode, true);

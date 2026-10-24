@@ -22,6 +22,8 @@ u32 read_le32(std::span<const std::byte> bytes, usize offset)
 Status BlockCache::attach(driver::BlockDevice &device)
 {
     smp::ScopedSpinLock guard(lock_);
+    if (device.geometry().block_size != driver::block_sector_size)
+        return Status::unsupported("block cache requires 512-byte sectors");
     device_ = &device;
     entries_ = {};
     stats_ = {};
@@ -69,6 +71,8 @@ Status BlockCache::read_block(u64 block, std::span<std::byte> out)
     }
     ++stats_.misses;
     auto &victim = entries_[next_victim_++ % entries_.size()];
+    // A failed device read may already have overwritten part of the buffer.
+    victim.valid = false;
     if (auto status = device_->read_blocks(block, victim.data); !status.ok())
     {
         ++stats_.errors;
@@ -106,6 +110,9 @@ Status BlockCache::write_block(u64 block, std::span<const std::byte> in)
     }
     if (auto status = device_->write_blocks(block, in); !status.ok())
     {
+        // Completion failure does not prove that the media stayed unchanged.
+        for (auto &entry : entries_)
+            if (entry.block == block) entry.valid = false;
         ++stats_.errors;
         return status;
     }

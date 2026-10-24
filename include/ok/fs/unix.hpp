@@ -109,7 +109,6 @@ class DeviceNode final : public FileOperations
   private:
     DeviceKind kind_{DeviceKind::null};
     usize bytes_written_{0};
-    u64 random_state_{0x123456789abcdef0ull};
 };
 
 class Pipe final : public FileOperations

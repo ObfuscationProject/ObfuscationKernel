@@ -52,14 +52,8 @@ Result<usize> DeviceNode::read(std::span<std::byte> out)
         }
         return out.size();
     case DeviceKind::random:
-        for (auto &byte : out)
-        {
-            random_state_ ^= random_state_ << 13;
-            random_state_ ^= random_state_ >> 7;
-            random_state_ ^= random_state_ << 17;
-            byte = static_cast<std::byte>(random_state_ & 0xffu);
-        }
-        return out.size();
+        return out.empty() ? Result<usize>{usize{0}} :
+            Result<usize>{Status::would_block("random device has no trusted entropy source")};
     }
     return Status::unsupported("device read is not implemented");
 }
@@ -93,8 +87,9 @@ Result<u32> DeviceNode::poll()
     case DeviceKind::block:
         return writable;
     case DeviceKind::zero:
-    case DeviceKind::random:
         return readable;
+    case DeviceKind::random:
+        return 0u;
     }
     return 0u;
 }
@@ -251,21 +246,15 @@ Status UnixVfsModel::validate_symlink()
         return Status::not_initialized("VFS model is not initialized");
     }
     static_cast<void>(vfs_->unlink("/tmp/roadmap-link"));
-    if (auto status = vfs_->create("/tmp/roadmap-link", NodeType::symlink); !status.ok())
-    {
-        return status;
-    }
     constexpr std::string_view target{"/tmp/roadmap-file"};
-    if (auto status =
-            vfs_->write_file("/tmp/roadmap-link",
-                             std::span<const std::byte>{reinterpret_cast<const std::byte *>(target.data()), target.size()});
-        !status.ok())
-    {
+    if (auto status = vfs_->create({}, "/tmp/roadmap-link", NodeType::symlink, 0777, 0, 0, target); !status.ok())
         return status;
-    }
-    auto read = vfs_->read_file("/tmp/roadmap-link");
-    return read && read.value().size == target.size() ? Status::success()
-                                                      : Status::fault("symlink validation failed");
+    auto link = vfs_->resolve({}, "/tmp/roadmap-link", FinalComponent::no_follow);
+    if (!link)
+        return link.status();
+    auto read = link.value().node()->read(0, target.size());
+    return read && read.value().size == target.size() && vfs_->lookup("/tmp/roadmap-link") == vfs_->lookup(target)
+               ? Status::success() : Status::fault("symlink validation failed");
 }
 
 Status UnixVfsModel::validate_devices()
