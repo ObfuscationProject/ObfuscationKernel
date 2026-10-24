@@ -30,16 +30,24 @@ struct Credentials
     UserId euid{root_uid};
     GroupId egid{root_gid};
     bool kernel_space{false};
+    // Omitted saved IDs follow the supplied effective IDs, including aggregates.
+    UserId suid{euid};
+    GroupId sgid{egid};
 };
+static_assert(sizeof(Credentials) == 28 && offsetof(Credentials, suid) == 20 &&
+              offsetof(Credentials, sgid) == 24 && offsetof(Credentials, kernel_space) == 16,
+              "SDK29 credential layout must be consistent across native profiles");
 
 [[nodiscard]] constexpr Credentials kernel_credentials()
 {
-    return Credentials{.uid = root_uid, .gid = root_gid, .euid = root_uid, .egid = root_gid, .kernel_space = true};
+    return Credentials{.uid = root_uid, .gid = root_gid, .euid = root_uid, .egid = root_gid,
+                       .kernel_space = true, .suid = root_uid, .sgid = root_gid};
 }
 
 [[nodiscard]] constexpr Credentials root_credentials()
 {
-    return Credentials{.uid = root_uid, .gid = root_gid, .euid = root_uid, .egid = root_gid, .kernel_space = false};
+    return Credentials{.uid = root_uid, .gid = root_gid, .euid = root_uid, .egid = root_gid,
+                       .kernel_space = false, .suid = root_uid, .sgid = root_gid};
 }
 
 [[nodiscard]] constexpr Credentials default_user_credentials()
@@ -48,7 +56,9 @@ struct Credentials
                        .gid = default_user_gid,
                        .euid = default_user_uid,
                        .egid = default_user_gid,
-                       .kernel_space = false};
+                       .kernel_space = false,
+                       .suid = default_user_uid,
+                       .sgid = default_user_gid};
 }
 
 [[nodiscard]] constexpr bool is_privileged(Credentials credentials)

@@ -1,4 +1,5 @@
 #include "ok/posix/posix.hpp"
+#include "ok/fs/mode_policy.hpp"
 
 namespace ok::posix
 {
@@ -6,6 +7,21 @@ namespace
 {
 
 inline constexpr u32 at_REMOVEDIR = 0x0200;
+
+FileStatus file_status(const fs::Metadata &metadata)
+{
+    return FileStatus{
+        .type = metadata.type,
+        .size = metadata.size,
+        .mode = metadata.mode,
+        .uid = metadata.uid,
+        .gid = metadata.gid,
+        .link_count = metadata.link_count,
+        .block_size = metadata.block_size,
+        .blocks = metadata.blocks,
+        .attributes = metadata.attributes,
+    };
+}
 
 usize align_up(usize value, usize alignment)
 {
@@ -22,6 +38,8 @@ u8 dirent_type(fs::NodeType type)
         return 8;
     case fs::NodeType::device:
         return 2;
+    case fs::NodeType::socket:
+        return 12;
     case fs::NodeType::symlink:
         return 10;
     }
@@ -37,104 +55,6 @@ template <typename T> void write_native(std::span<std::byte> out, usize offset, 
 
 } // namespace
 
-Status PosixService::require_parent_directory_access(std::string_view normalized_path, u32 access) const
-{
-    if (vfs_ == nullptr)
-    {
-        return Status::not_initialized("POSIX service not initialized");
-    }
-    if (normalized_path.empty() || normalized_path.front() != '/')
-    {
-        return Status::invalid_argument("path is not normalized");
-    }
-    while (normalized_path.size() > 1 && normalized_path.back() == '/')
-        normalized_path.remove_suffix(1);
-    if (normalized_path == "/")
-    {
-        return Status::invalid_argument("root has no parent directory");
-    }
-    usize slash = 0;
-    for (usize i = 0; i < normalized_path.size(); ++i)
-    {
-        if (normalized_path[i] == '/')
-        {
-            slash = i;
-        }
-    }
-    FixedString<96> parent;
-    if (slash == 0)
-    {
-        if (auto status = parent.assign("/"); !status.ok())
-        {
-            return status;
-        }
-    }
-    else if (auto status = parent.assign(normalized_path.substr(0, slash)); !status.ok())
-    {
-        return status;
-    }
-    auto metadata = vfs_->stat(parent.view());
-    if (!metadata)
-    {
-        return metadata.status();
-    }
-    if (metadata.value().type != fs::NodeType::directory)
-    {
-        return Status::not_directory("parent is not a directory");
-    }
-    return fs::require_access(metadata.value(), credentials(), access);
-}
-
-Status PosixService::require_path_search(Fd dirfd, std::string_view path)
-{
-    FixedString<256> prefix;
-    if (path.front() == '/')
-        static_cast<void>(prefix.assign("/"));
-    else if (dirfd == at_FDCWD)
-    {
-        auto cwd = current_directory();
-        if (!cwd)
-            return cwd.status();
-        static_cast<void>(prefix.assign(cwd.value()));
-    }
-    else
-    {
-        auto *entry = descriptor(dirfd);
-        if (!entry || !entry->node)
-            return Status::bad_descriptor("bad directory file descriptor");
-        auto base = vfs_->directory_path(*entry->node, entry->mount_id);
-        if (!base)
-            return base.status();
-        static_cast<void>(prefix.assign(base.value().view()));
-    }
-    // Search starts at the supplied directory, not at its ancestors. An already
-    // held cwd/dirfd remains usable if an ancestor later loses search permission.
-    usize cursor = 0;
-    while (cursor < path.size())
-    {
-        while (cursor < path.size() && path[cursor] == '/')
-            ++cursor;
-        if (cursor == path.size())
-            break;
-        auto parent = vfs_->stat(prefix.view());
-        if (!parent)
-            return parent.status();
-        if (parent.value().type != fs::NodeType::directory)
-            return Status::not_directory("path component is not a directory");
-        if (auto status = fs::require_access(parent.value(), credentials(), fs::access_execute); !status.ok())
-            return status;
-        const auto begin = cursor;
-        while (cursor < path.size() && path[cursor] != '/')
-            ++cursor;
-        if (prefix.view() != "/")
-            if (auto status = prefix.append('/'); !status.ok())
-                return status;
-        if (auto status = prefix.append(path.substr(begin, cursor - begin)); !status.ok())
-            return status;
-    }
-    return Status::success();
-}
-
 Status PosixService::mkdir(std::string_view path, u32 mode)
 {
     return mkdirat(at_FDCWD, path, mode);
@@ -142,30 +62,43 @@ Status PosixService::mkdir(std::string_view path, u32 mode)
 
 Status PosixService::mkdirat(Fd dirfd, std::string_view path, u32 mode)
 {
-    if (!initialized_ || vfs_ == nullptr)
-    {
-        return Status::not_initialized("POSIX service not initialized");
-    }
-    auto normalized = resolve_path(dirfd, path);
-    if (!normalized)
-    {
-        return normalized.status();
-    }
-    if (auto status = require_parent_directory_access(normalized.value(), fs::access_write | fs::access_execute);
-        !status.ok())
-    {
+    auto context = path_context(dirfd, path);
+    if (!context)
+        return context.status();
+    return vfs_->create(context.value(), path, fs::NodeType::directory,
+                        mode & ~resources().file_mode_mask, euid(), egid());
+}
+
+Status PosixService::symlinkat(std::string_view target, Fd dirfd, std::string_view path)
+{
+    auto context = path_context(dirfd, path);
+    if (!context)
+        return context.status();
+    return vfs_->create(context.value(), path, fs::NodeType::symlink, 0777u, euid(), egid(), target);
+}
+
+Result<usize> PosixService::readlinkat(Fd dirfd, std::string_view path, std::span<std::byte> out)
+{
+    if (out.empty())
+        return Status::invalid_argument("empty readlink buffer");
+    auto resolved = resolve_node(dirfd, path, fs::FinalComponent::no_follow);
+    if (!resolved)
+        return resolved.status();
+    auto metadata = resolved.value().node()->query_metadata();
+    if (!metadata)
+        return metadata.status();
+    if (metadata.value().type != fs::NodeType::symlink)
+        return Status::invalid_argument("path is not a symlink");
+    auto data = resolved.value().node()->read(0, out.size());
+    if (!data)
+        return data.status();
+    if (data.value().size > out.size())
+        return Status::io_error("readlink provider exceeded output capacity");
+    if (auto status = resolved.value().release(); !status.ok())
         return status;
-    }
-    if (auto status = vfs_->create(normalized.value(), fs::NodeType::directory); !status.ok())
-    {
-        return status;
-    }
-    const auto directory_mode = mode & ~resources().file_mode_mask;
-    if (auto status = vfs_->chmod(normalized.value(), directory_mode); !status.ok())
-    {
-        return status;
-    }
-    return vfs_->chown(normalized.value(), euid(), egid());
+    for (usize i = 0; i < data.value().size; ++i)
+        out[i] = data.value().data[i];
+    return data.value().size;
 }
 
 Status PosixService::link(std::string_view oldpath, std::string_view newpath)
@@ -175,38 +108,15 @@ Status PosixService::link(std::string_view oldpath, std::string_view newpath)
 
 Status PosixService::linkat(Fd olddirfd, std::string_view oldpath, Fd newdirfd, std::string_view newpath, u32 flags)
 {
-    if (!initialized_ || !vfs_)
-        return Status::not_initialized("POSIX service not initialized");
     if (flags)
         return Status::invalid_argument("linkat flags are unsupported");
-    if (oldpath.empty() || newpath.empty())
-        return Status::not_found("empty link path");
-    if (auto status = require_path_search(olddirfd, oldpath); !status.ok())
-        return status;
-    if (auto status = require_path_search(newdirfd, newpath); !status.ok())
-        return status;
-    auto old_resolved = resolve_path(olddirfd, oldpath);
-    if (!old_resolved)
-        return old_resolved.status();
-    // resolve_path uses one scratch buffer. Preserve the first path before
-    // resolving a relative destination, including when both dirfds differ.
-    FixedString<256> source;
-    if (auto status = source.assign(old_resolved.value()); !status.ok())
-        return status;
-    auto new_resolved = resolve_path(newdirfd, newpath);
-    if (!new_resolved)
-        return new_resolved.status();
-    if (auto status = require_parent_directory_access(source.view(), fs::access_execute); !status.ok())
-        return status;
-    if (auto status = require_parent_directory_access(new_resolved.value(), fs::access_write | fs::access_execute);
-        !status.ok())
-        return status;
-    auto *node = vfs_->lookup(source.view());
-    if (!node)
-        return Status::not_found("link source not found");
-    if (node->metadata().type == fs::NodeType::directory)
-        return Status::permission("directory hard links are forbidden");
-    return vfs_->link(source.view(), new_resolved.value());
+    auto source = path_context(olddirfd, oldpath);
+    if (!source)
+        return source.status();
+    auto target = path_context(newdirfd, newpath);
+    if (!target)
+        return target.status();
+    return vfs_->link(source.value(), oldpath, target.value(), newpath);
 }
 
 Status PosixService::rename(std::string_view oldpath, std::string_view newpath)
@@ -216,49 +126,13 @@ Status PosixService::rename(std::string_view oldpath, std::string_view newpath)
 
 Status PosixService::renameat(Fd olddirfd, std::string_view oldpath, Fd newdirfd, std::string_view newpath)
 {
-    if (!initialized_ || !vfs_)
-        return Status::not_initialized("POSIX service not initialized");
-    if (oldpath.empty() || newpath.empty())
-        return Status::not_found("empty rename path");
-    if (auto status = require_path_search(olddirfd, oldpath); !status.ok())
-        return status;
-    if (auto status = require_path_search(newdirfd, newpath); !status.ok())
-        return status;
-    auto old_resolved = resolve_path(olddirfd, oldpath);
-    if (!old_resolved)
-        return old_resolved.status();
-    FixedString<256> source;
-    if (auto status = source.assign(old_resolved.value()); !status.ok())
-        return status;
-    auto new_resolved = resolve_path(newdirfd, newpath);
-    if (!new_resolved)
-        return new_resolved.status();
-    if (auto status = require_parent_directory_access(source.view(), fs::access_write | fs::access_execute);
-        !status.ok())
-        return status;
-    if (auto status = require_parent_directory_access(new_resolved.value(), fs::access_write | fs::access_execute);
-        !status.ok())
-        return status;
-    const auto sticky_access = [&](std::string_view path) -> Status {
-        while (path.size() > 1 && path.back() == '/')
-            path.remove_suffix(1);
-        auto *node = vfs_->lookup(path);
-        if (!node || euid() == 0)
-            return Status::success();
-        const auto slash = path.find_last_of('/');
-        auto *parent = vfs_->lookup(slash == 0 ? "/" : path.substr(0, slash));
-        if (!parent)
-            return Status::not_found("rename parent not found");
-        const auto metadata = parent->metadata();
-        if ((metadata.mode & 01000u) && euid() != metadata.uid && euid() != node->metadata().uid)
-            return Status::permission("sticky directory protects another owner's file");
-        return Status::success();
-    };
-    if (auto status = sticky_access(source.view()); !status.ok())
-        return status;
-    if (auto status = sticky_access(new_resolved.value()); !status.ok())
-        return status;
-    return vfs_->rename(source.view(), new_resolved.value());
+    auto source = path_context(olddirfd, oldpath);
+    if (!source)
+        return source.status();
+    auto target = path_context(newdirfd, newpath);
+    if (!target)
+        return target.status();
+    return vfs_->rename(source.value(), oldpath, target.value(), newpath);
 }
 
 Status PosixService::unlink(std::string_view path)
@@ -268,79 +142,48 @@ Status PosixService::unlink(std::string_view path)
 
 Status PosixService::unlinkat(Fd dirfd, std::string_view path, u32 flags)
 {
-    if ((flags & at_REMOVEDIR) != 0)
-    {
-        auto normalized = resolve_path(dirfd, path);
-        return normalized ? rmdir(normalized.value()) : normalized.status();
-    }
-    if (!initialized_ || vfs_ == nullptr)
-    {
-        return Status::not_initialized("POSIX service not initialized");
-    }
-    auto normalized = resolve_path(dirfd, path);
-    if (!normalized)
-    {
-        return normalized.status();
-    }
-    if (auto status = require_parent_directory_access(normalized.value(), fs::access_write | fs::access_execute);
-        !status.ok())
-    {
-        return status;
-    }
-    return vfs_->unlink(normalized.value());
+    if (flags & ~at_REMOVEDIR)
+        return Status::invalid_argument("unsupported unlinkat flags");
+    auto context = path_context(dirfd, path);
+    if (!context)
+        return context.status();
+    return vfs_->remove(context.value(), path, (flags & at_REMOVEDIR) != 0);
 }
 
 Status PosixService::rmdir(std::string_view path)
 {
-    if (!initialized_ || vfs_ == nullptr)
-    {
-        return Status::not_initialized("POSIX service not initialized");
-    }
-    auto normalized = normalize_path(path);
-    if (!normalized)
-    {
-        return normalized.status();
-    }
-    if (auto status = require_parent_directory_access(normalized.value(), fs::access_write | fs::access_execute);
-        !status.ok())
-    {
-        return status;
-    }
-    return vfs_->rmdir(normalized.value());
+    return unlinkat(at_FDCWD, path, at_REMOVEDIR);
 }
 
 Status PosixService::chdir(std::string_view path)
 {
-    if (!initialized_ || vfs_ == nullptr)
-    {
-        return Status::not_initialized("POSIX service not initialized");
-    }
-    auto normalized = normalize_path(path);
-    if (!normalized)
-    {
-        return normalized.status();
-    }
-    usize mount_id = 0;
-    auto *node = vfs_->lookup(normalized.value(), &mount_id);
-    if (node == nullptr || node->metadata().type != fs::NodeType::directory)
-    {
-        return Status::not_found("directory not found");
-    }
-    if (auto status = fs::require_access(node->metadata(), credentials(), fs::access_execute); !status.ok())
-    {
+    auto resolved = resolve_node(at_FDCWD, path);
+    if (!resolved)
+        return resolved.status();
+    auto *node = resolved.value().node();
+    auto metadata = node->query_metadata();
+    if (!metadata)
+        return metadata.status();
+    if (metadata.value().type != fs::NodeType::directory)
+        return Status::not_directory("path is not a directory");
+    if (auto status = fs::require_access(metadata.value(), credentials(), fs::access_execute); !status.ok())
         return status;
-    }
-    auto canonical = vfs_->directory_path(*node, mount_id);
-    if (!canonical)
-        return canonical.status();
     if (auto status = node->retain(); !status.ok())
         return status;
+    const auto mount = resolved.value().handle().mount_id;
+    if (auto status = resolved.value().release(); !status.ok())
+    {
+        static_cast<void>(node->release());
+        return status;
+    }
     auto &owned = resources();
-    if (owned.cwd_node)
-        static_cast<void>(owned.cwd_node->release());
+    auto *previous = owned.cwd_node;
     owned.cwd_node = node;
-    owned.cwd_mount_id = mount_id;
-    return owned.cwd.assign(canonical.value().view());
+    owned.cwd_mount_id = mount;
+    owned.cwd.clear();
+    // Old cleanup consumes its pin even on failure; the new cwd already owns
+    // its independent pin and cannot retain a dangling previous reference.
+    return previous ? previous->release() : Status::success();
 }
 
 Result<std::string_view> PosixService::current_directory()
@@ -361,23 +204,24 @@ Status PosixService::fchdir(Fd fd)
     auto *entry = descriptor(fd);
     if (entry == nullptr || !entry->used || entry->node == nullptr)
         return Status::bad_descriptor("bad directory file descriptor");
-    if (entry->node->metadata().type != fs::NodeType::directory)
+    auto metadata = entry->node->query_metadata();
+    if (!metadata)
+        return metadata.status();
+    if (metadata.value().type != fs::NodeType::directory)
         return Status::not_directory("file descriptor is not a directory");
-    if (auto status = fs::require_access(entry->node->metadata(), credentials(), fs::access_execute); !status.ok())
+    if (auto status = fs::require_access(metadata.value(), credentials(), fs::access_execute); !status.ok())
     {
         return status;
     }
     if (auto status = entry->node->retain(); !status.ok())
         return status;
     auto &owned = resources();
-    if (owned.cwd_node)
-        static_cast<void>(owned.cwd_node->release());
+    auto *previous = owned.cwd_node;
     owned.cwd_node = entry->node;
     owned.cwd_mount_id = entry->mount_id;
-    // A detached directory is still a valid descriptor, but getcwd and relative
-    // operations must fail rather than resolve through a replacement pathname.
+    // A detached directory remains an object reference; getcwd may fail.
     owned.cwd.clear();
-    return Status::success();
+    return previous ? previous->release() : Status::success();
 }
 
 Status PosixService::access(std::string_view path, u32 mode)
@@ -385,70 +229,174 @@ Status PosixService::access(std::string_view path, u32 mode)
     return faccessat(at_FDCWD, path, mode);
 }
 
-Status PosixService::faccessat(Fd dirfd, std::string_view path, u32 mode, u32)
+Status PosixService::faccessat(Fd dirfd, std::string_view path, u32 mode, u32 flags)
 {
+    if (!initialized_ || !vfs_)
+        return Status::not_initialized("POSIX service not initialized");
     if ((mode & ~(r_OK | w_OK | x_OK)) != 0)
-    {
         return Status::invalid_argument("invalid access mode");
-    }
-    auto metadata = statat(dirfd, path);
-    if (!metadata)
+    if (flags & ~(at_EACCESS | at_SYMLINK_NOFOLLOW | at_EMPTY_PATH))
+        return Status::invalid_argument("unsupported access flags");
+    const auto ids = user_credentials();
+    const fs::Credentials selected = flags & at_EACCESS ? fs::Credentials{ids.euid, ids.egid}
+                                                       : fs::Credentials{ids.uid, ids.gid};
+    const auto permitted = [&](const fs::Metadata &metadata) {
+        // Root can bypass DAC, but a regular file still needs an execute bit.
+        if (!selected.uid && metadata.type == fs::NodeType::regular &&
+            (mode & x_OK) && !(metadata.mode & 0111u))
+            return Status::denied("regular file has no execute permission");
+        return fs::require_access(metadata, selected, mode);
+    };
+    if (path.empty() && (flags & at_EMPTY_PATH))
     {
-        return metadata.status();
+        if (dirfd != at_FDCWD)
+        {
+            const auto *entry = descriptor(dirfd);
+            if (!entry || !entry->used)
+                return Status::bad_descriptor("bad access descriptor");
+            // Special descriptions do not yet carry qualified owner metadata.
+            if (entry->pipe != sched::invalid_description || entry->native_udp_handle ||
+                entry->console || entry->input_console)
+                return mode ? Status::unsupported("special descriptor access metadata is unqualified")
+                            : Status::success();
+            auto status = fstat(dirfd);
+            if (!status) return status.status();
+            const auto &metadata = status.value();
+            return permitted(fs::Metadata{.type = metadata.type, .mode = metadata.mode,
+                                           .uid = metadata.uid, .gid = metadata.gid});
+        }
+        if (auto *cwd = resources().cwd_node)
+        {
+            auto metadata = vfs_->query_metadata(*cwd);
+            return metadata ? permitted(metadata.value()) : metadata.status();
+        }
+        path = "/";
     }
-    return fs::require_access(
-        fs::Metadata{
-            .type = metadata.value().type,
-            .size = metadata.value().size,
-            .mode = metadata.value().mode,
-            .uid = metadata.value().uid,
-            .gid = metadata.value().gid,
-            .link_count = metadata.value().link_count,
-            .block_size = metadata.value().block_size,
-            .blocks = metadata.value().blocks,
-        },
-        credentials(), mode);
+    auto context = path_context(dirfd, path);
+    if (!context) return context.status();
+    // Path search and final DAC must observe the same captured ID pair.
+    context.value().credentials = selected;
+    auto resolved = vfs_->resolve(context.value(), path, flags & at_SYMLINK_NOFOLLOW
+        ? fs::FinalComponent::no_follow : fs::FinalComponent::follow);
+    if (!resolved) return resolved.status();
+    auto metadata = vfs_->query_metadata(*resolved.value().node());
+    const auto released = resolved.value().release();
+    if (!metadata) return metadata.status();
+    if (!released) return released;
+    return permitted(metadata.value());
 }
 
 Status PosixService::chmod(std::string_view path, u32 mode)
 {
-    if (!initialized_ || vfs_ == nullptr)
-    {
-        return Status::not_initialized("POSIX service not initialized");
-    }
-    auto normalized = normalize_path(path);
-    if (!normalized)
-    {
-        return normalized.status();
-    }
-    auto metadata = vfs_->stat(normalized.value());
+    auto resolved = resolve_node(at_FDCWD, path);
+    if (!resolved)
+        return resolved.status();
+    auto *node = resolved.value().node();
+    auto metadata = node->query_metadata();
     if (!metadata)
-    {
         return metadata.status();
-    }
-    if (euid() != 0 && euid() != metadata.value().uid)
+    const auto decision = fs::mode_change_policy(metadata.value().uid, metadata.value().gid,
+                                                  mode, user_credentials());
+    if (!decision.authorized)
+        return Status::permission("only the owner can chmod a filesystem node");
+    if (auto status = node->chmod(decision.permissions); !status.ok())
+        return status;
+    return resolved.value().release();
+}
+
+fs::ModeChangeResult PosixService::change_mode_fd(Fd fd, u32 mode)
+{
+    if (!initialized_ || !vfs_)
+        return fs::ModeChangeResult::failure(Status::not_initialized("POSIX service not initialized"));
+    auto *entry = descriptor(fd);
+    if (!entry || !entry->used)
+        return fs::ModeChangeResult::failure(Status::bad_descriptor("bad mode-change descriptor"));
+    if (!entry->node)
+        return fs::ModeChangeResult::unavailable();
+    // The open description owns this node throughout the serialized operation.
+    return entry->node->change_mode(mode, user_credentials());
+}
+
+fs::ModeChangeResult PosixService::change_mode_at(Fd dirfd, std::string_view path, u32 mode, u32 flags)
+{
+    if (!initialized_ || !vfs_)
+        return fs::ModeChangeResult::failure(Status::not_initialized("POSIX service not initialized"));
+    if (flags & ~(at_EMPTY_PATH | at_SYMLINK_NOFOLLOW))
+        return fs::ModeChangeResult::failure(Status::invalid_argument("unsupported mode-change flags"));
+    if (path.empty() && (flags & at_EMPTY_PATH))
     {
-        return Status::denied("only the owner can chmod a filesystem node");
+        if (dirfd != at_FDCWD)
+            return change_mode_fd(dirfd, mode);
+        // A held cwd remains the target after rename or namespace detachment.
+        if (auto *cwd = resources().cwd_node)
+            return cwd->change_mode(mode, user_credentials());
+        path = "/";
     }
-    return vfs_->chmod(normalized.value(), mode);
+    auto resolved = resolve_node(dirfd, path, (flags & at_SYMLINK_NOFOLLOW) ? fs::FinalComponent::no_follow
+                                                                         : fs::FinalComponent::follow);
+    if (!resolved)
+        return resolved.status().code() == StatusCode::unsupported ? fs::ModeChangeResult::unavailable()
+                                                                   : fs::ModeChangeResult::failure(resolved.status());
+    const auto result = resolved.value().node()->change_mode(mode, user_credentials());
+    const auto released = resolved.value().release();
+    if (result.ok() && !released)
+        return fs::ModeChangeResult::failure(released);
+    return result;
+}
+
+fs::ModeChangeResult PosixService::change_owner_fd(Fd fd, u32 uid, u32 gid)
+{
+    if (!initialized_ || !vfs_)
+        return fs::ModeChangeResult::failure(Status::not_initialized("POSIX service not initialized"));
+    auto *entry = descriptor(fd);
+    if (!entry || !entry->used)
+        return fs::ModeChangeResult::failure(Status::bad_descriptor("bad ownership-change descriptor"));
+    if (euid() != user::root_uid)
+        return fs::ModeChangeResult::failure(Status::permission("ownership change requires root"));
+    if (!entry->node) return fs::ModeChangeResult::unavailable();
+    return entry->node->change_owner(uid, gid, user_credentials());
+}
+
+fs::ModeChangeResult PosixService::change_owner_at(Fd dirfd, std::string_view path, u32 uid, u32 gid, u32 flags)
+{
+    if (!initialized_ || !vfs_)
+        return fs::ModeChangeResult::failure(Status::not_initialized("POSIX service not initialized"));
+    if (flags & ~(at_EMPTY_PATH | at_SYMLINK_NOFOLLOW))
+        return fs::ModeChangeResult::failure(Status::invalid_argument("unsupported ownership-change flags"));
+    if (path.empty() && (flags & at_EMPTY_PATH))
+    {
+        if (dirfd != at_FDCWD) return change_owner_fd(dirfd, uid, gid);
+        if (auto *cwd = resources().cwd_node)
+        {
+            if (euid() != user::root_uid)
+                return fs::ModeChangeResult::failure(Status::permission("ownership change requires root"));
+            return cwd->change_owner(uid, gid, user_credentials());
+        }
+        path = "/";
+    }
+    auto resolved = resolve_node(dirfd, path, (flags & at_SYMLINK_NOFOLLOW) ? fs::FinalComponent::no_follow
+                                                                         : fs::FinalComponent::follow);
+    if (!resolved)
+        return resolved.status().code() == StatusCode::unsupported ? fs::ModeChangeResult::unavailable()
+                                                                   : fs::ModeChangeResult::failure(resolved.status());
+    const auto result = euid() != user::root_uid ?
+        fs::ModeChangeResult::failure(Status::permission("ownership change requires root")) :
+        resolved.value().node()->change_owner(uid, gid, user_credentials());
+    const auto released = resolved.value().release();
+    if (result.ok() && !released) return fs::ModeChangeResult::failure(released);
+    return result;
 }
 
 Status PosixService::chown(std::string_view path, u32 uid, u32 gid)
 {
-    if (!initialized_ || vfs_ == nullptr)
-    {
-        return Status::not_initialized("POSIX service not initialized");
-    }
     if (euid() != 0)
-    {
         return Status::denied("only root can chown a filesystem node");
-    }
-    auto normalized = normalize_path(path);
-    if (!normalized)
-    {
-        return normalized.status();
-    }
-    return vfs_->chown(normalized.value(), uid, gid);
+    auto resolved = resolve_node(at_FDCWD, path);
+    if (!resolved)
+        return resolved.status();
+    if (auto status = resolved.value().node()->chown(uid, gid); !status.ok())
+        return status;
+    return resolved.value().release();
 }
 
 Result<FileStatus> PosixService::stat(std::string_view path)
@@ -462,83 +410,57 @@ Result<FileStatus> PosixService::statat(Fd dirfd, std::string_view path, u32 fla
     {
         return Status::not_initialized("POSIX service not initialized");
     }
+    if (flags & ~(at_EMPTY_PATH | at_SYMLINK_NOFOLLOW))
+        return Status::invalid_argument("unsupported statat flags");
     if (path.empty() && (flags & at_EMPTY_PATH) != 0)
     {
-        return fstat(dirfd);
+        if (dirfd != at_FDCWD)
+            return fstat(dirfd);
+        if (auto *cwd = resources().cwd_node)
+        {
+            // ProcessResources owns this identity in the serialized caller.
+            // Empty-path status requires no search or reconstructed pathname.
+            auto queried = vfs_->query_metadata(*cwd);
+            if (!queried)
+                return queried.status();
+            return file_status(queried.value());
+        }
+        // A process without an explicit cwd pin still uses the namespace root.
+        path = "/";
     }
-    auto normalized = resolve_path(dirfd, path);
-    if (!normalized)
-    {
-        return normalized.status();
-    }
-    auto metadata = vfs_->stat(normalized.value());
-    if (!metadata)
-    {
-        return metadata.status();
-    }
-    return FileStatus{
-        .type = metadata.value().type,
-        .size = metadata.value().size,
-        .mode = metadata.value().mode,
-        .uid = metadata.value().uid,
-        .gid = metadata.value().gid,
-        .link_count = metadata.value().link_count,
-        .block_size = metadata.value().block_size,
-        .blocks = metadata.value().blocks,
-    };
+    auto resolved = resolve_node(dirfd, path, (flags & at_SYMLINK_NOFOLLOW) ? fs::FinalComponent::no_follow
+                                                                         : fs::FinalComponent::follow);
+    if (!resolved)
+        return resolved.status();
+    auto queried = vfs_->query_metadata(*resolved.value().node());
+    if (!queried)
+        return queried.status();
+    const auto metadata = queried.value();
+    if (auto status = resolved.value().release(); !status.ok())
+        return status;
+    return file_status(metadata);
 }
 
 Result<usize> PosixService::getdents64(Fd fd, std::span<std::byte> out)
 {
-    auto *entry = descriptor(fd);
-    if (entry == nullptr || !entry->used || entry->node == nullptr ||
-        entry->node->metadata().type != fs::NodeType::directory)
-    {
-        return Status::invalid_argument("file descriptor is not a directory");
-    }
-    if (auto status = fs::require_access(entry->node->metadata(), credentials(), fs::access_read); !status.ok())
-    {
-        return status;
-    }
-    auto listing = entry->node->list();
-    if (!listing)
-    {
-        return listing.status();
-    }
-
     usize written = 0;
-    usize index = entry->offset;
-    while (index < listing.value().count)
-    {
-        const auto &source = listing.value().entries[index];
-        const auto name = source.name.view();
-        const usize reclen = align_up(19 + name.size() + 1, 8);
-        if (written + reclen > out.size())
-        {
-            break;
-        }
-        write_native(out, written + 0, static_cast<u64>(index + 1));
-        write_native(out, written + 8, static_cast<i64>(index + 1));
-        write_native(out, written + 16, static_cast<u16>(reclen));
-        out[written + 18] = static_cast<std::byte>(dirent_type(source.metadata.type));
-        for (usize i = 0; i < name.size(); ++i)
-        {
-            out[written + 19 + i] = static_cast<std::byte>(name[i]);
-        }
-        out[written + 19 + name.size()] = static_cast<std::byte>(0);
-        for (usize i = 20 + name.size(); i < reclen; ++i)
-        {
-            out[written + i] = static_cast<std::byte>(0);
-        }
-        written += reclen;
-        ++index;
-    }
-    entry->offset = index;
-    if (written == 0 && entry->offset < listing.value().count)
-    {
-        return Status::overflow("getdents64 buffer too small");
-    }
-    return written;
+    return enumerate_directory<DirectoryPolicy::native>(fd,
+        [&](const fs::DirectoryEntry &source, u64 cookie) -> Result<usize> {
+            const auto name = source.name.view();
+            const usize reclen = align_up(19 + name.size() + 1, 8);
+            if (reclen > out.size() - written)
+                return Status::overflow("getdents64 buffer too small");
+            write_native(out, written, cookie);
+            write_native(out, written + 8, static_cast<i64>(cookie));
+            write_native(out, written + 16, static_cast<u16>(reclen));
+            out[written + 18] = static_cast<std::byte>(dirent_type(source.metadata.type));
+            for (usize i = 0; i < name.size(); ++i)
+                out[written + 19 + i] = static_cast<std::byte>(name[i]);
+            for (usize i = 19 + name.size(); i < reclen; ++i)
+                out[written + i] = std::byte{0};
+            written += reclen;
+            return reclen;
+        });
 }
 
 } // namespace ok::posix

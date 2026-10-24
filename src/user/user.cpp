@@ -93,6 +93,8 @@ Result<Credentials> UserManager::credentials_for(std::string_view name) const
         .euid = account->uid,
         .egid = account->gid,
         .kernel_space = account->kernel_space,
+        .suid = account->uid,
+        .sgid = account->gid,
     };
 }
 

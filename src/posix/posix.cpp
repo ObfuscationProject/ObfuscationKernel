@@ -8,6 +8,7 @@ Status PosixService::initialize(fs::VirtualFileSystem &vfs, driver::ConsoleDrive
     scheduler_ = &scheduler;
     initialized_ = true;
     monotonic_ticks_ = 0;
+    clock_resolution_ = 1000000;
     boot_tls_ = {};
     boot_credentials_ = user::kernel_credentials();
     return Status::success();
@@ -16,10 +17,34 @@ sched::ProcessId PosixService::getpid() const
 {
     return scheduler_ == nullptr ? 0 : scheduler_->current_pid();
 }
+sched::ThreadId PosixService::gettid() const
+{
+    return scheduler_ == nullptr ? 0 : scheduler_->current_tid(0);
+}
 sched::ProcessId PosixService::getppid() const
 {
     const auto *process = scheduler_ == nullptr ? nullptr : scheduler_->find(getpid());
     return process == nullptr ? 0 : process->parent_pid();
+}
+Result<sched::ProcessId> PosixService::getpgid(i32 pid) const
+{
+    return scheduler_ ? scheduler_->process_group(getpid(), pid)
+                      : Result<sched::ProcessId>(Status::not_initialized("POSIX service not initialized"));
+}
+Result<sched::ProcessId> PosixService::getsid(i32 pid) const
+{
+    return scheduler_ ? scheduler_->session_id(getpid(), pid)
+                      : Result<sched::ProcessId>(Status::not_initialized("POSIX service not initialized"));
+}
+Result<sched::ProcessId> PosixService::setsid()
+{
+    return scheduler_ ? scheduler_->create_session(getpid())
+                      : Result<sched::ProcessId>(Status::not_initialized("POSIX service not initialized"));
+}
+Status PosixService::setpgid(i32 pid, i32 group)
+{
+    return scheduler_ ? scheduler_->set_process_group(getpid(), pid, group)
+                      : Status::not_initialized("POSIX service not initialized");
 }
 sched::ProcessResources &PosixService::resources()
 {
@@ -52,7 +77,8 @@ user::Credentials PosixService::user_credentials() const
 }
 Status PosixService::set_identity(u32 uid, u32 gid)
 {
-    return set_credentials(user::Credentials{.uid = uid, .gid = gid, .euid = uid, .egid = gid, .kernel_space = false});
+    return set_credentials(user::Credentials{.uid = uid, .gid = gid, .euid = uid, .egid = gid,
+                                            .kernel_space = false, .suid = uid, .sgid = gid});
 }
 Status PosixService::set_credentials(user::Credentials credentials)
 {
@@ -71,11 +97,11 @@ Result<sched::ProcessId> PosixService::fork()
 {
     return fork(getpid());
 }
-Result<sched::ProcessId> PosixService::fork(sched::ProcessId parent)
+Result<sched::ProcessId> PosixService::fork(sched::ProcessId parent, bool publish)
 {
     if (scheduler_ == nullptr)
         return Status::not_initialized("POSIX service not initialized");
-    return scheduler_->fork_process(parent);
+    return scheduler_->fork_process(parent, publish);
 }
 Status PosixService::exec(sched::ProcessId pid, arch::CpuContext context, const sched::MemoryMap &memory)
 {
@@ -116,75 +142,40 @@ Result<Fd> PosixService::allocate_fd(Fd minimum)
     for (usize i = static_cast<usize>(minimum); i < max_open_files; ++i)
         if (!resources().files.contains(static_cast<Fd>(i)))
             return static_cast<Fd>(i);
-    return Status::overflow("file descriptor table full");
+    return Status::process_file_limit("file descriptor table full");
 }
-Result<std::string_view> PosixService::normalize_path(std::string_view path)
+Result<fs::ResolveContext> PosixService::path_context(Fd dirfd, std::string_view path)
 {
+    if (!initialized_ || !vfs_)
+        return Status::not_initialized("POSIX service not initialized");
     if (path.empty())
-    {
         return Status::not_found("empty pathname");
-    }
-    if (path[0] == '/')
+    fs::ResolveContext context{.credentials = credentials(), .check_search = true};
+    if (path.front() == '/')
+        return context;
+    if (dirfd == at_FDCWD)
     {
-        return path;
-    }
-    auto cwd = current_directory();
-    if (!cwd)
-        return cwd.status();
-    normalized_path_.clear();
-    if (auto status = normalized_path_.append(cwd.value()); !status.ok())
-    {
-        return status;
-    }
-    if (normalized_path_.view() != "/" && normalized_path_.view().back() != '/')
-    {
-        if (auto status = normalized_path_.append('/'); !status.ok())
-        {
-            return status;
-        }
-    }
-    if (auto status = normalized_path_.append(path); !status.ok())
-    {
-        return status;
-    }
-    return normalized_path_.view();
-}
-
-Result<std::string_view> PosixService::resolve_path(Fd dirfd, std::string_view path)
-{
-    if (path.empty())
-    {
-        return Status::not_found("empty pathname");
-    }
-    if (path[0] == '/' || dirfd == at_FDCWD)
-    {
-        return normalize_path(path);
+        context.start = {resources().cwd_node, resources().cwd_mount_id};
+        return context;
     }
     auto *entry = descriptor(dirfd);
-    if (entry == nullptr || !entry->used || entry->node == nullptr)
+    if (!entry || !entry->used || !entry->node)
         return Status::bad_descriptor("bad directory file descriptor");
-    if (entry->node->metadata().type != fs::NodeType::directory)
+    auto metadata = entry->node->query_metadata();
+    if (!metadata)
+        return metadata.status();
+    if (metadata.value().type != fs::NodeType::directory)
         return Status::not_directory("file descriptor is not a directory");
-    auto directory = vfs_->directory_path(*entry->node, entry->mount_id);
-    if (!directory)
-        return directory.status();
-    normalized_path_.clear();
-    if (auto status = normalized_path_.append(directory.value().view()); !status.ok())
-    {
-        return status;
-    }
-    if (normalized_path_.view() != "/" && normalized_path_.view().back() != '/')
-    {
-        if (auto status = normalized_path_.append('/'); !status.ok())
-        {
-            return status;
-        }
-    }
-    if (auto status = normalized_path_.append(path); !status.ok())
-    {
-        return status;
-    }
-    return normalized_path_.view();
+    context.start = {entry->node, entry->mount_id};
+    return context;
+}
+
+Result<fs::PathReference> PosixService::resolve_node(Fd dirfd, std::string_view path, fs::FinalComponent policy)
+{
+    auto context = path_context(dirfd, path);
+    if (!context)
+        return context.status();
+    return vfs_->resolve(context.value(), path, policy);
 }
 
 Status PosixService::copy_descriptor(Fd source, Fd target, u32 flags)

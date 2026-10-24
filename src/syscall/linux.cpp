@@ -16,6 +16,18 @@ i64 ErrnoMapper::errno_for(Status status)
 {
     switch (status.code())
     {
+    case StatusCode::not_terminal:
+        return 25;
+    case StatusCode::no_process:
+        return 3;
+    case StatusCode::name_too_long:
+        return 36;
+    case StatusCode::message_size:
+        return 90;
+    case StatusCode::process_file_limit:
+        return 24;
+    case StatusCode::system_file_limit:
+        return 23;
     case StatusCode::cross_device:
         return 18;
     case StatusCode::not_directory:
@@ -24,6 +36,8 @@ i64 ErrnoMapper::errno_for(Status status)
         return 21;
     case StatusCode::not_empty:
         return 39;
+    case StatusCode::too_many_symlinks:
+        return 40;
     case StatusCode::link_limit:
         return 31;
     case StatusCode::no_space:

@@ -17,13 +17,14 @@ usize align_up(usize value, usize alignment)
 ClockTime PosixService::clock_gettime() const
 {
     const auto ticks = monotonic_ticks_;
-    return ClockTime{.seconds = static_cast<i64>(ticks / 1000),
-                     .nanoseconds = static_cast<i64>((ticks % 1000) * 1000000)};
+    return ClockTime{.seconds = static_cast<i64>(ticks / 1000000000),
+                     .nanoseconds = static_cast<i64>(ticks % 1000000000)};
 }
 
 ClockTime PosixService::clock_getres() const
 {
-    return ClockTime{.seconds = 0, .nanoseconds = 1000000};
+    return ClockTime{.seconds = static_cast<i64>(clock_resolution_ / 1000000000),
+                     .nanoseconds = static_cast<i64>(clock_resolution_ % 1000000000)};
 }
 
 Status PosixService::nanosleep(ClockTime requested, ClockTime *remaining)
@@ -32,12 +33,16 @@ Status PosixService::nanosleep(ClockTime requested, ClockTime *remaining)
     {
         return Status::invalid_argument("invalid nanosleep interval");
     }
+    sched::DeadlineWait deadline;
+    auto armed = deadline.arm(monotonic_ticks_, requested.seconds, requested.nanoseconds, false);
+    if (!armed)
+        return armed.status();
     if (remaining != nullptr)
     {
         *remaining = {};
     }
-    monotonic_ticks_ +=
-        static_cast<u64>(requested.seconds) * 1000u + static_cast<u64>((requested.nanoseconds + 999999) / 1000000);
+    // Trusted model operation; native sleep uses a scheduler-owned deadline.
+    monotonic_ticks_ = deadline.deadline();
     return Status::success();
 }
 
@@ -196,19 +201,6 @@ Result<i64> PosixService::futex(uptr user_address, u32 operation, u32)
     default:
         return Status::unsupported("futex operation is not implemented");
     }
-}
-
-Result<usize> PosixService::getrandom(std::span<std::byte> out)
-{
-    u64 state = 0x9e3779b97f4a7c15ull ^ monotonic_ticks_;
-    for (usize i = 0; i < out.size(); ++i)
-    {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        out[i] = static_cast<std::byte>(state & 0xffu);
-    }
-    return out.size();
 }
 
 Status PosixService::set_tid_address(uptr address)
