@@ -83,11 +83,22 @@ Status sweep_usable(std::span<const MemoryRegion> regions, usize page_size, Emit
     return Status::success();
 }
 
+// Branch-based search: several profiles have no count-trailing-zeros
+// instruction and the libgcc fallback does not link into every kernel model.
 [[nodiscard]] usize lowest_clear_bit(u64 bits)
 {
-    const u64 clear = ~bits;
-    const auto low = static_cast<u32>(clear);
-    return low != 0 ? static_cast<usize>(__builtin_ctz(low)) : 32 + static_cast<usize>(__builtin_ctz(static_cast<u32>(clear >> 32)));
+    u64 clear = ~bits;
+    usize index = 0;
+    for (usize width = 32; width != 0; width /= 2)
+    {
+        const u64 mask = (u64{1} << width) - 1;
+        if ((clear & mask) == 0)
+        {
+            clear >>= width;
+            index += width;
+        }
+    }
+    return index;
 }
 
 struct SweepTotals

@@ -276,7 +276,7 @@ void pressure(Kernel &kernel)
     }
     // New runtime services and mapping metadata have their own reserve. Hold
     // the unused remainder so this still tests complete physical exhaustion.
-    std::array<native::NativePagePool::Lease, native::NativePagePool::capacity> reserve_holds{};
+    std::array<native::NativePagePool::Lease, native::hosted_page_count> reserve_holds{};
     const auto unused_reserve = native::page_pool.free_count();
     for (usize i = 0; i < unused_reserve; ++i)
     {

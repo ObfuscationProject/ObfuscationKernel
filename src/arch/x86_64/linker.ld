@@ -41,7 +41,9 @@ SECTIONS
 
     .bootstrap_bss ALIGN(4K) (NOLOAD) :
     {
+        _kernel_bootstrap_start = .;
         *(.bootstrap_bss)
+        _kernel_bootstrap_end = .;
     }
 
     _kernel_end = .;

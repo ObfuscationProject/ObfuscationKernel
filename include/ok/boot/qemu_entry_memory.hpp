@@ -22,8 +22,6 @@ Status qemu_entry_memory_plan(const FirmwareMemory &source, PhysicalRange linked
 {
     using enum arch::Architecture;
     using namespace qualified_detail;
-    if constexpr (A == loongarch64 || A == mips || A == mips64)
-        return Status::unsupported("profile has no qualified firmware map contract");
     if (source.source.architecture != A || !valid_range(linked_image) || !maximum_pages ||
         maximum_pages > ~u64{0}/4096 || extra_objects.size() > max_loaded_reservations-2)
         return Status::invalid_argument("entry memory identity, image or capacity invalid");
@@ -69,6 +67,27 @@ Status qemu_entry_memory_plan(const FirmwareMemory &source, PhysicalRange linked
             linked_image.address != 0x80000000)
             return Status::invalid_argument("entry does not match RISC-V no-firmware ELF contract");
         policy.accessible = {0x80000000,0x20000000};
+        policy.address_ceiling = 0x100000000ULL;
+    }
+    else if constexpr (A == loongarch64)
+    {
+        // QEMU virt enters in direct-address mode with the image in high RAM.
+        if (source.source.protocol != BootProtocol::loongarch64_efi_fdt || source.source.format != FirmwareFormat::fdt ||
+            linked_image.address != 0x90000000)
+            return Status::invalid_argument("entry does not match LoongArch EFI/FDT contract");
+        policy.accessible = {0, u64{1} << 48};
+        policy.address_ceiling = u64{1} << 48;
+        // The command line is loader data outside the decoded tables.
+        if (auto status = candidate.reservations.push_back(
+                {{source.source.arguments[1] & ~u64{4095}, 4096}, false}); !status) return status;
+    }
+    else if constexpr (A == mips || A == mips64)
+    {
+        // Physical image bounds; the kernel runs from their KSEG0 alias.
+        if (source.source.protocol != BootProtocol::malta_prom || source.source.format != FirmwareFormat::board ||
+            linked_image.address != 0x10000)
+            return Status::invalid_argument("entry does not match Malta PROM board contract");
+        policy.accessible = {0, malta_kseg_size};
         policy.address_ceiling = 0x100000000ULL;
     }
     else if constexpr (A == ppc)

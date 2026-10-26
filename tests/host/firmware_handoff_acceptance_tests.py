@@ -29,7 +29,20 @@ class Acceptance(unittest.TestCase):
     def test_failure(self):self.bad(self.data('x86_64')+b'FIRMWARE_FAIL injected\n')
     def test_wrong_source(self):self.bad(self.data('aarch64').replace(b'values=0x0000000048000000',b'values=0x0000000049000000'),'aarch64')
     def test_wrong_ram(self):self.bad(self.data('rv32').replace(b'FDT_RAM base=0x0000000080000000',b'FDT_RAM base=0x0000000040000000'),'rv32')
-    def test_unsupported_read(self):self.bad(self.data('mips')+b'FIRMWARE_READ address=0x0000000080002000 size=0x0000000000000028\n','mips')
+    def test_loongarch64_efi(self):
+        data=self.data('loongarch64-efi');run_native.acceptance('loongarch64',data)
+        for old,new in [(b'values=0x0000000000000001',b'values=0x0000000000000002'),(b'FIRMWARE_LOADER base=0x0000000000010200',b'FIRMWARE_LOADER base=0x0000000000010208'),
+                        (b'FDT_RAM base=0x0000000080000000',b'FDT_RAM base=0x0000000090000000'),(b'reads=0x0000000000000004',b'reads=0x0000000000000003')]:
+            with self.subTest(old=old),self.assertRaises(ValueError):run_native.acceptance('loongarch64',data.replace(old,new))
+        with self.assertRaises(ValueError):run_native.acceptance('loongarch64',data.replace(b'FIRMWARE_LOADER base=0x0000000000000200 size=0x0000000000000078\n',b''))
+    def test_malta_board(self):
+        for arch in ('mips','mips64'):
+            data=self.data(arch)
+            for old,new in [(b'reported_total=0x0000000010000000',b'reported_total=0x0000000020000000'),(b'BOARD_RAM base=0x0000000000000000 size=0x0000000010000000',b'BOARD_RAM base=0x0000000000000000 size=0x0000000008000000'),
+                            (b'BOARD_RESERVED base=0x0000000000000000',b'BOARD_RESERVED base=0x0000000000001000'),(b'FIRMWARE_STORAGE base=0x0000000000002000',b'FIRMWARE_STORAGE base=0x0000000000003000')]:
+                with self.subTest(arch=arch,old=old),self.assertRaises(ValueError):run_native.acceptance(arch,data.replace(old,new))
+            self.bad(data+b'BOARD_DEVICE base=0x0000000000000000 size=0x0000000000001000\n',arch)
+    def test_failed_read_publishes_nothing(self):self.bad(self.data('loongarch64')+b'FIRMWARE_READ address=0x0000000000000200 size=0x0000000000000078\n','loongarch64')
     def test_wrong_order(self):
         lines=self.data('x86_64').splitlines(keepends=True);result=next(l for l in lines if l.startswith(b'FIRMWARE_RESULT'));lines.remove(result);self.bad(result+b''.join(lines))
     def test_no_false_high(self):

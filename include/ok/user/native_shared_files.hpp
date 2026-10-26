@@ -427,7 +427,7 @@ class SharedMemoryFiles final : private NonCopyable
     }
     [[nodiscard]] bool valid_frame(const memory::PhysicalFrame &frame) const
     {
-        const auto *actual = pool_->handle(frame.address);
+        const auto actual = pool_->handle(frame.address);
         return actual && same_frame(frame, *actual) && pool_->reference_count(frame.address);
     }
     [[nodiscard]] Location locate(const memory::PhysicalFrame &frame) const
@@ -473,7 +473,7 @@ class SharedMemoryFiles final : private NonCopyable
     NativePagePool *pool_{};
     std::array<File, capacity> files_{};
     std::array<u64, capacity> generations_{};
-    std::array<Cell, NativePagePool::capacity> ledger_{};
+    std::array<Cell, capacity * max_pages> ledger_{};
     u64 size_reservations_{};
     fs::IdentitySequence<> inode_sequence_{};
     Status first_cleanup_failure_{};

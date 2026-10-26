@@ -35,18 +35,19 @@ void entry_policy_test()
     using enum arch::Architecture;
     FirmwareMemory source;
     source.source.architecture = A;
-    source.source.format = (A == i386 || A == x86_64) ? FirmwareFormat::e820 : FirmwareFormat::fdt;
+    constexpr bool malta = A == mips || A == mips64;
+    source.source.format = (A == i386 || A == x86_64) ? FirmwareFormat::e820 : malta ? FirmwareFormat::board : FirmwareFormat::fdt;
     source.source.protocol = (A == i386 || A == x86_64) ? BootProtocol::bios_e820 :
-        A == arm32 ? BootProtocol::arm32_linux_image : A == aarch64 ? BootProtocol::aarch64_linux_image : A == ppc ? BootProtocol::epapr : BootProtocol::riscv_fdt;
+        A == arm32 ? BootProtocol::arm32_linux_image : A == aarch64 ? BootProtocol::aarch64_linux_image : A == ppc ? BootProtocol::epapr :
+        A == loongarch64 ? BootProtocol::loongarch64_efi_fdt : malta ? BootProtocol::malta_prom : BootProtocol::riscv_fdt;
     source.source.initial_mapping_end = 0x4000000;
-    constexpr u64 image_start = (A == i386 || A == x86_64) ? 0x100000 : A == arm32 ? 0x40010000 : A == aarch64 ? 0x40080000 : A == ppc ? 0x1000000 : 0x80000000;
+    constexpr u64 image_start = (A == i386 || A == x86_64) ? 0x100000 : A == arm32 ? 0x40010000 : A == aarch64 ? 0x40080000 :
+        A == ppc ? 0x1000000 : A == loongarch64 ? 0x90000000 : malta ? 0x10000 : 0x80000000;
     QemuEntryMemoryPlan plan;
     const auto result = qemu_entry_memory_plan<A>(source,{image_start,0x180000},{},1024,plan);
-    if constexpr (A == loongarch64 || A == mips || A == mips64) {
-        CHECK(!result && result.code() == StatusCode::unsupported);
-    } else {
+    {
         CHECK(result && plan.policy.maximum_pages == 1024);
-        CHECK(plan.reservations.size() == (A == rv32 || A == rv64 ? 1 : 2));
+        CHECK(plan.reservations.size() == (A == rv32 || A == rv64 || malta ? 1 : 2));
         CHECK(plan.reservations[plan.reservations.size()-1].range.address == image_start);
         CHECK(!qemu_entry_memory_plan<A>(source,{image_start+1,0x180000},{},1024,plan));
         CHECK(!qemu_entry_memory_plan<A>(source,{image_start,0x180000},{},0,plan));

@@ -59,13 +59,18 @@ The map must contain only RAM the supervisor can already access.
 
 ## Boot map and VM scope
 
-`Kernel::boot` checks that a supplied map fits `KernelConfig::memory_map` before
-constructing its span. The current zero-region fallback is a synthetic 64 MiB
-map beginning at 1 MiB; `kernel_main` still supplies no discovered firmware map.
-That fallback is usable only for bring-up bookkeeping. It does not reserve the
-kernel image, boot stack, page tables, firmware or devices, and its addresses
-must not back new hardware mappings or DMA. Real E820/FDT/ACPI/platform RAM and
-reservation discovery is an outstanding native boot gate on each architecture.
+`kernel_main` discovers the boot memory map once, before translations change,
+and passes it to `Kernel::boot` through `KernelConfig::physical_memory`. All ten
+profiles have a loader contract: BIOS E820 (x86), FDT (aarch64, arm32, RISC-V,
+PPC), a UEFI system table naming an FDT (LoongArch) and the Malta board table
+sized by the PROM environment (MIPS). Firmware reservations, the loader tables,
+the linked image, the boot stack and page tables, page zero and the platform
+device windows are reserved explicitly; RAM outside the profile's managed window
+is recorded as excluded. See [discovered boot memory map](../qualification/BOOT_MEMORY_MAP.md).
+
+A freestanding `Kernel::boot` without a product-grade map fails with
+`not_found`. The synthetic 64 MiB map starting at 1 MiB exists only in hosted
+model builds, whose frame addresses are never dereferenced.
 
 `LinearAddressSpace`, `PageTable` and `UserAddressSpace` in this module are
 software mapping/copy models used by debug tests. `TranslationMode` records the
@@ -74,9 +79,10 @@ activate a hardware address space. Architecture page-table operations should use
 constrained templates/static dispatch rather than a virtual interface solely to
 share hot-path implementation.
 
-The native user runtime also provides a [bounded anonymous VM slice](../qualification/NATIVE_VM.md)
-using its separate linker-reserved backing arena. Its hardware mappings and
-acceptance tests are distinct from this module's software VM models.
+The native user runtime also provides a [bounded anonymous VM slice](../qualification/NATIVE_VM.md).
+In kernel builds its page pool draws from the kernel allocator; hosted model
+builds keep a host-backed arena. Its hardware mappings and acceptance tests are
+distinct from this module's software VM models.
 
 ## Verification
 

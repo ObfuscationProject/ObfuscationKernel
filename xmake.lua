@@ -113,7 +113,7 @@ local function systoolchain_qemu(target, arch)
 end
 
 function add_ok_kernel_sources(include_kernel_main)
-    add_files("src/boot/raw_handoff.cpp", "src/boot/fdt.cpp")
+    add_files("src/boot/raw_handoff.cpp", "src/boot/fdt.cpp", "src/boot/boot_memory.cpp")
     add_files("src/core/*.cpp")
     add_files("src/rescue/*.cpp")
     add_files("src/rescue/shell/*.cpp")

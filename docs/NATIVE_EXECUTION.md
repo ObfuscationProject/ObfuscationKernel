@@ -55,10 +55,14 @@ is represented separately as a signal status.
 The loader accepts static ELF32/ELF64 ET_EXEC files with the native class, byte order and architecture with separate
 read/execute and writable segments. It builds argc/argv/envp and a small auxiliary
 vector on an aligned user stack with a guard page. W+X segments, malformed ranges,
-non-executable entry points and oversized images are rejected. Current bounds:
-16 address spaces, 128 pages per process, a 4 MiB shared backing pool, a 128 KiB
-ELF input buffer, 64 KiB stacks, and up to 16 argument/environment strings each.
-These are bring-up limits, not a general physical-memory allocator or COW VM.
+non-executable entry points and oversized images are rejected. User and
+kernel-object pages come from the kernel frame allocator over the discovered
+boot memory map (see [memory](modules/memory.md)); the page pool has a fixed
+kernel-object reserve and a user-page quota of every frame free at activation.
+Remaining bounds: 16 address spaces and 1024 mapping records per address space
+in the execution backends, a 128 KiB ELF input buffer, 64 KiB stacks, and up to
+16 argument/environment strings each. Per-process quotas and COW fork are not
+implemented yet.
 
 ## Distribution and boot archive
 

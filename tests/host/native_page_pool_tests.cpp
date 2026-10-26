@@ -21,7 +21,7 @@ void original_registry_checks()
     for (auto &address : addresses)
     {
         auto allocated=pool.allocate();CHECK(allocated);address=allocated.value();
-        const auto *handle=pool.handle(address);
+        const auto handle=pool.handle(address);
         CHECK(handle && handle->owner==&frames && handle->generation!=0 && pool.owns(address));
     }
     CHECK(!pool.allocate() && pool.used_count()==1024 && pool.peak_count()==1024);
@@ -94,7 +94,7 @@ void object_reserve_and_lease_checks()
         for(auto user:users) CHECK(user!=address);
         for(usize previous=0;previous<i;++previous) CHECK(leases[previous].bytes.data()!=lease.bytes.data());
         for(usize byte=0;byte<lease.bytes.size();++byte)lease.bytes[byte]=std::byte(i+1);
-        CHECK(!pool.owns(address) && pool.handle(address)==nullptr);
+        CHECK(!pool.owns(address) && !pool.handle(address));
         CHECK(!pool.release(address) && !pool.pin(address) && !pool.unpin(address));
         CHECK(!other.release_kernel_page(lease));
     }
@@ -170,7 +170,7 @@ void dropped_and_overwritten_leases_remain_auditable()
                                       memory::RegionType::usable};
     CHECK(frames.initialize({&region, 1}, NativePagePool::page_size, frames_metadata.bytes));
     CHECK(pool.activate(frames, NativePagePool::Source::linker_reserved, 2));
-    usize dropped_index = NativePagePool::capacity;
+    usize dropped_index = frames.total_frames();
     {
         auto first = pool.allocate_kernel_page();
         auto second = pool.allocate_kernel_page();
@@ -182,13 +182,13 @@ void dropped_and_overwritten_leases_remain_auditable()
         const auto first_address = reinterpret_cast<uptr>(first.value().bytes.data());
         first.value() = std::move(second.value());
         CHECK(!second.value().bytes.data() && pool.quarantined_kernel_page_count() == 1);
-        for (usize index = 0; index < NativePagePool::capacity; ++index)
-            if (const auto *frame = pool.quarantined_kernel_page(index))
+        for (usize index = 0; index < frames.total_frames(); ++index)
+            if (const auto frame = pool.quarantined_kernel_page(index))
             {
                 CHECK(frame->address == first_address && frame->owner == &frames);
                 dropped_index = index;
             }
-        CHECK(dropped_index < NativePagePool::capacity);
+        CHECK(dropped_index < frames.total_frames());
         // The remaining active lease is retained automatically on scope exit.
     }
     CHECK(pool.object_count() == 2 && pool.quarantined_kernel_page_count() == 2);
@@ -251,16 +251,18 @@ void failed_final_release_preserves_retry_state()
     auto page = pool.allocate();
     CHECK(page);
     const auto address = page.value();
-    // Corrupt only the retained allocator generation to make final release
-    // fail; restoring it models a retryable allocator rejection.
-    auto *handle = const_cast<memory::PhysicalFrame *>(pool.handle(address));
-    CHECK(handle);
-    const auto generation = handle->generation;
-    ++handle->generation;
-    CHECK(!pool.release(address));
+    // The registry keeps no copy of the handle: its state is the allocator's
+    // descriptor. A descriptor that no longer names this pool's kind refuses
+    // release and leaves accounting intact; restoring it allows the retry.
+    const auto owner = *pool.handle(address);
+    auto *descriptor = frames.descriptor(owner);
+    CHECK(descriptor);
+    const auto kind = descriptor->kind;
+    descriptor->kind = static_cast<u8>(memory::PageKind::native_object);
+    CHECK(!pool.release(address) && !pool.release_reference(owner));
+    CHECK(!pool.owns(address) && pool.used_count() == 1 && pool.free_count() == 0 && pool.pending_count() == 0);
+    descriptor->kind = kind;
     CHECK(pool.owns(address) && pool.reference_count(address) == 1);
-    CHECK(pool.used_count() == 1 && pool.free_count() == 0 && pool.pending_count() == 0);
-    handle->generation = generation;
     CHECK(pool.release(address));
     CHECK(pool.used_count() == 0 && pool.free_count() == 1);
 
@@ -268,15 +270,13 @@ void failed_final_release_preserves_retry_state()
     CHECK(page && page.value() == address);
     CHECK(pool.pin(address) && pool.release(address));
     CHECK(pool.reference_count(address) == 0 && pool.pending_count() == 1 && pool.pinned_count() == 1);
-    handle = const_cast<memory::PhysicalFrame *>(pool.handle(address));
-    CHECK(handle);
-    const auto pinned_generation = handle->generation;
-    ++handle->generation;
-    CHECK(!pool.unpin(address));
+    const auto pinned = *pool.handle(address);
+    auto stale = pinned;
+    ++stale.generation;
+    CHECK(!pool.unpin(stale));
     CHECK(pool.owns(address) && pool.reference_count(address) == 0);
     CHECK(pool.used_count() == 1 && pool.free_count() == 0);
     CHECK(pool.pending_count() == 1 && pool.pinned_count() == 1);
-    handle->generation = pinned_generation;
     CHECK(pool.unpin(address));
     CHECK(pool.used_count() == 0 && pool.free_count() == 1);
     CHECK(pool.pending_count() == 0 && pool.pinned_count() == 0);
@@ -310,6 +310,39 @@ void exact_generation_wait_pin_survives_mapping_retirement()
     CHECK(pool.release(address) && pool.used_count() == 0);
 }
 }
+void shared_allocator_form_respects_other_owners()
+{
+    alignas(NativePagePool::page_size) static std::array<std::byte, 8 * NativePagePool::page_size> storage{};
+    static memory::FrameAllocator frames;
+    static memory::FrameMetadataStorage<8> frames_metadata;
+    static NativePagePool pool;
+    const memory::MemoryRegion region{reinterpret_cast<uptr>(storage.data()), storage.size(),
+                                      memory::RegionType::usable};
+    CHECK(frames.initialize({&region, 1}, NativePagePool::page_size, frames_metadata.bytes));
+    // Another kernel owner already holds a frame; the exclusive form refuses.
+    memory::ChargeAccount kernel_owner;
+    auto foreign = frames.allocate(kernel_owner);
+    CHECK(foreign && !pool.activate(frames, NativePagePool::Source::qualified_firmware, 1));
+    CHECK(!pool.activate(frames, NativePagePool::Source::qualified_firmware, 2, 7));
+    CHECK(pool.activate(frames, NativePagePool::Source::qualified_firmware, 2, 3));
+    CHECK(pool.kernel_reserve_count() == 2 && pool.user_capacity_count() == 3 && pool.total_count() == 8);
+    CHECK(!pool.owns(foreign.value().address) && !pool.valid(foreign.value()) && !pool.pin(foreign.value()));
+    CHECK(!pool.release(foreign.value().address) && frames.live(foreign.value()));
+    std::array<uptr, 3> users{};
+    for (auto &address : users)
+    {
+        auto page = pool.allocate();
+        CHECK(page && page.value() != foreign.value().address);
+        address = page.value();
+    }
+    CHECK(pool.allocate().status().code() == StatusCode::no_memory && frames.free_frames() == 4);
+    auto object = pool.allocate_kernel_page();
+    CHECK(object && pool.object_count() == 1 && pool.free_count() == 3);
+    // The other owner's allocation and release do not disturb pool state.
+    CHECK(frames.release(foreign.value(), kernel_owner) && pool.used_count() == 4);
+    for (auto address : users) CHECK(pool.release(address));
+    CHECK(pool.release_kernel_page(object.value()) && pool.used_count() == 0 && frames.free_frames() == 8);
+}
 int main()
 {
     original_registry_checks();object_reserve_and_lease_checks();
@@ -317,5 +350,6 @@ int main()
     shared_process_references_are_distinct_from_retirement_pins();
     failed_final_release_preserves_retry_state();
     exact_generation_wait_pin_survives_mapping_retirement();
+    shared_allocator_form_respects_other_owners();
     std::puts("PASS native page provider: user/object ownership, opaque lease generations, exact backing, reserve quota, accounting and retained quarantine; hosted=1 guest=0 smp=0");
 }

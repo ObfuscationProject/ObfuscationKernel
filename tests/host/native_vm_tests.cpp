@@ -639,7 +639,7 @@ void check_complete_runtime_purpose_budget()
         object = std::move(acquired.value());
     }
     CHECK(native::page_pool.object_count() == native::kernel_reserve_pages);
-    std::array<uptr, native::NativePagePool::capacity> users{};
+    std::array<uptr, native::hosted_page_count> users{};
     const usize user_limit = native::page_pool.user_capacity_count();
     for (usize i = 0; i < user_limit; ++i)
     {

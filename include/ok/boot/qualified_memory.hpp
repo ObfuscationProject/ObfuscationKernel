@@ -148,10 +148,27 @@ inline Status qualify_boot_memory(const FirmwareMemory &source, std::span<const 
         for (usize i = 0; i < source.fdt.reservation_count; ++i)
             if (auto status = append(reserved, source.fdt.reservations[i].range); !status) return status;
     }
+    else if (source.source.format == FirmwareFormat::board)
+    {
+        const auto &board = source.board;
+        if (!board.ram_count || board.ram_count > board.ram.size() || board.reserved_count > board.reserved.size() ||
+            board.device_count > board.devices.size())
+            return Status::invalid_argument("invalid owned board table counts");
+        for (usize i = 0; i < board.ram_count; ++i)
+            if (auto status = append(usable, board.ram[i]); !status) return status;
+        for (usize i = 0; i < board.reserved_count; ++i)
+            if (auto status = append(reserved, board.reserved[i]); !status) return status;
+        for (usize i = 0; i < board.device_count; ++i)
+            if (auto status = append(reserved, board.devices[i]); !status) return status;
+    }
     else return Status::unsupported("boot memory source has no supported format");
     if (auto status = canonicalize(usable); !status) return status;
     // Source storage is live firmware data, not just the decoded record bytes.
     if (auto status = append(reserved, source.source_storage); !status) return status;
+    if (source.loader_storage_count > source.loader_storage.size())
+        return Status::invalid_argument("invalid loader table count");
+    for (usize i = 0; i < source.loader_storage_count; ++i)
+        if (auto status = append(reserved, source.loader_storage[i]); !status) return status;
     for (const auto &object : loaded)
     {
         if (!valid_range(object.range) || (object.require_usable_ram && !contains(usable, object.range)))

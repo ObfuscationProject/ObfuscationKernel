@@ -109,8 +109,8 @@ void failed_final_release_keeps_canonical_tokens()
     CHECK(failed_pool.object_count() == 2 && failed_pool.quarantined_kernel_page_count() == 2);
     CHECK(failed_frames.free_frames() == 0 && !failed_pool.allocate_kernel_page());
     usize witnessed = 0;
-    for (usize index = 0; index < NativePagePool::capacity; ++index)
-        if (const auto *frame = failed_pool.quarantined_kernel_page(index))
+    for (usize index = 0; index < failed_frames.total_frames(); ++index)
+        if (const auto frame = failed_pool.quarantined_kernel_page(index))
         {
             CHECK(frame->owner == &failed_frames && frame->generation && frame->index == index);
             ++witnessed;

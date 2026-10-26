@@ -203,7 +203,7 @@ int main()
         CHECK(f.store.ledger().retained_frames == 2 && !f.store.ledger().reserved_cells);
         CHECK(f.pool.user_count() == 2);
         usize seen{};
-        for (usize index = 0; index < NativePagePool::capacity; ++index)
+        for (usize index = 0; index < SharedMemoryFiles::capacity * SharedMemoryFiles::max_pages; ++index)
             if (const auto *frame = f.store.retained_frame(index))
             {
                 CHECK(frame->owner == &f.frames && frame->generation && f.pool.reference_count(frame->address) == 1);

@@ -60,6 +60,15 @@ struct PageDescriptor
 };
 static_assert(sizeof(PageDescriptor) == 16);
 
+// PageDescriptor::kind values of the owners that share one allocator. An owner
+// only interprets descriptors of its own kind.
+enum class PageKind : u8
+{
+    unowned = 0,
+    native_user = 1,
+    native_object = 2,
+};
+
 inline constexpr usize max_virtual_mappings = 256;
 inline constexpr usize vm_test_page_size = 4096;
 inline constexpr usize max_user_pages = 32;

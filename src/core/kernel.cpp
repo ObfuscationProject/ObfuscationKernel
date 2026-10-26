@@ -13,12 +13,27 @@ namespace ok
 namespace
 {
 
-std::span<const memory::MemoryRegion> memory_map_span(const KernelConfig &config)
-{
-    return {config.memory_map.data(), config.memory_region_count};
-}
+#ifndef OK_KERNEL_FREESTANDING
+// Hosted model builds only: bookkeeping over addresses that are never touched.
+constexpr memory::MemoryRegion synthetic_memory{
+    .base = 0x0010'0000, .size = 64 * 1024 * 1024, .type = memory::RegionType::usable};
+memory::FrameMetadataStorage<synthetic_memory.size / 4096> synthetic_frame_metadata;
+#endif
 
-memory::FrameMetadataStorage<64 * 1024 * 1024 / 4096, 8> kernel_frame_metadata;
+Status initialize_memory(memory::MemoryManager &memory, const KernelConfig &config, usize page_size)
+{
+    if (config.physical_memory != nullptr)
+    {
+        if (!config.physical_memory->product_grade())
+            return Status::invalid_argument("boot memory map is synthetic or not normalized");
+        return memory.initialize(*config.physical_memory, page_size, config.direct_map_offset);
+    }
+#ifdef OK_KERNEL_FREESTANDING
+    return Status::not_found("boot memory map is absent");
+#else
+    return memory.initialize({&synthetic_memory, 1}, page_size, synthetic_frame_metadata.bytes);
+#endif
+}
 
 driver::DisplayBackend display_backend_for_arch(arch::Architecture architecture)
 {
@@ -164,10 +179,6 @@ Status Kernel::boot(KernelConfig config)
     {
         return status;
     }
-    if (config.memory_region_count > config.memory_map.size())
-    {
-        return Status::invalid_argument("kernel memory map exceeds its region capacity");
-    }
     test_report_ = {};
     kernel_modules_ = {};
     static_cast<void>(gui_module_.stop());
@@ -182,15 +193,6 @@ Status Kernel::boot(KernelConfig config)
     kernel_tick_count_ = 0;
     task_manager_next_refresh_tick_ = 0;
     gui_mouse_left_down_ = false;
-    if (config.memory_region_count == 0)
-    {
-        // Bring-up bookkeeping only: native RAM discovery must replace this map
-        // before these frames can back hardware mappings or device DMA.
-        config.memory_map[0] =
-            memory::MemoryRegion{.base = 0x0010'0000, .size = 64 * 1024 * 1024, .type = memory::RegionType::usable};
-        config.memory_region_count = 1;
-    }
-
     config_ = config;
     arch_ = &arch::arch_operations(config_.architecture);
     memory_.set_translation_mode(config_.modes.memory);
@@ -231,8 +233,7 @@ Status Kernel::boot(KernelConfig config)
         return status;
     }
 
-    if (auto status = memory_.initialize(memory_map_span(config_), arch_->page_size(), kernel_frame_metadata.bytes);
-        !status.ok())
+    if (auto status = initialize_memory(memory_, config_, arch_->page_size()); !status.ok())
     {
         return status;
     }

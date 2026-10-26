@@ -83,7 +83,7 @@
 #include "native_syscall_restart_publication.hpp"
 #endif
 #include "ok/memory/object_pool.hpp"
-#include "ok/boot/qemu_process_memory.hpp"
+#include "ok/boot/boot_memory.hpp"
 #include "ok/abi/linux_exec.hpp"
 #if defined(__x86_64__)
 #include "ok/abi/linux_dynamic_exec_x86_64.hpp"
@@ -145,16 +145,17 @@ void copy_bytes(void *dst, const void *src, usize size)
         out[i] = in[i];
 }
 using Pages = MappingPages;
-constexpr usize page_count = NativePagePool::capacity;
 constexpr auto runtime_arch = arch::configured_architecture();
 #ifdef OK_KERNEL_FREESTANDING
-constexpr bool linker_pool_required = !boot::qemu_firmware_process_pool<runtime_arch>;
+constexpr bool linker_pool_required = false; // Frames come from the kernel allocator over discovered RAM.
 #else
 constexpr bool linker_pool_required = true; // Hosted backing, never firmware evidence.
 #endif
-alignas(4096) std::array<std::array<std::byte, hw::page_size>, linker_pool_required ? page_count : 0> physical_pages;
+// Hosted models only: a host-backed arena with its own allocator.
+constexpr usize hosted_page_count = 1024;
+alignas(4096) std::array<std::array<std::byte, hw::page_size>, linker_pool_required ? hosted_page_count : 0> physical_pages;
 memory::FrameAllocator native_frames;
-memory::FrameMetadataStorage<page_count, 64> native_frame_metadata;
+memory::FrameMetadataStorage<linker_pool_required ? hosted_page_count : 1> native_frame_metadata;
 NativePagePool page_pool;
 SharedMemoryFiles shared_files;
 #ifdef OK_PRIVATE_SIGNAL_HAS_TRAMPOLINE
@@ -171,11 +172,8 @@ VfsStatContinuation<lu::configured_native_profile()> vfs_continuations{entry_sta
 SharedNativeCapture<lu::configured_native_profile()> shared_capture{entry_stacks};
 u64 entry_syscalls{}, entry_timers{}, entry_faults{}, entry_rejections{};
 #ifdef OK_KERNEL_FREESTANDING
-boot::FirmwareMemory firmware_workspace, firmware_memory;
-boot::QualifiedBootMemory qualified_workspace, qualified_memory;
 Status memory_preparation = Status::not_initialized("native memory not prepared at entry");
 bool memory_preparation_attempted{};
-extern "C" char _kernel_start[], _kernel_end[];
 #endif
 struct QuarantinedSpace
 {
@@ -365,7 +363,7 @@ struct PollWaitIndex
 };
 // This bounded index contains identities only; the records live in owned pages.
 std::array<PollWaitIndex, sched::max_processes> poll_waits{};
-Status activate_pool();
+Status activate_pool(Kernel *kernel = nullptr);
 void emit(std::string_view text);
 void emit_number(u64 value);
 
@@ -509,11 +507,11 @@ Status retire_linux_udp_receives(Kernel &kernel, sched::ProcessId pid,
 constexpr usize kernel_object_pages = poll_object_pages + futex_object_pages + pipe_read_object_pages + pipe_write_object_pages + pty_wait_object_pages + child_wait_object_pages + native_udp_receive_pages + linux_udp_receive_pages;
 // Aliases consume metadata records without another physical data frame. Bound
 // every published directory and one candidate independently of the data quota.
-static_assert(kernel_object_pages < NativePagePool::capacity);
+static_assert(kernel_object_pages < hosted_page_count);
 constexpr usize mapping_metadata_pages =
     (hw::max_address_spaces + 1) * (Pages::max_blocks + Pages::max_frame_blocks);
 constexpr usize kernel_reserve_pages = kernel_object_pages + mapping_metadata_pages;
-static_assert(kernel_reserve_pages < NativePagePool::capacity);
+static_assert(kernel_reserve_pages < hosted_page_count);
 #if __SIZEOF_POINTER__ == 8
 static_assert(Pages::records_per_block == 170 && Pages::frames_per_block == 128 && mapping_metadata_pages == 255);
 #else
@@ -894,7 +892,7 @@ Status retire_group_stacks(sched::ProcessControlBlock &process)
 }
 void emit_pool_stats()
 {
-    emit("\nOK_NATIVE_FRAMES version=2 source=");
+    emit("\nOK_NATIVE_FRAMES version=3 source=");
     emit(page_pool.source() == NativePagePool::Source::qualified_firmware ? "firmware" : "linker");
     emit(" used="); emit_number(page_pool.used_count());
     emit(" total="); emit_number(page_pool.total_count());
@@ -915,7 +913,7 @@ void emit_pool_stats()
     emit(" retained_frames="); emit_number(files.retained_frames);
     emit(" reserved_cells="); emit_number(files.reserved_cells); emit("\n");
 }
-Status activate_pool()
+Status activate_pool([[maybe_unused]] Kernel *kernel)
 {
     if (page_pool.source() != NativePagePool::Source::inactive)
         return Status::success();
@@ -923,9 +921,15 @@ Status activate_pool()
     if (!memory_preparation) return memory_preparation;
     if constexpr (!linker_pool_required)
     {
-        if (auto status = boot::initialize_qualified_frames(qualified_memory, native_frames, native_frame_metadata.bytes); !status)
-            return status;
-        return page_pool.activate(native_frames, NativePagePool::Source::qualified_firmware, kernel_reserve_pages);
+        if (!kernel) kernel = runtime_kernel;
+        if (!kernel) return Status::not_initialized("native page pool requires its kernel allocator");
+        // Shared with every other kernel owner: user pages may take what is
+        // free at activation outside the kernel-object reserve.
+        auto &frames = kernel->memory().frames();
+        if (frames.free_frames() <= kernel_reserve_pages)
+            return Status::no_memory("discovered RAM cannot hold the native kernel-object reserve");
+        return page_pool.activate(frames, NativePagePool::Source::qualified_firmware, kernel_reserve_pages,
+                                  frames.free_frames() - kernel_reserve_pages);
     }
 #endif
     const memory::MemoryRegion region{reinterpret_cast<uptr>(physical_pages.data()),sizeof(physical_pages),
@@ -4729,58 +4733,8 @@ Status prepare_memory()
 #ifdef OK_KERNEL_FREESTANDING
     if (memory_preparation_attempted) return memory_preparation;
     memory_preparation_attempted = true;
-    if constexpr (linker_pool_required)
-    {
-        memory_preparation = Status::success();
-        emit("OK_NATIVE_MEMORY stage=prepare source=linker reason=unsupported-firmware-profile limit=1024\n");
-    }
-    else
-    {
-        // The supported QEMU recipes have no separately loaded objects; the OS
-        // archive, extension and all NOLOAD reservations share these linker bounds.
-        const uptr first = reinterpret_cast<uptr>(_kernel_start), last = reinterpret_cast<uptr>(_kernel_end);
-        if constexpr (runtime_arch == arch::Architecture::arm32)
-        {
-            const auto &entry = boot::arm32_entry_state();
-            emit("OK_ARM32_ENTRY cpsr="); emit_hex(entry.cpsr);
-            emit(" sctlr="); emit_hex(entry.sctlr); emit(" mpidr="); emit_hex(entry.mpidr);
-            emit(" status="); emit(boot::valid_arm32_entry(entry) ? "pass\n" : "fail\n");
-            if (!boot::valid_arm32_entry(entry))
-            {
-                memory_preparation = Status::fault("ARM loader entry state rejected");
-                return memory_preparation;
-            }
-        }
-        boot::QemuProcessMemoryReader<runtime_arch> reader{boot::raw_boot_handoff().arguments[2]};
-        const auto discovery = boot::discover_firmware_memory<runtime_arch>(boot::raw_boot_handoff(),
-            boot::qemu_process_boot_protocol<runtime_arch>(),reader,firmware_workspace,firmware_memory);
-        memory_preparation = discovery.status;
-        if constexpr (runtime_arch == arch::Architecture::arm32)
-            if (memory_preparation)
-            {
-                emit("OK_NATIVE_MEMORY_SOURCE protocol=arm32-linux-image fdt=");
-                emit_hex(firmware_memory.source_storage.address); emit(" size=");
-                emit_hex(firmware_memory.source_storage.size); emit("\n");
-            }
-        boot::QemuEntryMemoryPlan plan;
-        if (memory_preparation && last <= first) memory_preparation = Status::fault("invalid final linker bounds");
-        if (memory_preparation) memory_preparation = boot::qemu_runtime_memory_plan<runtime_arch>(
-            firmware_memory,{first,last-first},{},page_count,plan);
-        if (memory_preparation) memory_preparation = boot::qualify_boot_memory(firmware_memory,
-            {plan.reservations.begin(),plan.reservations.size()},plan.policy,qualified_workspace,qualified_memory);
-        if (memory_preparation && qualified_memory.page_count() != page_count)
-            memory_preparation = Status::no_memory("insufficient qualified runtime frames");
-        emit("OK_NATIVE_MEMORY stage=prepare source=firmware status=");
-        emit(memory_preparation.ok() ? "pass" : "fail");
-        emit(" image_begin="); emit_hex(first); emit(" image_end="); emit_hex(last);
-        emit(" limit=1024\n");
-        if (memory_preparation)
-            for (auto range : qualified_memory.managed())
-            {
-                emit("OK_NATIVE_MEMORY_RANGE base="); emit_hex(range.address);
-                emit(" size="); emit_hex(range.size); emit("\n");
-            }
-    }
+    // Discovery belongs to kernel boot; the runtime only requires its result.
+    memory_preparation = boot::discover_kernel_memory(emit).status;
     return memory_preparation;
 #else
     return Status::unsupported("hosted tests do not discover firmware");
@@ -4823,7 +4777,7 @@ Status start(Kernel &kernel, fs::BootArchive archive)
     if (auto status = hw::initialize(); !status.ok())
         return status;
     // Allocation becomes possible only after supervisor mappings are established.
-    if (auto status = activate_pool(); !status) return status;
+    if (auto status = activate_pool(&kernel); !status) return status;
     if (auto status = shared_files.bind(page_pool); !status) return status;
     if (auto status = kernel.scheduler().set_shared_memory_files(shared_files); !status) return status;
     if (auto status = entry_stacks.activate(entry_stack_arena); !status) return status;

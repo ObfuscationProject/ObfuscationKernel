@@ -37,6 +37,11 @@ inline constexpr usize max_discovered_regions = 64;
 class PhysicalMemoryMap final : private NonCopyable
 {
   public:
+    void reset()
+    {
+        input_count_ = usable_count_ = 0;
+        normalized_ = false;
+    }
     Status add(MemoryRegion region, MapSource source);
     Status reserve(uptr base, usize size, RegionType type = RegionType::reserved);
     // Produces the usable ranges. Fails with overflow when more than

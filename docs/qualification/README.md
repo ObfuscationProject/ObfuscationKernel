@@ -13,6 +13,7 @@ live in the separate ObfuscationEvidence repository.
 | [ALLOCATED_EMPTY_RECOVERY_PREVIEW.md](ALLOCATED_EMPTY_RECOVERY_PREVIEW.md) | Private allocated-empty recovery preview |
 | [ALLOCATED_EMPTY_SESSION_PREVIEW.md](ALLOCATED_EMPTY_SESSION_PREVIEW.md) | Guarded allocated-empty Session preview |
 | [BOOT_MEMORY_HANDOFF.md](BOOT_MEMORY_HANDOFF.md) | Boot memory parsing and remaining handoff work |
+| [BOOT_MEMORY_MAP.md](BOOT_MEMORY_MAP.md) | Discovered boot memory map on ten profiles |
 | [CHECKED_CHILD_REAP.md](CHECKED_CHILD_REAP.md) | Checked child detachment and orphan reaping |
 | [CHECKED_VFS_CALLERS.md](CHECKED_VFS_CALLERS.md) | Checked filesystem callers candidate |
 | [EXT4_ALLOCATED_EMPTY_DATA.md](EXT4_ALLOCATED_EMPTY_DATA.md) | Private allocated-empty first-block planner |
