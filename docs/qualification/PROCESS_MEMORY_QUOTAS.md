@@ -8,7 +8,9 @@ the backend's 1024-record per-space mapping capacity.
 ## Contract
 
 - Charge: the process's mapped user pages. Native VM is eager, so every mapped
-  page is backed; a shared anonymous page counts for each process that maps it.
+  page is backed; a shared anonymous page counts for each process that maps it,
+  and so does a private page that copy-on-write fork still shares
+  ([NATIVE_COW_FORK](NATIVE_COW_FORK.md)).
   Mapping metadata blocks are kernel objects charged to the page pool's object
   reserve, not to the process.
 - Quota: `memory_limits.address_space.current / page_size` pages, admitted in

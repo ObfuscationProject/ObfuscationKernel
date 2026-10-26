@@ -92,6 +92,39 @@ void clone_and_relocation()
     CHECK(success_pool.object_count() == 0 && success_frames.free_frames() == 14);
 }
 
+alignas(4096) std::array<std::byte, 4 * 4096> replace_backing{};
+memory::FrameAllocator replace_frames;
+memory::FrameMetadataStorage<2048> replace_frames_metadata;
+NativePagePool replace_pool;
+
+void replace_keeps_address_and_token_pairing()
+{
+    const memory::MemoryRegion region{reinterpret_cast<uptr>(replace_backing.data()),
+        replace_backing.size(), memory::RegionType::usable};
+    CHECK(replace_frames.initialize({&region, 1}, 4096, replace_frames_metadata.bytes));
+    CHECK(replace_pool.activate(replace_frames, NativePagePool::Source::linker_reserved, 2));
+    auto original = replace_pool.allocate_frame();
+    auto copy = replace_pool.allocate_frame();
+    CHECK(original && copy);
+    MappingPages owner;
+    CHECK(owner.reserve(replace_pool, 1, true));
+    const auto page = arch::execution::user_begin;
+    CHECK(owner.push_back({page, original.value().address, arch::execution::page_read, 1}, original.value()));
+    const auto *published = owner.view().chunks[0].data();
+    // The address is fixed and the record must name its own token.
+    CHECK(!owner.replace(0, {page + 4096, copy.value().address, 3}, copy.value()));
+    CHECK(!owner.replace(0, {page, original.value().address, 3}, copy.value()));
+    CHECK(!owner.replace(1, {page, copy.value().address, 3}, copy.value()));
+    CHECK(owner[0].physical_address == original.value().address && owner[0].copy_on_write);
+    CHECK(owner.replace(0, {page, copy.value().address, 3}, copy.value()));
+    CHECK(&owner[0] == published && owner[0].flags == 3 && !owner[0].copy_on_write);
+    CHECK(owner.frame(0)->address == copy.value().address && owner.frame(0)->generation == copy.value().generation);
+    CHECK(replace_pool.release_reference(original.value()));
+    CHECK(!owner.replace(0, {page, original.value().address, 1}, original.value()));
+    CHECK(owner.clear() && replace_pool.release_reference(copy.value()));
+    CHECK(replace_pool.used_count() == 0);
+}
+
 void failed_final_release_keeps_canonical_tokens()
 {
     const memory::MemoryRegion region{reinterpret_cast<uptr>(failed_backing.data()),
@@ -123,6 +156,7 @@ int main()
 {
     block_boundary_failures();
     clone_and_relocation();
+    replace_keeps_address_and_token_pairing();
     failed_final_release_keeps_canonical_tokens();
-    std::puts("PASS native mapping metadata: seven block boundaries, fallible clone, stable view, unique relocation and retained failed-release tokens; hosted=1 guest=0");
+    std::puts("PASS native mapping metadata: seven block boundaries, fallible clone, in-place replacement, stable view, unique relocation and retained failed-release tokens; hosted=1 guest=0");
 }

@@ -68,7 +68,7 @@
 #endif
 #include "ok/user/native_select.hpp"
 #include "ok/user/native_pty_pair_dispatch.hpp"
-#include "ok/user/native_page_pool.hpp"
+#include "ok/user/native_copy_on_write.hpp"
 #include "ok/user/native_shared_files.hpp"
 #include "ok/abi/linux_futex_wake_operation.hpp"
 #include "ok/user/native_shared_files_sdk_profile.hpp"
@@ -912,6 +912,8 @@ void emit_pool_stats()
     emit(" retiring_files="); emit_number(files.retiring_files);
     emit(" retained_frames="); emit_number(files.retained_frames);
     emit(" reserved_cells="); emit_number(files.reserved_cells); emit("\n");
+    if (copy_on_write_fork) { emit("OK_NATIVE_COW version=1 shared="); emit_number(copy_on_write_stats.shared);
+        emit(" copied="); emit_number(copy_on_write_stats.copied); emit(" reused="); emit_number(copy_on_write_stats.reused); emit("\n"); }
 }
 Status activate_pool([[maybe_unused]] Kernel *kernel)
 {
@@ -996,6 +998,14 @@ bool same_space(const hw::AddressSpace &a, const hw::AddressSpace &b)
 {
     return a.root == b.root && a.slot == b.slot && a.generation == b.generation;
 }
+#ifdef OK_NATIVE_COW_FORK
+bool resolve_native_write(const hw::AddressSpace &space, uptr page) // Installed only after runtime_kernel.
+{
+    auto resolved = resolve_owner_write(runtime_kernel->scheduler().processes(), space, page, page_pool);
+    if (!resolved && resolved.status().code() != StatusCode::no_memory) runtime_failure = resolved.status();
+    return resolved && resolved.value();
+}
+#endif
 Status release_page_reference(const memory::PhysicalFrame &frame, bool &consumed)
 {
     consumed = false;
@@ -1401,12 +1411,12 @@ Status page_memory_map(const Pages &pages, sched::MemoryMap &map)
     for (usize first = 0; first < pages.size();)
     {
         usize last = first + 1;
-        while (last < pages.size() && pages[last].flags == pages[first].flags &&
+        while (last < pages.size() && intended_access(pages[last]) == intended_access(pages[first]) &&
                shared_pool_page(pages, pages[last]) == shared_pool_page(pages, pages[first]) &&
                pages[last].virtual_address == pages[last - 1].virtual_address + hw::page_size)
             ++last;
         if (auto status = map.add_area({pages[first].virtual_address, (last - first) * hw::page_size,
-                                      memory::page_user | pages[first].flags |
+                                      memory::page_user | intended_access(pages[first]) |
                                           (shared_pool_page(pages, pages[first]) ? static_cast<usize>(memory::page_shared) : usize{0})}); !status.ok())
             return Status::no_memory("native VM area capacity exceeded");
         first = last;
@@ -1723,7 +1733,7 @@ Status native_mprotect(sched::ProcessResources &resources, uptr address, usize l
     for (auto &page : candidate)
         if (page.virtual_address >= address && page.virtual_address - address < rounded.value())
         {
-            page.flags = flags.value();
+            settle_access(page, flags.value(), exclusive_frame(page_pool, page.physical_address));
             ++changed;
         }
     if (changed != rounded.value() / hw::page_size)
@@ -3680,14 +3690,16 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
                 }
                 continue;
             }
-            if (auto status = allocate(pages, page.virtual_address, page.flags); !status.ok())
+            if (auto status = copy_on_write_fork ? share_private_page(pages, page, *source_frame, page_pool)
+                                                 : allocate(pages, page.virtual_address, page.flags); !status.ok())
             {
                 finish(kernel, child_pid, 127);
                 static_cast<void>(kernel.posix().wait(pid, child_pid));
                 return error(status);
             }
-            copy_bytes(reinterpret_cast<void *>(pages[pages.size() - 1].physical_address),
-                       reinterpret_cast<const void *>(source_frame->address), hw::page_size);
+            if (!copy_on_write_fork)
+                copy_bytes(reinterpret_cast<void *>(pages[pages.size() - 1].physical_address),
+                           reinterpret_cast<const void *>(source_frame->address), hw::page_size);
         }
         sched::MemoryMap child_memory;
         if (auto status = page_memory_map(pages, child_memory); !status)
@@ -3705,6 +3717,10 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         }
         child->resources().native_space = child_space.value();
         child->resources().memory = child_memory;
+#ifdef OK_NATIVE_COW_FORK
+        if (auto status = withhold_shared_writes(process->resources().native_pages, space, page_pool); !status)
+        { runtime_failure = status; started = false; return error(status); }
+#endif
         if (auto status = encode_result(*child, child->threads()[0].native_frame, 0); !status.ok())
         {
             finish(kernel, child_pid, 127);
@@ -4867,6 +4883,9 @@ Status start(Kernel &kernel, fs::BootArchive archive)
 #endif
     started = true;
     runtime_kernel = &kernel;
+#ifdef OK_NATIVE_COW_FORK
+    hw::set_write_resolver(resolve_native_write);
+#endif
     // This static singleton has one boot lifetime and no reconstruction/reset API.
     original_shutdown_owner = {&original_shutdown_owner, 1, pid.value(), process->threads()[0].tid};
     emit("OK_NATIVE scope=hardware init=loaded\n");
@@ -5235,6 +5254,10 @@ bool step(Kernel &kernel)
                 reported = true;
             }
         }
+#ifdef OK_NATIVE_COW_FORK
+        else if (trap.value().kind == hw::TrapKind::page_fault &&
+                 resolve_native_write(process->resources().native_space, trap.value().fault_address)) {}
+#endif
         else
         {
             emit("OK_NATIVE scope=hardware fault=contained\n");

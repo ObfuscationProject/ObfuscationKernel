@@ -238,6 +238,37 @@ void shared_process_references_are_distinct_from_retirement_pins()
     for (usize count = 0; count < 65535; ++count) CHECK(pool.release_reference(live));
     CHECK(pool.used_count() == 0 && pool.free_count() == 2 && pool.pending_count() == 0);
 }
+void copy_on_write_references_stay_private()
+{
+    alignas(NativePagePool::page_size) static std::array<std::byte, 2 * NativePagePool::page_size> storage{};
+    static memory::FrameAllocator frames;
+    static memory::FrameMetadataStorage<2048> frames_metadata;
+    static NativePagePool pool;
+    const memory::MemoryRegion region{reinterpret_cast<uptr>(storage.data()), storage.size(),
+                                      memory::RegionType::usable};
+    CHECK(frames.initialize({&region, 1}, NativePagePool::page_size, frames_metadata.bytes));
+    CHECK(pool.activate(frames, NativePagePool::Source::qualified_firmware));
+    auto first = pool.allocate();
+    CHECK(first);
+    const auto owner = *pool.handle(first.value());
+    CHECK(pool.retain_copy(owner) && pool.reference_count(first.value()) == 2 && !pool.is_shared(first.value()));
+    // Copy-on-write sharing never classifies the frame shared, nor the reverse.
+    CHECK(!pool.retain_shared(owner) && !pool.mark_shared(owner));
+    CHECK(pool.release_reference(owner) && pool.reference_count(first.value()) == 1);
+    CHECK(pool.pin(owner) && pool.release_reference(owner) && pool.pending_count() == 1);
+    CHECK(!pool.retain_copy(owner));
+    CHECK(pool.unpin(owner) && pool.used_count() == 0);
+    CHECK(!pool.retain_copy(owner));
+    auto shared = pool.allocate_frame();
+    CHECK(shared && pool.mark_shared(shared.value()) && !pool.retain_copy(shared.value()));
+    CHECK(pool.release_reference(shared.value()));
+    auto live = pool.allocate_frame();
+    CHECK(live);
+    for (usize count = 1; count < 65535; ++count) CHECK(pool.retain_copy(live.value()));
+    CHECK(pool.reference_count(live.value().address) == 65535 && !pool.retain_copy(live.value()));
+    for (usize count = 0; count < 65535; ++count) CHECK(pool.release_reference(live.value()));
+    CHECK(pool.used_count() == 0 && pool.free_count() == 2);
+}
 void failed_final_release_preserves_retry_state()
 {
     alignas(NativePagePool::page_size) static std::array<std::byte, NativePagePool::page_size> storage{};
@@ -348,8 +379,9 @@ int main()
     original_registry_checks();object_reserve_and_lease_checks();
     dropped_and_overwritten_leases_remain_auditable();
     shared_process_references_are_distinct_from_retirement_pins();
+    copy_on_write_references_stay_private();
     failed_final_release_preserves_retry_state();
     exact_generation_wait_pin_survives_mapping_retirement();
     shared_allocator_form_respects_other_owners();
-    std::puts("PASS native page provider: user/object ownership, opaque lease generations, exact backing, reserve quota, accounting and retained quarantine; hosted=1 guest=0 smp=0");
+    std::puts("PASS native page provider: user/object ownership, copy-on-write references, opaque lease generations, exact backing, reserve quota, accounting and retained quarantine; hosted=1 guest=0 smp=0");
 }

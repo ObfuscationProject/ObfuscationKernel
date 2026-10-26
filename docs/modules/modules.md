@@ -19,7 +19,7 @@ Each module exposes a `ModuleManifest` with:
 - `ModuleResourceBudget` for maximum threads, services, memory pages, and
   handles.
 
-The current contract is module ABI 74 with public UAPI 0.16.0 and SDK manifest
+The current contract is module ABI 75 with public UAPI 0.16.0 and SDK manifest
 schema 1. The exporter writes the same generation into every SDK manifest, and
 the OS consumer rejects a mismatched generation before linking. Rebuild native
 extensions against the exact architecture/mode/compiler SDK; older generations
@@ -112,7 +112,10 @@ ABI75 (`feat/mm-general`) changes exported memory and process layouts:
 `KernelConfig` carries the discovered `PhysicalMemoryMap` instead of a fixed
 region array; `FrameAllocator` metadata is caller-owned with one
 `PageDescriptor` per frame (`ok/memory/frames.hpp`); `NativePagePool` keeps its
-registry in those descriptors and gains the shared-allocator activation;
+registry in those descriptors and gains the shared-allocator activation and
+`retain_copy`; `PageMapping` gains the `copy_on_write` record bit and
+`ok/arch/execution.hpp` adds `remap` and the write-resolver hook for
+copy-on-write fork, with `MappingPages::replace`;
 `MemoryManager` owns the kernel `SlabAllocator`; `fs::Node` gains the
 `page_cache()` virtual slot; `ProcessResources` gains `MemoryLimits`; the boot
 headers add the LoongArch EFI and Malta board protocols. The public UAPI stays

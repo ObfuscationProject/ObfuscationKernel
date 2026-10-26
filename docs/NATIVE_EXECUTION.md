@@ -64,8 +64,9 @@ soft limit; `RLIMIT_DATA` bounds its brk heap (see
 [process memory quotas](qualification/PROCESS_MEMORY_QUOTAS.md)). Remaining
 fixed bounds: 16 address spaces and 1024 mapping records per address space in
 the execution backends, a 128 KiB ELF input buffer, 64 KiB stacks, and up to 16
-argument/environment strings each. Fork copies private pages eagerly; COW fork
-is not implemented yet.
+argument/environment strings each. Fork copies private pages eagerly unless the
+kernel is built with `native_cow_fork`, which shares them copy-on-write (see
+[copy-on-write fork](qualification/NATIVE_COW_FORK.md)).
 
 ## Distribution and boot archive
 

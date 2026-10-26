@@ -175,6 +175,18 @@ class NativePagePool final : private NonCopyable
         ++descriptor->references;
         return Status::success();
     }
+    // Copy-on-write fork: each address space sharing a private frame holds one
+    // reference. The shared classification stays clear, so writes copy.
+    Status retain_copy(const memory::PhysicalFrame &frame)
+    {
+        auto *descriptor = state(frame, memory::PageKind::native_user);
+        if (!descriptor || (descriptor->flags & (shared_flag | pending_flag)) || !descriptor->references)
+            return Status::invalid_argument("copy-on-write frame is foreign, shared, stale or pending release");
+        if (descriptor->references == max_count)
+            return Status::overflow("copy-on-write frame reference count exhausted");
+        ++descriptor->references;
+        return Status::success();
+    }
     Status release_reference(const memory::PhysicalFrame &frame)
     {
         auto *descriptor = state(frame, memory::PageKind::native_user);

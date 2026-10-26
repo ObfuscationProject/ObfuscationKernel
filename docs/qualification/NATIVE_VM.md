@@ -113,8 +113,9 @@ accessible image page must remain; fully inaccessible or empty spaces are not
 supported by all current backends.
 
 This is a bounded native VM slice, not completion of M1 or M5.
-Runtime-sized allocators, demand paging, copy-on-write, coherent shared file
-mappings, file-fault `SIGBUS`, cross-process shared-frame futex keys, unbounded
+Runtime-sized allocators and copy-on-write fork (behind `native_cow_fork`, see
+[NATIVE_COW_FORK](NATIVE_COW_FORK.md)) arrived with `feat/mm-general`. Demand
+paging, coherent shared file mappings, file-fault `SIGBUS`, cross-process shared-frame futex keys, unbounded
 heap growth, reclaim/OOM policy and SMP shootdown remain separate work.
 
 ## Verification

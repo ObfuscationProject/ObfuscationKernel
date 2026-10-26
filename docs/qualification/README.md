@@ -43,6 +43,7 @@ live in the separate ObfuscationEvidence repository.
 | [NATIVE_CHILD_WAIT_SIGNALS.md](NATIVE_CHILD_WAIT_SIGNALS.md) | Owned native child waits and private caught signals |
 | [NATIVE_CONSOLE_CONTROL.md](NATIVE_CONSOLE_CONTROL.md) | Bounded controlling console and foreground groups |
 | [NATIVE_CONSOLE_INPUT.md](NATIVE_CONSOLE_INPUT.md) | Native console input lease |
+| [NATIVE_COW_FORK.md](NATIVE_COW_FORK.md) | Copy-on-write native fork |
 | [NATIVE_CREDENTIALS.md](NATIVE_CREDENTIALS.md) | Native Process Credentials |
 | [NATIVE_DYNAMIC_STARTUP.md](NATIVE_DYNAMIC_STARTUP.md) | First x86-64 shared-musl startup candidate |
 | [NATIVE_ENTROPY.md](NATIVE_ENTROPY.md) | Trusted entropy and Linux initial-stack randomness |

@@ -22,6 +22,12 @@ option("native_qemu_piix4_poweroff")
     set_description("Opt in to the bounded x86_64 QEMU PIIX4 PM terminal poweroff backend")
 option_end()
 
+option("native_cow_fork")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Share private pages copy-on-write at native fork instead of copying them eagerly")
+option_end()
+
 option("private_signal_delivery_fixture")
     set_default(false)
     set_showmenu(true)
@@ -78,6 +84,12 @@ local function add_ok_terminal_poweroff_policy()
     if get_config("native_qemu_piix4_poweroff") then
         add_rules("ok-native-qemu-piix4-poweroff")
         add_defines("OK_NATIVE_QEMU_PIIX4_POWEROFF=1")
+    end
+end
+
+local function add_ok_native_fork_policy()
+    if get_config("native_cow_fork") then
+        add_defines("OK_NATIVE_COW_FORK")
     end
 end
 
@@ -222,6 +234,7 @@ target("okernel")
     add_ok_arch_profile()
     add_ok_terminal_reboot_policy()
     add_ok_terminal_poweroff_policy()
+    add_ok_native_fork_policy()
     add_ok_debug_test_points()
     if get_config("private_futex_peer_fixture") and is_mode("debug") then
         add_defines("OK_PRIVATE_FUTEX_PEER_FIXTURE")
@@ -296,6 +309,7 @@ target("okernel_image")
     add_ok_arch_profile()
     add_ok_terminal_reboot_policy()
     add_ok_terminal_poweroff_policy()
+    add_ok_native_fork_policy()
     add_ok_debug_test_points()
     if get_config("private_futex_peer_fixture") and is_mode("debug") then
         add_defines("OK_PRIVATE_FUTEX_PEER_FIXTURE")

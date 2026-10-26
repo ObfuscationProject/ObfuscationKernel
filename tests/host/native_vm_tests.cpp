@@ -34,6 +34,11 @@ namespace ok::sched
 __attribute__((noinline)) ThreadControlBlock *SchedulerState::find_thread(ProcessId, ThreadId) { return nullptr; }
 __attribute__((noinline)) ProcessControlBlock *SchedulerState::find(ProcessId) { return nullptr; }
 __attribute__((noinline)) OpenFileDescription *SchedulerState::open_description(u16) { return nullptr; }
+// Descriptor reservations are never created here; the TCP runtime's cold
+// retirement path only needs these symbols to link.
+__attribute__((noinline)) Status SchedulerState::release_description(u16) { return Status::unsupported("no scheduler"); }
+__attribute__((noinline)) Status DescriptorReservation::cancel() { return {}; }
+DescriptorReservation::~DescriptorReservation() = default;
 }
 
 #define CHECK(condition)                                                                                               \
@@ -1481,6 +1486,133 @@ void check_shared_file_write_request_uses_existing_rw_ptes()
     native::runtime_failure = {};
 }
 
+#ifdef OK_NATIVE_COW_FORK
+namespace mock
+{
+usize remaps{};
+bool fail_remap{};
+} // namespace mock
+
+namespace ok::arch::execution
+{
+// Records are the mock translation, as for the software-refill backends.
+Status remap(const AddressSpace &space, const PageMapping &mapping)
+{
+    if (mock::fail_remap)
+        return Status::busy("injected remap failure");
+    CHECK(space.slot < mock::spaces.size() && mock::spaces[space.slot].live &&
+          mock::spaces[space.slot].generation == space.generation);
+    CHECK(mock::page(space, mapping.virtual_address) == &mapping);
+    ++mock::remaps;
+    return Status::success();
+}
+} // namespace ok::arch::execution
+
+struct ForkOwner
+{
+    sched::ProcessResources *value;
+    sched::ProcessResources &resources() { return *value; }
+};
+
+// Mirrors the runtime fork loop: shared frames gain an alias reference,
+// private frames are shared copy-on-write, then the parent withholds writes.
+void fork_resources(sched::ProcessResources &parent, sched::ProcessResources &child)
+{
+    CHECK(child.native_pages.reserve(native::page_pool, parent.native_pages.size(), true));
+    for (const auto &page : parent.native_pages)
+    {
+        const auto *frame = native::owned_frame(parent.native_pages, page);
+        CHECK(frame);
+        if (native::shared_pool_page(parent.native_pages, page))
+        {
+            CHECK(native::retain_page_reference(*frame));
+            CHECK(child.native_pages.push_back(page, *frame));
+        }
+        else CHECK(native::share_private_page(child.native_pages, page, *frame, native::page_pool));
+    }
+    auto space = native::create_page_space(child.native_pages);
+    CHECK(space);
+    child.native_space = space.value();
+    CHECK(native::page_memory_map(child.native_pages, child.memory));
+    CHECK(native::withhold_shared_writes(parent.native_pages, parent.native_space, native::page_pool));
+}
+
+void check_copy_on_write_fork()
+{
+    Fixture fixture;
+    auto &parent = fixture.resources;
+    const auto private_page = fixture.map(hw::page_size);
+    const auto shared_page = native::native_mmap(parent, 0, hw::page_size, 3,
+                                                 posix::map_SHARED | posix::map_ANONYMOUS, ~uptr{0}, 0);
+    CHECK(private_page && shared_page);
+    auto *bytes = reinterpret_cast<unsigned char *>(mock::page(parent.native_space, private_page.value())->physical_address);
+    for (usize i = 0; i < hw::page_size; ++i) bytes[i] = static_cast<unsigned char>(i * 7 + 3);
+    const usize frames = mock::used_frames();
+    const usize remaps = mock::remaps;
+
+    sched::ProcessResources child;
+    fork_resources(parent, child);
+    CHECK(mock::used_frames() == frames);
+    // Private writable pages: the stack page and the anonymous mapping.
+    CHECK(mock::remaps == remaps + 2);
+    const auto *parent_record = mock::page(parent.native_space, private_page.value());
+    const auto *child_record = mock::page(child.native_space, private_page.value());
+    CHECK(parent_record->physical_address == child_record->physical_address);
+    CHECK(parent_record->flags == hw::page_read && parent_record->copy_on_write);
+    CHECK(child_record->flags == hw::page_read && child_record->copy_on_write);
+    CHECK(native::intended_access(*child_record) == (hw::page_read | hw::page_write));
+    CHECK(native::page_pool.reference_count(child_record->physical_address) == 2);
+    CHECK(child.memory.allows_user_access(private_page.value(), 1, memory::page_write));
+    CHECK(mock::page(child.native_space, shared_page.value())->flags == (hw::page_read | hw::page_write));
+    CHECK(!mock::page(child.native_space, shared_page.value())->copy_on_write);
+    const auto *text = mock::page(child.native_space, hw::user_begin);
+    CHECK(text->flags == (hw::page_read | hw::page_execute) && !text->copy_on_write);
+
+    // The child's write copies; the shared and read-only pages do not resolve.
+    std::array<ForkOwner, 2> owners{{{&parent}, {&child}}};
+    auto resolved = native::resolve_owner_write(owners, child.native_space, private_page.value() + 9, native::page_pool);
+    CHECK(resolved && resolved.value() && mock::used_frames() == frames + 1);
+    child_record = mock::page(child.native_space, private_page.value());
+    CHECK(child_record->physical_address != parent_record->physical_address);
+    CHECK(child_record->flags == (hw::page_read | hw::page_write) && !child_record->copy_on_write);
+    CHECK(native::owned_frame(child.native_pages, *child_record));
+    const auto *copy = reinterpret_cast<const unsigned char *>(child_record->physical_address);
+    for (usize i = 0; i < hw::page_size; ++i) CHECK(copy[i] == bytes[i]);
+    CHECK(native::page_pool.reference_count(parent_record->physical_address) == 1);
+    for (const auto address : {private_page.value(), shared_page.value(), hw::user_begin})
+    {
+        resolved = native::resolve_owner_write(owners, child.native_space, address, native::page_pool);
+        CHECK(resolved && !resolved.value());
+    }
+
+    // The parent is now the sole owner and regains write access in place.
+    resolved = native::resolve_copy_on_write(parent.native_pages, parent.native_space, private_page.value(),
+                                             native::page_pool);
+    CHECK(resolved && resolved.value() && mock::used_frames() == frames + 1);
+    parent_record = mock::page(parent.native_space, private_page.value());
+    CHECK(parent_record->physical_address == reinterpret_cast<uptr>(bytes));
+    CHECK(parent_record->flags == (hw::page_read | hw::page_write) && !parent_record->copy_on_write);
+
+    // mprotect keeps write withheld while a private frame has another owner.
+    CHECK(native::native_mprotect(child, hw::user_begin, hw::page_size, 3));
+    text = mock::page(child.native_space, hw::user_begin);
+    CHECK(text->flags == hw::page_read && text->copy_on_write);
+    CHECK(child.memory.allows_user_access(hw::user_begin, 1, memory::page_write));
+    CHECK(native::native_mprotect(child, hw::user_begin, hw::page_size, 1));
+    text = mock::page(child.native_space, hw::user_begin);
+    CHECK(text->flags == hw::page_read && !text->copy_on_write);
+
+    // A failed remap is reported; the runtime treats it as fatal.
+    const auto stack = hw::user_end - hw::page_size;
+    mock::fail_remap = true;
+    CHECK(!native::resolve_copy_on_write(child.native_pages, child.native_space, stack, native::page_pool));
+    mock::fail_remap = false;
+    native::release(child.native_space, child.native_pages);
+    CHECK(native::runtime_failure);
+    CHECK(native::page_pool.reference_count(mock::page(parent.native_space, stack)->physical_address) == 1);
+}
+#endif
+
 int main(int argc, char **)
 {
     if (argc > 1)
@@ -1531,5 +1663,8 @@ int main(int argc, char **)
     check_pool_failure_rolls_back_partial_allocation();
     check_fixed_replacement();
     check_program_break();
+#ifdef OK_NATIVE_COW_FORK
+    check_copy_on_write_fork();
+#endif
     std::puts("PASS: native VM transaction tests (hosted backend model)");
 }

@@ -115,6 +115,18 @@ class MappingPages final
             return Status::invalid_argument("native mapping frame token is foreign, stale or unbound");
         return insert(mapping, frame);
     }
+    // Copy-on-write resolution is the one in-place edit of a published record:
+    // it keeps the address and swaps the frame and/or access. The caller then
+    // re-synchronizes the live translation with execution::remap.
+    Status replace(usize index, Mapping mapping, memory::PhysicalFrame frame)
+    {
+        if (index >= size_ || !pool_ || !exact_frames_ || !pool_->valid(frame) ||
+            frame.address != mapping.physical_address || mapping.virtual_address != (*this)[index].virtual_address)
+            return Status::invalid_argument("native mapping replacement is foreign, stale or moved");
+        *slot(index) = mapping;
+        *frame_slot(index) = frame;
+        return Status::success();
+    }
   private:
     Status insert(Mapping mapping, memory::PhysicalFrame frame)
     {
@@ -127,7 +139,7 @@ class MappingPages final
             return Status::already_exists("duplicate native mapping record");
         if (auto status = reserve(*pool_, size_ + 1); !status) return status;
         // Ordered records make memory-area coalescing a bounded scan without a
-        // process-sized stack copy. Existing published blocks are never edited.
+        // process-sized stack copy. Insertion never edits published blocks.
         for (usize slot_index = size_; slot_index > position; --slot_index)
         {
             *slot(slot_index) = (*this)[slot_index - 1];
