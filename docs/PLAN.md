@@ -146,8 +146,33 @@ Scaffold (merged to main from `refactor/user-runtime-split`):
   and `tests/host/native_pty/xmake.lua` updated; headers stay under `include/ok/apps`.
 - `src/user/README.md` unit map; `scripts/check_runtime_split.py` ratchet
   (5,876 lines / 101 includes) that fails when `runtime.cpp` grows.
-Next: extract `loader.cpp` first (ELF admission and stack setup have the fewest
-cross-dependencies), lower the ratchet, repeat per unit.
+
+Done on the worktree branch:
+- `runtime.cpp` and its 25 mid-namespace fragments are nine units under
+  `src/user/runtime/` (`loader`, `vm`, `wait`, `futex`, `pipe`, `pty`, `net`,
+  `signals`, `entry`) plus a 675-line `runtime.cpp`, sharing
+  `src/user/runtime/private.hpp`; the map and rules are in `src/user/README.md`.
+  Hosted tests compile the units as one translation unit through
+  `tests/host/native_runtime_units.hpp`. The ratchet caps `runtime.cpp` at 675
+  lines and rejects textual fragments and per-architecture signal pieces.
+- The 32 per-architecture signal headers (frame, delivery, return and the MIPS/PPC
+  context, readiness, gate and persistent state) are one
+  `include/ok/arch/<arch>/signal.hpp` each for `i386`, `x86_64`, `aarch64`,
+  `arm32`, `riscv` (rv32 and rv64), `loongarch64`, `mips`, `mips64` and `ppc`.
+  This changes the exported header set; no ObfuscationOS source includes these
+  headers, and the module ABI bump is due at merge.
+- Hosted runners compile `src/rescue` again (they still listed `src/apps`);
+  69 runners pass instead of 58.
+- Release image `.text` after the split: i386 -2.7K, rv32 -6.4K, aarch64 +0.9K,
+  mips64 +1.0K, rv64 +1.2K, mips +1.9K, x86_64 +3.1K, arm32 +8.2K,
+  loongarch64 +15.9K, ppc +44.3K (about 26K is fill before the 64 KiB-aligned
+  exception vectors). The growth is code no longer inlined across units.
+
+Open: building `src/rescue` only with `kernel_gui`. The debug self-test suite
+drives the shell and GUI applications, `scripts/qemu_test.py` requires `shell=1`,
+and `Kernel` holds the applications as members, so gating changes CI coverage
+and the exported `Kernel` layout. The applications are 80-155 KiB of release
+`.text` per profile.
 
 ## P2: platform and protocols
 
@@ -253,6 +278,9 @@ files under `src/fs/ext4/`.
 Total ext4/JBD2 headers mapped: 107. Unrelated headers kept as they are: `archive.hpp`, `archive_directory_profile.hpp`, `attributes.hpp`, `fat.hpp`, `fat_fs.hpp`, `mode_change.hpp`, `mode_policy.hpp`, `mount_retention.hpp`, `mount_snapshot.hpp`, `mount_snapshot_profile.hpp`, `persistent_sync_profile.hpp`, `simplefs.hpp`, `storage.hpp`, `unix.hpp`, `vfs.hpp`
 
 ## Appendix B: proposed user runtime split (`refactor/user-runtime-split`)
+
+The split as implemented is mapped in `src/user/README.md`; this table is the
+original proposal.
 
 | Target file | Current sources |
 | --- | --- |
