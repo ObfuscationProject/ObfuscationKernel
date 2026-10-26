@@ -22,6 +22,12 @@ units: `native_syscall_origin.hpp`, `native_shared_capture.hpp`,
 `native_syscall_restart_publication.hpp`, `native_poll_mask.hpp`,
 `linux_udp_*.hpp`, `tcp_*.hpp` and `signals/*.hpp`.
 
+Architecture signal frames, delivery, sigreturn decoding and the private
+readiness state live in one `include/ok/arch/<arch>/signal.hpp` per
+architecture (`i386`, `x86_64`, `aarch64`, `arm32`, `riscv` for rv32 and rv64,
+`loongarch64`, `mips`, `mips64`, `ppc`); `runtime/private.hpp` selects the
+configured one.
+
 Rules:
 
 - A helper used by one unit stays in that unit's anonymous namespace; only

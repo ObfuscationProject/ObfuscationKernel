@@ -2,7 +2,8 @@
 """Ratchet for the native runtime split (src/user/README.md).
 
 runtime.cpp must not regrow, the units must exist, and headers under src/user
-must be self-contained instead of textual fragments included mid-namespace.
+must be self-contained instead of textual fragments included mid-namespace;
+per-architecture signal pieces stay collapsed in include/ok/arch/<arch>/signal.hpp.
 """
 import re
 import sys
@@ -34,6 +35,12 @@ def main() -> int:
     for header in sorted(user.rglob("*.hpp")):
         if "#pragma once" not in header.read_text(errors="surrogateescape"):
             print(f"textual fragment {header.relative_to(ROOT)}: headers must be self-contained")
+            rc = 1
+    # Architecture signal code lives in include/ok/arch/<arch>/signal.hpp.
+    pieces = r"native_signal_(delivery|frame|return|context|gate|readiness|persistent)_\w+\.hpp"
+    for header in sorted((ROOT / "include/ok/user").glob("native_signal_*.hpp")):
+        if re.fullmatch(pieces, header.name):
+            print(f"per-architecture signal header {header.relative_to(ROOT)}: use include/ok/arch/<arch>/signal.hpp")
             rc = 1
     return rc
 

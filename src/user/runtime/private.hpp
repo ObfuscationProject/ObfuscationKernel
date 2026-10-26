@@ -23,46 +23,37 @@
 #include "ok/user/native_signal_target.hpp"
 #include "ok/user/native_sleep_interruption.hpp"
 #if defined(__i386__)
-#include "ok/user/native_signal_delivery_i386.hpp"
-#include "ok/user/native_signal_return_i386.hpp"
+#include "ok/arch/i386/signal.hpp"
 #elif defined(__arm__)
-#include "ok/user/native_signal_delivery_arm32.hpp"
-#include "ok/user/native_signal_return_arm32.hpp"
+#include "ok/arch/arm32/signal.hpp"
 #elif defined(__aarch64__)
-#include "ok/user/native_signal_delivery_aarch64.hpp"
+#include "ok/arch/aarch64/signal.hpp"
 #elif defined(__powerpc__) || defined(__PPC__)
-#include "ok/user/native_signal_delivery_ppc32.hpp"
-#include "ok/user/native_signal_return_ppc32.hpp"
-#include "ok/user/native_signal_persistent_ppc32.hpp"
+#include "ok/arch/ppc/signal.hpp"
 #define OK_PRIVATE_SIGNAL_HAS_TRAMPOLINE 1
 #define OK_PRIVATE_PPC32_SIGNAL 1
 #elif defined(__mips64)
-#include "ok/user/native_signal_delivery_mips64_n64.hpp"
-#include "ok/user/native_signal_return_mips64_n64.hpp"
-#include "ok/user/native_signal_gate_mips64_n64.hpp"
+#include "ok/arch/mips64/signal.hpp"
 #include "ok/user/native_mips64_n64_elf_admission.hpp"
 #include "ok/user/native_signal_trampoline.hpp"
 #define OK_PRIVATE_SIGNAL_HAS_TRAMPOLINE 1
 #define OK_PRIVATE_MIPS64_N64_SIGNAL 1
 #elif defined(__mips__) && !defined(__mips64)
-#include "ok/user/native_signal_delivery_mips_o32.hpp"
-#include "ok/user/native_signal_return_mips_o32.hpp"
-#include "ok/user/native_signal_gate_mips_o32.hpp"
+#include "ok/arch/mips/signal.hpp"
 #include "ok/user/native_mips_o32_elf_admission.hpp"
 #include "ok/user/native_signal_trampoline.hpp"
 #define OK_PRIVATE_SIGNAL_HAS_TRAMPOLINE 1
 #define OK_PRIVATE_MIPS_O32_SIGNAL 1
 #elif defined(__loongarch64)
-#include "ok/user/native_signal_delivery_loongarch64.hpp"
-#include "ok/user/native_signal_return_loongarch64.hpp"
+#include "ok/arch/loongarch64/signal.hpp"
 #include "ok/user/native_signal_trampoline.hpp"
 #define OK_PRIVATE_SIGNAL_HAS_TRAMPOLINE 1
 #elif defined(__riscv)
-#include "ok/user/native_signal_delivery_riscv.hpp"
+#include "ok/arch/riscv/signal.hpp"
 #include "ok/user/native_signal_trampoline.hpp"
 #define OK_PRIVATE_SIGNAL_HAS_TRAMPOLINE 1
 #else
-#include "ok/user/native_signal_delivery_x86_64.hpp"
+#include "ok/arch/x86_64/signal.hpp"
 #endif
 #endif
 #include "ok/user/native_poll.hpp"

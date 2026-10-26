@@ -1,12 +1,16 @@
 #pragma once
-
+// MIPS o32 native signal frames, delivery and return decoding, with the private readiness state.
 #include "ok/arch/execution.hpp"
 #include "ok/user/native_signal_mask.hpp"
 #include "ok/user/native_signal_info.hpp"
+#include "ok/user/native_signal_delivery.hpp"
+#include "ok/user/native_signal_trampoline.hpp"
+#include "ok/user/native_signal_altstack.hpp"
+#include "ok/user/native_signal_force.hpp"
+#include "ok/arch/mips_o32_private_signal.hpp"
 
 namespace ok::user::native
 {
-
 enum class MipsO32SignalFormat : u8 { legacy, realtime };
 
 // Big-endian native 32-bit o32, scalar eager FR0 only. This value codec does
@@ -277,4 +281,290 @@ struct MipsO32SignalFrame
 };
 using MipsO32LegacySignalFrame = MipsO32SignalFrame<MipsO32SignalFormat::legacy>;
 using MipsO32RtSignalFrame = MipsO32SignalFrame<MipsO32SignalFormat::realtime>;
+
+// Supplied by the trusted backend/runtime, never decoded from user memory.
+// Default construction does not attest hardware or a delay-slot continuation.
+struct MipsO32SignalContext {
+  using FpContract = MipsO32RtSignalFrame::FpContract;
+  using ResumeContract = MipsO32RtSignalFrame::ResumeContract;
+  FpContract fp{FpContract::unverified};
+  ResumeContract resume{ResumeContract::unverified};
+
+  template <MipsO32SignalFormat Format>
+  constexpr typename MipsO32SignalFrame<Format>::Capture codec() const {
+    using C = MipsO32SignalFrame<Format>;
+    return {fp == FpContract::eager_fr0_legacy_nan_no_extensions
+                ? C::FpContract::eager_fr0_legacy_nan_no_extensions
+                : C::FpContract::unverified,
+            resume == ResumeContract::normalized_resume_pc
+                ? C::ResumeContract::normalized_resume_pc
+                : C::ResumeContract::unverified};
+  }
+};
+
+struct MipsO32SignalFramePolicy {
+  using Frame = MipsO32RtSignalFrame;
+  using Trampoline = SignalTrampoline<abi::linux_user::Profile::mips>;
+  [[nodiscard]] static constexpr bool supported(const sched::SignalAction &) {
+    return true;
+  }
+
+  template <MipsO32SignalFormat Format, typename Write>
+  static bool
+  prepare_kind(const arch::execution::UserFrame &frame,
+               sched::SignalMask blocked, sched::PendingSignalInfo info,
+               const sched::SignalAction &action,
+               const sched::SignalAltstack &stack, u64 begin, u64 end,
+               const MipsO32SignalContext &context, Write &&write,
+               arch::execution::UserFrame &out, u64 mapped_trampoline) {
+    using C = MipsO32SignalFrame<Format>;
+    if (frame.sp > C::word_max)
+      return false;
+    const auto captured = context.template codec<Format>();
+    if (!C::capture(frame, captured))
+      return false;
+    const bool nested = stack.on_stack(frame.sp);
+    // Match Linux's overflow check before its emulator gap and sigsp().
+    if (nested && !stack.on_stack(static_cast<u32>(frame.sp - C::frame_bytes)))
+      return false;
+    const u32 after_gap = static_cast<u32>(frame.sp - 32);
+    const bool entering =
+        (action.flags & 0x08000000) && stack.status(after_gap) == 0;
+    u64 top = frame.sp;
+    if (entering) {
+      if (stack.base >= end || stack.size > end - stack.base)
+        return false;
+      top = stack.base + stack.size;
+    }
+    typename C::Placement placement;
+    if (!C::place(top, entering, begin, end, placement))
+      return false;
+    // Also contain alignment/gap bytes; this is stricter than Linux's
+    // pre-gap overflow check, especially at alternate-stack boundaries.
+    if ((nested || entering || stack.on_stack(after_gap)) &&
+        !stack.physically_contains(placement.address))
+      return false;
+    u64 restorer{};
+    constexpr auto entry = C::realtime ? SignalTrampolineEntry::realtime
+                                       : SignalTrampolineEntry::legacy;
+    if (!Trampoline::entry_address(mapped_trampoline, entry, begin, end,
+                                   restorer))
+      return false;
+    const typename C::Info sender{static_cast<i32>(info.signal), info.code,
+                                  info.sender_pid, info.sender_uid, info.child_status};
+    typename C::Image image;
+    arch::execution::UserFrame next;
+    if (!C::encode(frame, captured, blocked,
+                   {stack.base, stack.size, stack.flags}, sender, begin, end,
+                   image) ||
+        !C::setup_handler(frame, captured, placement, sender, action.handler,
+                          restorer, begin, end, next))
+      return false;
+    if (!write(placement.address, std::span<const std::byte>{image.bytes}))
+      return false;
+    out = next;
+    return true;
+  }
+
+  template <typename Write>
+  static bool prepare(const arch::execution::UserFrame &frame,
+                      sched::SignalMask blocked, sched::PendingSignalInfo info,
+                      const sched::SignalAction &action,
+                      const sched::SignalAltstack &stack, u64 begin, u64 end,
+                      const MipsO32SignalContext &context, Write &&write,
+                      arch::execution::UserFrame &out, u64 mapped_trampoline) {
+    if (action.flags & 8)
+      return prepare_kind<MipsO32SignalFormat::realtime>(
+          frame, blocked, info, action, stack, begin, end, context, write, out,
+          mapped_trampoline);
+    return prepare_kind<MipsO32SignalFormat::legacy>(
+        frame, blocked, info, action, stack, begin, end, context, write, out,
+        mapped_trampoline);
+  }
+};
+
+using MipsO32SignalDelivery =
+    SignalDelivery<abi::linux_user::Profile::mips, MipsO32SignalFramePolicy>;
+
+struct MipsO32SignalReturn {
+  using Frame = arch::execution::UserFrame;
+  using Operation = abi::linux_user::Operation;
+
+  template <MipsO32SignalFormat Format, typename Queue, typename Read,
+            typename Write, typename CanEnter, typename SizeValid>
+  static bool restore_kind(Queue &pending, sched::SignalActionTable &actions,
+                           sched::SignalMask &blocked, Frame &frame,
+                           sched::SignalAltstack &stack,
+                           const MipsO32SignalContext &context, u64 begin,
+                           u64 end, Read &&read, Write &&write,
+                           CanEnter &&can_enter, SizeValid &&size_valid) {
+    using C = MipsO32SignalFrame<Format>;
+    typename C::ReturnPlan staged;
+    if (!C::decode(frame.sp, frame, context.template codec<Format>(), begin,
+                   end, read, staged) ||
+        !can_enter(staged.frame))
+      return false;
+    auto next_stack = stack;
+    if constexpr (C::realtime)
+      apply_restored_altstack<abi::linux_user::Profile::mips>(
+          next_stack,
+          {staged.stack.pointer, staged.stack.size, staged.stack.flags},
+          staged.frame.sp, size_valid);
+    if (staged.fcsr_patch.required &&
+        !write(staged.fcsr_patch.address,
+               std::span<const std::byte>{staged.fcsr_patch.bytes}))
+      return false;
+    if (staged.pending == C::Pending::sigfpe &&
+        !force_kernel_signal(pending, actions, staged.mask, 8))
+      return false;
+    // No fallible operation remains after queue/disposition publication.
+    frame = staged.frame;
+    blocked = staged.mask;
+    stack = next_stack;
+    return true;
+  }
+
+  // Serialized current-task transaction. Runtime must admit executable PC,
+  // writable SP-1 and the captured profile contract; suppress ordinary syscall
+  // completion so restored v0/a3 survive. Legacy never restores altstack.
+  template <typename Queue, typename Read, typename Write, typename CanEnter,
+            typename SizeValid>
+  static bool
+  restore(Operation operation, Queue &pending,
+          sched::SignalActionTable &actions, sched::SignalMask &blocked,
+          Frame &frame, sched::SignalAltstack &stack,
+          const MipsO32SignalContext &context, u64 begin, u64 end, Read &&read,
+          Write &&write, CanEnter &&can_enter, SizeValid &&size_valid) {
+    if (operation == Operation::rt_sigreturn)
+      return restore_kind<MipsO32SignalFormat::realtime>(
+          pending, actions, blocked, frame, stack, context, begin, end, read,
+          write, can_enter, size_valid);
+    if (operation == Operation::sigreturn)
+      return restore_kind<MipsO32SignalFormat::legacy>(
+          pending, actions, blocked, frame, stack, context, begin, end, read,
+          write, can_enter, size_valid);
+    return false;
+  }
+};
+
+class MipsO32SignalReadiness final
+{
+  public:
+    using Capability = arch::execution::mips_o32_private::Capability;
+    using Observation = arch::execution::mips_o32_private::Observation;
+    using UserFrame = arch::execution::UserFrame;
+    struct Identity
+    {
+        uptr pool{};
+        u32 slot{};
+        u64 pid{}, tid{}, generation{};
+        [[nodiscard]] constexpr bool valid() const noexcept { return pool && pid && tid && generation; }
+        constexpr bool operator==(const Identity &) const = default;
+    };
+    enum class State : u8
+    { unverified, initial, awaiting_capture, syscall_normalized, timer_non_bd, timer_bd, handler, sigreturn };
+  private:
+    Identity identity_{};
+    State state_{};
+    u64 sequence_floor_{};
+    [[nodiscard]] constexpr bool owns(Identity id) const noexcept
+    { return id.valid() && id == identity_; }
+    [[nodiscard]] static constexpr bool frame(const UserFrame &f, Capability capability) noexcept
+    { return capability.admitted() && arch::execution::mips_o32_private::frame_mode(f); }
+  public:
+    [[nodiscard]] constexpr Identity identity() const noexcept { return identity_; }
+    [[nodiscard]] constexpr State state() const noexcept { return state_; }
+    // Explicit creation/reuse/exec hook. No frame-shape inference occurs here.
+    constexpr void reset(Identity id, Capability capability) noexcept
+    { identity_ = id.valid() ? id : Identity{}; state_ = State::unverified; sequence_floor_ = capability.sequence(); }
+    constexpr void revoke(Identity id) noexcept
+    { if (owns(id)) state_ = State::unverified; }
+    [[nodiscard]] constexpr bool ready(Identity id) const noexcept
+    {
+        return owns(id) && (state_ == State::initial || state_ == State::syscall_normalized ||
+            state_ == State::timer_non_bd || state_ == State::handler || state_ == State::sigreturn);
+    }
+    // Call only after fresh initial_frame construction and ELF/mapping/stack
+    // admission. It is a trusted publication event, not a lazy readiness query.
+    [[nodiscard]] constexpr bool publish_initial(Identity id, const UserFrame &f, Capability capability) noexcept
+    {
+        if (!owns(id) || state_ != State::unverified || !frame(f, capability)) return false;
+        state_ = State::initial; return true;
+    }
+    [[nodiscard]] constexpr bool begin_entry(Identity id, Capability capability) noexcept
+    {
+        if (!owns(id)) return false;
+        state_ = State::awaiting_capture;
+        sequence_floor_ = capability.sequence();
+        return capability.admitted();
+    }
+    // A fresh backend observation is consumed only while awaiting this lease's
+    // capture. The caller has already validated the owned privileged stack.
+    [[nodiscard]] constexpr bool capture(Identity id, const UserFrame &f, Observation observation) noexcept
+    {
+        if (!owns(id)) return false;
+        if (state_ != State::awaiting_capture || !observation.matches(f) ||
+            observation.sequence() <= sequence_floor_)
+        { state_ = State::unverified; return false; }
+        sequence_floor_ = observation.sequence();
+        using K = arch::execution::mips_o32_private::CaptureKind;
+        switch (observation.kind())
+        {
+        case K::syscall_normalized: state_ = State::syscall_normalized; return true;
+        case K::timer_non_bd: state_ = State::timer_non_bd; return true;
+        case K::timer_bd: state_ = State::timer_bd; return true;
+        default: state_ = State::unverified; return false;
+        }
+    }
+    [[nodiscard]] constexpr bool inherit_syscall(Identity id, const MipsO32SignalReadiness &parent,
+                                                Identity parent_id, const UserFrame &child,
+                                                Capability capability) noexcept
+    {
+        if (!owns(id) || state_ != State::unverified || !parent.owns(parent_id) ||
+            parent.state_ != State::syscall_normalized || !frame(child, capability)) return false;
+        state_ = State::syscall_normalized; return true;
+    }
+    // These hooks run only after their corresponding fallible transaction has
+    // committed. Failed preparations must never call a publication hook.
+    [[nodiscard]] constexpr bool publish_handler(Identity id, const UserFrame &f, Capability capability) noexcept
+    {
+        if (!ready(id) || !frame(f, capability)) return false;
+        state_ = State::handler; return true;
+    }
+    [[nodiscard]] constexpr bool publish_sigreturn(Identity id, const UserFrame &f, Capability capability) noexcept
+    {
+        if (!owns(id) || state_ != State::syscall_normalized || !frame(f, capability)) return false;
+        state_ = State::sigreturn; return true;
+    }
+    [[nodiscard]] constexpr MipsO32SignalContext context(Identity id, Capability capability) const noexcept
+    {
+        MipsO32SignalContext result{};
+        if (capability.admitted()) result.fp = MipsO32SignalContext::FpContract::eager_fr0_legacy_nan_no_extensions;
+        if (ready(id)) result.resume = MipsO32SignalContext::ResumeContract::normalized_resume_pc;
+        return result;
+    }
+};
+
+enum class MipsO32HandlerGate : u8 { proceed, defer_handler, unverified };
+// Inspect only. Runtime calls the immutable delivery policy on proceed, enters
+// the unchanged interrupted frame on defer_handler, and rejects a missing
+// trusted lifecycle hook on unverified. No ticket or signal state is modified.
+template <typename Queue>
+[[nodiscard]] MipsO32HandlerGate mips_o32_handler_gate(
+    const Queue &pending, const sched::SignalActionTable &actions, sched::SignalMask blocked,
+    const MipsO32SignalReadiness &readiness, MipsO32SignalReadiness::Identity identity,
+    MipsO32SignalReadiness::Capability capability) noexcept
+{
+    typename Queue::Delivery ticket;
+    if (!pending.peek(blocked, ticket)) return MipsO32HandlerGate::proceed;
+    const auto *action = actions.find(ticket.info.signal);
+    using Delivery = MipsO32SignalDelivery;
+    if (!action || Delivery::Actions::ignored(ticket.info.signal, *action) ||
+        action->handler == sched::SignalAction::default_handler || !Delivery::supported(*action))
+        return MipsO32HandlerGate::proceed;
+    if (!capability.admitted() || readiness.identity() != identity) return MipsO32HandlerGate::unverified;
+    if (readiness.ready(identity)) return MipsO32HandlerGate::proceed;
+    return readiness.state() == MipsO32SignalReadiness::State::timer_bd
+        ? MipsO32HandlerGate::defer_handler : MipsO32HandlerGate::unverified;
+}
 } // namespace ok::user::native

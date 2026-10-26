@@ -1,12 +1,13 @@
 #pragma once
-
+// i386 native signal frames, delivery and return decoding.
 #include "ok/arch/execution.hpp"
 #include "ok/user/native_signal_mask.hpp"
 #include "ok/user/native_signal_info.hpp"
+#include "ok/user/native_signal_delivery.hpp"
+#include "ok/user/native_signal_altstack.hpp"
 
 namespace ok::user::native
 {
-
 struct I386SignalWire
 {
     template <typename T, usize N>
@@ -325,4 +326,125 @@ struct I386SignalFrame : I386SignalWire
 using I386LegacySignalFrame = I386SignalFrame<I386SignalKind::legacy>;
 using I386RtSignalFrame = I386SignalFrame<I386SignalKind::realtime>;
 
+struct I386SignalFramePolicy
+{
+    using Frame = I386RtSignalFrame;
+    [[nodiscard]] static constexpr bool supported(const sched::SignalAction &action)
+    {
+        return action.handler <= 1 || (action.flags & 0x04000000);
+    }
+
+    template <I386SignalKind Kind, typename Write>
+    static bool prepare_kind(const arch::execution::UserFrame &frame, sched::SignalMask blocked,
+                             sched::PendingSignalInfo info, const sched::SignalAction &action,
+                             const sched::SignalAltstack &altstack, u64 begin, u64 end,
+                             Write &&write, arch::execution::UserFrame &out)
+    {
+        using Codec = I386SignalFrame<Kind>;
+        // Linux get_sigframe uses architectural ESP, not SS.base + ESP. The
+        // historical restorer-as-stack branch is excluded by SA_RESTORER.
+        const bool nested = altstack.on_stack(frame.sp);
+        const bool entering = (action.flags & 0x08000000) && altstack.status(frame.sp) == 0;
+        u64 top = frame.sp;
+        if (entering)
+        {
+            if (altstack.base >= end || altstack.size > end - altstack.base) return false;
+            top = altstack.base + altstack.size;
+        }
+        typename Codec::Placement placement;
+        if (!Codec::place(top, begin, end, placement) ||
+            ((nested || entering) && !altstack.physically_contains(placement.address))) return false;
+        u64 restorer{};
+        if (!(action.flags & 0x04000000) ||
+            !Codec::select_restorer(true, action.restorer, 0, begin, end, restorer)) return false;
+        const typename Codec::Info sender{static_cast<i32>(info.signal), info.code, info.sender_pid, info.sender_uid, info.child_status};
+        typename Codec::Image image;
+        arch::execution::UserFrame next;
+        if (!Codec::encode(frame, blocked, {altstack.base, altstack.size, altstack.flags}, sender, {},
+                           placement, restorer, begin, end, image) ||
+            !Codec::stage_handler(frame, placement, action.handler, sender, begin, end, next)) return false;
+        if (!write(placement.address, std::span<const std::byte>{image.bytes.data(), image.used})) return false;
+        out = next;
+        return true;
+    }
+
+    template <typename Write>
+    static bool prepare(const arch::execution::UserFrame &frame, sched::SignalMask blocked,
+                        sched::PendingSignalInfo info, const sched::SignalAction &action,
+                        const sched::SignalAltstack &altstack, u64 begin, u64 end, u32,
+                        Write &&write, arch::execution::UserFrame &out, u64)
+    {
+        if (action.flags & 4)
+            return prepare_kind<I386SignalKind::realtime>(frame, blocked, info, action, altstack,
+                                                          begin, end, write, out);
+        return prepare_kind<I386SignalKind::legacy>(frame, blocked, info, action, altstack,
+                                                   begin, end, write, out);
+    }
+};
+
+using I386SignalDelivery = SignalDelivery<abi::linux_user::Profile::i386, I386SignalFramePolicy>;
+
+struct I386SignalEntry
+{
+    using Frame = arch::execution::UserFrame;
+    // Return ESP stays an offset in the selected SS. Never publish its linear
+    // address as ESP; use this address only for native mapping admission.
+    [[nodiscard]] static constexpr bool effective_sp(const Frame &frame, u64 begin, u64 end, u64 &out)
+    {
+        using Codec = I386RtSignalFrame;
+        const u64 ss = frame.registers[12] & 0xffff;
+        if (!Codec::stack_selector(ss) || !Codec::tls_base(frame.fs_base, begin, end) ||
+            !Codec::tls_base(frame.gs_base, begin, end)) return false;
+        const u64 base = ss == 0x33 ? frame.fs_base : ss == 0x3b ? frame.gs_base : 0;
+        if (base > Codec::word_mask || frame.sp > Codec::word_mask - base) return false;
+        const u64 address = base + frame.sp;
+        if (begin >= end || end > Codec::word_mask || address <= begin || address > end) return false;
+        out = address;
+        return true;
+    }
+};
+
+struct I386SignalReturn
+{
+    using Frame = arch::execution::UserFrame;
+    using Operation = abi::linux_user::Operation;
+    struct Restored
+    {
+        Frame frame{};
+        sched::SignalMask mask{};
+        sched::SignalAltstack stack{};
+        bool restore_stack{};
+    };
+
+    template <I386SignalKind Kind, typename Read, typename CanEnter>
+    static bool decode_kind(const Frame &current, u64 begin, u64 end, Read &&read,
+                            CanEnter &&can_enter, Restored &out)
+    {
+        typename I386SignalFrame<Kind>::Restored decoded;
+        if (!I386SignalFrame<Kind>::decode(current.sp, current, begin, end, read, decoded)) return false;
+        u64 effective{};
+        if (!I386SignalEntry::effective_sp(decoded.frame, begin, end, effective) ||
+            !can_enter(decoded.frame, effective)) return false;
+        Restored staged{decoded.frame, decoded.mask, {}, Kind == I386SignalKind::realtime};
+        if constexpr (Kind == I386SignalKind::realtime)
+            staged.stack = {decoded.stack.base, decoded.stack.size, decoded.stack.flags};
+        out = staged;
+        return true;
+    }
+
+    // The callback must check executable PC and writable effective_sp - 1 in
+    // the current address space. Only successful output may be committed.
+    // Apply raw alternate-stack state only when restore_stack is true, using
+    // restored architectural ESP for Linux restore_altstack's membership test.
+    template <typename Read, typename CanEnter>
+    static bool decode(Operation operation, const Frame &current, u64 begin, u64 end,
+                       Read &&read, CanEnter &&can_enter, Restored &out)
+    {
+        if (operation == Operation::sigreturn)
+            return decode_kind<I386SignalKind::legacy>(current, begin, end, read, can_enter, out);
+        if (operation == Operation::rt_sigreturn)
+            return decode_kind<I386SignalKind::realtime>(current, begin, end, read, can_enter, out);
+        return false;
+    }
+};
 } // namespace ok::user::native

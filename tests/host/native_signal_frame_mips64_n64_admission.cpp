@@ -1,4 +1,4 @@
-#include "ok/user/native_signal_frame_mips64_n64.hpp"
+#include "ok/arch/mips64/signal.hpp"
 #include <cstdio>
 #include <cstdlib>
 using namespace ok;
