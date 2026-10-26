@@ -9,11 +9,12 @@ using user::native::NativePagePool;
 void original_registry_checks()
 {
     static memory::FrameAllocator frames;
+    static memory::FrameMetadataStorage<2048> frames_metadata;
     static NativePagePool pool;
     CHECK(!pool.allocate());
     CHECK(!pool.activate(frames,NativePagePool::Source::qualified_firmware));
     memory::MemoryRegion region{0x100000,1024*4096,memory::RegionType::usable};
-    CHECK(frames.initialize({&region,1},4096));
+    CHECK(frames.initialize({&region,1}, 4096, frames_metadata.bytes));
     CHECK(pool.activate(frames,NativePagePool::Source::qualified_firmware));
     CHECK(!pool.activate(frames,NativePagePool::Source::linker_reserved));
     std::array<uptr,1024> addresses{};
@@ -56,6 +57,8 @@ void account(const NativePagePool &pool, usize users, usize objects, usize free,
 void object_reserve_and_lease_checks()
 {
     static memory::FrameAllocator frames,other_frames;
+    static memory::FrameMetadataStorage<2048> frames_metadata;
+    static memory::FrameMetadataStorage<2048> other_frames_metadata;
     static NativePagePool pool,other;
     static_assert(NativePagePool::page_size==4096);
     static_assert(memory::ObjectPageProvider<NativePagePool>);
@@ -67,8 +70,8 @@ void object_reserve_and_lease_checks()
     CHECK(!pool.release_kernel_page(empty));
     const memory::MemoryRegion region{reinterpret_cast<uptr>(backing.data()),backing.size(),memory::RegionType::usable};
     const memory::MemoryRegion second{reinterpret_cast<uptr>(other_backing.data()),other_backing.size(),memory::RegionType::usable};
-    CHECK(frames.initialize({&region,1},NativePagePool::page_size));
-    CHECK(other_frames.initialize({&second,1},NativePagePool::page_size));
+    CHECK(frames.initialize({&region,1}, NativePagePool::page_size, frames_metadata.bytes));
+    CHECK(other_frames.initialize({&second,1}, NativePagePool::page_size, other_frames_metadata.bytes));
     CHECK(!pool.activate(frames,NativePagePool::Source::linker_reserved,9));
     CHECK(!pool.activate(frames,static_cast<NativePagePool::Source>(255),3));
     CHECK(pool.source()==NativePagePool::Source::inactive && frames.free_frames()==8);
@@ -127,29 +130,32 @@ void object_reserve_and_lease_checks()
     CHECK(!pool.release_kernel_page(once.value()));CHECK(pool.release_kernel_page(again.value()));
     account(pool,0,0,8);
     // An entirely reserved pool offers no user quota but still supplies objects.
-    static memory::FrameAllocator reserved_frames;static NativePagePool reserved;
+    static memory::FrameAllocator reserved_frames;
+    static memory::FrameMetadataStorage<2048> reserved_frames_metadata;static NativePagePool reserved;
     alignas(NativePagePool::page_size) static std::array<std::byte,NativePagePool::page_size> last{};
     const memory::MemoryRegion reserve_region{reinterpret_cast<uptr>(last.data()),last.size(),memory::RegionType::usable};
-    CHECK(reserved_frames.initialize({&reserve_region,1},NativePagePool::page_size));
+    CHECK(reserved_frames.initialize({&reserve_region,1}, NativePagePool::page_size, reserved_frames_metadata.bytes));
     CHECK(reserved.activate(reserved_frames,NativePagePool::Source::linker_reserved,1));
     CHECK(!reserved.allocate() && reserved.user_capacity_count()==0);
     auto all=reserved.allocate_kernel_page();CHECK(all);CHECK(reserved.release_kernel_page(all.value()));
     account(reserved,0,0,1);
     // Address-model checks preserve the entire supplied MIPS supervisor alias;
     // these bytes are never dereferenced on the hosted machine.
-    static memory::FrameAllocator alias_frames;static NativePagePool aliases;
+    static memory::FrameAllocator alias_frames;
+    static memory::FrameMetadataStorage<2048> alias_frames_metadata;static NativePagePool aliases;
     const uptr alias=static_cast<uptr>(static_cast<__INTPTR_TYPE__>(-2147483648LL))+0x100000;
     const memory::MemoryRegion alias_region{alias,NativePagePool::page_size,memory::RegionType::usable};
-    CHECK(alias_frames.initialize({&alias_region,1},NativePagePool::page_size));
+    CHECK(alias_frames.initialize({&alias_region,1}, NativePagePool::page_size, alias_frames_metadata.bytes));
     CHECK(aliases.activate(alias_frames,NativePagePool::Source::linker_reserved,1));
     auto alias_lease=aliases.allocate_kernel_page();CHECK(alias_lease);
     CHECK(reinterpret_cast<uptr>(alias_lease.value().bytes.data())==alias);
     CHECK(!aliases.owns(alias) && !aliases.owns(alias&0x1fffffffu));
     CHECK(aliases.release_kernel_page(alias_lease.value()));account(aliases,0,0,1);
     // A null kernel backing span is rejected and its exact frame is refunded.
-    static memory::FrameAllocator null_frames;static NativePagePool null_pool;
+    static memory::FrameAllocator null_frames;
+    static memory::FrameMetadataStorage<2048> null_frames_metadata;static NativePagePool null_pool;
     const memory::MemoryRegion null_region{0,NativePagePool::page_size,memory::RegionType::usable};
-    CHECK(null_frames.initialize({&null_region,1},NativePagePool::page_size));
+    CHECK(null_frames.initialize({&null_region,1}, NativePagePool::page_size, null_frames_metadata.bytes));
     CHECK(null_pool.activate(null_frames,NativePagePool::Source::linker_reserved,1));
     CHECK(null_pool.allocate_kernel_page().status().code()==StatusCode::fault);
     account(null_pool,0,0,1);CHECK(null_pool.allocations()==1 && null_pool.releases()==1);
@@ -158,10 +164,11 @@ void dropped_and_overwritten_leases_remain_auditable()
 {
     alignas(NativePagePool::page_size) static std::array<std::byte, 2 * NativePagePool::page_size> storage{};
     static memory::FrameAllocator frames;
+    static memory::FrameMetadataStorage<2048> frames_metadata;
     static NativePagePool pool;
     const memory::MemoryRegion region{reinterpret_cast<uptr>(storage.data()), storage.size(),
                                       memory::RegionType::usable};
-    CHECK(frames.initialize({&region, 1}, NativePagePool::page_size));
+    CHECK(frames.initialize({&region, 1}, NativePagePool::page_size, frames_metadata.bytes));
     CHECK(pool.activate(frames, NativePagePool::Source::linker_reserved, 2));
     usize dropped_index = NativePagePool::capacity;
     {
@@ -192,10 +199,11 @@ void shared_process_references_are_distinct_from_retirement_pins()
 {
     alignas(NativePagePool::page_size) static std::array<std::byte, 2 * NativePagePool::page_size> storage{};
     static memory::FrameAllocator frames;
+    static memory::FrameMetadataStorage<2048> frames_metadata;
     static NativePagePool pool;
     const memory::MemoryRegion region{reinterpret_cast<uptr>(storage.data()), storage.size(),
                                       memory::RegionType::usable};
-    CHECK(frames.initialize({&region, 1}, NativePagePool::page_size));
+    CHECK(frames.initialize({&region, 1}, NativePagePool::page_size, frames_metadata.bytes));
     CHECK(pool.activate(frames, NativePagePool::Source::qualified_firmware));
     auto first = pool.allocate();
     CHECK(first && !pool.is_shared(first.value()) && pool.reference_count(first.value()) == 1);
@@ -234,10 +242,11 @@ void failed_final_release_preserves_retry_state()
 {
     alignas(NativePagePool::page_size) static std::array<std::byte, NativePagePool::page_size> storage{};
     static memory::FrameAllocator frames;
+    static memory::FrameMetadataStorage<2048> frames_metadata;
     static NativePagePool pool;
     const memory::MemoryRegion region{reinterpret_cast<uptr>(storage.data()), storage.size(),
                                       memory::RegionType::usable};
-    CHECK(frames.initialize({&region, 1}, NativePagePool::page_size));
+    CHECK(frames.initialize({&region, 1}, NativePagePool::page_size, frames_metadata.bytes));
     CHECK(pool.activate(frames, NativePagePool::Source::qualified_firmware));
     auto page = pool.allocate();
     CHECK(page);
@@ -276,10 +285,11 @@ void exact_generation_wait_pin_survives_mapping_retirement()
 {
     alignas(NativePagePool::page_size) static std::array<std::byte, NativePagePool::page_size> storage{};
     static memory::FrameAllocator frames;
+    static memory::FrameMetadataStorage<2048> frames_metadata;
     static NativePagePool pool;
     const memory::MemoryRegion region{reinterpret_cast<uptr>(storage.data()), storage.size(),
                                       memory::RegionType::usable};
-    CHECK(frames.initialize({&region, 1}, NativePagePool::page_size));
+    CHECK(frames.initialize({&region, 1}, NativePagePool::page_size, frames_metadata.bytes));
     CHECK(pool.activate(frames, NativePagePool::Source::qualified_firmware));
     auto page = pool.allocate(); CHECK(page);
     const uptr address = page.value();

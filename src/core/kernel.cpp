@@ -18,6 +18,8 @@ std::span<const memory::MemoryRegion> memory_map_span(const KernelConfig &config
     return {config.memory_map.data(), config.memory_region_count};
 }
 
+memory::FrameMetadataStorage<64 * 1024 * 1024 / 4096, 8> kernel_frame_metadata;
+
 driver::DisplayBackend display_backend_for_arch(arch::Architecture architecture)
 {
     switch (architecture)
@@ -229,7 +231,8 @@ Status Kernel::boot(KernelConfig config)
         return status;
     }
 
-    if (auto status = memory_.initialize(memory_map_span(config_), arch_->page_size()); !status.ok())
+    if (auto status = memory_.initialize(memory_map_span(config_), arch_->page_size(), kernel_frame_metadata.bytes);
+        !status.ok())
     {
         return status;
     }

@@ -690,10 +690,11 @@ void test_orphan_reaping_and_native_ownership()
     auto &resources = f.scheduler.find(orphan)->resources();
     alignas(4096) static std::array<std::byte, 4096> metadata_backing{};
     static memory::FrameAllocator metadata_frames;
+    static memory::FrameMetadataStorage<2048> metadata_frames_metadata;
     static user::native::NativePagePool metadata_pool;
     const memory::MemoryRegion metadata_region{reinterpret_cast<uptr>(metadata_backing.data()),
         metadata_backing.size(), memory::RegionType::usable};
-    CHECK(metadata_frames.initialize({&metadata_region, 1}, 4096));
+    CHECK(metadata_frames.initialize({&metadata_region, 1}, 4096, metadata_frames_metadata.bytes));
     CHECK(metadata_pool.activate(metadata_frames, user::native::NativePagePool::Source::linker_reserved, 1));
     CHECK(resources.native_pages.reserve(metadata_pool, 1));
     resources.native_space.root = 0x1000;

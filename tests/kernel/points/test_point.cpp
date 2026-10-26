@@ -203,10 +203,12 @@ Status test_memory(TestPointRunner &runner)
         return status;
     }
     static memory::MemoryManager manager;
+    static memory::FrameMetadataStorage<16> metadata;
     const std::array regions{
         memory::MemoryRegion{.base = 0x1000, .size = 0x10000, .type = memory::RegionType::usable},
     };
-    if (auto status = runner.check_status("memory", "initialize", manager.initialize(regions, 4096)); !status.ok())
+    if (auto status = runner.check_status("memory", "initialize", manager.initialize(regions, 4096, metadata.bytes));
+        !status.ok())
     {
         return status;
     }

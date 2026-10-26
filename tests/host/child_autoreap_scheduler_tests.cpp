@@ -33,6 +33,7 @@ struct Fixture
         alignas(user::native::NativePagePool::page_size)
             std::array<std::byte, user::native::NativePagePool::page_size> bytes{};
         memory::FrameAllocator frames;
+        memory::FrameMetadataStorage<2048> frames_metadata;
         user::native::NativePagePool pool;
     };
     std::unique_ptr<MetadataBacking> metadata;
@@ -58,7 +59,7 @@ struct Fixture
         metadata = std::make_unique<MetadataBacking>();
         const memory::MemoryRegion region{reinterpret_cast<uptr>(metadata->bytes.data()),
             metadata->bytes.size(), memory::RegionType::usable};
-        CHECK(metadata->frames.initialize({&region, 1}, user::native::NativePagePool::page_size));
+        CHECK(metadata->frames.initialize({&region, 1}, user::native::NativePagePool::page_size, metadata->frames_metadata.bytes));
         CHECK(metadata->pool.activate(metadata->frames, user::native::NativePagePool::Source::linker_reserved, 1));
         CHECK(resources.native_pages.reserve(metadata->pool, 1));
         CHECK(resources.native_pages.push_back({}));

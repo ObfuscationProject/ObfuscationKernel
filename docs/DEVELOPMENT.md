@@ -34,15 +34,16 @@ Check sizes, alignment and capacity before publishing an allocation. Capacity
 failure must leave existing owners and accounting intact; never silently truncate
 a supplied physical memory map. Reservations override usable RAM declarations.
 
-The initial `FrameAllocator` is bounded bootstrap bookkeeping for at most 16,384
-eligible pages in 64 disjoint ranges. Its fixed metadata lives in its owning
-kernel object. It has no blocking, reclaim or interrupt/SMP synchronization;
-calls require a single serialized boot/model context. This capacity is its only
-current quota, not a per-process memory-pressure policy. Ownership handles carry
-the allocator identity and a generation; callers must retire all mappings,
-references and I/O pins before release. Bookkeeping does not prove those external
-lifetimes have ended. The allocator must outlive its handles and cannot be copied
-or moved. Reinitialization requires all frames to be released.
+`FrameAllocator` metadata (range table, free bitmap, one `PageDescriptor` per
+frame) is sized from the supplied map and lives in caller-owned storage; at boot
+it is carved from discovered RAM. It has no blocking, reclaim or interrupt/SMP
+synchronization; calls require a single serialized boot/model context.
+`ChargeAccount` charges are per owner with an explicit limit; a charge failure
+is distinct from exhaustion. Ownership handles carry the allocator identity and
+a generation; callers must retire all mappings, references and I/O pins before
+release. Bookkeeping does not prove those external lifetimes have ended. The
+allocator must outlive its handles and cannot be copied or moved.
+Reinitialization requires all frames to be released.
 
 Production page/object allocation still requires boot RAM and reservation
 discovery, runtime-sized metadata, explicit allocation contexts and charges,

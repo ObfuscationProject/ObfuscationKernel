@@ -72,6 +72,7 @@ template <Profile P> struct Fixture
     Origin origins{pool};
     alignas(4096) std::array<std::byte,4096> mapping_arena{};
     memory::FrameAllocator mapping_frames;
+    memory::FrameMetadataStorage<2048> mapping_frames_metadata;
     native::NativePagePool mapping_pool;
     sched::Scheduler scheduler;
     sched::ProcessControlBlock &process;
@@ -98,7 +99,7 @@ template <Profile P> struct Fixture
         const auto top=pool.top(lease.value(),{1,1});CHECK(top);t.kernel_stack_top=top.value();
         auto &resources=process.resources();resources.native_space=live_space;
         const memory::MemoryRegion mapping_region{reinterpret_cast<uptr>(mapping_arena.data()),mapping_arena.size(),memory::RegionType::usable};
-        CHECK(mapping_frames.initialize({&mapping_region,1},4096));
+        CHECK(mapping_frames.initialize({&mapping_region,1}, 4096, mapping_frames_metadata.bytes));
         CHECK(mapping_pool.activate(mapping_frames,native::NativePagePool::Source::linker_reserved,1));
         CHECK(resources.native_pages.bind(mapping_pool));
         resources.personality=sched::UserPersonality::linux;

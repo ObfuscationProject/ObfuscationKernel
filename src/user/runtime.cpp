@@ -154,6 +154,7 @@ constexpr bool linker_pool_required = true; // Hosted backing, never firmware ev
 #endif
 alignas(4096) std::array<std::array<std::byte, hw::page_size>, linker_pool_required ? page_count : 0> physical_pages;
 memory::FrameAllocator native_frames;
+memory::FrameMetadataStorage<page_count, 64> native_frame_metadata;
 NativePagePool page_pool;
 SharedMemoryFiles shared_files;
 #ifdef OK_PRIVATE_SIGNAL_HAS_TRAMPOLINE
@@ -922,14 +923,14 @@ Status activate_pool()
     if (!memory_preparation) return memory_preparation;
     if constexpr (!linker_pool_required)
     {
-        if (auto status = boot::initialize_qualified_frames(qualified_memory, native_frames); !status)
+        if (auto status = boot::initialize_qualified_frames(qualified_memory, native_frames, native_frame_metadata.bytes); !status)
             return status;
         return page_pool.activate(native_frames, NativePagePool::Source::qualified_firmware, kernel_reserve_pages);
     }
 #endif
     const memory::MemoryRegion region{reinterpret_cast<uptr>(physical_pages.data()),sizeof(physical_pages),
                                       memory::RegionType::usable};
-    if (auto status = native_frames.initialize({&region,1},hw::page_size); !status) return status;
+    if (auto status = native_frames.initialize({&region,1},hw::page_size,native_frame_metadata.bytes); !status) return status;
     return page_pool.activate(native_frames, NativePagePool::Source::linker_reserved, kernel_reserve_pages);
 }
 #ifdef OK_ENABLE_TEST_POINTS

@@ -1,65 +1,38 @@
 #include "ok/memory/memory.hpp"
+#include "ok/memory/physical_map.hpp"
 
 namespace ok::memory
 {
-
-Status FrameAllocator::initialize(std::span<const MemoryRegion> regions, usize page_size)
+namespace
 {
-    if (used_count_ != 0)
-    {
-        return Status::busy("physical frames are still owned");
-    }
-    if (page_size == 0 || (page_size & (page_size - 1)) != 0)
-    {
-        return Status::invalid_argument("page size must be a power of two");
-    }
 
+// Sweep byte boundaries before page alignment: reservations always win and
+// adjacent usable fragments may together cover a complete physical page.
+// `emit(base, count)` receives each eligible page run in ascending order.
+template <typename Emit>
+Status sweep_usable(std::span<const MemoryRegion> regions, usize page_size, Emit &&emit)
+{
+    if (page_size == 0 || (page_size & (page_size - 1)) != 0)
+        return Status::invalid_argument("page size must be a power of two");
     constexpr uptr address_limit = ~uptr{0};
     uptr cursor = address_limit;
     for (const auto &region : regions)
     {
         if (region.size > address_limit - region.base)
-        {
             return Status::overflow("physical memory region wraps the address space");
-        }
         if (region.size != 0 && region.base < cursor)
-        {
             cursor = region.base;
-        }
     }
-
-    std::array<FrameRange, max_physical_frame_ranges> candidate_ranges{};
-    usize candidate_range_count = 0;
-    usize candidate_frame_count = 0;
-    auto append_range = [&](uptr start, uptr end) -> Status {
+    auto append = [&](uptr start, uptr end) -> Status {
         const usize adjustment = (page_size - (start % page_size)) % page_size;
         if (adjustment >= end - start)
-        {
             return Status::success();
-        }
         start += adjustment;
         end -= end % page_size;
         if (end <= start)
-        {
             return Status::success();
-        }
-        const usize count = (end - start) / page_size;
-        if (count > max_physical_frames - candidate_frame_count)
-        {
-            return Status::overflow("bootstrap physical frame capacity exceeded");
-        }
-        if (candidate_range_count == candidate_ranges.size())
-        {
-            return Status::overflow("bootstrap physical range capacity exceeded");
-        }
-        candidate_ranges[candidate_range_count++] =
-            FrameRange{.base = start, .first_index = candidate_frame_count, .count = count};
-        candidate_frame_count += count;
-        return Status::success();
+        return emit(start, (end - start) / page_size);
     };
-
-    // Sweep byte boundaries before page alignment: reservations always win and
-    // adjacent usable fragments may together cover a complete physical page.
     bool in_usable_run = false;
     uptr run_start = 0;
     while (true)
@@ -71,9 +44,7 @@ Status FrameAllocator::initialize(std::span<const MemoryRegion> regions, usize p
         for (const auto &region : regions)
         {
             if (region.size == 0)
-            {
                 continue;
-            }
             const uptr end = region.base + region.size;
             if (region.base <= cursor && cursor < end)
             {
@@ -90,9 +61,7 @@ Status FrameAllocator::initialize(std::span<const MemoryRegion> regions, usize p
             }
         }
         if (!next_found)
-        {
             break;
-        }
         if (usable && !reserved)
         {
             if (!in_usable_run)
@@ -103,99 +72,275 @@ Status FrameAllocator::initialize(std::span<const MemoryRegion> regions, usize p
         }
         else if (in_usable_run)
         {
-            if (auto status = append_range(run_start, cursor); !status.ok())
-            {
+            if (auto status = append(run_start, cursor); !status.ok())
                 return status;
-            }
             in_usable_run = false;
         }
         cursor = next;
     }
     if (in_usable_run)
-    {
-        if (auto status = append_range(run_start, cursor); !status.ok())
-        {
-            return status;
-        }
-    }
-    if (candidate_frame_count == 0)
-    {
-        return Status::no_memory("no complete usable physical frames");
-    }
-
-    ranges_ = candidate_ranges;
-    range_count_ = candidate_range_count;
-    frame_count_ = candidate_frame_count;
-    page_size_ = page_size;
-    next_free_hint_ = 0;
-    generations_.fill(0);
-    // Preserve the sequence across reinitialization so old handles stay stale.
+        return append(run_start, cursor);
     return Status::success();
+}
+
+[[nodiscard]] usize lowest_clear_bit(u64 bits)
+{
+    const u64 clear = ~bits;
+    const auto low = static_cast<u32>(clear);
+    return low != 0 ? static_cast<usize>(__builtin_ctz(low)) : 32 + static_cast<usize>(__builtin_ctz(static_cast<u32>(clear >> 32)));
+}
+
+struct SweepTotals
+{
+    usize frames{0};
+    usize ranges{0};
+};
+
+Result<SweepTotals> count_usable(std::span<const MemoryRegion> regions, usize page_size)
+{
+    SweepTotals totals;
+    auto status = sweep_usable(regions, page_size, [&](uptr, usize count) -> Status {
+        if (count > ~usize{0} - totals.frames)
+            return Status::overflow("physical frame count overflows");
+        totals.frames += count;
+        ++totals.ranges;
+        return Status::success();
+    });
+    if (!status.ok())
+        return status;
+    if (totals.frames == 0)
+        return Status::no_memory("no complete usable physical frames");
+    // The descriptor array must itself be addressable.
+    if (totals.frames > (~usize{0} - FrameAllocator::metadata_alignment) / (sizeof(PageDescriptor) + 1) ||
+        totals.ranges > ~usize{0} / sizeof(FrameAllocator::FrameRange) / 2)
+        return Status::overflow("frame metadata size overflows");
+    return totals;
+}
+
+} // namespace
+
+Result<usize> FrameAllocator::metadata_bytes(std::span<const MemoryRegion> regions, usize page_size)
+{
+    auto totals = count_usable(regions, page_size);
+    if (!totals)
+        return totals.status();
+    return metadata_bytes_for(totals.value().frames, totals.value().ranges);
+}
+
+Status FrameAllocator::initialize(std::span<const MemoryRegion> regions, usize page_size, std::span<std::byte> metadata)
+{
+    if (used_count_ != 0)
+        return Status::busy("physical frames are still owned");
+    auto totals = count_usable(regions, page_size);
+    if (!totals)
+        return totals.status();
+    const auto [frames, range_count] = totals.value();
+    if (metadata.data() == nullptr || metadata.size() < metadata_bytes_for(frames, range_count))
+        return Status::no_memory("frame allocator metadata storage is too small");
+
+    const uptr start = reinterpret_cast<uptr>(metadata.data());
+    const uptr aligned = (start + metadata_alignment - 1) & ~uptr{metadata_alignment - 1};
+    std::byte *cursor = metadata.data() + (aligned - start);
+    const usize words = (frames + 63) / 64;
+    bitmap_ = {reinterpret_cast<u64 *>(cursor), words};
+    cursor += words * sizeof(u64);
+    descriptors_ = {reinterpret_cast<PageDescriptor *>(cursor), frames};
+    cursor += frames * sizeof(PageDescriptor);
+    ranges_ = {reinterpret_cast<FrameRange *>(cursor), range_count};
+    for (auto &word : bitmap_)
+        word = 0;
+    // Bits past the last frame stay set so the word scan never yields them.
+    if (frames % 64 != 0)
+        bitmap_[words - 1] = ~u64{0} << (frames % 64);
+    for (auto &descriptor : descriptors_)
+        descriptor = {};
+    usize index = 0;
+    usize range = 0;
+    static_cast<void>(sweep_usable(regions, page_size, [&](uptr base, usize count) -> Status {
+        ranges_[range++] = FrameRange{.base = base, .first_index = index, .count = count};
+        index += count;
+        return Status::success();
+    }));
+    page_size_ = page_size;
+    frame_count_ = frames;
+    next_free_hint_ = 0;
+    // Preserve the generation sequence across reinitialization so old handles stay stale.
+    return Status::success();
+}
+
+bool FrameAllocator::used(usize index) const
+{
+    return ((bitmap_[index / 64] >> (index % 64)) & 1u) != 0;
+}
+
+void FrameAllocator::mark(usize index, bool value)
+{
+    const u64 mask = u64{1} << (index % 64);
+    if (value)
+        bitmap_[index / 64] |= mask;
+    else
+        bitmap_[index / 64] &= ~mask;
 }
 
 uptr FrameAllocator::address_for(usize index) const
 {
-    for (usize i = 0; i < range_count_; ++i)
+    usize low = 0;
+    usize high = ranges_.size();
+    while (low < high)
     {
-        const auto &range = ranges_[i];
-        if (index >= range.first_index && index - range.first_index < range.count)
-        {
+        const usize middle = low + (high - low) / 2;
+        const auto &range = ranges_[middle];
+        if (index < range.first_index)
+            high = middle;
+        else if (index - range.first_index >= range.count)
+            low = middle + 1;
+        else
             return range.base + (index - range.first_index) * page_size_;
-        }
     }
     return 0;
+}
+
+Result<usize> FrameAllocator::index_of(uptr address) const
+{
+    if (frame_count_ == 0)
+        return Status::not_initialized("physical frame allocator is not initialized");
+    usize low = 0;
+    usize high = ranges_.size();
+    while (low < high)
+    {
+        const usize middle = low + (high - low) / 2;
+        const auto &range = ranges_[middle];
+        if (address < range.base)
+            high = middle;
+        else if ((address - range.base) / page_size_ >= range.count)
+            low = middle + 1;
+        else if ((address - range.base) % page_size_ != 0)
+            return Status::invalid_argument("frame address is not page aligned");
+        else
+            return range.first_index + (address - range.base) / page_size_;
+    }
+    return Status::not_found("address is not a managed physical frame");
+}
+
+bool FrameAllocator::exact(const PhysicalFrame &frame) const
+{
+    return frame.owner == this && frame.index < frame_count_ && frame.generation != 0 &&
+           descriptors_[frame.index].generation == frame.generation && address_for(frame.index) == frame.address;
+}
+
+PageDescriptor *FrameAllocator::descriptor(const PhysicalFrame &frame)
+{
+    return exact(frame) ? &descriptors_[frame.index] : nullptr;
+}
+
+const PageDescriptor *FrameAllocator::descriptor(const PhysicalFrame &frame) const
+{
+    return exact(frame) ? &descriptors_[frame.index] : nullptr;
+}
+
+Result<PhysicalFrame> FrameAllocator::handle_at(usize index) const
+{
+    if (index >= frame_count_ || descriptors_[index].generation == 0)
+        return Status::not_found("physical frame is not allocated");
+    return PhysicalFrame{
+        .address = address_for(index), .index = index, .owner = this, .generation = descriptors_[index].generation};
+}
+
+PhysicalFrame FrameAllocator::take(usize index)
+{
+    mark(index, true);
+    ++used_count_;
+    descriptors_[index] = PageDescriptor{.generation = next_generation_++};
+    return PhysicalFrame{
+        .address = address_for(index), .index = index, .owner = this, .generation = descriptors_[index].generation};
 }
 
 Result<PhysicalFrame> FrameAllocator::allocate()
 {
     if (frame_count_ == 0)
-    {
         return Status::not_initialized("physical frame allocator is not initialized");
-    }
     if (used_count_ >= frame_count_)
-    {
         return Status::no_memory("physical frame allocator exhausted");
-    }
     if (next_generation_ == 0)
-    {
         return Status::overflow("physical frame ownership sequence exhausted");
-    }
-
-    for (usize offset = 0; offset < frame_count_; ++offset)
+    const usize words = bitmap_.size();
+    for (usize scanned = 0; scanned <= words; ++scanned)
     {
-        const usize index = (next_free_hint_ + offset) % frame_count_;
-        if (generations_[index] == 0)
-        {
-            const u64 generation = next_generation_++;
-            generations_[index] = generation;
-            ++used_count_;
-            next_free_hint_ = (index + 1) % frame_count_;
-            return PhysicalFrame{
-                .address = address_for(index), .index = index, .owner = this, .generation = generation};
-        }
+        const usize word = (next_free_hint_ / 64 + scanned) % words;
+        const u64 bits = bitmap_[word];
+        if (bits == ~u64{0})
+            continue;
+        const usize index = word * 64 + lowest_clear_bit(bits);
+        auto frame = take(index);
+        next_free_hint_ = index + 1 < frame_count_ ? index + 1 : 0;
+        return frame;
     }
     return Status::no_memory("physical frame allocator exhausted");
 }
 
+Result<PhysicalFrame> FrameAllocator::allocate(ChargeAccount &account)
+{
+    if (frame_count_ == 0)
+        return Status::not_initialized("physical frame allocator is not initialized");
+    if (auto status = account.charge(1); !status.ok())
+        return status;
+    auto frame = allocate();
+    if (!frame)
+        static_cast<void>(account.uncharge(1));
+    return frame;
+}
+
+Status FrameAllocator::allocate_contiguous(usize count, std::span<PhysicalFrame> output, ChargeAccount &account)
+{
+    if (frame_count_ == 0)
+        return Status::not_initialized("physical frame allocator is not initialized");
+    if (count == 0 || output.size() < count)
+        return Status::invalid_argument("contiguous frame request has no complete output");
+    if (count > frame_count_ - used_count_)
+        return Status::no_memory("physical frame allocator exhausted");
+    if (count > ~u64{0} - next_generation_)
+        return Status::overflow("physical frame ownership sequence exhausted");
+    for (const auto &range : ranges_)
+    {
+        usize run = 0;
+        for (usize offset = 0; offset < range.count; ++offset)
+        {
+            run = used(range.first_index + offset) ? 0 : run + 1;
+            if (run != count)
+                continue;
+            if (auto status = account.charge(count); !status.ok())
+                return status;
+            const usize first = range.first_index + offset + 1 - count;
+            for (usize i = 0; i < count; ++i)
+                output[i] = take(first + i);
+            return Status::success();
+        }
+    }
+    return Status::no_memory("no physically contiguous frame run");
+}
+
 Status FrameAllocator::release(PhysicalFrame frame)
 {
-    if (frame.owner != this || frame.index >= frame_count_ || frame.generation == 0 ||
-        generations_[frame.index] != frame.generation || address_for(frame.index) != frame.address)
-    {
+    if (!exact(frame) || !used(frame.index))
         return Status::invalid_argument("physical frame ownership handle is invalid or stale");
-    }
-    generations_[frame.index] = 0;
+    mark(frame.index, false);
+    descriptors_[frame.index] = {};
     --used_count_;
     if (frame.index < next_free_hint_)
-    {
         next_free_hint_ = frame.index;
-    }
     return Status::success();
 }
 
-usize FrameAllocator::free_frames() const
+Status FrameAllocator::release(PhysicalFrame frame, ChargeAccount &account)
 {
-    return frame_count_ - used_count_;
+    if (!exact(frame) || !used(frame.index))
+        return Status::invalid_argument("physical frame ownership handle is invalid or stale");
+    if (account.used() == 0)
+        return Status::invalid_argument("physical frame release has no matching charge");
+    if (auto status = release(frame); !status.ok())
+        return status;
+    static_cast<void>(account.uncharge(1));
+    return Status::success();
 }
 
 Status LinearAddressSpace::map(uptr virtual_address, PhysicalFrame frame, usize flags)
@@ -546,9 +691,50 @@ PageFaultKind classify_page_fault(bool present, bool write, bool user, bool exec
     return PageFaultKind::protection;
 }
 
-Status MemoryManager::initialize(std::span<const MemoryRegion> regions, usize page_size)
+Status MemoryManager::initialize(std::span<const MemoryRegion> regions, usize page_size, std::span<std::byte> metadata)
 {
-    return frames_.initialize(regions, page_size);
+    if (auto status = frames_.initialize(regions, page_size, metadata); !status.ok())
+        return status;
+    metadata_region_ = {};
+    return Status::success();
+}
+
+Status MemoryManager::initialize(const PhysicalMemoryMap &map, usize page_size, uptr direct_offset)
+{
+    if (!map.normalized())
+        return Status::not_initialized("physical memory map is not normalized");
+    if (page_size == 0 || (page_size & (page_size - 1)) != 0)
+        return Status::invalid_argument("page size must be a power of two");
+    // One extra slot holds the carved metadata reservation.
+    std::array<MemoryRegion, max_discovered_regions + 1> regions{};
+    const auto usable = map.usable();
+    for (usize i = 0; i < usable.size(); ++i)
+    {
+        if (usable[i].base > ~uptr{0} - direct_offset || usable[i].size > ~uptr{0} - (usable[i].base + direct_offset))
+            return Status::overflow("direct-map address of usable RAM wraps");
+        regions[i] = {.base = usable[i].base + direct_offset, .size = usable[i].size, .type = RegionType::usable};
+    }
+    auto required = FrameAllocator::metadata_bytes({regions.data(), usable.size()}, page_size);
+    if (!required)
+        return required.status();
+    const usize carve = (required.value() + page_size - 1) & ~(page_size - 1);
+    // Top-down keeps low RAM for consumers with address limits. The carve must
+    // leave at least one managed page behind.
+    for (usize i = usable.size(); i-- != 0;)
+    {
+        if (regions[i].size <= carve)
+            continue;
+        const MemoryRegion metadata{
+            .base = regions[i].base + regions[i].size - carve, .size = carve, .type = RegionType::reserved};
+        regions[usable.size()] = metadata;
+        if (auto status = frames_.initialize({regions.data(), usable.size() + 1}, page_size,
+                                             {reinterpret_cast<std::byte *>(metadata.base), metadata.size});
+            !status.ok())
+            return status;
+        metadata_region_ = metadata;
+        return Status::success();
+    }
+    return Status::no_memory("no usable range can hold the frame allocator metadata");
 }
 
 } // namespace ok::memory

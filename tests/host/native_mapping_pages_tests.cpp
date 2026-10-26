@@ -31,12 +31,15 @@ namespace
 {
 alignas(4096) std::array<std::byte, 42 * 4096> failure_backing{};
 std::array<memory::FrameAllocator, 6> failure_frames{};
+std::array<memory::FrameMetadataStorage<8>, 6> failure_metadata{};
 std::array<NativePagePool, 6> failure_pools{};
 alignas(4096) std::array<std::byte, 14 * 4096> success_backing{};
 memory::FrameAllocator success_frames;
+memory::FrameMetadataStorage<2048> success_frames_metadata;
 NativePagePool success_pool;
 alignas(4096) std::array<std::byte, 2 * 4096> failed_backing{};
 memory::FrameAllocator failed_frames;
+memory::FrameMetadataStorage<2048> failed_frames_metadata;
 NativePagePool failed_pool;
 
 void block_boundary_failures()
@@ -44,11 +47,12 @@ void block_boundary_failures()
     for (usize available = 1; available <= 6; ++available)
     {
         auto &frames = failure_frames[available - 1];
+        auto &frames_metadata = failure_metadata[available - 1];
         auto &pool = failure_pools[available - 1];
         const memory::MemoryRegion region{
             reinterpret_cast<uptr>(failure_backing.data() + (available - 1) * 7 * 4096),
             available * 4096, memory::RegionType::usable};
-        CHECK(frames.initialize({&region, 1}, 4096));
+        CHECK(frames.initialize({&region, 1}, 4096, frames_metadata.bytes));
         CHECK(pool.activate(frames, NativePagePool::Source::linker_reserved, available));
         MappingPages owner;
         CHECK(owner.reserve(pool, available * MappingPages::records_per_block));
@@ -64,7 +68,7 @@ void clone_and_relocation()
 {
     const memory::MemoryRegion region{reinterpret_cast<uptr>(success_backing.data()),
         success_backing.size(), memory::RegionType::usable};
-    CHECK(success_frames.initialize({&region, 1}, 4096));
+    CHECK(success_frames.initialize({&region, 1}, 4096, success_frames_metadata.bytes));
     CHECK(success_pool.activate(success_frames, NativePagePool::Source::linker_reserved, 14));
     MappingPages first;
     CHECK(first.reserve(success_pool, MappingPages::capacity));
@@ -92,7 +96,7 @@ void failed_final_release_keeps_canonical_tokens()
 {
     const memory::MemoryRegion region{reinterpret_cast<uptr>(failed_backing.data()),
         failed_backing.size(), memory::RegionType::usable};
-    CHECK(failed_frames.initialize({&region, 1}, 4096));
+    CHECK(failed_frames.initialize({&region, 1}, 4096, failed_frames_metadata.bytes));
     CHECK(failed_pool.activate(failed_frames, NativePagePool::Source::linker_reserved, 2));
     {
         MappingPages owner;
