@@ -9,7 +9,7 @@ import shutil
 import stat
 import subprocess
 
-DIRECTORIES = ('core', 'apps', 'driver', 'fs', 'gui', 'interrupt', 'ipc', 'memory',
+DIRECTORIES = ('core', 'rescue', 'driver', 'fs', 'gui', 'interrupt', 'ipc', 'memory',
                'net', 'posix', 'sched', 'smp', 'syscall', 'user')
 TESTS = (
     ('linux_udp_sockname_capture', 'LINUX_UDP_SOCKNAME_CAPTURE_PASS'),

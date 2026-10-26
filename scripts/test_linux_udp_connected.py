@@ -10,7 +10,7 @@ import signal
 import stat
 import subprocess
 
-DIRECTORIES = ('core', 'apps', 'driver', 'fs', 'gui', 'interrupt', 'ipc', 'memory',
+DIRECTORIES = ('core', 'rescue', 'driver', 'fs', 'gui', 'interrupt', 'ipc', 'memory',
                'net', 'posix', 'sched', 'smp', 'syscall', 'user')
 TESTS = (
     ('network_wire', 'NETWORK_WIRE_PASS'),

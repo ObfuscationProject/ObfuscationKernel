@@ -4,7 +4,7 @@ from pathlib import Path
 import argparse,hashlib,json,os,resource,shutil,subprocess,sys
 
 ARCHES=('x86_64',)
-DIRECTORIES=('core','apps','driver','fs','gui','interrupt','ipc','memory','net','posix','sched','smp','syscall','user')
+DIRECTORIES=('core','rescue','driver','fs','gui','interrupt','ipc','memory','net','posix','sched','smp','syscall','user')
 
 def sha(path):
  return hashlib.sha256(Path(path).read_bytes()).hexdigest()

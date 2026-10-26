@@ -39,7 +39,7 @@ def main():
     tools = {str(p): sha(p) for p in (compiler, xmake, cc1)}
     shared = []
     if 'dispatch' in suites:
-        for subsystem in ('core', 'apps', 'driver', 'fs', 'gui', 'interrupt', 'ipc',
+        for subsystem in ('core', 'rescue', 'driver', 'fs', 'gui', 'interrupt', 'ipc',
                           'memory', 'net', 'posix', 'sched', 'smp', 'syscall', 'user'):
             shared += [str(p.relative_to(source)) for p in sorted((source / 'src' / subsystem).rglob('*.cpp'))
                        if p.name not in ('entry.cpp', 'kernel_main.cpp', 'runtime.cpp')]

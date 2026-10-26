@@ -9,7 +9,7 @@ import shutil
 import stat
 import subprocess
 
-DIRECTORIES = ('core', 'apps', 'driver', 'fs', 'gui', 'interrupt', 'ipc', 'memory',
+DIRECTORIES = ('core', 'rescue', 'driver', 'fs', 'gui', 'interrupt', 'ipc', 'memory',
                'net', 'posix', 'sched', 'smp', 'syscall', 'user')
 TESTS = (
     ('native_syscall_restart', 'RESTART_ADAPTER_PASS'),

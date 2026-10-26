@@ -15,7 +15,7 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     sources = [root/'tests/host/linux_umask_tests.cpp']
-    for umask in ('core', 'apps', 'driver', 'fs', 'gui', 'interrupt', 'ipc', 'memory',
+    for umask in ('core', 'rescue', 'driver', 'fs', 'gui', 'interrupt', 'ipc', 'memory',
                       'net', 'posix', 'sched', 'smp', 'syscall', 'user'):
         sources.extend(path for path in sorted((root/'src'/umask).rglob('*.cpp'))
                        if path.name not in ('entry.cpp', 'kernel_main.cpp', 'runtime.cpp'))
