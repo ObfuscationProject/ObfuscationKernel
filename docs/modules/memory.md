@@ -83,6 +83,9 @@ It follows the allocation contract below:
   return their frames on release. Failure returns `no_memory` and counts in
   `accounting().failures`; there is no OOM killer.
 
+The node-owned [page cache skeleton](filesystem.md#page-cache-skeleton) draws its
+pages from the same allocator (kind `page_cache`) and its index from this slab.
+
 Release checks the page kind, class, slot alignment, slot occupancy and the
 owner's charge, so foreign, misaligned, wrong-size and double releases fail
 without changing state. Slot reuse inside one page is not detected; callers that

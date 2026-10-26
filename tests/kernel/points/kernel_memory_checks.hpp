@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ok/fs/page_cache.hpp"
 #include "ok/memory/memory.hpp"
 
 #include <array>
@@ -7,9 +8,10 @@
 namespace ok::test
 {
 
-// Runs against the booted kernel's allocator over discovered RAM. Frames and
-// objects are written and read back through their supervisor addresses, so this
-// touches real QEMU guest memory; it does not qualify user mappings or DMA.
+// Runs against the booted kernel's allocator over discovered RAM. Frames,
+// objects and page-cache pages are written and read back through supervisor
+// addresses, so this touches real QEMU guest memory; it does not qualify user
+// mappings, DMA or any backing-store I/O.
 inline Status check_kernel_memory(memory::MemoryManager &memory)
 {
     auto &frames = memory.frames();
@@ -75,6 +77,35 @@ inline Status check_kernel_memory(memory::MemoryManager &memory)
             return Status::fault("kernel object release left live objects");
     if (owner.used() != 0 || after.large_pages != before.large_pages)
         return Status::fault("kernel object charges were not returned");
+
+    // A node-owned page cache over the same frames and objects.
+    memory::ChargeAccount cache_pages;
+    fs::FilePageCache cache;
+    if (auto status = cache.bind(memory, cache_pages); !status.ok())
+        return status;
+    for (u64 index : {3u, 0u, 12u})
+    {
+        auto page = cache.obtain(index);
+        if (!page)
+            return page.status();
+        auto *data = reinterpret_cast<volatile u8 *>(page.value().address);
+        data[0] = static_cast<u8>(index + 1);
+        data[frames.page_size() - 1] = static_cast<u8>(index + 2);
+        if (auto status = cache.mark_uptodate(index); !status.ok())
+            return status;
+    }
+    if (auto status = cache.mark_dirty(12); !status.ok())
+        return status;
+    auto dirty = cache.next_dirty(0);
+    const auto *first = reinterpret_cast<const volatile u8 *>(cache.lookup(3).value().address);
+    if (!dirty || dirty.value() != 12 || first[0] != 4 || first[frames.page_size() - 1] != 5 || cache.clear().ok())
+        return Status::fault("page cache lost its contents or dirty state");
+    if (auto status = cache.mark_clean(12); !status.ok())
+        return status;
+    if (auto status = cache.clear(); !status.ok())
+        return status;
+    if (cache_pages.used() != 0)
+        return Status::fault("page cache frames were not returned");
     return Status::success();
 }
 
