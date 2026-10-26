@@ -61,8 +61,8 @@ FILES = (
 PROFILES = (
     ('i386', 'i386-elf', 1, 1, 3, ('-mno-sse', '-mno-sse2')),
     ('x86_64', 'x86_64-elf', 2, 1, 62, ('-mno-red-zone',)),
-    ('aarch64', 'aarch64-elf', 2, 1, 183, ('-mno-outline-atomics', '-mgeneral-regs-only')),
-    ('arm32', 'arm-none-eabi', 1, 1, 40, ('-march=armv7-a', '-marm')),
+    ('aarch64', 'aarch64-elf', 2, 1, 183, ('-mno-outline-atomics', '-mgeneral-regs-only', '-mstrict-align')),
+    ('arm32', 'arm-none-eabi', 1, 1, 40, ('-march=armv7-a', '-marm', '-mno-unaligned-access')),
     ('rv64', 'riscv64-elf', 2, 1, 243, ('-mcmodel=medany',)),
     ('rv32', 'riscv32-elf', 1, 1, 243, ('-mcmodel=medany',)),
     ('loongarch64', 'loongarch64-elf', 2, 1, 258, ()),

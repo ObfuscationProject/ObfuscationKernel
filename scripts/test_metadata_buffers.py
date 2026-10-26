@@ -11,7 +11,7 @@ PROFILES = (
 )
 TARGET_FLAGS = {
     "i386": ["-mno-sse", "-mno-sse2"], "x86_64": ["-mno-red-zone"],
-    "aarch64": ["-mno-outline-atomics", "-mgeneral-regs-only"], "arm32": ["-march=armv7-a", "-marm"],
+    "aarch64": ["-mno-outline-atomics", "-mgeneral-regs-only", "-mstrict-align"], "arm32": ["-march=armv7-a", "-marm", "-mno-unaligned-access"],
     "rv64": ["-mcmodel=medany"], "rv32": ["-mcmodel=medany"], "loongarch64": [],
     "mips": ["-march=mips32r2", "-G0"], "mips64": ["-march=mips64r2", "-mabi=64", "-G0"],
     "ppc": ["-msoft-float", "-msdata=none"],

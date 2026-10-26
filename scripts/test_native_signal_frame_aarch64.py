@@ -35,7 +35,7 @@ set_toolchains("frame-aarch64")
 set_targetdir("artifacts")
 add_includedirs("include")
 add_files("tests/host/native_signal_frame_aarch64_compile.cpp")
-add_cxxflags("-O2","-g","-ffreestanding","-fno-exceptions","-frtti","-fno-stack-protector","-fno-pic","-fno-pie","-mno-outline-atomics","-mgeneral-regs-only","-Wall","-Wextra","-Wpedantic","-Werror",{force=true})
+add_cxxflags("-O2","-g","-ffreestanding","-fno-exceptions","-frtti","-fno-stack-protector","-fno-pic","-fno-pie","-mno-outline-atomics","-mgeneral-regs-only", "-mstrict-align","-Wall","-Wextra","-Wpedantic","-Werror",{force=true})
 target_end()
 '''
 (src/'xmake.lua').write_text(project);record['files']['xmake.lua']=sha(src/'xmake.lua')

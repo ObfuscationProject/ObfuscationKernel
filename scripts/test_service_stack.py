@@ -16,8 +16,8 @@ import subprocess
 PROFILES = {
     "i386": ("i386-elf", ["-mno-sse", "-mno-sse2"]),
     "x86_64": ("x86_64-elf", ["-mno-red-zone"]),
-    "aarch64": ("aarch64-elf", ["-mno-outline-atomics", "-mgeneral-regs-only"]),
-    "arm32": ("arm-none-eabi", ["-march=armv7-a", "-marm"]),
+    "aarch64": ("aarch64-elf", ["-mno-outline-atomics", "-mgeneral-regs-only", "-mstrict-align"]),
+    "arm32": ("arm-none-eabi", ["-march=armv7-a", "-marm", "-mno-unaligned-access"]),
     "rv64": ("riscv64-elf", ["-mcmodel=medany"]),
     "rv32": ("riscv32-elf", ["-mcmodel=medany"]),
     "loongarch64": ("loongarch64-elf", ["-msimd=none"]),

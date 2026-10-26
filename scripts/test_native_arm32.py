@@ -16,7 +16,7 @@ def main() -> int:
     compiler = toolchain.resolve() / "bin/arm-none-eabi-g++"
     output = args.output or root / "build/native-tests/arm32"
     output.mkdir(parents=True, exist_ok=True)
-    common = ["-march=armv7-a", "-marm", "-mfloat-abi=soft", "-mfpu=neon"]
+    common = ["-march=armv7-a", "-marm", "-mno-unaligned-access", "-mfloat-abi=soft", "-mfpu=neon"]
     cxx = ["-std=c++23", "-O2", "-ffreestanding", "-fno-builtin", "-fno-exceptions", "-fno-stack-protector", "-Wall", "-Wextra", "-Wpedantic", "-Werror", "-I", str(root / "include")]
     objects = []
     sources = [("boot", "src/arch/arm32/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/arm32/execution.cpp"), ("bridge", "src/arch/arm32/execution.S"), ("user", "tests/native/arm32_execution_user.S"), ("test", "tests/native/arm32_execution_test.cpp")]

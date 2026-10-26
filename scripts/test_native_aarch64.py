@@ -24,7 +24,7 @@ def main() -> int:
     gcc, gxx, objcopy = [str(prefix) + tool for tool in ("gcc", "g++", "objcopy")]
     flags = ["-std=c++23", "-O2", "-ffreestanding", "-fno-builtin", "-fno-exceptions",
              "-fno-stack-protector", "-fno-use-cxa-atexit", "-fno-threadsafe-statics", "-fno-pic", "-fno-pie",
-             "-mgeneral-regs-only", "-mno-outline-atomics", "-Wall", "-Wextra", "-Werror",
+             "-mgeneral-regs-only", "-mstrict-align", "-mno-outline-atomics", "-Wall", "-Wextra", "-Werror",
              "-I", str(project / "include")]
     objects = []
     for name, source in (("boot", "src/arch/aarch64/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/aarch64/execution.cpp"),
