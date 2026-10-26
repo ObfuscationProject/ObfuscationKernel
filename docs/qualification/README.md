@@ -85,6 +85,7 @@ live in the separate ObfuscationEvidence repository.
 | [PLATFORM_CLOCKS.md](PLATFORM_CLOCKS.md) | Native platform clocks |
 | [PRIVATE_FUTEX.md](PRIVATE_FUTEX.md) | Private futex implementation contract |
 | [PRIVATE_FUTEX_PEER_FIXTURE.md](PRIVATE_FUTEX_PEER_FIXTURE.md) | Actual private futex peer execution fixture |
+| [PROCESS_MEMORY_QUOTAS.md](PROCESS_MEMORY_QUOTAS.md) | Per-process memory quotas |
 | [PUBLIC_REALTIME.md](PUBLIC_REALTIME.md) | Checked public realtime clocks |
 | [QEMU_RUNTIME_FRAMES.md](QEMU_RUNTIME_FRAMES.md) | Qualified QEMU runtime frame bridge |
 | [QUALIFIED_BOOT_MEMORY.md](QUALIFIED_BOOT_MEMORY.md) | Qualified entry memory |

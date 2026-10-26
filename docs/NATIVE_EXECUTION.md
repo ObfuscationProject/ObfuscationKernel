@@ -59,10 +59,13 @@ non-executable entry points and oversized images are rejected. User and
 kernel-object pages come from the kernel frame allocator over the discovered
 boot memory map (see [memory](modules/memory.md)); the page pool has a fixed
 kernel-object reserve and a user-page quota of every frame free at activation.
-Remaining bounds: 16 address spaces and 1024 mapping records per address space
-in the execution backends, a 128 KiB ELF input buffer, 64 KiB stacks, and up to
-16 argument/environment strings each. Per-process quotas and COW fork are not
-implemented yet.
+Each process's mapped user pages are its charge against its own `RLIMIT_AS`
+soft limit; `RLIMIT_DATA` bounds its brk heap (see
+[process memory quotas](qualification/PROCESS_MEMORY_QUOTAS.md)). Remaining
+fixed bounds: 16 address spaces and 1024 mapping records per address space in
+the execution backends, a 128 KiB ELF input buffer, 64 KiB stacks, and up to 16
+argument/environment strings each. Fork copies private pages eagerly; COW fork
+is not implemented yet.
 
 ## Distribution and boot archive
 

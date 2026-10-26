@@ -66,3 +66,22 @@ scheduler model fixtures use static storage instead of consuming the 1 MiB
 bootstrap stack.
 The service regression invokes real GUI callback boundaries with a host native
 execution stub and verifies that selected or blocked process identities survive.
+
+## Memory quotas
+
+`ProcessResources::memory_limits` holds the process's `RLIMIT_AS` and
+`RLIMIT_DATA` soft and hard values in bytes (default unlimited). Fork copies
+them and exec keeps them. Native mappings are eager, so the process's charge is
+its mapped user page count: `native_mmap` (and therefore brk), and the
+replacement image at exec, are admitted only while the result fits the soft
+address-space limit and the backend's per-space mapping capacity. brk growth
+must also stay within the data limit. A failed admission returns `ENOMEM` and
+leaves the existing mappings unchanged. Lowering a soft limit below current
+usage is allowed; only later growth fails.
+
+Native `getrlimit` and `prlimit64` (pid 0 or the caller) read and set both
+resources with the common UAPI numbers (`RLIMIT_DATA` 2, `RLIMIT_AS` 9) and the
+`ok_rlimit` layout. A soft value above its maximum is `EINVAL`; raising a
+maximum requires effective UID 0 (`EPERM`). Other resources keep the static
+service values and remain read-only. Linux-personality processes are unchanged.
+

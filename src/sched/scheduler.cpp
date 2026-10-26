@@ -1205,6 +1205,7 @@ Result<ProcessId> SchedulerState::fork_process(ProcessId parent, bool publish)
     child_resources.program_break_limit = parent_resources.program_break_limit;
     child_resources.next_mapping_address = parent_resources.next_mapping_address;
     child_resources.file_mode_mask = parent_resources.file_mode_mask;
+    child_resources.memory_limits = parent_resources.memory_limits;
     for (const auto &slot : child->fd_table().entries())
         if (slot.used)
             if (auto *description = open_description(slot.description))

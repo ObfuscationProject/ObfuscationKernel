@@ -1596,6 +1596,8 @@ Result<uptr> native_mmap(sched::ProcessResources &resources, uptr hint, usize le
         }
     if (size / hw::page_size > Pages::capacity - (resources.native_pages.size() - removed_count))
         return Status::no_memory("native process page capacity exceeded");
+    if (auto status = resources.memory_limits.admit(resources.native_pages.size() - removed_count +
+                                                    size / hw::page_size, hw::page_size); !status) return status;
     auto retirement_result = PageRetirementReservation::reserve();
     if (!retirement_result) return retirement_result.status();
     auto retirement = std::move(retirement_result.value());
@@ -1788,6 +1790,8 @@ Result<uptr> native_brk(sched::ProcessResources &resources, uptr address)
         resources.program_break_limit >= hw::user_end ||
         address < resources.program_break_base || address > resources.program_break_limit)
         return Status::no_memory("native program break outside heap window");
+    if (address - resources.program_break_base > resources.memory_limits.data.current)
+        return Status::no_memory("process data quota exceeded");
     const uptr old_end = (resources.program_break + hw::page_size - 1) & ~(hw::page_size - 1);
     const uptr new_end = (address + hw::page_size - 1) & ~(hw::page_size - 1);
     if (new_end > old_end)
@@ -3237,6 +3241,19 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
             [&](uptr address, std::span<const u8> bytes) {
                 return hw::copy_to_user(space, address, bytes.data(), bytes.size());
             });
+    // Per-process memory quotas; other resources keep the static service table.
+    if ((number == N::getrlimit || number == N::prlimit64) && process->resources().personality == Personality::native)
+        if (auto *limit = process->resources().memory_limits.find(number == N::prlimit64 ? a[1] : a[0]))
+        {
+            const bool prlimit = number == N::prlimit64, set = prlimit && a[2];
+            const uptr previous = prlimit ? a[3] : a[1];
+            sched::MemoryLimit requested{}, saved = *limit;
+            if (prlimit && a[0] && a[0] != static_cast<uptr>(pid)) return -3; // Only the caller's own limits.
+            if (!prlimit && !previous) return -14;
+            if (set && !hw::copy_from_user(space, &requested, a[2], sizeof(requested))) return -14;
+            if (previous && !hw::copy_to_user(space, previous, &saved, sizeof(saved))) return -14;
+            return set ? sched::MemoryLimits::update(*limit, requested, process->credentials().euid == 0) : 0;
+        }
     if (number == N::power_prepare || number == N::power_commit)
     {
         if (process->resources().personality != Personality::native) return -38;
@@ -3727,6 +3744,8 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         auto image = load(kernel, path.view(), arguments);
         if (!image)
             return error(image.status());
+        if (auto status = process->resources().memory_limits.admit(image.value().pages.size(), hw::page_size); !status)
+            return error(status); // The quota survives exec.
         auto context = kernel.arch().make_user_context({image.value().frame.pc, image.value().frame.sp});
 #ifdef OK_PRIVATE_POLL_MASK
         const auto &mask_owner = *kernel.scheduler().find_thread(pid, calling_tid);
