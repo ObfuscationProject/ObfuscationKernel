@@ -72,18 +72,46 @@ Exit gate
 
 Paired OS worktree: `chore/sdk75-consumer`. Depends on: P0.
 
-Scaffold (merged to main from `feat/mm-general`) (hosted tests pass, nothing wired into boot):
-- `include/ok/memory/physical_map.hpp`, `src/memory/physical_map.cpp`: `PhysicalMemoryMap`
-  collects E820/FDT/board/linker regions, subtracts reservations, yields sorted
-  page-aligned usable ranges; `product_grade()` rejects synthetic maps.
-- `include/ok/memory/runtime_frames.hpp`, `src/memory/runtime_frames.cpp`:
-  `RuntimeFrameAllocator` sizes bitmap and generation metadata from the map at
-  initialisation (`metadata_bytes_required()`), charges `ChargeAccount` quotas,
-  rejects foreign/stale/mismatched handles.
-- `include/ok/memory/charges.hpp`: per-owner page charges with limit and peak.
-- `tests/host/runtime_frames_tests.cpp`, `scripts/test_runtime_frames.py` (plain and sanitised).
-Next: feed real maps from `kernel_main` per architecture, carve the metadata
-region from discovered RAM, replace `FrameAllocator` users, then slab and COW.
+Status on `feat/mm-general` (ABI 75; paired OS worktree `chore/sdk75-consumer`):
+- Boot memory on all ten profiles ([BOOT_MEMORY_MAP](qualification/BOOT_MEMORY_MAP.md)):
+  E820, FDT, LoongArch UEFI system table → FDT, Malta PROM-sized board table;
+  explicit image, boot stack/page-table, firmware, loader-table, page-zero and
+  device-window reservations; `kernel_main` → `KernelConfig::physical_memory`;
+  the synthetic 64 MiB map exists only in hosted builds.
+- `FrameAllocator` metadata is runtime-sized (range table, bitmap, one
+  `PageDescriptor` per frame) and carved from discovered RAM by `MemoryManager`;
+  the owner/generation handle contract is kept. The `RuntimeFrameAllocator`
+  scaffold folded into it.
+- `SlabAllocator`: size classes 16..1024 plus contiguous large objects, page and
+  per-owner byte charges, `boot`/`kernel`/`atomic` contexts with an atomic frame
+  reserve, empty-page reclamation.
+- The native page pool shares the kernel allocator (descriptor-held registry,
+  object reserve, user quota); the 1024-frame pool and linker arenas are gone
+  from kernel builds.
+- Per-process charges: mapped user pages against each process's `RLIMIT_AS`,
+  brk against `RLIMIT_DATA`, inherited by fork, kept by exec; native
+  `getrlimit`/`prlimit64` ([PROCESS_MEMORY_QUOTAS](qualification/PROCESS_MEMORY_QUOTAS.md)).
+- `fs::FilePageCache` skeleton owned by VFS nodes (`Node::page_cache()`).
+- Verification: `xmake test` on all ten profiles under the pinned QEMU 10.2.0
+  (including a discovered-RAM frame/slab/page-cache test point); the paired OS
+  distro boots natively on all ten with `qemu-distro --require-native`, whose
+  `posix-check` pressure phase now runs against a lowered `RLIMIT_AS`
+  (`OK_VM_QUOTA`); hosted suites `test_boot_memory`, `test_physical_map`,
+  `test_frame_allocator`, `test_slab`, `test_page_cache`, `test_native_page_pool`,
+  `test_process_resources`.
+Open before the exit gate:
+- Copy-on-write fork (behind a build option, eager default): needs a write-fault
+  classification in every execution backend; arm32, RISC-V and MIPS do not
+  report page faults distinctly yet, and `runtime.cpp` is at its split ratchet.
+- Fixed pools still in `include/ok/user`: the shared memory files (16 files of
+  64 pages, part of the SDK contract) until shared mappings move onto the page
+  cache (WT1.5/WT3.1). `include/ok/memory` keeps only the software VM model
+  bounds (`max_virtual_mappings`, `max_user_pages`) and the firmware input bound
+  (`max_discovered_regions`).
+- The execution backends' 16 static address spaces and 1024 mapping records
+  per space (`include/ok/arch/execution.hpp`) are not yet frame-allocated.
+- No reclaim or OOM policy beyond fallible failure; IRQ/SMP synchronization of
+  the allocators arrives with WT1.2 and WT2.1.
 
 ### WT1.2 `feat/irq-wait-time` (L, ABI)
 
