@@ -3,7 +3,7 @@
 from pathlib import Path
 import argparse, hashlib, json, os, resource, shutil, subprocess
 
-DIRECTORIES = ('core','apps','driver','fs','gui','interrupt','ipc','memory','net','posix','sched','smp','syscall','user')
+DIRECTORIES = ('core','rescue','driver','fs','gui','interrupt','ipc','memory','net','posix','sched','smp','syscall','user')
 def sha(path): return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 def main():
     ap=argparse.ArgumentParser(description=__doc__)

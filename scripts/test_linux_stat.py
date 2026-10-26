@@ -102,7 +102,7 @@ def main():
         'raw-blocks': ['tests/host/ext4_blocks_raw_query.cpp'],
         'dispatch': ['tests/host/linux_stat_dispatch_tests.cpp'],
     }
-    for subsystem in ('core', 'apps', 'driver', 'fs', 'gui', 'interrupt', 'ipc', 'memory',
+    for subsystem in ('core', 'rescue', 'driver', 'fs', 'gui', 'interrupt', 'ipc', 'memory',
                       'net', 'posix', 'sched', 'smp', 'syscall', 'user'):
         suites['dispatch'].extend(str(p.relative_to(source)) for p in sorted((source / 'src' / subsystem).rglob('*.cpp'))
                                   if p.name not in ('entry.cpp', 'kernel_main.cpp', 'runtime.cpp'))

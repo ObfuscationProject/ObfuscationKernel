@@ -11,7 +11,7 @@ import subprocess
 
 CASES = ('pipe_signal', 'pipe_write_signal', 'pipe_vector_signal', 'child_wait_signal',
          'futex_signal', 'poll_signal', 'poll_temporary_mask', 'sleep_interruption', 'pipe_blocking_write')
-DIRECTORIES = ('core', 'apps', 'driver', 'fs', 'gui', 'interrupt', 'ipc', 'memory', 'net', 'posix',
+DIRECTORIES = ('core', 'rescue', 'driver', 'fs', 'gui', 'interrupt', 'ipc', 'memory', 'net', 'posix',
                'sched', 'smp', 'syscall', 'user')
 
 
