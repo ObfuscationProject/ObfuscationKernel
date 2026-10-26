@@ -11,7 +11,7 @@ spec = importlib.util.spec_from_file_location("shared_file_sdk_exporter", path)
 exporter = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(exporter)
 
-PROFILE = 'inline constexpr std::string_view native_shared_file_profile = "bootcpu-volatile-sealed-size-write-eager-pages-v2";\ninline constexpr std::string_view linux_shared_file_profile = "bootcpu-volatile-sealed-size-write-eager-pages-v2";\ninline constexpr u32 native_shared_file_module_abi = 74;\ninline constexpr usize native_shared_file_capacity = 16;\ninline constexpr usize native_shared_file_max_pages = 64;\ninline constexpr usize native_shared_file_page_size = 4096;\ninline constexpr u32 native_shared_file_supported_seals = 15;\n'
+PROFILE = 'inline constexpr std::string_view native_shared_file_profile = "bootcpu-volatile-sealed-size-write-eager-pages-v2";\ninline constexpr std::string_view linux_shared_file_profile = "bootcpu-volatile-sealed-size-write-eager-pages-v2";\ninline constexpr u32 native_shared_file_module_abi = 75;\ninline constexpr usize native_shared_file_capacity = 16;\ninline constexpr usize native_shared_file_max_pages = 64;\ninline constexpr usize native_shared_file_page_size = 4096;\ninline constexpr u32 native_shared_file_supported_seals = 15;\n'
 
 
 class SharedFileProducerTests(unittest.TestCase):
@@ -36,11 +36,11 @@ class SharedFileProducerTests(unittest.TestCase):
                     exporter.validate_shared_file_profile(self.headers)
 
     def test_old_future_and_broadened_contracts_are_refused(self):
-        for before, after in (("module_abi = 74", "module_abi = 59"),
-                              ("module_abi = 74", "module_abi = 64"),
-                              ("module_abi = 74", "module_abi = 65"),
-                              ("module_abi = 74", "module_abi = 58"),
-                              ("module_abi = 74", "module_abi = 75"),
+        for before, after in (("module_abi = 75", "module_abi = 59"),
+                              ("module_abi = 75", "module_abi = 64"),
+                              ("module_abi = 75", "module_abi = 65"),
+                              ("module_abi = 75", "module_abi = 58"),
+                              ("module_abi = 75", "module_abi = 76"),
                               ("capacity = 16", "capacity = 32"),
                               ("max_pages = 64", "max_pages = 128"),
                               ("page_size = 4096", "page_size = 8192"),
@@ -75,12 +75,12 @@ class SharedFileProducerTests(unittest.TestCase):
         args = types.SimpleNamespace(headers=self.headers, mode="debug", arch="x86_64",
                                      define=[], asflag=[], cxxflag=[])
         for source in [f"inline constexpr u32 kernel_module_abi_version = {version};\n"
-                       for version in (*range(1, 74), 75)] + [
-                       "inline constexpr u32 kernel_module_abi_version = 74;\n" * 2,
+                       for version in (*range(1, 75), 76)] + [
+                       "inline constexpr u32 kernel_module_abi_version = 75;\n" * 2,
                        "inline constexpr u32 unrelated = 59;\n"]:
             header.write_text(source)
             with patch.object(exporter, "native_signal_profile", return_value="bounded-bootcpu-v1"), \
-                    self.subTest(source=source), self.assertRaisesRegex(ValueError, "ABI74 header"):
+                    self.subTest(source=source), self.assertRaisesRegex(ValueError, "ABI75 header"):
                 exporter.export(args)
 
 

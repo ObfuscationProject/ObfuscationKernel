@@ -12,7 +12,7 @@ Each module exposes a `ModuleManifest` with:
 - dependency, exported-service, and required-service lists;
 - `ModuleExecution`, either `inline_core` or `kernel_process`;
 - `ModuleThreading`, either `single_threaded` or `per_cpu`;
-- `abi_version`, currently `kernel_module_abi_version == 74`;
+- `abi_version`, currently `kernel_module_abi_version == 75`;
 - a capability mask declaring service export/use, kernel-process ownership,
   per-CPU workers, user ABI, driver ABI, or GUI behavior;
 - `ModuleRestartPolicy`;
@@ -107,6 +107,17 @@ Roadmap tests cover:
 - the built-in module graph used by the kernel debug suite.
 
 ## ABI history
+
+ABI75 (`feat/mm-general`) changes exported memory and process layouts:
+`KernelConfig` carries the discovered `PhysicalMemoryMap` instead of a fixed
+region array; `FrameAllocator` metadata is caller-owned with one
+`PageDescriptor` per frame (`ok/memory/frames.hpp`); `NativePagePool` keeps its
+registry in those descriptors and gains the shared-allocator activation;
+`MemoryManager` owns the kernel `SlabAllocator`; `fs::Node` gains the
+`page_cache()` virtual slot; `ProcessResources` gains `MemoryLimits`; the boot
+headers add the LoongArch EFI and Malta board protocols. The public UAPI stays
+0.16. Every exported module marker, the SDK manifest and the OS consumer declare
+75 and refuse 74 and 76.
 
 Earlier generations, kept for readers of archived qualification records. None of
 them can consume a current SDK.

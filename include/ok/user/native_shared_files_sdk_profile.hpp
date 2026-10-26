@@ -10,7 +10,7 @@ namespace ok::user::native
 {
 inline constexpr std::string_view native_shared_file_profile = "bootcpu-volatile-sealed-size-write-eager-pages-v2";
 inline constexpr std::string_view linux_shared_file_profile = "bootcpu-volatile-sealed-size-write-eager-pages-v2";
-inline constexpr u32 native_shared_file_module_abi = 74;
+inline constexpr u32 native_shared_file_module_abi = 75;
 inline constexpr usize native_shared_file_capacity = 16;
 inline constexpr usize native_shared_file_max_pages = 64;
 inline constexpr usize native_shared_file_page_size = 4096;
