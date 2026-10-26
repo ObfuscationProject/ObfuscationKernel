@@ -26,7 +26,10 @@ Status initialize_memory(memory::MemoryManager &memory, const KernelConfig &conf
     {
         if (!config.physical_memory->product_grade())
             return Status::invalid_argument("boot memory map is synthetic or not normalized");
-        return memory.initialize(*config.physical_memory, page_size, config.direct_map_offset);
+        if (auto status = memory.initialize(*config.physical_memory, page_size, config.direct_map_offset);
+            !status.ok())
+            return status;
+        return memory.initialize_objects();
     }
 #ifdef OK_KERNEL_FREESTANDING
     return Status::not_found("boot memory map is absent");

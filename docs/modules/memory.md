@@ -57,6 +57,37 @@ carves the metadata from the top of the highest usable range of a normalized
 The map must contain only RAM the supervisor can already access.
 `metadata_region()` reports the carve. The model form takes caller storage.
 
+## Kernel objects
+
+`SlabAllocator` (`ok/memory/slab.hpp`) is the general kernel object allocator.
+Objects up to 1024 bytes use the power-of-two classes 16..1024 in slab pages
+(252 slots of 16 bytes down to 3 of 1024); larger objects take physically
+contiguous frames. Objects are zeroed and aligned to their class (large objects
+to a page). Each slab page holds its partial-list link, free count and slot
+bitmap in a 64-byte header, and is identified by its `PageDescriptor` (kind
+`kernel_slab`, class in `flags`, live objects in `references`); large runs are
+kind `kernel_large` with the page count on the head.
+
+It follows the allocation contract below:
+
+- Owner: the `MemoryManager`; `initialize_objects()` runs after the boot form and
+  refuses the model form, whose frames are never dereferenced.
+- Accounting: every held frame charges the allocator's page account, limited to
+  a quarter of the managed frames; every object charges its caller's
+  `ChargeAccount` in bytes of its class (or pages for large objects).
+- Allocation context: `boot`, `kernel` and `atomic`, all on the serialized boot
+  CPU. Only `atomic` may take frames from the reserve of 1/128 of the managed
+  frames (16..256) that the others must leave free. Nothing blocks yet.
+- Reclamation: a slab page whose last object is released returns to the frame
+  allocator unless it is its class's only partially used page; large objects
+  return their frames on release. Failure returns `no_memory` and counts in
+  `accounting().failures`; there is no OOM killer.
+
+Release checks the page kind, class, slot alignment, slot occupancy and the
+owner's charge, so foreign, misaligned, wrong-size and double releases fail
+without changing state. Slot reuse inside one page is not detected; callers that
+need stale-handle detection keep using the generation-checked `ObjectPool`.
+
 ## Boot map and VM scope
 
 `kernel_main` discovers the boot memory map once, before translations change,
@@ -91,6 +122,8 @@ python3 scripts/test_frame_allocator.py
 python3 scripts/test_frame_allocator.py --sanitize
 python3 scripts/test_physical_map.py
 python3 scripts/test_physical_map.py --sanitize
+python3 scripts/test_slab.py --sanitize
+python3 scripts/test_boot_memory.py --sanitize
 ```
 
 The hosted suites test reserved overlap, sparse/duplicate/adjacent regions,
@@ -98,7 +131,15 @@ unaligned bounds, maps larger than the former fixed table, many-range maps,
 undersized metadata, exhaustion, initialization rollback, address wrap,
 foreign/stale release, charged allocation and quota failure, contiguous runs,
 descriptor reset, the boot metadata carve over host-backed RAM and a
-deterministic byte-coverage oracle over 200 maps in both input orders. The shared freestanding checks are also reached by
+deterministic byte-coverage oracle over 200 maps in both input orders. The slab
+suite covers every class, release validation, reclamation, page and owner
+limits, the atomic reserve, large objects and the boot policy.
+
+In debug kernels the `memory/discovered-ram-frames-and-objects` test point
+writes and reads back a two-frame run and one object of each class plus two
+large objects through the booted kernel's allocator, on every profile under
+QEMU. It touches real guest RAM through supervisor addresses; it does not
+qualify user mappings or DMA. The shared freestanding checks are also reached by
 `test_memory` through `kernel_main` in debug builds and `xmake qemu-test`. These
 are allocator bookkeeping checks even when run in QEMU; they do not establish
 real RAM discovery, hardware mappings or process isolation.

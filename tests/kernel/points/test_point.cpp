@@ -6,6 +6,7 @@
 #if defined(OK_ENABLE_TEST_POINTS)
 #include "frame_allocator_checks.hpp"
 #include "runtime_frames_checks.hpp"
+#include "kernel_memory_checks.hpp"
 #include "deadline_checks.hpp"
 #include "futex_wake_operation_checks.hpp"
 #include "wait_registration_checks.hpp"
@@ -551,6 +552,11 @@ Result<usize> run_kernel_test_points(Kernel &kernel)
         return status;
     }
     if (auto status = test_memory(runner); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = runner.check_status("memory", "discovered-ram-frames-and-objects", check_kernel_memory(kernel.memory()));
+        !status.ok())
     {
         return status;
     }

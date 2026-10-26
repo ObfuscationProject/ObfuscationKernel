@@ -111,18 +111,27 @@ static void check_contiguous()
                              MemoryRegion{0x10000, 8 * 4096, RegionType::usable}};
     CHECK(frames.initialize(regions, 4096, storage));
     ChargeAccount account;
-    std::array<PhysicalFrame, 6> run{};
     auto single = frames.allocate(account);
     CHECK(single && single.value().address == 0x1000);
-    CHECK(frames.allocate_contiguous(6, run, account));
-    CHECK(run[0].address == 0x10000 && run[5].address == 0x15000 && account.used() == 7);
-    CHECK(frames.allocate_contiguous(4, run, account).code() == StatusCode::no_memory && account.used() == 7);
-    CHECK(frames.allocate_contiguous(0, run, account).code() == StatusCode::invalid_argument);
-    std::array<PhysicalFrame, 2> pair{};
-    CHECK(frames.allocate_contiguous(2, pair, account) && pair[0].address == 0x2000 && pair[1].address == 0x3000);
+    auto run = frames.allocate_contiguous(6, account);
+    CHECK(run && run.value().address == 0x10000 && account.used() == 7);
+    CHECK(frames.handle_at(run.value().index + 5).value().address == 0x15000);
+    CHECK(frames.allocate_contiguous(4, account).status().code() == StatusCode::no_memory && account.used() == 7);
+    CHECK(frames.allocate_contiguous(0, account).status().code() == StatusCode::invalid_argument);
+    auto pair = frames.allocate_contiguous(2, account);
+    CHECK(pair && pair.value().address == 0x2000 && frames.handle_at(pair.value().index + 1).value().address == 0x3000);
     CHECK(account.used() == 9);
     ChargeAccount tight{1};
-    CHECK(frames.allocate_contiguous(2, pair, tight).code() == StatusCode::no_memory && tight.used() == 0);
+    CHECK(frames.allocate_contiguous(2, tight).status().code() == StatusCode::no_memory && tight.used() == 0);
+    // A run releases as a whole; a partial or stale run is refused unchanged.
+    ChargeAccount empty;
+    CHECK(frames.release_contiguous(run.value(), 6, empty).code() == StatusCode::invalid_argument);
+    CHECK(frames.release_contiguous(run.value(), 9, account).code() == StatusCode::invalid_argument);
+    CHECK(frames.release(frames.handle_at(run.value().index + 2).value(), account));
+    CHECK(frames.release_contiguous(run.value(), 6, account).code() == StatusCode::invalid_argument);
+    CHECK(frames.release_contiguous(run.value(), 2, account) && account.used() == 6 && !frames.live(run.value()));
+    CHECK(frames.release_contiguous(run.value(), 2, account).code() == StatusCode::invalid_argument);
+    CHECK(frames.release_contiguous(frames.handle_at(run.value().index + 3).value(), 3, account) && account.used() == 3);
 }
 
 static void check_boot_carve()

@@ -301,12 +301,12 @@ Result<PhysicalFrame> FrameAllocator::allocate(ChargeAccount &account)
     return frame;
 }
 
-Status FrameAllocator::allocate_contiguous(usize count, std::span<PhysicalFrame> output, ChargeAccount &account)
+Result<PhysicalFrame> FrameAllocator::allocate_contiguous(usize count, ChargeAccount &account)
 {
     if (frame_count_ == 0)
         return Status::not_initialized("physical frame allocator is not initialized");
-    if (count == 0 || output.size() < count)
-        return Status::invalid_argument("contiguous frame request has no complete output");
+    if (count == 0)
+        return Status::invalid_argument("contiguous frame request is empty");
     if (count > frame_count_ - used_count_)
         return Status::no_memory("physical frame allocator exhausted");
     if (count > ~u64{0} - next_generation_)
@@ -323,11 +323,32 @@ Status FrameAllocator::allocate_contiguous(usize count, std::span<PhysicalFrame>
                 return status;
             const usize first = range.first_index + offset + 1 - count;
             for (usize i = 0; i < count; ++i)
-                output[i] = take(first + i);
-            return Status::success();
+                static_cast<void>(take(first + i));
+            return handle_at(first);
         }
     }
     return Status::no_memory("no physically contiguous frame run");
+}
+
+Status FrameAllocator::release_contiguous(PhysicalFrame first, usize count, ChargeAccount &account)
+{
+    if (count == 0 || !exact(first) || count > frame_count_ - first.index)
+        return Status::invalid_argument("contiguous frame run handle is invalid or stale");
+    for (usize i = 1; i < count; ++i)
+        if (!used(first.index + i) || address_for(first.index + i) != first.address + i * page_size_)
+            return Status::invalid_argument("contiguous frame run is not wholly owned");
+    if (account.used() < count)
+        return Status::invalid_argument("contiguous frame release has no matching charge");
+    for (usize i = 0; i < count; ++i)
+    {
+        mark(first.index + i, false);
+        descriptors_[first.index + i] = {};
+    }
+    used_count_ -= count;
+    if (first.index < next_free_hint_)
+        next_free_hint_ = first.index;
+    static_cast<void>(account.uncharge(count));
+    return Status::success();
 }
 
 Status FrameAllocator::release(PhysicalFrame frame)

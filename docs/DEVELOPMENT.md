@@ -45,10 +45,13 @@ release. Bookkeeping does not prove those external lifetimes have ended. The
 allocator must outlive its handles and cannot be copied or moved.
 Reinitialization requires all frames to be released.
 
-Production page/object allocation still requires boot RAM and reservation
-discovery, runtime-sized metadata, explicit allocation contexts and charges,
-reclaim/reserves and OOM policy, and synchronized reference/TLB/DMA retirement.
-The default boot memory map and software VM/slab tests do not meet those gates.
+Boot RAM and reservations are discovered on every profile and the frame
+metadata is carved from them. `SlabAllocator` is the kernel object allocator
+under this contract: owned by the `MemoryManager`, charged per page and per
+owner, with `boot`/`kernel`/`atomic` contexts and an atomic frame reserve, and
+returning empty pages to the frame allocator. Still required: blocking and
+reclaim, an OOM policy beyond fallible failure, and synchronized
+reference/TLB/DMA retirement for IRQ and SMP callers.
 
 ## Architecture Work
 

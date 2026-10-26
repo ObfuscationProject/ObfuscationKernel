@@ -1234,7 +1234,9 @@ void check_partial_pin_retirement_preserves_failed_token()
     auto *saved = quarantine_for(original);
     CHECK(saved && saved->pages.size() == 2 && saved->pinned_count == 2);
     const auto failed = *saved->pages.frame(1);
-    auto *registry = const_cast<memory::PhysicalFrame *>(native::page_pool.handle(failed.address));
+    // The registry state is the allocator descriptor; skewing its generation
+    // makes the retained token stale exactly like a rejected canonical handle.
+    auto *registry = native::native_frames.descriptor(failed);
     CHECK(registry);
     ++registry->generation;
     mock::fail_destroy_root = 0;
@@ -1485,9 +1487,9 @@ int main(int argc, char **)
     {
         // A host-owned RAM array models already-qualified backing. Firmware
         // discovery and architecture mappings are covered separately in QEMU.
-        alignas(4096) static std::array<std::byte, native::page_count * hw::page_size> backing;
+        alignas(4096) static std::array<std::byte, native::hosted_page_count * hw::page_size> backing;
         const memory::MemoryRegion region{reinterpret_cast<uptr>(backing.data()),backing.size(),memory::RegionType::usable};
-        CHECK(native::native_frames.initialize({&region,1},hw::page_size));
+        CHECK(native::native_frames.initialize({&region,1},hw::page_size,native::native_frame_metadata.bytes));
         CHECK(native::page_pool.activate(native::native_frames,native::NativePagePool::Source::qualified_firmware,native::kernel_reserve_pages));
     }
     check_complete_runtime_purpose_budget();

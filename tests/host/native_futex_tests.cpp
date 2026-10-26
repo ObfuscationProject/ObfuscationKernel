@@ -241,7 +241,7 @@ void pressure(Kernel &kernel)
 {
     CHECK(native::activate_pool());
     const auto quota = native::page_pool.user_capacity_count();
-    std::array<uptr, native::page_count> users{};
+    std::array<uptr, native::hosted_page_count> users{};
     for (usize i = 0; i < quota; ++i)
     {
         auto p = native::page_pool.allocate();
