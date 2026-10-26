@@ -1,125 +1,12 @@
-#include "ok/user/native_signal_config.hpp"
-#include "ok/uapi/signal.h"
-#include "native_lifecycle.hpp"
-#include "ok/user/native_signal_action.hpp"
-#include "ok/user/runtime.hpp"
-#include "ok/user/native_sessions_profile.hpp"
-#include "ok/user/native_process_group_signal.hpp"
-#include "ok/user/native_group_signal_profile.hpp"
-#include "ok/user/native_console_control_profile.hpp"
-#include "ok/core/native_shutdown.hpp"
-#include "ok/user/native_sleep.hpp"
-#if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
-#define OK_PRIVATE_POLL_MASK 1
-#include "native_poll_mask.hpp"
-#include "signals/process_pending.hpp"
-#include "signals/wait_state.hpp"
-#include "signals/child_exit_lifecycle.hpp"
-#include "ok/user/native_signal_target.hpp"
-#include "ok/user/native_sleep_interruption.hpp"
-#if defined(__i386__)
-#include "ok/user/native_signal_delivery_i386.hpp"
-#include "ok/user/native_signal_return_i386.hpp"
-#elif defined(__arm__)
-#include "ok/user/native_signal_delivery_arm32.hpp"
-#include "ok/user/native_signal_return_arm32.hpp"
-#elif defined(__aarch64__)
-#include "ok/user/native_signal_delivery_aarch64.hpp"
-#elif defined(__powerpc__) || defined(__PPC__)
-#include "ok/user/native_signal_delivery_ppc32.hpp"
-#include "ok/user/native_signal_return_ppc32.hpp"
-#include "ok/user/native_signal_persistent_ppc32.hpp"
-#define OK_PRIVATE_SIGNAL_HAS_TRAMPOLINE 1
-#define OK_PRIVATE_PPC32_SIGNAL 1
-#elif defined(__mips64)
-#include "ok/user/native_signal_delivery_mips64_n64.hpp"
-#include "ok/user/native_signal_return_mips64_n64.hpp"
-#include "ok/user/native_signal_gate_mips64_n64.hpp"
-#include "ok/user/native_mips64_n64_elf_admission.hpp"
-#include "ok/user/native_signal_trampoline.hpp"
-#define OK_PRIVATE_SIGNAL_HAS_TRAMPOLINE 1
-#define OK_PRIVATE_MIPS64_N64_SIGNAL 1
-#elif defined(__mips__) && !defined(__mips64)
-#include "ok/user/native_signal_delivery_mips_o32.hpp"
-#include "ok/user/native_signal_return_mips_o32.hpp"
-#include "ok/user/native_signal_gate_mips_o32.hpp"
-#include "ok/user/native_mips_o32_elf_admission.hpp"
-#include "ok/user/native_signal_trampoline.hpp"
-#define OK_PRIVATE_SIGNAL_HAS_TRAMPOLINE 1
-#define OK_PRIVATE_MIPS_O32_SIGNAL 1
-#elif defined(__loongarch64)
-#include "ok/user/native_signal_delivery_loongarch64.hpp"
-#include "ok/user/native_signal_return_loongarch64.hpp"
-#include "ok/user/native_signal_trampoline.hpp"
-#define OK_PRIVATE_SIGNAL_HAS_TRAMPOLINE 1
-#elif defined(__riscv)
-#include "ok/user/native_signal_delivery_riscv.hpp"
-#include "ok/user/native_signal_trampoline.hpp"
-#define OK_PRIVATE_SIGNAL_HAS_TRAMPOLINE 1
-#else
-#include "ok/user/native_signal_delivery_x86_64.hpp"
-#endif
-#endif
-#include "ok/user/native_poll.hpp"
-#include "ok/user/native_futex.hpp"
-#include "ok/user/native_futex_requeue_sdk_profile.hpp"
-#if defined(OK_ENABLE_TEST_POINTS) && defined(OK_PRIVATE_FUTEX_PEER_FIXTURE)
-#include "../../tests/native/private_futex_peer_shared.hpp"
-#endif
-#include "ok/user/native_select.hpp"
-#include "ok/user/native_pty_pair_dispatch.hpp"
-#include "ok/user/native_page_pool.hpp"
-#include "ok/user/native_shared_files.hpp"
-#include "ok/abi/linux_futex_wake_operation.hpp"
-#include "ok/user/native_shared_files_sdk_profile.hpp"
-#include "ok/user/native_entry_stacks.hpp"
-#ifdef OK_KERNEL_FREESTANDING
-#include "ok/arch/service_stack.hpp"
-#endif
-#include "native_syscall_origin.hpp"
-#include <ok/net/tcp_accept_copied.hpp>
-#include "native_shared_capture.hpp"
-#if defined(OK_PRIVATE_MIPS64_N64_SIGNAL) || defined(OK_PRIVATE_PPC32_SIGNAL)
-#include "native_syscall_restart_publication.hpp"
-#endif
-#include "ok/memory/object_pool.hpp"
-#include "ok/boot/qemu_process_memory.hpp"
-#include "ok/abi/linux_exec.hpp"
-#if defined(__x86_64__)
-#include "ok/abi/linux_dynamic_exec_x86_64.hpp"
-#endif
-#include "ok/user/linux_bootstrap.hpp"
-#include "ok/user/native_credentials.hpp"
-#include "ok/user/native_mount_info.hpp"
-#include "ok/user/console_control_dispatch.hpp"
-#include "ok/user/native_metadata.hpp"
-#include "ok/arch/execution.hpp"
-#include "ok/arch/clock.hpp"
-#include "ok/time/public_clock.hpp"
-#include "ok/user/clock_set.hpp"
-#include "ok/core/kernel.hpp"
-#include "ok/net/native_udp_poll.hpp"
-#include "linux_udp_immediate_access.hpp"
-#include "linux_udp_captured_decode.hpp"
-#include "linux_udp_operation_body.hpp"
-#include "linux_udp_receive_owner_store.hpp"
-#include "tcp_immediate_access.hpp"
-#include "tcp_captured_accept.hpp"
-#include "ok/sched/process.hpp"
-#include "ok/syscall/linux.hpp"
-#include "ok/uapi/syscall.h"
+#include "runtime/private.hpp"
 
 extern "C" ok::Status ok_boot_filesystem(ok::fs::VirtualFileSystem &) __attribute__((weak));
 extern "C" ok::Status ok_boot_entropy(ok::posix::PosixService &) __attribute__((weak));
 
 namespace ok::user::native
 {
-namespace
+inline namespace runtime_detail
 {
-namespace hw = arch::execution;
-namespace lu = abi::linux_user;
-using LinuxExec = lu::ExecBootstrap<lu::configured_native_profile()>;
-using Personality = sched::UserPersonality;
 static_assert(native_sessions_module_abi == kernel_module_abi_version);
 static_assert(native_sessions_version == OK_NATIVE_SESSIONS_VERSION);
 static_assert(native_sessions_process_capacity == sched::max_processes);
@@ -3130,6 +3017,380 @@ void finish(Kernel &kernel, sched::ProcessId pid, i32 code, u8 signal)
 #include "signals/private_linux_udp_signal.hpp"
 #endif
 
+i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::ThreadControlBlock *caller,
+                    hw::AddressSpace &space, syscall::Number number, const std::array<uptr, 6> &a,
+                    bool &complete)
+{
+    using N = syscall::Number;
+    // Native UAPI numbers and sockaddr layout are not Linux ABI values on
+    // the ten supported targets. A Linux decoder must be added separately.
+    if (process->resources().personality != Personality::native) return -38;
+    static_assert(sizeof(ok_sockaddr_in) == 16);
+    auto socket_description = [&](u64 descriptor) -> Result<u16> {
+        if (descriptor > static_cast<u64>(__INT32_MAX__))
+            return Status::bad_descriptor("native UDP descriptor is out of range");
+        const auto *slot = process->fd_table().entry(static_cast<i32>(descriptor));
+        const auto *open = slot && slot->used ? kernel.scheduler().open_description(slot->description) : nullptr;
+        if (!open || !open->native_udp_handle)
+            return Status::bad_descriptor("descriptor is not a native UDP socket");
+        return slot->description;
+    };
+    auto address_from_user = [&](u64 pointer, u64 length) -> Result<ok_sockaddr_in> {
+        if (length != sizeof(ok_sockaddr_in))
+            return Status::invalid_argument("native UDP address must be sixteen bytes");
+        ok_sockaddr_in address{};
+        if (!hw::copy_from_user(space, &address, pointer, sizeof(address)))
+            return Status::fault("native UDP address is unreadable");
+        if (address.family != OK_AF_INET)
+            return Status::invalid_argument("native UDP requires AF_INET");
+        for (auto byte : address.reserved)
+            if (byte) return Status::invalid_argument("native UDP address has nonzero reserved bytes");
+        return address;
+    };
+    if (number == N::socket)
+    {
+        constexpr u64 allowed = OK_SOCK_DGRAM | OK_SOCK_NONBLOCK | OK_SOCK_CLOEXEC;
+        if (a[0] != OK_AF_INET || (a[1] & ~allowed) ||
+            (a[1] & OK_SOCK_DGRAM) != OK_SOCK_DGRAM ||
+            (a[2] != 0 && a[2] != OK_IPPROTO_UDP)) return -22;
+        if (auto status = kernel.native_udp_executor().status(); !status) return error(status);
+        if (!kernel.native_udp().configured())
+        {
+            auto *extension = kernel.extension();
+            if (!extension) return -38;
+            auto link = extension->network_link(kernel);
+            if (!link) return error(link.status());
+            if (auto status = kernel.native_udp().configure(link.value()); !status)
+                return error(status);
+        }
+        auto opened = kernel.native_udp().open();
+        if (!opened) return error(opened.status());
+        auto fd = kernel.posix().install_native_udp(opened.value(), (a[1] & OK_SOCK_CLOEXEC) != 0, (a[1] & OK_SOCK_NONBLOCK) != 0);
+        if (!fd)
+        {
+            static_cast<void>(kernel.native_udp().close(opened.value()));
+            return error(fd.status());
+        }
+        return fd.value();
+    }
+    const auto description_id = socket_description(a[0]);
+    if (!description_id) return error(description_id.status());
+    const Result<u32> handle = kernel.scheduler().open_description(description_id.value())->native_udp_handle;
+    if (number == N::bind)
+    {
+        auto address = address_from_user(a[1], a[2]);
+        if (!address) return error(address.status());
+        const auto port = static_cast<u16>((u16{address.value().port_be[0]} << 8) |
+                                           address.value().port_be[1]);
+        const net::wire::Ipv4 local{address.value().address[0], address.value().address[1],
+                                    address.value().address[2], address.value().address[3]};
+        return error(kernel.native_udp().bind(handle.value(), local, port));
+    }
+    if (number == N::sendto)
+    {
+        auto *extension = kernel.extension();
+        if (!extension) return -38;
+        if (a[3]) return -22;
+        if (auto status = kernel.native_udp_executor().status(); !status) return error(status);
+        if (a[2] > net::NativeUdpService::datagram_capacity) return -90;
+        auto address = address_from_user(a[4], a[5]);
+        if (!address) return error(address.status());
+        std::array<std::byte, net::NativeUdpService::datagram_capacity> payload{};
+        if (!hw::copy_from_user(space, payload.data(), a[1], static_cast<usize>(a[2]))) return -14;
+        std::array<std::byte, net::NativeUdpService::frame_capacity> frame{};
+        const auto port = static_cast<u16>((u16{address.value().port_be[0]} << 8) |
+                                           address.value().port_be[1]);
+        const net::wire::Ipv4 destination{address.value().address[0], address.value().address[1],
+                                           address.value().address[2], address.value().address[3]};
+        auto length = kernel.native_udp().build_datagram(handle.value(), destination,
+            port, {payload.data(), static_cast<usize>(a[2])}, frame);
+        if (!length) return error(length.status());
+        if (auto status = extension->network_transmit(kernel, {frame.data(), length.value()}); !status)
+            return error(status);
+        return static_cast<i64>(a[2]);
+    }
+    if (a[3]) return -22; // MSG_TRUNC and all other receive flags are unsupported.
+    if (!!a[4] != !!a[5]) return -22;
+    u32 address_capacity{};
+    if (a[4])
+    {
+        if (!hw::copy_from_user(space, &address_capacity, a[5], sizeof(address_capacity))) return -14;
+        if (address_capacity < sizeof(ok_sockaddr_in)) return -22;
+        if (!hw::user_range(space, a[4], sizeof(ok_sockaddr_in), true) ||
+            !hw::user_range(space, a[5], sizeof(address_capacity), true)) return -14;
+    }
+    const SyscallOrigins::NativeUdpReceiveRequest request{
+        static_cast<i32>(a[0]), a[1], a[2], a[3], a[4], a[5], address_capacity};
+    return begin_native_udp_receive(kernel, *process, *caller, description_id.value(), request, complete);
+}
+i64 fork_process(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock *process,
+                 [[maybe_unused]] sched::ThreadId calling_tid)
+{
+    auto result = kernel.posix().fork(pid, false);
+    if (!result)
+        return error(result.status());
+    const auto child_pid = result.value();
+    auto *child = kernel.scheduler().find(child_pid);
+    if (auto status = prepare_native_thread(child->threads()[0]); !status)
+    {
+        finish(kernel, child_pid, 127);
+        static_cast<void>(kernel.posix().wait(pid, child_pid));
+        return error(status);
+    }
+    auto &pages = child->resources().native_pages;
+    if (auto status = pages.reserve(page_pool, process->resources().native_pages.size(), true); !status)
+    {
+        finish(kernel, child_pid, 127);
+        static_cast<void>(kernel.posix().wait(pid, child_pid));
+        return error(status);
+    }
+    for (const auto &page : process->resources().native_pages)
+    {
+        const auto *source_frame = owned_frame(process->resources().native_pages, page);
+        if (!source_frame)
+        {
+            finish(kernel, child_pid, 127);
+            static_cast<void>(kernel.posix().wait(pid, child_pid));
+            return error(Status::fault("fork page lost exact frame authority"));
+        }
+        if (shared_pool_page(process->resources().native_pages, page))
+        {
+            const auto owner = *source_frame;
+            if (auto status = retain_page_reference(owner); !status)
+            {
+                finish(kernel, child_pid, 127);
+                static_cast<void>(kernel.posix().wait(pid, child_pid));
+                return error(status);
+            }
+            if (auto status = pages.push_back(page, owner); !status)
+            {
+                static_cast<void>(release_page_reference(owner));
+                finish(kernel, child_pid, 127);
+                static_cast<void>(kernel.posix().wait(pid, child_pid));
+                return error(status);
+            }
+            continue;
+        }
+        if (auto status = allocate(pages, page.virtual_address, page.flags); !status.ok())
+        {
+            finish(kernel, child_pid, 127);
+            static_cast<void>(kernel.posix().wait(pid, child_pid));
+            return error(status);
+        }
+        copy_bytes(reinterpret_cast<void *>(pages[pages.size() - 1].physical_address),
+                   reinterpret_cast<const void *>(source_frame->address), hw::page_size);
+    }
+    sched::MemoryMap child_memory;
+    if (auto status = page_memory_map(pages, child_memory); !status)
+    {
+        finish(kernel, child_pid, 127);
+        static_cast<void>(kernel.posix().wait(pid, child_pid));
+        return error(status);
+    }
+    auto child_space = create_page_space(pages);
+    if (!child_space)
+    {
+        finish(kernel, child_pid, 127);
+        static_cast<void>(kernel.posix().wait(pid, child_pid));
+        return error(child_space.status());
+    }
+    child->resources().native_space = child_space.value();
+    child->resources().memory = child_memory;
+    if (auto status = encode_result(*child, child->threads()[0].native_frame, 0); !status.ok())
+    {
+        finish(kernel, child_pid, 127);
+        static_cast<void>(kernel.posix().wait(pid, child_pid));
+        return error(status);
+    }
+#if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
+    if (auto status = private_signal_fork(kernel, pid, calling_tid, child_pid); !status)
+    {
+        finish(kernel, child_pid, 127);
+        static_cast<void>(kernel.posix().wait(pid, child_pid));
+        return error(status);
+    }
+#endif
+    child->threads()[0].native_active = true;
+    child->threads()[0].syscall_pending = false;
+    if (auto status = kernel.scheduler().set_runnable(child_pid); !status)
+    {
+        finish(kernel, child_pid, 127);
+        static_cast<void>(kernel.posix().wait(pid, child_pid));
+        return error(status);
+    }
+    return static_cast<i64>(child_pid);
+}
+i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock *process,
+               sched::ThreadId calling_tid, hw::AddressSpace &space, const std::array<uptr, 6> &a,
+               bool &complete)
+{
+    FixedString<256> path;
+    Arguments arguments;
+    if (auto status = string_from_user(space, a[0], path); !status.ok())
+        return error(status);
+    if (auto status = arguments_from_user(space, a[1], arguments.argv); !status.ok())
+        return error(status);
+    if (auto status = arguments_from_user(space, a[2], arguments.envp); !status.ok())
+        return error(status);
+    auto previous_image_retirement = ImageRetirementReservation::reserve();
+    if (!previous_image_retirement) return error(previous_image_retirement.status());
+    auto image = load(kernel, path.view(), arguments);
+    if (!image)
+        return error(image.status());
+    auto context = kernel.arch().make_user_context({image.value().frame.pc, image.value().frame.sp});
+#ifdef OK_PRIVATE_POLL_MASK
+    const auto &mask_owner = *kernel.scheduler().find_thread(pid, calling_tid);
+    const auto inherited_mask = signal_waits.find(mask_owner) ? signal_waits.exec_mask(mask_owner)
+                                                            : poll_signal_masks.exec_mask(mask_owner);
+#else
+    const auto inherited_mask = kernel.scheduler().find_thread(pid, calling_tid)->native_signal_mask;
+#endif
+#if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
+    auto *pending_before_exec = private_signal_queue(*kernel.scheduler().find_thread(pid, calling_tid));
+    const auto altstack_before_exec = *private_signal_altstack(*kernel.scheduler().find_thread(pid, calling_tid));
+    std::array<RetainedEntryStack, sched::max_threads_per_process> old_signal_owners{};
+    usize old_signal_owner_count{};
+    for (const auto &old_thread : process->threads())
+        if (old_thread.entry_stack.pool)
+            old_signal_owners[old_signal_owner_count++] = {{pid, old_thread.tid}, old_thread.entry_stack, 0};
+#endif
+    ExecRetirement retirement{*process, calling_tid};
+    VfsImageRetirement vfs_retirement;
+    if (auto status = vfs_retirement.prepare(kernel.scheduler(), *process); !status)
+    {
+        return error(status);
+    }
+#if defined(OK_PRIVATE_MIPS64_N64_SIGNAL) || defined(OK_PRIVATE_PPC32_SIGNAL)
+    std::array<u32, sched::max_threads_per_process> previous_signal_slots{};
+    usize previous_signal_count{};
+    for (const auto &old_thread : process->threads())
+        if (old_thread.entry_stack.pool) previous_signal_slots[previous_signal_count++] = old_thread.entry_stack.slot;
+#endif
+    bool vfs_retired{};
+    const auto replaced = replace_entry_stacks(entry_stacks, *process,
+        [&] {
+            return kernel.posix().exec(pid, context, image.value().memory);
+        }, [&] {
+            // Scheduler commit has escrowed the old entry stacks. A failed
+            // futex discharge must retain them and both VM generations.
+            if (auto status = cancel_futex(kernel, pid); !status) return status;
+            const auto native_udp_retired = retire_native_udp_receives_for_exec(kernel, pid);
+            const auto linux_udp_retired = retire_linux_udp_receives_for_exec(kernel, pid);
+            if (!native_udp_retired) return native_udp_retired;
+            if (!linux_udp_retired) return linux_udp_retired;
+            const auto status = vfs_retirement.consume(kernel.scheduler(), *process);
+            vfs_retired = status.ok();
+            if (!status) return status;
+#ifdef OK_PRIVATE_POLL_MASK
+            {
+                for (const auto &wait : signal_waits.records())
+                    if (wait.phase != PrivateSignalWaitState::Phase::none && wait.pid == pid)
+                        private_signal_wait_trace_retire(wait, "exec");
+                poll_signal_masks.discard_process(pid); signal_waits.discard_process(pid);
+            }
+#endif
+#ifdef OK_PRIVATE_MIPS64_N64_SIGNAL
+            for (usize i = 0; i < previous_signal_count; ++i) private_n64_revoke_slot(previous_signal_slots[i]);
+#endif
+#ifdef OK_PRIVATE_PPC32_SIGNAL
+            for (usize i = 0; i < previous_signal_count; ++i) private_ppc_revoke_slot(previous_signal_slots[i]);
+#endif
+            return status;
+        });
+    if (replaced.committed && vfs_retired) retirement.consume(kernel, *process);
+    if (!replaced)
+    {
+        if (!replaced.committed)
+        {
+            return error(replaced.status);
+        }
+        // Exec cannot return to the old image after scheduler commit. Keep
+        // both VM generations and every unreleased lease for diagnosis.
+        for (usize i = 0; i < replaced.retained_count; ++i)
+        {
+            const auto &saved = replaced.retained[i];
+            stranded_entry_stacks[saved.handle.slot] = {saved.owner, saved.handle};
+        }
+        static_cast<void>(image.value().retain_for_diagnosis());
+        runtime_failure = replaced.status;
+        started = false;
+        complete = false;
+        return 0;
+    }
+    cancel_poll(kernel, pid);
+    if (!runtime_failure)
+    {
+        static_cast<void>(image.value().retain_for_diagnosis());
+        started = false;
+        complete = false;
+        return 0;
+    }
+    if (auto status = retire_then_install(process->resources(), image.value(), previous_image_retirement.value(),
+            [&] { return install(*process, image.value(), inherited_mask); }); !status)
+    {
+        runtime_failure = status;
+        started = false;
+        complete = false;
+        return 0;
+    }
+#if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
+    private_signal_exec(kernel, *process, pending_before_exec, altstack_before_exec);
+    for (usize index = 0; index < old_signal_owner_count; ++index)
+        if (old_signal_owners[index].handle != process->threads()[0].entry_stack)
+            private_signal_thread_retire(pid, old_signal_owners[index].owner.tid, old_signal_owners[index].handle);
+#endif
+    complete = false; // The new image has its own entry register state.
+    return 0;
+}
+// Admit /init under its initial identity and install it as the first user process.
+Result<sched::ProcessId> install_init(Kernel &kernel, const fs::BootArchive &archive)
+{
+    Arguments arguments;
+    static_cast<void>(arguments.argv.push_back(FixedString<256>(archive.initial_program)));
+    static_cast<void>(arguments.envp.push_back(FixedString<256>("PATH=/bin")));
+    const auto initial_credentials = archive.initial_credentials;
+    if (initial_credentials.kernel_space || initial_credentials.uid != initial_credentials.euid ||
+        initial_credentials.gid != initial_credentials.egid ||
+        initial_credentials.suid != initial_credentials.euid ||
+        initial_credentials.sgid != initial_credentials.egid)
+        return Status::invalid_argument("initial user identity requires equal unprivileged IDs");
+    if (auto status = kernel.posix().set_credentials(initial_credentials); !status)
+        return status;
+    auto image = load(kernel, archive.initial_program, arguments);
+    const auto restored = kernel.posix().set_credentials(user::root_credentials());
+    if (!restored)
+    {
+        return restored;
+    }
+    if (!image)
+        return image.status();
+    auto context = kernel.arch().make_user_context({image.value().frame.pc, image.value().frame.sp});
+    auto pid = kernel.scheduler().create_init_process(context);
+    if (!pid)
+    {
+        return pid.status();
+    }
+    auto *process = kernel.scheduler().find(pid.value());
+    process->set_credentials(initial_credentials);
+    if (auto status = prepare_native_thread(process->threads()[0]); !status)
+    {
+        finish(kernel, pid.value(), 127);
+        return status;
+    }
+    if (auto status = install(*process, image.value()); !status)
+    {
+        finish(kernel, pid.value(), 127);
+        return status;
+    }
+#ifdef OK_PRIVATE_POLL_MASK
+    if (!private_signal_process(kernel, pid.value()))
+    {
+        finish(kernel, pid.value(), 127);
+        return Status::no_memory("private process signal owner capacity");
+    }
+#endif
+    return pid.value();
+}
 // Only this boundary accepts untrusted user pointers. The existing syscall
 // table receives kernel-owned buffers; calls without a complete marshaller are
 // deliberately unavailable to native programs.
@@ -3331,108 +3592,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         return 0;
     }
     if (number == N::socket || number == N::bind || number == N::sendto || number == N::recvfrom)
-    {
-        // Native UAPI numbers and sockaddr layout are not Linux ABI values on
-        // the ten supported targets. A Linux decoder must be added separately.
-        if (process->resources().personality != Personality::native) return -38;
-        static_assert(sizeof(ok_sockaddr_in) == 16);
-        auto socket_description = [&](u64 descriptor) -> Result<u16> {
-            if (descriptor > static_cast<u64>(__INT32_MAX__))
-                return Status::bad_descriptor("native UDP descriptor is out of range");
-            const auto *slot = process->fd_table().entry(static_cast<i32>(descriptor));
-            const auto *open = slot && slot->used ? kernel.scheduler().open_description(slot->description) : nullptr;
-            if (!open || !open->native_udp_handle)
-                return Status::bad_descriptor("descriptor is not a native UDP socket");
-            return slot->description;
-        };
-        auto address_from_user = [&](u64 pointer, u64 length) -> Result<ok_sockaddr_in> {
-            if (length != sizeof(ok_sockaddr_in))
-                return Status::invalid_argument("native UDP address must be sixteen bytes");
-            ok_sockaddr_in address{};
-            if (!hw::copy_from_user(space, &address, pointer, sizeof(address)))
-                return Status::fault("native UDP address is unreadable");
-            if (address.family != OK_AF_INET)
-                return Status::invalid_argument("native UDP requires AF_INET");
-            for (auto byte : address.reserved)
-                if (byte) return Status::invalid_argument("native UDP address has nonzero reserved bytes");
-            return address;
-        };
-        if (number == N::socket)
-        {
-            constexpr u64 allowed = OK_SOCK_DGRAM | OK_SOCK_NONBLOCK | OK_SOCK_CLOEXEC;
-            if (a[0] != OK_AF_INET || (a[1] & ~allowed) ||
-                (a[1] & OK_SOCK_DGRAM) != OK_SOCK_DGRAM ||
-                (a[2] != 0 && a[2] != OK_IPPROTO_UDP)) return -22;
-            if (auto status = kernel.native_udp_executor().status(); !status) return error(status);
-            if (!kernel.native_udp().configured())
-            {
-                auto *extension = kernel.extension();
-                if (!extension) return -38;
-                auto link = extension->network_link(kernel);
-                if (!link) return error(link.status());
-                if (auto status = kernel.native_udp().configure(link.value()); !status)
-                    return error(status);
-            }
-            auto opened = kernel.native_udp().open();
-            if (!opened) return error(opened.status());
-            auto fd = kernel.posix().install_native_udp(opened.value(), (a[1] & OK_SOCK_CLOEXEC) != 0, (a[1] & OK_SOCK_NONBLOCK) != 0);
-            if (!fd)
-            {
-                static_cast<void>(kernel.native_udp().close(opened.value()));
-                return error(fd.status());
-            }
-            return fd.value();
-        }
-        const auto description_id = socket_description(a[0]);
-        if (!description_id) return error(description_id.status());
-        const Result<u32> handle = kernel.scheduler().open_description(description_id.value())->native_udp_handle;
-        if (number == N::bind)
-        {
-            auto address = address_from_user(a[1], a[2]);
-            if (!address) return error(address.status());
-            const auto port = static_cast<u16>((u16{address.value().port_be[0]} << 8) |
-                                               address.value().port_be[1]);
-            const net::wire::Ipv4 local{address.value().address[0], address.value().address[1],
-                                        address.value().address[2], address.value().address[3]};
-            return error(kernel.native_udp().bind(handle.value(), local, port));
-        }
-        if (number == N::sendto)
-        {
-            auto *extension = kernel.extension();
-            if (!extension) return -38;
-            if (a[3]) return -22;
-            if (auto status = kernel.native_udp_executor().status(); !status) return error(status);
-            if (a[2] > net::NativeUdpService::datagram_capacity) return -90;
-            auto address = address_from_user(a[4], a[5]);
-            if (!address) return error(address.status());
-            std::array<std::byte, net::NativeUdpService::datagram_capacity> payload{};
-            if (!hw::copy_from_user(space, payload.data(), a[1], static_cast<usize>(a[2]))) return -14;
-            std::array<std::byte, net::NativeUdpService::frame_capacity> frame{};
-            const auto port = static_cast<u16>((u16{address.value().port_be[0]} << 8) |
-                                               address.value().port_be[1]);
-            const net::wire::Ipv4 destination{address.value().address[0], address.value().address[1],
-                                               address.value().address[2], address.value().address[3]};
-            auto length = kernel.native_udp().build_datagram(handle.value(), destination,
-                port, {payload.data(), static_cast<usize>(a[2])}, frame);
-            if (!length) return error(length.status());
-            if (auto status = extension->network_transmit(kernel, {frame.data(), length.value()}); !status)
-                return error(status);
-            return static_cast<i64>(a[2]);
-        }
-        if (a[3]) return -22; // MSG_TRUNC and all other receive flags are unsupported.
-        if (!!a[4] != !!a[5]) return -22;
-        u32 address_capacity{};
-        if (a[4])
-        {
-            if (!hw::copy_from_user(space, &address_capacity, a[5], sizeof(address_capacity))) return -14;
-            if (address_capacity < sizeof(ok_sockaddr_in)) return -22;
-            if (!hw::user_range(space, a[4], sizeof(ok_sockaddr_in), true) ||
-                !hw::user_range(space, a[5], sizeof(address_capacity), true)) return -14;
-        }
-        const SyscallOrigins::NativeUdpReceiveRequest request{
-            static_cast<i32>(a[0]), a[1], a[2], a[3], a[4], a[5], address_capacity};
-        return begin_native_udp_receive(kernel, *process, *caller, description_id.value(), request, complete);
-    }
+        return native_udp_call(kernel, process, caller, space, number, a, complete);
     if (number == N::poll)
     {
         if (a[1] > sched::max_process_fds)
@@ -3612,221 +3772,9 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         return 0;
     }
     if (number == N::fork)
-    {
-        auto result = kernel.posix().fork(pid, false);
-        if (!result)
-            return error(result.status());
-        const auto child_pid = result.value();
-        auto *child = kernel.scheduler().find(child_pid);
-        if (auto status = prepare_native_thread(child->threads()[0]); !status)
-        {
-            finish(kernel, child_pid, 127);
-            static_cast<void>(kernel.posix().wait(pid, child_pid));
-            return error(status);
-        }
-        auto &pages = child->resources().native_pages;
-        if (auto status = pages.reserve(page_pool, process->resources().native_pages.size(), true); !status)
-        {
-            finish(kernel, child_pid, 127);
-            static_cast<void>(kernel.posix().wait(pid, child_pid));
-            return error(status);
-        }
-        for (const auto &page : process->resources().native_pages)
-        {
-            const auto *source_frame = owned_frame(process->resources().native_pages, page);
-            if (!source_frame)
-            {
-                finish(kernel, child_pid, 127);
-                static_cast<void>(kernel.posix().wait(pid, child_pid));
-                return error(Status::fault("fork page lost exact frame authority"));
-            }
-            if (shared_pool_page(process->resources().native_pages, page))
-            {
-                const auto owner = *source_frame;
-                if (auto status = retain_page_reference(owner); !status)
-                {
-                    finish(kernel, child_pid, 127);
-                    static_cast<void>(kernel.posix().wait(pid, child_pid));
-                    return error(status);
-                }
-                if (auto status = pages.push_back(page, owner); !status)
-                {
-                    static_cast<void>(release_page_reference(owner));
-                    finish(kernel, child_pid, 127);
-                    static_cast<void>(kernel.posix().wait(pid, child_pid));
-                    return error(status);
-                }
-                continue;
-            }
-            if (auto status = allocate(pages, page.virtual_address, page.flags); !status.ok())
-            {
-                finish(kernel, child_pid, 127);
-                static_cast<void>(kernel.posix().wait(pid, child_pid));
-                return error(status);
-            }
-            copy_bytes(reinterpret_cast<void *>(pages[pages.size() - 1].physical_address),
-                       reinterpret_cast<const void *>(source_frame->address), hw::page_size);
-        }
-        sched::MemoryMap child_memory;
-        if (auto status = page_memory_map(pages, child_memory); !status)
-        {
-            finish(kernel, child_pid, 127);
-            static_cast<void>(kernel.posix().wait(pid, child_pid));
-            return error(status);
-        }
-        auto child_space = create_page_space(pages);
-        if (!child_space)
-        {
-            finish(kernel, child_pid, 127);
-            static_cast<void>(kernel.posix().wait(pid, child_pid));
-            return error(child_space.status());
-        }
-        child->resources().native_space = child_space.value();
-        child->resources().memory = child_memory;
-        if (auto status = encode_result(*child, child->threads()[0].native_frame, 0); !status.ok())
-        {
-            finish(kernel, child_pid, 127);
-            static_cast<void>(kernel.posix().wait(pid, child_pid));
-            return error(status);
-        }
-#if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
-        if (auto status = private_signal_fork(kernel, pid, calling_tid, child_pid); !status)
-        {
-            finish(kernel, child_pid, 127);
-            static_cast<void>(kernel.posix().wait(pid, child_pid));
-            return error(status);
-        }
-#endif
-        child->threads()[0].native_active = true;
-        child->threads()[0].syscall_pending = false;
-        if (auto status = kernel.scheduler().set_runnable(child_pid); !status)
-        {
-            finish(kernel, child_pid, 127);
-            static_cast<void>(kernel.posix().wait(pid, child_pid));
-            return error(status);
-        }
-        return static_cast<i64>(child_pid);
-    }
+        return fork_process(kernel, pid, process, calling_tid);
     if (number == N::execve)
-    {
-        FixedString<256> path;
-        Arguments arguments;
-        if (auto status = string_from_user(space, a[0], path); !status.ok())
-            return error(status);
-        if (auto status = arguments_from_user(space, a[1], arguments.argv); !status.ok())
-            return error(status);
-        if (auto status = arguments_from_user(space, a[2], arguments.envp); !status.ok())
-            return error(status);
-        auto previous_image_retirement = ImageRetirementReservation::reserve();
-        if (!previous_image_retirement) return error(previous_image_retirement.status());
-        auto image = load(kernel, path.view(), arguments);
-        if (!image)
-            return error(image.status());
-        auto context = kernel.arch().make_user_context({image.value().frame.pc, image.value().frame.sp});
-#ifdef OK_PRIVATE_POLL_MASK
-        const auto &mask_owner = *kernel.scheduler().find_thread(pid, calling_tid);
-        const auto inherited_mask = signal_waits.find(mask_owner) ? signal_waits.exec_mask(mask_owner)
-                                                                : poll_signal_masks.exec_mask(mask_owner);
-#else
-        const auto inherited_mask = kernel.scheduler().find_thread(pid, calling_tid)->native_signal_mask;
-#endif
-#if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
-        auto *pending_before_exec = private_signal_queue(*kernel.scheduler().find_thread(pid, calling_tid));
-        const auto altstack_before_exec = *private_signal_altstack(*kernel.scheduler().find_thread(pid, calling_tid));
-        std::array<RetainedEntryStack, sched::max_threads_per_process> old_signal_owners{};
-        usize old_signal_owner_count{};
-        for (const auto &old_thread : process->threads())
-            if (old_thread.entry_stack.pool)
-                old_signal_owners[old_signal_owner_count++] = {{pid, old_thread.tid}, old_thread.entry_stack, 0};
-#endif
-        ExecRetirement retirement{*process, calling_tid};
-        VfsImageRetirement vfs_retirement;
-        if (auto status = vfs_retirement.prepare(kernel.scheduler(), *process); !status)
-        {
-            return error(status);
-        }
-#if defined(OK_PRIVATE_MIPS64_N64_SIGNAL) || defined(OK_PRIVATE_PPC32_SIGNAL)
-        std::array<u32, sched::max_threads_per_process> previous_signal_slots{};
-        usize previous_signal_count{};
-        for (const auto &old_thread : process->threads())
-            if (old_thread.entry_stack.pool) previous_signal_slots[previous_signal_count++] = old_thread.entry_stack.slot;
-#endif
-        bool vfs_retired{};
-        const auto replaced = replace_entry_stacks(entry_stacks, *process,
-            [&] {
-                return kernel.posix().exec(pid, context, image.value().memory);
-            }, [&] {
-                // Scheduler commit has escrowed the old entry stacks. A failed
-                // futex discharge must retain them and both VM generations.
-                if (auto status = cancel_futex(kernel, pid); !status) return status;
-                const auto native_udp_retired = retire_native_udp_receives_for_exec(kernel, pid);
-                const auto linux_udp_retired = retire_linux_udp_receives_for_exec(kernel, pid);
-                if (!native_udp_retired) return native_udp_retired;
-                if (!linux_udp_retired) return linux_udp_retired;
-                const auto status = vfs_retirement.consume(kernel.scheduler(), *process);
-                vfs_retired = status.ok();
-                if (!status) return status;
-#ifdef OK_PRIVATE_POLL_MASK
-                {
-                    for (const auto &wait : signal_waits.records())
-                        if (wait.phase != PrivateSignalWaitState::Phase::none && wait.pid == pid)
-                            private_signal_wait_trace_retire(wait, "exec");
-                    poll_signal_masks.discard_process(pid); signal_waits.discard_process(pid);
-                }
-#endif
-#ifdef OK_PRIVATE_MIPS64_N64_SIGNAL
-                for (usize i = 0; i < previous_signal_count; ++i) private_n64_revoke_slot(previous_signal_slots[i]);
-#endif
-#ifdef OK_PRIVATE_PPC32_SIGNAL
-                for (usize i = 0; i < previous_signal_count; ++i) private_ppc_revoke_slot(previous_signal_slots[i]);
-#endif
-                return status;
-            });
-        if (replaced.committed && vfs_retired) retirement.consume(kernel, *process);
-        if (!replaced)
-        {
-            if (!replaced.committed)
-            {
-                return error(replaced.status);
-            }
-            // Exec cannot return to the old image after scheduler commit. Keep
-            // both VM generations and every unreleased lease for diagnosis.
-            for (usize i = 0; i < replaced.retained_count; ++i)
-            {
-                const auto &saved = replaced.retained[i];
-                stranded_entry_stacks[saved.handle.slot] = {saved.owner, saved.handle};
-            }
-            static_cast<void>(image.value().retain_for_diagnosis());
-            runtime_failure = replaced.status;
-            started = false;
-            complete = false;
-            return 0;
-        }
-        cancel_poll(kernel, pid);
-        if (!runtime_failure)
-        {
-            static_cast<void>(image.value().retain_for_diagnosis());
-            started = false;
-            complete = false;
-            return 0;
-        }
-        if (auto status = retire_then_install(process->resources(), image.value(), previous_image_retirement.value(),
-                [&] { return install(*process, image.value(), inherited_mask); }); !status)
-        {
-            runtime_failure = status;
-            started = false;
-            complete = false;
-            return 0;
-        }
-#if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
-        private_signal_exec(kernel, *process, pending_before_exec, altstack_before_exec);
-        for (usize index = 0; index < old_signal_owner_count; ++index)
-            if (old_signal_owners[index].handle != process->threads()[0].entry_stack)
-                private_signal_thread_retire(pid, old_signal_owners[index].owner.tid, old_signal_owners[index].handle);
-#endif
-        complete = false; // The new image has its own entry register state.
-        return 0;
-    }
+        return exec_image(kernel, pid, process, calling_tid, space, a, complete);
     if (number == N::wait4)
     {
         if ((a[2] & ~uptr{1}) || a[3]) return -22;
@@ -4220,7 +4168,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
     }
     return result.value;
 }
-} // namespace
+} // namespace runtime_detail
 
 i64 futex_wake_operation(Kernel &kernel, sched::ProcessId pid, const FutexWakeOperationRequest &request)
 {
@@ -4843,50 +4791,9 @@ Status start(Kernel &kernel, fs::BootArchive archive)
     emit(" source_resolution_ns="); emit_number(realtime_info.source_resolution_ns);
     emit(" acquisition_span_ns="); emit_number(realtime_info.acquisition_span_ns);
     emit(" accuracy=unknown available="); emit_number(realtime_status ? 1 : 0); emit("\n");
-    Arguments arguments;
-    static_cast<void>(arguments.argv.push_back(FixedString<256>(archive.initial_program)));
-    static_cast<void>(arguments.envp.push_back(FixedString<256>("PATH=/bin")));
-    const auto initial_credentials = archive.initial_credentials;
-    if (initial_credentials.kernel_space || initial_credentials.uid != initial_credentials.euid ||
-        initial_credentials.gid != initial_credentials.egid ||
-        initial_credentials.suid != initial_credentials.euid ||
-        initial_credentials.sgid != initial_credentials.egid)
-        return Status::invalid_argument("initial user identity requires equal unprivileged IDs");
-    if (auto status = kernel.posix().set_credentials(initial_credentials); !status)
-        return status;
-    auto image = load(kernel, archive.initial_program, arguments);
-    const auto restored = kernel.posix().set_credentials(user::root_credentials());
-    if (!restored)
-    {
-        return restored;
-    }
-    if (!image)
-        return image.status();
-    auto context = kernel.arch().make_user_context({image.value().frame.pc, image.value().frame.sp});
-    auto pid = kernel.scheduler().create_init_process(context);
-    if (!pid)
-    {
-        return pid.status();
-    }
+    auto pid = install_init(kernel, archive);
+    if (!pid) return pid.status();
     auto *process = kernel.scheduler().find(pid.value());
-    process->set_credentials(initial_credentials);
-    if (auto status = prepare_native_thread(process->threads()[0]); !status)
-    {
-        finish(kernel, pid.value(), 127);
-        return status;
-    }
-    if (auto status = install(*process, image.value()); !status)
-    {
-        finish(kernel, pid.value(), 127);
-        return status;
-    }
-#ifdef OK_PRIVATE_POLL_MASK
-    if (!private_signal_process(kernel, pid.value()))
-    {
-        finish(kernel, pid.value(), 127);
-        return Status::no_memory("private process signal owner capacity");
-    }
-#endif
     static_cast<void>(kernel.scheduler().set_runnable(pid.value()));
 #if defined(OK_ENABLE_TEST_POINTS) && defined(OK_PRIVATE_FUTEX_PEER_FIXTURE)
     if (auto status = setup_peer_fixture(kernel, pid.value()); !status) return status;
