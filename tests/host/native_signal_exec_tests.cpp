@@ -1,6 +1,6 @@
 #include "unavailable_realtime.hpp"
 // Hosted runtime integration: no guest CPU execution.
-#include "../../src/user/runtime.cpp"
+#include "native_runtime_units.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

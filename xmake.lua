@@ -135,6 +135,7 @@ function add_ok_kernel_sources(include_kernel_main)
     add_files("src/smp/*.cpp")
     add_files("src/syscall/*.cpp")
     add_files("src/user/*.cpp")
+    add_files("src/user/runtime/*.cpp")
     add_ok_arch_files()
 end
 

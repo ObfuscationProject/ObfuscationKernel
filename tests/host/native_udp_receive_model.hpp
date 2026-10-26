@@ -1,6 +1,6 @@
 #pragma once
 // Derived native x86_64 runtime model; hosted flat mappings and synthetic backend stack only.
-#include "../../src/user/runtime.cpp"
+#include "native_runtime_units.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

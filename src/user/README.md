@@ -1,22 +1,40 @@
 # Native user runtime layout
 
-Target of `refactor/user-runtime-split`: `runtime.cpp` (5,876 lines, 101 includes
-at the start of the worktree) splits into units with one responsibility each.
-`scripts/check_runtime_split.py` is a ratchet: it fails when `runtime.cpp` grows
-past the recorded size or include count, and the recorded numbers are lowered as
-code moves out.
+The native runtime is one serialized boot-CPU service compiled as separate
+translation units with one responsibility each. `runtime/private.hpp` is the only
+header the units share; it declares exactly what crosses a unit boundary.
 
-| Unit | Responsibility | Moves from |
-| --- | --- | --- |
-| `loader.cpp` | ELF admission, argv/envp/auxv, stack and address-space setup | `runtime.cpp` |
-| `entry.cpp` | Native loop, `enter_owned`, syscall/timer/fault dispatch, entry-stack leases | `runtime.cpp` |
-| `vm.cpp` | mmap/mprotect/munmap/brk, page pools, shared files | `runtime.cpp`, `native_*page*.hpp` |
-| `wait.cpp` | wait4, poll/select, sleep, futex, child wait | `runtime.cpp`, `native_child_wait_runtime.hpp`, `native_poll_mask.hpp` |
-| `pty.cpp` | PTY pair runtime and owners | `native_pty_*.hpp` |
-| `net.cpp` | UDP/TCP runtime adapters | `linux_udp_*.hpp`, `native_udp_*.hpp`, `tcp_*.hpp` |
-| `signals/` | Delivery, frames, return; one `include/ok/arch/<arch>/signal.hpp` per architecture replaces the 30 per-architecture headers | `signals/*.hpp`, `include/ok/user/native_signal_*_<arch>.hpp` |
+| Unit | Responsibility |
+| --- | --- |
+| `runtime.cpp` | Service state (entry-stack pool, syscall origins, VFS continuations, failure and shutdown state), diagnostics output, native thread preparation and retirement, syscall result encoding, process completion, shutdown, termination and release |
+| `runtime/loader.cpp` | ELF admission, the initial stack (argv/envp/auxv), image installation, `/init` installation and `execve` |
+| `runtime/vm.cpp` | Native page pool and firmware memory, address-space quarantine and retirement, mmap/mprotect/munmap/brk, fork page copies |
+| `runtime/wait.cpp` | poll/select readiness waits and wait4 child waits |
+| `runtime/futex.cpp` | futex wait/wake/requeue/wake-op, shared futex keys, robust lists and `clear_child_tid` |
+| `runtime/pipe.cpp` | Blocking pipe read/write continuations, including vectored I/O |
+| `runtime/pty.cpp` | Raw PTY pair I/O continuations and their owners |
+| `runtime/net.cpp` | Native and Linux UDP receive owners, TCP immediate operations, native UDP socket calls |
+| `runtime/signals.cpp` | Private signal delivery, frames and waits, signal interruption of blocking calls, per-architecture signal state |
+| `runtime/entry.cpp` | `start`/`step`, user entry through entry-stack leases, syscall dispatch |
 
-Rules: no behaviour change in this worktree; each extraction is one commit that
-moves code and its tests and is validated by `xmake test` on the fast lane
-(x86_64, arm32, ppc) plus the hosted runtime suites. The release image must not
-grow.
+Self-contained helpers that hosted tests also include stay as headers beside the
+units: `native_syscall_origin.hpp`, `native_shared_capture.hpp`,
+`native_syscall_restart_publication.hpp`, `native_poll_mask.hpp`,
+`linux_udp_*.hpp`, `tcp_*.hpp` and `signals/*.hpp`.
+
+Rules:
+
+- A helper used by one unit stays in that unit's anonymous namespace; only
+  cross-unit entities are declared in `runtime/private.hpp`. Public entry points
+  stay declared in `include/ok/user/`, `native_lifecycle.hpp` and
+  `signals/private_signal_scheduler_relocation.hpp`.
+- All runtime state is constant-initialized. The kernel never runs static
+  constructors, so no runtime object may carry an `.init_array` entry.
+- Hosted tests reach private state by compiling every unit as one translation
+  unit through `tests/host/native_runtime_units.hpp`; runner scripts exclude
+  `src/user/runtime.cpp` and `src/user/runtime/*.cpp` from separate compilation.
+- New code goes into the unit that owns its responsibility. Headers under
+  `src/user/` are self-contained (`#pragma once`); textual fragments included in
+  the middle of a namespace are not reintroduced.
+  `scripts/check_runtime_split.py` enforces both and keeps `runtime.cpp` from
+  regrowing.

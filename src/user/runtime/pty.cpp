@@ -1,10 +1,23 @@
-// Included after pipe checked-copy leaf helpers. This first PTY runtime is native-only.
+// Raw PTY pair I/O continuations and their owners.
+#include "private.hpp"
+
+namespace ok::user::native
+{
+inline namespace runtime_detail
+{
+// Private serialized runtime owners. Endpoint generations are never packed into wait keys.
+static_assert(sched::private_pty::RawPtyTable<>::queue_capacity == sched::pipe_capacity,
+              "PTY staging uses the separately checked native vector leaf capacity");
+constinit PtyWaitObjects pty_wait_objects{page_pool, pty_wait_capacity};
+std::array<PollWaitIndex, pty_wait_capacity> pty_waits{};
 memory::ObjectHandle pty_wait_object(sched::ProcessId pid, sched::ThreadId tid)
 {
     for (const auto &entry : pty_waits)
         if (entry.pid == pid && entry.tid == tid) return entry.object;
     return {};
 }
+namespace
+{
 u64 pty_wait_key(sched::private_pty::Handle endpoint)
 { return (static_cast<u64>(endpoint.slot) << 1) | (endpoint.side == sched::private_pty::Side::slave ? 1u : 0u); }
 sched::ThreadWaitReason pty_wait_reason(bool writing)
@@ -42,11 +55,14 @@ void cancel_pty_wait(Kernel &kernel, memory::ObjectHandle object,
     if (auto status = pty_wait_objects.trim_empty_pages(); !status) runtime_failure = status;
     if (wait.ticket.generation) emit_pty_wait(wait, true, outcome, result);
 }
-void cancel_pty_waits(Kernel &kernel, sched::ProcessId pid, sched::ThreadId tid = 0)
+} // namespace
+void cancel_pty_waits(Kernel &kernel, sched::ProcessId pid, sched::ThreadId tid)
 {
     for (const auto &entry : pty_waits)
         if (entry.pid == pid && (!tid || entry.tid == tid)) cancel_pty_wait(kernel, entry.object);
 }
+namespace
+{
 bool pty_owner_current(const sched::ProcessControlBlock &process, const sched::ThreadControlBlock &thread,
                        const PtyWait &wait)
 {
@@ -57,6 +73,7 @@ bool pty_owner_current(const sched::ProcessControlBlock &process, const sched::T
         SyscallOrigins::same_frame(thread.native_frame, wait.frame) &&
         space.root == wait.space.root && space.slot == wait.space.slot && space.generation == wait.space.generation;
 }
+} // namespace
 void prune_pty_waits(Kernel &kernel)
 {
     for (const auto &entry : pty_waits)
@@ -76,6 +93,8 @@ void prune_pty_waits(Kernel &kernel)
               thread->wait_key != pty_wait_key(wait.endpoint)))) cancel_pty_wait(kernel, object);
     }
 }
+namespace
+{
 i64 pty_terminal_result(const PtyWait &wait, i64 result)
 { return wait.writing && wait.committed ? static_cast<i64>(wait.committed) : result; }
 Status gather_pty_suffix(const hw::AddressSpace &space, std::span<std::byte> bytes, const PtyWait &wait)
@@ -143,6 +162,7 @@ Result<usize> attempt_pty_io(Kernel &kernel, sched::ProcessControlBlock &process
     if (auto status = gather_pty_suffix(space, {buffer.data(), count}, wait); !status) return status;
     return kernel.scheduler().write_pty_description(wait.description, {buffer.data(), count});
 }
+} // namespace
 i64 resume_pty_io(Kernel &kernel, sched::ProcessControlBlock &process,
                   memory::ObjectHandle object, bool &complete)
 {
@@ -177,7 +197,7 @@ i64 resume_pty_io(Kernel &kernel, sched::ProcessControlBlock &process,
 }
 i64 begin_pty_io(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadId tid,
                  i32 fd, u16 description_id, uptr address, usize count, bool writing,
-                 bool &complete, const PipeVectors &vectors = {})
+                 bool &complete, const PipeVectors &vectors)
 {
     if (process.resources().personality != Personality::native) return -95;
     const auto *description = kernel.scheduler().open_description(description_id);
@@ -229,3 +249,5 @@ i64 begin_pty_io(Kernel &kernel, sched::ProcessControlBlock &process, sched::Thr
     wait.ticket = registration.value(); wait.request = wait.ticket.generation;
     *slot = {wait.pid, wait.tid, object}; emit_pty_wait(wait, false, "arm"); complete = false; return -11;
 }
+} // namespace runtime_detail
+} // namespace ok::user::native

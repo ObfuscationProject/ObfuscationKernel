@@ -1,5 +1,5 @@
 // Actual runtime object-backed waits with observed hosted mapping/copy backends.
-#include "../../src/user/runtime.cpp"
+#include "native_runtime_units.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

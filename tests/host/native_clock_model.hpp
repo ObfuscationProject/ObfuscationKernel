@@ -1,6 +1,6 @@
 #pragma once
 // Actual Linux adapter/common native copy boundary with hosted mappings only.
-#include "../../src/user/runtime.cpp"
+#include "native_runtime_units.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
