@@ -49,6 +49,26 @@ u64 table_entry(const Table &table)
 {
     return (reinterpret_cast<uptr>(&table) >> 2) | pte_valid;
 }
+bool admissible(const PageMapping &page)
+{
+    return page.virtual_address >= user_begin && page.virtual_address < user_end &&
+           (page.virtual_address & (page_size - 1)) == 0 && page.physical_address != 0 &&
+           (page.physical_address & (page_size - 1)) == 0 && (page.physical_address >> 56) == 0 &&
+           (page.flags == 0 || (page.flags & page_read) != 0) &&
+           (page.flags & (page_write | page_execute)) != (page_write | page_execute) &&
+           (page.flags & ~(page_read | page_write | page_execute)) == 0;
+}
+u64 leaf_entry(const PageMapping &page)
+{
+    u64 flags = pte_valid | pte_user | pte_accessed | pte_dirty;
+    if (page.flags & page_read)
+        flags |= pte_read;
+    if (page.flags & page_write)
+        flags |= pte_write;
+    if (page.flags & page_execute)
+        flags |= pte_execute;
+    return static_cast<u64>(page.physical_address >> 2) | flags;
+}
 extern "C" void ok_rv64_enter_native(UserFrame *frame, uptr satp, Trap *trap, uptr stack_top);
 static_assert(offsetof(UserFrame, pc) == 256);
 static_assert(offsetof(UserFrame, sp) == 264);
@@ -113,13 +133,7 @@ Result<AddressSpace> create_space(MappingView mappings)
     for (usize i = 0; i < mappings.size(); ++i)
     {
         const auto &page = mappings[i];
-        if (page.virtual_address < user_begin || page.virtual_address >= user_end ||
-            (page.virtual_address & (page_size - 1)) != 0 || page.physical_address == 0 ||
-            (page.physical_address & (page_size - 1)) != 0 || (page.physical_address >> 56) != 0 ||
-            (page.flags != 0 && (page.flags & page_read) == 0) ||
-            (page.flags & (page_write | page_execute)) == (page_write | page_execute) ||
-            (page.flags & ~(page_read | page_write | page_execute)) != 0 ||
-            ((page.flags & page_write) && !(page.flags & page_read)))
+        if (!admissible(page))
             return Status::invalid_argument("invalid Sv39 user mapping");
         for (usize j = 0; j < i; ++j)
             if (mappings[j].virtual_address == page.virtual_address)
@@ -151,14 +165,7 @@ Result<AddressSpace> create_space(MappingView mappings)
             middle = table_entry(space.leaf[space.leaves++]);
         }
         auto *leaf = reinterpret_cast<Table *>((middle >> 10) << 12);
-        u64 flags = pte_valid | pte_user | pte_accessed | pte_dirty;
-        if (page.flags & page_read)
-            flags |= pte_read;
-        if (page.flags & page_write)
-            flags |= pte_write;
-        if (page.flags & page_execute)
-            flags |= pte_execute;
-        leaf->entries[(page.virtual_address >> 12) & 511u] = (page.physical_address >> 2) | flags;
+        leaf->entries[(page.virtual_address >> 12) & 511u] = leaf_entry(page);
     }
     space.mappings = mappings;
     space.count = mappings.size();
@@ -168,6 +175,26 @@ Result<AddressSpace> create_space(MappingView mappings)
     asm volatile("fence rw,rw\nfence.i" ::: "memory");
     return AddressSpace{
         .root = reinterpret_cast<uptr>(&space.root), .slot = static_cast<u32>(slot), .generation = space.generation};
+}
+Status remap(const AddressSpace &space, const PageMapping &mapping)
+{
+    auto *stored = lookup(space);
+    if (stored == nullptr)
+        return Status::invalid_argument("stale native address space");
+    if (entering)
+        return Status::busy("cannot remap an executing address space");
+    if (!admissible(mapping) || mapping.flags == 0)
+        return Status::invalid_argument("invalid Sv39 user remap");
+    const auto middle = stored->middle.entries[(mapping.virtual_address >> 21) & 511u];
+    if ((middle & pte_valid) == 0)
+        return Status::not_found("native user page has no translation");
+    auto &entry = reinterpret_cast<Table *>((middle >> 10) << 12)->entries[(mapping.virtual_address >> 12) & 511u];
+    if ((entry & pte_valid) == 0)
+        return Status::not_found("native user page has no translation");
+    // Native entry executes sfence.vma before it switches to U-mode.
+    entry = leaf_entry(mapping);
+    asm volatile("fence rw,rw\nfence.i" ::: "memory");
+    return Status::success();
 }
 Status destroy_space(AddressSpace &space)
 {
@@ -252,7 +279,9 @@ bool user_range(const AddressSpace &space, uptr address, usize size, bool write)
     for (uptr cursor = address; cursor < address + size;)
     {
         const auto *page = mapping(*stored, cursor);
-        if (page == nullptr || !(page->flags & (write ? page_write : page_read)))
+        if (page == nullptr || (!(page->flags & (write ? page_write : page_read)) &&
+                                !(write && resolve_write(space, cursor & ~(page_size - 1)) &&
+                                  (page->flags & page_write))))
             return false;
         const auto next = (cursor & ~(page_size - 1)) + page_size;
         cursor = next < address + size ? next : address + size;

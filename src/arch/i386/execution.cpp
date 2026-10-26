@@ -179,6 +179,24 @@ bool permits(u64 entry, bool write)
 {
     return (entry & (present | user)) == (present | user) && (!write || (entry & writable) != 0);
 }
+bool admissible(const PageMapping &mapping)
+{
+    return mapping.virtual_address >= user_begin && mapping.virtual_address < user_end &&
+           (mapping.virtual_address & (page_size - 1)) == 0 && mapping.physical_address >= page_size &&
+           mapping.physical_address < user_begin && (mapping.physical_address & (page_size - 1)) == 0 &&
+           (mapping.flags == 0 || (mapping.flags & page_read) != 0) &&
+           (mapping.flags & ~(page_read | page_write | page_execute)) == 0 &&
+           (mapping.flags & (page_write | page_execute)) != (page_write | page_execute);
+}
+u64 leaf_entry(const PageMapping &mapping)
+{
+    u64 entry = mapping.physical_address | present | user;
+    if ((mapping.flags & page_write) != 0)
+        entry |= writable;
+    if ((mapping.flags & page_execute) == 0)
+        entry |= no_execute;
+    return entry;
+}
 
 } // namespace
 
@@ -315,12 +333,7 @@ Result<AddressSpace> create_space(MappingView mappings)
     for (usize index = 0; index < mappings.size(); ++index)
     {
         const auto &mapping = mappings[index];
-        if (mapping.virtual_address < user_begin || mapping.virtual_address >= user_end ||
-            (mapping.virtual_address & (page_size - 1)) != 0 || mapping.physical_address < page_size ||
-            mapping.physical_address >= user_begin || (mapping.physical_address & (page_size - 1)) != 0 ||
-            (mapping.flags != 0 && (mapping.flags & page_read) == 0) ||
-            (mapping.flags & ~(page_read | page_write | page_execute)) != 0 ||
-            (mapping.flags & (page_write | page_execute)) == (page_write | page_execute))
+        if (!admissible(mapping))
             return Status::invalid_argument("invalid native user-page mapping or writable executable page");
         for (usize previous = 0; previous < index; ++previous)
             if (mappings[previous].virtual_address == mapping.virtual_address)
@@ -337,14 +350,30 @@ Result<AddressSpace> create_space(MappingView mappings)
         auto &entry = table->entries[(mapping.virtual_address >> 12) & 511];
         if ((entry & present) != 0)
             return Status::already_exists("duplicate native user-page mapping");
-        entry = mapping.physical_address | present | user;
-        if ((mapping.flags & page_write) != 0)
-            entry |= writable;
-        if ((mapping.flags & page_execute) == 0)
-            entry |= no_execute;
+        entry = leaf_entry(mapping);
     }
     value.allocated = true;
     return AddressSpace{reinterpret_cast<uptr>(&value.pdpt), static_cast<u32>(slot), value.generation};
+}
+
+Status remap(const AddressSpace &space, const PageMapping &mapping)
+{
+    auto *value = storage(space);
+    if (value == nullptr)
+        return Status::not_found("native address-space handle is stale");
+    if (executing)
+        return Status::busy("cannot remap an address space during native execution");
+    if (!admissible(mapping) || mapping.flags == 0)
+        return Status::invalid_argument("invalid native user-page remap");
+    const auto directory_entry = value->directory.entries[(mapping.virtual_address >> 21) & 511];
+    if ((directory_entry & present) == 0)
+        return Status::not_found("native user page has no translation");
+    auto &entry = reinterpret_cast<Table *>(directory_entry & address_mask)->entries[(mapping.virtual_address >> 12) & 511];
+    if ((entry & present) == 0)
+        return Status::not_found("native user page has no translation");
+    // The next entry reloads CR3, which drops these non-global translations.
+    entry = leaf_entry(mapping);
+    return Status::success();
 }
 
 Status destroy_space(AddressSpace &space)
@@ -398,7 +427,9 @@ bool user_range(const AddressSpace &space, uptr address, usize size, bool write)
         return false;
     const auto last = address + size - 1;
     for (auto page = address & ~(page_size - 1); page <= last; page += page_size)
-        if (!permits(lookup(space, page), write))
+        if (!permits(lookup(space, page), write) &&
+            !(write && permits(lookup(space, page), false) && resolve_write(space, page) &&
+              permits(lookup(space, page), true)))
             return false;
     return true;
 }

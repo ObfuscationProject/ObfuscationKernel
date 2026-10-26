@@ -46,6 +46,13 @@ const PageMapping *page_at(const Space &space, uptr address)
             return &space.pages[i];
     return nullptr;
 }
+bool admissible(const PageMapping &page)
+{
+    return page.virtual_address >= user_begin && page.virtual_address < user_end && !(page.virtual_address & 4095) &&
+           !(page.physical_address & 4095) && page.physical_address != 0 && page.physical_address < (uptr{1} << 48) &&
+           (page.flags == 0 || (page.flags & page_read)) && !(page.flags & ~7) &&
+           (page.flags & (page_write | page_execute)) != (page_write | page_execute);
+}
 u64 entry(const PageMapping *page)
 {
     if (!page)
@@ -132,10 +139,7 @@ Result<AddressSpace> create_space(MappingView mappings)
     for (usize i = 0; i < mappings.size(); ++i)
     {
         const auto &page = mappings[i];
-        if (page.virtual_address < user_begin || page.virtual_address >= user_end || (page.virtual_address & 4095) ||
-            (page.physical_address & 4095) || page.physical_address == 0 || page.physical_address >= (uptr{1} << 48) ||
-            (page.flags != 0 && !(page.flags & page_read)) || (page.flags & ~7) ||
-            (page.flags & (page_write | page_execute)) == (page_write | page_execute))
+        if (!admissible(page))
             return Status::invalid_argument("invalid native mapping");
         for (usize j = 0; j < i; ++j)
             if (mappings[j].virtual_address == page.virtual_address)
@@ -154,6 +158,20 @@ Result<AddressSpace> create_space(MappingView mappings)
         return AddressSpace{reinterpret_cast<uptr>(&space), slot, space.generation};
     }
     return Status::no_memory("native address space pool exhausted");
+}
+Status remap(const AddressSpace &space, const PageMapping &mapping)
+{
+    auto *storage = lookup(space);
+    if (!storage)
+        return Status::invalid_argument("stale native address space");
+    if (executing)
+        return Status::busy("native execution is active");
+    if (!admissible(mapping) || !mapping.flags)
+        return Status::invalid_argument("invalid native remap");
+    // Refill reads the runtime-owned records, and native entry runs INVTLB
+    // before ERTN, so a present record needs no further synchronization.
+    return page_at(*storage, mapping.virtual_address) ? Status::success()
+                                                      : Status::not_found("native user page has no translation");
 }
 Status destroy_space(AddressSpace &space)
 {
@@ -200,7 +218,9 @@ bool user_range(const AddressSpace &space, uptr address, usize size, bool write)
     while (size)
     {
         auto *page = page_at(*storage, address);
-        if (!page || !(page->flags & page_read) || (write && !(page->flags & page_write)))
+        if (!page || !(page->flags & page_read) ||
+            (write && !(page->flags & page_write) &&
+             !(resolve_write(space, address & ~(page_size - 1)) && (page->flags & page_write))))
             return false;
         usize chunk = page_size - (address & 4095);
         if (chunk > size)

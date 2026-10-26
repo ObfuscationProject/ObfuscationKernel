@@ -35,6 +35,9 @@ struct PageMapping
     uptr virtual_address{0};
     uptr physical_address{0};
     u8 flags{page_read};
+    // Runtime bookkeeping that backends ignore: write access is intended but
+    // withheld from `flags` while the private frame is shared copy-on-write.
+    u8 copy_on_write{0};
 };
 
 inline constexpr usize max_native_mappings = 1024;
@@ -158,6 +161,26 @@ struct Trap
 Status initialize();
 Result<AddressSpace> create_space(MappingView mappings);
 Status destroy_space(AddressSpace &space);
+// Re-synchronizes one present translation with its record after the runtime
+// changed that record in place (physical frame and/or flags). The handle stays
+// valid; only accessible records with an existing translation qualify. Not
+// while the space executes.
+Status remap(const AddressSpace &space, const PageMapping &mapping);
+
+// Deferred write access. A runtime that withholds write permission (copy-on-
+// write) installs a resolver; user_range() offers it each present, readable,
+// non-writable page of a kernel write once. A resolver that returns true has
+// made the page writable in place through remap().
+using WriteResolver = bool (*)(const AddressSpace &space, uptr page);
+inline constinit WriteResolver write_resolver{};
+inline void set_write_resolver(WriteResolver resolver) noexcept
+{
+    write_resolver = resolver;
+}
+[[nodiscard]] inline bool resolve_write(const AddressSpace &space, uptr page)
+{
+    return write_resolver != nullptr && write_resolver(space, page);
+}
 
 // Execute at user privilege until a real syscall, hardware timer interrupt or
 // CPU exception. Return to the original kernel call stack with the boot address

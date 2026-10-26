@@ -50,6 +50,26 @@ const PageMapping *mapping(const Space &space, uptr address)
             return &space.mappings[i];
     return nullptr;
 }
+bool admissible(const PageMapping &page)
+{
+    return page.virtual_address >= user_begin && page.virtual_address < user_end &&
+           (page.virtual_address & (page_size - 1)) == 0 && page.physical_address >= page_size &&
+           page.physical_address < ram_end && (page.physical_address & (page_size - 1)) == 0 &&
+           (page.flags == 0 || (page.flags & page_read) != 0) &&
+           (page.flags & ~(page_read | page_write | page_execute)) == 0 &&
+           (page.flags & (page_write | page_execute)) != (page_write | page_execute);
+}
+void publish_code(uptr physical)
+{
+    // The caller populated code using data stores through a physical alias.
+    // Publish those stores before first instruction fetch.
+    for (uptr address = physical; address < physical + page_size; address += 32)
+        asm volatile("dcbst 0,%0" : : "r"(address) : "memory");
+    asm volatile("sync" : : : "memory");
+    for (uptr address = physical; address < physical + page_size; address += 32)
+        asm volatile("icbi 0,%0" : : "r"(address) : "memory");
+    asm volatile("sync; isync" : : : "memory");
+}
 void write_tlb(u32 index, u32 mas1, u32 mas2, u32 mas3, u32 mas7 = 0)
 {
     const u32 mas0 = 0x10000000 | (index << 16);
@@ -210,11 +230,7 @@ Result<AddressSpace> create_space(MappingView mappings)
     for (usize i = 0; i < mappings.size(); ++i)
     {
         const auto &page = mappings[i];
-        if (page.virtual_address < user_begin || page.virtual_address >= user_end ||
-            (page.virtual_address & (page_size - 1)) != 0 || page.physical_address < page_size ||
-            page.physical_address >= ram_end || (page.physical_address & (page_size - 1)) != 0 ||
-            (page.flags != 0 && (page.flags & page_read) == 0) || (page.flags & ~(page_read | page_write | page_execute)) != 0 ||
-            (page.flags & (page_write | page_execute)) == (page_write | page_execute))
+        if (!admissible(page))
             return Status::invalid_argument("invalid PPC native mapping or writable executable page");
         for (usize j = 0; j < i; ++j)
             if (mappings[j].virtual_address == page.virtual_address)
@@ -229,25 +245,29 @@ Result<AddressSpace> create_space(MappingView mappings)
     if (++value.generation == 0)
         ++value.generation;
     for (usize i = 0; i < mappings.size(); ++i)
-    {
         if ((mappings[i].flags & page_execute) != 0)
-        {
-            // The caller populated code using data stores through a physical
-            // alias. Publish those stores before first instruction fetch.
-            for (uptr address = mappings[i].physical_address; address < mappings[i].physical_address + page_size;
-                 address += 32)
-                asm volatile("dcbst 0,%0" : : "r"(address) : "memory");
-            asm volatile("sync" : : : "memory");
-            for (uptr address = mappings[i].physical_address; address < mappings[i].physical_address + page_size;
-                 address += 32)
-                asm volatile("icbi 0,%0" : : "r"(address) : "memory");
-            asm volatile("sync; isync" : : : "memory");
-        }
-    }
+            publish_code(mappings[i].physical_address);
     value.mappings = mappings;
     value.count = mappings.size();
     value.allocated = true;
     return AddressSpace{reinterpret_cast<uptr>(&value), static_cast<u32>(slot), value.generation};
+}
+Status remap(const AddressSpace &space, const PageMapping &mapping)
+{
+    auto *value = storage(space);
+    if (value == nullptr)
+        return Status::not_found("native address-space handle is stale");
+    if (executing)
+        return Status::busy("cannot remap an executing address space");
+    if (!admissible(mapping) || mapping.flags == 0)
+        return Status::invalid_argument("invalid PPC native remap");
+    if (::ok::arch::execution::mapping(*value, mapping.virtual_address) == nullptr)
+        return Status::not_found("native user page has no translation");
+    // Misses refill from the runtime-owned records, and native entry clears
+    // the user TLB slots, so only a new executable frame needs publishing.
+    if ((mapping.flags & page_execute) != 0)
+        publish_code(mapping.physical_address);
+    return Status::success();
 }
 Status destroy_space(AddressSpace &space)
 {
@@ -292,7 +312,8 @@ bool user_range(const AddressSpace &space, uptr address, usize size, bool write)
     for (auto page = address & ~(page_size - 1); page <= address + size - 1; page += page_size)
     {
         const auto *entry = mapping(*value, page);
-        if (entry == nullptr || (write && (entry->flags & page_write) == 0))
+        if (entry == nullptr ||
+            (write && (entry->flags & page_write) == 0 && !(resolve_write(space, page) && (entry->flags & page_write))))
             return false;
     }
     return true;

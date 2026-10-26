@@ -111,6 +111,25 @@ bool permits(u64 entry, bool write)
     return (entry & (table_or_page | user_access)) == (table_or_page | user_access) &&
            (!write || (entry & read_only) == 0);
 }
+bool admissible(const PageMapping &mapping)
+{
+    return mapping.virtual_address >= user_begin && mapping.virtual_address < user_end &&
+           (mapping.virtual_address & (page_size - 1)) == 0 && mapping.physical_address >= ram_begin &&
+           mapping.physical_address < ram_end && (mapping.physical_address & (page_size - 1)) == 0 &&
+           (mapping.flags == 0 || (mapping.flags & page_read) != 0) &&
+           (mapping.flags & ~(page_read | page_write | page_execute)) == 0 &&
+           (mapping.flags & (page_write | page_execute)) != (page_write | page_execute);
+}
+u64 leaf_entry(const PageMapping &mapping)
+{
+    u64 entry = mapping.physical_address | table_or_page | normal_memory | accessed | not_global | user_access |
+                privileged_xn;
+    if ((mapping.flags & page_write) == 0)
+        entry |= read_only;
+    if ((mapping.flags & page_execute) == 0)
+        entry |= user_xn;
+    return entry;
+}
 void clean_code(uptr address)
 {
     u64 cache_type;
@@ -216,12 +235,7 @@ Result<AddressSpace> create_space(MappingView mappings)
     for (usize index = 0; index < mappings.size(); ++index)
     {
         const auto &mapping = mappings[index];
-        if (mapping.virtual_address < user_begin || mapping.virtual_address >= user_end ||
-            (mapping.virtual_address & (page_size - 1)) != 0 || mapping.physical_address < ram_begin ||
-            mapping.physical_address >= ram_end || (mapping.physical_address & (page_size - 1)) != 0 ||
-            (mapping.flags != 0 && (mapping.flags & page_read) == 0) ||
-            (mapping.flags & ~(page_read | page_write | page_execute)) != 0 ||
-            (mapping.flags & (page_write | page_execute)) == (page_write | page_execute))
+        if (!admissible(mapping))
             return Status::invalid_argument("invalid native user-page mapping or writable executable page");
         for (usize previous = 0; previous < index; ++previous)
             if (mappings[previous].virtual_address == mapping.virtual_address)
@@ -238,18 +252,38 @@ Result<AddressSpace> create_space(MappingView mappings)
         auto &entry = table->entries[(mapping.virtual_address >> 12) & 511];
         if ((entry & valid) != 0)
             return Status::already_exists("duplicate native user-page mapping");
-        entry = mapping.physical_address | table_or_page | normal_memory | accessed | not_global | user_access |
-                privileged_xn;
-        if ((mapping.flags & page_write) == 0)
-            entry |= read_only;
-        if ((mapping.flags & page_execute) == 0)
-            entry |= user_xn;
-        else
+        entry = leaf_entry(mapping);
+        if ((mapping.flags & page_execute) != 0)
             clean_code(mapping.physical_address);
     }
     asm volatile("dsb ish; ic iallu; dsb ish; isb" : : : "memory");
     value.allocated = true;
     return AddressSpace{reinterpret_cast<uptr>(&value.root), static_cast<u32>(slot), value.generation};
+}
+
+Status remap(const AddressSpace &space, const PageMapping &mapping)
+{
+    auto *value = storage(space);
+    if (value == nullptr)
+        return Status::not_found("native address-space handle is stale");
+    if (executing)
+        return Status::busy("cannot remap an address space during native execution");
+    if (!admissible(mapping) || mapping.flags == 0)
+        return Status::invalid_argument("invalid native user-page remap");
+    const auto directory_entry = value->directory.entries[(mapping.virtual_address >> 21) & 511];
+    if ((directory_entry & table_or_page) != table_or_page)
+        return Status::not_found("native user page has no translation");
+    auto &entry = reinterpret_cast<Table *>(directory_entry & address_mask)->entries[(mapping.virtual_address >> 12) & 511];
+    if ((entry & valid) == 0)
+        return Status::not_found("native user page has no translation");
+    if ((mapping.flags & page_execute) != 0)
+        clean_code(mapping.physical_address);
+    // Break before make; the next entry's select_root invalidates the stage-1 TLB.
+    entry = 0;
+    asm volatile("dsb ishst" : : : "memory");
+    entry = leaf_entry(mapping);
+    asm volatile("dsb ish; ic iallu; dsb ish; isb" : : : "memory");
+    return Status::success();
 }
 
 Status destroy_space(AddressSpace &space)
@@ -292,7 +326,9 @@ bool user_range(const AddressSpace &space, uptr address, usize size, bool write)
         return false;
     const auto last = address + size - 1;
     for (auto page = address & ~(page_size - 1); page <= last; page += page_size)
-        if (!permits(lookup(space, page), write))
+        if (!permits(lookup(space, page), write) &&
+            !(write && permits(lookup(space, page), false) && resolve_write(space, page) &&
+              permits(lookup(space, page), true)))
             return false;
     return true;
 }

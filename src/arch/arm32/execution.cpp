@@ -94,6 +94,23 @@ const PageMapping *mapping(const Space &space, uptr address)
             return &space.mappings[i];
     return nullptr;
 }
+bool admissible(const PageMapping &page)
+{
+    return page.virtual_address >= user_begin && page.virtual_address < user_end &&
+           (page.virtual_address & (page_size - 1)) == 0 && page.physical_address != 0 &&
+           (page.physical_address & (page_size - 1)) == 0 && (page.flags == 0 || (page.flags & page_read) != 0) &&
+           (page.flags & (page_write | page_execute)) != (page_write | page_execute) &&
+           (page.flags & ~(page_read | page_write | page_execute)) == 0;
+}
+u32 leaf_entry(const PageMapping &page)
+{
+    u32 flags = 0x72u; // User R/W, normal noncacheable small page.
+    if (!(page.flags & page_write))
+        flags |= 1u << 9;
+    if (!(page.flags & page_execute))
+        flags |= 1u;
+    return static_cast<u32>(page.physical_address) | flags;
+}
 extern "C" void ok_arm32_enter_native(UserFrame *frame, uptr table, Trap *trap, uptr stack_top);
 static_assert(offsetof(UserFrame, pc) == 128);
 static_assert(offsetof(UserFrame, sp) == 132);
@@ -155,12 +172,7 @@ Result<AddressSpace> create_space(MappingView mappings)
     for (usize i = 0; i < mappings.size(); ++i)
     {
         const auto &page = mappings[i];
-        if (page.virtual_address < user_begin || page.virtual_address >= user_end ||
-            (page.virtual_address & (page_size - 1)) != 0 || page.physical_address == 0 ||
-            (page.physical_address & (page_size - 1)) != 0 || (page.flags != 0 && (page.flags & page_read) == 0) ||
-            (page.flags & (page_write | page_execute)) == (page_write | page_execute) ||
-            (page.flags & ~(page_read | page_write | page_execute)) != 0 ||
-            ((page.flags & page_write) && !(page.flags & page_read)))
+        if (!admissible(page))
             return Status::invalid_argument("invalid ARM user mapping");
         for (usize j = 0; j < i; ++j)
             if (mappings[j].virtual_address == page.virtual_address)
@@ -196,12 +208,7 @@ Result<AddressSpace> create_space(MappingView mappings)
         if ((root_entry & 3u) != 1u)
             return Status::invalid_argument("user mapping overlaps privileged platform section");
         auto *leaf = reinterpret_cast<LeafTable *>(root_entry & ~uptr{1023});
-        u32 flags = 0x72u; // User R/W, normal noncacheable small page.
-        if (!(page.flags & page_write))
-            flags |= 1u << 9;
-        if (!(page.flags & page_execute))
-            flags |= 1u;
-        leaf->entries[(page.virtual_address >> 12) & 255u] = page.physical_address | flags;
+        leaf->entries[(page.virtual_address >> 12) & 255u] = leaf_entry(page);
     }
     space.mappings = mappings;
     space.count = mappings.size();
@@ -211,6 +218,26 @@ Result<AddressSpace> create_space(MappingView mappings)
     asm volatile("dsb sy\nisb" ::: "memory");
     return AddressSpace{
         .root = reinterpret_cast<uptr>(&space.root), .slot = static_cast<u32>(slot), .generation = space.generation};
+}
+Status remap(const AddressSpace &space, const PageMapping &mapping)
+{
+    auto *stored = lookup(space);
+    if (stored == nullptr)
+        return Status::invalid_argument("stale native address space");
+    if (entering)
+        return Status::busy("cannot remap an executing address space");
+    if (!admissible(mapping) || mapping.flags == 0)
+        return Status::invalid_argument("invalid ARM user remap");
+    const auto root_entry = stored->root.entries[mapping.virtual_address >> 20];
+    if ((root_entry & 3u) != 1u)
+        return Status::not_found("native user page has no translation");
+    auto &entry = reinterpret_cast<LeafTable *>(root_entry & ~uptr{1023})->entries[(mapping.virtual_address >> 12) & 255u];
+    if (entry == 0)
+        return Status::not_found("native user page has no translation");
+    // Native entry invalidates the whole TLB before it drops to user mode.
+    entry = leaf_entry(mapping);
+    asm volatile("dsb sy\nisb" ::: "memory");
+    return Status::success();
 }
 Status destroy_space(AddressSpace &space)
 {
@@ -300,7 +327,9 @@ bool user_range(const AddressSpace &space, uptr address, usize size, bool write)
     for (uptr cursor = address; cursor < address + size;)
     {
         const auto *page = mapping(*stored, cursor);
-        if (page == nullptr || !(page->flags & (write ? page_write : page_read)))
+        if (page == nullptr || (!(page->flags & (write ? page_write : page_read)) &&
+                                !(write && resolve_write(space, cursor & ~(page_size - 1)) &&
+                                  (page->flags & page_write))))
             return false;
         const auto next = (cursor & ~(page_size - 1)) + page_size;
         cursor = next < address + size ? next : address + size;
