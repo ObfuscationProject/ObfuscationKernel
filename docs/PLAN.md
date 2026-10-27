@@ -92,25 +92,24 @@ Status on `feat/mm-general` (ABI 75; paired OS worktree `chore/sdk75-consumer`):
   brk against `RLIMIT_DATA`, inherited by fork, kept by exec; native
   `getrlimit`/`prlimit64` ([PROCESS_MEMORY_QUOTAS](qualification/PROCESS_MEMORY_QUOTAS.md)).
 - `fs::FilePageCache` skeleton owned by VFS nodes (`Node::page_cache()`).
-- Copy-on-write fork behind the `native_cow_fork` option, eager by default
-  ([NATIVE_COW_FORK](qualification/NATIVE_COW_FORK.md)): fork shares private
-  frames by reference with write withheld in parent and child records; user
-  write faults and kernel `user_range` writes resolve by copying or, for the
-  last owner, in place; every backend gains `execution::remap`.
+- Copy-on-write fork is the default, with eager copies kept behind
+  `--native_cow_fork=n` ([NATIVE_COW_FORK](qualification/NATIVE_COW_FORK.md)):
+  fork shares private frames by reference with write withheld in parent and
+  child records; user write faults and kernel `user_range` writes resolve by
+  copying or, for the last owner, in place; every backend gains
+  `execution::remap`.
 - Verification: `xmake test` on all ten profiles under the pinned QEMU 10.2.0
   (including a discovered-RAM frame/slab/page-cache test point); the paired OS
   distro boots natively on all ten with `qemu-distro --require-native`, whose
   `posix-check` pressure phase now runs against a lowered `RLIMIT_AS`
-  (`OK_VM_QUOTA`) and whose fork copy probe (`OK_VM_FORK_COPY`) passes in eager
-  and `native_cow_fork` builds alike, the latter with `OK_NATIVE_COW` showing
-  shared, copied and in-place resolved pages on every profile; hosted suites
+  (`OK_VM_QUOTA`) and whose fork copy probe (`OK_VM_FORK_COPY`) passes in the
+  default copy-on-write and the eager fallback builds alike, the former with
+  `OK_NATIVE_COW` showing shared, copied and in-place resolved pages on every
+  profile; hosted suites
   `test_boot_memory`, `test_physical_map`, `test_frame_allocator`, `test_slab`,
   `test_page_cache`, `test_native_page_pool`, `test_native_mapping_pages`,
   `test_native_vm`, `test_process_resources`.
 Open before the exit gate:
-- Make copy-on-write the default fork with eager as the fallback option. The
-  ObfuscationOS evidence tools that admit an exact set of kernel lines inside
-  their spans must first accept `OK_NATIVE_COW`.
 - Fixed pools still in `include/ok/user`: the shared memory files (16 files of
   64 pages, part of the SDK contract) until shared mappings move onto the page
   cache (WT1.5/WT3.1). `include/ok/memory` keeps only the software VM model

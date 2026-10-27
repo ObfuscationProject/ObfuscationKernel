@@ -23,9 +23,9 @@ option("native_qemu_piix4_poweroff")
 option_end()
 
 option("native_cow_fork")
-    set_default(false)
+    set_default(true)
     set_showmenu(true)
-    set_description("Share private pages copy-on-write at native fork instead of copying them eagerly")
+    set_description("Share private pages copy-on-write at native fork; disable to copy them eagerly")
 option_end()
 
 option("private_signal_delivery_fixture")

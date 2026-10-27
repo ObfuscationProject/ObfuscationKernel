@@ -1,8 +1,9 @@
 # Copy-on-write native fork
 
-Slice of `feat/mm-general` (WT1.1). The xmake option `native_cow_fork`
-(`OK_NATIVE_COW_FORK`) makes native `fork` share private pages copy-on-write.
-Without it, fork copies every private page eagerly, as before.
+Slice of `feat/mm-general` (WT1.1). Native `fork` shares private pages
+copy-on-write. The xmake option `native_cow_fork` (default on, defines
+`OK_NATIVE_COW_FORK`) selects this; `--native_cow_fork=n` keeps the eager
+fallback, where fork copies every private page as before.
 
 ## Contract
 
@@ -45,28 +46,36 @@ MIPS and PPC refill from the records, which native entry invalidates, and PPC
 publishes a new executable frame to the instruction cache.
 
 `OK_NATIVE_COW version=1 shared=<n> copied=<n> reused=<n>` follows the
-`OK_NATIVE_FRAMES`/`OK_NATIVE_SHARED_FILES_LEDGER` pair in COW builds only:
-records shared at fork, writes resolved by copying, and writes resolved in
-place by the last owner. Eager builds stay the default; OS evidence tools that
-admit an exact set of kernel lines inside their spans do not know this line yet.
+`OK_NATIVE_FRAMES`/`OK_NATIVE_SHARED_FILES_LEDGER` pair in copy-on-write builds
+only: records shared at fork, writes resolved by copying, and writes resolved
+in place by the last owner. The ObfuscationOS consumers of SDK 75 serial output
+(`qemu_distro.py`, `test_musl_userland.py`, `test_shared_files.py`,
+`observe_shared_write_seal_qemu.py`, `object_pressure_evidence.py`) select
+their records by prefix or exact adjacency and admit the line. The validators
+that admit only an exact set of kernel lines inside a command span belong to
+SDK 31 receipts: they require an ABI 31 SDK and already reject the
+`OK_NATIVE_SHARED_FILES_LEDGER` line that every current build emits.
 
 ## Verification
 
 - Hosted model: `scripts/test_native_vm.py [--sanitize]` builds the actual VM
-  code twice, eager and with `OK_NATIVE_COW_FORK`; the COW build runs fork
+  code twice, with `OK_NATIVE_COW_FORK` and eager; the COW build runs fork
   sharing, parent withholding, copy and in-place resolution, shared and
   read-only pages that do not resolve, `mprotect` settling, a failed `remap`
   and teardown reference counts against a record-reading mock backend.
   `test_native_page_pool.py` covers `retain_copy`; `test_native_mapping_pages.py`
-  covers `replace`.
+  covers `replace`. Other hosted runners that compile `runtime.cpp` define
+  their own flags and so model the eager fallback.
 - Native QEMU guests through the paired ObfuscationOS worktree
-  (`chore/sdk75-consumer`) with a kernel SDK exported from
-  `xmake f --native_cow_fork=y`: `posix-check` runs its existing fork tests and
+  (`chore/sdk75-consumer`) with kernel SDKs exported from the default and the
+  `--native_cow_fork=n` configurations: `posix-check` runs its existing fork tests and
   a bidirectional copy probe, where parent and child each write a still-shared
   private page by CPU store and by a kernel copy (`read` from a pipe) and
   observe only their own values; it prints
   `OK_VM_FORK_COPY scope=hardware parent_store=pass parent_kernel_copy=pass child_kernel_copy=pass child_store=pass`.
   `qemu_distro.py --require-native` requires that marker in both builds.
+- Kernel CI builds the eager fallback image on every profile after exporting
+  the default SDK.
 
 This is QEMU execution on the boot CPU with one executing thread at a time. It
 does not cover TLB shootdown, concurrent faults, page reclaim or swap.

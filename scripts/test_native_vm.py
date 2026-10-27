@@ -21,8 +21,8 @@ def main():
                  "-fno-omit-frame-pointer"] if args.sanitize else []
         environment = dict(os.environ, ASAN_OPTIONS="detect_leaks=0:halt_on_error=1",
                            UBSAN_OPTIONS="halt_on_error=1")
-        # Eager fork is the default build; native_cow_fork adds the COW model.
-        for name, defines in (("native-vm", []), ("native-vm-cow", ["-DOK_NATIVE_COW_FORK"])):
+        # Copy-on-write fork is the default build; native_cow_fork=n keeps eager copies.
+        for name, defines in (("native-vm", ["-DOK_NATIVE_COW_FORK"]), ("native-vm-eager", [])):
             output = Path(directory) / name
             subprocess.run([
                 *shlex.split(args.cxx), "-std=c++23", "-O2", "-Wall", "-Wextra", "-Wpedantic", "-Werror",

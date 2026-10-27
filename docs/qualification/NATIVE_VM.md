@@ -11,7 +11,9 @@ virtual interface.
 - `mmap`: exactly one of `MAP_PRIVATE` and `MAP_SHARED`, optionally with
   `MAP_ANONYMOUS` and `MAP_FIXED`. Anonymous mappings require file descriptor
   `-1` and offset zero. `MAP_SHARED | MAP_ANONYMOUS` retains the same backing
-  frames across `fork`; private anonymous mappings retain eager fork copies.
+  frames across `fork`; private mappings are shared copy-on-write
+  ([NATIVE_COW_FORK](NATIVE_COW_FORK.md)), or copied eagerly with
+  `--native_cow_fork=n`.
   `MAP_PRIVATE` of a readable regular file eagerly copies the requested pages,
   including nonzero page-aligned offsets and partial-EOF zero fill. It has no
   file-cache coherence. The length is nonzero and rounded up to 4096 bytes
@@ -56,10 +58,10 @@ ELF loader; the MIPS backend retains its existing alias-to-physical translation.
 
 `PROT_NONE` pages keep their backing and contents in `native_pages`. The stable
 chunked backend view includes their records, but each backend omits their user
-translation. Restoring protection remaps the same contents. Fork eagerly copies
-private pages, including inaccessible ones, and retains references to shared
-anonymous frames. Per-process protection and unmap do not change a peer's
-translations. A shared frame remains classified as shared with one process
+translation. Restoring protection remaps the same contents. Fork shares
+private pages copy-on-write (or copies them eagerly), including inaccessible
+ones, and retains references to shared anonymous frames. Per-process
+protection and unmap do not change a peer's translations. A shared frame remains classified as shared with one process
 reference so a later fork still shares it.
 Exit, exec replacement and process kill use the existing native release path.
 That path retains backing when hardware table retirement fails.
@@ -113,7 +115,7 @@ accessible image page must remain; fully inaccessible or empty spaces are not
 supported by all current backends.
 
 This is a bounded native VM slice, not completion of M1 or M5.
-Runtime-sized allocators and copy-on-write fork (behind `native_cow_fork`, see
+Runtime-sized allocators and copy-on-write fork (the default; see
 [NATIVE_COW_FORK](NATIVE_COW_FORK.md)) arrived with `feat/mm-general`. Demand
 paging, coherent shared file mappings, file-fault `SIGBUS`, cross-process shared-frame futex keys, unbounded
 heap growth, reclaim/OOM policy and SMP shootdown remain separate work.
@@ -135,7 +137,7 @@ ASan/UBSan except unrelated virtual-device vptr instrumentation.
 
 ObfuscationOS `posix-check` supplies the separate hardware gate: direct native
 loads/stores, read-only and inaccessible-page faults in children, protection
-restoration, eager private fork isolation, shared anonymous fork visibility,
+restoration, private fork isolation, shared anonymous fork visibility,
 partial unmap and pressure/reclamation. These
 must pass through the exported Kernel SDK and each target's QEMU execution path.
 The separate OS musl probe (`--require-heap`) executes mapped `brk`, fixed zero

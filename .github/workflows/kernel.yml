@@ -52,3 +52,7 @@ jobs:
         with:
           name: kernel-sdk-${{ matrix.arch }}-debug
           path: build/sdk/${{ matrix.arch }}/debug
+      - name: Build eager fork fallback
+        run: |
+          xmake f -y -m debug -a ${{ matrix.arch }} --native_cow_fork=n
+          xmake -y -b okernel_image

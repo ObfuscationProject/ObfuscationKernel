@@ -8,8 +8,8 @@ namespace ok::user::native
 // A record keeps write access it is entitled to in `copy_on_write` while its
 // `flags`, which every backend translates, withhold page_write. Shared
 // anonymous and shared-file frames are coherent by design and never withheld.
-// The xmake option native_cow_fork selects this; otherwise fork copies every
-// private page eagerly and no record is ever withheld.
+// The xmake option native_cow_fork (on by default) selects this; with it off,
+// fork copies every private page eagerly and no record is ever withheld.
 #ifdef OK_NATIVE_COW_FORK
 inline constexpr bool copy_on_write_fork = true;
 #else

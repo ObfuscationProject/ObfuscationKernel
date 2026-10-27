@@ -114,7 +114,8 @@ constrained templates/static dispatch rather than a virtual interface solely to
 share hot-path implementation.
 
 The native user runtime also provides a [bounded anonymous VM slice](../qualification/NATIVE_VM.md)
-and, behind `native_cow_fork`, [copy-on-write fork](../qualification/NATIVE_COW_FORK.md).
+and [copy-on-write fork](../qualification/NATIVE_COW_FORK.md), with eager fork copies
+behind `--native_cow_fork=n`.
 In kernel builds its page pool draws from the kernel allocator; hosted model
 builds keep a host-backed arena. Its hardware mappings and acceptance tests are
 distinct from this module's software VM models.

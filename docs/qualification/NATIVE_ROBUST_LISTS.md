@@ -68,7 +68,7 @@ priority inheritance implementation.
 The native adapter uses full writable-range checks and endian-aware copies.
 These are indivisible relative to native users because every user is stopped
 on CPU0; they are not hardware atomic operations for SMP. Anonymous pages are
-eager. With `native_cow_fork`, the writable-range check itself resolves a page
+eager. Under copy-on-write fork, the writable-range check itself resolves a page
 still shared after fork, so the following copy writes a private frame. Future
 demand paging and transient atomic faults require fault-in/retry within the
 access policy. Terminal copy faults

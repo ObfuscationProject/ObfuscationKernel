@@ -43,7 +43,7 @@ A syscall crosses a checked copying boundary. User addresses are validated again
 all pages in the requested range; the trusted-buffer kernel syscall table never
 receives unchecked user buffers from this runtime. Invalid pointers return EFAULT.
 Faulting user programs exit and can be reaped without terminating the kernel.
-Fork eagerly copies user pages, retains shared open-file descriptions and resumes
+Fork shares private user pages copy-on-write, retains shared open-file descriptions and resumes
 with distinct return values. Exec stages and validates the complete new image
 before replacement. Wait blocks and consumes a zombie once. Pipes implement
 blocking transfer, EOF, EPIPE and endpoint-close wakeup.
@@ -64,8 +64,8 @@ soft limit; `RLIMIT_DATA` bounds its brk heap (see
 [process memory quotas](qualification/PROCESS_MEMORY_QUOTAS.md)). Remaining
 fixed bounds: 16 address spaces and 1024 mapping records per address space in
 the execution backends, a 128 KiB ELF input buffer, 64 KiB stacks, and up to 16
-argument/environment strings each. Fork copies private pages eagerly unless the
-kernel is built with `native_cow_fork`, which shares them copy-on-write (see
+argument/environment strings each. Fork shares private pages copy-on-write; a
+kernel built with `--native_cow_fork=n` copies them eagerly instead (see
 [copy-on-write fork](qualification/NATIVE_COW_FORK.md)).
 
 ## Distribution and boot archive
@@ -101,7 +101,7 @@ this is not Linux binary compatibility.
 
 Private and shared anonymous `mmap`, eager private file `mmap`, `mprotect` and
 partial `munmap` now modify native page tables. Shared anonymous frames survive
-fork by reference; private pages use eager copies. Protection faults and
+fork by reference; private pages are shared copy-on-write. Protection faults and
 transactional failure rollback remain supported.
 See [bounded native VM](qualification/NATIVE_VM.md) for supported flags and fixed limits.
 The [object pathname resolver](PATH_RESOLUTION.md) also serves cwd-relative exec,
