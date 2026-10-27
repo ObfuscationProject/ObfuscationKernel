@@ -1,4 +1,4 @@
-#include "ok/user/native_signal_frame_riscv.hpp"
+#include "ok/arch/riscv/signal.hpp"
 #include "../fixtures/signals/linux_riscv_layout.hpp"
 #include <cstdio>
 #include <cstdlib>

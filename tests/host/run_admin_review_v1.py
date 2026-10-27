@@ -3,7 +3,7 @@
 from pathlib import Path
 import argparse, hashlib, json, os, resource, shutil, subprocess
 
-DIRECTORIES = ('core','apps','driver','fs','gui','interrupt','ipc','memory','net','posix','sched','smp','syscall','user')
+DIRECTORIES = ('core','rescue','driver','fs','gui','interrupt','ipc','memory','net','posix','sched','smp','syscall','user')
 def sha(path): return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 def main():
     ap=argparse.ArgumentParser(description=__doc__)
@@ -31,9 +31,9 @@ def main():
         if actual!=declared:raise ValueError('complete source inventory mismatch')
         sources=[]
         for directory in DIRECTORIES:
-            sources.extend(str(p.relative_to(root)) for p in sorted((root/'src'/directory).rglob('*.cpp')) if p.name not in ('entry.cpp','kernel_main.cpp','runtime.cpp'))
+            sources.extend(str(p.relative_to(root)) for p in sorted((root/'src'/directory).rglob('*.cpp')) if p.name not in ('entry.cpp','kernel_main.cpp','runtime.cpp') and p.parent.name != 'runtime')
         sources.extend(['src/arch/arch.cpp','src/arch/x86_64/ops.cpp'])
-        files={root/name for name in sources}|{root/'src/user/runtime.cpp',root/'tests/host/native_clock_model.hpp'}
+        files={root/name for name in sources}|{root/'src/user/runtime.cpp',*(root/'src/user/runtime').glob('*.cpp'),root/'tests/host/native_clock_model.hpp'}
         for base in ('include','src','tests'):
             files.update(p for p in (root/base).rglob('*') if p.is_file() and p.suffix in ('.hpp','.h','.inc'))
         for path in sorted(files):

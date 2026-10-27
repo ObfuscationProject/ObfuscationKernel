@@ -1,8 +1,8 @@
 #pragma once
 
 #include "native_syscall_origin.hpp"
-#include "ok/user/native_signal_persistent_ppc32.hpp"
-#include "ok/user/native_signal_readiness_mips64_n64.hpp"
+#include "ok/arch/ppc/signal.hpp"
+#include "ok/arch/mips64/signal.hpp"
 
 namespace ok::user::native
 {

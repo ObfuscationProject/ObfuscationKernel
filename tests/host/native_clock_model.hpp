@@ -1,6 +1,6 @@
 #pragma once
 // Actual Linux adapter/common native copy boundary with hosted mappings only.
-#include "../../src/user/runtime.cpp"
+#include "native_runtime_units.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -127,7 +127,7 @@ Result<AddressSpace> create_space(MappingView)
     if (mock::spaces_enabled)
     {
         const auto generation = ++mock::space_generation;
-        return AddressSpace{0x1000 + generation * 0x1000, static_cast<u32>(generation % max_address_spaces), generation};
+        return AddressSpace{0x1000 + generation * 0x1000, static_cast<u32>(generation % 16), generation};
     }
 #endif
     return Status::unsupported();

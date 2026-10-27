@@ -1,7 +1,7 @@
 #include "ok/arch/execution.hpp"
 #include "ok/memory/kernel_entry_stack_pool.hpp"
 #include "ok/abi/linux_native.hpp"
-#include "ok/user/native_signal_readiness_ppc32.hpp"
+#include "ok/arch/ppc/signal.hpp"
 
 using namespace ok;
 namespace native = ok::arch::execution;

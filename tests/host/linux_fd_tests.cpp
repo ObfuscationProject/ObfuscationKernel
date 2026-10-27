@@ -2,7 +2,7 @@
 // Actual Linux adapter/common native copy boundary with hosted mappings only.
 #define OK_SYSCALL_ORIGIN_MODEL 1
 #define OK_NATIVE_VFS_CONTINUATION_MODEL 1
-#include "../../src/user/runtime.cpp"
+#include "native_runtime_units.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -26,7 +26,7 @@ std::array<std::byte, 8192> memory{};
 uptr forbidden{};
 usize copies{};
 struct Space { bool live{}; u32 generation{}; hw::MappingView pages; };
-std::array<Space, hw::max_address_spaces> spaces;
+std::array<Space, 16> spaces; // Fixed model slot table.
 uptr fail_destroy_root{};
 usize live_spaces()
 {
@@ -525,7 +525,7 @@ void loaded_image_cleanup(Kernel &kernel, sched::ProcessId pid)
             const auto *token = saved->pages.frame(index); CHECK(token);
             CHECK(token->owner == frames[index].owner && token->address == frames[index].address &&
                 token->index == frames[index].index && token->generation == frames[index].generation);
-            CHECK(saved->pin_held[index] && saved->ownership[index] == native::QuarantinedSpace::Ownership::discharged);
+            CHECK(saved->pin_held(index) && saved->ownership(index) == native::QuarantinedSpace::Ownership::discharged);
         }
         CHECK(native::page_pool.allocations() == allocations && native::page_pool.pending_count() == 17 &&
             native::page_pool.pinned_count() == 17 && mock::live_spaces() == 1);
@@ -563,7 +563,7 @@ void loaded_image_cleanup(Kernel &kernel, sched::ProcessId pid)
         {
             const auto *token = saved->pages.frame(index); CHECK(token);
             CHECK(token->owner == frames[index].owner && token->address == frames[index].address && token->generation == frames[index].generation);
-            CHECK(saved->pin_held[index] && saved->ownership[index] == native::QuarantinedSpace::Ownership::discharged);
+            CHECK(saved->pin_held(index) && saved->ownership(index) == native::QuarantinedSpace::Ownership::discharged);
         }
         CHECK(native::page_pool.allocations() == allocations && native::page_pool.pending_count() == 17 && mock::live_spaces() == 1);
         mock::fail_destroy_root = 0; retire(identity);

@@ -5,9 +5,12 @@ import argparse, hashlib, json, os, re, select, subprocess, sys, time
 sys.dont_write_bytecode=True
 stage=Path(__file__).resolve().parents[1]
 profiles=json.loads((stage/'scripts/native_firmware_profiles.json').read_text())
-protocols={'i386':'bios_e820','x86_64':'bios_e820','aarch64':'aarch64_linux_image','arm32':'arm32_linux_image','rv64':'riscv_fdt','rv32':'riscv_fdt','loongarch64':'loongarch64_direct_elf','mips':'malta_prom','mips64':'malta_prom','ppc':'epapr'}
-windows={'arm32':(0x40000000,0x60000000),'i386':(0x5000,0x5c10),'x86_64':(0x5000,0x5c10),'aarch64':(0x40000000,0x60000000),'rv64':(0x80000000,0xa0000000),'rv32':(0x80000000,0xa0000000),'ppc':(0,0x10000000)}
+protocols={'i386':'bios_e820','x86_64':'bios_e820','aarch64':'aarch64_linux_image','arm32':'arm32_linux_image','rv64':'riscv_fdt','rv32':'riscv_fdt','loongarch64':'loongarch64_efi_fdt','mips':'malta_prom','mips64':'malta_prom','ppc':'epapr'}
+windows={'arm32':(0x40000000,0x60000000),'i386':(0x5000,0x5c10),'x86_64':(0x5000,0x5c10),'aarch64':(0x40000000,0x60000000),'rv64':(0x80000000,0xa0000000),'rv32':(0x80000000,0xa0000000),'ppc':(0,0x10000000),'loongarch64':(0,0x10000000),'mips':(0,0x20000000),'mips64':(0,0x20000000)}
 supported=set(windows)
+# QEMU virt LoongArch -m 2G: low RAM below the I/O hole and the high bank.
+fdt_ram={'loongarch64':[(0x80000000,0x70000000),(0,0x10000000)]}
+def kseg0(word):return word&0x1fffffff if (word>>32) in (0,0xffffffff) and 0x80000000<=word&0xffffffff<0xa0000000 else None
 def digest(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 def acceptance(arch,data,header_only=False,high=False,arm32_direct_elf=False,legacy_arm32=False):
     text=data.decode(errors='replace');lines=text.splitlines()
@@ -30,7 +33,10 @@ def acceptance(arch,data,header_only=False,high=False,arm32_direct_elf=False,leg
             if not m or not raw_at<i<result_at:raise ValueError('invalid reader evidence')
             reads.append(tuple(int(v,16) for v in m.groups()));seen.add(i)
     if len(reads)!=int(result[3],16):raise ValueError('reader count mismatch')
-    expected=('protocol_mismatch' if arm32_direct_elf else 'source_absent') if arch=='arm32' and (arm32_direct_elf or legacy_arm32) else ('unmapped_source' if header_only else 'none') if arch in supported else ('source_absent' if arch in ('arm32','loongarch64') else 'unsupported_protocol')
+    if arch=='arm32' and (arm32_direct_elf or legacy_arm32):expected='protocol_mismatch' if arm32_direct_elf else 'source_absent'
+    # A LoongArch loader without an EFI system table (QEMU before 9.0) supplies nothing.
+    elif arch=='loongarch64' and not any(words):expected='source_absent'
+    else:expected='unmapped_source' if header_only else 'none'
     if result[1]!=expected or (int(result[2],16)==0)!=(expected=='none'):raise ValueError('unexpected discovery result: '+result[0])
     facts={'raw':[hex(v) for v in words],'reason':expected,'reads':reads,'allocator_qualified':False}
     if arch=='arm32' and not legacy_arm32:
@@ -41,15 +47,30 @@ def acceptance(arch,data,header_only=False,high=False,arm32_direct_elf=False,leg
         if text.count('ARM32_ENTRY')!=1:raise ValueError('duplicate ARM entry state')
     if expected!='none':
         if reads and not (header_only and len(reads)==2):raise ValueError('unexpected read for rejected protocol')
-        if any(line.startswith(('FIRMWARE_STORAGE','E820_','FDT_')) for line in lines):raise ValueError('failed discovery published map')
+        if any(line.startswith(('FIRMWARE_STORAGE','FIRMWARE_LOADER','E820_','FDT_','BOARD_')) for line in lines):raise ValueError('failed discovery published map')
         if (arch=='loongarch64' or (arch=='arm32' and (arm32_direct_elf or legacy_arm32))) and any(words):raise ValueError('unexpected direct ELF arguments')
-        if any(i not in seen and line.startswith(('FIRMWARE_','E820_','FDT_')) for i,line in enumerate(lines)):raise ValueError('unknown or malformed firmware diagnostics')
+        if any(i not in seen and line.startswith(('FIRMWARE_','E820_','FDT_','BOARD_')) for i,line in enumerate(lines)):raise ValueError('unknown or malformed firmware diagnostics')
         return facts
     storage_at,storage=unique(r'FIRMWARE_STORAGE base=(0x[0-9a-f]{16}) size=(0x[0-9a-f]{16}) decoded=(0x[0-9a-f]{16})')
     seen.add(storage_at)
     address,size,decoded=(int(v,16) for v in storage.groups())
-    source_word=2 if arch=='arm32' else 1 if arch in ('i386','x86_64','rv32','rv64') else 0
-    if address!=words[source_word]:raise ValueError('source address differs from captured argument')
+    loaders=[]
+    for i,line in enumerate(lines):
+        if line.startswith('FIRMWARE_LOADER'):
+            m=re.fullmatch(r'FIRMWARE_LOADER base=(0x[0-9a-f]{16}) size=(0x[0-9a-f]{16})',line)
+            if not m or not storage_at<i<result_at:raise ValueError('bad loader table evidence')
+            loaders.append(tuple(int(v,16) for v in m.groups()));seen.add(i)
+    if arch in ('mips','mips64'):return board_acceptance(arch,lines,words,reads,seen,(address,size,decoded),storage_at,result_at,facts)
+    if arch=='loongarch64':
+        # a0 = 1 (EFI), a2 = system table; its configuration array names the FDT.
+        if words[0]!=1 or not words[2] or words[2]&7:raise ValueError('LoongArch EFI handoff identity mismatch')
+        if len(loaders)!=2 or loaders[0]!=(words[2],0x78) or len(reads)!=4 or reads[0]!=loaders[0] or reads[1]!=loaders[1] or loaders[1][1]%24:
+            raise ValueError('EFI system and configuration table evidence mismatch')
+        facts['loader_tables']=loaders;reads=reads[2:]
+    elif loaders:raise ValueError('unexpected loader tables')
+    else:
+        source_word=2 if arch=='arm32' else 1 if arch in ('i386','x86_64','rv32','rv64') else 0
+        if address!=words[source_word]:raise ValueError('source address differs from captured argument')
     if arch=='arm32' and (words[0] or words[1]!=0xffffffff or not words[2] or words[2]&7 or words[2]>0xffffffff):raise ValueError('ARM Linux header identity mismatch')
     if arch=='aarch64' and any(words[1:]):raise ValueError('nonzero Linux Image reserved words')
     if arch=='ppc' and (words[1]!=0x45504150 or words[3]):raise ValueError('ePAPR identity mismatch')
@@ -87,12 +108,40 @@ def acceptance(arch,data,header_only=False,high=False,arm32_direct_elf=False,leg
                 reserved.append(tuple(int(v,16) for v in m.groups()));seen.add(i)
         if not storage_at<map_at or len(ram)!=int(count[1],16) or len(reserved)!=int(count[2],16):raise ValueError('FDT count mismatch')
         if decoded!=size:raise ValueError('FDT storage and decoded sizes differ')
-        if ram!=[(start,end-start)]:raise ValueError('FDT RAM differs from explicit QEMU -m contract: '+str(ram))
+        if ram!=fdt_ram.get(arch,[(start,end-start)]):raise ValueError('FDT RAM differs from explicit QEMU -m contract: '+str(ram))
         if any(not n or a+n>0xffffffffffffffff for a,n in ram) or any(not n or a+n>0xffffffffffffffff or source>1 or no_map>1 or reusable>1 or(no_map and reusable) for a,n,source,no_map,reusable in reserved):raise ValueError('invalid FDT range or reservation')
         facts.update(fdt_ram=ram,fdt_reservations=reserved)
-    if any(i not in seen and line.startswith(('FIRMWARE_','E820_','FDT_')) for i,line in enumerate(lines)):raise ValueError('unknown or malformed firmware diagnostics')
+    if any(i not in seen and line.startswith(('FIRMWARE_','E820_','FDT_','BOARD_')) for i,line in enumerate(lines)):raise ValueError('unknown or malformed firmware diagnostics')
     facts['source_storage']=(address,size)
     facts['decoded_bytes']=decoded
+    return facts
+
+def board_acceptance(arch,lines,words,reads,seen,storage,storage_at,result_at,facts):
+    """Malta PROM: KSEG0 argv/envp, a3 low RAM, board table sized by memsize/ememsize (-m 256M)."""
+    address,size,decoded=storage
+    argv,envp=kseg0(words[1]),kseg0(words[2])
+    if words[0]!=2 or argv is None or envp is None or words[3]!=0x10000000:raise ValueError('Malta PROM handoff identity mismatch')
+    if address!=argv or not reads or reads[0]!=(envp,8) or any(not 0<=a<0x20000000 or n not in (8,256) for a,n in reads):raise ValueError('PROM read evidence mismatch')
+    if not address<=envp<address+size or decoded!=sum(n for _,n in reads):raise ValueError('PROM storage does not cover the environment')
+    def unique(pattern):
+        found=[(i,re.fullmatch(pattern,line)) for i,line in enumerate(lines) if re.fullmatch(pattern,line)]
+        if len(found)!=1:raise ValueError('expected unique whole line: '+pattern)
+        return found[0]
+    map_at,board=unique(r'BOARD_MAP ram=(0x[0-9a-f]{16}) reserved=(0x[0-9a-f]{16}) devices=(0x[0-9a-f]{16}) reported_low=(0x[0-9a-f]{16}) reported_total=(0x[0-9a-f]{16})')
+    seen.add(map_at)
+    counts=[int(v,16) for v in board.groups()]
+    ranges={'BOARD_RAM':[],'BOARD_RESERVED':[],'BOARD_DEVICE':[]}
+    for i,line in enumerate(lines):
+        for name in ranges:
+            if line.startswith(name+' '):
+                m=re.fullmatch(name+r' base=(0x[0-9a-f]{16}) size=(0x[0-9a-f]{16})',line)
+                if not m or not map_at<i<result_at:raise ValueError('bad board evidence')
+                ranges[name].append(tuple(int(v,16) for v in m.groups()));seen.add(i)
+    if counts!=[1,1,1,0x10000000,0x10000000] or ranges!={'BOARD_RAM':[(0,0x10000000)],'BOARD_RESERVED':[(0,0x1000)],'BOARD_DEVICE':[(0x10000000,0x10000000)]}:
+        raise ValueError('Malta board table differs from explicit QEMU -m 256M contract')
+    if not storage_at<map_at<result_at:raise ValueError('map ordering')
+    if any(i not in seen and line.startswith(('FIRMWARE_','E820_','FDT_','BOARD_')) for i,line in enumerate(lines)):raise ValueError('unknown or malformed firmware diagnostics')
+    facts.update(board_ram=ranges['BOARD_RAM'],board_reserved=ranges['BOARD_RESERVED'],board_devices=ranges['BOARD_DEVICE'],source_storage=(address,size),decoded_bytes=decoded)
     return facts
 
 def qemu_command(qemu,arch,image):
@@ -110,20 +159,21 @@ def qemu_command(qemu,arch,image):
     return [str(qemu),'-M','virt','-m','2G','-kernel',str(image),*common]
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--kernel-root',type=Path,default=stage);p.add_argument('--output',type=Path,required=True);p.add_argument('--arch',choices=list(profiles),action='append');p.add_argument('--arm32-direct-elf',action='store_true');p.add_argument('--header-only',action='store_true');p.add_argument('--x86-high',action='store_true');p.add_argument('--aarch64-el2',action='store_true');a=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--kernel-root',type=Path,default=stage);p.add_argument('--output',type=Path,required=True);p.add_argument('--arch',choices=list(profiles),action='append');p.add_argument('--arm32-direct-elf',action='store_true');p.add_argument('--header-only',action='store_true');p.add_argument('--x86-high',action='store_true');p.add_argument('--aarch64-el2',action='store_true');p.add_argument('--toolchain-dir',type=Path,help='directory holding <triple>/bin (default: KERNEL_ROOT/toolchains)');p.add_argument('--qemu-dir',type=Path,help='directory holding qemu-system-* (default: /usr/bin)');a=p.parse_args()
     root=a.kernel_root.resolve();output=a.output.resolve();output.mkdir(parents=True,exist_ok=False);rows=[]
     selected=a.arch or list(profiles)
     if a.x86_high and any(arch not in ('i386','x86_64') for arch in selected):p.error('--x86-high requires x86-only selection')
     if a.arm32_direct_elf and (selected!=['arm32'] or a.header_only):p.error('--arm32-direct-elf requires only ARM32 and no shortened reader')
+    if a.header_only and any(arch in ('loongarch64','mips','mips64') for arch in selected):p.error('--header-only requires a direct E820/FDT source')
     for arch in selected:
         out=output/arch;out.mkdir();snap=out/'sources';hashes={};cfg=profiles[arch]
         def freeze(path,name):
             dest=snap/name;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(path.read_bytes());hashes[name]=digest(dest);return dest
         freeze(Path(__file__),'run_native.py');freeze(stage/'scripts/native_firmware_profiles.json','build-profiles.json')
-        for name in ['include/ok/arch/types.hpp','include/ok/core/types.hpp','include/ok/boot/e820.hpp','include/ok/boot/fdt.hpp','include/ok/boot/raw_handoff.hpp','src/boot/raw_handoff.cpp','src/boot/fdt.cpp',f'src/arch/{arch}/boot.S',f'src/arch/{arch}/linker.ld']:
+        for name in ['include/ok/arch/types.hpp','include/ok/core/types.hpp','include/ok/boot/e820.hpp','include/ok/boot/fdt.hpp','include/ok/boot/loader_tables.hpp','include/ok/boot/raw_handoff.hpp','include/ok/user/native_signal_config.hpp','src/boot/raw_handoff.cpp','src/boot/fdt.cpp',f'src/arch/{arch}/boot.S',f'src/arch/{arch}/linker.ld']:
             freeze(root/name,name)
         freeze(stage/'include/ok/boot/firmware_handoff.hpp','include/ok/boot/firmware_handoff.hpp');freeze(stage/'tests/native/firmware_handoff_probe.cpp','probe.cpp')
-        prefix=root/'toolchains'/cfg['triple']/'bin'/cfg['triple'];tools={n:Path(str(prefix)+'-'+n) for n in ['gcc','g++','ld','objcopy']}
+        prefix=(a.toolchain_dir.resolve() if a.toolchain_dir else root/'toolchains')/cfg['triple']/'bin'/cfg['triple'];tools={n:Path(str(prefix)+'-'+n) for n in ['gcc','g++','ld','objcopy']}
         if subprocess.check_output([str(tools['gcc']),'-dumpmachine'],text=True).strip()!=cfg['triple'] or subprocess.check_output([str(tools['gcc']),'-dumpfullversion'],text=True).strip()!=cfg['compiler']['version']:raise ValueError('compiler identity mismatch')
         window=windows.get(arch,(0,0));defines=cfg['defines']+[f'OK_PROBE_ARCH={arch}',f'OK_PROBE_PROTOCOL={protocols[arch]}',f'OK_PROBE_WINDOW_START={window[0]}ULL',f'OK_PROBE_WINDOW_END={window[1]}ULL']
         if a.header_only:defines+=['OK_PROBE_HEADER_ONLY']
@@ -131,7 +181,7 @@ def main():
         def run(cmd,log):
             cmd=list(map(str,cmd));commands.append(cmd);subprocess.run(cmd,check=True,stdout=log,stderr=subprocess.STDOUT)
         with (out/'build.log').open('w') as log:
-            run([tools['gcc'],*cfg['asflags'],'-c',snap/f'src/arch/{arch}/boot.S','-o',out/'boot.o'],log)
+            run([tools['gcc'],*cfg['asflags'],'-I'+str(snap/'include'),'-c',snap/f'src/arch/{arch}/boot.S','-o',out/'boot.o'],log)
             objects=[out/'boot.o']
             for name,path in [('probe','probe.cpp'),('capture','src/boot/raw_handoff.cpp'),('fdt','src/boot/fdt.cpp')]:
                 obj=out/(name+'.o');run([tools['g++'],'-std=c++23',*cfg['cxxflags'],'-fno-builtin','-Werror','-fstack-usage','-I'+str(snap/'include'),*['-D'+d for d in defines],'-c',snap/path,'-o',obj],log);objects.append(obj)
@@ -145,7 +195,7 @@ def main():
                     if len(sector)!=512 or sector[-2:]!=b'\x55\xaa' or len(data)>8*1024*1024:raise ValueError('invalid BIOS image size')
                     data=sector+data+bytes(8*1024*1024-len(data))
             (out/'kernel.bin').write_bytes(data)
-        qemu=Path('/usr/bin/qemu-system-'+{'rv64':'riscv64','rv32':'riscv32','arm32':'arm'}.get(arch,arch));command=qemu_command(qemu,arch,out/('probe.elf' if a.arm32_direct_elf else 'kernel.bin'))
+        qemu=(a.qemu_dir.resolve() if a.qemu_dir else Path('/usr/bin'))/('qemu-system-'+{'rv64':'riscv64','rv32':'riscv32','arm32':'arm'}.get(arch,arch));command=qemu_command(qemu,arch,out/('probe.elf' if a.arm32_direct_elf else 'kernel.bin'))
         if a.x86_high:command+=['-m','5G']
         if a.aarch64_el2 and arch=='aarch64':command[command.index('-M')+1]='virt,virtualization=on'
         child=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT);data=bytearray();deadline=time.monotonic()+20

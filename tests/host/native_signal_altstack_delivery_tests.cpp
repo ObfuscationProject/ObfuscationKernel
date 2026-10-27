@@ -1,6 +1,6 @@
 // Hosted transaction validation. Real stack switching is a separate guest gate.
-#include "ok/user/native_signal_delivery_x86_64.hpp"
-#include "ok/user/native_signal_delivery_aarch64.hpp"
+#include "ok/arch/x86_64/signal.hpp"
+#include "ok/arch/aarch64/signal.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>

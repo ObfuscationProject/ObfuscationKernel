@@ -12,8 +12,6 @@ Status qemu_runtime_memory_plan(const FirmwareMemory &source, PhysicalRange link
                                std::span<const LoadedReservation> extras, u64 maximum_pages,
                                QemuEntryMemoryPlan &output)
 {
-    if (maximum_pages > memory::max_physical_frames)
-        return Status::no_memory("runtime frame bookkeeping capacity exceeded");
     QemuEntryMemoryPlan candidate;
     if (auto status = qemu_entry_memory_plan<A>(source, linked_image, extras, maximum_pages, candidate); !status)
         return status;
@@ -32,20 +30,29 @@ Status qemu_runtime_memory_plan(const FirmwareMemory &source, PhysicalRange link
             candidate.policy.accessible.size = 0x10000000;
     // AArch64's 1GiB supervisor RAM covers the established 512MiB QEMU entry
     // window. RISC-V stays in M-mode and bypasses its userspace Sv32/Sv39 tables.
-    candidate.policy.maximum_ranges = memory::max_physical_frame_ranges;
     if (qualified_detail::end(linked_image) > qualified_detail::end(candidate.policy.accessible))
         return Status::fault("complete image exceeds runtime supervisor aperture");
     output = candidate;
     return Status::success();
 }
 
-inline Status initialize_qualified_frames(const QualifiedBootMemory &qualified, memory::FrameAllocator &frames)
+// Allocator metadata stays caller-owned; size it with qualified_frame_metadata_bytes().
+inline Result<usize> qualified_frame_metadata_bytes(const QualifiedBootMemory &qualified)
+{
+    if (!qualified.valid() || qualified.policy().page_size != memory::vm_test_page_size || qualified.managed().empty())
+        return Status::invalid_argument("qualified memory exceeds frame allocator contract");
+    return memory::FrameAllocator::metadata_bytes_for(static_cast<usize>(qualified.page_count()), qualified.managed().size());
+}
+
+inline Status initialize_qualified_frames(const QualifiedBootMemory &qualified, memory::FrameAllocator &frames,
+                                          std::span<std::byte> metadata)
 {
     if (!qualified.valid() || qualified.policy().page_size != memory::vm_test_page_size ||
-        qualified.managed().empty() || qualified.managed().size() > memory::max_physical_frame_ranges ||
-        qualified.page_count() > memory::max_physical_frames)
+        qualified.managed().empty() || qualified.page_count() > ~usize{0})
         return Status::invalid_argument("qualified memory exceeds frame allocator contract");
-    StaticVector<memory::MemoryRegion, memory::max_physical_frame_ranges> regions;
+    // Serialized boot-CPU use only; a qualified set never exceeds this bound.
+    static StaticVector<memory::MemoryRegion, max_qualified_ranges> regions;
+    regions.clear();
     for (const auto range : qualified.managed())
     {
         // Do not truncate full-width firmware addresses into a 32-bit profile.
@@ -56,6 +63,6 @@ inline Status initialize_qualified_frames(const QualifiedBootMemory &qualified, 
                                             memory::RegionType::usable}); !status)
             return status;
     }
-    return frames.initialize({regions.begin(), regions.size()}, memory::vm_test_page_size);
+    return frames.initialize({regions.begin(), regions.size()}, memory::vm_test_page_size, metadata);
 }
 } // namespace ok::boot

@@ -52,7 +52,13 @@ struct ProbeReader
 #ifdef OK_PROBE_HEADER_ONLY
         if(count>40)return ok::Status::fault("injected shortened firmware mapping");
 #endif
-        return std::span<const std::byte>{reinterpret_cast<const std::byte *>(static_cast<ok::uptr>(address)),count};
+        // Malta reaches physical RAM through its KSEG0 alias; elsewhere identity.
+#if defined(OK_ARCH_TARGET_MIPS) || defined(OK_ARCH_TARGET_MIPS64)
+        constexpr ok::uptr offset=static_cast<ok::uptr>(static_cast<__INTPTR_TYPE__>(-2147483648LL));
+#else
+        constexpr ok::uptr offset=0;
+#endif
+        return std::span<const std::byte>{reinterpret_cast<const std::byte *>(static_cast<ok::uptr>(address)+offset),count};
     }
 };
 static const char *reason(ok::boot::DiscoveryFailure value)
@@ -77,7 +83,16 @@ extern "C" void kernel_main()
     if(result)
     {
         text("FIRMWARE_STORAGE base=");hex64(output.source_storage.address);text(" size=");hex64(output.source_storage.size);text(" decoded=");hex64(output.decoded_bytes);put('\n');
-        if(output.source.format==FirmwareFormat::e820)
+        for(usize i=0;i<output.loader_storage_count;++i){text("FIRMWARE_LOADER base=");hex64(output.loader_storage[i].address);text(" size=");hex64(output.loader_storage[i].size);put('\n');}
+        if(output.source.format==FirmwareFormat::board)
+        {
+            const auto&b=output.board;
+            text("BOARD_MAP ram=");hex64(b.ram_count);text(" reserved=");hex64(b.reserved_count);text(" devices=");hex64(b.device_count);text(" reported_low=");hex64(b.reported_low);text(" reported_total=");hex64(b.reported_total);put('\n');
+            for(usize i=0;i<b.ram_count;++i){text("BOARD_RAM base=");hex64(b.ram[i].address);text(" size=");hex64(b.ram[i].size);put('\n');}
+            for(usize i=0;i<b.reserved_count;++i){text("BOARD_RESERVED base=");hex64(b.reserved[i].address);text(" size=");hex64(b.reserved[i].size);put('\n');}
+            for(usize i=0;i<b.device_count;++i){text("BOARD_DEVICE base=");hex64(b.devices[i].address);text(" size=");hex64(b.devices[i].size);put('\n');}
+        }
+        else if(output.source.format==FirmwareFormat::e820)
         {
             text("E820_MAP count=");hex64(output.e820.count);put('\n');
             for(usize i=0;i<output.e820.count;++i){const auto&r=output.e820.records[i];text("E820_RECORD base=");hex64(r.address);text(" size=");hex64(r.size);text(" type=");hex64(r.type);text(" attributes=");hex64(r.attributes);put('\n');}

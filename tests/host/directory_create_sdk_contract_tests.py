@@ -1,4 +1,4 @@
-"""Private ABI74 directory-create profile producer/consumer admission; no code loading."""
+"""Private ABI75 directory-create profile producer/consumer admission; no code loading."""
 from pathlib import Path
 import importlib.util
 import tempfile
@@ -56,7 +56,7 @@ class DirectoryCreateSdkContract(unittest.TestCase):
                 continue
             for mutated in (PROFILE.replace(line, ''), PROFILE + line,
                             '#if 1\n' + PROFILE + '\n#endif\n',
-                            '#define ext4_directory_create_module_abi 74\n' + PROFILE):
+                            '#define ext4_directory_create_module_abi 75\n' + PROFILE):
                 self.profile.write_text(mutated)
                 with self.subTest(declaration=line, mutation=mutated):
                     self.refused()
@@ -73,10 +73,10 @@ class DirectoryCreateSdkContract(unittest.TestCase):
                 self.refused()
 
     def test_old_future_and_broadened_bounded_contracts_are_refused(self):
-        for before, after in (('module_abi = 74', 'module_abi = 62'),
-                              ('module_abi = 74', 'module_abi = 64'),
-                              ('module_abi = 74', 'module_abi = 65'),
-                              ('module_abi = 74', 'module_abi = 75'),
+        for before, after in (('module_abi = 75', 'module_abi = 62'),
+                              ('module_abi = 75', 'module_abi = 64'),
+                              ('module_abi = 75', 'module_abi = 65'),
+                              ('module_abi = 75', 'module_abi = 76'),
                               ('home_capacity = 8', 'home_capacity = 9'),
                               ('owner_buffers = 9', 'owner_buffers = 8'),
                               ('single-block-directory-create-ordered-free-init-v2', 'general-directory-create-v1')):
@@ -110,7 +110,7 @@ class DirectoryCreateSdkContract(unittest.TestCase):
         for arch, mode in (('aarch64', 'debug'), ('x86_64', 'release')):
             with self.subTest(arch=arch, mode=mode), self.assertRaises(ValueError):
                 CONSUMER.validate_sdk(fixture.sdk, arch, mode)
-        for version in (62, 63, 64, 65, 68, 69, 70, 71, 75):
+        for version in (62, 63, 64, 65, 68, 69, 70, 71, 74, 76):
             fixture.manifest['abi_version'] = version
             fixture.save()
             with self.subTest(version=version), self.assertRaises(ValueError):

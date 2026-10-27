@@ -33,10 +33,15 @@ inline constexpr usize max_discovered_regions = 64;
 // may overlap; `normalize()` produces sorted, disjoint, page-aligned usable
 // ranges. Reservations always win over usable declarations. The map itself has
 // fixed metadata; the frame allocator built on it sizes its own metadata from
-// the result (see RuntimeFrameAllocator).
+// the result (see MemoryManager::initialize).
 class PhysicalMemoryMap final : private NonCopyable
 {
   public:
+    void reset()
+    {
+        input_count_ = usable_count_ = 0;
+        normalized_ = false;
+    }
     Status add(MemoryRegion region, MapSource source);
     Status reserve(uptr base, usize size, RegionType type = RegionType::reserved);
     // Produces the usable ranges. Fails with overflow when more than

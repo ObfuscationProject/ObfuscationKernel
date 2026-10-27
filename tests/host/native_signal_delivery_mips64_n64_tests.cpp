@@ -1,5 +1,4 @@
-#include "ok/user/native_signal_delivery_mips64_n64.hpp"
-#include "ok/user/native_signal_return_mips64_n64.hpp"
+#include "ok/arch/mips64/signal.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>

@@ -9,7 +9,7 @@ import shutil
 import stat
 import subprocess
 
-DIRECTORIES = ('core', 'apps', 'driver', 'fs', 'gui', 'interrupt', 'ipc', 'memory',
+DIRECTORIES = ('core', 'rescue', 'driver', 'fs', 'gui', 'interrupt', 'ipc', 'memory',
                'net', 'posix', 'sched', 'smp', 'syscall', 'user')
 TESTS = (
     ('native_syscall_restart', 'RESTART_ADAPTER_PASS'),
@@ -107,7 +107,7 @@ def main():
         common = []
         for directory in DIRECTORIES:
             common.extend(path for path in sorted((kernel / 'src' / directory).rglob('*.cpp'))
-                          if path.name not in ('entry.cpp', 'kernel_main.cpp', 'runtime.cpp'))
+                          if path.name not in ('entry.cpp', 'kernel_main.cpp', 'runtime.cpp') and path.parent.name != 'runtime')
         common += [kernel / 'src/arch/arch.cpp', kernel / 'src/arch/x86_64/ops.cpp']
         cxx = Path(shutil.which(args.cxx) or args.cxx).resolve()
         xmake = Path(shutil.which('xmake') or 'missing-xmake').resolve()

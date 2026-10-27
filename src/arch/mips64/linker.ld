@@ -36,7 +36,9 @@ SECTIONS
 
     .bootstrap_bss ALIGN(4K) (NOLOAD) : AT(ADDR(.bootstrap_bss) - 0xffffffff00000000)
     {
+        _kernel_bootstrap_start = .;
         *(.bootstrap_bss)
+        _kernel_bootstrap_end = .;
     }
 
     _kernel_end = .;

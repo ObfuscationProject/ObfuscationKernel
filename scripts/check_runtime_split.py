@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
-"""Ratchet for refactor/user-runtime-split: runtime.cpp must not grow.
+"""Ratchet for the native runtime split (src/user/README.md).
 
-Lower the limits here as code moves into src/user/{loader,entry,vm,wait,pty,net}.cpp.
+runtime.cpp must not regrow, the units must exist, and headers under src/user
+must be self-contained instead of textual fragments included mid-namespace;
+per-architecture signal pieces stay collapsed in include/ok/arch/<arch>/signal.hpp.
 """
 import re
 import sys
 from pathlib import Path
 
-LIMITS = {"lines": 5876, "includes": 101}
+LIMITS = {"lines": 675, "includes": 1}
+UNITS = ("loader", "vm", "wait", "futex", "pipe", "pty", "net", "signals", "entry")
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> int:
-    source = ROOT / "src/user/runtime.cpp"
-    text = source.read_text(errors="surrogateescape")
+    user = ROOT / "src/user"
+    text = (user / "runtime.cpp").read_text(errors="surrogateescape")
     lines = text.count("\n")
     includes = len(re.findall(r"^\s*#include", text, re.M))
     rc = 0
@@ -22,8 +25,23 @@ def main() -> int:
         if status == "GREW":
             rc = 1
         print(f"runtime.cpp {name}: {value} (limit {LIMITS[name]}) {status}")
-    units = sorted(p.name for p in (ROOT / "src/user").glob("*.cpp"))
-    print("units:", ", ".join(units))
+    for unit in UNITS:
+        path = user / "runtime" / f"{unit}.cpp"
+        if not path.is_file():
+            print(f"missing unit {path.relative_to(ROOT)}")
+            rc = 1
+            continue
+        print(f"{path.relative_to(ROOT)}: {path.read_text(errors='surrogateescape').count(chr(10))} lines")
+    for header in sorted(user.rglob("*.hpp")):
+        if "#pragma once" not in header.read_text(errors="surrogateescape"):
+            print(f"textual fragment {header.relative_to(ROOT)}: headers must be self-contained")
+            rc = 1
+    # Architecture signal code lives in include/ok/arch/<arch>/signal.hpp.
+    pieces = r"native_signal_(delivery|frame|return|context|gate|readiness|persistent)_\w+\.hpp"
+    for header in sorted((ROOT / "include/ok/user").glob("native_signal_*.hpp")):
+        if re.fullmatch(pieces, header.name):
+            print(f"per-architecture signal header {header.relative_to(ROOT)}: use include/ok/arch/<arch>/signal.hpp")
+            rc = 1
     return rc
 
 

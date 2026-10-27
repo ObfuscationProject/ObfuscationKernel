@@ -1,6 +1,6 @@
 
 #include "ok/user/native_signal_config.hpp"
-#include "ok/arch/execution.hpp"
+#include "ok/arch/execution_spaces.hpp"
 #include <cstddef>
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__powerpc__) || defined(__PPC__)) && __SIZEOF_POINTER__ == 4 && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
 #define OK_PPC32_PRIVATE_BACKEND 1
@@ -11,17 +11,14 @@ namespace ok::arch::execution
 {
 namespace
 {
-constexpr usize max_pages = max_native_mappings;
 constexpr uptr ram_end = 0x10000000;
 constexpr uptr msr_user = 0x0200c000; // SPE, EE, PR; no unavailable classic FPU.
+// Refill reads the runtime-owned records directly; a space needs no tables.
 struct Space
 {
     MappingView mappings{};
-    usize count{};
-    u32 generation{};
-    bool allocated{};
 };
-std::array<Space, max_address_spaces> spaces{};
+constinit SpaceTable<Space> spaces;
 bool initialized{};
 bool executing{};
 u32 next_tlb = 3;
@@ -35,20 +32,32 @@ static_assert(offsetof(Trap, vector) == 4 && offsetof(Trap, error_code) == 8 && 
 
 Space *storage(const AddressSpace &space)
 {
-    if (space.slot >= spaces.size())
-        return nullptr;
-    auto &value = spaces[space.slot];
-    return value.allocated && value.generation == space.generation && reinterpret_cast<uptr>(&value) == space.root
-               ? &value
-               : nullptr;
+    return spaces.find(space);
 }
 const PageMapping *mapping(const Space &space, uptr address)
 {
-    const auto page = address & ~(page_size - 1);
-    for (usize i = 0; i < space.count; ++i)
-        if (space.mappings[i].flags && space.mappings[i].virtual_address == page)
-            return &space.mappings[i];
-    return nullptr;
+    const auto *page = space.mappings.find(address);
+    return page && page->flags ? page : nullptr;
+}
+bool admissible(const PageMapping &page)
+{
+    return page.virtual_address >= user_begin && page.virtual_address < user_end &&
+           (page.virtual_address & (page_size - 1)) == 0 && page.physical_address >= page_size &&
+           page.physical_address < ram_end && (page.physical_address & (page_size - 1)) == 0 &&
+           (page.flags == 0 || (page.flags & page_read) != 0) &&
+           (page.flags & ~(page_read | page_write | page_execute)) == 0 &&
+           (page.flags & (page_write | page_execute)) != (page_write | page_execute);
+}
+void publish_code(uptr physical)
+{
+    // The caller populated code using data stores through a physical alias.
+    // Publish those stores before first instruction fetch.
+    for (uptr address = physical; address < physical + page_size; address += 32)
+        asm volatile("dcbst 0,%0" : : "r"(address) : "memory");
+    asm volatile("sync" : : : "memory");
+    for (uptr address = physical; address < physical + page_size; address += 32)
+        asm volatile("icbi 0,%0" : : "r"(address) : "memory");
+    asm volatile("sync; isync" : : : "memory");
 }
 void write_tlb(u32 index, u32 mas1, u32 mas2, u32 mas3, u32 mas7 = 0)
 {
@@ -135,19 +144,12 @@ OwnershipReport ownership_report() noexcept
 {
     OwnershipReport report{};
     report.executing = executing;
-    for (const auto &space : spaces)
-    {
-        const bool retained = space.count != 0 || !space.mappings.empty() || !space.mappings.valid();
-        if (space.allocated || retained) ++report.address_spaces;
-        if (space.allocated)
-        {
-            if (!space.generation || !space.count || space.count != space.mappings.size() ||
-                !space.mappings.valid())
-                report.failure = Status::io_error("native backend has an inconsistent mapping owner");
-        }
-        else if (retained)
-            report.failure = Status::io_error("native backend has an orphan mapping owner");
-    }
+    spaces.each([&](const Space &space, uptr root) {
+        ++report.address_spaces;
+        if (space.mappings.empty() || !space.mappings.valid() || root != reinterpret_cast<uptr>(space.mappings.records))
+            report.failure = Status::io_error("native backend has an inconsistent mapping owner");
+    });
+    report.table_pages = spaces.pages();
     if (!initialized && (report.address_spaces || report.executing))
         report.failure = Status::io_error("uninitialized native backend retains owners");
     return report;
@@ -205,49 +207,38 @@ Result<AddressSpace> create_space(MappingView mappings)
 {
     if (!initialized)
         return Status::not_initialized("native execution backend is not initialized");
-    if (!mappings.valid() || mappings.empty() || mappings.size() > max_pages)
-        return Status::invalid_argument("invalid PPC native page count");
-    for (usize i = 0; i < mappings.size(); ++i)
-    {
-        const auto &page = mappings[i];
-        if (page.virtual_address < user_begin || page.virtual_address >= user_end ||
-            (page.virtual_address & (page_size - 1)) != 0 || page.physical_address < page_size ||
-            page.physical_address >= ram_end || (page.physical_address & (page_size - 1)) != 0 ||
-            (page.flags != 0 && (page.flags & page_read) == 0) || (page.flags & ~(page_read | page_write | page_execute)) != 0 ||
-            (page.flags & (page_write | page_execute)) == (page_write | page_execute))
+    if (!mappings.valid() || mappings.empty())
+        return Status::invalid_argument("invalid PPC native mapping directory");
+    for (const auto &page : mappings)
+        if (!admissible(page))
             return Status::invalid_argument("invalid PPC native mapping or writable executable page");
-        for (usize j = 0; j < i; ++j)
-            if (mappings[j].virtual_address == page.virtual_address)
-                return Status::already_exists("duplicate PPC native page");
-    }
-    usize slot = 0;
-    while (slot < spaces.size() && spaces[slot].allocated)
-        ++slot;
-    if (slot == spaces.size())
-        return Status::no_memory("native address space slots exhausted");
-    auto &value = spaces[slot];
-    if (++value.generation == 0)
-        ++value.generation;
-    for (usize i = 0; i < mappings.size(); ++i)
-    {
-        if ((mappings[i].flags & page_execute) != 0)
-        {
-            // The caller populated code using data stores through a physical
-            // alias. Publish those stores before first instruction fetch.
-            for (uptr address = mappings[i].physical_address; address < mappings[i].physical_address + page_size;
-                 address += 32)
-                asm volatile("dcbst 0,%0" : : "r"(address) : "memory");
-            asm volatile("sync" : : : "memory");
-            for (uptr address = mappings[i].physical_address; address < mappings[i].physical_address + page_size;
-                 address += 32)
-                asm volatile("icbi 0,%0" : : "r"(address) : "memory");
-            asm volatile("sync; isync" : : : "memory");
-        }
-    }
-    value.mappings = mappings;
-    value.count = mappings.size();
-    value.allocated = true;
-    return AddressSpace{reinterpret_cast<uptr>(&value), static_cast<u32>(slot), value.generation};
+    auto entry = spaces.acquire();
+    if (!entry)
+        return entry.status();
+    for (const auto &page : mappings)
+        if ((page.flags & page_execute) != 0)
+            publish_code(page.physical_address);
+    // The published records identify the space; no other live space names them.
+    entry.value()->space.mappings = mappings;
+    entry.value()->root = reinterpret_cast<uptr>(mappings.records);
+    return spaces.handle(*entry.value());
+}
+Status remap(const AddressSpace &space, const PageMapping &mapping)
+{
+    auto *value = storage(space);
+    if (value == nullptr)
+        return Status::not_found("native address-space handle is stale");
+    if (executing)
+        return Status::busy("cannot remap an executing address space");
+    if (!admissible(mapping) || mapping.flags == 0)
+        return Status::invalid_argument("invalid PPC native remap");
+    if (::ok::arch::execution::mapping(*value, mapping.virtual_address) == nullptr)
+        return Status::not_found("native user page has no translation");
+    // Misses refill from the runtime-owned records, and native entry clears
+    // the user TLB slots, so only a new executable frame needs publishing.
+    if ((mapping.flags & page_execute) != 0)
+        publish_code(mapping.physical_address);
+    return Status::success();
 }
 Status destroy_space(AddressSpace &space)
 {
@@ -256,11 +247,9 @@ Status destroy_space(AddressSpace &space)
         return Status::not_found("native address-space handle is stale");
     if (executing)
         return Status::busy("cannot destroy an executing address space");
-    value->allocated = false;
-    value->mappings = {};
-    value->count = 0;
+    const auto retired = spaces.release(*value);
     space = {};
-    return Status::success();
+    return retired;
 }
 UserFrame initial_frame(uptr entry, uptr stack)
 {
@@ -292,7 +281,8 @@ bool user_range(const AddressSpace &space, uptr address, usize size, bool write)
     for (auto page = address & ~(page_size - 1); page <= address + size - 1; page += page_size)
     {
         const auto *entry = mapping(*value, page);
-        if (entry == nullptr || (write && (entry->flags & page_write) == 0))
+        if (entry == nullptr ||
+            (write && (entry->flags & page_write) == 0 && !(resolve_write(space, page) && (entry->flags & page_write))))
             return false;
     }
     return true;

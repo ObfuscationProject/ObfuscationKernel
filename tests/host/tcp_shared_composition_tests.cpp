@@ -28,7 +28,8 @@ struct Iss { Result<u32> operator()(tcp::Endpoint,tcp::Endpoint) { return u32{50
 struct Fixture
 {
     alignas(4096) std::array<std::byte,24*4096> backing{};
-    memory::FrameAllocator frames; native::NativePagePool pages; native::SharedMemoryFiles store;
+    memory::FrameAllocator frames;
+    memory::FrameMetadataStorage<2048> frames_metadata; native::NativePagePool pages; native::SharedMemoryFiles store;
     std::unique_ptr<sched::Scheduler> scheduler{std::make_unique<sched::Scheduler>()};
     NativeTcpStreamService tcp{tcp::TableIdentity{identity++}}; TcpStreamOperations operations{*scheduler,tcp};
     arch::CpuContext context{arch::configured_arch_operations().make_kernel_context(4096,32768)};
@@ -36,7 +37,7 @@ struct Fixture
     Fixture()
     {
         const memory::MemoryRegion region{reinterpret_cast<uptr>(backing.data()),backing.size(),memory::RegionType::usable};
-        CHECK(frames.initialize({&region,1},4096));CHECK(pages.activate(frames,native::NativePagePool::Source::linker_reserved,2));
+        CHECK(frames.initialize({&region,1}, 4096, frames_metadata.bytes));CHECK(pages.activate(frames,native::NativePagePool::Source::linker_reserved,2));
         CHECK(store.bind(pages));CHECK(scheduler->set_shared_memory_files(store));CHECK(scheduler->set_native_tcp_service(tcp));
         auto created=scheduler->create_process("tcp-shared-composition",context);CHECK(created);pid=created.value();
         CHECK(scheduler->set_runnable(pid));CHECK(scheduler->activate(pid));

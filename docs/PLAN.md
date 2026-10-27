@@ -72,18 +72,60 @@ Exit gate
 
 Paired OS worktree: `chore/sdk75-consumer`. Depends on: P0.
 
-Scaffold (merged to main from `feat/mm-general`) (hosted tests pass, nothing wired into boot):
-- `include/ok/memory/physical_map.hpp`, `src/memory/physical_map.cpp`: `PhysicalMemoryMap`
-  collects E820/FDT/board/linker regions, subtracts reservations, yields sorted
-  page-aligned usable ranges; `product_grade()` rejects synthetic maps.
-- `include/ok/memory/runtime_frames.hpp`, `src/memory/runtime_frames.cpp`:
-  `RuntimeFrameAllocator` sizes bitmap and generation metadata from the map at
-  initialisation (`metadata_bytes_required()`), charges `ChargeAccount` quotas,
-  rejects foreign/stale/mismatched handles.
-- `include/ok/memory/charges.hpp`: per-owner page charges with limit and peak.
-- `tests/host/runtime_frames_tests.cpp`, `scripts/test_runtime_frames.py` (plain and sanitised).
-Next: feed real maps from `kernel_main` per architecture, carve the metadata
-region from discovered RAM, replace `FrameAllocator` users, then slab and COW.
+Status on `feat/mm-general` (ABI 75; paired OS worktree `chore/sdk75-consumer`):
+- Boot memory on all ten profiles ([BOOT_MEMORY_MAP](qualification/BOOT_MEMORY_MAP.md)):
+  E820, FDT, LoongArch UEFI system table → FDT, Malta PROM-sized board table;
+  explicit image, boot stack/page-table, firmware, loader-table, page-zero and
+  device-window reservations; `kernel_main` → `KernelConfig::physical_memory`;
+  the synthetic 64 MiB map exists only in hosted builds.
+- `FrameAllocator` metadata is runtime-sized (range table, bitmap, one
+  `PageDescriptor` per frame) and carved from discovered RAM by `MemoryManager`;
+  the owner/generation handle contract is kept. The `RuntimeFrameAllocator`
+  scaffold folded into it.
+- `SlabAllocator`: size classes 16..1024 plus contiguous large objects, page and
+  per-owner byte charges, `boot`/`kernel`/`atomic` contexts with an atomic frame
+  reserve, empty-page reclamation.
+- The native page pool shares the kernel allocator (descriptor-held registry,
+  object reserve, user quota); the 1024-frame pool and linker arenas are gone
+  from kernel builds.
+- Per-process charges: mapped user pages against each process's `RLIMIT_AS`,
+  brk against `RLIMIT_DATA`, inherited by fork, kept by exec; native
+  `getrlimit`/`prlimit64` ([PROCESS_MEMORY_QUOTAS](qualification/PROCESS_MEMORY_QUOTAS.md)).
+- `fs::FilePageCache` skeleton owned by VFS nodes (`Node::page_cache()`).
+- Copy-on-write fork is the default, with eager copies kept behind
+  `--native_cow_fork=n` ([NATIVE_COW_FORK](qualification/NATIVE_COW_FORK.md)):
+  fork shares private frames by reference with write withheld in parent and
+  child records; user write faults and kernel `user_range` writes resolve by
+  copying or, for the last owner, in place; every backend gains
+  `execution::remap`.
+- No fixed user memory pool remains
+  ([NATIVE_TABLE_STORAGE](qualification/NATIVE_TABLE_STORAGE.md)): backends take
+  translation tables from the page pool's object reserve and keep growable slot
+  tables, a process's mapping records are contiguous runs bounded by the user
+  window, shared memory files (SDK profile v3) keep their table, page indexes
+  and ledger in object runs, and the software VM model moved to the kernel
+  tests. The object reserve scales with discovered RAM (a sixteenth of the free
+  frames, at least 256 pages, plus the runtime objects).
+- Verification: `xmake test` on all ten profiles under the pinned QEMU 10.2.0
+  (including a discovered-RAM frame/slab/page-cache test point); the paired OS
+  distro boots natively on all ten with `qemu-distro --require-native`, whose
+  `posix-check` pressure phase now runs against a lowered `RLIMIT_AS`
+  (`OK_VM_QUOTA`), maps past the former 1024-record bound, and whose fork copy
+  probe (`OK_VM_FORK_COPY`) passes in the default copy-on-write and the eager
+  fallback builds alike, the former with `OK_NATIVE_COW` showing shared, copied
+  and in-place resolved pages on every profile; hosted suites
+  `test_boot_memory`, `test_physical_map`, `test_frame_allocator`, `test_slab`,
+  `test_page_cache`, `test_native_page_pool`, `test_native_mapping_pages`,
+  `test_mapping_view`, `test_native_vm`, `test_process_resources`.
+Carried forward (outside the exit gate):
+- No reclaim or OOM policy beyond fallible failure; IRQ/SMP synchronization of
+  the allocators arrives with WT1.2 and WT2.1.
+- `sched::max_processes` (64) bounds native processes; the remaining constants
+  in `include/ok/user` are subsystem object capacities, not memory pools, and
+  `include/ok/memory` keeps only the firmware input bound
+  (`max_discovered_regions`).
+- Shared memory files keep eager frames of their own; moving them onto
+  `fs::FilePageCache` belongs with shared file mappings (WT1.5/WT3.1).
 
 ### WT1.2 `feat/irq-wait-time` (L, ABI)
 
@@ -150,8 +192,37 @@ Scaffold (merged to main from `refactor/user-runtime-split`):
   and `tests/host/native_pty/xmake.lua` updated; headers stay under `include/ok/apps`.
 - `src/user/README.md` unit map; `scripts/check_runtime_split.py` ratchet
   (5,876 lines / 101 includes) that fails when `runtime.cpp` grows.
-Next: extract `loader.cpp` first (ELF admission and stack setup have the fewest
-cross-dependencies), lower the ratchet, repeat per unit.
+
+Merged to main from `refactor/user-runtime-split` (tag `p1-user-runtime-split`):
+- `runtime.cpp` and its 25 mid-namespace fragments are nine units under
+  `src/user/runtime/` (`loader`, `vm`, `wait`, `futex`, `pipe`, `pty`, `net`,
+  `signals`, `entry`) plus a 675-line `runtime.cpp`, sharing
+  `src/user/runtime/private.hpp`; the map and rules are in `src/user/README.md`.
+  Hosted tests compile the units as one translation unit through
+  `tests/host/native_runtime_units.hpp`. The ratchet caps `runtime.cpp` at 675
+  lines and rejects textual fragments and per-architecture signal pieces.
+- The 32 per-architecture signal headers (frame, delivery, return and the MIPS/PPC
+  context, readiness, gate and persistent state) are one
+  `include/ok/arch/<arch>/signal.hpp` each for `i386`, `x86_64`, `aarch64`,
+  `arm32`, `riscv` (rv32 and rv64), `loongarch64`, `mips`, `mips64` and `ppc`.
+  This changes the exported header set but not the binary interface, and no
+  ObfuscationOS source includes these headers. It merges at module ABI 74;
+  the ABI 75 bump of `feat/mm-general` covers it and its ABI history entry
+  names the move.
+- Hosted runners compile `src/rescue` again (they still listed `src/apps`);
+  69 runners pass instead of 58.
+- `src/rescue` is compiled only with `kernel_gui` or in debug builds; other
+  release builds link `src/rescue/disabled.cpp`, which keeps the interfaces
+  (`Kernel` layout and SDK symbols are unchanged) and behaves as never opened.
+- Release image `.text` (no `kernel_gui`) against the start of the worktree:
+  aarch64 -91K, arm32 -92K, i386 -95K, loongarch64 -103K, mips -113K,
+  mips64 -122K, ppc -137K, rv32 -86K, rv64 -76K, x86_64 -104K. The split alone
+  grows `.text` by up to 16K (ppc +44K, mostly fill before the 64 KiB-aligned
+  exception vectors) because code is no longer inlined across units; dropping
+  the rescue applications more than offsets it. All ten release kernels boot to
+  `status=ready`.
+- Results and ObfuscationEvidence receipts:
+  [qualification/USER_RUNTIME_SPLIT.md](qualification/USER_RUNTIME_SPLIT.md).
 
 ## P2: platform and protocols
 
@@ -257,6 +328,9 @@ files under `src/fs/ext4/`.
 Total ext4/JBD2 headers mapped: 107. Unrelated headers kept as they are: `archive.hpp`, `archive_directory_profile.hpp`, `attributes.hpp`, `fat.hpp`, `fat_fs.hpp`, `mode_change.hpp`, `mode_policy.hpp`, `mount_retention.hpp`, `mount_snapshot.hpp`, `mount_snapshot_profile.hpp`, `persistent_sync_profile.hpp`, `simplefs.hpp`, `storage.hpp`, `unix.hpp`, `vfs.hpp`
 
 ## Appendix B: proposed user runtime split (`refactor/user-runtime-split`)
+
+The split as implemented is mapped in `src/user/README.md`; this table is the
+original proposal.
 
 | Target file | Current sources |
 | --- | --- |

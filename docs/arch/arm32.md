@@ -13,9 +13,11 @@ CPU 0 in SVC mode with the MMU and data cache disabled. The bridge temporarily
 installs its vector table and short-descriptor page tables, then restores the
 kernel's CP15 state and exception-mode stacks on return.
 
-Each address space has a 16 KiB L1 table and up to 16 coarse L2 tables. Up to
-128 supplied 4 KiB backing pages are mapped in
-`0x10000000 <= address < 0x40000000`; there are 16 address-space slots. AP/APX
+Each address space has a 16 KiB-aligned L1 table (a four-page table-storage
+run) and one table-storage page per populated 4 MiB holding its four coarse L2
+tables, all in the RAM sections and released with the space. Supplied 4 KiB
+backing pages are mapped in `0x10000000 <= address < 0x40000000`; the slot table
+grows with the number of spaces. AP/APX
 permissions and XN enforce user page permissions. Mapping validation rejects
 writable executable pages, duplicates, bad alignment and invalid ranges.
 Copies validate the entire range before accessing the physical backing, and

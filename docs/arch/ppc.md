@@ -52,8 +52,8 @@ and the installed GCC does not supply an SPE floating-point ABI.
   `[0xc0000000, 0xd0000000)` as supervisor read/write, cache-inhibited and guarded
   PCI MMIO. Boot programs the outbound PCI window and a 256 MiB inbound identity
   DMA window. PCI config address is big-endian; config data is little-endian.
-- Up to 256 4 KiB mappings per address space cover user virtual addresses in
-  `[0x40000000, 0x80000000)`. TLB1 slots 3–15 cache user mappings. Real DTLB/ITLB
+- 4 KiB mappings cover user virtual addresses in `[0x40000000, 0x80000000)`;
+  refill searches the space's ordered records. TLB1 slots 3–15 cache user mappings. Real DTLB/ITLB
   misses refill from the current address space; switching spaces invalidates
   every user cache entry. The refill path does not restart the decrementer.
 - Hardware UR/UW/UX permissions enforce supervisor isolation, read-only text

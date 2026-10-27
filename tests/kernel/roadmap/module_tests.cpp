@@ -328,8 +328,8 @@ std::array<std::byte, 1024> make_fake_linux_ko()
 
 Status test_module_abi_contract()
 {
-    static_assert(kernel_module_abi_version == 74,
-                  "the retired ABI controls require the coherent ABI74 header");
+    static_assert(kernel_module_abi_version == 75,
+                  "the retired ABI controls require the coherent ABI75 header");
     // This exercises compiled ModuleManifest admission by the real manager.
     // It does not load a binary module or parse an external metadata record.
     {
@@ -361,7 +361,7 @@ Status test_module_abi_contract()
             admission_manager.started_count() != 0 || admission_manager.find("current-abi74") != &current_abi ||
             admission_manager.find("previous-abi64") != nullptr || previous_abi.state() != ModuleState::failed)
         {
-            return Status::fault("compiled current ABI74 module admission control failed");
+            return Status::fault("compiled current ABI75 module admission control failed");
         }
     }
     for (const u32 version : std::array<u32, 14>{1, 2, 49, 51, 65, 66, 67, 68, 69, 70, 71, 72, 73, kernel_module_abi_version + 1})

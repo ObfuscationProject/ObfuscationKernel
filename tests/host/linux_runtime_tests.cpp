@@ -1,6 +1,6 @@
 #include "unavailable_realtime.hpp"
 // Hosted runtime integration: no guest CPU execution.
-#include "../../src/user/runtime.cpp"
+#include "native_runtime_units.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -37,7 +37,7 @@ struct Space
     u32 generation{};
     hw::MappingView pages;
 };
-std::array<Space, hw::max_address_spaces> spaces;
+std::array<Space, 16> spaces; // Fixed model slot table.
 bool fail_create{};
 uptr expect_clear{};
 const hw::PageMapping *page(const hw::AddressSpace &space, uptr address)

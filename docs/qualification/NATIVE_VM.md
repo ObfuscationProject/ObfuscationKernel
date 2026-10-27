@@ -11,7 +11,9 @@ virtual interface.
 - `mmap`: exactly one of `MAP_PRIVATE` and `MAP_SHARED`, optionally with
   `MAP_ANONYMOUS` and `MAP_FIXED`. Anonymous mappings require file descriptor
   `-1` and offset zero. `MAP_SHARED | MAP_ANONYMOUS` retains the same backing
-  frames across `fork`; private anonymous mappings retain eager fork copies.
+  frames across `fork`; private mappings are shared copy-on-write
+  ([NATIVE_COW_FORK](NATIVE_COW_FORK.md)), or copied eagerly with
+  `--native_cow_fork=n`.
   `MAP_PRIVATE` of a readable regular file eagerly copies the requested pages,
   including nonzero page-aligned offsets and partial-EOF zero fill. It has no
   file-cache coherence. The length is nonzero and rounded up to 4096 bytes
@@ -56,10 +58,10 @@ ELF loader; the MIPS backend retains its existing alias-to-physical translation.
 
 `PROT_NONE` pages keep their backing and contents in `native_pages`. The stable
 chunked backend view includes their records, but each backend omits their user
-translation. Restoring protection remaps the same contents. Fork eagerly copies
-private pages, including inaccessible ones, and retains references to shared
-anonymous frames. Per-process protection and unmap do not change a peer's
-translations. A shared frame remains classified as shared with one process
+translation. Restoring protection remaps the same contents. Fork shares
+private pages copy-on-write (or copies them eagerly), including inaccessible
+ones, and retains references to shared anonymous frames. Per-process
+protection and unmap do not change a peer's translations. A shared frame remains classified as shared with one process
 reference so a later fork still shares it.
 Exit, exec replacement and process kill use the existing native release path.
 That path retains backing when hardware table retirement fails.
@@ -94,27 +96,32 @@ runs. There is no remote TLB protocol or SMP lifetime proof here.
 
 ## Bounds and remaining work
 
-The metadata sequence allows at most 1024 mapping records per process. On a
-64-bit target, a 4096-byte metadata block holds 170 records, so one owner uses
-at most seven blocks. Sixteen backend slots cover live and quarantined spaces;
-one staged owner may exist before it receives a slot. Their worst-case metadata
-charge is therefore 17 × 7 = 119 pages. The existing object pools require 38
-pages on x86_64, for an explicit 157-page kernel reserve and an 867-page user
-quota from a 1024-frame pool. On 32-bit targets a block holds 341 records and
-the mapping charge is 17 × 4 = 68 pages; object-pool pages are calculated from
-their architecture-specific object sizes at compile time. Activation rejects a
-pool smaller than its reserve. The actual total allocation remains limited by
-the available frames.
+A process's mapping records form one contiguous run of kernel-object pages,
+ordered by virtual address and followed by one retirement byte per record; with
+exact frame tokens a second run holds them. Both runs grow by doubling while
+the directory is unpublished; a directory whose view a backend holds refuses
+insertion and growth, so transactions build a candidate and publish it. The
+user window bounds the record count (`user_window_pages`, 262,144 pages, or
+196,608 on ARM). Table-walking backends allocate their translation tables from
+the same reserve through `execution::allocate_table_pages`: each space's fixed
+root tables plus one leaf page per populated 2 MiB (4 MiB on rv32 and ARM32,
+whose page holds four 1 KiB coarse tables), released when the space retires.
+LoongArch, MIPS and PPC refill from the records and need no tables. Every
+backend's slot table doubles as needed and is released with its last space. The object
+reserve is the runtime objects' pages plus a sixteenth of the frames free at
+activation, at least 256; user pages never take reserved frames, and
+activation rejects RAM that cannot hold the reserve.
 
-Sixteen coalesced `MemoryMap` areas and each architecture's fixed page-table
-pool remain separate limits. Replacement needs one additional free native
-address-space slot. Capacity failure is reported without destroying the previous image. At least one
+Sixteen coalesced `MemoryMap` areas remain a separate limit. Replacement needs
+the object pages of one more address space while the previous one is live.
+Capacity failure is reported without destroying the previous image. At least one
 accessible image page must remain; fully inaccessible or empty spaces are not
 supported by all current backends.
 
 This is a bounded native VM slice, not completion of M1 or M5.
-Runtime-sized allocators, demand paging, copy-on-write, coherent shared file
-mappings, file-fault `SIGBUS`, cross-process shared-frame futex keys, unbounded
+Runtime-sized allocators and copy-on-write fork (the default; see
+[NATIVE_COW_FORK](NATIVE_COW_FORK.md)) arrived with `feat/mm-general`. Demand
+paging, coherent shared file mappings, file-fault `SIGBUS`, cross-process shared-frame futex keys, unbounded
 heap growth, reclaim/OOM policy and SMP shootdown remain separate work.
 
 ## Verification
@@ -134,7 +141,7 @@ ASan/UBSan except unrelated virtual-device vptr instrumentation.
 
 ObfuscationOS `posix-check` supplies the separate hardware gate: direct native
 loads/stores, read-only and inaccessible-page faults in children, protection
-restoration, eager private fork isolation, shared anonymous fork visibility,
+restoration, private fork isolation, shared anonymous fork visibility,
 partial unmap and pressure/reclamation. These
 must pass through the exported Kernel SDK and each target's QEMU execution path.
 The separate OS musl probe (`--require-heap`) executes mapped `brk`, fixed zero

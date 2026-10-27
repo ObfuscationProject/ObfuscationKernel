@@ -22,6 +22,12 @@ option("native_qemu_piix4_poweroff")
     set_description("Opt in to the bounded x86_64 QEMU PIIX4 PM terminal poweroff backend")
 option_end()
 
+option("native_cow_fork")
+    set_default(true)
+    set_showmenu(true)
+    set_description("Share private pages copy-on-write at native fork; disable to copy them eagerly")
+option_end()
+
 option("private_signal_delivery_fixture")
     set_default(false)
     set_showmenu(true)
@@ -81,6 +87,12 @@ local function add_ok_terminal_poweroff_policy()
     end
 end
 
+local function add_ok_native_fork_policy()
+    if get_config("native_cow_fork") then
+        add_defines("OK_NATIVE_COW_FORK")
+    end
+end
+
 local configured_arch_spec = ok_arch_spec(ok_current_arch())
 local configured_toolchain_dir = get_config("systoolchain_dir")
 local configured_qemu_binary = get_config("qemu_binary")
@@ -113,10 +125,17 @@ local function systoolchain_qemu(target, arch)
 end
 
 function add_ok_kernel_sources(include_kernel_main)
-    add_files("src/boot/raw_handoff.cpp", "src/boot/fdt.cpp")
+    add_files("src/boot/raw_handoff.cpp", "src/boot/fdt.cpp", "src/boot/boot_memory.cpp")
     add_files("src/core/*.cpp")
-    add_files("src/rescue/*.cpp")
-    add_files("src/rescue/shell/*.cpp")
+    -- Rescue applications are diagnostics: built with kernel_gui or debug test
+    -- points; other builds link stand-ins that behave as never opened.
+    if has_config("kernel_gui") or is_mode("debug") then
+        add_files("src/rescue/*.cpp")
+        add_files("src/rescue/shell/*.cpp")
+    else
+        add_files("src/rescue/disabled.cpp")
+        add_defines("OK_DISABLE_RESCUE_APPS")
+    end
     if not include_kernel_main then
         remove_files("src/core/kernel_main.cpp")
     end
@@ -135,6 +154,7 @@ function add_ok_kernel_sources(include_kernel_main)
     add_files("src/smp/*.cpp")
     add_files("src/syscall/*.cpp")
     add_files("src/user/*.cpp")
+    add_files("src/user/runtime/*.cpp")
     add_ok_arch_files()
 end
 
@@ -222,6 +242,7 @@ target("okernel")
     add_ok_arch_profile()
     add_ok_terminal_reboot_policy()
     add_ok_terminal_poweroff_policy()
+    add_ok_native_fork_policy()
     add_ok_debug_test_points()
     if get_config("private_futex_peer_fixture") and is_mode("debug") then
         add_defines("OK_PRIVATE_FUTEX_PEER_FIXTURE")
@@ -296,6 +317,7 @@ target("okernel_image")
     add_ok_arch_profile()
     add_ok_terminal_reboot_policy()
     add_ok_terminal_poweroff_policy()
+    add_ok_native_fork_policy()
     add_ok_debug_test_points()
     if get_config("private_futex_peer_fixture") and is_mode("debug") then
         add_defines("OK_PRIVATE_FUTEX_PEER_FIXTURE")

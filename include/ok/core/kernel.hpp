@@ -13,6 +13,7 @@
 #include "ok/interrupt/interrupt.hpp"
 #include "ok/ipc/ipc.hpp"
 #include "ok/memory/memory.hpp"
+#include "ok/memory/physical_map.hpp"
 #include "ok/net/net.hpp"
 #include "ok/net/native_udp.hpp"
 #include "ok/net/native_tcp_ethernet.hpp"
@@ -44,8 +45,11 @@ struct KernelModuleModes
 struct KernelConfig
 {
     arch::Architecture architecture{arch::configured_architecture()};
-    std::array<memory::MemoryRegion, 8> memory_map{};
-    usize memory_region_count{0};
+    // Normalized discovered boot memory in physical addresses; the caller owns
+    // it. Freestanding boots require a product-grade map. Null selects the
+    // synthetic map that only hosted model builds provide.
+    const memory::PhysicalMemoryMap *physical_memory{nullptr};
+    uptr direct_map_offset{0}; // Frame address = physical + offset (MIPS KSEG0).
     usize timer_hz{1000};
     KernelModuleModes modes{};
     KernelExtension *extension{nullptr}; // Optional statically linked distribution extension; caller owns lifetime.

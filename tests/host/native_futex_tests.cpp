@@ -241,7 +241,7 @@ void pressure(Kernel &kernel)
 {
     CHECK(native::activate_pool());
     const auto quota = native::page_pool.user_capacity_count();
-    std::array<uptr, native::page_count> users{};
+    std::array<uptr, native::hosted_page_count> users{};
     for (usize i = 0; i < quota; ++i)
     {
         auto p = native::page_pool.allocate();
@@ -276,7 +276,7 @@ void pressure(Kernel &kernel)
     }
     // New runtime services and mapping metadata have their own reserve. Hold
     // the unused remainder so this still tests complete physical exhaustion.
-    std::array<native::NativePagePool::Lease, native::NativePagePool::capacity> reserve_holds{};
+    std::array<native::NativePagePool::Lease, native::hosted_page_count> reserve_holds{};
     const auto unused_reserve = native::page_pool.free_count();
     for (usize i = 0; i < unused_reserve; ++i)
     {

@@ -1,5 +1,5 @@
 // Actual runtime object-backed waits with observed hosted mapping/copy backends.
-#include "../../src/user/runtime.cpp"
+#include "native_runtime_units.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -303,7 +303,7 @@ void pressure_and_cleanup(Kernel &kernel)
     constexpr usize owner_count = 8;
     static_assert(owner_count * sched::max_threads_per_process == sched::max_processes);
     static_assert(native::PollObjects::capacity >= sched::max_processes);
-    std::array<uptr, native::NativePagePool::capacity> users{};
+    std::array<uptr, native::hosted_page_count> users{};
     const auto quota = native::page_pool.user_capacity_count();
     for (usize i = 0; i < quota; ++i)
     {

@@ -1,4 +1,4 @@
-#include "ok/user/native_signal_readiness_ppc32.hpp"
+#include "ok/arch/ppc/signal.hpp"
 #include "ok/memory/kernel_entry_stack_pool.hpp"
 #include <cstdio>
 #include <cstdlib>

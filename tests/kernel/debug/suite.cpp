@@ -10,6 +10,7 @@
 #include "../points/directory_checks.hpp"
 #include <new>
 
+#include "../model/vm_model.hpp"
 #include "../roadmap/roadmap_tests.hpp"
 
 #include <array>
@@ -156,11 +157,12 @@ Status Kernel::run_debug_test_suite()
         return frame.status();
     }
     const auto test_address = test_mapping_address(config_.architecture);
-    if (auto status = memory_.kernel_address_space().map(test_address, frame.value(), 0b11); !status.ok())
+    memory::model::LinearAddressSpace kernel_space;
+    if (auto status = kernel_space.map(test_address, frame.value(), 0b11); !status.ok())
     {
         return status;
     }
-    if (auto status = memory_.kernel_address_space().unmap(test_address); !status.ok())
+    if (auto status = kernel_space.unmap(test_address); !status.ok())
     {
         return status;
     }

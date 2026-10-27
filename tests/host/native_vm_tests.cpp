@@ -3,7 +3,7 @@
 #ifndef OK_ENABLE_TEST_POINTS
 #define OK_ENABLE_TEST_POINTS
 #endif
-#include "../../src/user/runtime.cpp"
+#include "native_runtime_units.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -34,6 +34,11 @@ namespace ok::sched
 __attribute__((noinline)) ThreadControlBlock *SchedulerState::find_thread(ProcessId, ThreadId) { return nullptr; }
 __attribute__((noinline)) ProcessControlBlock *SchedulerState::find(ProcessId) { return nullptr; }
 __attribute__((noinline)) OpenFileDescription *SchedulerState::open_description(u16) { return nullptr; }
+// Descriptor reservations are never created here; the TCP runtime's cold
+// retirement path only needs these symbols to link.
+__attribute__((noinline)) Status SchedulerState::release_description(u16) { return Status::unsupported("no scheduler"); }
+__attribute__((noinline)) Status DescriptorReservation::cancel() { return {}; }
+DescriptorReservation::~DescriptorReservation() = default;
 }
 
 #define CHECK(condition)                                                                                               \
@@ -54,7 +59,9 @@ struct Space
     u32 generation{};
     hw::MappingView pages;
 };
-std::array<Space, hw::max_address_spaces> spaces;
+// The model backend keeps a fixed slot table so exhaustion stays testable.
+constexpr usize slot_count = 16;
+std::array<Space, slot_count> spaces;
 bool fail_create{};
 bool fail_all_retirement{};
 uptr fail_destroy_root{};
@@ -340,7 +347,7 @@ void check_backend_and_metadata_limits()
 {
     Fixture fixture;
     auto &resources = fixture.resources;
-    std::array<hw::AddressSpace, hw::max_address_spaces - 1> borrowed{};
+    std::array<hw::AddressSpace, mock::slot_count - 1> borrowed{};
     for (auto &space : borrowed)
     {
         auto created = native::create_page_space(resources.native_pages);
@@ -348,7 +355,7 @@ void check_backend_and_metadata_limits()
         space = created.value();
     }
     CHECK(fixture.map(4096).status().code() == StatusCode::no_memory);
-    CHECK(mock::used_frames() == 2 && mock::live_spaces() == hw::max_address_spaces);
+    CHECK(mock::used_frames() == 2 && mock::live_spaces() == mock::slot_count);
     for (auto &space : borrowed)
         CHECK(hw::destroy_space(space));
     for (usize i = 0; i < sched::max_memory_areas - 2; ++i)
@@ -620,17 +627,13 @@ void check_complete_runtime_purpose_budget()
 {
     CHECK(native::activate_pool());
     CHECK(native::page_pool.used_count() == 0);
-    std::array<native::Pages, hw::max_address_spaces + 1> directories;
-    for (usize i = 0; i < hw::max_address_spaces; ++i)
-    {
-        CHECK(directories[i].reserve(native::page_pool, native::Pages::capacity, true));
-        CHECK(directories[i].block_count() == native::Pages::max_blocks);
-        CHECK(directories[i].frame_block_count() == native::Pages::max_frame_blocks);
-    }
-    CHECK(directories.back().reserve(native::page_pool, native::Pages::capacity, true));
-    CHECK(directories.back().block_count() == native::Pages::max_blocks);
-    CHECK(directories.back().frame_block_count() == native::Pages::max_frame_blocks);
-    CHECK(native::page_pool.object_count() == native::mapping_metadata_pages);
+    // Mapping metadata and translation tables share whatever part of the
+    // reserve the runtime objects leave; one directory can take all of it.
+    const usize metadata_pages = native::kernel_reserve_pages - native::kernel_object_pages;
+    std::array<native::Pages, 1> directories;
+    CHECK(directories[0].reserve(native::page_pool, metadata_pages * hw::page_size / native::Pages::record_bytes));
+    CHECK(directories[0].record_pages() == metadata_pages && directories[0].frame_pages() == 0);
+    CHECK(native::page_pool.object_count() == metadata_pages);
     std::array<native::NativePagePool::Lease, native::kernel_object_pages> objects;
     for (auto &object : objects)
     {
@@ -639,7 +642,7 @@ void check_complete_runtime_purpose_budget()
         object = std::move(acquired.value());
     }
     CHECK(native::page_pool.object_count() == native::kernel_reserve_pages);
-    std::array<uptr, native::NativePagePool::capacity> users{};
+    std::array<uptr, native::hosted_page_count> users{};
     const usize user_limit = native::page_pool.user_capacity_count();
     for (usize i = 0; i < user_limit; ++i)
     {
@@ -681,6 +684,8 @@ void check_over_quota_mapping_publication()
 void check_exact_alias_publication_above_data_page_quota()
 {
     Fixture fixture;
+    // The file table and page index are object runs that leave with the file.
+    const auto initial_objects = native::page_pool.object_count();
     CHECK(native::shared_files.bind(native::page_pool));
     auto reservation = native::shared_files.reserve("exact alias capacity");
     CHECK(reservation);
@@ -728,7 +733,7 @@ void check_exact_alias_publication_above_data_page_quota()
     const auto ledger = native::shared_files.ledger();
     CHECK(!ledger.files && !ledger.aliases && !ledger.retiring_files && !ledger.retained_frames && !ledger.reserved_cells);
     CHECK(!native::page_pool.valid(frame) && native::page_pool.user_count() == baseline_users - 1);
-    CHECK(native::page_pool.object_count() == baseline_objects);
+    CHECK(native::page_pool.object_count() == initial_objects && baseline_objects > initial_objects);
 }
 
 void check_shared_pressure_with_live_image_footprint()
@@ -863,8 +868,8 @@ void check_exec_failed_old_retirement_skips_install()
     CHECK(saved && saved->pages.size() == 2 && saved->pin_complete && !saved->table_retired);
     for (usize index = 0; index < saved->pages.size(); ++index)
     {
-        CHECK(saved->ownership[index] == native::QuarantinedSpace::Ownership::discharged);
-        CHECK(saved->pin_held[index] && native::page_pool.valid(*saved->pages.frame(index)));
+        CHECK(saved->ownership(index) == native::QuarantinedSpace::Ownership::discharged);
+        CHECK(saved->pin_held(index) && native::page_pool.valid(*saved->pages.frame(index)));
         CHECK(native::page_pool.reference_count(saved->pages[index].physical_address) == 0);
     }
     CHECK(mock::live_spaces() == 1 && native::page_pool.user_count() == 2);
@@ -892,7 +897,7 @@ void check_exec_failed_install_retains_replacement()
     CHECK(calls == 1 && native::runtime_failure.code() == StatusCode::io_error);
     auto *saved = quarantine_for(replacement);
     CHECK(saved && saved->pages.frame(0)->generation == frame.generation && saved->pages.frame(0)->owner == frame.owner);
-    CHECK(saved->pin_complete && saved->pin_held[0] && native::page_pool.valid(frame));
+    CHECK(saved->pin_complete && saved->pin_held(0) && native::page_pool.valid(frame));
     CHECK(!image.retirement.active() && image.pages.empty() && !image.space.root);
     CHECK(mock::live_spaces() == 1 && native::page_pool.user_count() == 2);
     mock::fail_destroy_root = 0;
@@ -927,8 +932,8 @@ void check_exec_failed_old_shared_aliases_retire_once()
         if (saved->pages[index].physical_address == frame.address)
         {
             ++aliases;
-            CHECK(saved->pages.frame(index)->generation == frame.generation && saved->pin_held[index]);
-            CHECK(saved->ownership[index] == native::QuarantinedSpace::Ownership::discharged);
+            CHECK(saved->pages.frame(index)->generation == frame.generation && saved->pin_held(index));
+            CHECK(saved->ownership(index) == native::QuarantinedSpace::Ownership::discharged);
         }
     CHECK(aliases == 2 && native::page_pool.valid(frame) && native::page_pool.reference_count(frame.address) == 0);
     CHECK(native::page_pool.pending_count() == 3 && mock::live_spaces() == 1);
@@ -976,11 +981,11 @@ void check_image_partial_pin_failure_keeps_pending_owners()
     mock::fail_destroy_root = identity.root;
     CHECK(image.retire().code() == StatusCode::fault);
     auto *saved = quarantine_for(identity);
-    CHECK(saved && !saved->pin_complete && saved->pinned_count == 1 && saved->pin_held[0] && !saved->pin_held[1]);
+    CHECK(saved && !saved->pin_complete && saved->pinned_count == 1 && saved->pin_held(0) && !saved->pin_held(1));
     CHECK(saved->pages.frame(1)->generation == blocked.generation && mock::live_spaces() == 2);
     for (usize index = 0; index < saved->pages.size(); ++index)
     {
-        CHECK(saved->ownership[index] == native::QuarantinedSpace::Ownership::pending);
+        CHECK(saved->ownership(index) == native::QuarantinedSpace::Ownership::pending);
         CHECK(native::page_pool.reference_count(saved->pages[index].physical_address) == 1);
     }
     CHECK(native::page_pool.user_count() == users + 2);
@@ -1002,8 +1007,8 @@ void check_image_failed_owner_release_retries_once()
     native::QuarantinedSpace *saved{};
     for (auto &row : native::quarantined_spaces) if (row.used && row.table_retired) saved = &row;
     CHECK(saved && saved->pages.frame(0)->generation == first.generation);
-    CHECK(saved->ownership[0] == native::QuarantinedSpace::Ownership::pending &&
-          saved->ownership[1] == native::QuarantinedSpace::Ownership::discharged);
+    CHECK(saved->ownership(0) == native::QuarantinedSpace::Ownership::pending &&
+          saved->ownership(1) == native::QuarantinedSpace::Ownership::discharged);
     CHECK(native::page_pool.valid(first) && !native::page_pool.valid(second));
     CHECK(native::page_pool.user_count() == users + 1 && mock::live_spaces() == 1);
     native::NativePagePoolFaultProbe::exact_release(native::page_pool, {}, 0);
@@ -1073,7 +1078,7 @@ void check_repeated_teardown_discharges_shared_alias_once()
     CHECK(native::shared_files.info(file).value().aliases == 1);
     CHECK(native::page_pool.reference_count(frame.address) == 2 && native::page_pool.pinned_count() == pins);
     for (usize index = 0; index < saved->pages.size(); ++index)
-        CHECK(saved->ownership[index] == native::QuarantinedSpace::Ownership::discharged);
+        CHECK(saved->ownership(index) == native::QuarantinedSpace::Ownership::discharged);
     CHECK(native::shared_files.release_description(file));
     mock::fail_destroy_root = 0;
     native::release(fixture.resources.native_space, fixture.resources.native_pages);
@@ -1103,7 +1108,7 @@ void check_alias_discharge_is_consumed_before_failed_base_retirement()
     CHECK(saved && native::shared_files.ledger().retiring_files == 1);
     CHECK(native::shared_files.ledger().aliases == 0 && native::page_pool.reference_count(frame.address) == 1);
     for (usize index = 0; index < saved->pages.size(); ++index)
-        CHECK(saved->ownership[index] == native::QuarantinedSpace::Ownership::discharged);
+        CHECK(saved->ownership(index) == native::QuarantinedSpace::Ownership::discharged);
     native::release(fixture.resources.native_space, fixture.resources.native_pages);
     CHECK(native::shared_files.ledger().retiring_files == 1 && native::page_pool.reference_count(frame.address) == 1);
     native::SharedMemoryFilesFaultProbe::final_release(native::shared_files, false);
@@ -1138,7 +1143,7 @@ void check_write_seal_requires_retired_table_pins()
     CHECK(native::shared_files.add_seals(file, 8 | 1).code() == StatusCode::busy);
     CHECK(native::shared_files.info(file).value().seals == 6);
     for (usize index = 0; index < saved->pages.size(); ++index)
-        CHECK(saved->ownership[index] == native::QuarantinedSpace::Ownership::discharged);
+        CHECK(saved->ownership(index) == native::QuarantinedSpace::Ownership::discharged);
     const auto releases = native::page_pool.releases();
     native::release(fixture.resources.native_space, fixture.resources.native_pages);
     CHECK(native::shared_files.info(file).value().aliases == 0);
@@ -1234,14 +1239,16 @@ void check_partial_pin_retirement_preserves_failed_token()
     auto *saved = quarantine_for(original);
     CHECK(saved && saved->pages.size() == 2 && saved->pinned_count == 2);
     const auto failed = *saved->pages.frame(1);
-    auto *registry = const_cast<memory::PhysicalFrame *>(native::page_pool.handle(failed.address));
+    // The registry state is the allocator descriptor; skewing its generation
+    // makes the retained token stale exactly like a rejected canonical handle.
+    auto *registry = native::native_frames.descriptor(failed);
     CHECK(registry);
     ++registry->generation;
     mock::fail_destroy_root = 0;
     auto retired = original;
     CHECK(!native::retire_space(retired, fixture.resources.native_pages));
     CHECK(!retired.root && saved->used && saved->table_retired);
-    CHECK(!saved->pin_held[0] && saved->pin_held[1] && saved->pinned_count == 1);
+    CHECK(!saved->pin_held(0) && saved->pin_held(1) && saved->pinned_count == 1);
     CHECK(saved->pages.size() == 2 && saved->pages.frame(1)->generation == failed.generation);
     CHECK(native::page_pool.user_count() == 1 && native::page_pool.pinned_count() == 1);
     // The first token is already physically retired. A retry must skip it,
@@ -1269,7 +1276,7 @@ void check_incomplete_quarantine_keeps_all_owner_edges()
     CHECK(native::page_pool.reference_count(saved->pages[0].physical_address) == 1);
     CHECK(native::page_pool.reference_count(saved->pages[1].physical_address) == 1);
     for (usize index = 0; index < saved->pages.size(); ++index)
-        CHECK(saved->ownership[index] == native::QuarantinedSpace::Ownership::pending);
+        CHECK(saved->ownership(index) == native::QuarantinedSpace::Ownership::pending);
     const_cast<memory::PhysicalFrame *>(saved->pages.frame(1))->generation = generation;
     CHECK(native::retire_space(fixture.resources.native_space, fixture.resources.native_pages));
     CHECK(!saved->used && native::page_pool.used_count() == 0 && mock::live_spaces() == 0);
@@ -1320,15 +1327,15 @@ native::QuarantinedSpace *retained_range()
     return result;
 }
 
-void check_range_owner_states(const native::QuarantinedSpace &saved, usize pending, usize discharged, usize borrowed)
+void check_range_owner_states(native::QuarantinedSpace &saved, usize pending, usize discharged, usize borrowed)
 {
     usize actual_pending{}, actual_discharged{}, actual_borrowed{};
     for (usize index = 0; index < saved.pages.size(); ++index)
     {
-        actual_pending += saved.ownership[index] == native::QuarantinedSpace::Ownership::pending;
-        actual_discharged += saved.ownership[index] == native::QuarantinedSpace::Ownership::discharged;
-        actual_borrowed += saved.ownership[index] == native::QuarantinedSpace::Ownership::borrowed;
-        CHECK(!saved.pin_held[index]);
+        actual_pending += saved.ownership(index) == native::QuarantinedSpace::Ownership::pending;
+        actual_discharged += saved.ownership(index) == native::QuarantinedSpace::Ownership::discharged;
+        actual_borrowed += saved.ownership(index) == native::QuarantinedSpace::Ownership::borrowed;
+        CHECK(!saved.pin_held(index));
     }
     CHECK(actual_pending == pending && actual_discharged == discharged && actual_borrowed == borrowed);
 }
@@ -1479,15 +1486,142 @@ void check_shared_file_write_request_uses_existing_rw_ptes()
     native::runtime_failure = {};
 }
 
+#ifdef OK_NATIVE_COW_FORK
+namespace mock
+{
+usize remaps{};
+bool fail_remap{};
+} // namespace mock
+
+namespace ok::arch::execution
+{
+// Records are the mock translation, as for the software-refill backends.
+Status remap(const AddressSpace &space, const PageMapping &mapping)
+{
+    if (mock::fail_remap)
+        return Status::busy("injected remap failure");
+    CHECK(space.slot < mock::spaces.size() && mock::spaces[space.slot].live &&
+          mock::spaces[space.slot].generation == space.generation);
+    CHECK(mock::page(space, mapping.virtual_address) == &mapping);
+    ++mock::remaps;
+    return Status::success();
+}
+} // namespace ok::arch::execution
+
+struct ForkOwner
+{
+    sched::ProcessResources *value;
+    sched::ProcessResources &resources() { return *value; }
+};
+
+// Mirrors the runtime fork loop: shared frames gain an alias reference,
+// private frames are shared copy-on-write, then the parent withholds writes.
+void fork_resources(sched::ProcessResources &parent, sched::ProcessResources &child)
+{
+    CHECK(child.native_pages.reserve(native::page_pool, parent.native_pages.size(), true));
+    for (const auto &page : parent.native_pages)
+    {
+        const auto *frame = native::owned_frame(parent.native_pages, page);
+        CHECK(frame);
+        if (native::shared_pool_page(parent.native_pages, page))
+        {
+            CHECK(native::retain_page_reference(*frame));
+            CHECK(child.native_pages.push_back(page, *frame));
+        }
+        else CHECK(native::share_private_page(child.native_pages, page, *frame, native::page_pool));
+    }
+    auto space = native::create_page_space(child.native_pages);
+    CHECK(space);
+    child.native_space = space.value();
+    CHECK(native::page_memory_map(child.native_pages, child.memory));
+    CHECK(native::withhold_shared_writes(parent.native_pages, parent.native_space, native::page_pool));
+}
+
+void check_copy_on_write_fork()
+{
+    Fixture fixture;
+    auto &parent = fixture.resources;
+    const auto private_page = fixture.map(hw::page_size);
+    const auto shared_page = native::native_mmap(parent, 0, hw::page_size, 3,
+                                                 posix::map_SHARED | posix::map_ANONYMOUS, ~uptr{0}, 0);
+    CHECK(private_page && shared_page);
+    auto *bytes = reinterpret_cast<unsigned char *>(mock::page(parent.native_space, private_page.value())->physical_address);
+    for (usize i = 0; i < hw::page_size; ++i) bytes[i] = static_cast<unsigned char>(i * 7 + 3);
+    const usize frames = mock::used_frames();
+    const usize remaps = mock::remaps;
+
+    sched::ProcessResources child;
+    fork_resources(parent, child);
+    CHECK(mock::used_frames() == frames);
+    // Private writable pages: the stack page and the anonymous mapping.
+    CHECK(mock::remaps == remaps + 2);
+    const auto *parent_record = mock::page(parent.native_space, private_page.value());
+    const auto *child_record = mock::page(child.native_space, private_page.value());
+    CHECK(parent_record->physical_address == child_record->physical_address);
+    CHECK(parent_record->flags == hw::page_read && parent_record->copy_on_write);
+    CHECK(child_record->flags == hw::page_read && child_record->copy_on_write);
+    CHECK(native::intended_access(*child_record) == (hw::page_read | hw::page_write));
+    CHECK(native::page_pool.reference_count(child_record->physical_address) == 2);
+    CHECK(child.memory.allows_user_access(private_page.value(), 1, memory::page_write));
+    CHECK(mock::page(child.native_space, shared_page.value())->flags == (hw::page_read | hw::page_write));
+    CHECK(!mock::page(child.native_space, shared_page.value())->copy_on_write);
+    const auto *text = mock::page(child.native_space, hw::user_begin);
+    CHECK(text->flags == (hw::page_read | hw::page_execute) && !text->copy_on_write);
+
+    // The child's write copies; the shared and read-only pages do not resolve.
+    std::array<ForkOwner, 2> owners{{{&parent}, {&child}}};
+    auto resolved = native::resolve_owner_write(owners, child.native_space, private_page.value() + 9, native::page_pool);
+    CHECK(resolved && resolved.value() && mock::used_frames() == frames + 1);
+    child_record = mock::page(child.native_space, private_page.value());
+    CHECK(child_record->physical_address != parent_record->physical_address);
+    CHECK(child_record->flags == (hw::page_read | hw::page_write) && !child_record->copy_on_write);
+    CHECK(native::owned_frame(child.native_pages, *child_record));
+    const auto *copy = reinterpret_cast<const unsigned char *>(child_record->physical_address);
+    for (usize i = 0; i < hw::page_size; ++i) CHECK(copy[i] == bytes[i]);
+    CHECK(native::page_pool.reference_count(parent_record->physical_address) == 1);
+    for (const auto address : {private_page.value(), shared_page.value(), hw::user_begin})
+    {
+        resolved = native::resolve_owner_write(owners, child.native_space, address, native::page_pool);
+        CHECK(resolved && !resolved.value());
+    }
+
+    // The parent is now the sole owner and regains write access in place.
+    resolved = native::resolve_copy_on_write(parent.native_pages, parent.native_space, private_page.value(),
+                                             native::page_pool);
+    CHECK(resolved && resolved.value() && mock::used_frames() == frames + 1);
+    parent_record = mock::page(parent.native_space, private_page.value());
+    CHECK(parent_record->physical_address == reinterpret_cast<uptr>(bytes));
+    CHECK(parent_record->flags == (hw::page_read | hw::page_write) && !parent_record->copy_on_write);
+
+    // mprotect keeps write withheld while a private frame has another owner.
+    CHECK(native::native_mprotect(child, hw::user_begin, hw::page_size, 3));
+    text = mock::page(child.native_space, hw::user_begin);
+    CHECK(text->flags == hw::page_read && text->copy_on_write);
+    CHECK(child.memory.allows_user_access(hw::user_begin, 1, memory::page_write));
+    CHECK(native::native_mprotect(child, hw::user_begin, hw::page_size, 1));
+    text = mock::page(child.native_space, hw::user_begin);
+    CHECK(text->flags == hw::page_read && !text->copy_on_write);
+
+    // A failed remap is reported; the runtime treats it as fatal.
+    const auto stack = hw::user_end - hw::page_size;
+    mock::fail_remap = true;
+    CHECK(!native::resolve_copy_on_write(child.native_pages, child.native_space, stack, native::page_pool));
+    mock::fail_remap = false;
+    native::release(child.native_space, child.native_pages);
+    CHECK(native::runtime_failure);
+    CHECK(native::page_pool.reference_count(mock::page(parent.native_space, stack)->physical_address) == 1);
+}
+#endif
+
 int main(int argc, char **)
 {
     if (argc > 1)
     {
         // A host-owned RAM array models already-qualified backing. Firmware
         // discovery and architecture mappings are covered separately in QEMU.
-        alignas(4096) static std::array<std::byte, native::page_count * hw::page_size> backing;
+        alignas(4096) static std::array<std::byte, native::hosted_page_count * hw::page_size> backing;
         const memory::MemoryRegion region{reinterpret_cast<uptr>(backing.data()),backing.size(),memory::RegionType::usable};
-        CHECK(native::native_frames.initialize({&region,1},hw::page_size));
+        CHECK(native::native_frames.initialize({&region,1},hw::page_size,native::native_frame_metadata.bytes));
         CHECK(native::page_pool.activate(native::native_frames,native::NativePagePool::Source::qualified_firmware,native::kernel_reserve_pages));
     }
     check_complete_runtime_purpose_budget();
@@ -1529,5 +1663,8 @@ int main(int argc, char **)
     check_pool_failure_rolls_back_partial_allocation();
     check_fixed_replacement();
     check_program_break();
+#ifdef OK_NATIVE_COW_FORK
+    check_copy_on_write_fork();
+#endif
     std::puts("PASS: native VM transaction tests (hosted backend model)");
 }

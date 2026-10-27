@@ -16,6 +16,7 @@ struct Fixture
 {
     alignas(4096) std::array<std::byte, 32 * 4096> backing{};
     memory::FrameAllocator frames;
+    memory::FrameMetadataStorage<2048> frames_metadata;
     user::native::NativePagePool pool;
     Store store, alternative;
     sched::Scheduler scheduler;
@@ -25,7 +26,7 @@ struct Fixture
     Fixture()
     {
         const memory::MemoryRegion region{reinterpret_cast<uptr>(backing.data()), backing.size(), memory::RegionType::usable};
-        CHECK(frames.initialize({&region, 1}, 4096));
+        CHECK(frames.initialize({&region, 1}, 4096, frames_metadata.bytes));
         CHECK(pool.activate(frames, user::native::NativePagePool::Source::linker_reserved, 2));
         CHECK(store.bind(pool) && alternative.bind(pool));
         CHECK(scheduler.set_shared_memory_files(store));

@@ -1,4 +1,5 @@
 #include "ok/arch/arch.hpp"
+#include "ok/boot/boot_memory.hpp"
 #include "ok/core/entry.hpp"
 #include "ok/core/native_shutdown.hpp"
 #include "ok/arch/terminal_power.hpp"
@@ -159,7 +160,13 @@ extern "C" [[noreturn]] void kernel_main()
     config.mode = ok::KernelBootMode::normal;
 #endif
 
+    // Boot memory is discovered once, before any translation changes.
     [[maybe_unused]] auto status = ok::user::native::prepare_memory();
+    if (const auto &boot_memory = ok::boot::kernel_boot_memory(); status.ok() && boot_memory.map != nullptr)
+    {
+        config.kernel.physical_memory = boot_memory.map;
+        config.kernel.direct_map_offset = boot_memory.direct_offset;
+    }
     if (status.ok()) status = ok::ok_kernel_entry(config);
     if (status.ok() && ok_boot_archive != nullptr)
     {
