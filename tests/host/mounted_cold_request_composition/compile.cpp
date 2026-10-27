@@ -1,5 +1,5 @@
 // Normal-access freestanding instantiation of distinct cold startup semantics.
-#include <ok/fs/ext4_mounted_metadata.hpp>
+#include <ok/fs/ext4/mount.hpp>
 template class ok::fs::Ext4OwnedTransaction<2, 8>;
 template class ok::fs::Ext4MountedMetadata<2>;
 // Explicit instantiation also compiles the synchronous local opening scope;

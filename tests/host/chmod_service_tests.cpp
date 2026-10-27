@@ -1,7 +1,7 @@
 // Hosted common service and checked provider composition; no user instructions.
 #include "ext4_realtime_model.hpp"
 #include "ok/abi/linux_chmod_call.hpp"
-#include "ok/fs/ext4_fs.hpp"
+#include "ok/fs/ext4/layout.hpp"
 #include "ok/posix/posix.hpp"
 #include <cstdio>
 #include <cstdlib>

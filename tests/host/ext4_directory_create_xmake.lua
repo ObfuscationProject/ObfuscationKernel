@@ -34,15 +34,16 @@ for _, suite in ipairs({
         {"directory-create-plan", "tests/host/ext4_directory_create_plan_tests.cpp", false},
         {"directory-replay-shape", "tests/host/ext4_replay_shape_tests.cpp", false},
         {"regular-owned-create", "tests/host/ext4_owned_create_tests.cpp", true},
-        {"regular-mounted-create", "tests/host/ext4_mounted_create_tests.cpp", true},
+        {"regular-mounted-create", "tests/host/ext4_mounted_create_tests.cpp", true, true},
         {"common-opening-budget", "tests/host/common_opening_budget/model.cpp", false},
         {"directory-replay-semantics", "tests/host/ext4_directory_create_replay_tests.cpp", true},
         {"mounted-directory-create", "tests/host/ext4_mounted_directory_create_tests.cpp", true}}) do
     target(suite[1] .. "-model")
         set_kind("binary")
         add_files(path.join(kernel, suite[2]))
-        -- The legacy regular mounted fixture scopes its access shim in source.
-        -- New directory models use public APIs without the historical shim.
+        -- The legacy regular mounted fixture reaches private state.
+        -- New directory models use public APIs.
+        if suite[4] then add_cxxflags("-fno-access-control", {force=true}) end
         if suite[3] then
             if retained_runtime then add_ldflags(retained_runtime, {force=true})
             else add_deps("mkdir-host-runtime") end

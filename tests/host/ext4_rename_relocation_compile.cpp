@@ -1,5 +1,5 @@
 #include "../fixtures/ext4_rename_relocation_fixture.hpp"
-#include <ok/fs/ext4_completion.hpp>
+#include <ok/fs/ext4/txn.hpp>
 
 ok::Status relocation_compile_probe(ok::driver::BlockDevice &device, ok::fs::Ext4RecoveryBounds bounds)
 {

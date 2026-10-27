@@ -1,6 +1,6 @@
 // Real ext4 transport callbacks challenge VFS operation admission and owned release.
 #include "ext4_realtime_model.hpp"
-#include "ok/fs/ext4_fs.hpp"
+#include "ok/fs/ext4/layout.hpp"
 
 #include <atomic>
 #include <chrono>

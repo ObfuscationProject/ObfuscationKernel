@@ -1,7 +1,7 @@
 // Compile this private integration test with -fno-access-control.
 #include "ext4_mounted_support.hpp"
 #include "ext4_mounted_retention_support.hpp"
-#include <ok/fs/ext4_mounted_metadata.hpp>
+#include <ok/fs/ext4/mount.hpp>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>

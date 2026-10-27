@@ -1,5 +1,5 @@
 #include "ext4_rename_relocation_support.hpp"
-#include <ok/fs/ext4_mounted_metadata.hpp>
+#include <ok/fs/ext4/mount.hpp>
 #include <memory>
 
 using namespace ok;

@@ -475,7 +475,7 @@ void startup_failed(Status status)
     if (blocked) { smp::ScopedSpinLock guard(lock_); startup_report_.phase = Ext4StartupPhase::blocked; }
     startup_failed(status); return fail(status);
 }
-#include "ok/fs/ext4_mounted_startup_locator.inc"
+#include "ok/fs/ext4/detail/mounted_startup_locator.inc"
 [[nodiscard]] Status startup_classify()
 {
     if (auto status = startup_locator(); !status) return status;
@@ -743,12 +743,12 @@ void startup_failed(Status status)
     }
     return {};
 }
-#include "ok/fs/ext4_mounted_reclaim_checkpoint.inc"
-#include "ok/fs/ext4_mounted_startup_owner.inc"
-#include "ok/fs/ext4_mounted_reclaim_history.inc"
-#include "ok/fs/ext4_mounted_namespace_history.inc"
-#include "ok/fs/ext4_mounted_namespace_checkpoint.inc"
-#include "ok/fs/ext4_mounted_regular_move_startup.inc"
+#include "ok/fs/ext4/detail/mounted_reclaim_checkpoint.inc"
+#include "ok/fs/ext4/detail/mounted_startup_owner.inc"
+#include "ok/fs/ext4/detail/mounted_reclaim_history.inc"
+#include "ok/fs/ext4/detail/mounted_namespace_history.inc"
+#include "ok/fs/ext4/detail/mounted_namespace_checkpoint.inc"
+#include "ok/fs/ext4/detail/mounted_regular_move_startup.inc"
 Ext4MountedStartupWorkspace *startup_workspace_{};
 const Ext4MountedMetadata<DeviceCapacity> *startup_mount_{};
 MetadataOwnerReport startup_identity_{};

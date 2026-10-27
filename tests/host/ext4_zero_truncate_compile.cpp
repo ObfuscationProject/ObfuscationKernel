@@ -1,8 +1,5 @@
-#include <ok/fs/ext4_zero_truncate_plan.hpp>
-#include <ok/fs/ext4_zero_truncate_witness.hpp>
-#include <ok/fs/ext4_zero_truncate_preview.hpp>
-#include <ok/fs/ext4_zero_truncate_session_preview.hpp>
-#include <ok/fs/ext4_zero_truncate_journal.hpp>
+#include <ok/fs/ext4/extent.hpp>
+#include <ok/fs/ext4/txn.hpp>
 
 using namespace ok;
 using namespace ok::fs;

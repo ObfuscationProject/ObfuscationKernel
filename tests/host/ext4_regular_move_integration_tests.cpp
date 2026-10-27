@@ -2,9 +2,9 @@
 // This exercises synchronous transport models, not hardware or mounted move.
 #include "ext4_mounted_support.hpp"
 #include "ext4_realtime_model.hpp"
-#include <ok/fs/ext4_mounted_metadata.hpp>
-#include <ok/fs/ext4_regular_move_transaction.hpp>
-#include <ok/fs/ext4_regular_move_completion.hpp>
+#include <ok/fs/ext4/mount.hpp>
+#include <ok/fs/ext4/txn.hpp>
+#include <ok/fs/ext4/recovery.hpp>
 #include <memory>
 
 using namespace owned_fixture;

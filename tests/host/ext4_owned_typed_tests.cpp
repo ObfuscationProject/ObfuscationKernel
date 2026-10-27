@@ -2,7 +2,7 @@
 // private owner, child and Session headers are compiled unchanged with access
 // control enabled by the separate freestanding instantiation target.
 #include "ext4_zero_truncate_preview_test_support.hpp"
-#include <ok/fs/ext4_owned_transaction.hpp>
+#include <ok/fs/ext4/mount.hpp>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>

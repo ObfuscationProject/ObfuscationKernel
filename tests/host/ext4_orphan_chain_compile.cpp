@@ -1,3 +1,3 @@
-#include "ok/fs/ext4_orphan_chain.hpp"
+#include "ok/fs/ext4/alloc.hpp"
 
 static_assert(ok::fs::Ext4OrphanChainProof::capacity == 8);

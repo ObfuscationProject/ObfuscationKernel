@@ -1,9 +1,9 @@
 #include "ext4_zero_truncate_preview_test_support.hpp"
-#include <ok/fs/ext4_zero_truncate_preview.hpp>
-#include <ok/fs/ext4_reclaim_history.hpp>
+#include <ok/fs/ext4/extent.hpp>
+#include <ok/fs/ext4/alloc.hpp>
 #include <type_traits>
 #define private public
-#include <ok/fs/ext4_zero_truncate_session_preview.hpp>
+#include <ok/fs/ext4/txn.hpp>
 #undef private
 #include <cstdio>
 #include <cstdlib>

@@ -1,6 +1,6 @@
 #include "ext4_realtime_model.hpp"
 // File-backed integration with raw-inode oracle supplied by the Python runner.
-#include "ok/fs/ext4_fs.hpp"
+#include "ok/fs/ext4/layout.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

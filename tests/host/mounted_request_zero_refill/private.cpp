@@ -1,4 +1,4 @@
-#include <ok/fs/ext4_mounted_metadata.hpp>
+#include <ok/fs/ext4/mount.hpp>
 using Mount = ok::fs::Ext4MountedMetadata<2>;
 #if defined(OK_PRIVATE_STORAGE)
 using Denied = Mount::TypedMutationStorage;

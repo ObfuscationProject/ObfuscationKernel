@@ -1,8 +1,8 @@
 // Actual canonical owner/cache/session composition over an existing fixture.
 // Hosted synchronous device models do not qualify hardware or an OS workflow.
 #include "ext4_mounted_support.hpp"
-#include <ok/fs/ext4_regular_move_transaction.hpp>
-#include <ok/fs/ext4_mounted_metadata.hpp>
+#include <ok/fs/ext4/txn.hpp>
+#include <ok/fs/ext4/mount.hpp>
 #include <memory>
 #include <type_traits>
 using namespace owned_fixture;

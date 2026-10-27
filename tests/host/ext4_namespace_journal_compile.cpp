@@ -1,4 +1,4 @@
-#include <ok/fs/ext4_namespace_journal.hpp>
+#include <ok/fs/ext4/dir.hpp>
 
 ok::Status compile_namespace_journal(const ok::fs::Ext4RecoveryInfo &binding,
     const ok::fs::Ext4NamespaceUpdate &update, const ok::fs::Ext4NamespaceSource &source,

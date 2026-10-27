@@ -1,5 +1,5 @@
 // Freestanding compile probe; execution requires a distinct native receipt.
-#include <ok/fs/ext4_mounted_metadata.hpp>
+#include <ok/fs/ext4/mount.hpp>
 using Mount=ok::fs::Ext4MountedMetadata<1>;
 extern "C" ok::Status ext4_mounted_namespace_c1_probe(Mount &mount,Mount::Registry &registry,
     Mount::Registry::Registration registration,ok::block::SessionBounds bounds)

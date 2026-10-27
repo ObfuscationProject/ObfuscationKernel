@@ -4,10 +4,9 @@
 #include <functional>
 #include <memory>
 #include <type_traits>
-#define private public
-#include "ok/fs/ext4_reclaim_history.hpp"
-#include "ok/fs/ext4_orphan_chain_capture.hpp"
-#undef private
+// Negative controls reach private history state; build with -fno-access-control.
+#include "ok/fs/ext4/alloc.hpp"
+#include "ok/fs/ext4/recovery.hpp"
 
 namespace
 {

@@ -3,8 +3,8 @@
 #include "ext4_allocated_empty_data_preview_tests.cpp"
 #undef main
 #define private public
-#include <ok/fs/ext4_reclaim_history.hpp>
-#include <ok/fs/ext4_allocated_empty_data_session_preview.hpp>
+#include <ok/fs/ext4/alloc.hpp>
+#include <ok/fs/ext4/txn.hpp>
 #undef private
 #include <new>
 

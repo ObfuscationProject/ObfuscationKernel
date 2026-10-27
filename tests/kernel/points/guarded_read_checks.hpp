@@ -1,10 +1,9 @@
 #pragma once
 
 #include "ok/block/guarded_reads.hpp"
-#include "ok/fs/ext4_direct_read_scope.hpp"
-#include "ok/fs/ext4_reclaim_route_budget.hpp"
-#include "ok/fs/ext4_orphan_chain_capture.hpp"
-#include "ok/fs/metadata_buffers.hpp"
+#include "ok/fs/ext4/mount.hpp"
+#include "ok/fs/ext4/recovery.hpp"
+#include "ok/fs/ext4/txn.hpp"
 #include <new>
 
 namespace ok::tests

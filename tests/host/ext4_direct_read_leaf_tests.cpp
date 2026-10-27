@@ -4,8 +4,7 @@
 #include "ext4_mounted_support.hpp"
 #include "ext4_namespace_journal_fixture.hpp"
 #include "ext4_realtime_model.hpp"
-#include "ok/fs/ext4_mounted_metadata.hpp"
-#include "ok/fs/ext4_empty_orphan_recovery.hpp"
+#include "ok/fs/ext4/mount.hpp"
 #include <memory>
 #include <type_traits>
 

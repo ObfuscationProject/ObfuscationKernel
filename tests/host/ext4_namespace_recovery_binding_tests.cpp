@@ -1,6 +1,6 @@
 #include "ext4_namespace_journal_fixture.hpp"
 #include "ext4_owned_support.hpp"
-#include <ok/fs/ext4_namespace_recovery_binding.hpp>
+#include <ok/fs/ext4/recovery.hpp>
 #include <memory>
 
 using namespace namespace_journal_model;

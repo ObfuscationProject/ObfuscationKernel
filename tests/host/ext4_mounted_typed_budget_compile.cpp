@@ -1,4 +1,4 @@
-#include <ok/fs/ext4_mounted_typed_budget.hpp>
+#include <ok/fs/ext4/mount.hpp>
 
 ok::Result<ok::fs::Ext4MountedTypedCapacity> compile_mounted_typed_budget(
     const ok::block::SessionReport &report, ok::u32 groups, ok::u64 blocks,

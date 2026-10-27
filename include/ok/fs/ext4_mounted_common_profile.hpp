@@ -2,7 +2,7 @@
 
 #include "ok/block/session_counters.hpp"
 #include "ok/core/module.hpp"
-#include "ok/fs/ext4_mounted_metadata.hpp"
+#include "ok/fs/ext4/mount.hpp"
 #include <string_view>
 #include <type_traits>
 

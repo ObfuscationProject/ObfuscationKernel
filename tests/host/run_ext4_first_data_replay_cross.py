@@ -21,8 +21,7 @@ SOURCES = (
     ROOT / 'src/fs/ext4_recovery.cpp',
 )
 HEADERS = tuple(ROOT / 'include/ok/fs' / name for name in (
-    'ext4_replay_view.hpp', 'ext4_recovery.hpp', 'ext4_completion.hpp',
-    'ext4_first_data_plan.hpp', 'ext4_readonly.hpp'))
+    'ext4/txn.hpp', 'ext4/journal.hpp', 'ext4/extent.hpp', 'ext4/layout.hpp'))
 
 
 def digest(path: Path) -> str:

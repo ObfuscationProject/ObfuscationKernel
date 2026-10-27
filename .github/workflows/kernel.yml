@@ -9,6 +9,13 @@ on:
 # the installed package is cached per toolchain version and architecture. The
 # packaged QEMU links the host GLib, Pixman and SDL2 shared libraries.
 jobs:
+  source-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the ext4 module layout
+        run: python3 scripts/check_ext4_layout.py
   build-and-test:
     runs-on: ubuntu-24.04
     timeout-minutes: 90

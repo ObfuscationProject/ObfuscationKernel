@@ -1,4 +1,4 @@
-#include "ok/fs/ext4_inode_lifetime.hpp"
+#include "ok/fs/ext4/alloc.hpp"
 
 ok::Status compile_lifetime_ticket(
     const ok::fs::Ext4InodeLifetimeTable<128, 512> &table,

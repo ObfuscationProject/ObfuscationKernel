@@ -1,7 +1,7 @@
 // Extracted namespace model fixture; no production code or device writes.
 #pragma once
 
-#include "ok/fs/ext4_namespace_journal.hpp"
+#include "ok/fs/ext4/dir.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>

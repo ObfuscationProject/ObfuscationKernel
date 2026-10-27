@@ -1,7 +1,7 @@
 // Actual hosted legacy ext4 provider operations with controlled I/O handoffs.
 // Private access observes state; no synthetic phase is used for unlink/destroy.
 #include "ext4_realtime_model.hpp"
-#include "ok/fs/ext4_fs.hpp"
+#include "ok/fs/ext4/layout.hpp"
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>

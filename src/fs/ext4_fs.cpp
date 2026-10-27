@@ -1,8 +1,6 @@
 #include "ok/fs/mode_policy.hpp"
-#include "ok/fs/ext4_fs.hpp"
-#include "ok/fs/ext4_times.hpp"
+#include "ok/fs/ext4/layout.hpp"
 #include "ok/arch/realtime.hpp"
-#include "ok/fs/ext4_blocks.hpp"
 
 namespace ok::fs
 {

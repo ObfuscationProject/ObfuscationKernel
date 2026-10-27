@@ -1,4 +1,4 @@
-#include "ok/fs/ext4_inode_lifetime.hpp"
+#include "ok/fs/ext4/alloc.hpp"
 
 ok::Status compile_ext4_inode_lifetime(ok::fs::Ext4InodeLifetimeTable<> &table,
                                        ok::fs::Ext4InodeLifetimeKey key)

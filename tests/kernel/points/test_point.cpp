@@ -1,7 +1,7 @@
 #include "ok/core/test_point.hpp"
 
 #include "ok/core/kernel.hpp"
-#include "ok/fs/ext4.hpp"
+#include "ok/fs/ext4/layout.hpp"
 
 #if defined(OK_ENABLE_TEST_POINTS)
 #include "frame_allocator_checks.hpp"

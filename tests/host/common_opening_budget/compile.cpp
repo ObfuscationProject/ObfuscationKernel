@@ -1,5 +1,4 @@
-#include <ok/fs/ext4_mounted_common_opening_budget.hpp>
-#include <ok/fs/ext4_mounted_typed_budget.hpp>
+#include <ok/fs/ext4/mount.hpp>
 
 using Budget = ok::fs::Ext4MountedCommonOpeningBudget;
 static_assert(Budget::whole_union().reads == 58'811'342'498ULL);

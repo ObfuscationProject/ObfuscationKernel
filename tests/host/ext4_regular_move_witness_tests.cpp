@@ -1,5 +1,5 @@
 // Hosted record tests; no device, journal transaction or recovery I/O.
-#include "ok/fs/ext4_regular_move_witness.hpp"
+#include "ok/fs/ext4/dir.hpp"
 #include <cstdio>
 #include <cstdlib>
 

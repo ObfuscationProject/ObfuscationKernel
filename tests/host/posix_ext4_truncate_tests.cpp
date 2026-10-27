@@ -1,6 +1,6 @@
 #include "ext4_realtime_model.hpp"
 // Hosted common POSIX + real ext4 replay. No Virtio transport or guest CPU.
-#include "ok/fs/ext4_fs.hpp"
+#include "ok/fs/ext4/layout.hpp"
 #include "ok/posix/posix.hpp"
 #include "ok/syscall/linux.hpp"
 #include <cstdio>

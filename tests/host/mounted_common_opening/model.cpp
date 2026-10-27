@@ -1,7 +1,7 @@
 // Hosted common opening with genuine native writer bytes and native transport.
 #include "../mounted_typed_cold_startup/fixture.hpp"
 #include "../ext4_realtime_model.hpp"
-#include <ok/fs/ext4_mounted_metadata.hpp>
+#include <ok/fs/ext4/mount.hpp>
 #include <string>
 using namespace typed_cold_startup_fixture;
 namespace {

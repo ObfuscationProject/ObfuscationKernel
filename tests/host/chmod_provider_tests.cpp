@@ -1,6 +1,6 @@
 // Hosted provider model: no syscall, user process or hardware is executed.
 #include "ext4_realtime_model.hpp"
-#include "ok/fs/ext4_fs.hpp"
+#include "ok/fs/ext4/layout.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>

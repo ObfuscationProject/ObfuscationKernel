@@ -2,7 +2,7 @@
 // Author-adapted synthetic fixture from the preserved independent writer test.
 // Original SHA256: abfa0e031fc2813e4f555b4709db9f32f36f3b891d4c0a7b6816188274b3d037
 // Reusing this fixture is author regression evidence, not independent review.
-#include <ok/fs/ext4_allocated_empty_data_journal.hpp>
+#include <ok/fs/ext4/extent.hpp>
 #include <cstdio>
 #include <cstdlib>
 namespace typed_owner_allocated_large_fixture {

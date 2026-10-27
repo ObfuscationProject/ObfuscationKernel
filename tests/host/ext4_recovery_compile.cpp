@@ -1,4 +1,4 @@
-#include "ok/fs/ext4_recovery.hpp"
+#include "ok/fs/ext4/journal.hpp"
 
 ok::Status ext4_recovery_compile_probe(ok::driver::BlockDevice &device, ok::fs::Ext4RecoveryBinding &binding,
                                         ok::fs::Ext4RecoveryBounds bounds)

@@ -2,16 +2,12 @@
 #include <algorithm>
 #include <ok/driver/driver.hpp>
 #include <ok/smp/smp.hpp>
-#define private public
+// Negative controls reach private session and transaction state; build with
+// -fno-access-control.
 #include <ok/block/sessions.hpp>
-#undef private
-#include <ok/fs/ext4_orphan_reclaim_cold.hpp>
-#include <ok/fs/ext4_zero_truncate_journal.hpp>
-#include <ok/fs/ext4_zero_truncate_transaction_budget.hpp>
-#define private public
-#include <ok/fs/ext4_reclaim_history.hpp>
-#include <ok/fs/ext4_zero_truncate_transaction.hpp>
-#undef private
+#include <ok/fs/ext4/alloc.hpp>
+#include <ok/fs/ext4/extent.hpp>
+#include <ok/fs/ext4/txn.hpp>
 #include <cstdio>
 #include <cstdlib>
 #include <new>

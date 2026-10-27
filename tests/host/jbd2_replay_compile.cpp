@@ -1,4 +1,4 @@
-#include "ok/fs/jbd2_replay.hpp"
+#include "ok/fs/ext4/journal.hpp"
 
 ok::Result<ok::fs::jbd2::RecoveryIo> bind_jbd2_recovery(ok::driver::BlockDevice &device,
                                                      ok::fs::jbd2::RecoveryLayout layout)

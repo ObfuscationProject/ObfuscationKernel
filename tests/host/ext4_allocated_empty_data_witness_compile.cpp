@@ -1,4 +1,4 @@
-#include <ok/fs/ext4_allocated_empty_data_witness.hpp>
+#include <ok/fs/ext4/extent.hpp>
 
 ok::Status allocated_empty_witness_encode_probe(const ok::fs::Ext4RecoveryInfo &binding,
     const ok::fs::Ext4AllocatedEmptyDataPlan &plan, const ok::fs::Ext4FirstDataBlock &inode_bitmap,

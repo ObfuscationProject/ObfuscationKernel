@@ -1,4 +1,4 @@
-#include "ok/fs/ext4_orphan_ownership.hpp"
+#include "ok/fs/ext4/alloc.hpp"
 
 ok::Status compile_orphan_ownership(const ok::fs::Ext4RecoveryInfo &binding,
     const ok::fs::Ext4OrphanOwnershipSource &source,

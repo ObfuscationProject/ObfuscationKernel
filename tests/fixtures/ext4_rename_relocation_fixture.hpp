@@ -1,5 +1,5 @@
 #pragma once
-#include <ok/fs/ext4_rename_plan.hpp>
+#include <ok/fs/ext4/dir.hpp>
 
 namespace ok::testing::rename_fixture
 {

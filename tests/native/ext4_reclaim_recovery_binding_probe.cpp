@@ -1,5 +1,4 @@
-#include "ok/fs/ext4_reclaim_recovery_binding.hpp"
-#include "ok/fs/ext4_reclaim_route_budget.hpp"
+#include "ok/fs/ext4/recovery.hpp"
 #include <type_traits>
 template class ok::fs::Ext4ReclaimRecoveryBinding<2>;
 

@@ -1,7 +1,7 @@
 #pragma once
 // Author-adapted exact inherited large zero-truncate synthetic fixture.
 // Original SHA256: ee87a2dfb79e45552a8978081090429bfe5a2222f6a44dbc6bf504398357bb2c
-#include <ok/fs/ext4_zero_truncate_session_preview.hpp>
+#include <ok/fs/ext4/txn.hpp>
 #include <cstdio>
 #include <cstdlib>
 namespace typed_owner_zero_large_fixture {
