@@ -684,6 +684,8 @@ void check_over_quota_mapping_publication()
 void check_exact_alias_publication_above_data_page_quota()
 {
     Fixture fixture;
+    // The file table and page index are object runs that leave with the file.
+    const auto initial_objects = native::page_pool.object_count();
     CHECK(native::shared_files.bind(native::page_pool));
     auto reservation = native::shared_files.reserve("exact alias capacity");
     CHECK(reservation);
@@ -731,7 +733,7 @@ void check_exact_alias_publication_above_data_page_quota()
     const auto ledger = native::shared_files.ledger();
     CHECK(!ledger.files && !ledger.aliases && !ledger.retiring_files && !ledger.retained_frames && !ledger.reserved_cells);
     CHECK(!native::page_pool.valid(frame) && native::page_pool.user_count() == baseline_users - 1);
-    CHECK(native::page_pool.object_count() == baseline_objects);
+    CHECK(native::page_pool.object_count() == initial_objects && baseline_objects > initial_objects);
 }
 
 void check_shared_pressure_with_live_image_footprint()

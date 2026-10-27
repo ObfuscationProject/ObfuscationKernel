@@ -18,29 +18,28 @@ struct SharedMemoryFilesFaultProbe
     static void allocation(SharedMemoryFiles &store, usize after) { store.refuse_allocation_after_ = after; }
     static void staged_release(SharedMemoryFiles &store, bool refuse) { store.refuse_staged_release_ = refuse; }
     static void final_release(SharedMemoryFiles &store, bool refuse) { store.refuse_final_release_ = refuse; }
-    static void ledger_pressure(SharedMemoryFiles &store, bool full)
-    { for (auto &cell : store.ledger_) cell.state = full ? SharedMemoryFiles::LedgerState::reserved : SharedMemoryFiles::LedgerState::free; }
 };
 }
-struct Fixture
+// Tables, page indexes and the ledger are object runs: the reserve covers them.
+template <usize Pages = 16, usize Reserve = 6> struct Store
 {
-    alignas(4096) std::array<std::byte, 16 * 4096> backing{};
+    alignas(4096) std::array<std::byte, Pages * 4096> backing{};
     memory::FrameAllocator frames;
     memory::FrameMetadataStorage<2048> frames_metadata;
     NativePagePool pool;
     SharedMemoryFiles store;
-    Fixture()
+    Store()
     {
         const memory::MemoryRegion region{reinterpret_cast<uptr>(backing.data()), backing.size(), memory::RegionType::usable};
         CHECK(frames.initialize({&region, 1}, 4096, frames_metadata.bytes));
-        CHECK(pool.activate(frames, NativePagePool::Source::linker_reserved, 2));
+        CHECK(pool.activate(frames, NativePagePool::Source::linker_reserved, Reserve));
         CHECK(store.bind(pool));
     }
-    ~Fixture()
+    ~Store()
     {
         const auto ledger = store.ledger();
         CHECK(!ledger.files && !ledger.aliases && !ledger.retained_frames && !ledger.reserved_cells);
-        CHECK(pool.used_count() == 0 && pool.free_count() == 16);
+        CHECK(pool.used_count() == 0 && pool.free_count() == Pages);
     }
     SharedFileHandle file()
     {
@@ -50,12 +49,13 @@ struct Fixture
         return handle.value();
     }
 };
-template<class Function> void test(Function function)
+using Fixture = Store<>;
+template<class Kind = Fixture, class Function> void test(Function function)
 {
-    alignas(Fixture) static std::array<std::byte, sizeof(Fixture)> storage{};
-    auto &fixture = *::new(storage.data()) Fixture;
+    alignas(Kind) static std::array<std::byte, sizeof(Kind)> storage{};
+    auto &fixture = *::new(storage.data()) Kind;
     function(fixture);
-    fixture.~Fixture();
+    fixture.~Kind();
 }
 std::span<const std::byte> bytes(std::string_view text)
 { return {reinterpret_cast<const std::byte *>(text.data()), text.size()}; }
@@ -147,8 +147,8 @@ int main()
     test([](Fixture &f) {
         const auto handle = f.file();
         CHECK(f.store.initialize_size(handle, 1).code() == StatusCode::unsupported);
-        CHECK(!f.store.initialize_size(handle, 64 * 4096));
-        CHECK(f.store.info(handle).value().size == 0 && f.pool.used_count() == 0);
+        CHECK(f.store.initialize_size(handle, 64 * 4096).code() == StatusCode::no_memory);
+        CHECK(f.store.info(handle).value().size == 0 && f.pool.user_count() == 0 && f.pool.object_count() == 1);
         CHECK(!f.store.ledger().reserved_cells && !f.store.ledger().retained_frames);
         CHECK(f.store.initialize_size(handle, 2 * 4096));
         CHECK(f.store.initialize_size(handle, 2 * 4096));
@@ -203,7 +203,7 @@ int main()
         CHECK(f.store.ledger().retained_frames == 2 && !f.store.ledger().reserved_cells);
         CHECK(f.pool.user_count() == 2);
         usize seen{};
-        for (usize index = 0; index < SharedMemoryFiles::capacity * SharedMemoryFiles::max_pages; ++index)
+        for (usize index = 0; index < f.store.ledger_capacity(); ++index)
             if (const auto *frame = f.store.retained_frame(index))
             {
                 CHECK(frame->owner == &f.frames && frame->generation && f.pool.reference_count(frame->address) == 1);
@@ -211,17 +211,23 @@ int main()
             }
         CHECK(seen == 2);
         SharedMemoryFilesFaultProbe::staged_release(f.store, false);
-        CHECK(f.store.retry_retirement()); CHECK(f.pool.used_count() == 0);
+        CHECK(f.store.retry_retirement()); CHECK(f.pool.user_count() == 0 && !f.store.ledger_capacity());
         SharedMemoryFilesFaultProbe::allocation(f.store, ~usize{0});
         CHECK(f.store.initialize_size(handle, 4096));
         CHECK(f.store.release_description(handle));
     });
     test([](Fixture &f) {
         const auto handle = f.file();
-        SharedMemoryFilesFaultProbe::ledger_pressure(f.store, true);
+        // Ledger and page-index growth draw on the object reserve first.
+        std::array<NativePagePool::Lease, 8> held{};
+        usize count{};
+        for (auto lease = f.pool.allocate_kernel_page(); lease; lease = f.pool.allocate_kernel_page())
+            held[count++] = std::move(lease.value());
+        const auto objects = f.pool.object_count();
         CHECK(f.store.initialize_size(handle, 4096).code() == StatusCode::no_memory);
-        CHECK(f.store.info(handle).value().size == 0 && f.pool.used_count() == 0);
-        SharedMemoryFilesFaultProbe::ledger_pressure(f.store, false);
+        CHECK(f.store.info(handle).value().size == 0 && f.pool.user_count() == 0 && f.pool.object_count() == objects);
+        CHECK(!f.store.ledger().reserved_cells && !f.store.ledger().retained_frames);
+        while (count) CHECK(f.pool.release_kernel_page(held[--count]));
         CHECK(f.store.initialize_size(handle, 4096));
         SharedMemoryFilesFaultProbe::final_release(f.store, true);
         CHECK(!f.store.release_description(handle)); CHECK(!f.store.valid(handle));
@@ -272,6 +278,42 @@ int main()
         CHECK(!f.store.release_alias(page, consumed) && !consumed);
         SharedMemoryFilesFaultProbe::final_release(f.store, false);
         CHECK(f.store.retry_retirement());
+    });
+    // No fixed file count: the table grows past sixteen files, keeps every
+    // handle valid and goes back to the pool once the last file retires.
+    test<Store<24, 12>>([](Store<24, 12> &f) {
+        std::array<SharedFileHandle, 40> handles{};
+        for (auto &handle : handles) handle = f.file();
+        CHECK(f.store.ledger().files == handles.size() && f.pool.user_count() == 0 && f.pool.object_count());
+        for (usize index = 0; index < handles.size(); ++index)
+        {
+            CHECK(f.store.valid(handles[index]) && handles[index].slot == index);
+            if (index) CHECK(handles[index].generation > handles[index - 1].generation);
+        }
+        for (auto handle : handles) CHECK(f.store.release_description(handle));
+        CHECK(f.pool.object_count() == 0);
+        for (auto handle : handles) CHECK(!f.store.valid(handle));
+        const auto successor = f.file();
+        CHECK(successor.slot == 0 && successor.generation > handles.back().generation);
+        CHECK(f.store.release_description(successor));
+    });
+    // No fixed page count: a file larger than the former 64-page bound maps,
+    // reads back zeroed and retires every page and its index.
+    test<Store<96, 8>>([](Store<96, 8> &f) {
+        const auto handle = f.file();
+        CHECK(f.store.initialize_size(handle, 80 * 4096));
+        CHECK(f.store.info(handle).value().pages == 80 && f.pool.user_count() == 80);
+        CHECK(f.store.add_seals(handle, 6));
+        const auto last = f.store.page(handle, 79).value();
+        CHECK(f.store.retain_alias(last) && f.store.write(handle, 79 * 4096, bytes("tail")).value() == 4);
+        std::array<std::byte, 4> output{};
+        CHECK(f.store.read(handle, 79 * 4096, output).value() == 4 && output[0] == std::byte{'t'});
+        CHECK(f.store.release_description(handle) && f.store.valid(handle));
+        CHECK(f.store.release_alias(last) && !f.store.valid(handle));
+        // A size the user quota cannot hold is refused before any allocation.
+        const auto oversized = f.file();
+        CHECK(f.store.initialize_size(oversized, 96 * 4096).code() == StatusCode::no_memory);
+        CHECK(f.pool.user_count() == 0 && f.store.release_description(oversized));
     });
     std::printf("PASS shared file owner ledger: checks=%zu hosted=1 actual_native_alias=0 guest=0\n", checks);
 }
