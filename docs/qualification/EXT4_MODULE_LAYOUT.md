@@ -49,8 +49,12 @@ built with `-fno-access-control`, as most hosted owner models already are.
 
 ## Equivalence evidence
 
-Model-scope and QEMU-scope checks only; no physical hardware. Receipts belong in
-ObfuscationEvidence; the numbers below are from the worktree run of 2026-10-27.
+Model-scope and QEMU-scope checks only; no physical hardware. Receipts are in
+ObfuscationEvidence; each `result.json` names the tree it ran on.
+
+| Commit | Receipts |
+| --- | --- |
+| `5372e50` (OS `084e2bf`) | `receipts/ObfuscationKernel@5372e50/refactor/ext4-layout/{kernel-ten-profile,object-identity,hosted-runners,os-consumer}` |
 
 - Kernel: all objects of `okernel` and `okernel_image` for the ten profiles in
   debug and release were built from the folded tree and from the parent commit.
