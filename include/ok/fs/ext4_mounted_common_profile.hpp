@@ -11,7 +11,7 @@ namespace ok::fs
 // Serialized eight-family startup, bounded directory creation, zero/refill and
 // canonical legacy writes on checksum-v3 media with no active revokes.
 inline constexpr std::string_view ext4_common_opening_profile = "serialized-common-eight-family-directory-create-ordered-free-init-zero-refill-optional-revoke-legacy-v4";
-inline constexpr u32 ext4_common_module_abi = 75;
+inline constexpr u32 ext4_common_module_abi = 76;
 inline constexpr u32 ext4_common_session_counter_bits = 64;
 
 static_assert(kernel_module_abi_version == ext4_common_module_abi);

@@ -120,7 +120,7 @@ template <typename Word> bool words()
 int main()
 {
     static_assert(OK_UAPI_VERSION_MINOR == 16 && OK_NATIVE_METADATA_VERSION == 1);
-    static_assert(ok::user::native_metadata_module_abi == 75);
+    static_assert(ok::user::native_metadata_module_abi == 76);
     static_assert(OK_SYS_CHMOD == 90 && OK_SYS_FCHMOD == 91 && OK_SYS_CHOWN == 92 && OK_SYS_FCHOWN == 93);
     static_assert(OK_SYS_FCHOWNAT == 260 && OK_SYS_FCHMODAT == 268);
     static_assert(static_cast<u64>(syscall::Number::chmod) == OK_SYS_CHMOD && static_cast<u64>(syscall::Number::fchmod) == OK_SYS_FCHMOD);
