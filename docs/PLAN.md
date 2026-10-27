@@ -174,8 +174,9 @@ Folded (worktree `refactor/ext4-layout`, paired OS worktree `refactor/ext4-layou
   `docs/qualification/EXT4_MODULE_LAYOUT.md` records the equivalence checks.
 - `src/`, tests, hosted runners, `tools/export_sdk.py` and the OS consumer use the
   module headers; `scripts/check_ext4_layout.py` enforces the layering.
-Merge: bump the module ABI together with `feat/mm-general` and land the paired OS
-worktree in the same promotion.
+Merge: `feat/mm-general` merged first at ABI 75, so this worktree merges main and
+bumps the module ABI to 76; the paired OS worktree consumes SDK 76 and merges
+right after the kernel.
 
 ### WT1.4 `refactor/user-runtime-split` (M)
 

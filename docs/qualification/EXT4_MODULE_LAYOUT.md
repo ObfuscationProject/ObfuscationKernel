@@ -37,8 +37,9 @@ The two SDK contract marker headers, `ext4_directory_create_sdk_profile.hpp` and
 `ext4_mounted_common_profile.hpp`, stay standalone. `tools/export_sdk.py` and the
 OS consumer read them with a strict contract parser that refuses conditionals and
 treats the digit separators used in the modules as malformed literals; keeping
-markers small is the convention of every other `*_profile.hpp` header. The module
-ABI stays at 74 on this branch; the bump is aligned with `feat/mm-general` at merge.
+markers small is the convention of every other `*_profile.hpp` header. The
+worktree merged main after `feat/mm-general` had landed at ABI 75 and bumps the
+module ABI to 76, because SDK consumers must include the new paths.
 
 Six hosted models reached private members by wrapping one slice include in
 `#define private public`. With modules the wrapped header is already included,
