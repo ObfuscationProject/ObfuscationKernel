@@ -1,5 +1,5 @@
 #define OK_MIPS64_N64_ADMISSION_MODEL 1
-#include "ok/user/native_signal_gate_mips64_n64.hpp"
+#include "ok/arch/mips64/signal.hpp"
 #include "ok/user/native_mips64_n64_elf_admission.hpp"
 #include "ok/memory/kernel_entry_stack_pool.hpp"
 #include <cstdio>

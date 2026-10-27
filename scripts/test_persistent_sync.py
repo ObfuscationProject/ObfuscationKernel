@@ -4,7 +4,7 @@ from pathlib import Path
 import argparse,hashlib,json,os,shutil,subprocess,sys
 
 ARCHES=('x86_64',)
-DIRECTORIES=('core','apps','driver','fs','gui','interrupt','ipc','memory','net','posix','sched','smp','syscall','user')
+DIRECTORIES=('core','rescue','driver','fs','gui','interrupt','ipc','memory','net','posix','sched','smp','syscall','user')
 
 def sha(path):
  return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -28,7 +28,7 @@ def main():
  try:
   sources=['tests/host/persistent_sync_tests.cpp','tests/host/ext4_realtime_model.cpp']
   for directory in DIRECTORIES:
-   sources.extend(str(p.relative_to(root)) for p in sorted((root/'src'/directory).rglob('*.cpp')) if p.name not in ('entry.cpp','kernel_main.cpp','runtime.cpp'))
+   sources.extend(str(p.relative_to(root)) for p in sorted((root/'src'/directory).rglob('*.cpp')) if p.name not in ('entry.cpp','kernel_main.cpp','runtime.cpp') and p.parent.name != 'runtime')
   sources.append('src/arch/arch.cpp')
   sys.path.insert(0,str(root.parent/'ObfuscationOS/tools/jbd2'))
   from admit_linux_fixture import inspect,header_for
@@ -44,7 +44,7 @@ def main():
    helper=root.parent/'ObfuscationOS/tools/jbd2'/name;target=out/'fixture-helpers'/name;target.parent.mkdir(exist_ok=True);shutil.copy2(helper,target);record['fixture']['helper_sha256'][name]=sha(target)
    if sha(helper)!=sha(target):raise ValueError('fixture helper changed: '+name)
   for name in ('capture-manifest.json','admission.json','linux_fixture.hpp'):shutil.copy2(fixture/name,out/name)
-  files={root/'tests/host/native_clock_model.hpp'}|{root/name for name in sources}|{root/'src/user/runtime.cpp',Path(__file__).resolve()}
+  files={root/'tests/host/native_clock_model.hpp'}|{root/name for name in sources}|{root/'src/user/runtime.cpp',*(root/'src/user/runtime').glob('*.cpp'),Path(__file__).resolve()}
   for base in ('include','src','tests'):
    files.update(p for p in (root/base).rglob('*') if p.is_file() and p.suffix in ('.hpp','.h','.inc'))
   files.update(root/f'src/arch/{arch}/ops.cpp' for arch in ARCHES)

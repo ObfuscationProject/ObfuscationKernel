@@ -4,23 +4,23 @@
 using namespace ok;
 using namespace ok::user::native;
 #if defined(OK_ARCH_TARGET_I386)
-#include "ok/user/native_signal_delivery_i386.hpp"
+#include "ok/arch/i386/signal.hpp"
 using Frame = I386RtSignalFrame;
 constexpr auto selected = abi::linux_user::Profile::i386;
 #elif defined(OK_ARCH_TARGET_X86_64)
-#include "ok/user/native_signal_delivery_x86_64.hpp"
+#include "ok/arch/x86_64/signal.hpp"
 using Frame = X86SignalFrame;
 constexpr auto selected = abi::linux_user::Profile::x86_64;
 #elif defined(OK_ARCH_TARGET_AARCH64)
-#include "ok/user/native_signal_delivery_aarch64.hpp"
+#include "ok/arch/aarch64/signal.hpp"
 using Frame = Aarch64SignalFrame;
 constexpr auto selected = abi::linux_user::Profile::aarch64;
 #elif defined(OK_ARCH_TARGET_ARM32)
-#include "ok/user/native_signal_delivery_arm32.hpp"
+#include "ok/arch/arm32/signal.hpp"
 using Frame = Arm32RtSignalFrame;
 constexpr auto selected = abi::linux_user::Profile::arm32;
 #elif defined(OK_ARCH_TARGET_RV32) || defined(OK_ARCH_TARGET_RV64)
-#include "ok/user/native_signal_delivery_riscv.hpp"
+#include "ok/arch/riscv/signal.hpp"
 #if defined(OK_ARCH_TARGET_RV32)
 constexpr auto selected = abi::linux_user::Profile::rv32;
 #else
@@ -28,19 +28,19 @@ constexpr auto selected = abi::linux_user::Profile::rv64;
 #endif
 using Frame = RiscvSignalFrame<selected>;
 #elif defined(OK_ARCH_TARGET_LOONGARCH64)
-#include "ok/user/native_signal_delivery_loongarch64.hpp"
+#include "ok/arch/loongarch64/signal.hpp"
 using Frame = Loongarch64SignalFrame;
 constexpr auto selected = abi::linux_user::Profile::loongarch64;
 #elif defined(OK_ARCH_TARGET_MIPS)
-#include "ok/user/native_signal_delivery_mips_o32.hpp"
+#include "ok/arch/mips/signal.hpp"
 using Frame = MipsO32RtSignalFrame;
 constexpr auto selected = abi::linux_user::Profile::mips;
 #elif defined(OK_ARCH_TARGET_MIPS64)
-#include "ok/user/native_signal_delivery_mips64_n64.hpp"
+#include "ok/arch/mips64/signal.hpp"
 using Frame = Mips64N64SignalFrame;
 constexpr auto selected = abi::linux_user::Profile::mips64;
 #elif defined(OK_ARCH_TARGET_PPC)
-#include "ok/user/native_signal_delivery_ppc32.hpp"
+#include "ok/arch/ppc/signal.hpp"
 using Frame = Ppc32RtSignalFrame;
 constexpr auto selected = abi::linux_user::Profile::ppc;
 #else

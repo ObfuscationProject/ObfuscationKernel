@@ -1,6 +1,6 @@
 // Actual Linux adapter and native rename service over hosted user mappings.
 #include "unavailable_realtime.hpp"
-#include "../../src/user/runtime.cpp"
+#include "native_runtime_units.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

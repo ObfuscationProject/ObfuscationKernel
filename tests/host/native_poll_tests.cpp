@@ -1,6 +1,6 @@
 #include "unavailable_realtime.hpp"
 // Actual runtime wait registration with a hosted user-copy backend; no CPU traps.
-#include "../../src/user/runtime.cpp"
+#include "native_runtime_units.hpp"
 #include "ok/user/linux_bootstrap.hpp"
 #include <cstdio>
 #include <cstdlib>

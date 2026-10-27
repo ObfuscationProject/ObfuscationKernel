@@ -1,6 +1,6 @@
 #include "unavailable_realtime.hpp"
 // Actual Linux adapter/common native copy boundary with hosted mappings only.
-#include "../../src/user/runtime.cpp"
+#include "native_runtime_units.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdio>

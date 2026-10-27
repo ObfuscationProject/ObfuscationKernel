@@ -3,7 +3,7 @@
 #ifndef OK_ENABLE_TEST_POINTS
 #define OK_ENABLE_TEST_POINTS
 #endif
-#include "../../src/user/runtime.cpp"
+#include "native_runtime_units.hpp"
 
 #include <cstdio>
 #include <cstdlib>

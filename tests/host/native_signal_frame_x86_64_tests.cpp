@@ -1,4 +1,4 @@
-#include "ok/user/native_signal_frame_x86_64.hpp"
+#include "ok/arch/x86_64/signal.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstddef>

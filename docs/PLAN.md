@@ -146,8 +146,37 @@ Scaffold (merged to main from `refactor/user-runtime-split`):
   and `tests/host/native_pty/xmake.lua` updated; headers stay under `include/ok/apps`.
 - `src/user/README.md` unit map; `scripts/check_runtime_split.py` ratchet
   (5,876 lines / 101 includes) that fails when `runtime.cpp` grows.
-Next: extract `loader.cpp` first (ELF admission and stack setup have the fewest
-cross-dependencies), lower the ratchet, repeat per unit.
+
+Merged to main from `refactor/user-runtime-split` (tag `p1-user-runtime-split`):
+- `runtime.cpp` and its 25 mid-namespace fragments are nine units under
+  `src/user/runtime/` (`loader`, `vm`, `wait`, `futex`, `pipe`, `pty`, `net`,
+  `signals`, `entry`) plus a 675-line `runtime.cpp`, sharing
+  `src/user/runtime/private.hpp`; the map and rules are in `src/user/README.md`.
+  Hosted tests compile the units as one translation unit through
+  `tests/host/native_runtime_units.hpp`. The ratchet caps `runtime.cpp` at 675
+  lines and rejects textual fragments and per-architecture signal pieces.
+- The 32 per-architecture signal headers (frame, delivery, return and the MIPS/PPC
+  context, readiness, gate and persistent state) are one
+  `include/ok/arch/<arch>/signal.hpp` each for `i386`, `x86_64`, `aarch64`,
+  `arm32`, `riscv` (rv32 and rv64), `loongarch64`, `mips`, `mips64` and `ppc`.
+  This changes the exported header set but not the binary interface, and no
+  ObfuscationOS source includes these headers. It merges at module ABI 74;
+  the ABI 75 bump of `feat/mm-general` covers it and its ABI history entry
+  names the move.
+- Hosted runners compile `src/rescue` again (they still listed `src/apps`);
+  69 runners pass instead of 58.
+- `src/rescue` is compiled only with `kernel_gui` or in debug builds; other
+  release builds link `src/rescue/disabled.cpp`, which keeps the interfaces
+  (`Kernel` layout and SDK symbols are unchanged) and behaves as never opened.
+- Release image `.text` (no `kernel_gui`) against the start of the worktree:
+  aarch64 -91K, arm32 -92K, i386 -95K, loongarch64 -103K, mips -113K,
+  mips64 -122K, ppc -137K, rv32 -86K, rv64 -76K, x86_64 -104K. The split alone
+  grows `.text` by up to 16K (ppc +44K, mostly fill before the 64 KiB-aligned
+  exception vectors) because code is no longer inlined across units; dropping
+  the rescue applications more than offsets it. All ten release kernels boot to
+  `status=ready`.
+- Results and ObfuscationEvidence receipts:
+  [qualification/USER_RUNTIME_SPLIT.md](qualification/USER_RUNTIME_SPLIT.md).
 
 ## P2: platform and protocols
 
@@ -253,6 +282,9 @@ files under `src/fs/ext4/`.
 Total ext4/JBD2 headers mapped: 107. Unrelated headers kept as they are: `archive.hpp`, `archive_directory_profile.hpp`, `attributes.hpp`, `fat.hpp`, `fat_fs.hpp`, `mode_change.hpp`, `mode_policy.hpp`, `mount_retention.hpp`, `mount_snapshot.hpp`, `mount_snapshot_profile.hpp`, `persistent_sync_profile.hpp`, `simplefs.hpp`, `storage.hpp`, `unix.hpp`, `vfs.hpp`
 
 ## Appendix B: proposed user runtime split (`refactor/user-runtime-split`)
+
+The split as implemented is mapped in `src/user/README.md`; this table is the
+original proposal.
 
 | Target file | Current sources |
 | --- | --- |

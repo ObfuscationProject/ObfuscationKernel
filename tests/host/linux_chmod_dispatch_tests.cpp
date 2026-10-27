@@ -1,6 +1,6 @@
 // Actual chmod dispatcher/service with hosted user memory and an injected provider.
 // Provider outcomes are modeled; this does not qualify ext4 writes or guest execution.
-#include "../../src/user/runtime.cpp"
+#include "native_runtime_units.hpp"
 #include "unavailable_realtime.hpp"
 #include <cstdio>
 #include <cstdlib>

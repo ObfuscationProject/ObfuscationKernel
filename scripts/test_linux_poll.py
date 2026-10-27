@@ -15,10 +15,10 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     sources = [root/'tests/host/linux_poll_tests.cpp']
-    for directory in ('core', 'apps', 'driver', 'fs', 'gui', 'interrupt', 'ipc', 'memory',
+    for directory in ('core', 'rescue', 'driver', 'fs', 'gui', 'interrupt', 'ipc', 'memory',
                       'net', 'posix', 'sched', 'smp', 'syscall', 'user'):
         sources.extend(path for path in sorted((root/'src'/directory).rglob('*.cpp'))
-                       if path.name not in ('entry.cpp', 'kernel_main.cpp', 'runtime.cpp'))
+                       if path.name not in ('entry.cpp', 'kernel_main.cpp', 'runtime.cpp') and path.parent.name != 'runtime')
     sources.extend(root/path for path in ('src/arch/arch.cpp', 'src/arch/x86_64/ops.cpp'))
     with tempfile.TemporaryDirectory(prefix='ok-linux-poll-') as directory:
         executable = Path(directory)/'poll-tests'

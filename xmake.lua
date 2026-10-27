@@ -115,8 +115,15 @@ end
 function add_ok_kernel_sources(include_kernel_main)
     add_files("src/boot/raw_handoff.cpp", "src/boot/fdt.cpp")
     add_files("src/core/*.cpp")
-    add_files("src/rescue/*.cpp")
-    add_files("src/rescue/shell/*.cpp")
+    -- Rescue applications are diagnostics: built with kernel_gui or debug test
+    -- points; other builds link stand-ins that behave as never opened.
+    if has_config("kernel_gui") or is_mode("debug") then
+        add_files("src/rescue/*.cpp")
+        add_files("src/rescue/shell/*.cpp")
+    else
+        add_files("src/rescue/disabled.cpp")
+        add_defines("OK_DISABLE_RESCUE_APPS")
+    end
     if not include_kernel_main then
         remove_files("src/core/kernel_main.cpp")
     end
@@ -135,6 +142,7 @@ function add_ok_kernel_sources(include_kernel_main)
     add_files("src/smp/*.cpp")
     add_files("src/syscall/*.cpp")
     add_files("src/user/*.cpp")
+    add_files("src/user/runtime/*.cpp")
     add_ok_arch_files()
 end
 

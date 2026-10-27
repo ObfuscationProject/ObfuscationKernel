@@ -1,5 +1,4 @@
-#include "ok/user/native_signal_delivery_ppc32.hpp"
-#include "ok/user/native_signal_return_ppc32.hpp"
+#include "ok/arch/ppc/signal.hpp"
 #include "../fixtures/signals/ppc32_trampoline_baseline.hpp"
 #include <cstdio>
 #include <cstdlib>
