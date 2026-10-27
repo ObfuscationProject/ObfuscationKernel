@@ -102,4 +102,6 @@ without an OS extension. Hosted runners are model tests, and most of the 74
 that fail do so for reasons unrelated to WT1.4, such as missing architecture
 backends or fixtures. CI builds debug only, so `src/rescue/disabled.cpp`
 compiles only in local release builds such as these receipts. The exported
-header set changed at `69b73c2`; the module ABI bump is due at merge.
+header set changed at `69b73c2` while the binary interface did not; the
+branch merges at module ABI 74 and the ABI 75 bump of `feat/mm-general`
+covers the move.

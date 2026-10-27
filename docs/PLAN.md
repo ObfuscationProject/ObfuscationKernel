@@ -147,7 +147,7 @@ Scaffold (merged to main from `refactor/user-runtime-split`):
 - `src/user/README.md` unit map; `scripts/check_runtime_split.py` ratchet
   (5,876 lines / 101 includes) that fails when `runtime.cpp` grows.
 
-Done on the worktree branch:
+Merged to main from `refactor/user-runtime-split` (tag `p1-user-runtime-split`):
 - `runtime.cpp` and its 25 mid-namespace fragments are nine units under
   `src/user/runtime/` (`loader`, `vm`, `wait`, `futex`, `pipe`, `pty`, `net`,
   `signals`, `entry`) plus a 675-line `runtime.cpp`, sharing
@@ -159,8 +159,10 @@ Done on the worktree branch:
   context, readiness, gate and persistent state) are one
   `include/ok/arch/<arch>/signal.hpp` each for `i386`, `x86_64`, `aarch64`,
   `arm32`, `riscv` (rv32 and rv64), `loongarch64`, `mips`, `mips64` and `ppc`.
-  This changes the exported header set; no ObfuscationOS source includes these
-  headers, and the module ABI bump is due at merge.
+  This changes the exported header set but not the binary interface, and no
+  ObfuscationOS source includes these headers. It merges at module ABI 74;
+  the ABI 75 bump of `feat/mm-general` covers it and its ABI history entry
+  names the move.
 - Hosted runners compile `src/rescue` again (they still listed `src/apps`);
   69 runners pass instead of 58.
 - `src/rescue` is compiled only with `kernel_gui` or in debug builds; other
