@@ -8,7 +8,7 @@
 #undef main
 #pragma GCC diagnostic pop
 #include "ext4_mounted_support.hpp"
-#include "ok/fs/ext4_mounted_metadata.hpp"
+#include "ok/fs/ext4/mount.hpp"
 #include <cstring>
 #include <new>
 

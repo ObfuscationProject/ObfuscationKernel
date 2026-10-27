@@ -1,4 +1,4 @@
-#include <ok/fs/ext4_mounted_metadata.hpp>
+#include <ok/fs/ext4/mount.hpp>
 #include <type_traits>
 using Mount = ok::fs::Ext4MountedMetadata<2>;
 static_assert(!std::is_copy_constructible_v<Mount::CommonStorage>);

@@ -1,5 +1,5 @@
 // Synthetic pure replay-validation model; no device or recovery I/O.
-#include "ok/fs/ext4_regular_move_replay.hpp"
+#include "ok/fs/ext4/recovery.hpp"
 #include <cstdio>
 #include <cstdlib>
 

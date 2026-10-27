@@ -2,7 +2,7 @@
 // This covers the interval after backend admission ends and before handoff to
 // the receiving caller, independently of the transport-pause ownership tests.
 #include "ext4_realtime_model.hpp"
-#include "ok/fs/ext4_fs.hpp"
+#include "ok/fs/ext4/layout.hpp"
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>

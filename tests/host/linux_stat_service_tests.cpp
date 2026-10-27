@@ -2,7 +2,7 @@
 #include "ext4_realtime_model.hpp"
 #include "ok/abi/linux_stat_call.hpp"
 #include "stat_service_call.hpp"
-#include "ok/fs/ext4_fs.hpp"
+#include "ok/fs/ext4/layout.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

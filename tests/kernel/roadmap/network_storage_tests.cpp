@@ -1,7 +1,7 @@
 #include "roadmap_tests.hpp"
 #include "block_cache_failure.hpp"
 
-#include "ok/fs/ext4.hpp"
+#include "ok/fs/ext4/layout.hpp"
 #include "ok/fs/fat.hpp"
 #include "ok/fs/fat_fs.hpp"
 #include "ok/fs/storage.hpp"

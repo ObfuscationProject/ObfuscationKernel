@@ -1,12 +1,9 @@
 // Hosted actual canonical Owner/Session I/O, distinct from guest execution.
 #include "ext4_mounted_support.hpp"
 #include "ext4_realtime_model.hpp"
-#include <ok/fs/ext4_mounted_metadata.hpp>
-// Test-only privilege opens the new wrapper/workspace for destructive negative controls.
-// The existing canonical Owner remains private; the native probe uses real privacy.
-#define private public
-#include <ok/fs/ext4_empty_orphan_recovery.hpp>
-#undef private
+#include <ok/fs/ext4/mount.hpp>
+// Destructive negative controls reach private wrapper/workspace state; build this
+// model with -fno-access-control. The native probe uses real privacy.
 #include <memory>
 #include <type_traits>
 #include <atomic>

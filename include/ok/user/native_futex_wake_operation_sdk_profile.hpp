@@ -18,7 +18,7 @@ namespace ok::user::native
 {
 inline constexpr std::string_view native_futex_wake_operation_profile = "bootcpu-serialized-two-key-private-anonymous-shared-signed-wrap-legacy-count-v1";
 inline constexpr std::string_view linux_futex_wake_operation_profile = "bootcpu-serialized-two-key-private-anonymous-shared-signed-wrap-legacy-count-v1";
-inline constexpr u32 native_futex_wake_operation_module_abi = 75;
+inline constexpr u32 native_futex_wake_operation_module_abi = 76;
 inline constexpr usize native_futex_wake_operation_word_bits = 32;
 inline constexpr usize native_futex_wake_operation_operand_bits = 12;
 inline constexpr usize native_futex_wake_operation_shift_bits = 5;

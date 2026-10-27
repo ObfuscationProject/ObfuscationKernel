@@ -1,5 +1,5 @@
 #include "ext4_zero_truncate_preview_test_support.hpp"
-#include <ok/fs/ext4_allocated_empty_data_transaction.hpp>
+#include <ok/fs/ext4/txn.hpp>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>

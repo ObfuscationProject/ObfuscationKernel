@@ -1,4 +1,4 @@
-#include "ok/fs/ext4_fs.hpp"
+#include "ok/fs/ext4/layout.hpp"
 #include <type_traits>
 
 static_assert(std::is_final_v<ok::fs::Ext4Node>);

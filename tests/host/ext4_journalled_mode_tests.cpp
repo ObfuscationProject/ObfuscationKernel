@@ -1,7 +1,7 @@
 // Hosted real VFS/POSIX/provider composition. No user instructions or hardware.
 #include "ext4_mounted_support.hpp"
 #include "ext4_realtime_model.hpp"
-#include <ok/fs/ext4_mounted_metadata.hpp>
+#include <ok/fs/ext4/mount.hpp>
 #include <ok/abi/linux_chmod_call.hpp>
 #include <ok/abi/linux_stat.hpp>
 #include <memory>

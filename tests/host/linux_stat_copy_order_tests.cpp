@@ -1,7 +1,7 @@
 // Hosted maintained provider with late stat output failure; no hardware copy.
 #include "ext4_realtime_model.hpp"
 #include "ok/abi/linux_stat_call.hpp"
-#include "ok/fs/ext4_fs.hpp"
+#include "ok/fs/ext4/layout.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

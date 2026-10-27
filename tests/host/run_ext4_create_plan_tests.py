@@ -51,7 +51,7 @@ def main() -> None:
     receipt = {'schema': 1, 'scope': 'hosted-ext4-empty-create-plan-only',
                'status': 'passed' if len(results) == 2 and all(not row['returncode'] for row in results)
                else 'failed', 'source': str(SOURCE), 'source_sha256': digest(SOURCE),
-               'header_sha256': digest(ROOT / 'include/ok/fs/ext4_create_plan.hpp'),
+               'header_sha256': digest(ROOT / 'include/ok/fs/ext4/alloc.hpp'),
                'commands': results, 'qemu': False, 'hardware': False, 'disk_writes': False}
     (output / 'result.json').write_text(json.dumps(receipt, indent=2, sort_keys=True) + '\n')
     if receipt['status'] != 'passed':

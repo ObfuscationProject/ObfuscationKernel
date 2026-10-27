@@ -1,8 +1,7 @@
 // Hosted actual native Session/child bridge execution. Mounted role and full
 // suffix filesystem semantics remain separate integration gates.
 #include "ext4_zero_truncate_preview_test_support.hpp"
-#include <ok/fs/ext4_mounted_metadata.hpp>
-#include <ok/fs/ext4_mounted_typed_cursor.hpp>
+#include <ok/fs/ext4/mount.hpp>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>

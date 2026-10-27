@@ -12,7 +12,7 @@ Each module exposes a `ModuleManifest` with:
 - dependency, exported-service, and required-service lists;
 - `ModuleExecution`, either `inline_core` or `kernel_process`;
 - `ModuleThreading`, either `single_threaded` or `per_cpu`;
-- `abi_version`, currently `kernel_module_abi_version == 75`;
+- `abi_version`, currently `kernel_module_abi_version == 76`;
 - a capability mask declaring service export/use, kernel-process ownership,
   per-CPU workers, user ABI, driver ABI, or GUI behavior;
 - `ModuleRestartPolicy`;
@@ -107,6 +107,14 @@ Roadmap tests cover:
 - the built-in module graph used by the kernel debug suite.
 
 ## ABI history
+
+ABI76 (`refactor/ext4-layout`) changes the exported ext4/JBD2 header set: the
+85 slice headers of `ok/fs/` become the eight modules `ok/fs/ext4/{journal,
+layout,extent,alloc,dir,txn,recovery,mount}.hpp`, the partial class bodies move
+to `ok/fs/ext4/detail/`, and `src/fs/ext4_rename_plan.hpp` is removed. No
+declaration, layout or generated code changes; the two ext4 SDK profile markers
+keep their paths. The public UAPI stays 0.16. Every exported module marker, the
+SDK manifest and the OS consumer declare 76 and refuse 75 and 77.
 
 ABI75 (`feat/mm-general`) changes exported memory and process layouts:
 `KernelConfig` carries the discovered `PhysicalMemoryMap` instead of a fixed

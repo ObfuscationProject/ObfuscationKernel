@@ -1,4 +1,4 @@
-#include <ok/fs/ext4_namespace_recovery_binding.hpp>
+#include <ok/fs/ext4/recovery.hpp>
 
 ok::Status compile_namespace_recovery(ok::fs::Ext4NamespaceRecoveryAdmission &admission,
     ok::driver::BlockDevice &device, ok::fs::Ext4RecoveryBounds bounds,

@@ -1,4 +1,4 @@
-#include <ok/fs/ext4_allocated_empty_data_journal.hpp>
+#include <ok/fs/ext4/extent.hpp>
 
 ok::Status allocated_empty_journal_format_probe(const ok::fs::Ext4RecoveryInfo &binding,
     const ok::fs::Ext4AllocatedEmptyDataPlan &plan, const ok::fs::Ext4FirstDataBlock &head,

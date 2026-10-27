@@ -1,6 +1,5 @@
 #include "ext4_allocated_empty_preview_test_support.hpp"
-#include <ok/fs/ext4_allocated_empty_data_journal.hpp>
-#include <ok/fs/ext4_allocated_empty_data_preview.hpp>
+#include <ok/fs/ext4/extent.hpp>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>

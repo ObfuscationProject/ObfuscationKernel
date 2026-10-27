@@ -19,8 +19,7 @@ REFERENCE = ROOT / "tests/host/ext4_next_data_replay_tests.cpp"
 SUPPORT = ROOT / "tests/host/ext4_completion_support.hpp"
 VIEW_SUPPORT = ROOT / "tests/host/ext4_view_test_support.hpp"
 HEADERS = tuple(ROOT / "include/ok/fs" / name for name in (
-    "ext4_readonly.hpp", "ext4_next_data_plan.hpp", "ext4_replay_view.hpp",
-    "ext4_completion.hpp", "ext4_recovery.hpp"))
+    "ext4/layout.hpp", "ext4/extent.hpp", "ext4/txn.hpp", "ext4/journal.hpp"))
 RECOVERY = ROOT / "src/fs/ext4_recovery.cpp"
 
 

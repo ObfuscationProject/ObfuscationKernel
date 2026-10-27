@@ -1,5 +1,4 @@
-#include "ok/fs/ext4_orphan_reclaim_plan.hpp"
-#include "ok/fs/ext4_create_plan.hpp"
+#include "ok/fs/ext4/alloc.hpp"
 #include "ext4_orphan_access_fixture.hpp"
 
 namespace

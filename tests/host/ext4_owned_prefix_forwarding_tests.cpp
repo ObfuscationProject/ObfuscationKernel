@@ -1,7 +1,7 @@
 // Privileged hosted observations only (-fno-access-control). The actual frozen
 // production headers must also be compiled separately with access control.
 #include "ext4_zero_truncate_preview_test_support.hpp"
-#include <ok/fs/ext4_mounted_metadata.hpp>
+#include <ok/fs/ext4/mount.hpp>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>

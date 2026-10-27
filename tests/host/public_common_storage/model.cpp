@@ -1,5 +1,5 @@
 // Normal-access public API model; failure points are armed between operations.
-#include <ok/fs/ext4_mounted_metadata.hpp>
+#include <ok/fs/ext4/mount.hpp>
 #include "../ext4_realtime_model.hpp"
 #include <algorithm>
 #include <cstdio>

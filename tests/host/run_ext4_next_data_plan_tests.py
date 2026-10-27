@@ -14,7 +14,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / 'tests/host/ext4_next_data_plan_tests.cpp'
-HEADERS = tuple(ROOT / 'include/ok/fs' / name for name in ('ext4_next_data_plan.hpp', 'ext4_first_data_plan.hpp'))
+HEADERS = tuple(ROOT / 'include/ok/fs' / name for name in (
+    'ext4/extent.hpp',))
 
 
 def digest(path: Path) -> str:

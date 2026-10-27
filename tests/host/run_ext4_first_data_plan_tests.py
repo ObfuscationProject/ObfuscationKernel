@@ -14,7 +14,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / 'tests/host/ext4_first_data_plan_tests.cpp'
-HEADER = ROOT / 'include/ok/fs/ext4_first_data_plan.hpp'
+HEADER = ROOT / 'include/ok/fs/ext4/extent.hpp'
 
 
 def digest(path: Path) -> str:

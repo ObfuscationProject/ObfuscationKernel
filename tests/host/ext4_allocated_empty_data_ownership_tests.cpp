@@ -1,5 +1,5 @@
 #include "ext4_zero_truncate_test_support.hpp"
-#include <ok/fs/ext4_allocated_empty_data_ownership.hpp>
+#include <ok/fs/ext4/extent.hpp>
 #include <cstdio>
 #include <cstdlib>
 using namespace zero_fixture;

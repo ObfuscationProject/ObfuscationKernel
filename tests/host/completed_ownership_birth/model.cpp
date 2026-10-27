@@ -1,7 +1,7 @@
 // Safe hosted lifecycle/field-comparison model. Device callbacks only observe
 // seal completion; altered copied fields are tested by pure comparisons only.
 #include "ext4_zero_truncate_preview_test_support.hpp"
-#include <ok/fs/ext4_mounted_metadata.hpp>
+#include <ok/fs/ext4/mount.hpp>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

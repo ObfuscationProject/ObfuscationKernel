@@ -49,7 +49,7 @@ The successor CALCULATION.json SHA256 is
 | directory create | absent | 23,524,132,523 | 9 | 5 | 2 | 5 |
 
 The typed rows grow by exactly one attempted/completed READ. In
-`ext4_owned_typed_port.inc`, admission reserves `child_reads + BufferCapacity`,
+`ext4/detail/owned_typed_port.inc`, admission reserves `child_reads + BufferCapacity`,
 sets `prefix_reservation_ = BufferCapacity` and rereads each ready resident slot
 in a loop bounded by BufferCapacity. The mounted owner now has nine slots.
 Comparison loops that merely inspect in-memory slots add no READs. The bound

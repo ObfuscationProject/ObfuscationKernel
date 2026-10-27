@@ -1,6 +1,6 @@
 #include "ext4_completion_support.hpp"
-#include "../../src/fs/ext4_rename_plan.hpp"
-#include <ok/fs/ext4_completion.hpp>
+#include <ok/fs/ext4/dir.hpp>
+#include <ok/fs/ext4/txn.hpp>
 #include <algorithm>
 #include <fstream>
 #include <iterator>

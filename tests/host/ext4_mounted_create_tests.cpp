@@ -1,10 +1,8 @@
 #include "ext4_mounted_support.hpp"
 #include "ext4_realtime_model.hpp"
 #include <memory>
-// Retain the historical capacity fixture without changing standard headers.
-#define private public
-#include <ok/fs/ext4_mounted_metadata.hpp>
-#undef private
+// The historical capacity fixture reaches private state; build with -fno-access-control.
+#include <ok/fs/ext4/mount.hpp>
 #include <ok/posix/posix.hpp>
 
 using namespace owned_fixture;

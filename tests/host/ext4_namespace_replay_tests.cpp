@@ -1,5 +1,5 @@
 #include "ext4_namespace_journal_fixture.hpp"
-#include <ok/fs/ext4_namespace_replay.hpp>
+#include <ok/fs/ext4/recovery.hpp>
 
 using namespace namespace_journal_model;
 namespace

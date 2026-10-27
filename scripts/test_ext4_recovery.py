@@ -72,7 +72,7 @@ def main():
     try:
         frozen = output / "sources"
         shutil.copytree(root / "include", frozen / "include")
-        for relative in ("include/ok/fs/ext4_recovery.hpp", "src/fs/ext4_recovery.cpp",
+        for relative in ("include/ok/fs/ext4/journal.hpp", "src/fs/ext4_recovery.cpp",
                          "tests/host/ext4_recovery_tests.cpp", "tests/host/ext4_recovery_compile.cpp",
                          "scripts/test_ext4_recovery.py"):
             destination = frozen / relative

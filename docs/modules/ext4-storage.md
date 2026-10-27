@@ -6,6 +6,11 @@ read/write, truncate, symbolic links, unlink/rmdir, rename, hard links and synch
 namespace. The OS owns Virtio transport drivers, image creation and root selection.
 The old `Ext4Volume` metadata reader and RAM-backed block models remain separate.
 
+The ext4 and JBD2 mechanisms are declared in eight layered module headers under
+`include/ok/fs/ext4/`; `Ext4FileSystem` and `Ext4Node` are in `layout.hpp`.
+[`include/ok/fs/ext4/README.md`](../../include/ok/fs/ext4/README.md) lists the
+modules, their layering and the private partials.
+
 ## Supported on-disk format
 
 The initial writer deliberately supports a bounded, non-journalled ext4 subset:

@@ -1,9 +1,7 @@
 #include "ext4_zero_truncate_preview_test_support.hpp"
 #include <ok/block/sessions.hpp>
-#include <ok/fs/ext4_orphan_reclaim_cold.hpp>
-#define private public
-#include <ok/fs/ext4_reclaim_history.hpp>
-#undef private
+// The injected anchor drift reaches private state; build with -fno-access-control.
+#include <ok/fs/ext4/alloc.hpp>
 
 // Reuse the Session fixture and independently inject one minority anchor drift.
 #define main inherited_author_session_models

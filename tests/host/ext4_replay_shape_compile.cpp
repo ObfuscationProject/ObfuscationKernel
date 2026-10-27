@@ -1,4 +1,4 @@
-#include <ok/fs/ext4_replay_shape.hpp>
+#include <ok/fs/ext4/recovery.hpp>
 
 ok::Result<ok::fs::Ext4ReplayShape> compile_shape(const ok::fs::Ext4RecoveryInfo &binding,
     ok::fs::Ext4ReplayDirectoryDomain directories, const ok::fs::jbd2::ReplayPlan &plan)

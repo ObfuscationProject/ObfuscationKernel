@@ -2,7 +2,7 @@
 // serialized private-record fault injection; publication uses the actual Node.
 #include "ext4_mounted_support.hpp"
 #include "ext4_realtime_model.hpp"
-#include <ok/fs/ext4_mounted_metadata.hpp>
+#include <ok/fs/ext4/mount.hpp>
 #include <array>
 #include <memory>
 

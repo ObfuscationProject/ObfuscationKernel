@@ -1,7 +1,6 @@
 // Explicit instantiation compiles private template bodies with normal access
 // checking. It grants no public construction or mounted execution permission.
-#include <ok/fs/ext4_mounted_metadata.hpp>
-#include <ok/fs/ext4_mounted_typed_cursor.hpp>
+#include <ok/fs/ext4/mount.hpp>
 struct BridgeCompileAuthority {
     ok::Status validate(ok::fs::Ext4MountedTypedCursorPhase, ok::fs::Ext4MountedTypedSuffixStage) { return {}; }
     ok::Status complete_stage(ok::fs::Ext4MountedTypedSuffixStage) { return {}; }

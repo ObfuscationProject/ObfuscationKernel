@@ -1,6 +1,6 @@
 // Hosted vertical slice over actual generated media and original native history.
 #include "fixture.hpp"
-#include <ok/fs/ext4_mounted_metadata.hpp>
+#include <ok/fs/ext4/mount.hpp>
 #include <set>
 using namespace typed_cold_startup_fixture;
 namespace {

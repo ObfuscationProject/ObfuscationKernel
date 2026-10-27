@@ -35,7 +35,7 @@ def main():
  save()
  try:
   frozen=out/'sources';shutil.copytree(root/'include',frozen/'include')
-  for relative in ['include/ok/block/sessions.hpp','include/ok/fs/metadata_buffers.hpp','tests/host/metadata_buffers_tests.cpp','tests/host/metadata_buffers_compile.cpp','tests/host/metadata_session_invalidation_tests.cpp','scripts/test_metadata_buffers.py']:
+  for relative in ['include/ok/block/sessions.hpp','include/ok/fs/ext4/txn.hpp','tests/host/metadata_buffers_tests.cpp','tests/host/metadata_buffers_compile.cpp','tests/host/metadata_session_invalidation_tests.cpp','scripts/test_metadata_buffers.py']:
    target=frozen/relative;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes((source/relative).read_bytes())
   r['source_sha256']={str(f.relative_to(frozen)):sha(f) for f in sorted(frozen.rglob('*')) if f.is_file()}
   flags=['-std=c++23','-O2','-Wall','-Wextra','-Wpedantic','-Werror','-fno-exceptions','-frtti']

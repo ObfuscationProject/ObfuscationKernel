@@ -1,6 +1,5 @@
 #include "ext4_directory_create_fixture.hpp"
-#include <ok/fs/ext4_directory_create_plan.hpp>
-#include <ok/fs/ext4_directory_create_witness.hpp>
+#include <ok/fs/ext4/alloc.hpp>
 
 using namespace mkdir_plan_fixture;
 

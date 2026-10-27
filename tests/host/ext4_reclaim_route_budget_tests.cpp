@@ -12,9 +12,9 @@
 #define private public
 #include <ok/block/sessions.hpp>
 #undef private
-#include <ok/fs/ext4_reclaim_history.hpp>
+#include <ok/fs/ext4/alloc.hpp>
 #define private public
-#include <ok/fs/ext4_reclaim_route_budget.hpp>
+#include <ok/fs/ext4/recovery.hpp>
 #undef private
 
 using namespace ok;

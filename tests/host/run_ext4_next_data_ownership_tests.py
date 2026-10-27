@@ -16,7 +16,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "tests/host/ext4_next_data_ownership_tests.cpp"
 SUPPORT = ROOT / "tests/host/ext4_next_data_test_support.hpp"
-HEADER = ROOT / "include/ok/fs/ext4_readonly.hpp"
+HEADER = ROOT / "include/ok/fs/ext4/layout.hpp"
 RECOVERY = ROOT / "src/fs/ext4_recovery.cpp"
 
 

@@ -1,4 +1,4 @@
-#include <ok/fs/ext4_namespace_cold_replay.hpp>
+#include <ok/fs/ext4/recovery.hpp>
 
 ok::Status compile_namespace_cold(const ok::fs::Ext4RecoveryInfo &binding,
     const ok::fs::Ext4NamespaceReplayRecords &records,

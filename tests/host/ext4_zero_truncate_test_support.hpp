@@ -1,5 +1,5 @@
 #pragma once
-#include <ok/fs/ext4_zero_truncate_plan.hpp>
+#include <ok/fs/ext4/extent.hpp>
 using namespace ok;
 using namespace ok::fs;
 namespace zero_fixture

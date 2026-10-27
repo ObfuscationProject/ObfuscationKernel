@@ -1,5 +1,5 @@
 #include "ext4_zero_truncate_preview_test_support.hpp"
-#include <ok/fs/ext4_zero_truncate_preview.hpp>
+#include <ok/fs/ext4/extent.hpp>
 #include <cstdio>
 #include <cstdlib>
 #include <new>

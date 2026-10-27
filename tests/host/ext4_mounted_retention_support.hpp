@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ok/fs/ext4_mounted_metadata.hpp"
+#include "ok/fs/ext4/mount.hpp"
 
 namespace owned_fixture
 {

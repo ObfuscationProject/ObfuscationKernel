@@ -1,8 +1,8 @@
 // Actual hosted Session/device capture; no writable recovery or guest execution.
 #include "snapshot_fixture.hpp"
-#include "ok/fs/ext4_reclaim_history.hpp"
+#include "ok/fs/ext4/alloc.hpp"
 #define private public
-#include "ok/fs/ext4_reclaim_recovery_binding.hpp"
+#include "ok/fs/ext4/recovery.hpp"
 #undef private
 #include <functional>
 #include <memory>

@@ -1,4 +1,4 @@
-#include "ok/fs/ext4_direct_read_scope.hpp"
+#include "ok/fs/ext4/mount.hpp"
 
 using Registry = ok::block::BlockSessions<1>;
 extern "C" ok::Status ok_direct_read_scope_probe(Registry::Session &session,

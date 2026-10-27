@@ -1,6 +1,6 @@
 // Hosted execution of the actual mounted Owner/cache/Session; no hardware claim.
 #include "ext4_mounted_support.hpp"
-#include <ok/fs/ext4_mounted_metadata.hpp>
+#include <ok/fs/ext4/mount.hpp>
 #include <memory>
 
 using namespace owned_fixture;

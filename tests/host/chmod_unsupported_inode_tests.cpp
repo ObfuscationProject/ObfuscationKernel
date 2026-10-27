@@ -1,6 +1,6 @@
 // Hosted unsupported-inode admission regression; no user instructions or syscall dispatcher.
 #include "ext4_realtime_model.hpp"
-#include "ok/fs/ext4_fs.hpp"
+#include "ok/fs/ext4/layout.hpp"
 #include "ok/abi/linux_chmod_call.hpp"
 #include <algorithm>
 #include <cstdio>

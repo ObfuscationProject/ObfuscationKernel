@@ -1,6 +1,6 @@
 // Compiled with -fno-access-control only to corrupt otherwise private authority.
 #include "ext4_mounted_support.hpp"
-#include <ok/fs/ext4_mounted_metadata.hpp>
+#include <ok/fs/ext4/mount.hpp>
 #include <memory>
 using namespace owned_fixture;
 using Mount = Ext4MountedMetadata<1>;

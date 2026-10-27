@@ -1,4 +1,4 @@
-#include <ok/fs/ext4_empty_orphan_recovery.hpp>
+#include <ok/fs/ext4/mount.hpp>
 #include <type_traits>
 using Recovery = ok::fs::Ext4EmptyOrphanRecoveryOwner<1>;
 using Workspace = ok::fs::Ext4EmptyOrphanRecoveryWorkspace;

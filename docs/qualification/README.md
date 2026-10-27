@@ -17,6 +17,7 @@ live in the separate ObfuscationEvidence repository.
 | [CHECKED_CHILD_REAP.md](CHECKED_CHILD_REAP.md) | Checked child detachment and orphan reaping |
 | [CHECKED_VFS_CALLERS.md](CHECKED_VFS_CALLERS.md) | Checked filesystem callers candidate |
 | [EXT4_ALLOCATED_EMPTY_DATA.md](EXT4_ALLOCATED_EMPTY_DATA.md) | Private allocated-empty first-block planner |
+| [EXT4_MODULE_LAYOUT.md](EXT4_MODULE_LAYOUT.md) | ext4 module header layout and equivalence checks |
 | [EXT4_MOUNTED_METADATA.md](EXT4_MOUNTED_METADATA.md) | Bounded mounted ext4 metadata policies |
 | [EXT4_ZERO_TRUNCATE_SLICE1.md](EXT4_ZERO_TRUNCATE_SLICE1.md) | Zero-truncate source slice 1 |
 | [EXT4_ZERO_TRUNCATE_SLICE2.md](EXT4_ZERO_TRUNCATE_SLICE2.md) | Exact linked-inode zero-truncate witness |
