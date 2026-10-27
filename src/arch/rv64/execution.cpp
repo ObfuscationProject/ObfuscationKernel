@@ -54,8 +54,9 @@ Status release_tables(Space &space)
         if (auto status = release_table_pages(reinterpret_cast<uptr>(table), 1); !status && result) result = status;
         table = nullptr;
     };
+    constexpr usize first = (user_begin >> 21) & 511u, last = ((user_end - 1) >> 21) & 511u;
     if (space.middle)
-        for (usize index = user_begin >> 21 & 511u; index <= user_end - 1 >> 21 & 511u; ++index)
+        for (usize index = first; index <= last; ++index)
             if (auto &entry = space.middle->entries[index]; entry & pte_valid)
             {
                 auto *leaf = reinterpret_cast<Table *>((entry >> 10) << 12);
