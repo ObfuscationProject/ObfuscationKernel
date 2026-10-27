@@ -32,9 +32,8 @@ def main() -> int:
               'sanitized': args.sanitize, 'native_execution': False,
               'hardware_power_loss': False, 'commands': []}
     relevant = ['scripts/test_ext4_mounted_create.py', 'tests/host/ext4_mounted_create_tests.cpp',
-                'include/ok/fs/ext4_mounted_metadata.hpp', 'include/ok/fs/ext4_owned_transaction.hpp',
-                'include/ok/fs/ext4_create_transaction.hpp', 'include/ok/fs/ext4_create_plan.hpp',
-                'include/ok/fs/ext4_completion.hpp', 'include/ok/fs/ext4_replay_view.hpp', *SOURCES]
+                'include/ok/fs/ext4/mount.hpp', 'include/ok/fs/ext4/txn.hpp',
+                'include/ok/fs/ext4/alloc.hpp', *SOURCES]
     result['source_sha256'] = {name: digest(root / name) for name in relevant}
 
     def save() -> None:

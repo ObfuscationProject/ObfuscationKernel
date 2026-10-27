@@ -48,7 +48,7 @@ def main():
         disk=out/'clean-input.img';shutil.copyfile(args.clean_image,disk)
         report['clean_input_sha256']=digest(disk)
         frozen=out/'sources';shutil.copytree(root/'include',frozen/'include')
-        paths=['include/ok/fs/ext4_metadata_transaction.hpp','include/ok/fs/ext4_completion.hpp','include/ok/fs/ext4_replay_view.hpp','include/ok/fs/ext4_readonly.hpp',
+        paths=['include/ok/fs/ext4/txn.hpp','include/ok/fs/ext4/layout.hpp',
                'tests/host/ext4_transaction_tests.cpp','tests/host/ext4_transaction_support.hpp',
                'tests/host/ext4_transaction_compile.cpp','scripts/test_ext4_transaction.py']
         for relative in paths:

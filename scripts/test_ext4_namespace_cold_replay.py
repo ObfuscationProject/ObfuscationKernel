@@ -18,12 +18,8 @@ import traceback
 
 ROOT = Path(__file__).resolve().parents[1]
 FILES = (
-    'include/ok/fs/ext4_namespace_plan.hpp',
-    'include/ok/fs/ext4_namespace_journal.hpp',
-    'include/ok/fs/ext4_replay_shape.hpp',
-    'include/ok/fs/ext4_namespace_replay.hpp',
-    'include/ok/fs/ext4_namespace_witness.hpp',
-    'include/ok/fs/ext4_namespace_cold_replay.hpp',
+    'include/ok/fs/ext4/dir.hpp',
+    'include/ok/fs/ext4/recovery.hpp',
     'src/fs/ext4_recovery.cpp',
     'tests/host/ext4_namespace_journal_fixture.hpp',
     'tests/host/ext4_namespace_cold_replay_tests.cpp',

@@ -48,8 +48,8 @@ def main():
         disk=out/'clean-input.img';shutil.copyfile(args.clean_image,disk)
         report['clean_input_sha256']=digest(disk)
         frozen=out/'sources';shutil.copytree(root/'include',frozen/'include')
-        paths=['include/ok/fs/ext4_owned_transaction.hpp','include/ok/fs/ext4_completion.hpp','include/ok/fs/ext4_replay_view.hpp','include/ok/fs/ext4_readonly.hpp',
-               'tests/host/ext4_owned_tests.cpp','tests/host/ext4_transaction_support.hpp','tests/host/ext4_owned_support.hpp','tests/host/ext4_owned_invariant_tests.cpp','include/ok/fs/ext4_metadata_transaction.hpp','include/ok/fs/metadata_buffers.hpp',
+        paths=['include/ok/fs/ext4/mount.hpp','include/ok/fs/ext4/txn.hpp','include/ok/fs/ext4/layout.hpp',
+               'tests/host/ext4_owned_tests.cpp','tests/host/ext4_transaction_support.hpp','tests/host/ext4_owned_support.hpp','tests/host/ext4_owned_invariant_tests.cpp',
                'tests/host/ext4_owned_compile.cpp','scripts/test_ext4_owned.py']
         for relative in paths:
             target=frozen/relative;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes((source/relative).read_bytes())

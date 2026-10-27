@@ -51,7 +51,7 @@ def main():
         (out/'capture-manifest.json').write_bytes((fixture/'capture-manifest.json').read_bytes())
         report.update(capture_sha256=digest(disk),linux_image_sha256=capture['linux_image_sha256'],linux_source_provenance=capture['linux_source_provenance'])
         frozen=out/'sources';shutil.copytree(root/'include',frozen/'include')
-        paths=['include/ok/fs/ext4_completion.hpp','include/ok/fs/ext4_replay_view.hpp','include/ok/fs/ext4_readonly.hpp',
+        paths=['include/ok/fs/ext4/txn.hpp','include/ok/fs/ext4/layout.hpp',
                'tests/host/ext4_completion_tests.cpp','tests/host/ext4_completion_support.hpp',
                'tests/host/ext4_completion_compile.cpp','scripts/test_ext4_completion.py']
         for relative in paths:
