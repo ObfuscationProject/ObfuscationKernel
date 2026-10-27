@@ -1,11 +1,12 @@
 # Checked ext4 read-only replay preview
 
-`ok/fs/ext4_readonly.hpp` supplies static-dispatch decoding over a filesystem-block
-reader. `ok/fs/ext4_replay_view.hpp` binds an actual device through
-`Ext4RecoveryBinding`, plans committed JBD2 actions with revoke filtering, and
-provides a final read-only overlay. This is inspection: it does not write home
-blocks, flush, clear recovery flags, advance the journal tail, publish a VFS mount
-or grant replay execution. Existing ext4 mount admission remains unchanged.
+`Ext4ReadOnlyView` in `ok/fs/ext4/layout.hpp` supplies static-dispatch decoding
+over a filesystem-block reader. `Ext4ReplayPreview` in `ok/fs/ext4/txn.hpp` binds
+an actual device through `Ext4RecoveryBinding`, plans committed JBD2 actions with
+revoke filtering, and provides a final read-only overlay. This is inspection: it
+does not write home blocks, flush, clear recovery flags, advance the journal tail,
+publish a VFS mount or grant replay execution. Existing ext4 mount admission
+remains unchanged.
 
 ## Lifetime and access
 

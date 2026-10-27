@@ -1,11 +1,12 @@
 # JBD2 read-only codec and replay-plan foundation
 
-`include/ok/fs/jbd2.hpp` implements a bounded, freestanding C++23 **host-model
-foundation** for the storage plan. It parses an immutable journal snapshot and
-returns an ordered list of candidate replay actions after commit and revoke
-validation. It does not issue disk writes, execute recovery, checkpoint a
-transaction, expose a filesystem root, or admit a journaled ext4 mount. Existing
-ext4 admission remains unchanged. This is not native recovery acceptance.
+The `ok::fs::jbd2` codec in `include/ok/fs/ext4/journal.hpp` implements a
+bounded, freestanding C++23 **host-model foundation** for the storage plan. It
+parses an immutable journal snapshot and returns an ordered list of candidate
+replay actions after commit and revoke validation. It does not issue disk
+writes, execute recovery, checkpoint a transaction, expose a filesystem root, or
+admit a journaled ext4 mount. Existing ext4 admission remains unchanged. This is
+not native recovery acceptance.
 
 ## Admitted format
 

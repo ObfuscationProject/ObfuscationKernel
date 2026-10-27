@@ -123,13 +123,17 @@ is the generated starting map. Tests under `tests/host/ext4_*` move with the
 headers; hosted ext4 suites and the OS two-boot persistence test must produce
 identical results. Can run in parallel with WT1.1; align the ABI bump at merge.
 
-Scaffold (merged to main from `refactor/ext4-layout`):
-- `include/ok/fs/ext4/{layout,extent,dir,alloc,txn,journal,recovery,mount}.hpp`
-  facades own the 87 slice headers (one owner each); `include/ok/fs/ext4/README.md`.
-- `scripts/check_ext4_layout.py` enforces ownership and reports include-order
-  dependent slices (`ext4_regular_move_completion.hpp` today; `--strict` fails on it).
-Next: switch `src/fs/*.cpp` and tests to the facades, fold slices in, move the 20
-`.inc` partials under `src/fs/ext4/`.
+Folded (worktree `refactor/ext4-layout`, paired OS worktree `refactor/ext4-layout`):
+- 85 slices are folded into the eight modules, layered by actual dependency
+  `journal → layout → extent → alloc → dir → txn → recovery → mount` (Appendix A
+  was cyclic); the 20 partials are in `include/ok/fs/ext4/detail/`, because they
+  are template class bodies the OS compiles from the SDK. `include/ok/fs/ext4/README.md`
+  maps every former header; the two SDK profile marker headers stay standalone.
+  `docs/qualification/EXT4_MODULE_LAYOUT.md` records the equivalence checks.
+- `src/`, tests, hosted runners, `tools/export_sdk.py` and the OS consumer use the
+  module headers; `scripts/check_ext4_layout.py` enforces the layering.
+Merge: bump the module ABI together with `feat/mm-general` and land the paired OS
+worktree in the same promotion.
 
 ### WT1.4 `refactor/user-runtime-split` (M)
 

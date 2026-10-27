@@ -1,10 +1,11 @@
 # JBD2 replay execution foundation
 
-`include/ok/fs/jbd2_replay.hpp` executes the actions produced by the existing
-checksum-v3 JBD2 recovery planner. It performs real `driver::BlockDevice` read,
-write and flush calls. The accompanying tests inject a hosted block device;
-they establish executable recovery logic and exact modeled device bytes, not
-hardware crash recovery, a writable ext4 implementation or mount admission.
+The replay executor in `include/ok/fs/ext4/journal.hpp` executes the actions
+produced by the existing checksum-v3 JBD2 recovery planner. It performs real
+`driver::BlockDevice` read, write and flush calls. The accompanying tests inject
+a hosted block device; they establish executable recovery logic and exact
+modeled device bytes, not hardware crash recovery, a writable ext4
+implementation or mount admission.
 
 The existing [read-only codec and plan contract](jbd2-model.md) is unchanged.
 No ext4 mount, filesystem writer, kernel application, xmake configuration or
