@@ -115,7 +115,15 @@ region array; `FrameAllocator` metadata is caller-owned with one
 registry in those descriptors and gains the shared-allocator activation and
 `retain_copy`; `PageMapping` gains the `copy_on_write` record bit and
 `ok/arch/execution.hpp` adds `remap` and the write-resolver hook for
-copy-on-write fork, with `MappingPages::replace`;
+copy-on-write fork, with `MappingPages::replace`; `MappingView` is one
+contiguous ascending record span with `find()`, `max_address_spaces` and
+`max_native_mappings` give way to `user_window_pages`, backends take table
+storage through `allocate_table_pages`/`release_table_pages` and report
+`OwnershipReport::table_pages`; `MappingPages` keeps contiguous record and
+token runs with retirement bytes; `NativePagePool` adds kernel-object runs and
+`FrameAllocator::allocate_contiguous` an alignment; the shared-file profile
+moves to v3 without fixed file or page counts; the software VM model leaves
+`ok/memory/memory.hpp` for the kernel tests;
 `MemoryManager` owns the kernel `SlabAllocator`; `fs::Node` gains the
 `page_cache()` virtual slot; `ProcessResources` gains `MemoryLimits`; the boot
 headers add the LoongArch EFI and Malta board protocols. The public UAPI stays

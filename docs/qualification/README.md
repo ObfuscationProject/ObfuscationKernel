@@ -77,6 +77,7 @@ live in the separate ObfuscationEvidence repository.
 | [NATIVE_STAT_IDENTITY.md](NATIVE_STAT_IDENTITY.md) | Native file identity |
 | [NATIVE_SYSCALL_ORIGINS.md](NATIVE_SYSCALL_ORIGINS.md) | Owned native syscall origins |
 | [NATIVE_SYSCALL_RESTART_ADAPTER.md](NATIVE_SYSCALL_RESTART_ADAPTER.md) | Static syscall restart preparation |
+| [NATIVE_TABLE_STORAGE.md](NATIVE_TABLE_STORAGE.md) | Runtime-allocated address spaces, mapping records and shared files |
 | [NATIVE_VM.md](NATIVE_VM.md) | Bounded native virtual memory |
 | [NATIVE_WAITS.md](NATIVE_WAITS.md) | Native waits and descriptor readiness |
 | [NETWORK_WIRE.md](NETWORK_WIRE.md) | Network wire bytes |

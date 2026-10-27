@@ -98,27 +98,34 @@ Status on `feat/mm-general` (ABI 75; paired OS worktree `chore/sdk75-consumer`):
   child records; user write faults and kernel `user_range` writes resolve by
   copying or, for the last owner, in place; every backend gains
   `execution::remap`.
+- No fixed user memory pool remains
+  ([NATIVE_TABLE_STORAGE](qualification/NATIVE_TABLE_STORAGE.md)): backends take
+  translation tables from the page pool's object reserve and keep growable slot
+  tables, a process's mapping records are contiguous runs bounded by the user
+  window, shared memory files (SDK profile v3) keep their table, page indexes
+  and ledger in object runs, and the software VM model moved to the kernel
+  tests. The object reserve scales with discovered RAM (a sixteenth of the free
+  frames, at least 256 pages, plus the runtime objects).
 - Verification: `xmake test` on all ten profiles under the pinned QEMU 10.2.0
   (including a discovered-RAM frame/slab/page-cache test point); the paired OS
   distro boots natively on all ten with `qemu-distro --require-native`, whose
   `posix-check` pressure phase now runs against a lowered `RLIMIT_AS`
-  (`OK_VM_QUOTA`) and whose fork copy probe (`OK_VM_FORK_COPY`) passes in the
-  default copy-on-write and the eager fallback builds alike, the former with
-  `OK_NATIVE_COW` showing shared, copied and in-place resolved pages on every
-  profile; hosted suites
+  (`OK_VM_QUOTA`), maps past the former 1024-record bound, and whose fork copy
+  probe (`OK_VM_FORK_COPY`) passes in the default copy-on-write and the eager
+  fallback builds alike, the former with `OK_NATIVE_COW` showing shared, copied
+  and in-place resolved pages on every profile; hosted suites
   `test_boot_memory`, `test_physical_map`, `test_frame_allocator`, `test_slab`,
   `test_page_cache`, `test_native_page_pool`, `test_native_mapping_pages`,
-  `test_native_vm`, `test_process_resources`.
-Open before the exit gate:
-- Fixed pools still in `include/ok/user`: the shared memory files (16 files of
-  64 pages, part of the SDK contract) until shared mappings move onto the page
-  cache (WT1.5/WT3.1). `include/ok/memory` keeps only the software VM model
-  bounds (`max_virtual_mappings`, `max_user_pages`) and the firmware input bound
-  (`max_discovered_regions`).
-- The execution backends' 16 static address spaces and 1024 mapping records
-  per space (`include/ok/arch/execution.hpp`) are not yet frame-allocated.
+  `test_mapping_view`, `test_native_vm`, `test_process_resources`.
+Carried forward (outside the exit gate):
 - No reclaim or OOM policy beyond fallible failure; IRQ/SMP synchronization of
   the allocators arrives with WT1.2 and WT2.1.
+- `sched::max_processes` (64) bounds native processes; the remaining constants
+  in `include/ok/user` are subsystem object capacities, not memory pools, and
+  `include/ok/memory` keeps only the firmware input bound
+  (`max_discovered_regions`).
+- Shared memory files keep eager frames of their own; moving them onto
+  `fs::FilePageCache` belongs with shared file mappings (WT1.5/WT3.1).
 
 ### WT1.2 `feat/irq-wait-time` (L, ABI)
 
