@@ -106,8 +106,10 @@ A freestanding `Kernel::boot` without a product-grade map fails with
 `not_found`. The synthetic 64 MiB map starting at 1 MiB exists only in hosted
 model builds, whose frame addresses are never dereferenced.
 
-`LinearAddressSpace`, `PageTable` and `UserAddressSpace` in this module are
-software mapping/copy models used by debug tests. `TranslationMode` records the
+The software mapping/copy models (`LinearAddressSpace`, `PageTable`,
+`UserAddressSpace`, `VirtualMemoryManager`) live with the kernel's roadmap tests
+and test points in `tests/kernel/model/vm_model.hpp`; this module keeps no fixed
+user page or mapping tables. `TranslationMode` records the
 selected profile (`linear`, `paged`, `higher_half`); selecting a value does not
 activate a hardware address space. Architecture page-table operations should use
 constrained templates/static dispatch rather than a virtual interface solely to
@@ -118,7 +120,7 @@ and [copy-on-write fork](../qualification/NATIVE_COW_FORK.md), with eager fork c
 behind `--native_cow_fork=n`.
 In kernel builds its page pool draws from the kernel allocator; hosted model
 builds keep a host-backed arena. Its hardware mappings and acceptance tests are
-distinct from this module's software VM models.
+distinct from the software VM models.
 
 ## Verification
 

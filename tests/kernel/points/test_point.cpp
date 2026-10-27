@@ -1,6 +1,7 @@
 #include "ok/core/test_point.hpp"
 
 #include "ok/core/kernel.hpp"
+#include "../model/vm_model.hpp"
 #include "ok/fs/ext4.hpp"
 
 #if defined(OK_ENABLE_TEST_POINTS)
@@ -218,13 +219,13 @@ Status test_memory(TestPointRunner &runner)
     {
         return status;
     }
-    if (auto status =
-            runner.check_status("memory", "map", manager.kernel_address_space().map(0x2000, frame.value(), 0b11));
+    memory::model::LinearAddressSpace kernel_space;
+    if (auto status = runner.check_status("memory", "map", kernel_space.map(0x2000, frame.value(), 0b11));
         !status.ok())
     {
         return status;
     }
-    if (auto status = runner.check_status("memory", "unmap", manager.kernel_address_space().unmap(0x2000));
+    if (auto status = runner.check_status("memory", "unmap", kernel_space.unmap(0x2000));
         !status.ok())
     {
         return status;
