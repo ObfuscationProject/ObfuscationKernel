@@ -173,6 +173,8 @@ Done on the worktree branch:
   exception vectors) because code is no longer inlined across units; dropping
   the rescue applications more than offsets it. All ten release kernels boot to
   `status=ready`.
+- Results and ObfuscationEvidence receipts:
+  [qualification/USER_RUNTIME_SPLIT.md](qualification/USER_RUNTIME_SPLIT.md).
 
 ## P2: platform and protocols
 
