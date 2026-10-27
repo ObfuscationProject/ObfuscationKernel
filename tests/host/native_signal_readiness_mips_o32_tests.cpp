@@ -1,4 +1,4 @@
-#include "ok/user/native_signal_gate_mips_o32.hpp"
+#include "ok/arch/mips/signal.hpp"
 #include <cstdio>
 #include <cstdlib>
 using namespace ok;

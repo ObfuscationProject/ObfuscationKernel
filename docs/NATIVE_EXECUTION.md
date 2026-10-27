@@ -32,7 +32,8 @@ modeled CPU topology is not hardware SMP.
 `SchedulerState` owns the only process/thread table. Each process owns its native
 address-space handle and backing-page list; each thread owns the saved integer,
 floating-point and TLS state. See [process resources](modules/process-resources.md).
-The native runtime in `src/user/runtime.cpp` selects runnable native threads from
+The native runtime loop in `src/user/runtime/entry.cpp` (the runtime's units are
+mapped in [src/user/README.md](../src/user/README.md)) selects runnable native threads from
 that table, calls the architecture-selected `execution::enter_owned` with an active [entry stack lease](qualification/NATIVE_ENTRY_STACKS.md), and handles the
 returned syscall, timer or fault. There is no virtual call in architecture entry
 or a duplicate native process table. The existing scheduler policy remains a

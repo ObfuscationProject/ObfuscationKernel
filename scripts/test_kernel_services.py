@@ -20,7 +20,7 @@ def main() -> None:
     for directory in ("core", "rescue", "driver", "fs", "gui", "interrupt", "ipc", "memory",
                       "net", "posix", "sched", "smp", "syscall", "user"):
         sources.extend(path for path in sorted((root / "src" / directory).rglob("*.cpp"))
-                       if path.name not in ("entry.cpp", "kernel_main.cpp"))
+                       if path.name not in ("entry.cpp", "kernel_main.cpp") or path.parent.name == "runtime")
     sources.extend(root / path for path in ("src/arch/arch.cpp", "src/arch/clock.cpp", "src/arch/realtime.cpp",
                                           "src/arch/terminal_power.cpp", "src/arch/x86_64/ops.cpp",
                                           "src/arch/execution_stub.cpp"))

@@ -1,5 +1,5 @@
 // Actual Linux adapter/common native copy boundary with hosted mappings only.
-#include "../../src/user/runtime.cpp"
+#include "native_runtime_units.hpp"
 #include "unavailable_realtime.hpp"
 #include "ok/fs/mode_policy.hpp"
 #include "../kernel/points/directory_checks.hpp"

@@ -29,7 +29,8 @@ def main():
         shutil.copytree(root / name, source / name)
     suites = ['dispatch', 'bridge', 'policy', 'call'] if args.suite == 'all' else [args.suite]
     names = ['tests/host/linux_chmod_' + suite + '_tests.cpp' for suite in suites]
-    names += ['tests/host/unavailable_realtime.hpp', 'scripts/test_linux_chmod.py']
+    names += ['tests/host/unavailable_realtime.hpp', 'tests/host/native_runtime_units.hpp',
+              'scripts/test_linux_chmod.py']
     for name in names:
         (source / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(root / name, source / name)
@@ -42,7 +43,7 @@ def main():
         for subsystem in ('core', 'rescue', 'driver', 'fs', 'gui', 'interrupt', 'ipc',
                           'memory', 'net', 'posix', 'sched', 'smp', 'syscall', 'user'):
             shared += [str(p.relative_to(source)) for p in sorted((source / 'src' / subsystem).rglob('*.cpp'))
-                       if p.name not in ('entry.cpp', 'kernel_main.cpp', 'runtime.cpp')]
+                       if p.name not in ('entry.cpp', 'kernel_main.cpp', 'runtime.cpp') and p.parent.name != 'runtime']
         shared += ['src/arch/arch.cpp', 'src/arch/x86_64/ops.cpp']
     project = ['set_project("linux_chmod_hosted")', 'set_languages("cxx23")']
     for suite in suites:

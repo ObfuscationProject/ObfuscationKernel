@@ -64,8 +64,8 @@ SDK 31 receipts: they require an ABI 31 SDK and already reject the
   read-only pages that do not resolve, `mprotect` settling, a failed `remap`
   and teardown reference counts against a record-reading mock backend.
   `test_native_page_pool.py` covers `retain_copy`; `test_native_mapping_pages.py`
-  covers `replace`. Other hosted runners that compile `runtime.cpp` define
-  their own flags and so model the eager fallback.
+  covers `replace`. Other hosted runners that build the native runtime
+  units define their own flags and so model the eager fallback.
 - Native QEMU guests through the paired ObfuscationOS worktree
   (`chore/sdk75-consumer`) with kernel SDKs exported from the default and the
   `--native_cow_fork=n` configurations: `posix-check` runs its existing fork tests and

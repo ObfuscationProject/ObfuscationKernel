@@ -99,4 +99,5 @@ live in the separate ObfuscationEvidence repository.
 | [THREAD_LIFECYCLE.md](THREAD_LIFECYCLE.md) | Serialized native thread foundation (SDK26) |
 | [TYPED_FIRMWARE_HANDOFF.md](TYPED_FIRMWARE_HANDOFF.md) | Typed firmware memory discovery |
 | [UDP_ZERO_DESTINATION_SEND.md](UDP_ZERO_DESTINATION_SEND.md) | Connected UDP zero-destination send successor |
+| [USER_RUNTIME_SPLIT.md](USER_RUNTIME_SPLIT.md) | Native runtime split, signal headers and rescue gate |
 | [WAIT_REGISTRATION.md](WAIT_REGISTRATION.md) | Serialized wait registration prototype |

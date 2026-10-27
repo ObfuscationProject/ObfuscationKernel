@@ -2,7 +2,7 @@
 // Actual Linux adapter/common native copy boundary with hosted mappings only.
 #define OK_SYSCALL_ORIGIN_MODEL 1
 #define OK_NATIVE_VFS_CONTINUATION_MODEL 1
-#include "../../src/user/runtime.cpp"
+#include "native_runtime_units.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

@@ -6,7 +6,7 @@
 #include "ok/abi/linux_udp_call.hpp"
 #include "ok/core/kernel.hpp"
 
-namespace ok::user::native { namespace { class LinuxUdpOperationRuntimeAuthority; } }
+namespace ok::user::native { inline namespace runtime_detail { class LinuxUdpOperationRuntimeAuthority; } }
 
 namespace ok::user::native::linux_udp
 {

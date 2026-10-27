@@ -1,4 +1,4 @@
-#include "ok/user/native_signal_frame_ppc32.hpp"
+#include "ok/arch/ppc/signal.hpp"
 #include "../fixtures/signals/linux_ppc32_layout.hpp"
 #include <cstdio>
 #include <cstdlib>

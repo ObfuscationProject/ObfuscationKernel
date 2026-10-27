@@ -105,7 +105,7 @@ def main():
     for subsystem in ('core', 'rescue', 'driver', 'fs', 'gui', 'interrupt', 'ipc', 'memory',
                       'net', 'posix', 'sched', 'smp', 'syscall', 'user'):
         suites['dispatch'].extend(str(p.relative_to(source)) for p in sorted((source / 'src' / subsystem).rglob('*.cpp'))
-                                  if p.name not in ('entry.cpp', 'kernel_main.cpp', 'runtime.cpp'))
+                                  if p.name not in ('entry.cpp', 'kernel_main.cpp', 'runtime.cpp') and p.parent.name != 'runtime')
     suites['dispatch'].extend(['src/arch/arch.cpp', 'src/arch/x86_64/ops.cpp'])
     selected = ['codec', 'call', 'bridge', 'dispatch', 'blocks'] if args.suite == 'all' else [args.suite]
     if not args.build_only and not args.argument and args.suite in ('provider', 'service', 'copy-order', 'raw-blocks'):

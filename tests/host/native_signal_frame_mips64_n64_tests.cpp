@@ -1,4 +1,4 @@
-#include "ok/user/native_signal_frame_mips64_n64.hpp"
+#include "ok/arch/mips64/signal.hpp"
 #include "../fixtures/signals/linux_mips64_n64_layout.hpp"
 #include <cstdio>
 #include <cstdlib>

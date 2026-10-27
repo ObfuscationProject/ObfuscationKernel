@@ -1,4 +1,4 @@
-#include "ok/user/native_signal_frame_riscv.hpp"
+#include "ok/arch/riscv/signal.hpp"
 using namespace ok; using namespace ok::user::native;
 #if __riscv_xlen == 32
 using C=Rv32SignalFrame;

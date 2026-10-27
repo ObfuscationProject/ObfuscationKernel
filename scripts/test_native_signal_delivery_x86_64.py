@@ -11,7 +11,7 @@ inputs=('include/ok/core/types.hpp','include/ok/abi/linux_user.hpp','include/ok/
  'include/ok/sched/signal_mask.hpp','include/ok/sched/signal_action.hpp','include/ok/sched/pending_signals.hpp', 'include/ok/sched/child_exit.hpp', 'include/ok/user/native_signal_info.hpp',
  'include/ok/user/native_signal_mask.hpp','include/ok/user/native_signal_action.hpp',
  'include/ok/user/native_signal_delivery.hpp','include/ok/sched/signal_altstack.hpp','include/ok/user/native_signal_altstack.hpp',
- 'include/ok/user/native_signal_frame_x86_64.hpp','include/ok/user/native_signal_delivery_x86_64.hpp',
+ 'include/ok/arch/x86_64/signal.hpp',
  'tests/host/native_signal_delivery_x86_64_tests.cpp','scripts/test_native_signal_delivery_x86_64.py')
 for name in inputs:
  p=root/name;q=src/name;q.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(p,q);record['files'][name]=sha(q)

@@ -1,4 +1,4 @@
-#include "ok/user/native_signal_frame_x86_64.hpp"
+#include "ok/arch/x86_64/signal.hpp"
 using Codec = ok::user::native::X86SignalFrame;
 extern bool signal_frame_read(ok::u64, std::span<std::byte>);
 bool signal_frame_compile(ok::u64 sp, const Codec::Frame &current, Codec::Restored &restored)

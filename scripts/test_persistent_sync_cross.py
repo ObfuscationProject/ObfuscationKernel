@@ -23,6 +23,7 @@ def main():
     out = args.output.resolve(); out.mkdir(parents=True, exist_ok=False)
     source = out / 'source'
     paths = ['src/posix/fd.cpp', 'src/core/kernel_syscalls.cpp', 'src/user/runtime.cpp',
+             *sorted(str(p.relative_to(root)) for p in (root / 'src/user/runtime').glob('*.cpp')),
              'tests/host/persistent_sync_debug_compile.cpp', 'tests/host/persistent_sync_compile.cpp']
     files = {root / name for name in paths} | {Path(__file__).resolve(), root / 'scripts/test_ext4_owned.py'}
     for base in ('include', 'src', 'tests'):

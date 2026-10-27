@@ -24,7 +24,7 @@ def main():
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     source = output / 'input'
-    names = ('include/ok/arch/execution.hpp', 'include/ok/arch/kernel_entry_stack.hpp', 'include/ok/user/native_signal_frame_x86_64.hpp', 'include/ok/sched/signal_mask.hpp', 'include/ok/sched/child_exit.hpp', 'include/ok/sched/pending_signals.hpp', 'include/ok/user/native_signal_info.hpp', 'include/ok/core/types.hpp', 'include/ok/abi/linux_user.hpp',
+    names = ('include/ok/arch/execution.hpp', 'include/ok/arch/kernel_entry_stack.hpp', 'include/ok/arch/x86_64/signal.hpp', 'include/ok/sched/signal_mask.hpp', 'include/ok/sched/child_exit.hpp', 'include/ok/sched/pending_signals.hpp', 'include/ok/user/native_signal_info.hpp', 'include/ok/core/types.hpp', 'include/ok/abi/linux_user.hpp',
              'include/ok/abi/linux_profile_data.hpp', 'include/ok/user/native_signal_mask.hpp',
              'tests/host/native_signal_frame_x86_64_tests.cpp', 'scripts/test_native_signal_frame_x86_64.py')
     for name in names:

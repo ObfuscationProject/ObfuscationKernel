@@ -1,5 +1,5 @@
 // Hosted delivery transaction tests: no scheduler, guest CPU or live sigreturn.
-#include "ok/user/native_signal_delivery_x86_64.hpp"
+#include "ok/arch/x86_64/signal.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>

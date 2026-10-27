@@ -30,6 +30,7 @@ def main():
     if args.native_integration:
         paths += ['src/core/native_shutdown.cpp', 'src/core/entry.cpp', 'src/core/module.cpp',
                   'src/driver/driver.cpp', 'src/sched/scheduler.cpp', 'src/user/runtime.cpp',
+                  *sorted(str(p.relative_to(root)) for p in (root / 'src/user/runtime').glob('*.cpp')),
                   'src/arch/terminal_power.cpp']
     if args.debug_point_only: paths = ['tests/kernel/points/test_point.cpp']
     files = {root / name for name in paths} | {Path(__file__).resolve(), root / 'scripts/test_ext4_owned.py'}
