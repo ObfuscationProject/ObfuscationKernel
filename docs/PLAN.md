@@ -163,16 +163,16 @@ Done on the worktree branch:
   headers, and the module ABI bump is due at merge.
 - Hosted runners compile `src/rescue` again (they still listed `src/apps`);
   69 runners pass instead of 58.
-- Release image `.text` after the split: i386 -2.7K, rv32 -6.4K, aarch64 +0.9K,
-  mips64 +1.0K, rv64 +1.2K, mips +1.9K, x86_64 +3.1K, arm32 +8.2K,
-  loongarch64 +15.9K, ppc +44.3K (about 26K is fill before the 64 KiB-aligned
-  exception vectors). The growth is code no longer inlined across units.
-
-Open: building `src/rescue` only with `kernel_gui`. The debug self-test suite
-drives the shell and GUI applications, `scripts/qemu_test.py` requires `shell=1`,
-and `Kernel` holds the applications as members, so gating changes CI coverage
-and the exported `Kernel` layout. The applications are 80-155 KiB of release
-`.text` per profile.
+- `src/rescue` is compiled only with `kernel_gui` or in debug builds; other
+  release builds link `src/rescue/disabled.cpp`, which keeps the interfaces
+  (`Kernel` layout and SDK symbols are unchanged) and behaves as never opened.
+- Release image `.text` (no `kernel_gui`) against the start of the worktree:
+  aarch64 -91K, arm32 -92K, i386 -95K, loongarch64 -103K, mips -113K,
+  mips64 -122K, ppc -137K, rv32 -86K, rv64 -76K, x86_64 -104K. The split alone
+  grows `.text` by up to 16K (ppc +44K, mostly fill before the 64 KiB-aligned
+  exception vectors) because code is no longer inlined across units; dropping
+  the rescue applications more than offsets it. All ten release kernels boot to
+  `status=ready`.
 
 ## P2: platform and protocols
 

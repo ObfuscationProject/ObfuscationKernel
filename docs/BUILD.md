@@ -105,6 +105,12 @@ xmake f -c -y -m release -a x86_64 --kernel_gui=y
 xmake -y -b okernel_image
 ```
 
+The kernel rescue applications in `src/rescue/` (debug shell, file manager, task
+manager) are compiled only with `kernel_gui` or in debug builds, whose test points
+exercise them. Other release builds link `src/rescue/disabled.cpp`, which keeps the
+same interfaces and behaves as if the applications were never opened, so the
+`Kernel` layout and the SDK symbols do not depend on the option.
+
 The convenience launcher builds with that option and opens a QEMU window:
 
 ```sh
