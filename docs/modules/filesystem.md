@@ -42,6 +42,28 @@ use checked user buffers; `pread`/`pwrite` preserve the shared open-file offset.
 `fsync` and `fdatasync` reach the node's synchronization operation. RAM nodes
 have no persistent backing; ext4 issues device FLUSH.
 
+## Page cache skeleton
+
+`fs::FilePageCache` (`ok/fs/page_cache.hpp`) holds the page-sized contents of
+one file and is owned by its VFS node; `Node::page_cache()` exposes it and
+returns null for providers that keep uncached `read`/`write`. No provider binds
+one yet: it is the base for shared file mappings and storage write-back, and it
+never performs backing-store I/O itself.
+
+Pages are frames of kind `page_cache` from the kernel allocator, charged to the
+cache's page account; the sorted page index grows through the kernel slab and
+is charged to the cache in bytes. Per-page state is the frame's descriptor:
+uptodate and dirty flags and a pin count for mappings and in-flight I/O.
+`obtain()` returns an existing page or a new zeroed one that is not uptodate;
+only an uptodate page can become dirty; `next_dirty()` walks dirty pages in file
+order for write-back, which then marks them clean. `evict_clean()` releases
+unpinned clean pages, `truncate()` drops pages past a new end and refuses while
+one of them is pinned, and `clear()` (node retirement) refuses while any page is
+pinned or dirty. Calls are serialized like the allocators underneath. The hosted
+suite is `scripts/test_page_cache.py`; the debug test point
+`memory/discovered-ram-frames-and-objects` also drives a cache over real guest
+RAM on every profile.
+
 ## Device-backed ext4
 
 `ok::fs::Ext4FileSystem` mounts clean supported ext4 volumes through

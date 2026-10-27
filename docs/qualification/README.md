@@ -13,6 +13,7 @@ live in the separate ObfuscationEvidence repository.
 | [ALLOCATED_EMPTY_RECOVERY_PREVIEW.md](ALLOCATED_EMPTY_RECOVERY_PREVIEW.md) | Private allocated-empty recovery preview |
 | [ALLOCATED_EMPTY_SESSION_PREVIEW.md](ALLOCATED_EMPTY_SESSION_PREVIEW.md) | Guarded allocated-empty Session preview |
 | [BOOT_MEMORY_HANDOFF.md](BOOT_MEMORY_HANDOFF.md) | Boot memory parsing and remaining handoff work |
+| [BOOT_MEMORY_MAP.md](BOOT_MEMORY_MAP.md) | Discovered boot memory map on ten profiles |
 | [CHECKED_CHILD_REAP.md](CHECKED_CHILD_REAP.md) | Checked child detachment and orphan reaping |
 | [CHECKED_VFS_CALLERS.md](CHECKED_VFS_CALLERS.md) | Checked filesystem callers candidate |
 | [EXT4_ALLOCATED_EMPTY_DATA.md](EXT4_ALLOCATED_EMPTY_DATA.md) | Private allocated-empty first-block planner |
@@ -42,6 +43,7 @@ live in the separate ObfuscationEvidence repository.
 | [NATIVE_CHILD_WAIT_SIGNALS.md](NATIVE_CHILD_WAIT_SIGNALS.md) | Owned native child waits and private caught signals |
 | [NATIVE_CONSOLE_CONTROL.md](NATIVE_CONSOLE_CONTROL.md) | Bounded controlling console and foreground groups |
 | [NATIVE_CONSOLE_INPUT.md](NATIVE_CONSOLE_INPUT.md) | Native console input lease |
+| [NATIVE_COW_FORK.md](NATIVE_COW_FORK.md) | Copy-on-write native fork |
 | [NATIVE_CREDENTIALS.md](NATIVE_CREDENTIALS.md) | Native Process Credentials |
 | [NATIVE_DYNAMIC_STARTUP.md](NATIVE_DYNAMIC_STARTUP.md) | First x86-64 shared-musl startup candidate |
 | [NATIVE_ENTROPY.md](NATIVE_ENTROPY.md) | Trusted entropy and Linux initial-stack randomness |
@@ -75,6 +77,7 @@ live in the separate ObfuscationEvidence repository.
 | [NATIVE_STAT_IDENTITY.md](NATIVE_STAT_IDENTITY.md) | Native file identity |
 | [NATIVE_SYSCALL_ORIGINS.md](NATIVE_SYSCALL_ORIGINS.md) | Owned native syscall origins |
 | [NATIVE_SYSCALL_RESTART_ADAPTER.md](NATIVE_SYSCALL_RESTART_ADAPTER.md) | Static syscall restart preparation |
+| [NATIVE_TABLE_STORAGE.md](NATIVE_TABLE_STORAGE.md) | Runtime-allocated address spaces, mapping records and shared files |
 | [NATIVE_VM.md](NATIVE_VM.md) | Bounded native virtual memory |
 | [NATIVE_WAITS.md](NATIVE_WAITS.md) | Native waits and descriptor readiness |
 | [NETWORK_WIRE.md](NETWORK_WIRE.md) | Network wire bytes |
@@ -84,6 +87,7 @@ live in the separate ObfuscationEvidence repository.
 | [PLATFORM_CLOCKS.md](PLATFORM_CLOCKS.md) | Native platform clocks |
 | [PRIVATE_FUTEX.md](PRIVATE_FUTEX.md) | Private futex implementation contract |
 | [PRIVATE_FUTEX_PEER_FIXTURE.md](PRIVATE_FUTEX_PEER_FIXTURE.md) | Actual private futex peer execution fixture |
+| [PROCESS_MEMORY_QUOTAS.md](PROCESS_MEMORY_QUOTAS.md) | Per-process memory quotas |
 | [PUBLIC_REALTIME.md](PUBLIC_REALTIME.md) | Checked public realtime clocks |
 | [QEMU_RUNTIME_FRAMES.md](QEMU_RUNTIME_FRAMES.md) | Qualified QEMU runtime frame bridge |
 | [QUALIFIED_BOOT_MEMORY.md](QUALIFIED_BOOT_MEMORY.md) | Qualified entry memory |

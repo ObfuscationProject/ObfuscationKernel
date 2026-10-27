@@ -30,9 +30,11 @@ with GICv2, in addition to the architecture-neutral model tests.
 - Fault classification from ESR_EL1/FAR_EL1, safe user-copy validation across
   every requested page, and stable generation-checked address-space handles.
 
-The current backend supports one executing CPU and 16 address spaces, each
-with up to 16 sparse level-3 page tables. Application backing pages belong to
-the caller's reserved physical storage; the backend owns page tables only.
+The current backend supports one executing CPU. Each address space owns a
+level-1 root, a level-2 directory and one level-3 table per populated 2 MiB,
+all allocated from the runtime's table storage and released with the space;
+the slot table grows with the number of spaces. Application backing pages
+belong to the caller; the backend owns page tables only.
 The initial identity layout assumes QEMU virt RAM in `[0x40000000, 0x80000000)`
 and MMIO below `0x10000000`; it does not discover memory from a device tree.
 GICv3, SVE, SMP execution and general physical-page allocation remain future

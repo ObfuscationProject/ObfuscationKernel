@@ -9,6 +9,7 @@ namespace ok::test
 inline Status check_frame_allocator()
 {
     static memory::FrameAllocator frames;
+    static memory::FrameMetadataStorage<8, 4> metadata;
     const std::array regions{
         memory::MemoryRegion{0x1000'0000, 0x2000, memory::RegionType::usable},
         memory::MemoryRegion{0x3001, 0x1000, memory::RegionType::reserved},
@@ -17,7 +18,7 @@ inline Status check_frame_allocator()
         memory::MemoryRegion{0x7000, 0x1000, memory::RegionType::kernel_image},
         memory::MemoryRegion{0x8000, 1, memory::RegionType::device_mmio},
     };
-    if (auto status = frames.initialize(regions, 4096); !status.ok())
+    if (auto status = frames.initialize(regions, 4096, metadata.bytes); !status.ok())
     {
         return status;
     }
@@ -37,7 +38,7 @@ inline Status check_frame_allocator()
         owned[i] = frame.value();
     }
     if (frames.allocate().status().code() != StatusCode::no_memory ||
-        frames.initialize(regions, 4096).code() != StatusCode::busy)
+        frames.initialize(regions, 4096, metadata.bytes).code() != StatusCode::busy)
     {
         return Status::fault("physical frame exhaustion or live reset was accepted");
     }
@@ -74,7 +75,7 @@ inline Status check_frame_allocator()
     {
         return status;
     }
-    if (auto status = frames.initialize(regions, 4096); !status.ok())
+    if (auto status = frames.initialize(regions, 4096, metadata.bytes); !status.ok())
     {
         return status;
     }
@@ -89,18 +90,21 @@ inline Status check_frame_allocator()
     }
 
     const std::array overflow{memory::MemoryRegion{~uptr{0} - 7, 16, memory::RegionType::usable}};
-    if (frames.initialize(overflow, 4096).code() != StatusCode::overflow ||
-        frames.initialize(regions, 0).code() != StatusCode::invalid_argument ||
-        frames.initialize(regions, 3000).code() != StatusCode::invalid_argument ||
+    if (frames.initialize(overflow, 4096, metadata.bytes).code() != StatusCode::overflow ||
+        frames.initialize(regions, 0, metadata.bytes).code() != StatusCode::invalid_argument ||
+        frames.initialize(regions, 3000, metadata.bytes).code() != StatusCode::invalid_argument ||
         frames.total_frames() != 5 || frames.free_frames() != 5)
     {
         return Status::fault("invalid physical map changed the active allocator");
     }
-    const std::array too_large{memory::MemoryRegion{
-        0x1000, (memory::max_physical_frames + 1) * 4096, memory::RegionType::usable}};
-    if (frames.initialize(too_large, 4096).code() != StatusCode::overflow || frames.total_frames() != 5)
+    // Larger maps need larger caller storage; they are never truncated to fit.
+    constexpr usize too_many = sizeof(metadata.bytes) / sizeof(memory::PageDescriptor) + 1;
+    const std::array too_large{memory::MemoryRegion{0x1000, too_many * 4096, memory::RegionType::usable}};
+    auto required = memory::FrameAllocator::metadata_bytes(too_large, 4096);
+    if (!required || required.value() <= metadata.bytes.size() ||
+        frames.initialize(too_large, 4096, metadata.bytes).code() != StatusCode::no_memory || frames.total_frames() != 5)
     {
-        return Status::fault("physical map was silently truncated to bootstrap capacity");
+        return Status::fault("physical map was silently truncated to its metadata storage");
     }
     return Status::success();
 }

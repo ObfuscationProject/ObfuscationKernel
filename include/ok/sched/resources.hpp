@@ -172,6 +172,44 @@ enum class UserPersonality : u8
     linux
 };
 
+// One RLIMIT value pair in bytes, laid out like the UAPI `ok_rlimit`.
+struct MemoryLimit
+{
+    u64 current{~u64{0}};
+    u64 maximum{~u64{0}};
+};
+
+// Per-process memory quotas (RLIMIT_AS, RLIMIT_DATA). Native mappings are
+// eager, so every mapped user page is the process's charge against the address
+// space limit; the data limit bounds the brk heap. Inherited by fork, kept by exec.
+struct MemoryLimits
+{
+    MemoryLimit address_space{};
+    MemoryLimit data{};
+
+    // Common UAPI resource numbers (x86_64 Linux): RLIMIT_DATA 2, RLIMIT_AS 9.
+    [[nodiscard]] MemoryLimit *find(uptr resource)
+    {
+        return resource == 9 ? &address_space : resource == 2 ? &data : nullptr;
+    }
+    [[nodiscard]] Status admit(usize pages, usize page_size) const
+    {
+        return pages > address_space.current / page_size ? Status::no_memory("process address-space quota exceeded")
+                                                         : Status::success();
+    }
+    // Errno-style result. Lowering below current usage is allowed (growth then
+    // fails); only a privileged caller may raise a maximum.
+    static i64 update(MemoryLimit &limit, MemoryLimit requested, bool privileged)
+    {
+        if (requested.current > requested.maximum)
+            return -22;
+        if (requested.maximum > limit.maximum && !privileged)
+            return -1;
+        limit = requested;
+        return 0;
+    }
+};
+
 struct ProcessResources
 {
     usize unix_receive_operations{}; // Prepared UNIX receives/accepts prevent resource retirement.
@@ -190,6 +228,7 @@ struct ProcessResources
     uptr program_break_limit{0x1010'0000};
     uptr next_mapping_address{0x2000'0000};
     u32 file_mode_mask{0022};
+    MemoryLimits memory_limits{};
 };
 
 inline constexpr usize max_process_pipes = 16;

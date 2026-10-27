@@ -5,15 +5,10 @@ namespace ok::user::native
 {
 inline namespace runtime_detail
 {
-namespace
-{
-constexpr usize page_count = NativePagePool::capacity;
-constexpr auto runtime_arch = arch::configured_architecture();
-} // namespace
 #ifdef OK_KERNEL_FREESTANDING
 namespace
 {
-constexpr bool linker_pool_required = !boot::qemu_firmware_process_pool<runtime_arch>;
+constexpr bool linker_pool_required = false; // Frames come from the kernel allocator over discovered RAM.
 } // namespace
 #else
 namespace
@@ -23,43 +18,39 @@ constexpr bool linker_pool_required = true; // Hosted backing, never firmware ev
 #endif
 namespace
 {
-alignas(4096) std::array<std::array<std::byte, hw::page_size>, linker_pool_required ? page_count : 0> physical_pages;
+// Hosted models only: a host-backed arena with its own allocator.
+constexpr usize hosted_page_count = 1024;
+alignas(4096) std::array<std::array<std::byte, hw::page_size>, linker_pool_required ? hosted_page_count : 0> physical_pages;
 memory::FrameAllocator native_frames;
+memory::FrameMetadataStorage<linker_pool_required ? hosted_page_count : 1> native_frame_metadata;
 } // namespace
 NativePagePool page_pool;
 SharedMemoryFiles shared_files;
 #ifdef OK_KERNEL_FREESTANDING
 namespace
 {
-boot::FirmwareMemory firmware_workspace, firmware_memory;
-boot::QualifiedBootMemory qualified_workspace, qualified_memory;
 Status memory_preparation = Status::not_initialized("native memory not prepared at entry");
 bool memory_preparation_attempted{};
 } // namespace
 #endif
-std::array<QuarantinedSpace, hw::max_address_spaces + 1> quarantined_spaces{};
+std::array<QuarantinedSpace, sched::max_processes + 1> quarantined_spaces{};
 namespace
 {
 constexpr usize kernel_object_pages = poll_object_pages + futex_object_pages + pipe_read_object_pages + pipe_write_object_pages + pty_wait_object_pages + child_wait_object_pages + native_udp_receive_pages + linux_udp_receive_pages;
 } // namespace
-// Aliases consume metadata records without another physical data frame. Bound
-// every published directory and one candidate independently of the data quota.
-static_assert(kernel_object_pages < NativePagePool::capacity);
+static_assert(kernel_object_pages < hosted_page_count);
 namespace
 {
-constexpr usize mapping_metadata_pages =
-    (hw::max_address_spaces + 1) * (Pages::max_blocks + Pages::max_frame_blocks);
-constexpr usize kernel_reserve_pages = kernel_object_pages + mapping_metadata_pages;
+// Translation tables and mapping metadata grow with the processes they serve:
+// beside the runtime objects, the reserve holds a sixteenth of the frames free
+// at activation, at least 256. User pages never take reserved frames.
+constexpr usize object_reserve_pages(usize free) { return kernel_object_pages + (free / 16 > 256 ? free / 16 : 256); }
+constexpr usize kernel_reserve_pages = object_reserve_pages(hosted_page_count);
 } // namespace
-static_assert(kernel_reserve_pages < NativePagePool::capacity);
-#if __SIZEOF_POINTER__ == 8
-static_assert(Pages::records_per_block == 170 && Pages::frames_per_block == 128 && mapping_metadata_pages == 255);
-#else
-static_assert(Pages::records_per_block == 341 && Pages::max_frame_blocks >= 6 && Pages::max_frame_blocks <= 7);
-#endif
+static_assert(kernel_reserve_pages < hosted_page_count);
 void emit_pool_stats()
 {
-    emit("\nOK_NATIVE_FRAMES version=2 source=");
+    emit("\nOK_NATIVE_FRAMES version=3 source=");
     emit(page_pool.source() == NativePagePool::Source::qualified_firmware ? "firmware" : "linker");
     emit(" used="); emit_number(page_pool.used_count());
     emit(" total="); emit_number(page_pool.total_count());
@@ -79,8 +70,10 @@ void emit_pool_stats()
     emit(" retiring_files="); emit_number(files.retiring_files);
     emit(" retained_frames="); emit_number(files.retained_frames);
     emit(" reserved_cells="); emit_number(files.reserved_cells); emit("\n");
+    if (copy_on_write_fork) { emit("OK_NATIVE_COW version=1 shared="); emit_number(copy_on_write_stats.shared);
+        emit(" copied="); emit_number(copy_on_write_stats.copied); emit(" reused="); emit_number(copy_on_write_stats.reused); emit("\n"); }
 }
-Status activate_pool()
+Status activate_pool([[maybe_unused]] Kernel *kernel)
 {
     if (page_pool.source() != NativePagePool::Source::inactive)
         return Status::success();
@@ -88,14 +81,21 @@ Status activate_pool()
     if (!memory_preparation) return memory_preparation;
     if constexpr (!linker_pool_required)
     {
-        if (auto status = boot::initialize_qualified_frames(qualified_memory, native_frames); !status)
-            return status;
-        return page_pool.activate(native_frames, NativePagePool::Source::qualified_firmware, kernel_reserve_pages);
+        if (!kernel) kernel = runtime_kernel;
+        if (!kernel) return Status::not_initialized("native page pool requires its kernel allocator");
+        // Shared with every other kernel owner: user pages may take what is
+        // free at activation outside the kernel-object reserve.
+        auto &frames = kernel->memory().frames();
+        const auto reserve = object_reserve_pages(frames.free_frames());
+        if (frames.free_frames() <= reserve)
+            return Status::no_memory("discovered RAM cannot hold the native kernel-object reserve");
+        return page_pool.activate(frames, NativePagePool::Source::qualified_firmware, reserve,
+                                  frames.free_frames() - reserve);
     }
 #endif
     const memory::MemoryRegion region{reinterpret_cast<uptr>(physical_pages.data()),sizeof(physical_pages),
                                       memory::RegionType::usable};
-    if (auto status = native_frames.initialize({&region,1},hw::page_size); !status) return status;
+    if (auto status = native_frames.initialize({&region,1},hw::page_size,native_frame_metadata.bytes); !status) return status;
     return page_pool.activate(native_frames, NativePagePool::Source::linker_reserved, kernel_reserve_pages);
 }
 #ifdef OK_ENABLE_TEST_POINTS
@@ -157,6 +157,14 @@ bool same_space(const hw::AddressSpace &a, const hw::AddressSpace &b)
 {
     return a.root == b.root && a.slot == b.slot && a.generation == b.generation;
 }
+#ifdef OK_NATIVE_COW_FORK
+bool resolve_native_write(const hw::AddressSpace &space, uptr page) // Installed only after runtime_kernel.
+{
+    auto resolved = resolve_owner_write(runtime_kernel->scheduler().processes(), space, page, page_pool);
+    if (!resolved && resolved.status().code() != StatusCode::no_memory) runtime_failure = resolved.status();
+    return resolved && resolved.value();
+}
+#endif
 namespace
 {
 Status release_page_reference(const memory::PhysicalFrame &frame, bool &consumed)
@@ -195,14 +203,14 @@ Status discharge_quarantine(QuarantinedSpace &saved, bool all, uptr begin, usize
     {
         const auto &page = saved.pages[index];
         const bool selected = all || (size && page.virtual_address >= begin && page.virtual_address - begin < size);
-        if (selected && saved.ownership[index] == Ownership::borrowed) saved.ownership[index] = Ownership::pending;
+        if (selected && saved.ownership(index) == Ownership::borrowed) saved.ownership(index) = Ownership::pending;
     }
     if (!saved.pin_complete && !saved.table_retired)
         return Status::busy("quarantine cannot discharge an incompletely pinned native table");
     for (usize index = 0; index < saved.pages.size(); ++index)
     {
         const auto &page = saved.pages[index];
-        auto &ownership = saved.ownership[index];
+        auto ownership = saved.ownership(index);
         if (ownership != Ownership::pending) continue;
         const auto *frame = owned_frame(saved.pages, page);
         if (!frame)
@@ -225,8 +233,8 @@ Status finish_quarantine(QuarantinedSpace &saved, bool retry_owners)
     Status result = retry_owners ? discharge_quarantine(saved) : Status{};
     for (usize index = 0; index < saved.pages.size(); ++index)
     {
-        if (saved.ownership[index] == QuarantinedSpace::Ownership::pending) continue;
-        if (!saved.pin_held[index]) continue;
+        if (saved.ownership(index) == QuarantinedSpace::Ownership::pending) continue;
+        if (!saved.pin_held(index)) continue;
         const auto *frame = saved_frame(saved.pages, saved.pages[index]);
         if (!frame)
         {
@@ -236,13 +244,13 @@ Status finish_quarantine(QuarantinedSpace &saved, bool retry_owners)
         const auto status = page_pool.unpin(*frame);
         if (status)
         {
-            saved.pin_held[index] = false;
+            saved.pin_held(index) = false;
             --saved.pinned_count;
         }
         else if (result) result = status;
     }
     for (usize index = 0; index < saved.pages.size(); ++index)
-        if (saved.ownership[index] == QuarantinedSpace::Ownership::pending || saved.pin_held[index])
+        if (saved.ownership(index) == QuarantinedSpace::Ownership::pending || saved.pin_held(index))
             return result ? Status::busy("quarantine still owns failed frame retirement") : result;
     if (auto status = saved.pages.clear(); !status) return status;
     saved.space = {};
@@ -294,8 +302,7 @@ class PageRetirementReservation final : private NonCopyable
         saved.table_retired = true;
         saved.pin_complete = true;
         saved.pinned_count = 0;
-        saved.pin_held.fill(false);
-        saved.ownership.fill(QuarantinedSpace::Ownership::borrowed);
+        saved.reset(QuarantinedSpace::Ownership::borrowed);
         saved_ = nullptr;
         const auto discharged = discharge_quarantine(saved, false, begin, size);
         const auto retired = finish_quarantine(saved, false);
@@ -324,8 +331,7 @@ Status quarantine(const hw::AddressSpace &space, Pages &pages)
             saved.space = space;
             saved.used = true;
             saved.table_retired = false;
-            saved.ownership.fill(QuarantinedSpace::Ownership::borrowed);
-            saved.pin_held.fill(false);
+            saved.reset(QuarantinedSpace::Ownership::borrowed);
             saved.pinned_count = 0;
             saved.pin_complete = false;
             for (usize index = 0; index < saved.pages.size(); ++index)
@@ -339,7 +345,7 @@ Status quarantine(const hw::AddressSpace &space, Pages &pages)
                     // may be discharged while this borrow is incompletely pinned.
                     return status;
                 }
-                saved.pin_held[index] = true;
+                saved.pin_held(index) = true;
                 ++saved.pinned_count;
             }
             saved.pin_complete = true;
@@ -427,8 +433,7 @@ void release(hw::AddressSpace &space, Pages &pages)
             saved.table_retired = true;
             saved.pin_complete = true;
             saved.pinned_count = 0;
-            saved.pin_held.fill(false);
-            saved.ownership.fill(QuarantinedSpace::Ownership::borrowed);
+            saved.reset(QuarantinedSpace::Ownership::borrowed);
             const auto discharged = discharge_quarantine(saved, true);
             const auto retired = finish_quarantine(saved, false);
             if (!discharged) runtime_failure = discharged;
@@ -535,12 +540,12 @@ Status page_memory_map(const Pages &pages, sched::MemoryMap &map)
     for (usize first = 0; first < pages.size();)
     {
         usize last = first + 1;
-        while (last < pages.size() && pages[last].flags == pages[first].flags &&
+        while (last < pages.size() && intended_access(pages[last]) == intended_access(pages[first]) &&
                shared_pool_page(pages, pages[last]) == shared_pool_page(pages, pages[first]) &&
                pages[last].virtual_address == pages[last - 1].virtual_address + hw::page_size)
             ++last;
         if (auto status = map.add_area({pages[first].virtual_address, (last - first) * hw::page_size,
-                                      memory::page_user | pages[first].flags |
+                                      memory::page_user | intended_access(pages[first]) |
                                           (shared_pool_page(pages, pages[first]) ? static_cast<usize>(memory::page_shared) : usize{0})}); !status.ok())
             return Status::no_memory("native VM area capacity exceeded");
         first = last;
@@ -729,6 +734,8 @@ Result<uptr> native_mmap(sched::ProcessResources &resources, uptr hint, usize le
         }
     if (size / hw::page_size > Pages::capacity - (resources.native_pages.size() - removed_count))
         return Status::no_memory("native process page capacity exceeded");
+    if (auto status = resources.memory_limits.admit(resources.native_pages.size() - removed_count +
+                                                    size / hw::page_size, hw::page_size); !status) return status;
     auto retirement_result = PageRetirementReservation::reserve();
     if (!retirement_result) return retirement_result.status();
     auto retirement = std::move(retirement_result.value());
@@ -854,7 +861,7 @@ Status native_mprotect(sched::ProcessResources &resources, uptr address, usize l
     for (auto &page : candidate)
         if (page.virtual_address >= address && page.virtual_address - address < rounded.value())
         {
-            page.flags = flags.value();
+            settle_access(page, flags.value(), exclusive_frame(page_pool, page.physical_address));
             ++changed;
         }
     if (changed != rounded.value() / hw::page_size)
@@ -921,6 +928,8 @@ Result<uptr> native_brk(sched::ProcessResources &resources, uptr address)
         resources.program_break_limit >= hw::user_end ||
         address < resources.program_break_base || address > resources.program_break_limit)
         return Status::no_memory("native program break outside heap window");
+    if (address - resources.program_break_base > resources.memory_limits.data.current)
+        return Status::no_memory("process data quota exceeded");
     const uptr old_end = (resources.program_break + hw::page_size - 1) & ~(hw::page_size - 1);
     const uptr new_end = (address + hw::page_size - 1) & ~(hw::page_size - 1);
     if (new_end > old_end)
@@ -1016,14 +1025,16 @@ i64 fork_process(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBloc
             }
             continue;
         }
-        if (auto status = allocate(pages, page.virtual_address, page.flags); !status.ok())
+        if (auto status = copy_on_write_fork ? share_private_page(pages, page, *source_frame, page_pool)
+                                             : allocate(pages, page.virtual_address, page.flags); !status.ok())
         {
             finish(kernel, child_pid, 127);
             static_cast<void>(kernel.posix().wait(pid, child_pid));
             return error(status);
         }
-        copy_bytes(reinterpret_cast<void *>(pages[pages.size() - 1].physical_address),
-                   reinterpret_cast<const void *>(source_frame->address), hw::page_size);
+        if (!copy_on_write_fork)
+            copy_bytes(reinterpret_cast<void *>(pages[pages.size() - 1].physical_address),
+                       reinterpret_cast<const void *>(source_frame->address), hw::page_size);
     }
     sched::MemoryMap child_memory;
     if (auto status = page_memory_map(pages, child_memory); !status)
@@ -1041,6 +1052,11 @@ i64 fork_process(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBloc
     }
     child->resources().native_space = child_space.value();
     child->resources().memory = child_memory;
+#ifdef OK_NATIVE_COW_FORK
+    if (auto status = withhold_shared_writes(process->resources().native_pages, process->resources().native_space,
+                                             page_pool); !status)
+    { runtime_failure = status; started = false; return error(status); }
+#endif
     if (auto status = encode_result(*child, child->threads()[0].native_frame, 0); !status.ok())
     {
         finish(kernel, child_pid, 127);
@@ -1071,61 +1087,16 @@ Status prepare_memory()
 #ifdef OK_KERNEL_FREESTANDING
     if (memory_preparation_attempted) return memory_preparation;
     memory_preparation_attempted = true;
-    if constexpr (linker_pool_required)
-    {
-        memory_preparation = Status::success();
-        emit("OK_NATIVE_MEMORY stage=prepare source=linker reason=unsupported-firmware-profile limit=1024\n");
-    }
-    else
-    {
-        // The supported QEMU recipes have no separately loaded objects; the OS
-        // archive, extension and all NOLOAD reservations share these linker bounds.
-        const uptr first = reinterpret_cast<uptr>(_kernel_start), last = reinterpret_cast<uptr>(_kernel_end);
-        if constexpr (runtime_arch == arch::Architecture::arm32)
-        {
-            const auto &entry = boot::arm32_entry_state();
-            emit("OK_ARM32_ENTRY cpsr="); emit_hex(entry.cpsr);
-            emit(" sctlr="); emit_hex(entry.sctlr); emit(" mpidr="); emit_hex(entry.mpidr);
-            emit(" status="); emit(boot::valid_arm32_entry(entry) ? "pass\n" : "fail\n");
-            if (!boot::valid_arm32_entry(entry))
-            {
-                memory_preparation = Status::fault("ARM loader entry state rejected");
-                return memory_preparation;
-            }
-        }
-        boot::QemuProcessMemoryReader<runtime_arch> reader{boot::raw_boot_handoff().arguments[2]};
-        const auto discovery = boot::discover_firmware_memory<runtime_arch>(boot::raw_boot_handoff(),
-            boot::qemu_process_boot_protocol<runtime_arch>(),reader,firmware_workspace,firmware_memory);
-        memory_preparation = discovery.status;
-        if constexpr (runtime_arch == arch::Architecture::arm32)
-            if (memory_preparation)
-            {
-                emit("OK_NATIVE_MEMORY_SOURCE protocol=arm32-linux-image fdt=");
-                emit_hex(firmware_memory.source_storage.address); emit(" size=");
-                emit_hex(firmware_memory.source_storage.size); emit("\n");
-            }
-        boot::QemuEntryMemoryPlan plan;
-        if (memory_preparation && last <= first) memory_preparation = Status::fault("invalid final linker bounds");
-        if (memory_preparation) memory_preparation = boot::qemu_runtime_memory_plan<runtime_arch>(
-            firmware_memory,{first,last-first},{},page_count,plan);
-        if (memory_preparation) memory_preparation = boot::qualify_boot_memory(firmware_memory,
-            {plan.reservations.begin(),plan.reservations.size()},plan.policy,qualified_workspace,qualified_memory);
-        if (memory_preparation && qualified_memory.page_count() != page_count)
-            memory_preparation = Status::no_memory("insufficient qualified runtime frames");
-        emit("OK_NATIVE_MEMORY stage=prepare source=firmware status=");
-        emit(memory_preparation.ok() ? "pass" : "fail");
-        emit(" image_begin="); emit_hex(first); emit(" image_end="); emit_hex(last);
-        emit(" limit=1024\n");
-        if (memory_preparation)
-            for (auto range : qualified_memory.managed())
-            {
-                emit("OK_NATIVE_MEMORY_RANGE base="); emit_hex(range.address);
-                emit(" size="); emit_hex(range.size); emit("\n");
-            }
-    }
+    // Discovery belongs to kernel boot; the runtime only requires its result.
+    memory_preparation = boot::discover_kernel_memory(emit).status;
     return memory_preparation;
 #else
     return Status::unsupported("hosted tests do not discover firmware");
 #endif
 }
 } // namespace ok::user::native
+// Backend translation tables are kernel objects of the native page pool.
+ok::Result<ok::uptr> ok::arch::execution::allocate_table_pages(usize pages, usize alignment)
+{ return user::native::page_pool.allocate_object_run(pages, alignment); }
+ok::Status ok::arch::execution::release_table_pages(uptr address, usize pages)
+{ return user::native::page_pool.release_object_run(address, pages); }

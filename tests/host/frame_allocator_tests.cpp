@@ -24,17 +24,18 @@ static_assert(!std::is_move_constructible_v<memory::FrameAllocator>);
 void check_boundaries()
 {
     memory::FrameAllocator frames;
+    memory::FrameMetadataStorage<4, 4> metadata;
     CHECK(frames.total_frames() == 0 && frames.free_frames() == 0);
     CHECK(frames.allocate().status().code() == StatusCode::not_initialized);
     CHECK(!frames.release({}));
-    CHECK(frames.initialize({}, 4096).code() == StatusCode::no_memory);
+    CHECK(frames.initialize({}, 4096, metadata.bytes).code() == StatusCode::no_memory);
     const std::array fragments{
         memory::MemoryRegion{0, 1, memory::RegionType::usable},
         memory::MemoryRegion{1, 4095, memory::RegionType::usable},
         memory::MemoryRegion{0x3000, 0, memory::RegionType::reserved},
         memory::MemoryRegion{~uptr{0} - 8191, 8191, memory::RegionType::usable},
     };
-    CHECK(frames.initialize(fragments, 4096));
+    CHECK(frames.initialize(fragments, 4096, metadata.bytes));
     CHECK(frames.total_frames() == 2);
     auto zero = frames.allocate();
     auto high = frames.allocate();
@@ -43,10 +44,10 @@ void check_boundaries()
     CHECK(frames.release(zero.value()));
     CHECK(frames.release(high.value()));
     const std::array partial{memory::MemoryRegion{1, 4095, memory::RegionType::usable}};
-    CHECK(frames.initialize(partial, 4096).code() == StatusCode::no_memory);
+    CHECK(frames.initialize(partial, 4096, metadata.bytes).code() == StatusCode::no_memory);
     CHECK(frames.total_frames() == 2 && frames.free_frames() == 2);
     const std::array large_pages{memory::MemoryRegion{4096, 16384, memory::RegionType::usable}};
-    CHECK(frames.initialize(large_pages, 8192));
+    CHECK(frames.initialize(large_pages, 8192, metadata.bytes));
     auto large = frames.allocate();
     CHECK(large && large.value().address == 8192 && frames.total_frames() == 1);
     CHECK(frames.release(large.value()));
@@ -54,14 +55,18 @@ void check_boundaries()
 
 void check_capacity_and_foreign_handles()
 {
+    // Metadata is sized from the map: a map beyond the old fixed table works.
+    constexpr usize frame_count = 16384 + 3;
     memory::FrameAllocator frames;
     memory::FrameAllocator other;
-    const std::array regions{memory::MemoryRegion{
-        0x1000, memory::max_physical_frames * 4096, memory::RegionType::usable}};
-    CHECK(frames.initialize(regions, 4096));
-    CHECK(other.initialize(regions, 4096));
-    CHECK(frames.total_frames() == memory::max_physical_frames);
-    std::array<memory::PhysicalFrame, memory::max_physical_frames> owned{};
+    static memory::FrameMetadataStorage<frame_count> metadata;
+    static memory::FrameMetadataStorage<frame_count> other_metadata;
+    const std::array regions{memory::MemoryRegion{0x1000, frame_count * 4096, memory::RegionType::usable}};
+    CHECK(memory::FrameAllocator::metadata_bytes(regions, 4096).value() <= metadata.bytes.size());
+    CHECK(frames.initialize(regions, 4096, metadata.bytes));
+    CHECK(other.initialize(regions, 4096, other_metadata.bytes));
+    CHECK(frames.total_frames() == frame_count);
+    static std::array<memory::PhysicalFrame, frame_count> owned{};
     for (usize i = 0; i < owned.size(); ++i)
     {
         auto frame = frames.allocate();
@@ -71,20 +76,34 @@ void check_capacity_and_foreign_handles()
     CHECK(frames.allocate().status().code() == StatusCode::no_memory);
     auto foreign = other.allocate();
     CHECK(foreign && !frames.release(foreign.value()) && !other.release(owned[0]));
-    CHECK(frames.free_frames() == 0 && other.free_frames() == memory::max_physical_frames - 1);
+    CHECK(frames.free_frames() == 0 && other.free_frames() == frame_count - 1);
     CHECK(other.release(foreign.value()));
     for (auto frame : owned)
     {
         CHECK(frames.release(frame));
     }
-    CHECK(frames.free_frames() == memory::max_physical_frames);
-    std::array<memory::MemoryRegion, memory::max_physical_frame_ranges + 1> fragmented{};
+    CHECK(frames.free_frames() == frame_count);
+    // Many disjoint ranges need range metadata, not a fixed range table.
+    std::array<memory::MemoryRegion, 65> fragmented{};
     for (usize i = 0; i < fragmented.size(); ++i)
     {
         fragmented[i] = {i * 8192, 4096, memory::RegionType::usable};
     }
-    CHECK(frames.initialize(fragmented, 4096).code() == StatusCode::overflow);
-    CHECK(frames.free_frames() == memory::max_physical_frames);
+    memory::FrameMetadataStorage<65, 65> fragmented_metadata;
+    memory::FrameMetadataStorage<65, 1> short_metadata;
+    CHECK(frames.initialize(fragmented, 4096, short_metadata.bytes).code() == StatusCode::no_memory);
+    CHECK(frames.free_frames() == frame_count);
+    CHECK(frames.initialize(fragmented, 4096, fragmented_metadata.bytes));
+    CHECK(frames.total_frames() == 65 && frames.ranges().size() == 65);
+    auto last = frames.handle_at(64);
+    CHECK(!last);
+    usize taken = 0;
+    while (auto frame = frames.allocate())
+    {
+        CHECK(frame.value().address == taken * 8192);
+        ++taken;
+    }
+    CHECK(taken == 65);
 }
 
 void check_map_order_and_reference_oracle()
@@ -98,6 +117,7 @@ void check_map_order_and_reference_oracle()
         return random;
     };
     memory::FrameAllocator frames;
+    memory::FrameMetadataStorage<byte_count / page_size, 12> metadata;
     for (usize trial = 0; trial < 200; ++trial)
     {
         std::array<memory::MemoryRegion, 12> regions{};
@@ -129,7 +149,7 @@ void check_map_order_and_reference_oracle()
         }
         for (usize order = 0; order < 2; ++order)
         {
-            auto status = frames.initialize(regions, page_size);
+            auto status = frames.initialize(regions, page_size, metadata.bytes);
             if (count == 0)
             {
                 CHECK(status.code() == StatusCode::no_memory);
@@ -162,5 +182,5 @@ int main()
     check_boundaries();
     check_capacity_and_foreign_handles();
     check_map_order_and_reference_oracle();
-    std::puts("PASS: bootstrap physical frame bookkeeping (hosted model)");
+    std::puts("PASS: runtime-sized physical frame bookkeeping (hosted model)");
 }

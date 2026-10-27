@@ -22,7 +22,7 @@ can still retire. Canary pages are mapped supervisor memory, not faulting guards
 
 Creation reserves a lease before runnable publication. Linux clone uses a
 constrained preparation callback on an unpublished TCB before parent-TID stores.
-Native fork leaves its child created until eager VM copying, entry-stack
+Native fork leaves its child created until its address space is built, entry-stack
 preparation and return-frame setup succeed. Init likewise prepares before
 `set_runnable`. Resource failure leaves existing owners intact.
 

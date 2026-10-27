@@ -1,24 +1,26 @@
 #pragma once
 
 #include "ok/user/native_page_pool.hpp"
-#include <array>
 #include <utility>
 
 namespace ok::user::native
 {
 // Metadata ownership only. User frames are retired by the native runtime after
-// their last backend translation has gone away. The directory is bounded, but
-// every PageMapping record lives in a supervisor page leased from the pool.
+// their last backend translation has gone away. Records live in one contiguous
+// kernel-object run, followed by one retirement byte per record for the
+// runtime's quarantine; exact frame tokens live in a second run. Both runs grow
+// by moving, so a directory refuses insertion and growth once a view of it has
+// been published to a backend. The user window bounds the record count.
 class MappingPages final
 {
   public:
     using Mapping = arch::execution::PageMapping;
-    static constexpr usize capacity = arch::execution::max_native_mappings;
-    static constexpr usize records_per_block = NativePagePool::page_size / sizeof(Mapping);
-    static constexpr usize max_blocks = (capacity + records_per_block - 1) / records_per_block;
-    static constexpr usize frames_per_block = NativePagePool::page_size / sizeof(memory::PhysicalFrame);
-    static constexpr usize max_frame_blocks = (capacity + frames_per_block - 1) / frames_per_block;
-    static_assert(records_per_block && max_blocks == arch::execution::MappingView::max_chunks);
+    static constexpr usize capacity = arch::execution::user_window_pages;
+    static constexpr usize page_size = NativePagePool::page_size;
+    static constexpr usize record_bytes = sizeof(Mapping) + 1;
+    static constexpr usize records_per_page = page_size / record_bytes;
+    static constexpr usize frames_per_page = page_size / sizeof(memory::PhysicalFrame);
+    static_assert(records_per_page && frames_per_page);
 
     MappingPages() = default;
     MappingPages(const MappingPages &) = delete;
@@ -29,23 +31,32 @@ class MappingPages final
         if (this != &other) swap(other);
         return *this;
     }
-    ~MappingPages() { static_cast<void>(clear()); }
+    ~MappingPages()
+    {
+        // A run the pool refuses to take back stays accounted and diagnosable.
+        if (!clear() && pool_)
+        {
+            if (frames_) static_cast<void>(pool_->quarantine_object_run(reinterpret_cast<uptr>(frames_), frame_pages_));
+            if (records_) static_cast<void>(pool_->quarantine_object_run(reinterpret_cast<uptr>(records_), record_pages_));
+        }
+    }
 
     [[nodiscard]] usize size() const { return size_; }
     [[nodiscard]] bool empty() const { return size_ == 0; }
     [[nodiscard]] bool full() const { return size_ == capacity; }
-    [[nodiscard]] usize block_count() const { return blocks_; }
-    [[nodiscard]] usize frame_block_count() const { return frame_blocks_; }
+    [[nodiscard]] usize reserved() const { return reserved_; }
+    [[nodiscard]] usize record_pages() const { return record_pages_; }
+    [[nodiscard]] usize frame_pages() const { return frame_pages_; }
     [[nodiscard]] bool exact_frames() const { return exact_frames_; }
+    [[nodiscard]] bool published() const { return published_; }
     [[nodiscard]] const memory::PhysicalFrame *frame(usize index) const
     {
-        return exact_frames_ && index < size_ ? frame_slot(index) : nullptr;
+        return exact_frames_ && index < size_ ? &frames_[index] : nullptr;
     }
     [[nodiscard]] const memory::PhysicalFrame *frame(const Mapping &mapping) const
     {
-        for (usize index = 0; index < size_; ++index)
-            if (&(*this)[index] == &mapping) return frame(index);
-        return nullptr;
+        return &mapping >= records_ && &mapping < records_ + size_ ? frame(static_cast<usize>(&mapping - records_))
+                                                                   : nullptr;
     }
 
     Status bind(NativePagePool &pool)
@@ -60,48 +71,79 @@ class MappingPages final
         if (auto status = bind(pool); !status) return status;
         if (records > capacity)
             return Status::no_memory("native process page capacity exceeded");
-        const usize required = (records + records_per_block - 1) / records_per_block;
-        const usize original = blocks_;
-        const usize original_frames = frame_blocks_;
-        const bool require_frames = exact_frames_ || exact_frames;
         if (exact_frames && !exact_frames_ && size_)
             return Status::invalid_argument("unowned metadata cannot become native frame authority");
-        auto unwind = [&]() -> Status {
-            while (frame_blocks_ > original_frames)
-            {
-                if (auto status = pool.release_kernel_page(frame_leases_[frame_blocks_ - 1]); !status) return status;
-                --frame_blocks_;
-            }
-            while (blocks_ > original)
-            {
-                if (auto status = pool.release_kernel_page(leases_[blocks_ - 1]); !status) return status;
-                --blocks_;
-            }
-            return {};
-        };
-        while (blocks_ < required)
+        const bool require_frames = exact_frames_ || exact_frames;
+        usize target = reserved_;
+        if (records > reserved_)
         {
-            auto lease = pool.allocate_kernel_page();
-            if (!lease)
-            {
-                if (auto status = unwind(); !status) return status;
-                return lease.status();
-            }
-            leases_[blocks_++] = std::move(lease.value());
+            // Whole pages for each run; with exact tokens the frame run, whose
+            // entries are larger, decides how many records the pages hold.
+            const usize wanted = records > reserved_ * 2 ? (records < capacity ? records : capacity)
+                                                         : (reserved_ * 2 < capacity ? reserved_ * 2 : capacity);
+            auto fitting = [&](usize bytes) { return (wanted * bytes + page_size - 1) / page_size * page_size / bytes; };
+            target = fitting(record_bytes);
+            if (require_frames && fitting(sizeof(memory::PhysicalFrame)) < target)
+                target = fitting(sizeof(memory::PhysicalFrame));
+            if (target > capacity) target = capacity;
         }
-        const usize required_frames = require_frames ? (records + frames_per_block - 1) / frames_per_block : 0;
-        while (frame_blocks_ < required_frames)
+        if (!target)
         {
-            auto lease = pool.allocate_kernel_page();
-            if (!lease)
-            {
-                if (auto status = unwind(); !status) return status;
-                return lease.status();
-            }
-            frame_leases_[frame_blocks_++] = std::move(lease.value());
+            exact_frames_ = require_frames;
+            return Status::success();
         }
+        const bool move_records = target != reserved_;
+        const bool move_frames = require_frames && (move_records || !frames_);
+        if (!move_records && !move_frames)
+        {
+            exact_frames_ = require_frames;
+            return Status::success();
+        }
+        if (published_)
+            return Status::busy("published mapping metadata cannot grow");
+        const usize record_pages = (target * record_bytes + page_size - 1) / page_size;
+        const usize frame_pages = (target * sizeof(memory::PhysicalFrame) + page_size - 1) / page_size;
+        Mapping *records_run = records_;
+        memory::PhysicalFrame *frames_run = frames_;
+        if (move_records)
+        {
+            auto run = pool.allocate_object_run(record_pages);
+            if (!run) return run.status();
+            records_run = reinterpret_cast<Mapping *>(run.value());
+        }
+        if (move_frames)
+        {
+            auto run = pool.allocate_object_run(frame_pages);
+            if (!run)
+            {
+                if (move_records)
+                    static_cast<void>(pool.release_object_run(reinterpret_cast<uptr>(records_run), record_pages));
+                return run.status();
+            }
+            frames_run = reinterpret_cast<memory::PhysicalFrame *>(run.value());
+        }
+        for (usize index = 0; index < size_; ++index)
+        {
+            if (move_records)
+            {
+                records_run[index] = records_[index];
+                reinterpret_cast<u8 *>(records_run + target)[index] = retirement(index);
+            }
+            if (move_frames && frames_) frames_run[index] = frames_[index];
+        }
+        const auto previous_records = std::exchange(records_, records_run);
+        const auto previous_frames = move_frames ? std::exchange(frames_, frames_run) : nullptr;
+        const auto previous_record_pages = std::exchange(record_pages_, record_pages);
+        const auto previous_frame_pages = move_frames ? std::exchange(frame_pages_, frame_pages) : 0;
+        reserved_ = target;
         exact_frames_ = require_frames;
-        return Status::success();
+        Status result{};
+        if (move_records && previous_records)
+            result = retire_run(reinterpret_cast<uptr>(previous_records), previous_record_pages);
+        if (previous_frames)
+            if (auto status = retire_run(reinterpret_cast<uptr>(previous_frames), previous_frame_pages); !status && result)
+                result = status;
+        return result;
     }
     Status push_back(Mapping mapping)
     {
@@ -115,67 +157,37 @@ class MappingPages final
             return Status::invalid_argument("native mapping frame token is foreign, stale or unbound");
         return insert(mapping, frame);
     }
-  private:
-    Status insert(Mapping mapping, memory::PhysicalFrame frame)
+    // Copy-on-write resolution is the one in-place edit of a published record:
+    // it keeps the address and swaps the frame and/or access. The caller then
+    // re-synchronizes the live translation with execution::remap.
+    Status replace(usize index, Mapping mapping, memory::PhysicalFrame frame)
     {
-        if (!pool_)
-            return Status::not_initialized("mapping metadata has no page owner");
-        usize position = 0;
-        while (position < size_ && (*this)[position].virtual_address < mapping.virtual_address)
-            ++position;
-        if (position < size_ && (*this)[position].virtual_address == mapping.virtual_address)
-            return Status::already_exists("duplicate native mapping record");
-        if (auto status = reserve(*pool_, size_ + 1); !status) return status;
-        // Ordered records make memory-area coalescing a bounded scan without a
-        // process-sized stack copy. Existing published blocks are never edited.
-        for (usize slot_index = size_; slot_index > position; --slot_index)
-        {
-            *slot(slot_index) = (*this)[slot_index - 1];
-            if (exact_frames_) *frame_slot(slot_index) = *frame_slot(slot_index - 1);
-        }
-        *slot(position) = mapping;
-        if (exact_frames_) *frame_slot(position) = frame;
-        ++size_;
+        if (index >= size_ || !pool_ || !exact_frames_ || !pool_->valid(frame) ||
+            frame.address != mapping.physical_address || mapping.virtual_address != records_[index].virtual_address)
+            return Status::invalid_argument("native mapping replacement is foreign, stale or moved");
+        records_[index] = mapping;
+        frames_[index] = frame;
         return Status::success();
     }
-  public:
-    [[nodiscard]] Mapping &operator[](usize index) { return *slot(index); }
-    [[nodiscard]] const Mapping &operator[](usize index) const { return *slot(index); }
 
-    struct Iterator
-    {
-        MappingPages *owner{};
-        usize index{};
-        [[nodiscard]] Mapping &operator*() const { return (*owner)[index]; }
-        Iterator &operator++() { ++index; return *this; }
-        [[nodiscard]] bool operator!=(Iterator other) const { return index != other.index; }
-    };
-    struct ConstIterator
-    {
-        const MappingPages *owner{};
-        usize index{};
-        [[nodiscard]] const Mapping &operator*() const { return (*owner)[index]; }
-        ConstIterator &operator++() { ++index; return *this; }
-        [[nodiscard]] bool operator!=(ConstIterator other) const { return index != other.index; }
-    };
-    [[nodiscard]] Iterator begin() { return {this, 0}; }
-    [[nodiscard]] Iterator end() { return {this, size_}; }
-    [[nodiscard]] ConstIterator begin() const { return {this, 0}; }
-    [[nodiscard]] ConstIterator end() const { return {this, size_}; }
+    [[nodiscard]] Mapping &operator[](usize index) { return records_[index]; }
+    [[nodiscard]] const Mapping &operator[](usize index) const { return records_[index]; }
+    [[nodiscard]] Mapping *begin() { return records_; }
+    [[nodiscard]] Mapping *end() { return records_ + size_; }
+    [[nodiscard]] const Mapping *begin() const { return records_; }
+    [[nodiscard]] const Mapping *end() const { return records_ + size_; }
 
+    // Taking a view publishes the directory: until clear(), records keep their
+    // addresses and only replace() edits them.
     [[nodiscard]] arch::execution::MappingView view() const
     {
-        arch::execution::MappingView result;
-        result.count = size_;
-        for (usize block = 0; block < blocks_; ++block)
-        {
-            const usize first = block * records_per_block;
-            const usize count = size_ > first ?
-                (size_ - first < records_per_block ? size_ - first : records_per_block) : 0;
-            result.chunks[block] = {reinterpret_cast<const Mapping *>(leases_[block].bytes.data()), count};
-        }
-        return result;
+        published_ = true;
+        return {records_, size_};
     }
+    // Per-record retirement state for the runtime's quarantine; zero for every
+    // record a directory gains.
+    [[nodiscard]] u8 &retirement(usize index) { return reinterpret_cast<u8 *>(records_ + reserved_)[index]; }
+    [[nodiscard]] u8 retirement(usize index) const { return reinterpret_cast<const u8 *>(records_ + reserved_)[index]; }
 
     [[nodiscard]] static Result<MappingPages> clone(const MappingPages &source, NativePagePool &pool)
     {
@@ -189,60 +201,104 @@ class MappingPages final
         return result;
     }
 
-    // Metadata release is explicit and reports a failed lease retirement. A
-    // failed release leaves that lease in this owner for a later retry.
+    // Metadata release is explicit and reports a failed run retirement. A
+    // failed release leaves that run in this owner for a later retry.
     Status clear()
     {
-        size_ = 0;
-        while (frame_blocks_)
+        if (frames_)
         {
-            if (auto status = pool_->release_kernel_page(frame_leases_[frame_blocks_ - 1]); !status)
+            if (auto status = pool_->release_object_run(reinterpret_cast<uptr>(frames_), frame_pages_); !status)
                 return status;
-            --frame_blocks_;
+            frames_ = nullptr;
+            frame_pages_ = 0;
         }
-        while (blocks_)
+        if (records_)
         {
-            if (auto status = pool_->release_kernel_page(leases_[blocks_ - 1]); !status)
+            if (auto status = pool_->release_object_run(reinterpret_cast<uptr>(records_), record_pages_); !status)
                 return status;
-            --blocks_;
+            records_ = nullptr;
+            record_pages_ = 0;
         }
+        size_ = reserved_ = 0;
         pool_ = nullptr;
-        exact_frames_ = false;
+        exact_frames_ = published_ = false;
         return Status::success();
     }
     void swap(MappingPages &other) noexcept
     {
         using std::swap;
         swap(pool_, other.pool_);
+        swap(records_, other.records_);
+        swap(frames_, other.frames_);
         swap(size_, other.size_);
-        swap(blocks_, other.blocks_);
-        swap(frame_blocks_, other.frame_blocks_);
+        swap(reserved_, other.reserved_);
+        swap(record_pages_, other.record_pages_);
+        swap(frame_pages_, other.frame_pages_);
         swap(exact_frames_, other.exact_frames_);
-        for (usize i = 0; i < max_blocks; ++i)
-            swap(leases_[i], other.leases_[i]);
-        for (usize i = 0; i < max_frame_blocks; ++i)
-            swap(frame_leases_[i], other.frame_leases_[i]);
+        swap(published_, other.published_);
     }
 
   private:
 #if defined(OK_ENABLE_TEST_POINTS)
     friend struct MappingPagesFaultProbe;
 #endif
-    [[nodiscard]] Mapping *slot(usize index) const
+    Status insert(Mapping mapping, memory::PhysicalFrame frame)
     {
-        const usize block = index / records_per_block;
-        return reinterpret_cast<Mapping *>(leases_[block].bytes.data()) + index % records_per_block;
+        if (!pool_)
+            return Status::not_initialized("mapping metadata has no page owner");
+        if (published_)
+            return Status::busy("published mapping metadata cannot gain records");
+        // Ordered records let backends search by address and make memory-area
+        // coalescing a bounded scan without a process-sized stack copy.
+        usize low = 0, high = size_;
+        while (low < high)
+        {
+            const usize middle = low + (high - low) / 2;
+            if (records_[middle].virtual_address < mapping.virtual_address) low = middle + 1;
+            else high = middle;
+        }
+        if (low < size_ && records_[low].virtual_address == mapping.virtual_address)
+            return Status::already_exists("duplicate native mapping record");
+        if (auto status = reserve(*pool_, size_ + 1); !status) return status;
+        for (usize index = size_; index > low; --index)
+        {
+            records_[index] = records_[index - 1];
+            retirement(index) = retirement(index - 1);
+            if (exact_frames_) frames_[index] = frames_[index - 1];
+        }
+        records_[low] = mapping;
+        retirement(low) = 0;
+        if (exact_frames_) frames_[low] = frame;
+        ++size_;
+        return Status::success();
     }
-    [[nodiscard]] memory::PhysicalFrame *frame_slot(usize index) const
+    Status retire_run(uptr address, usize pages)
     {
-        return reinterpret_cast<memory::PhysicalFrame *>(frame_leases_[index / frames_per_block].bytes.data()) +
-            index % frames_per_block;
+        if (auto status = pool_->release_object_run(address, pages); !status)
+        {
+            static_cast<void>(pool_->quarantine_object_run(address, pages));
+            return status;
+        }
+        return Status::success();
     }
     NativePagePool *pool_{};
-    std::array<NativePagePool::Lease, max_blocks> leases_{};
-    std::array<NativePagePool::Lease, max_frame_blocks> frame_leases_{};
-    usize size_{}, blocks_{};
-    usize frame_blocks_{};
+    Mapping *records_{};
+    memory::PhysicalFrame *frames_{};
+    usize size_{}, reserved_{};
+    usize record_pages_{}, frame_pages_{};
     bool exact_frames_{};
+    mutable bool published_{};
+};
+
+// One bit field of a record's retirement byte.
+template <typename Value, u8 Mask, u8 Shift> struct RetirementField
+{
+    u8 *byte;
+    operator Value() const { return static_cast<Value>((*byte & Mask) >> Shift); }
+    RetirementField &operator=(Value value)
+    {
+        *byte = static_cast<u8>((*byte & ~Mask) | ((static_cast<u8>(value) << Shift) & Mask));
+        return *this;
+    }
 };
 } // namespace ok::user::native

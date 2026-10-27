@@ -74,8 +74,7 @@ class ImageRetirementReservation final : private NonCopyable
         saved.table_retired = saved.space.root == 0;
         saved.pin_complete = saved.table_retired;
         saved.pinned_count = 0;
-        saved.pin_held.fill(false);
-        saved.ownership.fill(QuarantinedSpace::Ownership::pending);
+        saved.reset(QuarantinedSpace::Ownership::pending);
         for (const auto &page : saved.pages)
             if (!owned_frame(saved.pages, page))
                 return Status::fault("native image retirement lost an exact owner token");
@@ -93,7 +92,7 @@ class ImageRetirementReservation final : private NonCopyable
                 const auto *frame = owned_frame(saved.pages, saved.pages[index]);
                 if (!frame) return Status::fault("native image pin lost exact owner token");
                 if (auto status = page_pool.pin(*frame); !status) return status;
-                saved.pin_held[index] = true;
+                saved.pin_held(index) = true;
                 ++saved.pinned_count;
             }
             saved.pin_complete = true;
@@ -752,6 +751,8 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     auto image = load(kernel, path.view(), arguments);
     if (!image)
         return error(image.status());
+    if (auto status = process->resources().memory_limits.admit(image.value().pages.size(), hw::page_size); !status)
+        return error(status); // The quota survives exec.
     auto context = kernel.arch().make_user_context({image.value().frame.pc, image.value().frame.sp});
 #ifdef OK_PRIVATE_POLL_MASK
     const auto &mask_owner = *kernel.scheduler().find_thread(pid, calling_tid);

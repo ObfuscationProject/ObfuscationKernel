@@ -96,12 +96,13 @@ static void memory_probe(const ok::boot::FirmwareMemory &source, bool discovered
     if (status && !entry_mode()) status=Status::fault("unexpected entry translation state");
     if (status) status=qualify_boot_memory(source,{plan.reservations.begin(),plan.reservations.size()},plan.policy,workspace,memory);
     static ok::memory::FrameAllocator frames;
+    static ok::memory::FrameMetadataStorage<1024, 64> frame_metadata;
     static std::array<ok::memory::PhysicalFrame, 1024> handles;
     bool native_pass = false;
     if (status)
     {
         status = arch::execution::initialize();
-        if (status) status = initialize_qualified_frames(memory, frames);
+        if (status) status = initialize_qualified_frames(memory, frames, frame_metadata.bytes);
         if (status && frames.total_frames() != 1024) status = Status::invalid_argument("frame count differs");
         usize allocated = 0;
         for (; status && allocated < handles.size(); ++allocated)

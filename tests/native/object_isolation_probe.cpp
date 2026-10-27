@@ -64,6 +64,7 @@ extern "C" char _kernel_start[], _kernel_end[];
 extern "C" const u8 ok_object_user_begin[], ok_object_user_end[], ok_object_user_load[];
 extern "C" void ok_platform_console_write_char(char c) { put(c); }
 static memory::FrameAllocator frames;
+static memory::FrameMetadataStorage<1024, 64> frame_metadata;
 static user::native::NativePagePool pages;
 struct Secret { u32 value = 0xc3917a25; std::array<u8, 60> padding{}; };
 static constinit memory::ObjectPool<Secret, user::native::NativePagePool, 1> objects{pages};
@@ -81,7 +82,7 @@ static Status activate_pages()
     // linker backing and its supervisor alias explicit, including MIPS KSEG.
     status = hw::initialize();
     const memory::MemoryRegion region{reinterpret_cast<uptr>(fallback.data()), fallback.size(), memory::RegionType::usable};
-    if (status) status = frames.initialize({&region, 1}, 4096);
+    if (status) status = frames.initialize({&region, 1}, 4096, frame_metadata.bytes);
     source = user::native::NativePagePool::Source::linker_reserved;
     text("OBJECT_BACKING source=linker");field("base", region.base);field("size", region.size);put('\n');
 #else
@@ -95,7 +96,7 @@ static Status activate_pages()
     if (status) status = qemu_runtime_memory_plan<arch::Architecture::OK_PROBE_ARCH>(firmware, {begin, end-begin}, {}, 1024, plan);
     if (status) status = qualify_boot_memory(firmware, {plan.reservations.begin(),plan.reservations.size()}, plan.policy, workspace, qualified);
     if (status) status = hw::initialize();
-    if (status) status = initialize_qualified_frames(qualified, frames);
+    if (status) status = initialize_qualified_frames(qualified, frames, frame_metadata.bytes);
     source = user::native::NativePagePool::Source::qualified_firmware;
     text("OBJECT_BACKING source=firmware");field("pages", qualified.page_count());field("status", static_cast<u32>(status.code()));put('\n');
     for (const auto range : qualified.managed()) {text("OBJECT_RANGE");field("base",range.address);field("size",range.size);put('\n');}

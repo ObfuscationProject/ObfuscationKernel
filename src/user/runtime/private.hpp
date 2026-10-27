@@ -64,7 +64,7 @@
 #endif
 #include "ok/user/native_select.hpp"
 #include "ok/user/native_pty_pair_dispatch.hpp"
-#include "ok/user/native_page_pool.hpp"
+#include "ok/user/native_copy_on_write.hpp"
 #include "ok/user/native_shared_files.hpp"
 #include "ok/abi/linux_futex_wake_operation.hpp"
 #include "ok/user/native_shared_files_sdk_profile.hpp"
@@ -79,7 +79,7 @@
 #include "../native_syscall_restart_publication.hpp"
 #endif
 #include "ok/memory/object_pool.hpp"
-#include "ok/boot/qemu_process_memory.hpp"
+#include "ok/boot/boot_memory.hpp"
 #include "ok/abi/linux_exec.hpp"
 #if defined(__x86_64__)
 #include "ok/abi/linux_dynamic_exec_x86_64.hpp"
@@ -128,25 +128,24 @@ using SyscallOrigins = SyscallOriginTable<lu::configured_native_profile()>;
 extern SyscallOrigins syscall_origins;
 extern VfsStatContinuation<lu::configured_native_profile()> vfs_continuations;
 extern u64 entry_syscalls, entry_timers, entry_faults, entry_rejections;
-#ifdef OK_KERNEL_FREESTANDING
-extern "C" char _kernel_start[], _kernel_end[];
-#endif
 struct QuarantinedSpace
 {
     enum class Ownership : u8 { borrowed, pending, discharged };
     hw::AddressSpace space{};
     Pages pages;
-    std::array<Ownership, Pages::capacity> ownership{};
-    std::array<bool, Pages::capacity> pin_held{};
+    // Per-record state lives in the directory's retirement bytes.
+    RetirementField<Ownership, 3, 0> ownership(usize index) { return {&pages.retirement(index)}; }
+    RetirementField<bool, 4, 2> pin_held(usize index) { return {&pages.retirement(index)}; }
+    void reset(Ownership value) { for (usize index = 0; index < pages.size(); ++index) pages.retirement(index) = u8(value); }
     usize pinned_count{};
     bool used{};
     bool reserved{};
     bool table_retired{};
     bool pin_complete{};
 };
-// The final slot retains a candidate even if a backend incorrectly reports a
-// failed retirement after consuming all of its advertised space slots.
-extern std::array<QuarantinedSpace, hw::max_address_spaces + 1> quarantined_spaces;
+// A process holds at most one live space and transactions build one
+// replacement at a time: one slot per process plus one candidate.
+extern std::array<QuarantinedSpace, sched::max_processes + 1> quarantined_spaces;
 extern bool started;
 extern Kernel *runtime_kernel;
 extern Status runtime_failure;
@@ -288,7 +287,7 @@ struct PollWaitIndex
 };
 // This bounded index contains identities only; the records live in owned pages.
 extern std::array<PollWaitIndex, sched::max_processes> poll_waits;
-Status activate_pool();
+Status activate_pool(Kernel *kernel = nullptr);
 void emit(std::string_view text);
 void emit_number(u64 value);
 
@@ -467,11 +466,14 @@ void emit_number(u64 value);
 [[maybe_unused]] void emit_hex(u64 value);
 void emit_entry_stack_stats();
 void emit_pool_stats();
-Status activate_pool();
+Status activate_pool(Kernel *kernel);
 #ifdef OK_ENABLE_TEST_POINTS
 Status check_runtime_objects();
 #endif
 bool same_space(const hw::AddressSpace &a, const hw::AddressSpace &b);
+#ifdef OK_NATIVE_COW_FORK
+bool resolve_native_write(const hw::AddressSpace &space, uptr page);
+#endif
 const memory::PhysicalFrame *owned_frame(const Pages &pages, const hw::PageMapping &page);
 Status discharge_quarantine(QuarantinedSpace &saved, bool all = false, uptr begin = 0, usize size = 0);
 Status finish_quarantine(QuarantinedSpace &saved, bool retry_owners = true);

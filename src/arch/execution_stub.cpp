@@ -22,6 +22,10 @@ Status destroy_space(AddressSpace &)
 {
     return initialize();
 }
+Status remap(const AddressSpace &, const PageMapping &)
+{
+    return initialize();
+}
 Result<Trap> enter(AddressSpace &, UserFrame &)
 {
     return initialize();

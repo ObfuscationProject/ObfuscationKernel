@@ -141,6 +141,7 @@ struct DirectoryListing
 };
 
 class VirtualFileSystem;
+class FilePageCache;
 
 // Internal topology checks must not be reported as directory access events.
 enum class DirectoryReadIntent : u8 { access, inspection };
@@ -185,6 +186,12 @@ class Node
         return Status::unsupported("remove unavailable");
     }
     [[nodiscard]] virtual const void *filesystem_identity() const
+    {
+        return nullptr;
+    }
+    // A provider that caches file contents exposes the node-owned page cache;
+    // null means uncached I/O through read/write.
+    [[nodiscard]] virtual FilePageCache *page_cache()
     {
         return nullptr;
     }

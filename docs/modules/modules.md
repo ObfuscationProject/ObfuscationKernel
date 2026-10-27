@@ -12,14 +12,14 @@ Each module exposes a `ModuleManifest` with:
 - dependency, exported-service, and required-service lists;
 - `ModuleExecution`, either `inline_core` or `kernel_process`;
 - `ModuleThreading`, either `single_threaded` or `per_cpu`;
-- `abi_version`, currently `kernel_module_abi_version == 74`;
+- `abi_version`, currently `kernel_module_abi_version == 75`;
 - a capability mask declaring service export/use, kernel-process ownership,
   per-CPU workers, user ABI, driver ABI, or GUI behavior;
 - `ModuleRestartPolicy`;
 - `ModuleResourceBudget` for maximum threads, services, memory pages, and
   handles.
 
-The current contract is module ABI 74 with public UAPI 0.16.0 and SDK manifest
+The current contract is module ABI 75 with public UAPI 0.16.0 and SDK manifest
 schema 1. The exporter writes the same generation into every SDK manifest, and
 the OS consumer rejects a mismatched generation before linking. Rebuild native
 extensions against the exact architecture/mode/compiler SDK; older generations
@@ -107,6 +107,28 @@ Roadmap tests cover:
 - the built-in module graph used by the kernel debug suite.
 
 ## ABI history
+
+ABI75 (`feat/mm-general`) changes exported memory and process layouts:
+`KernelConfig` carries the discovered `PhysicalMemoryMap` instead of a fixed
+region array; `FrameAllocator` metadata is caller-owned with one
+`PageDescriptor` per frame (`ok/memory/frames.hpp`); `NativePagePool` keeps its
+registry in those descriptors and gains the shared-allocator activation and
+`retain_copy`; `PageMapping` gains the `copy_on_write` record bit and
+`ok/arch/execution.hpp` adds `remap` and the write-resolver hook for
+copy-on-write fork, with `MappingPages::replace`; `MappingView` is one
+contiguous ascending record span with `find()`, `max_address_spaces` and
+`max_native_mappings` give way to `user_window_pages`, backends take table
+storage through `allocate_table_pages`/`release_table_pages` and report
+`OwnershipReport::table_pages`; `MappingPages` keeps contiguous record and
+token runs with retirement bytes; `NativePagePool` adds kernel-object runs and
+`FrameAllocator::allocate_contiguous` an alignment; the shared-file profile
+moves to v3 without fixed file or page counts; the software VM model leaves
+`ok/memory/memory.hpp` for the kernel tests;
+`MemoryManager` owns the kernel `SlabAllocator`; `fs::Node` gains the
+`page_cache()` virtual slot; `ProcessResources` gains `MemoryLimits`; the boot
+headers add the LoongArch EFI and Malta board protocols. The public UAPI stays
+0.16. Every exported module marker, the SDK manifest and the OS consumer declare
+75 and refuse 74 and 76.
 
 Earlier generations, kept for readers of archived qualification records. None of
 them can consume a current SDK.

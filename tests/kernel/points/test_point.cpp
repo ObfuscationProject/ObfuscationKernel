@@ -1,11 +1,13 @@
 #include "ok/core/test_point.hpp"
 
 #include "ok/core/kernel.hpp"
+#include "../model/vm_model.hpp"
 #include "ok/fs/ext4.hpp"
 
 #if defined(OK_ENABLE_TEST_POINTS)
 #include "frame_allocator_checks.hpp"
 #include "runtime_frames_checks.hpp"
+#include "kernel_memory_checks.hpp"
 #include "deadline_checks.hpp"
 #include "futex_wake_operation_checks.hpp"
 #include "wait_registration_checks.hpp"
@@ -203,10 +205,12 @@ Status test_memory(TestPointRunner &runner)
         return status;
     }
     static memory::MemoryManager manager;
+    static memory::FrameMetadataStorage<16> metadata;
     const std::array regions{
         memory::MemoryRegion{.base = 0x1000, .size = 0x10000, .type = memory::RegionType::usable},
     };
-    if (auto status = runner.check_status("memory", "initialize", manager.initialize(regions, 4096)); !status.ok())
+    if (auto status = runner.check_status("memory", "initialize", manager.initialize(regions, 4096, metadata.bytes));
+        !status.ok())
     {
         return status;
     }
@@ -215,13 +219,13 @@ Status test_memory(TestPointRunner &runner)
     {
         return status;
     }
-    if (auto status =
-            runner.check_status("memory", "map", manager.kernel_address_space().map(0x2000, frame.value(), 0b11));
+    memory::model::LinearAddressSpace kernel_space;
+    if (auto status = runner.check_status("memory", "map", kernel_space.map(0x2000, frame.value(), 0b11));
         !status.ok())
     {
         return status;
     }
-    if (auto status = runner.check_status("memory", "unmap", manager.kernel_address_space().unmap(0x2000));
+    if (auto status = runner.check_status("memory", "unmap", kernel_space.unmap(0x2000));
         !status.ok())
     {
         return status;
@@ -549,6 +553,11 @@ Result<usize> run_kernel_test_points(Kernel &kernel)
         return status;
     }
     if (auto status = test_memory(runner); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = runner.check_status("memory", "discovered-ram-frames-and-objects", check_kernel_memory(kernel.memory()));
+        !status.ok())
     {
         return status;
     }

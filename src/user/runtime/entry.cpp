@@ -143,6 +143,19 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
             [&](uptr address, std::span<const u8> bytes) {
                 return hw::copy_to_user(space, address, bytes.data(), bytes.size());
             });
+    // Per-process memory quotas; other resources keep the static service table.
+    if ((number == N::getrlimit || number == N::prlimit64) && process->resources().personality == Personality::native)
+        if (auto *limit = process->resources().memory_limits.find(number == N::prlimit64 ? a[1] : a[0]))
+        {
+            const bool prlimit = number == N::prlimit64, set = prlimit && a[2];
+            const uptr previous = prlimit ? a[3] : a[1];
+            sched::MemoryLimit requested{}, saved = *limit;
+            if (prlimit && a[0] && a[0] != static_cast<uptr>(pid)) return -3; // Only the caller's own limits.
+            if (!prlimit && !previous) return -14;
+            if (set && !hw::copy_from_user(space, &requested, a[2], sizeof(requested))) return -14;
+            if (previous && !hw::copy_to_user(space, previous, &saved, sizeof(saved))) return -14;
+            return set ? sched::MemoryLimits::update(*limit, requested, process->credentials().euid == 0) : 0;
+        }
     if (number == N::power_prepare || number == N::power_commit)
     {
         if (process->resources().personality != Personality::native) return -38;
@@ -857,7 +870,7 @@ Status start(Kernel &kernel, fs::BootArchive archive)
     if (auto status = hw::initialize(); !status.ok())
         return status;
     // Allocation becomes possible only after supervisor mappings are established.
-    if (auto status = activate_pool(); !status) return status;
+    if (auto status = activate_pool(&kernel); !status) return status;
     if (auto status = shared_files.bind(page_pool); !status) return status;
     if (auto status = kernel.scheduler().set_shared_memory_files(shared_files); !status) return status;
     if (auto status = entry_stacks.activate(entry_stack_arena); !status) return status;
@@ -887,6 +900,9 @@ Status start(Kernel &kernel, fs::BootArchive archive)
 #endif
     started = true;
     runtime_kernel = &kernel;
+#ifdef OK_NATIVE_COW_FORK
+    hw::set_write_resolver(resolve_native_write);
+#endif
     // This static singleton has one boot lifetime and no reconstruction/reset API.
     original_shutdown_owner = {&original_shutdown_owner, 1, pid.value(), process->threads()[0].tid};
     emit("OK_NATIVE scope=hardware init=loaded\n");
@@ -1255,6 +1271,10 @@ bool step(Kernel &kernel)
                 reported = true;
             }
         }
+#ifdef OK_NATIVE_COW_FORK
+        else if (trap.value().kind == hw::TrapKind::page_fault &&
+                 resolve_native_write(process->resources().native_space, trap.value().fault_address)) {}
+#endif
         else
         {
             emit("OK_NATIVE scope=hardware fault=contained\n");

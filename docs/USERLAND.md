@@ -111,8 +111,8 @@ RAM files have no persistent backing.
 
 The trusted-buffer `mmap` handler allocates bounded kernel memory-map records.
 The native boundary independently implements private anonymous `mmap`,
-`mprotect` and partial `munmap` through real architecture mappings. It retains
-the static ELF loader and eager fork; `brk` remains unavailable. See
+`mprotect`, partial `munmap` and `brk` through real architecture mappings. It
+retains the static ELF loader and shares private pages copy-on-write at fork. See
 [native VM](qualification/NATIVE_VM.md) for the supported protections and resource bounds.
 
 ## What Is Still Missing

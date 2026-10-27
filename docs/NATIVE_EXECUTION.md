@@ -44,7 +44,7 @@ A syscall crosses a checked copying boundary. User addresses are validated again
 all pages in the requested range; the trusted-buffer kernel syscall table never
 receives unchecked user buffers from this runtime. Invalid pointers return EFAULT.
 Faulting user programs exit and can be reaped without terminating the kernel.
-Fork eagerly copies user pages, retains shared open-file descriptions and resumes
+Fork shares private user pages copy-on-write, retains shared open-file descriptions and resumes
 with distinct return values. Exec stages and validates the complete new image
 before replacement. Wait blocks and consumes a zombie once. Pipes implement
 blocking transfer, EOF, EPIPE and endpoint-close wakeup.
@@ -56,10 +56,19 @@ is represented separately as a signal status.
 The loader accepts static ELF32/ELF64 ET_EXEC files with the native class, byte order and architecture with separate
 read/execute and writable segments. It builds argc/argv/envp and a small auxiliary
 vector on an aligned user stack with a guard page. W+X segments, malformed ranges,
-non-executable entry points and oversized images are rejected. Current bounds:
-16 address spaces, 128 pages per process, a 4 MiB shared backing pool, a 128 KiB
-ELF input buffer, 64 KiB stacks, and up to 16 argument/environment strings each.
-These are bring-up limits, not a general physical-memory allocator or COW VM.
+non-executable entry points and oversized images are rejected. User and
+kernel-object pages come from the kernel frame allocator over the discovered
+boot memory map (see [memory](modules/memory.md)); the page pool has a fixed
+kernel-object reserve and a user-page quota of every frame free at activation.
+Each process's mapped user pages are its charge against its own `RLIMIT_AS`
+soft limit; `RLIMIT_DATA` bounds its brk heap (see
+[process memory quotas](qualification/PROCESS_MEMORY_QUOTAS.md)). Address
+spaces, their translation tables and mapping records are allocated per process
+from the page pool's object reserve (see [bounded native VM](qualification/NATIVE_VM.md)).
+Remaining fixed bounds: a 128 KiB ELF input buffer, 64 KiB stacks, and up to 16
+argument/environment strings each. Fork shares private pages copy-on-write; a
+kernel built with `--native_cow_fork=n` copies them eagerly instead (see
+[copy-on-write fork](qualification/NATIVE_COW_FORK.md)).
 
 ## Distribution and boot archive
 
@@ -94,7 +103,7 @@ this is not Linux binary compatibility.
 
 Private and shared anonymous `mmap`, eager private file `mmap`, `mprotect` and
 partial `munmap` now modify native page tables. Shared anonymous frames survive
-fork by reference; private pages use eager copies. Protection faults and
+fork by reference; private pages are shared copy-on-write. Protection faults and
 transactional failure rollback remain supported.
 See [bounded native VM](qualification/NATIVE_VM.md) for supported flags and fixed limits.
 The [object pathname resolver](PATH_RESOLUTION.md) also serves cwd-relative exec,

@@ -8,7 +8,7 @@ header the units share; it declares exactly what crosses a unit boundary.
 | --- | --- |
 | `runtime.cpp` | Service state (entry-stack pool, syscall origins, VFS continuations, failure and shutdown state), diagnostics output, native thread preparation and retirement, syscall result encoding, process completion, shutdown, termination and release |
 | `runtime/loader.cpp` | ELF admission, the initial stack (argv/envp/auxv), image installation, `/init` installation and `execve` |
-| `runtime/vm.cpp` | Native page pool and firmware memory, address-space quarantine and retirement, mmap/mprotect/munmap/brk, fork page copies |
+| `runtime/vm.cpp` | Native page pool and backend table storage, address-space quarantine and retirement, mmap/mprotect/munmap/brk, fork page sharing and copies |
 | `runtime/wait.cpp` | poll/select readiness waits and wait4 child waits |
 | `runtime/futex.cpp` | futex wait/wake/requeue/wake-op, shared futex keys, robust lists and `clear_child_tid` |
 | `runtime/pipe.cpp` | Blocking pipe read/write continuations, including vectored I/O |

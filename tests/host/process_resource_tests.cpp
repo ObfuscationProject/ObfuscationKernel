@@ -690,10 +690,11 @@ void test_orphan_reaping_and_native_ownership()
     auto &resources = f.scheduler.find(orphan)->resources();
     alignas(4096) static std::array<std::byte, 4096> metadata_backing{};
     static memory::FrameAllocator metadata_frames;
+    static memory::FrameMetadataStorage<2048> metadata_frames_metadata;
     static user::native::NativePagePool metadata_pool;
     const memory::MemoryRegion metadata_region{reinterpret_cast<uptr>(metadata_backing.data()),
         metadata_backing.size(), memory::RegionType::usable};
-    CHECK(metadata_frames.initialize({&metadata_region, 1}, 4096));
+    CHECK(metadata_frames.initialize({&metadata_region, 1}, 4096, metadata_frames_metadata.bytes));
     CHECK(metadata_pool.activate(metadata_frames, user::native::NativePagePool::Source::linker_reserved, 1));
     CHECK(resources.native_pages.reserve(metadata_pool, 1));
     resources.native_space.root = 0x1000;
@@ -1229,6 +1230,33 @@ void test_unix_socketpair_lifetime_and_streams()
     std::puts("PASS hosted AF_UNIX streams: duplex, partial/EAGAIN/EPIPE, dup/fork, EOF ownership and rollback");
 }
 
+void test_memory_limits_and_fork_inheritance()
+{
+    // Quota rules: resource numbers, admission in pages, unprivileged updates.
+    sched::MemoryLimits limits;
+    CHECK(limits.find(9) == &limits.address_space && limits.find(2) == &limits.data && !limits.find(3));
+    CHECK(limits.admit(1u << 20, 4096));
+    CHECK(sched::MemoryLimits::update(limits.address_space, {64 * 4096, 128 * 4096}, false) == 0);
+    CHECK(limits.admit(64, 4096) && limits.admit(65, 4096).code() == StatusCode::no_memory);
+    CHECK(sched::MemoryLimits::update(limits.address_space, {256 * 4096, 512 * 4096}, false) == -1);
+    CHECK(sched::MemoryLimits::update(limits.address_space, {256 * 4096, 128 * 4096}, true) == -22);
+    CHECK(limits.address_space.current == 64 * 4096 && limits.address_space.maximum == 128 * 4096);
+    CHECK(sched::MemoryLimits::update(limits.address_space, {128 * 4096, 128 * 4096}, false) == 0);
+    CHECK(sched::MemoryLimits::update(limits.address_space, {~u64{0}, ~u64{0}}, true) == 0);
+
+    // Fork inherits the parent's quotas; the child changes its own.
+    static Fixture f;
+    const auto parent = f.create("limits");
+    CHECK(f.posix.activate(parent));
+    auto &parent_limits = f.scheduler.find(parent)->resources().memory_limits;
+    CHECK(sched::MemoryLimits::update(parent_limits.data, {32 * 4096, 64 * 4096}, false) == 0);
+    auto child = f.posix.fork();
+    CHECK(child);
+    auto &child_limits = f.scheduler.find(child.value())->resources().memory_limits;
+    CHECK(child_limits.data.current == 32 * 4096 && child_limits.data.maximum == 64 * 4096);
+    CHECK(sched::MemoryLimits::update(child_limits.data, {4096, 4096}, false) == 0);
+    CHECK(parent_limits.data.current == 32 * 4096);
+}
 int main()
 {
     test_unix_socketpair_lifetime_and_streams();
@@ -1251,6 +1279,7 @@ int main()
     test_orphan_reaping_and_native_ownership();
     test_exit_status_and_signal_status();
     test_elf_validation_and_failed_exec();
+    test_memory_limits_and_fork_inheritance();
     std::puts("PASS canonical owner, process isolation, shared offsets, exec, exit/wait, pipe wakeup, orphan reaping, "
               "exit status, rename/link lifetimes and retained directories");
 }

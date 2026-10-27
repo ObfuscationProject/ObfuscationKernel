@@ -6,9 +6,10 @@
 namespace ok::memory
 {
 
-// Per-owner page accounting. A charge account is owned by a process, a kernel
-// subsystem or a cache; frames are charged before they are handed out and
-// uncharged when released. `limit == 0` means unlimited (kernel-owned pools).
+// Per-owner accounting. A charge account is owned by a process, a kernel
+// subsystem or a cache; resources are charged before they are handed out and
+// uncharged when released. The owner fixes the unit: frame accounts count
+// pages, object accounts count bytes. `limit == 0` means unlimited.
 class ChargeAccount final : private NonCopyable
 {
   public:
@@ -17,22 +18,22 @@ class ChargeAccount final : private NonCopyable
     {
     }
 
-    Status charge(usize pages)
+    Status charge(usize units)
     {
-        if (pages > ~usize{0} - used_)
+        if (units > ~usize{0} - used_)
             return Status{StatusCode::overflow, "charge counter overflow"};
-        if (limit_ != 0 && used_ + pages > limit_)
+        if (limit_ != 0 && used_ + units > limit_)
             return Status{StatusCode::no_memory, "charge account quota exhausted"};
-        used_ += pages;
+        used_ += units;
         if (used_ > peak_)
             peak_ = used_;
         return Status::success();
     }
-    bool uncharge(usize pages)
+    bool uncharge(usize units)
     {
-        if (pages > used_)
+        if (units > used_)
             return false;
-        used_ -= pages;
+        used_ -= units;
         return true;
     }
     Status set_limit(usize limit)
