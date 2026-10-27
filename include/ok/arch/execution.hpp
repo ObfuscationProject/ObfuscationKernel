@@ -19,7 +19,8 @@ inline constexpr uptr user_end = 0x40000000;
 inline constexpr uptr user_begin = 0x40000000;
 inline constexpr uptr user_end = 0x80000000;
 #endif
-inline constexpr usize max_address_spaces = 16;
+// Every page of the user window can carry one mapping record.
+inline constexpr usize user_window_pages = (user_end - user_begin) / page_size;
 
 enum PageFlags : u8
 {
@@ -40,64 +41,52 @@ struct PageMapping
     u8 copy_on_write{0};
 };
 
-inline constexpr usize max_native_mappings = 1024;
-// A backend may retain this read-only directory while its address-space slot
-// exists. The pointed-to records live in page-pool metadata blocks; moving the
-// owner never moves those blocks. Zero-flag records retain backing for PROT_NONE
-// but must not acquire a user translation.
+// Contiguous records in strictly ascending virtual-address order. A backend
+// may retain the view while the address space it created from it exists: the
+// owner neither moves nor edits published records, except one record at a time
+// through remap(). Zero-flag records retain backing for PROT_NONE but must not
+// acquire a user translation.
 struct MappingView
 {
-    static constexpr usize records_per_chunk = page_size / sizeof(PageMapping);
-    static constexpr usize max_chunks =
-        (max_native_mappings + records_per_chunk - 1) / records_per_chunk;
-    std::array<std::span<const PageMapping>, max_chunks> chunks{};
+    const PageMapping *records{};
     usize count{};
 
     constexpr MappingView() = default;
-    constexpr MappingView(std::span<const PageMapping> contiguous) : count(contiguous.size())
-    {
-        chunks[0] = contiguous;
-    }
-    constexpr MappingView(const PageMapping *data, usize size) : MappingView(std::span<const PageMapping>{data, size}) {}
+    constexpr MappingView(std::span<const PageMapping> contiguous)
+        : records(contiguous.data()), count(contiguous.size()) {}
+    constexpr MappingView(const PageMapping *data, usize size) : records(data), count(size) {}
     template <usize N> constexpr MappingView(const std::array<PageMapping, N> &data)
         : MappingView(data.data(), N) {}
     template <usize N> constexpr MappingView(const PageMapping (&data)[N])
         : MappingView(data, N) {}
     [[nodiscard]] constexpr usize size() const { return count; }
     [[nodiscard]] constexpr bool empty() const { return count == 0; }
-    // Validate the public directory before a backend indexes it. Subtracting
-    // from count avoids overflow even when a caller supplies a huge span.
+    // Validate the public directory before a backend indexes it: bounded by
+    // the user window, present when nonempty and strictly ascending, which
+    // also excludes duplicate pages.
     [[nodiscard]] constexpr bool valid() const
     {
-        if (count > max_native_mappings) return false;
-        usize total = 0;
-        for (const auto chunk : chunks)
-        {
-            if (chunk.size() && !chunk.data()) return false;
-            if (chunk.size() > count - total) return false;
-            total += chunk.size();
-        }
-        return total == count;
+        if (count > user_window_pages || (count && !records)) return false;
+        for (usize index = 1; index < count; ++index)
+            if (records[index].virtual_address <= records[index - 1].virtual_address) return false;
+        return true;
     }
-    [[nodiscard]] constexpr const PageMapping &operator[](usize index) const
+    [[nodiscard]] constexpr const PageMapping &operator[](usize index) const { return records[index]; }
+    [[nodiscard]] constexpr const PageMapping *begin() const { return records; }
+    [[nodiscard]] constexpr const PageMapping *end() const { return records + count; }
+    // The record of the page holding `address`, or null.
+    [[nodiscard]] constexpr const PageMapping *find(uptr address) const
     {
-        for (const auto chunk : chunks)
+        const uptr page = address & ~uptr{page_size - 1};
+        usize low = 0, high = count;
+        while (low < high)
         {
-            if (index < chunk.size()) return chunk[index];
-            index -= chunk.size();
+            const usize middle = low + (high - low) / 2;
+            if (records[middle].virtual_address < page) low = middle + 1;
+            else high = middle;
         }
-        __builtin_unreachable();
+        return low < count && records[low].virtual_address == page ? &records[low] : nullptr;
     }
-    struct Iterator
-    {
-        const MappingView *view{};
-        usize index{};
-        [[nodiscard]] constexpr const PageMapping &operator*() const { return (*view)[index]; }
-        constexpr Iterator &operator++() { ++index; return *this; }
-        [[nodiscard]] constexpr bool operator!=(Iterator other) const { return index != other.index; }
-    };
-    [[nodiscard]] constexpr Iterator begin() const { return {this, 0}; }
-    [[nodiscard]] constexpr Iterator end() const { return {this, count}; }
 };
 
 struct AddressSpace
@@ -109,12 +98,14 @@ struct AddressSpace
 
 // Serialized boot-CPU snapshot of backend slots, independent of process records.
 // Includes allocated slots whose handles were never published to a process.
-// Static kernel tables and inactive reusable bytes are excluded. These backends
-// retire synchronously; runtime page/pin/quarantine owners are reported separately.
+// `table_pages` counts the table-storage pages the backend holds, including its
+// slot table; static kernel tables are excluded. These backends retire
+// synchronously; runtime page/pin/quarantine owners are reported separately.
 struct OwnershipReport
 {
     Status failure{};
     usize address_spaces{};
+    usize table_pages{};
     bool executing{};
 };
 
@@ -159,6 +150,13 @@ struct Trap
 
 [[nodiscard]] bool supported() noexcept;
 Status initialize();
+// Translation-table storage, supplied by the native runtime that owns user
+// memory: `pages` zero-filled frames whose first address is aligned to
+// `alignment` and is both the supervisor pointer and the address the
+// translation hardware walks. Backends hold tables and slot records here only
+// while an address space needs them and release each run as allocated.
+[[nodiscard]] Result<uptr> allocate_table_pages(usize pages, usize alignment = page_size);
+Status release_table_pages(uptr address, usize pages);
 Result<AddressSpace> create_space(MappingView mappings);
 Status destroy_space(AddressSpace &space);
 // Re-synchronizes one present translation with its record after the runtime

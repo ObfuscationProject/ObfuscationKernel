@@ -33,7 +33,7 @@ int main()
         const auto first = *f.pool.handle(first_address), second = *f.pool.handle(second_address);
         MappingPages pages;
         CHECK(pages.reserve(f.pool, 2, true));
-        CHECK(pages.exact_frames() && pages.block_count() == 1 && pages.frame_block_count() == 1);
+        CHECK(pages.exact_frames() && pages.record_pages() == 1 && pages.frame_pages() == 1);
         CHECK(pages.push_back({0x40001000, first.address, 3}, first));
         CHECK(pages.push_back({0x40000000, second.address, 1}, second));
         CHECK(pages[0].physical_address == second.address && pages.frame(0)->generation == second.generation);
@@ -55,11 +55,11 @@ int main()
     test(1, [](Fixture &f) {
         MappingPages pages;
         CHECK(!pages.reserve(f.pool, 1, true));
-        CHECK(!pages.exact_frames() && !pages.block_count() && !pages.frame_block_count());
+        CHECK(!pages.exact_frames() && !pages.record_pages() && !pages.frame_pages());
         CHECK(f.pool.object_count() == 0);
         CHECK(pages.reserve(f.pool, 1));
         CHECK(!pages.reserve(f.pool, 1, true));
-        CHECK(pages.block_count() == 1 && !pages.frame_block_count() && !pages.exact_frames());
+        CHECK(pages.record_pages() == 1 && !pages.frame_pages() && !pages.exact_frames());
         CHECK(pages.clear() && f.pool.object_count() == 0);
     });
     test(6, [](Fixture &f) {

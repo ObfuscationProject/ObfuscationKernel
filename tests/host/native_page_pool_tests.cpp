@@ -374,8 +374,41 @@ void shared_allocator_form_respects_other_owners()
     for (auto address : users) CHECK(pool.release(address));
     CHECK(pool.release_kernel_page(object.value()) && pool.used_count() == 0 && frames.free_frames() == 8);
 }
+void object_runs_are_aligned_zeroed_and_reserve_bounded()
+{
+    alignas(4 * NativePagePool::page_size) static std::array<std::byte, 12 * NativePagePool::page_size> storage{};
+    static memory::FrameAllocator frames;
+    static memory::FrameMetadataStorage<2048> frames_metadata;
+    static NativePagePool pool;
+    CHECK(!pool.allocate_object_run(1));
+    const memory::MemoryRegion region{reinterpret_cast<uptr>(storage.data()) + NativePagePool::page_size,
+                                      storage.size() - NativePagePool::page_size, memory::RegionType::usable};
+    CHECK(frames.initialize({&region, 1}, NativePagePool::page_size, frames_metadata.bytes));
+    CHECK(pool.activate(frames, NativePagePool::Source::linker_reserved, 7));
+    storage.fill(std::byte{0x5a});
+    auto single = pool.allocate_object_run(1);
+    CHECK(single && single.value() == region.base && pool.object_count() == 1 && pool.user_count() == 0);
+    // A four-page run aligned to its own size skips the unaligned prefix.
+    auto aligned = pool.allocate_object_run(4, 4 * NativePagePool::page_size);
+    CHECK(aligned && aligned.value() % (4 * NativePagePool::page_size) == 0 && aligned.value() > single.value());
+    for (usize offset = 0; offset < 4 * NativePagePool::page_size; ++offset)
+        CHECK(reinterpret_cast<const std::byte *>(aligned.value())[offset] == std::byte{});
+    CHECK(pool.object_count() == 5 && pool.allocations() == 5 && pool.used_count() == 5);
+    // The object reserve bounds runs as it bounds leases; users never take them.
+    CHECK(pool.allocate_object_run(3).status().code() == StatusCode::no_memory && pool.object_count() == 5);
+    CHECK(!pool.allocate_object_run(0) && !pool.allocate_object_run(2, 3 * NativePagePool::page_size));
+    CHECK(!pool.release_object_run(aligned.value() + NativePagePool::page_size, 4));
+    CHECK(!pool.release_object_run(aligned.value(), 5) && pool.object_count() == 5);
+    auto user = pool.allocate();
+    CHECK(user && !pool.release_object_run(user.value(), 1) && pool.release(user.value()));
+    CHECK(pool.release_object_run(aligned.value(), 4) && pool.object_count() == 1);
+    CHECK(!pool.release_object_run(aligned.value(), 4));
+    CHECK(pool.release_object_run(single.value(), 1) && pool.used_count() == 0);
+    CHECK(pool.allocations() == pool.releases() && frames.free_frames() == frames.total_frames());
+}
 int main()
 {
+    object_runs_are_aligned_zeroed_and_reserve_bounded();
     original_registry_checks();object_reserve_and_lease_checks();
     dropped_and_overwritten_leases_remain_auditable();
     shared_process_references_are_distinct_from_retirement_pins();

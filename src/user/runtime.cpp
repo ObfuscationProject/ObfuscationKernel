@@ -180,17 +180,19 @@ struct QuarantinedSpace
     enum class Ownership : u8 { borrowed, pending, discharged };
     hw::AddressSpace space{};
     Pages pages;
-    std::array<Ownership, Pages::capacity> ownership{};
-    std::array<bool, Pages::capacity> pin_held{};
+    // Per-record state lives in the directory's retirement bytes.
+    RetirementField<Ownership, 3, 0> ownership(usize index) { return {&pages.retirement(index)}; }
+    RetirementField<bool, 4, 2> pin_held(usize index) { return {&pages.retirement(index)}; }
+    void reset(Ownership value) { for (usize index = 0; index < pages.size(); ++index) pages.retirement(index) = u8(value); }
     usize pinned_count{};
     bool used{};
     bool reserved{};
     bool table_retired{};
     bool pin_complete{};
 };
-// The final slot retains a candidate even if a backend incorrectly reports a
-// failed retirement after consuming all of its advertised space slots.
-std::array<QuarantinedSpace, hw::max_address_spaces + 1> quarantined_spaces{};
+// A process holds at most one live space and transactions build one
+// replacement at a time: one slot per process plus one candidate.
+std::array<QuarantinedSpace, sched::max_processes + 1> quarantined_spaces{};
 #ifdef OK_PRIVATE_PPC32_SIGNAL
 // Pinned PPC musl debug files retain section tables after their debug data.
 // This bounded private prefix is metadata storage, not executable image memory.
@@ -505,18 +507,13 @@ std::array<PollWaitIndex, child_wait_capacity> child_waits{};
 Status retire_linux_udp_receives(Kernel &kernel, sched::ProcessId pid,
     std::optional<sched::ThreadId> tid, LinuxUdpReceiveRetirement cause);
 constexpr usize kernel_object_pages = poll_object_pages + futex_object_pages + pipe_read_object_pages + pipe_write_object_pages + pty_wait_object_pages + child_wait_object_pages + native_udp_receive_pages + linux_udp_receive_pages;
-// Aliases consume metadata records without another physical data frame. Bound
-// every published directory and one candidate independently of the data quota.
 static_assert(kernel_object_pages < hosted_page_count);
-constexpr usize mapping_metadata_pages =
-    (hw::max_address_spaces + 1) * (Pages::max_blocks + Pages::max_frame_blocks);
-constexpr usize kernel_reserve_pages = kernel_object_pages + mapping_metadata_pages;
+// Translation tables and mapping metadata grow with the processes they serve:
+// beside the runtime objects, the reserve holds a sixteenth of the frames free
+// at activation, at least 256. User pages never take reserved frames.
+constexpr usize object_reserve_pages(usize free) { return kernel_object_pages + (free / 16 > 256 ? free / 16 : 256); }
+constexpr usize kernel_reserve_pages = object_reserve_pages(hosted_page_count);
 static_assert(kernel_reserve_pages < hosted_page_count);
-#if __SIZEOF_POINTER__ == 8
-static_assert(Pages::records_per_block == 170 && Pages::frames_per_block == 128 && mapping_metadata_pages == 255);
-#else
-static_assert(Pages::records_per_block == 341 && Pages::max_frame_blocks >= 6 && Pages::max_frame_blocks <= 7);
-#endif
 
 [[maybe_unused]] memory::ObjectHandle futex_object(sched::ProcessId pid, sched::ThreadId tid)
 {
@@ -928,10 +925,11 @@ Status activate_pool([[maybe_unused]] Kernel *kernel)
         // Shared with every other kernel owner: user pages may take what is
         // free at activation outside the kernel-object reserve.
         auto &frames = kernel->memory().frames();
-        if (frames.free_frames() <= kernel_reserve_pages)
+        const auto reserve = object_reserve_pages(frames.free_frames());
+        if (frames.free_frames() <= reserve)
             return Status::no_memory("discovered RAM cannot hold the native kernel-object reserve");
-        return page_pool.activate(frames, NativePagePool::Source::qualified_firmware, kernel_reserve_pages,
-                                  frames.free_frames() - kernel_reserve_pages);
+        return page_pool.activate(frames, NativePagePool::Source::qualified_firmware, reserve,
+                                  frames.free_frames() - reserve);
     }
 #endif
     const memory::MemoryRegion region{reinterpret_cast<uptr>(physical_pages.data()),sizeof(physical_pages),
@@ -1041,14 +1039,14 @@ Status discharge_quarantine(QuarantinedSpace &saved, bool all = false, uptr begi
     {
         const auto &page = saved.pages[index];
         const bool selected = all || (size && page.virtual_address >= begin && page.virtual_address - begin < size);
-        if (selected && saved.ownership[index] == Ownership::borrowed) saved.ownership[index] = Ownership::pending;
+        if (selected && saved.ownership(index) == Ownership::borrowed) saved.ownership(index) = Ownership::pending;
     }
     if (!saved.pin_complete && !saved.table_retired)
         return Status::busy("quarantine cannot discharge an incompletely pinned native table");
     for (usize index = 0; index < saved.pages.size(); ++index)
     {
         const auto &page = saved.pages[index];
-        auto &ownership = saved.ownership[index];
+        auto ownership = saved.ownership(index);
         if (ownership != Ownership::pending) continue;
         const auto *frame = owned_frame(saved.pages, page);
         if (!frame)
@@ -1071,8 +1069,8 @@ Status finish_quarantine(QuarantinedSpace &saved, bool retry_owners = true)
     Status result = retry_owners ? discharge_quarantine(saved) : Status{};
     for (usize index = 0; index < saved.pages.size(); ++index)
     {
-        if (saved.ownership[index] == QuarantinedSpace::Ownership::pending) continue;
-        if (!saved.pin_held[index]) continue;
+        if (saved.ownership(index) == QuarantinedSpace::Ownership::pending) continue;
+        if (!saved.pin_held(index)) continue;
         const auto *frame = saved_frame(saved.pages, saved.pages[index]);
         if (!frame)
         {
@@ -1082,13 +1080,13 @@ Status finish_quarantine(QuarantinedSpace &saved, bool retry_owners = true)
         const auto status = page_pool.unpin(*frame);
         if (status)
         {
-            saved.pin_held[index] = false;
+            saved.pin_held(index) = false;
             --saved.pinned_count;
         }
         else if (result) result = status;
     }
     for (usize index = 0; index < saved.pages.size(); ++index)
-        if (saved.ownership[index] == QuarantinedSpace::Ownership::pending || saved.pin_held[index])
+        if (saved.ownership(index) == QuarantinedSpace::Ownership::pending || saved.pin_held(index))
             return result ? Status::busy("quarantine still owns failed frame retirement") : result;
     if (auto status = saved.pages.clear(); !status) return status;
     saved.space = {};
@@ -1140,8 +1138,7 @@ class PageRetirementReservation final : private NonCopyable
         saved.table_retired = true;
         saved.pin_complete = true;
         saved.pinned_count = 0;
-        saved.pin_held.fill(false);
-        saved.ownership.fill(QuarantinedSpace::Ownership::borrowed);
+        saved.reset(QuarantinedSpace::Ownership::borrowed);
         saved_ = nullptr;
         const auto discharged = discharge_quarantine(saved, false, begin, size);
         const auto retired = finish_quarantine(saved, false);
@@ -1168,8 +1165,7 @@ Status quarantine(const hw::AddressSpace &space, Pages &pages)
             saved.space = space;
             saved.used = true;
             saved.table_retired = false;
-            saved.ownership.fill(QuarantinedSpace::Ownership::borrowed);
-            saved.pin_held.fill(false);
+            saved.reset(QuarantinedSpace::Ownership::borrowed);
             saved.pinned_count = 0;
             saved.pin_complete = false;
             for (usize index = 0; index < saved.pages.size(); ++index)
@@ -1183,7 +1179,7 @@ Status quarantine(const hw::AddressSpace &space, Pages &pages)
                     // may be discharged while this borrow is incompletely pinned.
                     return status;
                 }
-                saved.pin_held[index] = true;
+                saved.pin_held(index) = true;
                 ++saved.pinned_count;
             }
             saved.pin_complete = true;
@@ -1270,8 +1266,7 @@ void release(hw::AddressSpace &space, Pages &pages)
             saved.table_retired = true;
             saved.pin_complete = true;
             saved.pinned_count = 0;
-            saved.pin_held.fill(false);
-            saved.ownership.fill(QuarantinedSpace::Ownership::borrowed);
+            saved.reset(QuarantinedSpace::Ownership::borrowed);
             const auto discharged = discharge_quarantine(saved, true);
             const auto retired = finish_quarantine(saved, false);
             if (!discharged) runtime_failure = discharged;
@@ -1905,8 +1900,7 @@ class ImageRetirementReservation final : private NonCopyable
         saved.table_retired = saved.space.root == 0;
         saved.pin_complete = saved.table_retired;
         saved.pinned_count = 0;
-        saved.pin_held.fill(false);
-        saved.ownership.fill(QuarantinedSpace::Ownership::pending);
+        saved.reset(QuarantinedSpace::Ownership::pending);
         for (const auto &page : saved.pages)
             if (!owned_frame(saved.pages, page))
                 return Status::fault("native image retirement lost an exact owner token");
@@ -1924,7 +1918,7 @@ class ImageRetirementReservation final : private NonCopyable
                 const auto *frame = owned_frame(saved.pages, saved.pages[index]);
                 if (!frame) return Status::fault("native image pin lost exact owner token");
                 if (auto status = page_pool.pin(*frame); !status) return status;
-                saved.pin_held[index] = true;
+                saved.pin_held(index) = true;
                 ++saved.pinned_count;
             }
             saved.pin_complete = true;
@@ -5871,3 +5865,8 @@ void input(char value)
         runtime_kernel->scheduler().console_input(value);
 }
 } // namespace ok::user::native
+// Backend translation tables are kernel objects of the native page pool.
+ok::Result<ok::uptr> ok::arch::execution::allocate_table_pages(usize pages, usize alignment)
+{ return user::native::page_pool.allocate_object_run(pages, alignment); }
+ok::Status ok::arch::execution::release_table_pages(uptr address, usize pages)
+{ return user::native::page_pool.release_object_run(address, pages); }

@@ -132,6 +132,12 @@ static void check_contiguous()
     CHECK(frames.release_contiguous(run.value(), 2, account) && account.used() == 6 && !frames.live(run.value()));
     CHECK(frames.release_contiguous(run.value(), 2, account).code() == StatusCode::invalid_argument);
     CHECK(frames.release_contiguous(frames.handle_at(run.value().index + 3).value(), 3, account) && account.used() == 3);
+    // An aligned run skips free frames below the boundary and refuses bad alignments.
+    CHECK(frames.allocate_contiguous(2, account, 3 * 4096).status().code() == StatusCode::invalid_argument);
+    auto aligned = frames.allocate_contiguous(4, account, 4 * 4096);
+    CHECK(aligned && aligned.value().address == 0x10000 && account.used() == 7);
+    CHECK(frames.allocate_contiguous(2, account, 0x10000).status().code() == StatusCode::no_memory && account.used() == 7);
+    CHECK(frames.release_contiguous(aligned.value(), 4, account) && account.used() == 3);
 }
 
 static void check_boot_carve()

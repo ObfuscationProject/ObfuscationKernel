@@ -59,7 +59,9 @@ struct Space
     u32 generation{};
     hw::MappingView pages;
 };
-std::array<Space, hw::max_address_spaces> spaces;
+// The model backend keeps a fixed slot table so exhaustion stays testable.
+constexpr usize slot_count = 16;
+std::array<Space, slot_count> spaces;
 bool fail_create{};
 bool fail_all_retirement{};
 uptr fail_destroy_root{};
@@ -345,7 +347,7 @@ void check_backend_and_metadata_limits()
 {
     Fixture fixture;
     auto &resources = fixture.resources;
-    std::array<hw::AddressSpace, hw::max_address_spaces - 1> borrowed{};
+    std::array<hw::AddressSpace, mock::slot_count - 1> borrowed{};
     for (auto &space : borrowed)
     {
         auto created = native::create_page_space(resources.native_pages);
@@ -353,7 +355,7 @@ void check_backend_and_metadata_limits()
         space = created.value();
     }
     CHECK(fixture.map(4096).status().code() == StatusCode::no_memory);
-    CHECK(mock::used_frames() == 2 && mock::live_spaces() == hw::max_address_spaces);
+    CHECK(mock::used_frames() == 2 && mock::live_spaces() == mock::slot_count);
     for (auto &space : borrowed)
         CHECK(hw::destroy_space(space));
     for (usize i = 0; i < sched::max_memory_areas - 2; ++i)
@@ -625,17 +627,13 @@ void check_complete_runtime_purpose_budget()
 {
     CHECK(native::activate_pool());
     CHECK(native::page_pool.used_count() == 0);
-    std::array<native::Pages, hw::max_address_spaces + 1> directories;
-    for (usize i = 0; i < hw::max_address_spaces; ++i)
-    {
-        CHECK(directories[i].reserve(native::page_pool, native::Pages::capacity, true));
-        CHECK(directories[i].block_count() == native::Pages::max_blocks);
-        CHECK(directories[i].frame_block_count() == native::Pages::max_frame_blocks);
-    }
-    CHECK(directories.back().reserve(native::page_pool, native::Pages::capacity, true));
-    CHECK(directories.back().block_count() == native::Pages::max_blocks);
-    CHECK(directories.back().frame_block_count() == native::Pages::max_frame_blocks);
-    CHECK(native::page_pool.object_count() == native::mapping_metadata_pages);
+    // Mapping metadata and translation tables share whatever part of the
+    // reserve the runtime objects leave; one directory can take all of it.
+    const usize metadata_pages = native::kernel_reserve_pages - native::kernel_object_pages;
+    std::array<native::Pages, 1> directories;
+    CHECK(directories[0].reserve(native::page_pool, metadata_pages * hw::page_size / native::Pages::record_bytes));
+    CHECK(directories[0].record_pages() == metadata_pages && directories[0].frame_pages() == 0);
+    CHECK(native::page_pool.object_count() == metadata_pages);
     std::array<native::NativePagePool::Lease, native::kernel_object_pages> objects;
     for (auto &object : objects)
     {
@@ -868,8 +866,8 @@ void check_exec_failed_old_retirement_skips_install()
     CHECK(saved && saved->pages.size() == 2 && saved->pin_complete && !saved->table_retired);
     for (usize index = 0; index < saved->pages.size(); ++index)
     {
-        CHECK(saved->ownership[index] == native::QuarantinedSpace::Ownership::discharged);
-        CHECK(saved->pin_held[index] && native::page_pool.valid(*saved->pages.frame(index)));
+        CHECK(saved->ownership(index) == native::QuarantinedSpace::Ownership::discharged);
+        CHECK(saved->pin_held(index) && native::page_pool.valid(*saved->pages.frame(index)));
         CHECK(native::page_pool.reference_count(saved->pages[index].physical_address) == 0);
     }
     CHECK(mock::live_spaces() == 1 && native::page_pool.user_count() == 2);
@@ -897,7 +895,7 @@ void check_exec_failed_install_retains_replacement()
     CHECK(calls == 1 && native::runtime_failure.code() == StatusCode::io_error);
     auto *saved = quarantine_for(replacement);
     CHECK(saved && saved->pages.frame(0)->generation == frame.generation && saved->pages.frame(0)->owner == frame.owner);
-    CHECK(saved->pin_complete && saved->pin_held[0] && native::page_pool.valid(frame));
+    CHECK(saved->pin_complete && saved->pin_held(0) && native::page_pool.valid(frame));
     CHECK(!image.retirement.active() && image.pages.empty() && !image.space.root);
     CHECK(mock::live_spaces() == 1 && native::page_pool.user_count() == 2);
     mock::fail_destroy_root = 0;
@@ -932,8 +930,8 @@ void check_exec_failed_old_shared_aliases_retire_once()
         if (saved->pages[index].physical_address == frame.address)
         {
             ++aliases;
-            CHECK(saved->pages.frame(index)->generation == frame.generation && saved->pin_held[index]);
-            CHECK(saved->ownership[index] == native::QuarantinedSpace::Ownership::discharged);
+            CHECK(saved->pages.frame(index)->generation == frame.generation && saved->pin_held(index));
+            CHECK(saved->ownership(index) == native::QuarantinedSpace::Ownership::discharged);
         }
     CHECK(aliases == 2 && native::page_pool.valid(frame) && native::page_pool.reference_count(frame.address) == 0);
     CHECK(native::page_pool.pending_count() == 3 && mock::live_spaces() == 1);
@@ -981,11 +979,11 @@ void check_image_partial_pin_failure_keeps_pending_owners()
     mock::fail_destroy_root = identity.root;
     CHECK(image.retire().code() == StatusCode::fault);
     auto *saved = quarantine_for(identity);
-    CHECK(saved && !saved->pin_complete && saved->pinned_count == 1 && saved->pin_held[0] && !saved->pin_held[1]);
+    CHECK(saved && !saved->pin_complete && saved->pinned_count == 1 && saved->pin_held(0) && !saved->pin_held(1));
     CHECK(saved->pages.frame(1)->generation == blocked.generation && mock::live_spaces() == 2);
     for (usize index = 0; index < saved->pages.size(); ++index)
     {
-        CHECK(saved->ownership[index] == native::QuarantinedSpace::Ownership::pending);
+        CHECK(saved->ownership(index) == native::QuarantinedSpace::Ownership::pending);
         CHECK(native::page_pool.reference_count(saved->pages[index].physical_address) == 1);
     }
     CHECK(native::page_pool.user_count() == users + 2);
@@ -1007,8 +1005,8 @@ void check_image_failed_owner_release_retries_once()
     native::QuarantinedSpace *saved{};
     for (auto &row : native::quarantined_spaces) if (row.used && row.table_retired) saved = &row;
     CHECK(saved && saved->pages.frame(0)->generation == first.generation);
-    CHECK(saved->ownership[0] == native::QuarantinedSpace::Ownership::pending &&
-          saved->ownership[1] == native::QuarantinedSpace::Ownership::discharged);
+    CHECK(saved->ownership(0) == native::QuarantinedSpace::Ownership::pending &&
+          saved->ownership(1) == native::QuarantinedSpace::Ownership::discharged);
     CHECK(native::page_pool.valid(first) && !native::page_pool.valid(second));
     CHECK(native::page_pool.user_count() == users + 1 && mock::live_spaces() == 1);
     native::NativePagePoolFaultProbe::exact_release(native::page_pool, {}, 0);
@@ -1078,7 +1076,7 @@ void check_repeated_teardown_discharges_shared_alias_once()
     CHECK(native::shared_files.info(file).value().aliases == 1);
     CHECK(native::page_pool.reference_count(frame.address) == 2 && native::page_pool.pinned_count() == pins);
     for (usize index = 0; index < saved->pages.size(); ++index)
-        CHECK(saved->ownership[index] == native::QuarantinedSpace::Ownership::discharged);
+        CHECK(saved->ownership(index) == native::QuarantinedSpace::Ownership::discharged);
     CHECK(native::shared_files.release_description(file));
     mock::fail_destroy_root = 0;
     native::release(fixture.resources.native_space, fixture.resources.native_pages);
@@ -1108,7 +1106,7 @@ void check_alias_discharge_is_consumed_before_failed_base_retirement()
     CHECK(saved && native::shared_files.ledger().retiring_files == 1);
     CHECK(native::shared_files.ledger().aliases == 0 && native::page_pool.reference_count(frame.address) == 1);
     for (usize index = 0; index < saved->pages.size(); ++index)
-        CHECK(saved->ownership[index] == native::QuarantinedSpace::Ownership::discharged);
+        CHECK(saved->ownership(index) == native::QuarantinedSpace::Ownership::discharged);
     native::release(fixture.resources.native_space, fixture.resources.native_pages);
     CHECK(native::shared_files.ledger().retiring_files == 1 && native::page_pool.reference_count(frame.address) == 1);
     native::SharedMemoryFilesFaultProbe::final_release(native::shared_files, false);
@@ -1143,7 +1141,7 @@ void check_write_seal_requires_retired_table_pins()
     CHECK(native::shared_files.add_seals(file, 8 | 1).code() == StatusCode::busy);
     CHECK(native::shared_files.info(file).value().seals == 6);
     for (usize index = 0; index < saved->pages.size(); ++index)
-        CHECK(saved->ownership[index] == native::QuarantinedSpace::Ownership::discharged);
+        CHECK(saved->ownership(index) == native::QuarantinedSpace::Ownership::discharged);
     const auto releases = native::page_pool.releases();
     native::release(fixture.resources.native_space, fixture.resources.native_pages);
     CHECK(native::shared_files.info(file).value().aliases == 0);
@@ -1248,7 +1246,7 @@ void check_partial_pin_retirement_preserves_failed_token()
     auto retired = original;
     CHECK(!native::retire_space(retired, fixture.resources.native_pages));
     CHECK(!retired.root && saved->used && saved->table_retired);
-    CHECK(!saved->pin_held[0] && saved->pin_held[1] && saved->pinned_count == 1);
+    CHECK(!saved->pin_held(0) && saved->pin_held(1) && saved->pinned_count == 1);
     CHECK(saved->pages.size() == 2 && saved->pages.frame(1)->generation == failed.generation);
     CHECK(native::page_pool.user_count() == 1 && native::page_pool.pinned_count() == 1);
     // The first token is already physically retired. A retry must skip it,
@@ -1276,7 +1274,7 @@ void check_incomplete_quarantine_keeps_all_owner_edges()
     CHECK(native::page_pool.reference_count(saved->pages[0].physical_address) == 1);
     CHECK(native::page_pool.reference_count(saved->pages[1].physical_address) == 1);
     for (usize index = 0; index < saved->pages.size(); ++index)
-        CHECK(saved->ownership[index] == native::QuarantinedSpace::Ownership::pending);
+        CHECK(saved->ownership(index) == native::QuarantinedSpace::Ownership::pending);
     const_cast<memory::PhysicalFrame *>(saved->pages.frame(1))->generation = generation;
     CHECK(native::retire_space(fixture.resources.native_space, fixture.resources.native_pages));
     CHECK(!saved->used && native::page_pool.used_count() == 0 && mock::live_spaces() == 0);
@@ -1327,15 +1325,15 @@ native::QuarantinedSpace *retained_range()
     return result;
 }
 
-void check_range_owner_states(const native::QuarantinedSpace &saved, usize pending, usize discharged, usize borrowed)
+void check_range_owner_states(native::QuarantinedSpace &saved, usize pending, usize discharged, usize borrowed)
 {
     usize actual_pending{}, actual_discharged{}, actual_borrowed{};
     for (usize index = 0; index < saved.pages.size(); ++index)
     {
-        actual_pending += saved.ownership[index] == native::QuarantinedSpace::Ownership::pending;
-        actual_discharged += saved.ownership[index] == native::QuarantinedSpace::Ownership::discharged;
-        actual_borrowed += saved.ownership[index] == native::QuarantinedSpace::Ownership::borrowed;
-        CHECK(!saved.pin_held[index]);
+        actual_pending += saved.ownership(index) == native::QuarantinedSpace::Ownership::pending;
+        actual_discharged += saved.ownership(index) == native::QuarantinedSpace::Ownership::discharged;
+        actual_borrowed += saved.ownership(index) == native::QuarantinedSpace::Ownership::borrowed;
+        CHECK(!saved.pin_held(index));
     }
     CHECK(actual_pending == pending && actual_discharged == discharged && actual_borrowed == borrowed);
 }

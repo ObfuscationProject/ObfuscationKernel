@@ -1,4 +1,4 @@
-#include "ok/arch/execution.hpp"
+#include "ok/arch/execution_spaces.hpp"
 #include "ok/arch/arm32/fp_state.hpp"
 #include <cstddef>
 
@@ -6,8 +6,6 @@ namespace ok::arch::execution
 {
 namespace
 {
-constexpr usize max_pages = max_native_mappings;
-constexpr usize max_leaf_tables = 16;
 struct alignas(16384) RootTable
 {
     std::array<u32, 4096> entries{};
@@ -16,16 +14,20 @@ struct alignas(1024) LeafTable
 {
     std::array<u32, 256> entries{};
 };
+constexpr usize root_pages = sizeof(RootTable) / page_size;
+// Table storage pages hold four coarse tables: one page serves an aligned
+// 4 MiB group of first-level entries.
+constexpr usize leaves_per_page = page_size / sizeof(LeafTable);
+// The kernel runs with the MMU off; tables live in the RAM sections every
+// first-level table maps.
+constexpr uptr table_begin = uptr{1024} << 20, table_end = uptr{1280} << 20;
 struct Space
 {
-    bool used{false};
-    u32 generation{0};
-    usize count{0}, leaves{0};
+    RootTable *root{};
     MappingView mappings{};
-    RootTable root;
-    std::array<LeafTable, max_leaf_tables> leaf;
+    usize leaf_pages{};
 };
-std::array<Space, max_address_spaces> spaces{};
+constinit SpaceTable<Space> spaces;
 bool initialized{false}, entering{false};
 volatile u32 &mmio(uptr address)
 {
@@ -79,20 +81,52 @@ void restore_timer(const TimerState &old)
 }
 Space *lookup(const AddressSpace &space)
 {
-    if (space.slot >= spaces.size())
-        return nullptr;
-    auto &stored = spaces[space.slot];
-    return stored.used && stored.generation == space.generation && reinterpret_cast<uptr>(&stored.root) == space.root
-               ? &stored
-               : nullptr;
+    return spaces.find(space);
 }
 const PageMapping *mapping(const Space &space, uptr address)
 {
-    const auto page = address & ~(page_size - 1);
-    for (usize i = 0; i < space.count; ++i)
-        if (space.mappings[i].flags && space.mappings[i].virtual_address == page)
-            return &space.mappings[i];
-    return nullptr;
+    const auto *page = space.mappings.find(address);
+    return page && page->flags ? page : nullptr;
+}
+Result<uptr> allocate_table(usize pages, usize alignment)
+{
+    auto run = allocate_table_pages(pages, alignment);
+    if (!run) return run.status();
+    if (run.value() < table_begin || run.value() + pages * page_size > table_end)
+    {
+        static_cast<void>(release_table_pages(run.value(), pages));
+        return Status::unsupported("native table storage lies outside the RAM sections");
+    }
+    return run.value();
+}
+// Leaf pages first, one per populated 4 MiB group, then the first-level table.
+Status release_tables(Space &space)
+{
+    Status result{};
+    auto release = [&](uptr address, usize pages) {
+        if (auto status = release_table_pages(address, pages); !status && result) result = status;
+    };
+    if (space.root)
+    {
+        for (usize group = user_begin >> 20; group < user_end >> 20; group += leaves_per_page)
+        {
+            uptr page = 0;
+            for (usize index = group; index < group + leaves_per_page; ++index)
+                if ((space.root->entries[index] & 3u) == 1u)
+                {
+                    page = space.root->entries[index] & ~uptr{page_size - 1};
+                    space.root->entries[index] = 0;
+                }
+            if (page)
+            {
+                release(page, 1);
+                --space.leaf_pages;
+            }
+        }
+        release(reinterpret_cast<uptr>(space.root), root_pages);
+        space.root = nullptr;
+    }
+    return result;
 }
 bool admissible(const PageMapping &page)
 {
@@ -131,21 +165,14 @@ OwnershipReport ownership_report() noexcept
 {
     OwnershipReport report{};
     report.executing = entering;
-    for (const auto &space : spaces)
-    {
-        const bool retained = space.count != 0 || !space.mappings.empty() || !space.mappings.valid();
-        if (space.used || retained) ++report.address_spaces;
-        if (space.used)
-        {
-            if (!space.generation || !space.count || space.count != space.mappings.size() ||
-                !space.mappings.valid())
-                report.failure = Status::io_error("native backend has an inconsistent mapping owner");
-        }
-        else if (retained)
-            report.failure = Status::io_error("native backend has an orphan mapping owner");
-        if (space.used && space.leaves > max_leaf_tables)
-            report.failure = Status::io_error("native backend leaf-table ownership exceeds capacity");
-    }
+    spaces.each([&](const Space &space, uptr root) {
+        ++report.address_spaces;
+        report.table_pages += root_pages + space.leaf_pages;
+        if (!space.root || root != reinterpret_cast<uptr>(space.root) || space.mappings.empty() ||
+            !space.mappings.valid())
+            report.failure = Status::io_error("native backend has an inconsistent mapping owner");
+    });
+    report.table_pages += spaces.pages();
     if (!initialized && (report.address_spaces || report.executing))
         report.failure = Status::io_error("uninitialized native backend retains owners");
     return report;
@@ -167,57 +194,60 @@ Result<AddressSpace> create_space(MappingView mappings)
 {
     if (!initialized)
         return Status::not_initialized("native execution is not initialized");
-    if (!mappings.valid() || mappings.empty() || mappings.size() > max_pages)
-        return Status::invalid_argument("invalid user page count");
-    for (usize i = 0; i < mappings.size(); ++i)
-    {
-        const auto &page = mappings[i];
+    if (!mappings.valid() || mappings.empty())
+        return Status::invalid_argument("invalid user mapping directory");
+    for (const auto &page : mappings)
         if (!admissible(page))
             return Status::invalid_argument("invalid ARM user mapping");
-        for (usize j = 0; j < i; ++j)
-            if (mappings[j].virtual_address == page.virtual_address)
-                return Status::already_exists("duplicate user page");
-    }
-    usize slot = 0;
-    while (slot < spaces.size() && spaces[slot].used)
-        ++slot;
-    if (slot == spaces.size())
-        return Status::no_memory("native address space table full");
-    auto &space = spaces[slot];
-    space.root.entries.fill(0);
-    for (auto &table : space.leaf)
-        table.entries.fill(0);
-    space.count = 0;
-    space.mappings = {};
-    space.leaves = 0;
+    auto entry = spaces.acquire();
+    if (!entry)
+        return entry.status();
+    auto &space = entry.value()->space;
+    auto fail = [&](Status status) {
+        static_cast<void>(release_tables(space));
+        static_cast<void>(spaces.release(space));
+        return status;
+    };
+    auto root = allocate_table(root_pages, sizeof(RootTable));
+    if (!root)
+        return fail(root.status());
+    space.root = reinterpret_cast<RootTable *>(root.value());
     // Identity-map platform MMIO and kernel RAM as privileged-only sections.
     for (usize i = 0; i < 256; ++i)
-        space.root.entries[i] = static_cast<u32>(i << 20) | 0x416u;
+        space.root->entries[i] = static_cast<u32>(i << 20) | 0x416u;
     for (usize i = 1024; i < 1280; ++i)
-        space.root.entries[i] = static_cast<u32>(i << 20) | 0x1402u;
+        space.root->entries[i] = static_cast<u32>(i << 20) | 0x1402u;
     for (const auto &page : mappings)
     {
         if (!page.flags) continue; // PROT_NONE has no user translation.
-        auto &root_entry = space.root.entries[page.virtual_address >> 20];
+        const usize section = page.virtual_address >> 20;
+        auto &root_entry = space.root->entries[section];
         if (root_entry == 0)
         {
-            if (space.leaves == max_leaf_tables)
-                return Status::no_memory("ARM coarse table capacity exceeded");
-            root_entry = reinterpret_cast<uptr>(&space.leaf[space.leaves++]) | 1u;
+            const usize group = section & ~(leaves_per_page - 1);
+            uptr leaf_page = 0;
+            for (usize index = group; index < group + leaves_per_page; ++index)
+                if ((space.root->entries[index] & 3u) == 1u)
+                    leaf_page = space.root->entries[index] & ~uptr{page_size - 1};
+            if (!leaf_page)
+            {
+                auto allocated = allocate_table(1, page_size);
+                if (!allocated)
+                    return fail(allocated.status());
+                leaf_page = allocated.value();
+                ++space.leaf_pages;
+            }
+            root_entry = static_cast<u32>(leaf_page + (section - group) * sizeof(LeafTable)) | 1u;
         }
         if ((root_entry & 3u) != 1u)
-            return Status::invalid_argument("user mapping overlaps privileged platform section");
+            return fail(Status::invalid_argument("user mapping overlaps privileged platform section"));
         auto *leaf = reinterpret_cast<LeafTable *>(root_entry & ~uptr{1023});
         leaf->entries[(page.virtual_address >> 12) & 255u] = leaf_entry(page);
     }
     space.mappings = mappings;
-    space.count = mappings.size();
-    if (++space.generation == 0)
-        ++space.generation;
-    space.used = true;
     asm volatile("dsb sy\nisb" ::: "memory");
-    return AddressSpace{
-        .root = reinterpret_cast<uptr>(&space.root), .slot = static_cast<u32>(slot), .generation = space.generation};
+    entry.value()->root = reinterpret_cast<uptr>(space.root);
+    return spaces.handle(*entry.value());
 }
 Status remap(const AddressSpace &space, const PageMapping &mapping)
 {
@@ -228,7 +258,7 @@ Status remap(const AddressSpace &space, const PageMapping &mapping)
         return Status::busy("cannot remap an executing address space");
     if (!admissible(mapping) || mapping.flags == 0)
         return Status::invalid_argument("invalid ARM user remap");
-    const auto root_entry = stored->root.entries[mapping.virtual_address >> 20];
+    const auto root_entry = stored->root->entries[mapping.virtual_address >> 20];
     if ((root_entry & 3u) != 1u)
         return Status::not_found("native user page has no translation");
     auto &entry = reinterpret_cast<LeafTable *>(root_entry & ~uptr{1023})->entries[(mapping.virtual_address >> 12) & 255u];
@@ -246,11 +276,10 @@ Status destroy_space(AddressSpace &space)
     auto *stored = lookup(space);
     if (stored == nullptr)
         return Status::invalid_argument("stale native address space");
-    stored->used = false;
-    stored->count = 0;
-    stored->mappings = {};
+    const auto released = release_tables(*stored);
+    const auto retired = spaces.release(*stored);
     space = {};
-    return Status::success();
+    return !released ? released : retired;
 }
 UserFrame initial_frame(uptr entry, uptr stack)
 {

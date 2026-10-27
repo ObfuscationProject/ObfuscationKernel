@@ -93,8 +93,9 @@ class FrameAllocator final : private NonCopyable
     Result<PhysicalFrame> allocate();
     Result<PhysicalFrame> allocate(ChargeAccount &account);
     // Physically contiguous frames inside one range. Returns the lowest; the
-    // others are the next indices (handle_at). Release them together.
-    Result<PhysicalFrame> allocate_contiguous(usize count, ChargeAccount &account);
+    // others are the next indices (handle_at). Release them together. A
+    // nonzero power-of-two `alignment` also aligns the first frame's address.
+    Result<PhysicalFrame> allocate_contiguous(usize count, ChargeAccount &account, usize alignment = 0);
     Status release_contiguous(PhysicalFrame first, usize count, ChargeAccount &account);
     Status release(PhysicalFrame frame);
     Status release(PhysicalFrame frame, ChargeAccount &account);

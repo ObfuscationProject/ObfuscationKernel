@@ -1,4 +1,4 @@
-#include "ok/arch/execution.hpp"
+#include "ok/arch/execution_spaces.hpp"
 
 #include <cstddef>
 
@@ -16,7 +16,6 @@ constexpr u64 not_global = 1u << 11;
 constexpr u64 privileged_xn = u64{1} << 53;
 constexpr u64 user_xn = u64{1} << 54;
 constexpr u64 address_mask = 0x0000fffffffff000ULL;
-constexpr usize table_count = 16;
 constexpr uptr ram_begin = 0x40000000;
 constexpr uptr ram_end = 0x80000000;
 constexpr uptr gic_distributor = 0x08000000;
@@ -27,16 +26,15 @@ struct alignas(page_size) Table
 {
     u64 entries[512]{};
 };
-struct SpaceStorage
+// Each space owns a root and a directory table and one leaf table per 2 MiB of
+// user window it maps, all from table storage.
+struct Space
 {
-    Table root{};
-    Table directory{};
-    Table tables[table_count]{};
-    usize tables_used{0};
-    u32 generation{0};
-    bool allocated{false};
+    Table *root{};
+    Table *directory{};
+    usize tables{};
 };
-SpaceStorage spaces[max_address_spaces]{};
+constinit SpaceTable<Space> spaces;
 Table kernel_root{};
 Table kernel_directory{};
 bool initialized = false;
@@ -84,14 +82,9 @@ void populate_kernel(Table &root, Table &directory)
     for (usize i = 0; i < user_begin / (2 * 1024 * 1024); ++i)
         directory.entries[i] = i * 2 * 1024 * 1024 | valid | accessed | privileged_xn | user_xn;
 }
-SpaceStorage *storage(const AddressSpace &space)
+Space *storage(const AddressSpace &space)
 {
-    if (space.slot >= max_address_spaces)
-        return nullptr;
-    auto &value = spaces[space.slot];
-    return value.allocated && value.generation == space.generation && reinterpret_cast<uptr>(&value.root) == space.root
-               ? &value
-               : nullptr;
+    return spaces.find(space);
 }
 u64 lookup(const AddressSpace &space, uptr address)
 {
@@ -100,7 +93,7 @@ u64 lookup(const AddressSpace &space, uptr address)
     const auto *value = storage(space);
     if (value == nullptr)
         return 0;
-    const auto directory_entry = value->directory.entries[(address >> 21) & 511];
+    const auto directory_entry = value->directory->entries[(address >> 21) & 511];
     if ((directory_entry & table_or_page) != table_or_page)
         return 0;
     const auto *table = reinterpret_cast<const Table *>(directory_entry & address_mask);
@@ -130,6 +123,43 @@ u64 leaf_entry(const PageMapping &mapping)
         entry |= user_xn;
     return entry;
 }
+// The kernel runs with the MMU off, so table storage must be RAM the walker
+// reaches at the same address.
+Result<Table *> allocate_table()
+{
+    auto page = allocate_table_pages(1);
+    if (!page) return page.status();
+    if (page.value() < ram_begin || page.value() >= ram_end)
+    {
+        static_cast<void>(release_table_pages(page.value(), 1));
+        return Status::unsupported("native table storage lies outside supervisor RAM");
+    }
+    return reinterpret_cast<Table *>(page.value());
+}
+void release_table(Table *&table, Status &result)
+{
+    if (!table) return;
+    if (auto status = release_table_pages(reinterpret_cast<uptr>(table), 1); !status && result) result = status;
+    table = nullptr;
+}
+// User leaves first (the low directory holds MMIO blocks), then the fixed
+// tables; the first refused release is reported.
+Status release_tables(Space &value)
+{
+    Status result{};
+    if (value.directory)
+        for (usize index = user_begin >> 21; index < 512; ++index)
+            if (auto &entry = value.directory->entries[index]; (entry & table_or_page) == table_or_page)
+            {
+                auto *leaf = reinterpret_cast<Table *>(entry & address_mask);
+                release_table(leaf, result);
+                entry = 0;
+                --value.tables;
+            }
+    release_table(value.directory, result);
+    release_table(value.root, result);
+    return result;
+}
 void clean_code(uptr address)
 {
     u64 cache_type;
@@ -157,13 +187,13 @@ OwnershipReport ownership_report() noexcept
 {
     OwnershipReport report{};
     report.executing = executing || ok_arm_execution_active_frame != nullptr || ok_arm_execution_resume_sp != 0;
-    for (const auto &space : spaces)
-    {
-        if (!space.allocated) continue;
+    spaces.each([&](const Space &value, uptr root) {
         ++report.address_spaces;
-        if (!space.generation || space.tables_used > table_count)
+        report.table_pages += 2 + value.tables;
+        if (!value.root || !value.directory || root != reinterpret_cast<uptr>(value.root))
             report.failure = Status::io_error("native backend has an inconsistent table owner");
-    }
+    });
+    report.table_pages += spaces.pages();
     if (!initialized && (report.address_spaces || report.executing))
         report.failure = Status::io_error("uninitialized native backend retains owners");
     return report;
@@ -220,45 +250,49 @@ Result<AddressSpace> create_space(MappingView mappings)
 {
     if (!initialized)
         return Status::not_initialized("native execution backend is not initialized");
-    if (!mappings.valid() || mappings.empty() || mappings.size() > max_native_mappings)
-        return Status::invalid_argument("invalid native mapping count");
-    usize slot = 0;
-    while (slot < max_address_spaces && spaces[slot].allocated)
-        ++slot;
-    if (slot == max_address_spaces)
-        return Status::no_memory("native address-space slots exhausted");
-    auto &value = spaces[slot];
-    const auto generation = value.generation + 1;
-    value = {};
-    value.generation = generation == 0 ? 1 : generation;
-    populate_kernel(value.root, value.directory);
-    for (usize index = 0; index < mappings.size(); ++index)
-    {
-        const auto &mapping = mappings[index];
+    if (!mappings.valid() || mappings.empty())
+        return Status::invalid_argument("invalid native mapping directory");
+    for (const auto &mapping : mappings)
         if (!admissible(mapping))
             return Status::invalid_argument("invalid native user-page mapping or writable executable page");
-        for (usize previous = 0; previous < index; ++previous)
-            if (mappings[previous].virtual_address == mapping.virtual_address)
-                return Status::already_exists("duplicate native user-page mapping");
+    auto entry = spaces.acquire();
+    if (!entry)
+        return entry.status();
+    auto &value = entry.value()->space;
+    auto fail = [&](Status status) {
+        static_cast<void>(release_tables(value));
+        static_cast<void>(spaces.release(value));
+        return status;
+    };
+    for (Table **table : {&value.root, &value.directory})
+    {
+        auto allocated = allocate_table();
+        if (!allocated)
+            return fail(allocated.status());
+        *table = allocated.value();
+    }
+    populate_kernel(*value.root, *value.directory);
+    for (const auto &mapping : mappings)
+    {
         if (mapping.flags == 0) continue; // PROT_NONE owns backing without a PTE.
-        auto &directory_entry = value.directory.entries[(mapping.virtual_address >> 21) & 511];
+        auto &directory_entry = value.directory->entries[(mapping.virtual_address >> 21) & 511];
         if ((directory_entry & valid) == 0)
         {
-            if (value.tables_used == table_count)
-                return Status::no_memory("native page-table pool exhausted");
-            directory_entry = reinterpret_cast<uptr>(&value.tables[value.tables_used++]) | table_or_page;
+            auto table = allocate_table();
+            if (!table)
+                return fail(table.status());
+            directory_entry = reinterpret_cast<uptr>(table.value()) | table_or_page;
+            ++value.tables;
         }
-        auto *table = reinterpret_cast<Table *>(directory_entry & address_mask);
-        auto &entry = table->entries[(mapping.virtual_address >> 12) & 511];
-        if ((entry & valid) != 0)
-            return Status::already_exists("duplicate native user-page mapping");
-        entry = leaf_entry(mapping);
+        reinterpret_cast<Table *>(directory_entry & address_mask)->entries[(mapping.virtual_address >> 12) & 511] =
+            leaf_entry(mapping);
         if ((mapping.flags & page_execute) != 0)
             clean_code(mapping.physical_address);
     }
+    // Table stores must be visible to the walker before the root is selected.
     asm volatile("dsb ish; ic iallu; dsb ish; isb" : : : "memory");
-    value.allocated = true;
-    return AddressSpace{reinterpret_cast<uptr>(&value.root), static_cast<u32>(slot), value.generation};
+    entry.value()->root = reinterpret_cast<uptr>(value.root);
+    return spaces.handle(*entry.value());
 }
 
 Status remap(const AddressSpace &space, const PageMapping &mapping)
@@ -270,7 +304,7 @@ Status remap(const AddressSpace &space, const PageMapping &mapping)
         return Status::busy("cannot remap an address space during native execution");
     if (!admissible(mapping) || mapping.flags == 0)
         return Status::invalid_argument("invalid native user-page remap");
-    const auto directory_entry = value->directory.entries[(mapping.virtual_address >> 21) & 511];
+    const auto directory_entry = value->directory->entries[(mapping.virtual_address >> 21) & 511];
     if ((directory_entry & table_or_page) != table_or_page)
         return Status::not_found("native user page has no translation");
     auto &entry = reinterpret_cast<Table *>(directory_entry & address_mask)->entries[(mapping.virtual_address >> 12) & 511];
@@ -293,9 +327,10 @@ Status destroy_space(AddressSpace &space)
         return Status::not_found("native address-space handle is stale");
     if (executing)
         return Status::busy("cannot destroy an address space during native execution");
-    value->allocated = false;
+    const auto released = release_tables(*value);
+    const auto retired = spaces.release(*value);
     space = {};
-    return Status::success();
+    return !released ? released : retired;
 }
 
 UserFrame initial_frame(uptr entry, uptr stack)

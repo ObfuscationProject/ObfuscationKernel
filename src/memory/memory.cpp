@@ -301,12 +301,14 @@ Result<PhysicalFrame> FrameAllocator::allocate(ChargeAccount &account)
     return frame;
 }
 
-Result<PhysicalFrame> FrameAllocator::allocate_contiguous(usize count, ChargeAccount &account)
+Result<PhysicalFrame> FrameAllocator::allocate_contiguous(usize count, ChargeAccount &account, usize alignment)
 {
     if (frame_count_ == 0)
         return Status::not_initialized("physical frame allocator is not initialized");
     if (count == 0)
         return Status::invalid_argument("contiguous frame request is empty");
+    if (alignment & (alignment - 1))
+        return Status::invalid_argument("contiguous frame alignment is not a power of two");
     if (count > frame_count_ - used_count_)
         return Status::no_memory("physical frame allocator exhausted");
     if (count > ~u64{0} - next_generation_)
@@ -317,11 +319,11 @@ Result<PhysicalFrame> FrameAllocator::allocate_contiguous(usize count, ChargeAcc
         for (usize offset = 0; offset < range.count; ++offset)
         {
             run = used(range.first_index + offset) ? 0 : run + 1;
-            if (run != count)
+            const usize first = range.first_index + offset + 1 - count;
+            if (run < count || (alignment && address_for(first) % alignment))
                 continue;
             if (auto status = account.charge(count); !status.ok())
                 return status;
-            const usize first = range.first_index + offset + 1 - count;
             for (usize i = 0; i < count; ++i)
                 static_cast<void>(take(first + i));
             return handle_at(first);

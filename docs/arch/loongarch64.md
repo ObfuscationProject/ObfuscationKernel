@@ -22,8 +22,9 @@ The freestanding build uses `-msimd=none`; LSX/LASX are not enabled.
   PLV3 cannot use that window.
 - User virtual addresses occupy `[0x40000000, 0x80000000)`. Software TLB refill
   installs paired 4 KiB mappings with PLV3, read-only and execute-never bits.
-  User backing pages remain caller-owned; the backend keeps up to 128 mappings
-  per space and 16 generation-checked address-space handles.
+  User backing pages remain caller-owned; refill searches the space's ordered
+  records, and generation-checked handles live in a slot table that grows with
+  the number of spaces.
 - Real `ertn` entry, `syscall` return, architectural timer preemption and
   exception/refill vectors. The generic runtime receives traps synchronously
   on its original kernel stack and owns process policy.

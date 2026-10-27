@@ -96,21 +96,25 @@ runs. There is no remote TLB protocol or SMP lifetime proof here.
 
 ## Bounds and remaining work
 
-The metadata sequence allows at most 1024 mapping records per process. On a
-64-bit target, a 4096-byte metadata block holds 170 records, so one owner uses
-at most seven blocks. Sixteen backend slots cover live and quarantined spaces;
-one staged owner may exist before it receives a slot. Their worst-case metadata
-charge is therefore 17 × 7 = 119 pages. The existing object pools require 38
-pages on x86_64, for an explicit 157-page kernel reserve and an 867-page user
-quota from a 1024-frame pool. On 32-bit targets a block holds 341 records and
-the mapping charge is 17 × 4 = 68 pages; object-pool pages are calculated from
-their architecture-specific object sizes at compile time. Activation rejects a
-pool smaller than its reserve. The actual total allocation remains limited by
-the available frames.
+A process's mapping records form one contiguous run of kernel-object pages,
+ordered by virtual address and followed by one retirement byte per record; with
+exact frame tokens a second run holds them. Both runs grow by doubling while
+the directory is unpublished; a directory whose view a backend holds refuses
+insertion and growth, so transactions build a candidate and publish it. The
+user window bounds the record count (`user_window_pages`, 262,144 pages, or
+196,608 on ARM). Table-walking backends allocate their translation tables from
+the same reserve through `execution::allocate_table_pages`: each space's fixed
+root tables plus one leaf page per populated 2 MiB (4 MiB on rv32 and ARM32,
+whose page holds four 1 KiB coarse tables), released when the space retires.
+LoongArch, MIPS and PPC refill from the records and need no tables. Every
+backend's slot table doubles as needed and is released with its last space. The object
+reserve is the runtime objects' pages plus a sixteenth of the frames free at
+activation, at least 256; user pages never take reserved frames, and
+activation rejects RAM that cannot hold the reserve.
 
-Sixteen coalesced `MemoryMap` areas and each architecture's fixed page-table
-pool remain separate limits. Replacement needs one additional free native
-address-space slot. Capacity failure is reported without destroying the previous image. At least one
+Sixteen coalesced `MemoryMap` areas remain a separate limit. Replacement needs
+the object pages of one more address space while the previous one is live.
+Capacity failure is reported without destroying the previous image. At least one
 accessible image page must remain; fully inaccessible or empty spaces are not
 supported by all current backends.
 

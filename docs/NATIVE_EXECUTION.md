@@ -61,9 +61,10 @@ boot memory map (see [memory](modules/memory.md)); the page pool has a fixed
 kernel-object reserve and a user-page quota of every frame free at activation.
 Each process's mapped user pages are its charge against its own `RLIMIT_AS`
 soft limit; `RLIMIT_DATA` bounds its brk heap (see
-[process memory quotas](qualification/PROCESS_MEMORY_QUOTAS.md)). Remaining
-fixed bounds: 16 address spaces and 1024 mapping records per address space in
-the execution backends, a 128 KiB ELF input buffer, 64 KiB stacks, and up to 16
+[process memory quotas](qualification/PROCESS_MEMORY_QUOTAS.md)). Address
+spaces, their translation tables and mapping records are allocated per process
+from the page pool's object reserve (see [bounded native VM](qualification/NATIVE_VM.md)).
+Remaining fixed bounds: a 128 KiB ELF input buffer, 64 KiB stacks, and up to 16
 argument/environment strings each. Fork shares private pages copy-on-write; a
 kernel built with `--native_cow_fork=n` copies them eagerly instead (see
 [copy-on-write fork](qualification/NATIVE_COW_FORK.md)).

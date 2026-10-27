@@ -1,53 +1,71 @@
-#include "ok/arch/execution.hpp"
+#include "ok/arch/execution_spaces.hpp"
 #include <cstddef>
 
 namespace ok::arch::execution
 {
 namespace
 {
-constexpr usize max_pages = max_native_mappings;
-constexpr usize max_leaf_tables = 16;
 constexpr u64 pte_valid = 1, pte_read = 2, pte_write = 4, pte_execute = 8, pte_user = 16, pte_accessed = 64,
               pte_dirty = 128;
 struct alignas(page_size) Table
 {
     std::array<u64, 512> entries{};
 };
+// Each space owns a root and a middle table and one leaf table per 2 MiB of
+// user window it maps, all from table storage the M-mode kernel reaches
+// untranslated.
 struct Space
 {
-    bool used{false};
-    u32 generation{0};
-    usize count{0};
-    usize leaves{0};
+    Table *root{};
+    Table *middle{};
     MappingView mappings{};
-    Table root;
-    Table middle;
-    std::array<Table, max_leaf_tables> leaf;
+    usize leaves{};
 };
-std::array<Space, max_address_spaces> spaces{};
+constinit SpaceTable<Space> spaces;
 bool initialized{false};
 bool entering{false};
 
 Space *lookup(const AddressSpace &space)
 {
-    if (space.slot >= spaces.size())
-        return nullptr;
-    auto &stored = spaces[space.slot];
-    return stored.used && stored.generation == space.generation && reinterpret_cast<uptr>(&stored.root) == space.root
-               ? &stored
-               : nullptr;
+    return spaces.find(space);
 }
 const PageMapping *mapping(const Space &space, uptr address)
 {
-    const auto page = address & ~(page_size - 1);
-    for (usize i = 0; i < space.count; ++i)
-        if (space.mappings[i].flags && space.mappings[i].virtual_address == page)
-            return &space.mappings[i];
-    return nullptr;
+    const auto *page = space.mappings.find(address);
+    return page && page->flags ? page : nullptr;
 }
 u64 table_entry(const Table &table)
 {
     return (reinterpret_cast<uptr>(&table) >> 2) | pte_valid;
+}
+Result<Table *> allocate_table()
+{
+    auto page = allocate_table_pages(1);
+    if (!page) return page.status();
+    return reinterpret_cast<Table *>(page.value());
+}
+// Leaf tables first, then the fixed tables; the first refused release is
+// reported.
+Status release_tables(Space &space)
+{
+    Status result{};
+    auto release = [&](Table *&table) {
+        if (!table) return;
+        if (auto status = release_table_pages(reinterpret_cast<uptr>(table), 1); !status && result) result = status;
+        table = nullptr;
+    };
+    if (space.middle)
+        for (usize index = user_begin >> 21 & 511u; index <= user_end - 1 >> 21 & 511u; ++index)
+            if (auto &entry = space.middle->entries[index]; entry & pte_valid)
+            {
+                auto *leaf = reinterpret_cast<Table *>((entry >> 10) << 12);
+                release(leaf);
+                entry = 0;
+                --space.leaves;
+            }
+    release(space.middle);
+    release(space.root);
+    return result;
 }
 bool admissible(const PageMapping &page)
 {
@@ -88,21 +106,14 @@ OwnershipReport ownership_report() noexcept
 {
     OwnershipReport report{};
     report.executing = entering;
-    for (const auto &space : spaces)
-    {
-        const bool retained = space.count != 0 || !space.mappings.empty() || !space.mappings.valid();
-        if (space.used || retained) ++report.address_spaces;
-        if (space.used)
-        {
-            if (!space.generation || !space.count || space.count != space.mappings.size() ||
-                !space.mappings.valid())
-                report.failure = Status::io_error("native backend has an inconsistent mapping owner");
-        }
-        else if (retained)
-            report.failure = Status::io_error("native backend has an orphan mapping owner");
-        if (space.used && space.leaves > max_leaf_tables)
-            report.failure = Status::io_error("native backend leaf-table ownership exceeds capacity");
-    }
+    spaces.each([&](const Space &space, uptr root) {
+        ++report.address_spaces;
+        report.table_pages += 2 + space.leaves;
+        if (!space.root || !space.middle || root != reinterpret_cast<uptr>(space.root) || space.mappings.empty() ||
+            !space.mappings.valid())
+            report.failure = Status::io_error("native backend has an inconsistent mapping owner");
+    });
+    report.table_pages += spaces.pages();
     if (!initialized && (report.address_spaces || report.executing))
         report.failure = Status::io_error("uninitialized native backend retains owners");
     return report;
@@ -128,53 +139,47 @@ Result<AddressSpace> create_space(MappingView mappings)
 {
     if (!initialized)
         return Status::not_initialized("native execution is not initialized");
-    if (!mappings.valid() || mappings.empty() || mappings.size() > max_pages)
-        return Status::invalid_argument("invalid user page count");
-    for (usize i = 0; i < mappings.size(); ++i)
-    {
-        const auto &page = mappings[i];
+    if (!mappings.valid() || mappings.empty())
+        return Status::invalid_argument("invalid user mapping directory");
+    for (const auto &page : mappings)
         if (!admissible(page))
             return Status::invalid_argument("invalid Sv39 user mapping");
-        for (usize j = 0; j < i; ++j)
-            if (mappings[j].virtual_address == page.virtual_address)
-                return Status::already_exists("duplicate user page");
+    auto entry = spaces.acquire();
+    if (!entry)
+        return entry.status();
+    auto &space = entry.value()->space;
+    auto fail = [&](Status status) {
+        static_cast<void>(release_tables(space));
+        static_cast<void>(spaces.release(space));
+        return status;
+    };
+    for (Table **table : {&space.root, &space.middle})
+    {
+        auto allocated = allocate_table();
+        if (!allocated)
+            return fail(allocated.status());
+        *table = allocated.value();
     }
-    usize slot = 0;
-    while (slot < spaces.size() && spaces[slot].used)
-        ++slot;
-    if (slot == spaces.size())
-        return Status::no_memory("native address space table full");
-    auto &space = spaces[slot];
-    space.root.entries.fill(0);
-    space.middle.entries.fill(0);
-    for (auto &table : space.leaf)
-        table.entries.fill(0);
-    space.count = 0;
-    space.mappings = {};
-    space.leaves = 0;
-    space.root.entries[1] = table_entry(space.middle);
+    space.root->entries[1] = table_entry(*space.middle);
     for (const auto &page : mappings)
     {
         if (!page.flags) continue; // PROT_NONE has no user translation.
-        const usize middle_index = (page.virtual_address >> 21) & 511u;
-        auto &middle = space.middle.entries[middle_index];
-        if (middle == 0)
+        auto &directory_entry = space.middle->entries[(page.virtual_address >> 21) & 511u];
+        if (directory_entry == 0)
         {
-            if (space.leaves == max_leaf_tables)
-                return Status::no_memory("Sv39 leaf table capacity exceeded");
-            middle = table_entry(space.leaf[space.leaves++]);
+            auto table = allocate_table();
+            if (!table)
+                return fail(table.status());
+            directory_entry = table_entry(*table.value());
+            ++space.leaves;
         }
-        auto *leaf = reinterpret_cast<Table *>((middle >> 10) << 12);
+        auto *leaf = reinterpret_cast<Table *>((directory_entry >> 10) << 12);
         leaf->entries[(page.virtual_address >> 12) & 511u] = leaf_entry(page);
     }
     space.mappings = mappings;
-    space.count = mappings.size();
-    if (++space.generation == 0)
-        ++space.generation;
-    space.used = true;
     asm volatile("fence rw,rw\nfence.i" ::: "memory");
-    return AddressSpace{
-        .root = reinterpret_cast<uptr>(&space.root), .slot = static_cast<u32>(slot), .generation = space.generation};
+    entry.value()->root = reinterpret_cast<uptr>(space.root);
+    return spaces.handle(*entry.value());
 }
 Status remap(const AddressSpace &space, const PageMapping &mapping)
 {
@@ -185,7 +190,7 @@ Status remap(const AddressSpace &space, const PageMapping &mapping)
         return Status::busy("cannot remap an executing address space");
     if (!admissible(mapping) || mapping.flags == 0)
         return Status::invalid_argument("invalid Sv39 user remap");
-    const auto middle = stored->middle.entries[(mapping.virtual_address >> 21) & 511u];
+    const auto middle = stored->middle->entries[(mapping.virtual_address >> 21) & 511u];
     if ((middle & pte_valid) == 0)
         return Status::not_found("native user page has no translation");
     auto &entry = reinterpret_cast<Table *>((middle >> 10) << 12)->entries[(mapping.virtual_address >> 12) & 511u];
@@ -203,11 +208,10 @@ Status destroy_space(AddressSpace &space)
     auto *stored = lookup(space);
     if (stored == nullptr)
         return Status::invalid_argument("stale native address space");
-    stored->used = false;
-    stored->count = 0;
-    stored->mappings = {};
+    const auto released = release_tables(*stored);
+    const auto retired = spaces.release(*stored);
     space = {};
-    return Status::success();
+    return !released ? released : retired;
 }
 UserFrame initial_frame(uptr entry, uptr stack)
 {

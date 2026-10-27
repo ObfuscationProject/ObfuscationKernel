@@ -1,6 +1,6 @@
 
 #include "ok/user/native_signal_config.hpp"
-#include "ok/arch/execution.hpp"
+#include "ok/arch/execution_spaces.hpp"
 #include <cstddef>
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && defined(__mips64)
 #define OK_PRIVATE_MIPS64_N64_ADMISSION 1
@@ -18,14 +18,12 @@ namespace
 {
 static_assert(offsetof(UserFrame, pc) == sizeof(uptr) * 32);
 static_assert(offsetof(UserFrame, fp_state) == (sizeof(uptr) == 8 ? 304 : 160));
+// Refill reads the runtime-owned records directly; a space needs no tables.
 struct Space
 {
     MappingView pages{};
-    usize count{};
-    u32 generation{};
-    bool used{};
 };
-std::array<Space, max_address_spaces> spaces{};
+constinit SpaceTable<Space> spaces;
 bool initialized{}, executing{};
 u32 tlb_entries{};
 #ifdef OK_PRIVATE_MIPS_O32_ADMISSION
@@ -60,19 +58,12 @@ template <unsigned Register, unsigned Select = 0> void write_cp0(uptr value)
 }
 Space *lookup(const AddressSpace &space)
 {
-    if (space.slot >= spaces.size())
-        return nullptr;
-    auto &storage = spaces[space.slot];
-    return storage.used && storage.generation == space.generation && reinterpret_cast<uptr>(&storage) == space.root
-               ? &storage
-               : nullptr;
+    return spaces.find(space);
 }
 const PageMapping *page_at(const Space &space, uptr address)
 {
-    for (usize i = 0; i < space.count; ++i)
-        if (space.pages[i].flags && space.pages[i].virtual_address == (address & ~(page_size - 1)))
-            return &space.pages[i];
-    return nullptr;
+    const auto *page = space.pages.find(address);
+    return page && page->flags ? page : nullptr;
 }
 bool admissible(const PageMapping &page)
 {
@@ -183,9 +174,8 @@ bool continuation(const Space &space, const UserFrame &frame, uptr cause, uptr &
 }
 void synchronize_code(const Space &space)
 {
-    for (usize i = 0; i < space.count; ++i)
+    for (const auto &page : space.pages)
     {
-        const auto &page = space.pages[i];
         if (!(page.flags & page_execute))
             continue;
         for (uptr address = page.physical_address; address < page.physical_address + page_size; address += 16)
@@ -226,19 +216,12 @@ OwnershipReport ownership_report() noexcept
 {
     OwnershipReport report{};
     report.executing = executing || ok_mips_execution_active_frame != nullptr || ok_mips_execution_resume_sp != 0;
-    for (const auto &space : spaces)
-    {
-        const bool retained = space.count != 0 || !space.pages.empty() || !space.pages.valid();
-        if (space.used || retained) ++report.address_spaces;
-        if (space.used)
-        {
-            if (!space.generation || !space.count || space.count != space.pages.size() ||
-                !space.pages.valid())
-                report.failure = Status::io_error("native backend has an inconsistent mapping owner");
-        }
-        else if (retained)
-            report.failure = Status::io_error("native backend has an orphan mapping owner");
-    }
+    spaces.each([&](const Space &space, uptr root) {
+        ++report.address_spaces;
+        if (space.pages.empty() || !space.pages.valid() || root != reinterpret_cast<uptr>(space.pages.records))
+            report.failure = Status::io_error("native backend has an inconsistent mapping owner");
+    });
+    report.table_pages = spaces.pages();
     if (!initialized && (report.address_spaces || report.executing))
         report.failure = Status::io_error("uninitialized native backend retains owners");
     return report;
@@ -331,30 +314,18 @@ Result<AddressSpace> create_space(MappingView mappings)
 {
     if (!initialized)
         return Status::not_initialized("native execution is not initialized");
-    if (!mappings.valid() || mappings.empty() || mappings.size() > max_native_mappings)
-        return Status::invalid_argument("invalid mapping count");
-    for (usize i = 0; i < mappings.size(); ++i)
-    {
-        const auto &page = mappings[i];
+    if (!mappings.valid() || mappings.empty())
+        return Status::invalid_argument("invalid mapping directory");
+    for (const auto &page : mappings)
         if (!admissible(page))
             return Status::invalid_argument("invalid native mapping");
-        for (usize j = 0; j < i; ++j)
-            if (mappings[j].virtual_address == page.virtual_address)
-                return Status::already_exists("duplicate mapping");
-    }
-    for (u32 slot = 0; slot < spaces.size(); ++slot)
-    {
-        auto &space = spaces[slot];
-        if (space.used)
-            continue;
-        space.used = true;
-        if (++space.generation == 0)
-            ++space.generation;
-        space.count = mappings.size();
-        space.pages = mappings;
-        return AddressSpace{reinterpret_cast<uptr>(&space), slot, space.generation};
-    }
-    return Status::no_memory("native address space pool exhausted");
+    auto entry = spaces.acquire();
+    if (!entry)
+        return entry.status();
+    // The published records identify the space; no other live space names them.
+    entry.value()->space.pages = mappings;
+    entry.value()->root = reinterpret_cast<uptr>(mappings.records);
+    return spaces.handle(*entry.value());
 }
 Status remap(const AddressSpace &space, const PageMapping &mapping)
 {
@@ -380,11 +351,9 @@ Status destroy_space(AddressSpace &space)
         return Status::invalid_argument("stale native address space");
     if (executing)
         return Status::busy("native execution is active");
-    storage->used = false;
-    storage->count = 0;
-    storage->pages = {};
+    const auto retired = spaces.release(*storage);
     space = {};
-    return Status::success();
+    return retired;
 }
 UserFrame initial_frame(uptr pc, uptr sp)
 {
