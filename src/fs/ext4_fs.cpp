@@ -239,6 +239,12 @@ Result<DirectoryListing> Ext4Node::list(DirectoryReadIntent intent) const
     return fs_->operation(this, [&] { return list_active(intent); });
 }
 
+Result<DirectoryListing> Ext4Node::list_from(usize start, DirectoryReadIntent intent) const
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return list_active(intent, start, true); });
+}
+
 Status Ext4FileSystem::mount(driver::BlockDevice &device, bool writable)
 {
     return mount(device, Ext4MountOptions{writable, Ext4TimestampPolicy::unqualified});
@@ -2363,7 +2369,7 @@ Status Ext4Node::chown_active(u32 uid, u32 gid, bool clear_set_id)
     mutation.committed = true;
     return Status::success();
 }
-Result<DirectoryListing> Ext4Node::list_active(DirectoryReadIntent intent) const
+Result<DirectoryListing> Ext4Node::list_active(DirectoryReadIntent intent, usize start, bool paged) const
 {
     if (!fs_ || !ino_)
         return Status::not_found("ext4 node was removed");
@@ -2395,10 +2401,15 @@ Result<DirectoryListing> Ext4Node::list_active(DirectoryReadIntent intent) const
                 return fs_->io_status(corrupt());
             const auto number = r32(entry);
             const std::string_view name(reinterpret_cast<const char *>(entry + 8), namelen);
-            if (number && name != "." && name != "..")
+            if (number && name != "." && name != ".." && start)
+                --start;
+            else if (number && name != "." && name != "..")
             {
                 if (out.count == out.entries.size())
+                {
+                    if (paged) return out;
                     return Status::overflow("directory listing capacity exceeded");
+                }
                 auto child_inode = fs_->inode(number);
                 if (!child_inode)
                     return child_inode.status();

@@ -391,11 +391,17 @@ Result<usize> PosixService::enumerate_directory(Fd fd, Consumer &&consumer)
     // Open-time read authority survives later inode permission changes.
     if (!description->readable)
         return Status::bad_descriptor("directory descriptor is not readable");
-    auto listing = description->node->list();
-    if (!listing) return listing.status();
-    if (listing.value().count > listing.value().entries.size())
-        return Status::io_error("directory provider exceeded listing capacity");
     constexpr usize dots = Policy == DirectoryPolicy::linux ? 2 : 0;
+    // Entries arrive one listing (page) at a time from the stream position.
+    const auto page_at = [&](usize start) -> Result<fs::DirectoryListing> {
+        auto page = description->node->list_from(start);
+        if (page && page.value().count > page.value().entries.size())
+            return Status::io_error("directory provider exceeded listing capacity");
+        return page;
+    };
+    usize page_start = description->offset > dots ? description->offset - dots : 0;
+    auto listing = page_at(page_start);
+    if (!listing) return listing.status();
     std::array<fs::DirectoryEntry, dots> dot_entries{};
     if constexpr (Policy == DirectoryPolicy::linux)
     {
@@ -417,10 +423,20 @@ Result<usize> PosixService::enumerate_directory(Fd fd, Consumer &&consumer)
                 return Status::unsupported("directory provider has no qualified inode identity");
     }
     usize written = 0;
-    while (description->offset < listing.value().count + dots)
+    for (;;)
     {
         const auto position = description->offset;
-        const auto &source = position < dots ? dot_entries[position] : listing.value().entries[position - dots];
+        if (position >= dots && position - dots >= page_start + listing.value().count)
+        {
+            // A short page ends the directory; a full one may be followed by more.
+            if (listing.value().count < listing.value().entries.size()) break;
+            page_start += listing.value().count;
+            listing = page_at(page_start);
+            if (!listing) return written ? Result<usize>{written} : Result<usize>{listing.status()};
+            if (!listing.value().count) break;
+        }
+        const auto &source = position < dots ? dot_entries[position]
+                                             : listing.value().entries[position - dots - page_start];
         const auto name = source.name.view();
         if constexpr (Policy == DirectoryPolicy::linux)
         {

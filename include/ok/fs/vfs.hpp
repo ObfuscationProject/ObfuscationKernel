@@ -181,6 +181,19 @@ class Node
     {
         return Status::unsupported("directory listing unavailable");
     }
+    // At most one listing of entries from position `start` in directory
+    // order; a full listing may be followed by more. Providers whose
+    // directories can exceed one listing override this; the default slices list().
+    virtual Result<DirectoryListing> list_from(usize start, DirectoryReadIntent intent = DirectoryReadIntent::access) const
+    {
+        auto listing = list(intent);
+        if (!listing || !start) return listing;
+        auto &value = listing.value();
+        const usize kept = start < value.count ? value.count - start : 0;
+        for (usize i = 0; i < kept; ++i) value.entries[i] = value.entries[start + i];
+        value.count = kept;
+        return listing;
+    }
     virtual Status remove(std::string_view, bool)
     {
         return Status::unsupported("remove unavailable");

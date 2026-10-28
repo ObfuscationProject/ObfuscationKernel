@@ -199,6 +199,7 @@ class Ext4Node final : public Node
     Status chown(u32 uid, u32 gid) override;
     ModeChangeResult change_owner(u32 uid, u32 gid, user::Credentials caller) override;
     Result<DirectoryListing> list(DirectoryReadIntent = DirectoryReadIntent::access) const override;
+    Result<DirectoryListing> list_from(usize start, DirectoryReadIntent = DirectoryReadIntent::access) const override;
 
   private:
     friend class Ext4FileSystem;
@@ -217,7 +218,7 @@ class Ext4Node final : public Node
     Status chmod_active(u32 mode);
     ModeChangeResult change_mode_active(u32 mode, user::Credentials caller);
     Status chown_active(u32 uid, u32 gid, bool clear_set_id = false);
-    Result<DirectoryListing> list_active(DirectoryReadIntent intent) const;
+    Result<DirectoryListing> list_active(DirectoryReadIntent intent, usize start = 0, bool paged = false) const;
     Status retain_locked();
     Status expose_locked();
     Ext4FileSystem *fs_{nullptr};
