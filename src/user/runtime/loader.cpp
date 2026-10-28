@@ -18,6 +18,73 @@ namespace
 std::array<std::byte, 128 * 1024> elf_buffer{};
 } // namespace
 #endif
+namespace
+{
+// ELF admission reads metadata from a file prefix. When an architecture check
+// needs more than the static buffer (a section table after debug data, an ABI
+// record after the text), the prefix it asks for is read into a kernel object
+// run, released when the load ends.
+class ElfPrefix final : private NonCopyable
+{
+  public:
+    static constexpr usize max_bytes = 16 * 1024 * 1024;
+    ElfPrefix() = default;
+    ~ElfPrefix() { if (run_) static_cast<void>(page_pool.release_object_run(run_, pages_)); }
+    [[nodiscard]] std::byte *data() const { return run_ ? reinterpret_cast<std::byte *>(run_) : elf_buffer.data(); }
+    [[nodiscard]] usize size() const { return size_; }
+    [[nodiscard]] std::span<const std::byte> bytes() const { return {data(), size_}; }
+    [[nodiscard]] Status read(fs::Node &node, usize size)
+    {
+        if (size > elf_buffer.size())
+        {
+            if (size > max_bytes) return Status::no_memory("ELF metadata prefix exceeds the admission bound");
+            if (auto status = activate_pool(); !status) return status;
+            const usize pages = (size + hw::page_size - 1) / hw::page_size;
+            auto run = page_pool.allocate_object_run(pages);
+            if (!run) return run.status();
+            if (run_) static_cast<void>(page_pool.release_object_run(run_, pages_));
+            run_ = run.value();
+            pages_ = pages;
+        }
+        for (usize offset = 0; offset < size;)
+        {
+            auto bytes = node.read(offset, size - offset);
+            if (!bytes)
+                return bytes.status();
+            if (bytes.value().size == 0 || bytes.value().size > size - offset)
+                return Status::invalid_argument("truncated executable");
+            copy_bytes(data() + offset, bytes.value().data.data(), bytes.value().size);
+            offset += bytes.value().size;
+        }
+        size_ = size;
+        return Status::success();
+    }
+
+  private:
+    uptr run_{};
+    usize pages_{}, size_{};
+};
+// The prefix the configured architecture's admission still needs, if more.
+[[maybe_unused]] usize admission_prefix(std::span<const std::byte> bytes, usize file_bytes)
+{
+    usize required = 0;
+    [[maybe_unused]] auto need = [&](usize bytes_needed) { if (bytes_needed > required) required = bytes_needed; };
+#ifdef OK_PRIVATE_MIPS64_N64_SIGNAL
+    need(::ok::user::mips64_n64_elf_admission::admit(bytes, file_bytes).required_prefix_bytes);
+#endif
+#ifdef OK_PRIVATE_MIPS_O32_SIGNAL
+    need(::ok::user::mips_o32_elf_admission::admit(bytes, file_bytes).required_prefix_bytes);
+#endif
+#ifdef OK_PRIVATE_PPC32_SIGNAL
+    if (bytes.size() > 7)
+        need(ppc32_elf_admission::admit(bytes, file_bytes,
+            std::to_integer<u8>(bytes[7]) == 3 ? ppc32_elf_admission::Personality::linux_user
+                                               : ppc32_elf_admission::Personality::native_os,
+            ppc32_elf_admission::RuntimeProfile::e500v2_scalar_soft_float).required_prefix_bytes);
+#endif
+    return required;
+}
+} // namespace
 // Exec argument and environment strings in one kernel object run, released
 // with the object. As on Linux, each string with its NUL is at most
 // MAX_ARG_STRLEN and the whole set at most ARG_MAX; beyond that execve fails
@@ -257,36 +324,39 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
     if (auto status = fs::require_access(metadata, {kernel.posix().euid(), kernel.posix().egid()}, fs::access_execute);
         !status.ok())
         return status;
-    const usize prefix_size = metadata.size < elf_buffer.size() ? metadata.size : elf_buffer.size();
-    usize offset = 0;
-    while (offset < prefix_size)
+    ElfPrefix prefix;
+    if (auto status = prefix.read(*node, metadata.size < elf_buffer.size() ? metadata.size : elf_buffer.size());
+        !status.ok())
+        return status;
+    // Each grown prefix can expose one further record (section names, then
+    // attributes), so a few rounds cover every bounded admission.
+    for (usize round = 0; round < 4; ++round)
     {
-        auto bytes = node->read(offset, prefix_size - offset);
-        if (!bytes)
-            return bytes.status();
-        if (bytes.value().size == 0 || bytes.value().size > prefix_size - offset)
-            return Status::invalid_argument("truncated executable");
-        copy_bytes(elf_buffer.data() + offset, bytes.value().data.data(), bytes.value().size);
-        offset += bytes.value().size;
+        const usize required = admission_prefix(prefix.bytes(), metadata.size);
+        if (required <= prefix.size() || required > metadata.size) break;
+        if (auto status = prefix.read(*node, required); !status.ok())
+            return status;
     }
+    const usize prefix_size = prefix.size();
+    std::byte *const image_bytes = prefix.data();
     constexpr u8 native_encoding = __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ ? 2 : 1;
-    if (metadata.size < 4 || elf_buffer[0] != std::byte{0x7f} || elf_buffer[1] != std::byte{'E'} ||
-        elf_buffer[2] != std::byte{'L'} || elf_buffer[3] != std::byte{'F'})
+    if (metadata.size < 4 || image_bytes[0] != std::byte{0x7f} || image_bytes[1] != std::byte{'E'} ||
+        image_bytes[2] != std::byte{'L'} || image_bytes[3] != std::byte{'F'})
         return Status::exec_format("not an ELF executable");
-    if (metadata.size < 16 || std::to_integer<u8>(elf_buffer[4]) != (sizeof(uptr) == 8 ? 2 : 1) ||
-        std::to_integer<u8>(elf_buffer[5]) != native_encoding)
+    if (metadata.size < 16 || std::to_integer<u8>(image_bytes[4]) != (sizeof(uptr) == 8 ? 2 : 1) ||
+        std::to_integer<u8>(image_bytes[5]) != native_encoding)
         return Status::invalid_argument("ELF class or byte order does not match the native ABI");
 #ifdef OK_PRIVATE_MIPS64_N64_SIGNAL
     // A required prefix beyond the explicit 128 KiB bound is unsupported. The
     // serialized file read above and ordinary loader still own mapping checks.
-    if (!::ok::user::mips64_n64_elf_admission::admit({elf_buffer.data(), prefix_size}, metadata.size))
+    if (!::ok::user::mips64_n64_elf_admission::admit({image_bytes, prefix_size}, metadata.size))
         return Status::unsupported("private n64 signal ELF profile is not admitted");
 #endif
 #ifdef OK_PRIVATE_MIPS_O32_SIGNAL
-    if (!::ok::user::mips_o32_elf_admission::admit({elf_buffer.data(), prefix_size}, metadata.size).ok())
+    if (!::ok::user::mips_o32_elf_admission::admit({image_bytes, prefix_size}, metadata.size).ok())
         return Status::unsupported("private MIPS signal ELF profile is not admitted");
 #endif
-    auto elf = sched::ElfLoader{}.load_prefix({elf_buffer.data(), prefix_size}, metadata.size, kernel.arch().architecture());
+    auto elf = sched::ElfLoader{}.load_prefix({image_bytes, prefix_size}, metadata.size, kernel.arch().architecture());
     if (!elf)
         return elf.status();
     auto retained = ImageRetirementReservation::reserve();
@@ -299,17 +369,17 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
     constexpr std::string_view x86_interpreter_path = "/lib/ld-musl-x86_64.so.1";
     uptr entry_bias = 0;
 #endif
-    const auto osabi = std::to_integer<u8>(elf_buffer[7]);
+    const auto osabi = std::to_integer<u8>(image_bytes[7]);
     if (osabi == 3)
     {
         constexpr u8 abi_version = LinuxExec::architecture == arch::Architecture::mips ||
                                    LinuxExec::architecture == arch::Architecture::mips64 ? 1 : 0;
-        if (std::to_integer<u8>(elf_buffer[8]) != abi_version)
+        if (std::to_integer<u8>(image_bytes[8]) != abi_version)
             return Status::unsupported("Linux ELF ABI version differs from configured profile");
         const usize linux_prefix = prefix_size < LinuxExec::max_prefix_bytes ? prefix_size : LinuxExec::max_prefix_bytes;
         if (elf.value().static_executable)
         {
-            auto inspected = LinuxExec::inspect({elf_buffer.data(), linux_prefix}, metadata.size);
+            auto inspected = LinuxExec::inspect({image_bytes, linux_prefix}, metadata.size);
             if (!inspected)
                 return inspected.status();
             linux_metadata = inspected.value().metadata;
@@ -317,7 +387,7 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
         else
         {
 #if defined(__x86_64__)
-            auto inspected = lu::X86DynamicExec::inspect({elf_buffer.data(), linux_prefix}, metadata.size, false);
+            auto inspected = lu::X86DynamicExec::inspect({image_bytes, linux_prefix}, metadata.size, false);
             if (!inspected)
                 return inspected.status();
             const auto path_offset = inspected.value().interpreter_offset;
@@ -326,9 +396,9 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
                 path_offset > linux_prefix || path_size > linux_prefix - path_offset)
                 return Status::unsupported("x86-64 dynamic ELF interpreter path differs from pinned musl loader");
             for (usize i = 0; i < x86_interpreter_path.size(); ++i)
-                if (std::to_integer<u8>(elf_buffer[path_offset + i]) != static_cast<u8>(x86_interpreter_path[i]))
+                if (std::to_integer<u8>(image_bytes[path_offset + i]) != static_cast<u8>(x86_interpreter_path[i]))
                     return Status::unsupported("x86-64 dynamic ELF interpreter path differs from pinned musl loader");
-            if (elf_buffer[path_offset + x86_interpreter_path.size()] != std::byte{})
+            if (image_bytes[path_offset + x86_interpreter_path.size()] != std::byte{})
                 return Status::invalid_argument("x86-64 dynamic ELF interpreter path is not terminated");
             dynamic_x86 = true;
             entry_bias = 0x42000000;
@@ -350,7 +420,7 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
         return Status::unsupported("native dynamic ELF images are unsupported");
 #ifdef OK_PRIVATE_PPC32_SIGNAL
     image.signal_image = Ppc32ImageAdmission::inspect(private_ppc_backend::capability(),
-        {elf_buffer.data(), prefix_size}, metadata.size,
+        {image_bytes, prefix_size}, metadata.size,
         image.personality == Personality::linux ? ppc32_elf_admission::Personality::linux_user :
             ppc32_elf_admission::Personality::native_os,
         ppc32_elf_admission::RuntimeProfile::e500v2_scalar_soft_float);
