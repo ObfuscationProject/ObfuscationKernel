@@ -33,6 +33,7 @@ live in the separate ObfuscationEvidence repository.
 | [LINUX_EXEC_BOOTSTRAP.md](LINUX_EXEC_BOOTSTRAP.md) | Linux static ELF bootstrap metadata |
 | [LINUX_MKDIR.md](LINUX_MKDIR.md) | Linux directory creation |
 | [LINUX_PATH_BOOTSTRAP.md](LINUX_PATH_BOOTSTRAP.md) | Linux pathname bootstrap calls |
+| [LINUX_PERSONALITY_LIMITS.md](LINUX_PERSONALITY_LIMITS.md) | Linux personality limits on the musl/BusyBox gate |
 | [LINUX_POSITIONAL_IO.md](LINUX_POSITIONAL_IO.md) | Bounded Linux positional I/O |
 | [LINUX_STAT.md](LINUX_STAT.md) | Qualified Linux stat subset |
 | [LINUX_UMASK.md](LINUX_UMASK.md) | Linux process creation mask |
