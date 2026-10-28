@@ -128,6 +128,16 @@ struct FileBuffer
     usize size{0};
 };
 
+// One timestamp of a utimensat-style change: left alone, set to the current
+// time, or set to an explicit epoch value.
+struct TimestampChange
+{
+    enum class Kind : u8 { omit, now, value };
+    Kind kind{Kind::omit};
+    i64 seconds{};
+    u32 nanoseconds{};
+};
+
 struct DirectoryEntry
 {
     FixedString<max_path_segment> name{};
@@ -197,6 +207,12 @@ class Node
     virtual Status remove(std::string_view, bool)
     {
         return Status::unsupported("remove unavailable");
+    }
+    // Sets the access and modification times and the change time to now.
+    // Permission follows Linux utimensat and is the caller's to check.
+    virtual Status set_times(TimestampChange, TimestampChange)
+    {
+        return Status::unsupported("timestamp changes unavailable");
     }
     [[nodiscard]] virtual const void *filesystem_identity() const
     {

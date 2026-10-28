@@ -152,6 +152,57 @@ i64 linux_chown(Kernel &kernel, const hw::AddressSpace &space, u64 number, const
     return -syscall::ErrnoMapper::errno_for(result.status());
 }
 
+// utimensat and utimensat_time64: a NULL path names the descriptor, a NULL
+// times pointer means now for both, and UTIME_NOW/UTIME_OMIT select per field.
+template <lu::Profile Profile>
+i64 linux_utimensat(Kernel &kernel, const hw::AddressSpace &space, const std::array<u64, 6> &a, bool time64)
+{
+    using Codec = lu::Codec<Profile>;
+    constexpr usize word = Codec::profile.word_bytes;
+    constexpr u64 utime_now = (u64{1} << 30) - 1, utime_omit = (u64{1} << 30) - 2;
+    const i32 dirfd = static_cast<i32>(static_cast<u32>(a[0]));
+    const u32 flags = static_cast<u32>(a[3]);
+    FixedString<256> path;
+    if (a[1])
+    {
+        if (auto status = copy_pathname(space, static_cast<uptr>(a[1]), path); !status.ok())
+            return -syscall::ErrnoMapper::errno_for(status);
+        if (path.view().empty() && !(flags & posix::at_EMPTY_PATH)) return -2;
+    }
+    std::array<fs::TimestampChange, 2> times{};
+    times[0].kind = times[1].kind = fs::TimestampChange::Kind::now;
+    if (a[2])
+    {
+        // time64 records are two 64-bit words; time32 records two native words.
+        const usize field = time64 ? 8 : word, record = 2 * field;
+        std::array<u8, 32> bytes{};
+        if (!hw::copy_from_user(space, bytes.data(), static_cast<uptr>(a[2]), 2 * record)) return -14;
+        const auto get = [&](usize at) {
+            u64 value{};
+            for (usize i = 0; i < field; ++i)
+                value |= u64{bytes[at + i]} << (8 * (Codec::profile.big_endian ? field - 1 - i : i));
+            return value;
+        };
+        for (usize i = 0; i < 2; ++i)
+        {
+            const u64 raw_seconds = get(i * record);
+            // A 32-bit kernel reads only the low half of a time64 tv_nsec.
+            const u64 nanoseconds = word == 4 ? get(i * record + field) & 0xffffffffULL : get(i * record + field);
+            if (nanoseconds == utime_omit) times[i].kind = fs::TimestampChange::Kind::omit;
+            else if (nanoseconds == utime_now) times[i].kind = fs::TimestampChange::Kind::now;
+            else if (nanoseconds >= 1000000000ULL) return -22;
+            else
+            {
+                const i64 seconds = field == 8 ? static_cast<i64>(raw_seconds)
+                                               : static_cast<i64>(static_cast<i32>(static_cast<u32>(raw_seconds)));
+                times[i] = {fs::TimestampChange::Kind::value, seconds, static_cast<u32>(nanoseconds)};
+            }
+        }
+    }
+    const auto status = kernel.posix().utimensat(dirfd, path.view(), times[0], times[1], flags);
+    return status ? 0 : -syscall::ErrnoMapper::errno_for(status);
+}
+
 // vfork and clone(CLONE_VFORK) run as a copy-on-write fork: the child has its
 // own copy of memory, so a caller cannot observe the difference except that
 // the parent is not suspended. A clone stack becomes the child's stack.
@@ -360,6 +411,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
              is(Operation::chown32) || is(Operation::lchown32) || is(Operation::fchown32))
         count = 3;
     else if (is(Operation::linkat) || is(Operation::fchownat)) count = 5;
+    else if (is(Operation::utimensat) || is(Operation::utimensat_time64)) count = 4;
     else
         return -38;
     auto decoded = Bridge::decode_call_copying_stack(frame, count, [&](uptr address, std::span<u8> destination) {
@@ -1016,6 +1068,8 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
     if (is(Operation::chown) || is(Operation::lchown) || is(Operation::fchown) || is(Operation::chown32) ||
         is(Operation::lchown32) || is(Operation::fchown32) || is(Operation::fchownat))
         return linux_chown<Profile>(kernel, space, number, a);
+    if (is(Operation::utimensat) || is(Operation::utimensat_time64))
+        return linux_utimensat<Profile>(kernel, space, a, is(Operation::utimensat_time64) || Codec::profile.word_bytes == 8);
     if (is(Operation::uname)) return linux_uname<Profile>(kernel, space, static_cast<uptr>(a[0]));
     if (is(Operation::sysinfo)) return linux_sysinfo<Profile>(kernel, space, static_cast<uptr>(a[0]));
     if (is(Operation::vfork))

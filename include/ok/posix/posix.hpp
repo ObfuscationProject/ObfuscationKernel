@@ -288,6 +288,10 @@ class PosixService final
     fs::ModeChangeResult change_owner_at(Fd dirfd, std::string_view path, u32 uid, u32 gid, u32 flags = 0);
     fs::ModeChangeResult change_owner_fd(Fd fd, u32 uid, u32 gid);
     Status chown(std::string_view path, u32 uid, u32 gid);
+    // Linux utimensat: an empty path names the descriptor itself. Explicit
+    // times need the owner or root; "now" also accepts write access.
+    Status utimensat(Fd dirfd, std::string_view path, fs::TimestampChange access,
+                     fs::TimestampChange modification, u32 flags = 0);
     Result<i64> fcntl(Fd fd, u32 command, u64 argument);
     Result<i64> ioctl(Fd fd, u64 request, u64 argument);
     [[nodiscard]] Status console_control_descriptor(Fd fd) const;

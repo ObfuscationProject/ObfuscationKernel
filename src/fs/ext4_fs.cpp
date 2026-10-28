@@ -224,6 +224,47 @@ Status Ext4Node::chown(u32 uid, u32 gid)
     if (!fs_) return Status::not_found("ext4 node has no owner");
     return fs_->operation(this, [&] { return chown_active(uid, gid); });
 }
+Status Ext4Node::set_times(TimestampChange access, TimestampChange modification)
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return set_times_active(access, modification); });
+}
+// Requires maintained timestamps: "now" and the change time come from the
+// same realtime event as every other maintained update.
+Status Ext4Node::set_times_active(TimestampChange access, TimestampChange modification)
+{
+    if (!fs_ || !ino_)
+        return Status::not_found("ext4 node was removed");
+    if (!fs_->maintained())
+        return Status::unsupported("ext4 timestamps are not maintained on this mount");
+    auto data = fs_->inode(ino_);
+    if (!data)
+        return data.status();
+    if (auto status = fs_->writable(data.value()); !status)
+        return status;
+    using K = TimestampChange::Kind;
+    auto fields = Ext4TimestampFields::change;
+    if (access.kind == K::now) fields = fields | Ext4TimestampFields::access;
+    if (modification.kind == K::now) fields = fields | Ext4TimestampFields::modification;
+    Ext4FileSystem::TimestampEvent event;
+    const Ext4FileSystem::TimestampTarget target{&data.value(), fields};
+    if (auto status = fs_->prepare_event(event, {&target, 1}); !status)
+        return status;
+    const auto record = std::span<std::byte>{data.value()}.first(fs_->inode_size_);
+    if (access.kind == K::value)
+        if (auto status = encode_ext4_times(record, Ext4TimestampFields::access, access.seconds, access.nanoseconds);
+            !status)
+            return status;
+    if (modification.kind == K::value)
+        if (auto status = encode_ext4_times(record, Ext4TimestampFields::modification, modification.seconds,
+                                            modification.nanoseconds); !status)
+            return status;
+    Ext4FileSystem::NamespaceMutation mutation(*fs_, true);
+    if (auto status = fs_->save_inode(ino_, data.value()); !status)
+        return status;
+    mutation.committed = true;
+    return Status::success();
+}
 // As on Linux since 2.2.13, an ownership change clears set-user-ID, and
 // set-group-ID on a group-executable file, for root as well.
 ModeChangeResult Ext4Node::change_owner(u32 uid, u32 gid, user::Credentials caller)
