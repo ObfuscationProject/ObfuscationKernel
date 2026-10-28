@@ -42,6 +42,10 @@ jobs:
           - irq_wait_time
     steps:
       - uses: actions/checkout@v4
+      # Some runners build their hosted binaries through a generated xmake project.
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
       - name: Run hosted model suite
         run: python3 -B scripts/test_${{ matrix.suite }}.py --sanitize
   build-and-test:
