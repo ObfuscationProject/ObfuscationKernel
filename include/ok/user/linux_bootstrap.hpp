@@ -203,6 +203,49 @@ i64 linux_utimensat(Kernel &kernel, const hw::AddressSpace &space, const std::ar
     return status ? 0 : -syscall::ErrnoMapper::errno_for(status);
 }
 
+// statfs/fstatfs on LP64 profiles and statfs64/fstatfs64 on ILP32 ones, the
+// calls musl makes, in each architecture's Linux record layout.
+template <lu::Profile Profile>
+i64 linux_statfs(Kernel &kernel, const hw::AddressSpace &space, bool by_fd, bool sized, const std::array<u64, 6> &a)
+{
+    using Codec = lu::Codec<Profile>;
+    struct Field { usize at, width; };
+    struct Layout { Field type, bsize, blocks, bfree, bavail, files, ffree, namelen, frsize, flags; usize size; };
+    constexpr Layout layout = Profile == lu::Profile::mips64 ?
+        Layout{{0, 8}, {8, 8}, {24, 8}, {32, 8}, {56, 8}, {40, 8}, {48, 8}, {72, 8}, {16, 8}, {80, 8}, 128} :
+        Profile == lu::Profile::mips ?
+        Layout{{0, 4}, {4, 4}, {16, 8}, {24, 8}, {48, 8}, {32, 8}, {40, 8}, {64, 4}, {8, 4}, {68, 4}, 96} :
+        Codec::profile.word_bytes == 8 ?
+        Layout{{0, 8}, {8, 8}, {16, 8}, {24, 8}, {32, 8}, {40, 8}, {48, 8}, {64, 8}, {72, 8}, {80, 8}, 120} :
+        Layout{{0, 4}, {4, 4}, {8, 8}, {16, 8}, {24, 8}, {32, 8}, {40, 8}, {56, 4}, {60, 4}, {64, 4},
+               Profile == lu::Profile::i386 || Profile == lu::Profile::arm32 ? 84 : 88};
+    const uptr output = static_cast<uptr>(a[sized ? 2 : 1]);
+    // The arm kernel accepts musl's 8-aligned 88-byte record for its packed 84 bytes.
+    if (sized && a[1] != layout.size && !(Profile == lu::Profile::arm32 && a[1] == 88)) return -22;
+    FixedString<256> path;
+    if (!by_fd)
+        if (auto status = copy_pathname(space, static_cast<uptr>(a[0]), path); !status.ok())
+            return -syscall::ErrnoMapper::errno_for(status);
+    auto statistics = kernel.posix().statfs(by_fd ? static_cast<i32>(static_cast<u32>(a[0])) : posix::at_FDCWD,
+                                            path.view());
+    if (!statistics) return -syscall::ErrnoMapper::errno_for(statistics.status());
+    const auto &value = statistics.value();
+    std::array<u8, 128> bytes{};
+    bool fits = true;
+    const auto put = [&](Field field, u64 data) {
+        if (field.width == 4 && data > 0xffffffffULL) fits = false;
+        for (usize i = 0; i < field.width; ++i)
+            bytes[field.at + (Codec::profile.big_endian ? field.width - 1 - i : i)] = static_cast<u8>(data >> (8 * i));
+    };
+    constexpr u64 st_valid = 0x20, st_rdonly = 1;
+    put(layout.type, value.type); put(layout.bsize, value.block_size); put(layout.blocks, value.blocks);
+    put(layout.bfree, value.free_blocks); put(layout.bavail, value.available_blocks);
+    put(layout.files, value.files); put(layout.ffree, value.free_files); put(layout.namelen, value.name_max);
+    put(layout.frsize, value.block_size); put(layout.flags, st_valid | (value.read_only ? st_rdonly : 0));
+    if (!fits) return -75;
+    return hw::copy_to_user(space, output, bytes.data(), layout.size) ? 0 : -14;
+}
+
 // vfork and clone(CLONE_VFORK) run as a copy-on-write fork: the child has its
 // own copy of memory, so a caller cannot observe the difference except that
 // the parent is not suspended. A clone stack becomes the child's stack.
@@ -412,6 +455,8 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
         count = 3;
     else if (is(Operation::linkat) || is(Operation::fchownat)) count = 5;
     else if (is(Operation::utimensat) || is(Operation::utimensat_time64)) count = 4;
+    else if (Codec::profile.word_bytes == 8 && (is(Operation::statfs) || is(Operation::fstatfs))) count = 2;
+    else if (Codec::profile.word_bytes == 4 && (is(Operation::statfs64) || is(Operation::fstatfs64))) count = 3;
     else
         return -38;
     auto decoded = Bridge::decode_call_copying_stack(frame, count, [&](uptr address, std::span<u8> destination) {
@@ -1070,6 +1115,9 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
         return linux_chown<Profile>(kernel, space, number, a);
     if (is(Operation::utimensat) || is(Operation::utimensat_time64))
         return linux_utimensat<Profile>(kernel, space, a, is(Operation::utimensat_time64) || Codec::profile.word_bytes == 8);
+    if (is(Operation::statfs) || is(Operation::fstatfs) || is(Operation::statfs64) || is(Operation::fstatfs64))
+        return linux_statfs<Profile>(kernel, space, is(Operation::fstatfs) || is(Operation::fstatfs64),
+                                     is(Operation::statfs64) || is(Operation::fstatfs64), a);
     if (is(Operation::uname)) return linux_uname<Profile>(kernel, space, static_cast<uptr>(a[0]));
     if (is(Operation::sysinfo)) return linux_sysinfo<Profile>(kernel, space, static_cast<uptr>(a[0]));
     if (is(Operation::vfork))

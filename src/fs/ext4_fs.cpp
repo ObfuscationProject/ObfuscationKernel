@@ -224,6 +224,25 @@ Status Ext4Node::chown(u32 uid, u32 gid)
     if (!fs_) return Status::not_found("ext4 node has no owner");
     return fs_->operation(this, [&] { return chown_active(uid, gid); });
 }
+Result<FilesystemStatistics> Ext4Node::filesystem_statistics() const
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return fs_->statistics(); });
+}
+// From the superblock counters, which every allocation keeps current. Names
+// are bounded by the VFS path component, not ext4's 255 bytes.
+Result<FilesystemStatistics> Ext4FileSystem::statistics() const
+{
+    Block super{};
+    if (auto status = read_block(1024 / block_size_, super); !status.ok())
+        return status;
+    const auto *s = super.data() + 1024 % block_size_;
+    const u64 reserved = r32(s + 8), free = r32(s + 12);
+    return FilesystemStatistics{.type = 0xef53, .block_size = block_size_, .blocks = r32(s + 4),
+                                .free_blocks = free, .available_blocks = free > reserved ? free - reserved : 0,
+                                .files = r32(s), .free_files = r32(s + 16), .name_max = max_path_segment - 1,
+                                .read_only = !writable_};
+}
 Status Ext4Node::set_times(TimestampChange access, TimestampChange modification)
 {
     if (!fs_) return Status::not_found("ext4 node has no owner");

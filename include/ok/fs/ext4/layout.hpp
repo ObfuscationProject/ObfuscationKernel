@@ -199,6 +199,7 @@ class Ext4Node final : public Node
     Status chown(u32 uid, u32 gid) override;
     ModeChangeResult change_owner(u32 uid, u32 gid, user::Credentials caller) override;
     Status set_times(TimestampChange access, TimestampChange modification) override;
+    Result<FilesystemStatistics> filesystem_statistics() const override;
     Result<DirectoryListing> list(DirectoryReadIntent = DirectoryReadIntent::access) const override;
     Result<DirectoryListing> list_from(usize start, DirectoryReadIntent = DirectoryReadIntent::access) const override;
 
@@ -346,6 +347,7 @@ class Ext4FileSystem final
     Status zero_tail(const Inode &inode);
     Status resize(u32 ino, Inode &inode, usize size);
     Status destroy(u32 ino);
+    Result<FilesystemStatistics> statistics() const;
     Ext4Node *node(u32 ino, std::string_view name);
     Metadata metadata(const Inode &inode) const;
     Status writable(const Inode &inode) const;

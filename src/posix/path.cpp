@@ -426,6 +426,26 @@ Status PosixService::utimensat(Fd dirfd, std::string_view path, fs::TimestampCha
     return status ? released : status;
 }
 
+Result<fs::FilesystemStatistics> PosixService::statfs(Fd dirfd, std::string_view path)
+{
+    if (!initialized_ || !vfs_)
+        return Status::not_initialized("POSIX service not initialized");
+    if (path.empty())
+    {
+        auto *description = descriptor(dirfd);
+        if (!description || !description->used || !description->node)
+            return Status::bad_descriptor("statfs needs an open file");
+        return description->node->filesystem_statistics();
+    }
+    auto resolved = resolve_node(dirfd, path, fs::FinalComponent::follow);
+    if (!resolved)
+        return resolved.status();
+    auto statistics = resolved.value().node()->filesystem_statistics();
+    const auto released = resolved.value().release();
+    if (statistics && !released) return released;
+    return statistics;
+}
+
 Status PosixService::chown(std::string_view path, u32 uid, u32 gid)
 {
     if (euid() != 0)

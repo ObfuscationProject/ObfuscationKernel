@@ -288,6 +288,8 @@ class PosixService final
     fs::ModeChangeResult change_owner_at(Fd dirfd, std::string_view path, u32 uid, u32 gid, u32 flags = 0);
     fs::ModeChangeResult change_owner_fd(Fd fd, u32 uid, u32 gid);
     Status chown(std::string_view path, u32 uid, u32 gid);
+    // statfs of the filesystem holding path; an empty path names the descriptor.
+    Result<fs::FilesystemStatistics> statfs(Fd dirfd, std::string_view path);
     // Linux utimensat: an empty path names the descriptor itself. Explicit
     // times need the owner or root; "now" also accepts write access.
     Status utimensat(Fd dirfd, std::string_view path, fs::TimestampChange access,
