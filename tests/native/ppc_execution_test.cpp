@@ -1,4 +1,5 @@
 #include "ok/arch/execution.hpp"
+#include "execution_table_pages.hpp"
 
 using namespace ok;
 namespace native = ok::arch::execution;
@@ -184,12 +185,13 @@ extern "C" [[noreturn]] void kernel_main()
     check_fault(space_a, ok_native_user_unmapped, native::TrapKind::page_fault, 0x60000000, 0);
     check_fault(space_a, ok_native_user_invalid, native::TrapKind::exception, 0, 0);
     print("OK_NATIVE_TEST supervisor_isolation=pass readonly=pass nx=pass faults=pass\n");
+    // Mapping directories are strictly ascending: code, the stress pages, stack.
     native::PageMapping stress_mappings[22]{};
     stress_mappings[0] = mappings_a[0];
-    stress_mappings[1] = mappings_a[2];
     for (usize i = 0; i < 20; ++i)
-        stress_mappings[i + 2] = {0x41000000 + i * 4096, reinterpret_cast<uptr>(stress_pages[i]),
+        stress_mappings[i + 1] = {0x41000000 + i * 4096, reinterpret_cast<uptr>(stress_pages[i]),
                                   native::page_read | native::page_write};
+    stress_mappings[21] = mappings_a[2];
     auto stress_result = native::create_space(stress_mappings);
     require(stress_result.ok(), "create TLB eviction address space");
     auto stress_space = stress_result.value();

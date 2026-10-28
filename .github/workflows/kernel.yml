@@ -16,6 +16,38 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check the ext4 module layout
         run: python3 scripts/check_ext4_layout.py
+      - name: Check the native runtime split ratchet
+        run: python3 scripts/check_runtime_split.py
+  # Hosted model suites (scope=model) for the P1 memory, allocator, page cache,
+  # VM and IRQ/wait/time mechanisms, under ASan and UBSan with the host g++.
+  hosted-models:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - boot_memory
+          - e820_memory
+          - fdt_memory
+          - physical_map
+          - frame_allocator
+          - slab
+          - page_cache
+          - native_page_pool
+          - native_mapping_pages
+          - mapping_view
+          - native_vm
+          - process_resources
+          - irq_wait_time
+    steps:
+      - uses: actions/checkout@v4
+      # Some runners build their hosted binaries through a generated xmake project.
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
+      - name: Run hosted model suite
+        run: python3 -B scripts/test_${{ matrix.suite }}.py --sanitize
   build-and-test:
     runs-on: ubuntu-24.04
     timeout-minutes: 90

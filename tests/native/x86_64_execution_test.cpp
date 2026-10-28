@@ -1,4 +1,5 @@
 #include "ok/arch/execution.hpp"
+#include "execution_table_pages.hpp"
 
 using namespace ok;
 namespace native = ok::arch::execution;
@@ -231,8 +232,14 @@ extern "C" [[noreturn]] void kernel_main()
     for (usize i = 0; i < scattered.size(); ++i)
         scattered[i] = {native::user_begin + i * 0x200000, reinterpret_cast<uptr>(dense_data[i]),
                         native::page_read};
-    require(!native::create_space(scattered) && native::user_range(dense_space, dense_va, 1) &&
-            dense_data[0][0] == static_cast<u8>(dense_pages), "failed table growth preserves old bytes");
+    // Translation tables come from runtime storage; a budget that runs out
+    // partway through the 17 leaf tables makes growth fail.
+    const usize tables_before = native::probe::table_pages_used;
+    native::probe::table_page_budget = tables_before + 4;
+    require(!native::create_space(scattered) && native::probe::table_pages_used == tables_before &&
+                native::user_range(dense_space, dense_va, 1) && dense_data[0][0] == static_cast<u8>(dense_pages),
+            "failed table growth releases its tables and preserves old bytes");
+    native::probe::table_page_budget = native::probe::table_arena_pages;
     require(native::destroy_space(dense_space).ok(), "retire remapped dense table");
     print("OK_NATIVE_DENSE none=pass unmap=pass remap=pass failure=pass\n");
     print("OK_NATIVE_TEST_PASS scope=hardware architecture=x86_64\n");

@@ -53,7 +53,7 @@ Status release_tables(Space &space)
         table = nullptr;
     };
     if (space.root)
-        for (usize index = user_begin >> 22; index <= user_end - 1 >> 22; ++index)
+        for (usize index = user_begin >> 22; index <= (user_end - 1) >> 22; ++index)
             if (auto &entry = space.root->entries[index]; entry & pte_valid)
             {
                 auto *leaf = reinterpret_cast<Table *>((entry >> 10) << 12);
