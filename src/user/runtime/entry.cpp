@@ -228,9 +228,13 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
     {
         if (process->resources().personality != Personality::native) return -38;
         using C = lu::UnixMessageCodec<lu::configured_native_profile(), true>;
-        static_assert(sizeof(ok_msghdr) == C::header_bytes && sizeof(ok_cmsghdr) == C::cmsg_header_bytes);
-        static_assert(offsetof(ok_msghdr, vectors) == C::vectors_offset &&
-            offsetof(ok_msghdr, flags) == C::flags_offset);
+        // The UAPI structs have the target layout only when the compiler's word
+        // matches the profile; a hosted model of a 32-bit profile on a 64-bit
+        // host decodes the target bytes through the codec alone.
+        static_assert(sizeof(void *) != C::word_bytes ||
+            (sizeof(ok_msghdr) == C::header_bytes && sizeof(ok_cmsghdr) == C::cmsg_header_bytes));
+        static_assert(sizeof(void *) != C::word_bytes ||
+            (offsetof(ok_msghdr, vectors) == C::vectors_offset && offsetof(ok_msghdr, flags) == C::flags_offset));
         return unix_message<lu::configured_native_profile(), true>(kernel.posix(), number == N::recvmsg,
             a[0], a[1], a[2],
             [&](u64 address, std::span<u8> bytes) { return hw::copy_from_user(space, bytes.data(), address, bytes.size()); },
