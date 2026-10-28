@@ -1185,10 +1185,16 @@ bool step(Kernel &kernel)
         const bool needs_capture = trap && (trap.value().kind == hw::TrapKind::syscall ||
                                            trap.value().kind == hw::TrapKind::timer);
         const bool bad_capture = (capture && !captured) || (needs_capture && !captured);
+#if defined(OK_PRIVATE_MIPS64_N64_SIGNAL) || defined(OK_PRIVATE_MIPS_O32_SIGNAL)
+        // A copy-on-write fault resumes the same frame. Its capture keeps the
+        // handler readiness; without one the thread stays unverified.
+        const bool resumable_fault = captured && trap.value().kind == hw::TrapKind::page_fault;
+#endif
 #ifdef OK_PRIVATE_MIPS64_N64_SIGNAL
         // The observation expires with view deactivation. Consume it first.
         const bool n64_capture_valid = !needs_capture || (!bad_capture && private_n64_capture(*process, thread, view));
-        if (!needs_capture || !n64_capture_valid) private_n64_revoke(thread);
+        const bool n64_fault_captured = resumable_fault && private_n64_capture(*process, thread, view);
+        if ((!needs_capture && !n64_fault_captured) || !n64_capture_valid) private_n64_revoke(thread);
 #endif
 #ifdef OK_PRIVATE_PPC32_SIGNAL
         const bool ppc_linux = process->resources().personality == Personality::linux;
@@ -1238,7 +1244,7 @@ bool step(Kernel &kernel)
                 return false;
             }
         }
-        else private_mips_revoke(thread);
+        else if (!resumable_fault || !private_mips_capture(thread)) private_mips_revoke(thread);
 #endif
         if (captured)
         {

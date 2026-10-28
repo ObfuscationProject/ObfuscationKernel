@@ -346,7 +346,7 @@ class Mips64N64SignalReadiness final
             arch::execution::mips64_n64_private::same_space(space,other.space); }
     };
     enum class State : u8
-    { unverified, initial, awaiting_capture, syscall_normalized, timer_non_bd, timer_bd, handler, sigreturn, restart_staged, restart_prepared };
+    { unverified, initial, awaiting_capture, syscall_normalized, interrupted_non_bd, interrupted_bd, handler, sigreturn, restart_staged, restart_prepared };
   private:
     Identity identity_{};
     State state_{};
@@ -394,11 +394,11 @@ class Mips64N64SignalReadiness final
     [[nodiscard]] bool ready(Identity id, const Backend &frame, Capability cap) const noexcept
     {
         return owns(id) && capable(cap) && unchanged(frame) &&
-            (state_==State::initial || state_==State::syscall_normalized || state_==State::timer_non_bd ||
+            (state_==State::initial || state_==State::syscall_normalized || state_==State::interrupted_non_bd ||
              state_==State::handler || state_==State::sigreturn || state_==State::restart_prepared);
     }
     [[nodiscard]] bool deferred(Identity id, const Backend &frame, Capability cap) const noexcept
-    { return owns(id) && capable(cap) && unchanged(frame) && state_==State::timer_bd; }
+    { return owns(id) && capable(cap) && unchanged(frame) && state_==State::interrupted_bd; }
     // Trusted scheduler compaction only. Stage while the canonical source
     // still exists; commit after its nonthrowing copy, before result encoding.
     // No observation, initial origin, or syscall origin is minted here.
@@ -459,8 +459,8 @@ class Mips64N64SignalReadiness final
         switch(observation.kind())
         {
         case Kind::syscall_normalized: remember(frame,State::syscall_normalized,true);return true;
-        case Kind::timer_non_bd: remember(frame,State::timer_non_bd);return true;
-        case Kind::timer_bd: remember(frame,State::timer_bd);return true;
+        case Kind::interrupted_non_bd: remember(frame,State::interrupted_non_bd);return true;
+        case Kind::interrupted_bd: remember(frame,State::interrupted_bd);return true;
         default: frame_=nullptr;return false;
         }
     }
@@ -511,7 +511,7 @@ class Mips64N64SignalReadiness final
     [[nodiscard]] bool publish_handler(Identity id, const Backend &after, Capability cap) noexcept
     {
         const bool previous=state_==State::initial || state_==State::syscall_normalized ||
-            state_==State::timer_non_bd || state_==State::handler || state_==State::sigreturn ||
+            state_==State::interrupted_non_bd || state_==State::handler || state_==State::sigreturn ||
             state_==State::restart_prepared;
         if(!owns(id) || !capable(cap) || !previous || frame_!=&after || !shape(after)) return false;
         remember(after,State::handler);return true;

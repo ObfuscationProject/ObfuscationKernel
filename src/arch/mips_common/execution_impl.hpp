@@ -521,9 +521,13 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     executing = false;
     write_cp0<12>(saved_status);
 #ifdef OK_PRIVATE_MIPS_O32_ADMISSION
+    // A timer or a page fault leaves EPC at an instruction that has not
+    // completed (the branch when Cause.BD is set), so the runtime may resume it
+    // unchanged or, for a resolved fault, deliver a handler before resuming.
     using K = mips_o32_private::CaptureKind;
+    const bool interrupted = result.kind == TrapKind::timer || result.kind == TrapKind::page_fault;
     private_signal_capture.publish(frame, result.kind == TrapKind::syscall ? K::syscall_normalized :
-        result.kind == TrapKind::timer ? ((result.error_code & 0x80000000u) ? K::timer_bd : K::timer_non_bd) : K::unverified);
+        interrupted ? ((result.error_code & 0x80000000u) ? K::interrupted_bd : K::interrupted_non_bd) : K::unverified);
 #endif
     return result;
 }
