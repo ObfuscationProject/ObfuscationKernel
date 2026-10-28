@@ -1210,6 +1210,22 @@ Status Ext4FileSystem::destroy(u32 ino)
     mutation.committed = true;
     return Status::success();
 }
+// Identity lock held. Returns the slot of a linked identity nothing can reach
+// (no references, never handed out raw, not the root) to the vacant state.
+Ext4Node *Ext4FileSystem::evict_locked()
+{
+    for (usize index = 1; index < nodes_.size(); ++index)
+    {
+        auto &node = nodes_[index];
+        if (node.phase_ != Ext4Node::Phase::linked || node.references_ || node.borrowed_identity_exposed_)
+            continue;
+        node.ino_ = 0;
+        node.name_ = {};
+        node.phase_ = Ext4Node::Phase::vacant;
+        return &node;
+    }
+    return nullptr;
+}
 Ext4Node *Ext4FileSystem::node(u32 ino, std::string_view name)
 {
     smp::ScopedSpinLock guard(identity_lock_);
@@ -1221,17 +1237,17 @@ Ext4Node *Ext4FileSystem::node(u32 ino, std::string_view name)
     for (auto &node : nodes_)
         if (node.ino_ == ino && node.phase_ == Ext4Node::Phase::linked)
             return &node;
+    Ext4Node *slot{};
     for (auto &node : nodes_)
         if (node.phase_ == Ext4Node::Phase::vacant && !node.borrowed_identity_exposed_ && !node.references_)
-        {
-            if (!node.name_.assign(name).ok())
-                return nullptr;
-            node.ino_ = ino;
-            node.references_ = 0;
-            node.phase_ = Ext4Node::Phase::linked;
-            return &node;
-        }
-    return nullptr;
+        { slot = &node; break; }
+    if (!slot) slot = evict_locked();
+    if (!slot || !slot->name_.assign(name).ok())
+        return nullptr;
+    slot->ino_ = ino;
+    slot->references_ = 0;
+    slot->phase_ = Ext4Node::Phase::linked;
+    return slot;
 }
 Metadata Ext4FileSystem::metadata(const Inode &node) const
 {
@@ -1536,6 +1552,7 @@ Result<Node *> Ext4Node::create_active(std::string_view name, const InitialNodeA
         for (auto &candidate : fs_->nodes_)
             if (candidate.phase_ == Phase::vacant && !candidate.borrowed_identity_exposed_ && !candidate.references_)
             { result = &candidate; break; }
+        if (!result) result = fs_->evict_locked();
         if (!result) return Status::no_memory("ext4 node cache capacity exceeded");
         if (auto status = result->name_.assign(name); !status) return status;
     }
