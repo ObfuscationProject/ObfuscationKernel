@@ -16,10 +16,10 @@ ARCHITECTURES = (
 SOURCES = (
     "tests/host/posix_ext4_truncate_tests.cpp",
     "tests/host/ext4_realtime_model.cpp",
-    "src/sched/scheduler.cpp", "src/sched/process.cpp",
+    "src/sched/scheduler.cpp", "src/sched/process.cpp", "src/memory/memory.cpp", "src/net/native_udp.cpp",
     "src/posix/posix.cpp", "src/posix/fd.cpp", "src/posix/path.cpp",
     "src/posix/process.cpp", "src/fs/vfs.cpp", "src/fs/ext4_fs.cpp",
-    "src/driver/driver.cpp", "src/smp/smp.cpp", "src/arch/arch.cpp",
+    "src/driver/driver.cpp", "src/smp/smp.cpp", "src/arch/arch.cpp", "src/arch/terminal_power.cpp",
     "src/syscall/linux.cpp",
 )
 

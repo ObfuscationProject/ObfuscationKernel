@@ -72,7 +72,7 @@ HEADERS = (
     'include/ok/user/user.hpp',
 )
 FILES = (
-    'src/arch/arch.cpp',
+    'src/arch/arch.cpp', 'src/arch/terminal_power.cpp',
     'src/arch/ops_private.hpp',
     'src/arch/x86_64/ops.cpp',
     'src/fs/vfs.cpp',
@@ -192,7 +192,7 @@ def main() -> None:
 
         tests = snapshot / 'tests/host/ext4_inode_lifetime_tests.cpp'
         host_sources = [snapshot / name for name in
-                        ('src/fs/vfs.cpp', 'src/smp/smp.cpp', 'src/arch/arch.cpp',
+                        ('src/fs/vfs.cpp', 'src/smp/smp.cpp', 'src/arch/arch.cpp', 'src/arch/terminal_power.cpp',
                          'src/arch/x86_64/ops.cpp')]
         host_flags = ['-std=c++23', '-O1', '-Wall', '-Wextra', '-Wpedantic', '-Werror',
                       '-fno-exceptions', '-ffunction-sections', '-fdata-sections',

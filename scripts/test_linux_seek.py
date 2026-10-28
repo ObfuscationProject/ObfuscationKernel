@@ -19,7 +19,7 @@ def main():
                       'net', 'posix', 'sched', 'smp', 'syscall', 'user'):
         sources.extend(path for path in sorted((root/'src'/directory).rglob('*.cpp'))
                        if path.name not in ('entry.cpp', 'kernel_main.cpp', 'runtime.cpp') and path.parent.name != 'runtime')
-    sources.extend(root/path for path in ('src/arch/arch.cpp', 'src/arch/x86_64/ops.cpp'))
+    sources.extend(root/path for path in ('src/arch/arch.cpp', 'src/arch/terminal_power.cpp', 'src/arch/x86_64/ops.cpp'))
     with tempfile.TemporaryDirectory(prefix='ok-linux-seek-') as directory:
         executable = Path(directory)/'seek-tests'
         subprocess.run([*shlex.split(args.cxx), '-std=c++23', '-O1', '-g', '-Wall', '-Wextra',

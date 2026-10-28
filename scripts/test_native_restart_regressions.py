@@ -8,6 +8,7 @@ import os
 import shutil
 import stat
 import subprocess
+from hosted_closure import SNAPSHOT_TREES
 
 DIRECTORIES = ('core', 'rescue', 'driver', 'fs', 'gui', 'interrupt', 'ipc', 'memory',
                'net', 'posix', 'sched', 'smp', 'syscall', 'user')
@@ -91,15 +92,13 @@ def main():
     save()
     try:
         source.mkdir()
-        trees = [root]
-        os_root = root.parent / 'ObfuscationOS'
-        if os_root.is_dir():
-            trees.append(os_root)
-        for tree in trees:
-            before = forest(tree)
-            shutil.copytree(tree, source / tree.name, copy_function=shutil.copy2)
-            if forest(tree) != before or forest(source / tree.name) != before:
-                raise ValueError('source changed during complete copy: ' + str(tree))
+        # Only the kernel source trees: the checkout root holds build output,
+        # caches and untracked links, and the build reads nothing outside them.
+        for tree in SNAPSHOT_TREES:
+            before = forest(root / tree)
+            shutil.copytree(root / tree, source / root.name / tree, copy_function=shutil.copy2)
+            if forest(root / tree) != before or forest(source / root.name / tree) != before:
+                raise ValueError('source changed during complete copy: ' + str(root / tree))
         manifest = forest(source)
         record['source_members'] = len(manifest)
         record['complete_source_manifest'] = manifest
@@ -108,7 +107,7 @@ def main():
         for directory in DIRECTORIES:
             common.extend(path for path in sorted((kernel / 'src' / directory).rglob('*.cpp'))
                           if path.name not in ('entry.cpp', 'kernel_main.cpp', 'runtime.cpp') and path.parent.name != 'runtime')
-        common += [kernel / 'src/arch/arch.cpp', kernel / 'src/arch/x86_64/ops.cpp']
+        common += [kernel / 'src/arch/arch.cpp', kernel / 'src/arch/terminal_power.cpp', kernel / 'src/arch/x86_64/ops.cpp']
         cxx = Path(shutil.which(args.cxx) or args.cxx).resolve()
         xmake = Path(shutil.which('xmake') or 'missing-xmake').resolve()
         if not cxx.is_file() or not xmake.is_file():
