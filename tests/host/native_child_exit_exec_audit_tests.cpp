@@ -218,9 +218,19 @@ void leader_cause_reset_after_exec(Kernel &kernel)
     CHECK(kernel.scheduler().wait_process(parent, child)); release(kernel, parent);
 }
 }
+// Linux exec stores AT_RANDOM bytes; hosted kernels have no entropy device.
+struct HostedExecEntropy final : driver::EntropySource
+{
+    Status fill(std::span<std::byte> output) override
+    {
+        for (usize index = 0; index < output.size(); ++index) output[index] = static_cast<std::byte>(index + 1);
+        return Status::success();
+    }
+};
 int main()
 {
     static Kernel kernel; CHECK(kernel.boot({})); CHECK(native::entry_stacks.activate(native::entry_stack_arena));
+    static HostedExecEntropy entropy; kernel.posix().set_entropy_source(&entropy);
     install_exec_image(kernel);
     canonical_stack_exec(kernel, false, false, false);
     canonical_stack_exec(kernel, true, false, false);

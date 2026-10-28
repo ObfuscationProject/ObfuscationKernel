@@ -21,6 +21,7 @@ u64 clock_resolution_ns() { return 1; }
 }
 namespace ok::arch::execution {
 bool supported() noexcept { return false; }
+OwnershipReport ownership_report() noexcept { return {}; }
 Status initialize() { return Status::unsupported(); }
 Result<AddressSpace> create_space(MappingView) { return Status::unsupported(); }
 Status destroy_space(AddressSpace &space) { space = {}; return Status::success(); }

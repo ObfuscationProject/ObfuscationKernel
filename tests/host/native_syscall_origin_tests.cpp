@@ -338,7 +338,8 @@ void consume_and_exec(Kernel &kernel, unsigned mode)
             [&] { return kernel.posix().exec(g.pid, p->threads()[0].context, p->resources().memory); });
         expect(replaced && replaced.committed); retirement.consume(kernel, *p);
         expect(!native::pipe_read_object(g.pid, g.reader).pool);
-        native::Image image{};
+        auto image_retirement = native::ImageRetirementReservation::reserve(); CHECK(image_retirement);
+        native::Image image{std::move(image_retirement.value())};
         image.personality = sched::UserPersonality::linux;
         image.space = p->resources().native_space; ++image.space.generation;
         for (const auto &page : p->resources().native_pages)

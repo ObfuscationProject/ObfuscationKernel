@@ -875,9 +875,19 @@ void root_ready_generation(Kernel &kernel, bool process, bool explicit_ignore, b
 
 } // namespace
 
+// Linux exec stores AT_RANDOM bytes; hosted kernels have no entropy device.
+struct HostedExecEntropy final : driver::EntropySource
+{
+    Status fill(std::span<std::byte> output) override
+    {
+        for (usize index = 0; index < output.size(); ++index) output[index] = static_cast<std::byte>(index + 1);
+        return Status::success();
+    }
+};
 int main()
 {
     static Kernel kernel; CHECK(kernel.boot({})); CHECK(native::entry_stacks.activate(native::entry_stack_arena));
+    static HostedExecEntropy entropy; kernel.posix().set_entropy_source(&entropy);
     for (const bool process : {false, true}) for (const bool ignored : {false, true})
         for (const bool cancel : {false, true}) root_ready_generation(kernel, process, ignored, cancel);
     for (unsigned outcome = 0; outcome < 4; ++outcome) diagnostic_timed(kernel, outcome);

@@ -56,6 +56,8 @@ sched::ProcessId process(Kernel &kernel)
 {
     auto p=kernel.scheduler().create_user_process("native-robust",kernel.arch().make_user_context({hw::user_begin,hw::user_begin+4096}));CHECK(p);
     auto *owner=kernel.scheduler().find(p.value());owner->resources().personality=sched::UserPersonality::linux;
+    // Shared-domain futex keys resolve through an actual mapping record.
+    CHECK(native::allocate(owner->resources().native_pages,hw::user_begin,hw::page_read|hw::page_write|hw::page_execute));
     auto &leader=owner->threads()[0];CHECK(native::prepare_native_thread(leader));
     leader.native_active=true;leader.native_frame.pc=hw::user_begin;
     Bridge::set_stack_pointer(leader.native_frame,hw::user_begin+4096);
