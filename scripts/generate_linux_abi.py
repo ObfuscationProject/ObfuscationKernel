@@ -37,6 +37,9 @@ OPERATIONS += ['rename', 'renameat', 'renameat2']
 OPERATIONS += ['truncate', 'ftruncate', 'truncate64', 'ftruncate64']
 OPERATIONS += ['access', 'faccessat', 'faccessat2']
 OPERATIONS += ['setpgid', 'getpgid', 'getpgrp', 'setsid', 'getsid']
+OPERATIONS += ['uname', 'sysinfo', 'link', 'linkat', 'symlink', 'symlinkat', 'chown', 'lchown', 'fchown',
+               'fchownat', 'chown32', 'lchown32', 'fchown32', 'vfork', 'statfs', 'statfs64', 'fstatfs',
+               'fstatfs64', 'utimensat', 'utimensat_time64', 'mknod', 'mknodat']
 ERRORS += ['ESRCH']
 ERRORS += ['ENOTTY']
 CONSOLE_IOCTLS = ['TIOCSCTTY', 'TIOCGSID', 'TIOCGPGRP', 'TIOCSPGRP']
