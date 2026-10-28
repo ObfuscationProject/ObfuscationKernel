@@ -1,4 +1,5 @@
 #include "ok/arch/execution.hpp"
+#include "execution_table_pages.hpp"
 namespace hw = ok::arch::execution;
 using namespace ok;
 extern "C" const std::byte ok_rv64_probe_begin[], ok_rv64_probe_timer[], ok_rv64_probe_write_fault[],

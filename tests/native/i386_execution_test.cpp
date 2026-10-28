@@ -1,4 +1,5 @@
 #include "ok/arch/execution.hpp"
+#include "execution_table_pages.hpp"
 
 using namespace ok;
 namespace native = ok::arch::execution;
