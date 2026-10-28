@@ -224,6 +224,15 @@ Status Ext4Node::chown(u32 uid, u32 gid)
     if (!fs_) return Status::not_found("ext4 node has no owner");
     return fs_->operation(this, [&] { return chown_active(uid, gid); });
 }
+// As on Linux since 2.2.13, an ownership change clears set-user-ID, and
+// set-group-ID on a group-executable file, for root as well.
+ModeChangeResult Ext4Node::change_owner(u32 uid, u32 gid, user::Credentials caller)
+{
+    if (!fs_) return ModeChangeResult::failure(Status::not_found("ext4 node has no owner"));
+    if (caller.euid != user::root_uid)
+        return ModeChangeResult::failure(Status::permission("ext4 ownership change requires root"));
+    return ModeChangeResult::failure(fs_->operation(this, [&] { return chown_active(uid, gid, true); }));
+}
 Result<DirectoryListing> Ext4Node::list(DirectoryReadIntent intent) const
 {
     if (!fs_) return Status::not_found("ext4 node has no owner");
@@ -2324,7 +2333,7 @@ ModeChangeResult Ext4Node::change_mode_active(u32 mode, user::Credentials caller
     return status.code() == StatusCode::unsupported ? ModeChangeResult::unavailable()
                                                     : ModeChangeResult::failure(status);
 }
-Status Ext4Node::chown_active(u32 uid, u32 gid)
+Status Ext4Node::chown_active(u32 uid, u32 gid, bool clear_set_id)
 {
     if (!fs_ || !ino_)
         return Status::not_found("ext4 node was removed");
@@ -2343,6 +2352,12 @@ Status Ext4Node::chown_active(u32 uid, u32 gid)
     w16(data.value().data() + 24, static_cast<u16>(gid));
     w16(data.value().data() + 120, static_cast<u16>(uid >> 16));
     w16(data.value().data() + 122, static_cast<u16>(gid >> 16));
+    if (const u16 mode = r16(data.value().data()); clear_set_id && (mode & mode_type_mask) == mode_regular)
+    {
+        u16 cleared = static_cast<u16>(mode & ~04000u);
+        if (mode & 010u) cleared = static_cast<u16>(cleared & ~02000u);
+        w16(data.value().data(), cleared);
+    }
     if (auto status = fs_->save_inode(ino_, data.value()); !status)
         return status;
     mutation.committed = true;

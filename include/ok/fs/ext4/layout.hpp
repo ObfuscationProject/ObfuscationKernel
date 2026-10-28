@@ -197,6 +197,7 @@ class Ext4Node final : public Node
     Status chmod(u32 mode) override;
     ModeChangeResult change_mode(u32 mode, user::Credentials caller) override;
     Status chown(u32 uid, u32 gid) override;
+    ModeChangeResult change_owner(u32 uid, u32 gid, user::Credentials caller) override;
     Result<DirectoryListing> list(DirectoryReadIntent = DirectoryReadIntent::access) const override;
 
   private:
@@ -215,7 +216,7 @@ class Ext4Node final : public Node
     Status remove_active(std::string_view name, bool directory);
     Status chmod_active(u32 mode);
     ModeChangeResult change_mode_active(u32 mode, user::Credentials caller);
-    Status chown_active(u32 uid, u32 gid);
+    Status chown_active(u32 uid, u32 gid, bool clear_set_id = false);
     Result<DirectoryListing> list_active(DirectoryReadIntent intent) const;
     Status retain_locked();
     Status expose_locked();
