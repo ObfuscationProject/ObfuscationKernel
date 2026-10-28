@@ -243,6 +243,7 @@ class Ext4FileSystem final
     Status mount(driver::BlockDevice &device, Ext4MountOptions options);
     [[nodiscard]] Node *root();
     Status sync();
+    [[nodiscard]] Result<FilesystemStatistics> statistics() const;
 
   private:
     friend class Ext4Node;
@@ -347,7 +348,6 @@ class Ext4FileSystem final
     Status zero_tail(const Inode &inode);
     Status resize(u32 ino, Inode &inode, usize size);
     Status destroy(u32 ino);
-    Result<FilesystemStatistics> statistics() const;
     Ext4Node *node(u32 ino, std::string_view name);
     Metadata metadata(const Inode &inode) const;
     Status writable(const Inode &inode) const;
