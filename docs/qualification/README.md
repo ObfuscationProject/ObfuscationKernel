@@ -19,6 +19,7 @@ live in the separate ObfuscationEvidence repository.
 | [EXT4_ALLOCATED_EMPTY_DATA.md](EXT4_ALLOCATED_EMPTY_DATA.md) | Private allocated-empty first-block planner |
 | [EXT4_MODULE_LAYOUT.md](EXT4_MODULE_LAYOUT.md) | ext4 module header layout and equivalence checks |
 | [EXT4_MOUNTED_METADATA.md](EXT4_MOUNTED_METADATA.md) | Bounded mounted ext4 metadata policies |
+| [EXT4_NODE_CACHE.md](EXT4_NODE_CACHE.md) | ext4 node cache eviction and the 128-inode scan bounds |
 | [EXT4_ZERO_TRUNCATE_SLICE1.md](EXT4_ZERO_TRUNCATE_SLICE1.md) | Zero-truncate source slice 1 |
 | [EXT4_ZERO_TRUNCATE_SLICE2.md](EXT4_ZERO_TRUNCATE_SLICE2.md) | Exact linked-inode zero-truncate witness |
 | [EXT4_ZERO_TRUNCATE_SLICE3.md](EXT4_ZERO_TRUNCATE_SLICE3.md) | Committed zero-truncate journal and ownership preview |
