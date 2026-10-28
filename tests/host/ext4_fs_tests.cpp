@@ -368,6 +368,45 @@ int main(int argc, char **argv)
         CHECK(dir->remove("reuse", false));
         CHECK(n->release());
     }
+    // The node cache holds 128 identities. Unreferenced identities that were
+    // never handed out raw are evicted, so one mount reaches more inodes; a
+    // retained node stays resident throughout.
+    {
+        auto many = root->create_child_retained("many", {fs::NodeType::directory, 0755, 0, 0});
+        CHECK(many);
+        auto *held = many.value();
+        constexpr int directories = 8, per_directory = 40;
+        std::array<u64, directories * per_directory> inodes{};
+        for (int d = 0; d < directories; ++d)
+        {
+            char name[8]; std::snprintf(name, sizeof(name), "d%d", d);
+            auto sub = held->create_child_retained(name, {fs::NodeType::directory, 0755, 0, 0}); CHECK(sub);
+            for (int f = 0; f < per_directory; ++f)
+            {
+                char leaf[8]; std::snprintf(leaf, sizeof(leaf), "f%d", f);
+                auto created = sub.value()->create_child_retained(leaf, {fs::NodeType::regular, 0644, 0, 0});
+                CHECK(created);
+                inodes[d * per_directory + f] = created.value()->query_metadata().value().attributes.inode;
+                CHECK(created.value()->release());
+            }
+            CHECK(sub.value()->release());
+        }
+        for (int d = 0; d < directories; ++d)
+        {
+            char name[8]; std::snprintf(name, sizeof(name), "d%d", d);
+            auto sub = held->lookup_child_retained(name); CHECK(sub);
+            for (int f = 0; f < per_directory; ++f)
+            {
+                char leaf[8]; std::snprintf(leaf, sizeof(leaf), "f%d", f);
+                auto found = sub.value()->lookup_child_retained(leaf); CHECK(found);
+                CHECK(found.value()->query_metadata().value().attributes.inode == inodes[d * per_directory + f]);
+                CHECK(found.value()->release());
+            }
+            CHECK(sub.value()->release());
+        }
+        CHECK(held->query_metadata().value().type == fs::NodeType::directory);
+        CHECK(held->release());
+    }
     namespace_mutations(*root);
     symlinks(*root, true);
     CHECK(file->sync());
