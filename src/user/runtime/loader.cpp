@@ -18,10 +18,102 @@ namespace
 std::array<std::byte, 128 * 1024> elf_buffer{};
 } // namespace
 #endif
-struct Arguments
+// Exec argument and environment strings in one kernel object run, released
+// with the object. As on Linux, each string with its NUL is at most
+// MAX_ARG_STRLEN and the whole set at most ARG_MAX; beyond that execve fails
+// with E2BIG.
+class Arguments final : private NonCopyable
 {
-    StaticVector<FixedString<256>, 16> argv;
-    StaticVector<FixedString<256>, 16> envp;
+  public:
+    static constexpr usize max_string_bytes = 32 * hw::page_size;
+    static constexpr usize max_total_bytes = 64 * hw::page_size;
+    static constexpr usize max_strings = 4096;
+
+    Arguments() = default;
+    Arguments(Arguments &&other) noexcept
+        : run_(std::exchange(other.run_, 0)), pages_(std::exchange(other.pages_, 0)),
+          argc_(std::exchange(other.argc_, 0)), envc_(std::exchange(other.envc_, 0)),
+          used_(std::exchange(other.used_, 0)) {}
+    Arguments &operator=(Arguments &&) = delete;
+    ~Arguments() { if (run_) static_cast<void>(page_pool.release_object_run(run_, pages_)); }
+
+    [[nodiscard]] Status push_argv(std::string_view text) { return insert(text, false, argc_); }
+    [[nodiscard]] Status push_envp(std::string_view text) { return insert(text, true, envc_); }
+    // A #! script runs as its interpreter with the script path before its own arguments.
+    [[nodiscard]] Status prepend_argv(std::string_view text) { return insert(text, false, 0); }
+    [[nodiscard]] Status replace_argv(usize index, std::string_view text)
+    {
+        if (index >= argc_) return Status::invalid_argument("exec argument index");
+        if (auto status = insert(text, false, index); !status) return status;
+        auto *list = entries(false);
+        for (usize i = index + 1; i + 1 < argc_; ++i) list[i] = list[i + 1];
+        --argc_;
+        return Status::success();
+    }
+    [[nodiscard]] usize argc() const { return argc_; }
+    [[nodiscard]] usize envc() const { return envc_; }
+    [[nodiscard]] std::string_view argv(usize index) const { return view(entries(false)[index]); }
+    [[nodiscard]] std::string_view envp(usize index) const { return view(entries(true)[index]); }
+    // String bytes including each NUL, as they are copied to the new stack.
+    [[nodiscard]] usize string_bytes() const
+    {
+        usize bytes = 0;
+        for (usize i = 0; i < argc_; ++i) bytes += entries(false)[i].size + 1;
+        for (usize i = 0; i < envc_; ++i) bytes += entries(true)[i].size + 1;
+        return bytes;
+    }
+
+  private:
+    struct Entry { u32 offset{}, size{}; };
+    static constexpr usize index_bytes = max_strings * sizeof(Entry);
+    [[nodiscard]] Entry *entries(bool environment) const
+    { return reinterpret_cast<Entry *>(run_) + (environment ? max_strings / 2 : 0); }
+    [[nodiscard]] std::string_view view(Entry entry) const
+    { return {reinterpret_cast<const char *>(run_ + index_bytes + entry.offset), entry.size}; }
+    [[nodiscard]] Status insert(std::string_view text, bool environment, usize at)
+    {
+        auto bytes = reserve(text.size(), environment, at);
+        if (!bytes) return bytes.status();
+        for (usize i = 0; i < text.size(); ++i) bytes.value()[i] = text[i];
+        return Status::success();
+    }
+    // A new entry of `length` bytes plus its NUL; the caller fills the bytes.
+    [[nodiscard]] Result<char *> reserve(usize length, bool environment, usize at)
+    {
+        auto &count = environment ? envc_ : argc_;
+        if (length + 1 > max_string_bytes || count == max_strings / 2 || used_ + length + 1 > max_total_bytes)
+            return Status::argument_list_too_long("exec arguments exceed ARG_MAX");
+        if (auto status = grow(used_ + length + 1); !status) return status;
+        auto *bytes = reinterpret_cast<char *>(run_ + index_bytes + used_);
+        bytes[length] = 0;
+        auto *list = entries(environment);
+        for (usize i = count; i > at; --i) list[i] = list[i - 1];
+        list[at] = {static_cast<u32>(used_), static_cast<u32>(length)};
+        ++count;
+        used_ += length + 1;
+        return bytes;
+    }
+    friend Status argument_from_user(const hw::AddressSpace &, uptr, Arguments &, bool);
+    [[nodiscard]] Status grow(usize bytes)
+    {
+        const usize needed = (index_bytes + bytes + hw::page_size - 1) / hw::page_size;
+        if (needed <= pages_) return Status::success();
+        if (auto status = activate_pool(); !status) return status;
+        const usize pages = needed > 2 * pages_ ? needed : 2 * pages_;
+        auto run = page_pool.allocate_object_run(pages);
+        if (!run) return run.status();
+        if (run_)
+        {
+            copy_bytes(reinterpret_cast<std::byte *>(run.value()), reinterpret_cast<const std::byte *>(run_),
+                       index_bytes + used_);
+            static_cast<void>(page_pool.release_object_run(run_, pages_));
+        }
+        run_ = run.value();
+        pages_ = pages;
+        return Status::success();
+    }
+    uptr run_{};
+    usize pages_{}, argc_{}, envc_{}, used_{};
 };
 // A local loaded image must reserve failure retention before it acquires any
 // pages. Publishing its complete directory into this cell is infallible; a
@@ -178,6 +270,9 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
         offset += bytes.value().size;
     }
     constexpr u8 native_encoding = __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ ? 2 : 1;
+    if (metadata.size < 4 || elf_buffer[0] != std::byte{0x7f} || elf_buffer[1] != std::byte{'E'} ||
+        elf_buffer[2] != std::byte{'L'} || elf_buffer[3] != std::byte{'F'})
+        return Status::exec_format("not an ELF executable");
     if (metadata.size < 16 || std::to_integer<u8>(elf_buffer[4]) != (sizeof(uptr) == 8 ? 2 : 1) ||
         std::to_integer<u8>(elf_buffer[5]) != native_encoding)
         return Status::invalid_argument("ELF class or byte order does not match the native ABI");
@@ -266,12 +361,15 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
         return status;
     };
     constexpr uptr stack_top = hw::user_end - 0x100000;
-    constexpr usize stack_size = 16 * hw::page_size;
+    // The initial stack holds the argument strings and vectors above 64 KiB of
+    // ordinary stack.
+    const usize argument_bytes = args.string_bytes() + (args.argc() + args.envc() + 3) * sizeof(uptr);
+    const usize stack_size = 16 * hw::page_size + ((argument_bytes + hw::page_size - 1) & ~(hw::page_size - 1));
     const uptr main_bias = dynamic_x86 ? uptr{0x42000000} : uptr{0};
     auto map_loaded = [&](const sched::LoadedElf &loaded, fs::Node *source,
                           usize file_size, uptr bias, bool main_program) -> Status {
         bool entry_executable = false;
-        constexpr uptr load_limit = stack_top - stack_size - hw::page_size;
+        const uptr load_limit = stack_top - stack_size - hw::page_size;
         if (loaded.entry > ~uptr{0} - bias)
             return Status::overflow("ELF entry relocation wraps");
         const uptr entry = loaded.entry + bias;
@@ -374,31 +472,33 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
             return fail(status);
     static_cast<void>(image.memory.add_area(
         {stack_top - stack_size, stack_size, memory::page_user | memory::page_read | memory::page_write}));
-    uptr sp = stack_top;
-    std::array<uptr, 16> argv{}, envp{};
-    auto strings = [&](const auto &values, auto &pointers) -> Status {
-        for (usize i = 0; i < values.size(); ++i)
-        {
-            sp -= values[i].size() + 1;
-            pointers[i] = sp;
-            if (auto status = store(image.pages, sp, values[i].c_str(), values[i].size() + 1); !status.ok())
-                return status;
-        }
-        return Status::success();
-    };
-    if (auto status = strings(args.argv, argv); !status.ok())
-        return fail(status);
-    if (auto status = strings(args.envp, envp); !status.ok())
-        return fail(status);
-    std::array<uptr, 64> words{};
-    usize n = 0;
-    words[n++] = args.argv.size();
-    for (usize i = 0; i < args.argv.size(); ++i)
-        words[n++] = argv[i];
-    words[n++] = 0;
-    for (usize i = 0; i < args.envp.size(); ++i)
-        words[n++] = envp[i];
-    words[n++] = 0;
+    // Strings ascend from argv[0] to the last environment string, as on Linux.
+    const uptr strings_begin = stack_top - args.string_bytes();
+    uptr sp = strings_begin;
+    {
+        uptr cursor = strings_begin;
+        auto strings = [&](usize count, bool environment) -> Status {
+            for (usize i = 0; i < count; ++i)
+            {
+                const auto text = environment ? args.envp(i) : args.argv(i);
+                const char terminator = 0;
+                if (auto status = store(image.pages, cursor, text.data(), text.size()); !status.ok())
+                    return status;
+                if (auto status = store(image.pages, cursor + text.size(), &terminator, 1); !status.ok())
+                    return status;
+                cursor += text.size() + 1;
+            }
+            return Status::success();
+        };
+        if (auto status = strings(args.argc(), false); !status.ok())
+            return fail(status);
+        if (auto status = strings(args.envc(), true); !status.ok())
+            return fail(status);
+    }
+    // argc, the argv and envp pointer vectors (each NULL-terminated) and the
+    // auxiliary vector form one record that starts 16-byte aligned.
+    std::array<u8, LinuxExec::max_auxv_bytes> auxv{};
+    usize auxv_bytes = 0;
     if (image.personality == Personality::linux)
     {
         sp -= path.size() + 1;
@@ -417,7 +517,6 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
         if (auto status = store(image.pages, sp, random.data(), random.size()); !status.ok())
             return fail(status);
         const uptr random_address = sp;
-        std::array<u8, LinuxExec::max_auxv_bytes> auxv{};
         auto encoded = LinuxExec::encode_auxv(auxv, linux_metadata,
             {.page_size = hw::page_size, .uid = kernel.posix().uid(), .euid = kernel.posix().euid(),
              .gid = kernel.posix().gid(), .egid = kernel.posix().egid(),
@@ -425,23 +524,38 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
              .execfn = sp + random.size(), .random = random_address});
         if (!encoded)
             return fail(encoded.status());
-        if (encoded.value() > (words.size() - n) * sizeof(uptr))
-            return fail(Status::overflow("initial auxiliary vector exceeds stack record"));
-        copy_bytes(words.data() + n, auxv.data(), encoded.value());
-        n += encoded.value() / sizeof(uptr);
+        auxv_bytes = encoded.value();
     }
     else
     {
-        words[n++] = 6;
-        words[n++] = hw::page_size; // AT_PAGESZ
-        words[n++] = 9;
-        words[n++] = elf.value().entry; // AT_ENTRY
-        words[n++] = 0;
-        words[n++] = 0;
+        const std::array<uptr, 6> native_auxv{6, hw::page_size, 9, elf.value().entry, 0, 0}; // AT_PAGESZ, AT_ENTRY
+        copy_bytes(auxv.data(), native_auxv.data(), sizeof(native_auxv));
+        auxv_bytes = sizeof(native_auxv);
     }
-    sp = (sp - n * sizeof(uptr)) & ~uptr(15);
-    if (auto status = store(image.pages, sp, words.data(), n * sizeof(uptr)); !status.ok())
-        return fail(status);
+    const usize vector_bytes = (1 + args.argc() + 1 + args.envc() + 1) * sizeof(uptr);
+    sp = (sp - vector_bytes - auxv_bytes) & ~uptr(15);
+    {
+        uptr cursor = sp, string = strings_begin;
+        auto word = [&](uptr value) -> Status {
+            const auto status = store(image.pages, cursor, &value, sizeof(value));
+            cursor += sizeof(value);
+            return status;
+        };
+        if (auto status = word(args.argc()); !status.ok())
+            return fail(status);
+        for (usize i = 0; i < args.argc(); string += args.argv(i).size() + 1, ++i)
+            if (auto status = word(string); !status.ok())
+                return fail(status);
+        if (auto status = word(0); !status.ok())
+            return fail(status);
+        for (usize i = 0; i < args.envc(); string += args.envp(i).size() + 1, ++i)
+            if (auto status = word(string); !status.ok())
+                return fail(status);
+        if (auto status = word(0); !status.ok())
+            return fail(status);
+        if (auto status = store(image.pages, cursor, auxv.data(), auxv_bytes); !status.ok())
+            return fail(status);
+    }
 #ifdef OK_PRIVATE_SIGNAL_HAS_TRAMPOLINE
     if (image.personality == Personality::linux)
     {
@@ -467,11 +581,36 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
     return image;
 }
 } // namespace
-Status arguments_from_user(const hw::AddressSpace &space, uptr pointer, auto &out)
+// Copy one NUL-terminated user string, a page-bounded chunk at a time.
+Status argument_from_user(const hw::AddressSpace &space, uptr address, Arguments &out, bool environment)
+{
+    std::array<char, 256> chunk{};
+    usize length = 0;
+    for (;;)
+    {
+        if (address + length < address) return Status::fault("invalid user string");
+        const uptr at = address + length;
+        const usize to_page = hw::page_size - (at & (hw::page_size - 1));
+        const usize count = to_page < chunk.size() ? to_page : chunk.size();
+        if (!hw::copy_from_user(space, chunk.data(), at, count)) return Status::fault("invalid user string");
+        usize used = 0;
+        while (used < count && chunk[used]) ++used;
+        length += used;
+        if (length + 1 > Arguments::max_string_bytes)
+            return Status::argument_list_too_long("exec string exceeds MAX_ARG_STRLEN");
+        if (used < count) break;
+    }
+    // Copy into the arena now that the length is known and bounded.
+    auto bytes = out.reserve(length, environment, environment ? out.envc() : out.argc());
+    if (!bytes) return bytes.status();
+    if (!hw::copy_from_user(space, bytes.value(), address, length)) return Status::fault("invalid user string");
+    return Status::success();
+}
+Status arguments_from_user(const hw::AddressSpace &space, uptr pointer, Arguments &out, bool environment)
 {
     if (pointer == 0)
         return Status::success();
-    for (usize i = 0; i <= 16; ++i)
+    for (usize i = 0;; ++i)
     {
         uptr value{};
         const uptr address = pointer + i * sizeof(uptr);
@@ -479,14 +618,9 @@ Status arguments_from_user(const hw::AddressSpace &space, uptr pointer, auto &ou
             return Status::fault("invalid argument vector");
         if (value == 0)
             return Status::success();
-        if (i == 16)
-            return Status::overflow("too many arguments");
-        FixedString<256> text;
-        if (auto status = string_from_user(space, value, text); !status.ok())
+        if (auto status = argument_from_user(space, value, out, environment); !status.ok())
             return status;
-        static_cast<void>(out.push_back(text));
     }
-    return Status::overflow("argument vector exceeds limit");
 }
 namespace
 {
@@ -734,6 +868,105 @@ struct ExecRetirement
         threads.clear();
     }
 };
+namespace
+{
+// Linux binfmt_script: an executable whose first line is "#!interpreter [arg]"
+// runs as `interpreter [arg] path argv[1..]`. The line must fit 256 bytes.
+struct Script
+{
+    FixedString<256> interpreter, argument;
+    bool has_argument{};
+};
+Result<bool> script_interpreter(Kernel &kernel, std::string_view path, Script &out)
+{
+    auto resolved = kernel.posix().resolve_node(posix::at_FDCWD, path);
+    if (!resolved)
+        return resolved.status();
+    auto *node = resolved.value().node();
+    auto queried = node->query_metadata();
+    Result<bool> result{false};
+    if (!queried)
+        result = queried.status();
+    else if (queried.value().type == fs::NodeType::regular && queried.value().size >= 2)
+    {
+        auto bytes = node->read(0, 256);
+        if (!bytes)
+            result = bytes.status();
+        else if (bytes.value().size >= 2 && bytes.value().data[0] == std::byte{'#'} &&
+                 bytes.value().data[1] == std::byte{'!'})
+        {
+            // As for ELF images, even root needs one execute bit.
+            if ((queried.value().mode & 0111u) == 0)
+                result = Status::denied("script is not executable");
+            else if (auto status = fs::require_access(queried.value(), {kernel.posix().euid(), kernel.posix().egid()},
+                                                      fs::access_execute); !status.ok())
+                result = status;
+            else
+            {
+                const auto *line = reinterpret_cast<const char *>(bytes.value().data.data());
+                usize end = 2;
+                while (end < bytes.value().size && line[end] != '\n') ++end;
+                if (end == bytes.value().size && bytes.value().size == 256)
+                    result = Status::exec_format("script interpreter line exceeds 256 bytes");
+                else
+                {
+                    auto blank = [](char c) { return c == ' ' || c == '\t'; };
+                    usize at = 2;
+                    while (at < end && blank(line[at])) ++at;
+                    const usize name = at;
+                    while (at < end && !blank(line[at]) && line[at]) ++at;
+                    usize tail = end;
+                    while (tail > at && (blank(line[tail - 1]) || !line[tail - 1])) --tail;
+                    usize argument = at;
+                    while (argument < tail && blank(line[argument])) ++argument;
+                    if (at == name)
+                        result = Status::exec_format("script names no interpreter");
+                    else if (auto status = out.interpreter.assign({line + name, at - name}); !status.ok())
+                        result = status;
+                    else if (auto status = out.argument.assign({line + argument, tail - argument}); !status.ok())
+                        result = status;
+                    else
+                    {
+                        out.has_argument = argument < tail;
+                        result = true;
+                    }
+                }
+            }
+        }
+    }
+    if (auto status = resolved.value().release(); !status.ok())
+        return status;
+    return result;
+}
+// Rewrites `path` and `arguments` through at most four nested interpreters.
+Status resolve_scripts(Kernel &kernel, FixedString<256> &path, Arguments &arguments)
+{
+    for (usize depth = 0;; ++depth)
+    {
+        Script script;
+        auto found = script_interpreter(kernel, path.view(), script);
+        if (!found)
+            return found.status();
+        if (!found.value())
+            return Status::success();
+        if (depth == 4)
+            return Status::too_many_symlinks("script interpreters nest more than four levels");
+        if (arguments.argc())
+        {
+            if (auto status = arguments.replace_argv(0, path.view()); !status.ok())
+                return status;
+        }
+        else if (auto status = arguments.push_argv(path.view()); !status.ok())
+            return status;
+        if (script.has_argument)
+            if (auto status = arguments.prepend_argv(script.argument.view()); !status.ok())
+                return status;
+        if (auto status = arguments.prepend_argv(script.interpreter.view()); !status.ok())
+            return status;
+        path = script.interpreter;
+    }
+}
+} // namespace
 i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock *process,
                sched::ThreadId calling_tid, hw::AddressSpace &space, const std::array<uptr, 6> &a,
                bool &complete)
@@ -742,9 +975,11 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     Arguments arguments;
     if (auto status = string_from_user(space, a[0], path); !status.ok())
         return error(status);
-    if (auto status = arguments_from_user(space, a[1], arguments.argv); !status.ok())
+    if (auto status = arguments_from_user(space, a[1], arguments, false); !status.ok())
         return error(status);
-    if (auto status = arguments_from_user(space, a[2], arguments.envp); !status.ok())
+    if (auto status = arguments_from_user(space, a[2], arguments, true); !status.ok())
+        return error(status);
+    if (auto status = resolve_scripts(kernel, path, arguments); !status.ok())
         return error(status);
     auto previous_image_retirement = ImageRetirementReservation::reserve();
     if (!previous_image_retirement) return error(previous_image_retirement.status());
@@ -861,8 +1096,10 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
 Result<sched::ProcessId> install_init(Kernel &kernel, const fs::BootArchive &archive)
 {
     Arguments arguments;
-    static_cast<void>(arguments.argv.push_back(FixedString<256>(archive.initial_program)));
-    static_cast<void>(arguments.envp.push_back(FixedString<256>("PATH=/bin")));
+    if (auto status = arguments.push_argv(archive.initial_program); !status.ok())
+        return status;
+    if (auto status = arguments.push_envp("PATH=/bin"); !status.ok())
+        return status;
     const auto initial_credentials = archive.initial_credentials;
     if (initial_credentials.kernel_space || initial_credentials.uid != initial_credentials.euid ||
         initial_credentials.gid != initial_credentials.egid ||
