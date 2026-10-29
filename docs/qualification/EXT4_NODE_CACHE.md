@@ -33,13 +33,20 @@ about 110 new files; only a reboot recovered.
   instead of 128; each still proves the candidate against every allocated
   inode. The composed recovery seal no longer requires at most 128 checked
   inodes.
+- A borrowed VFS mount (`VirtualFileSystem::mount`) keeps the directory it
+  covers as a raw pointer with no reference. Once slots are evicted that
+  identity could be recycled for another directory, which then resolved as
+  the mount (in the guest, `/dev` captured a new directory after about 120
+  files). The covered node now records permanent borrowed exposure, as the
+  mount root already did; owned mounts hold a reference and were unaffected.
 
 ## Tests
 
 Hosted (`scope=model`):
 - `test_ext4_mounted_create.py` (clean image from
-  `scripts/make_clean_ext4_fixture.py`): one mount creates 400 files in eight
-  directories, reopens each, writes a first and a block-aligned next data block
+  `scripts/make_clean_ext4_fixture.py`): one mount creates 400 files in seven
+  directories beside a borrowed mount over an eighth, reopens each, checks the
+  mount still covers its directory and no other directory resolves to it, writes a first and a block-aligned next data block
   to one of them, keeps an open descriptor's node resident throughout, keeps
   the lifetime records within capacity, and `e2fsck -fn` finds the result
   clean (421 inodes).
