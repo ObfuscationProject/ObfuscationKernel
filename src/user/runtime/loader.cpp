@@ -431,10 +431,11 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
         return status;
     };
     constexpr uptr stack_top = hw::user_end - 0x100000;
-    // The initial stack holds the argument strings and vectors above 64 KiB of
-    // ordinary stack.
+    // Arguments up to 16 KiB share the 64 KiB initial stack, as before; larger
+    // ones get their own pages above it.
     const usize argument_bytes = args.string_bytes() + (args.argc() + args.envc() + 3) * sizeof(uptr);
-    const usize stack_size = 16 * hw::page_size + ((argument_bytes + hw::page_size - 1) & ~(hw::page_size - 1));
+    const usize stack_size = 16 * hw::page_size +
+        (argument_bytes > 4 * hw::page_size ? (argument_bytes + hw::page_size - 1) & ~(hw::page_size - 1) : 0);
     const uptr main_bias = dynamic_x86 ? uptr{0x42000000} : uptr{0};
     auto map_loaded = [&](const sched::LoadedElf &loaded, fs::Node *source,
                           usize file_size, uptr bias, bool main_program) -> Status {
