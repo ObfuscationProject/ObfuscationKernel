@@ -65,7 +65,7 @@ class Capability final
     [[nodiscard]] constexpr bool admitted() const noexcept { return admitted_; }
     [[nodiscard]] constexpr u64 sequence() const noexcept { return sequence_; }
 };
-enum class CaptureKind : u8 { unverified, syscall_normalized, timer_non_bd, timer_bd };
+enum class CaptureKind : u8 { unverified, syscall_normalized, interrupted_non_bd, interrupted_bd };
 class Observation final
 {
     const UserFrame *frame_{};

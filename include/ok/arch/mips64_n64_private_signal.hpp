@@ -95,7 +95,7 @@ class Capability final
     [[nodiscard]] constexpr bool same_issuer(Capability other) const noexcept
     { return issuer_ && issuer_==other.issuer_ && epoch_==other.epoch_; }
 };
-enum class CaptureKind : u8 { unverified, syscall_normalized, timer_non_bd, timer_bd };
+enum class CaptureKind : u8 { unverified, syscall_normalized, interrupted_non_bd, interrupted_bd };
 class Observation final
 {
     const detail::Tracker *issuer_{};
@@ -155,8 +155,9 @@ class Tracker final
             !trap.kernel_stack_pointer || !view.contains(trap.kernel_stack_pointer, sizeof(UserFrame)+16)) return;
         CaptureKind kind=CaptureKind::unverified;
         if(trap.kind==TrapKind::syscall) kind=CaptureKind::syscall_normalized;
-        else if(trap.kind==TrapKind::timer)
-            kind=(static_cast<u32>(trap.error_code)&0x80000000u)?CaptureKind::timer_bd:CaptureKind::timer_non_bd;
+        // Timers and page faults leave EPC at an instruction that has not completed.
+        else if(trap.kind==TrapKind::timer || trap.kind==TrapKind::page_fault)
+            kind=(static_cast<u32>(trap.error_code)&0x80000000u)?CaptureKind::interrupted_bd:CaptureKind::interrupted_non_bd;
         if(kind==CaptureKind::unverified) return;
         captured_=frame;space_=space;view_=view;captured_sp_=trap.kernel_stack_pointer;
         observation_.issuer_=this;observation_.frame_=&frame;observation_.epoch_=epoch_;

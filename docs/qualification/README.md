@@ -38,6 +38,7 @@ live in the separate ObfuscationEvidence repository.
 | [LINUX_STAT.md](LINUX_STAT.md) | Qualified Linux stat subset |
 | [LINUX_UMASK.md](LINUX_UMASK.md) | Linux process creation mask |
 | [MAINTAINED_EXT4_TIMESTAMPS.md](MAINTAINED_EXT4_TIMESTAMPS.md) | Explicit maintained ext4 timestamps |
+| [MIPS_SIGNAL_RESUME.md](MIPS_SIGNAL_RESUME.md) | MIPS handler resume after resolved faults |
 | [MOUNTED_MUTATION_IDENTITY.md](MOUNTED_MUTATION_IDENTITY.md) | Authentic Node admission for mounted write and truncate |
 | [MOUNT_RETENTION.md](MOUNT_RETENTION.md) | Owned mount publication and resource drainage |
 | [NATIVE_CHILD_EXIT_SIGNALS.md](NATIVE_CHILD_EXIT_SIGNALS.md) | Private native child exit signals |
