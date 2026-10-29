@@ -2,6 +2,7 @@
 """Retain hosted alternate-stack delivery transaction tests and exact inputs."""
 from pathlib import Path
 import argparse,hashlib,json,os,re,shutil,subprocess
+from hosted_closure import include_closure
 parser=argparse.ArgumentParser();parser.add_argument('--output',type=Path,required=True);args=parser.parse_args()
 root=Path(__file__).resolve().parents[1];out=args.output.resolve();out.mkdir(exist_ok=False);src=out/'source'
 sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
@@ -13,6 +14,7 @@ inputs=('include/ok/core/types.hpp','include/ok/abi/linux_user.hpp','include/ok/
  'include/ok/user/native_signal_delivery.hpp','include/ok/sched/signal_altstack.hpp','include/ok/user/native_signal_altstack.hpp',
  'include/ok/arch/aarch64/signal.hpp','include/ok/arch/x86_64/signal.hpp',
  'tests/host/native_signal_altstack_delivery_tests.cpp','scripts/test_native_signal_altstack_delivery.py')
+inputs=include_closure(root,inputs)
 for name in inputs:
  p=root/name;q=src/name;q.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(p,q);record['files'][name]=sha(q)
 project='''set_project("independent-native-signal-delivery-x86_64")

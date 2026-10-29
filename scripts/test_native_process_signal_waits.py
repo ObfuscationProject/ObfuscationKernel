@@ -96,7 +96,7 @@ def main():
         for directory in DIRECTORIES:
             support.extend(str(p.relative_to(root)) for p in sorted((root / 'src' / directory).rglob('*.cpp'))
                            if p.name not in ('entry.cpp', 'kernel_main.cpp', 'runtime.cpp') and p.parent.name != 'runtime')
-        support += ['src/arch/arch.cpp', 'src/arch/x86_64/ops.cpp']
+        support += ['src/arch/arch.cpp', 'src/arch/terminal_power.cpp', 'src/arch/x86_64/ops.cpp']
         files = {root / n for n in support} | {root / 'src/user/runtime.cpp', *(root / 'src/user/runtime').glob('*.cpp'), Path(__file__).resolve()}
         files.update(root / ('tests/host/native_' + case + '_tests.cpp') for case in CASES)
         for directory in ('include', 'src', 'tests'):

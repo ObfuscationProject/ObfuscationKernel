@@ -48,6 +48,30 @@ jobs:
           xmake-version: latest
       - name: Run hosted model suite
         run: python3 -B scripts/test_${{ matrix.suite }}.py --sanitize
+  # Every self-contained runner under scripts/test_*.py, classified by
+  # scripts/hosted_suite.py, plus the ext4 runners that take the clean image it
+  # builds with e2fsprogs. Runners that need other images, oracles, OS-built ELFs
+  # or all ten cross toolchains at once are listed by `--list` and run in the
+  # workspace lane; quarantined runners are reported there with their reason.
+  hosted-suite:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
+      - name: Run hosted suite shard
+        run: python3 -B scripts/hosted_suite.py --output hosted-suite --shard ${{ matrix.shard }}/8 --jobs 4 --ext4-fixture
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hosted-suite-shard-${{ matrix.shard }}
+          path: hosted-suite/*.log
   build-and-test:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -85,6 +109,8 @@ jobs:
         run: xmake -y -b okernel
       - name: Run xmake tests (profile and booted QEMU debug kernel)
         run: xmake test
+      - name: Run the QEMU execution probe (scope=hardware)
+        run: xmake native-probe --output=build/native-probe
       - name: Export kernel SDK
         run: xmake -y -b kernel-sdk
       - uses: actions/upload-artifact@v4

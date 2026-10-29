@@ -88,7 +88,7 @@ def main():
     tools = {str(p): sha(p) for p in (compiler, xmake, cc1)}
     shared = ['src/sched/scheduler.cpp', 'src/sched/process.cpp', 'src/posix/posix.cpp',
               'src/posix/fd.cpp', 'src/posix/path.cpp', 'src/posix/process.cpp', 'src/fs/vfs.cpp',
-              'src/driver/driver.cpp', 'src/smp/smp.cpp', 'src/arch/arch.cpp',
+              'src/driver/driver.cpp', 'src/smp/smp.cpp', 'src/arch/arch.cpp', 'src/arch/terminal_power.cpp',
               'src/syscall/linux.cpp', 'src/arch/x86_64/ops.cpp']
     provider = ['src/fs/ext4_fs.cpp', 'tests/host/ext4_realtime_model.cpp']
     suites = {
@@ -106,7 +106,7 @@ def main():
                       'net', 'posix', 'sched', 'smp', 'syscall', 'user'):
         suites['dispatch'].extend(str(p.relative_to(source)) for p in sorted((source / 'src' / subsystem).rglob('*.cpp'))
                                   if p.name not in ('entry.cpp', 'kernel_main.cpp', 'runtime.cpp') and p.parent.name != 'runtime')
-    suites['dispatch'].extend(['src/arch/arch.cpp', 'src/arch/x86_64/ops.cpp'])
+    suites['dispatch'].extend(['src/arch/arch.cpp', 'src/arch/terminal_power.cpp', 'src/arch/x86_64/ops.cpp'])
     selected = ['codec', 'call', 'bridge', 'dispatch', 'blocks'] if args.suite == 'all' else [args.suite]
     if not args.build_only and not args.argument and args.suite in ('provider', 'service', 'copy-order', 'raw-blocks'):
         parser.error('image suites require explicit --argument values or --build-only')

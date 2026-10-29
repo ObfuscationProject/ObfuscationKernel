@@ -19,7 +19,7 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     sources = ("tests/host/vfs_mount_snapshot_tests.cpp", "src/fs/vfs.cpp",
-               "src/smp/smp.cpp", "src/arch/arch.cpp")
+               "src/smp/smp.cpp", "src/arch/arch.cpp", "src/arch/terminal_power.cpp")
     with tempfile.TemporaryDirectory(prefix="ok-vfs-mount-snapshot-") as directory:
         for arch in ARCHITECTURES if args.arch == "all" else (args.arch,):
             output = Path(directory) / arch

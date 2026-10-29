@@ -24,6 +24,7 @@ live in the separate ObfuscationEvidence repository.
 | [EXT4_ZERO_TRUNCATE_SLICE3.md](EXT4_ZERO_TRUNCATE_SLICE3.md) | Committed zero-truncate journal and ownership preview |
 | [EXT4_ZERO_TRUNCATE_SLICE4.md](EXT4_ZERO_TRUNCATE_SLICE4.md) | Zero-truncate journal formatting and guarded Session preview |
 | [EXT4_ZERO_TRUNCATE_TRANSACTION.md](EXT4_ZERO_TRUNCATE_TRANSACTION.md) | Private zero-truncate transaction |
+| [HOSTED_RUNNER_SUITE.md](HOSTED_RUNNER_SUITE.md) | Hosted runner suite, repairs and CI |
 | [INITIAL_NODE_ATTRIBUTES.md](INITIAL_NODE_ATTRIBUTES.md) | Initial node attributes and namespace publication |
 | [LEGACY_ACTIVE_STARTUP.md](LEGACY_ACTIVE_STARTUP.md) | Legacy journal recovery with startup storage |
 | [LINUX_BOOTSTRAP_ADAPTER.md](LINUX_BOOTSTRAP_ADAPTER.md) | Bounded Linux bootstrap adapter |

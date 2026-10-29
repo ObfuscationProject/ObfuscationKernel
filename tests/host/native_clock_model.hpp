@@ -108,7 +108,8 @@ namespace ok::arch::execution
 OwnershipReport ownership_report() noexcept
 {
 #ifdef OK_SHUTDOWN_RUNTIME_MODEL
-    return {mock::shutdown_backend_failure, mock::shutdown_backend_owners, mock::shutdown_backend_executing};
+    return {.failure = mock::shutdown_backend_failure, .address_spaces = mock::shutdown_backend_owners,
+            .executing = mock::shutdown_backend_executing};
 #else
     return {}; // Hosted mapping mock only; ordinary fixtures do not qualify shutdown.
 #endif

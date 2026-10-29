@@ -2,7 +2,7 @@
 #include "ok/fs/ext4/mount.hpp"
 #include "ok/sched/scheduler.hpp"
 #include <type_traits>
-static_assert(ok::kernel_module_abi_version == 52);
+static_assert(ok::kernel_module_abi_version == 76);
 static_assert(!std::is_copy_constructible_v<ok::fs::MountedRootReference>);
 static_assert(!std::is_move_assignable_v<ok::fs::MountedRootReference>);
 template class ok::fs::Ext4MountedMetadata<1>;
