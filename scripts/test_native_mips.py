@@ -24,7 +24,7 @@ def main() -> int:
            "-I", str(root / "include")]
     if args.kernel_fault:
         cxx.append("-DOK_NATIVE_KERNEL_FAULT=1")
-    sources = ["src/boot/raw_handoff.cpp", f"src/arch/{args.arch}/boot.S", f"src/arch/{args.arch}/execution.cpp",
+    sources = ["src/boot/raw_handoff.cpp", f"src/arch/{args.arch}/boot.S", f"src/arch/{args.arch}/execution.cpp", "src/interrupt/platform_irq.cpp",
                f"src/arch/{args.arch}/execution.S", "tests/native/mips_execution_test.cpp", "tests/native/mips_execution_user.S"]
     objects = []
     for index, source in enumerate(sources):

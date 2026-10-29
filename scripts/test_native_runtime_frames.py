@@ -162,7 +162,7 @@ def main():
                 if dependency.is_file():freeze(dependency,str(dependency.relative_to(root)))
         freeze(stage/'include/ok/boot/qemu_runtime_frames.hpp','include/ok/boot/qemu_runtime_frames.hpp')
         freeze(stage/'tests/native/runtime_frame_user.S','user.S')
-        for relative in ['src/memory/memory.cpp',f'src/arch/{arch}/execution.cpp',f'src/arch/{arch}/execution.S']:
+        for relative in ['src/memory/memory.cpp',f'src/arch/{arch}/execution.cpp',f'src/arch/{arch}/execution.S','src/interrupt/platform_irq.cpp','src/interrupt/pic8259.hpp','src/arch/arm_common/gicv2.hpp','src/arch/riscv_common/plic.hpp','src/arch/loongarch64/eiointc.hpp','src/arch/ppc/mpic.hpp']:
             freeze(root/relative,relative)
         prefix=root/'toolchains'/cfg['triple']/'bin'/cfg['triple'];tools={n:Path(str(prefix)+'-'+n) for n in ['gcc','g++','ld','objcopy']}
         if subprocess.check_output([str(tools['gcc']),'-dumpmachine'],text=True).strip()!=cfg['triple'] or subprocess.check_output([str(tools['gcc']),'-dumpfullversion'],text=True).strip()!=cfg['compiler']['version']:raise ValueError('compiler identity mismatch')
@@ -174,7 +174,7 @@ def main():
         with (out/'build.log').open('w') as log:
             run([tools['gcc'],*cfg['asflags'],'-c',snap/f'src/arch/{arch}/boot.S','-o',out/'boot.o'],log)
             objects=[out/'boot.o']
-            for name,path in [('probe','probe.cpp'),('capture','src/boot/raw_handoff.cpp'),('fdt','src/boot/fdt.cpp'),('memory','src/memory/memory.cpp'),('execution',f'src/arch/{arch}/execution.cpp')]:
+            for name,path in [('probe','probe.cpp'),('capture','src/boot/raw_handoff.cpp'),('fdt','src/boot/fdt.cpp'),('memory','src/memory/memory.cpp'),('execution',f'src/arch/{arch}/execution.cpp'),('irq','src/interrupt/platform_irq.cpp')]:
                 obj=out/(name+'.o');run([tools['g++'],'-std=c++23',*cfg['cxxflags'],'-fno-builtin','-Werror','-fstack-usage','-ffunction-sections','-fdata-sections','-I'+str(snap/'include'),*['-D'+d for d in defines],'-c',snap/path,'-o',obj],log);objects.append(obj)
             for name,path in [('native-entry',f'src/arch/{arch}/execution.S'),('user','user.S')]:
                 obj=out/(name+'.o');run([tools['gcc'],*cfg['asflags'],*['-D'+d for d in defines],'-c',snap/path,'-o',obj],log);objects.append(obj)

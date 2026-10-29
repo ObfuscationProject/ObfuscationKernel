@@ -137,7 +137,7 @@ def project(snap, arch, cfg, tools):
     flags = cfg['cxxflags'] + ['-fno-builtin', '-Werror', '-ffunction-sections', '-fdata-sections']
     window = firmware.windows.get(arch, (0,0))
     defines = cfg['defines'] + [f'OK_PROBE_ARCH={arch}', f'OK_PROBE_PROTOCOL={firmware.protocols[arch]}', f'OK_PROBE_WINDOW_START={window[0]}ULL', f'OK_PROBE_WINDOW_END={window[1]}ULL']
-    sources = ['probe.cpp', 'user.S', 'src/boot/raw_handoff.cpp', 'src/boot/fdt.cpp', 'src/memory/memory.cpp', f'src/arch/{arch}/boot.S', f'src/arch/{arch}/execution.cpp', f'src/arch/{arch}/execution.S']
+    sources = ['probe.cpp', 'user.S', 'src/boot/raw_handoff.cpp', 'src/boot/fdt.cpp', 'src/memory/memory.cpp', f'src/arch/{arch}/boot.S', f'src/arch/{arch}/execution.cpp', 'src/interrupt/platform_irq.cpp', f'src/arch/{arch}/execution.S']
     code = '\n'.join([
         'set_project("object-isolation")', 'set_languages("c++23")',
         'toolchain("probe-cross")', '    set_kind("standalone")',
@@ -181,7 +181,7 @@ def main():
         rows.append(row);directory=out/arch;directory.mkdir();snap=directory/'sources';snap.mkdir()
         cfg=PROFILES[arch];prefix=args.toolchains.resolve()/cfg['triple']/'bin'/cfg['triple']
         tools={name:Path(str(prefix)+'-'+name) for name in ['gcc','g++','ld','objcopy','nm']}
-        sources=['tests/native/object_isolation_probe.cpp','tests/native/object_isolation_user.S','src/boot/raw_handoff.cpp','src/boot/fdt.cpp','src/memory/memory.cpp',f'src/arch/{arch}/boot.S',f'src/arch/{arch}/linker.ld',f'src/arch/{arch}/execution.cpp',f'src/arch/{arch}/execution.S']
+        sources=['tests/native/object_isolation_probe.cpp','tests/native/object_isolation_user.S','src/boot/raw_handoff.cpp','src/boot/fdt.cpp','src/memory/memory.cpp',f'src/arch/{arch}/boot.S',f'src/arch/{arch}/linker.ld',f'src/arch/{arch}/execution.cpp','src/interrupt/platform_irq.cpp','src/interrupt/pic8259.hpp','src/arch/arm_common/gicv2.hpp','src/arch/riscv_common/plic.hpp','src/arch/loongarch64/eiointc.hpp','src/arch/ppc/mpic.hpp',f'src/arch/{arch}/execution.S']
         sources += [str(path.relative_to(root)) for path in (root/'include').rglob('*.hpp')]
         if arch in ('mips','mips64'):
             sources += [str(path.relative_to(root)) for path in (root/'src/arch/mips_common').iterdir() if path.is_file()]

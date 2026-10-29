@@ -25,7 +25,7 @@ def main() -> int:
     if args.kernel_fault:
         cxx.append("-DOK_NATIVE_TEST_KERNEL_FAULT=1")
     objects = []
-    sources = [("boot", "src/arch/ppc/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/ppc/execution.cpp"),
+    sources = [("boot", "src/arch/ppc/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/ppc/execution.cpp"), ("irq", "src/interrupt/platform_irq.cpp"),
                ("bridge", "src/arch/ppc/execution.S"), ("user", "tests/native/ppc_execution_user.S"),
                ("test", "tests/native/ppc_execution_test.cpp")]
     for name, source in sources:
