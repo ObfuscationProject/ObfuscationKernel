@@ -52,3 +52,9 @@ QEMU guest (`scope=hardware`): `tests/userland/sh-acceptance.sh` gains
 `dev_zero`, `dev_full`, `uname`, `uptime`, `hostname`, `links`, `chown`,
 `touch`, `statfs`, `listing`, `listing_glob`, `bc` and `bzip2`. Results per
 profile are in the paired ObfuscationOS note.
+
+## Receipts
+
+Validated at module ABI 77 on `feat/linux-personality` `6968183`, which merges the
+four P1 review branches, with ObfuscationOS `feat/linux-personality` (guest runs at
+`8cb051a`, tip `9d9bae5`): ObfuscationEvidence `receipts/ObfuscationKernel@6968183/feat/linux-personality/{kernel-ten-profile,hosted-runners,sdk-contracts,os-consumer}` and `receipts/ObfuscationOS@9d9bae5/feat/linux-personality/{port-builds,userland-gate}`.

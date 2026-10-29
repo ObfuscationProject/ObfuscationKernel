@@ -64,3 +64,9 @@ match the other eight profiles in ObfuscationOS `docs/qualification/MUSL_USERLAN
 PPC keeps its own readiness model and its gate refusal still stops the
 runtime; it has not shown this failure. Signals that interrupt a delay-slot
 fault wait for the next syscall or timer capture.
+
+## Receipts
+
+Validated at module ABI 77 on `feat/linux-personality` `6968183`, which merges the
+four P1 review branches, with ObfuscationOS `feat/linux-personality` (guest runs at
+`8cb051a`, tip `9d9bae5`): ObfuscationEvidence `receipts/ObfuscationKernel@6968183/feat/linux-personality/{kernel-ten-profile}` and `receipts/ObfuscationOS@9d9bae5/feat/linux-personality/userland-gate` (mips and mips64 pass like the other eight).
