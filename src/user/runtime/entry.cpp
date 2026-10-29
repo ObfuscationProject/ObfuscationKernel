@@ -829,6 +829,26 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         if (output_size > buffer.size() || !hw::copy_to_user(space, a[output_arg], buffer.data(), output_size))
             return -14;
     }
+    // A file or device read fills the request one buffer at a time, as on
+    // Linux, until a chunk comes back short. Pipes, PTYs and the console
+    // returned above with their own semantics.
+    if (number == N::read && description && description->node && output_size == sched::pipe_capacity)
+    {
+        usize total = output_size;
+        while (total < a[2])
+        {
+            const usize wanted = a[2] - total < sched::pipe_capacity ? a[2] - total : sched::pipe_capacity;
+            request.args[1] = reinterpret_cast<uptr>(buffer.data());
+            request.args[2] = wanted;
+            const auto more = kernel.syscalls().dispatch(request);
+            if (!more.status.ok() || more.value <= 0) break;
+            const auto chunk = static_cast<usize>(more.value);
+            if (chunk > wanted || !hw::copy_to_user(space, a[1] + total, buffer.data(), chunk)) break;
+            total += chunk;
+            if (chunk < wanted) break;
+        }
+        return static_cast<i64>(total);
+    }
     return result.value;
 }
 } // namespace
