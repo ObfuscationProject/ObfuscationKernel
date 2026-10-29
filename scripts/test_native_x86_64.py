@@ -28,7 +28,7 @@ def main() -> int:
              "-fno-stack-protector", "-fno-use-cxa-atexit", "-fno-threadsafe-statics", "-fno-pic", "-fno-pie",
              "-Wall", "-Wextra", "-Werror", "-I", str(project / "include")]
     objects = []
-    for name, source in (("boot", "src/arch/x86_64/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/x86_64/execution.cpp"),
+    for name, source in (("boot", "src/arch/x86_64/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/x86_64/execution.cpp"), ("irq", "src/interrupt/platform_irq.cpp"),
                          ("entry", "src/arch/x86_64/execution.S"), ("user", "tests/native/x86_64_execution_user.S"),
                          ("test", "tests/native/x86_64_execution_test.cpp")):
         target = out / (name + ".o")

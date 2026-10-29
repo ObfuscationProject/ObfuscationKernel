@@ -19,7 +19,7 @@ def main() -> int:
     common = ["-march=armv7-a", "-marm", "-mno-unaligned-access", "-mfloat-abi=soft", "-mfpu=neon"]
     cxx = ["-std=c++23", "-O2", "-ffreestanding", "-fno-builtin", "-fno-exceptions", "-fno-stack-protector", "-Wall", "-Wextra", "-Wpedantic", "-Werror", "-I", str(root / "include")]
     objects = []
-    sources = [("boot", "src/arch/arm32/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/arm32/execution.cpp"), ("bridge", "src/arch/arm32/execution.S"), ("user", "tests/native/arm32_execution_user.S"), ("test", "tests/native/arm32_execution_test.cpp")]
+    sources = [("boot", "src/arch/arm32/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/arm32/execution.cpp"), ("irq", "src/interrupt/platform_irq.cpp"), ("bridge", "src/arch/arm32/execution.S"), ("user", "tests/native/arm32_execution_user.S"), ("test", "tests/native/arm32_execution_test.cpp")]
     for name, source in sources:
         target = output / f"{name}.o"
         subprocess.run([str(compiler), *common, *(cxx if source.endswith(".cpp") else []), "-c", str(root / source), "-o", str(target)], check=True)
