@@ -1,4 +1,4 @@
-"""Private ABI76 pathname profile producer/consumer admission; no code loading."""
+"""Private ABI77 pathname profile producer/consumer admission; no code loading."""
 from pathlib import Path
 import importlib.util
 import tempfile
@@ -56,7 +56,7 @@ class UnixPathnameSdkContract(unittest.TestCase):
                 continue
             for mutated in (PROFILE.replace(line, ''), PROFILE + line,
                             '#if 1\n' + PROFILE + '\n#endif\n',
-                            '#define unix_pathname_module_abi 76\n' + PROFILE):
+                            '#define unix_pathname_module_abi 77\n' + PROFILE):
                 self.profile.write_text(mutated)
                 with self.subTest(declaration=line, mutation=mutated):
                     self.refused()
@@ -64,10 +64,10 @@ class UnixPathnameSdkContract(unittest.TestCase):
         self.accepted()
 
     def test_old_future_and_broadened_bounded_contracts_are_refused(self):
-        for before, after in (('module_abi = 76', 'module_abi = 61'),
-                              ('module_abi = 76', 'module_abi = 64'),
-                              ('module_abi = 76', 'module_abi = 65'),
-                              ('module_abi = 76', 'module_abi = 77'),
+        for before, after in (('module_abi = 77', 'module_abi = 61'),
+                              ('module_abi = 77', 'module_abi = 64'),
+                              ('module_abi = 77', 'module_abi = 65'),
+                              ('module_abi = 77', 'module_abi = 78'),
                               ('endpoint_capacity = 32', 'endpoint_capacity = 33'),
                               ('backlog_capacity = 4', 'backlog_capacity = 5'),
                               ('text_capacity = 107', 'text_capacity = 108'),
@@ -102,7 +102,7 @@ class UnixPathnameSdkContract(unittest.TestCase):
         for arch, mode in (('aarch64', 'debug'), ('x86_64', 'release')):
             with self.subTest(arch=arch, mode=mode), self.assertRaises(ValueError):
                 CONSUMER.validate_sdk(fixture.sdk, arch, mode)
-        for version in (61, 63, 64, 65, 68, 69, 70, 71, 75, 77):
+        for version in (61, 63, 64, 65, 68, 69, 70, 71, 75, 76, 78):
             fixture.manifest['abi_version'] = version
             fixture.save()
             with self.subTest(version=version), self.assertRaises(ValueError):

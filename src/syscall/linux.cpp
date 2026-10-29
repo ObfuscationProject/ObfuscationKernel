@@ -18,6 +18,10 @@ i64 ErrnoMapper::errno_for(Status status)
     {
     case StatusCode::not_terminal:
         return 25;
+    case StatusCode::exec_format:
+        return 8;
+    case StatusCode::argument_list_too_long:
+        return 7;
     case StatusCode::no_process:
         return 3;
     case StatusCode::name_too_long:

@@ -70,7 +70,13 @@ same three profiles.
   first-data replay, keeps its 128-inode bound: the zero-truncate session read
   reservations (`A=1420+531G`) assume it. Recovery admits only its bounded
   32 MiB domain. Both belong with WT2.4 `feat/storage-durable`.
-- A directory listing holds 64 entries (`max_child_nodes`); `getdents` of a
-  larger directory fails with `EOVERFLOW` (Kernel issue #6 scope).
+- Directory listings past 64 entries (`max_child_nodes`) are paged since
+  `feat/linux-personality` (#6); before it `getdents` failed with `EOVERFLOW`.
 - The journalled writer admits a first data block and block-aligned next
   blocks only; an unaligned second write returns 0 bytes. Unchanged here.
+
+## Receipts
+
+Validated at module ABI 77 on `feat/linux-personality` `6968183`, which merges the
+four P1 review branches, with ObfuscationOS `feat/linux-personality` (guest runs at
+`8cb051a`, tip `9d9bae5`): ObfuscationEvidence `receipts/ObfuscationKernel@6968183/feat/linux-personality/{hosted-runners,os-consumer}` and `receipts/ObfuscationOS@9d9bae5/feat/linux-personality/userland-gate` (`many_files` on all ten profiles).

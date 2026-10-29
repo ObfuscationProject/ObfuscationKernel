@@ -92,7 +92,8 @@ struct StatCodec final
         const bool type_matches = (status.type == fs::NodeType::regular && mode_type == 0100000u) ||
             (status.type == fs::NodeType::directory && mode_type == 0040000u) ||
             (status.type == fs::NodeType::symlink && mode_type == 0120000u) ||
-            (status.type == fs::NodeType::socket && mode_type == fs::mode_socket);
+            (status.type == fs::NodeType::socket && mode_type == fs::mode_socket) ||
+            (status.type == fs::NodeType::device && mode_type == fs::mode_character_device);
         if (!type_matches) return Status::unsupported("Linux stat provider type unavailable");
         const auto &a = status.attributes;
         if (!a.has(fs::Attribute::blocks512))
@@ -123,7 +124,8 @@ struct StatCodec final
         if (status.mode > 0xffffu) return Status::overflow("Linux stat mode width");
         for (const auto *time : {&a.access,&a.modification,&a.change})
         {
-            if (time->source != fs::TimestampSource::readonly_ext4 && time->source != fs::TimestampSource::maintained_ext4)
+            if (time->source != fs::TimestampSource::readonly_ext4 && time->source != fs::TimestampSource::maintained_ext4 &&
+                time->source != fs::TimestampSource::kernel_fixed)
                 return Status::unsupported("Linux stat epoch provenance unavailable");
             if (time->nanoseconds >= 1000000000u)
                 return Status::io_error("Linux stat malformed provider nanoseconds");

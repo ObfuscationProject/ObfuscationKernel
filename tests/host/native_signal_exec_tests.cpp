@@ -376,7 +376,7 @@ int main(int argc,char **argv)
     CHECK(native::entry_stacks.activate(native::entry_stack_arena));
     auto bytes=read_file(argv[1]);bytes[7]=std::byte{3};
     CHECK(kernel.vfs().create_readonly_file("/old",bytes));CHECK(kernel.vfs().create_readonly_file("/target",bytes));
-    native::Arguments args;CHECK(args.argv.push_back(FixedString<256>("old")));
+    native::Arguments args;CHECK(args.push_argv("old"));
     auto image=native::load(kernel,"/old",args);CHECK(image);
     auto created=kernel.scheduler().create_user_process("sdk28-mask-regression",kernel.arch().make_user_context({image.value().frame.pc,image.value().frame.sp}));CHECK(created);
     const auto pid=created.value();auto *process=kernel.scheduler().find(pid);

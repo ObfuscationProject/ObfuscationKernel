@@ -59,6 +59,207 @@ inline Status copy_pathname(const hw::AddressSpace &space, uptr address, FixedSt
     return Status::name_too_long("Linux pathname exceeds supported capacity");
 }
 
+// Linux struct utsname: six NUL-padded 65-byte fields on every profile. The
+// personality reports the Linux ABI the adapter follows (6.13).
+template <lu::Profile Profile> i64 linux_uname(Kernel &kernel, const hw::AddressSpace &space, uptr output)
+{
+    constexpr std::string_view machine =
+        Profile == lu::Profile::i386 ? "i686" : Profile == lu::Profile::x86_64 ? "x86_64" :
+        Profile == lu::Profile::aarch64 ? "aarch64" : Profile == lu::Profile::arm32 ? "armv7l" :
+        Profile == lu::Profile::rv64 ? "riscv64" : Profile == lu::Profile::rv32 ? "riscv32" :
+        Profile == lu::Profile::loongarch64 ? "loongarch64" : Profile == lu::Profile::mips ? "mips" :
+        Profile == lu::Profile::mips64 ? "mips64" : "ppc";
+    std::array<char, 6 * 65> bytes{};
+    const auto put = [&](usize field, std::string_view text) {
+        for (usize i = 0; i < text.size() && i < 64; ++i) bytes[field * 65 + i] = text[i];
+    };
+    const auto native = kernel.posix().uname();
+    put(0, "Linux");
+    put(1, native.nodename.view());
+    put(2, "6.13.0-obfuscation");
+    put(3, "#1 ObfuscationKernel");
+    put(4, machine);
+    put(5, "(none)");
+    return hw::copy_to_user(space, output, bytes.data(), bytes.size()) ? 0 : -14;
+}
+
+// Linux struct sysinfo with this profile's word: memory from the discovered
+// frames, no swap or high memory, load averages zero.
+template <lu::Profile Profile> i64 linux_sysinfo(Kernel &kernel, const hw::AddressSpace &space, uptr output)
+{
+    using Codec = lu::Codec<Profile>;
+    constexpr usize word = Codec::profile.word_bytes;
+    std::array<u8, word == 8 ? 112 : 64> bytes{};
+    const auto put = [&](usize at, u64 value, usize width) {
+        for (usize i = 0; i < width; ++i)
+            bytes[at + (Codec::profile.big_endian ? width - 1 - i : i)] = static_cast<u8>(value >> (8 * i));
+    };
+    const auto info = kernel.posix().system_info();
+    const auto &frames = kernel.memory().frames();
+    u64 total = static_cast<u64>(frames.total_frames()) * hw::page_size;
+    u64 free = static_cast<u64>(frames.free_frames()) * hw::page_size;
+    u32 unit = 1;
+    if constexpr (word == 4)
+        if (total > 0xffffffffULL) { unit = hw::page_size; total /= unit; free /= unit; }
+    put(0, static_cast<u64>(info.uptime), word);
+    put(4 * word, total, word);
+    put(5 * word, free, word);
+    put(10 * word, info.process_count, 2);
+    put(word == 8 ? 104 : 52, unit, 4);
+    return hw::copy_to_user(space, output, bytes.data(), bytes.size()) ? 0 : -14;
+}
+
+// chown, lchown, fchown, their 32-bit-ID variants and fchownat. An ID of -1
+// keeps the current one; profiles with chown32 keep 16-bit legacy calls.
+template <lu::Profile Profile>
+i64 linux_chown(Kernel &kernel, const hw::AddressSpace &space, u64 number, const std::array<u64, 6> &a)
+{
+    using Codec = lu::Codec<Profile>;
+    using O = lu::Operation;
+    const auto is = [&](O operation) { const auto expected = Codec::syscall_number(operation); return expected && number == *expected; };
+    const bool legacy = Codec::syscall_number(O::chown32).has_value() && (is(O::chown) || is(O::lchown) || is(O::fchown));
+    const bool by_fd = is(O::fchown) || is(O::fchown32), at = is(O::fchownat);
+    const u32 flags = at ? static_cast<u32>(a[4]) : (is(O::lchown) || is(O::lchown32)) ? posix::at_SYMLINK_NOFOLLOW : 0;
+    if (flags & ~(posix::at_SYMLINK_NOFOLLOW | posix::at_EMPTY_PATH)) return -22;
+    const auto id = [&](u64 value) {
+        const u32 raw = static_cast<u32>(value);
+        return legacy ? (static_cast<u16>(raw) == 0xffff ? ~u32{0} : u32{static_cast<u16>(raw)}) : raw;
+    };
+    const usize ids = at ? 2 : 1;
+    u32 uid = id(a[ids]), gid = id(a[ids + 1]);
+    const i32 fd = static_cast<i32>(static_cast<u32>(a[0]));
+    const i32 dirfd = at ? fd : posix::at_FDCWD;
+    FixedString<256> path;
+    if (!by_fd)
+        if (auto status = copy_pathname(space, static_cast<uptr>(a[at ? 1 : 0]), path); !status.ok())
+            return -syscall::ErrnoMapper::errno_for(status);
+    if (uid == ~u32{0} || gid == ~u32{0})
+    {
+        auto current = by_fd ? kernel.posix().fstat(fd) : kernel.posix().statat(dirfd, path.view(), flags);
+        if (!current) return -syscall::ErrnoMapper::errno_for(current.status());
+        if (uid == ~u32{0}) uid = current.value().uid;
+        if (gid == ~u32{0}) gid = current.value().gid;
+    }
+    const auto result = by_fd ? kernel.posix().change_owner_fd(fd, uid, gid)
+                              : kernel.posix().change_owner_at(dirfd, path.view(), uid, gid, flags);
+    switch (result.kind())
+    {
+    case fs::ModeChangeResult::Kind::applied: return 0;
+    case fs::ModeChangeResult::Kind::read_only: return -30;
+    case fs::ModeChangeResult::Kind::unavailable: return -95;
+    case fs::ModeChangeResult::Kind::failed: break;
+    }
+    return -syscall::ErrnoMapper::errno_for(result.status());
+}
+
+// utimensat and utimensat_time64: a NULL path names the descriptor, a NULL
+// times pointer means now for both, and UTIME_NOW/UTIME_OMIT select per field.
+template <lu::Profile Profile>
+i64 linux_utimensat(Kernel &kernel, const hw::AddressSpace &space, const std::array<u64, 6> &a, bool time64)
+{
+    using Codec = lu::Codec<Profile>;
+    constexpr usize word = Codec::profile.word_bytes;
+    constexpr u64 utime_now = (u64{1} << 30) - 1, utime_omit = (u64{1} << 30) - 2;
+    const i32 dirfd = static_cast<i32>(static_cast<u32>(a[0]));
+    const u32 flags = static_cast<u32>(a[3]);
+    FixedString<256> path;
+    if (a[1])
+    {
+        if (auto status = copy_pathname(space, static_cast<uptr>(a[1]), path); !status.ok())
+            return -syscall::ErrnoMapper::errno_for(status);
+        if (path.view().empty() && !(flags & posix::at_EMPTY_PATH)) return -2;
+    }
+    std::array<fs::TimestampChange, 2> times{};
+    times[0].kind = times[1].kind = fs::TimestampChange::Kind::now;
+    if (a[2])
+    {
+        // time64 records are two 64-bit words; time32 records two native words.
+        const usize field = time64 ? 8 : word, record = 2 * field;
+        std::array<u8, 32> bytes{};
+        if (!hw::copy_from_user(space, bytes.data(), static_cast<uptr>(a[2]), 2 * record)) return -14;
+        const auto get = [&](usize at) {
+            u64 value{};
+            for (usize i = 0; i < field; ++i)
+                value |= u64{bytes[at + i]} << (8 * (Codec::profile.big_endian ? field - 1 - i : i));
+            return value;
+        };
+        for (usize i = 0; i < 2; ++i)
+        {
+            const u64 raw_seconds = get(i * record);
+            // A 32-bit kernel reads only the low half of a time64 tv_nsec.
+            const u64 nanoseconds = word == 4 ? get(i * record + field) & 0xffffffffULL : get(i * record + field);
+            if (nanoseconds == utime_omit) times[i].kind = fs::TimestampChange::Kind::omit;
+            else if (nanoseconds == utime_now) times[i].kind = fs::TimestampChange::Kind::now;
+            else if (nanoseconds >= 1000000000ULL) return -22;
+            else
+            {
+                const i64 seconds = field == 8 ? static_cast<i64>(raw_seconds)
+                                               : static_cast<i64>(static_cast<i32>(static_cast<u32>(raw_seconds)));
+                times[i] = {fs::TimestampChange::Kind::value, seconds, static_cast<u32>(nanoseconds)};
+            }
+        }
+    }
+    const auto status = kernel.posix().utimensat(dirfd, path.view(), times[0], times[1], flags);
+    return status ? 0 : -syscall::ErrnoMapper::errno_for(status);
+}
+
+// statfs/fstatfs on LP64 profiles and statfs64/fstatfs64 on ILP32 ones, the
+// calls musl makes, in each architecture's Linux record layout.
+template <lu::Profile Profile>
+i64 linux_statfs(Kernel &kernel, const hw::AddressSpace &space, bool by_fd, bool sized, const std::array<u64, 6> &a)
+{
+    using Codec = lu::Codec<Profile>;
+    struct Field { usize at, width; };
+    struct Layout { Field type, bsize, blocks, bfree, bavail, files, ffree, namelen, frsize, flags; usize size; };
+    constexpr Layout layout = Profile == lu::Profile::mips64 ?
+        Layout{{0, 8}, {8, 8}, {24, 8}, {32, 8}, {56, 8}, {40, 8}, {48, 8}, {72, 8}, {16, 8}, {80, 8}, 128} :
+        Profile == lu::Profile::mips ?
+        Layout{{0, 4}, {4, 4}, {16, 8}, {24, 8}, {48, 8}, {32, 8}, {40, 8}, {64, 4}, {8, 4}, {68, 4}, 96} :
+        Codec::profile.word_bytes == 8 ?
+        Layout{{0, 8}, {8, 8}, {16, 8}, {24, 8}, {32, 8}, {40, 8}, {48, 8}, {64, 8}, {72, 8}, {80, 8}, 120} :
+        Layout{{0, 4}, {4, 4}, {8, 8}, {16, 8}, {24, 8}, {32, 8}, {40, 8}, {56, 4}, {60, 4}, {64, 4},
+               Profile == lu::Profile::i386 || Profile == lu::Profile::arm32 ? 84 : 88};
+    const uptr output = static_cast<uptr>(a[sized ? 2 : 1]);
+    // The arm kernel accepts musl's 8-aligned 88-byte record for its packed 84 bytes.
+    if (sized && a[1] != layout.size && !(Profile == lu::Profile::arm32 && a[1] == 88)) return -22;
+    FixedString<256> path;
+    if (!by_fd)
+        if (auto status = copy_pathname(space, static_cast<uptr>(a[0]), path); !status.ok())
+            return -syscall::ErrnoMapper::errno_for(status);
+    auto statistics = kernel.posix().statfs(by_fd ? static_cast<i32>(static_cast<u32>(a[0])) : posix::at_FDCWD,
+                                            path.view());
+    if (!statistics) return -syscall::ErrnoMapper::errno_for(statistics.status());
+    const auto &value = statistics.value();
+    std::array<u8, 128> bytes{};
+    bool fits = true;
+    const auto put = [&](Field field, u64 data) {
+        if (field.width == 4 && data > 0xffffffffULL) fits = false;
+        for (usize i = 0; i < field.width; ++i)
+            bytes[field.at + (Codec::profile.big_endian ? field.width - 1 - i : i)] = static_cast<u8>(data >> (8 * i));
+    };
+    constexpr u64 st_valid = 0x20, st_rdonly = 1;
+    put(layout.type, value.type); put(layout.bsize, value.block_size); put(layout.blocks, value.blocks);
+    put(layout.bfree, value.free_blocks); put(layout.bavail, value.available_blocks);
+    put(layout.files, value.files); put(layout.ffree, value.free_files); put(layout.namelen, value.name_max);
+    put(layout.frsize, value.block_size); put(layout.flags, st_valid | (value.read_only ? st_rdonly : 0));
+    if (!fits) return -75;
+    return hw::copy_to_user(space, output, bytes.data(), layout.size) ? 0 : -14;
+}
+
+// vfork and clone(CLONE_VFORK) run as a copy-on-write fork: the child has its
+// own copy of memory, so a caller cannot observe the difference except that
+// the parent is not suspended. A clone stack becomes the child's stack.
+template <lu::Profile Profile, typename Fork>
+i64 linux_vfork(Kernel &kernel, sched::ProcessId, uptr stack, Fork &&fork)
+{
+    const i64 child = fork();
+    if (child <= 0 || !stack) return child;
+    auto *thread = kernel.scheduler().find_thread(static_cast<sched::ProcessId>(child),
+                                                  static_cast<sched::ThreadId>(child));
+    if (thread) lu::NativeBridge<Profile>::set_stack_pointer(thread->native_frame, stack);
+    return child;
+}
+
 // The native callback is statically bound to the existing checked user-copy
 // boundary. This adapter does not duplicate file/VM implementation or guess
 // unsupported Linux syscall signatures. Integration must select it per image.
@@ -246,6 +447,16 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
         count = 4;
     else if (is(Operation::mmap2) || (Profile != lu::Profile::i386 && is(Operation::mmap)))
         count = 6;
+    else if (is(Operation::vfork)) count = 0;
+    else if (is(Operation::uname) || is(Operation::sysinfo)) count = 1;
+    else if (is(Operation::link) || is(Operation::symlink)) count = 2;
+    else if (is(Operation::symlinkat) || is(Operation::chown) || is(Operation::lchown) || is(Operation::fchown) ||
+             is(Operation::chown32) || is(Operation::lchown32) || is(Operation::fchown32))
+        count = 3;
+    else if (is(Operation::linkat) || is(Operation::fchownat)) count = 5;
+    else if (is(Operation::utimensat) || is(Operation::utimensat_time64)) count = 4;
+    else if (Codec::profile.word_bytes == 8 && (is(Operation::statfs) || is(Operation::fstatfs))) count = 2;
+    else if (Codec::profile.word_bytes == 4 && (is(Operation::statfs64) || is(Operation::fstatfs64))) count = 3;
     else
         return -38;
     auto decoded = Bridge::decode_call_copying_stack(frame, count, [&](uptr address, std::span<u8> destination) {
@@ -890,6 +1101,27 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
             return -14;
         return static_cast<i64>(bytes);
     }
+    if (is(Operation::link)) return shared(syscall::Number::link);
+    if (is(Operation::symlink)) return shared(syscall::Number::symlink);
+    if (is(Operation::symlinkat)) return shared(syscall::Number::symlinkat);
+    if (is(Operation::linkat))
+    {
+        // Linux AT_SYMLINK_FOLLOW and AT_EMPTY_PATH are the only flags.
+        if (static_cast<u32>(a[4]) & ~(0x400U | posix::at_EMPTY_PATH)) return -22;
+        return shared(syscall::Number::linkat);
+    }
+    if (is(Operation::chown) || is(Operation::lchown) || is(Operation::fchown) || is(Operation::chown32) ||
+        is(Operation::lchown32) || is(Operation::fchown32) || is(Operation::fchownat))
+        return linux_chown<Profile>(kernel, space, number, a);
+    if (is(Operation::utimensat) || is(Operation::utimensat_time64))
+        return linux_utimensat<Profile>(kernel, space, a, is(Operation::utimensat_time64) || Codec::profile.word_bytes == 8);
+    if (is(Operation::statfs) || is(Operation::fstatfs) || is(Operation::statfs64) || is(Operation::fstatfs64))
+        return linux_statfs<Profile>(kernel, space, is(Operation::fstatfs) || is(Operation::fstatfs64),
+                                     is(Operation::statfs64) || is(Operation::fstatfs64), a);
+    if (is(Operation::uname)) return linux_uname<Profile>(kernel, space, static_cast<uptr>(a[0]));
+    if (is(Operation::sysinfo)) return linux_sysinfo<Profile>(kernel, space, static_cast<uptr>(a[0]));
+    if (is(Operation::vfork))
+        return linux_vfork<Profile>(kernel, pid, 0, [&] { return shared(syscall::Number::fork); });
     if (is(Operation::chdir)) return shared(syscall::Number::chdir);
     if (is(Operation::fchdir)) return shared(syscall::Number::fchdir);
     if (is(Operation::unlink)) return shared(syscall::Number::unlink);
@@ -977,6 +1209,9 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
             if (a[1] != 0) return -22;
             return shared(syscall::Number::fork);
         }
+        constexpr u32 vfork = 0x4000;
+        if (flags == (vfork | child_exit_signal) || flags == (clone_flags::vm | vfork | child_exit_signal))
+            return linux_vfork<Profile>(kernel, pid, static_cast<uptr>(a[1]), [&] { return shared(syscall::Number::fork); });
         if ((flags & clone_flags::shared_group) != clone_flags::shared_group || (flags & ~clone_flags::supported))
             return -38;
         auto arguments = [&]() -> Result<lu::Call> {

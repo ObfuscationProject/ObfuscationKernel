@@ -3466,12 +3466,19 @@ class Ext4MountedMetadata final
             }, false, &lifetime_key_);
         }
         Result<DirectoryListing> list(DirectoryReadIntent = DirectoryReadIntent::access) const override
+        { return list_entries(0, false); }
+        Result<DirectoryListing> list_from(usize start, DirectoryReadIntent = DirectoryReadIntent::access) const override
+        { return list_entries(start, true); }
+        // A full page stops the scan with overflow, which the paged caller
+        // returns as a complete listing that more entries may follow.
+        Result<DirectoryListing> list_entries(usize start, bool paged) const
         {
             Result<DirectoryListing> result{std::in_place};
             auto &listing = result.value();
             const auto status = mount_->read_operation([&]() -> Status {
                 return mount_->view_.directory(inode_, [&](const Ext4ReadOnlyDirent &entry) -> Status {
                     if (entry.name == "." || entry.name == "..") return {};
+                    if (start) { --start; return {}; }
                     if (listing.count == listing.entries.size()) return Status::overflow("mounted directory capacity");
                     auto metadata = mount_->metadata(entry.inode);
                     if (!metadata) return metadata.status();
@@ -3480,7 +3487,8 @@ class Ext4MountedMetadata final
                     item.metadata = metadata.value(); ++listing.count; return {};
                 });
             }, false, &lifetime_key_);
-            if (!status) return status;
+            if (!status && !(paged && status.code() == StatusCode::overflow &&
+                             listing.count == listing.entries.size())) return status;
             return result;
         }
         Result<FixedString<96>> directory_path(const Node &root) const override

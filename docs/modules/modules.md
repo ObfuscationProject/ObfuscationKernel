@@ -12,7 +12,7 @@ Each module exposes a `ModuleManifest` with:
 - dependency, exported-service, and required-service lists;
 - `ModuleExecution`, either `inline_core` or `kernel_process`;
 - `ModuleThreading`, either `single_threaded` or `per_cpu`;
-- `abi_version`, currently `kernel_module_abi_version == 76`;
+- `abi_version`, currently `kernel_module_abi_version == 77`;
 - a capability mask declaring service export/use, kernel-process ownership,
   per-CPU workers, user ABI, driver ABI, or GUI behavior;
 - `ModuleRestartPolicy`;
@@ -107,6 +107,20 @@ Roadmap tests cover:
 - the built-in module graph used by the kernel debug suite.
 
 ## ABI history
+
+ABI77 (`feat/linux-personality`, with `fix/ext4-node-cache` and
+`fix/mips-signal-resume`) changes exported declarations: `StatusCode` gains
+`exec_format` and `argument_list_too_long`, `fs::TimestampSource` gains
+`kernel_fixed`, `fs::Node` gains the `list_from`, `set_times` and
+`filesystem_statistics` virtuals with `TimestampChange` and
+`FilesystemStatistics`, `ok/fs/devfs.hpp` adds `DeviceFileSystem`, the generated
+Linux profile tables route uname, sysinfo, link, symlink, the chown family,
+vfork, statfs and utimensat, and `PosixService` gains `utimensat`, `statfs` and
+paged directory enumeration. The ext4 node caches evict (`Ext4InodeLifetimeTable::forget`
+and private eviction members, no layout change), and the MIPS signal capture
+kinds `timer_non_bd`/`timer_bd` become `interrupted_non_bd`/`interrupted_bd`.
+The public UAPI stays 0.16. Every exported module marker, the SDK manifest and
+the OS consumer declare 77 and refuse 76 and 78.
 
 ABI76 (`refactor/ext4-layout`) changes the exported ext4/JBD2 header set: the
 85 slice headers of `ok/fs/` become the eight modules `ok/fs/ext4/{journal,

@@ -515,15 +515,26 @@ Result<usize> PosixService::read(Fd fd, std::span<std::byte> out)
     {
         return Status::invalid_argument("file descriptor has no backing node");
     }
-    auto data = entry->node->read(entry->offset, out.size());
-    if (!data)
+    // Providers return at most one FileBuffer per call. As on Linux, a read
+    // fills the request until a provider returns a short chunk (end of file).
+    usize count = 0;
+    while (count < out.size())
     {
-        return data.status();
-    }
-    const auto count = data.value().size < out.size() ? data.value().size : out.size();
-    for (usize i = 0; i < count; ++i)
-    {
-        out[i] = data.value().data[i];
+        const usize wanted = out.size() - count;
+        auto data = entry->node->read(entry->offset + count, wanted);
+        if (!data)
+        {
+            if (count) break;
+            return data.status();
+        }
+        const auto chunk = data.value().size < wanted ? data.value().size : wanted;
+        for (usize i = 0; i < chunk; ++i)
+        {
+            out[count + i] = data.value().data[i];
+        }
+        count += chunk;
+        if (chunk < (wanted < fs::max_file_data ? wanted : fs::max_file_data))
+            break;
     }
     entry->offset += count;
     return count;
