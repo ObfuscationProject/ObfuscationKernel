@@ -65,7 +65,7 @@ class ElfPrefix final : private NonCopyable
     usize pages_{}, size_{};
 };
 // The prefix the configured architecture's admission still needs, if more.
-[[maybe_unused]] usize admission_prefix(std::span<const std::byte> bytes, usize file_bytes)
+usize admission_prefix([[maybe_unused]] std::span<const std::byte> bytes, [[maybe_unused]] usize file_bytes)
 {
     usize required = 0;
     [[maybe_unused]] auto need = [&](usize bytes_needed) { if (bytes_needed > required) required = bytes_needed; };
