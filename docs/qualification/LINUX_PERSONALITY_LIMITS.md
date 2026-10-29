@@ -9,7 +9,7 @@ recipe ([MUSL_USERLAND](../../../ObfuscationOS/docs/qualification/MUSL_USERLAND.
 
 | Limit | Now |
 | --- | --- |
-| `execve` copied at most 16 argv and 16 envp strings under 256 bytes | Strings live in one kernel object run (`Arguments`): each with its NUL at most 128 KiB (`MAX_ARG_STRLEN`), all at most 256 KiB, 2048 per vector; `E2BIG` beyond. The initial stack grows with them; the pointer vectors and auxiliary vector form one 16-byte-aligned record |
+| `execve` copied at most 16 argv and 16 envp strings under 256 bytes | `Arguments` keeps up to 64 strings per vector and about 3 KiB of text inline, so an ordinary exec takes no pool pages; larger sets move to one kernel object run that doubles as it fills. Each string with its NUL is at most 128 KiB (`MAX_ARG_STRLEN`), all at most 256 KiB, 2048 per vector; `E2BIG` beyond. Up to 16 KiB of strings and pointer vectors share the 64 KiB initial stack; beyond that the stack grows by their size; the pointer vectors and auxiliary vector form one 16-byte-aligned record |
 | A non-ELF file returned `EINVAL`; no `#!` | A file without the ELF magic returns `ENOEXEC`. A file whose first line is `#!interpreter [argument]` runs as `interpreter [argument] path argv[1..]`, through at most four interpreters (`ELOOP` beyond), as Linux `binfmt_script` does; the script needs an execute bit and execute access |
 | No `/dev/null`, `/dev/zero` | `fs::DeviceFileSystem` (`include/ok/fs/devfs.hpp`): `null`, `zero` and `full` character devices, constant-initialized, with `kernel_fixed` epoch timestamps that Linux `stat` admits; ObfuscationOS mounts it on `/dev` |
 | `CLONE_VM\|CLONE_VFORK` returned `ENOSYS` | `vfork` and `clone(CLONE_VFORK [\| CLONE_VM])` with the child exit signal run as a copy-on-write fork, on the caller's new stack when one is given. The child has its own copy of memory, so a program cannot tell except that the parent is not suspended |
@@ -42,7 +42,7 @@ paired ObfuscationOS branch consumes.
 
 ## Tests
 
-Hosted (`scope=model`): `scripts/test_native_exec_arguments.py` (arena growth,
+Hosted (`scope=model`): `scripts/test_native_exec_arguments.py` (inline sets, arena growth,
 prepend/replace, `MAX_ARG_STRLEN`, `ARG_MAX` and per-vector bounds, nested
 `#!` interpreters and the four-level limit, execute-bit refusal, `ENOEXEC`),
 plus the existing runtime suites on the integration tree.
