@@ -160,6 +160,9 @@ kernel main loop (`src/core/kernel_main.cpp`) still polls network, userland,
 console and input, device IRQs stay masked, and the OS virtio drivers spin on
 their used rings with `VIRTQ_AVAIL_F_NO_INTERRUPT`. Slices, each validated on
 the fast lane and then all ten profiles:
+Slices 1 and 2 are done on all ten profiles
+([PLATFORM_INTERRUPTS](qualification/PLATFORM_INTERRUPTS.md)), with the
+console UART as the first interrupt-driven device; slices 3–6 remain.
 1. Interrupt core: kernel-mode IRQ entry with interrupts enabled only inside
    an idle wait, a per-architecture `PlatformIrqChip` selected at compile time
    behind `IrqChip`, a bounded top half that records the line, and a deferred

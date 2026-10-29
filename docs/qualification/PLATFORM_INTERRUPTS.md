@@ -46,6 +46,15 @@ the first controller. This note grows with each slice.
 | mips, mips64 | Malta's PIIX4 8259 pair (`Pic8259<MaltaPortIo, false>`) through the GT-64120 PCI I/O window, on CPU IP2 | Done. These pre-R6 cores leave WAIT only for an interrupt they can take, so `ok_mips_idle` sets IE with IM2 and IM7; the exception vector recognizes the idle window, resumes after WAIT with IE clear, and the C side claims the line with an OCW3 poll. The CP0 timer is the tick, so 8259 line 0 stays masked. User mode adds IM2 once the service runs; the o32/n64 capture readiness ignores that kernel-owned bit. COM1 receive is bound to line 4 |
 | ppc | Freescale MPIC (`src/arch/ppc/mpic.hpp`): sources 0–255 programmed with their own number as the vector, routed to CPU 0 | Done. e500 dozes on MSR[WE] with HID0[DOZE], but QEMU's BookE model wakes only for an interrupt MSR[EE] admits, so `ok_ppc_idle` sets EE for a short window and the IVOR4/IVOR10 vectors return past it with EE clear; the wait then claims with IACK. A one-shot decrementer is the tick. User-mode IVOR4 returns as `TrapKind::interrupt`; the private PPC readiness treats it like the decrementer (trap 0x500). The DUART is bound to source 42 |
 
+## Ten-profile result
+
+After merging main (module ABI 77), all ten profiles pass `xmake test`, the
+ext4 native boot and `scripts/test_musl_shell.py` against ObfuscationOS main
+`ddbfe45`: 54 sh checks, and 134/151 suite cases with the 8 reviewed failures,
+the same as kernel main. Every profile idles on interrupts and receives its
+console UART through the interrupt, with no spurious line or controller
+error. The per-profile sections below give the first runs.
+
 ## Results (x86_64, QEMU 10.2.0, ObfuscationOS main with BusyBox)
 
 - Hosted (`scope=model`): `scripts/test_irq_wait_time.py`. It covers bind and
