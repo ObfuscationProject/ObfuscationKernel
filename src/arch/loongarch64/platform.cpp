@@ -1,5 +1,6 @@
 #include "ok/core/types.hpp"
 #include "ok/core/entry.hpp"
+#include "ok/interrupt/platform.hpp"
 #include "ok/driver/qemu_virt/ramfb.hpp"
 #include "ok/driver/qemu_virt/virtio_pci_input.hpp"
 
@@ -258,11 +259,47 @@ extern "C" int ok_platform_input_poll()
     return poll_virtio_keyboard();
 }
 
-extern "C" int ok_platform_console_poll()
+namespace
+{
+// NS16550 receive bytes the PCH-PIC input 2 bottom half moved out of the UART;
+// filled and drained with interrupts disabled on the boot CPU.
+constexpr ok::interrupt::IrqLine uart_irq = 2;
+constexpr ok::uptr uart_ier = uart_base + 0x01;
+constinit ok::u8 uart_ring[256]{};
+constinit ok::usize uart_head{0}, uart_tail{0};
+
+int read_uart()
 {
     if ((mmio8(uart_lsr) & uart_lsr_data_ready) == 0)
-    {
         return -1;
-    }
     return static_cast<int>(mmio8(uart_rbr_thr));
+}
+
+void uart_interrupt(void *, ok::interrupt::IrqLine)
+{
+    while (uart_head - uart_tail < sizeof(uart_ring))
+    {
+        const int value = read_uart();
+        if (value < 0)
+            return;
+        uart_ring[uart_head++ % sizeof(uart_ring)] = static_cast<ok::u8>(value);
+    }
+}
+} // namespace
+
+extern "C" ok::Status ok_platform_bind_irqs()
+{
+    if (auto status = ok::interrupt::bind_platform_irq(uart_irq, ok::interrupt::IrqTrigger::level, uart_interrupt,
+                                                       nullptr);
+        !status.ok())
+        return status;
+    mmio8(uart_ier) = 0x01; // Received-data-available interrupt.
+    return ok::Status::success();
+}
+
+extern "C" int ok_platform_console_poll()
+{
+    if (uart_tail != uart_head)
+        return uart_ring[uart_tail++ % sizeof(uart_ring)];
+    return read_uart();
 }

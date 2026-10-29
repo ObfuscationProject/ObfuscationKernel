@@ -9,6 +9,9 @@
 #elif defined(OK_KERNEL_FREESTANDING) && defined(__riscv)
 #include "../arch/riscv_common/plic.hpp"
 #define OK_PLATFORM_IRQ_WAIT 1
+#elif defined(OK_KERNEL_FREESTANDING) && defined(__loongarch64)
+#include "../arch/loongarch64/eiointc.hpp"
+#define OK_PLATFORM_IRQ_WAIT 1
 #endif
 
 namespace ok::interrupt
@@ -23,6 +26,8 @@ using PlatformIrqChip = arch::x86::Pic8259;
 using PlatformIrqChip = arch::arm::GicV2;
 #elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__riscv)
 using PlatformIrqChip = arch::riscv::Plic;
+#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__loongarch64)
+using PlatformIrqChip = arch::loongarch::Eiointc;
 #else
 using PlatformIrqChip = ModelIrqChip;
 #endif
@@ -136,6 +141,35 @@ void halt_until_interrupt()
     else if (pending & mie_mtie)
         ok_interrupt_tick();
     asm volatile("csrs mstatus, %0" : : "r"(status & uptr{8}) : "memory");
+#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__loongarch64)
+    // IDLE wakes when ESTAT.IS & ECFG.LIE is nonzero whatever CRMD.IE says.
+    // IE stays clear, so nothing traps and the wait claims from the EIOINTC.
+    uptr crmd, frequency, ratio, index = 4;
+    asm volatile("csrrd %0, 0x0" : "=r"(crmd));
+    asm volatile("csrxchg $zero, %0, 0x0" : : "r"(uptr{4}) : "memory");
+    asm volatile("cpucfg %0, %1" : "=r"(frequency) : "r"(index));
+    index = 5;
+    asm volatile("cpucfg %0, %1" : "=r"(ratio) : "r"(index));
+    const uptr ticks = (ratio >> 16) ? frequency * (ratio & 0xffff) / (ratio >> 16) / 100 : 1000000;
+    // CSRWR swaps, so each write goes through a scratch register.
+    uptr sources = (uptr{1} << 11) | PlatformIrqChip::hwi0, compare = (ticks & ~uptr(3)) | 1;
+    asm volatile("csrwr %0, 0x4" : "+r"(sources) : : "memory");
+    asm volatile("csrwr %0, 0x41" : "+r"(compare) : : "memory");
+    asm volatile("dbar 0\nidle 0" : : : "memory");
+    uptr estat;
+    asm volatile("csrrd %0, 0x5" : "=r"(estat));
+    uptr zero = 0, one = 1, timer_only = uptr{1} << 11;
+    asm volatile("csrwr %0, 0x41" : "+r"(zero) : : "memory");
+    asm volatile("csrwr %0, 0x44" : "+r"(one) : : "memory");
+    asm volatile("csrwr %0, 0x4" : "+r"(timer_only) : : "memory");
+    if (estat & PlatformIrqChip::hwi0)
+    {
+        if (const u32 line = PlatformIrqChip::claim(); line < 32)
+            ok_interrupt_top_half(static_cast<IrqLine>(line));
+    }
+    else if (estat & (uptr{1} << 11))
+        ok_interrupt_tick();
+    asm volatile("csrxchg %0, %1, 0x0" : : "r"(crmd & uptr{4}), "r"(uptr{4}) : "memory");
 #endif
 }
 } // namespace

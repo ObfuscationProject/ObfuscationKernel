@@ -1,4 +1,5 @@
 #include "ok/arch/execution_spaces.hpp"
+#include "ok/interrupt/platform.hpp"
 #include <cstddef>
 
 namespace ok::arch::execution
@@ -242,6 +243,25 @@ Status copy_to_user(const AddressSpace &space, uptr destination, const void *sou
     }
     return Status::success();
 }
+// A device interrupt in user mode: claim the EIOINTC line and run its top half
+// once the interrupt service owns the controller, otherwise only clear it.
+void complete_irq(Trap &trap)
+{
+    if (trap.kind == TrapKind::timer)
+        ok_interrupt_tick();
+    if (trap.kind != TrapKind::interrupt)
+        return;
+    u32 pending;
+    asm volatile("iocsrrd.w %0, %1" : "=r"(pending) : "r"(uptr{0x1800}) : "memory");
+    if (pending == 0)
+        return;
+    const u32 line = static_cast<u32>(__builtin_ctz(pending));
+    trap.vector = line;
+    if (interrupt::platform_irqs_started())
+        ok_interrupt_top_half(static_cast<interrupt::IrqLine>(line));
+    else
+        asm volatile("iocsrwr.w %0, %1" : : "r"(1u << line), "r"(uptr{0x1800}) : "memory");
+}
 static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack_top)
 {
     auto *storage = lookup(space);
@@ -259,6 +279,10 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     ok_loong_execution_active_frame = &frame;
     write_csr<0x44>(1);
     write_csr<0x41>((timer_ticks & ~uptr(3)) | 1);
+    // User mode takes the timer and, once the interrupt service owns the
+    // EIOINTC, IP0; the kernel itself only ever enables the timer source.
+    if (interrupt::platform_irqs_started())
+        write_csr<4>((1u << 11) | (1u << 2));
     for (;;)
     {
         refill = false;
@@ -277,6 +301,8 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     }
     write_csr<0x41>(0);
     write_csr<0x44>(1);
+    write_csr<4>(1u << 11);
+    complete_irq(last_trap);
     ok_loong_execution_active_frame = nullptr;
     ok_loong_execution_resume_sp = 0;
     executing = false;
@@ -333,6 +359,8 @@ extern "C" void ok_loong_execution_trap(uptr is_refill)
     }
     else if (code == 0 && (status & (1u << 11)))
         last_trap = {TrapKind::timer, 11, 0, 0};
+    else if (code == 0)
+        last_trap = {TrapKind::interrupt, 0, status, 0};
     else if (code == 11)
     {
         frame.pc += 4;
