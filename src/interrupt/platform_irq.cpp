@@ -1,7 +1,7 @@
 #include "ok/interrupt/platform.hpp"
 
 #if defined(OK_KERNEL_FREESTANDING) && (defined(__x86_64__) || defined(__i386__))
-#include "../arch/x86_common/pic8259.hpp"
+#include "pic8259.hpp"
 #define OK_PLATFORM_IRQ_WAIT 1
 #elif defined(OK_KERNEL_FREESTANDING) && (defined(__arm__) || defined(__aarch64__))
 #include "../arch/arm_common/gicv2.hpp"
@@ -21,7 +21,7 @@ namespace
 // Static dispatch: each profile names its controller here. Profiles without a
 // controller driver keep the model chip and never idle on interrupts.
 #if defined(OK_PLATFORM_IRQ_WAIT) && (defined(__x86_64__) || defined(__i386__))
-using PlatformIrqChip = arch::x86::Pic8259;
+using PlatformIrqChip = Pic8259<X86PortIo>;
 #elif defined(OK_PLATFORM_IRQ_WAIT) && (defined(__arm__) || defined(__aarch64__))
 using PlatformIrqChip = arch::arm::GicV2;
 #elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__riscv)

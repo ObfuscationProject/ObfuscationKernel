@@ -3,21 +3,30 @@
 #include "ok/core/types.hpp"
 #include "ok/interrupt/irq_chip.hpp"
 
+#include <concepts>
 #include <string_view>
 
-namespace ok::arch::x86
+namespace ok::interrupt
 {
 
-// The PC's cascaded 8259A pair, remapped to vectors 32..47 (line N is vector
-// 32 + N). Line 0 is the PIT tick and line 2 the cascade; the platform keeps
-// both unmasked and never binds them. Lines 3..15 other than 8 and 13 can be
-// level-triggered through the PIIX ELCR registers. Boot CPU only.
-class Pic8259 final
+// I/O access for the 8259 pair: x86 port instructions, or the PCI I/O window
+// a board maps ISA ports into (Malta's GT-64120).
+template <typename Io>
+concept PortIo = requires(u16 port, u8 value) {
+    { Io::in(port) } -> std::same_as<u8>;
+    { Io::out(port, value) } -> std::same_as<void>;
+};
+
+// A cascaded 8259A pair (PC, Malta's PIIX4), remapped to vectors 32..47 (line
+// N is vector 32 + N). Line 0 is the PIT tick and line 2 the cascade; the
+// platform keeps both unmasked and never binds them. Lines 3..15 other than 8
+// and 13 can be level-triggered through the PIIX ELCR registers. Boot CPU only.
+template <PortIo Io> class Pic8259 final
 {
   public:
     static constexpr u8 vector_base = 32;
-    static constexpr interrupt::IrqLine tick_line = 0;
-    static constexpr interrupt::IrqLine cascade_line = 2;
+    static constexpr IrqLine tick_line = 0;
+    static constexpr IrqLine cascade_line = 2;
 
     Status initialize()
     {
@@ -35,11 +44,11 @@ class Pic8259 final
         initialized_ = true;
         return Status::success();
     }
-    Status configure(interrupt::IrqLine line, interrupt::IrqTrigger trigger)
+    Status configure(IrqLine line, IrqTrigger trigger)
     {
         if (auto status = admit(line); !status.ok())
             return status;
-        const bool level = trigger == interrupt::IrqTrigger::level;
+        const bool level = trigger == IrqTrigger::level;
         if (level && (line == 0 || line == 1 || line == 8 || line == 13))
             return Status::invalid_argument("8259 line cannot be level-triggered");
         const u16 port = line < 8 ? 0x4d0 : 0x4d1;
@@ -48,7 +57,7 @@ class Pic8259 final
         outb(port, level ? static_cast<u8>(old | bit) : static_cast<u8>(old & ~bit));
         return Status::success();
     }
-    Status mask(interrupt::IrqLine line)
+    Status mask(IrqLine line)
     {
         if (auto status = admit(line); !status.ok())
             return status;
@@ -56,7 +65,7 @@ class Pic8259 final
         write_mask();
         return Status::success();
     }
-    Status unmask(interrupt::IrqLine line)
+    Status unmask(IrqLine line)
     {
         if (auto status = admit(line); !status.ok())
             return status;
@@ -65,7 +74,7 @@ class Pic8259 final
         return Status::success();
     }
     // Rejects a spurious line 7 or 15: its in-service bit is clear.
-    Status acknowledge(interrupt::IrqLine line)
+    Status acknowledge(IrqLine line)
     {
         if (!initialized_ || line >= line_count())
             return Status::invalid_argument("8259 line out of range");
@@ -73,7 +82,7 @@ class Pic8259 final
             return Status::not_found("spurious 8259 interrupt");
         return Status::success();
     }
-    Status end_of_interrupt(interrupt::IrqLine line)
+    Status end_of_interrupt(IrqLine line)
     {
         if (!initialized_ || line >= line_count())
             return Status::invalid_argument("8259 line out of range");
@@ -101,19 +110,31 @@ class Pic8259 final
     {
         return mask_;
     }
+    // OCW3 poll: claims the highest-priority request as an acknowledge would,
+    // without an interrupt cycle; line_count() when nothing is requested.
+    static u32 poll()
+    {
+        outb(0x20, 0x0c);
+        const u8 master = inb(0x20);
+        if ((master & 0x80) == 0)
+            return 16;
+        if ((master & 7) != cascade_line)
+            return master & 7;
+        outb(0xa0, 0x0c);
+        const u8 slave = inb(0xa0);
+        return (slave & 0x80) ? 8u + (slave & 7) : 16u;
+    }
 
   private:
     static void outb(u16 port, u8 value)
     {
-        asm volatile("outb %0, %1" : : "a"(value), "Nd"(port) : "memory");
+        Io::out(port, value);
     }
     static u8 inb(u16 port)
     {
-        u8 value;
-        asm volatile("inb %1, %0" : "=a"(value) : "Nd"(port) : "memory");
-        return value;
+        return Io::in(port);
     }
-    [[nodiscard]] Status admit(interrupt::IrqLine line) const
+    [[nodiscard]] Status admit(IrqLine line) const
     {
         if (!initialized_)
             return Status::not_initialized("8259 not initialized");
@@ -135,6 +156,31 @@ class Pic8259 final
     u16 mask_{0xffff};
     bool initialized_{false};
 };
-static_assert(interrupt::IrqChip<Pic8259>);
 
-} // namespace ok::arch::x86
+// x86 port instructions.
+struct X86PortIo
+{
+    static u8 in(u16 port)
+    {
+#if defined(__x86_64__) || defined(__i386__)
+        u8 value;
+        asm volatile("inb %1, %0" : "=a"(value) : "Nd"(port) : "memory");
+        return value;
+#else
+        static_cast<void>(port);
+        return 0xff;
+#endif
+    }
+    static void out(u16 port, u8 value)
+    {
+#if defined(__x86_64__) || defined(__i386__)
+        asm volatile("outb %0, %1" : : "a"(value), "Nd"(port) : "memory");
+#else
+        static_cast<void>(port);
+        static_cast<void>(value);
+#endif
+    }
+};
+static_assert(IrqChip<Pic8259<X86PortIo>>);
+
+} // namespace ok::interrupt
