@@ -3,6 +3,9 @@
 #if defined(OK_KERNEL_FREESTANDING) && (defined(__x86_64__) || defined(__i386__))
 #include "../arch/x86_common/pic8259.hpp"
 #define OK_PLATFORM_IRQ_WAIT 1
+#elif defined(OK_KERNEL_FREESTANDING) && defined(__arm__)
+#include "../arch/arm_common/gicv2.hpp"
+#define OK_PLATFORM_IRQ_WAIT 1
 #endif
 
 namespace ok::interrupt
@@ -13,6 +16,8 @@ namespace
 // controller driver keep the model chip and never idle on interrupts.
 #if defined(OK_PLATFORM_IRQ_WAIT) && (defined(__x86_64__) || defined(__i386__))
 using PlatformIrqChip = arch::x86::Pic8259;
+#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__arm__)
+using PlatformIrqChip = arch::arm::GicV2;
 #else
 using PlatformIrqChip = ModelIrqChip;
 #endif
@@ -23,12 +28,46 @@ constinit IrqStatistics statistics{};
 bool started{false};
 volatile bool interrupted{false};
 
+#if defined(OK_PLATFORM_IRQ_WAIT) && defined(__arm__)
+// The physical timer (PPI 30) as a one-shot idle tick at 100 Hz. The native
+// backend reprograms it around each user entry and leaves it disabled.
+void arm_idle_tick()
+{
+    u32 frequency;
+    asm volatile("mrc p15, 0, %0, c14, c0, 0" : "=r"(frequency));
+    const u32 ticks = frequency / 100, enable = 1;
+    asm volatile("mcr p15, 0, %0, c14, c2, 0\nmcr p15, 0, %1, c14, c2, 1\nisb" ::"r"(ticks), "r"(enable) : "memory");
+}
+void disarm_idle_tick()
+{
+    const u32 disable = 0;
+    asm volatile("mcr p15, 0, %0, c14, c2, 1\nisb" ::"r"(disable) : "memory");
+}
+#endif
+
 void halt_until_interrupt()
 {
 #if defined(OK_PLATFORM_IRQ_WAIT) && (defined(__x86_64__) || defined(__i386__))
     // STI's one-instruction shadow makes the enable and HLT atomic: an
     // interrupt already pending is taken at the HLT and ends it.
     asm volatile("sti; hlt; cli" : : : "memory");
+#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__arm__)
+    // WFI wakes on a pending IRQ even with CPSR.I set, so the kernel waits
+    // masked and claims the interrupt from the GIC instead of taking it.
+    arm_idle_tick();
+    asm volatile("dsb sy\nwfi" : : : "memory");
+    const u32 acknowledge = PlatformIrqChip::claim();
+    const u32 id = acknowledge & 0x3ff;
+    if (id == PlatformIrqChip::spurious_id)
+        return;
+    disarm_idle_tick();
+    if (id == PlatformIrqChip::timer_ppi)
+    {
+        PlatformIrqChip::complete(acknowledge);
+        ok_interrupt_tick();
+    }
+    else
+        ok_interrupt_top_half(static_cast<IrqLine>(id));
 #endif
 }
 } // namespace

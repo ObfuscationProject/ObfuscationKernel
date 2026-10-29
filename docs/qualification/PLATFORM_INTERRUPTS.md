@@ -40,7 +40,8 @@ the first controller. This note grows with each slice.
 | Profiles | Controller | Status |
 | --- | --- | --- |
 | i386, x86_64 | 8259A pair (`src/arch/x86_common/pic8259.hpp`): vectors 32–47, ELCR edge/level, spurious 7/15 detection | Done. The PIT tick (line 0) wakes the wait; COM1 receive is bound to line 4 and fills a 256-byte ring that the console poll drains first |
-| aarch64, arm32 | GICv2 SPIs | Slice 2 |
+| arm32 | GICv2 (`src/arch/arm_common/gicv2.hpp`): SPIs 32–255, ICFGR edge/level, CPU 0 targets | Done. The kernel waits with CPSR.I set (WFI wakes on a pending IRQ regardless) and claims from GICC_IAR; a one-shot physical-timer PPI 30 at 100 Hz ends the wait. The user IRQ path completes only the timer PPI and reports other IDs as `TrapKind::interrupt`. PL011 receive is bound to ID 33 (SPI 1, level) |
+| aarch64 | GICv2 | Slice 2 |
 | rv64, rv32 | PLIC | Slice 2 |
 | loongarch64 | EIOINTC with PCH-PIC | Slice 2 |
 | mips, mips64 | Malta i8259 behind the GT-64120 | Slice 2 |
@@ -63,6 +64,16 @@ the first controller. This note grows with each slice.
 - During the shell test COM1 delivered 14 interrupts, 12 of them while user
   code ran (`TrapKind::interrupt`), with no spurious line or controller
   error.
+
+## Results (arm32, QEMU 10.2.0, ObfuscationOS main with BusyBox)
+
+- `xmake test`, `qemu-distro --fs=ext4 --require-native` and
+  `scripts/test_musl_shell.py` pass: 35 sh checks, and 133/151 suite cases
+  with the 9 reviewed failures. The PL011 delivered 166 interrupts, all while
+  user code ran.
+- A guest `sleep 2` takes 2.08 s of host time over 165 idle waits.
+- A user-mode shell loop with no syscalls still takes timer preemptions after
+  the service starts: 199 (`timers=199`, `ticks=365` with the idle ticks).
 
 ## Limits
 
