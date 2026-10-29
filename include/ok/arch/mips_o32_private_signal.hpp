@@ -4,6 +4,9 @@
 namespace ok::arch::execution::mips_o32_private
 {
 inline constexpr u32 user_status = 0x20008013;
+// IM2 (the Malta 8259 pair): enabled in user mode by the kernel once its
+// interrupt service runs, so captures may carry it; not ABI state.
+inline constexpr u32 device_interrupt_mask = 0x400;
 inline constexpr u32 unsupported_fcsr = 0x007c0000;
 struct Facts
 {
@@ -30,7 +33,7 @@ struct Facts
 }
 [[nodiscard]] constexpr bool frame_mode(const UserFrame &f) noexcept
 {
-    return f.flags == user_status && !(fcsr(f) & unsupported_fcsr);
+    return (f.flags & ~uptr{device_interrupt_mask}) == user_status && !(fcsr(f) & unsupported_fcsr);
 }
 [[nodiscard]] constexpr bool delay_operands_admitted(u32 instruction) noexcept
 {

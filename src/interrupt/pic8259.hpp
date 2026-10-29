@@ -18,10 +18,11 @@ concept PortIo = requires(u16 port, u8 value) {
 };
 
 // A cascaded 8259A pair (PC, Malta's PIIX4), remapped to vectors 32..47 (line
-// N is vector 32 + N). Line 0 is the PIT tick and line 2 the cascade; the
-// platform keeps both unmasked and never binds them. Lines 3..15 other than 8
-// and 13 can be level-triggered through the PIIX ELCR registers. Boot CPU only.
-template <PortIo Io> class Pic8259 final
+// N is vector 32 + N). Line 2 is the cascade. With PitTick, line 0 is the PIT
+// tick; both stay unmasked and are never bound. A board with another tick
+// (Malta's CP0 timer) leaves line 0 masked. Lines 3..15 other than 8 and 13 can
+// be level-triggered through the PIIX ELCR registers. Boot CPU only.
+template <PortIo Io, bool PitTick = true> class Pic8259 final
 {
   public:
     static constexpr u8 vector_base = 32;
@@ -39,7 +40,7 @@ template <PortIo Io> class Pic8259 final
         outb(0xa1, 0x02);
         outb(0x21, 0x01);
         outb(0xa1, 0x01);
-        mask_ = 0xffff & ~((1u << tick_line) | (1u << cascade_line));
+        mask_ = 0xffff & ~((PitTick ? 1u << tick_line : 0u) | (1u << cascade_line));
         write_mask();
         initialized_ = true;
         return Status::success();
@@ -138,7 +139,7 @@ template <PortIo Io> class Pic8259 final
     {
         if (!initialized_)
             return Status::not_initialized("8259 not initialized");
-        if (line >= line_count() || line == tick_line || line == cascade_line)
+        if (line >= line_count() || (PitTick && line == tick_line) || line == cascade_line)
             return Status::invalid_argument("8259 line is reserved or out of range");
         return Status::success();
     }

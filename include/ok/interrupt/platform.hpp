@@ -28,6 +28,10 @@ Status start_platform_irqs();
 Status bind_platform_irq(IrqLine line, IrqTrigger trigger, IrqHandler handler, void *context);
 Status unbind_platform_irq(IrqLine line);
 usize drain_platform_irqs();
+// From a user-mode TrapKind::interrupt on boards whose trap path does not claim
+// the line itself (Malta): claims the controller's pending line and runs its
+// top half. A no-op elsewhere.
+void claim_platform_irq();
 [[nodiscard]] bool platform_irq_pending();
 // Enables interrupts, halts until one has been taken and disables them again.
 // Returns false without waiting when the profile cannot idle on interrupts.

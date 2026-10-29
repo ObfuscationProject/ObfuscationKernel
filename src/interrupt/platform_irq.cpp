@@ -12,6 +12,10 @@
 #elif defined(OK_KERNEL_FREESTANDING) && defined(__loongarch64)
 #include "../arch/loongarch64/eiointc.hpp"
 #define OK_PLATFORM_IRQ_WAIT 1
+#elif defined(OK_KERNEL_FREESTANDING) && defined(__mips__)
+#include "pic8259.hpp"
+#define OK_PLATFORM_IRQ_WAIT 1
+extern "C" void ok_mips_idle(ok::u32 interrupt_mask);
 #endif
 
 namespace ok::interrupt
@@ -28,6 +32,26 @@ using PlatformIrqChip = arch::arm::GicV2;
 using PlatformIrqChip = arch::riscv::Plic;
 #elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__loongarch64)
 using PlatformIrqChip = arch::loongarch::Eiointc;
+#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__mips__)
+// Malta maps ISA ports into the GT-64120 PCI I/O window at physical
+// 0x18000000, reached uncached through KSEG1.
+struct MaltaPortIo
+{
+#if defined(__mips64)
+    static constexpr uptr window = 0xffffffffb8000000ull;
+#else
+    static constexpr uptr window = 0xb8000000;
+#endif
+    static u8 in(u16 port)
+    {
+        return *reinterpret_cast<volatile u8 *>(window + port);
+    }
+    static void out(u16 port, u8 value)
+    {
+        *reinterpret_cast<volatile u8 *>(window + port) = value;
+    }
+};
+using PlatformIrqChip = Pic8259<MaltaPortIo, false>;
 #else
 using PlatformIrqChip = ModelIrqChip;
 #endif
@@ -170,8 +194,30 @@ void halt_until_interrupt()
     else if (estat & (uptr{1} << 11))
         ok_interrupt_tick();
     asm volatile("csrxchg %0, %1, 0x0" : : "r"(crmd & uptr{4}), "r"(uptr{4}) : "memory");
+#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__mips__)
+    // WAIT on these pre-R6 cores wakes only for an interrupt it could take, so
+    // ok_mips_idle enables IP2 (the 8259) and IP7 (CP0 timer) with Status.IE.
+    // The exception vector recognizes the idle window and resumes after WAIT
+    // with IE clear; the interrupt itself is claimed here.
+    u32 count;
+    asm volatile("mfc0 %0, $9" : "=r"(count));
+    const u32 compare = count + 1000000; // The backend's 10 ms user quantum.
+    asm volatile("mtc0 %0, $11\n\tehb" : : "r"(compare) : "memory");
+    ok_mips_idle(0x8400);
+    u32 cause;
+    asm volatile("mfc0 %0, $13" : "=r"(cause));
+    const u32 zero = 0;
+    asm volatile("mtc0 %0, $11\n\tehb" : : "r"(zero) : "memory"); // Writing Compare clears IP7.
+    if (cause & 0x400)
+    {
+        if (const u32 line = PlatformIrqChip::poll(); line < 16)
+            ok_interrupt_top_half(static_cast<IrqLine>(line));
+    }
+    else if (cause & 0x8000)
+        ok_interrupt_tick();
 #endif
 }
+
 } // namespace
 
 Status start_platform_irqs()
@@ -222,6 +268,18 @@ usize drain_platform_irqs()
 bool platform_irq_pending()
 {
     return router.pending();
+}
+
+// Claims the controller's pending line from a user-mode interrupt trap on
+// boards whose trap path does not claim it itself.
+void claim_platform_irq()
+{
+#if defined(OK_PLATFORM_IRQ_WAIT) && defined(__mips__)
+    if (!started)
+        return;
+    if (const u32 line = PlatformIrqChip::poll(); line < 16)
+        ok_interrupt_top_half(static_cast<IrqLine>(line));
+#endif
 }
 
 bool wait_for_interrupt()

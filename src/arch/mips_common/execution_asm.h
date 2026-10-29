@@ -198,7 +198,8 @@ ok_mips_execution_enter:
     LOAD $27, 32*PTR($26)
     C0_WRITE $27, $14
     LOAD_FP $26
-    li $27, USER_STATUS
+    ADDRESS $27, ok_mips_user_status
+    lw $27, 0($27)
     mtc0 $27, $12
     ehb
     LOAD $1, 1*PTR($26)
@@ -246,6 +247,33 @@ ok_mips_execution_vectors:
 .Luser_trap:
     mfc0 $26, $12
     andi $26, $26, 0x18
+    bnez $26, .Lnot_kernel
+    nop
+    // Kernel mode: only an interrupt inside ok_mips_idle's window is expected.
+    // Resume after WAIT with Status.IE clear; the C side claims the interrupt.
+    mfc0 $26, $13
+    andi $26, $26, 0x7c
+    bnez $26, .Lkernel_fault
+    nop
+    C0_READ $26, $14
+    ADDRESS $27, ok_mips_idle_begin
+    sltu $27, $26, $27
+    bnez $27, .Lkernel_fault
+    nop
+    ADDRESS $27, ok_mips_idle_end
+    sltu $27, $26, $27
+    beqz $27, .Lkernel_fault
+    nop
+    ADDRESS $26, ok_mips_idle_end
+    C0_WRITE $26, $14
+    mfc0 $26, $12
+    ori $26, $26, 1
+    xori $26, $26, 1
+    mtc0 $26, $12
+    ehb
+    eret
+    nop
+.Lnot_kernel:
     xori $26, $26, 0x10
     bnez $26, .Lkernel_fault
     nop
@@ -316,5 +344,26 @@ ok_mips_execution_vectors:
     nop
 .Lkernel_fault:
     j ok_mips_execution_kernel_fault
+    nop
+
+// ok_mips_idle(interrupt_mask): WAIT with Status.IM |= mask and IE set. An
+// interrupt taken between ok_mips_idle_begin and ok_mips_idle_end returns to
+// ok_mips_idle_end with IE clear (see .Luser_trap); Status is then restored.
+.global ok_mips_idle
+.global ok_mips_idle_begin
+.global ok_mips_idle_end
+ok_mips_idle:
+    mfc0 $8, $12
+    or $9, $8, $4
+    ori $9, $9, 1
+ok_mips_idle_begin:
+    mtc0 $9, $12
+    ehb
+    wait
+    nop
+ok_mips_idle_end:
+    mtc0 $8, $12
+    ehb
+    jr $31
     nop
 .section .note.GNU-stack,"",@progbits
