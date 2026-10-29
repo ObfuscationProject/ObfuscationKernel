@@ -125,7 +125,7 @@ def validate_native_sessions_profile(headers: Path) -> None:
         '{',
         'inline constexpr std::string_view native_sessions_profile = "bootcpu-serialized-process-group-session-console-lifecycle-v3";',
         'inline constexpr u32 native_sessions_version = 3;',
-        'inline constexpr u32 native_sessions_module_abi = 76;',
+        'inline constexpr u32 native_sessions_module_abi = 77;',
         'inline constexpr u32 native_sessions_pid_bits = 32;',
         'inline constexpr u32 native_sessions_process_capacity = 64;',
         'inline constexpr u32 native_sessions_fork_inherits = 1;',
@@ -179,7 +179,7 @@ def validate_native_group_signal_profile(headers: Path) -> None:
         '{',
         'inline constexpr std::string_view native_group_signal_profile = "bootcpu-signed32-current-negative-pgid-probe-term-kill-deferred-partial-v2";',
         'inline constexpr u32 native_group_signal_version = 2;',
-        'inline constexpr u32 native_group_signal_module_abi = 76;',
+        'inline constexpr u32 native_group_signal_module_abi = 77;',
         'inline constexpr u32 native_group_signal_pid_bits = 32;',
         'inline constexpr u32 native_group_signal_process_capacity = 64;',
         'inline constexpr u32 native_group_signal_current_group = 1;',
@@ -243,7 +243,7 @@ def validate_native_console_control_profile(headers: Path) -> None:
         '{',
         'inline constexpr std::string_view native_console_control_profile = "bootcpu-lease-epoch-explicit-session-foreground-eio-pid32-ioctl-v1";',
         'inline constexpr u32 native_console_control_version = 1;',
-        'inline constexpr u32 native_console_control_module_abi = 76;',
+        'inline constexpr u32 native_console_control_module_abi = 77;',
         'inline constexpr u32 native_console_control_serialized_boot_cpu = 1;',
         'inline constexpr u32 native_console_control_lease_epoch = 1;',
         'inline constexpr u32 native_console_control_explicit_acquire = 1;',
@@ -314,7 +314,7 @@ def validate_native_pty_profile(headers: Path) -> None:
         '{',
         'inline constexpr std::string_view native_pty_profile = "bootcpu-native-raw-pair-ofd-waits-drain-eof-eio-v1";',
         'inline constexpr u32 native_pty_version = 1;',
-        'inline constexpr u32 native_pty_module_abi = 76;',
+        'inline constexpr u32 native_pty_module_abi = 77;',
         'inline constexpr u32 native_pty_pair_capacity = 8;',
         'inline constexpr u32 native_pty_queue_capacity = 4096;',
         'inline constexpr u32 native_pty_generation_bits = 64;',
@@ -386,7 +386,7 @@ def validate_native_metadata_profile(headers: Path) -> None:
                 "namespace ok::user", "{",
                 'inline constexpr std::string_view native_metadata_profile = "checked-mode-root-owner-u32-v1";',
                 "inline constexpr u32 native_metadata_version = 1;",
-                "inline constexpr u32 native_metadata_module_abi = 76;", "} // namespace ok::user"]
+                "inline constexpr u32 native_metadata_module_abi = 77;", "} // namespace ok::user"]
     if lines != expected:
         raise ValueError("kernel SDK native metadata profile mismatch")
     validate_module_abi(headers / "ok/core/module.hpp")
@@ -647,18 +647,18 @@ def validate_directory_create_profile(headers: Path) -> None:
     """Require the explicit bounded directory producer/consumer contract."""
     for name in DIRECTORY_CREATE_PROFILE_HEADERS:
         if not (headers / name).is_file():
-            raise ValueError("SDK76 directory-create contract header is missing: " + name)
+            raise ValueError("SDK77 directory-create contract header is missing: " + name)
     source = shared_file_contract_code((headers / DIRECTORY_CREATE_PROFILE_HEADER).read_text())
     name = "ext4_directory_create_profile"
     pattern = rf'^[ \t]*inline[ \t]+constexpr[ \t]+std::string_view[ \t]+{name}[ \t]*=[ \t]*"([^"\n]+)"[ \t]*;[ \t]*$'
     if contract_declaration_values(source, name, pattern) != [DIRECTORY_CREATE_PROFILE]:
-        raise ValueError("SDK76 directory-create profile mismatch")
-    for name, kind, expected in (("ext4_directory_create_module_abi", "u32", "76"),
+        raise ValueError("SDK77 directory-create profile mismatch")
+    for name, kind, expected in (("ext4_directory_create_module_abi", "u32", "77"),
                                  ("ext4_directory_create_home_capacity", "usize", "8"),
                                  ("ext4_directory_create_owner_buffers", "usize", "9")):
         pattern = rf"^[ \t]*inline[ \t]+constexpr[ \t]+{kind}[ \t]+{name}[ \t]*=[ \t]*([0-9]+)[ \t]*;[ \t]*$"
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK76 directory-create contract mismatch: " + name)
+            raise ValueError("SDK77 directory-create contract mismatch: " + name)
 
 
 UNIX_PATHNAME_PROFILE_HEADER = "ok/sched/unix_pathname_sdk_profile.hpp"
@@ -673,13 +673,13 @@ UNIX_PATHNAME_PROFILE_HEADERS = (
 def validate_unix_pathname_profile(headers: Path) -> None:
     for name in UNIX_PATHNAME_PROFILE_HEADERS:
         if not (headers / name).is_file():
-            raise ValueError("SDK76 UNIX pathname contract header is missing: " + name)
+            raise ValueError("SDK77 UNIX pathname contract header is missing: " + name)
     source = shared_file_contract_code((headers / UNIX_PATHNAME_PROFILE_HEADER).read_text())
     for name in ("native_unix_pathname_profile", "linux_unix_pathname_profile"):
         pattern = rf'^[ \t]*inline[ \t]+constexpr[ \t]+std::string_view[ \t]+{name}[ \t]*=[ \t]*"([^"\n]+)"[ \t]*;[ \t]*$'
         if contract_declaration_values(source, name, pattern) != [UNIX_PATHNAME_PROFILE]:
-            raise ValueError("SDK76 UNIX pathname profile mismatch: " + name)
-    for name, kind, expected in (("unix_pathname_module_abi", "u32", "76"),
+            raise ValueError("SDK77 UNIX pathname profile mismatch: " + name)
+    for name, kind, expected in (("unix_pathname_module_abi", "u32", "77"),
             ("unix_pathname_endpoint_capacity", "usize", "32"),
             ("unix_pathname_backlog_capacity", "usize", "4"),
             ("unix_pathname_address_capacity", "usize", "110"),
@@ -687,7 +687,7 @@ def validate_unix_pathname_profile(headers: Path) -> None:
             ("unix_pathname_peer_credentials_bytes", "usize", "12")):
         pattern = rf"^[ \t]*inline[ \t]+constexpr[ \t]+{kind}[ \t]+{name}[ \t]*=[ \t]*([0-9]+)[ \t]*;[ \t]*$"
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK76 UNIX pathname contract mismatch: " + name)
+            raise ValueError("SDK77 UNIX pathname contract mismatch: " + name)
 
 
 UDP_PROFILE_HEADER = "ok/net/native_udp_sdk_profile.hpp"
@@ -725,14 +725,14 @@ def validate_futex_wake_operation_profile(headers: Path) -> None:
     """Require the explicit serialized two-key contract, without claiming execution."""
     for name in FUTEX_WAKE_OPERATION_PROFILE_HEADERS:
         if not (headers / name).is_file():
-            raise ValueError("SDK76 futex wake-operation contract header is missing: " + name)
+            raise ValueError("SDK77 futex wake-operation contract header is missing: " + name)
     source = shared_file_contract_code((headers / FUTEX_WAKE_OPERATION_PROFILE_HEADER).read_text())
     for name in ("native_futex_wake_operation_profile", "linux_futex_wake_operation_profile"):
         pattern = rf'^[ \t]*inline[ \t]+constexpr[ \t]+std::string_view[ \t]+{name}[ \t]*=[ \t]*"([^"\n]+)"[ \t]*;[ \t]*$'
         if contract_declaration_values(source, name, pattern) != [FUTEX_WAKE_OPERATION_PROFILE]:
-            raise ValueError("SDK76 futex wake-operation profile mismatch: " + name)
+            raise ValueError("SDK77 futex wake-operation profile mismatch: " + name)
     for name, kind, expected in (
-            ("native_futex_wake_operation_module_abi", "u32", "76"),
+            ("native_futex_wake_operation_module_abi", "u32", "77"),
             ("native_futex_wake_operation_word_bits", "usize", "32"),
             ("native_futex_wake_operation_operand_bits", "usize", "12"),
             ("native_futex_wake_operation_shift_bits", "usize", "5"),
@@ -746,7 +746,7 @@ def validate_futex_wake_operation_profile(headers: Path) -> None:
             ("native_futex_wake_operation_cross_process_clone_vm", "u32", "0")):
         pattern = rf"^[ \t]*inline[ \t]+constexpr[ \t]+{kind}[ \t]+{name}[ \t]*=[ \t]*([0-9]+)[ \t]*;[ \t]*$"
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK76 futex wake-operation contract mismatch: " + name)
+            raise ValueError("SDK77 futex wake-operation contract mismatch: " + name)
 
 
 FUTEX_REQUEUE_PROFILE_HEADER = "ok/user/native_futex_requeue_sdk_profile.hpp"
@@ -762,14 +762,14 @@ def validate_futex_requeue_profile(headers: Path) -> None:
     """Require the exact implemented source slice; metadata is not execution."""
     for name in FUTEX_REQUEUE_PROFILE_HEADERS:
         if not (headers / name).is_file():
-            raise ValueError("SDK76 futex requeue contract header is missing: " + name)
+            raise ValueError("SDK77 futex requeue contract header is missing: " + name)
     source = shared_file_contract_code((headers / FUTEX_REQUEUE_PROFILE_HEADER).read_text())
     for name in ("native_futex_requeue_profile", "linux_futex_requeue_profile"):
         pattern = rf'^[ \t]*inline[ \t]+constexpr[ \t]+std::string_view[ \t]+{name}[ \t]*=[ \t]*"([^"\n]+)"[ \t]*;[ \t]*$'
         if contract_declaration_values(source, name, pattern) != [FUTEX_REQUEUE_PROFILE]:
-            raise ValueError("SDK76 futex requeue profile mismatch: " + name)
+            raise ValueError("SDK77 futex requeue profile mismatch: " + name)
     for name, kind, expected in (
-            ("native_futex_requeue_module_abi", "u32", "76"),
+            ("native_futex_requeue_module_abi", "u32", "77"),
             ("native_futex_requeue_word_bits", "usize", "32"),
             ("native_futex_requeue_operation_count", "usize", "2"),
             ("native_futex_requeue_linux_operation", "usize", "3"),
@@ -791,7 +791,7 @@ def validate_futex_requeue_profile(headers: Path) -> None:
     ):
         pattern = rf"^[ \t]*inline[ \t]+constexpr[ \t]+{kind}[ \t]+{name}[ \t]*=[ \t]*([0-9]+)[ \t]*;[ \t]*$"
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK76 futex requeue contract mismatch: " + name)
+            raise ValueError("SDK77 futex requeue contract mismatch: " + name)
 
 
 def shared_file_contract_code(source: str, preserve_strings: bool = True) -> str:
@@ -803,7 +803,7 @@ def shared_file_contract_code(source: str, preserve_strings: bool = True) -> str
     approximating C++ raw-string restoration of preprocessing transformations.
     """
     if re.search(r"\\[ \t]*\r?\n", source):
-        raise ValueError("SDK76 contract markers cannot use physical line continuations")
+        raise ValueError("SDK77 contract markers cannot use physical line continuations")
     output: list[str] = []
     index = 0
     raw_start = re.compile(r'(?:u8|[uUL])?R"([^ ()\\\t\v\f\r\n]{0,16})\(')
@@ -821,7 +821,7 @@ def shared_file_contract_code(source: str, preserve_strings: bool = True) -> str
         if source.startswith("/*", index):
             end = source.find("*/", index + 2)
             if end < 0:
-                raise ValueError("SDK76 contract has an unterminated comment")
+                raise ValueError("SDK77 contract has an unterminated comment")
             end += 2
             output.append(mask(source[index:end]))
             index = end
@@ -832,7 +832,7 @@ def shared_file_contract_code(source: str, preserve_strings: bool = True) -> str
             end_token = ")" + raw[1] + '"'
             end = source.find(end_token, raw.end())
             if end < 0:
-                raise ValueError("SDK76 contract has an unterminated raw string")
+                raise ValueError("SDK77 contract has an unterminated raw string")
             end += len(end_token)
             output.append(mask(source[index:end]))
             index = end
@@ -842,10 +842,10 @@ def shared_file_contract_code(source: str, preserve_strings: bool = True) -> str
             end = index + 1
             while end < len(source) and source[end] != quote:
                 if source[end] == "\n":
-                    raise ValueError("SDK76 contract has an invalid multiline quoted literal")
+                    raise ValueError("SDK77 contract has an invalid multiline quoted literal")
                 end += 2 if source[end] == "\\" else 1
             if end >= len(source):
-                raise ValueError("SDK76 contract has an unterminated quoted literal")
+                raise ValueError("SDK77 contract has an unterminated quoted literal")
             end += 1
             value = source[index:end]
             output.append(value if preserve_strings and quote == '"' else mask(value))
@@ -855,7 +855,7 @@ def shared_file_contract_code(source: str, preserve_strings: bool = True) -> str
         index += 1
     code = "".join(output)
     if re.search(r"^[ \t\v\f]*(?:#|%:)[ \t\v\f]*(?:if|ifdef|ifndef|elif|else|endif|define|undef)\b", code, re.MULTILINE):
-        raise ValueError("SDK76 contract markers must be unconditional and free of local macros")
+        raise ValueError("SDK77 contract markers must be unconditional and free of local macros")
     return code
 
 
@@ -899,20 +899,20 @@ def validate_shared_file_profile(headers: Path) -> None:
     """Require exact typed declarations in the named bounded contract header."""
     for name in SHARED_FILE_PROFILE_HEADERS:
         if not (headers / name).is_file():
-            raise ValueError("SDK76 shared-file contract header is missing: " + name)
+            raise ValueError("SDK77 shared-file contract header is missing: " + name)
     source = shared_file_contract_code((headers / SHARED_FILE_PROFILE_HEADER).read_text())
     for name, expected in (("native_shared_file_profile", NATIVE_SHARED_FILE_PROFILE),
                            ("linux_shared_file_profile", LINUX_SHARED_FILE_PROFILE)):
         pattern = rf'^[ \t]*inline[ \t]+constexpr[ \t]+std::string_view[ \t]+{name}[ \t]*=[ \t]*"([^"\n]+)"[ \t]*;[ \t]*$'
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK76 shared-file profile mismatch: " + name)
+            raise ValueError("SDK77 shared-file profile mismatch: " + name)
     # Profile v3 has no fixed file or page-count bound; the pool's quotas apply.
-    for name, kind, expected in (("native_shared_file_module_abi", "u32", "76"),
+    for name, kind, expected in (("native_shared_file_module_abi", "u32", "77"),
                                  ("native_shared_file_page_size", "usize", "4096"),
                                  ("native_shared_file_supported_seals", "u32", "15")):
         pattern = rf"^[ \t]*inline[ \t]+constexpr[ \t]+{kind}[ \t]+{name}[ \t]*=[ \t]*([0-9]+)[ \t]*;[ \t]*$"
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK76 shared-file contract marker mismatch: " + name)
+            raise ValueError("SDK77 shared-file contract marker mismatch: " + name)
 
 
 BOOT_ARCHIVE_RECEIPT_PREFIX = "[kernel-sdk] boot-archive-construction-v1 "
@@ -991,7 +991,7 @@ def validate_tcp_profile(headers: Path) -> None:
     """Require real typed declarations for bounded client and prepared accept profiles."""
     for name in TCP_PROFILE_HEADERS:
         if not (headers / name).is_file():
-            raise ValueError("SDK76 TCP contract header is missing: " + name)
+            raise ValueError("SDK77 TCP contract header is missing: " + name)
     source = shared_file_contract_code((headers / TCP_PROFILE_HEADER).read_text())
     for name, expected in (("native_tcp_profile", NATIVE_TCP_PROFILE),
                            ("linux_tcp_profile", LINUX_TCP_PROFILE),
@@ -999,8 +999,8 @@ def validate_tcp_profile(headers: Path) -> None:
                            ("linux_tcp_accept_profile", LINUX_TCP_ACCEPT_PROFILE)):
         pattern = rf'^[ \t]*inline[ \t]+constexpr[ \t]+std::string_view[ \t]+{name}[ \t]*=[ \t]*"([^"\n]+)"[ \t]*;[ \t]*$'
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK76 TCP profile mismatch: " + name)
-    for name, expected in (("native_tcp_module_abi", "76"), ("native_tcp_stream_capacity", "16"),
+            raise ValueError("SDK77 TCP profile mismatch: " + name)
+    for name, expected in (("native_tcp_module_abi", "77"), ("native_tcp_stream_capacity", "16"),
                            ("native_tcp_connection_capacity", "8"), ("native_tcp_listener_capacity", "4"),
                            ("native_tcp_backlog_capacity", "4"), ("native_tcp_send_capacity", "1024"),
                            ("native_tcp_receive_capacity", "1024"), ("native_tcp_segment_capacity", "536"),
@@ -1008,43 +1008,43 @@ def validate_tcp_profile(headers: Path) -> None:
         kind = "u32" if name == "native_tcp_module_abi" else "usize"
         pattern = rf"^[ \t]*inline[ \t]+constexpr[ \t]+{kind}[ \t]+{name}[ \t]*=[ \t]*([0-9]+)[ \t]*;[ \t]*$"
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK76 TCP contract marker mismatch: " + name)
+            raise ValueError("SDK77 TCP contract marker mismatch: " + name)
 
 
 def validate_udp_profile(headers: Path) -> None:
     """Require the existing bounded UDP values as actual typed declarations."""
     for name in UDP_PROFILE_HEADERS:
         if not (headers / name).is_file():
-            raise ValueError("SDK76 UDP contract header is missing: " + name)
+            raise ValueError("SDK77 UDP contract header is missing: " + name)
     source = shared_file_contract_code((headers / UDP_PROFILE_HEADER).read_text())
     for name, expected in (("native_udp_profile", NATIVE_UDP_PROFILE),
                            ("linux_udp_profile", LINUX_UDP_PROFILE),
                            ("native_udp_connected_profile", CONNECTED_UDP_PROFILE)):
         pattern = rf'^[ \t]*inline[ \t]+constexpr[ \t]+std::string_view[ \t]+{name}[ \t]*=[ \t]*"([^"\n]+)"[ \t]*;[ \t]*$'
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK76 UDP profile mismatch: " + name)
-    for name, expected in (("native_udp_module_abi", "76"), ("native_udp_socket_capacity", "16"),
+            raise ValueError("SDK77 UDP profile mismatch: " + name)
+    for name, expected in (("native_udp_module_abi", "77"), ("native_udp_socket_capacity", "16"),
                            ("native_udp_queue_capacity", "2"), ("native_udp_datagram_capacity", "1472"),
                            ("native_udp_frame_capacity", "1514")):
         kind = "u32" if name == "native_udp_module_abi" else "usize"
         pattern = rf"^[ \t]*inline[ \t]+constexpr[ \t]+{kind}[ \t]+{name}[ \t]*=[ \t]*([0-9]+)[ \t]*;[ \t]*$"
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK76 UDP contract marker mismatch: " + name)
+            raise ValueError("SDK77 UDP contract marker mismatch: " + name)
 
 
 def validate_common_profile(headers: Path) -> None:
     """Require actual typed declarations for the preserved ext4 common profile."""
     for name in COMMON_HEADERS:
         if not (headers / name).is_file():
-            raise ValueError("SDK76 common-opening header is missing: " + name)
+            raise ValueError("SDK77 common-opening header is missing: " + name)
     source = shared_file_contract_code((headers / COMMON_HEADERS[0]).read_text())
     pattern = r'^[ \t]*inline[ \t]+constexpr[ \t]+std::string_view[ \t]+ext4_common_opening_profile[ \t]*=[ \t]*"([^"\n]+)"[ \t]*;[ \t]*$'
     if contract_declaration_values(source, "ext4_common_opening_profile", pattern) != [COMMON_PROFILE]:
-        raise ValueError("SDK76 common-opening profile declaration mismatch")
-    for name, expected in (("ext4_common_module_abi", "76"), ("ext4_common_session_counter_bits", "64")):
+        raise ValueError("SDK77 common-opening profile declaration mismatch")
+    for name, expected in (("ext4_common_module_abi", "77"), ("ext4_common_session_counter_bits", "64")):
         pattern = rf"^[ \t]*inline[ \t]+constexpr[ \t]+u32[ \t]+{name}[ \t]*=[ \t]*([0-9]+)[ \t]*;[ \t]*$"
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK76 common-opening contract mismatch: " + name)
+            raise ValueError("SDK77 common-opening contract mismatch: " + name)
 
 
 def validate_image(arch: str, image_format: str, payload: bytes) -> None:
@@ -1136,8 +1136,8 @@ def validate_module_abi(header: Path) -> None:
     """Check one actual typed native ABI declaration in the hashed SDK header."""
     source = shared_file_contract_code(header.read_text())
     pattern = r"^[ \t]*inline[ \t]+constexpr[ \t]+u32[ \t]+kernel_module_abi_version[ \t]*=[ \t]*([0-9]+)[ \t]*;[ \t]*$"
-    if contract_declaration_values(source, "kernel_module_abi_version", pattern) != ["76"]:
-        raise ValueError("SDK76 requires the compiled native module ABI76 header")
+    if contract_declaration_values(source, "kernel_module_abi_version", pattern) != ["77"]:
+        raise ValueError("SDK77 requires the compiled native module ABI77 header")
 
 
 def validate_uapi_version(header: Path) -> None:
@@ -1177,7 +1177,7 @@ def export(args: argparse.Namespace) -> None:
     scheduler_contract = (args.headers / "ok/sched/scheduler.hpp").read_text()
     for declaration in ("user_init_pid = 1", "create_init_process(", "user_adoption_target("):
         if declaration not in scheduler_contract:
-            raise ValueError("SDK76 lacks designated init/adoption scheduler contract: " + declaration)
+            raise ValueError("SDK77 lacks designated init/adoption scheduler contract: " + declaration)
     validate_uapi_version(args.headers / "ok/uapi/syscall.h")
     validate_common_profile(args.headers)
     validate_udp_profile(args.headers)
@@ -1221,7 +1221,7 @@ def export(args: argparse.Namespace) -> None:
             raise ValueError(f"compiler target {compiler_target} != {args.triple}")
         compiler_version = subprocess.check_output([str(args.compiler), "-dumpfullversion"], text=True).strip()
         manifest = {
-            "schema": 1, "kernel_version": args.version, "abi_version": 76,
+            "schema": 1, "kernel_version": args.version, "abi_version": 77,
             "arch": args.arch, "mode": args.mode, "triple": args.triple,
             "native_signal_profile": profile,
             "native_init_profile": "designated-pid1-native-linux-adoption-v2",

@@ -17,7 +17,7 @@ namespace ok::user::native
 {
 inline constexpr std::string_view native_futex_requeue_profile = "bootcpu-nonpi-read-keys-signed-counts-exact-origin-ticket-sequence-owned-transfer-v1";
 inline constexpr std::string_view linux_futex_requeue_profile = "bootcpu-nonpi-read-keys-signed-counts-exact-origin-ticket-sequence-owned-transfer-v1";
-inline constexpr u32 native_futex_requeue_module_abi = 76;
+inline constexpr u32 native_futex_requeue_module_abi = 77;
 inline constexpr usize native_futex_requeue_word_bits = 32;
 inline constexpr usize native_futex_requeue_operation_count = 2;
 inline constexpr usize native_futex_requeue_linux_operation = 3;
