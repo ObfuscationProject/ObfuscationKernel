@@ -3,12 +3,13 @@
 from pathlib import Path
 import argparse, hashlib, json, os, shutil, subprocess, struct
 from test_ext4_owned import PROFILES, TARGET_FLAGS
+from hosted_closure import include_closure
 
 SOURCES = ['src/fs/ext4_recovery.cpp', 'src/memory/memory.cpp', 'src/net/native_udp.cpp',
            'src/sched/scheduler.cpp', 'src/sched/process.cpp',
            'src/posix/posix.cpp', 'src/posix/fd.cpp', 'src/posix/path.cpp', 'src/posix/process.cpp',
-           'src/fs/vfs.cpp', 'src/driver/driver.cpp', 'src/smp/smp.cpp', 'src/arch/arch.cpp',
-           'src/arch/x86_64/ops.cpp', 'src/syscall/linux.cpp',
+           'src/fs/vfs.cpp', 'src/driver/driver.cpp', 'src/smp/smp.cpp', 'src/arch/arch.cpp', 'src/arch/terminal_power.cpp',
+           'src/arch/x86_64/ops.cpp', 'src/syscall/linux.cpp', 'src/syscall/syscall.cpp',
            'tests/host/ext4_realtime_model.cpp']
 
 def main():
@@ -40,7 +41,7 @@ def main():
                  'ext4_mounted_support.hpp', 'ext4_owned_support.hpp', 'ext4_transaction_support.hpp']]
         files += ['scripts/test_ext4_mounted.py', 'scripts/test_ext4_owned.py', 'src/arch/ops_private.hpp',
                   'tests/host/ext4_mounted_compile.cpp', 'tests/host/ext4_realtime_model.hpp']
-        for name in files:
+        for name in include_closure(root, files):
             target=snapshot/name;target.parent.mkdir(parents=True, exist_ok=True);shutil.copyfile(root/name,target)
         report['source_sha256']={str(f.relative_to(snapshot)):digest(f) for f in sorted(snapshot.rglob('*')) if f.is_file()}
         clean=output/'clean-input.img';shutil.copyfile(args.clean_image,clean);report['input_sha256']=digest(clean)

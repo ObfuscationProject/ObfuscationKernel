@@ -83,6 +83,7 @@ bool supported() noexcept
 {
     return false;
 }
+OwnershipReport ownership_report() noexcept { return {}; }
 Status initialize()
 {
     return Status::unsupported();
@@ -272,8 +273,8 @@ int main(int argc, char **argv)
     native::Arguments arguments;
     for (int i = 0; i < 16; ++i)
     {
-        CHECK(arguments.argv.push_back(FixedString<256>("argument")));
-        CHECK(arguments.envp.push_back(FixedString<256>("ENV=value")));
+        CHECK(arguments.push_argv("argument"));
+        CHECK(arguments.push_envp("ENV=value"));
     }
     FaultingExecutable fault_root, fault_file;
     fault_root.directory=true;fault_root.child=&fault_file;

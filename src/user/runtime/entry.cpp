@@ -229,9 +229,13 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
     {
         if (process->resources().personality != Personality::native) return -38;
         using C = lu::UnixMessageCodec<lu::configured_native_profile(), true>;
-        static_assert(sizeof(ok_msghdr) == C::header_bytes && sizeof(ok_cmsghdr) == C::cmsg_header_bytes);
-        static_assert(offsetof(ok_msghdr, vectors) == C::vectors_offset &&
-            offsetof(ok_msghdr, flags) == C::flags_offset);
+        // The UAPI structs have the target layout only when the compiler's word
+        // matches the profile; a hosted model of a 32-bit profile on a 64-bit
+        // host decodes the target bytes through the codec alone.
+        static_assert(sizeof(void *) != C::word_bytes ||
+            (sizeof(ok_msghdr) == C::header_bytes && sizeof(ok_cmsghdr) == C::cmsg_header_bytes));
+        static_assert(sizeof(void *) != C::word_bytes ||
+            (offsetof(ok_msghdr, vectors) == C::vectors_offset && offsetof(ok_msghdr, flags) == C::flags_offset));
         return unix_message<lu::configured_native_profile(), true>(kernel.posix(), number == N::recvmsg,
             a[0], a[1], a[2],
             [&](u64 address, std::span<u8> bytes) { return hw::copy_from_user(space, bytes.data(), address, bytes.size()); },
@@ -830,6 +834,26 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         if (output_size > buffer.size() || !hw::copy_to_user(space, a[output_arg], buffer.data(), output_size))
             return -14;
     }
+    // A file or device read fills the request one buffer at a time, as on
+    // Linux, until a chunk comes back short. Pipes, PTYs and the console
+    // returned above with their own semantics.
+    if (number == N::read && description && description->node && output_size == sched::pipe_capacity)
+    {
+        usize total = output_size;
+        while (total < a[2])
+        {
+            const usize wanted = a[2] - total < sched::pipe_capacity ? a[2] - total : sched::pipe_capacity;
+            request.args[1] = reinterpret_cast<uptr>(buffer.data());
+            request.args[2] = wanted;
+            const auto more = kernel.syscalls().dispatch(request);
+            if (!more.status.ok() || more.value <= 0) break;
+            const auto chunk = static_cast<usize>(more.value);
+            if (chunk > wanted || !hw::copy_to_user(space, a[1] + total, buffer.data(), chunk)) break;
+            total += chunk;
+            if (chunk < wanted) break;
+        }
+        return static_cast<i64>(total);
+    }
     return result.value;
 }
 } // namespace
@@ -1196,10 +1220,16 @@ bool step(Kernel &kernel)
                                            trap.value().kind == hw::TrapKind::timer ||
                                            trap.value().kind == hw::TrapKind::interrupt);
         const bool bad_capture = (capture && !captured) || (needs_capture && !captured);
+#if defined(OK_PRIVATE_MIPS64_N64_SIGNAL) || defined(OK_PRIVATE_MIPS_O32_SIGNAL)
+        // A copy-on-write fault resumes the same frame. Its capture keeps the
+        // handler readiness; without one the thread stays unverified.
+        const bool resumable_fault = captured && trap.value().kind == hw::TrapKind::page_fault;
+#endif
 #ifdef OK_PRIVATE_MIPS64_N64_SIGNAL
         // The observation expires with view deactivation. Consume it first.
         const bool n64_capture_valid = !needs_capture || (!bad_capture && private_n64_capture(*process, thread, view));
-        if (!needs_capture || !n64_capture_valid) private_n64_revoke(thread);
+        const bool n64_fault_captured = resumable_fault && private_n64_capture(*process, thread, view);
+        if ((!needs_capture && !n64_fault_captured) || !n64_capture_valid) private_n64_revoke(thread);
 #endif
 #ifdef OK_PRIVATE_PPC32_SIGNAL
         const bool ppc_linux = process->resources().personality == Personality::linux;
@@ -1249,7 +1279,7 @@ bool step(Kernel &kernel)
                 return false;
             }
         }
-        else private_mips_revoke(thread);
+        else if (!resumable_fault || !private_mips_capture(thread)) private_mips_revoke(thread);
 #endif
         if (captured)
         {

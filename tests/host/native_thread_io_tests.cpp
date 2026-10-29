@@ -32,6 +32,11 @@ int main()
         CHECK(peer->state == sched::ProcessState::blocked && peer->wait_registration.active());
         CHECK(leader->state == sched::ProcessState::runnable && leader->wait_key == 73);
         CHECK(kernel.scheduler().complete_wait(peer->wait_registration.ticket(), sched::WaitCompletion::cancelled));
+        // The resumed continuation reports the cancellation before the next call.
+        activate();
+        CHECK(native::dispatch(kernel, pid, {number,
+            {static_cast<uptr>(descriptors.value()[0]), hw::user_begin, 1, 0, 0, 0}}, complete) == -125);
+        CHECK(!peer->wait_registration.active());
     }
     // A full pipe must retain the selected writer continuation as well.
     std::array<std::byte, sched::pipe_capacity> data{};
@@ -47,6 +52,9 @@ int main()
         CHECK(!complete && peer->wait_registration.active() && peer->state == sched::ProcessState::blocked);
         CHECK(leader->state == sched::ProcessState::runnable && leader->wait_key == 73);
         CHECK(kernel.scheduler().complete_wait(peer->wait_registration.ticket(), sched::WaitCompletion::cancelled));
+        activate();
+        CHECK(native::dispatch(kernel, pid, {number,
+            {static_cast<uptr>(descriptors.value()[1]), hw::user_begin, 1, 0, 0, 0}}, complete) == -125);
     }
     CHECK(kernel.scheduler().read_pipe(writer->pipe, data, true).value() == data.size());
     activate();

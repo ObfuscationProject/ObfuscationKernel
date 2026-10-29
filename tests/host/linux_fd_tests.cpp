@@ -100,6 +100,7 @@ bool supported() noexcept
 {
     return false;
 }
+OwnershipReport ownership_report() noexcept { return {}; }
 Status initialize()
 {
     return Status::unsupported();
@@ -418,7 +419,7 @@ void loaded_image_cleanup(Kernel &kernel, sched::ProcessId pid)
     CHECK(native::entry_stacks.activate(native::entry_stack_arena));
     CHECK(native::prepare_native_thread(thread));
     native::Arguments args;
-    CHECK(args.argv.push_back(FixedString<256>("loaded-cleanup")));
+    CHECK(args.push_argv("loaded-cleanup"));
     auto load = [&]() { return native::load(kernel, "/loaded-cleanup", args); };
     auto retire = [&](hw::AddressSpace identity) {
         native::Pages empty;

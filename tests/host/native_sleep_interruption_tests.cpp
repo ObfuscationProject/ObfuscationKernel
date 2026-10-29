@@ -152,7 +152,8 @@ void selected_runtime(Kernel &kernel,lu::Operation op)
         const auto pid=create(kernel);auto &p=*kernel.scheduler().find(pid);auto &t=p.threads()[0];
         auto *actions=native::private_signal_table(kernel,pid);CHECK(actions);
         *actions->find(10)={.handler=hw::user_begin+128,.flags=0x04000000|0x10000000,.restorer=hw::user_begin+192};
-        CHECK(p.resources().native_pages.push_back({hw::user_begin,0,hw::page_read|hw::page_execute}));
+        // Process mapping records carry their exact pool frame.
+        CHECK(native::allocate(p.resources().native_pages,hw::user_begin,hw::page_read|hw::page_execute));
         auto *queue=native::private_signal_queue(t);CHECK(queue);
         // The pending-before-arm path must be selected despite the PCB block.
         if(mode==0) CHECK(queue->enqueue({10,-6,99,100})==native::PrivateSignalQueue::Enqueue::queued);

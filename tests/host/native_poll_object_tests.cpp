@@ -93,6 +93,7 @@ bool supported() noexcept
 {
     return false;
 }
+OwnershipReport ownership_report() noexcept { return {}; }
 Status initialize()
 {
     return Status::unsupported();
@@ -186,7 +187,7 @@ void provider_mapping_and_lifetime()
 {
     CHECK(native::activate_pool());
     CHECK(native::page_pool.user_count() == 0 && native::page_pool.object_count() == 0);
-    CHECK(native::page_pool.kernel_reserve_count() == native::kernel_object_pages);
+    CHECK(native::page_pool.kernel_reserve_count() == native::kernel_reserve_pages);
     CHECK(native::page_pool.user_capacity_count() + native::page_pool.kernel_reserve_count() ==
           native::page_pool.total_count());
     auto lease = native::page_pool.allocate_kernel_page();
@@ -314,7 +315,7 @@ void pressure_and_cleanup(Kernel &kernel)
     const auto denied_user = native::page_pool.allocate();
     CHECK(!denied_user && denied_user.status().code() == StatusCode::no_memory);
     CHECK(native::page_pool.user_count() == quota && native::page_pool.object_count() == 0);
-    CHECK(native::page_pool.free_count() == native::kernel_object_pages);
+    CHECK(native::page_pool.free_count() == native::kernel_reserve_pages);
     const auto baseline = native::poll_objects.accounting();
     CHECK(baseline.live_objects == 0 && baseline.backing_pages == 0);
     std::array<Owner, owner_count + 1> owners{};
@@ -417,7 +418,7 @@ void pressure_and_cleanup(Kernel &kernel)
     CHECK(native::poll_objects.accounting().allocations - baseline.allocations == 65);
     CHECK(native::poll_objects.accounting().destructions - baseline.destructions == 65);
     CHECK(native::page_pool.object_count() == 0 && native::page_pool.user_count() == quota);
-    CHECK(native::page_pool.free_count() == native::kernel_object_pages && !native::page_pool.allocate());
+    CHECK(native::page_pool.free_count() == native::kernel_reserve_pages && !native::page_pool.allocate());
     CHECK(!native::poll_objects.resolve(resumed));
     for (const auto &handle : handles) CHECK(!native::poll_objects.resolve(handle));
     for (const auto &owner : owners)

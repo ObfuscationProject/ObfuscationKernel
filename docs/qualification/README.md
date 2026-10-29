@@ -19,11 +19,13 @@ live in the separate ObfuscationEvidence repository.
 | [EXT4_ALLOCATED_EMPTY_DATA.md](EXT4_ALLOCATED_EMPTY_DATA.md) | Private allocated-empty first-block planner |
 | [EXT4_MODULE_LAYOUT.md](EXT4_MODULE_LAYOUT.md) | ext4 module header layout and equivalence checks |
 | [EXT4_MOUNTED_METADATA.md](EXT4_MOUNTED_METADATA.md) | Bounded mounted ext4 metadata policies |
+| [EXT4_NODE_CACHE.md](EXT4_NODE_CACHE.md) | ext4 node cache eviction and the 128-inode scan bounds |
 | [EXT4_ZERO_TRUNCATE_SLICE1.md](EXT4_ZERO_TRUNCATE_SLICE1.md) | Zero-truncate source slice 1 |
 | [EXT4_ZERO_TRUNCATE_SLICE2.md](EXT4_ZERO_TRUNCATE_SLICE2.md) | Exact linked-inode zero-truncate witness |
 | [EXT4_ZERO_TRUNCATE_SLICE3.md](EXT4_ZERO_TRUNCATE_SLICE3.md) | Committed zero-truncate journal and ownership preview |
 | [EXT4_ZERO_TRUNCATE_SLICE4.md](EXT4_ZERO_TRUNCATE_SLICE4.md) | Zero-truncate journal formatting and guarded Session preview |
 | [EXT4_ZERO_TRUNCATE_TRANSACTION.md](EXT4_ZERO_TRUNCATE_TRANSACTION.md) | Private zero-truncate transaction |
+| [HOSTED_RUNNER_SUITE.md](HOSTED_RUNNER_SUITE.md) | Hosted runner suite, repairs and CI |
 | [INITIAL_NODE_ATTRIBUTES.md](INITIAL_NODE_ATTRIBUTES.md) | Initial node attributes and namespace publication |
 | [LEGACY_ACTIVE_STARTUP.md](LEGACY_ACTIVE_STARTUP.md) | Legacy journal recovery with startup storage |
 | [LINUX_BOOTSTRAP_ADAPTER.md](LINUX_BOOTSTRAP_ADAPTER.md) | Bounded Linux bootstrap adapter |
@@ -33,10 +35,12 @@ live in the separate ObfuscationEvidence repository.
 | [LINUX_EXEC_BOOTSTRAP.md](LINUX_EXEC_BOOTSTRAP.md) | Linux static ELF bootstrap metadata |
 | [LINUX_MKDIR.md](LINUX_MKDIR.md) | Linux directory creation |
 | [LINUX_PATH_BOOTSTRAP.md](LINUX_PATH_BOOTSTRAP.md) | Linux pathname bootstrap calls |
+| [LINUX_PERSONALITY_LIMITS.md](LINUX_PERSONALITY_LIMITS.md) | Linux personality limits on the musl/BusyBox gate |
 | [LINUX_POSITIONAL_IO.md](LINUX_POSITIONAL_IO.md) | Bounded Linux positional I/O |
 | [LINUX_STAT.md](LINUX_STAT.md) | Qualified Linux stat subset |
 | [LINUX_UMASK.md](LINUX_UMASK.md) | Linux process creation mask |
 | [MAINTAINED_EXT4_TIMESTAMPS.md](MAINTAINED_EXT4_TIMESTAMPS.md) | Explicit maintained ext4 timestamps |
+| [MIPS_SIGNAL_RESUME.md](MIPS_SIGNAL_RESUME.md) | MIPS handler resume after resolved faults |
 | [MOUNTED_MUTATION_IDENTITY.md](MOUNTED_MUTATION_IDENTITY.md) | Authentic Node admission for mounted write and truncate |
 | [MOUNT_RETENTION.md](MOUNT_RETENTION.md) | Owned mount publication and resource drainage |
 | [NATIVE_CHILD_EXIT_SIGNALS.md](NATIVE_CHILD_EXIT_SIGNALS.md) | Private native child exit signals |

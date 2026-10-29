@@ -83,6 +83,7 @@ bool supported() noexcept
 {
     return false;
 }
+OwnershipReport ownership_report() noexcept { return {}; }
 Status initialize()
 {
     return Status::unsupported();
@@ -357,15 +358,25 @@ void lookup_cases(Kernel &kernel,sched::ProcessId pid,uptr scratch)
     CHECK(kernel.scheduler().find_thread(pid,peer)->tls.robust_list==1);
     std::puts("PASS SDK28 lookup: caller/peer/signed32/overlap/fault-order/cross-group/leader-zombie/retired-peer/fork-reset guest=0");
 }
+// Linux exec stores AT_RANDOM bytes; hosted kernels have no entropy device.
+struct HostedExecEntropy final : driver::EntropySource
+{
+    Status fill(std::span<std::byte> output) override
+    {
+        for (usize index = 0; index < output.size(); ++index) output[index] = static_cast<std::byte>(index + 1);
+        return Status::success();
+    }
+};
 int main(int argc,char **argv)
 {
     CHECK(argc==3);const bool fatal=std::strcmp(argv[2],"fatal-new")==0 || std::strcmp(argv[2],"fatal-old")==0;
     const bool oldowner=std::strstr(argv[2],"old")!=nullptr;
     static Kernel kernel;CHECK(kernel.boot({}));CHECK(kernel.posix().activate(0));
+    static HostedExecEntropy entropy;kernel.posix().set_entropy_source(&entropy);
     CHECK(native::entry_stacks.activate(native::entry_stack_arena));
     auto bytes=read_file(argv[1]);bytes[7]=std::byte{3};
     CHECK(kernel.vfs().create_readonly_file("/old",bytes));CHECK(kernel.vfs().create_readonly_file("/target",bytes));
-    native::Arguments args;CHECK(args.argv.push_back(FixedString<256>("old")));
+    native::Arguments args;CHECK(args.push_argv("old"));
     auto image=native::load(kernel,"/old",args);CHECK(image);
     auto created=kernel.scheduler().create_user_process("sdk28-mask-regression",kernel.arch().make_user_context({image.value().frame.pc,image.value().frame.sp}));CHECK(created);
     const auto pid=created.value();auto *process=kernel.scheduler().find(pid);

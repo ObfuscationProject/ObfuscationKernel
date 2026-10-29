@@ -387,6 +387,65 @@ fs::ModeChangeResult PosixService::change_owner_at(Fd dirfd, std::string_view pa
     return result;
 }
 
+Status PosixService::utimensat(Fd dirfd, std::string_view path, fs::TimestampChange access,
+                               fs::TimestampChange modification, u32 flags)
+{
+    if (!initialized_ || !vfs_)
+        return Status::not_initialized("POSIX service not initialized");
+    if (flags & ~(at_SYMLINK_NOFOLLOW | at_EMPTY_PATH))
+        return Status::invalid_argument("unsupported timestamp-change flags");
+    using Kind = fs::TimestampChange::Kind;
+    if (access.kind == Kind::omit && modification.kind == Kind::omit)
+        return Status::success();
+    const auto apply = [&](fs::Node &node) -> Status {
+        auto metadata = node.query_metadata();
+        if (!metadata) return metadata.status();
+        const bool owner = euid() == user::root_uid || euid() == metadata.value().uid;
+        if (!owner)
+        {
+            if (access.kind == Kind::value || modification.kind == Kind::value)
+                return Status::permission("explicit timestamps require the owner");
+            if (auto status = fs::require_access(metadata.value(), {euid(), egid()}, fs::access_write); !status)
+                return status;
+        }
+        return node.set_times(access, modification);
+    };
+    if (path.empty())
+    {
+        auto *description = descriptor(dirfd);
+        if (!description || !description->used || !description->node)
+            return Status::bad_descriptor("timestamp change needs an open file");
+        return apply(*description->node);
+    }
+    auto resolved = resolve_node(dirfd, path, (flags & at_SYMLINK_NOFOLLOW) ? fs::FinalComponent::no_follow
+                                                                             : fs::FinalComponent::follow);
+    if (!resolved)
+        return resolved.status();
+    const auto status = apply(*resolved.value().node());
+    const auto released = resolved.value().release();
+    return status ? released : status;
+}
+
+Result<fs::FilesystemStatistics> PosixService::statfs(Fd dirfd, std::string_view path)
+{
+    if (!initialized_ || !vfs_)
+        return Status::not_initialized("POSIX service not initialized");
+    if (path.empty())
+    {
+        auto *description = descriptor(dirfd);
+        if (!description || !description->used || !description->node)
+            return Status::bad_descriptor("statfs needs an open file");
+        return description->node->filesystem_statistics();
+    }
+    auto resolved = resolve_node(dirfd, path, fs::FinalComponent::follow);
+    if (!resolved)
+        return resolved.status();
+    auto statistics = resolved.value().node()->filesystem_statistics();
+    const auto released = resolved.value().release();
+    if (statistics && !released) return released;
+    return statistics;
+}
+
 Status PosixService::chown(std::string_view path, u32 uid, u32 gid)
 {
     if (euid() != 0)

@@ -74,19 +74,24 @@ int main()
     CHECK(ready.begin_entry(id,f,space,view,tracker.capability()));CHECK(!ready.capture(id,f,space,view,current,tracker.capability()));
     tracker.invalidate();CHECK(!current.valid_for(f,space,view));CHECK(!ready.capture(id,f,space,view,current,tracker.capability()));deactivate();
     for(uptr bad:std::array<uptr,4>{0,id.lower-1,id.top,id.top-831}){view=activate();CHECK(ready.begin_entry(id,f,space,view,tracker.capability()));tracker.invalidate();tracker.publish_owned(f,space,view,{hw::TrapKind::syscall,8,0,0,bad});CHECK(!tracker.query(f).sequence());CHECK(!ready.capture(id,f,space,view,tracker.query(f),tracker.capability()));deactivate();}
-    for(hw::TrapKind kind:std::array{hw::TrapKind::exception,hw::TrapKind::page_fault}){view=activate();CHECK(ready.begin_entry(id,f,space,view,tracker.capability()));tracker.invalidate();tracker.publish_owned(f,space,view,{kind,8,0,0,view.top()-832});CHECK(!tracker.query(f).sequence());deactivate();ready.revoke(id);}
+    for(hw::TrapKind kind:std::array{hw::TrapKind::exception}){view=activate();CHECK(ready.begin_entry(id,f,space,view,tracker.capability()));tracker.invalidate();tracker.publish_owned(f,space,view,{kind,8,0,0,view.top()-832});CHECK(!tracker.query(f).sequence());deactivate();ready.revoke(id);}
     sched::PendingSignals<128> pending;CHECK(pending.reset({1,1,handle.generation}));CHECK(pending.enqueue({16,-6,41,7})==sched::PendingSignals<128>::Enqueue::queued);
     sched::SignalActionTable actions;actions.find(16)->handler=0x40000300;actions.find(16)->flags=0x88000008;
     sched::SignalAltstack altstack{0x40004000,8192,0};auto saved_altstack=altstack;auto saved_actions=actions;
     sched::PendingSignals<128>::Delivery ticket,again;CHECK(pending.peek({},ticket));
-    capture(hw::TrapKind::timer,0xffffffff80008000ULL);CHECK(ready.state()==Ready::State::timer_bd);CHECK(ready.deferred(id,f,tracker.capability()));CHECK(!ready.ready(id,f,tracker.capability()));
+    capture(hw::TrapKind::timer,0xffffffff80008000ULL);CHECK(ready.state()==Ready::State::interrupted_bd);CHECK(ready.deferred(id,f,tracker.capability()));CHECK(!ready.ready(id,f,tracker.capability()));
     CHECK(sn::mips64_n64_handler_gate(pending,actions,{},ready,id,f,tracker.capability())==sn::Mips64N64HandlerGate::defer_handler);CHECK(pending.peek({},again)&&ticket==again);CHECK(actions==saved_actions&&altstack==saved_altstack);
     CHECK(ready.context(id,f,tracker.capability()).resume==sn::Mips64N64SignalFrame::ResumeContract::unverified);
     CHECK(!ready.publish_handler(id,f,tracker.capability()));CHECK(!ready.publish_sigreturn(id,f,tracker.capability()));
     f.registers[4]^=1;CHECK(sn::mips64_n64_handler_gate(pending,actions,{},ready,id,f,tracker.capability())==sn::Mips64N64HandlerGate::unverified);f.registers[4]^=1;
     actions.find(16)->handler=0;CHECK(sn::mips64_n64_handler_gate(pending,actions,{},ready,id,f,{})==sn::Mips64N64HandlerGate::proceed);
     actions.find(16)->handler=1;CHECK(sn::mips64_n64_handler_gate(pending,actions,{},ready,id,f,{})==sn::Mips64N64HandlerGate::proceed);actions=saved_actions;
-    capture(hw::TrapKind::timer);CHECK(ready.state()==Ready::State::timer_non_bd&&ready.ready(id,f,tracker.capability()));
+    capture(hw::TrapKind::timer);CHECK(ready.state()==Ready::State::interrupted_non_bd&&ready.ready(id,f,tracker.capability()));
+    // A resolved copy-on-write fault resumes at EPC like a timer: delay-slot faults defer, others are ready.
+    capture(hw::TrapKind::page_fault,0xffffffff80000008ULL);CHECK(ready.state()==Ready::State::interrupted_bd&&ready.deferred(id,f,tracker.capability()));
+    CHECK(sn::mips64_n64_handler_gate(pending,actions,{},ready,id,f,tracker.capability())==sn::Mips64N64HandlerGate::defer_handler);
+    capture(hw::TrapKind::page_fault,0x8);CHECK(ready.state()==Ready::State::interrupted_non_bd&&ready.ready(id,f,tracker.capability()));
+    CHECK(sn::mips64_n64_handler_gate(pending,actions,{},ready,id,f,tracker.capability())==sn::Mips64N64HandlerGate::proceed);CHECK(pending.peek({},again)&&ticket==again);
     Ready never_captured;auto fresh_id=child_id;++fresh_id.image_generation;never_captured.reset(fresh_id,tracker.capability());CHECK(!never_captured.inherit_syscall(fresh_id,ready,id,f,child_frame,tracker.capability()));
     capture(hw::TrapKind::syscall);CHECK(sn::mips64_n64_handler_gate(pending,actions,{},ready,id,f,tracker.capability())==sn::Mips64N64HandlerGate::proceed);CHECK(pending.peek({},again)&&ticket==again);
     f.pc=0x40000300;f.sp=0x40006000;f.registers[29]=f.sp;CHECK(ready.publish_handler(id,f,tracker.capability()));CHECK(ready.state()==Ready::State::handler);

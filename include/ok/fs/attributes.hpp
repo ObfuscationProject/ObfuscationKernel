@@ -9,7 +9,8 @@ enum class Attribute : u32
 {
     inode = 1, device = 2, access_time = 4, modification_time = 8, change_time = 16, blocks512 = 32,
 };
-enum class TimestampSource : u8 { unavailable, readonly_ext4, maintained_ext4 };
+// kernel_fixed: a kernel-defined node (devfs) with constant epoch timestamps.
+enum class TimestampSource : u8 { unavailable, readonly_ext4, maintained_ext4, kernel_fixed };
 struct EpochTimestamp
 {
     i64 seconds{};

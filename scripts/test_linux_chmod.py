@@ -44,7 +44,7 @@ def main():
                           'memory', 'net', 'posix', 'sched', 'smp', 'syscall', 'user'):
             shared += [str(p.relative_to(source)) for p in sorted((source / 'src' / subsystem).rglob('*.cpp'))
                        if p.name not in ('entry.cpp', 'kernel_main.cpp', 'runtime.cpp') and p.parent.name != 'runtime']
-        shared += ['src/arch/arch.cpp', 'src/arch/x86_64/ops.cpp']
+        shared += ['src/arch/arch.cpp', 'src/arch/terminal_power.cpp', 'src/arch/x86_64/ops.cpp']
     project = ['set_project("linux_chmod_hosted")', 'set_languages("cxx23")']
     for suite in suites:
         project += [f'target("chmod-{suite}")', 'set_kind("binary")',

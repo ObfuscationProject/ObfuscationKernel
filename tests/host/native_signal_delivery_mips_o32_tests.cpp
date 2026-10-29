@@ -382,11 +382,18 @@ template <K Kind> void policy_edges() {
           x.actions == actions && x.queue.pending_mask().contains(16));
   }
   {
+    // SA_NOCLDSTOP and SA_NOCLDWAIT are accepted; o32 leaves bit 1 unassigned.
     Fixture<Kind> x;
-    x.actions.find(16)->flags |= 1;
+    x.actions.find(16)->flags |= 2;
     u32 signal{};
     CHECK(x.deliver(signal) == D::Result::unsupported && !x.writes &&
           x.queue.pending_mask().contains(16));
+  }
+  {
+    Fixture<Kind> x;
+    x.actions.find(16)->flags |= 1 | 0x10000;
+    u32 signal{};
+    CHECK(x.deliver(signal) == D::Result::handler && signal == 16);
   }
   {
     Fixture<Kind> x;

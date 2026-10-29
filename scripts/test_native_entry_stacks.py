@@ -10,7 +10,7 @@ import subprocess
 import sys
 
 ARCHITECTURES = ('i386', 'x86_64', 'aarch64', 'arm32', 'rv64', 'rv32', 'loongarch64', 'mips', 'mips64', 'ppc')
-SOURCES = ('tests/host/native_entry_stacks_tests.cpp', 'src/sched/scheduler.cpp', 'src/sched/process.cpp', 'src/arch/arch.cpp')
+SOURCES = ('tests/host/native_entry_stacks_tests.cpp', 'src/sched/scheduler.cpp', 'src/sched/process.cpp', 'src/memory/memory.cpp', 'src/fs/vfs.cpp', 'src/net/native_udp.cpp', 'src/arch/arch.cpp', 'src/arch/terminal_power.cpp')
 
 
 def sha(path):
@@ -56,6 +56,7 @@ def main():
         files.update(root / f'src/arch/{arch}/ops.cpp' for arch in ARCHITECTURES)
         files.update(path for path in (root / 'include').rglob('*') if path.is_file())
         files.update((root / 'src').rglob('*.hpp'))
+        files.update((root / 'src').rglob('*.inc'))
         files.add(Path(__file__).resolve())
         for path in sorted(files):
             relative = str(path.relative_to(root))

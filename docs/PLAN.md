@@ -246,6 +246,26 @@ Merged to main from `refactor/user-runtime-split` (tag `p1-user-runtime-split`):
 - Results and ObfuscationEvidence receipts:
   [qualification/USER_RUNTIME_SPLIT.md](qualification/USER_RUNTIME_SPLIT.md).
 
+### P1 review issues (#5–#8)
+
+Four worktrees answer the 2026-10-28 review of the P1 results; WT1.2 (#4) stays
+its own worktree.
+- `chore/hosted-runners` (#5): every `scripts/test_*.py` is classified and the
+  runnable ones run in CI (`scripts/hosted_suite.py`, `xmake hosted-test`,
+  `xmake native-probe`); [qualification/HOSTED_RUNNER_SUITE.md](qualification/HOSTED_RUNNER_SUITE.md).
+- `fix/mips-signal-resume` (#8): resolved page faults publish MIPS captures; a
+  refused handler frame ends only its process;
+  [qualification/MIPS_SIGNAL_RESUME.md](qualification/MIPS_SIGNAL_RESUME.md).
+- `fix/ext4-node-cache` (#7, paired OS `fix/ext4-node-cache`): both ext4
+  providers evict unreachable nodes and the create/data scans are bounded by
+  the filesystem; [qualification/EXT4_NODE_CACHE.md](qualification/EXT4_NODE_CACHE.md).
+- `feat/linux-personality` (#6, paired OS `feat/linux-personality`): ARG_MAX
+  exec arguments, `ENOEXEC` and `#!`, devfs, vfork and the routed Linux calls;
+  [qualification/LINUX_PERSONALITY_LIMITS.md](qualification/LINUX_PERSONALITY_LIMITS.md).
+Merge: the three smaller branches merge into `feat/linux-personality`, which
+bumps the module ABI once to 77 for all four; the paired OS worktree consumes
+SDK 77. Merge the kernel PRs in the order #5, #8, #7, #6, then the OS PRs.
+
 ## P2: platform and protocols
 
 ### WT2.1 `feat/smp-bringup` (XL)

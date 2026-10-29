@@ -8,7 +8,7 @@ source=out/'input'
 for name in ('include','src','tests/host'):
  shutil.copytree(kernel/name,source/name,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
 shutil.copy2(__file__,source/'test_linux_chmod_service.py')
-shared=['src/sched/scheduler.cpp','src/sched/process.cpp','src/posix/posix.cpp','src/posix/fd.cpp','src/posix/path.cpp','src/posix/process.cpp','src/fs/vfs.cpp','src/driver/driver.cpp','src/smp/smp.cpp','src/arch/arch.cpp','src/syscall/linux.cpp','src/arch/x86_64/ops.cpp']
+shared=['src/sched/scheduler.cpp','src/sched/process.cpp','src/posix/posix.cpp','src/posix/fd.cpp','src/posix/path.cpp','src/posix/process.cpp','src/fs/vfs.cpp','src/driver/driver.cpp','src/smp/smp.cpp','src/arch/arch.cpp', 'src/arch/terminal_power.cpp','src/syscall/linux.cpp','src/arch/x86_64/ops.cpp']
 suites={'service':['tests/host/chmod_service_tests.cpp','src/fs/ext4_fs.cpp','tests/host/ext4_realtime_model.cpp',*shared], 'initial':['tests/host/initial_child_tests.cpp',*shared], 'checked':['tests/host/checked_vfs_tests.cpp',*shared]}
 project=['set_project("chmod-service-hosted")','set_languages("cxx23")']
 for name,files in suites.items():

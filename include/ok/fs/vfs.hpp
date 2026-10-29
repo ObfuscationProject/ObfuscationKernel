@@ -128,6 +128,23 @@ struct FileBuffer
     usize size{0};
 };
 
+// One timestamp of a utimensat-style change: left alone, set to the current
+// time, or set to an explicit epoch value.
+struct TimestampChange
+{
+    enum class Kind : u8 { omit, now, value };
+    Kind kind{Kind::omit};
+    i64 seconds{};
+    u32 nanoseconds{};
+};
+
+// statfs facts of the filesystem holding a node, in blocks of block_size.
+struct FilesystemStatistics
+{
+    u64 type{}, block_size{}, blocks{}, free_blocks{}, available_blocks{}, files{}, free_files{}, name_max{};
+    bool read_only{};
+};
+
 struct DirectoryEntry
 {
     FixedString<max_path_segment> name{};
@@ -181,9 +198,32 @@ class Node
     {
         return Status::unsupported("directory listing unavailable");
     }
+    // At most one listing of entries from position `start` in directory
+    // order; a full listing may be followed by more. Providers whose
+    // directories can exceed one listing override this; the default slices list().
+    virtual Result<DirectoryListing> list_from(usize start, DirectoryReadIntent intent = DirectoryReadIntent::access) const
+    {
+        auto listing = list(intent);
+        if (!listing || !start) return listing;
+        auto &value = listing.value();
+        const usize kept = start < value.count ? value.count - start : 0;
+        for (usize i = 0; i < kept; ++i) value.entries[i] = value.entries[start + i];
+        value.count = kept;
+        return listing;
+    }
     virtual Status remove(std::string_view, bool)
     {
         return Status::unsupported("remove unavailable");
+    }
+    // Sets the access and modification times and the change time to now.
+    // Permission follows Linux utimensat and is the caller's to check.
+    virtual Status set_times(TimestampChange, TimestampChange)
+    {
+        return Status::unsupported("timestamp changes unavailable");
+    }
+    virtual Result<FilesystemStatistics> filesystem_statistics() const
+    {
+        return Status::unsupported("filesystem statistics unavailable");
     }
     [[nodiscard]] virtual const void *filesystem_identity() const
     {

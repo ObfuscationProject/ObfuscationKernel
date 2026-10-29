@@ -462,7 +462,7 @@ class MipsO32SignalReadiness final
         constexpr bool operator==(const Identity &) const = default;
     };
     enum class State : u8
-    { unverified, initial, awaiting_capture, syscall_normalized, timer_non_bd, timer_bd, handler, sigreturn };
+    { unverified, initial, awaiting_capture, syscall_normalized, interrupted_non_bd, interrupted_bd, handler, sigreturn };
   private:
     Identity identity_{};
     State state_{};
@@ -482,7 +482,7 @@ class MipsO32SignalReadiness final
     [[nodiscard]] constexpr bool ready(Identity id) const noexcept
     {
         return owns(id) && (state_ == State::initial || state_ == State::syscall_normalized ||
-            state_ == State::timer_non_bd || state_ == State::handler || state_ == State::sigreturn);
+            state_ == State::interrupted_non_bd || state_ == State::handler || state_ == State::sigreturn);
     }
     // Call only after fresh initial_frame construction and ELF/mapping/stack
     // admission. It is a trusted publication event, not a lazy readiness query.
@@ -511,8 +511,8 @@ class MipsO32SignalReadiness final
         switch (observation.kind())
         {
         case K::syscall_normalized: state_ = State::syscall_normalized; return true;
-        case K::timer_non_bd: state_ = State::timer_non_bd; return true;
-        case K::timer_bd: state_ = State::timer_bd; return true;
+        case K::interrupted_non_bd: state_ = State::interrupted_non_bd; return true;
+        case K::interrupted_bd: state_ = State::interrupted_bd; return true;
         default: state_ = State::unverified; return false;
         }
     }
@@ -564,7 +564,7 @@ template <typename Queue>
         return MipsO32HandlerGate::proceed;
     if (!capability.admitted() || readiness.identity() != identity) return MipsO32HandlerGate::unverified;
     if (readiness.ready(identity)) return MipsO32HandlerGate::proceed;
-    return readiness.state() == MipsO32SignalReadiness::State::timer_bd
+    return readiness.state() == MipsO32SignalReadiness::State::interrupted_bd
         ? MipsO32HandlerGate::defer_handler : MipsO32HandlerGate::unverified;
 }
 } // namespace ok::user::native

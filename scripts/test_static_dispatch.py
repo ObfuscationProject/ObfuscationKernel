@@ -44,6 +44,7 @@ def main() -> None:
                 str(root / "src/net/native_udp.cpp"),
                 str(root / "src/fs/vfs.cpp"),
                 str(root / "src/arch/arch.cpp"),
+                str(root / "src/arch/terminal_power.cpp"),
                 str(root / f"src/arch/{architecture}/ops.cpp"),
                 "-o", str(executable),
             ]

@@ -110,6 +110,87 @@ local function task_systoolchain_qemu(arch)
     return qemu
 end
 
+task("hosted-test")
+    set_menu {
+        usage = "xmake hosted-test --output=DIR [--jobs=N] [--shard=I/N] [--toolchain-root=DIR] [--sanitize] [--list]",
+        description = "Run the classified hosted and QEMU runners under scripts/test_*.py (scripts/hosted_suite.py)",
+        options = {
+            {nil, "output", "kv", nil, "New directory outside the source tree for logs, runner output and summary.json"},
+            {nil, "jobs", "kv", nil, "Runners started in parallel"},
+            {nil, "shard", "kv", nil, "Run only shard I of N"},
+            {nil, "toolchain-root", "kv", nil, "SysToolchain root holding the ten <triple> trees; enables toolchain runners"},
+            {nil, "sanitize", "k", nil, "Pass --sanitize to runners that take it"},
+            {nil, "quarantined", "k", nil, "Also run runners quarantined on main"},
+            {nil, "list", "k", nil, "Print each runner's classification and exit"}
+        }
+    }
+    on_run(function ()
+        import("core.base.option")
+        local argv = {"-B", path.join(os.projectdir(), "scripts", "hosted_suite.py")}
+        if option.get("list") then
+            table.insert(argv, "--list")
+        else
+            local output = option.get("output")
+            assert(output, "hosted-test requires --output=DIR")
+            table.insert(argv, "--output")
+            table.insert(argv, path.absolute(output))
+        end
+        for _, name in ipairs({"jobs", "shard"}) do
+            if option.get(name) then
+                table.insert(argv, "--" .. name)
+                table.insert(argv, option.get(name))
+            end
+        end
+        if option.get("toolchain-root") then
+            table.insert(argv, "--toolchain-root")
+            table.insert(argv, path.absolute(option.get("toolchain-root")))
+        end
+        if option.get("sanitize") then table.insert(argv, "--sanitize") end
+        if option.get("quarantined") then table.insert(argv, "--quarantined") end
+        os.execv("python3", argv, {envs = {PYTHONDONTWRITEBYTECODE = "1"}})
+    end)
+task_end()
+
+task("native-probe")
+    set_menu {
+        usage = "xmake native-probe [--output=DIR]",
+        description = "Run the configured architecture's QEMU execution probe with the SysToolchain compiler and QEMU",
+        options = {
+            {nil, "output", "kv", nil, "Directory for the probe objects, ELF and serial log"}
+        }
+    }
+    on_run(function ()
+        import("core.base.option")
+        import("core.project.config")
+        import("core.project.project")
+        config.load()
+        local arch, spec = task_require_arch(config.get("arch"))
+        local probe = path.join(os.projectdir(), "scripts", "test_native_" .. arch .. ".py")
+        if not os.isfile(probe) then
+            print("no QEMU execution probe for %s (scripts/test_native_%s.py); nothing to run", arch, arch)
+            return
+        end
+        -- The probe takes the toolchain root (<root>/bin/<triple>-g++) and its QEMU.
+        local root = config.get("systoolchain_dir")
+        if root then
+            root = path.absolute(root)
+        else
+            local package = project.required_package("systoolchain")
+            assert(package, "the systoolchain package is not resolved")
+            root = path.absolute(package:installdir())
+        end
+        local qemu = config.get("qemu_binary") and path.absolute(config.get("qemu_binary")) or
+            path.join(root, "bin", spec.qemu)
+        assert(os.isfile(qemu), "SysToolchain is missing QEMU: %s", qemu)
+        local argv = {"-B", probe, "--toolchain", root, "--qemu", qemu}
+        if option.get("output") then
+            table.insert(argv, "--output")
+            table.insert(argv, path.absolute(option.get("output")))
+        end
+        os.execv("python3", argv, {envs = {PYTHONDONTWRITEBYTECODE = "1"}})
+    end)
+task_end()
+
 task("network-wire-test")
     set_menu {
         usage = "xmake network-wire-test --output=DIR [--sanitize] [--toolchain-root=DIR]",

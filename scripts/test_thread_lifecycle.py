@@ -11,7 +11,7 @@ import sys
 
 ARCHITECTURES = ('i386', 'x86_64', 'aarch64', 'arm32', 'rv64', 'rv32', 'loongarch64', 'mips', 'mips64', 'ppc')
 SOURCES = ('tests/host/thread_lifecycle_tests.cpp', 'src/sched/scheduler.cpp', 'src/sched/process.cpp',
-           'src/memory/memory.cpp', 'src/net/native_udp.cpp', 'src/fs/vfs.cpp', 'src/arch/arch.cpp')
+           'src/memory/memory.cpp', 'src/net/native_udp.cpp', 'src/fs/vfs.cpp', 'src/arch/arch.cpp', 'src/arch/terminal_power.cpp')
 
 
 def sha(path):

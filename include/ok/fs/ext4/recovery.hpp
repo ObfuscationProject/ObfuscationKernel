@@ -5054,7 +5054,7 @@ class Ext4ReclaimComposedHistory final
         if (!status) return reject(status);
         const auto &report = completion_.report();
         if (report.phase != Ext4CompletionPhase::preflight || !report.empty_log || report.write_attempts || report.flush_attempts ||
-            report.journal_sequence != storage_->rows_[row_count_ - 1].cleanup_sequence || report.checked_inodes > 128)
+            report.journal_sequence != storage_->rows_[row_count_ - 1].cleanup_sequence)
             return reject(Status::fault("composed full ordinary endpoint differs"));
         terminal_report_ = report; endpoint_ = seal_.endpoint = true;
         begin_phase(ReadPhase::terminal);

@@ -29,7 +29,7 @@ def main():
   sources=['tests/host/persistent_sync_tests.cpp','tests/host/ext4_realtime_model.cpp']
   for directory in DIRECTORIES:
    sources.extend(str(p.relative_to(root)) for p in sorted((root/'src'/directory).rglob('*.cpp')) if p.name not in ('entry.cpp','kernel_main.cpp','runtime.cpp') and p.parent.name != 'runtime')
-  sources.append('src/arch/arch.cpp')
+  sources.extend(('src/arch/arch.cpp', 'src/arch/terminal_power.cpp'))
   sys.path.insert(0,str(root.parent/'ObfuscationOS/tools/jbd2'))
   from admit_linux_fixture import inspect,header_for
   from transaction_fixture import clean_capture

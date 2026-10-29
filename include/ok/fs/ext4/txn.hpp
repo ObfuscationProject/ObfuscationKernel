@@ -359,7 +359,6 @@ class Ext4ReplayPreview final
         for (usize index = 0; index < info.metadata_count; ++index)
             domain_[domain_count_++] = info.metadata[index];
         std::array<u8, 4096> bitmap{};
-        usize inspected = 0;
         for (u32 group = 0; group < raw_view_.group_count_; ++group)
         {
             const auto &g = raw_view_.groups_[group];
@@ -373,7 +372,6 @@ class Ext4ReplayPreview final
                 const u32 number = group * raw_view_.inodes_per_group_ + local + 1;
                 if (number != 2 && number < raw_view_.first_inode_) continue;
                 if (!(bitmap[local / 8] & (1U << (local % 8)))) continue;
-                if (++inspected > 128) return Status::no_memory("ext4 directory replay inode scan budget");
                 std::array<u8, 256> inode{};
                 if (auto status = raw_view_.decode_inode(number, inode); !status) return status;
                 if ((ext4_checked::le16(inode, 0) & 0170000) != 0040000) continue;
@@ -593,7 +591,6 @@ class Ext4ReplayPreview final
     {
         auto &view = view_;
         u32 parent{};
-        usize inspected{};
         std::array<u8, 4096> bitmap{};
         for (u32 group = 0; group < view.group_count_; ++group)
         {
@@ -608,7 +605,6 @@ class Ext4ReplayPreview final
                 const u32 number = group * view.inodes_per_group_ + local + 1;
                 if (number != 2 && number < view.first_inode_) continue;
                 if (!(bitmap[local / 8] & (1U << (local % 8)))) continue;
-                if (++inspected > 128) return Status::no_memory("ext4 create replay inode scan budget");
                 std::array<u8, 256> inode{};
                 if (auto status = view.decode_inode(number, inode); !status) return status;
                 if ((ext4_checked::le16(inode, 0) & 0170000) != 0040000) continue;
@@ -1763,8 +1759,7 @@ class Ext4RecoveryCompletion final
                 const u32 number = group * view.inodes_per_group_ + local + 1;
                 if (number < view.first_inode_ || !(bitmap[local / 8] & (1U << (local % 8))))
                     continue;
-                if (++report_.checked_inodes > 128)
-                    return Status::no_memory("ext4 completion inode inspection budget");
+                ++report_.checked_inodes;
                 const auto inode = preview_.inode(number);
                 if (!inode)
                     return inode.status();

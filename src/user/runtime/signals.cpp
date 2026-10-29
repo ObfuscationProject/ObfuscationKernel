@@ -842,6 +842,19 @@ namespace
 bool private_signal_wait_rearm_delivery(Kernel &kernel, sched::ProcessControlBlock &process,
                                         sched::ThreadControlBlock &thread);
 } // namespace
+#if defined(OK_PRIVATE_MIPS64_N64_SIGNAL) || defined(OK_PRIVATE_MIPS_O32_SIGNAL)
+namespace
+{
+// A handler is due but its resume state cannot be verified. Like Linux
+// force_sigsegv for an unusable frame, only the process terminates.
+bool private_signal_unusable_frame(Kernel &kernel, sched::ProcessControlBlock &process)
+{
+    emit("OK_NATIVE_SIGNAL_FRAME_REFUSED pid="); emit_number(process.pid()); emit(" signal=11\n");
+    finish(kernel, process.pid(), 0, 11);
+    return false;
+}
+} // namespace
+#endif
 bool private_signal_deliver(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread)
 {
     if (process.resources().personality != Personality::linux) return true;
@@ -888,8 +901,7 @@ bool private_signal_deliver(Kernel &kernel, sched::ProcessControlBlock &process,
         const auto gate = mips64_n64_handler_gate(queue, *actions, thread.native_signal_mask,
                                                 *readiness, identity, thread.native_frame, capability);
         if (gate == Mips64N64HandlerGate::defer_handler) return !signal_waits.saved(thread);
-        if (gate != Mips64N64HandlerGate::proceed)
-        { runtime_failure = Status::fault("private n64 handler resume unverified"); started = false; return false; }
+        if (gate != Mips64N64HandlerGate::proceed) return private_signal_unusable_frame(kernel, process);
         const auto cpu_context = readiness->context(identity, thread.native_frame, capability);
 #elif defined(OK_PRIVATE_MIPS_O32_SIGNAL)
         auto *readiness = private_mips_state(thread);
@@ -900,8 +912,7 @@ bool private_signal_deliver(Kernel &kernel, sched::ProcessControlBlock &process,
         const auto gate = mips_o32_handler_gate(queue, *actions, thread.native_signal_mask,
                                                *readiness, identity, capability);
         if (gate == MipsO32HandlerGate::defer_handler) return !signal_waits.saved(thread);
-        if (gate != MipsO32HandlerGate::proceed)
-        { runtime_failure = Status::fault("private MIPS handler resume unverified"); started = false; return false; }
+        if (gate != MipsO32HandlerGate::proceed) return private_signal_unusable_frame(kernel, process);
         const auto cpu_context = readiness->context(identity, capability);
 #else
         constexpr u32 cpu_context = 0xffbf;

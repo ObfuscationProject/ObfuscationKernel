@@ -224,10 +224,85 @@ Status Ext4Node::chown(u32 uid, u32 gid)
     if (!fs_) return Status::not_found("ext4 node has no owner");
     return fs_->operation(this, [&] { return chown_active(uid, gid); });
 }
+Result<FilesystemStatistics> Ext4Node::filesystem_statistics() const
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return fs_->statistics(); });
+}
+// From the superblock counters, which every allocation keeps current. Names
+// are bounded by the VFS path component, not ext4's 255 bytes.
+Result<FilesystemStatistics> Ext4FileSystem::statistics() const
+{
+    Block super{};
+    if (auto status = read_block(1024 / block_size_, super); !status.ok())
+        return status;
+    const auto *s = super.data() + 1024 % block_size_;
+    const u64 reserved = r32(s + 8), free = r32(s + 12);
+    return FilesystemStatistics{.type = 0xef53, .block_size = block_size_, .blocks = r32(s + 4),
+                                .free_blocks = free, .available_blocks = free > reserved ? free - reserved : 0,
+                                .files = r32(s), .free_files = r32(s + 16), .name_max = max_path_segment - 1,
+                                .read_only = !writable_};
+}
+Status Ext4Node::set_times(TimestampChange access, TimestampChange modification)
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return set_times_active(access, modification); });
+}
+// Requires maintained timestamps: "now" and the change time come from the
+// same realtime event as every other maintained update.
+Status Ext4Node::set_times_active(TimestampChange access, TimestampChange modification)
+{
+    if (!fs_ || !ino_)
+        return Status::not_found("ext4 node was removed");
+    if (!fs_->maintained())
+        return Status::unsupported("ext4 timestamps are not maintained on this mount");
+    auto data = fs_->inode(ino_);
+    if (!data)
+        return data.status();
+    if (auto status = fs_->writable(data.value()); !status)
+        return status;
+    using K = TimestampChange::Kind;
+    auto fields = Ext4TimestampFields::change;
+    if (access.kind == K::now) fields = fields | Ext4TimestampFields::access;
+    if (modification.kind == K::now) fields = fields | Ext4TimestampFields::modification;
+    Ext4FileSystem::TimestampEvent event;
+    const Ext4FileSystem::TimestampTarget target{&data.value(), fields};
+    if (auto status = fs_->prepare_event(event, {&target, 1}); !status)
+        return status;
+    const auto record = std::span<std::byte>{data.value()}.first(fs_->inode_size_);
+    if (access.kind == K::value)
+        if (auto status = encode_ext4_times(record, Ext4TimestampFields::access, access.seconds, access.nanoseconds);
+            !status)
+            return status;
+    if (modification.kind == K::value)
+        if (auto status = encode_ext4_times(record, Ext4TimestampFields::modification, modification.seconds,
+                                            modification.nanoseconds); !status)
+            return status;
+    Ext4FileSystem::NamespaceMutation mutation(*fs_, true);
+    if (auto status = fs_->save_inode(ino_, data.value()); !status)
+        return status;
+    mutation.committed = true;
+    return Status::success();
+}
+// As on Linux since 2.2.13, an ownership change clears set-user-ID, and
+// set-group-ID on a group-executable file, for root as well.
+ModeChangeResult Ext4Node::change_owner(u32 uid, u32 gid, user::Credentials caller)
+{
+    if (!fs_) return ModeChangeResult::failure(Status::not_found("ext4 node has no owner"));
+    if (caller.euid != user::root_uid)
+        return ModeChangeResult::failure(Status::permission("ext4 ownership change requires root"));
+    return ModeChangeResult::failure(fs_->operation(this, [&] { return chown_active(uid, gid, true); }));
+}
 Result<DirectoryListing> Ext4Node::list(DirectoryReadIntent intent) const
 {
     if (!fs_) return Status::not_found("ext4 node has no owner");
     return fs_->operation(this, [&] { return list_active(intent); });
+}
+
+Result<DirectoryListing> Ext4Node::list_from(usize start, DirectoryReadIntent intent) const
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&] { return list_active(intent, start, true); });
 }
 
 Status Ext4FileSystem::mount(driver::BlockDevice &device, bool writable)
@@ -1210,6 +1285,22 @@ Status Ext4FileSystem::destroy(u32 ino)
     mutation.committed = true;
     return Status::success();
 }
+// Identity lock held. Returns the slot of a linked identity nothing can reach
+// (no references, never handed out raw, not the root) to the vacant state.
+Ext4Node *Ext4FileSystem::evict_locked()
+{
+    for (usize index = 1; index < nodes_.size(); ++index)
+    {
+        auto &node = nodes_[index];
+        if (node.phase_ != Ext4Node::Phase::linked || node.references_ || node.borrowed_identity_exposed_)
+            continue;
+        node.ino_ = 0;
+        node.name_ = {};
+        node.phase_ = Ext4Node::Phase::vacant;
+        return &node;
+    }
+    return nullptr;
+}
 Ext4Node *Ext4FileSystem::node(u32 ino, std::string_view name)
 {
     smp::ScopedSpinLock guard(identity_lock_);
@@ -1221,17 +1312,17 @@ Ext4Node *Ext4FileSystem::node(u32 ino, std::string_view name)
     for (auto &node : nodes_)
         if (node.ino_ == ino && node.phase_ == Ext4Node::Phase::linked)
             return &node;
+    Ext4Node *slot{};
     for (auto &node : nodes_)
         if (node.phase_ == Ext4Node::Phase::vacant && !node.borrowed_identity_exposed_ && !node.references_)
-        {
-            if (!node.name_.assign(name).ok())
-                return nullptr;
-            node.ino_ = ino;
-            node.references_ = 0;
-            node.phase_ = Ext4Node::Phase::linked;
-            return &node;
-        }
-    return nullptr;
+        { slot = &node; break; }
+    if (!slot) slot = evict_locked();
+    if (!slot || !slot->name_.assign(name).ok())
+        return nullptr;
+    slot->ino_ = ino;
+    slot->references_ = 0;
+    slot->phase_ = Ext4Node::Phase::linked;
+    return slot;
 }
 Metadata Ext4FileSystem::metadata(const Inode &node) const
 {
@@ -1536,6 +1627,7 @@ Result<Node *> Ext4Node::create_active(std::string_view name, const InitialNodeA
         for (auto &candidate : fs_->nodes_)
             if (candidate.phase_ == Phase::vacant && !candidate.borrowed_identity_exposed_ && !candidate.references_)
             { result = &candidate; break; }
+        if (!result) result = fs_->evict_locked();
         if (!result) return Status::no_memory("ext4 node cache capacity exceeded");
         if (auto status = result->name_.assign(name); !status) return status;
     }
@@ -2324,7 +2416,7 @@ ModeChangeResult Ext4Node::change_mode_active(u32 mode, user::Credentials caller
     return status.code() == StatusCode::unsupported ? ModeChangeResult::unavailable()
                                                     : ModeChangeResult::failure(status);
 }
-Status Ext4Node::chown_active(u32 uid, u32 gid)
+Status Ext4Node::chown_active(u32 uid, u32 gid, bool clear_set_id)
 {
     if (!fs_ || !ino_)
         return Status::not_found("ext4 node was removed");
@@ -2343,12 +2435,18 @@ Status Ext4Node::chown_active(u32 uid, u32 gid)
     w16(data.value().data() + 24, static_cast<u16>(gid));
     w16(data.value().data() + 120, static_cast<u16>(uid >> 16));
     w16(data.value().data() + 122, static_cast<u16>(gid >> 16));
+    if (const u16 mode = r16(data.value().data()); clear_set_id && (mode & mode_type_mask) == mode_regular)
+    {
+        u16 cleared = static_cast<u16>(mode & ~04000u);
+        if (mode & 010u) cleared = static_cast<u16>(cleared & ~02000u);
+        w16(data.value().data(), cleared);
+    }
     if (auto status = fs_->save_inode(ino_, data.value()); !status)
         return status;
     mutation.committed = true;
     return Status::success();
 }
-Result<DirectoryListing> Ext4Node::list_active(DirectoryReadIntent intent) const
+Result<DirectoryListing> Ext4Node::list_active(DirectoryReadIntent intent, usize start, bool paged) const
 {
     if (!fs_ || !ino_)
         return Status::not_found("ext4 node was removed");
@@ -2380,10 +2478,15 @@ Result<DirectoryListing> Ext4Node::list_active(DirectoryReadIntent intent) const
                 return fs_->io_status(corrupt());
             const auto number = r32(entry);
             const std::string_view name(reinterpret_cast<const char *>(entry + 8), namelen);
-            if (number && name != "." && name != "..")
+            if (number && name != "." && name != ".." && start)
+                --start;
+            else if (number && name != "." && name != "..")
             {
                 if (out.count == out.entries.size())
+                {
+                    if (paged) return out;
                     return Status::overflow("directory listing capacity exceeded");
+                }
                 auto child_inode = fs_->inode(number);
                 if (!child_inode)
                     return child_inode.status();

@@ -74,15 +74,15 @@ int main()
         CHECK(lease.publish_sigreturn(id,frame,backend.capability()));
         CHECK(lease.ready(id)); CHECK(!lease.publish_sigreturn(id,frame,backend.capability()));
         CHECK(lease.begin_entry(id,backend.capability())); backend.invalidate();
-        const auto saved=frame; backend.publish(frame,cpu::CaptureKind::timer_bd);
+        const auto saved=frame; backend.publish(frame,cpu::CaptureKind::interrupted_bd);
         CHECK(lease.capture(id,frame,backend.query(frame))); CHECK(!lease.ready(id));
-        CHECK(lease.state()==R::State::timer_bd); CHECK(same(frame,saved));
+        CHECK(lease.state()==R::State::interrupted_bd); CHECK(same(frame,saved));
         CHECK(!lease.publish_handler(id,frame,backend.capability()));
         child.reset(child_id,backend.capability()); CHECK(!child.inherit_syscall(child_id,lease,id,frame,backend.capability()));
         CHECK(lease.begin_entry(id,backend.capability())); backend.invalidate();
         CHECK(!lease.capture(id,frame,syscall)); CHECK(!lease.ready(id));
         CHECK(lease.begin_entry(id,backend.capability())); backend.invalidate();
-        backend.publish(frame,cpu::CaptureKind::timer_non_bd);
+        backend.publish(frame,cpu::CaptureKind::interrupted_non_bd);
         CHECK(lease.capture(id,frame,backend.query(frame))); CHECK(lease.ready(id));
         CHECK(lease.publish_handler(id,frame,backend.capability()));
         auto reused=id; ++reused.generation;
@@ -92,7 +92,16 @@ int main()
         lease.reset(id,backend.capability()); CHECK(lease.publish_initial(id,frame,backend.capability()));
     }
     CHECK(lease.begin_entry(id,backend.capability())); backend.invalidate();
-    backend.publish(frame,cpu::CaptureKind::timer_bd); CHECK(lease.capture(id,frame,backend.query(frame)));
+    backend.publish(frame,cpu::CaptureKind::interrupted_bd); CHECK(lease.capture(id,frame,backend.query(frame)));
+    // An unverified backend observation (an unresolvable trap) does not promote readiness.
+    {
+        R other; R::Identity other_id{0x2000,0,3,3,1}; other.reset(other_id,backend.capability());
+        CHECK(other.publish_initial(other_id,frame,backend.capability()));
+        CHECK(other.begin_entry(other_id,backend.capability())); backend.invalidate();
+        backend.publish(frame,cpu::CaptureKind::unverified); CHECK(!backend.query(frame).matches(frame));
+        CHECK(!other.capture(other_id,frame,backend.query(frame))); CHECK(!other.ready(other_id));
+        CHECK(other.state()==R::State::unverified);
+    }
     Q queue; CHECK(queue.reset({1,1,1})); CHECK(queue.enqueue({16,-6,1,1})==Q::Enqueue::queued);
     sched::SignalActionTable actions; auto *action=actions.find(16); CHECK(action);
     action->handler=0x40001000; action->flags=0x88000008; action->mask.set(17);
@@ -108,7 +117,16 @@ int main()
     CHECK(n::mips_o32_handler_gate(queue,actions,mask,lease,id,backend.capability())==n::MipsO32HandlerGate::proceed);
     action->handler=sched::SignalAction::default_handler;
     CHECK(n::mips_o32_handler_gate(queue,actions,mask,lease,id,backend.capability())==n::MipsO32HandlerGate::proceed);
-    action->handler=0x40001000; action->flags=0;
+    action->handler=0x40001000;
+    // Without a capture the gate refuses; the runtime then terminates only this process.
+    lease.revoke(id);
+    CHECK(n::mips_o32_handler_gate(queue,actions,mask,lease,id,backend.capability())==n::MipsO32HandlerGate::unverified);
+    CHECK(queue.peek(mask,after)&&after==ticket);
+    // A resolved fault outside a delay slot (the backend publishes it as interrupted_non_bd) proceeds.
+    CHECK(lease.begin_entry(id,backend.capability())); backend.invalidate();
+    backend.publish(frame,cpu::CaptureKind::interrupted_non_bd); CHECK(lease.capture(id,frame,backend.query(frame)));
+    CHECK(n::mips_o32_handler_gate(queue,actions,mask,lease,id,backend.capability())==n::MipsO32HandlerGate::proceed);
+    action->flags=0;
     CHECK(lease.begin_entry(id,backend.capability())); backend.invalidate();
     backend.publish(frame,cpu::CaptureKind::syscall_normalized); CHECK(lease.capture(id,frame,backend.query(frame)));
     CHECK(n::mips_o32_handler_gate(queue,actions,mask,lease,id,backend.capability())==n::MipsO32HandlerGate::proceed);
