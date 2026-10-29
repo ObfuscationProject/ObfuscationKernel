@@ -260,9 +260,10 @@ int main(int argc, char **argv)
         group_crc(bytes, 0, desc);
         w32(bytes, 1040, r32(bytes, 1040) - 116); super_crc(bytes);
         Opened opened(bytes);
+        // The candidate scan is bounded by the filesystem's inodes, not by 128;
+        // the global proof keeps the bound its zero-truncate reservation assumes.
         const auto proof = opened.view.prove_next_data_blocks(13, candidate, false);
-        check(!proof && proof.status().code() == StatusCode::no_memory && opened.view.valid(),
-              "reserved-inclusive next-data scan budget");
+        check(proof && opened.view.valid(), "next-data scan admits more than 128 allocated inodes");
         const auto global = opened.view.prove_global_data_ownership();
         check(!global && global.code() == StatusCode::no_memory && !opened.view.valid(),
               "reserved-inclusive final ownership scan budget");

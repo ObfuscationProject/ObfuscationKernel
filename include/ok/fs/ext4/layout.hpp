@@ -348,6 +348,7 @@ class Ext4FileSystem final
     Status zero_tail(const Inode &inode);
     Status resize(u32 ino, Inode &inode, usize size);
     Status destroy(u32 ino);
+    Ext4Node *evict_locked();
     Ext4Node *node(u32 ino, std::string_view name);
     Metadata metadata(const Inode &inode) const;
     Status writable(const Inode &inode) const;
@@ -779,7 +780,6 @@ class Ext4ReadOnlyView final
         const u32 candidate_local = (candidate - first_data_) % blocks_per_group_;
         if (bool(bitmap[candidate_local / 8] & (1U << (candidate_local % 8))) != candidate_allocated)
             return failure(Status::io_error("ext4 next-data candidate allocation bit"));
-        usize inspected = 0;
         bool journal_seen = false, target_seen = false;
         for (u32 group = 0; group < group_count_; ++group)
         {
@@ -792,7 +792,6 @@ class Ext4ReadOnlyView final
             for (u32 local = 0; local < inodes_per_group_; ++local)
             {
                 if (!(bitmap[local / 8] & (1U << (local % 8)))) continue;
-                if (++inspected > 128) return Status::no_memory("ext4 next-data ownership scan budget");
                 const u32 other_number = group * inodes_per_group_ + local + 1;
                 const u32 offset = local * 256;
                 if (auto status = block(g.table + offset / layout_.block_size, table); !status) return status;
@@ -873,6 +872,7 @@ class Ext4ReadOnlyView final
         ownership_range_count_ = 0;
         auto &scratch = workspace.block;
         auto &inode_bitmap = workspace.inode_bitmap;
+        // The zero-truncate read reservations (A=1420+531G) assume this bound.
         usize inspected = 0;
         bool journal_seen = false;
         for (u32 group = 0; group < group_count_; ++group)
@@ -1038,7 +1038,6 @@ class Ext4ReadOnlyView final
         const u32 local_block = (physical - first_data_) % blocks_per_group_;
         if (bool(bitmap[local_block / 8] & (1U << (local_block % 8))) != bool(exclusive_inode))
             return failure(Status::io_error("ext4 first-data candidate allocation bit"));
-        usize inspected = 0;
         bool journal_seen = false, target_seen = !exclusive_inode;
         for (u32 group = 0; group < group_count_; ++group)
         {
@@ -1052,7 +1051,6 @@ class Ext4ReadOnlyView final
             for (u32 local = 0; local < inodes_per_group_; ++local)
             {
                 if (!(bitmap[local / 8] & (1U << (local % 8)))) continue;
-                if (++inspected > 128) return Status::no_memory("ext4 first-data ownership scan budget");
                 const u32 number = group * inodes_per_group_ + local + 1;
                 const u32 offset = local * 256;
                 if (auto status = block(g.table + offset / layout_.block_size, table); !status) return status;
@@ -1106,7 +1104,6 @@ class Ext4ReadOnlyView final
     [[nodiscard]] Result<u32> unique_physical_block(u32 number, u32 physical)
     {
         std::array<u8, 4096> bitmap{};
-        usize inspected = 0;
         for (u32 group = 0; group < group_count_; ++group)
         {
             const auto &g = groups_[group];
@@ -1120,7 +1117,6 @@ class Ext4ReadOnlyView final
                 const u32 candidate = group * inodes_per_group_ + local + 1;
                 if (candidate != 2 && candidate < first_inode_) continue;
                 if (!(bitmap[local / 8] & (1U << (local % 8)))) continue;
-                if (++inspected > 128) return Status::no_memory("ext4 ordered-data ownership scan budget");
                 if (candidate == number) continue;
                 std::array<u8, 256> other{};
                 if (auto status = decode_inode(candidate, other); !status) return failure(status);
