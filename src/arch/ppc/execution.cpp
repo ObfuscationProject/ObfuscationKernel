@@ -1,5 +1,6 @@
 
 #include "ok/user/native_signal_config.hpp"
+#include "ok/interrupt/platform.hpp"
 #include "ok/arch/execution_spaces.hpp"
 #include <cstddef>
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__powerpc__) || defined(__PPC__)) && __SIZEOF_POINTER__ == 4 && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
@@ -376,9 +377,16 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     executing = false;
     trap.kind = trap.vector == 8    ? TrapKind::syscall
                 : trap.vector == 10 ? TrapKind::timer
+                : trap.vector == 4  ? TrapKind::interrupt
                 : (trap.vector == 2 || trap.vector == 3 || trap.vector == 13 || trap.vector == 14)
                     ? TrapKind::page_fault
                     : TrapKind::exception;
+    // An external input (IVOR4) is claimed from the MPIC once the interrupt
+    // service owns it; MSR[EE] in user mode lets only bound sources through.
+    if (trap.kind == TrapKind::timer)
+        ok_interrupt_tick();
+    else if (trap.kind == TrapKind::interrupt)
+        interrupt::claim_platform_irq();
 #ifdef OK_PPC32_PRIVATE_BACKEND
     ppc32_private::detail::BackendAccess::raw=trap;
 #endif

@@ -16,6 +16,10 @@
 #include "pic8259.hpp"
 #define OK_PLATFORM_IRQ_WAIT 1
 extern "C" void ok_mips_idle(ok::u32 interrupt_mask);
+#elif defined(OK_KERNEL_FREESTANDING) && (defined(__powerpc__) || defined(__PPC__))
+#include "../arch/ppc/mpic.hpp"
+#define OK_PLATFORM_IRQ_WAIT 1
+extern "C" void ok_ppc_idle(ok::u32 msr);
 #endif
 
 namespace ok::interrupt
@@ -52,6 +56,8 @@ struct MaltaPortIo
     }
 };
 using PlatformIrqChip = Pic8259<MaltaPortIo, false>;
+#elif defined(OK_PLATFORM_IRQ_WAIT) && (defined(__powerpc__) || defined(__PPC__))
+using PlatformIrqChip = arch::ppc::Mpic;
 #else
 using PlatformIrqChip = ModelIrqChip;
 #endif
@@ -215,6 +221,27 @@ void halt_until_interrupt()
     }
     else if (cause & 0x8000)
         ok_interrupt_tick();
+#elif defined(OK_PLATFORM_IRQ_WAIT) && (defined(__powerpc__) || defined(__PPC__))
+    // e500 dozes on MSR[WE] with HID0[DOZE]; QEMU's BookE model wakes only for
+    // an interrupt MSR[EE] admits, so ok_ppc_idle sets EE for the window and the
+    // vector returns past it with EE clear. The wait then claims from the MPIC.
+    // A one-shot decrementer (400 MHz timebase, 10 ms) is the tick.
+    u32 msr, hid0, tcr;
+    asm volatile("mfmsr %0" : "=r"(msr));
+    asm volatile("mfspr %0, 1008" : "=r"(hid0));
+    asm volatile("mfspr %0, 340" : "=r"(tcr));
+    const u32 doze = hid0 | 0x00800000u, dec = 4000000, die = 0x04000000, dis = 0x08000000;
+    asm volatile("mtspr 1008, %0\n\tisync" : : "r"(doze) : "memory");
+    asm volatile("mtspr 336, %0" : : "r"(dis) : "memory");
+    asm volatile("mtspr 22, %0\n\tmtspr 340, %1\n\tisync" : : "r"(dec), "r"(die) : "memory");
+    ok_ppc_idle(msr | 0x8000u | 0x00040000u);
+    u32 tsr;
+    asm volatile("mfspr %0, 336" : "=r"(tsr));
+    asm volatile("mtspr 340, %0\n\tmtspr 336, %1\n\tmtspr 1008, %2\n\tisync" : : "r"(tcr), "r"(dis), "r"(hid0) : "memory");
+    if (const u32 vector = PlatformIrqChip::claim(); vector < 256)
+        ok_interrupt_top_half(static_cast<IrqLine>(vector));
+    else if (tsr & dis)
+        ok_interrupt_tick();
 #endif
 }
 
@@ -279,6 +306,11 @@ void claim_platform_irq()
         return;
     if (const u32 line = PlatformIrqChip::poll(); line < 16)
         ok_interrupt_top_half(static_cast<IrqLine>(line));
+#elif defined(OK_PLATFORM_IRQ_WAIT) && (defined(__powerpc__) || defined(__PPC__))
+    if (!started)
+        return;
+    if (const u32 vector = PlatformIrqChip::claim(); vector < 256)
+        ok_interrupt_top_half(static_cast<IrqLine>(vector));
 #endif
 }
 
