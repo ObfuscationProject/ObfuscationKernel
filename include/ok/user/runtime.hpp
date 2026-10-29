@@ -11,6 +11,9 @@ namespace ok::user::native
 Status prepare_memory();
 Status start(Kernel &kernel, fs::BootArchive archive);
 bool step(Kernel &kernel);
+// True when the last step found no thread to run: the kernel loop may idle
+// until an interrupt (a tick, a device line) instead of stepping again.
+bool idle();
 Status runtime_status();
 // Serialized native-owner proof. Historical generation counters are not owners.
 struct NativeShutdownReport

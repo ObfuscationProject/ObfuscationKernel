@@ -1,4 +1,5 @@
 #include "ok/arch/execution_spaces.hpp"
+#include "ok/interrupt/platform.hpp"
 
 #include <cstddef>
 
@@ -146,6 +147,19 @@ void acknowledge_irq(uptr vector)
         outb(0xa0, 0x20);
     if (vector >= 32 && vector < 48)
         outb(0x20, 0x20);
+}
+// Vector 32 is the PIT tick; 33..47 are platform lines whose top half the
+// interrupt service runs once it has started. Before that, only acknowledge.
+void complete_irq(uptr vector)
+{
+    if (vector < 32 || vector >= 48)
+        return;
+    if (vector == 32)
+        ok_interrupt_tick();
+    if (vector == 32 || !interrupt::platform_irqs_started())
+        acknowledge_irq(vector);
+    else
+        ok_interrupt_top_half(static_cast<interrupt::IrqLine>(vector - 32));
 }
 void install_gate(usize vector, uptr entry, u8 ist = 0)
 {
@@ -523,15 +537,22 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     ok_x86_execution_kernel_fs = read_msr(0xc0000100);
     ok_x86_execution_kernel_gs = read_msr(0xc0000101);
     executing = true;
-    outb(0x21, 0xfe);
-    outb(0xa1, 0xff);
+    const bool routed = interrupt::platform_irqs_started();
+    if (!routed)
+    {
+        outb(0x21, 0xfe);
+        outb(0xa1, 0xff);
+    }
     write_msr(0xc0000100, frame.fs_base);
     write_msr(0xc0000101, frame.gs_base);
     write_cr3(space.root);
     ok_x86_execution_enter(&frame);
     write_cr3(old_root);
-    outb(0x21, old_master);
-    outb(0xa1, old_slave);
+    if (!routed)
+    {
+        outb(0x21, old_master);
+        outb(0xa1, old_slave);
+    }
     executing = false;
     ok_x86_execution_active_frame = nullptr;
     tss.rsp[0] = old_stack_top;
@@ -572,16 +593,17 @@ extern "C" void ok_x86_execution_trap(const SavedTrap *saved)
     last_trap = {saved->vector == 256  ? TrapKind::syscall
                  : saved->vector == 32 ? TrapKind::timer
                  : saved->vector == 14 ? TrapKind::page_fault
+                 : saved->vector > 32 && saved->vector < 48 ? TrapKind::interrupt
                                        : TrapKind::exception,
                  static_cast<u32>(saved->vector), saved->error, fault_address, reinterpret_cast<uptr>(saved)};
-    acknowledge_irq(saved->vector);
+    complete_irq(saved->vector);
 }
 
 extern "C" void ok_x86_execution_kernel_trap(const SavedTrap *saved)
 {
     if (saved->vector >= 32 && saved->vector < 48)
     {
-        acknowledge_irq(saved->vector);
+        complete_irq(saved->vector);
         return;
     }
     console("OK_NATIVE_KERNEL_FAULT vector=");

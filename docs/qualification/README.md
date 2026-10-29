@@ -86,6 +86,7 @@ live in the separate ObfuscationEvidence repository.
 | [OBJECT_POOL.md](OBJECT_POOL.md) | Bounded physical-page-backed object pool |
 | [PENDING_SIGNALS.md](PENDING_SIGNALS.md) | Internal pending signal queue |
 | [PLATFORM_CLOCKS.md](PLATFORM_CLOCKS.md) | Native platform clocks |
+| [PLATFORM_INTERRUPTS.md](PLATFORM_INTERRUPTS.md) | Platform interrupt lines, the top/bottom-half router and the idle wait (WT1.2) |
 | [PRIVATE_FUTEX.md](PRIVATE_FUTEX.md) | Private futex implementation contract |
 | [PRIVATE_FUTEX_PEER_FIXTURE.md](PRIVATE_FUTEX_PEER_FIXTURE.md) | Actual private futex peer execution fixture |
 | [PROCESS_MEMORY_QUOTAS.md](PROCESS_MEMORY_QUOTAS.md) | Per-process memory quotas |

@@ -11,7 +11,8 @@ namespace
 {
 SharedNativeCapture<lu::configured_native_profile()> shared_capture{entry_stacks};
 } // namespace
-u64 entry_syscalls{}, entry_timers{}, entry_faults{}, entry_rejections{};
+u64 entry_syscalls{}, entry_timers{}, entry_interrupts{}, entry_faults{}, entry_rejections{};
+bool runtime_idle{false};
 namespace
 {
 sched::ProcessId last_pid{};
@@ -908,8 +909,14 @@ Status start(Kernel &kernel, fs::BootArchive archive)
     emit("OK_NATIVE scope=hardware init=loaded\n");
     return Status::success();
 }
+bool idle()
+{
+    return runtime_idle;
+}
+
 bool step(Kernel &kernel)
 {
+    runtime_idle = false;
     if (shutdown_admission_closed || native_shutdown_pending()) return false;
     if (runtime_step_active)
     { runtime_failure = Status::busy("native step is not reentrant"); started = false; return false; }
@@ -1075,7 +1082,10 @@ bool step(Kernel &kernel)
     if (!chosen.pid)
         chosen = first;
     if (!chosen.pid)
+    {
+        runtime_idle = true;
         return waiting_deadline;
+    }
     last_pid = chosen.pid;
     last_tid = chosen.tid;
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
@@ -1183,7 +1193,8 @@ bool step(Kernel &kernel)
         const auto capture = trap ? trap.value().kernel_stack_pointer : 0;
         const bool captured = capture != 0 && view.contains(capture);
         const bool needs_capture = trap && (trap.value().kind == hw::TrapKind::syscall ||
-                                           trap.value().kind == hw::TrapKind::timer);
+                                           trap.value().kind == hw::TrapKind::timer ||
+                                           trap.value().kind == hw::TrapKind::interrupt);
         const bool bad_capture = (capture && !captured) || (needs_capture && !captured);
 #ifdef OK_PRIVATE_MIPS64_N64_SIGNAL
         // The observation expires with view deactivation. Consume it first.
@@ -1244,6 +1255,7 @@ bool step(Kernel &kernel)
         {
             if (trap.value().kind == hw::TrapKind::syscall) ++entry_syscalls;
             else if (trap.value().kind == hw::TrapKind::timer) ++entry_timers;
+            else if (trap.value().kind == hw::TrapKind::interrupt) ++entry_interrupts;
             else ++entry_faults;
         }
         else ++entry_rejections;
@@ -1260,6 +1272,15 @@ bool step(Kernel &kernel)
 #endif
             linux_udp_delay_slot = linux_udp_delay_slot_excluded<lu::configured_native_profile()>(trap.value());
             thread.syscall_pending = true;
+        }
+        else if (trap.value().kind == hw::TrapKind::interrupt)
+        {
+            static bool reported = false;
+            if (!reported)
+            {
+                emit("OK_NATIVE scope=hardware interrupt=preempted\n");
+                reported = true;
+            }
         }
         else if (trap.value().kind == hw::TrapKind::timer)
         {

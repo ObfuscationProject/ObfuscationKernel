@@ -72,7 +72,8 @@ class BackendCapture final : private NonCopyable
         if (!trap) return trap.status();
         const auto stack = trap.value().kernel_stack_pointer;
         const bool required = trap.value().kind == arch::execution::TrapKind::syscall ||
-                              trap.value().kind == arch::execution::TrapKind::timer;
+                              trap.value().kind == arch::execution::TrapKind::timer ||
+                              trap.value().kind == arch::execution::TrapKind::interrupt;
         if ((stack && !view.contains(stack)) || (required && !stack))
             return Status::denied("shared backend capture lacks its privileged stack");
         return Observation(*this, lease, entry.sequence, entry.epoch, thread.owner, thread.tid,

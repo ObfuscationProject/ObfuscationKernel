@@ -137,6 +137,9 @@ enum class TrapKind : u8
     timer,
     page_fault,
     exception,
+    // A device interrupt preempted user code; its top half already ran. The
+    // thread resumes like a timer preemption but is not charged a CPU tick.
+    interrupt,
 };
 
 struct Trap

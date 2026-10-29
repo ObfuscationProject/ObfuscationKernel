@@ -1,6 +1,7 @@
 // Native runtime service state, diagnostics, thread retirement, result encoding,
 // process completion and shutdown. The units are mapped in src/user/README.md.
 #include "runtime/private.hpp"
+#include "ok/interrupt/platform.hpp"
 
 namespace ok::user::native
 {
@@ -184,6 +185,18 @@ void emit_entry_stack_stats()
     emit(" faults="); emit_number(entry_faults);
     emit(" rejected="); emit_number(entry_rejections);
     emit(" guards=mapped-canaries smp=0\n");
+    // After the stack report: how the kernel loop idled and what the platform
+    // interrupt lines delivered, once the interrupt service runs.
+    if (!interrupt::platform_irqs_started()) return;
+    const auto irqs = interrupt::platform_irq_statistics();
+    emit("OK_IRQ_PLATFORM scope=hardware waits="); emit_number(irqs.waits);
+    emit(" ticks="); emit_number(irqs.ticks);
+    emit(" delivered="); emit_number(irqs.delivered);
+    emit(" serviced="); emit_number(irqs.serviced);
+    emit(" user_interrupts="); emit_number(entry_interrupts);
+    emit(" spurious="); emit_number(irqs.spurious);
+    emit(" controller_errors="); emit_number(irqs.controller_errors);
+    emit("\n");
 }
 namespace
 {

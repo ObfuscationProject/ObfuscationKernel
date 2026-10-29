@@ -64,6 +64,7 @@ Result<SystemPowerAction> ok_advance_native_shutdown(const NativeShutdownBoundar
 bool ok_step_userland();
 Status ok_poll_network();
 Status ok_userland_status();
+bool ok_userland_idle();
 void ok_userland_input(char value);
 SystemPowerAction ok_system_power_action();
 bool ok_debug_shell_gui_ready();

@@ -1,3 +1,4 @@
+#include "ok/interrupt/platform.hpp"
 #include "ok/core/types.hpp"
 #include "ok/core/entry.hpp"
 #include "ok/driver/qemu_virt/ramfb.hpp"
@@ -524,9 +525,45 @@ extern "C" void ok_platform_reboot()
     outb(keyboard_status_port, 0xfe);
 }
 
-extern "C" int ok_platform_console_poll()
+namespace
+{
+// COM1 receive bytes the IRQ 4 bottom half moved out of the UART. The ring is
+// filled and drained with interrupts disabled on the boot CPU; a full ring
+// leaves the rest in the UART FIFO for the next drain or poll.
+constinit ok::u8 com1_ring[256]{};
+constinit ok::usize com1_head{0}, com1_tail{0};
+
+int read_com1()
 {
     return (inb(com1 + 5) & 1u) != 0 ? static_cast<int>(inb(com1)) : -1;
+}
+
+void com1_interrupt(void *, ok::interrupt::IrqLine)
+{
+    while (com1_head - com1_tail < sizeof(com1_ring))
+    {
+        const int value = read_com1();
+        if (value < 0)
+            return;
+        com1_ring[com1_head++ % sizeof(com1_ring)] = static_cast<ok::u8>(value);
+    }
+}
+} // namespace
+
+extern "C" ok::Status ok_platform_bind_irqs()
+{
+    if (auto status = ok::interrupt::bind_platform_irq(4, ok::interrupt::IrqTrigger::edge, com1_interrupt, nullptr);
+        !status.ok())
+        return status;
+    outb(com1 + 1, 0x01); // Received-data-available interrupt; MCR OUT2 already routes it.
+    return ok::Status::success();
+}
+
+extern "C" int ok_platform_console_poll()
+{
+    if (com1_tail != com1_head)
+        return com1_ring[com1_tail++ % sizeof(com1_ring)];
+    return read_com1();
 }
 
 extern "C" int ok_platform_input_poll()

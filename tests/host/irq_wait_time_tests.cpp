@@ -17,34 +17,53 @@ using namespace ok;
         }                                                                                                  \
     } while (false)
 
-static int handled_calls = 0;
-static Status count_handler(void *, arch::TrapFrame &)
+struct Serviced
 {
-    ++handled_calls;
-    return Status::success();
+    int calls{0};
+    interrupt::IrqLine last{0};
+    interrupt::ModelIrqChip *chip{nullptr};
+    bool masked_during{false};
+};
+static void service(void *context, interrupt::IrqLine line)
+{
+    auto &seen = *static_cast<Serviced *>(context);
+    ++seen.calls;
+    seen.last = line;
+    seen.masked_during = seen.chip->masked(line);
 }
 
 static void check_irq_router()
 {
     interrupt::ModelIrqChip chip;
-    interrupt::InterruptDispatcher dispatcher;
-    interrupt::IrqRouter<interrupt::ModelIrqChip> router(chip, dispatcher);
-    arch::TrapFrame frame{};
-    CHECK(router.bind(3, 40, interrupt::IrqTrigger::level).code() == StatusCode::not_initialized);
+    interrupt::IrqRouter<interrupt::ModelIrqChip> router(chip);
+    Serviced seen{.chip = &chip};
+    CHECK(router.bind(3, interrupt::IrqTrigger::level, service, &seen).code() == StatusCode::not_initialized);
+    CHECK(!router.bound(3));
     CHECK(chip.initialize().ok());
-    CHECK(router.bind(3, 40, interrupt::IrqTrigger::level).ok());
-    CHECK(router.bind(3, 41, interrupt::IrqTrigger::level).code() == StatusCode::already_exists);
-    CHECK(router.bind(64, 41, interrupt::IrqTrigger::edge).code() == StatusCode::invalid_argument);
-    CHECK(!chip.masked(3));
-    CHECK(router.on_interrupt(3, frame).code() == StatusCode::not_found); // no handler yet
-    CHECK(chip.acknowledged(3) == 1 && chip.completed(3) == 1);
-    CHECK(dispatcher.register_callback(40, "count", nullptr, count_handler).ok());
-    CHECK(router.on_interrupt(3, frame).ok());
-    CHECK(handled_calls == 1 && router.delivered(3) == 2 && dispatcher.handled_count(40) == 1);
-    CHECK(router.on_interrupt(9, frame).code() == StatusCode::not_found);
-    CHECK(router.spurious() == 1);
-    CHECK(router.unbind(3).ok() && chip.masked(3));
+    CHECK(router.bind(3, interrupt::IrqTrigger::level, nullptr, &seen).code() == StatusCode::invalid_argument);
+    CHECK(router.bind(3, interrupt::IrqTrigger::level, service, &seen).ok());
+    CHECK(router.bind(3, interrupt::IrqTrigger::level, service, &seen).code() == StatusCode::already_exists);
+    CHECK(router.bind(64, interrupt::IrqTrigger::edge, service, &seen).code() == StatusCode::invalid_argument);
+    CHECK(!chip.masked(3) && !router.pending());
+    // Top half: acknowledged, masked, pending and completed; no handler runs yet.
+    router.top_half(3);
+    CHECK(chip.acknowledged(3) == 1 && chip.completed(3) == 1 && chip.masked(3));
+    CHECK(router.pending() && router.delivered(3) == 1 && seen.calls == 0);
+    // A second top half before the drain coalesces into one service.
+    router.top_half(3);
+    CHECK(router.delivered(3) == 2 && chip.completed(3) == 2);
+    // Bottom half: one service with the line still masked, then the line is unmasked.
+    CHECK(router.drain() == 1);
+    CHECK(seen.calls == 1 && seen.last == 3 && seen.masked_during && !chip.masked(3));
+    CHECK(!router.pending() && router.serviced(3) == 1 && router.drain() == 0);
+    // An unbound line is counted spurious, masked and completed, never serviced.
+    router.top_half(9);
+    CHECK(router.spurious() == 1 && chip.masked(9) && chip.completed(9) == 1 && !router.pending());
+    router.top_half(300);
+    CHECK(router.spurious() == 2);
+    CHECK(router.unbind(3).ok() && chip.masked(3) && !router.bound(3));
     CHECK(router.unbind(3).code() == StatusCode::not_found);
+    CHECK(router.controller_errors() == 0);
 }
 
 static void check_wait_queue()

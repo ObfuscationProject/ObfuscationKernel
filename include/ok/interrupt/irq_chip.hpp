@@ -115,68 +115,129 @@ class ModelIrqChip final
 };
 static_assert(IrqChip<ModelIrqChip>);
 
-// Binds controller lines to dispatcher vectors and performs the
-// acknowledge -> dispatch -> end-of-interrupt sequence. Top halves must stay
-// bounded; deferred work goes through the work queue (feat/irq-wait-time).
+// Bottom-half handler for one line: services the device (reads its interrupt
+// status, consumes completions) with interrupts disabled, outside trap context.
+using IrqHandler = void (*)(void *context, IrqLine line);
+
+// Splits an interrupt into a bounded top half and a deferred bottom half. The
+// top half runs in the trap path: it acknowledges the line, masks it so a
+// level-triggered device cannot re-enter before it is serviced, records it
+// pending and completes it at the controller. drain() runs from the kernel
+// loop and calls each pending line's handler once, then unmasks the line. No
+// device code and no allocation runs in trap context.
 template <IrqChip Chip> class IrqRouter final : private NonCopyable
 {
   public:
-    IrqRouter(Chip &chip, InterruptDispatcher &dispatcher) : chip_(chip), dispatcher_(dispatcher)
+    constexpr explicit IrqRouter(Chip &chip) : chip_(chip)
     {
     }
 
-    Status bind(IrqLine line, Vector vector, IrqTrigger trigger)
+    Status bind(IrqLine line, IrqTrigger trigger, IrqHandler handler, void *context)
     {
-        if (line >= chip_.line_count() || line >= max_irq_lines)
-            return Status{StatusCode::invalid_argument, "irq line out of range"};
-        if (bound_[line])
+        if (line >= chip_.line_count() || line >= max_irq_lines || handler == nullptr)
+            return Status{StatusCode::invalid_argument, "irq line out of range or without handler"};
+        if (lines_[line].handler != nullptr)
             return Status{StatusCode::already_exists, "irq line already bound"};
         if (auto configured = chip_.configure(line, trigger); !configured.ok())
             return configured;
+        lines_[line] = {handler, context, false};
         if (auto unmasked = chip_.unmask(line); !unmasked.ok())
+        {
+            lines_[line] = {};
             return unmasked;
-        vectors_[line] = vector;
-        bound_[line] = true;
+        }
         return Status::success();
     }
     Status unbind(IrqLine line)
     {
-        if (line >= max_irq_lines || !bound_[line])
+        if (line >= max_irq_lines || lines_[line].handler == nullptr)
             return Status{StatusCode::not_found, "irq line not bound"};
-        bound_[line] = false;
+        lines_[line] = {};
         return chip_.mask(line);
     }
-    // Called from the architecture trap entry with the pending line.
-    Status on_interrupt(IrqLine line, arch::TrapFrame &frame)
+    [[nodiscard]] bool bound(IrqLine line) const
     {
-        if (line >= max_irq_lines || !bound_[line])
+        return line < max_irq_lines && lines_[line].handler != nullptr;
+    }
+    // Top half: called with interrupts disabled for the line the trap names.
+    void top_half(IrqLine line)
+    {
+        if (line >= max_irq_lines || lines_[line].handler == nullptr)
         {
+            // Unclaimed: keep it from re-asserting and complete it.
             ++spurious_;
-            return Status{StatusCode::not_found, "spurious interrupt line"};
+            if (line < chip_.line_count())
+            {
+                static_cast<void>(chip_.mask(line));
+                static_cast<void>(chip_.end_of_interrupt(line));
+            }
+            return;
         }
-        if (auto acked = chip_.acknowledge(line); !acked.ok())
-            return acked;
+        if (!chip_.acknowledge(line).ok() || !chip_.mask(line).ok())
+            ++controller_errors_;
+        if (!lines_[line].pending)
+        {
+            lines_[line].pending = true;
+            ++pending_count_;
+        }
         ++delivered_[line];
-        const Status handled = dispatcher_.dispatch_vector(vectors_[line], frame);
-        const Status eoi = chip_.end_of_interrupt(line);
-        return handled.ok() ? eoi : handled;
+        if (!chip_.end_of_interrupt(line).ok())
+            ++controller_errors_;
+    }
+    // Bottom half: runs every pending handler once and re-enables its line.
+    usize drain()
+    {
+        usize serviced = 0;
+        for (IrqLine line = 0; pending_count_ != 0 && line < max_irq_lines; ++line)
+        {
+            auto &entry = lines_[line];
+            if (!entry.pending)
+                continue;
+            entry.pending = false;
+            --pending_count_;
+            entry.handler(entry.context, line);
+            ++serviced_[line];
+            ++serviced;
+            if (entry.handler != nullptr && !chip_.unmask(line).ok())
+                ++controller_errors_;
+        }
+        return serviced;
+    }
+    [[nodiscard]] bool pending() const
+    {
+        return pending_count_ != 0;
     }
     [[nodiscard]] usize delivered(IrqLine line) const
     {
         return line < max_irq_lines ? delivered_[line] : 0;
     }
+    [[nodiscard]] usize serviced(IrqLine line) const
+    {
+        return line < max_irq_lines ? serviced_[line] : 0;
+    }
     [[nodiscard]] usize spurious() const
     {
         return spurious_;
     }
+    [[nodiscard]] usize controller_errors() const
+    {
+        return controller_errors_;
+    }
 
   private:
+    struct Line
+    {
+        IrqHandler handler{nullptr};
+        void *context{nullptr};
+        bool pending{false};
+    };
     Chip &chip_;
-    InterruptDispatcher &dispatcher_;
-    std::array<Vector, max_irq_lines> vectors_{};
-    std::array<bool, max_irq_lines> bound_{};
+    std::array<Line, max_irq_lines> lines_{};
     std::array<usize, max_irq_lines> delivered_{};
+    std::array<usize, max_irq_lines> serviced_{};
+    usize pending_count_{0};
     usize spurious_{0};
+    usize controller_errors_{0};
 };
 
 } // namespace ok::interrupt

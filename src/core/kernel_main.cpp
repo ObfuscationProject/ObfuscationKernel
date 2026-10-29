@@ -2,6 +2,7 @@
 #include "ok/boot/boot_memory.hpp"
 #include "ok/core/entry.hpp"
 #include "ok/core/native_shutdown.hpp"
+#include "ok/interrupt/platform.hpp"
 #include "ok/arch/terminal_power.hpp"
 #include "ok/user/runtime.hpp"
 
@@ -34,6 +35,43 @@ void platform_write(std::string_view text)
 {
     for (char value : text)
         ok_platform_console_write_char(value);
+}
+
+void write_number(ok::usize value)
+{
+    char digits[24]{};
+    ok::usize count = 0;
+    do
+    {
+        digits[count++] = static_cast<char>('0' + value % 10);
+        value /= 10;
+    } while (value != 0 && count < sizeof(digits));
+    char text[24]{};
+    for (ok::usize i = 0; i < count; ++i)
+        text[i] = digits[count - 1 - i];
+    platform_write(std::string_view(text, count));
+}
+
+// One line before the shutdown report: how often the loop idled on an
+// interrupt and what the platform lines delivered.
+void report_interrupts()
+{
+    if (!ok::interrupt::platform_irqs_started())
+        return;
+    const auto stats = ok::interrupt::platform_irq_statistics();
+    platform_write("OK_IRQ_PLATFORM waits=");
+    write_number(stats.waits);
+    platform_write(" ticks=");
+    write_number(stats.ticks);
+    platform_write(" delivered=");
+    write_number(stats.delivered);
+    platform_write(" serviced=");
+    write_number(stats.serviced);
+    platform_write(" spurious=");
+    write_number(stats.spurious);
+    platform_write(" controller_errors=");
+    write_number(stats.controller_errors);
+    platform_write("\n");
 }
 
 [[noreturn]] void halt_forever()
@@ -74,6 +112,7 @@ namespace ok::detail
         }
         if (action.value() != SystemPowerAction::none)
         {
+            report_interrupts();
             if (action.value() == SystemPowerAction::halt)
                 platform_write("OK_SHUTDOWN clean=1 action=halt\n");
             else if (action.value() == SystemPowerAction::reboot)
@@ -85,10 +124,20 @@ namespace ok::detail
             arch::terminal_power_action(action.value());
         }
     };
+    // Device interrupts and the idle wait need the native backend's trap
+    // vectors, so they start only with native userland.
+    if (native_userland_started)
+        if (auto status = ok::interrupt::start_platform_irqs(); !status.ok())
+        {
+            platform_write("OK_IRQ_FAIL ");
+            platform_write(status.message());
+            platform_write("\n");
+        }
     ok::u64 ui_tick_counter = 0;
     for (;;)
     {
         shutdown_boundary();
+        static_cast<void>(ok::interrupt::drain_platform_irqs());
         // Retain link failure in the executor; unrelated tasks keep running.
         static_cast<void>(ok::ok_poll_network());
         static_cast<void>(ok::ok_step_userland());
@@ -123,7 +172,10 @@ namespace ok::detail
             static_cast<void>(ok::ok_debug_shell_tick());
             did_work = true;
         }
-        if (!did_work)
+        // With nothing runnable, wait for a tick or a device line instead of
+        // spinning; profiles without a controller driver keep polling.
+        if (!did_work && !(native_userland_started && ok::ok_userland_idle() &&
+                           ok::interrupt::wait_for_interrupt()))
         {
             desktop_idle();
         }

@@ -127,7 +127,7 @@ extern memory::KernelEntryStackPool entry_stacks;
 using SyscallOrigins = SyscallOriginTable<lu::configured_native_profile()>;
 extern SyscallOrigins syscall_origins;
 extern VfsStatContinuation<lu::configured_native_profile()> vfs_continuations;
-extern u64 entry_syscalls, entry_timers, entry_faults, entry_rejections;
+extern u64 entry_syscalls, entry_timers, entry_interrupts, entry_faults, entry_rejections;
 struct QuarantinedSpace
 {
     enum class Ownership : u8 { borrowed, pending, discharged };
