@@ -92,6 +92,9 @@ boot-CPU runtime; these arrays do not supply an SMP locking protocol.
   soft-float. They do not advertise arbitrary dynamic extension state; AArch64
   rejects unsupported records such as SVE/SME. MIPS and PPC handler publication
   and return depend on backend capability and capture/readiness attestations.
+  MIPS captures syscalls, timers and resolved page faults; a handler whose
+  resume state cannot be verified terminates only its process with `SIGSEGV`
+  ([MIPS_SIGNAL_RESUME](MIPS_SIGNAL_RESUME.md)).
   Production admission must match actual enabled CPU state, ELF ABI, context
   capture/restore and alternate-stack sizing on every supported profile.
 
