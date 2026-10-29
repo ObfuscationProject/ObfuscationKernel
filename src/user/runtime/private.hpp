@@ -232,6 +232,9 @@ struct QuarantinedEntryStack
     memory::KernelEntryStackHandle handle{};
 };
 extern std::array<QuarantinedEntryStack, memory::KernelEntryStackPool::capacity> stranded_entry_stacks;
+// For markers emitted when a preemption interrupted user output: starts a new
+// line first, so the marker never joins a partial user line.
+void emit_line(std::string_view text);
 #ifdef OK_PRIVATE_POLL_MASK
 extern PollSignalMasks poll_signal_masks;
 extern SignalWaitState<lu::configured_native_profile()> signal_waits;

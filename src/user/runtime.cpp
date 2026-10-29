@@ -139,11 +139,23 @@ Status prepare_native_thread(sched::ThreadControlBlock &thread)
     return status;
 }
 extern "C" void ok_platform_console_write_char(char) __attribute__((weak));
+namespace
+{
+char console_last{'\n'};
+} // namespace
 void emit(std::string_view text)
 {
     if (ok_platform_console_write_char != nullptr)
         for (char c : text)
             ok_platform_console_write_char(c);
+    if (!text.empty())
+        console_last = text.back();
+}
+void emit_line(std::string_view text)
+{
+    if (console_last != '\n')
+        emit("\n");
+    emit(text);
 }
 void emit_number(u64 value)
 {

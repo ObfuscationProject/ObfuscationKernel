@@ -1308,7 +1308,7 @@ bool step(Kernel &kernel)
             static bool reported = false;
             if (!reported)
             {
-                emit("OK_NATIVE scope=hardware interrupt=preempted\n");
+                emit_line("OK_NATIVE scope=hardware interrupt=preempted\n");
                 reported = true;
             }
         }
@@ -1318,7 +1318,7 @@ bool step(Kernel &kernel)
             static bool reported = false;
             if (!reported)
             {
-                emit("OK_NATIVE scope=hardware timer=preempted\n");
+                emit_line("OK_NATIVE scope=hardware timer=preempted\n");
                 reported = true;
             }
         }
