@@ -66,12 +66,12 @@ jobs:
         with:
           xmake-version: latest
       - name: Run hosted suite shard
-        run: python3 -B scripts/hosted_suite.py --output hosted-suite --shard ${{ matrix.shard }}/8 --jobs 4 --ext4-fixture
+        run: python3 -B scripts/hosted_suite.py --output ${{ runner.temp }}/hosted-suite --shard ${{ matrix.shard }}/8 --jobs 4 --ext4-fixture
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: hosted-suite-shard-${{ matrix.shard }}
-          path: hosted-suite/*.log
+          path: ${{ runner.temp }}/hosted-suite/*.log
   build-and-test:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
