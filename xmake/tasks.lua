@@ -115,7 +115,7 @@ task("hosted-test")
         usage = "xmake hosted-test --output=DIR [--jobs=N] [--shard=I/N] [--toolchain-root=DIR] [--sanitize] [--list]",
         description = "Run the classified hosted and QEMU runners under scripts/test_*.py (scripts/hosted_suite.py)",
         options = {
-            {nil, "output", "kv", nil, "New directory for logs, runner output and summary.json"},
+            {nil, "output", "kv", nil, "New directory outside the source tree for logs, runner output and summary.json"},
             {nil, "jobs", "kv", nil, "Runners started in parallel"},
             {nil, "shard", "kv", nil, "Run only shard I of N"},
             {nil, "toolchain-root", "kv", nil, "SysToolchain root holding the ten <triple> trees; enables toolchain runners"},

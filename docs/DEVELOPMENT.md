@@ -86,8 +86,8 @@ xmake qemu-test
 ```
 
 Hosted and QEMU runners live in `scripts/test_*.py`. `scripts/hosted_suite.py`
-classifies every one of them, and `xmake hosted-test --output=DIR` runs the
-self-contained set; `--toolchain-root=DIR` (a directory holding the ten
+classifies every one of them, and `xmake hosted-test --output=DIR` (a new
+directory outside the source tree) runs the self-contained set; `--toolchain-root=DIR` (a directory holding the ten
 SysToolchain `<triple>/` trees) adds the cross-compile and per-architecture QEMU
 probe runners, `--ext4-fixture` builds the clean journalled ext4 image with
 e2fsprogs and adds the runners that take it, and `xmake hosted-test --list`

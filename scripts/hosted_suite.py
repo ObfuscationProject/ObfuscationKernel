@@ -185,7 +185,7 @@ def run(name, command, output, timeout):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--output', type=Path, help='New directory for logs, runner output and summary.json')
+    parser.add_argument('--output', type=Path, help='New directory outside the source tree for logs, runner output and summary.json')
     parser.add_argument('--toolchain-root', type=Path, help='SysToolchain root holding the ten <triple>/ trees')
     parser.add_argument('--jobs', type=int, default=os.cpu_count() or 2)
     parser.add_argument('--shard', default='1/1', help='Run only shard I of N (I/N), by runner name')
@@ -235,6 +235,9 @@ def main():
         parser.error('unknown runners: ' + ', '.join(unknown))
 
     output = args.output.resolve()
+    # Several runners refuse evidence inside the source tree; refuse it here, before any runs.
+    if output.is_relative_to(ROOT):
+        parser.error('--output must be outside the source tree')
     output.mkdir(parents=True, exist_ok=False)
     clean_image = output / 'fixtures' / 'clean.img'
     if any(kind == 'fixture' for _, kind in selected):
