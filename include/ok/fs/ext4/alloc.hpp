@@ -150,6 +150,19 @@ class Ext4InodeLifetimeTable final
         return release_locked(lease, *held);
     }
 
+    // Drop the record of a linked inode that nothing holds, so its identity
+    // can leave a provider's node cache. A later lookup observes it afresh.
+    [[nodiscard]] Status forget(Ext4InodeLifetimeKey key)
+    {
+        smp::ScopedSpinLock guard(lock_);
+        const usize index = find(key);
+        if (index == RecordCapacity) return Status::not_found("inode lifetime forget key absent");
+        if (records_[index].phase != Phase::linked || total(records_[index]))
+            return Status::busy("inode lifetime record is held or detached");
+        records_[index] = {};
+        return {};
+    }
+
     // Call only after the last-link namespace transaction is durable. This
     // blocks fresh path references; existing holders can still clone a hold.
     [[nodiscard]] Status mark_orphan(Ext4InodeLifetimeKey key)

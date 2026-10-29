@@ -4570,6 +4570,7 @@ class Ext4MountedMetadata final
         MountedNode *reserved = nullptr;
         for (auto &candidate : nodes_)
             if (!candidate.inode_ && !candidate.borrowed_identity_exposed_) { reserved = &candidate; break; }
+        if (!reserved) { smp::ScopedSpinLock guard(lock_); reserved = evict_locked(); }
         if (!reserved) return reject(Status::no_memory("mounted metadata node capacity"));
         if (auto status = reserved->name_.assign(name); !status) return reject(status);
         const auto release = [&] { reserved->name_ = {}; };
@@ -5271,6 +5272,27 @@ class Ext4MountedMetadata final
         return Status::not_found("mounted node retirement identity is absent");
     }
 
+    // Mount lock held. Reclaims the slot of an identity nothing can reach: no
+    // references or leases, never handed out raw, and not the root, the
+    // pending orphan or the node under mutation. Its lifetime record goes with
+    // it; a later lookup observes the inode afresh from the checked image.
+    [[nodiscard]] MountedNode *evict_locked()
+    {
+        for (usize index = 1; index < nodes_.size(); ++index)
+        {
+            auto &node = nodes_[index];
+            if (!node.inode_ || node.references_ || node.borrowed_identity_exposed_ ||
+                &node == pending_orphan_ || &node == mutation_node_)
+                continue;
+            bool held{};
+            for (const auto &hold : reference_holds_) held = held || hold.node == &node;
+            if (held || !lifetime_.forget(node.lifetime_key_)) continue;
+            node.inode_ = 0; node.lifetime_key_ = {}; node.name_ = {};
+            node.rename_names_ = {}; node.rename_count_ = 0;
+            return &node;
+        }
+        return nullptr;
+    }
     [[nodiscard]] Result<Node *> node(u32 inode, std::string_view name)
     {
         auto checked = view_.inode(inode);
@@ -5281,15 +5303,15 @@ class Ext4MountedMetadata final
         for (auto &node : nodes_) if (node.inode_ == inode)
             return node.lifetime_key_ == key ? Result<Node *>{static_cast<Node *>(&node)} :
                 Result<Node *>{Status::io_error("mounted inode generation changed under a live node")};
-        for (auto &node : nodes_) if (!node.inode_ && !node.borrowed_identity_exposed_)
-        {
-            if (auto status = node.name_.assign(name); !status) return status;
-            if (auto status = lifetime_.observe(key); !status)
-            { node.name_ = {}; return status; }
-            node.mount_ = this; node.inode_ = inode; node.lifetime_key_ = key;
-            return static_cast<Node *>(&node);
-        }
-        return Status::no_memory("mounted metadata node capacity");
+        MountedNode *slot{};
+        for (auto &node : nodes_) if (!node.inode_ && !node.borrowed_identity_exposed_) { slot = &node; break; }
+        if (!slot) slot = evict_locked();
+        if (!slot) return Status::no_memory("mounted metadata node capacity");
+        if (auto status = slot->name_.assign(name); !status) return status;
+        if (auto status = lifetime_.observe(key); !status)
+        { slot->name_ = {}; return status; }
+        slot->mount_ = this; slot->inode_ = inode; slot->lifetime_key_ = key;
+        return static_cast<Node *>(slot);
     }
     const Ext4MountedPolicy policy_;
     Ext4MountedReclaimWorkspace *reclaim_workspace_{};

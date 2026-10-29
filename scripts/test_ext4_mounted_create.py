@@ -67,6 +67,7 @@ def main() -> int:
         if 'PASS mounted empty create:' not in report:
             raise RuntimeError('hosted result lacks pass marker')
         run('readonly-fsck', ['e2fsck', '-fn', str(generated)])
+        run('readonly-fsck-many', ['e2fsck', '-fn', str(generated) + '.many'])
         for name in ('hello', 'posix'):
             details = run('debugfs-' + name, ['debugfs', '-R', 'stat /' + name, str(generated)])
             if 'Inode:' not in details or 'Size: 0' not in details:
