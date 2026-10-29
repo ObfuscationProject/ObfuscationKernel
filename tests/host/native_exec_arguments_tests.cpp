@@ -39,13 +39,23 @@ std::span<const std::byte> bytes(std::string_view text)
 
 void arena()
 {
+    {
+        // A small set stays inline: an ordinary exec takes no pool pages, and a
+        // move copies the inline strings.
+        native::Arguments small;
+        for (usize i = 0; i < 16; ++i) CHECK(small.push_argv("argument") && small.push_envp("NAME=value"));
+        CHECK(native::page_pool.object_count() == 0);
+        native::Arguments moved{std::move(small)};
+        CHECK(moved.argc() == 16 && moved.envc() == 16 && moved.argv(15) == "argument");
+        CHECK(moved.envp(0) == "NAME=value" && small.argc() == 0 && native::page_pool.object_count() == 0);
+    }
     native::Arguments arguments;
     CHECK(arguments.argc() == 0 && arguments.envc() == 0 && arguments.string_bytes() == 0);
     // Far past the former 16 x 256-byte bound, growing the run as it fills.
     const std::string word(100, 'a');
     for (usize i = 0; i < 1000; ++i) CHECK(arguments.push_argv(word));
     for (usize i = 0; i < 100; ++i) CHECK(arguments.push_envp("NAME=value"));
-    CHECK(arguments.argc() == 1000 && arguments.envc() == 100);
+    CHECK(arguments.argc() == 1000 && arguments.envc() == 100 && native::page_pool.object_count() != 0);
     CHECK(arguments.string_bytes() == 1000 * 101 + 100 * 11);
     CHECK(arguments.prepend_argv("first") && arguments.argv(0) == "first" && arguments.argv(1) == word);
     CHECK(arguments.replace_argv(1, "second") && arguments.argc() == 1001);

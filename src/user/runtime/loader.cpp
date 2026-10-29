@@ -85,10 +85,11 @@ usize admission_prefix([[maybe_unused]] std::span<const std::byte> bytes, [[mayb
     return required;
 }
 } // namespace
-// Exec argument and environment strings in one kernel object run, released
-// with the object. As on Linux, each string with its NUL is at most
-// MAX_ARG_STRLEN and the whole set at most ARG_MAX; beyond that execve fails
-// with E2BIG.
+// Exec argument and environment strings. Small sets live inline, as the
+// former fixed arrays did; larger ones move to one kernel object run sized to
+// them and released with the object. As on Linux, each string with its NUL is
+// at most MAX_ARG_STRLEN and the whole set at most ARG_MAX; beyond that execve
+// fails with E2BIG.
 class Arguments final : private NonCopyable
 {
   public:
@@ -99,8 +100,13 @@ class Arguments final : private NonCopyable
     Arguments() = default;
     Arguments(Arguments &&other) noexcept
         : run_(std::exchange(other.run_, 0)), pages_(std::exchange(other.pages_, 0)),
+          capacity_(std::exchange(other.capacity_, inline_capacity)),
+          string_capacity_(std::exchange(other.string_capacity_, inline_string_capacity)),
           argc_(std::exchange(other.argc_, 0)), envc_(std::exchange(other.envc_, 0)),
-          used_(std::exchange(other.used_, 0)) {}
+          used_(std::exchange(other.used_, 0))
+    {
+        if (!run_) copy_bytes(inline_.data(), other.inline_.data(), inline_.size());
+    }
     Arguments &operator=(Arguments &&) = delete;
     ~Arguments() { if (run_) static_cast<void>(page_pool.release_object_run(run_, pages_)); }
 
@@ -132,11 +138,16 @@ class Arguments final : private NonCopyable
 
   private:
     struct Entry { u32 offset{}, size{}; };
-    static constexpr usize index_bytes = max_strings * sizeof(Entry);
+    // Region layout: argv entries, envp entries (capacity_ each), then strings.
+    static constexpr usize inline_capacity = 64;
+    static constexpr usize inline_string_capacity = 4096 - 2 * inline_capacity * sizeof(Entry);
+    [[nodiscard]] std::byte *base() const
+    { return run_ ? reinterpret_cast<std::byte *>(run_) : const_cast<std::byte *>(inline_.data()); }
     [[nodiscard]] Entry *entries(bool environment) const
-    { return reinterpret_cast<Entry *>(run_) + (environment ? max_strings / 2 : 0); }
-    [[nodiscard]] std::string_view view(Entry entry) const
-    { return {reinterpret_cast<const char *>(run_ + index_bytes + entry.offset), entry.size}; }
+    { return reinterpret_cast<Entry *>(base()) + (environment ? capacity_ : 0); }
+    [[nodiscard]] char *strings() const
+    { return reinterpret_cast<char *>(base() + 2 * capacity_ * sizeof(Entry)); }
+    [[nodiscard]] std::string_view view(Entry entry) const { return {strings() + entry.offset, entry.size}; }
     [[nodiscard]] Status insert(std::string_view text, bool environment, usize at)
     {
         auto bytes = reserve(text.size(), environment, at);
@@ -150,8 +161,10 @@ class Arguments final : private NonCopyable
         auto &count = environment ? envc_ : argc_;
         if (length + 1 > max_string_bytes || count == max_strings / 2 || used_ + length + 1 > max_total_bytes)
             return Status::argument_list_too_long("exec arguments exceed ARG_MAX");
-        if (auto status = grow(used_ + length + 1); !status) return status;
-        auto *bytes = reinterpret_cast<char *>(run_ + index_bytes + used_);
+        if (count == capacity_ || used_ + length + 1 > string_capacity_)
+            if (auto status = grow(count == capacity_ ? 2 * capacity_ : capacity_, used_ + length + 1); !status)
+                return status;
+        char *bytes = strings() + used_;
         bytes[length] = 0;
         auto *list = entries(environment);
         for (usize i = count; i > at; --i) list[i] = list[i - 1];
@@ -161,26 +174,32 @@ class Arguments final : private NonCopyable
         return bytes;
     }
     friend Status argument_from_user(const hw::AddressSpace &, uptr, Arguments &, bool);
-    [[nodiscard]] Status grow(usize bytes)
+    // Entry vectors double up to max_strings / 2; string space doubles up to ARG_MAX.
+    [[nodiscard]] Status grow(usize capacity, usize string_bytes)
     {
-        const usize needed = (index_bytes + bytes + hw::page_size - 1) / hw::page_size;
-        if (needed <= pages_) return Status::success();
+        if (string_bytes <= string_capacity_) string_bytes = string_capacity_;
+        else if (string_bytes < 2 * string_capacity_)
+            string_bytes = 2 * string_capacity_ < max_total_bytes ? 2 * string_capacity_ : max_total_bytes;
+        const usize bytes = 2 * capacity * sizeof(Entry) + string_bytes;
+        const usize pages = (bytes + hw::page_size - 1) / hw::page_size;
         if (auto status = activate_pool(); !status) return status;
-        const usize pages = needed > 2 * pages_ ? needed : 2 * pages_;
         auto run = page_pool.allocate_object_run(pages);
         if (!run) return run.status();
-        if (run_)
-        {
-            copy_bytes(reinterpret_cast<std::byte *>(run.value()), reinterpret_cast<const std::byte *>(run_),
-                       index_bytes + used_);
-            static_cast<void>(page_pool.release_object_run(run_, pages_));
-        }
+        auto *target = reinterpret_cast<std::byte *>(run.value());
+        copy_bytes(target, entries(false), argc_ * sizeof(Entry));
+        copy_bytes(target + capacity * sizeof(Entry), entries(true), envc_ * sizeof(Entry));
+        copy_bytes(target + 2 * capacity * sizeof(Entry), strings(), used_);
+        if (run_) static_cast<void>(page_pool.release_object_run(run_, pages_));
         run_ = run.value();
         pages_ = pages;
+        capacity_ = capacity;
+        string_capacity_ = pages * hw::page_size - 2 * capacity * sizeof(Entry);
         return Status::success();
     }
+    alignas(alignof(Entry)) std::array<std::byte, 4096> inline_{};
     uptr run_{};
-    usize pages_{}, argc_{}, envc_{}, used_{};
+    usize pages_{}, capacity_{inline_capacity}, string_capacity_{inline_string_capacity};
+    usize argc_{}, envc_{}, used_{};
 };
 // A local loaded image must reserve failure retention before it acquires any
 // pages. Publishing its complete directory into this cell is infallible; a
