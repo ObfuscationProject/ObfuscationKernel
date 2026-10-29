@@ -12,7 +12,7 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     sources = ('tests/host/vfs_namespace_tests.cpp', 'src/fs/vfs.cpp', 'src/smp/smp.cpp',
-               'src/arch/arch.cpp', 'src/arch/x86_64/ops.cpp')
+               'src/arch/arch.cpp', 'src/arch/terminal_power.cpp', 'src/arch/x86_64/ops.cpp')
     with tempfile.TemporaryDirectory(prefix='ok-vfs-namespace-') as tmp:
         app = Path(tmp)/'namespace-test'
         subprocess.run([args.cxx, '-std=c++23', '-O2', '-Wall', '-Wextra', '-Werror',

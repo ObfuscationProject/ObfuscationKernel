@@ -144,7 +144,8 @@ void inherited_masks(Kernel &kernel)
     auto replaced=native::replace_entry_stacks(native::entry_stacks,*p,[&] {
         return kernel.scheduler().replace_image(pid,kernel.arch().make_user_context({hw::user_begin,hw::user_begin+4096}),{});
     }); CHECK(replaced && replaced.committed);
-    native::Image image; image.personality=sched::UserPersonality::linux;
+    auto retirement=native::ImageRetirementReservation::reserve(); CHECK(retirement);
+    native::Image image{std::move(retirement.value())}; image.personality=sched::UserPersonality::linux;
     image.frame=hw::initial_frame(hw::user_begin,hw::user_begin+4096);
     native::install(*p,image,saved); CHECK(p->threads()[0].native_signal_mask==peer_mask);
     native::install(*p,image); CHECK(p->threads()[0].native_signal_mask==Mask{});

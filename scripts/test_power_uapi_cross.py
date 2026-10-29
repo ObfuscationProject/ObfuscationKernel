@@ -111,7 +111,7 @@ def main():
                                 if name in wires: raise ValueError('duplicate emitted wire section')
                                 wires[name] = list(struct.unpack(('<' if endian == 1 else '>') + '14I', emitted))
                     offset += 60 + size + size % 2
-                expected = [0, 11, 0, 1, 1, 2, 3, 0x3fffffff, 1032, 1033, 32 if elf_class == 1 else 64,
+                expected = [0, 16, 0, 1, 1, 2, 3, 0x3fffffff, 1032, 1033, 32 if elf_class == 1 else 64,
                             0xffffffff, 0xffffffea, 0xffffffa1]
                 if offset != len(data) or objects != 3 or wires != {name: expected for name in ('.ok_power_wire_c', '.ok_power_wire_cpp')}:
                     raise ValueError('native scalar wire bytes differ: ' + arch)

@@ -83,6 +83,7 @@ bool supported() noexcept
 {
     return false;
 }
+OwnershipReport ownership_report() noexcept { return {}; }
 Status initialize()
 {
     return Status::unsupported();

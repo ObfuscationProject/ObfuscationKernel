@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+from hosted_closure import include_closure
 
 
 def sha(path):
@@ -27,7 +28,7 @@ def main():
     names = ('include/ok/core/types.hpp', 'include/ok/memory/kernel_entry_stack_pool.hpp',
              'include/ok/arch/kernel_entry_stack.hpp',
              'tests/host/kernel_entry_stack_pool_tests.cpp', 'scripts/test_kernel_entry_stack_pool.py')
-    for name in names:
+    for name in include_closure(root, names):
         destination = source / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(root / name, destination)

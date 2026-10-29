@@ -110,7 +110,7 @@ def main():
                                 if name in wires: raise ValueError('duplicate emitted wire section')
                                 wires[name] = list(struct.unpack(('<' if endian == 1 else '>') + '30I', emitted))
                     offset += 60 + size + size % 2
-                expected = [0, 11, 0, 1, 1034, 288, 0, 4, 8, 12, 16, 20, 24, 28, 32,
+                expected = [0, 16, 0, 1, 1034, 288, 0, 4, 8, 12, 16, 20, 24, 28, 32,
                             9, 256, 0, 1, 2, 3, 4, 5, 4, 4, 32 if elf_class == 1 else 64,
                             0xffffffff, 0xffffffea, 0xffffffda, 0xfffffff2]
                 if offset != len(data) or objects != 2 or wires != {name: expected for name in ('.ok_mount_wire_c', '.ok_mount_wire_cpp')}:

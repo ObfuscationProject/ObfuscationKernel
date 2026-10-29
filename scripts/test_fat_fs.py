@@ -28,7 +28,7 @@ def main():
     source = output / 'source'
     root = Path(__file__).resolve().parents[1]
     names = ['include/ok/fs/fat.hpp', 'include/ok/fs/fat_fs.hpp', 'src/fs/fat.cpp', 'src/fs/fat_fs.cpp',
-             'tests/host/fat_fs_tests.cpp', 'scripts/test_fat_fs.py', 'src/fs/vfs.cpp', 'src/smp/smp.cpp', 'src/arch/arch.cpp', 'src/arch/x86_64/ops.cpp', 'src/arch/ops_private.hpp']
+             'tests/host/fat_fs_tests.cpp', 'scripts/test_fat_fs.py', 'src/fs/vfs.cpp', 'src/smp/smp.cpp', 'src/arch/arch.cpp', 'src/arch/terminal_power.cpp', 'src/arch/x86_64/ops.cpp', 'src/arch/ops_private.hpp']
     shutil.copytree(root / 'include', source / 'include')
     for name in names:
         destination = source / name
@@ -37,7 +37,7 @@ def main():
     project = ['set_project("fat-vfs")', 'set_languages("c++23")', 'target("fat-vfs")',
                'set_kind("binary")', 'set_targetdir("artifacts")', 'add_defines("OK_ARCH_TARGET_X86_64")',
                'add_includedirs("include")',
-               'add_files("tests/host/fat_fs_tests.cpp", "src/fs/fat.cpp", "src/fs/fat_fs.cpp", "src/fs/vfs.cpp", "src/smp/smp.cpp", "src/arch/arch.cpp", "src/arch/x86_64/ops.cpp")',
+               'add_files("tests/host/fat_fs_tests.cpp", "src/fs/fat.cpp", "src/fs/fat_fs.cpp", "src/fs/vfs.cpp", "src/smp/smp.cpp", "src/arch/arch.cpp", "src/arch/terminal_power.cpp", "src/arch/x86_64/ops.cpp")',
                'add_cxxflags("-O1", "-g", "-Wall", "-Wextra", "-Werror", "-fno-exceptions", "-ffunction-sections", "-fdata-sections", "-fstack-usage", {force=true})']
     project += ['add_ldflags("-Wl,--gc-sections", {force=true})']
     if args.sanitize:

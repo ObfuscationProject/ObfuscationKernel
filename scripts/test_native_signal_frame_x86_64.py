@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+from hosted_closure import include_closure
 
 
 def sha(path):
@@ -27,7 +28,7 @@ def main():
     names = ('include/ok/arch/execution.hpp', 'include/ok/arch/kernel_entry_stack.hpp', 'include/ok/arch/x86_64/signal.hpp', 'include/ok/sched/signal_mask.hpp', 'include/ok/sched/child_exit.hpp', 'include/ok/sched/pending_signals.hpp', 'include/ok/user/native_signal_info.hpp', 'include/ok/core/types.hpp', 'include/ok/abi/linux_user.hpp',
              'include/ok/abi/linux_profile_data.hpp', 'include/ok/user/native_signal_mask.hpp',
              'tests/host/native_signal_frame_x86_64_tests.cpp', 'scripts/test_native_signal_frame_x86_64.py')
-    for name in names:
+    for name in include_closure(root, names):
         destination = source / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(root / name, destination)

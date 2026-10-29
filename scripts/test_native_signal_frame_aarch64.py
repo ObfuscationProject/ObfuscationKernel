@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Retain hosted AArch64 frame tests plus native freestanding compile evidence."""
 from pathlib import Path
+from hosted_closure import include_closure
 import argparse, hashlib, json, os, shutil, subprocess
 parser=argparse.ArgumentParser();parser.add_argument('--output',type=Path,required=True);parser.add_argument('--toolchain',type=Path,required=True);args=parser.parse_args()
 root=Path(__file__).resolve().parents[1];out=args.output.resolve();out.mkdir(exist_ok=False);src=out/'source'
 sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
 inputs=['include/ok/core/types.hpp','include/ok/arch/execution.hpp','include/ok/arch/kernel_entry_stack.hpp','include/ok/abi/linux_user.hpp','include/ok/abi/linux_profile_data.hpp','include/ok/sched/signal_mask.hpp', 'include/ok/sched/child_exit.hpp', 'include/ok/sched/pending_signals.hpp', 'include/ok/user/native_signal_info.hpp','include/ok/user/native_signal_mask.hpp','include/ok/arch/aarch64/signal.hpp','tests/host/native_signal_frame_aarch64_tests.cpp','tests/host/native_signal_frame_aarch64_compile.cpp','tests/fixtures/signals/linux_aarch64_layout.hpp','tests/fixtures/signals/linux_aarch64_layout.json','scripts/test_native_signal_frame_aarch64.py']
+inputs=include_closure(root,inputs)
 record=dict(status='preparing',scope='AArch64 FPSIMD frame hosted models and native compile only',guest_execution=False,files={},commands=[],tools={})
 for name in inputs:
  p=src/name;p.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(root/name,p);record['files'][name]=sha(p)

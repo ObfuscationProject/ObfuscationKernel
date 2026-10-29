@@ -85,6 +85,24 @@ xmake -y -b okernel
 xmake qemu-test
 ```
 
+Hosted and QEMU runners live in `scripts/test_*.py`. `scripts/hosted_suite.py`
+classifies every one of them, and `xmake hosted-test --output=DIR` (a new
+directory outside the source tree) runs the self-contained set; `--toolchain-root=DIR` (a directory holding the ten
+SysToolchain `<triple>/` trees) adds the cross-compile and per-architecture QEMU
+probe runners, `--ext4-fixture` builds the clean journalled ext4 image with
+e2fsprogs and adds the runners that take it, and `xmake hosted-test --list`
+shows each runner's class, the inputs of those it cannot run and the reason
+for each quarantined runner. The suite refuses an unclassified runner with
+required arguments. `xmake native-probe` runs the configured architecture's
+QEMU execution probe with the SysToolchain compiler and QEMU. CI runs both.
+
+Runners that build from a retained source snapshot copy `include/`, `src/` and
+`tests/` (`hosted_closure.SNAPSHOT_TREES`) or the quoted include closure of the
+files they name (`hosted_closure.include_closure`), never the checkout root.
+When a runner lists kernel sources explicitly, check the link closure when a
+generic `src/` unit gains a dependency, and give hosted execution mocks every
+function of `ok::arch::execution` the runtime calls.
+
 ## Repository boundaries
 
 ObfuscationKernel exports an architecture/mode-specific SDK with native headers,
