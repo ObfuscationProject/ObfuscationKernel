@@ -6,6 +6,9 @@
 #elif defined(OK_KERNEL_FREESTANDING) && (defined(__arm__) || defined(__aarch64__))
 #include "../arch/arm_common/gicv2.hpp"
 #define OK_PLATFORM_IRQ_WAIT 1
+#elif defined(OK_KERNEL_FREESTANDING) && defined(__riscv)
+#include "../arch/riscv_common/plic.hpp"
+#define OK_PLATFORM_IRQ_WAIT 1
 #endif
 
 namespace ok::interrupt
@@ -18,6 +21,8 @@ namespace
 using PlatformIrqChip = arch::x86::Pic8259;
 #elif defined(OK_PLATFORM_IRQ_WAIT) && (defined(__arm__) || defined(__aarch64__))
 using PlatformIrqChip = arch::arm::GicV2;
+#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__riscv)
+using PlatformIrqChip = arch::riscv::Plic;
 #else
 using PlatformIrqChip = ModelIrqChip;
 #endif
@@ -56,6 +61,40 @@ void disarm_idle_tick()
 }
 #endif
 
+#if defined(OK_PLATFORM_IRQ_WAIT) && defined(__riscv)
+// The CLINT compare register as a one-shot idle tick: 100,000 ticks of the
+// 10 MHz virt timebase. The native backend saves and restores it around each
+// user entry; the wait leaves it at its maximum.
+constexpr uptr clint_mtimecmp = 0x2004000, clint_mtime = 0x200bff8;
+constexpr uptr mie_mtie = uptr{1} << 7, mie_meie = uptr{1} << 11;
+void set_compare(u64 value)
+{
+#if __riscv_xlen == 32
+    auto *compare = reinterpret_cast<volatile u32 *>(clint_mtimecmp);
+    compare[0] = 0xffffffffu; // Never below the current time while the halves change.
+    compare[1] = static_cast<u32>(value >> 32);
+    compare[0] = static_cast<u32>(value);
+#else
+    *reinterpret_cast<volatile u64 *>(clint_mtimecmp) = value;
+#endif
+}
+u64 machine_time()
+{
+#if __riscv_xlen == 32
+    const auto *time = reinterpret_cast<volatile u32 *>(clint_mtime);
+    u32 high, low;
+    do
+    {
+        high = time[1];
+        low = time[0];
+    } while (time[1] != high);
+    return (u64{high} << 32) | low;
+#else
+    return *reinterpret_cast<volatile u64 *>(clint_mtime);
+#endif
+}
+#endif
+
 void halt_until_interrupt()
 {
 #if defined(OK_PLATFORM_IRQ_WAIT) && (defined(__x86_64__) || defined(__i386__))
@@ -79,6 +118,24 @@ void halt_until_interrupt()
     }
     else
         ok_interrupt_top_half(static_cast<IrqLine>(id));
+#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__riscv)
+    // In M-mode WFI wakes when mip & mie is nonzero whatever mstatus.MIE says;
+    // MIE stays clear, so nothing traps and the wait claims from the PLIC.
+    uptr status;
+    asm volatile("csrrc %0, mstatus, %1" : "=r"(status) : "r"(uptr{8}) : "memory");
+    set_compare(machine_time() + 100000);
+    asm volatile("csrw mie, %0\nwfi\ncsrw mie, zero" : : "r"(mie_mtie | mie_meie) : "memory");
+    uptr pending;
+    asm volatile("csrr %0, mip" : "=r"(pending));
+    set_compare(~u64{0});
+    if (pending & mie_meie)
+    {
+        if (const u32 source = PlatformIrqChip::claim(); source != 0)
+            ok_interrupt_top_half(static_cast<IrqLine>(source));
+    }
+    else if (pending & mie_mtie)
+        ok_interrupt_tick();
+    asm volatile("csrs mstatus, %0" : : "r"(status & uptr{8}) : "memory");
 #endif
 }
 } // namespace

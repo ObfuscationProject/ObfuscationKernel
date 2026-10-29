@@ -41,7 +41,7 @@ the first controller. This note grows with each slice.
 | --- | --- | --- |
 | i386, x86_64 | 8259A pair (`src/arch/x86_common/pic8259.hpp`): vectors 32–47, ELCR edge/level, spurious 7/15 detection | Done. The PIT tick (line 0) wakes the wait; COM1 receive is bound to line 4 and fills a 256-byte ring that the console poll drains first |
 | arm32, aarch64 | GICv2 (`src/arch/arm_common/gicv2.hpp`): SPIs 32–255, ICFGR edge/level, CPU 0 targets | Done. The kernel waits with CPSR.I set (WFI wakes on a pending IRQ regardless) and claims from GICC_IAR; a one-shot physical-timer PPI 30 at 100 Hz ends the wait. The user IRQ path completes only the timer PPI and reports other IDs as `TrapKind::interrupt`. PL011 receive is bound to ID 33 (SPI 1, level) |
-| rv64, rv32 | PLIC | Slice 2 |
+| rv64, rv32 | PLIC (`src/arch/riscv_common/plic.hpp`), hart 0 machine context: sources 1–127 | Done. The M-mode kernel waits with mstatus.MIE clear (WFI wakes on `mip & mie`) and a one-shot CLINT compare at 100 Hz, then claims from the PLIC. User mode enables MEIE once the service runs; the trap assembly separates the machine timer (cause 7) from device interrupts. NS16550 receive is bound to source 10 |
 | loongarch64 | EIOINTC with PCH-PIC | Slice 2 |
 | mips, mips64 | Malta i8259 behind the GT-64120 | Slice 2 |
 | ppc | MPIC | Slice 2 |
@@ -76,6 +76,14 @@ the first controller. This note grows with each slice.
 - aarch64: the same shell results; the PL011 delivered 120 interrupts in user
   mode; `sleep 2` takes 2.08 s; the shell loop takes 152 timer preemptions
   (`waits=169 ticks=321`).
+
+## Results (rv64 and rv32, QEMU 10.2.0, ObfuscationOS main with BusyBox)
+
+- `xmake test`, the ext4 native boot and `scripts/test_musl_shell.py` pass on
+  both: 35 sh checks, and 133/151 suite cases with the 9 reviewed failures.
+  The UART delivered 165 (rv64) and 166 (rv32) interrupts, all in user mode.
+- `sleep 2` takes 2.07–2.08 s of host time. The syscall-free shell loop takes
+  225 (rv64) and 217 (rv32) timer preemptions after the service starts.
 
 ## Limits
 

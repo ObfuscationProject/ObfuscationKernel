@@ -1,4 +1,5 @@
 #include "ok/arch/execution_spaces.hpp"
+#include "ok/interrupt/platform.hpp"
 #include <cstddef>
 
 namespace ok::arch::execution
@@ -85,6 +86,11 @@ u32 leaf_entry(const PageMapping &page)
     return static_cast<u32>(page.physical_address >> 2) | flags;
 }
 extern "C" void ok_rv32_enter_native(UserFrame *frame, uptr satp, Trap *trap, uptr stack_top);
+// mie for user mode, read by the entry assembly.
+extern "C"
+{
+constinit uptr ok_rv_user_mie = 0x80;
+}
 static_assert(offsetof(UserFrame, pc) == 128);
 static_assert(offsetof(UserFrame, sp) == 132);
 static_assert(offsetof(UserFrame, flags) == 136);
@@ -217,6 +223,24 @@ UserFrame initial_frame(uptr entry, uptr stack)
     frame.registers[2] = stack;
     return frame;
 }
+// A device interrupt in user mode: claim the PLIC source and run its top half
+// once the interrupt service owns the PLIC, otherwise only complete it.
+void complete_irq(Trap &trap)
+{
+    if (trap.kind == TrapKind::timer)
+        ok_interrupt_tick();
+    if (trap.kind != TrapKind::interrupt)
+        return;
+    auto &claim = *reinterpret_cast<volatile u32 *>(uptr{0x0c200004});
+    const u32 source = claim;
+    trap.vector = source;
+    if (source == 0)
+        return;
+    if (interrupt::platform_irqs_started())
+        ok_interrupt_top_half(static_cast<interrupt::IrqLine>(source));
+    else
+        claim = source;
+}
 static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack_top)
 {
     auto *stored = lookup(space);
@@ -231,10 +255,14 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     uptr saved_status;
     asm volatile("csrrc %0, mstatus, %1" : "=r"(saved_status) : "r"(uptr{8}) : "memory");
     entering = true;
+    // User mode takes the machine timer and, once the interrupt service owns the
+    // PLIC, machine external interrupts.
+    ok_rv_user_mie = interrupt::platform_irqs_started() ? 0x880 : 0x80;
     Trap trap{};
     const uptr satp = (uptr{1} << 31) | (space.root >> 12);
     ok_rv32_enter_native(&frame, satp, &trap, stack_top);
     entering = false;
+    complete_irq(trap);
     // The assembly restored the masked status; re-enable only on the service stack.
     asm volatile("csrs mstatus, %0" : : "r"(saved_status & uptr{8}) : "memory");
     return trap;

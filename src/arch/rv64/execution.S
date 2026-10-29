@@ -94,7 +94,8 @@ ok_rv64_enter_native:
     li t1, 0x6080
     or t0, t0, t1
     csrw mstatus, t0
-    li t0, 128
+    la t0, ok_rv_user_mie
+    ld t0, 0(t0)
     csrw mie, t0
     ld t6, 200(sp)
     ld t0, 256(t6)
@@ -275,6 +276,14 @@ ok_rv64_native_trap:
     li t3, 3
     j 5f
 2:
+    // Machine timer (cause 7) is the tick; any other interrupt is a device
+    // line the C side claims from the PLIC (TrapKind::interrupt).
+    andi t4, t2, 0xff
+    li t3, 7
+    beq t4, t3, 6f
+    li t3, 4
+    j 5f
+6:
     li t3, 1
     j 5f
 3:
