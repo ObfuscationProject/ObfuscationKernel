@@ -35,8 +35,11 @@ int main()
         CHECK(!cpu::qualified(bad));
     }
     auto frame=valid_frame(); CHECK(cpu::frame_mode(frame));
+    // Every Status bit is fixed except IM2, which the kernel sets once its
+    // interrupt service owns the Malta 8259 pair.
     for(unsigned bit=0;bit<sizeof(uptr)*8;++bit) {
-        auto bad=frame; bad.flags^=uptr{1}<<bit; CHECK(!cpu::frame_mode(bad));
+        auto bad=frame; bad.flags^=uptr{1}<<bit;
+        CHECK(cpu::frame_mode(bad)==((uptr{1}<<bit)==cpu::device_interrupt_mask));
     }
     for(unsigned bit=0;bit<32;++bit) {
         auto f=frame; const u32 value=u32{1}<<bit;
