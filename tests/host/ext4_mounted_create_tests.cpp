@@ -57,6 +57,27 @@ struct Services
     }
 };
 
+// A borrowed mount root: an empty directory with a fixed identity.
+struct StubDirectory final : Node
+{
+    std::string_view name() const override { return "/"; }
+    Metadata metadata() const override
+    {
+        Metadata result{.type = NodeType::directory, .mode = mode_for(NodeType::directory, 0755u)};
+        result.attributes.inode = 1;
+        result.attributes.mark(Attribute::inode);
+        return result;
+    }
+    Result<FileBuffer> read(usize, usize) const override { return Status::is_directory("stub"); }
+    Status write(usize, std::span<const std::byte>) override { return Status::is_directory("stub"); }
+    Result<DirectoryListing> list(DirectoryReadIntent) const override { return DirectoryListing{}; }
+    const void *filesystem_identity() const override { return this; }
+    Node *lookup(std::string_view) override { return nullptr; }
+    Status create(std::string_view, NodeType) override { return Status::permission("stub"); }
+    Status chmod(u32) override { return Status::permission("stub"); }
+    Status chown(u32, u32) override { return Status::permission("stub"); }
+};
+
 static void empty_file(Node &node, u32 mode, u32 uid, u32 gid)
 {
     auto metadata = node.query_metadata(); CHECK(metadata);
@@ -186,10 +207,14 @@ int main(int argc, char **argv)
         char path[32]; std::snprintf(path, sizeof(path), "/mnt/d%zu", directory);
         CHECK(many_posix.mkdir(path, 0755));
     }
+    // A borrowed mount over an ext4 directory keeps that node as a raw pointer:
+    // eviction must never recycle it into another directory's identity.
+    static StubDirectory covering;
+    CHECK(many_services->vfs.mount("/mnt/d0", covering));
     std::vector<u64> many_inodes;
     for (usize index = 0; index < many_files; ++index)
     {
-        char path[32]; std::snprintf(path, sizeof(path), "/mnt/d%zu/f%zu", index % many_directories, index);
+        char path[32]; std::snprintf(path, sizeof(path), "/mnt/d%zu/f%zu", 1 + index % (many_directories - 1), index);
         auto fd = many_posix.open(path, posix::o_CREAT | posix::o_EXCL | posix::o_RDWR, 0644);
         CHECK(fd);
         many_inodes.push_back(many_posix.fstat(fd.value()).value().attributes.inode);
@@ -198,17 +223,24 @@ int main(int argc, char **argv)
     CHECK(many->mount.lifetime_.active_records() <= many->mount.nodes_.size());
     for (usize index = 0; index < many_files; ++index)
     {
-        char path[32]; std::snprintf(path, sizeof(path), "/mnt/d%zu/f%zu", index % many_directories, index);
+        char path[32]; std::snprintf(path, sizeof(path), "/mnt/d%zu/f%zu", 1 + index % (many_directories - 1), index);
         auto fd = many_posix.open(path, posix::o_RDONLY);
         CHECK(fd);
         CHECK(many_posix.fstat(fd.value()).value().attributes.inode == many_inodes[index]);
         CHECK(many_posix.close(fd.value()));
     }
     CHECK(std::set<u64>(many_inodes.begin(), many_inodes.end()).size() == many_files);
+    // The mount still covers d0, and no recycled ext4 directory turned into it.
+    CHECK(many_posix.statat(posix::at_FDCWD, "/mnt/d0").value().attributes.inode == 1);
+    for (usize directory = 1; directory < many_directories; ++directory)
+    {
+        char path[32]; std::snprintf(path, sizeof(path), "/mnt/d%zu", directory);
+        CHECK(many_posix.statat(posix::at_FDCWD, path).value().attributes.inode != 1);
+    }
     {
         // The first and a block-aligned next data block are admitted with more
         // than 128 inodes in use (each proves the block against every inode).
-        auto data = many_posix.open("/mnt/d7/f399", posix::o_RDWR); CHECK(data);
+        auto data = many_posix.open("/mnt/d1/f399", posix::o_RDWR); CHECK(data);
         const std::array<std::byte, 1024> payload{std::byte{0x5a}};
         CHECK(many_posix.write(data.value(), payload).value() == payload.size());
         CHECK(many_posix.write(data.value(), payload).value() == payload.size());

@@ -867,9 +867,14 @@ Status VirtualFileSystem::mount_borrowed(std::string_view path, Node &root)
             // their explicit external-lifetime compatibility contract.
             if (auto status = root.retain(); !status) return status;
             PathReference root_hold({&root, 0});
+            // The table keeps the root and the covered node as raw pointers
+            // with no reference, so neither provider may recycle them.
             if (auto status = with_reference(root_hold, [&]() -> Status {
-                    auto exposed = root.expose_borrowed_identity();
-                    return exposed.code() == StatusCode::unsupported ? Status::success() : exposed;
+                    for (auto *node : {&root, covered})
+                        if (auto exposed = node->expose_borrowed_identity();
+                            !exposed && exposed.code() != StatusCode::unsupported)
+                            return exposed;
+                    return Status::success();
                 }); !status) return status;
             {
                 smp::ScopedSpinLock guard(lock_);
