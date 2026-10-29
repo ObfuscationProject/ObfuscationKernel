@@ -1,4 +1,5 @@
 #include "ok/arch/execution_spaces.hpp"
+#include "ok/interrupt/platform.hpp"
 
 #include <cstddef>
 
@@ -461,9 +462,18 @@ extern "C" void ok_arm_execution_trap(u64 vector, uptr capture_sp)
         const auto acknowledge = mmio(gic_cpu + 0xc);
         const auto irq = acknowledge & 0x3ff;
         asm volatile("msr cntp_ctl_el0, xzr; isb" : : : "memory");
-        if (irq < 1020)
+        // The timer completes here; any other ID is a device line whose top
+        // half masks and completes it once the interrupt service runs.
+        if (irq == timer_irq)
+        {
             mmio(gic_cpu + 0x10) = acknowledge;
-        last_trap = {irq == timer_irq ? TrapKind::timer : TrapKind::exception, irq, 0, 0, capture_sp};
+            ok_interrupt_tick();
+        }
+        else if (irq < 1020 && interrupt::platform_irqs_started())
+            ok_interrupt_top_half(static_cast<interrupt::IrqLine>(irq));
+        else if (irq < 1020)
+            mmio(gic_cpu + 0x10) = acknowledge;
+        last_trap = {irq == timer_irq ? TrapKind::timer : TrapKind::interrupt, irq, 0, 0, capture_sp};
         return;
     }
     const auto exception_class = (syndrome >> 26) & 0x3f;

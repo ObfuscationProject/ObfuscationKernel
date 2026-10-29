@@ -1,5 +1,6 @@
 #include "ok/core/types.hpp"
 #include "ok/core/entry.hpp"
+#include "ok/interrupt/platform.hpp"
 #include "ok/driver/qemu_virt/ramfb.hpp"
 #include "ok/driver/qemu_virt/virtio_input.hpp"
 
@@ -262,11 +263,51 @@ extern "C" int ok_platform_input_poll()
     return poll_virtio_keyboard();
 }
 
-extern "C" int ok_platform_console_poll()
+namespace
+{
+// PL011 receive bytes the SPI 1 (ID 33) bottom half moved out of the UART;
+// filled and drained with interrupts disabled on the boot CPU.
+constexpr ok::interrupt::IrqLine uart_irq = 33;
+constexpr ok::uptr uart_imsc = pl011_base + 0x38;
+constexpr ok::uptr uart_icr = pl011_base + 0x44;
+constexpr ok::u32 uart_receive_interrupts = (1u << 4) | (1u << 6); // RX and receive timeout.
+constinit ok::u8 uart_ring[256]{};
+constinit ok::usize uart_head{0}, uart_tail{0};
+
+int read_uart()
 {
     if ((mmio32(uart_fr) & uart_fr_rxfe) != 0)
-    {
         return -1;
-    }
     return static_cast<int>(mmio32(uart_dr) & 0xffu);
+}
+
+void uart_interrupt(void *, ok::interrupt::IrqLine)
+{
+    while (uart_head - uart_tail < sizeof(uart_ring))
+    {
+        const int value = read_uart();
+        if (value < 0)
+            break;
+        uart_ring[uart_head++ % sizeof(uart_ring)] = static_cast<ok::u8>(value);
+    }
+    mmio32(uart_icr) = uart_receive_interrupts;
+}
+} // namespace
+
+extern "C" ok::Status ok_platform_bind_irqs()
+{
+    if (auto status = ok::interrupt::bind_platform_irq(uart_irq, ok::interrupt::IrqTrigger::level, uart_interrupt,
+                                                       nullptr);
+        !status.ok())
+        return status;
+    mmio32(uart_icr) = uart_receive_interrupts;
+    mmio32(uart_imsc) = mmio32(uart_imsc) | uart_receive_interrupts;
+    return ok::Status::success();
+}
+
+extern "C" int ok_platform_console_poll()
+{
+    if (uart_tail != uart_head)
+        return uart_ring[uart_tail++ % sizeof(uart_ring)];
+    return read_uart();
 }

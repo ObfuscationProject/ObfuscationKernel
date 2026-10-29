@@ -3,7 +3,7 @@
 #if defined(OK_KERNEL_FREESTANDING) && (defined(__x86_64__) || defined(__i386__))
 #include "../arch/x86_common/pic8259.hpp"
 #define OK_PLATFORM_IRQ_WAIT 1
-#elif defined(OK_KERNEL_FREESTANDING) && defined(__arm__)
+#elif defined(OK_KERNEL_FREESTANDING) && (defined(__arm__) || defined(__aarch64__))
 #include "../arch/arm_common/gicv2.hpp"
 #define OK_PLATFORM_IRQ_WAIT 1
 #endif
@@ -16,7 +16,7 @@ namespace
 // controller driver keep the model chip and never idle on interrupts.
 #if defined(OK_PLATFORM_IRQ_WAIT) && (defined(__x86_64__) || defined(__i386__))
 using PlatformIrqChip = arch::x86::Pic8259;
-#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__arm__)
+#elif defined(OK_PLATFORM_IRQ_WAIT) && (defined(__arm__) || defined(__aarch64__))
 using PlatformIrqChip = arch::arm::GicV2;
 #else
 using PlatformIrqChip = ModelIrqChip;
@@ -43,6 +43,17 @@ void disarm_idle_tick()
     const u32 disable = 0;
     asm volatile("mcr p15, 0, %0, c14, c2, 1\nisb" ::"r"(disable) : "memory");
 }
+#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__aarch64__)
+void arm_idle_tick()
+{
+    u64 frequency;
+    asm volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
+    asm volatile("msr cntp_tval_el0, %0; msr cntp_ctl_el0, %1; isb" : : "r"(frequency / 100), "r"(u64{1}) : "memory");
+}
+void disarm_idle_tick()
+{
+    asm volatile("msr cntp_ctl_el0, xzr; isb" : : : "memory");
+}
 #endif
 
 void halt_until_interrupt()
@@ -51,9 +62,9 @@ void halt_until_interrupt()
     // STI's one-instruction shadow makes the enable and HLT atomic: an
     // interrupt already pending is taken at the HLT and ends it.
     asm volatile("sti; hlt; cli" : : : "memory");
-#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__arm__)
-    // WFI wakes on a pending IRQ even with CPSR.I set, so the kernel waits
-    // masked and claims the interrupt from the GIC instead of taking it.
+#elif defined(OK_PLATFORM_IRQ_WAIT) && (defined(__arm__) || defined(__aarch64__))
+    // WFI wakes on a pending IRQ even with the IRQ mask set, so the kernel
+    // waits masked and claims the interrupt from the GIC instead of taking it.
     arm_idle_tick();
     asm volatile("dsb sy\nwfi" : : : "memory");
     const u32 acknowledge = PlatformIrqChip::claim();
