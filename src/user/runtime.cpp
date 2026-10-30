@@ -197,29 +197,7 @@ void emit_entry_stack_stats()
     emit(" faults="); emit_number(entry_faults);
     emit(" rejected="); emit_number(entry_rejections);
     emit(" guards=mapped-canaries smp=0\n");
-    // After the stack report: how the kernel loop idled and what the platform
-    // interrupt lines delivered, once the interrupt service runs.
-    if (!interrupt::platform_irqs_started()) return;
-    const auto irqs = interrupt::platform_irq_statistics();
-    emit("OK_IRQ_PLATFORM scope=hardware waits="); emit_number(irqs.waits);
-    emit(" ticks="); emit_number(irqs.ticks);
-    emit(" delivered="); emit_number(irqs.delivered);
-    emit(" serviced="); emit_number(irqs.serviced);
-    emit(" user_interrupts="); emit_number(entry_interrupts);
-    emit(" spurious="); emit_number(irqs.spurious);
-    emit(" controller_errors="); emit_number(irqs.controller_errors);
-    // Bound lines as line:delivered.
-    emit(" lines=");
-    bool first = true;
-    for (usize line = 0; line < interrupt::max_irq_lines; ++line)
-    {
-        const auto id = static_cast<interrupt::IrqLine>(line);
-        if (!interrupt::platform_irq_bound(id)) continue;
-        if (!first) emit(",");
-        first = false;
-        emit_number(line); emit(":"); emit_number(interrupt::platform_irq_delivered(id));
-    }
-    emit("\n");
+    report_interrupts();
 }
 namespace
 {
@@ -703,9 +681,53 @@ void release_process(Kernel &kernel, u64 pid)
         }
     }
 }
-void input(char value)
+// How the kernel loop idled, what the platform lines delivered, how the device
+// event sources were served (driven:posted:served:polled) and what woke the
+// waits that completed ready or timed out; once the interrupt service runs.
+void report_interrupts()
+{
+    if (!interrupt::platform_irqs_started()) return;
+    const auto irqs = interrupt::platform_irq_statistics();
+    emit_line("OK_IRQ_PLATFORM scope=hardware waits="); emit_number(irqs.waits);
+    emit(" ticks="); emit_number(irqs.ticks);
+    emit(" delivered="); emit_number(irqs.delivered);
+    emit(" serviced="); emit_number(irqs.serviced);
+    emit(" user_interrupts="); emit_number(entry_interrupts);
+    emit(" spurious="); emit_number(irqs.spurious);
+    emit(" controller_errors="); emit_number(irqs.controller_errors);
+    // Bound lines as line:delivered.
+    emit(" lines=");
+    bool first = true;
+    for (usize line = 0; line < interrupt::max_irq_lines; ++line)
+    {
+        const auto id = static_cast<interrupt::IrqLine>(line);
+        if (!interrupt::platform_irq_bound(id)) continue;
+        if (!first) emit(",");
+        first = false;
+        emit_number(line); emit(":"); emit_number(interrupt::platform_irq_delivered(id));
+    }
+    emit("\nOK_IRQ_EVENTS scope=hardware");
+    constexpr std::string_view sources[interrupt::event_source_count]{"console", "input", "network"};
+    for (usize source = 0; source < interrupt::event_source_count; ++source)
+    {
+        const auto events = interrupt::event_statistics(static_cast<interrupt::EventSource>(source));
+        emit(" "); emit(sources[source]); emit("="); emit_number(events.driven ? 1 : 0);
+        emit(":"); emit_number(events.posted); emit(":"); emit_number(events.served);
+        emit(":"); emit_number(events.polled);
+    }
+    if (runtime_kernel)
+    {
+        const auto &scheduler = runtime_kernel->scheduler();
+        emit(" wakes=thread:"); emit_number(scheduler.wakes(sched::WakeSource::thread));
+        emit(",timer:"); emit_number(scheduler.wakes(sched::WakeSource::timer));
+        emit(",interrupt:"); emit_number(scheduler.wakes(sched::WakeSource::interrupt));
+        emit(",poll:"); emit_number(scheduler.wakes(sched::WakeSource::poll));
+    }
+    emit("\n");
+}
+void input(char value, sched::WakeSource source)
 {
     if (!shutdown_admission_closed && !native_shutdown_pending() && runtime_kernel != nullptr)
-        runtime_kernel->scheduler().console_input(value);
+        runtime_kernel->scheduler().console_input(value, source);
 }
 } // namespace ok::user::native

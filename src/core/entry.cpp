@@ -507,9 +507,9 @@ Status ok_userland_status()
 {
     return user::native::runtime_status();
 }
-void ok_userland_input(char value)
+void ok_userland_input(char value, sched::WakeSource source)
 {
-    user::native::input(value);
+    user::native::input(value, source);
 }
 SystemPowerAction ok_system_power_action()
 {

@@ -37,41 +37,11 @@ void platform_write(std::string_view text)
         ok_platform_console_write_char(value);
 }
 
-void write_number(ok::usize value)
-{
-    char digits[24]{};
-    ok::usize count = 0;
-    do
-    {
-        digits[count++] = static_cast<char>('0' + value % 10);
-        value /= 10;
-    } while (value != 0 && count < sizeof(digits));
-    char text[24]{};
-    for (ok::usize i = 0; i < count; ++i)
-        text[i] = digits[count - 1 - i];
-    platform_write(std::string_view(text, count));
-}
-
-// One line before the shutdown report: how often the loop idled on an
-// interrupt and what the platform lines delivered.
+// The interrupt report before the shutdown line, once the service runs.
 void report_interrupts()
 {
-    if (!ok::interrupt::platform_irqs_started())
-        return;
-    const auto stats = ok::interrupt::platform_irq_statistics();
-    platform_write("OK_IRQ_PLATFORM waits=");
-    write_number(stats.waits);
-    platform_write(" ticks=");
-    write_number(stats.ticks);
-    platform_write(" delivered=");
-    write_number(stats.delivered);
-    platform_write(" serviced=");
-    write_number(stats.serviced);
-    platform_write(" spurious=");
-    write_number(stats.spurious);
-    platform_write(" controller_errors=");
-    write_number(stats.controller_errors);
-    platform_write("\n");
+    if (native_userland_started)
+        ok::user::native::report_interrupts();
 }
 
 [[noreturn]] void halt_forever()
@@ -151,20 +121,30 @@ namespace ok::detail
             halt_forever();
         }
         bool did_work = false;
-        const int serial = ok_platform_console_poll != nullptr ? ok_platform_console_poll() : -1;
-        if (serial >= 0)
+        // A driven source is read only after its interrupt posted it; the
+        // platform posts it again while bytes remain.
+        using ok::interrupt::EventSource;
+        if (ok::interrupt::take_event(EventSource::console))
         {
-            if (native_userland_started)
-                ok::ok_userland_input(static_cast<char>(serial == '\r' ? '\n' : serial));
-            else
-                static_cast<void>(ok::ok_gui_key_event(serial));
-            did_work = true;
+            const int serial = ok_platform_console_poll != nullptr ? ok_platform_console_poll() : -1;
+            if (serial >= 0)
+            {
+                if (native_userland_started)
+                    ok::ok_userland_input(static_cast<char>(serial == '\r' ? '\n' : serial),
+                                          ok::interrupt::event_wake_source(EventSource::console));
+                else
+                    static_cast<void>(ok::ok_gui_key_event(serial));
+                did_work = true;
+            }
         }
-        const int value = ok_platform_input_poll();
-        if (value >= 0)
+        if (ok::interrupt::take_event(EventSource::input))
         {
-            static_cast<void>(ok::ok_gui_key_event(value));
-            did_work = true;
+            const int value = ok_platform_input_poll();
+            if (value >= 0)
+            {
+                static_cast<void>(ok::ok_gui_key_event(value));
+                did_work = true;
+            }
         }
         ++ui_tick_counter;
         if ((ui_tick_counter & 0x7ffu) == 0)
@@ -172,10 +152,11 @@ namespace ok::detail
             static_cast<void>(ok::ok_debug_shell_tick());
             did_work = true;
         }
-        // With nothing runnable, wait for a tick or a device line instead of
-        // spinning; profiles without a controller driver keep polling.
-        if (!did_work && !(native_userland_started && ok::ok_userland_idle() &&
-                           ok::interrupt::wait_for_interrupt()))
+        // With nothing runnable and no event left to serve, wait for a tick or
+        // a device line instead of spinning; profiles without a controller
+        // driver keep polling.
+        if (!did_work && !ok::interrupt::events_posted() &&
+            !(native_userland_started && ok::ok_userland_idle() && ok::interrupt::wait_for_interrupt()))
         {
             desktop_idle();
         }

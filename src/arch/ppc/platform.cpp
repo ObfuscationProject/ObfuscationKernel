@@ -1,5 +1,6 @@
 #include "ok/core/types.hpp"
 #include "ok/interrupt/platform.hpp"
+#include "../../interrupt/console_ring.hpp"
 
 namespace
 {
@@ -94,11 +95,9 @@ extern "C" int ok_platform_input_poll()
 
 namespace
 {
-// DUART receive bytes the MPIC source 42 bottom half moved out of the UART;
-// filled and drained with interrupts disabled on the boot CPU.
+// DUART receive bytes the MPIC source 42 bottom half moved out of the UART.
 constexpr ok::interrupt::IrqLine uart_irq = 42;
-constinit ok::u8 uart_ring[256]{};
-constinit ok::usize uart_head{0}, uart_tail{0};
+constinit ok::interrupt::ConsoleRing<256> uart_ring{};
 
 int read_uart()
 {
@@ -110,13 +109,7 @@ int read_uart()
 
 void uart_interrupt(void *, ok::interrupt::IrqLine)
 {
-    while (uart_head - uart_tail < sizeof(uart_ring))
-    {
-        const int value = read_uart();
-        if (value < 0)
-            return;
-        uart_ring[uart_head++ % sizeof(uart_ring)] = static_cast<ok::u8>(value);
-    }
+    uart_ring.fill(read_uart);
 }
 } // namespace
 
@@ -127,12 +120,12 @@ extern "C" ok::Status ok_platform_bind_irqs()
         !status.ok())
         return status;
     mmio8(uart_primary_base + 0x01) = 0x01; // Received-data-available interrupt.
+    ok::interrupt::drive_events(ok::interrupt::EventSource::console);
+    ok::interrupt::drive_events(ok::interrupt::EventSource::input); // No input device to poll.
     return ok::Status::success();
 }
 
 extern "C" int ok_platform_console_poll()
 {
-    if (uart_tail != uart_head)
-        return uart_ring[uart_tail++ % sizeof(uart_ring)];
-    return read_uart();
+    return uart_ring.take(read_uart);
 }

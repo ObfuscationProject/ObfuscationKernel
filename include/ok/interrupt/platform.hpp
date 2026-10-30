@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ok/interrupt/irq_chip.hpp"
+#include "ok/sched/wait_registration.hpp"
 
 namespace ok::interrupt
 {
@@ -40,6 +41,37 @@ bool wait_for_interrupt();
 // Interrupts delivered to `line` so far (top halves run).
 [[nodiscard]] usize platform_irq_delivered(IrqLine line);
 [[nodiscard]] bool platform_irq_bound(IrqLine line);
+
+// Device event sources the kernel loop serves. A driver whose line is bound
+// calls drive_events() once; from then on its bottom half posts the source and
+// the loop serves the source only after a post, never by polling the device.
+// A source that is not driven (no bound line, or before start_platform_irqs())
+// is polled on every pass. A consumer that stops before the source is empty
+// (a budget, a one-byte step) posts it again.
+enum class EventSource : u8
+{
+    console,
+    input,
+    network,
+};
+inline constexpr usize event_source_count = 3;
+struct EventStatistics
+{
+    bool driven{false};
+    usize posted{0};
+    usize served{0}; // Passes that served a post.
+    usize polled{0}; // Passes that polled the source before it was driven.
+};
+void drive_events(EventSource source);
+void post_event(EventSource source);
+// True when the loop should serve `source` on this pass; consumes a post.
+[[nodiscard]] bool take_event(EventSource source);
+[[nodiscard]] bool event_driven(EventSource source);
+// A driven source has a post the loop has not taken yet.
+[[nodiscard]] bool events_posted();
+// The wake source a waiter made ready by `source`'s events is credited to.
+[[nodiscard]] sched::WakeSource event_wake_source(EventSource source);
+[[nodiscard]] EventStatistics event_statistics(EventSource source);
 
 // Board routing for device drivers: the platform line a device interrupts on.
 struct PlatformLine

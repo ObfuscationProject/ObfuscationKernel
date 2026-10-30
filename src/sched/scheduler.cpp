@@ -1840,14 +1840,16 @@ Result<WaitTicket> SchedulerState::register_current_wait(ThreadWaitReason reason
         process->set_state(ProcessState::blocked);
     return ticket;
 }
-bool SchedulerState::complete_wait(WaitTicket ticket, WaitCompletion completion)
+bool SchedulerState::complete_wait(WaitTicket ticket, WaitCompletion completion, WakeSource source)
 {
     auto *process = find(ticket.owner);
     auto *thread = find_thread(ticket.owner, ticket.thread);
     if (!process || !thread || process->state() == ProcessState::zombie ||
         process->state() == ProcessState::exited || thread->state != ProcessState::blocked ||
-        !thread->wait_registration.complete(ticket, completion))
+        !thread->wait_registration.complete(ticket, completion, source))
         return false;
+    if (completion == WaitCompletion::ready || completion == WaitCompletion::timeout)
+        ++wakes_[static_cast<usize>(thread->wait_registration.source())];
     thread->native_deadline.cancel();
     thread->wait_reason = ThreadWaitReason::none;
     thread->wait_key = 0;
@@ -1856,7 +1858,7 @@ bool SchedulerState::complete_wait(WaitTicket ticket, WaitCompletion completion)
         process->set_state(ProcessState::runnable);
     return true;
 }
-void SchedulerState::wake_waiters(ThreadWaitReason reason, u64 key)
+void SchedulerState::wake_waiters(ThreadWaitReason reason, u64 key, WakeSource source)
 {
     for (auto &process : processes_)
     {
@@ -1865,7 +1867,7 @@ void SchedulerState::wake_waiters(ThreadWaitReason reason, u64 key)
         for (auto &thread : process.threads())
             if (thread.state == ProcessState::blocked && thread.wait_reason == reason && thread.wait_key == key)
             {
-                static_cast<void>(complete_wait(thread.wait_registration.ticket(), WaitCompletion::ready));
+                static_cast<void>(complete_wait(thread.wait_registration.ticket(), WaitCompletion::ready, source));
             }
     }
 }

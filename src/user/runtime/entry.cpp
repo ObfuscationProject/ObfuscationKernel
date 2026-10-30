@@ -1027,7 +1027,7 @@ bool step(Kernel &kernel)
         {
             const auto cause = ready && ready.value() == 0 && expired
                 ? sched::WaitCompletion::timeout : sched::WaitCompletion::ready;
-            if (!kernel.scheduler().complete_wait(wait.ticket, cause))
+            if (!kernel.scheduler().complete_wait(wait.ticket, cause, wait.ready_source))
             {
                 cancel_poll(kernel, object);
                 continue;

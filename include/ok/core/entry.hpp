@@ -65,7 +65,7 @@ bool ok_step_userland();
 Status ok_poll_network();
 Status ok_userland_status();
 bool ok_userland_idle();
-void ok_userland_input(char value);
+void ok_userland_input(char value, sched::WakeSource source);
 SystemPowerAction ok_system_power_action();
 bool ok_debug_shell_gui_ready();
 bool ok_debug_shell_gui_open();

@@ -3,6 +3,7 @@
 #include "ok/interrupt/platform.hpp"
 #include "ok/driver/qemu_virt/ramfb.hpp"
 #include "ok/driver/qemu_virt/virtio_input.hpp"
+#include "../../interrupt/console_ring.hpp"
 
 namespace
 {
@@ -196,20 +197,19 @@ int poll_virtio_keyboard()
     return -1;
 }
 
-// Keyboard and mouse events arrive on their virtio-mmio lines; the main loop
-// reads the queues only after an interrupt, until both are drained.
-constinit bool input_interrupts{false}, input_pending{true};
-
+// Keyboard and mouse events arrive on their virtio-mmio lines; the loop reads
+// the queues only after an interrupt, until both are drained.
 void input_interrupt(void *device, ok::interrupt::IrqLine)
 {
     static_cast<ok::driver::qemu_virt::VirtioInputDevice *>(device)->acknowledge();
-    input_pending = true;
+    ok::interrupt::post_event(ok::interrupt::EventSource::input);
 }
 
+// An absent device leaves nothing to poll; a present one needs its line.
 bool bind_input(ok::driver::qemu_virt::VirtioInputDevice &device, ok::driver::qemu_virt::VirtioInputKind kind)
 {
     if (!device.initialize(virtio_input_bases, sizeof(virtio_input_bases) / sizeof(virtio_input_bases[0]), kind))
-        return false;
+        return true;
     const auto line = ok::interrupt::virtio_mmio_line((device.base() - virtio_input_bases[0]) / 0x1000);
     return line && ok::interrupt::bind_platform_irq(line.value().line, line.value().trigger, input_interrupt, &device);
 }
@@ -272,25 +272,23 @@ extern "C" void ok_platform_poll_idle()
     asm volatile("nop" ::: "memory");
 }
 
+// Runs when the loop serves the input source; posts it again until both
+// queues and the pending key sequence are drained.
 extern "C" int ok_platform_input_poll()
 {
-    if (input_interrupts && !input_pending)
-        return pop_pending_keyboard_input();
     poll_virtio_mouse();
     const int key = poll_virtio_keyboard();
-    if (key < 0)
-        input_pending = false; // Both queues drained: wait for the next interrupt.
+    if (key >= 0)
+        ok::interrupt::post_event(ok::interrupt::EventSource::input);
     return key;
 }
 
 namespace
 {
-// NS16550 receive bytes the PLIC source 10 bottom half moved out of the UART;
-// filled and drained with interrupts disabled on the boot CPU.
+// NS16550 receive bytes the PLIC source 10 bottom half moved out of the UART.
 constexpr ok::interrupt::IrqLine uart_irq = 10;
 constexpr ok::uptr uart_ier = uart_base + 0x01;
-constinit ok::u8 uart_ring[256]{};
-constinit ok::usize uart_head{0}, uart_tail{0};
+constinit ok::interrupt::ConsoleRing<256> uart_ring{};
 
 int read_uart()
 {
@@ -301,31 +299,29 @@ int read_uart()
 
 void uart_interrupt(void *, ok::interrupt::IrqLine)
 {
-    while (uart_head - uart_tail < sizeof(uart_ring))
-    {
-        const int value = read_uart();
-        if (value < 0)
-            return;
-        uart_ring[uart_head++ % sizeof(uart_ring)] = static_cast<ok::u8>(value);
-    }
+    uart_ring.fill(read_uart);
 }
 } // namespace
 
 extern "C" ok::Status ok_platform_bind_irqs()
 {
-    input_interrupts = bind_input(virtio_keyboard, ok::driver::qemu_virt::VirtioInputKind::keyboard) &&
-                       bind_input(virtio_mouse, ok::driver::qemu_virt::VirtioInputKind::mouse);
+    if (bind_input(virtio_keyboard, ok::driver::qemu_virt::VirtioInputKind::keyboard) &&
+        bind_input(virtio_mouse, ok::driver::qemu_virt::VirtioInputKind::mouse))
+    {
+        ok::interrupt::drive_events(ok::interrupt::EventSource::input);
+        // Events queued before the lines were bound.
+        ok::interrupt::post_event(ok::interrupt::EventSource::input);
+    }
     if (auto status = ok::interrupt::bind_platform_irq(uart_irq, ok::interrupt::IrqTrigger::level, uart_interrupt,
                                                        nullptr);
         !status.ok())
         return status;
     mmio8(uart_ier) = 0x01; // Received-data-available interrupt.
+    ok::interrupt::drive_events(ok::interrupt::EventSource::console);
     return ok::Status::success();
 }
 
 extern "C" int ok_platform_console_poll()
 {
-    if (uart_tail != uart_head)
-        return uart_ring[uart_tail++ % sizeof(uart_ring)];
-    return read_uart();
+    return uart_ring.take(read_uart);
 }

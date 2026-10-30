@@ -9,13 +9,6 @@
 namespace ok::sched
 {
 
-enum class WakeSource : u8
-{
-    thread,
-    timer,
-    interrupt,
-};
-
 // Bounded queue of armed WaitRegistration records attached to one wait
 // condition (a pipe, a device completion, a socket). Protocol, in order:
 //   1. ticket = queue.prepare(registration)   -- register the waiter
@@ -70,7 +63,7 @@ template <usize Capacity> class WaitQueue final : private NonCopyable
             const usize i = (oldest_ + scanned) % Capacity;
             if (slots_[i] == nullptr)
                 continue;
-            slots_[i]->complete(slots_[i]->ticket(), completion);
+            slots_[i]->complete(slots_[i]->ticket(), completion, source);
             detach(i);
             oldest_ = (i + 1) % Capacity;
             ++wakes_[static_cast<usize>(source)];
@@ -103,7 +96,7 @@ template <usize Capacity> class WaitQueue final : private NonCopyable
         --count_;
     }
     std::array<WaitRegistration *, Capacity> slots_{};
-    std::array<usize, 3> wakes_{};
+    std::array<usize, wake_source_count> wakes_{};
     usize count_{0};
     usize oldest_{0};
 };

@@ -149,12 +149,12 @@ Result<usize> SchedulerState::read_console(ProcessId pid, u32 expected_epoch, st
     return console_input_.read(pid, caller->console_epoch_, expected_epoch, output);
 }
 
-void SchedulerState::console_input(char value)
+void SchedulerState::console_input(char value, WakeSource source)
 {
     if (console_input_.active() && !console_authorized(console_input_.leader(), console_input_.epoch()))
         abort_console_input();
     if (console_input_.input(value))
-        wake_waiters(ThreadWaitReason::console_read, console_input_.epoch());
+        wake_waiters(ThreadWaitReason::console_read, console_input_.epoch(), source);
 }
 
 void SchedulerState::cancel_console_epoch(u32 epoch)

@@ -415,6 +415,67 @@ Result<PlatformLine> pci_intx_line(u8 device, u8 pin, u8 interrupt_line)
 #endif
 }
 
+namespace
+{
+constinit std::array<EventStatistics, event_source_count> events{};
+constinit std::array<bool, event_source_count> posted{};
+} // namespace
+
+void drive_events(EventSource source)
+{
+    events[static_cast<usize>(source)].driven = true;
+}
+
+// An undriven source is polled on every pass anyway, so a consumer's repost
+// is dropped.
+void post_event(EventSource source)
+{
+    const auto index = static_cast<usize>(source);
+    if (!events[index].driven)
+        return;
+    ++events[index].posted;
+    posted[index] = true;
+}
+
+bool take_event(EventSource source)
+{
+    const auto index = static_cast<usize>(source);
+    if (!events[index].driven)
+    {
+        posted[index] = false;
+        ++events[index].polled;
+        return true;
+    }
+    if (!posted[index])
+        return false;
+    posted[index] = false;
+    ++events[index].served;
+    return true;
+}
+
+bool event_driven(EventSource source)
+{
+    return events[static_cast<usize>(source)].driven;
+}
+
+bool events_posted()
+{
+    for (usize index = 0; index < event_source_count; ++index)
+        if (events[index].driven && posted[index])
+            return true;
+    return false;
+}
+
+sched::WakeSource event_wake_source(EventSource source)
+{
+    return event_driven(source) ? sched::WakeSource::interrupt : sched::WakeSource::poll;
+}
+
+EventStatistics event_statistics(EventSource source)
+{
+    return events[static_cast<usize>(source)];
+}
+
 IrqStatistics platform_irq_statistics()
 {
     IrqStatistics result = statistics;

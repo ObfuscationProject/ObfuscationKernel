@@ -565,10 +565,14 @@ class SchedulerState
     Status block_current(ThreadWaitReason reason, u64 key);
     // Serialized boot-CPU wait ownership. Tokens never identify a TCB address.
     Result<WaitTicket> register_current_wait(ThreadWaitReason reason, u64 key);
-    bool complete_wait(WaitTicket ticket, WaitCompletion completion);
+    // `source` names what made the wait ready; completed waits are counted by
+    // the source their registration recorded.
+    bool complete_wait(WaitTicket ticket, WaitCompletion completion, WakeSource source = WakeSource::thread);
     [[nodiscard]] ThreadControlBlock *find_thread(ProcessId pid, ThreadId tid);
     [[nodiscard]] ThreadControlBlock *current_thread();
-    void wake_waiters(ThreadWaitReason reason, u64 key);
+    void wake_waiters(ThreadWaitReason reason, u64 key, WakeSource source = WakeSource::thread);
+    // Ready and timed-out waits completed so far, by wake source.
+    [[nodiscard]] u64 wakes(WakeSource source) const { return wakes_[static_cast<usize>(source)]; }
     // Native single-console input; descriptor possession never grants membership.
     Result<u32> claim_console(ProcessId target);
     Status revoke_console(u32 expected_epoch);
@@ -579,7 +583,8 @@ class SchedulerState
     [[nodiscard]] bool console_readable(ProcessId pid, u32 expected_epoch) const;
     [[nodiscard]] Status shutdown_console_status() const;
     Result<usize> read_console(ProcessId pid, u32 expected_epoch, std::span<std::byte> output);
-    void console_input(char value);
+    // `source` is the console's: interrupt once its UART line is bound.
+    void console_input(char value, WakeSource source = WakeSource::thread);
     // Trusted runtime ingress failure closes ownership before returning to userland.
     void abort_console_input();
     Status configure_cpus(usize cpu_count);
@@ -637,6 +642,7 @@ class SchedulerState
     void cancel_console_epoch(u32 epoch);
     private_pty::RawPtyTable<> pty_transport_{}; // One stable table; handles never cross scheduler domains.
     ConsoleInputLease console_input_{};
+    std::array<u64, wake_source_count> wakes_{};
     struct ConsoleTerminal
     {
         u32 epoch{};

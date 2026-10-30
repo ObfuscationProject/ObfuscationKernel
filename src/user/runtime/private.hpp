@@ -91,6 +91,7 @@
 #include "ok/user/native_metadata.hpp"
 #include "ok/arch/execution.hpp"
 #include "ok/arch/clock.hpp"
+#include "ok/interrupt/platform.hpp"
 #include "ok/time/public_clock.hpp"
 #include "ok/user/clock_set.hpp"
 #include "ok/core/kernel.hpp"
@@ -276,6 +277,8 @@ struct PollWait
     bool select_sets{};
     SelectSets sets{};
     std::array<u32, 3> ready_sets{};
+    // Set by poll_ready(): the device source of a ready console or socket.
+    sched::WakeSource ready_source{sched::WakeSource::thread};
 };
 using PollObjectsLayout = memory::ObjectPool<PollWait, NativePagePool, 1>;
 constexpr usize poll_object_pages = (sched::max_processes + PollObjectsLayout::slots_per_page - 1) /

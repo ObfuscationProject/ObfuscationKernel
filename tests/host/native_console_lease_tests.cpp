@@ -171,6 +171,18 @@ void runtime_ownership(Kernel &kernel)
     CHECK(call(kernel, login, N::read, {0, out, 1}) == -14);
     mock::write_forbidden = 0;
     CHECK(call(kernel, login, N::read, {0, out, 1}) == 1 && mock::memory[128] == std::byte{'e'});
+    // A read blocked on the empty lease is woken with the console's source.
+    {
+        activate(kernel, login);
+        CHECK(scheduler.block_current(sched::ThreadWaitReason::console_read, static_cast<u64>(first)));
+        const auto &waiter = scheduler.find(login)->threads()[0];
+        const auto interrupt_wakes = scheduler.wakes(sched::WakeSource::interrupt);
+        native::input('w', sched::WakeSource::interrupt);
+        CHECK(waiter.state == sched::ProcessState::runnable &&
+              waiter.wait_registration.source() == sched::WakeSource::interrupt);
+        CHECK(scheduler.wakes(sched::WakeSource::interrupt) == interrupt_wakes + 1);
+    }
+    CHECK(call(kernel, login, N::read, {0, out, 1}) == 1 && mock::memory[128] == std::byte{'w'});
 
     const auto orphan = child(kernel, login);
     CHECK(scheduler.find(orphan)->console_epoch() == first);

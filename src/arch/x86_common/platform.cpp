@@ -2,6 +2,7 @@
 #include "ok/core/types.hpp"
 #include "ok/core/entry.hpp"
 #include "ok/driver/qemu_virt/ramfb.hpp"
+#include "../../interrupt/console_ring.hpp"
 
 namespace
 {
@@ -528,11 +529,8 @@ extern "C" void ok_platform_reboot()
 
 namespace
 {
-// COM1 receive bytes the IRQ 4 bottom half moved out of the UART. The ring is
-// filled and drained with interrupts disabled on the boot CPU; a full ring
-// leaves the rest in the UART FIFO for the next drain or poll.
-constinit ok::u8 com1_ring[256]{};
-constinit ok::usize com1_head{0}, com1_tail{0};
+// COM1 receive bytes the IRQ 4 bottom half moved out of the UART.
+constinit ok::interrupt::ConsoleRing<256> com1_ring{};
 
 int read_com1()
 {
@@ -541,25 +539,14 @@ int read_com1()
 
 void com1_interrupt(void *, ok::interrupt::IrqLine)
 {
-    while (com1_head - com1_tail < sizeof(com1_ring))
-    {
-        const int value = read_com1();
-        if (value < 0)
-            return;
-        com1_ring[com1_head++ % sizeof(com1_ring)] = static_cast<ok::u8>(value);
-    }
+    com1_ring.fill(read_com1);
 }
-} // namespace
 
-namespace
-{
-// PS/2 keyboard (line 1) and mouse (line 12) bytes: the main loop reads the
-// 8042 only after one of them interrupted, until its output buffer is empty.
-constinit bool input_interrupts{false}, input_pending{true};
-
+// PS/2 keyboard (line 1) and mouse (line 12) bytes: the loop reads the 8042
+// only after one of them interrupted, until its output buffer is empty.
 void ps2_interrupt(void *, ok::interrupt::IrqLine)
 {
-    input_pending = true;
+    ok::interrupt::post_event(ok::interrupt::EventSource::input);
 }
 } // namespace
 
@@ -569,37 +556,39 @@ extern "C" ok::Status ok_platform_bind_irqs()
         !status.ok())
         return status;
     outb(com1 + 1, 0x01); // Received-data-available interrupt; MCR OUT2 already routes it.
+    ok::interrupt::drive_events(ok::interrupt::EventSource::console);
     ok::u8 config = 0;
     if (ps2_read_config(config) &&
         ok::interrupt::bind_platform_irq(1, ok::interrupt::IrqTrigger::edge, ps2_interrupt, nullptr) &&
         ok::interrupt::bind_platform_irq(12, ok::interrupt::IrqTrigger::edge, ps2_interrupt, nullptr) &&
         ps2_write_config(static_cast<ok::u8>(config | ps2_config_keyboard_irq | ps2_config_aux_irq)))
-        input_interrupts = true;
+    {
+        ok::interrupt::drive_events(ok::interrupt::EventSource::input);
+        // Bytes that arrived before the 8042 raised its lines.
+        ok::interrupt::post_event(ok::interrupt::EventSource::input);
+    }
     return ok::Status::success();
 }
 
 extern "C" int ok_platform_console_poll()
 {
-    if (com1_tail != com1_head)
-        return com1_ring[com1_tail++ % sizeof(com1_ring)];
-    return read_com1();
+    return com1_ring.take(read_com1);
 }
 
+// Runs when the loop serves the input source; posts it again until the
+// pending sequence and the 8042 output buffer are empty.
 extern "C" int ok_platform_input_poll()
 {
     if (const int pending = pop_pending_input(); pending >= 0)
     {
+        ok::interrupt::post_event(ok::interrupt::EventSource::input);
         return pending;
     }
-    if (input_interrupts && !input_pending)
-        return -1;
     poll_ps2_mouse();
     const auto status = inb(keyboard_status_port);
     if ((status & ps2_status_output_full) == 0)
-    {
-        input_pending = false; // Output buffer empty: wait for the next interrupt.
         return -1;
-    }
+    ok::interrupt::post_event(ok::interrupt::EventSource::input);
     const auto scancode = inb(keyboard_data_port);
     if ((status & ps2_status_aux_output) != 0)
     {

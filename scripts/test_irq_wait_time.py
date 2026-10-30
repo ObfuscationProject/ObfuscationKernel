@@ -24,6 +24,7 @@ def main():
             *shlex.split(args.cxx), "-std=c++23", "-O2", "-Wall", "-Wextra", "-Wpedantic", "-Werror",
             "-fno-exceptions", *flags, f"-I{root / 'include'}", f"-I{root / 'src'}",
             str(root / "tests/host/irq_wait_time_tests.cpp"), str(root / "src/interrupt/interrupt.cpp"),
+            str(root / "src/interrupt/platform_irq.cpp"),
             "-o", str(output)], check=True)
         subprocess.run([str(output)], check=True)
 

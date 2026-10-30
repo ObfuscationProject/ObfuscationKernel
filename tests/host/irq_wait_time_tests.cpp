@@ -1,6 +1,8 @@
 #include "ok/interrupt/irq_chip.hpp"
+#include "ok/interrupt/platform.hpp"
 #include "ok/sched/wait_queue.hpp"
 #include "ok/time/clocksource.hpp"
+#include "interrupt/console_ring.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -107,6 +109,90 @@ static void check_wait_queue()
     CHECK(a.completion() == sched::WaitCompletion::timeout && b.completion() == sched::WaitCompletion::timeout);
 }
 
+static void check_wake_source()
+{
+    sched::WaitRegistration registration;
+    auto ticket = registration.arm(1, 10);
+    CHECK(ticket && registration.source() == sched::WakeSource::thread);
+    CHECK(registration.complete(ticket.value(), sched::WaitCompletion::ready, sched::WakeSource::interrupt));
+    CHECK(registration.source() == sched::WakeSource::interrupt);
+    // A timeout is a timer wake whatever the caller names; arm() resets it.
+    ticket = registration.arm(1, 10);
+    CHECK(ticket && registration.source() == sched::WakeSource::thread);
+    CHECK(registration.complete(ticket.value(), sched::WaitCompletion::timeout, sched::WakeSource::poll));
+    CHECK(registration.source() == sched::WakeSource::timer);
+    // A refused completion records nothing.
+    CHECK(!registration.complete(ticket.value(), sched::WaitCompletion::ready, sched::WakeSource::interrupt));
+    CHECK(registration.source() == sched::WakeSource::timer);
+}
+
+// The hosted build has no controller, so start_platform_irqs() never runs and
+// the event sources are exercised directly.
+static void check_event_sources()
+{
+    using interrupt::EventSource;
+    // Undriven: served on every pass, posts dropped.
+    interrupt::post_event(EventSource::network);
+    CHECK(!interrupt::events_posted());
+    CHECK(interrupt::take_event(EventSource::network) && interrupt::take_event(EventSource::network));
+    CHECK(interrupt::event_wake_source(EventSource::network) == sched::WakeSource::poll);
+    auto stats = interrupt::event_statistics(EventSource::network);
+    CHECK(!stats.driven && stats.posted == 0 && stats.served == 0 && stats.polled == 2);
+    // Driven: served once per post.
+    interrupt::drive_events(EventSource::network);
+    CHECK(interrupt::event_driven(EventSource::network) && !interrupt::take_event(EventSource::network));
+    interrupt::post_event(EventSource::network);
+    interrupt::post_event(EventSource::network);
+    CHECK(interrupt::events_posted());
+    CHECK(interrupt::take_event(EventSource::network) && !interrupt::events_posted());
+    CHECK(!interrupt::take_event(EventSource::network));
+    CHECK(interrupt::event_wake_source(EventSource::network) == sched::WakeSource::interrupt);
+    stats = interrupt::event_statistics(EventSource::network);
+    CHECK(stats.driven && stats.posted == 2 && stats.served == 1 && stats.polled == 2);
+    // Sources are independent.
+    CHECK(!interrupt::event_driven(EventSource::input) && interrupt::take_event(EventSource::input));
+}
+
+struct ModelUart
+{
+    int fifo[600]{};
+    usize head{0}, tail{0}, reads{0};
+    void receive(int value) { fifo[head++] = value; }
+    int read()
+    {
+        ++reads;
+        return tail == head ? -1 : fifo[tail++];
+    }
+};
+
+static void check_console_ring()
+{
+    using interrupt::EventSource;
+    ModelUart uart;
+    const auto read = [&] { return uart.read(); };
+    interrupt::ConsoleRing<4> ring;
+    // Before the console is driven the ring reads the UART itself.
+    CHECK(!interrupt::event_driven(EventSource::console));
+    uart.receive('a');
+    CHECK(ring.take(read) == 'a' && ring.take(read) == -1);
+    interrupt::drive_events(EventSource::console);
+    // Driven: no UART access outside the handler.
+    uart.receive('b');
+    const usize reads = uart.reads;
+    CHECK(!interrupt::take_event(EventSource::console) && ring.take(read) == -1 && uart.reads == reads);
+    ring.fill(read);
+    CHECK(interrupt::take_event(EventSource::console) && ring.take(read) == 'b');
+    CHECK(!interrupt::take_event(EventSource::console) && ring.take(read) == -1);
+    // A burst larger than the ring: the handler leaves the rest in the FIFO
+    // and take() refills from it once the ring drains, posting until empty.
+    for (int value = 0; value < 10; ++value)
+        uart.receive('0' + value);
+    ring.fill(read);
+    for (int value = 0; value < 10; ++value)
+        CHECK(interrupt::take_event(EventSource::console) && ring.take(read) == '0' + value);
+    CHECK(!interrupt::take_event(EventSource::console));
+}
+
 static void check_calibrated_clock()
 {
     time::ModelClockSource source(24'000'000); // 24 MHz, like the QEMU virt generic timer
@@ -136,6 +222,9 @@ int main()
 {
     check_irq_router();
     check_wait_queue();
+    check_wake_source();
+    check_event_sources();
+    check_console_ring();
     check_calibrated_clock();
     std::puts("OK_HOST irq_wait_time model=pass");
     return 0;

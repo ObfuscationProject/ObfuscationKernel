@@ -3,6 +3,7 @@
 #include "ok/interrupt/platform.hpp"
 #include "ok/driver/qemu_virt/ramfb.hpp"
 #include "ok/driver/qemu_virt/virtio_pci_input.hpp"
+#include "../../interrupt/console_ring.hpp"
 
 namespace
 {
@@ -261,12 +262,10 @@ extern "C" int ok_platform_input_poll()
 
 namespace
 {
-// NS16550 receive bytes the PCH-PIC input 2 bottom half moved out of the UART;
-// filled and drained with interrupts disabled on the boot CPU.
+// NS16550 receive bytes the PCH-PIC input 2 bottom half moved out of the UART.
 constexpr ok::interrupt::IrqLine uart_irq = 2;
 constexpr ok::uptr uart_ier = uart_base + 0x01;
-constinit ok::u8 uart_ring[256]{};
-constinit ok::usize uart_head{0}, uart_tail{0};
+constinit ok::interrupt::ConsoleRing<256> uart_ring{};
 
 int read_uart()
 {
@@ -277,13 +276,7 @@ int read_uart()
 
 void uart_interrupt(void *, ok::interrupt::IrqLine)
 {
-    while (uart_head - uart_tail < sizeof(uart_ring))
-    {
-        const int value = read_uart();
-        if (value < 0)
-            return;
-        uart_ring[uart_head++ % sizeof(uart_ring)] = static_cast<ok::u8>(value);
-    }
+    uart_ring.fill(read_uart);
 }
 } // namespace
 
@@ -294,12 +287,18 @@ extern "C" ok::Status ok_platform_bind_irqs()
         !status.ok())
         return status;
     mmio8(uart_ier) = 0x01; // Received-data-available interrupt.
+    ok::interrupt::drive_events(ok::interrupt::EventSource::console);
+    // The virtio-pci keyboard and mouse stay polled: their INTx line keeps
+    // asserting once bound (docs/qualification/PLATFORM_INTERRUPTS.md).
+    // Without either device there is nothing to poll.
+    const bool keyboard = virtio_keyboard.initialize(ok::driver::qemu_virt::VirtioInputKind::keyboard);
+    const bool mouse = virtio_mouse.initialize(ok::driver::qemu_virt::VirtioInputKind::mouse);
+    if (!keyboard && !mouse)
+        ok::interrupt::drive_events(ok::interrupt::EventSource::input);
     return ok::Status::success();
 }
 
 extern "C" int ok_platform_console_poll()
 {
-    if (uart_tail != uart_head)
-        return uart_ring[uart_tail++ % sizeof(uart_ring)];
-    return read_uart();
+    return uart_ring.take(read_uart);
 }
