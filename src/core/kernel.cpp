@@ -4,6 +4,7 @@
 #include "ok/net/native_udp_sdk_profile.hpp"
 #include "ok/user/native_futex_wake_operation_sdk_profile.hpp"
 #include "ok/arch/clock.hpp"
+#include "ok/interrupt/platform.hpp"
 #include "ok/sched/process.hpp"
 #include "ok/user/runtime.hpp"
 #include "../user/native_lifecycle.hpp"
@@ -737,8 +738,17 @@ Status Kernel::poll_network()
         Result<u32> operator()(net::tcp::Endpoint local, net::tcp::Endpoint peer)
         { return kernel.native_tcp_iss(local, peer); }
     } iss{*this};
-    const auto result = native_ethernet_executor_.poll(native_tcp_, native_udp_, native_tcp_waits_, transport, iss, now);
+    // Once the NIC driver bound its line, its interrupt posts the network
+    // source and only those passes touch the TX ledger and RX queue; a pass
+    // that stopped at its receive budget posts it again.
+    using interrupt::EventSource;
+    const net::LinkPass pass{interrupt::take_event(EventSource::network),
+                             interrupt::event_wake_source(EventSource::network)};
+    const auto result = native_ethernet_executor_.poll(native_tcp_, native_udp_, native_tcp_waits_, transport, iss, now,
+                                                       pass);
     const auto state = native_ethernet_executor_.state();
+    if (state.receive_backlog)
+        interrupt::post_event(EventSource::network);
     const auto observed = native_udp_executor_.observe_shared_link(state.credit, state.controls, state.dropped_control,
         state.retired ? Status{state.cause, "common Ethernet link is retired"} : Status{});
     if (!observed)

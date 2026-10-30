@@ -145,11 +145,17 @@ SyscallOrigins::NativeUdpReceiveBinding native_udp_receive_binding(
 {
     return {object, wait.ticket, wait.request, wait.retained_description, wait.endpoint, wait.operation};
 }
+// A receive wait made ready by a queued datagram is credited to the link.
+sched::WakeSource udp_wake_source(const Result<net::NativeUdpReceiveReadiness> &ready)
+{
+    return ready && ready.value().receive.readable() ? interrupt::event_wake_source(interrupt::EventSource::network)
+                                                     : sched::WakeSource::thread;
+}
 Status native_udp_receive_post_arm(Kernel &kernel, const NativeUdpReceiveWait &wait)
 {
     const auto ready = kernel.native_udp_executor().readiness(kernel.native_udp(), wait.endpoint);
     if (!ready || !ready.value().may_wait(wait.observed_receive, wait.observed_executor))
-        if (!kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::ready))
+        if (!kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::ready, udp_wake_source(ready)))
             return native_udp_receive_invariant(Status::fault("UDP receive post-arm ticket changed"));
     return {};
 }
@@ -307,7 +313,7 @@ Status scan_native_udp_receives(Kernel &kernel)
             const auto *description = kernel.scheduler().open_description(wait.retained_description);
             if (!ready || !description || (description->flags & posix::o_NONBLOCK) ||
                 !ready.value().may_wait(wait.observed_receive, wait.observed_executor))
-                if (!kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::ready))
+                if (!kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::ready, udp_wake_source(ready)))
                 {
                     retire_native_udp_receive(kernel, object);
                     return native_udp_receive_invariant(Status::fault("UDP receive scan lost its exact ticket"));
@@ -645,7 +651,7 @@ Status linux_udp_receive_post_arm(Kernel &kernel, const LinuxUdpReceiveWait &wai
     const auto *description = kernel.scheduler().open_description(wait.retained_description);
     if (!ready || !description || (description->flags & posix::o_NONBLOCK) ||
         !ready.value().may_wait(wait.observed_receive, wait.observed_executor))
-        if (!kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::ready))
+        if (!kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::ready, udp_wake_source(ready)))
             return linux_udp_receive_invariant(Status::fault("Linux UDP receive post-arm lost exact ticket"));
     return {};
 }

@@ -9,6 +9,18 @@ struct TcpEthernetState
     bool retired{}; usize credit{}, controls{};
     u64 received{}, tcp_received{}, udp_received{}, submitted{}, dropped{}, dropped_control{};
     StatusCode cause{StatusCode::ok};
+    // The last device pass stopped at its receive budget; frames may remain.
+    bool receive_backlog{};
+};
+
+// What the kernel loop asks of one pass. Without a device event (the link's
+// interrupt has not fired since the last pass) the TX ledger and the RX queue
+// are left alone; closes, protocol timers and queued segments still run.
+// `source` is credited to TCP waiters the pass's frames made ready.
+struct LinkPass
+{
+    bool device{true};
+    sched::WakeSource source{sched::WakeSource::poll};
 };
 
 // Sole copied RX consumer for this static peer link. Do not run the existing
@@ -23,7 +35,7 @@ class NativeTcpEthernetExecutor final
     NativeTcpEthernetExecutor(NativeTcpEthernetExecutor &&) = delete;
     NativeTcpEthernetExecutor &operator=(NativeTcpEthernetExecutor &&) = delete;
     [[nodiscard]] TcpEthernetState state() const
-    { return {retired_, credit_, count_, received_, tcp_received_, udp_received_, submitted_, dropped_, dropped_control_, cause_}; }
+    { return {retired_, credit_, count_, received_, tcp_received_, udp_received_, submitted_, dropped_, dropped_control_, cause_, backlog_}; }
     Status retire(NativeTcpStreamService &tcp, TcpStreamWaits &waits, Status cause)
     {
         const auto drained = tcp.endpoints().retire(); if (!drained) return drained;
@@ -33,19 +45,25 @@ class NativeTcpEthernetExecutor final
     }
     template <NativeUdpTransport Transport, tcp::IssSource Source>
     Status poll(NativeTcpStreamService &tcp, NativeUdpService &udp, TcpStreamWaits &waits,
-                Transport &transport, Source &iss, u64 now)
+                Transport &transport, Source &iss, u64 now, LinkPass pass = {})
     {
         if (retired_) return Status::io_error("TCP Ethernet executor is retired");
         if (!udp.configured()) return Status::not_initialized("TCP Ethernet static link is unconfigured");
         if (tcp.endpoints().pools().prepared) return Status::busy("TCP external packet ticket must complete first");
         if (auto drained = tcp.drain_closes(); !drained) return drained;
         if (auto timed = tcp.endpoints().tick(now); !timed) return timed;
-        auto reaped = transport.reap(budget); if (!reaped) return retire(tcp, waits, reaped.status());
-        if (reaped.value().completed > budget || reaped.value().credit > maximum_credit)
-            return retire(tcp, waits, Status::io_error("Ethernet TX ledger exceeds its contract"));
-        credit_ = reaped.value().credit;
+        backlog_ = false;
+        if (pass.device)
+        {
+            auto reaped = transport.reap(budget); if (!reaped) return retire(tcp, waits, reaped.status());
+            if (reaped.value().completed > budget || reaped.value().credit > maximum_credit)
+                return retire(tcp, waits, Status::io_error("Ethernet TX ledger exceeds its contract"));
+            credit_ = reaped.value().credit;
+        }
         const auto &link = udp.link();
-        for (usize i = 0; i < budget; ++i)
+        const usize receive_budget = pass.device ? budget : 0;
+        usize frames = 0;
+        for (; frames < receive_budget; ++frames)
         {
             auto received = transport.receive(incoming_);
             if (!received)
@@ -94,6 +112,7 @@ class NativeTcpEthernetExecutor final
             }
             else add(dropped_);
         }
+        backlog_ = pass.device && frames == budget;
         if (auto drained = tcp.drain_closes(); !drained) return retire(tcp, waits, drained);
         for (usize i = 0; i < budget && credit_; ++i)
         {
@@ -132,7 +151,7 @@ class NativeTcpEthernetExecutor final
             }
             --credit_; add(submitted_);
         }
-        return waits.poll();
+        return waits.poll(pass.device ? pass.source : sched::WakeSource::thread);
     }
   private:
     static void add(u64 &count) { if (count != ~u64{0}) ++count; }
@@ -141,6 +160,6 @@ class NativeTcpEthernetExecutor final
     std::array<Control, control_capacity> controls_{};
     usize head_{}, count_{}, credit_{};
     u64 received_{}, tcp_received_{}, udp_received_{}, submitted_{}, dropped_{}, dropped_control_{};
-    bool retired_{}; StatusCode cause_{StatusCode::ok};
+    bool retired_{}, backlog_{}; StatusCode cause_{StatusCode::ok};
 };
 }
