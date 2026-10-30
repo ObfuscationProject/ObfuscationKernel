@@ -26,7 +26,7 @@ Status start_platform_irqs();
 // True when this profile has a controller driver and can idle on interrupts.
 [[nodiscard]] bool platform_irqs_supported();
 Status bind_platform_irq(IrqLine line, IrqTrigger trigger, IrqHandler handler, void *context);
-Status unbind_platform_irq(IrqLine line);
+Status unbind_platform_irq(IrqLine line, IrqHandler handler, void *context);
 usize drain_platform_irqs();
 // From a user-mode TrapKind::interrupt on boards whose trap path does not claim
 // the line itself (Malta): claims the controller's pending line and runs its
@@ -37,6 +37,22 @@ void claim_platform_irq();
 // Returns false without waiting when the profile cannot idle on interrupts.
 bool wait_for_interrupt();
 [[nodiscard]] IrqStatistics platform_irq_statistics();
+// Interrupts delivered to `line` so far (top halves run).
+[[nodiscard]] usize platform_irq_delivered(IrqLine line);
+[[nodiscard]] bool platform_irq_bound(IrqLine line);
+
+// Board routing for device drivers: the platform line a device interrupts on.
+struct PlatformLine
+{
+    IrqLine line{};
+    IrqTrigger trigger{IrqTrigger::level};
+};
+// QEMU virt's virtio-mmio transport `slot` (arm32, aarch64, rv64, rv32).
+[[nodiscard]] Result<PlatformLine> virtio_mmio_line(usize slot);
+// PCI bus 0 device `device`, interrupt pin `pin` (1 = INTA .. 4 = INTD).
+// `interrupt_line` is its configuration register 0x3c, which only boards whose
+// firmware routes INTx (the PC's SeaBIOS) fill in.
+[[nodiscard]] Result<PlatformLine> pci_intx_line(u8 device, u8 pin, u8 interrupt_line);
 
 } // namespace ok::interrupt
 

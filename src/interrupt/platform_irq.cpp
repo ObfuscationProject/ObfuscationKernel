@@ -280,9 +280,9 @@ Status bind_platform_irq(IrqLine line, IrqTrigger trigger, IrqHandler handler, v
     return router.bind(line, trigger, handler, context);
 }
 
-Status unbind_platform_irq(IrqLine line)
+Status unbind_platform_irq(IrqLine line, IrqHandler handler, void *context)
 {
-    return router.unbind(line);
+    return router.unbind(line, handler, context);
 }
 
 usize drain_platform_irqs()
@@ -327,6 +327,77 @@ bool wait_for_interrupt()
     while (!interrupted)
         halt_until_interrupt();
     return true;
+}
+
+usize platform_irq_delivered(IrqLine line)
+{
+    return router.delivered(line);
+}
+
+bool platform_irq_bound(IrqLine line)
+{
+    return router.bound(line);
+}
+
+Result<PlatformLine> virtio_mmio_line(usize slot)
+{
+#if defined(OK_PLATFORM_IRQ_WAIT) && (defined(__arm__) || defined(__aarch64__))
+    // 32 transports at 0x0a000000 + 0x200 * slot on SPIs 16..47 (IDs 48..79),
+    // rising edge in the board's device tree.
+    if (slot < 32)
+        return PlatformLine{static_cast<IrqLine>(48 + slot), IrqTrigger::edge};
+#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__riscv)
+    // 8 transports at 0x10001000 + 0x1000 * slot on PLIC sources 1..8.
+    if (slot < 8)
+        return PlatformLine{static_cast<IrqLine>(1 + slot), IrqTrigger::level};
+#else
+    static_cast<void>(slot);
+#endif
+    return Status::not_found("no virtio-mmio interrupt line for this transport");
+}
+
+Result<PlatformLine> pci_intx_line(u8 device, u8 pin, u8 interrupt_line)
+{
+    if (pin < 1 || pin > 4 || device >= 32)
+        return Status::invalid_argument("PCI interrupt pin or device out of range");
+    const unsigned intx = pin - 1u;
+#if defined(OK_PLATFORM_IRQ_WAIT) && (defined(__x86_64__) || defined(__i386__))
+    // SeaBIOS routes the PIIX3 PIRQs and records the 8259 line in 0x3c.
+    static_cast<void>(device);
+    static_cast<void>(intx);
+    if (interrupt_line == 0 || interrupt_line >= 16 || interrupt_line == 2)
+        return Status::not_found("firmware left the PCI interrupt line unrouted");
+    return PlatformLine{interrupt_line, IrqTrigger::level};
+#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__loongarch64)
+    // GPEX swizzles INTx onto PCH-PIC inputs 16..19.
+    static_cast<void>(interrupt_line);
+    return PlatformLine{static_cast<IrqLine>(16 + (device + intx) % 4), IrqTrigger::level};
+#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__mips__)
+    // Malta: slots 18..21 swizzle, the onboard devices have fixed PIRQs, and
+    // any other slot uses its pin. The -kernel bootloader routes PIIX4 PIRQ
+    // A..D to 8259 lines 10, 10, 11, 11.
+    static_cast<void>(interrupt_line);
+    unsigned pirq = intx;
+    if (device == 10)
+        pirq = 3;
+    else if (device == 11)
+        pirq = 1;
+    else if (device == 12)
+        pirq = 2;
+    else if (device >= 18 && device <= 21)
+        pirq = ((device - 18u) + intx) & 3u;
+    constexpr IrqLine routed[4] = {10, 10, 11, 11};
+    return PlatformLine{routed[pirq], IrqTrigger::level};
+#elif defined(OK_PLATFORM_IRQ_WAIT) && (defined(__powerpc__) || defined(__PPC__))
+    // ppce500: (slot + pin) % 4 onto MPIC external sources 1..4.
+    static_cast<void>(interrupt_line);
+    return PlatformLine{static_cast<IrqLine>(1 + (device + intx) % 4), IrqTrigger::level};
+#else
+    static_cast<void>(device);
+    static_cast<void>(intx);
+    static_cast<void>(interrupt_line);
+    return Status::not_found("no PCI interrupt routing on this platform");
+#endif
 }
 
 IrqStatistics platform_irq_statistics()

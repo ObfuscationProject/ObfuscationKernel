@@ -128,6 +128,9 @@ using IrqHandler = void (*)(void *context, IrqLine line);
 template <IrqChip Chip> class IrqRouter final : private NonCopyable
 {
   public:
+    // A line may be shared (PCI INTx); its handlers run in bind order.
+    static constexpr usize max_line_handlers = 4;
+
     constexpr explicit IrqRouter(Chip &chip) : chip_(chip)
     {
     }
@@ -136,33 +139,59 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
     {
         if (line >= chip_.line_count() || line >= max_irq_lines || handler == nullptr)
             return Status{StatusCode::invalid_argument, "irq line out of range or without handler"};
-        if (lines_[line].handler != nullptr)
-            return Status{StatusCode::already_exists, "irq line already bound"};
-        if (auto configured = chip_.configure(line, trigger); !configured.ok())
-            return configured;
-        lines_[line] = {handler, context, false};
-        if (auto unmasked = chip_.unmask(line); !unmasked.ok())
+        auto &entry = lines_[line];
+        for (usize i = 0; i < entry.count; ++i)
+            if (entry.handlers[i].handler == handler && entry.handlers[i].context == context)
+                return Status{StatusCode::already_exists, "irq handler already bound to this line"};
+        if (entry.count == max_line_handlers)
+            return Status{StatusCode::overflow, "irq line has no free handler slot"};
+        if (entry.count != 0 && entry.trigger != trigger)
+            return Status{StatusCode::invalid_argument, "irq line is already bound with another trigger"};
+        if (entry.count == 0)
         {
-            lines_[line] = {};
-            return unmasked;
+            if (auto configured = chip_.configure(line, trigger); !configured.ok())
+                return configured;
+            entry.trigger = trigger;
         }
+        entry.handlers[entry.count++] = {handler, context};
+        if (entry.count == 1)
+            if (auto unmasked = chip_.unmask(line); !unmasked.ok())
+            {
+                entry = {};
+                return unmasked;
+            }
         return Status::success();
     }
-    Status unbind(IrqLine line)
+    // Removes one handler; the line is masked when its last handler goes.
+    Status unbind(IrqLine line, IrqHandler handler, void *context)
     {
-        if (line >= max_irq_lines || lines_[line].handler == nullptr)
+        if (line >= max_irq_lines)
             return Status{StatusCode::not_found, "irq line not bound"};
-        lines_[line] = {};
-        return chip_.mask(line);
+        auto &entry = lines_[line];
+        for (usize i = 0; i < entry.count; ++i)
+        {
+            if (entry.handlers[i].handler != handler || entry.handlers[i].context != context)
+                continue;
+            for (usize j = i + 1; j < entry.count; ++j)
+                entry.handlers[j - 1] = entry.handlers[j];
+            entry.handlers[--entry.count] = {};
+            if (entry.count != 0)
+                return Status::success();
+            if (entry.pending)
+                --pending_count_;
+            entry = {};
+            return chip_.mask(line);
+        }
+        return Status{StatusCode::not_found, "irq handler not bound to this line"};
     }
     [[nodiscard]] bool bound(IrqLine line) const
     {
-        return line < max_irq_lines && lines_[line].handler != nullptr;
+        return line < max_irq_lines && lines_[line].count != 0;
     }
     // Top half: called with interrupts disabled for the line the trap names.
     void top_half(IrqLine line)
     {
-        if (line >= max_irq_lines || lines_[line].handler == nullptr)
+        if (line >= max_irq_lines || lines_[line].count == 0)
         {
             // Unclaimed: keep it from re-asserting and complete it.
             ++spurious_;
@@ -184,7 +213,7 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
         if (!chip_.end_of_interrupt(line).ok())
             ++controller_errors_;
     }
-    // Bottom half: runs every pending handler once and re-enables its line.
+    // Bottom half: runs every pending line's handlers once and re-enables it.
     usize drain()
     {
         usize serviced = 0;
@@ -195,10 +224,11 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
                 continue;
             entry.pending = false;
             --pending_count_;
-            entry.handler(entry.context, line);
+            for (usize i = 0; i < entry.count; ++i)
+                entry.handlers[i].handler(entry.handlers[i].context, line);
             ++serviced_[line];
             ++serviced;
-            if (entry.handler != nullptr && !chip_.unmask(line).ok())
+            if (entry.count != 0 && !chip_.unmask(line).ok())
                 ++controller_errors_;
         }
         return serviced;
@@ -225,10 +255,16 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
     }
 
   private:
-    struct Line
+    struct Handler
     {
         IrqHandler handler{nullptr};
         void *context{nullptr};
+    };
+    struct Line
+    {
+        std::array<Handler, max_line_handlers> handlers{};
+        usize count{0};
+        IrqTrigger trigger{IrqTrigger::edge};
         bool pending{false};
     };
     Chip &chip_;

@@ -61,8 +61,28 @@ static void check_irq_router()
     CHECK(router.spurious() == 1 && chip.masked(9) && chip.completed(9) == 1 && !router.pending());
     router.top_half(300);
     CHECK(router.spurious() == 2);
-    CHECK(router.unbind(3).ok() && chip.masked(3) && !router.bound(3));
-    CHECK(router.unbind(3).code() == StatusCode::not_found);
+    // A shared line (PCI INTx): a second handler with the same trigger joins it,
+    // another trigger is refused, and one bottom half runs both handlers.
+    Serviced other{.chip = &chip};
+    CHECK(router.bind(3, interrupt::IrqTrigger::edge, service, &other).code() == StatusCode::invalid_argument);
+    CHECK(router.bind(3, interrupt::IrqTrigger::level, service, &other).ok());
+    router.top_half(3);
+    CHECK(router.drain() == 1 && seen.calls == 2 && other.calls == 1 && !chip.masked(3));
+    // Removing one handler keeps the line live; removing the last masks it.
+    CHECK(router.unbind(3, service, &seen).ok() && router.bound(3) && !chip.masked(3));
+    router.top_half(3);
+    CHECK(router.drain() == 1 && seen.calls == 2 && other.calls == 2);
+    CHECK(router.unbind(3, service, &seen).code() == StatusCode::not_found);
+    CHECK(router.unbind(3, service, &other).ok() && chip.masked(3) && !router.bound(3));
+    // A line holds at most max_line_handlers handlers.
+    Serviced many[interrupt::IrqRouter<interrupt::ModelIrqChip>::max_line_handlers + 1]{};
+    for (auto &entry : many)
+        entry.chip = &chip;
+    for (usize i = 0; i < interrupt::IrqRouter<interrupt::ModelIrqChip>::max_line_handlers; ++i)
+        CHECK(router.bind(5, interrupt::IrqTrigger::level, service, &many[i]).ok());
+    CHECK(router.bind(5, interrupt::IrqTrigger::level, service,
+                      &many[interrupt::IrqRouter<interrupt::ModelIrqChip>::max_line_handlers]).code() ==
+          StatusCode::overflow);
     CHECK(router.controller_errors() == 0);
 }
 

@@ -208,6 +208,17 @@ void emit_entry_stack_stats()
     emit(" user_interrupts="); emit_number(entry_interrupts);
     emit(" spurious="); emit_number(irqs.spurious);
     emit(" controller_errors="); emit_number(irqs.controller_errors);
+    // Bound lines as line:delivered.
+    emit(" lines=");
+    bool first = true;
+    for (usize line = 0; line < interrupt::max_irq_lines; ++line)
+    {
+        const auto id = static_cast<interrupt::IrqLine>(line);
+        if (!interrupt::platform_irq_bound(id)) continue;
+        if (!first) emit(",");
+        first = false;
+        emit_number(line); emit(":"); emit_number(interrupt::platform_irq_delivered(id));
+    }
     emit("\n");
 }
 namespace

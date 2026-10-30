@@ -63,7 +63,7 @@ template <PortIo Io, bool PitTick = true> class Pic8259 final
         if (auto status = admit(line); !status.ok())
             return status;
         mask_ |= static_cast<u16>(1u << line);
-        write_mask();
+        write_mask(line);
         return Status::success();
     }
     Status unmask(IrqLine line)
@@ -71,7 +71,7 @@ template <PortIo Io, bool PitTick = true> class Pic8259 final
         if (auto status = admit(line); !status.ok())
             return status;
         mask_ &= static_cast<u16>(~(1u << line));
-        write_mask();
+        write_mask(line);
         return Status::success();
     }
     // Rejects a spurious line 7 or 15: its in-service bit is clear.
@@ -147,6 +147,15 @@ template <PortIo Io, bool PitTick = true> class Pic8259 final
     {
         outb(0x21, static_cast<u8>(mask_));
         outb(0xa1, static_cast<u8>(mask_ >> 8));
+    }
+    // Only the chip that holds the line: port writes are the expensive part of
+    // a completion on emulated and virtualized machines.
+    void write_mask(IrqLine line)
+    {
+        if (line < 8)
+            outb(0x21, static_cast<u8>(mask_));
+        else
+            outb(0xa1, static_cast<u8>(mask_ >> 8));
     }
     static u16 in_service()
     {
