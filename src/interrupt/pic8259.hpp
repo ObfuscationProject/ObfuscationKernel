@@ -123,7 +123,13 @@ template <PortIo Io, bool PitTick = true> class Pic8259 final
             return master & 7;
         outb(0xa0, 0x0c);
         const u8 slave = inb(0xa0);
-        return (slave & 0x80) ? 8u + (slave & 7) : 16u;
+        if (slave & 0x80)
+            return 8u + (slave & 7);
+        // The master acknowledged the cascade for a request the slave dropped
+        // (a level line deasserted first): complete it, or the cascade's
+        // in-service bit blocks every later slave interrupt.
+        outb(0x20, 0x20);
+        return 16u;
     }
 
   private:
