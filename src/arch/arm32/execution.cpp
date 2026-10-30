@@ -315,8 +315,10 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     if (!Arm32FpState::admitted(frame))
         return Status::unsupported("ARM32 pending VFP exception state is not supported");
     const auto *entry = mapping(*stored, frame.pc);
+    // Like Linux, the stack need not be mapped; only an access to it faults (a
+    // detached musl thread unmaps its own stack before its exit syscall).
     if (entry == nullptr || !(entry->flags & page_execute) || (frame.pc & ((frame.flags & 0x20) ? 1u : 3u)) != 0 ||
-        frame.sp <= user_begin || frame.sp > user_end || !user_range(space, frame.sp - 1, 1, true))
+        frame.sp <= user_begin || frame.sp > user_end)
         return Status::invalid_argument("invalid user entry frame");
     uptr saved_mask;
     asm volatile("mrs %0, cpsr; cpsid if" : "=r"(saved_mask) : : "memory");

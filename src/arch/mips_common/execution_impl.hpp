@@ -469,8 +469,11 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     private_signal_capture.invalidate();
 #endif
     auto *storage = lookup(space);
+    // Like Linux, the stack need not be mapped or aligned; only an access to it
+    // faults. A detached musl thread unmaps its own stack before its exit
+    // syscall, and on o32 points sp at its code first.
     if (!storage || executing || frame.pc < user_begin || frame.pc >= user_end || (frame.pc & 3) ||
-        frame.sp <= user_begin || frame.sp > user_end || (frame.sp & 7) || !user_range(space, frame.sp - 1, 1, true))
+        frame.sp <= user_begin || frame.sp > user_end)
         return Status::invalid_argument("invalid native entry");
     if (const auto *code = page_at(*storage, frame.pc); code && !(code->flags & page_execute))
         return Trap{TrapKind::page_fault, 2, 0, frame.pc};

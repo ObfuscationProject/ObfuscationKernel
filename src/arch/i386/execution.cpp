@@ -538,9 +538,10 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
         return Status::fault("invalid native user stack selector");
     const auto stack_base = stack_selector == 0x33 ? frame.fs_base : stack_selector == 0x3b ? frame.gs_base : 0;
     const auto stack_address = frame.sp + stack_base;
-    if (stack_address < frame.sp || stack_address <= user_begin || stack_address > user_end ||
-        !user_range(space, stack_address - 1, 1, true))
-        return Status::fault("native user stack has invalid permissions");
+    // Like Linux, the stack need not be mapped; only an access to it faults (a
+    // detached musl thread unmaps its own stack before its exit syscall).
+    if (stack_address < frame.sp || stack_address <= user_begin || stack_address > user_end)
+        return Status::fault("native user stack lies outside the user window");
     if ((frame.fs_base != 0 && (frame.fs_base < user_begin || frame.fs_base >= user_end)) ||
         (frame.gs_base != 0 && (frame.gs_base < user_begin || frame.gs_base >= user_end)))
         return Status::fault("user TLS base lies outside the native user window");

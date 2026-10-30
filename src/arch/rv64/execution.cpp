@@ -254,8 +254,10 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     if (entering)
         return Status::busy("nested native entry is unsupported");
     const auto *entry = mapping(*stored, frame.pc);
+    // Like Linux, the stack need not be mapped; only an access to it faults (a
+    // detached musl thread unmaps its own stack before its exit syscall).
     if (entry == nullptr || !(entry->flags & page_execute) || (frame.pc & 1) != 0 || frame.sp <= user_begin ||
-        frame.sp > user_end || !user_range(space, frame.sp - 1, 1, true))
+        frame.sp > user_end)
         return Status::invalid_argument("invalid user entry frame");
     uptr saved_status;
     asm volatile("csrrc %0, mstatus, %1" : "=r"(saved_status) : "r"(uptr{8}) : "memory");

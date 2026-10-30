@@ -519,9 +519,10 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     if (executing)
         return Status::busy("native backend currently supports one executing CPU");
     const auto code = lookup(space, frame.pc);
-    if (!permits(code, false) || (code & no_execute) != 0 || frame.sp <= user_begin || frame.sp > user_end ||
-        !user_range(space, frame.sp - 1, 1, true))
-        return Status::fault("native user entry or stack has invalid permissions");
+    // Like Linux, the stack need not be mapped; only an access to it faults (a
+    // detached musl thread unmaps its own stack before its exit syscall).
+    if (!permits(code, false) || (code & no_execute) != 0 || frame.sp <= user_begin || frame.sp > user_end)
+        return Status::fault("native user entry or stack pointer is invalid");
     if ((frame.fs_base != 0 && (frame.fs_base < user_begin || frame.fs_base >= user_end)) ||
         (frame.gs_base != 0 && (frame.gs_base < user_begin || frame.gs_base >= user_end)))
         return Status::fault("user TLS base lies outside the native user window");

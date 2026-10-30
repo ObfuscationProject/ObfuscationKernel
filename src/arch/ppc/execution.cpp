@@ -332,9 +332,11 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     if (executing)
         return Status::busy("PPC native backend currently supports one executing CPU");
     const auto *code = mapping(*value, frame.pc);
+    // Like Linux, the stack need not be mapped; only an access to it faults (a
+    // detached musl thread unmaps its own stack before its exit syscall).
     if (code == nullptr || (code->flags & page_execute) == 0 || (frame.pc & 3) != 0 || frame.sp <= user_begin ||
-        frame.sp > user_end || !user_range(space, frame.sp - 1, 1, true))
-        return Status::fault("native entry or stack has invalid permissions");
+        frame.sp > user_end)
+        return Status::fault("native entry or stack pointer is invalid");
     uptr kernel_msr;
     asm volatile("mfmsr %0" : "=r"(kernel_msr));
     if ((kernel_msr & 0x8000) != 0)

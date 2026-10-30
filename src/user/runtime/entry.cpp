@@ -1297,7 +1297,9 @@ bool step(Kernel &kernel)
         if (!trap)
         {
             finish(kernel, chosen.pid, 127);
-            emit("OK_NATIVE scope=hardware enter=failed\n");
+            emit("OK_NATIVE scope=hardware enter=failed reason=");
+            emit(trap.status().message());
+            emit("\n");
         }
         else if (trap.value().kind == hw::TrapKind::syscall)
         {

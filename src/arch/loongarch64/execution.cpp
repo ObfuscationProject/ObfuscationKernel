@@ -265,8 +265,10 @@ void complete_irq(Trap &trap)
 static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack_top)
 {
     auto *storage = lookup(space);
+    // Like Linux, the stack need not be mapped; only an access to it faults (a
+    // detached musl thread unmaps its own stack before its exit syscall).
     if (!storage || executing || frame.pc < user_begin || frame.pc >= user_end || frame.sp <= user_begin ||
-        frame.sp > user_end || !user_range(space, frame.sp - 1, 1, true))
+        frame.sp > user_end)
         return Status::invalid_argument("invalid native entry");
     // Reject non-executable continuation targets before ERTN. The hardware
     // PTE still carries NX for branches taken after entry.
