@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hosted model test for IrqRouter, WaitQueue and CalibratedClock (feat/irq-wait-time).
+"""Hosted model test for IrqRouter, WaitQueue, CalibratedClock and IntervalTimer (feat/irq-wait-time).
 
 Model coverage only: no interrupt controller, device or hardware timer executes.
 """
@@ -19,7 +19,9 @@ def main():
     root = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix="ok-irq-wait-time-") as directory:
         output = Path(directory) / "irq-wait-time"
-        flags = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"] if args.sanitize else []
+        # A sanitizer report must fail the run, not just print.
+        flags = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+                 "-fno-omit-frame-pointer"] if args.sanitize else []
         subprocess.run([
             *shlex.split(args.cxx), "-std=c++23", "-O2", "-Wall", "-Wextra", "-Wpedantic", "-Werror",
             "-fno-exceptions", *flags, f"-I{root / 'include'}", f"-I{root / 'src'}",
