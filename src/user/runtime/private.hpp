@@ -639,6 +639,18 @@ i64 native_process_kill(Kernel &kernel, const sched::ProcessControlBlock &sender
 void private_process_signal_fatal(Kernel &kernel);
 bool private_signal_call(Kernel &kernel, sched::ProcessControlBlock &process,
                          sched::ThreadControlBlock &thread, bool &complete, i64 &result);
+// Interval timers (timers.cpp). An expiry signal is sent, dropped as ignored
+// or by a departed target, or stays owed to the timer until a later step.
+enum class PrivateTimerSend : u8 { sent, ignored, departed, retry };
+PrivateTimerSend private_timer_signal(Kernel &kernel, sched::ProcessControlBlock &process,
+                                      sched::ThreadId tid, sched::PendingSignalInfo info);
+bool private_timer_call(Kernel &kernel, sched::ProcessControlBlock &process,
+                        sched::ThreadControlBlock &thread, i64 &result);
+bool private_timer_service(Kernel &kernel, u64 now);
+void private_timer_exec(sched::ProcessId pid);
+void private_timer_retire(sched::ProcessId pid);
+struct PrivateTimerCounters { u64 armed{}, expired{}, signalled{}, dequeued{}, retried{}; };
+PrivateTimerCounters private_timer_counters();
 Status private_child_exit_commit(Kernel &kernel, PrivateChildExit::Completion &completion);
 
 bool private_child_reap(Kernel &kernel);

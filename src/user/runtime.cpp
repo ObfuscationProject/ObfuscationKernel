@@ -724,6 +724,18 @@ void report_interrupts()
         emit(",poll:"); emit_number(scheduler.wakes(sched::WakeSource::poll));
     }
     emit("\n");
+#if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
+    // Interval timers once any was armed: settings, expiries, signals queued,
+    // rearms after a dequeue and steps an expiry stayed owed.
+    const auto timers = private_timer_counters();
+    if (!timers.armed) return;
+    emit_line("OK_TIMERS scope=hardware armed="); emit_number(timers.armed);
+    emit(" expired="); emit_number(timers.expired);
+    emit(" signalled="); emit_number(timers.signalled);
+    emit(" rearmed="); emit_number(timers.dequeued);
+    emit(" retried="); emit_number(timers.retried);
+    emit("\n");
+#endif
 }
 void input(char value, sched::WakeSource source)
 {

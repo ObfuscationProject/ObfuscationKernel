@@ -998,6 +998,11 @@ bool step(Kernel &kernel)
 #ifdef OK_PRIVATE_POLL_MASK
     waiting_deadline |= private_signal_wait_pending(kernel);
 #endif
+#if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
+    // Expired timers queue their signals before interruptible waits are chosen.
+    waiting_deadline |= private_timer_service(kernel, now.value());
+    if (!runtime_failure) { started = false; return false; }
+#endif
     for (const auto &entry : poll_waits)
     {
         if (entry.pid == 0)
