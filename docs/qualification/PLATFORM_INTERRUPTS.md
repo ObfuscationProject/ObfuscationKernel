@@ -2,7 +2,8 @@
 
 WT1.2 `feat/irq-wait-time` (Kernel issue #4). Slices 1 and 2: the interrupt
 core and one controller per profile. Slice 3: device completion through
-interrupts. This note grows with each slice.
+interrupts. Slice 4: event sources and wake sources, so that waits are woken
+from interrupts and no device is polled. This note grows with each slice.
 
 ## Design
 
@@ -33,8 +34,9 @@ interrupts. This note grows with each slice.
   it, as they do for the timer.
 - `OK_IRQ_PLATFORM` follows the `OK_ENTRY_STACKS` report once the service
   runs. It reports waits, ticks, deliveries, serviced bottom halves,
-  user-mode interrupts, spurious lines and controller errors. A clean
-  shutdown prints the same counters on one line before `OK_SHUTDOWN`.
+  user-mode interrupts, spurious lines and controller errors, and
+  `OK_IRQ_EVENTS` (slice 4) follows it. A clean shutdown prints both lines
+  before `OK_SHUTDOWN`.
 
 ## Controllers
 
@@ -170,13 +172,106 @@ on main `ddbfe45`, ABI 77):
   interrupt completion; mips takes 171.5 and 172.1 s polled and 166.7 and
   168.7 s with interrupts.
 
+## Slice 4: event sources and wake sources
+
+- `EventSource` (`ok/interrupt/platform.hpp`): the console, the kernel's
+  input devices and the network link. A driver whose line is bound calls
+  `drive_events()`; its bottom half posts the source, and the kernel loop
+  serves a driven source only after a post (`take_event()`). A consumer that
+  stops early posts again: the console after each byte while bytes remain,
+  the input devices until their queues or the 8042 are empty, the Ethernet
+  executor when it stopped at its eight-frame receive budget. An undriven
+  source is polled on every pass. The loop does not idle while a post is
+  pending.
+- Console: one `ConsoleRing` (`src/interrupt/console_ring.hpp`) replaces the
+  ten per-platform rings. Once the console is driven the UART is read only by
+  its bottom half; outside it only to refill a ring that overflowed, because
+  an edge line does not fire again for bytes already in the FIFO. Before,
+  every loop pass read the line status register when the ring was empty.
+- Input: the PS/2 and virtio-mmio handlers post the input source. Profiles
+  without an input device (mips, mips64, ppc, and loongarch64 when its
+  virtio-pci devices are absent) drive the source with nothing to poll.
+- Network: the NIC's bottom half (ObfuscationOS `feat/irq-wait-time`) posts
+  the network source after `drive_events()` at bind time. A pass without a
+  post (`net::LinkPass{device = false}`) leaves the TX ledger and the RX queue
+  alone and runs only closes, TCP timers and queued segments with the TX
+  credit it holds. The first pass, before the driver binds its line, polls.
+- Block and RNG (ObfuscationOS): the bottom half also signals the waiting
+  request, which rechecks the used ring only after its own line fired, not on
+  ticks or other lines. With the line bound only the bottom half reads the
+  virtio ISR. A request that found its completion before its interrupt was
+  taken used to read the ISR itself, which dropped INTx under the pending
+  interrupt; the 8259 then delivered it as spurious (41,536 times in one
+  x86_64 gate run on a loaded host, 0 after the change).
+- No poll behind the console also means none to hide a lost interrupt. Two
+  appeared on the virt boards and are fixed. On arm32 and aarch64 the PL011
+  handler wrote UARTICR after draining DR: a byte that arrived in between had
+  its RX interrupt cleared, and the PL011 raises RX again only when its FIFO
+  goes from empty to one byte, so input stopped after the first byte. Reading
+  DR to empty already clears RX and the receive timeout; the handler no longer
+  writes UARTICR. On rv64 and rv32 QEMU's PLIC re-evaluates its outputs on a
+  threshold write but not on an enable write: a UART byte that arrived while
+  the router had source 10 masked stayed pending, never reached MEIP after the
+  unmask, and the 16550, holding that byte, never raised its line again.
+  `Plic::unmask()` rewrites the threshold.
+- Wake sources: `sched::WaitRegistration` records the `WakeSource` that
+  completed a wait (thread, timer, interrupt, poll); every timeout is a timer
+  wake. A console read woken by input, poll/select made ready by console
+  input or socket data, a TCP wait made readable, writable or connected, and
+  a UDP receive made ready by a queued datagram take the source of that
+  device's events: interrupt once it is driven, poll before. The scheduler
+  counts ready and timed-out waits by source.
+- `OK_IRQ_EVENTS scope=hardware console=D:P:S:Q input=… network=…
+  wakes=thread:…,timer:…,interrupt:…,poll:…` gives, per source, driven (1/0),
+  posts, served posts and polled passes.
+
+Results (QEMU 10.2.0, ObfuscationOS `feat/irq-wait-time`, ABI 77):
+
+- Hosted (`scope=model`): `scripts/test_irq_wait_time.py` adds the wake
+  source of a registration, undriven, driven and independent event sources,
+  and the console ring (no UART access while driven, a burst larger than the
+  ring refilled from the FIFO). `tests/host/tcp_streams_tests.cpp` adds a pass
+  without a device event (no reap or receive), the interrupt source credited
+  to a TCP waiter its SYN-ACK made ready, and the receive backlog.
+  `tests/host/native_console_lease_tests.cpp` checks a blocked console read
+  woken with the interrupt source. ObfuscationOS
+  `tests/drivers/virtio_poll_tests.cpp` checks that unsignalled wakes do not
+  recheck the device.
+- All ten profiles: `xmake test`, the ext4 native boot and the shell gate pass
+  (54 sh checks, 134/151 with the 8 reviewed failures). On every profile the
+  console is driven and never polled (`console=1:…:172:0` over the 172 typed
+  bytes), and no interrupt is spurious or a controller error. The disk
+  completes through its line, 1.18–1.58 million interrupts per run (3.03
+  million on ppc).
+- x86_64 on an idle host: the shell gate takes 111.4 s (110.7–111.2 s in
+  slice 3), with `delivered=serviced=1262207`.
+- Console wakes: the harness types each line as soon as `oksh> ` appears. On
+  x86 the shell is already blocked in `read()`, so each line is an interrupt
+  wake (three for the probe's three commands). On the slower profiles the
+  bytes arrive while the shell is still running (`user_interrupts` equals the
+  bytes typed) and its read never sleeps.
+- Input: QMP `send-key` of five keys gives ten interrupts on the keyboard's
+  line on x86_64, i386, arm32, aarch64, rv64 and rv32; the input source is
+  driven and served after each (`input=1:22:22:0` on x86, `1:16:16:0` on the
+  virt boards), never polled. On loongarch64 it stays undriven and polled
+  (`input=0:0:0:95667` over a gate run); mips, mips64 and ppc have no input
+  device (`input=1:0:0:0`).
+- x86_64 `scripts/test_native_udp_socket.py` (ObfuscationOS) passes with
+  `network=1:7:7:1`: one polled pass before the driver bound its line, then
+  seven passes, one per NIC interrupt. The probe's child now receives on a
+  blocking socket, and its wait is the run's interrupt wake.
+- ObfuscationOS artifact tests: 1321 run, OK (34 skipped).
+
 ## Limits
 
-- The console poll still reads the UART when the ring is empty. Network
-  receive is still read by the kernel's network poll on every loop iteration;
-  its interrupt only ends an idle wait (slice 4).
 - loongarch64's virtio-pci keyboard and mouse stay polled. Bound, the
   keyboard's INTx (PCH-PIC input 18) kept re-asserting after each ISR read
   and the guest made no progress; the cause is not found yet.
-- Wait granularity is the 100 Hz PIT tick; no one-shot deadline programming.
+- The runtime still rechecks its software waits (poll/select, UDP receives,
+  futex and sleep deadlines) on every step after any wake. The device behind
+  them is touched only after its interrupt, but the waits are not yet linked
+  to the event that readied them.
+- Wake attribution is by readiness kind: a socket wait made ready by queued
+  data is credited to the link even if the data arrived before it slept.
+- Wait granularity is the 100 Hz tick; no one-shot deadline programming.
 - No local APIC or I/O APIC; the 8259 only.

@@ -18,10 +18,35 @@ built-in timer driver.
 ## Platform interrupt lines
 
 `ok/interrupt/platform.hpp` is the boot-CPU interrupt service over the
-profile's `PlatformIrqChip`, selected at compile time. Trap paths run a
-bounded top half per line: acknowledge, mask, mark pending, end of interrupt.
-The kernel loop drains bottom halves, which run the bound handler and unmask
-the line, and it waits for an interrupt when no thread is runnable.
-`TrapKind::interrupt` reports a device line that preempted user code. i386
-and x86_64 use the 8259A pair. The other profiles keep the model chip and
-still poll; see `docs/qualification/PLATFORM_INTERRUPTS.md`.
+profile's `PlatformIrqChip`, selected at compile time: the 8259A pair (i386,
+x86_64), GICv2 (arm32, aarch64), the PLIC (rv64, rv32), EIOINTC with PCH-PIC
+(loongarch64), Malta's 8259 pair behind the GT-64120 (mips, mips64) and the
+MPIC (ppc). Trap paths run a bounded top half per line: acknowledge, mask,
+mark pending, end of interrupt. The kernel loop drains bottom halves, which
+run the bound handlers (up to four per line) and unmask the line, and it
+waits for an interrupt when no thread is runnable and no device event is left
+to serve. `TrapKind::interrupt` reports a device line that preempted user
+code. `virtio_mmio_line()` and `pci_intx_line()` give drivers their board's
+line.
+
+## Device event sources
+
+`EventSource` names what the kernel loop serves for devices: the console, the
+kernel's input devices and the network link. A driver whose line is bound
+calls `drive_events()` once; its bottom half then posts the source and the
+loop serves it only after a post. A consumer that stops before the source is
+empty (a one-byte console step, the Ethernet receive budget) posts it again.
+An undriven source, before the service starts or without a bound line, is
+polled on every pass. The UART receive rings are one
+`ConsoleRing` (`src/interrupt/console_ring.hpp`) on every profile: the
+handler fills it, and the console is read outside the handler only to refill
+a ring that overflowed.
+
+`sched::WaitRegistration` records the `WakeSource` that completed a wait:
+another thread, a timer (every timeout), an interrupt-driven device event, or
+a polled device. Console reads, poll/select on the console or a socket, TCP
+waits and UDP receives made ready by device data take the source of that
+device's events (`event_wake_source()`); the scheduler counts ready and timed
+out waits by source. `OK_IRQ_EVENTS` reports each event source as
+`driven:posted:served:polled` and the wake counts; see
+`docs/qualification/PLATFORM_INTERRUPTS.md`.
