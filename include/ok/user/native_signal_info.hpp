@@ -18,6 +18,10 @@ struct SignalInfoCodec
     static constexpr usize code_offset = Mask::mips ? 4 : 8;
     static constexpr usize pid_offset = Abi::profile.word_bytes == 8 ? 16 : 12;
     static constexpr usize uid_offset = pid_offset + 4, status_offset = pid_offset + 8;
+    // Linux _timer: si_tid, si_overrun, then the word-sized si_value.
+    static constexpr usize overrun_offset = pid_offset + 4, value_offset = pid_offset + 8;
+    static constexpr i32 timer_code = sched::PendingSignalInfo::timer_code(maximum_signal);
+    static constexpr u32 alarm_signal = 14;
     static constexpr usize utime_offset = Abi::profile.word_bytes == 8 ? 32 : 24;
     static constexpr usize stime_offset = utime_offset + Abi::profile.word_bytes;
 
@@ -25,15 +29,18 @@ struct SignalInfoCodec
     [[nodiscard]] static constexpr bool valid(const Info &info)
     {
         const sched::PendingSignalInfo value{static_cast<u32>(info.signal), info.code,
-                                            info.sender_pid, info.sender_uid, info.child_status};
+                                            info.sender_pid, info.sender_uid, info.child_status,
+                                            info.timer, info.overrun, info.value};
         return value.valid(maximum_signal);
     }
     // Preserve existing frame-specific SI_KERNEL admission. Synchronous wait
-    // accepts every valid zero-payload SI_KERNEL record, not just FPE.
+    // accepts every valid zero-payload SI_KERNEL record, not just FPE. An
+    // ITIMER_REAL expiry is SIGALRM sent as SI_KERNEL (Linux it_real_fn).
     template <bool AllowKernelFpe = false, typename Info>
     [[nodiscard]] static constexpr bool frame_valid(const Info &info)
     {
-        return valid(info) && (info.code != 128 || (AllowKernelFpe && info.signal == 8));
+        return valid(info) && (info.code != 128 || (AllowKernelFpe && info.signal == 8) ||
+                               static_cast<u32>(info.signal) == alarm_signal);
     }
     template <typename Info>
     [[nodiscard]] static constexpr bool encode(const Info &info, std::array<std::byte, bytes> &out)
@@ -46,6 +53,18 @@ struct SignalInfoCodec
         };
         put(0, static_cast<u32>(info.signal));
         put(code_offset, static_cast<u32>(info.code));
+        if (info.code == timer_code)
+        {
+            put(pid_offset, static_cast<u32>(info.timer));
+            put(overrun_offset, static_cast<u32>(info.overrun));
+            // The sigevent value word round-trips in target byte order.
+            constexpr usize word = Abi::profile.word_bytes;
+            for (usize i = 0; i < word; ++i)
+                next[value_offset + i] = static_cast<std::byte>(
+                    info.value >> (8 * (Abi::profile.big_endian ? word - 1 - i : i)));
+            out = next;
+            return true;
+        }
         put(pid_offset, info.sender_pid);
         put(uid_offset, info.sender_uid);
         if (info.code == 1 || info.code == 2) put(status_offset, static_cast<u32>(info.child_status));

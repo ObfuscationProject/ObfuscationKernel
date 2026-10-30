@@ -45,7 +45,7 @@ struct Arm32SignalFrame
         u32 flags{2};
         constexpr bool operator==(const Stack &) const = default;
     };
-    struct Info { i32 signal{}, code{}; u32 sender_pid{}, sender_uid{}; i32 child_status{}; };
+    struct Info { i32 signal{}, code{}; u32 sender_pid{}, sender_uid{}; i32 child_status{}, timer{}, overrun{}; u64 value{}; };
     // The present backend captures D0-D31 and FPSCR, not user FPEXC/FPINST.
     // The caller must attest this fixed state from trusted backend policy;
     // constructing it is not evidence that the hardware has that state.
@@ -310,7 +310,8 @@ struct Arm32SignalFramePolicy
         // FPEXC comes from the actual trap capture. This synchronous D32 profile
         // excludes pending exception/FPINST state; it does not claim to capture it.
         const typename Codec::ExceptionState exception{Fp::fpexc(frame), 0, 0};
-        const typename Codec::Info sender{static_cast<i32>(info.signal), info.code, info.sender_pid, info.sender_uid, info.child_status};
+        const typename Codec::Info sender{static_cast<i32>(info.signal), info.code, info.sender_pid, info.sender_uid, info.child_status,
+            info.timer, info.overrun, info.value};
         typename Codec::Image image;
         arch::execution::UserFrame next;
         if (!Codec::encode(frame, blocked, {altstack.base, altstack.size, altstack.flags}, sender,

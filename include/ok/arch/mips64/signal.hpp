@@ -40,7 +40,7 @@ struct Mips64N64SignalFrame
         u32 flags{2};
         constexpr bool operator==(const Stack &) const = default;
     };
-    struct Info { i32 signal{}, code{}; u32 sender_pid{}, sender_uid{}; i32 child_status{}; };
+    struct Info { i32 signal{}, code{}; u32 sender_pid{}, sender_uid{}; i32 child_status{}, timer{}, overrun{}; u64 value{}; };
     struct Placement { u64 address{}; constexpr bool operator==(const Placement &) const = default; };
     struct Image { std::array<std::byte, frame_bytes> bytes{}; };
     struct FcsrPatch
@@ -274,7 +274,8 @@ struct Mips64N64SignalFramePolicy
         u64 restorer{};
         if (!Trampoline::entry_address(mapped_trampoline, SignalTrampolineEntry::realtime,
                                         begin, end, restorer)) return false;
-        const Frame::Info sender{static_cast<i32>(info.signal), info.code, info.sender_pid, info.sender_uid, info.child_status};
+        const Frame::Info sender{static_cast<i32>(info.signal), info.code, info.sender_pid, info.sender_uid, info.child_status,
+            info.timer, info.overrun, info.value};
         Frame::Image image;
         arch::execution::UserFrame next;
         if (!Frame::encode(frame, context, blocked, {stack.base, stack.size, stack.flags}, sender, begin, end, image) ||

@@ -64,7 +64,8 @@ constexpr auto payloads()
     return result;
 }
 static_assert(Frame::valid_info({static_cast<i32>(child), 1, 1, 0, 165}));
-static_assert(sizeof(Frame::Info) == 20 && sizeof(sched::PendingSignalInfo) == 20);
+static_assert(sizeof(Frame::Info) == sizeof(sched::PendingSignalInfo) &&
+              sizeof(sched::PendingSignalInfo) == (alignof(u64) == 8 ? 40 : 36));
 extern "C" [[gnu::used, gnu::section(".child_payloads")]] const auto child_payloads = payloads();
 extern "C" [[gnu::used, gnu::section(".child_layout")]] const u32 child_layout[] = {
     sizeof(sched::PendingSignalInfo), alignof(sched::PendingSignalInfo), offsetof(sched::PendingSignalInfo, child_status),

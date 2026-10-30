@@ -63,6 +63,20 @@ public:
         if (result == Queue::Enqueue::coalesced) return Enqueue::coalesced;
         return result == Queue::Enqueue::full ? Enqueue::exhausted : Enqueue::invalid;
     }
+    // Timer expiry never uses the lossy realtime fallback either: a full
+    // queue leaves the expiry owed to the timer owner.
+    [[nodiscard]] typename Queue::Enqueue enqueue_kernel(u32 signal)
+    {
+        return owner_.process ? queue_.enqueue_kernel(signal) : Queue::Enqueue::invalid;
+    }
+    [[nodiscard]] typename Queue::Enqueue enqueue_timer(u32 signal, i32 timer, i32 overrun, u64 value)
+    {
+        return owner_.process ? queue_.enqueue_timer(signal, timer, overrun, value) : Queue::Enqueue::invalid;
+    }
+    [[nodiscard]] bool timer_queued(u32 signal, i32 timer) const { return queue_.timer_queued(signal, timer); }
+    bool refresh_timer(u32 signal, i32 timer, i32 overrun) { return queue_.refresh_timer(signal, timer, overrun); }
+    void discard_timer(u32 signal, i32 timer) { queue_.discard_timer(signal, timer); }
+    void discard_timers() { queue_.discard_timers(); }
     [[nodiscard]] bool peek(const sched::SignalMask &blocked, Delivery &out) const
     {
         if (!owner_.process) return false;
