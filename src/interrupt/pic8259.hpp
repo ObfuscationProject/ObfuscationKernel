@@ -115,6 +115,14 @@ template <PortIo Io, bool PitTick = true> class Pic8259 final
     // without an interrupt cycle; line_count() when nothing is requested.
     static u32 poll()
     {
+        // A board with an interrupt-acknowledge cycle (Malta's GT-64120) reads
+        // the vector in one access; the cascade and spurious cases are the
+        // 8259's own, and a spurious 7 or 15 reaches the router unclaimed.
+        if constexpr (requires { { Io::acknowledge_vector() } -> std::same_as<u8>; })
+        {
+            const u32 line = static_cast<u32>(Io::acknowledge_vector()) - vector_base;
+            return line < 16 ? line : 16u;
+        }
         outb(0x20, 0x0c);
         const u8 master = inb(0x20);
         if ((master & 0x80) == 0)

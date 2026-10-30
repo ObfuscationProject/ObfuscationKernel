@@ -54,6 +54,21 @@ struct MaltaPortIo
     {
         *reinterpret_cast<volatile u8 *>(window + port) = value;
     }
+    // GT_PCI0_IACK: one read runs the 8259's acknowledge cycle. The GT-64120's
+    // internal registers are little-endian.
+    static u8 acknowledge_vector()
+    {
+#if defined(__mips64)
+        constexpr uptr iack = 0xffffffffbbe00c34ull;
+#else
+        constexpr uptr iack = 0xbbe00c34;
+#endif
+        u32 value = *reinterpret_cast<volatile u32 *>(iack);
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        value = __builtin_bswap32(value);
+#endif
+        return static_cast<u8>(value);
+    }
 };
 using PlatformIrqChip = Pic8259<MaltaPortIo, false>;
 #elif defined(OK_PLATFORM_IRQ_WAIT) && (defined(__powerpc__) || defined(__PPC__))
