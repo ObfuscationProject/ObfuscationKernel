@@ -1,7 +1,8 @@
 # Platform interrupts and the idle wait
 
-WT1.2 `feat/irq-wait-time` (Kernel issue #4), slice 1: the interrupt core and
-the first controller. This note grows with each slice.
+WT1.2 `feat/irq-wait-time` (Kernel issue #4). Slices 1 and 2: the interrupt
+core and one controller per profile. Slice 3: device completion through
+interrupts. This note grows with each slice.
 
 ## Design
 
@@ -119,9 +120,63 @@ error. The per-profile sections below give the first runs.
   52.9 s on kernel main (4,862 and 4,906 timer preemptions): ppc is slow on
   that loop either way, so this is no regression.
 
+## Slice 3: device completion through interrupts
+
+Board routing (`ok/interrupt/platform.hpp`), for drivers in the OS image:
+
+| Boards | Call | Line |
+| --- | --- | --- |
+| QEMU virt, arm32 and aarch64 | `virtio_mmio_line(slot)` | GIC ID 48 + slot, rising edge |
+| QEMU virt, rv64 and rv32 | `virtio_mmio_line(slot)` | PLIC source 1 + slot |
+| PC (i386, x86_64) | `pci_intx_line(device, pin, line_register)` | The 8259 line SeaBIOS writes into 0x3c |
+| loongarch64 virt | `pci_intx_line` | PCH-PIC input 16 + (slot + pin - 1) % 4 (GPEX swizzle) |
+| Malta (mips, mips64) | `pci_intx_line` | PIIX4 PIRQ by slot, routed by the `-kernel` bootloader to 8259 lines 10, 10, 11, 11 |
+| ppce500 | `pci_intx_line` | MPIC source 1 + (slot + pin - 1) % 4 |
+
+- A router line holds up to four handlers with one trigger (PCI INTx is
+  shared). `OK_IRQ_PLATFORM` lists bound lines as `line:delivered`.
+- ObfuscationOS `feat/irq-wait-time`: the virtio block, net and RNG drivers
+  bind their line at the first request after the service starts. They clear
+  `VIRTQ_AVAIL_F_NO_INTERRUPT` and, on PCI, the INTx disable bit, and the
+  bottom half acknowledges the device. A request then sleeps in
+  `wait_for_interrupt()` and drains bottom halves between readiness checks.
+  Before the service starts (the root mounts first), or when no line can be
+  bound, requests are polled as before.
+- Kernel input: the virtio-mmio keyboard and mouse (arm32, aarch64, rv64,
+  rv32) and the PS/2 8042 (i386, x86_64, lines 1 and 12) are bound. The main
+  loop reads their queues or the controller only after an interrupt, until
+  they are drained. mips, mips64 and ppc have no input device.
+- Interrupt cost: per completion the 8259 writes only the mask register of
+  the chip that holds the line. Malta claims with one GT-64120 `GT_PCI0_IACK`
+  read (the byte-swapped vector) instead of a four-access OCW3 poll. A stale
+  cascade from a request that dropped between the polls is completed;
+  otherwise its in-service bit blocks every later slave line.
+
+Results on all ten profiles (QEMU 10.2.0, ObfuscationOS `feat/irq-wait-time`
+on main `ddbfe45`, ABI 77):
+
+- `xmake test`, the ext4 native boot and the shell gate pass: 54 sh checks,
+  and 134/151 suite cases with the 8 reviewed failures.
+- The disk completed through its line on every profile, about 1.2–1.6 million
+  interrupts per gate run (3.0 million on ppc), and the RNG on its line.
+  There were no controller errors. The only spurious interrupts were 8259 ones
+  (up to 56 on x86, 8 on Malta), from a level line that dropped before its
+  acknowledge cycle.
+- `scripts/test_native_udp_socket.py` passes on x86_64 with the NIC bound.
+- QMP `send-key` of five keys arrives as ten interrupts on the keyboard's
+  line on x86_64, i386, arm32, aarch64, rv64 and rv32.
+- Cost, same kernel SDK, idle host, two runs each: the x86_64 shell gate takes
+  110.3 and 111.6 s with OS main's polled drivers and 110.7 and 111.2 s with
+  interrupt completion; mips takes 171.5 and 172.1 s polled and 166.7 and
+  168.7 s with interrupts.
+
 ## Limits
 
-- The console poll still reads the UART when the ring is empty, and network,
-  block and input are still polled. The wait only replaces the idle spin.
+- The console poll still reads the UART when the ring is empty. Network
+  receive is still read by the kernel's network poll on every loop iteration;
+  its interrupt only ends an idle wait (slice 4).
+- loongarch64's virtio-pci keyboard and mouse stay polled. Bound, the
+  keyboard's INTx (PCH-PIC input 18) kept re-asserting after each ISR read
+  and the guest made no progress; the cause is not found yet.
 - Wait granularity is the 100 Hz PIT tick; no one-shot deadline programming.
 - No local APIC or I/O APIC; the 8259 only.
