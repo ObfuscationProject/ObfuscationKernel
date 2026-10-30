@@ -40,6 +40,9 @@ OPERATIONS += ['setpgid', 'getpgid', 'getpgrp', 'setsid', 'getsid']
 OPERATIONS += ['uname', 'sysinfo', 'link', 'linkat', 'symlink', 'symlinkat', 'chown', 'lchown', 'fchown',
                'fchownat', 'chown32', 'lchown32', 'fchown32', 'vfork', 'statfs', 'statfs64', 'fstatfs',
                'fstatfs64', 'utimensat', 'utimensat_time64', 'mknod', 'mknodat']
+OPERATIONS += ['getitimer', 'setitimer', 'alarm', 'timer_create', 'timer_settime', 'timer_settime32',
+               'timer_settime64', 'timer_gettime', 'timer_gettime32', 'timer_gettime64',
+               'timer_getoverrun', 'timer_delete']
 ERRORS += ['ESRCH']
 ERRORS += ['ENOTTY']
 CONSOLE_IOCTLS = ['TIOCSCTTY', 'TIOCGSID', 'TIOCGPGRP', 'TIOCSPGRP']
@@ -48,6 +51,7 @@ LINUX_FILES = ['Makefile', 'fs/select.c', 'kernel/signal.c', 'include/uapi/asm-g
 
 LINUX_FILES += ['kernel/sys.c', 'kernel/uid16.c', 'include/linux/highuid.h', 'fs/exec.c', 'kernel/cred.c']
 LINUX_FILES += ['kernel/fork.c', 'kernel/exit.c', 'include/linux/pid.h', 'include/linux/sched/signal.h']
+LINUX_FILES += ['kernel/time/itimer.c']
 LINUX_FILES += ['fs/ioctl.c', 'drivers/tty/tty_jobctrl.c', 'drivers/tty/tty_io.c',
                 'include/uapi/asm-generic/ioctl.h', 'include/uapi/asm-generic/ioctls.h',
                 'arch/mips/include/uapi/asm/ioctl.h', 'arch/mips/include/uapi/asm/ioctls.h',
@@ -315,6 +319,11 @@ def generate(archive_path: Path, linux: Path):
         read('src/time/clock_nanosleep.c')
         read('src/time/clock_getres.c')
         read('src/time/clock_settime.c')
+        for wrapper in ('setitimer', 'getitimer'):
+            read('src/signal/' + wrapper + '.c')
+        read('src/unistd/alarm.c')
+        for wrapper in ('timer_create', 'timer_settime', 'timer_gettime', 'timer_getoverrun', 'timer_delete'):
+            read('src/time/' + wrapper + '.c')
         read('src/unistd/pipe.c')
         read('src/unistd/pipe2.c')
         read('src/unistd/mips/pipe.s')
@@ -380,7 +389,8 @@ def generate(archive_path: Path, linux: Path):
                 checked.append(operation)
                 continue
             source_name = {'clock_gettime32': 'clock_gettime', 'nanosleep_time32': 'nanosleep',
-                           'clock_nanosleep_time32': 'clock_nanosleep', 'clock_getres_time32': 'clock_getres', 'clock_settime32': 'clock_settime'}.get(operation, operation)
+                           'clock_nanosleep_time32': 'clock_nanosleep', 'clock_getres_time32': 'clock_getres', 'clock_settime32': 'clock_settime',
+                           'timer_settime32': 'timer_settime', 'timer_gettime32': 'timer_gettime'}.get(operation, operation)
             if operation == 'futex' and row['word_bytes'] == 4 and value == row['syscall_numbers'].get('futex_time64'):
                 source_name = 'futex_time64'
             # Generic UAPI defines both word-size aliases to __NR3264_* numbers.

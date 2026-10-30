@@ -81,6 +81,7 @@
     "linux/kernel/signal.c": "9c381a2e7fdb252d82dbc478dffa6679bfa8184b247c02d9a0b32747f15791d2",
     "linux/kernel/sys.c": "18bda9b60b09ed445a3275358ce4f8973561693f05e034c1f3c7a1fd1d628e7b",
     "linux/kernel/time/hrtimer.c": "ae7b6ba3f807ce3063c096e74c17409d11cedc7730fafdd69ad1f779a1d5a6e2",
+    "linux/kernel/time/itimer.c": "902200293e00ab26445dcb28ebaa83fd9ad33fa3c1cd1c0c29214d815c93ca74",
     "linux/kernel/time/posix-clock.c": "1436e7c7432459d853590701fe77f8b19b4c413eb17944a71638dd8448b7d466",
     "linux/kernel/time/posix-cpu-timers.c": "866e926e818ac7f563e17c08e8a21e439ad48c8ffaad995ed79930244d92c459",
     "linux/kernel/time/posix-timers.c": "83324177d6d61da625db194aad40d2712f4a77b6915a3f6060ad484c21e71b98",
@@ -157,8 +158,10 @@
     "musl/src/select/ppoll.c": "6c6650e6029354ecac9c3ed9f0e8491ffe10c33eacab1bfd573be5d38406bf29",
     "musl/src/select/pselect.c": "a02cbcbe4a13cb6ea22558d1d6b562cf0f2f8daaa7bb0d3014efa3a601bf624a",
     "musl/src/select/select.c": "a52f8e60ae644a7cb5fc77ec6d5e339dcf27b41d1a46196dc7eaf10d6058105c",
+    "musl/src/signal/getitimer.c": "9d787a7786ffaab9339138e3bb6dd7133459d9f23fa6957ac10deae24f246c02",
     "musl/src/signal/kill.c": "6733ef4d982a9b1496c9d5bf5012c9f8e12da7f3ec6ff961094039dfd1e022f5",
     "musl/src/signal/raise.c": "2c662f584cb042b82cf69608aeb11a27bde26066610877fbfc7a5f8de29d43fc",
+    "musl/src/signal/setitimer.c": "888cca7645b233c5ab61b59bdd9d0dbc5b5c821596f3636efbc6027c1f3ec798",
     "musl/src/signal/sigaltstack.c": "2d0ff72310c1b2aed53e79bb06cad78ab168f3a4674fefa62a724846c649e902",
     "musl/src/signal/sigpending.c": "58466de259abd12ea5b0d2e6ab3d6515d48839edbea0465dc38f4cf5d15d9b87",
     "musl/src/signal/sigqueue.c": "dc0599bfe5ce2e5082502adbe1b30c13e74e42f3a8425cea020ced6eb4ef3e3d",
@@ -184,7 +187,13 @@
     "musl/src/time/clock_nanosleep.c": "e4ee1b947194e1c32a9c3a669cad2a64010b98e0ef2b23c39b9622abc7affdd8",
     "musl/src/time/clock_settime.c": "785dae6a37a18afef3a7bd3c47d2a29457a0fcf0ba885c25ed32d8676b935985",
     "musl/src/time/nanosleep.c": "5ad9738734680a61ac941173a478374a23f9bd2297336d3013a35d51e6030ff7",
+    "musl/src/time/timer_create.c": "fedf5589cd543a137572af7514afc6fbe68a805fbfaa40ad98deaaf37b06d79f",
+    "musl/src/time/timer_delete.c": "243eccd2a4e6a7ea0d5a9844391afe5ced55d10fb26b6d80ef18d051ad7695c2",
+    "musl/src/time/timer_getoverrun.c": "770835d98c243629d551d29c9acc9950091051f82d9d4d5181f3cba73d681e57",
+    "musl/src/time/timer_gettime.c": "b5090c6f60819698238f2a53fe69a8438c2d2c2b46ab5871254ee572626e59db",
+    "musl/src/time/timer_settime.c": "2c38bce39bde91ba17ce24313be92bc37e8201655c6bcff6b5dc3ccc00c55973",
     "musl/src/unistd/access.c": "35d4db9f8d1bca35a16a13fda70de8f072a98412e704eabfc55d227432b25504",
+    "musl/src/unistd/alarm.c": "df4fdca5c538c12a86778f7e7c4cb91c1c7f3f39221e0ae4a47132c2b8eb4b61",
     "musl/src/unistd/dup.c": "b98dbdf4a6fb9ac81aafaa3bc31dcf2c6ebfbc65e864ebee6862d39341a1fcb8",
     "musl/src/unistd/dup2.c": "cba463e4d44ae7e9a388ba02ea785dfdd66fdd660456efde7e23bab4d93d301e",
     "musl/src/unistd/dup3.c": "ebe3d52ea96ad1f810e1b6b46d8aaa896925dd243936c5d3bf5d13021d87aacf",
@@ -409,7 +418,19 @@
         "utimensat": 320,
         "utimensat_time64": 412,
         "mknod": 14,
-        "mknodat": 297
+        "mknodat": 297,
+        "getitimer": 105,
+        "setitimer": 104,
+        "alarm": 27,
+        "timer_create": 259,
+        "timer_settime": null,
+        "timer_settime32": 260,
+        "timer_settime64": 409,
+        "timer_gettime": null,
+        "timer_gettime32": 261,
+        "timer_gettime64": 408,
+        "timer_getoverrun": 262,
+        "timer_delete": 263
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -605,7 +626,17 @@
         "utimensat",
         "utimensat_time64",
         "mknod",
-        "mknodat"
+        "mknodat",
+        "getitimer",
+        "setitimer",
+        "alarm",
+        "timer_create",
+        "timer_settime32",
+        "timer_settime64",
+        "timer_gettime32",
+        "timer_gettime64",
+        "timer_getoverrun",
+        "timer_delete"
       ],
       "linux_errno_crosschecks": [
         "EPERM",
@@ -817,7 +848,19 @@
         "utimensat": 280,
         "utimensat_time64": null,
         "mknod": 133,
-        "mknodat": 259
+        "mknodat": 259,
+        "getitimer": 36,
+        "setitimer": 38,
+        "alarm": 37,
+        "timer_create": 222,
+        "timer_settime": 223,
+        "timer_settime32": null,
+        "timer_settime64": null,
+        "timer_gettime": 224,
+        "timer_gettime32": null,
+        "timer_gettime64": null,
+        "timer_getoverrun": 225,
+        "timer_delete": 226
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -979,7 +1022,15 @@
         "fstatfs",
         "utimensat",
         "mknod",
-        "mknodat"
+        "mknodat",
+        "getitimer",
+        "setitimer",
+        "alarm",
+        "timer_create",
+        "timer_settime",
+        "timer_gettime",
+        "timer_getoverrun",
+        "timer_delete"
       ],
       "linux_errno_crosschecks": [
         "EPERM",
@@ -1191,7 +1242,19 @@
         "utimensat": 88,
         "utimensat_time64": null,
         "mknod": null,
-        "mknodat": 33
+        "mknodat": 33,
+        "getitimer": 102,
+        "setitimer": 103,
+        "alarm": null,
+        "timer_create": 107,
+        "timer_settime": 110,
+        "timer_settime32": null,
+        "timer_settime64": null,
+        "timer_gettime": 108,
+        "timer_gettime32": null,
+        "timer_gettime64": null,
+        "timer_getoverrun": 109,
+        "timer_delete": 111
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -1328,7 +1391,14 @@
         "statfs",
         "fstatfs",
         "utimensat",
-        "mknodat"
+        "mknodat",
+        "getitimer",
+        "setitimer",
+        "timer_create",
+        "timer_settime",
+        "timer_gettime",
+        "timer_getoverrun",
+        "timer_delete"
       ],
       "linux_errno_crosschecks": [
         "EPERM",
@@ -1540,7 +1610,19 @@
         "utimensat": 348,
         "utimensat_time64": 412,
         "mknod": 14,
-        "mknodat": 324
+        "mknodat": 324,
+        "getitimer": 105,
+        "setitimer": 104,
+        "alarm": null,
+        "timer_create": 257,
+        "timer_settime": null,
+        "timer_settime32": 258,
+        "timer_settime64": 409,
+        "timer_gettime": null,
+        "timer_gettime32": 259,
+        "timer_gettime64": 408,
+        "timer_getoverrun": 260,
+        "timer_delete": 261
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -1733,7 +1815,16 @@
         "utimensat",
         "utimensat_time64",
         "mknod",
-        "mknodat"
+        "mknodat",
+        "getitimer",
+        "setitimer",
+        "timer_create",
+        "timer_settime32",
+        "timer_settime64",
+        "timer_gettime32",
+        "timer_gettime64",
+        "timer_getoverrun",
+        "timer_delete"
       ],
       "linux_errno_crosschecks": [
         "EPERM",
@@ -1945,7 +2036,19 @@
         "utimensat": 88,
         "utimensat_time64": null,
         "mknod": null,
-        "mknodat": 33
+        "mknodat": 33,
+        "getitimer": 102,
+        "setitimer": 103,
+        "alarm": null,
+        "timer_create": 107,
+        "timer_settime": 110,
+        "timer_settime32": null,
+        "timer_settime64": null,
+        "timer_gettime": 108,
+        "timer_gettime32": null,
+        "timer_gettime64": null,
+        "timer_getoverrun": 109,
+        "timer_delete": 111
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -2081,7 +2184,14 @@
         "statfs",
         "fstatfs",
         "utimensat",
-        "mknodat"
+        "mknodat",
+        "getitimer",
+        "setitimer",
+        "timer_create",
+        "timer_settime",
+        "timer_gettime",
+        "timer_getoverrun",
+        "timer_delete"
       ],
       "linux_errno_crosschecks": [
         "EPERM",
@@ -2293,7 +2403,19 @@
         "utimensat": null,
         "utimensat_time64": 412,
         "mknod": null,
-        "mknodat": 33
+        "mknodat": 33,
+        "getitimer": 102,
+        "setitimer": 103,
+        "alarm": null,
+        "timer_create": 107,
+        "timer_settime": null,
+        "timer_settime32": null,
+        "timer_settime64": 409,
+        "timer_gettime": null,
+        "timer_gettime32": null,
+        "timer_gettime64": 408,
+        "timer_getoverrun": 109,
+        "timer_delete": 111
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -2427,7 +2549,14 @@
         "statfs64",
         "fstatfs64",
         "utimensat_time64",
-        "mknodat"
+        "mknodat",
+        "getitimer",
+        "setitimer",
+        "timer_create",
+        "timer_settime64",
+        "timer_gettime64",
+        "timer_getoverrun",
+        "timer_delete"
       ],
       "linux_errno_crosschecks": [
         "EPERM",
@@ -2639,7 +2768,19 @@
         "utimensat": 88,
         "utimensat_time64": null,
         "mknod": null,
-        "mknodat": 33
+        "mknodat": 33,
+        "getitimer": 102,
+        "setitimer": 103,
+        "alarm": null,
+        "timer_create": 107,
+        "timer_settime": 110,
+        "timer_settime32": null,
+        "timer_settime64": null,
+        "timer_gettime": 108,
+        "timer_gettime32": null,
+        "timer_gettime64": null,
+        "timer_getoverrun": 109,
+        "timer_delete": 111
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -2773,7 +2914,14 @@
         "statfs",
         "fstatfs",
         "utimensat",
-        "mknodat"
+        "mknodat",
+        "getitimer",
+        "setitimer",
+        "timer_create",
+        "timer_settime",
+        "timer_gettime",
+        "timer_getoverrun",
+        "timer_delete"
       ],
       "linux_errno_crosschecks": [
         "EPERM",
@@ -2985,7 +3133,19 @@
         "utimensat": 4316,
         "utimensat_time64": 4412,
         "mknod": 4014,
-        "mknodat": 4290
+        "mknodat": 4290,
+        "getitimer": 4105,
+        "setitimer": 4104,
+        "alarm": 4027,
+        "timer_create": 4257,
+        "timer_settime": null,
+        "timer_settime32": 4258,
+        "timer_settime64": 4409,
+        "timer_gettime": null,
+        "timer_gettime32": 4259,
+        "timer_gettime64": 4408,
+        "timer_getoverrun": 4260,
+        "timer_delete": 4261
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -3163,7 +3323,17 @@
         "utimensat",
         "utimensat_time64",
         "mknod",
-        "mknodat"
+        "mknodat",
+        "getitimer",
+        "setitimer",
+        "alarm",
+        "timer_create",
+        "timer_settime32",
+        "timer_settime64",
+        "timer_gettime32",
+        "timer_gettime64",
+        "timer_getoverrun",
+        "timer_delete"
       ],
       "linux_errno_crosschecks": [
         "EPERM",
@@ -3375,7 +3545,19 @@
         "utimensat": 5275,
         "utimensat_time64": null,
         "mknod": 5131,
-        "mknodat": 5249
+        "mknodat": 5249,
+        "getitimer": 5035,
+        "setitimer": 5036,
+        "alarm": 5037,
+        "timer_create": 5216,
+        "timer_settime": 5217,
+        "timer_settime32": null,
+        "timer_settime64": null,
+        "timer_gettime": 5218,
+        "timer_gettime32": null,
+        "timer_gettime64": null,
+        "timer_getoverrun": 5219,
+        "timer_delete": 5220
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -3535,7 +3717,15 @@
         "fstatfs",
         "utimensat",
         "mknod",
-        "mknodat"
+        "mknodat",
+        "getitimer",
+        "setitimer",
+        "alarm",
+        "timer_create",
+        "timer_settime",
+        "timer_gettime",
+        "timer_getoverrun",
+        "timer_delete"
       ],
       "linux_errno_crosschecks": [
         "EPERM",
@@ -3747,7 +3937,19 @@
         "utimensat": 304,
         "utimensat_time64": 412,
         "mknod": 14,
-        "mknodat": 288
+        "mknodat": 288,
+        "getitimer": 105,
+        "setitimer": 104,
+        "alarm": 27,
+        "timer_create": 240,
+        "timer_settime": null,
+        "timer_settime32": 241,
+        "timer_settime64": 409,
+        "timer_gettime": null,
+        "timer_gettime32": 242,
+        "timer_gettime64": 408,
+        "timer_getoverrun": 243,
+        "timer_delete": 244
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -3926,7 +4128,17 @@
         "utimensat",
         "utimensat_time64",
         "mknod",
-        "mknodat"
+        "mknodat",
+        "getitimer",
+        "setitimer",
+        "alarm",
+        "timer_create",
+        "timer_settime32",
+        "timer_settime64",
+        "timer_gettime32",
+        "timer_gettime64",
+        "timer_getoverrun",
+        "timer_delete"
       ],
       "linux_errno_crosschecks": [
         "EPERM",
