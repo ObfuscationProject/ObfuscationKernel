@@ -199,6 +199,24 @@ int poll_virtio_keyboard()
     return -1;
 }
 
+// Keyboard and mouse events arrive on their virtio-mmio lines; the main loop
+// reads the queues only after an interrupt, until both are drained.
+constinit bool input_interrupts{false}, input_pending{true};
+
+void input_interrupt(void *device, ok::interrupt::IrqLine)
+{
+    static_cast<ok::driver::qemu_virt::VirtioInputDevice *>(device)->acknowledge();
+    input_pending = true;
+}
+
+bool bind_input(ok::driver::qemu_virt::VirtioInputDevice &device, ok::driver::qemu_virt::VirtioInputKind kind)
+{
+    if (!device.initialize(virtio_input_bases, sizeof(virtio_input_bases) / sizeof(virtio_input_bases[0]), kind))
+        return false;
+    const auto line = ok::interrupt::virtio_mmio_line((device.base() - virtio_input_bases[0]) / 0x200);
+    return line && ok::interrupt::bind_platform_irq(line.value().line, line.value().trigger, input_interrupt, &device);
+}
+
 } // namespace
 
 extern "C" void ok_platform_console_init() {}
@@ -259,8 +277,13 @@ extern "C" void ok_platform_poll_idle()
 
 extern "C" int ok_platform_input_poll()
 {
+    if (input_interrupts && !input_pending)
+        return pop_pending_keyboard_input();
     poll_virtio_mouse();
-    return poll_virtio_keyboard();
+    const int key = poll_virtio_keyboard();
+    if (key < 0)
+        input_pending = false; // Both queues drained: wait for the next interrupt.
+    return key;
 }
 
 namespace
@@ -296,6 +319,8 @@ void uart_interrupt(void *, ok::interrupt::IrqLine)
 
 extern "C" ok::Status ok_platform_bind_irqs()
 {
+    input_interrupts = bind_input(virtio_keyboard, ok::driver::qemu_virt::VirtioInputKind::keyboard) &&
+                       bind_input(virtio_mouse, ok::driver::qemu_virt::VirtioInputKind::mouse);
     if (auto status = ok::interrupt::bind_platform_irq(uart_irq, ok::interrupt::IrqTrigger::level, uart_interrupt,
                                                        nullptr);
         !status.ok())
