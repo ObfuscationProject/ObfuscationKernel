@@ -43,11 +43,17 @@ class Plic final
         reg(enable + 4 * (line / 32)) = reg(enable + 4 * (line / 32)) & ~(1u << (line % 32));
         return Status::success();
     }
+    // QEMU's PLIC re-evaluates its interrupt outputs on a threshold write but
+    // not on an enable write. A source that became pending while masked, from
+    // a device that will not raise its line again (a 16550 holding one byte),
+    // would otherwise never reach the hart, so unmasking rewrites the
+    // threshold.
     Status unmask(interrupt::IrqLine line)
     {
         if (auto status = admit(line); !status.ok())
             return status;
         reg(enable + 4 * (line / 32)) = reg(enable + 4 * (line / 32)) | (1u << (line % 32));
+        reg(threshold) = 0;
         return Status::success();
     }
     Status acknowledge(interrupt::IrqLine line)

@@ -302,10 +302,13 @@ int read_uart()
     return static_cast<int>(mmio32(uart_dr) & 0xffu);
 }
 
+// Reading DR until the FIFO is empty clears RX and the receive timeout. An
+// UARTICR write after the drain would also clear the RX interrupt of a byte
+// that arrived meanwhile, and the PL011 raises RX again only when its FIFO
+// goes from empty to one byte, so that byte would wait forever.
 void uart_interrupt(void *, ok::interrupt::IrqLine)
 {
     uart_ring.fill(read_uart);
-    mmio32(uart_icr) = uart_receive_interrupts;
 }
 } // namespace
 
