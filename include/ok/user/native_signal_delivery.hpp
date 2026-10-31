@@ -52,10 +52,7 @@ struct SignalDelivery
         if (action.handler == sched::SignalAction::default_handler)
         {
             // Job control remains an explicit runtime integration gate.
-            constexpr u32 first_job_stop = Actions::mips ? 23 : 19;
-            if (signal == first_job_stop || signal == (Actions::mips ? 24 : 20) ||
-                signal == (Actions::mips ? 26 : 21) || signal == (Actions::mips ? 27 : 22))
-                return Result::unsupported;
+            if (Actions::default_stop(signal)) return Result::unsupported;
             return pending.consume(ticket) ? Result::terminate : Result::corrupt;
         }
         if (!supported(action)) return Result::unsupported;

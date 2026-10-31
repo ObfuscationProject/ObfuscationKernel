@@ -104,9 +104,7 @@ template <abi::linux_user::Profile Profile, typename Deliver, typename AdmitBloc
     // The default remains refusal; signal masks and blocked waits are distinct.
     if ((target.thread->state == sched::ProcessState::blocked &&
          !std::forward<AdmitBlocked>(admit_blocked)(*target.process, *target.thread)) ||
-        signal == static_cast<i32>(Codec::stop_signal) ||
-        signal == (Codec::mips ? 24 : 20) || signal == (Codec::mips ? 26 : 21) ||
-        signal == (Codec::mips ? 27 : 22) || signal == (Codec::mips ? 25 : 18)) return -95;
+        Codec::stop_or_continue(static_cast<u32>(signal))) return -95;
     return std::forward<Deliver>(deliver)(*target.process, *target.thread,
         sched::PendingSignalInfo{static_cast<u32>(signal), -6,
                                  static_cast<u32>(sender.pid()), credentials.uid});
