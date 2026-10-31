@@ -37,6 +37,146 @@ def systoolchain_qemu(arch: str) -> Path:
     return Path("/xmake/packages/s/systoolchain/0.1.0/bin") / names[arch]
 
 
+# Frozen copy of the builder before the -smp lane; default commands must not drift from it.
+def single_cpu_qemu_command(arch: str, qemu: Path, kernel: Path, display: str, debug_exit: bool, disk: Path) -> list[str]:
+    if arch not in qemu_test.BOOTABLE_QEMU_ARCHES:
+        raise qemu_test.QemuConfigurationError(f"qemu-system boot is not implemented for {arch} yet")
+    qemu_path = str(qemu)
+
+    if arch in ("aarch64", "arm32"):
+        command = [
+            qemu_path,
+            "-M",
+            "virt",
+            "-cpu",
+            "cortex-a57" if arch == "aarch64" else "cortex-a15",
+            "-m",
+            "256M",
+            "-kernel",
+            str(kernel),
+            "-monitor",
+            "none",
+            "-no-reboot",
+            "-display",
+            display,
+        ]
+        command += qemu_test.serial_args(arch, display)
+        command += qemu_test.ramfb_args()
+        command += qemu_test.virtio_mmio_input_args()
+        command += qemu_test.virtio_disk_args(disk)
+        return command
+    if arch in ("rv64", "rv32"):
+        command = [
+            qemu_path,
+            "-M",
+            "virt",
+            "-m",
+            "256M",
+            "-bios",
+            "none",
+            "-kernel",
+            str(kernel),
+            "-monitor",
+            "none",
+            "-no-reboot",
+            "-display",
+            display,
+        ]
+        command += qemu_test.serial_args(arch, display)
+        command += qemu_test.ramfb_args()
+        command += qemu_test.virtio_mmio_input_args()
+        command += qemu_test.virtio_disk_args(disk)
+        return command
+    if arch == "loongarch64":
+        command = [
+            qemu_path,
+            "-M",
+            "virt",
+            "-m",
+            "2G",
+            "-kernel",
+            str(kernel),
+            "-monitor",
+            "none",
+            "-no-reboot",
+            "-display",
+            display,
+        ]
+        command += qemu_test.serial_args(arch, display)
+        command += qemu_test.ramfb_args()
+        command += qemu_test.virtio_pci_input_args()
+        command += qemu_test.virtio_disk_args(disk)
+        return command
+    if arch in ("mips", "mips64"):
+        command = [
+            qemu_path,
+            "-M",
+            "malta",
+        ]
+        if arch == "mips64":
+            command += ["-cpu", "MIPS64R2-generic"]
+        command += [
+            "-vga",
+            "none",
+            "-m",
+            "256M",
+            "-kernel",
+            str(kernel),
+            "-monitor",
+            "none",
+            "-no-reboot",
+            "-display",
+            display,
+        ]
+        command += qemu_test.serial_args(arch, display)
+        command += qemu_test.virtio_disk_args(disk)
+        return command
+    if arch == "ppc":
+        command = [
+            qemu_path,
+            "-M",
+            "ppce500",
+            "-m",
+            "256M",
+            "-kernel",
+            str(kernel),
+            "-monitor",
+            "none",
+            "-no-reboot",
+            "-display",
+            display,
+        ]
+        command += qemu_test.serial_args(arch, display)
+        command += qemu_test.virtio_disk_args(disk)
+        return command
+
+    command = [
+        qemu_path,
+        "-drive",
+        f"file={kernel},format=raw,if=ide",
+        "-boot",
+        "c",
+        "-serial",
+        "stdio",
+        "-monitor",
+        "none",
+        "-no-reboot",
+        "-vga",
+        "none",
+        "-display",
+        display,
+    ]
+    command += qemu_test.ramfb_args()
+    command += qemu_test.virtio_disk_args(disk)
+    if debug_exit:
+        command += ["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
+    return command
+
+
+def make_smp_output(arch: str, smp_line: str | None) -> str:
+    output = make_output(arch) + "OK_SMP scope=model topology=pass per_cpu=pass ap_start=unsupported\n"
+    return output + (smp_line + "\n" if smp_line else "")
+
 def make_output(arch: str, fields: dict[str, str] | None = None, include_display_text: bool = True) -> str:
     merged = {
         "arch": arch,
@@ -195,6 +335,130 @@ class QemuRunnerValidationTests(unittest.TestCase):
         self.assertIn("scope.OK_SMP=model", summary)
         self.assertIn("scope.OK_MODULES=unspecified", summary)
         self.assertIn("scope.OK_IRQ=absent", summary)
+
+    def validate_smp(self, arch: str, output: str, cpus: int) -> tuple[int, str, str]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = qemu_test.validate_output(arch, output, 0, False, cpus)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def test_single_cpu_run_ignores_missing_hardware_smp_marker(self) -> None:
+        for arch in qemu_test.BOOTABLE_QEMU_ARCHES:
+            with self.subTest(arch=arch):
+                code, stdout, stderr = self.validate_smp(arch, make_smp_output(arch, None), 1)
+                self.assertEqual(code, 0, stderr)
+                self.assertNotIn("OK_QEMU_SMP_TEST", stdout)
+
+    def test_smp_profiles_require_every_cpu_online_with_ipi(self) -> None:
+        for arch in qemu_test.SMP_QEMU_ARCHES:
+            with self.subTest(arch=arch):
+                line = "OK_SMP scope=hardware cpus=4 online=4 ap_start=psci ipi=pass"
+                code, stdout, stderr = self.validate_smp(arch, make_smp_output(arch, line), 4)
+                self.assertEqual(code, 0, stderr)
+                self.assertIn(f"OK_QEMU_SMP_TEST arch={arch} smp=4 cpus=4 online=4", stdout)
+
+    def test_smp_profiles_reject_partial_bringup_or_failed_ipi(self) -> None:
+        rejected = (
+            "OK_SMP scope=hardware cpus=2 online=1 ap_start=sipi ipi=pass",
+            "OK_SMP scope=hardware cpus=1 online=1 ap_start=sipi ipi=pass",
+            "OK_SMP scope=hardware cpus=2 online=2 ap_start=sipi ipi=fail",
+            "OK_SMP scope=hardware cpus=2 online=2 ap_start=sipi",
+            "OK_SMP scope=model cpus=2 online=2 ap_start=sipi ipi=pass",
+            "OK_SMP scope=hardware cpus=1 online=1 ap_start=unsupported ipi=unsupported reason=no_ap_start",
+        )
+        for arch in qemu_test.SMP_QEMU_ARCHES:
+            for line in rejected:
+                with self.subTest(arch=arch, line=line):
+                    code, stdout, stderr = self.validate_smp(arch, make_smp_output(arch, line), 2)
+                    self.assertEqual(code, 14)
+                    self.assertIn("-smp 2", stderr)
+                    self.assertNotIn("OK_QEMU_SMP_TEST", stdout)
+
+    def test_smp_run_without_hardware_marker_names_the_marker(self) -> None:
+        code, _, stderr = self.validate_smp("x86_64", make_smp_output("x86_64", None), 2)
+        self.assertEqual(code, 14)
+        self.assertIn("did not report OK_SMP scope=hardware for -smp 2", stderr)
+
+    def test_up_profiles_must_report_up_honestly(self) -> None:
+        up_arches = [arch for arch in qemu_test.BOOTABLE_QEMU_ARCHES if arch not in qemu_test.SMP_QEMU_ARCHES]
+        self.assertEqual(len(up_arches), 7)
+        honest = "OK_SMP scope=hardware cpus=2 online=1 ap_start=unsupported ipi=unsupported reason=no_ap_start"
+        claimed = (
+            "OK_SMP scope=hardware cpus=2 online=2 ap_start=psci ipi=pass",
+            "OK_SMP scope=hardware cpus=2 online=1 ap_start=sbi ipi=unsupported reason=no_ap_start",
+            "OK_SMP scope=model cpus=1 online=1 ap_start=unsupported ipi=unsupported reason=no_ap_start",
+        )
+        for arch in up_arches:
+            with self.subTest(arch=arch):
+                code, stdout, stderr = self.validate_smp(arch, make_smp_output(arch, honest), 2)
+                self.assertEqual(code, 0, stderr)
+                self.assertIn(f"OK_QEMU_SMP_TEST arch={arch} smp=2", stdout)
+                self.assertIn("reason=no_ap_start", stdout)
+            for line in claimed:
+                with self.subTest(arch=arch, line=line):
+                    code, _, _ = self.validate_smp(arch, make_smp_output(arch, line), 2)
+                    self.assertEqual(code, 14)
+
+    def test_summary_records_cpu_count_and_both_smp_scopes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            kernel = Path(tmp) / "kernel.bin"
+            kernel.write_bytes(b"ok")
+            output = make_smp_output("aarch64", "OK_SMP scope=hardware cpus=2 online=2 ap_start=psci ipi=pass")
+            qemu_test.write_summary(kernel, "aarch64", output, 0, 0, 2)
+            summary = (kernel.parent / "qemu-test-summary.txt").read_text(encoding="utf-8").splitlines()
+        self.assertIn("smp.cpus=2", summary)
+        self.assertIn("marker.OK_SMP=present", summary)
+        self.assertIn("scopes.OK_SMP=model,hardware", summary)
+        self.assertIn("marker.OK_SMP_HARDWARE=present", summary)
+        self.assertIn("smp.hardware.online=2", summary)
+        self.assertIn("smp.hardware.ap_start=psci", summary)
+
+    def test_summary_defaults_to_one_cpu_without_hardware_smp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            kernel = Path(tmp) / "kernel.bin"
+            kernel.write_bytes(b"ok")
+            qemu_test.write_summary(kernel, "x86_64", make_smp_output("x86_64", None), 0, 0)
+            summary = (kernel.parent / "qemu-test-summary.txt").read_text(encoding="utf-8").splitlines()
+        self.assertIn("smp.cpus=1", summary)
+        self.assertIn("scope.OK_SMP=model", summary)
+        self.assertIn("scopes.OK_SMP=model", summary)
+        self.assertIn("scopes.OK_IRQ=absent", summary)
+        self.assertIn("marker.OK_SMP_HARDWARE=missing", summary)
+        self.assertFalse(any(line.startswith("smp.hardware.") for line in summary))
+
+    def test_default_qemu_command_matches_single_cpu_builder(self) -> None:
+        for arch in qemu_test.BOOTABLE_QEMU_ARCHES:
+            for display in ("none", "sdl"):
+                for debug_exit in (False, True):
+                    with self.subTest(arch=arch, display=display, debug_exit=debug_exit):
+                        args = (arch, systoolchain_qemu(arch), Path("kernel.bin"), display, debug_exit,
+                                Path("disk.img"))
+                        expected = single_cpu_qemu_command(*args)
+                        self.assertEqual(qemu_test.qemu_command(*args), expected)
+                        self.assertEqual(qemu_test.qemu_command(*args, 1), expected)
+                        self.assertNotIn("-smp", expected)
+
+    def test_qemu_command_appends_smp_only_above_one_cpu(self) -> None:
+        for arch in qemu_test.BOOTABLE_QEMU_ARCHES:
+            with self.subTest(arch=arch):
+                args = (arch, systoolchain_qemu(arch), Path("kernel.bin"), "none", arch in ("i386", "x86_64"),
+                        Path("disk.img"))
+                command = qemu_test.qemu_command(*args, 4)
+                self.assertEqual(command, single_cpu_qemu_command(*args) + ["-smp", "4"])
+
+    def test_qemu_command_rejects_unsupported_cpu_counts(self) -> None:
+        for cpus in (0, -1, qemu_test.MAX_QEMU_CPUS + 1):
+            with self.subTest(cpus=cpus), self.assertRaises(qemu_test.QemuConfigurationError):
+                qemu_test.qemu_command("x86_64", systoolchain_qemu("x86_64"), Path("kernel.bin"), "none", True,
+                                       Path("disk.img"), cpus)
+
+    def test_smp_cli_option_accepts_one_through_eight(self) -> None:
+        self.assertEqual(qemu_test.smp_cpu_count("1"), 1)
+        self.assertEqual(qemu_test.smp_cpu_count("8"), 8)
+        for value in ("0", "9", "two"):
+            with self.subTest(value=value), self.assertRaises(qemu_test.argparse.ArgumentTypeError):
+                qemu_test.smp_cpu_count(value)
 
     def test_qemu_command_uses_explicit_systoolchain_executable(self) -> None:
         qemu = systoolchain_qemu("x86_64")

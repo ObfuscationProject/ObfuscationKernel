@@ -50,6 +50,12 @@ option("qemu_binary")
     set_description("Explicit QEMU system executable for the configured architecture")
 option_end()
 
+option("qemu_smp")
+    set_default("1")
+    set_showmenu(true)
+    set_description("QEMU vCPU count for the debug boot test; above 1 requires the hardware OK_SMP marker")
+option_end()
+
 if not get_config("systoolchain_dir") then
     add_repositories("obfuscation-repo https://github.com/ObfuscationProject/ObfuscationRepo.git")
     add_requires("systoolchain 0.1.0", {
@@ -96,6 +102,7 @@ end
 local configured_arch_spec = ok_arch_spec(ok_current_arch())
 local configured_toolchain_dir = get_config("systoolchain_dir")
 local configured_qemu_binary = get_config("qemu_binary")
+local configured_qemu_smp = get_config("qemu_smp")
 local configured_mode = get_config("mode") or "release"
 
 local function systoolchain_qemu(target, arch)
@@ -122,6 +129,24 @@ local function systoolchain_qemu(target, arch)
         raise("the systoolchain package is missing QEMU: %s", qemu)
     end
     return qemu
+end
+
+local function qemu_test_argv(target)
+    local argv = {
+        path.join(os.projectdir(), "scripts", "qemu_test.py"),
+        "--arch", target:values("ok.arch"),
+        "--kernel", path.join(target:targetdir(), "kernel.bin"),
+        "--qemu", systoolchain_qemu(target, target:values("ok.arch"))
+    }
+    local cpus = tonumber(configured_qemu_smp or "1")
+    if cpus == nil then
+        raise("qemu_smp must be a CPU count, got %s", tostring(configured_qemu_smp))
+    end
+    if cpus > 1 then
+        table.insert(argv, "--smp")
+        table.insert(argv, tostring(cpus))
+    end
+    return argv
 end
 
 function add_ok_kernel_sources(include_kernel_main)
@@ -338,20 +363,10 @@ target("okernel_image")
     end
     after_build(build_kernel_image)
     on_run(function (target)
-        os.execv("python3", {
-            path.join(os.projectdir(), "scripts", "qemu_test.py"),
-            "--arch", target:values("ok.arch"),
-            "--kernel", path.join(target:targetdir(), "kernel.bin"),
-            "--qemu", systoolchain_qemu(target, target:values("ok.arch"))
-        })
+        os.execv("python3", qemu_test_argv(target))
     end)
     on_test(function (target)
-        local code = os.execv("python3", {
-            path.join(os.projectdir(), "scripts", "qemu_test.py"),
-            "--arch", target:values("ok.arch"),
-            "--kernel", path.join(target:targetdir(), "kernel.bin"),
-            "--qemu", systoolchain_qemu(target, target:values("ok.arch"))
-        }, {try = true})
+        local code = os.execv("python3", qemu_test_argv(target), {try = true})
         return code == 0
     end)
 target_end()

@@ -41,6 +41,9 @@ CAPABILITIES_BY_ARCH = {
     arch: SERIAL_WINDOW_QEMU_CAPABILITIES if arch in SERIAL_WINDOW_QEMU_ARCHES else BOOTABLE_QEMU_CAPABILITIES
     for arch in BOOTABLE_QEMU_ARCHES
 }
+# Profiles whose kernel must start every QEMU vCPU; the rest report UP.
+SMP_QEMU_ARCHES = ("x86_64", "aarch64", "rv64")
+MAX_QEMU_CPUS = 8
 
 
 class QemuConfigurationError(RuntimeError):
@@ -122,11 +125,22 @@ def serial_args(arch: str, display: str) -> list[str]:
     return ["-serial", "stdio"]
 
 
-def qemu_command(arch: str, qemu: Path, kernel: Path, display: str, debug_exit: bool, disk: Path) -> list[str]:
+def qemu_command(
+    arch: str, qemu: Path, kernel: Path, display: str, debug_exit: bool, disk: Path, cpus: int = 1
+) -> list[str]:
     if arch not in BOOTABLE_QEMU_ARCHES:
         raise QemuConfigurationError(f"qemu-system boot is not implemented for {arch} yet")
-    qemu_path = str(qemu)
+    if not 1 <= cpus <= MAX_QEMU_CPUS:
+        raise QemuConfigurationError(f"qemu -smp must be between 1 and {MAX_QEMU_CPUS}, got {cpus}")
+    command = profile_command(arch, str(qemu), kernel, display, debug_exit, disk)
+    if cpus > 1:
+        command += ["-smp", str(cpus)]
+    return command
 
+
+def profile_command(
+    arch: str, qemu_path: str, kernel: Path, display: str, debug_exit: bool, disk: Path
+) -> list[str]:
     if arch in ("aarch64", "arm32"):
         command = [
             qemu_path,
@@ -264,13 +278,14 @@ def run_kernel(
     display: str,
     debug_exit: bool,
     timeout: float | None,
+    cpus: int = 1,
 ) -> subprocess.CompletedProcess[str]:
     with tempfile.TemporaryDirectory(prefix="okernel-qemu-") as tmp:
         runnable_kernel = Path(tmp) / "kernel.bin"
         scratch_disk = Path(tmp) / "fs.img"
         shutil.copyfile(kernel, runnable_kernel)
         create_virtual_disk(scratch_disk)
-        command = qemu_command(arch, qemu, runnable_kernel, display, debug_exit, scratch_disk)
+        command = qemu_command(arch, qemu, runnable_kernel, display, debug_exit, scratch_disk, cpus)
         if not debug_exit:
             return run_until_marker(command, timeout)
         return subprocess.run(command, text=True, capture_output=True, check=False, timeout=timeout)
@@ -326,7 +341,35 @@ def run_until_marker(command: list[str], timeout: float | None) -> subprocess.Co
                                        stderr.decode(errors="replace"))
 
 
-def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: bool) -> int:
+def hardware_smp_fields(lines: list[str]) -> dict[str, str] | None:
+    for line in reversed(lines):
+        if line.startswith("OK_SMP "):
+            fields = parse_fields(line)
+            if fields.get("scope") == "hardware":
+                return fields
+    return None
+
+
+def validate_smp(arch: str, lines: list[str], cpus: int) -> int:
+    fields = hardware_smp_fields(lines)
+    if fields is None:
+        print(f"debug kernel did not report OK_SMP scope=hardware for -smp {cpus}", file=sys.stderr)
+        return 14
+    reported = " ".join(f"{key}={fields.get(key, 'missing')}" for key in ("cpus", "online", "ap_start", "ipi"))
+    if arch in SMP_QEMU_ARCHES:
+        expected = {"cpus": str(cpus), "online": str(cpus), "ipi": "pass"}
+    else:
+        expected = {"online": "1", "ap_start": "unsupported"}
+    if any(fields.get(key) != value for key, value in expected.items()):
+        wanted = " ".join(f"{key}={value}" for key, value in expected.items())
+        print(f"debug kernel SMP report mismatch for -smp {cpus}: expected {wanted}, got {reported}", file=sys.stderr)
+        return 14
+    reason = f" reason={fields['reason']}" if "reason" in fields else ""
+    print(f"OK_QEMU_SMP_TEST arch={arch} smp={cpus} {reported}{reason}")
+    return 0
+
+
+def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: bool, cpus: int = 1) -> int:
     lines = output.splitlines()
     fail_lines = [line for line in lines if line.startswith("OK_TEST_FAIL ")]
     if fail_lines:
@@ -387,10 +430,14 @@ def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: 
         print("display driver did not report boot text", file=sys.stderr)
         return 10
     print(f"OK_QEMU_NET_TEST arch={arch} udp=pass tcp=pass")
+    if cpus > 1:
+        return validate_smp(arch, lines, cpus)
     return 0
 
 
-def write_summary(kernel: Path, arch: str, output: str, qemu_returncode: int, validation_code: int) -> None:
+def write_summary(
+    kernel: Path, arch: str, output: str, qemu_returncode: int, validation_code: int, cpus: int = 1
+) -> None:
     summary = kernel.parent / "qemu-test-summary.txt"
     lines = output.splitlines()
     pass_lines = [line for line in lines if line.startswith("OK_TEST_PASS ")]
@@ -428,6 +475,12 @@ def write_summary(kernel: Path, arch: str, output: str, qemu_returncode: int, va
                       for line in reversed(lines) if line.startswith(marker + " ")), "absent")
         for marker in roadmap_markers
     }
+    marker_scope_lists = {
+        marker: ",".join(dict.fromkeys(parse_fields(line).get("scope", "unspecified")
+                                       for line in lines if line.startswith(marker + " "))) or "absent"
+        for marker in roadmap_markers
+    }
+    smp_hardware = hardware_smp_fields(lines)
     coverage = coverage_statuses(arch, fields)
     with summary.open("w", encoding="utf-8") as handle:
         handle.write(f"arch={arch}\n")
@@ -435,6 +488,7 @@ def write_summary(kernel: Path, arch: str, output: str, qemu_returncode: int, va
         handle.write(f"qemu_returncode={qemu_returncode}\n")
         handle.write(f"validation_code={validation_code}\n")
         handle.write(f"capabilities={','.join(CAPABILITIES_BY_ARCH.get(arch, ()))}\n")
+        handle.write(f"smp.cpus={cpus}\n")
         handle.write(f"ok_mode={'OK_MODE debug' in lines}\n")
         handle.write(f"boot_complete={any(line.startswith('OK_DEBUG boot=complete') for line in lines)}\n")
         handle.write(f"ok_test_pass={bool(pass_lines)}\n")
@@ -448,6 +502,10 @@ def write_summary(kernel: Path, arch: str, output: str, qemu_returncode: int, va
         for marker, present in marker_status.items():
             handle.write(f"marker.{marker}={'present' if present else 'missing'}\n")
             handle.write(f"scope.{marker}={marker_scopes[marker]}\n")
+            handle.write(f"scopes.{marker}={marker_scope_lists[marker]}\n")
+        handle.write(f"marker.OK_SMP_HARDWARE={'present' if smp_hardware is not None else 'missing'}\n")
+        for key in sorted(smp_hardware or {}):
+            handle.write(f"smp.hardware.{key}={smp_hardware[key]}\n")
 
 
 def parse_fields(line: str) -> dict[str, str]:
@@ -459,6 +517,16 @@ def parse_fields(line: str) -> dict[str, str]:
     return fields
 
 
+def smp_cpu_count(value: str) -> int:
+    try:
+        cpus = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid CPU count: {value}") from None
+    if not 1 <= cpus <= MAX_QEMU_CPUS:
+        raise argparse.ArgumentTypeError(f"CPU count must be between 1 and {MAX_QEMU_CPUS}")
+    return cpus
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--arch", required=True)
@@ -467,6 +535,8 @@ def main() -> int:
     parser.add_argument("--display", default="none")
     parser.add_argument("--no-debug-exit", action="store_true")
     parser.add_argument("--timeout", type=float, default=DEFAULT_QEMU_TIMEOUT_SECONDS)
+    parser.add_argument("--smp", type=smp_cpu_count, default=1,
+                        help=f"QEMU vCPU count (1..{MAX_QEMU_CPUS}); above 1 requires the hardware OK_SMP marker")
     args = parser.parse_args()
 
     arch = normalize_arch(args.arch)
@@ -486,10 +556,10 @@ def main() -> int:
             file=sys.stderr,
         )
     try:
-        result = run_kernel(arch, qemu, kernel, args.display, use_debug_exit, args.timeout)
+        result = run_kernel(arch, qemu, kernel, args.display, use_debug_exit, args.timeout, args.smp)
     except QemuConfigurationError as error:
         print(str(error), file=sys.stderr)
-        write_summary(kernel, arch, "", 127, 11)
+        write_summary(kernel, arch, "", 127, 11, args.smp)
         return 11
     except subprocess.TimeoutExpired as error:
         stdout = error.stdout or ""
@@ -503,14 +573,14 @@ def main() -> int:
         if stderr:
             print(stderr, end="", file=sys.stderr)
         print("qemu timed out before OK_TEST_PASS", file=sys.stderr)
-        write_summary(kernel, arch, stdout, 124, 12)
+        write_summary(kernel, arch, stdout, 124, 12, args.smp)
         return 12
     if result.stdout:
         print(result.stdout, end="")
     if result.stderr:
         print(result.stderr, end="", file=sys.stderr)
-    validation_code = validate_output(arch, result.stdout, result.returncode, use_debug_exit)
-    write_summary(kernel, arch, result.stdout, result.returncode, validation_code)
+    validation_code = validate_output(arch, result.stdout, result.returncode, use_debug_exit, args.smp)
+    write_summary(kernel, arch, result.stdout, result.returncode, validation_code, args.smp)
     return validation_code
 
 

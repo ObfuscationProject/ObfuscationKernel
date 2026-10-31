@@ -158,3 +158,26 @@ The OS owns system-desktop integration tests. Run its `distro_image` with the
 matching exported SDK to exercise extension attachment, package dispatch and
 GUI lifecycle; a standalone kernel does not include the OS desktop or Linux
 driver compatibility model.
+
+## SMP lane
+
+`scripts/qemu_test.py --smp N` (1 to 8) appends `-smp N` to every profile's
+QEMU command line; the default of 1 leaves the command line unchanged. The
+xmake option `qemu_smp` (default 1) forwards it from `xmake run`, `xmake test`,
+`xmake qemu-test` and `xmake qemu-matrix`:
+
+```sh
+xmake f -c -y -m debug -a x86_64 --qemu_smp=2
+xmake test
+```
+
+With N above 1 the runner requires the hardware marker
+`OK_SMP scope=hardware cpus=<discovered> online=<online> ap_start=<method>
+ipi=<pass|fail|unsupported>`, with a trailing `reason=<token>` when the kernel
+stays uniprocessor. `x86_64`, `aarch64` and `rv64` must report `cpus=N`,
+`online=N` and `ipi=pass`; every other profile must report `online=1` and
+`ap_start=unsupported`. A missing or mismatched marker fails with exit code 14.
+The `scope=model` `OK_SMP` line is not evidence of secondary-CPU startup and
+never satisfies this check. The summary records `smp.cpus`, the distinct scopes
+of each marker under `scopes.<marker>`, `marker.OK_SMP_HARDWARE` and the
+hardware marker's fields as `smp.hardware.<field>`.
