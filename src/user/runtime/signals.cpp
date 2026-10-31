@@ -2273,6 +2273,7 @@ bool private_signal_call(Kernel &kernel, sched::ProcessControlBlock &process,
         }
         result = update_signal_action<private_signal_profile>(*actions, static_cast<i32>(a[0]), a[1], a[2], a[3],
             read, write, [&](u32 signal) noexcept {
+                private_timer_discard(kernel, process.pid(), signal);
                 shared->discard(signal);
                 for (auto &peer : process.threads())
                     if (auto *pending = private_signal_queue(peer)) pending->discard(signal);

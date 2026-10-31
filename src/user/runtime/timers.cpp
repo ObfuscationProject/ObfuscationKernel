@@ -109,12 +109,26 @@ void discard_record(Kernel &kernel, sched::ProcessId pid, const PosixTimer &time
         return true;
     }));
 }
-// A signalled interval timer whose record left its queue was dequeued (or its
-// ignored record discarded) at the last preview; it rearms past that time.
+// A SIGEV_THREAD_ID target that exited took its queued record with it.
+bool target_gone(Kernel &kernel, sched::ProcessId pid, const PosixTimer &timer)
+{
+    if (!timer.thread) return false;
+    const auto *thread = kernel.scheduler().find_thread(pid, timer.thread);
+    return !thread || thread->state == sched::ProcessState::exited;
+}
+// A signalled interval timer whose record left its queue was dequeued at the
+// last preview; it rearms past that time. A record discarded because its signal
+// became ignored is owed instead (private_timer_discard), and one whose target
+// exited is never dequeued, so Linux never rearms that timer.
 void settle_posix(Kernel &kernel, sched::ProcessId pid, PosixTimer &timer)
 {
-    if (timer.timer.state() != TimerState::signalled || timer.owed || timer.stalled || record_queued(kernel, pid, timer))
+    if (timer.timer.state() != TimerState::signalled || timer.owed || timer.stalled) return;
+    if (target_gone(kernel, pid, timer))
+    {
+        timer.stalled = true;
         return;
+    }
+    if (record_queued(kernel, pid, timer)) return;
     timer.timer.dequeued();
     ++timer_counters.dequeued;
 }
@@ -256,7 +270,7 @@ i64 create_timer(Kernel &kernel, sched::ProcessControlBlock &process, const std:
     slot->thread = target;
     slot->value = event.value;
     slot->timer.reset(event.notify == lu::sigev_none);
-    return id;
+    return 0; // The id went out through the third argument.
 }
 
 i64 set_timer(Kernel &kernel, sched::ProcessControlBlock &process, const std::array<u64, 6> &a,
@@ -367,7 +381,7 @@ i64 set_alarm(sched::ProcessControlBlock &process, u64 raw, u64 now)
     u64 result = old.value / timer_second;
     const u64 fraction = old.value % timer_second;
     if ((!result && fraction) || fraction >= timer_second / 2) ++result;
-    return static_cast<i64>(result);
+    return static_cast<i64>(static_cast<u32>(result)); // alarm returns unsigned int.
 }
 } // namespace
 
@@ -446,6 +460,24 @@ void private_timer_exec(sched::ProcessId pid)
 {
     if (auto *timers = find_timers(pid))
         for (auto &timer : timers->posix) timer = {};
+}
+
+// sigaction made `signal` ignored and is about to discard its pending records.
+// Linux frees a pending SIGALRM, so an expired ITIMER_REAL is never rearmed (it
+// rearms only at dequeue), and parks a periodic POSIX timer's record until the
+// signal is unignored, then queues it again (posixtimer_sig_ignore/unignore):
+// here the timer stays signalled and its signal is owed, which service_posix
+// keeps parked while the signal is ignored.
+void private_timer_discard(Kernel &kernel, sched::ProcessId pid, u32 signal)
+{
+    auto *timers = find_timers(pid);
+    if (!timers) return;
+    if (signal == alarm_signal && timers->real.state() == TimerState::signalled && !timers->real_owed)
+        timers->real.abandon();
+    for (auto &timer : timers->posix)
+        if (timer.used && timer.signal == signal && timer.timer.state() == TimerState::signalled && !timer.owed &&
+            !timer.stalled && record_queued(kernel, pid, timer))
+            timer.owed = true;
 }
 
 void private_timer_retire(sched::ProcessId pid)

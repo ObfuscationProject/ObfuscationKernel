@@ -648,6 +648,7 @@ bool private_timer_call(Kernel &kernel, sched::ProcessControlBlock &process,
                         sched::ThreadControlBlock &thread, i64 &result);
 bool private_timer_service(Kernel &kernel, u64 now);
 void private_timer_exec(sched::ProcessId pid);
+void private_timer_discard(Kernel &kernel, sched::ProcessId pid, u32 signal);
 void private_timer_retire(sched::ProcessId pid);
 struct PrivateTimerCounters { u64 armed{}, expired{}, signalled{}, dequeued{}, retried{}; };
 PrivateTimerCounters private_timer_counters();

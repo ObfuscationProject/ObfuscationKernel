@@ -27,9 +27,11 @@ The reference is Linux 6.13.4 `kernel/time/itimer.c` and `posix-timers.c`.
   `clock_gettime` serves, and `SIGEV_SIGNAL`, `SIGEV_NONE`, `SIGEV_THREAD`
   (process-directed, as the kernel sees it) and `SIGEV_THREAD_ID` with a live
   thread of the caller. A NULL `sigevent` is `SIGALRM` with the timer id as
-  `sival_int`. Ids count up per process from 0 and wrap at `INT_MAX`; an id is
+  `sival_int`. `timer_create` returns 0 and writes the id through its third
+  argument. Ids count up per process from 0 and wrap at `INT_MAX`; an id is
   consumed even when the `sigevent` is then refused or the id cannot be copied
-  out. Eight POSIX timers per process; the next `timer_create` fails `EAGAIN`.
+  out. `alarm` returns the old remainder, rounded, as an `unsigned int`.
+  Eight POSIX timers per process; the next `timer_create` fails `EAGAIN`.
 - Bases: `ITIMER_REAL` and `CLOCK_MONOTONIC` timers run on the monotonic clock,
   as does a relative `CLOCK_REALTIME` timer (`common_hrtimer_arm`). A
   `TIMER_ABSTIME` `CLOCK_REALTIME` timer runs on the wall clock, so
@@ -54,8 +56,12 @@ The reference is Linux 6.13.4 `kernel/time/itimer.c` and `posix-timers.c`.
   queued (Linux 6.13 drops it at dequeue via the signal sequence); `setitimer`
   leaves a queued `SIGALRM` alone. An ignored interval timer parks until its
   signal is unignored, then queues with the overrun it accumulated; an ignored
-  `ITIMER_REAL` stops, keeping its interval for `getitimer`. A timer whose
-  `SIGEV_THREAD_ID` target exited stays signalled and never rearms.
+  `ITIMER_REAL` stops, keeping its interval for `getitimer`. A queued record
+  that `sigaction` discards because its signal became ignored parks the same
+  way and queues again once the signal is unignored (`posixtimer_sig_ignore`);
+  a discarded `SIGALRM` was never dequeued, so `ITIMER_REAL` stays expired. A
+  timer whose `SIGEV_THREAD_ID` target exited stays signalled and never
+  rearms.
 - `fork` inherits no timer. `exec` deletes the POSIX timers and their queued
   records and keeps `ITIMER_REAL`; the id sequence continues. Process exit
   deletes everything.
