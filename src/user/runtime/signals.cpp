@@ -2008,7 +2008,9 @@ i64 private_process_kill_one(Kernel &kernel, user::ProcessSignalSender sender, u
     if (recipient.state() == sched::ProcessState::zombie || recipient.state() == sched::ProcessState::exited)
         return 0;
     if (recipient.resources().personality != Personality::linux) return -95;
-    if (Codec::stop_or_continue(static_cast<u32>(signal))) return -95;
+    if (signal == static_cast<i32>(Codec::stop_signal) || signal == static_cast<i32>(Codec::tstp_signal) ||
+        signal == static_cast<i32>(Codec::ttin_signal) || signal == static_cast<i32>(Codec::ttou_signal) ||
+        signal == static_cast<i32>(Codec::continue_signal)) return -95;
     auto *state = private_signal_process(kernel, recipient.pid());
     if (!state) return -12;
     if (signal == 9)
@@ -2118,7 +2120,8 @@ PrivateTimerSend private_timer_signal(Kernel &kernel, sched::ProcessControlBlock
     auto *state = private_signal_process(kernel, process.pid());
     if (!state) return PrivateTimerSend::retry;
     // Job control remains an explicit runtime gate; such a timer signal is dropped.
-    if (Codec::stop_or_continue(signal)) return PrivateTimerSend::ignored;
+    if (signal == Codec::stop_signal || signal == Codec::tstp_signal || signal == Codec::ttin_signal ||
+        signal == Codec::ttou_signal || signal == Codec::continue_signal) return PrivateTimerSend::ignored;
     const auto *action = state->table.find(signal);
     if (!action) return PrivateTimerSend::ignored;
     const bool ignored = Codec::ignored(signal, *action);
