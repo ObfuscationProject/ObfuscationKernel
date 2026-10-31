@@ -254,10 +254,15 @@ extern "C" void ok_platform_poll_idle()
     asm volatile("nop" ::: "memory");
 }
 
+// Runs when the loop serves the input source; posts it again until both
+// queues and the pending key sequence are drained.
 extern "C" int ok_platform_input_poll()
 {
     poll_virtio_mouse();
-    return poll_virtio_keyboard();
+    const int key = poll_virtio_keyboard();
+    if (key >= 0)
+        ok::interrupt::post_event(ok::interrupt::EventSource::input);
+    return key;
 }
 
 namespace
@@ -278,6 +283,25 @@ void uart_interrupt(void *, ok::interrupt::IrqLine)
 {
     uart_ring.fill(read_uart);
 }
+
+// Reading the ISR deasserts the device's INTx; the loop then drains its queue.
+void input_interrupt(void *device, ok::interrupt::IrqLine)
+{
+    static_cast<VirtioPciInput *>(device)->acknowledge();
+    ok::interrupt::post_event(ok::interrupt::EventSource::input);
+}
+
+// An absent device leaves nothing to poll; a present one needs its line.
+bool bind_input(VirtioPciInput &device, ok::driver::qemu_virt::VirtioInputKind kind)
+{
+    if (!device.initialize(kind))
+        return true;
+    const auto line = ok::interrupt::pci_intx_line(device.slot(), device.interrupt_pin(), 0);
+    if (!line || !ok::interrupt::bind_platform_irq(line.value().line, line.value().trigger, input_interrupt, &device))
+        return false;
+    device.bind_interrupt();
+    return true;
+}
 } // namespace
 
 extern "C" ok::Status ok_platform_bind_irqs()
@@ -288,13 +312,13 @@ extern "C" ok::Status ok_platform_bind_irqs()
         return status;
     mmio8(uart_ier) = 0x01; // Received-data-available interrupt.
     ok::interrupt::drive_events(ok::interrupt::EventSource::console);
-    // The virtio-pci keyboard and mouse stay polled: their INTx line keeps
-    // asserting once bound (docs/qualification/PLATFORM_INTERRUPTS.md).
-    // Without either device there is nothing to poll.
-    const bool keyboard = virtio_keyboard.initialize(ok::driver::qemu_virt::VirtioInputKind::keyboard);
-    const bool mouse = virtio_mouse.initialize(ok::driver::qemu_virt::VirtioInputKind::mouse);
-    if (!keyboard && !mouse)
+    if (bind_input(virtio_keyboard, ok::driver::qemu_virt::VirtioInputKind::keyboard) &&
+        bind_input(virtio_mouse, ok::driver::qemu_virt::VirtioInputKind::mouse))
+    {
         ok::interrupt::drive_events(ok::interrupt::EventSource::input);
+        // Events queued before the lines were bound.
+        ok::interrupt::post_event(ok::interrupt::EventSource::input);
+    }
     return ok::Status::success();
 }
 

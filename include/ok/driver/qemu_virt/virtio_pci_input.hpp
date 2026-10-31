@@ -23,15 +23,51 @@ template <uptr PciEcamBase, uptr PciMmioBase> class VirtioPciInputDevice final
             {
                 continue;
             }
+            // A device another instance already drives keeps its BARs, and
+            // its configuration is not selected again: after DRIVER_OK every
+            // configuration write raises a configuration-change interrupt.
+            if ((claimed_slots_ & (u32{1} << slot)) != 0)
+            {
+                continue;
+            }
             configure_bars(slot);
             if (!load_caps(slot) || !matches_kind(kind))
             {
                 continue;
             }
+            slot_ = slot;
             ready_ = setup_queue();
+            if (ready_)
+            {
+                claimed_slots_ |= u32{1} << slot;
+            }
             return ready_;
         }
         return false;
+    }
+
+    [[nodiscard]] u8 slot() const
+    {
+        return ready_ ? slot_ : 0;
+    }
+    // PCI interrupt pin (1 = INTA .. 4 = INTD), or 0 when there is none.
+    [[nodiscard]] u8 interrupt_pin() const
+    {
+        return ready_ ? pci_config_read8(slot_, pci_interrupt_pin) : 0;
+    }
+    // Once the line is bound only the interrupt bottom half reads the ISR,
+    // which deasserts INTx.
+    void bind_interrupt()
+    {
+        interrupt_bound_ = ready_;
+    }
+    void acknowledge()
+    {
+        if (ready_ && isr_cfg_ != 0)
+        {
+            const u8 ignored_isr = mmio8(isr_cfg_);
+            static_cast<void>(ignored_isr);
+        }
     }
 
     bool poll(VirtioInputEvent &event)
@@ -64,6 +100,7 @@ template <uptr PciEcamBase, uptr PciMmioBase> class VirtioPciInputDevice final
     static constexpr u16 pci_command = 0x04;
     static constexpr u16 pci_status = 0x06;
     static constexpr u16 pci_capability_pointer = 0x34;
+    static constexpr u16 pci_interrupt_pin = 0x3d;
     static constexpr u16 pci_bar0 = 0x10;
     static constexpr u16 pci_bar1 = 0x14;
     static constexpr u16 pci_bar4 = 0x20;
@@ -370,15 +407,18 @@ template <uptr PciEcamBase, uptr PciMmioBase> class VirtioPciInputDevice final
         available_->idx = available_index_;
         asm volatile("" ::: "memory");
         notify_queue();
-        if (isr_cfg_ != 0)
+        if (!interrupt_bound_)
         {
-            const u8 ignored_isr = mmio8(isr_cfg_);
-            static_cast<void>(ignored_isr);
+            acknowledge();
         }
     }
 
+    // Slots of the devices that instances of this board's driver set up.
+    static inline u32 claimed_slots_{0};
     bool initialized_{false};
     bool ready_{false};
+    bool interrupt_bound_{false};
+    u8 slot_{0};
     uptr common_cfg_{0};
     uptr notify_cfg_{0};
     uptr isr_cfg_{0};
