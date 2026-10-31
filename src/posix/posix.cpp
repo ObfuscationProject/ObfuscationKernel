@@ -19,7 +19,7 @@ sched::ProcessId PosixService::getpid() const
 }
 sched::ThreadId PosixService::gettid() const
 {
-    return scheduler_ == nullptr ? 0 : scheduler_->current_tid(0);
+    return scheduler_ == nullptr ? 0 : scheduler_->current_tid(smp::current_cpu());
 }
 sched::ProcessId PosixService::getppid() const
 {
@@ -66,7 +66,7 @@ sched::ThreadLocalState &PosixService::thread_local_state()
     if (process == nullptr || process->threads().empty())
         return boot_tls_;
     for (auto &thread : process->threads())
-        if (thread.tid == scheduler_->current_tid(0))
+        if (thread.tid == scheduler_->current_tid(smp::current_cpu()))
             return thread.tls;
     return process->threads()[0].tls;
 }

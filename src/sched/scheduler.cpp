@@ -481,7 +481,8 @@ smp::CpuId SchedulerState::select_cpu(const ProcessControlBlock &process, const 
 {
     const u32 affinity = process.cpu_affinity_mask();
     const u32 allowed = affinity & online_cpus_;
-    if (thread.last_cpu < smp::max_cpus && (allowed & (1u << thread.last_cpu)) != 0)
+    // A thread that never ran has no cache to return to.
+    if (thread.dispatch_count != 0 && thread.last_cpu < smp::max_cpus && (allowed & (1u << thread.last_cpu)) != 0)
         return thread.last_cpu;
     smp::CpuId best = no_cpu;
     usize shortest = 0;
@@ -1363,7 +1364,7 @@ Result<ProcessId> SchedulerState::fork_process(ProcessId parent, bool publish)
     }
     const ThreadControlBlock *calling_thread = &source->threads()[0];
     for (const auto &thread : source->threads())
-        if (thread.tid == current_tid(0) && current_pid(0) == parent)
+        if (thread.tid == current_tid(smp::current_cpu()) && current_pid() == parent)
             calling_thread = &thread;
     if (source->resources().cwd_node)
         if (auto status = source->resources().cwd_node->retain(); !status.ok())
@@ -2004,7 +2005,8 @@ ThreadControlBlock *SchedulerState::find_thread(ProcessId pid, ThreadId tid)
 }
 ThreadControlBlock *SchedulerState::current_thread()
 {
-    return find_thread(current_pid(0), current_tid(0));
+    const auto cpu = smp::current_cpu();
+    return find_thread(current_pid(cpu), current_tid(cpu));
 }
 Result<WaitTicket> SchedulerState::register_current_wait(ThreadWaitReason reason, u64 key)
 {

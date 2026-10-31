@@ -13,7 +13,8 @@ inline Status validate_entry_stack(memory::KernelEntryStackPool &pool, const sch
     if (!thread.entry_stack.pool)
         return thread.kernel_stack_top == 0 ? Status::success()
             : Status::fault("entry stack top has no lease");
-    auto top = pool.top(thread.entry_stack, {thread.owner, thread.tid});
+    // Another CPU may be running the thread on this lease.
+    auto top = pool.lease_top(thread.entry_stack, {thread.owner, thread.tid});
     if (!top) return top.status();
     return top.value() == thread.kernel_stack_top ? Status::success()
         : Status::fault("entry stack top disagrees with canonical lease");
@@ -73,6 +74,10 @@ EntryStackReplacement replace_entry_stacks(memory::KernelEntryStackPool &pool, s
     {
         const auto &thread = process.threads()[i];
         if (auto status = validate_entry_stack(pool, thread); !status) return {status};
+        // Replacement releases these leases: none may still be in use.
+        if (thread.entry_stack.pool)
+            if (auto status = pool.validate_inactive(thread.entry_stack, {thread.owner, thread.tid}); !status)
+                return {status};
         saved[i] = {{thread.owner, thread.tid}, thread.entry_stack, thread.kernel_stack_top};
     }
     auto leader = saved[0];

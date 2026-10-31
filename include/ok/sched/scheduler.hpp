@@ -16,6 +16,7 @@
 #include "ok/sched/console_input.hpp"
 #include "ok/sched/console_control.hpp"
 #include "ok/sched/wait_registration.hpp"
+#include "ok/smp/cpu.hpp"
 #include "ok/smp/smp.hpp"
 #include "ok/user/user.hpp"
 
@@ -469,15 +470,15 @@ class SchedulerState
 
     // Serialized retirement only; caller drains external waits and releases
     // thread-owned resources first. Process/VM/FD ownership remains unchanged.
-    Result<usize> exit_thread(ProcessId pid, ThreadId tid, smp::CpuId cpu = 0);
+    Result<usize> exit_thread(ProcessId pid, ThreadId tid, smp::CpuId cpu = smp::current_cpu());
     Result<ProcessId> spawn(ScheduleRequest request);
     Status set_credentials(ProcessId pid, user::Credentials credentials);
     Status set_priority(ProcessId pid, u8 priority);
     Status set_cpu_affinity(ProcessId pid, u16 cpu_affinity_mask);
     Status set_cpu_accounting(ProcessId pid, ProcessCpuAccounting accounting);
     Status kill_process(ProcessId pid);
-    Status activate(ProcessId pid, smp::CpuId cpu = 0);
-    Status activate_thread(ProcessId pid, ThreadId tid, smp::CpuId cpu = 0);
+    Status activate(ProcessId pid, smp::CpuId cpu = smp::current_cpu());
+    Status activate_thread(ProcessId pid, ThreadId tid, smp::CpuId cpu = smp::current_cpu());
     Result<ProcessId> fork_process(ProcessId parent, bool publish = true);
     // Trusted serialized process mechanisms. Native and Linux syscall boundaries
     // authenticate the caller before entering these operations.
@@ -608,13 +609,16 @@ class SchedulerState
     // queued on a CPU that goes offline stay there and are not stolen.
     Status set_online_cpus(u32 mask);
     [[nodiscard]] u32 online_cpus() const { return online_cpus_; }
-    // Per-CPU run queues are a mechanism; nothing enqueues implicitly. The
+    // Per-CPU run queues are a mechanism; nothing enqueues implicitly, so a
+    // thread woken while still on its CPU must be enqueued again by whoever
+    // vacates that CPU (the native runtime enqueues every runnable thread that
+    // is off-CPU on each step). The
     // caller serializes scheduler state, while each queue lock guards only its
     // ring, so no path ever holds two queue locks.
     // Succeeds without change when the thread is on a CPU or already queued.
     Status enqueue_thread(ProcessId pid, ThreadId tid);
-    // Placement: the thread's last CPU while it is online and allowed;
-    // otherwise the allowed online CPU with the shortest queue, lowest id on a
+    // Placement: the last CPU of a thread that has run, while it is online
+    // and allowed; otherwise the allowed online CPU with the shortest queue, lowest id on a
     // tie; with no allowed CPU online, the lowest allowed configured CPU, whose
     // queue waits for it; with no allowed configured CPU, CPU 0.
     [[nodiscard]] smp::CpuId select_cpu(const ProcessControlBlock &process, const ThreadControlBlock &thread) const;
@@ -632,10 +636,10 @@ class SchedulerState
     Status set_runnable(ProcessId pid);
     Status block_process(ProcessId pid);
 
+    // No-argument native services act for the thread of the calling CPU.
     [[nodiscard]] ProcessId current_pid() const
     {
-        // No-argument native services operate on the serialized boot CPU.
-        return current_pid_;
+        return current_pid(smp::current_cpu());
     }
     [[nodiscard]] ProcessId current_pid(smp::CpuId cpu) const;
     [[nodiscard]] ThreadId current_tid(smp::CpuId cpu) const;

@@ -4,6 +4,7 @@
 // OK_IRQ_COMPLETIONS, OK_TIMER_LATENCY, OK_TIMERS).
 #include "private.hpp"
 #include "ok/interrupt/platform.hpp"
+#include "ok/smp/bringup.hpp"
 
 namespace ok::user::native
 {
@@ -74,13 +75,31 @@ void report_interrupts()
     // Interval timers once any was armed: settings, expiries, signals queued,
     // rearms after a dequeue and steps an expiry stayed owed.
     const auto timers = private_timer_counters();
-    if (!timers.armed) return;
-    emit_line("OK_TIMERS scope=hardware armed="); emit_number(timers.armed);
-    emit(" expired="); emit_number(timers.expired);
-    emit(" signalled="); emit_number(timers.signalled);
-    emit(" rearmed="); emit_number(timers.dequeued);
-    emit(" retried="); emit_number(timers.retried);
-    emit("\n");
+    if (timers.armed)
+    {
+        emit_line("OK_TIMERS scope=hardware armed="); emit_number(timers.armed);
+        emit(" expired="); emit_number(timers.expired);
+        emit(" signalled="); emit_number(timers.signalled);
+        emit(" rearmed="); emit_number(timers.dequeued);
+        emit(" retried="); emit_number(timers.retried);
+        emit("\n");
+    }
 #endif
+    // With secondary CPUs online, what each CPU did: user entries, local timer
+    // ticks, IPIs received and sent, and shootdowns it waited for.
+    if (smp::online_cpus() < 2) return;
+    emit_line("OK_SMP_CPUS scope=hardware online="); emit_number(smp::online_cpus());
+    for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
+    {
+        if ((smp::online_mask() & (u32{1} << cpu)) == 0) continue;
+        const auto &record = smp::cpu_record(cpu);
+        emit(" cpu"); emit_number(cpu); emit("=");
+        emit_number(record.user_entries.load(std::memory_order_relaxed));
+        emit(":"); emit_number(record.local_ticks.load(std::memory_order_relaxed));
+        emit(":"); emit_number(record.ipis_received.load(std::memory_order_relaxed));
+        emit(":"); emit_number(record.ipis_sent.load(std::memory_order_relaxed));
+        emit(":"); emit_number(record.shootdowns.load(std::memory_order_relaxed));
+    }
+    emit("\n");
 }
 } // namespace ok::user::native

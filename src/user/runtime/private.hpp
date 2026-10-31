@@ -13,6 +13,8 @@
 #include "ok/user/native_group_signal_profile.hpp"
 #include "ok/user/native_console_control_profile.hpp"
 #include "ok/core/native_shutdown.hpp"
+#include "ok/smp/bringup.hpp"
+#include "ok/smp/cpu.hpp"
 #include "ok/user/native_sleep.hpp"
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
 #define OK_PRIVATE_POLL_MASK 1
@@ -151,7 +153,18 @@ extern bool started;
 extern Kernel *runtime_kernel;
 extern Status runtime_failure;
 extern ShutdownOwner original_shutdown_owner;
-extern bool runtime_step_active, shutdown_admission_closed, shutdown_retirement_started, shutdown_retirement_completed;
+extern bool shutdown_admission_closed, shutdown_retirement_started, shutdown_retirement_completed;
+// Per CPU: inside step(), and whether its last step found nothing to run.
+extern std::array<bool, smp::max_cpus> runtime_step_active, runtime_idle;
+bool any_step_active();
+extern std::atomic<bool> secondary_admission;
+// The backend entry for the shared capture: leaves the kernel lock while this
+// CPU runs user code (src/user/runtime/smp.cpp).
+Result<hw::Trap> enter_unlocked(hw::AddressSpace &space, hw::UserFrame &frame, const hw::KernelEntryStackView &view,
+                                memory::KernelEntryStackHandle lease, u64 pid, u64 tid);
+// Takes over the entry of every other CPU that is running `thread`, so its
+// lease and address space can be retired.
+Status evict_thread(Kernel &kernel, const sched::ThreadControlBlock &thread);
 #ifdef OK_PRIVATE_MIPS_O32_SIGNAL
 // The backend owns capability/capture tokens; this table owns per-lease state.
 using PrivateMipsReadiness = MipsO32SignalReadiness;

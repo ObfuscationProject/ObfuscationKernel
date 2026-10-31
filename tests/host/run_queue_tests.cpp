@@ -98,14 +98,26 @@ struct Fixture
         CHECK(scheduler.configure_cpus(cpus));
         CHECK(scheduler.set_online_cpus(online));
     }
-    ProcessId create(u16 affinity = cpu_affinity_any)
+    // Unless `fresh`, the thread has a history on CPU 0, which placement
+    // prefers while its affinity allows CPU 0.
+    ProcessId create(u16 affinity = cpu_affinity_any, bool fresh = false)
     {
         auto process = scheduler.create_process("queued", context);
         CHECK(process);
         CHECK(scheduler.set_runnable(process.value()));
         if (affinity != cpu_affinity_any)
             CHECK(scheduler.set_cpu_affinity(process.value(), affinity));
+        if (!fresh)
+            thread(process.value()).dispatch_count = 1;
         return process.value();
+    }
+    // A further thread with a history on CPU 0, like create().
+    Result<ThreadId> create_thread(ProcessId pid)
+    {
+        auto created = scheduler.create_thread(pid, context);
+        if (created)
+            thread(pid, created.value()).dispatch_count = 1;
+        return created;
     }
     ThreadControlBlock &thread(ProcessId pid, ThreadId tid = 0)
     {
@@ -199,6 +211,12 @@ void test_placement()
     CHECK(f.scheduler.block_process(blocked));
     CHECK(f.scheduler.enqueue_thread(blocked, blocked).code() == StatusCode::invalid_argument);
     CHECK(f.thread(blocked).queued_cpu == no_cpu);
+
+    // Threads that never ran spread over the online queues.
+    Fixture fresh;
+    for (unsigned i = 0; i < 4; ++i)
+        CHECK(fresh.enqueue(fresh.create(cpu_affinity_any, true)) == i);
+    CHECK(fresh.length(0) == 1 && fresh.length(1) == 1 && fresh.length(2) == 1 && fresh.length(3) == 1);
 }
 
 void test_stealing()
@@ -271,14 +289,14 @@ void test_exit_and_erase_clean_queues()
 {
     Fixture f;
     const auto group = f.create();
-    const auto worker = f.scheduler.create_thread(group, f.context);
+    const auto worker = f.create_thread(group);
     CHECK(worker);
     CHECK(f.enqueue(group) == 0 && f.enqueue(group, worker.value()) == 0);
     CHECK(f.scheduler.exit_thread(group, worker.value()));
     CHECK(f.length(0) == 1 && !f.scheduler.run_queue(0).contains({group, worker.value()}));
 
     // Exec retires every other thread and its entry.
-    const auto second = f.scheduler.create_thread(group, f.context);
+    const auto second = f.create_thread(group);
     CHECK(second && f.enqueue(group, second.value()) == 0 && f.length(0) == 2);
     CHECK(f.scheduler.replace_image(group, f.context, {}));
     CHECK(f.length(0) == 1 && f.scheduler.run_queue(0).contains({group, group}));
@@ -299,10 +317,10 @@ void test_exit_and_erase_clean_queues()
 
     // A retired thread slot reused by create_thread carries no entry.
     const auto host = f.create();
-    const auto retiring = f.scheduler.create_thread(host, f.context);
+    const auto retiring = f.create_thread(host);
     CHECK(retiring && f.enqueue(host, retiring.value()) == 0);
     CHECK(f.scheduler.exit_thread(host, retiring.value()) && f.length(0) == 0);
-    const auto reused = f.scheduler.create_thread(host, f.context);
+    const auto reused = f.create_thread(host);
     CHECK(reused && f.thread(host, reused.value()).queued_cpu == no_cpu);
     f.check_consistent();
 
@@ -361,7 +379,7 @@ void test_two_threads_one_process()
 {
     Fixture f(2, 0x3);
     const auto group = f.create();
-    const auto peer = f.scheduler.create_thread(group, f.context);
+    const auto peer = f.create_thread(group);
     const auto other = f.create();
     const auto third = f.create();
     CHECK(peer);

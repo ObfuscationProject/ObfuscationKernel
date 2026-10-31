@@ -55,7 +55,8 @@ def run_suite(args):
         env = dict(os.environ, XMAKE_ROOT='y', ASAN_OPTIONS='detect_leaks=0:halt_on_error=1', UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1')
         for name in ('CPATH', 'CPLUS_INCLUDE_PATH', 'C_INCLUDE_PATH', 'LIBRARY_PATH', 'GCC_EXEC_PREFIX', 'COMPILER_PATH'):
             env.pop(name, None)
-        completed = subprocess.run(list(map(str, argv)), cwd=source, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        completed = subprocess.run(list(map(str, argv)), cwd=source, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   timeout=600)
         log = out / (label + '.log')
         log.write_bytes(completed.stdout)
         record['commands'].append(dict(argv=list(map(str, argv)), returncode=completed.returncode, log=log.name, log_sha256=sha(log)))

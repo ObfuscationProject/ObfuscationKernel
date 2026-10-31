@@ -748,7 +748,8 @@ Status install(sched::ProcessControlBlock &process, Image &image, sched::SignalM
         process.set_cpu_affinity_mask(previous_affinity);
         return status;
     };
-    process.set_cpu_affinity_mask(1);
+    // Native threads run on every online CPU; the scheduler places them.
+    process.set_cpu_affinity_mask(sched::cpu_affinity_any);
     if (image.personality == Personality::linux)
     {
         uptr first = ~uptr{0}, last = 0;
@@ -1107,6 +1108,10 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     for (const auto &old_thread : process->threads())
         if (old_thread.entry_stack.pool) previous_signal_slots[previous_signal_count++] = old_thread.entry_stack.slot;
 #endif
+    // Sibling threads still running on other CPUs leave those entries first:
+    // replacement releases their leases.
+    for (const auto &old_thread : process->threads())
+        if (auto status = evict_thread(kernel, old_thread); !status) return error(status);
     bool vfs_retired{};
     const auto replaced = replace_entry_stacks(entry_stacks, *process,
         [&] {

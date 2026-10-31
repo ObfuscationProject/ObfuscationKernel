@@ -38,7 +38,7 @@ bool started{};
 Kernel *runtime_kernel{};
 Status runtime_failure{};
 ShutdownOwner original_shutdown_owner{};
-bool runtime_step_active{}, shutdown_admission_closed{}, shutdown_retirement_started{}, shutdown_retirement_completed{};
+bool shutdown_admission_closed{}, shutdown_retirement_started{}, shutdown_retirement_completed{};
 namespace
 {
 Status shutdown_failure{};
@@ -62,6 +62,8 @@ Status retire_native_thread(sched::ThreadControlBlock &thread
 {
     if (linux_udp_receive_object(thread.owner, thread.tid).pool)
         return Status::busy("native thread retirement must first retire its Linux UDP receive owner");
+    if (runtime_kernel)
+        if (auto status = evict_thread(*runtime_kernel, thread); !status) return status;
     if (auto status = cancel_native_vfs_thread(thread); !status) return status;
 #ifdef OK_PRIVATE_POLL_MASK
     const auto signal_lease = thread.entry_stack;
@@ -453,7 +455,7 @@ Status shutdown_outer_boundary(Kernel &kernel)
 #ifdef OK_KERNEL_FREESTANDING
     if (auto status = arch::require_service_stack(); !status) return status;
 #endif
-    if (runtime_step_active || entry_stacks.accounting().active_slots)
+    if (any_step_active() || entry_stacks.accounting().active_slots)
         return Status::busy("native shutdown requires return from the complete runtime step");
     const auto backend = hw::ownership_report();
     if (!backend.failure) return backend.failure;
@@ -472,7 +474,7 @@ NativeShutdownReport shutdown_report(Kernel &kernel)
     auto retain_failure = [&](Status status) { if (result.failure && !status) result.failure = status; };
     retain_failure(shutdown_runtime_owner(kernel));
     result.admission_closed = shutdown_admission_closed;
-    result.step_active = runtime_step_active;
+    result.step_active = any_step_active();
     result.retirement_started = shutdown_retirement_started;
     result.retirement_completed = shutdown_retirement_completed;
     for (const auto &process : kernel.scheduler().processes())
