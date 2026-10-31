@@ -16,14 +16,19 @@ Layers:
 - `EthernetInterface` (`interface.hpp`): link filtering, ARP and neighbour
   discovery replies, ICMP echo and port unreachable, IPv6 duplicate address
   detection, router solicitation and SLAAC, routed egress with held packets.
-- Transports: `NativeUdpService` (IPv4 datagram sockets) and the TCP endpoint
-  table (`tcp_transport.hpp`, `tcp_endpoints.hpp`); `NativeTcpEthernetExecutor`
-  runs both over the interface from the kernel loop.
+- Transports: `NativeUdpService` (datagram sockets of either family) and the
+  TCP endpoint table (`tcp_transport.hpp`, `tcp_endpoints.hpp`);
+  `NativeTcpEthernetExecutor` runs both over the interface from the kernel loop.
+- Sockets: `AF_INET` and `AF_INET6` datagram and stream sockets in the native
+  and Linux personalities. A socket keeps its `socket()` family; IPv6 sockets
+  are v6-only. Linux records go through `ok/abi/linux_udp_address.hpp`
+  (`sockaddr_in`, `sockaddr_in6` per profile); the native UAPI has
+  `ok_sockaddr_in` and `ok_sockaddr_in6`.
 - `NetworkStack`/`SocketTable` (`net.hpp`) remain the loopback debug stack of
   the rescue shell and task manager.
 
-Limits: IPv4 sockets only (IPv6 packets are answered at the ICMPv6/ND level),
-one interface, no fragmentation, no forwarding. TCP sends a sliding window
+Limits: no dual-stack (IPv4-mapped addresses are refused), no IPv6 flow
+labels or scope selection (one interface), no fragmentation, no forwarding. TCP sends a sliding window
 under NewReno congestion control, reassembles out-of-order segments and
 probes zero windows; it has no window scaling, timestamps or SACK. Design notes and evidence:
 [NET_CORE](../qualification/NET_CORE.md).
