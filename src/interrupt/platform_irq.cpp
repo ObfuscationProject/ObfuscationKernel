@@ -295,10 +295,12 @@ void halt_until_interrupt()
     asm volatile("mfspr %0, 340" : "=r"(tcr));
     const u32 doze = hid0 | 0x00800000u, dec = 4000000, die = 0x04000000, dis = 0x08000000;
     asm volatile("mtspr 1008, %0\n\tisync" : : "r"(doze) : "memory");
-    asm volatile("mtspr 336, %0" : : "r"(dis) : "memory");
-    // The decrementer counts at the timebase rate from this write.
+    // The decrementer counts at the timebase rate from this write. TSR[DIS]
+    // is cleared after it, so an older count that ran out first does not
+    // end the wait early.
     const u64 deadline = timebase() + dec;
-    asm volatile("mtspr 22, %0\n\tmtspr 340, %1\n\tisync" : : "r"(dec), "r"(die) : "memory");
+    asm volatile("mtspr 22, %0" : : "r"(dec) : "memory");
+    asm volatile("mtspr 336, %0\n\tmtspr 340, %1\n\tisync" : : "r"(dis), "r"(die) : "memory");
     ok_ppc_idle(msr | 0x8000u | 0x00040000u);
     u32 tsr;
     asm volatile("mfspr %0, 336" : "=r"(tsr));

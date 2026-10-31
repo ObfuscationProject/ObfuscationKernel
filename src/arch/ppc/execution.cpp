@@ -359,10 +359,12 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     const auto old_tcr = read_spr<340>();
     const auto old_dec = read_spr<22>();
     invalidate_user_tlb();
-    write_spr<336>(0x08000000); // Clear TSR.DIS.
-    // The decrementer counts at the timebase rate from this write.
+    // The decrementer counts at the timebase rate from this write. TSR.DIS is
+    // cleared after it, so an older count that ran out first does not cut the
+    // quantum short.
     const u64 user_deadline = timebase() + 4000000;
     write_spr<22>(4000000);     // ppce500 timebase 400 MHz: 10 ms quantum.
+    write_spr<336>(0x08000000); // Clear TSR.DIS.
     write_spr<340>(0x04000000); // TCR.DIE; no automatic reload.
     Trap trap{};
     for (;;)
