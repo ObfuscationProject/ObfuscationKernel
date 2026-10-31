@@ -363,6 +363,30 @@ void posix_timers(Kernel &kernel)
     for (u32 id = 11; id < 14; ++id)
         expect(call(kernel, g, g.pid, Op::timer_create, {1, 0, id_out}) == 0 && get(id_out, 4) == id);
     expect(call(kernel, g, g.pid, Op::timer_create, {1, 0, id_out}) == -11);
+    // An owed expiry counts as queued when sigaction ignores its signal: of two
+    // periodic timers on one legacy signal the second waits behind the first,
+    // and both park, queueing nothing while the signal stays ignored.
+    for (u32 id = 11; id < 14; ++id) expect(call(kernel, g, g.pid, Op::timer_delete, {id}) == 0);
+    action(kernel, g, 12);
+    for (auto &t : kernel.scheduler().find(g.pid)->threads()) t.native_signal_mask.set(12);
+    sigevent(0, 12, 0);
+    expect(call(kernel, g, g.pid, Op::timer_create, {1, event, id_out}) == 0 && get(id_out, 4) == 14);
+    expect(call(kernel, g, g.pid, Op::timer_create, {1, event, id_out}) == 0 && get(id_out, 4) == 15);
+    mock::now = 14000 * ms; itimerspec(spec, 10 * ms, 10 * ms);
+    expect(call(kernel, g, g.pid, Op::timer_settime, {14, 0, spec, 0}) == 0);
+    expect(call(kernel, g, g.pid, Op::timer_settime, {15, 0, spec, 0}) == 0);
+    const auto coalesced = native::private_timer_counters().retried;
+    service(kernel, 14010 * ms);
+    expect(pending(kernel, g, 12) && native::private_timer_counters().retried == coalesced + 1);
+    sigaction(kernel, g, 12, 1); expect(!pending(kernel, g, 12));
+    const auto parked_dequeues = native::private_timer_counters().dequeued;
+    service(kernel, 14011 * ms); service(kernel, 14050 * ms);
+    expect(!pending(kernel, g, 12) && native::private_timer_counters().dequeued == parked_dequeues);
+    for (auto &t : kernel.scheduler().find(g.pid)->threads()) t.native_signal_mask = {};
+    sigaction(kernel, g, 12, handler);
+    service(kernel, 14051 * ms);
+    native::PrivateProcessQueue::Delivery first;
+    expect(shared(kernel, g).peek({}, first) && first.info.timer == 14 && first.info.overrun == 4);
     retire(kernel, g);
 }
 

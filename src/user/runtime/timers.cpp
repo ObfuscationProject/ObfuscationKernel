@@ -481,20 +481,31 @@ void private_timer_exec(sched::ProcessId pid)
 // pending stays expired (it rearms only at a dequeue; one already dequeued
 // rearmed then, which settle_real catches up on first), and parks a periodic
 // POSIX timer's record until the signal is unignored, then queues it again
-// (posixtimer_sig_ignore/unignore).
+// (posixtimer_sig_ignore/unignore), dropping a one-shot one. An owed expiry
+// counts as queued: Linux queued its record at the expiry.
 void private_timer_discard(Kernel &kernel, sched::ProcessId pid, u32 signal)
 {
     auto *timers = find_timers(pid);
     if (!timers) return;
-    if (signal == alarm_signal && !timers->real_owed)
+    if (signal == alarm_signal)
     {
-        settle_real(*timers);
+        if (timers->real_owed)
+            timers->real_owed = false;
+        else
+            settle_real(*timers);
         if (timers->real.state() == TimerState::signalled) timers->real.abandon();
     }
     for (auto &timer : timers->posix)
-        if (timer.used && timer.signal == signal && timer.timer.state() == TimerState::signalled && !timer.owed &&
-            !timer.parked && !timer.stalled && record_queued(kernel, pid, timer))
+    {
+        if (!timer.used || timer.signal != signal || timer.parked || timer.stalled) continue;
+        if (timer.owed)
+        {
+            timer.owed = false;
+            timer.parked = timer.timer.state() == TimerState::signalled;
+        }
+        else if (timer.timer.state() == TimerState::signalled && record_queued(kernel, pid, timer))
             timer.parked = true;
+    }
 }
 
 // A SIGEV_THREAD_ID target is exiting and its queue can still be read: a record
