@@ -64,6 +64,8 @@ enum class FdtCpuFlavor : u8
 // method or the reason the platform must run UP; the boot CPU is the header's
 // boot_cpuid_phys when it names an enabled CPU (otherwise the caller marks it).
 // Failure leaves output unchanged. Nothing is started and no pointer is retained.
+// Without a cpu_on property a PSCI 0.2+ node gets the SMC64 CPU_ON id
+// 0xC4000003; an AArch32 caller must use 0x84000003 instead.
 Status parse_fdt_cpus(std::span<const std::byte> blob, FdtCpuFlavor flavor, CpuTopologyMap &output);
 
 } // namespace ok::boot

@@ -664,7 +664,7 @@ class CpuVisitor final
         else
             ++map_.count;
         boot_recorded_ = boot_recorded_ || (enabled && id == boot_cpu_);
-        map_.cpus[slot] = {id, enabled, false};
+        map_.cpus[slot] = {id, enabled, false, flavor_ == FdtCpuFlavor::riscv || node.psci_enable};
         psci_enable_[slot] = node.psci_enable;
         return Status::success();
     }

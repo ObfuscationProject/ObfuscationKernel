@@ -25,6 +25,8 @@ struct DiscoveredCpu
     u64 hardware_id{}; // Local APIC/x2APIC id, MPIDR affinity or RISC-V hart id.
     bool enabled{};
     bool boot{};
+    // The firmware names a start method for it (an arm enable-method of psci).
+    bool startable{true};
 };
 
 struct CpuTopologyMap
@@ -66,6 +68,13 @@ constexpr bool mark_boot_cpu(CpuTopologyMap &map, u64 hardware_id)
         map.cpus[i].boot = true;
         map.boot_index = i;
         map.boot_known = true;
+        // The CPU the firmware thought was the boot CPU may now be a secondary.
+        for (usize j = 0; j < map.count; ++j)
+            if (map.method != CpuStartMethod::none && j != i && map.cpus[j].enabled && !map.cpus[j].startable)
+            {
+                map.method = CpuStartMethod::none;
+                map.up_reason = "enable-method-not-psci";
+            }
         return true;
     }
     map.method = CpuStartMethod::none;

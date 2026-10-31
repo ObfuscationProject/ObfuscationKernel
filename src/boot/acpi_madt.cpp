@@ -179,7 +179,7 @@ class MadtParser final
                     return invalid("ACPI MADT x2APIC entry is truncated");
                 const auto id = le32(entry + 4);
                 if (id != 0xffffffff)
-                    if (auto status = add(id, le32(entry + 8)); !status.ok())
+                    if (auto status = add(id, le32(entry + 8), true); !status.ok())
                         return status;
             }
             offset += length;
@@ -203,24 +203,34 @@ class MadtParser final
   private:
     // Flags bit 0 is Enabled; bit 1 (ACPI 6.3) is Online Capable. A processor
     // with neither flag is unusable and is not recorded.
-    Status add(u64 id, u32 flags)
+    // Some firmware lists a CPU below the xAPIC limit both as a Local APIC and
+    // as an x2APIC entry; like Linux, the x2APIC duplicate only adds its flag.
+    Status add(u64 id, u32 flags, bool x2apic = false)
     {
         const bool enabled = flags & 1;
         if (!enabled && !(flags & 2))
             return Status::success();
         for (usize i = 0; i < map_.count; ++i)
             if (map_.cpus[i].hardware_id == id)
-                return invalid("ACPI MADT describes an APIC id twice");
+            {
+                if (!x2apic || id >= 0xff || recorded_x2apic_[i])
+                    return invalid("ACPI MADT describes an APIC id twice");
+                map_.cpus[i].enabled = map_.cpus[i].enabled || enabled;
+                recorded_x2apic_[i] = true;
+                return Status::success();
+            }
         if (map_.count == map_.cpus.size())
         {
             map_.truncated = true;
             return Status::success();
         }
+        recorded_x2apic_[map_.count] = x2apic;
         map_.cpus[map_.count++] = {id, enabled, false};
         return Status::success();
     }
 
     CpuTopologyMap map_{};
+    std::array<bool, smp::max_cpus> recorded_x2apic_{};
 };
 
 } // namespace

@@ -126,6 +126,7 @@ struct ArmShape
     bool cpu_on{};
     bool enable_method{true};
     std::string_view secondary_method{"psci"};
+    std::string_view boot_method{"psci"};
     bool two_cells{};
     u32 aff3{};
     int disabled{-1};
@@ -146,7 +147,7 @@ static void arm_cpu(Tree &tree, const ArmShape &shape, u32 index)
     else
         tree.prop("reg", cells({mpidr}));
     if (shape.enable_method)
-        tree.prop("enable-method", strings({index ? shape.secondary_method : "psci"}));
+        tree.prop("enable-method", strings({index ? shape.secondary_method : shape.boot_method}));
     if (static_cast<int>(index) == shape.disabled)
         tree.prop("status", strings({"disabled"}));
     tree.end();
@@ -353,6 +354,11 @@ static void fdt_checks()
     assert(boot::mark_boot_cpu(map, 1) && map.boot_index == 1 && !map.cpus[2].boot);
     assert(!boot::mark_boot_cpu(map, 77) && !map.boot_known && map.method == CpuStartMethod::none);
     assert(map.up_reason == "boot-cpu-not-described");
+    // The firmware's boot CPU needs no enable-method, but once another CPU
+    // turns out to be the boot CPU it becomes a secondary that must name psci.
+    map = parsed(arm_tree({.boot_method = "spin-table"}).blob(), FdtCpuFlavor::arm);
+    assert(map.method == CpuStartMethod::psci_hvc && !map.cpus[0].startable);
+    assert(boot::mark_boot_cpu(map, 1) && map.method == CpuStartMethod::none && map.up_reason == "enable-method-not-psci");
     map = parsed(arm_tree({.cpus = 3, .disabled = 2}).blob(), FdtCpuFlavor::arm);
     assert(!boot::mark_boot_cpu(map, 2) && map.method == CpuStartMethod::none); // A disabled CPU cannot be running.
 
@@ -910,8 +916,15 @@ static void acpi_checks()
     acpi_fails(memory, at, StatusCode::invalid_argument); // Two address overrides.
     memory = madt_variant([](Bytes &t) { lapic(t, 9, 1, 1); });
     acpi_fails(memory, at, StatusCode::invalid_argument); // Duplicate APIC id.
-    memory = madt_variant([](Bytes &t) { x2apic(t, 1, 1, 9); });
-    acpi_fails(memory, at, StatusCode::invalid_argument); // Duplicate across entry types.
+    memory = madt_variant([](Bytes &t) { x2apic(t, 1, 1, 9); x2apic(t, 1, 1, 10); });
+    acpi_fails(memory, at, StatusCode::invalid_argument); // Duplicate x2APIC entries.
+    {
+        // A Local APIC CPU also listed as an x2APIC entry stays one CPU.
+        memory = madt_variant([](Bytes &t) { x2apic(t, 1, 1, 9); });
+        boot::CpuTopologyMap merged{};
+        assert(boot::parse_acpi_madt(memory.reader(), at, merged) && merged.count == 2 && merged.cpus[1].enabled);
+        ++acpi_cases;
+    }
     memory = madt_variant([](Bytes &t) { std::memset(t.data() + 36, 0, 4); });
     acpi_fails(memory, at, StatusCode::invalid_argument); // No local APIC address.
     memory = madt_variant([](Bytes &t) { t.resize(44); });
