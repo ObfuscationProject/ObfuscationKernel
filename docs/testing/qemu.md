@@ -177,6 +177,10 @@ ipi=<pass|fail|unsupported>`, with a trailing `reason=<token>` when the kernel
 stays uniprocessor. `x86_64`, `aarch64` and `rv64` must report `cpus=N`,
 `online=N` and `ipi=pass`; every other profile must report `online=1` and
 `ap_start=unsupported`. A missing or mismatched marker fails with exit code 14.
+The kernel prints the hardware line before `OK_TEST_PASS`: every profile except
+i386 and x86_64 stops capturing output at that marker. Under `-bios none` QEMU
+starts every RISC-V hart at the kernel entry, so rv64 and rv32 park the harts
+other than hart 0 before they touch the stack or BSS.
 The `scope=model` `OK_SMP` line is not evidence of secondary-CPU startup and
 never satisfies this check. The summary records `smp.cpus`, the distinct scopes
 of each marker under `scopes.<marker>`, `marker.OK_SMP_HARDWARE` and the

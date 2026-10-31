@@ -139,12 +139,12 @@ local function qemu_test_argv(target)
         "--qemu", systoolchain_qemu(target, target:values("ok.arch"))
     }
     local cpus = tonumber(configured_qemu_smp or "1")
-    if cpus == nil then
-        raise("qemu_smp must be a CPU count, got %s", tostring(configured_qemu_smp))
+    if cpus == nil or cpus ~= math.floor(cpus) or cpus < 1 or cpus > 8 then
+        raise("qemu_smp must be a CPU count from 1 to 8, got %s", tostring(configured_qemu_smp))
     end
     if cpus > 1 then
         table.insert(argv, "--smp")
-        table.insert(argv, tostring(cpus))
+        table.insert(argv, tostring(math.floor(cpus)))
     end
     return argv
 end

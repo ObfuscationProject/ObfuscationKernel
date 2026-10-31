@@ -42,6 +42,8 @@ CAPABILITIES_BY_ARCH = {
     for arch in BOOTABLE_QEMU_ARCHES
 }
 # Profiles whose kernel must start every QEMU vCPU; the rest report UP.
+# The hardware OK_SMP line must precede OK_TEST_PASS: run_until_marker stops
+# reading there on every profile without a debug exit device.
 SMP_QEMU_ARCHES = ("x86_64", "aarch64", "rv64")
 MAX_QEMU_CPUS = 8
 
