@@ -13,9 +13,12 @@ struct TcpAcceptReservation
     u64 operation{};
     tcp::AcceptPreview endpoint{};
 };
+// `family` is the socket() domain; an unbound local endpoint is its
+// unspecified address.
 struct TcpStreamSnapshot
 {
     TcpStreamHandle handle{}; tcp::Endpoint local{}; std::optional<tcp::Handle> endpoint{};
+    Family family{Family::ipv4};
 };
 // The scheduler emits actual close/exec/exit events. A callback retains no
 // caller buffer and must consume its wait edge before releasing its OFD pin.
@@ -51,7 +54,7 @@ class NativeTcpStreamService final
     [[nodiscard]] Result<TcpStreamSnapshot> snapshot(TcpStreamHandle handle) const
     {
         const auto *entry = find(handle); if (!entry) return stale();
-        return TcpStreamSnapshot{handle, entry->local, entry->endpoint};
+        return TcpStreamSnapshot{handle, entry->local, entry->endpoint, entry->family};
     }
     Status set_wait_observer(TcpWaitObserver observer)
     {
@@ -73,11 +76,11 @@ class NativeTcpStreamService final
     }
     void cancel_process(u64 pid)
     { if (observer_.context) observer_.process_cancelled(observer_.context, pid); }
-    Result<TcpStreamHandle> open()
+    Result<TcpStreamHandle> open(Family family = Family::ipv4)
     {
         if (auto status = table_.status(); !status) return status;
         auto selected = vacant(); if (!selected) return selected.status();
-        return allocate(selected.value(), {}, {});
+        return allocate(selected.value(), {family == Family::ipv6 ? IpAddress{wire::Ipv6{}} : IpAddress{}, 0}, {});
     }
     Status close(TcpStreamHandle handle)
     {
@@ -98,6 +101,7 @@ class NativeTcpStreamService final
     {
         auto *entry = find(handle); if (!entry) return stale();
         if (entry->endpoint || entry->local.port) return Status::invalid_argument("TCP stream is already bound or started");
+        if (local.address.family != entry->family) return Status::invalid_argument("TCP endpoint family differs from the stream");
         if (!local.port || !local.address.unicast()) return Status::invalid_argument("TCP bind requires a specified unicast endpoint");
         auto reserved = table_.local_reserved(local); if (!reserved) return reserved.status();
         if (reserved.value()) return Status::already_exists("TCP local endpoint is reserved by protocol ownership");
@@ -117,6 +121,7 @@ class NativeTcpStreamService final
     {
         auto *entry = find(handle); if (!entry) return stale();
         if (entry->endpoint) return Status::already_exists("TCP stream has already started");
+        if (peer.address.family != entry->family) return Status::invalid_argument("TCP endpoint family differs from the stream");
         auto endpoint = table_.connect(entry->local, peer, iss, now); if (!endpoint) return endpoint.status();
         entry->endpoint = endpoint.value(); return {};
     }
@@ -162,7 +167,7 @@ class NativeTcpStreamService final
         auto accepted = table_.commit_accept(reservation.endpoint.ticket); if (!accepted) return accepted.status();
         auto &entry = streams_[reservation.stream.slot];
         // All reservations were checked before endpoint ownership transfer.
-        entry.local = reservation.endpoint.local; entry.endpoint = accepted.value();
+        entry.local = reservation.endpoint.local; entry.family = entry.local.address.family; entry.endpoint = accepted.value();
         entry.prepared = {}; entry.prepared_listener = {}; entry.reservation = 0; entry.used = true;
         return reservation.stream;
     }
@@ -223,7 +228,7 @@ class NativeTcpStreamService final
     struct Stream
     {
         bool used{}, closing{}; u64 generation{}, reservation{};
-        tcp::Endpoint local{}; std::optional<tcp::Handle> endpoint{};
+        tcp::Endpoint local{}; std::optional<tcp::Handle> endpoint{}; Family family{Family::ipv4};
         tcp::AcceptPreview prepared{};
         TcpStreamHandle prepared_listener{};
     };
@@ -276,6 +281,7 @@ class NativeTcpStreamService final
     TcpStreamHandle allocate(usize slot, tcp::Endpoint local, std::optional<tcp::Handle> endpoint)
     {
         auto &entry = streams_[slot]; ++entry.generation; entry.used = true; entry.local = local; entry.endpoint = endpoint;
+        entry.family = local.address.family;
         return {identity_, entry.generation, static_cast<u32>(slot)};
     }
     Table table_;

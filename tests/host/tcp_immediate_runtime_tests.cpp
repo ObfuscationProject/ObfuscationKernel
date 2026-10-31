@@ -61,7 +61,7 @@ class Link final : public KernelExtension
             head = (head + 1) % outgoing.size(); --count;
         }
     }
-    void send_peer(Peer &peer)
+    void send_peer(Peer &peer, u16 type = 0x0800)
     {
         expect(!incoming_count);
         // ACK and data/FIN are distinct prepared packets. Retain every accepted
@@ -75,7 +75,7 @@ class Link final : public KernelExtension
             const auto packet = *prepared.value();
             for (usize at = 0; at < 6; ++at)
             { bytes[at] = std::byte{link.local_mac[at]}; bytes[at + 6] = std::byte{link.peer_mac[at]}; }
-            net::wire::be16(bytes, 12, 0x0800); incoming_lengths[slot] = packet.length + 14; ++incoming_count;
+            net::wire::be16(bytes, 12, type); incoming_lengths[slot] = packet.length + 14; ++incoming_count;
             CHECK(peer.complete_transmit(packet.token, true, mock::now / 1000000));
         }
         expect(incoming_count != 0);
@@ -135,10 +135,109 @@ net::TcpStreamHandle stream(Kernel &kernel, Group group, i32 fd)
     const auto *description = kernel.scheduler().open_description(slot->description); CHECK(description);
     return description->native_tcp_handle;
 }
+void address6(u16 family, const net::wire::Ipv6 &ip, u16 port)
+{
+    std::array<u8, 28> encoded{};
+    CHECK(lu::Ipv6SocketAddressCodec<lu::Profile::x86_64>::encode(encoded, {family, port, 0x01020304u, ip, 9}));
+    std::memcpy(mock::memory.data() + 768, encoded.data(), encoded.size());
+}
+// Feeds the peer only TCP segments; interface frames (DAD, ND) are dropped.
+void receive_tcp6(Peer &peer)
+{
+    while (extension.count)
+    {
+        auto &frame = extension.outgoing[extension.head];
+        auto ethernet = net::wire::ethernet({frame.data(), extension.lengths[extension.head]}); CHECK(ethernet);
+        if (ethernet.value().type == net::wire::ethertype_ipv6)
+        {
+            auto ip = net::wire::ipv6(ethernet.value().payload); CHECK(ip);
+            if (ip.value().protocol == net::wire::protocol_tcp)
+                CHECK(peer.receive(ethernet.value().payload, mock::now / 1000000));
+        }
+        extension.head = (extension.head + 1) % extension.outgoing.size(); --extension.count;
+    }
+}
+void poll6(Kernel &kernel, Peer *peer = nullptr)
+{
+    CHECK(kernel.poll_network());
+    if (peer) receive_tcp6(*peer); else { extension.head = extension.count = 0; }
+}
+// AF_INET6 streams through the configured runtime: v6-only record rules for
+// both personalities, then a connect and an accept over the hosted link.
+void ipv6_exercise(Kernel &kernel, bool linux, u16 port)
+{
+    namespace wire = net::wire;
+    const auto self = wire::link_local_from_mac(link.local_mac), router = wire::link_local_from_mac(link.peer_mac);
+    const wire::Ipv6 remote{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9};
+    const wire::Ipv6 mapped{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 2};
+    auto group = create(kernel, linux);
+    const auto fd = invoke(kernel, group, 41, {10, OK_SOCK_STREAM | OK_SOCK_NONBLOCK, 6}); expect(fd >= 3);
+    const auto handle = stream(kernel, group, static_cast<i32>(fd));
+    expect(kernel.native_tcp().snapshot(handle).value().family == net::Family::ipv6);
+    // Duplicate address detection settles the link-local address first.
+    for (usize step = 0; step < 4 && !kernel.network_interface().local(self); ++step)
+    { mock::now += 1000000000; poll6(kernel); }
+    expect(kernel.network_interface().local(self));
+    const auto at = static_cast<uptr>(fd);
+    address6(10, self, port); expect(invoke(kernel, group, 49, {at, address_pointer, 16}) == -22);
+    address6(2, self, port); expect(invoke(kernel, group, 49, {at, address_pointer, 28}) == -97);
+    address6(10, mapped, port); expect(invoke(kernel, group, 49, {at, address_pointer, 28}) == -22);
+    address6(10, remote, port); expect(invoke(kernel, group, 49, {at, address_pointer, 28}) == -99);
+    // Linux admits the RFC 2133 length; the native record is exact.
+    address6(10, self, port); expect(invoke(kernel, group, 49, {at, address_pointer, 24}) == (linux ? 0 : -22));
+    if (!linux) expect(invoke(kernel, group, 49, {at, address_pointer, 28}) == 0);
+    expect(kernel.native_tcp().snapshot(handle).value().local == (net::tcp::Endpoint{self, port}));
+    address(link.peer_ip, 7000); expect(invoke(kernel, group, 42, {at, address_pointer, 16}) == -22);
+    address6(2, router, 7000); expect(invoke(kernel, group, 42, {at, address_pointer, 28}) == -97);
+    address6(10, mapped, 7000); expect(invoke(kernel, group, 42, {at, address_pointer, 28}) == -101);
+    address6(10, remote, 7000); expect(invoke(kernel, group, 42, {at, address_pointer, 28}) == -101);
+    address6(10, router, 7000); expect(invoke(kernel, group, 42, {at, address_pointer, 28}) == -115);
+    // A first SYN waits for neighbour discovery; the router's advert releases it.
+    Peer peer; CHECK(peer.passive_open({router, 7000}, 4000 + port, mock::now / 1000000));
+    poll6(kernel, &peer);
+    std::array<std::byte, 128> advert{};
+    auto na = wire::build_neighbor_advertisement(std::span{advert}.subspan(14), router, self, router, true, true, true, link.peer_mac);
+    CHECK(na && wire::build_ethernet(advert, link.local_mac, link.peer_mac, wire::ethertype_ipv6, na.value()));
+    std::copy_n(advert.begin(), 14 + na.value(), extension.incoming[extension.incoming_head].begin());
+    extension.incoming_lengths[extension.incoming_head] = 14 + na.value(); extension.incoming_count = 1;
+    poll6(kernel, &peer); poll6(kernel, &peer);
+    extension.send_peer(peer, wire::ethertype_ipv6); poll6(kernel, &peer);
+    expect(peer.snapshot().state == net::tcp::State::established);
+    const std::array<std::byte, 3> data{std::byte{'v'}, std::byte{'6'}, std::byte{'!'}};
+    std::copy(data.begin(), data.end(), mock::memory.begin() + 128);
+    expect(invoke(kernel, group, 1, {at, payload_pointer, data.size()}) == 3);
+    poll6(kernel, &peer);
+    std::array<std::byte, 8> received{}; auto read = peer.read(received); CHECK(read); expect(read.value() == 3 && received[1] == std::byte{'6'});
+    expect(invoke(kernel, group, 3, {at}) == 0);
+
+    // A listener's accepted peer is a 28-byte sockaddr_in6 with scope 1.
+    const auto listener = invoke(kernel, group, 41, {10, OK_SOCK_STREAM | OK_SOCK_NONBLOCK, 6}); expect(listener >= 3);
+    const auto server = static_cast<uptr>(listener);
+    address6(10, self, static_cast<u16>(port + 1));
+    expect(invoke(kernel, group, 49, {server, address_pointer, 28}) == 0);
+    expect(invoke(kernel, group, 50, {server, 2}) == 0);
+    Peer client; CHECK(client.active_open({router, 7001}, {self, static_cast<u16>(port + 1)}, 9000 + port, mock::now / 1000000));
+    extension.send_peer(client, wire::ethertype_ipv6); poll6(kernel, &client);
+    extension.send_peer(client, wire::ethertype_ipv6); poll6(kernel, &client);
+    expect(client.snapshot().state == net::tcp::State::established);
+    constexpr uptr length_pointer = hw::user_begin + 896;
+    const u32 capacity = 64; std::memcpy(mock::memory.data() + 896, &capacity, sizeof(capacity));
+    std::fill_n(mock::memory.begin() + 768, 64, std::byte{0x5a});
+    const auto accepted = invoke(kernel, group, 288, {server, address_pointer, length_pointer, 0}); expect(accepted >= 3);
+    u32 reported{}; std::memcpy(&reported, mock::memory.data() + 896, sizeof(reported)); expect(reported == 28);
+    auto name = lu::Ipv6SocketAddressCodec<lu::Profile::x86_64>::decode(
+        {reinterpret_cast<const u8 *>(mock::memory.data() + 768), 28});
+    expect(name && name.value().family == 10 && name.value().port == 7001 && name.value().address == router);
+    expect(name.value().scope_id == 1 && name.value().flowinfo == 0 && mock::memory[768 + 28] == std::byte{0x5a});
+    expect(kernel.native_tcp().snapshot(stream(kernel, group, static_cast<i32>(accepted))).value().family == net::Family::ipv6);
+    expect(invoke(kernel, group, 3, {static_cast<uptr>(accepted)}) == 0);
+    expect(invoke(kernel, group, 3, {server}) == 0);
+    retire(kernel, group);
+}
 void exercise(Kernel &kernel, bool linux, u16 port)
 {
     auto group = create(kernel, linux);
-    expect(invoke(kernel, group, 41, {10, OK_SOCK_STREAM | OK_SOCK_NONBLOCK, 6}) == -97);
+    expect(invoke(kernel, group, 41, {3, OK_SOCK_STREAM | OK_SOCK_NONBLOCK, 6}) == -97);
     auto fd = invoke(kernel, group, 41, {2, OK_SOCK_STREAM | OK_SOCK_NONBLOCK | OK_SOCK_CLOEXEC, 6}); expect(fd >= 3);
     const auto handle = stream(kernel, group, static_cast<i32>(fd)); expect(kernel.native_tcp().valid(handle));
     expect(kernel.native_udp().active_sockets() == 0);
@@ -227,6 +326,7 @@ int main()
     CHECK(native::entry_stacks.activate(native::entry_stack_arena));
     kernel.posix().set_entropy_source(&entropy);
     original_guard_closes(kernel);
+    ipv6_exercise(kernel, false, 56001); ipv6_exercise(kernel, true, 56011);
     listener_errors(kernel, false, 55001); listener_errors(kernel, true, 55002);
     exercise(kernel, false, 54001); exercise(kernel, true, 54002);
     const auto before = kernel.native_udp_executor().state(); expect(before.active && !before.failed);
