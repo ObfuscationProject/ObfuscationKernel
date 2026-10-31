@@ -1,6 +1,7 @@
 
 #include "ok/user/native_signal_config.hpp"
 #include "ok/interrupt/platform.hpp"
+#include "ok/arch/clock.hpp"
 #include "ok/arch/execution_spaces.hpp"
 #include <cstddef>
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__powerpc__) || defined(__PPC__)) && __SIZEOF_POINTER__ == 4 && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
@@ -92,6 +93,16 @@ template <u32 Spr> u32 read_spr()
     u32 value;
     asm volatile("mfspr %0,%1" : "=r"(value) : "i"(Spr));
     return value;
+}
+u64 timebase()
+{
+    u32 high, low;
+    do
+    {
+        high = read_spr<269>();
+        low = read_spr<268>();
+    } while (read_spr<269>() != high);
+    return (u64{high} << 32) | low;
 }
 template <u32 Spr> void write_spr(u32 value)
 {
@@ -349,6 +360,8 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     const auto old_dec = read_spr<22>();
     invalidate_user_tlb();
     write_spr<336>(0x08000000); // Clear TSR.DIS.
+    // The decrementer counts at the timebase rate from this write.
+    const u64 user_deadline = timebase() + 4000000;
     write_spr<22>(4000000);     // ppce500 timebase 400 MHz: 10 ms quantum.
     write_spr<340>(0x04000000); // TCR.DIE; no automatic reload.
     Trap trap{};
@@ -386,7 +399,12 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     // An external input (IVOR4) is claimed from the MPIC once the interrupt
     // service owns it; MSR[EE] in user mode lets only bound sources through.
     if (trap.kind == TrapKind::timer)
+    {
+        const u64 now = timebase();
+        interrupt::record_timer_latency(interrupt::TimerWake::user, now > user_deadline ? now - user_deadline : 0,
+                                        arch::clock_frequency());
         ok_interrupt_tick();
+    }
     else if (trap.kind == TrapKind::interrupt)
         interrupt::claim_platform_irq();
 #ifdef OK_PPC32_PRIVATE_BACKEND

@@ -148,14 +148,30 @@ void acknowledge_irq(uptr vector)
     if (vector >= 32 && vector < 48)
         outb(0x20, 0x20);
 }
+// PIT channel 0 runs in mode 2, the rate generator Linux programs: IRQ 0
+// rises as the count reloads, so the count latched in the handler is how far
+// past that edge the tick was taken (modulo one period).
+constexpr u16 pit_divisor = 11932; // Approximately 100 actual IRQs/second.
+constexpr u64 pit_frequency = 1193182;
+u64 pit_tick_late()
+{
+    outb(0x43, 0x00); // Latch channel 0.
+    const u16 low = inb(0x40);
+    const u16 count = static_cast<u16>(low | (u16{inb(0x40)} << 8));
+    return count != 0 && count <= pit_divisor ? pit_divisor - count : 0;
+}
 // Vector 32 is the PIT tick; 33..47 are platform lines whose top half the
 // interrupt service runs once it has started. Before that, only acknowledge.
-void complete_irq(uptr vector)
+// The kernel takes interrupts only in the idle wait.
+void complete_irq(uptr vector, interrupt::TimerWake wake)
 {
     if (vector < 32 || vector >= 48)
         return;
     if (vector == 32)
+    {
+        interrupt::record_timer_latency(wake, pit_tick_late(), pit_frequency);
         ok_interrupt_tick();
+    }
     if (vector == 32 || !interrupt::platform_irqs_started())
         acknowledge_irq(vector);
     else
@@ -344,8 +360,7 @@ Status initialize()
     io_wait();
     outb(0x21, master_mask);
     outb(0xa1, slave_mask);
-    constexpr u16 pit_divisor = 11932; // Approximately 100 actual IRQs/second.
-    outb(0x43, 0x36);
+    outb(0x43, 0x34); // Channel 0, low/high byte, mode 2, binary.
     outb(0x40, pit_divisor & 0xff);
     outb(0x40, pit_divisor >> 8);
     initialized = true;
@@ -597,14 +612,14 @@ extern "C" void ok_x86_execution_trap(const SavedTrap *saved)
                  : saved->vector > 32 && saved->vector < 48 ? TrapKind::interrupt
                                        : TrapKind::exception,
                  static_cast<u32>(saved->vector), saved->error, fault_address, reinterpret_cast<uptr>(saved)};
-    complete_irq(saved->vector);
+    complete_irq(saved->vector, interrupt::TimerWake::user);
 }
 
 extern "C" void ok_x86_execution_kernel_trap(const SavedTrap *saved)
 {
     if (saved->vector >= 32 && saved->vector < 48)
     {
-        complete_irq(saved->vector);
+        complete_irq(saved->vector, interrupt::TimerWake::idle);
         return;
     }
     console("OK_NATIVE_KERNEL_FAULT vector=");

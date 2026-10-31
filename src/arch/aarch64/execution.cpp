@@ -1,5 +1,6 @@
 #include "ok/arch/execution_spaces.hpp"
 #include "ok/interrupt/platform.hpp"
+#include "ok/arch/clock.hpp"
 
 #include <cstddef>
 
@@ -468,6 +469,11 @@ extern "C" void ok_arm_execution_trap(u64 vector, uptr capture_sp)
         // half masks and completes it once the interrupt service runs.
         if (irq == timer_irq)
         {
+            // CNTP_CVAL keeps the user quantum's expiry.
+            u64 compare, count;
+            asm volatile("mrs %0, cntp_cval_el0; mrs %1, cntpct_el0" : "=r"(compare), "=r"(count));
+            interrupt::record_timer_latency(interrupt::TimerWake::user, count > compare ? count - compare : 0,
+                                            arch::clock_frequency());
             mmio(gic_cpu + 0x10) = acknowledge;
             ok_interrupt_tick();
         }

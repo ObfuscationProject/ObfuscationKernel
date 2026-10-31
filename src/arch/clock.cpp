@@ -329,4 +329,9 @@ u64 clock_resolution_ns()
     return clock_invalidated ? 0 : clock_state.resolution();
 }
 
+u64 clock_frequency()
+{
+    return clock_invalidated ? 0 : clock_state.frequency();
+}
+
 } // namespace ok::arch

@@ -1,5 +1,6 @@
 #include "ok/arch/execution_spaces.hpp"
 #include "ok/interrupt/platform.hpp"
+#include "ok/arch/clock.hpp"
 #include "ok/arch/arm32/fp_state.hpp"
 #include <cstddef>
 
@@ -62,6 +63,16 @@ TimerState arm_timer()
     const u32 ticks = frequency / 100, enable = 1;
     asm volatile("mcr p15, 0, %0, c14, c2, 0\nmcr p15, 0, %1, c14, c2, 1\nisb" ::"r"(ticks), "r"(enable) : "memory");
     return old;
+}
+// The count past the user quantum's expiry, which CNTP_CVAL keeps after the
+// trap path disabled the timer.
+u64 timer_late()
+{
+    u32 compare_low, compare_high, count_low, count_high;
+    asm volatile("mrrc p15, 2, %0, %1, c14" : "=r"(compare_low), "=r"(compare_high));
+    asm volatile("isb\nmrrc p15, 0, %0, %1, c14" : "=r"(count_low), "=r"(count_high) : : "memory");
+    const u64 compare = (u64{compare_high} << 32) | compare_low, count = (u64{count_high} << 32) | count_low;
+    return count > compare ? count - compare : 0;
 }
 // A device line claimed in the user IRQ path: run its top half once the
 // interrupt service owns the GIC, otherwise only complete it. 1023 is spurious.
@@ -327,6 +338,8 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     frame.registers[13] = frame.sp;
     const auto timer = arm_timer();
     ok_arm32_enter_native(&frame, space.root, &trap, stack_top);
+    if (trap.kind == TrapKind::timer)
+        interrupt::record_timer_latency(interrupt::TimerWake::user, timer_late(), arch::clock_frequency());
     restore_timer(timer);
     complete_irq(trap);
     entering = false;

@@ -87,6 +87,8 @@ ok_rv64_enter_native:
     li t2, 100000
     add t1, t1, t2
     sd t1, 0(t0)
+    la t2, ok_rv_user_deadline
+    sd t1, 0(t2)
     ld t0, 120(sp)
     li t1, 0xe1808
     not t1, t1

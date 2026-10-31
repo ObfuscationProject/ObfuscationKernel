@@ -99,6 +99,9 @@ ok_rv32_enter_native:
     sw t1, 0(t0)
     sw t2, 4(t0)
     sw t3, 0(t0)
+    la t0, ok_rv_user_deadline
+    sw t3, 0(t0)
+    sw t2, 4(t0)
     lw t0, 60(sp)
     li t1, 0xe1808
     not t1, t1

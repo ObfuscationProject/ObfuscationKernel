@@ -1,5 +1,6 @@
 #include "ok/arch/execution_spaces.hpp"
 #include "ok/interrupt/platform.hpp"
+#include "ok/arch/clock.hpp"
 #include <cstddef>
 
 namespace ok::arch::execution
@@ -86,10 +87,12 @@ u32 leaf_entry(const PageMapping &page)
     return static_cast<u32>(page.physical_address >> 2) | flags;
 }
 extern "C" void ok_rv32_enter_native(UserFrame *frame, uptr satp, Trap *trap, uptr stack_top);
-// mie for user mode, read by the entry assembly.
+// mie for user mode, read by the entry assembly, which records the user
+// quantum's mtimecmp expiry.
 extern "C"
 {
 constinit uptr ok_rv_user_mie = 0x80;
+constinit u64 ok_rv_user_deadline = 0;
 }
 static_assert(offsetof(UserFrame, pc) == 128);
 static_assert(offsetof(UserFrame, sp) == 132);
@@ -223,12 +226,30 @@ UserFrame initial_frame(uptr entry, uptr stack)
     frame.registers[2] = stack;
     return frame;
 }
+// CLINT mtime, the counter mtimecmp compares against.
+u64 machine_time()
+{
+    const auto *time = reinterpret_cast<volatile u32 *>(uptr{0x200bff8});
+    u32 high, low;
+    do
+    {
+        high = time[1];
+        low = time[0];
+    } while (time[1] != high);
+    return (u64{high} << 32) | low;
+}
 // A device interrupt in user mode: claim the PLIC source and run its top half
 // once the interrupt service owns the PLIC, otherwise only complete it.
 void complete_irq(Trap &trap)
 {
     if (trap.kind == TrapKind::timer)
+    {
+        const u64 now = machine_time();
+        interrupt::record_timer_latency(interrupt::TimerWake::user,
+                                        now > ok_rv_user_deadline ? now - ok_rv_user_deadline : 0,
+                                        arch::clock_frequency());
         ok_interrupt_tick();
+    }
     if (trap.kind != TrapKind::interrupt)
         return;
     auto &claim = *reinterpret_cast<volatile u32 *>(uptr{0x0c200004});

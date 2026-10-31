@@ -1,4 +1,5 @@
 #include "ok/interrupt/platform.hpp"
+#include "ok/arch/clock.hpp"
 
 #if defined(OK_KERNEL_FREESTANDING) && (defined(__x86_64__) || defined(__i386__))
 #include "pic8259.hpp"
@@ -86,6 +87,15 @@ volatile bool interrupted{false};
 #if defined(OK_PLATFORM_IRQ_WAIT) && defined(__arm__)
 // The physical timer (PPI 30) as a one-shot idle tick at 100 Hz. The native
 // backend reprograms it around each user entry and leaves it disabled.
+// CNTP_CVAL keeps the expiry, so the latency is the count past it.
+u64 idle_tick_late()
+{
+    u32 compare_low, compare_high, count_low, count_high;
+    asm volatile("mrrc p15, 2, %0, %1, c14" : "=r"(compare_low), "=r"(compare_high));
+    asm volatile("isb\nmrrc p15, 0, %0, %1, c14" : "=r"(count_low), "=r"(count_high) : : "memory");
+    const u64 compare = (u64{compare_high} << 32) | compare_low, count = (u64{count_high} << 32) | count_low;
+    return count > compare ? count - compare : 0;
+}
 void arm_idle_tick()
 {
     u32 frequency;
@@ -99,6 +109,13 @@ void disarm_idle_tick()
     asm volatile("mcr p15, 0, %0, c14, c2, 1\nisb" ::"r"(disable) : "memory");
 }
 #elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__aarch64__)
+u64 idle_tick_late()
+{
+    u64 compare, count;
+    asm volatile("mrs %0, cntp_cval_el0" : "=r"(compare));
+    asm volatile("isb; mrs %0, cntpct_el0" : "=r"(count) : : "memory");
+    return count > compare ? count - compare : 0;
+}
 void arm_idle_tick()
 {
     u64 frequency;
@@ -108,6 +125,17 @@ void arm_idle_tick()
 void disarm_idle_tick()
 {
     asm volatile("msr cntp_ctl_el0, xzr; isb" : : : "memory");
+}
+#endif
+
+#if defined(OK_PLATFORM_IRQ_WAIT) && (defined(__powerpc__) || defined(__PPC__))
+u64 timebase()
+{
+    u32 high, low, checked;
+    do
+        asm volatile("mfspr %0, 269; mfspr %1, 268; mfspr %2, 269" : "=r"(high), "=r"(low), "=r"(checked));
+    while (high != checked);
+    return (u64{high} << 32) | low;
 }
 #endif
 
@@ -163,6 +191,7 @@ void halt_until_interrupt()
     disarm_idle_tick();
     if (id == PlatformIrqChip::timer_ppi)
     {
+        record_timer_latency(TimerWake::idle, idle_tick_late(), arch::clock_frequency());
         PlatformIrqChip::complete(acknowledge);
         ok_interrupt_tick();
     }
@@ -173,7 +202,8 @@ void halt_until_interrupt()
     // MIE stays clear, so nothing traps and the wait claims from the PLIC.
     uptr status;
     asm volatile("csrrc %0, mstatus, %1" : "=r"(status) : "r"(uptr{8}) : "memory");
-    set_compare(machine_time() + 100000);
+    const u64 deadline = machine_time() + 100000;
+    set_compare(deadline);
     asm volatile("csrw mie, %0\nwfi\ncsrw mie, zero" : : "r"(mie_mtie | mie_meie) : "memory");
     uptr pending;
     asm volatile("csrr %0, mip" : "=r"(pending));
@@ -184,7 +214,11 @@ void halt_until_interrupt()
             ok_interrupt_top_half(static_cast<IrqLine>(source));
     }
     else if (pending & mie_mtie)
+    {
+        const u64 now = machine_time();
+        record_timer_latency(TimerWake::idle, now > deadline ? now - deadline : 0, arch::clock_frequency());
         ok_interrupt_tick();
+    }
     asm volatile("csrs mstatus, %0" : : "r"(status & uptr{8}) : "memory");
 #elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__loongarch64)
     // IDLE wakes when ESTAT.IS & ECFG.LIE is nonzero whatever CRMD.IE says.
@@ -199,6 +233,10 @@ void halt_until_interrupt()
     // CSRWR swaps, so each write goes through a scratch register.
     uptr sources = (uptr{1} << 11) | PlatformIrqChip::hwi0, compare = (ticks & ~uptr(3)) | 1;
     asm volatile("csrwr %0, 0x4" : "+r"(sources) : : "memory");
+    // The timer counts InitVal ticks of the stable counter from this write.
+    uptr deadline;
+    asm volatile("rdtime.d %0, $zero" : "=r"(deadline));
+    deadline += ticks & ~uptr(3);
     asm volatile("csrwr %0, 0x41" : "+r"(compare) : : "memory");
     asm volatile("dbar 0\nidle 0" : : : "memory");
     uptr estat;
@@ -213,7 +251,12 @@ void halt_until_interrupt()
             ok_interrupt_top_half(static_cast<IrqLine>(line));
     }
     else if (estat & (uptr{1} << 11))
+    {
+        uptr now;
+        asm volatile("rdtime.d %0, $zero" : "=r"(now));
+        record_timer_latency(TimerWake::idle, now > deadline ? now - deadline : 0, arch::clock_frequency());
         ok_interrupt_tick();
+    }
     asm volatile("csrxchg %0, %1, 0x0" : : "r"(crmd & uptr{4}), "r"(uptr{4}) : "memory");
 #elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__mips__)
     // WAIT on these pre-R6 cores wakes only for an interrupt it could take, so
@@ -225,8 +268,9 @@ void halt_until_interrupt()
     const u32 compare = count + 1000000; // The backend's 10 ms user quantum.
     asm volatile("mtc0 %0, $11\n\tehb" : : "r"(compare) : "memory");
     ok_mips_idle(0x8400);
-    u32 cause;
+    u32 cause, now;
     asm volatile("mfc0 %0, $13" : "=r"(cause));
+    asm volatile("mfc0 %0, $9" : "=r"(now));
     const u32 zero = 0;
     asm volatile("mtc0 %0, $11\n\tehb" : : "r"(zero) : "memory"); // Writing Compare clears IP7.
     if (cause & 0x400)
@@ -235,7 +279,11 @@ void halt_until_interrupt()
             ok_interrupt_top_half(static_cast<IrqLine>(line));
     }
     else if (cause & 0x8000)
+    {
+        // Count wraps; the expiry is less than one wrap behind.
+        record_timer_latency(TimerWake::idle, now - compare, arch::clock_frequency());
         ok_interrupt_tick();
+    }
 #elif defined(OK_PLATFORM_IRQ_WAIT) && (defined(__powerpc__) || defined(__PPC__))
     // e500 dozes on MSR[WE] with HID0[DOZE]; QEMU's BookE model wakes only for
     // an interrupt MSR[EE] admits, so ok_ppc_idle sets EE for the window and the
@@ -248,6 +296,8 @@ void halt_until_interrupt()
     const u32 doze = hid0 | 0x00800000u, dec = 4000000, die = 0x04000000, dis = 0x08000000;
     asm volatile("mtspr 1008, %0\n\tisync" : : "r"(doze) : "memory");
     asm volatile("mtspr 336, %0" : : "r"(dis) : "memory");
+    // The decrementer counts at the timebase rate from this write.
+    const u64 deadline = timebase() + dec;
     asm volatile("mtspr 22, %0\n\tmtspr 340, %1\n\tisync" : : "r"(dec), "r"(die) : "memory");
     ok_ppc_idle(msr | 0x8000u | 0x00040000u);
     u32 tsr;
@@ -256,7 +306,11 @@ void halt_until_interrupt()
     if (const u32 vector = PlatformIrqChip::claim(); vector < 256)
         ok_interrupt_top_half(static_cast<IrqLine>(vector));
     else if (tsr & dis)
+    {
+        const u64 now = timebase();
+        record_timer_latency(TimerWake::idle, now > deadline ? now - deadline : 0, arch::clock_frequency());
         ok_interrupt_tick();
+    }
 #endif
 }
 
@@ -474,6 +528,33 @@ sched::WakeSource event_wake_source(EventSource source)
 EventStatistics event_statistics(EventSource source)
 {
     return events[static_cast<usize>(source)];
+}
+
+namespace
+{
+constinit std::array<time::LatencyHistogram, 2> timer_latencies{};
+constinit std::array<DeviceWaitStatistics, device_wait_count> device_waits{};
+} // namespace
+
+void record_timer_latency(TimerWake wake, u64 late, u64 frequency)
+{
+    timer_latencies[static_cast<usize>(wake)].record(time::ticks_to_nanoseconds(late, frequency));
+}
+
+const time::LatencyHistogram &timer_latency(TimerWake wake)
+{
+    return timer_latencies[static_cast<usize>(wake)];
+}
+
+void count_device_wait(DeviceWait device, bool interrupt)
+{
+    auto &waits = device_waits[static_cast<usize>(device)];
+    ++(interrupt ? waits.interrupt : waits.polled);
+}
+
+DeviceWaitStatistics device_wait_statistics(DeviceWait device)
+{
+    return device_waits[static_cast<usize>(device)];
 }
 
 IrqStatistics platform_irq_statistics()

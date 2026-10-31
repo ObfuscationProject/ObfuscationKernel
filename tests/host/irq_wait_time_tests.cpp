@@ -3,6 +3,7 @@
 #include "ok/sched/wait_queue.hpp"
 #include "ok/time/clocksource.hpp"
 #include "ok/time/interval_timer.hpp"
+#include "ok/time/latency_histogram.hpp"
 #include "ok/abi/linux_timer.hpp"
 #include "ok/user/native_signal_info.hpp"
 #include "interrupt/console_ring.hpp"
@@ -374,6 +375,55 @@ static void check_timer_records()
     CHECK(X::frame_valid(sched::PendingSignalInfo{14, 128, 0, 0}) && !X::frame_valid(sched::PendingSignalInfo{10, 128, 0, 0}));
 }
 
+static void check_latency_histogram()
+{
+    // Counter ticks to nanoseconds: exact on the boards' rates, no wrap.
+    CHECK(time::ticks_to_nanoseconds(1, 1193182) == 838 && time::ticks_to_nanoseconds(1193182, 1193182) == 1000000000);
+    CHECK(time::ticks_to_nanoseconds(3, 10000000) == 300 && time::ticks_to_nanoseconds(4000000, 400000000) == 10000000);
+    CHECK(time::ticks_to_nanoseconds(25, 62500000) == 400 && time::ticks_to_nanoseconds(7, 0) == 0);
+    CHECK(time::ticks_to_nanoseconds(~u64{0}, 1) == ~u64{0});
+    CHECK(time::ticks_to_nanoseconds(u64{3} << 62, 3000000000) == 4611686018427387904ULL);
+    // Buckets: exact below 8, then eight per octave, each value in its bucket.
+    using H = time::LatencyHistogram;
+    CHECK(H::index(0) == 0 && H::index(7) == 7 && H::index(8) == 8 && H::index(15) == 15 && H::index(16) == 16);
+    CHECK(H::index(17) == 16 && H::index(18) == 17 && H::index(0xffffffffu) == H::bucket_count - 1);
+    CHECK(H::index(u64{1} << 40) == H::bucket_count - 1);
+    for (u64 value : {u64{8}, u64{9}, u64{100}, u64{1000}, u64{65535}, u64{1000000}, u64{999999999}, u64{0xefffffff}})
+    {
+        const auto bucket = H::index(value);
+        CHECK(H::upper_bound(bucket) >= value && (bucket == 0 || H::upper_bound(bucket - 1) < value));
+        CHECK(H::upper_bound(bucket) - value <= value / 8);
+    }
+    H histogram;
+    CHECK(histogram.count() == 0 && histogram.percentile(500) == 0 && histogram.mean() == 0);
+    for (u64 value = 1; value <= 100; ++value)
+        histogram.record(value * 1000);
+    CHECK(histogram.count() == 100 && histogram.minimum() == 1000 && histogram.maximum() == 100000);
+    CHECK(histogram.mean() == 50500);
+    const auto median = histogram.percentile(500), tail = histogram.percentile(990);
+    CHECK(median >= 50000 && median <= 50000 + 50000 / 8 && tail >= 99000 && tail <= 100000);
+    CHECK(histogram.percentile(1000) == 100000 && histogram.percentile(1) >= 1000 && histogram.percentile(1) <= 1023);
+    histogram.record(u64{5} << 32); // Past the buckets: the maximum stays exact.
+    CHECK(histogram.maximum() == u64{5} << 32 && histogram.percentile(1000) == u64{5} << 32);
+    // The service converts each architecture's ticks and counts driver waits.
+    interrupt::record_timer_latency(interrupt::TimerWake::idle, 12, 1193182);
+    interrupt::record_timer_latency(interrupt::TimerWake::user, 40, 10000000);
+    interrupt::record_timer_latency(interrupt::TimerWake::user, 2, 10000000);
+    CHECK(interrupt::timer_latency(interrupt::TimerWake::idle).count() == 1 &&
+          interrupt::timer_latency(interrupt::TimerWake::idle).maximum() == 10057);
+    CHECK(interrupt::timer_latency(interrupt::TimerWake::user).count() == 2 &&
+          interrupt::timer_latency(interrupt::TimerWake::user).minimum() == 200 &&
+          interrupt::timer_latency(interrupt::TimerWake::user).maximum() == 4000);
+    interrupt::count_device_wait(interrupt::DeviceWait::block, true);
+    interrupt::count_device_wait(interrupt::DeviceWait::block, true);
+    interrupt::count_device_wait(interrupt::DeviceWait::block, false);
+    interrupt::count_device_wait(interrupt::DeviceWait::transmit, true);
+    CHECK(interrupt::device_wait_statistics(interrupt::DeviceWait::block).interrupt == 2 &&
+          interrupt::device_wait_statistics(interrupt::DeviceWait::block).polled == 1);
+    CHECK(interrupt::device_wait_statistics(interrupt::DeviceWait::entropy).interrupt == 0 &&
+          interrupt::device_wait_statistics(interrupt::DeviceWait::transmit).interrupt == 1);
+}
+
 int main()
 {
     check_irq_router();
@@ -385,6 +435,7 @@ int main()
     check_interval_timer();
     check_timer_codec();
     check_timer_records();
+    check_latency_histogram();
     std::puts("OK_HOST irq_wait_time model=pass");
     return 0;
 }

@@ -2,6 +2,7 @@
 
 #include "ok/interrupt/irq_chip.hpp"
 #include "ok/sched/wait_registration.hpp"
+#include "ok/time/latency_histogram.hpp"
 
 namespace ok::interrupt
 {
@@ -72,6 +73,36 @@ void post_event(EventSource source);
 // The wake source a waiter made ready by `source`'s events is credited to.
 [[nodiscard]] sched::WakeSource event_wake_source(EventSource source);
 [[nodiscard]] EventStatistics event_statistics(EventSource source);
+
+// Timer interrupt latency: how long after its programmed expiry the kernel
+// observed a timer interrupt, for the tick that ends the idle wait and for the
+// tick that preempts user code. Architecture code reports `late` ticks of its
+// `frequency` Hz timer counter.
+enum class TimerWake : u8
+{
+    idle,
+    user,
+};
+void record_timer_latency(TimerWake wake, u64 late, u64 frequency);
+[[nodiscard]] const time::LatencyHistogram &timer_latency(TimerWake wake);
+
+// Driver waits for a device (a block or entropy request, a blocking transmit)
+// by how they completed: after the device's own interrupt, or by polling,
+// before the service started or with polling selected.
+enum class DeviceWait : u8
+{
+    block,
+    entropy,
+    transmit,
+};
+inline constexpr usize device_wait_count = 3;
+struct DeviceWaitStatistics
+{
+    usize interrupt{0};
+    usize polled{0};
+};
+void count_device_wait(DeviceWait device, bool interrupt);
+[[nodiscard]] DeviceWaitStatistics device_wait_statistics(DeviceWait device);
 
 // Board routing for device drivers: the platform line a device interrupts on.
 struct PlatformLine

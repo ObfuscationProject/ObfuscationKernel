@@ -1,6 +1,7 @@
 
 #include "ok/user/native_signal_config.hpp"
 #include "ok/interrupt/platform.hpp"
+#include "ok/arch/clock.hpp"
 #include "ok/arch/execution_spaces.hpp"
 #include <cstddef>
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && defined(__mips64)
@@ -483,7 +484,8 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     flush_tlb();
     executing = true;
     ok_mips_execution_active_frame = &frame;
-    write_cp0<11>(static_cast<u32>(read_cp0<9>()) + timer_period);
+    const u32 user_compare = static_cast<u32>(read_cp0<9>()) + timer_period;
+    write_cp0<11>(user_compare);
     // User mode takes the CP0 timer and, once the interrupt service owns the
     // 8259 pair, IP2.
     ok_mips_user_status = user_status | (interrupt::platform_irqs_started() ? 0x400u : 0u);
@@ -537,9 +539,15 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
         }
         break;
     }
+    const u32 count = static_cast<u32>(read_cp0<9>());
     write_cp0<11>(0);
     if (result.kind == TrapKind::timer)
+    {
+        // Count wraps; the expiry is less than one wrap behind.
+        interrupt::record_timer_latency(interrupt::TimerWake::user, u32{count - user_compare},
+                                        arch::clock_frequency());
         ok_interrupt_tick();
+    }
     else if (result.kind == TrapKind::interrupt)
         interrupt::claim_platform_irq();
     flush_tlb();

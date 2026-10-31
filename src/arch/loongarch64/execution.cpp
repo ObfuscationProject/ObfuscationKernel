@@ -1,5 +1,6 @@
 #include "ok/arch/execution_spaces.hpp"
 #include "ok/interrupt/platform.hpp"
+#include "ok/arch/clock.hpp"
 #include <cstddef>
 
 namespace ok::arch::execution
@@ -19,6 +20,8 @@ bool initialized{}, executing{};
 Trap last_trap;
 bool refill{};
 uptr timer_ticks{1000000};
+// The stable counter value at which the user quantum expires.
+uptr user_deadline{};
 template <unsigned C> uptr read_csr()
 {
     uptr value;
@@ -248,7 +251,13 @@ Status copy_to_user(const AddressSpace &space, uptr destination, const void *sou
 void complete_irq(Trap &trap)
 {
     if (trap.kind == TrapKind::timer)
+    {
+        uptr now;
+        asm volatile("rdtime.d %0, $zero" : "=r"(now));
+        interrupt::record_timer_latency(interrupt::TimerWake::user, now > user_deadline ? now - user_deadline : 0,
+                                        arch::clock_frequency());
         ok_interrupt_tick();
+    }
     if (trap.kind != TrapKind::interrupt)
         return;
     u32 pending;
@@ -280,6 +289,9 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     executing = true;
     ok_loong_execution_active_frame = &frame;
     write_csr<0x44>(1);
+    // The timer counts InitVal ticks of the stable counter from this write.
+    asm volatile("rdtime.d %0, $zero" : "=r"(user_deadline));
+    user_deadline += timer_ticks & ~uptr(3);
     write_csr<0x41>((timer_ticks & ~uptr(3)) | 1);
     // User mode takes the timer and, once the interrupt service owns the
     // EIOINTC, IP0; the kernel itself only ever enables the timer source.

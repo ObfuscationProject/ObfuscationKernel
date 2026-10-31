@@ -45,6 +45,7 @@ class CounterClock final
     }
 
     [[nodiscard]] bool initialized() const { return frequency_ != 0; }
+    [[nodiscard]] u64 frequency() const { return frequency_; }
     [[nodiscard]] u64 resolution() const
     {
         return initialized() ? (nanoseconds_per_second + frequency_ - 1) / frequency_ : 0;
