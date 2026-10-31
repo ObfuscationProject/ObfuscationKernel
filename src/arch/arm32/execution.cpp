@@ -1,4 +1,6 @@
 #include "ok/arch/execution_spaces.hpp"
+#include "ok/interrupt/platform.hpp"
+#include "ok/arch/clock.hpp"
 #include "ok/arch/arm32/fp_state.hpp"
 #include <cstddef>
 
@@ -61,6 +63,29 @@ TimerState arm_timer()
     const u32 ticks = frequency / 100, enable = 1;
     asm volatile("mcr p15, 0, %0, c14, c2, 0\nmcr p15, 0, %1, c14, c2, 1\nisb" ::"r"(ticks), "r"(enable) : "memory");
     return old;
+}
+// The count past the user quantum's expiry, which CNTP_CVAL keeps after the
+// trap path disabled the timer.
+u64 timer_late()
+{
+    u32 compare_low, compare_high, count_low, count_high;
+    asm volatile("mrrc p15, 2, %0, %1, c14" : "=r"(compare_low), "=r"(compare_high));
+    asm volatile("isb\nmrrc p15, 0, %0, %1, c14" : "=r"(count_low), "=r"(count_high) : : "memory");
+    const u64 compare = (u64{compare_high} << 32) | compare_low, count = (u64{count_high} << 32) | count_low;
+    return count > compare ? count - compare : 0;
+}
+// A device line claimed in the user IRQ path: run its top half once the
+// interrupt service owns the GIC, otherwise only complete it. 1023 is spurious.
+void complete_irq(const Trap &trap)
+{
+    if (trap.kind == TrapKind::timer)
+        ok_interrupt_tick();
+    if (trap.kind != TrapKind::interrupt || trap.vector >= 1020)
+        return;
+    if (interrupt::platform_irqs_started())
+        ok_interrupt_top_half(static_cast<interrupt::IrqLine>(trap.vector));
+    else
+        mmio(cpu_interface + 0x10) = trap.vector;
 }
 void restore_timer(const TimerState &old)
 {
@@ -301,8 +326,10 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     if (!Arm32FpState::admitted(frame))
         return Status::unsupported("ARM32 pending VFP exception state is not supported");
     const auto *entry = mapping(*stored, frame.pc);
+    // Like Linux, the stack need not be mapped; only an access to it faults (a
+    // detached musl thread unmaps its own stack before its exit syscall).
     if (entry == nullptr || !(entry->flags & page_execute) || (frame.pc & ((frame.flags & 0x20) ? 1u : 3u)) != 0 ||
-        frame.sp <= user_begin || frame.sp > user_end || !user_range(space, frame.sp - 1, 1, true))
+        frame.sp <= user_begin || frame.sp > user_end)
         return Status::invalid_argument("invalid user entry frame");
     uptr saved_mask;
     asm volatile("mrs %0, cpsr; cpsid if" : "=r"(saved_mask) : : "memory");
@@ -311,7 +338,10 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     frame.registers[13] = frame.sp;
     const auto timer = arm_timer();
     ok_arm32_enter_native(&frame, space.root, &trap, stack_top);
+    if (trap.kind == TrapKind::timer)
+        interrupt::record_timer_latency(interrupt::TimerWake::user, timer_late(), arch::clock_frequency());
     restore_timer(timer);
+    complete_irq(trap);
     entering = false;
     asm volatile("msr cpsr_c, %0" : : "r"(saved_mask) : "memory", "cc");
     return trap;

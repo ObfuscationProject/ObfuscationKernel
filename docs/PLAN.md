@@ -153,8 +153,44 @@ Scaffold (merged to main from `feat/irq-wait-time`) (hosted tests pass):
 - `include/ok/time/clocksource.hpp`: `ClockSource` concept, `ModelClockSource`,
   `CalibratedClock<Source>` (nanoseconds without 128-bit arithmetic, deadlines).
 - `tests/host/irq_wait_time_tests.cpp`, `scripts/test_irq_wait_time.py`.
-Next: one `src/arch/<arch>/irq_chip.cpp` per profile, virtio completion through
-the router, wait queues in pipes/block/net, counter-backed `clock_gettime`.
+Status on `feat/irq-wait-time` (opened 2026-10-29, Kernel issue #4; paired OS
+worktree `feat/irq-wait-time`). Monotonic clocks are already counter-backed on
+all ten profiles ([PLATFORM_CLOCKS](qualification/PLATFORM_CLOCKS.md)); the
+kernel main loop (`src/core/kernel_main.cpp`) still polls network, userland,
+console and input, device IRQs stay masked, and the OS virtio drivers spin on
+their used rings with `VIRTQ_AVAIL_F_NO_INTERRUPT`. Slices, each validated on
+the fast lane and then all ten profiles:
+Slices 1–6 are done on all ten profiles
+([PLATFORM_INTERRUPTS](qualification/PLATFORM_INTERRUPTS.md)): the console UART,
+virtio block, net and RNG (paired OS worktree) and the kernel's virtio-mmio,
+virtio-pci and PS/2 input complete through interrupts, from the root mount on.
+The kernel loop serves the console, input and network event sources only
+after their interrupt posted them, and waits record what woke them. Linux
+processes have `ITIMER_REAL` and the `timer_create` family
+([linux-timers](abi/linux-timers.md)). Gate evidence (slice 6): no device wait
+is polled in a shell gate run (`OK_IRQ_COMPLETIONS`), the monotonic clock
+drifts within 100 ppm of the host's on every profile (the PC TSC calibration
+was 500–700 ppm off and is fixed), and timer interrupt latency is measured for
+idle and user ticks (`OK_TIMER_LATENCY`).
+Merge: the exported interrupt, wait, signal-record and timer declarations bump
+the module ABI once to 78 (`docs/modules/modules.md`); the paired OS worktree
+consumes SDK 78 and merges right after the kernel.
+1. Interrupt core: kernel-mode IRQ entry with interrupts enabled only inside
+   an idle wait, a per-architecture `PlatformIrqChip` selected at compile time
+   behind `IrqChip`, a bounded top half that records the line, and a deferred
+   work queue drained by the main loop. The main loop waits for an interrupt
+   instead of spinning when no thread is runnable and no deadline is due.
+2. Controllers: 8259 (i386, x86_64), GICv2 SPIs (aarch64, arm32), PLIC (rv64,
+   rv32), EIOINTC with PCH-PIC (loongarch64), Malta i8259 behind the GT-64120
+   (mips, mips64), MPIC (ppc), each with a QEMU probe that observes a real
+   device interrupt.
+3. Module boundary: an exported IRQ registration service (runtime selection,
+   so a virtual boundary) and the paired OS virtio blk / net / rng / input
+   drivers completing through it; polling only behind an explicit option.
+4. Wait queues woken from IRQ sources: console input, network receive, block.
+5. POSIX timers (`timer_create` family), `setitimer`/`getitimer`/`alarm`.
+6. Gate evidence: no polling loop in the block/net/input paths on ten
+   profiles, clock drift against QEMU wall time, timer interrupt latency.
 
 ### WT1.3 `refactor/ext4-layout` (M, header set changes)
 

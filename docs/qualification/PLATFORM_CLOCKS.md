@@ -14,7 +14,7 @@ QEMU platform profiles with the following source contracts:
 
 | Profiles | Counter | Frequency source and boundary |
 | --- | --- | --- |
-| x86_64, i386 | Serialized TSC | Measured over approximately 50 ms using the PC PIT's 1,193,182 Hz input. Channel 2 is reserved during boot calibration; channel 0 preemption remains independent. Requires the retained PC CPU profile's TSC and a stable QEMU TSC rate. |
+| x86_64, i386 | Serialized TSC | Measured over approximately 200 ms against the PC PIT's 1,193,182 Hz input: channel 2 free-runs in mode 0, each end is the tightest of eight latched count reads bracketed by TSC reads, and wraps are summed from reads taken more often than one 55 ms wrap (an attempt with a longer gap is repeated). Channel 2 is reserved during boot calibration; channel 0 preemption remains independent. Requires the retained PC CPU profile's TSC and a stable QEMU TSC rate. |
 | aarch64 | CNTVCT_EL0 | CNTFRQ_EL0 on QEMU virt/cortex-a57; boot establishes CNTVOFF_EL2. |
 | arm32 | CNTPCT | CNTFRQ on QEMU virt/cortex-a15; no optional PMU counter or software fallback. |
 | rv64, rv32 | Stable high/low/high CLINT `mtime` read at `0x0200bff8` | QEMU virt board contract: 10,000,000 Hz, matching `/cpus/timebase-frequency`. This is not inferred from `rdcycle`. |
@@ -51,8 +51,15 @@ independent overflow interrupt is required to remove that limitation. The
 
 Malta calibration may take almost two seconds. Reference polling is bounded
 and missing RTC transitions return an error. PC calibration likewise rejects
-a PIT that does not start or complete its countdown. Neither failure falls
-back to the old nominal timer-period counter.
+a PIT that does not count, and repeats an attempt whose reads may have missed
+a wrap. Neither failure falls back to the old nominal timer-period counter.
+
+The PC calibration used to start the TSC after writing a 50 ms mode 0 count
+and stop it when it saw OUT2 rise. QEMU starts a mode 0 count when it is
+written, whatever the gate, and any stall of the vCPU while it polled OUT2
+went straight into the frequency: the guest drift test (WT1.2 slice 6) found
+the monotonic clock 502 ppm slow on x86_64 and 686 ppm slow on i386. Bracketed
+latch reads at both ends of a longer window remove both errors.
 
 ## Validation
 
@@ -68,3 +75,14 @@ short syscalls, sibling progress and absolute-deadline behavior. MIPS native
 runs additionally establish that the RTC reference is reachable; PC runs
 establish real PIT calibration. This backend alone does not establish signal
 interruption, realtime adjustment, CPU clocks, time64 or complete POSIX P04.
+
+ObfuscationOS `scripts/test_clock_drift.py` (WT1.2 slice 6) measures the
+calibration: it brackets 13 guest `CLOCK_MONOTONIC` samples over 120 s with
+the host's clock. On the eight profiles whose frequency is a board contract,
+an architectural register or the PC's PIT calibration, the drift was within
+±6 ppm in every run. mips and mips64 measured between +3 and +22 ppm across
+runs, the spread of polling Malta's RTC update edges for one second; every
+strict bound stayed within ±60 ppm, inside the test's 100 ppm limit.
+Per-profile figures are in [PLATFORM_INTERRUPTS](PLATFORM_INTERRUPTS.md).
+Under TCG the counters follow QEMU's virtual clock, so this checks the
+frequency the kernel uses, not an oscillator.

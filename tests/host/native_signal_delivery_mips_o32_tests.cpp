@@ -360,7 +360,7 @@ template <K Kind> void returns() {
           x.stack == s && !limited.pending_mask().contains(8));
   }
   for (i32 sig = 1; sig <= 128; ++sig) {
-    CHECK(C::valid_info({sig, 128, 0, 0}) == (sig == 8));
+    CHECK(C::valid_info({sig, 128, 0, 0}) == (sig == 8 || sig == 14)); // FPE; ITIMER_REAL SIGALRM
     CHECK(!C::valid_info({sig, 128, 1, 0}) && !C::valid_info({sig, 128, 0, 1}));
   }
 }

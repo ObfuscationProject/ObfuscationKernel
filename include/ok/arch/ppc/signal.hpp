@@ -73,7 +73,7 @@ struct Ppc32SignalFrame
         u32 flags{2};
         constexpr bool operator==(const Stack &) const = default;
     };
-    struct Info { i32 signal{}, code{}; u32 sender_pid{}, sender_uid{}; i32 child_status{}; };
+    struct Info { i32 signal{}, code{}; u32 sender_pid{}, sender_uid{}; i32 child_status{}, timer{}, overrun{}; u64 value{}; };
     struct Placement
     {
         u64 frame_address{}, stack_pointer{};
@@ -397,7 +397,8 @@ struct Ppc32SignalFramePolicy
         u64 restorer{};
         constexpr auto entry = C::realtime ? SignalTrampolineEntry::realtime : SignalTrampolineEntry::legacy;
         if (!Trampoline::entry_address(mapped_trampoline, entry, begin, end, restorer)) return false;
-        const typename C::Info sender{static_cast<i32>(info.signal), info.code, info.sender_pid, info.sender_uid, info.child_status};
+        const typename C::Info sender{static_cast<i32>(info.signal), info.code, info.sender_pid, info.sender_uid, info.child_status,
+            info.timer, info.overrun, info.value};
         typename C::Image image;
         Frame staged;
         // Native PPC ignores the action's SA_RESTORER address. Only the owned,

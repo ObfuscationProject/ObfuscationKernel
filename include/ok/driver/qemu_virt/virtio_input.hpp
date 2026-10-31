@@ -124,6 +124,17 @@ class VirtioInputDevice final
         return false;
     }
 
+    [[nodiscard]] uptr base() const
+    {
+        return ready_ ? base_ : 0;
+    }
+    // Interrupt bottom half: clears the transport's interrupt status.
+    void acknowledge()
+    {
+        if (ready_)
+            write32(base_ + interrupt_ack, read32(base_ + interrupt_status));
+    }
+
     bool poll(VirtioInputEvent &event)
     {
         if (!ready_)

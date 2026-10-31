@@ -1,4 +1,6 @@
 #include "ok/arch/execution_spaces.hpp"
+#include "ok/interrupt/platform.hpp"
+#include "ok/arch/clock.hpp"
 #include <cstddef>
 
 namespace ok::arch::execution
@@ -18,6 +20,8 @@ bool initialized{}, executing{};
 Trap last_trap;
 bool refill{};
 uptr timer_ticks{1000000};
+// The stable counter value at which the user quantum expires.
+uptr user_deadline{};
 template <unsigned C> uptr read_csr()
 {
     uptr value;
@@ -242,11 +246,38 @@ Status copy_to_user(const AddressSpace &space, uptr destination, const void *sou
     }
     return Status::success();
 }
+// A device interrupt in user mode: claim the EIOINTC line and run its top half
+// once the interrupt service owns the controller, otherwise only clear it.
+void complete_irq(Trap &trap)
+{
+    if (trap.kind == TrapKind::timer)
+    {
+        uptr now;
+        asm volatile("rdtime.d %0, $zero" : "=r"(now));
+        interrupt::record_timer_latency(interrupt::TimerWake::user, now > user_deadline ? now - user_deadline : 0,
+                                        arch::clock_frequency());
+        ok_interrupt_tick();
+    }
+    if (trap.kind != TrapKind::interrupt)
+        return;
+    u32 pending;
+    asm volatile("iocsrrd.w %0, %1" : "=r"(pending) : "r"(uptr{0x1800}) : "memory");
+    if (pending == 0)
+        return;
+    const u32 line = static_cast<u32>(__builtin_ctz(pending));
+    trap.vector = line;
+    if (interrupt::platform_irqs_started())
+        ok_interrupt_top_half(static_cast<interrupt::IrqLine>(line));
+    else
+        asm volatile("iocsrwr.w %0, %1" : : "r"(1u << line), "r"(uptr{0x1800}) : "memory");
+}
 static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack_top)
 {
     auto *storage = lookup(space);
+    // Like Linux, the stack need not be mapped; only an access to it faults (a
+    // detached musl thread unmaps its own stack before its exit syscall).
     if (!storage || executing || frame.pc < user_begin || frame.pc >= user_end || frame.sp <= user_begin ||
-        frame.sp > user_end || !user_range(space, frame.sp - 1, 1, true))
+        frame.sp > user_end)
         return Status::invalid_argument("invalid native entry");
     // Reject non-executable continuation targets before ERTN. The hardware
     // PTE still carries NX for branches taken after entry.
@@ -258,7 +289,14 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     executing = true;
     ok_loong_execution_active_frame = &frame;
     write_csr<0x44>(1);
+    // The timer counts InitVal ticks of the stable counter from this write.
+    asm volatile("rdtime.d %0, $zero" : "=r"(user_deadline));
+    user_deadline += timer_ticks & ~uptr(3);
     write_csr<0x41>((timer_ticks & ~uptr(3)) | 1);
+    // User mode takes the timer and, once the interrupt service owns the
+    // EIOINTC, IP0; the kernel itself only ever enables the timer source.
+    if (interrupt::platform_irqs_started())
+        write_csr<4>((1u << 11) | (1u << 2));
     for (;;)
     {
         refill = false;
@@ -277,6 +315,8 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     }
     write_csr<0x41>(0);
     write_csr<0x44>(1);
+    write_csr<4>(1u << 11);
+    complete_irq(last_trap);
     ok_loong_execution_active_frame = nullptr;
     ok_loong_execution_resume_sp = 0;
     executing = false;
@@ -333,6 +373,8 @@ extern "C" void ok_loong_execution_trap(uptr is_refill)
     }
     else if (code == 0 && (status & (1u << 11)))
         last_trap = {TrapKind::timer, 11, 0, 0};
+    else if (code == 0)
+        last_trap = {TrapKind::interrupt, 0, status, 0};
     else if (code == 11)
     {
         frame.pc += 4;

@@ -29,7 +29,7 @@ def main() -> int:
     if args.kernel_fault:
         flags.append("-DOK_NATIVE_TEST_KERNEL_FAULT=1")
     objects = []
-    for name, source in (("boot", "src/arch/i386/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/i386/execution.cpp"),
+    for name, source in (("boot", "src/arch/i386/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/i386/execution.cpp"), ("irq", "src/interrupt/platform_irq.cpp"),
                          ("entry", "src/arch/i386/execution.S"), ("user", "tests/native/i386_execution_user.S"),
                          ("test", "tests/native/i386_execution_test.cpp")):
         target = out / (name + ".o")

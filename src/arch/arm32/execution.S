@@ -251,12 +251,14 @@ ok_arm32_capture:
     ldr r6, [r5, #12]
     ubfx r1, r6, #0, #10
     str r1, [r7, #4]
+    // The timer PPI completes here; any other ID is a device line
+    // (TrapKind::interrupt) whose top half masks and completes it in C.
     cmp r1, #30
-    movne r0, #3
+    movne r0, #4
     strb r0, [r7]
     mov r0, #0
     mcr p15, 0, r0, c14, c2, 1
-    str r6, [r5, #16]
+    streq r6, [r5, #16]
     dsb sy
 2:
     cpsid if

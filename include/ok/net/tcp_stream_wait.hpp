@@ -88,7 +88,10 @@ class TcpStreamWaits final
         if (record->completion != sched::WaitCompletion::none) return Status::already_exists("TCP wait has already completed");
         complete(*record, cause); return status_;
     }
-    Status poll()
+    // `source` is credited to waiters whose stream became readable, writable or
+    // connected, which only received segments do; other completions are
+    // thread wakes (timeouts are timer wakes).
+    Status poll(sched::WakeSource source = sched::WakeSource::thread)
     {
         if (!status_) return status_;
         for (auto &record : waits_) if (record.used && record.completion == sched::WaitCompletion::none)
@@ -106,7 +109,11 @@ class TcpStreamWaits final
             const auto ready = service_.readiness(record.stream);
             if (!open || open->native_tcp_handle != record.stream || (open->flags & nonblock) || !ready ||
                 !ready.value().may_wait(record.endpoint, record.observed, record.interests))
-                complete(record, sched::WaitCompletion::ready);
+            {
+                const bool received = open && ready &&
+                    (ready.value().readable() || ready.value().writable() || ready.value().connect_complete);
+                complete(record, sched::WaitCompletion::ready, received ? source : sched::WakeSource::thread);
+            }
             else if (record.deadline && service_.now() >= *record.deadline)
                 complete(record, sched::WaitCompletion::timeout);
         }
@@ -151,13 +158,13 @@ class TcpStreamWaits final
         record.held = false; const auto id = record.description; record.description = sched::invalid_description;
         remember(scheduler_.release_description(id));
     }
-    void complete(Record &record, sched::WaitCompletion completion)
+    void complete(Record &record, sched::WaitCompletion completion, sched::WakeSource source = sched::WakeSource::thread)
     {
         if (record.completion == sched::WaitCompletion::none)
         {
             auto *thread = scheduler_.find_thread(record.ticket.owner, record.ticket.thread);
             if (thread && thread->wait_registration.pending(record.ticket))
-                if (!scheduler_.complete_wait(record.ticket, completion))
+                if (!scheduler_.complete_wait(record.ticket, completion, source))
                     remember(Status::fault("TCP waiter lost its exact scheduler ticket"));
         }
         record.completion = completion;

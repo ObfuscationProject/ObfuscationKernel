@@ -33,8 +33,8 @@ struct RiscvSignalFrame
     // Raw stored altstack fields, not query(sp). Selection, AUTODISARM commit,
     // and Linux restore_altstack error suppression belong to the caller.
     struct Stack { u64 base{}; u64 size{}; u32 flags{2}; };
-    // Typed sender/child payload; fault/timer/queued-value variants remain unavailable.
-    struct Info { i32 signal{}; i32 code{}; u32 sender_pid{}; u32 sender_uid{}; i32 child_status{}; };
+    // Typed sender/child/timer payload; fault and queued-value variants remain unavailable.
+    struct Info { i32 signal{}; i32 code{}; u32 sender_pid{}; u32 sender_uid{}; i32 child_status{}; i32 timer{}; i32 overrun{}; u64 value{}; };
     struct Placement { u64 address{}; };
     struct Image { std::array<std::byte, frame_bytes> bytes{}; };
     struct Restored { Frame frame{}; SignalMask mask{}; Stack stack{}; };
@@ -192,7 +192,8 @@ struct RiscvSignalFramePolicy
         typename Frame::Placement placement;
         if (!Frame::place(top, begin, end, placement) ||
             ((nested || entering) && !altstack.physically_contains(placement.address))) return false;
-        const typename Frame::Info sender{static_cast<i32>(info.signal), info.code, info.sender_pid, info.sender_uid, info.child_status};
+        const typename Frame::Info sender{static_cast<i32>(info.signal), info.code, info.sender_pid, info.sender_uid, info.child_status,
+            info.timer, info.overrun, info.value};
         typename Frame::Image image;
         arch::execution::UserFrame next;
         if (!Frame::encode(frame, blocked, {altstack.base, altstack.size, altstack.flags}, sender, begin, end, image) ||

@@ -115,6 +115,12 @@ Result<usize> poll_ready(Kernel &kernel, PollWait &wait)
 {
     usize count = 0;
     wait.ready_sets = {};
+    wait.ready_source = sched::WakeSource::thread;
+    // Readable console input or socket data came from that device's events.
+    const auto device_ready = [&](interrupt::EventSource source) {
+        if (wait.ready_source == sched::WakeSource::thread)
+            wait.ready_source = interrupt::event_wake_source(source);
+    };
     for (usize i = 0; i < wait.count; ++i)
     {
         auto &entry = wait.fds[i];
@@ -142,8 +148,15 @@ Result<usize> poll_ready(Kernel &kernel, PollWait &wait)
                 else if (!kernel.scheduler().console_read_authority(wait.pid, wait.console_epoch))
                     events |= OK_POLLERR;
                 else if ((canonical & OK_POLLIN) && kernel.scheduler().console_readable(wait.pid, wait.console_epoch))
+                {
                     events |= OK_POLLIN;
+                    device_ready(interrupt::EventSource::console);
+                }
             }
+            else if (events & OK_POLLIN)
+                if (const auto *description = kernel.scheduler().open_description(wait.descriptions[i]);
+                    description && (description->native_udp_handle || description->native_tcp_handle))
+                    device_ready(interrupt::EventSource::network);
             u16 result = events & (OK_POLLERR | OK_POLLHUP | OK_POLLNVAL);
             if (events & OK_POLLIN) result |= requested & (OK_POLLIN | wait.read_normal);
             if (events & OK_POLLOUT) result |= requested & (OK_POLLOUT | wait.write_normal);

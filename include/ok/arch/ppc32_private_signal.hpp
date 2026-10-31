@@ -103,6 +103,8 @@ struct Diagnostics
     {
     case 8: if(t.kind!=TrapKind::syscall) return {};d.event=Event::syscall;d.trap=0xc00;d.original_r3=static_cast<u32>(f.registers[3]);d.validity=original_r3_valid;break;
     case 10: if(t.kind!=TrapKind::timer) return {};d.event=Event::timer;d.trap=0x900;break;
+    // An external input preempts like the decrementer: resumable, nothing executed.
+    case 4: if(t.kind!=TrapKind::interrupt) return {};d.event=Event::timer;d.trap=0x500;break;
     case 2: case 13:
         if(t.kind!=TrapKind::page_fault) return {};
         d.event=Event::data_fault;d.trap=0x300;d.dar=d.raw_dear;d.dsisr=d.raw_esr;d.validity=dar_valid|dsisr_valid;break;

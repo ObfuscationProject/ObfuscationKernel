@@ -282,7 +282,7 @@ ok_ppc_trap_common:
     mtspr 276,0
     mfspr 0,27
     andi. 0,0,0x4000
-    beq ok_ppc_kernel_fault
+    beq .Lkernel_trap
     mfspr 12,272
     stmw 0,0(12)
     mfspr 0,274
@@ -369,6 +369,51 @@ ok_ppc_trap_common:
     lwz 30,136(1)
     lwz 31,140(1)
     lwz 1,736(1)
+    blr
+
+// Kernel mode: only an external input (IVOR4) or the decrementer (IVOR10)
+// taken inside ok_ppc_idle's window is expected. Resume at ok_ppc_idle_end
+// with MSR[EE] clear, restoring the r0, r12 and CR the stubs saved.
+.Lkernel_trap:
+    mfspr 0,277
+    cmpwi 0,4
+    beq 1f
+    cmpwi 0,10
+    bne ok_ppc_kernel_fault
+1:  mfspr 0,26
+    lis 12,ok_ppc_idle_begin@ha
+    addi 12,12,ok_ppc_idle_begin@l
+    cmplw 0,12
+    blt ok_ppc_kernel_fault
+    lis 12,ok_ppc_idle_end@ha
+    addi 12,12,ok_ppc_idle_end@l
+    cmplw 0,12
+    bge ok_ppc_kernel_fault
+    mtspr 26,12
+    mfspr 0,27
+    rlwinm 0,0,0,17,15
+    mtspr 27,0
+    mfspr 0,276
+    mtcr 0
+    mfspr 12,275
+    mfspr 0,274
+    rfi
+
+// ok_ppc_idle(msr): runs with r3 as MSR (EE and WE set) until an interrupt is
+// taken, which .Lkernel_trap turns into a return to ok_ppc_idle_end; the
+// caller's MSR is then restored. Without a doze the window simply falls through.
+.global ok_ppc_idle
+.global ok_ppc_idle_begin
+.global ok_ppc_idle_end
+ok_ppc_idle:
+    mfmsr 4
+    sync
+ok_ppc_idle_begin:
+    mtmsr 3
+    isync
+ok_ppc_idle_end:
+    mtmsr 4
+    isync
     blr
 
 ok_ppc_kernel_fault:

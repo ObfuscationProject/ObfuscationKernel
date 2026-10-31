@@ -21,7 +21,7 @@ inline constexpr usize max_module_parameters = 16;
 inline constexpr usize max_module_text = 128;
 inline constexpr std::string_view kernel_module_process_prefix{"mod:"};
 // Development cohort for bounded native raw PTY ownership; native userland uses UAPI 0.16.0.
-inline constexpr u32 kernel_module_abi_version = 77;
+inline constexpr u32 kernel_module_abi_version = 78;
 
 struct ModuleId
 {

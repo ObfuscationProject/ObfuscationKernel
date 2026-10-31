@@ -5,7 +5,7 @@ namespace ok::user
 {
 inline constexpr std::string_view native_sessions_profile = "bootcpu-serialized-process-group-session-console-lifecycle-v3";
 inline constexpr u32 native_sessions_version = 3;
-inline constexpr u32 native_sessions_module_abi = 77;
+inline constexpr u32 native_sessions_module_abi = 78;
 inline constexpr u32 native_sessions_pid_bits = 32;
 inline constexpr u32 native_sessions_process_capacity = 64;
 inline constexpr u32 native_sessions_fork_inherits = 1;

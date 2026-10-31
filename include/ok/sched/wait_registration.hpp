@@ -23,6 +23,18 @@ enum class WaitCompletion : u8
     interrupted,
 };
 
+// What made a wait ready: another thread's state change, a deadline, a device
+// event the kernel served after its interrupt, or one it found by polling a
+// source that has no bound interrupt line.
+enum class WakeSource : u8
+{
+    thread,
+    timer,
+    interrupt,
+    poll,
+};
+inline constexpr usize wake_source_count = 4;
+
 // A single authoritative record belongs to one scheduler thread. The caller
 // serializes arm/complete/cancel on the boot CPU; this class supplies no IRQ or
 // SMP synchronization. Exclusive relocation keeps tickets valid; never duplicate
@@ -41,6 +53,7 @@ class WaitRegistration final
             return Status::overflow("wait registration generation exhausted");
         ticket_ = {owner, thread, ticket_.generation + 1};
         completion_ = WaitCompletion::none;
+        source_ = WakeSource::thread;
         active_ = true;
         return ticket_;
     }
@@ -50,13 +63,15 @@ class WaitRegistration final
         return active_ && ticket == ticket_;
     }
 
-    bool complete(WaitTicket ticket, WaitCompletion completion)
+    // A timeout is always a timer wake, whatever `source` the caller names.
+    bool complete(WaitTicket ticket, WaitCompletion completion, WakeSource source = WakeSource::thread)
     {
         if (!pending(ticket) ||
             (completion != WaitCompletion::ready && completion != WaitCompletion::timeout &&
              completion != WaitCompletion::cancelled && completion != WaitCompletion::interrupted))
             return false;
         completion_ = completion;
+        source_ = completion == WaitCompletion::timeout ? WakeSource::timer : source;
         active_ = false;
         return true;
     }
@@ -69,6 +84,8 @@ class WaitRegistration final
     [[nodiscard]] WaitTicket ticket() const { return ticket_; }
     [[nodiscard]] bool active() const { return active_; }
     [[nodiscard]] WaitCompletion completion() const { return completion_; }
+    // Meaningful once the wait completed; reset by the next arm().
+    [[nodiscard]] WakeSource source() const { return source_; }
 
   private:
     // Test-only fault injection reaches the otherwise impractical u64 boundary;
@@ -76,6 +93,7 @@ class WaitRegistration final
     friend struct WaitRegistrationTestAccess;
     WaitTicket ticket_{};
     WaitCompletion completion_{WaitCompletion::none};
+    WakeSource source_{WakeSource::thread};
     bool active_{};
 };
 

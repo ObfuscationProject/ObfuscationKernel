@@ -24,13 +24,13 @@ def main() -> int:
     flags = ["-msimd=none"]
     cxx = ["-std=c++23", "-O2", "-ffreestanding", "-fno-builtin", "-fno-exceptions",
            "-fno-stack-protector", "-fno-threadsafe-statics", "-Wall", "-Wextra", "-Wpedantic",
-           "-Werror", "-I", str(root / "include")]
+           "-Werror", "-I", str(root / "include"), "-DOK_ARCH_TARGET_LOONGARCH64"]
     if args.nx_branch:
         cxx.append("-DOK_NATIVE_NX_BRANCH=1")
     if args.kernel_fault:
         cxx.append("-DOK_NATIVE_KERNEL_FAULT=1")
-    sources = ["src/boot/raw_handoff.cpp", "src/arch/loongarch64/boot.S", "src/arch/loongarch64/execution.cpp",
-               "src/arch/loongarch64/execution.S", "tests/native/loongarch64_execution_test.cpp",
+    sources = ["src/boot/raw_handoff.cpp", "src/arch/loongarch64/boot.S", "src/arch/loongarch64/execution.cpp", "src/interrupt/platform_irq.cpp",
+               "src/arch/clock.cpp", "src/arch/loongarch64/execution.S", "tests/native/loongarch64_execution_test.cpp",
                "tests/native/loongarch64_execution_user.S"]
     objects = []
     for index, source in enumerate(sources):

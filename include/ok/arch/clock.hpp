@@ -19,5 +19,8 @@ void invalidate_clock();
 // Returns zero before successful initialization, otherwise the counter's
 // conversion granularity rounded upward to whole nanoseconds (not accuracy).
 [[nodiscard]] u64 clock_resolution_ns();
+// The counter's frequency in Hz, or zero before successful initialization. On
+// every profile but the PC the platform timer counts the same counter.
+[[nodiscard]] u64 clock_frequency();
 
 } // namespace ok::arch

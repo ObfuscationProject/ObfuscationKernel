@@ -647,6 +647,7 @@ PrivateProcessQueue *private_signal_shared(Kernel &kernel, sched::ProcessId pid)
 } // namespace
 void private_signal_retire(sched::ProcessId pid)
 {
+    private_timer_retire(pid);
     for (auto &entry : private_signal_actions)
         if (entry.pid == pid)
         {
@@ -676,6 +677,7 @@ void private_signal_thread_retire(sched::ProcessId pid, sched::ThreadId tid, mem
     if (!lease.pool || lease.slot >= private_signal_queues.size()) return;
     auto &queue = private_signal_queues[lease.slot];
     if (queue.identity() != PrivateSignalQueue::Identity{pid, tid, lease.generation}) return;
+    private_timer_thread_exit(pid, tid, queue);
     // Revoke borrowed views while preserving the non-repeating sequence counter.
     queue.retire();
     private_signal_altstacks[lease.slot].reset();
@@ -788,6 +790,7 @@ Status private_signal_fork(Kernel &kernel, sched::ProcessId parent, sched::Threa
 #endif
     *to = from->fork_copy();
     *child_stack = *parent_stack;
+    private_timer_retire(child); // Neither itimers nor POSIX timers are inherited.
     return PrivateChildExit::inherit(kernel.scheduler(), parent, caller, child, private_signal_find);
 }
 void private_signal_exec(Kernel &kernel, sched::ProcessControlBlock &process, PrivateSignalQueue *previous,
@@ -803,6 +806,12 @@ void private_signal_exec(Kernel &kernel, sched::ProcessControlBlock &process, Pr
         return;
     }
     actions->reset_for_exec();
+    // POSIX timers die with the old image (Linux exit_itimers) and so do their
+    // queued records; ITIMER_REAL and its SIGALRM survive.
+    private_timer_exec(process.pid());
+    previous->discard_timers();
+    next->discard_timers();
+    owner->shared.discard_timers();
     auto *stack = private_signal_altstack(process.threads()[0]);
     if (!stack) { runtime_failure = Status::fault("private signal exec altstack owner"); started = false; return; }
     old_stack.clear_for_exec();
@@ -2093,6 +2102,78 @@ i64 native_process_kill(Kernel &kernel, const sched::ProcessControlBlock &sender
             return native_process_kill_one(kernel, origin, target, static_cast<u64>(signal));
         });
 }
+bool private_signal_ignored(Kernel &kernel, sched::ProcessId pid, u32 signal)
+{
+    using Codec = SignalActionCodec<private_signal_profile>;
+    auto *state = private_signal_process(kernel, pid);
+    if (!state) return false;
+    const auto *action = state->table.find(signal);
+    return !action || Codec::ignored(signal, *action);
+}
+PrivateTimerSend private_timer_signal(Kernel &kernel, sched::ProcessControlBlock &process,
+                                      sched::ThreadId tid, sched::PendingSignalInfo info)
+{
+    using Codec = SignalActionCodec<private_signal_profile>;
+    const auto signal = info.signal;
+    if (process.state() == sched::ProcessState::zombie || process.state() == sched::ProcessState::exited ||
+        process.resources().personality != Personality::linux) return PrivateTimerSend::departed;
+    auto *state = private_signal_process(kernel, process.pid());
+    if (!state) return PrivateTimerSend::retry;
+    // Job control remains an explicit runtime gate; such a timer signal is dropped.
+    if (signal == Codec::stop_signal || signal == (Codec::mips ? 24 : 20) || signal == (Codec::mips ? 26 : 21) ||
+        signal == (Codec::mips ? 27 : 22) || signal == Codec::continue_signal) return PrivateTimerSend::ignored;
+    const auto *action = state->table.find(signal);
+    if (!action) return PrivateTimerSend::ignored;
+    const bool ignored = Codec::ignored(signal, *action);
+    const bool timer = info.code == sched::PendingSignalInfo::timer_code(Codec::max_signal);
+    if (tid)
+    {
+        // SIGEV_THREAD_ID follows the tgkill admission of its target.
+        auto *target = kernel.scheduler().find_thread(process.pid(), tid);
+        if (!target || target->state == sched::ProcessState::exited || !target->native_active)
+            return PrivateTimerSend::departed;
+        if (target->state == sched::ProcessState::blocked && !private_signal_admit_blocked(kernel, process, *target))
+            return PrivateTimerSend::retry;
+        const auto *real = signal_waits.real_blocked(*target);
+        if (ignored && !target->native_signal_mask.contains(signal) && !(real && real->contains(signal)))
+            return PrivateTimerSend::ignored;
+        auto *queue = private_signal_queue(*target);
+        if (!queue) return PrivateTimerSend::retry;
+        return queue->enqueue_timer(signal, info.timer, info.overrun, info.value) == PrivateSignalQueue::Enqueue::queued
+            ? PrivateTimerSend::sent : PrivateTimerSend::retry;
+    }
+    if (signal == 9)
+    {
+        state->group_kill = true;
+        return PrivateTimerSend::sent;
+    }
+    // Process-directed timers follow the kill admission against the leader.
+    const auto target = user::find_directed_signal_target(kernel.scheduler(), 0, process.pid());
+    if (!target) return PrivateTimerSend::departed;
+    const auto *real = signal_waits.real_blocked(*target.thread);
+    if (ignored && !target.thread->native_signal_mask.contains(signal) && !(real && real->contains(signal)))
+        return PrivateTimerSend::ignored;
+    bool live = false, unblocked = false, qualified = false;
+    for (const auto &peer : process.threads())
+    {
+        if (peer.state == sched::ProcessState::exited || !peer.native_active) continue;
+        live = true;
+        if (peer.native_signal_mask.contains(signal)) continue;
+        unblocked = true;
+        qualified |= peer.state == sched::ProcessState::runnable || peer.state == sched::ProcessState::running ||
+                     private_signal_admit_blocked(kernel, process, peer);
+    }
+    if (!live) return PrivateTimerSend::departed;
+    if (!ignored && unblocked && !qualified) return PrivateTimerSend::retry;
+    const auto result = timer ? state->shared.enqueue_timer(signal, info.timer, info.overrun, info.value)
+                              : state->shared.enqueue_kernel(signal);
+    // A legacy timer record coalesced into another pending occurrence was not
+    // queued; Linux keeps a timer's own record, so the expiry stays owed.
+    if (result == PrivateProcessQueue::Queue::Enqueue::queued ||
+        (!timer && result == PrivateProcessQueue::Queue::Enqueue::coalesced))
+        return PrivateTimerSend::sent;
+    return PrivateTimerSend::retry;
+}
 void private_process_signal_fatal(Kernel &kernel)
 {
     // Stable side-table iteration survives group teardown and PCB compaction.
@@ -2119,6 +2200,7 @@ bool private_signal_call(Kernel &kernel, sched::ProcessControlBlock &process,
 {
     if (process.resources().personality != Personality::linux) return false;
     if (private_signal_wait_call(kernel, process, thread, complete, result)) return true;
+    if (private_timer_call(kernel, process, thread, result)) return true;
     const auto call = hw::syscall(thread.native_frame);
     using Codec = SignalActionCodec<private_signal_profile>;
     using Operation = lu::Operation;
@@ -2200,6 +2282,7 @@ bool private_signal_call(Kernel &kernel, sched::ProcessControlBlock &process,
         }
         result = update_signal_action<private_signal_profile>(*actions, static_cast<i32>(a[0]), a[1], a[2], a[3],
             read, write, [&](u32 signal) noexcept {
+                private_timer_discard(kernel, process.pid(), signal);
                 shared->discard(signal);
                 for (auto &peer : process.threads())
                     if (auto *pending = private_signal_queue(peer)) pending->discard(signal);

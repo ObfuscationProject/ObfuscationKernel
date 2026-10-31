@@ -1,4 +1,5 @@
 #include "ok/arch/execution_spaces.hpp"
+#include "ok/interrupt/platform.hpp"
 
 #include <cstddef>
 
@@ -142,6 +143,35 @@ void acknowledge_irq(uptr vector)
         outb(0xa0, 0x20);
     if (vector >= 32 && vector < 48)
         outb(0x20, 0x20);
+}
+// PIT channel 0 runs in mode 2, the rate generator Linux programs: IRQ 0
+// rises as the count reloads, so the count latched in the handler is how far
+// past that edge the tick was taken (modulo one period).
+constexpr u16 pit_divisor = 11932; // Approximately 100 actual IRQs/second.
+constexpr u64 pit_frequency = 1193182;
+u64 pit_tick_late()
+{
+    outb(0x43, 0x00); // Latch channel 0.
+    const u16 low = inb(0x40);
+    const u16 count = static_cast<u16>(low | (u16{inb(0x40)} << 8));
+    return count != 0 && count <= pit_divisor ? pit_divisor - count : 0;
+}
+// Vector 32 is the PIT tick; 33..47 are platform lines whose top half the
+// interrupt service runs once it has started. Before that, only acknowledge.
+// The kernel takes interrupts only in the idle wait.
+void complete_irq(uptr vector, interrupt::TimerWake wake)
+{
+    if (vector < 32 || vector >= 48)
+        return;
+    if (vector == 32)
+    {
+        interrupt::record_timer_latency(wake, pit_tick_late(), pit_frequency);
+        ok_interrupt_tick();
+    }
+    if (vector == 32 || !interrupt::platform_irqs_started())
+        acknowledge_irq(vector);
+    else
+        ok_interrupt_top_half(static_cast<interrupt::IrqLine>(vector - 32));
 }
 void install_gate(usize vector, uptr entry, u8 attributes = 0x8e)
 {
@@ -333,8 +363,7 @@ Status initialize()
     io_wait();
     outb(0x21, master_mask);
     outb(0xa1, slave_mask);
-    constexpr u16 pit_divisor = 11932; // Approximately 100 actual IRQs/second.
-    outb(0x43, 0x36);
+    outb(0x43, 0x34); // Channel 0, low/high byte, mode 2, binary.
     outb(0x40, pit_divisor & 0xff);
     outb(0x40, pit_divisor >> 8);
     initialized = true;
@@ -524,9 +553,10 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
         return Status::fault("invalid native user stack selector");
     const auto stack_base = stack_selector == 0x33 ? frame.fs_base : stack_selector == 0x3b ? frame.gs_base : 0;
     const auto stack_address = frame.sp + stack_base;
-    if (stack_address < frame.sp || stack_address <= user_begin || stack_address > user_end ||
-        !user_range(space, stack_address - 1, 1, true))
-        return Status::fault("native user stack has invalid permissions");
+    // Like Linux, the stack need not be mapped; only an access to it faults (a
+    // detached musl thread unmaps its own stack before its exit syscall).
+    if (stack_address < frame.sp || stack_address <= user_begin || stack_address > user_end)
+        return Status::fault("native user stack lies outside the user window");
     if ((frame.fs_base != 0 && (frame.fs_base < user_begin || frame.fs_base >= user_end)) ||
         (frame.gs_base != 0 && (frame.gs_base < user_begin || frame.gs_base >= user_end)))
         return Status::fault("user TLS base lies outside the native user window");
@@ -540,15 +570,22 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     const auto old_slave = inb(0xa1);
     asm volatile("mov %%fs, %0; mov %%gs, %1" : "=m"(ok_i386_execution_kernel_fs), "=m"(ok_i386_execution_kernel_gs));
     executing = true;
-    outb(0x21, 0xfe);
-    outb(0xa1, 0xff);
+    const bool routed = interrupt::platform_irqs_started();
+    if (!routed)
+    {
+        outb(0x21, 0xfe);
+        outb(0xa1, 0xff);
+    }
     gdt[6] = data_descriptor(frame.fs_base);
     gdt[7] = data_descriptor(frame.gs_base);
     write_cr3(space.root);
     ok_i386_execution_enter(&frame);
     write_cr3(old_root);
-    outb(0x21, old_master);
-    outb(0xa1, old_slave);
+    if (!routed)
+    {
+        outb(0x21, old_master);
+        outb(0xa1, old_slave);
+    }
     executing = false;
     ok_i386_execution_active_frame = nullptr;
     tss.esp0 = old_stack_top;
@@ -588,16 +625,17 @@ extern "C" void ok_i386_execution_trap(const SavedTrap *saved)
     last_trap = {saved->vector == 128  ? TrapKind::syscall
                  : saved->vector == 32 ? TrapKind::timer
                  : saved->vector == 14 ? TrapKind::page_fault
+                 : saved->vector > 32 && saved->vector < 48 ? TrapKind::interrupt
                                        : TrapKind::exception,
                  static_cast<u32>(saved->vector), saved->error, fault_address, reinterpret_cast<uptr>(saved)};
-    acknowledge_irq(saved->vector);
+    complete_irq(saved->vector, interrupt::TimerWake::user);
 }
 
 extern "C" void ok_i386_execution_kernel_trap(const SavedTrap *saved)
 {
     if (saved->vector >= 32 && saved->vector < 48)
     {
-        acknowledge_irq(saved->vector);
+        complete_irq(saved->vector, interrupt::TimerWake::idle);
         return;
     }
     console("OK_NATIVE_KERNEL_FAULT vector=");

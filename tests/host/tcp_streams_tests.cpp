@@ -375,6 +375,35 @@ void ethernet_integration()
     CHECK(f.waits.observe(ticket).value().completion == sched::WaitCompletion::ready); CHECK(f.waits.finish(ticket));
     CHECK(f.scheduler.close_descriptor(f.process().resources(), fd.value())); CHECK(f.udp.close(udp_socket.value()));
 }
+// A pass without a device event leaves the TX ledger and RX queue alone; a
+// device pass credits the waiters its frames made ready with its source and
+// reports a backlog when it stopped at the receive budget.
+void ethernet_link_passes()
+{
+    auto owner = fixture(); auto &f = *owner; Device device;
+    const LinkPass idle{false, sched::WakeSource::interrupt}, irq{true, sched::WakeSource::interrupt};
+    auto fd = f.operations.open(f.pid); CHECK(fd); CHECK(f.operations.bind(f.pid, fd.value(), local));
+    CHECK(f.operations.connect(f.pid, fd.value(), peer, 100, 0));
+    CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 0, irq)); CHECK(device.sent == 1);
+    CHECK(device.reaps == 1 && device.receives == 1);
+    auto ticket = f.wait(fd.value(), tcp::Readiness::connect_interest);
+    device.push(ethernet(packet(peer, local, 200, 101, tcp_syn | tcp_ack)));
+    CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 1, idle));
+    CHECK(device.reaps == 1 && device.receives == 1 && device.count == 1);
+    CHECK(f.waits.observe(ticket).value().completion == sched::WaitCompletion::none);
+    const auto interrupt_wakes = f.scheduler.wakes(sched::WakeSource::interrupt);
+    CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 2, irq)); CHECK(device.count == 0);
+    CHECK(f.waits.observe(ticket).value().completion == sched::WaitCompletion::ready);
+    CHECK(f.scheduler.find_thread(ticket.owner, ticket.thread)->wait_registration.source() == sched::WakeSource::interrupt);
+    CHECK(f.scheduler.wakes(sched::WakeSource::interrupt) == interrupt_wakes + 1); CHECK(f.waits.finish(ticket));
+    CHECK(!f.executor.state().receive_backlog);
+    for (usize i = 0; i < NativeTcpEthernetExecutor::budget; ++i) device.push(arp_request());
+    CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 3, irq));
+    CHECK(device.count == 0 && f.executor.state().receive_backlog);
+    CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 4, idle)); CHECK(!f.executor.state().receive_backlog);
+    CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 5, irq)); CHECK(!f.executor.state().receive_backlog);
+    CHECK(f.scheduler.close_descriptor(f.process().resources(), fd.value()));
+}
 void ethernet_failure_controls()
 {
     for (usize control = 0; control < 4; ++control)
@@ -408,6 +437,6 @@ int main()
     linux_profile<abi::linux_user::Profile::rv64>(); linux_profile<abi::linux_user::Profile::rv32>();
     linux_profile<abi::linux_user::Profile::loongarch64>(); linux_profile<abi::linux_user::Profile::mips>();
     linux_profile<abi::linux_user::Profile::mips64>(); linux_profile<abi::linux_user::Profile::ppc>();
-    ethernet_integration(); ethernet_failure_controls();
+    ethernet_integration(); ethernet_link_passes(); ethernet_failure_controls();
     std::printf("TCP_STREAMS_HOSTED_PASS checks=%zu real_scheduler=1 guest_execution=0 socket_execution=0 nic_execution=0\n", checks);
 }

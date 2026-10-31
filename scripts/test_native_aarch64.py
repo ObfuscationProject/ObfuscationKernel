@@ -25,10 +25,10 @@ def main() -> int:
     flags = ["-std=c++23", "-O2", "-ffreestanding", "-fno-builtin", "-fno-exceptions",
              "-fno-stack-protector", "-fno-use-cxa-atexit", "-fno-threadsafe-statics", "-fno-pic", "-fno-pie",
              "-mgeneral-regs-only", "-mstrict-align", "-mno-outline-atomics", "-Wall", "-Wextra", "-Werror",
-             "-I", str(project / "include")]
+             "-I", str(project / "include"), "-DOK_ARCH_TARGET_AARCH64"]
     objects = []
-    for name, source in (("boot", "src/arch/aarch64/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/aarch64/execution.cpp"),
-                         ("entry", "src/arch/aarch64/execution.S"), ("user", "tests/native/aarch64_execution_user.S"),
+    for name, source in (("boot", "src/arch/aarch64/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/aarch64/execution.cpp"), ("irq", "src/interrupt/platform_irq.cpp"),
+                         ("clock", "src/arch/clock.cpp"), ("entry", "src/arch/aarch64/execution.S"), ("user", "tests/native/aarch64_execution_user.S"),
                          ("test", "tests/native/aarch64_execution_test.cpp")):
         target = out / (name + ".o")
         command = [gxx, *flags] if source.endswith(".cpp") else [gcc]

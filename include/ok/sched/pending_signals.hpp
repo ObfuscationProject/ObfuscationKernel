@@ -7,8 +7,10 @@
 namespace ok::sched
 {
 
-// Owned sender, zero-payload SI_KERNEL or trusted child-completion payload.
-// Child status is separate from the packed wait word. No pointers are retained.
+// Owned sender, zero-payload SI_KERNEL, trusted child-completion or timer
+// payload. Child status is separate from the packed wait word; a timer record
+// carries its timer id, overrun count and the sigevent value word verbatim.
+// No pointers are retained.
 struct PendingSignalInfo
 {
     u32 signal{};
@@ -16,12 +18,23 @@ struct PendingSignalInfo
     u32 sender_pid{};
     u32 sender_uid{};
     i32 child_status{};
+    i32 timer{};
+    i32 overrun{};
+    u64 value{};
     constexpr bool operator==(const PendingSignalInfo &) const = default;
 
+    // SI_TIMER; MIPS numbers it -3 and keeps -2 for SI_ASYNCIO.
+    [[nodiscard]] static constexpr i32 timer_code(u32 maximum_signal) noexcept
+    {
+        return maximum_signal == 128 ? -3 : -2;
+    }
     [[nodiscard]] constexpr bool valid(u32 maximum_signal) const noexcept
     {
         if ((maximum_signal != 64 && maximum_signal != 128) || !signal || signal > maximum_signal)
             return false;
+        if (code == timer_code(maximum_signal))
+            return !sender_pid && !sender_uid && !child_status && timer >= 0 && overrun >= 0;
+        if (timer || overrun || value) return false;
         if (code == 0 || code == -6) return child_status == 0;
         if (code == 128) return !sender_pid && !sender_uid && !child_status;
         if (signal != (maximum_signal == 128 ? 18U : 17U) || !sender_pid || sender_pid > 0x7fffffffU)
@@ -92,6 +105,14 @@ class PendingSignals
     [[nodiscard]] constexpr Enqueue enqueue_kernel(u32 signal)
     {
         return enqueue_checked({signal, 128, 0, 0});
+    }
+    // Trusted timer expiry only. Each timer keeps at most one record queued;
+    // a coalesced legacy signal did not queue this timer's record.
+    [[nodiscard]] constexpr Enqueue enqueue_timer(u32 signal, i32 timer, i32 overrun, u64 value)
+    {
+        const PendingSignalInfo info{signal, PendingSignalInfo::timer_code(MaximumSignal), 0, 0, 0,
+                                     timer, overrun, value};
+        return info.valid(MaximumSignal) ? enqueue_checked(info) : Enqueue::invalid;
     }
     // Trusted lifecycle callers only. Generic sender enqueue still rejects
     // positive CLD codes; signal number and cause cannot be supplied as siginfo.
@@ -170,6 +191,44 @@ class PendingSignals
             }
         return false;
     }
+    [[nodiscard]] constexpr bool timer_queued(u32 signal, i32 timer) const noexcept
+    {
+        return find_timer(signal, timer) != nullptr;
+    }
+    // The owner refreshes the overrun its queued record will report; serialized
+    // callers hold no delivery ticket across the update.
+    constexpr bool refresh_timer(u32 signal, i32 timer, i32 overrun) noexcept
+    {
+        auto *entry = const_cast<Entry *>(find_timer(signal, timer));
+        if (!entry || overrun < 0) return false;
+        entry->info.overrun = overrun;
+        return true;
+    }
+    constexpr void discard_timer(u32 signal, i32 timer) noexcept
+    {
+        const auto *entry = find_timer(signal, timer);
+        if (!entry) return;
+        if (signal < 32)
+        {
+            normal_mask_.set(signal, false);
+            normal_[signal - 1] = {};
+            return;
+        }
+        erase_realtime(static_cast<usize>(entry - realtime_.data()));
+    }
+    // Every timer record, when the timers that own them are deleted together.
+    constexpr void discard_timers() noexcept
+    {
+        const auto code = PendingSignalInfo::timer_code(MaximumSignal);
+        for (u32 signal = 1; signal < 32; ++signal)
+            if (normal_mask_.contains(signal) && normal_[signal - 1].info.code == code)
+            {
+                normal_mask_.set(signal, false);
+                normal_[signal - 1] = {};
+            }
+        for (usize i = 0; i < realtime_count_;)
+            if (realtime_[i].info.code == code) erase_realtime(i); else ++i;
+    }
     constexpr void discard(u32 signal) noexcept
     {
         if (!signal || signal > MaximumSignal) return;
@@ -199,11 +258,26 @@ class PendingSignals
         u64 sequence{};
         PendingSignalInfo info{};
     };
-    static_assert(sizeof(PendingSignalInfo) == 20);
-    static_assert(sizeof(Entry) == (alignof(u64) == 8 ? 32 : 28));
+    static_assert(sizeof(PendingSignalInfo) == (alignof(u64) == 8 ? 40 : 36));
+    static_assert(sizeof(Entry) == (alignof(u64) == 8 ? 48 : 44));
     [[nodiscard]] static constexpr bool matches(const Entry &entry, const Delivery &ticket)
     {
         return entry.sequence == ticket.sequence && entry.info == ticket.info;
+    }
+    [[nodiscard]] constexpr const Entry *find_timer(u32 signal, i32 timer) const noexcept
+    {
+        const auto code = PendingSignalInfo::timer_code(MaximumSignal);
+        if (!signal || signal > MaximumSignal) return nullptr;
+        if (signal < 32)
+        {
+            const auto &entry = normal_[signal - 1];
+            return normal_mask_.contains(signal) && entry.info.code == code && entry.info.timer == timer
+                ? &entry : nullptr;
+        }
+        for (usize i = 0; i < realtime_count_; ++i)
+            if (realtime_[i].info.signal == signal && realtime_[i].info.code == code && realtime_[i].info.timer == timer)
+                return &realtime_[i];
+        return nullptr;
     }
     constexpr void erase_realtime(usize at)
     {

@@ -1,4 +1,6 @@
 #include "ok/core/types.hpp"
+#include "ok/interrupt/platform.hpp"
+#include "../../interrupt/console_ring.hpp"
 
 namespace
 {
@@ -91,12 +93,45 @@ extern "C" int ok_platform_input_poll()
     return -1;
 }
 
-extern "C" int ok_platform_console_poll()
+namespace
+{
+// DUART receive bytes the MPIC source 42 bottom half moved out of the UART.
+constexpr ok::interrupt::IrqLine uart_irq = 42;
+constinit ok::interrupt::ConsoleRing<256> uart_ring{};
+
+int read_uart()
 {
     constexpr ok::uptr uart_lsr = uart_primary_base + 0x05;
     if ((mmio8(uart_lsr) & uart_lsr_data_ready) == 0)
-    {
         return -1;
-    }
     return static_cast<int>(mmio8(uart_primary_base));
+}
+
+// The line is level: a full ring turns the received-data interrupt off until
+// the console has drained the backlog.
+void quiet_uart(bool quiet)
+{
+    mmio8(uart_primary_base + 0x01) = quiet ? 0x00 : 0x01;
+}
+void uart_interrupt(void *, ok::interrupt::IrqLine)
+{
+    uart_ring.fill(read_uart, quiet_uart);
+}
+} // namespace
+
+extern "C" ok::Status ok_platform_bind_irqs()
+{
+    if (auto status = ok::interrupt::bind_platform_irq(uart_irq, ok::interrupt::IrqTrigger::level, uart_interrupt,
+                                                       nullptr);
+        !status.ok())
+        return status;
+    mmio8(uart_primary_base + 0x01) = 0x01; // Received-data-available interrupt.
+    ok::interrupt::drive_events(ok::interrupt::EventSource::console);
+    ok::interrupt::drive_events(ok::interrupt::EventSource::input); // No input device to poll.
+    return ok::Status::success();
+}
+
+extern "C" int ok_platform_console_poll()
+{
+    return uart_ring.take(read_uart, quiet_uart);
 }

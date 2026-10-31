@@ -138,11 +138,23 @@ Status prepare_native_thread(sched::ThreadControlBlock &thread)
     return status;
 }
 extern "C" void ok_platform_console_write_char(char) __attribute__((weak));
+namespace
+{
+char console_last{'\n'};
+} // namespace
 void emit(std::string_view text)
 {
     if (ok_platform_console_write_char != nullptr)
         for (char c : text)
             ok_platform_console_write_char(c);
+    if (!text.empty())
+        console_last = text.back();
+}
+void emit_line(std::string_view text)
+{
+    if (console_last != '\n')
+        emit("\n");
+    emit(text);
 }
 void emit_number(u64 value)
 {
@@ -184,6 +196,7 @@ void emit_entry_stack_stats()
     emit(" faults="); emit_number(entry_faults);
     emit(" rejected="); emit_number(entry_rejections);
     emit(" guards=mapped-canaries smp=0\n");
+    report_interrupts();
 }
 namespace
 {
@@ -667,9 +680,9 @@ void release_process(Kernel &kernel, u64 pid)
         }
     }
 }
-void input(char value)
+void input(char value, sched::WakeSource source)
 {
     if (!shutdown_admission_closed && !native_shutdown_pending() && runtime_kernel != nullptr)
-        runtime_kernel->scheduler().console_input(value);
+        runtime_kernel->scheduler().console_input(value, source);
 }
 } // namespace ok::user::native

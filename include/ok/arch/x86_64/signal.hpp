@@ -24,8 +24,8 @@ struct X86SignalFrame
     static constexpr std::array<usize, 15> register_slots{7, 6, 5, 4, 3, 2, 1, 0, 9, 10, 8, 13, 11, 14, 12};
 
     struct Stack { u64 pointer{}; u64 size{}; u32 flags{2}; };
-    // Typed sender/child payload. Other fault and timer variants remain unavailable.
-    struct Info { i32 signal{}; i32 code{}; u32 sender_pid{}; u32 sender_uid{}; i32 child_status{}; };
+    // Typed sender/child/timer payload. Other fault variants remain unavailable.
+    struct Info { i32 signal{}; i32 code{}; u32 sender_pid{}; u32 sender_uid{}; i32 child_status{}; i32 timer{}; i32 overrun{}; u64 value{}; };
     static constexpr bool valid_info(Info info)
     {
         return InfoCodec::template frame_valid<>(info);
@@ -199,7 +199,7 @@ struct X86SignalFramePolicy
         if (!Frame::place_below(top, begin, end, placement) ||
             ((nested || entering) && !altstack.physically_contains(placement.address))) return false;
         const Frame::Info sender{static_cast<i32>(info.signal), info.code, info.sender_pid,
-                                 info.sender_uid, info.child_status};
+                                 info.sender_uid, info.child_status, info.timer, info.overrun, info.value};
         if (!Frame::valid_info(sender)) return false;
         const auto image = Frame::encode(frame, blocked, {altstack.base, altstack.size, altstack.flags},
             sender, placement, action.restorer, mxcsr_mask);

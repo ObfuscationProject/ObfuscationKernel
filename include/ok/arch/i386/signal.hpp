@@ -157,7 +157,7 @@ struct I386SignalFrame : I386SignalWire
     static constexpr u16 user_cs = 0x23, user_ds = 0x1b;
     static constexpr u64 word_mask = 0xffffffffULL;
     struct Stack { u64 base{}, size{}; u32 flags{2}; };
-    struct Info { i32 signal{}, code{}; u32 sender_pid{}, sender_uid{}; i32 child_status{}; };
+    struct Info { i32 signal{}, code{}; u32 sender_pid{}, sender_uid{}; i32 child_status{}, timer{}, overrun{}; u64 value{}; };
     struct TrapInfo { u32 number{}, error{}, address{}; };
     struct Placement { u64 address{}, fp_address{}, fx_address{}; };
     struct Image { std::array<std::byte, max_image_bytes> bytes{}; usize used{}; };
@@ -357,7 +357,8 @@ struct I386SignalFramePolicy
         u64 restorer{};
         if (!(action.flags & 0x04000000) ||
             !Codec::select_restorer(true, action.restorer, 0, begin, end, restorer)) return false;
-        const typename Codec::Info sender{static_cast<i32>(info.signal), info.code, info.sender_pid, info.sender_uid, info.child_status};
+        const typename Codec::Info sender{static_cast<i32>(info.signal), info.code, info.sender_pid, info.sender_uid, info.child_status,
+            info.timer, info.overrun, info.value};
         typename Codec::Image image;
         arch::execution::UserFrame next;
         if (!Codec::encode(frame, blocked, {altstack.base, altstack.size, altstack.flags}, sender, {},

@@ -1,4 +1,6 @@
 #include "ok/arch/execution_spaces.hpp"
+#include "ok/interrupt/platform.hpp"
+#include "ok/arch/clock.hpp"
 
 #include <cstddef>
 
@@ -411,9 +413,11 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     if (executing)
         return Status::busy("native backend currently supports one executing CPU");
     const auto code = lookup(space, frame.pc);
+    // Like Linux, the stack need not be mapped; only an access to it faults (a
+    // detached musl thread unmaps its own stack before its exit syscall).
     if (!permits(code, false) || (code & user_xn) != 0 || (frame.pc & 3) != 0 || frame.sp <= user_begin ||
-        frame.sp > user_end || (frame.sp & 15) != 0 || !user_range(space, frame.sp - 1, 1, true))
-        return Status::fault("native user entry or stack has invalid permissions");
+        frame.sp > user_end || (frame.sp & 15) != 0)
+        return Status::fault("native user entry or stack pointer is invalid");
     if ((frame.fs_base != 0 && (frame.fs_base < user_begin || frame.fs_base >= user_end)) ||
         (frame.gs_base != 0 && (frame.gs_base < user_begin || frame.gs_base >= user_end)))
         return Status::fault("user TLS base lies outside the native user window");
@@ -461,9 +465,23 @@ extern "C" void ok_arm_execution_trap(u64 vector, uptr capture_sp)
         const auto acknowledge = mmio(gic_cpu + 0xc);
         const auto irq = acknowledge & 0x3ff;
         asm volatile("msr cntp_ctl_el0, xzr; isb" : : : "memory");
-        if (irq < 1020)
+        // The timer completes here; any other ID is a device line whose top
+        // half masks and completes it once the interrupt service runs.
+        if (irq == timer_irq)
+        {
+            // CNTP_CVAL keeps the user quantum's expiry.
+            u64 compare, count;
+            asm volatile("mrs %0, cntp_cval_el0; mrs %1, cntpct_el0" : "=r"(compare), "=r"(count));
+            interrupt::record_timer_latency(interrupt::TimerWake::user, count > compare ? count - compare : 0,
+                                            arch::clock_frequency());
             mmio(gic_cpu + 0x10) = acknowledge;
-        last_trap = {irq == timer_irq ? TrapKind::timer : TrapKind::exception, irq, 0, 0, capture_sp};
+            ok_interrupt_tick();
+        }
+        else if (irq < 1020 && interrupt::platform_irqs_started())
+            ok_interrupt_top_half(static_cast<interrupt::IrqLine>(irq));
+        else if (irq < 1020)
+            mmio(gic_cpu + 0x10) = acknowledge;
+        last_trap = {irq == timer_irq ? TrapKind::timer : TrapKind::interrupt, irq, 0, 0, capture_sp};
         return;
     }
     const auto exception_class = (syndrome >> 26) & 0x3f;

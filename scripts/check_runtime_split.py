@@ -9,8 +9,11 @@ import re
 import sys
 from pathlib import Path
 
-LIMITS = {"lines": 675, "includes": 1}
-UNITS = ("loader", "vm", "wait", "futex", "pipe", "pty", "net", "signals", "entry")
+# 675 at the split (WT1.4); WT1.2 added emit_line() and its line state (13
+# lines), diagnostics output that is runtime.cpp's own responsibility. New
+# responsibilities go into units: WT1.2's interval timers and interrupt report.
+LIMITS = {"lines": 688, "includes": 1}
+UNITS = ("loader", "vm", "wait", "futex", "pipe", "pty", "net", "signals", "timers", "interrupts", "entry")
 ROOT = Path(__file__).resolve().parents[1]
 
 

@@ -21,12 +21,13 @@ def main() -> int:
     output.mkdir(parents=True, exist_ok=True)
     common = ["-msoft-float", "-msdata=none", "-fno-pic", "-fno-pie"]
     cxx = ["-std=c++23", "-O2", "-ffreestanding", "-fno-builtin", "-fno-exceptions",
-           "-fno-stack-protector", "-Wall", "-Wextra", "-Werror", "-I", str(root / "include")]
+           "-fno-stack-protector", "-Wall", "-Wextra", "-Werror", "-I", str(root / "include"),
+           "-DOK_ARCH_TARGET_PPC"]
     if args.kernel_fault:
         cxx.append("-DOK_NATIVE_TEST_KERNEL_FAULT=1")
     objects = []
-    sources = [("boot", "src/arch/ppc/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/ppc/execution.cpp"),
-               ("bridge", "src/arch/ppc/execution.S"), ("user", "tests/native/ppc_execution_user.S"),
+    sources = [("boot", "src/arch/ppc/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/ppc/execution.cpp"), ("irq", "src/interrupt/platform_irq.cpp"),
+               ("clock", "src/arch/clock.cpp"), ("bridge", "src/arch/ppc/execution.S"), ("user", "tests/native/ppc_execution_user.S"),
                ("test", "tests/native/ppc_execution_test.cpp")]
     for name, source in sources:
         target = output / f"{name}.o"

@@ -1,5 +1,7 @@
 
 #include "ok/user/native_signal_config.hpp"
+#include "ok/interrupt/platform.hpp"
+#include "ok/arch/clock.hpp"
 #include "ok/arch/execution_spaces.hpp"
 #include <cstddef>
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__powerpc__) || defined(__PPC__)) && __SIZEOF_POINTER__ == 4 && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
@@ -91,6 +93,16 @@ template <u32 Spr> u32 read_spr()
     u32 value;
     asm volatile("mfspr %0,%1" : "=r"(value) : "i"(Spr));
     return value;
+}
+u64 timebase()
+{
+    u32 high, low;
+    do
+    {
+        high = read_spr<269>();
+        low = read_spr<268>();
+    } while (read_spr<269>() != high);
+    return (u64{high} << 32) | low;
 }
 template <u32 Spr> void write_spr(u32 value)
 {
@@ -331,9 +343,11 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     if (executing)
         return Status::busy("PPC native backend currently supports one executing CPU");
     const auto *code = mapping(*value, frame.pc);
+    // Like Linux, the stack need not be mapped; only an access to it faults (a
+    // detached musl thread unmaps its own stack before its exit syscall).
     if (code == nullptr || (code->flags & page_execute) == 0 || (frame.pc & 3) != 0 || frame.sp <= user_begin ||
-        frame.sp > user_end || !user_range(space, frame.sp - 1, 1, true))
-        return Status::fault("native entry or stack has invalid permissions");
+        frame.sp > user_end)
+        return Status::fault("native entry or stack pointer is invalid");
     uptr kernel_msr;
     asm volatile("mfmsr %0" : "=r"(kernel_msr));
     if ((kernel_msr & 0x8000) != 0)
@@ -345,8 +359,12 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     const auto old_tcr = read_spr<340>();
     const auto old_dec = read_spr<22>();
     invalidate_user_tlb();
-    write_spr<336>(0x08000000); // Clear TSR.DIS.
+    // The decrementer counts at the timebase rate from this write. TSR.DIS is
+    // cleared after it, so an older count that ran out first does not cut the
+    // quantum short.
+    const u64 user_deadline = timebase() + 4000000;
     write_spr<22>(4000000);     // ppce500 timebase 400 MHz: 10 ms quantum.
+    write_spr<336>(0x08000000); // Clear TSR.DIS.
     write_spr<340>(0x04000000); // TCR.DIE; no automatic reload.
     Trap trap{};
     for (;;)
@@ -376,9 +394,21 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     executing = false;
     trap.kind = trap.vector == 8    ? TrapKind::syscall
                 : trap.vector == 10 ? TrapKind::timer
+                : trap.vector == 4  ? TrapKind::interrupt
                 : (trap.vector == 2 || trap.vector == 3 || trap.vector == 13 || trap.vector == 14)
                     ? TrapKind::page_fault
                     : TrapKind::exception;
+    // An external input (IVOR4) is claimed from the MPIC once the interrupt
+    // service owns it; MSR[EE] in user mode lets only bound sources through.
+    if (trap.kind == TrapKind::timer)
+    {
+        const u64 now = timebase();
+        interrupt::record_timer_latency(interrupt::TimerWake::user, now > user_deadline ? now - user_deadline : 0,
+                                        arch::clock_frequency());
+        ok_interrupt_tick();
+    }
+    else if (trap.kind == TrapKind::interrupt)
+        interrupt::claim_platform_irq();
 #ifdef OK_PPC32_PRIVATE_BACKEND
     ppc32_private::detail::BackendAccess::raw=trap;
 #endif

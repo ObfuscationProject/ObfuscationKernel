@@ -11,7 +11,8 @@ namespace
 {
 SharedNativeCapture<lu::configured_native_profile()> shared_capture{entry_stacks};
 } // namespace
-u64 entry_syscalls{}, entry_timers{}, entry_faults{}, entry_rejections{};
+u64 entry_syscalls{}, entry_timers{}, entry_interrupts{}, entry_faults{}, entry_rejections{};
+bool runtime_idle{false};
 namespace
 {
 sched::ProcessId last_pid{};
@@ -877,6 +878,19 @@ Status start(Kernel &kernel, fs::BootArchive archive)
         return Status::unsupported("native execution backend is unavailable");
     if (!archive.data || !archive.initial_program)
         return Status::invalid_argument("missing boot archive");
+    // Device interrupts arrive through the backend's trap vectors, so the
+    // backend and the interrupt service start before the root is mounted:
+    // the root's disk and the entropy source then complete through their
+    // lines instead of being polled.
+    if (auto status = hw::initialize(); !status.ok())
+        return status;
+    // A controller that cannot start leaves the devices polled.
+    if (auto status = interrupt::start_platform_irqs(); !status.ok())
+    {
+        emit("OK_IRQ_FAIL ");
+        emit(status.message());
+        emit("\n");
+    }
     if (auto status = fs::mount_archive(kernel.vfs(), {archive.data, archive.size}); !status.ok())
         return status;
     if (ok_boot_filesystem != nullptr)
@@ -890,8 +904,6 @@ Status start(Kernel &kernel, fs::BootArchive archive)
     if (auto status = kernel.posix().activate(0); !status.ok())
         return status;
     if (auto status = kernel.posix().chdir("/"); !status.ok())
-        return status;
-    if (auto status = hw::initialize(); !status.ok())
         return status;
     // Allocation becomes possible only after supervisor mappings are established.
     if (auto status = activate_pool(&kernel); !status) return status;
@@ -932,8 +944,14 @@ Status start(Kernel &kernel, fs::BootArchive archive)
     emit("OK_NATIVE scope=hardware init=loaded\n");
     return Status::success();
 }
+bool idle()
+{
+    return runtime_idle;
+}
+
 bool step(Kernel &kernel)
 {
+    runtime_idle = false;
     if (shutdown_admission_closed || native_shutdown_pending()) return false;
     if (runtime_step_active)
     { runtime_failure = Status::busy("native step is not reentrant"); started = false; return false; }
@@ -991,6 +1009,11 @@ bool step(Kernel &kernel)
 #ifdef OK_PRIVATE_POLL_MASK
     waiting_deadline |= private_signal_wait_pending(kernel);
 #endif
+#if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
+    // Expired timers queue their signals before interruptible waits are chosen.
+    waiting_deadline |= private_timer_service(kernel, now.value());
+    if (!runtime_failure) { started = false; return false; }
+#endif
     for (const auto &entry : poll_waits)
     {
         if (entry.pid == 0)
@@ -1020,7 +1043,7 @@ bool step(Kernel &kernel)
         {
             const auto cause = ready && ready.value() == 0 && expired
                 ? sched::WaitCompletion::timeout : sched::WaitCompletion::ready;
-            if (!kernel.scheduler().complete_wait(wait.ticket, cause))
+            if (!kernel.scheduler().complete_wait(wait.ticket, cause, wait.ready_source))
             {
                 cancel_poll(kernel, object);
                 continue;
@@ -1099,7 +1122,10 @@ bool step(Kernel &kernel)
     if (!chosen.pid)
         chosen = first;
     if (!chosen.pid)
+    {
+        runtime_idle = true;
         return waiting_deadline;
+    }
     last_pid = chosen.pid;
     last_tid = chosen.tid;
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
@@ -1207,7 +1233,8 @@ bool step(Kernel &kernel)
         const auto capture = trap ? trap.value().kernel_stack_pointer : 0;
         const bool captured = capture != 0 && view.contains(capture);
         const bool needs_capture = trap && (trap.value().kind == hw::TrapKind::syscall ||
-                                           trap.value().kind == hw::TrapKind::timer);
+                                           trap.value().kind == hw::TrapKind::timer ||
+                                           trap.value().kind == hw::TrapKind::interrupt);
         const bool bad_capture = (capture && !captured) || (needs_capture && !captured);
 #if defined(OK_PRIVATE_MIPS64_N64_SIGNAL) || defined(OK_PRIVATE_MIPS_O32_SIGNAL)
         // A copy-on-write fault resumes the same frame. Its capture keeps the
@@ -1274,13 +1301,16 @@ bool step(Kernel &kernel)
         {
             if (trap.value().kind == hw::TrapKind::syscall) ++entry_syscalls;
             else if (trap.value().kind == hw::TrapKind::timer) ++entry_timers;
+            else if (trap.value().kind == hw::TrapKind::interrupt) ++entry_interrupts;
             else ++entry_faults;
         }
         else ++entry_rejections;
         if (!trap)
         {
             finish(kernel, chosen.pid, 127);
-            emit("OK_NATIVE scope=hardware enter=failed\n");
+            emit("OK_NATIVE scope=hardware enter=failed reason=");
+            emit(trap.status().message());
+            emit("\n");
         }
         else if (trap.value().kind == hw::TrapKind::syscall)
         {
@@ -1291,13 +1321,22 @@ bool step(Kernel &kernel)
             linux_udp_delay_slot = linux_udp_delay_slot_excluded<lu::configured_native_profile()>(trap.value());
             thread.syscall_pending = true;
         }
+        else if (trap.value().kind == hw::TrapKind::interrupt)
+        {
+            static bool reported = false;
+            if (!reported)
+            {
+                emit_line("OK_NATIVE scope=hardware interrupt=preempted\n");
+                reported = true;
+            }
+        }
         else if (trap.value().kind == hw::TrapKind::timer)
         {
             ++thread.cpu_time_ticks;
             static bool reported = false;
             if (!reported)
             {
-                emit("OK_NATIVE scope=hardware timer=preempted\n");
+                emit_line("OK_NATIVE scope=hardware timer=preempted\n");
                 reported = true;
             }
         }

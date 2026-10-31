@@ -91,6 +91,7 @@
 #include "ok/user/native_metadata.hpp"
 #include "ok/arch/execution.hpp"
 #include "ok/arch/clock.hpp"
+#include "ok/interrupt/platform.hpp"
 #include "ok/time/public_clock.hpp"
 #include "ok/user/clock_set.hpp"
 #include "ok/core/kernel.hpp"
@@ -127,7 +128,7 @@ extern memory::KernelEntryStackPool entry_stacks;
 using SyscallOrigins = SyscallOriginTable<lu::configured_native_profile()>;
 extern SyscallOrigins syscall_origins;
 extern VfsStatContinuation<lu::configured_native_profile()> vfs_continuations;
-extern u64 entry_syscalls, entry_timers, entry_faults, entry_rejections;
+extern u64 entry_syscalls, entry_timers, entry_interrupts, entry_faults, entry_rejections;
 struct QuarantinedSpace
 {
     enum class Ownership : u8 { borrowed, pending, discharged };
@@ -232,6 +233,9 @@ struct QuarantinedEntryStack
     memory::KernelEntryStackHandle handle{};
 };
 extern std::array<QuarantinedEntryStack, memory::KernelEntryStackPool::capacity> stranded_entry_stacks;
+// For markers emitted when a preemption interrupted user output: starts a new
+// line first, so the marker never joins a partial user line.
+void emit_line(std::string_view text);
 #ifdef OK_PRIVATE_POLL_MASK
 extern PollSignalMasks poll_signal_masks;
 extern SignalWaitState<lu::configured_native_profile()> signal_waits;
@@ -273,6 +277,8 @@ struct PollWait
     bool select_sets{};
     SelectSets sets{};
     std::array<u32, 3> ready_sets{};
+    // Set by poll_ready(): the device source of a ready console or socket.
+    sched::WakeSource ready_source{sched::WakeSource::thread};
 };
 using PollObjectsLayout = memory::ObjectPool<PollWait, NativePagePool, 1>;
 constexpr usize poll_object_pages = (sched::max_processes + PollObjectsLayout::slots_per_page - 1) /
@@ -633,6 +639,22 @@ i64 native_process_kill(Kernel &kernel, const sched::ProcessControlBlock &sender
 void private_process_signal_fatal(Kernel &kernel);
 bool private_signal_call(Kernel &kernel, sched::ProcessControlBlock &process,
                          sched::ThreadControlBlock &thread, bool &complete, i64 &result);
+// Interval timers (timers.cpp). An expiry signal is sent, dropped as ignored
+// or by a departed target, or stays owed to the timer until a later step.
+enum class PrivateTimerSend : u8 { sent, ignored, departed, retry };
+PrivateTimerSend private_timer_signal(Kernel &kernel, sched::ProcessControlBlock &process,
+                                      sched::ThreadId tid, sched::PendingSignalInfo info);
+bool private_timer_call(Kernel &kernel, sched::ProcessControlBlock &process,
+                        sched::ThreadControlBlock &thread, i64 &result);
+bool private_timer_service(Kernel &kernel, u64 now);
+void private_timer_exec(sched::ProcessId pid);
+void private_timer_discard(Kernel &kernel, sched::ProcessId pid, u32 signal);
+void private_timer_thread_exit(sched::ProcessId pid, sched::ThreadId tid, const PrivateSignalQueue &queue);
+// The signal's action is ignored now (SIG_IGN, or a default that ignores it).
+bool private_signal_ignored(Kernel &kernel, sched::ProcessId pid, u32 signal);
+void private_timer_retire(sched::ProcessId pid);
+struct PrivateTimerCounters { u64 armed{}, expired{}, signalled{}, dequeued{}, retried{}; };
+PrivateTimerCounters private_timer_counters();
 Status private_child_exit_commit(Kernel &kernel, PrivateChildExit::Completion &completion);
 
 bool private_child_reap(Kernel &kernel);

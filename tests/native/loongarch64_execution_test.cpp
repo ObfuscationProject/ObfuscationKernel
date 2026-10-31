@@ -164,8 +164,12 @@ extern "C" [[noreturn]] void kernel_main()
     check(trap && trap.value().kind == hw::TrapKind::exception, "invalid opcode");
     check(hw::copy_from_user(space, nullptr, 0, 0).ok(), "empty copy");
     check(!hw::copy_from_user(space, nullptr, hw::user_begin, 1), "null destination");
+    // Like Linux, entry does not need a mapped stack; this probe reaches its
+    // syscall without touching one.
     frame = hw::initial_frame(hw::user_begin, hw::user_begin + 0x10000);
-    check(!hw::enter(space, frame), "invalid stack");
+    trap = hw::enter(space, frame);
+    while (trap && trap.value().kind == hw::TrapKind::timer) trap = hw::enter(space, frame);
+    check(trap && trap.value().kind == hw::TrapKind::syscall && hw::syscall(frame).number == 65, "unmapped stack");
     const auto stale = space;
     check(hw::destroy_space(space).ok() && !hw::user_range(stale, hw::user_begin, 1), "stale");
 #if defined(OK_NATIVE_KERNEL_FAULT)

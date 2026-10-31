@@ -35,39 +35,94 @@ struct PlatformClock
         asm volatile("rdtsc" : "=a"(low), "=d"(high) : : "memory");
         return (u64{high} << 32) | low;
     }
+    // One latched read of PIT channel 2 between two TSC samples: the count
+    // was latched at some point inside the bracket.
+    struct PitRead
+    {
+        u64 before{}, after{};
+        u16 count{};
+    };
+    static PitRead pit_read()
+    {
+        PitRead sample{};
+        sample.before = read();
+        out8(0x43, 0x80); // Latch channel 2.
+        const u8 low = in8(0x42);
+        const u8 high = in8(0x42);
+        sample.after = read();
+        sample.count = static_cast<u16>(low | (u16{high} << 8));
+        return sample;
+    }
+    // The tightest bracket of a few consecutive reads, so a vCPU or SMI
+    // stall during one read does not move the estimate.
+    static PitRead tight_read()
+    {
+        auto best = pit_read();
+        for (unsigned i = 1; i < 8; ++i)
+            if (const auto next = pit_read(); next.after - next.before < best.after - best.before)
+                best = next;
+        return best;
+    }
     static Result<u64> frequency()
     {
         u32 a = 1, b, c, d;
         asm volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d) : : "memory");
         if ((d & (1u << 4)) == 0)
             return Status::unsupported("PC monotonic clock requires TSC");
-        constexpr u32 pit_frequency = 1193182;
-        constexpr u16 interval = 59659; // Approximately 50 ms at the PIT input rate.
+        constexpr u64 pit_frequency = 1193182;
+        constexpr u32 window = 238636;     // About 200 ms at the PIT input rate.
+        constexpr u64 wrap_ticks = 65536;  // Mode 0 keeps counting down through zero.
         const auto saved = in8(0x61);
-        const auto disabled = static_cast<u8>(saved & ~u8{3});
-        out8(0x61, disabled);
+        // Gate on, speaker off; the count free-runs from 0xffff.
+        out8(0x61, static_cast<u8>((saved & ~u8{2}) | 1));
         out8(0x43, 0xb0); // Channel 2, low/high byte, mode 0, binary.
-        out8(0x42, static_cast<u8>(interval));
-        out8(0x42, static_cast<u8>(interval >> 8));
-        if ((in8(0x61) & 0x20) != 0)
+        out8(0x42, 0xff);
+        out8(0x42, 0xff);
+        // Elapsed ticks are summed from successive reads, which must come
+        // more often than one 55 ms wrap; a longer gap between two reads
+        // could hide a wrap, so that attempt is repeated.
+        Status failure = Status::io_error("PIT reference did not calibrate the TSC");
+        for (unsigned attempt = 0; attempt < 4; ++attempt)
         {
-            out8(0x61, saved);
-            return Status::io_error("PIT reference did not enter countdown mode");
-        }
-        const auto start = read();
-        out8(0x61, static_cast<u8>(disabled | 1));
-        bool finished = false;
-        for (u32 attempt = 0; attempt < 100000000; ++attempt)
-            if ((in8(0x61) & 0x20) != 0)
+            const auto start = tight_read();
+            u32 elapsed = 0;
+            u16 previous = start.count;
+            u64 last = start.after, widest_gap = 0;
+            bool counting = true;
+            for (u32 reads = 0; elapsed < window; ++reads)
             {
-                finished = true;
+                const auto sample = pit_read();
+                elapsed += static_cast<u16>(previous - sample.count);
+                previous = sample.count;
+                widest_gap = sample.after - last > widest_gap ? sample.after - last : widest_gap;
+                last = sample.after;
+                if (reads > 100000000)
+                {
+                    counting = false;
+                    break;
+                }
+            }
+            if (!counting)
+            {
+                failure = Status::io_error("PIT reference did not count");
                 break;
             }
-        const auto end = read();
+            const auto end = tight_read();
+            elapsed += static_cast<u16>(previous - end.count);
+            widest_gap = end.after - last > widest_gap ? end.after - last : widest_gap;
+            const u64 start_mid = start.before + (start.after - start.before) / 2;
+            const u64 end_mid = end.before + (end.after - end.before) / 2;
+            if (end_mid <= start_mid || !elapsed || end_mid - start_mid > (~u64{0}) / pit_frequency)
+                continue;
+            const u64 cycles = end_mid - start_mid;
+            // A gap of 3/4 of a wrap or more may have hidden one.
+            if (widest_gap * 4 * window >= cycles * 3 * wrap_ticks)
+                continue;
+            out8(0x61, saved);
+            return cycles * pit_frequency / elapsed;
+        }
         out8(0x61, saved);
-        if (!finished || end <= start || end - start > (~u64{0}) / pit_frequency)
-            return Status::io_error("PIT reference did not calibrate the TSC");
-        return (end - start) * pit_frequency / interval;
+        return failure;
     }
 };
 #elif defined(OK_ARCH_TARGET_AARCH64)
@@ -272,6 +327,11 @@ Status clock_status()
 u64 clock_resolution_ns()
 {
     return clock_invalidated ? 0 : clock_state.resolution();
+}
+
+u64 clock_frequency()
+{
+    return clock_invalidated ? 0 : clock_state.frequency();
 }
 
 } // namespace ok::arch

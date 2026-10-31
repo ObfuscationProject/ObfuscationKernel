@@ -1,7 +1,9 @@
 #include "ok/core/types.hpp"
 #include "ok/core/entry.hpp"
+#include "ok/interrupt/platform.hpp"
 #include "ok/driver/qemu_virt/ramfb.hpp"
 #include "ok/driver/qemu_virt/virtio_input.hpp"
+#include "../../interrupt/console_ring.hpp"
 
 namespace
 {
@@ -198,6 +200,23 @@ int poll_virtio_keyboard()
     return -1;
 }
 
+// Keyboard and mouse events arrive on their virtio-mmio lines; the loop reads
+// the queues only after an interrupt, until both are drained.
+void input_interrupt(void *device, ok::interrupt::IrqLine)
+{
+    static_cast<ok::driver::qemu_virt::VirtioInputDevice *>(device)->acknowledge();
+    ok::interrupt::post_event(ok::interrupt::EventSource::input);
+}
+
+// An absent device leaves nothing to poll; a present one needs its line.
+bool bind_input(ok::driver::qemu_virt::VirtioInputDevice &device, ok::driver::qemu_virt::VirtioInputKind kind)
+{
+    if (!device.initialize(virtio_input_bases, sizeof(virtio_input_bases) / sizeof(virtio_input_bases[0]), kind))
+        return true;
+    const auto line = ok::interrupt::virtio_mmio_line((device.base() - virtio_input_bases[0]) / 0x200);
+    return line && ok::interrupt::bind_platform_irq(line.value().line, line.value().trigger, input_interrupt, &device);
+}
+
 } // namespace
 
 extern "C" void ok_platform_console_init() {}
@@ -256,17 +275,73 @@ extern "C" void ok_platform_poll_idle()
     asm volatile("nop" ::: "memory");
 }
 
+// Runs when the loop serves the input source; posts it again until both
+// queues and the pending key sequence are drained.
 extern "C" int ok_platform_input_poll()
 {
     poll_virtio_mouse();
-    return poll_virtio_keyboard();
+    const int key = poll_virtio_keyboard();
+    if (key >= 0)
+        ok::interrupt::post_event(ok::interrupt::EventSource::input);
+    return key;
+}
+
+namespace
+{
+// PL011 receive bytes the SPI 1 (ID 33) bottom half moved out of the UART.
+constexpr ok::interrupt::IrqLine uart_irq = 33;
+constexpr ok::uptr uart_imsc = pl011_base + 0x38;
+constexpr ok::uptr uart_icr = pl011_base + 0x44;
+constexpr ok::u32 uart_receive_interrupts = (1u << 4) | (1u << 6); // RX and receive timeout.
+constinit ok::interrupt::ConsoleRing<256> uart_ring{};
+
+int read_uart()
+{
+    if ((mmio32(uart_fr) & uart_fr_rxfe) != 0)
+        return -1;
+    return static_cast<int>(mmio32(uart_dr) & 0xffu);
+}
+
+// Reading DR until the FIFO is empty clears RX and the receive timeout. An
+// UARTICR write after the drain would also clear the RX interrupt of a byte
+// that arrived meanwhile, and the PL011 raises RX again only when its FIFO
+// goes from empty to one byte, so that byte would wait forever.
+// The line is level: a full ring masks RX and the receive timeout until the
+// console has drained the backlog.
+void quiet_uart(bool quiet)
+{
+    const auto mask = mmio32(uart_imsc);
+    mmio32(uart_imsc) = quiet ? mask & ~uart_receive_interrupts : mask | uart_receive_interrupts;
+}
+void uart_interrupt(void *, ok::interrupt::IrqLine)
+{
+    uart_ring.fill(read_uart, quiet_uart);
+}
+} // namespace
+
+extern "C" ok::Status ok_platform_bind_irqs()
+{
+    if (bind_input(virtio_keyboard, ok::driver::qemu_virt::VirtioInputKind::keyboard) &&
+        bind_input(virtio_mouse, ok::driver::qemu_virt::VirtioInputKind::mouse))
+    {
+        ok::interrupt::drive_events(ok::interrupt::EventSource::input);
+        // Events queued before the lines were bound.
+        ok::interrupt::post_event(ok::interrupt::EventSource::input);
+    }
+    if (auto status = ok::interrupt::bind_platform_irq(uart_irq, ok::interrupt::IrqTrigger::level, uart_interrupt,
+                                                       nullptr);
+        !status.ok())
+        return status;
+    mmio32(uart_icr) = uart_receive_interrupts;
+    mmio32(uart_imsc) = mmio32(uart_imsc) | uart_receive_interrupts;
+    ok::interrupt::drive_events(ok::interrupt::EventSource::console);
+    // Bytes that arrived before the bind: the ICR write cleared their RX, and
+    // the PL011 raises it again only when its FIFO goes from empty to one byte.
+    uart_ring.fill(read_uart, quiet_uart);
+    return ok::Status::success();
 }
 
 extern "C" int ok_platform_console_poll()
 {
-    if ((mmio32(uart_fr) & uart_fr_rxfe) != 0)
-    {
-        return -1;
-    }
-    return static_cast<int>(mmio32(uart_dr) & 0xffu);
+    return uart_ring.take(read_uart, quiet_uart);
 }

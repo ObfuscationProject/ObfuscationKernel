@@ -4,6 +4,7 @@
 #include "ok/net/native_udp_sdk_profile.hpp"
 #include "ok/user/native_futex_wake_operation_sdk_profile.hpp"
 #include "ok/arch/clock.hpp"
+#include "ok/interrupt/platform.hpp"
 #include "ok/sched/process.hpp"
 #include "ok/user/runtime.hpp"
 #include "../user/native_lifecycle.hpp"
@@ -699,13 +700,27 @@ Status Kernel::poll_network()
         explicit PollScope(bool &value) : active(value) { active = true; }
         ~PollScope() { active = false; }
     } scope{network_poll_active_};
+    // A pass that cannot serve the link (retired, or not configured yet) drops
+    // the network source's post: a NIC interrupt or a receive backlog would
+    // otherwise leave it pending and keep the kernel loop from idling again.
+    const auto drop_post = [] { interrupt::discard_event(interrupt::EventSource::network); };
     const auto observer = native_udp_executor_.state();
     if (observer.failed)
+    {
+        drop_post();
         return retire_native_link(Status{observer.failure_cause, "UDP shared link observer is retired"});
+    }
     const auto existing = native_ethernet_executor_.state();
     if (existing.retired)
+    {
+        drop_post();
         return retire_native_link(Status{existing.cause, "common Ethernet link is retired"});
-    if (!native_udp_.configured()) return Status::success();
+    }
+    if (!native_udp_.configured())
+    {
+        drop_post();
+        return Status::success();
+    }
     u64 now = native_tcp_.now();
     if (native_tcp_clock_generation_)
     {
@@ -737,8 +752,17 @@ Status Kernel::poll_network()
         Result<u32> operator()(net::tcp::Endpoint local, net::tcp::Endpoint peer)
         { return kernel.native_tcp_iss(local, peer); }
     } iss{*this};
-    const auto result = native_ethernet_executor_.poll(native_tcp_, native_udp_, native_tcp_waits_, transport, iss, now);
+    // Once the NIC driver bound its line, its interrupt posts the network
+    // source and only those passes touch the TX ledger and RX queue; a pass
+    // that stopped at its receive budget posts it again.
+    using interrupt::EventSource;
+    const net::LinkPass pass{interrupt::take_event(EventSource::network),
+                             interrupt::event_wake_source(EventSource::network)};
+    const auto result = native_ethernet_executor_.poll(native_tcp_, native_udp_, native_tcp_waits_, transport, iss, now,
+                                                       pass);
     const auto state = native_ethernet_executor_.state();
+    if (state.receive_backlog)
+        interrupt::post_event(EventSource::network);
     const auto observed = native_udp_executor_.observe_shared_link(state.credit, state.controls, state.dropped_control,
         state.retired ? Status{state.cause, "common Ethernet link is retired"} : Status{});
     if (!observed)

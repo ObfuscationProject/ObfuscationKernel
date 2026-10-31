@@ -46,7 +46,7 @@ struct Aarch64SignalFrame
             return true;
         }
     };
-    struct Info { i32 signal{}; i32 code{}; u32 sender_pid{}; u32 sender_uid{}; i32 child_status{}; };
+    struct Info { i32 signal{}; i32 code{}; u32 sender_pid{}; u32 sender_uid{}; i32 child_status{}; i32 timer{}; i32 overrun{}; u64 value{}; };
     static constexpr bool valid_info(Info info)
     {
         return InfoCodec::template frame_valid<>(info);
@@ -252,7 +252,8 @@ struct Aarch64SignalFramePolicy
         }
         if (!Frame::place(top, begin, end, placement) ||
             ((nested || entering) && !altstack.physically_contains(placement.address))) return false;
-        const Frame::Info sender{static_cast<i32>(info.signal), info.code, info.sender_pid, info.sender_uid, info.child_status};
+        const Frame::Info sender{static_cast<i32>(info.signal), info.code, info.sender_pid, info.sender_uid, info.child_status,
+            info.timer, info.overrun, info.value};
         Frame::Image image;
         Frame::Frame next;
         auto raw_stack = [](Frame::Stack raw, Frame::Stack &normalized) noexcept {

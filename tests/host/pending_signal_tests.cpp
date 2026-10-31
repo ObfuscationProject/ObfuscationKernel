@@ -173,7 +173,8 @@ int main()
     boundaries<64>();boundaries<128>();exhaustion();
     random_model<64,1>();random_model<64,4>();random_model<64,32>();
     random_model<128,1>();random_model<128,4>();random_model<128,32>();
-    // SDK31 adds a typed child status to each bounded record.
-    static_assert(sizeof(PendingSignals<64>)<=2072&&sizeof(PendingSignals<128>)<=2072);
+    // SDK31 adds a typed child status to each bounded record; WT1.2 the timer id,
+    // overrun and sigevent value.
+    static_assert(sizeof(PendingSignals<64>)<=3080&&sizeof(PendingSignals<128>)<=3080);
     std::printf("PASS pending checks=%zu queue_bytes=%zu ticket_bytes=%zu hosted=1 guest=0\n",checks,sizeof(PendingSignals<64>),sizeof(PendingSignals<64>::Delivery));
 }

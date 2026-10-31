@@ -190,8 +190,10 @@ extern "C" [[noreturn]] void kernel_main()
     auto invalid = pages;
     invalid[0].flags |= hw::page_write;
     check(!hw::create_space(invalid), "reject writable executable mapping");
+    // Like Linux, entry does not need a mapped stack; this probe reaches its
+    // syscall without touching one.
     frame = hw::initial_frame(hw::user_begin, hw::user_begin + 16384);
-    check(!hw::enter(space, frame), "reject unmapped stack");
+    check(run(space, frame).kind == hw::TrapKind::syscall, "enter with an unmapped stack");
     const auto stale = space;
     check(hw::destroy_space(space).ok() && !hw::user_range(stale, hw::user_begin, 1), "destroy/stale");
     check(hw::destroy_space(second.value()).ok(), "second destroy");

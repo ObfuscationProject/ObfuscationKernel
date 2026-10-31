@@ -1,5 +1,7 @@
 
 #include "ok/user/native_signal_config.hpp"
+#include "ok/interrupt/platform.hpp"
+#include "ok/arch/clock.hpp"
 #include "ok/arch/execution_spaces.hpp"
 #include <cstddef>
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && defined(__mips64)
@@ -186,6 +188,12 @@ void synchronize_code(const Space &space)
 } // namespace
 extern "C"
 {
+    // Status for user mode, read by the entry assembly.
+#if defined(__mips64)
+    constinit u32 ok_mips_user_status = 0x240080b3;
+#else
+    constinit u32 ok_mips_user_status = 0x20008013;
+#endif
     void ok_mips_execution_enter(UserFrame *, uptr);
     void ok_mips_execution_vectors();
     UserFrame *ok_mips_execution_active_frame{};
@@ -227,6 +235,11 @@ OwnershipReport ownership_report() noexcept
     return report;
 }
 
+#if defined(__mips64)
+constexpr u32 user_status = 0x240080b3; // Matches USER_STATUS in execution_asm.h.
+#else
+constexpr u32 user_status = 0x20008013;
+#endif
 Status initialize()
 {
     if (initialized)
@@ -457,8 +470,11 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     private_signal_capture.invalidate();
 #endif
     auto *storage = lookup(space);
+    // Like Linux, the stack need not be mapped or aligned; only an access to it
+    // faults. A detached musl thread unmaps its own stack before its exit
+    // syscall, and on o32 points sp at its code first.
     if (!storage || executing || frame.pc < user_begin || frame.pc >= user_end || (frame.pc & 3) ||
-        frame.sp <= user_begin || frame.sp > user_end || (frame.sp & 7) || !user_range(space, frame.sp - 1, 1, true))
+        frame.sp <= user_begin || frame.sp > user_end)
         return Status::invalid_argument("invalid native entry");
     if (const auto *code = page_at(*storage, frame.pc); code && !(code->flags & page_execute))
         return Trap{TrapKind::page_fault, 2, 0, frame.pc};
@@ -468,7 +484,11 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     flush_tlb();
     executing = true;
     ok_mips_execution_active_frame = &frame;
-    write_cp0<11>(static_cast<u32>(read_cp0<9>()) + timer_period);
+    const u32 user_compare = static_cast<u32>(read_cp0<9>()) + timer_period;
+    write_cp0<11>(user_compare);
+    // User mode takes the CP0 timer and, once the interrupt service owns the
+    // 8259 pair, IP2.
+    ok_mips_user_status = user_status | (interrupt::platform_irqs_started() ? 0x400u : 0u);
     Trap result;
     for (;;)
     {
@@ -480,6 +500,11 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
         if (exception == 0 && (cause & 0x8000))
         {
             result.kind = TrapKind::timer;
+            break;
+        }
+        if (exception == 0)
+        {
+            result.kind = TrapKind::interrupt;
             break;
         }
         if (exception == 1 || exception == 2 || exception == 3 || exception == 4 || exception == 5)
@@ -514,7 +539,17 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
         }
         break;
     }
+    const u32 count = static_cast<u32>(read_cp0<9>());
     write_cp0<11>(0);
+    if (result.kind == TrapKind::timer)
+    {
+        // Count wraps; the expiry is less than one wrap behind.
+        interrupt::record_timer_latency(interrupt::TimerWake::user, u32{count - user_compare},
+                                        arch::clock_frequency());
+        ok_interrupt_tick();
+    }
+    else if (result.kind == TrapKind::interrupt)
+        interrupt::claim_platform_irq();
     flush_tlb();
     ok_mips_execution_active_frame = nullptr;
     ok_mips_execution_resume_sp = 0;
@@ -525,7 +560,8 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     // completed (the branch when Cause.BD is set), so the runtime may resume it
     // unchanged or, for a resolved fault, deliver a handler before resuming.
     using K = mips_o32_private::CaptureKind;
-    const bool interrupted = result.kind == TrapKind::timer || result.kind == TrapKind::page_fault;
+    const bool interrupted = result.kind == TrapKind::timer || result.kind == TrapKind::interrupt ||
+                             result.kind == TrapKind::page_fault;
     private_signal_capture.publish(frame, result.kind == TrapKind::syscall ? K::syscall_normalized :
         interrupted ? ((result.error_code & 0x80000000u) ? K::interrupted_bd : K::interrupted_non_bd) : K::unverified);
 #endif

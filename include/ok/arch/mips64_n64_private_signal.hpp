@@ -28,6 +28,9 @@ struct Mips64N64PrivateViewAccess final
 namespace ok::arch::execution::mips64_n64_private
 {
 inline constexpr u32 user_status = 0x240080b3;
+// IM2 (the Malta 8259 pair): enabled in user mode by the kernel once its
+// interrupt service runs, so captures may carry it; not ABI state.
+inline constexpr u32 device_interrupt_mask = 0x400;
 inline constexpr u32 unsupported_fcsr = 0x007c0000;
 struct Facts
 {
@@ -52,7 +55,7 @@ struct Facts
         (u32{f.fp_state[258]} << 8) | f.fp_state[259];
 }
 [[nodiscard]] constexpr bool frame_mode(const UserFrame &f) noexcept
-{ return f.flags == user_status && !(fcsr(f) & unsupported_fcsr); }
+{ return (f.flags & ~uptr{device_interrupt_mask}) == user_status && !(fcsr(f) & unsupported_fcsr); }
 [[nodiscard]] constexpr bool same_space(AddressSpace a, AddressSpace b) noexcept
 { return a.root == b.root && a.slot == b.slot && a.generation == b.generation; }
 [[nodiscard]] constexpr bool same_frame(const UserFrame &a, const UserFrame &b) noexcept
@@ -156,7 +159,7 @@ class Tracker final
         CaptureKind kind=CaptureKind::unverified;
         if(trap.kind==TrapKind::syscall) kind=CaptureKind::syscall_normalized;
         // Timers and page faults leave EPC at an instruction that has not completed.
-        else if(trap.kind==TrapKind::timer || trap.kind==TrapKind::page_fault)
+        else if(trap.kind==TrapKind::timer || trap.kind==TrapKind::interrupt || trap.kind==TrapKind::page_fault)
             kind=(static_cast<u32>(trap.error_code)&0x80000000u)?CaptureKind::interrupted_bd:CaptureKind::interrupted_non_bd;
         if(kind==CaptureKind::unverified) return;
         captured_=frame;space_=space;view_=view;captured_sp_=trap.kernel_stack_pointer;

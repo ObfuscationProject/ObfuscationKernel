@@ -1,6 +1,7 @@
 #pragma once
 #include "ok/fs/archive.hpp"
 #include "ok/core/shutdown.hpp"
+#include "ok/sched/wait_registration.hpp"
 namespace ok
 {
 class Kernel;
@@ -11,6 +12,9 @@ namespace ok::user::native
 Status prepare_memory();
 Status start(Kernel &kernel, fs::BootArchive archive);
 bool step(Kernel &kernel);
+// True when the last step found no thread to run: the kernel loop may idle
+// until an interrupt (a tick, a device line) instead of stepping again.
+bool idle();
 Status runtime_status();
 // Serialized native-owner proof. Historical generation counters are not owners.
 struct NativeShutdownReport
@@ -34,6 +38,9 @@ Status shutdown_close_admission(Kernel &kernel);
 Status shutdown_retire(Kernel &kernel);
 NativeShutdownReport shutdown_report(Kernel &kernel);
 Status shutdown_verify_drained(Kernel &kernel);
-void input(char value);
+// `source` is the console's wake source (interrupt once its line is bound).
+void input(char value, sched::WakeSource source = sched::WakeSource::thread);
 void release_process(Kernel &kernel, u64 pid);
+// OK_IRQ_PLATFORM and OK_IRQ_EVENTS, once the platform interrupt service runs.
+void report_interrupts();
 } // namespace ok::user::native

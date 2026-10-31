@@ -35,7 +35,7 @@ struct Loongarch64SignalFrame
         u32 flags{2};
         constexpr bool operator==(const Stack &) const = default;
     };
-    struct Info { i32 signal{}; i32 code{}; u32 sender_pid{}; u32 sender_uid{}; i32 child_status{}; };
+    struct Info { i32 signal{}; i32 code{}; u32 sender_pid{}; u32 sender_uid{}; i32 child_status{}; i32 timer{}; i32 overrun{}; u64 value{}; };
     struct Placement { u64 address{}; constexpr bool operator==(const Placement &) const = default; };
     struct Image { std::array<std::byte, image_bytes> bytes{}; };
     struct FcsrPatch
@@ -247,7 +247,8 @@ struct Loongarch64SignalFramePolicy
         Frame::Placement placement;
         if (!Frame::place(top, begin, end, placement) ||
             ((nested || entering) && !altstack.physically_contains(placement.address))) return false;
-        const Frame::Info sender{static_cast<i32>(info.signal), info.code, info.sender_pid, info.sender_uid, info.child_status};
+        const Frame::Info sender{static_cast<i32>(info.signal), info.code, info.sender_pid, info.sender_uid, info.child_status,
+            info.timer, info.overrun, info.value};
         Frame::Image image;
         arch::execution::UserFrame next;
         if (!Frame::encode(frame, blocked, {altstack.base, altstack.size, altstack.flags}, sender, begin, end, image) ||

@@ -36,7 +36,7 @@ target("tcp-streams")
         add_files(path.join(source, "tests/host/tcp_streams_tests.cpp"),
             path.join(source, "src/sched/process.cpp"), path.join(source, "src/arch/arch.cpp"),
             path.join(source, "src/arch", arch, "ops.cpp"), path.join(source, "src/net/native_udp.cpp"),
-            path.join(source, "src/memory/memory.cpp"))
+            path.join(source, "src/memory/memory.cpp"), path.join(source, "src/fs/vfs.cpp"))
         add_ldflags("-Wl,--gc-sections", {force = true})
         if kind == "sanitized" then
             add_cxxflags("-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", {force = true})

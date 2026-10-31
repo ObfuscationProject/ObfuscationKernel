@@ -1,7 +1,9 @@
 #include "ok/core/types.hpp"
 #include "ok/core/entry.hpp"
+#include "ok/interrupt/platform.hpp"
 #include "ok/driver/qemu_virt/ramfb.hpp"
 #include "ok/driver/qemu_virt/virtio_pci_input.hpp"
+#include "../../interrupt/console_ring.hpp"
 
 namespace
 {
@@ -252,17 +254,81 @@ extern "C" void ok_platform_poll_idle()
     asm volatile("nop" ::: "memory");
 }
 
+// Runs when the loop serves the input source; posts it again until both
+// queues and the pending key sequence are drained.
 extern "C" int ok_platform_input_poll()
 {
     poll_virtio_mouse();
-    return poll_virtio_keyboard();
+    const int key = poll_virtio_keyboard();
+    if (key >= 0)
+        ok::interrupt::post_event(ok::interrupt::EventSource::input);
+    return key;
+}
+
+namespace
+{
+// NS16550 receive bytes the PCH-PIC input 2 bottom half moved out of the UART.
+constexpr ok::interrupt::IrqLine uart_irq = 2;
+constexpr ok::uptr uart_ier = uart_base + 0x01;
+constinit ok::interrupt::ConsoleRing<256> uart_ring{};
+
+int read_uart()
+{
+    if ((mmio8(uart_lsr) & uart_lsr_data_ready) == 0)
+        return -1;
+    return static_cast<int>(mmio8(uart_rbr_thr));
+}
+
+// The line is level: a full ring turns the received-data interrupt off until
+// the console has drained the backlog.
+void quiet_uart(bool quiet)
+{
+    mmio8(uart_ier) = quiet ? 0x00 : 0x01;
+}
+void uart_interrupt(void *, ok::interrupt::IrqLine)
+{
+    uart_ring.fill(read_uart, quiet_uart);
+}
+
+// Reading the ISR deasserts the device's INTx; the loop then drains its queue.
+void input_interrupt(void *device, ok::interrupt::IrqLine)
+{
+    static_cast<VirtioPciInput *>(device)->acknowledge();
+    ok::interrupt::post_event(ok::interrupt::EventSource::input);
+}
+
+// An absent device leaves nothing to poll; a present one needs its line.
+bool bind_input(VirtioPciInput &device, ok::driver::qemu_virt::VirtioInputKind kind)
+{
+    if (!device.initialize(kind))
+        return true;
+    const auto line = ok::interrupt::pci_intx_line(device.slot(), device.interrupt_pin(), 0);
+    if (!line || !ok::interrupt::bind_platform_irq(line.value().line, line.value().trigger, input_interrupt, &device))
+        return false;
+    device.bind_interrupt();
+    return true;
+}
+} // namespace
+
+extern "C" ok::Status ok_platform_bind_irqs()
+{
+    if (auto status = ok::interrupt::bind_platform_irq(uart_irq, ok::interrupt::IrqTrigger::level, uart_interrupt,
+                                                       nullptr);
+        !status.ok())
+        return status;
+    mmio8(uart_ier) = 0x01; // Received-data-available interrupt.
+    ok::interrupt::drive_events(ok::interrupt::EventSource::console);
+    if (bind_input(virtio_keyboard, ok::driver::qemu_virt::VirtioInputKind::keyboard) &&
+        bind_input(virtio_mouse, ok::driver::qemu_virt::VirtioInputKind::mouse))
+    {
+        ok::interrupt::drive_events(ok::interrupt::EventSource::input);
+        // Events queued before the lines were bound.
+        ok::interrupt::post_event(ok::interrupt::EventSource::input);
+    }
+    return ok::Status::success();
 }
 
 extern "C" int ok_platform_console_poll()
 {
-    if ((mmio8(uart_lsr) & uart_lsr_data_ready) == 0)
-    {
-        return -1;
-    }
-    return static_cast<int>(mmio8(uart_rbr_thr));
+    return uart_ring.take(read_uart, quiet_uart);
 }
