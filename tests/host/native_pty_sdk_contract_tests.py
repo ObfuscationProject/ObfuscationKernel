@@ -2,12 +2,18 @@
 from pathlib import Path
 import hashlib
 import importlib.util
+import os
 import tempfile
 import types
 import unittest
 from unittest.mock import patch
 
-ROOT = Path(__file__).resolve().parents[3]
+# OK_KERNEL_ROOT and OK_OS_ROOT name the producer and consumer checkouts; the
+# defaults are this file's checkout and its ObfuscationOS sibling in the
+# umbrella repository.
+KERNEL_ROOT = Path(os.environ.get('OK_KERNEL_ROOT') or Path(__file__).resolve().parents[2]).resolve()
+OS_ROOT = Path(os.environ.get('OK_OS_ROOT') or Path(__file__).resolve().parents[3] / 'ObfuscationOS').resolve()
+CONSUMER_FOUND = (OS_ROOT / 'tools/kernel_sdk.py').is_file()
 
 
 def load(name, path):
@@ -17,14 +23,15 @@ def load(name, path):
     return result
 
 
-PRODUCER = load('native_pty_sdk_producer', ROOT / 'ObfuscationKernel/tools/export_sdk.py')
-CONSUMER = load('native_pty_sdk_consumer', ROOT / 'ObfuscationOS/tools/kernel_sdk.py')
-FIXTURES = load('native_pty_sdk_fixtures', ROOT / 'ObfuscationOS/tests/tools/test_kernel_sdk.py')
-PROFILE = (ROOT / 'ObfuscationKernel/include' / PRODUCER.NATIVE_PTY_PROFILE_HEADER).read_text()
+PRODUCER = load('native_pty_sdk_producer', KERNEL_ROOT / 'tools/export_sdk.py')
+CONSUMER = load('native_pty_sdk_consumer', OS_ROOT / 'tools/kernel_sdk.py') if CONSUMER_FOUND else None
+FIXTURES = load('native_pty_sdk_fixtures', OS_ROOT / 'tests/tools/test_kernel_sdk.py') if CONSUMER_FOUND else None
+PROFILE = (KERNEL_ROOT / 'include' / PRODUCER.NATIVE_PTY_PROFILE_HEADER).read_text()
 DECLARATIONS = ''.join(line for line in PROFILE.splitlines(keepends=True)
                        if line.startswith('inline constexpr'))
 
 
+@unittest.skipUnless(CONSUMER_FOUND, 'ObfuscationOS consumer not found at ' + str(OS_ROOT) + '; set OK_OS_ROOT')
 class NativePtySdkContract(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -62,7 +69,7 @@ class NativePtySdkContract(unittest.TestCase):
         self.assertEqual(PROFILE, FIXTURES.PTY_HEADER)
         self.assertIn('native_sessions_pty = 0;', FIXTURES.SESSIONS_HEADER)
         self.assertIn('native_console_control_pty = 0;', FIXTURES.CONSOLE_CONTROL_HEADER)
-        syscall = (ROOT / 'ObfuscationKernel/include/ok/syscall/syscall.hpp').read_text()
+        syscall = (KERNEL_ROOT / 'include/ok/syscall/syscall.hpp').read_text()
         self.assertIn('    pty_pair = 1035,\n', syscall)
         self.assertIn('    fsync = 74,\n', syscall)
         self.accepted()

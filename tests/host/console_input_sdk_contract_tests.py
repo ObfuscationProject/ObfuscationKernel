@@ -2,11 +2,13 @@
 """Reject console lease SDK declarations that do not match the exported contract."""
 from pathlib import Path
 import importlib.util
+import os
 import shutil
 import tempfile
 import unittest
 
-ROOT = Path(__file__).resolve().parents[2]
+# OK_KERNEL_ROOT names the producer checkout; the default is this file's checkout.
+ROOT = Path(os.environ.get("OK_KERNEL_ROOT") or Path(__file__).resolve().parents[2]).resolve()
 SPEC = importlib.util.spec_from_file_location("console_export", ROOT / "tools/export_sdk.py")
 EXPORT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(EXPORT)
