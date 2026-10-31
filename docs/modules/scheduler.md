@@ -72,11 +72,44 @@ tick; user-driven redraws such as open, resize, and scroll still render
 immediately. The GUI monitor samples scheduler counters per refresh, so displayed
 CPU percentages are interval deltas rather than ever-growing boot averages.
 Future work should replace the simulated dispatch counters with timer-derived
-runtime deltas and add real SMP run queues once architecture code starts running
-kernel threads concurrently.
+runtime deltas.
 
 `python3 scripts/test_static_dispatch.py` runs host model tests under all ten
 architecture profile macros. It exercises the default policy and an independent
 stateful policy, priority/affinity, copied policy ownership, invalid CPU IDs,
 and compile-time rejection of a policy with an incompatible signature. These
 tests are not hardware preemption or SMP evidence.
+
+## Per-CPU run queues
+
+`SchedulerState` owns one `CpuRunQueue` per CPU (`include/ok/sched/run_queue.hpp`):
+a bounded FIFO of `ThreadRef{pid, tid}` identities, never PCB/TCB addresses,
+because process storage compacts on reap and task identities are never reused.
+Each queue has its own lock, selected at build time through `SchedulerRunQueue`
+and constrained by the `RunQueue` concept; every queue operation takes only that
+lock, so no path holds two queue locks. Queues are a mechanism: nothing enqueues
+implicitly, and the native runtime still picks threads by its own scan.
+
+- `set_online_cpus(mask)` keeps CPU 0 online and refuses unconfigured CPUs; the
+  default is CPU 0 only. `configure_cpus` intersects the online set with the new
+  count and places entries of removed CPUs again.
+- `enqueue_thread` places a runnable thread once (`queued_cpu`); a thread already
+  queued or on a CPU is left alone. `select_cpu` prefers the last CPU while it is
+  online and allowed, then the allowed online CPU with the shortest queue (lowest
+  id on a tie), then the lowest allowed configured CPU, whose queue waits for it,
+  and finally CPU 0 when the affinity names no configured CPU.
+- `dequeue_thread(cpu)` pops the CPU's own queue, discarding stale entries
+  (threads that blocked after they were queued) and moving entries whose
+  affinity changed. An empty queue steals the oldest eligible entry from the longest
+  other online queue, try-locking each victim after releasing its own lock.
+- `mark_on_cpu` dispatches a thread on a vacant online CPU and refuses a thread
+  already on another CPU; `clear_on_cpu` vacates it. `on_cpu` mirrors each CPU's
+  current slot and replaces the per-CPU scan that guarded double dispatch.
+- Thread exit, exec, process exit and reap remove the affected entries, so each
+  queue holds at most one entry per thread record and cannot overflow.
+- A preempted thread leaves its process `running` while another of its threads
+  is still on a CPU; with one CPU the transitions are unchanged.
+
+`python3 -B scripts/test_run_queues.py --sanitize` is the hosted model suite
+(`OK_RUN_QUEUES scope=model`). Host threads stand in for CPUs in its contention
+case; it is not AP start, IPI or hardware SMP evidence.

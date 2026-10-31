@@ -40,6 +40,7 @@ jobs:
           - native_vm
           - process_resources
           - irq_wait_time
+          - run_queues
     steps:
       - uses: actions/checkout@v4
       # Some runners build their hosted binaries through a generated xmake project.

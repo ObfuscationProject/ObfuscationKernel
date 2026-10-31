@@ -6,6 +6,7 @@
 #include "ok/fs/vfs.hpp"
 #include "ok/memory/kernel_entry_stack_pool.hpp"
 #include "ok/sched/resources.hpp"
+#include "ok/sched/run_queue.hpp"
 #include "ok/sched/unix_rights.hpp"
 #include "ok/sched/unix_pathname_sdk_profile.hpp"
 #include "ok/sched/descriptor_reservation.hpp"
@@ -31,8 +32,6 @@ namespace ok::user::native { class SharedMemoryFiles; }
 namespace ok::sched
 {
 
-using ProcessId = u64;
-using ThreadId = u64;
 inline constexpr ProcessId user_init_pid = 1;
 // Common Linux-visible task namespace; zero is reserved for boot/service context.
 // Linux robust futex owner words reserve the upper two bits for state flags.
@@ -44,6 +43,8 @@ inline constexpr u8 scheduler_min_priority = 0;
 inline constexpr u8 scheduler_default_priority = 16;
 inline constexpr u8 scheduler_max_priority = 31;
 inline constexpr u16 cpu_affinity_any = 0xffffu;
+// Marks a thread that is neither on a CPU nor placed on a run queue.
+inline constexpr smp::CpuId no_cpu = 0xffff;
 
 struct PipeReadiness
 {
@@ -112,6 +113,11 @@ struct ThreadControlBlock
     u64 dispatch_count{0};
     u64 cpu_time_ticks{0};
     smp::CpuId last_cpu{0};
+    // The CPU executing this thread, mirrored by that CPU's current slot.
+    smp::CpuId on_cpu{no_cpu};
+    // The run queue holding this thread's single entry. Dispatch and exit drop
+    // the entry; one whose thread blocked meanwhile is discarded when popped.
+    smp::CpuId queued_cpu{no_cpu};
 };
 
 struct CpuSchedulingStats
@@ -371,6 +377,11 @@ class RoundRobinPolicy final
     Result<ProcessId> pick_next(std::span<const ProcessControlBlock> processes, ProcessId current, smp::CpuId cpu);
 };
 
+// A queue can hold every thread a process table admits. Lock types are a
+// build-time choice made here, not a runtime queue interface.
+using SchedulerRunQueue = CpuRunQueue<max_processes * max_threads_per_process, smp::SpinLock>;
+static_assert(RunQueue<SchedulerRunQueue>);
+
 // Nonvirtual shared storage/mechanisms keep each policy instantiation small.
 // Construction and dispatch are protected for use by BasicScheduler.
 class SchedulerState
@@ -443,7 +454,10 @@ class SchedulerState
             return status;
         created.state = ProcessState::runnable;
         if (retired)
+        {
+            forget_queued(pid, *retired);
             *retired = created;
+        }
         else if (auto status = process->threads().push_back(created); !status.ok())
             return status;
         if (process->state() == ProcessState::created || process->state() == ProcessState::blocked)
@@ -587,7 +601,34 @@ class SchedulerState
     void console_input(char value, WakeSource source = WakeSource::thread);
     // Trusted runtime ingress failure closes ownership before returning to userland.
     void abort_console_input();
+    // Clears every CPU slot and moves queue entries off CPUs beyond the count;
+    // the online set keeps only its configured CPUs.
     Status configure_cpus(usize cpu_count);
+    // CPU 0 stays online; every online CPU must be configured. Entries already
+    // queued on a CPU that goes offline stay there and are not stolen.
+    Status set_online_cpus(u32 mask);
+    [[nodiscard]] u32 online_cpus() const { return online_cpus_; }
+    // Per-CPU run queues are a mechanism; nothing enqueues implicitly. The
+    // caller serializes scheduler state, while each queue lock guards only its
+    // ring, so no path ever holds two queue locks.
+    // Succeeds without change when the thread is on a CPU or already queued.
+    Status enqueue_thread(ProcessId pid, ThreadId tid);
+    // Placement: the thread's last CPU while it is online and allowed;
+    // otherwise the allowed online CPU with the shortest queue, lowest id on a
+    // tie; with no allowed CPU online, the lowest allowed configured CPU, whose
+    // queue waits for it; with no allowed configured CPU, CPU 0.
+    [[nodiscard]] smp::CpuId select_cpu(const ProcessControlBlock &process, const ThreadControlBlock &thread) const;
+    // Pops this online CPU's queue, discarding stale entries and moving
+    // entries the affinity no longer allows. An empty queue steals the oldest
+    // eligible entry from the longest other online queue it can try-lock,
+    // trying shorter victims next. The caller marks the result with mark_on_cpu.
+    std::optional<ThreadRef> dequeue_thread(smp::CpuId cpu);
+    // Dispatches exactly this thread on an online, vacant CPU, like
+    // activate_thread, and refuses a thread running on another CPU.
+    Status mark_on_cpu(ProcessId pid, ThreadId tid, smp::CpuId cpu);
+    // Vacates the CPU; the thread returns to runnable unless it blocked or exited.
+    Status clear_on_cpu(ProcessId pid, ThreadId tid, smp::CpuId cpu);
+    [[nodiscard]] const SchedulerRunQueue &run_queue(smp::CpuId cpu) const { return run_queues_.get(cpu); }
     Status set_runnable(ProcessId pid);
     Status block_process(ProcessId pid);
 
@@ -624,7 +665,21 @@ class SchedulerState
     [[nodiscard]] u8 process_usage_percent(ProcessId pid) const;
 
   private:
-    [[nodiscard]] bool thread_running_on_other_cpu(ThreadId tid, smp::CpuId cpu) const;
+    [[nodiscard]] static bool thread_running_on_other_cpu(const ThreadControlBlock &thread, smp::CpuId cpu)
+    {
+        return thread.on_cpu != no_cpu && thread.on_cpu != cpu;
+    }
+    [[nodiscard]] bool cpu_online(smp::CpuId cpu) const
+    {
+        return cpu < cpu_count_ && (online_cpus_ & (1u << cpu)) != 0;
+    }
+    // Drops the thread's queue entry, if any; storage moves never need this.
+    void forget_queued(ProcessId pid, ThreadControlBlock &thread);
+    void vacate_cpu_slot(usize cpu);
+    void occupy_cpu(smp::CpuId cpu, ProcessControlBlock &process, ThreadControlBlock &thread);
+    // The CPU 0 fallback of select_cpu admits a thread whose affinity names no configured CPU.
+    [[nodiscard]] bool affinity_admits(const ProcessControlBlock &process, smp::CpuId cpu) const;
+    [[nodiscard]] bool eligible_on(ThreadRef ref, smp::CpuId queue, smp::CpuId cpu) const;
     Result<ProcessId> create_process_with_pid(ProcessId pid, std::string_view name,
                                                arch::CpuContext initial_context);
     [[nodiscard]] Result<ThreadId> pick_next_thread(ProcessControlBlock &process, ThreadId current, smp::CpuId cpu);
@@ -708,6 +763,8 @@ class SchedulerState
     std::array<ProcessId, smp::max_cpus> current_by_cpu_{};
     std::array<ThreadId, smp::max_cpus> current_thread_by_cpu_{};
     std::array<CpuSchedulingStats, smp::max_cpus> cpu_stats_{};
+    u32 online_cpus_{1};
+    smp::PerCpu<SchedulerRunQueue> run_queues_{};
 };
 
 template <SchedulerPolicy Policy = RoundRobinPolicy> class BasicScheduler final : public SchedulerState
