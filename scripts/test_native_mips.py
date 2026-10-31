@@ -21,11 +21,11 @@ def main() -> int:
     flags = ["-march=mips32r2", "-G0"] if args.arch == "mips" else ["-march=mips64r2", "-mabi=64", "-G0"]
     cxx = ["-std=c++23", "-O2", "-ffreestanding", "-fno-builtin", "-fno-exceptions",
            "-fno-stack-protector", "-fno-threadsafe-statics", "-Wall", "-Wextra", "-Wpedantic", "-Werror",
-           "-I", str(root / "include")]
+           "-I", str(root / "include"), "-DOK_ARCH_TARGET_" + args.arch.upper()]
     if args.kernel_fault:
         cxx.append("-DOK_NATIVE_KERNEL_FAULT=1")
     sources = ["src/boot/raw_handoff.cpp", f"src/arch/{args.arch}/boot.S", f"src/arch/{args.arch}/execution.cpp", "src/interrupt/platform_irq.cpp",
-               f"src/arch/{args.arch}/execution.S", "tests/native/mips_execution_test.cpp", "tests/native/mips_execution_user.S"]
+               "src/arch/clock.cpp", f"src/arch/{args.arch}/execution.S", "tests/native/mips_execution_test.cpp", "tests/native/mips_execution_user.S"]
     objects = []
     for index, source in enumerate(sources):
         obj = output / f"{index}.o"
