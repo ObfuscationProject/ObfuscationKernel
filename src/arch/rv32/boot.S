@@ -4,6 +4,10 @@
 _start:
     .option push
     .option norelax
+    # QEMU -bios none starts every hart here; this profile runs on hart 0
+    # alone and parks the others for good before they touch memory.
+    csrr t0, mhartid
+    bnez t0, .Lpark
     la sp, boot_stack_top
     la t0, _bss_start
     la t1, _bss_end
@@ -18,6 +22,11 @@ _start:
 3:
     wfi
     j 3b
+.Lpark:
+    csrw mie, zero
+4:
+    wfi
+    j 4b
     .option pop
 
 .section .bootstrap_bss, "aw", @nobits

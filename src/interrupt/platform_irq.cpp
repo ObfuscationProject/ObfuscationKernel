@@ -8,7 +8,9 @@
 #include "../arch/arm_common/gicv2.hpp"
 #define OK_PLATFORM_IRQ_WAIT 1
 #elif defined(OK_KERNEL_FREESTANDING) && defined(__riscv)
+#include "../arch/riscv_common/clint.hpp"
 #include "../arch/riscv_common/plic.hpp"
+#include "ok/smp/bringup.hpp"
 #define OK_PLATFORM_IRQ_WAIT 1
 #elif defined(OK_KERNEL_FREESTANDING) && defined(__loongarch64)
 #include "../arch/loongarch64/eiointc.hpp"
@@ -140,37 +142,11 @@ u64 timebase()
 #endif
 
 #if defined(OK_PLATFORM_IRQ_WAIT) && defined(__riscv)
-// The CLINT compare register as a one-shot idle tick: 100,000 ticks of the
-// 10 MHz virt timebase. The native backend saves and restores it around each
-// user entry; the wait leaves it at its maximum.
-constexpr uptr clint_mtimecmp = 0x2004000, clint_mtime = 0x200bff8;
-constexpr uptr mie_mtie = uptr{1} << 7, mie_meie = uptr{1} << 11;
-void set_compare(u64 value)
-{
-#if __riscv_xlen == 32
-    auto *compare = reinterpret_cast<volatile u32 *>(clint_mtimecmp);
-    compare[0] = 0xffffffffu; // Never below the current time while the halves change.
-    compare[1] = static_cast<u32>(value >> 32);
-    compare[0] = static_cast<u32>(value);
-#else
-    *reinterpret_cast<volatile u64 *>(clint_mtimecmp) = value;
-#endif
-}
-u64 machine_time()
-{
-#if __riscv_xlen == 32
-    const auto *time = reinterpret_cast<volatile u32 *>(clint_mtime);
-    u32 high, low;
-    do
-    {
-        high = time[1];
-        low = time[0];
-    } while (time[1] != high);
-    return (u64{high} << 32) | low;
-#else
-    return *reinterpret_cast<volatile u64 *>(clint_mtime);
-#endif
-}
+// This hart's CLINT compare register as a one-shot idle tick: 100,000 ticks of
+// the 10 MHz virt timebase. The native backend saves and restores it around
+// each user entry; the wait leaves it at its maximum.
+using arch::riscv::Clint;
+using arch::riscv::mie_meie, arch::riscv::mie_msie, arch::riscv::mie_mtie;
 #endif
 
 void halt_until_interrupt()
@@ -202,12 +178,18 @@ void halt_until_interrupt()
     // MIE stays clear, so nothing traps and the wait claims from the PLIC.
     uptr status;
     asm volatile("csrrc %0, mstatus, %1" : "=r"(status) : "r"(uptr{8}) : "memory");
-    const u64 deadline = machine_time() + 100000;
-    set_compare(deadline);
-    asm volatile("csrw mie, %0\nwfi\ncsrw mie, zero" : : "r"(mie_mtie | mie_meie) : "memory");
+    // Another CPU's IPI (machine software interrupt) also ends the wait.
+    const u64 deadline = Clint::time() + 100000;
+    Clint::set_compare(deadline);
+    asm volatile("csrw mie, %0\nwfi\ncsrw mie, zero" : : "r"(mie_mtie | mie_meie | mie_msie) : "memory");
     uptr pending;
     asm volatile("csrr %0, mip" : "=r"(pending));
-    set_compare(~u64{0});
+    Clint::set_compare(~u64{0});
+    if (pending & mie_msie)
+    {
+        Clint::clear_software();
+        static_cast<void>(smp::receive_ipi());
+    }
     if (pending & mie_meie)
     {
         if (const u32 source = PlatformIrqChip::claim(); source != 0)
@@ -215,7 +197,7 @@ void halt_until_interrupt()
     }
     else if (pending & mie_mtie)
     {
-        const u64 now = machine_time();
+        const u64 now = Clint::time();
         record_timer_latency(TimerWake::idle, now > deadline ? now - deadline : 0, arch::clock_frequency());
         ok_interrupt_tick();
     }

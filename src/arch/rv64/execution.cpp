@@ -1,6 +1,8 @@
 #include "ok/arch/execution_spaces.hpp"
 #include "ok/interrupt/platform.hpp"
 #include "ok/arch/clock.hpp"
+#include "ok/smp/bringup.hpp"
+#include "../riscv_common/clint.hpp"
 #include <cstddef>
 
 namespace ok::arch::execution
@@ -24,8 +26,10 @@ struct Space
     usize leaves{};
 };
 constinit SpaceTable<Space> spaces;
+// Entries look a space up without the kernel lock; growing or retiring the
+// slot table under that lock must not move the table under such a lookup.
+constinit smp::SpinLock spaces_lock{};
 bool initialized{false};
-bool entering{false};
 
 Space *lookup(const AddressSpace &space)
 {
@@ -91,12 +95,25 @@ u64 leaf_entry(const PageMapping &page)
     return static_cast<u64>(page.physical_address >> 2) | flags;
 }
 extern "C" void ok_rv64_enter_native(UserFrame *frame, uptr satp, Trap *trap, uptr stack_top);
-// mie for user mode, read by the entry assembly, which records the user
-// quantum's mtimecmp expiry.
-extern "C"
+// One hart's entry state, reached through tp: boot.S points hart 0 at the
+// first block and a started hart gets its block from the start mailbox. The
+// logical id comes first (ops.cpp reads it); the entry assembly reads the user
+// mie and records the quantum's mtimecmp expiry at the next two offsets.
+struct alignas(64) CpuBlock
 {
-constinit uptr ok_rv_user_mie = 0x80;
-constinit u64 ok_rv_user_deadline = 0;
+    uptr logical{};
+    uptr user_mie{};
+    u64 user_deadline{};
+    uptr hart{};
+    std::atomic<bool> executing{};
+};
+static_assert(offsetof(CpuBlock, logical) == 0 && offsetof(CpuBlock, user_mie) == 8 &&
+              offsetof(CpuBlock, user_deadline) == 16);
+CpuBlock &this_cpu()
+{
+    CpuBlock *block;
+    asm("mv %0, tp" : "=r"(block));
+    return *block;
 }
 static_assert(offsetof(UserFrame, pc) == 256);
 static_assert(offsetof(UserFrame, sp) == 264);
@@ -107,6 +124,26 @@ static_assert(offsetof(Trap, vector) == 4);
 static_assert(offsetof(Trap, error_code) == 8);
 static_assert(offsetof(Trap, fault_address) == 16);
 } // namespace
+} // namespace ok::arch::execution
+
+extern "C"
+{
+constinit std::array<ok::arch::execution::CpuBlock, ok::smp::max_cpus> ok_rv64_cpu_blocks{};
+}
+
+namespace ok::arch::execution
+{
+namespace
+{
+// PMP entry 0 as one NAPOT region over all memory, R/W/X: U-mode runs only
+// under a PMP match, and the PTEs enforce its access. Each hart has its own.
+void allow_user_memory()
+{
+    const uptr all_memory = ~uptr{0};
+    const uptr permission = 0x1f;
+    asm volatile("csrw pmpaddr0, %0\ncsrw pmpcfg0, %1" ::"r"(all_memory), "r"(permission) : "memory");
+}
+} // namespace
 
 bool supported() noexcept
 {
@@ -115,7 +152,8 @@ bool supported() noexcept
 OwnershipReport ownership_report() noexcept
 {
     OwnershipReport report{};
-    report.executing = entering;
+    for (const auto &block : ok_rv64_cpu_blocks)
+        report.executing = report.executing || block.executing.load(std::memory_order_acquire);
     spaces.each([&](const Space &space, uptr root) {
         ++report.address_spaces;
         report.table_pages += 2 + space.leaves;
@@ -135,13 +173,12 @@ Status initialize()
         return Status::success();
     // The virt kernel remains in M-mode. U-mode uses Sv39 and returns directly
     // to the machine trap vector; no supervisor kernel mapping is exposed.
-    uptr hart = 0;
-    asm volatile("csrr %0, mhartid" : "=r"(hart));
-    if (hart != 0)
-        return Status::unsupported("native virt execution currently uses the boot hart");
-    const uptr all_memory = ~uptr{0};
-    const uptr permission = 0x1f; // PMP NAPOT region, R/W/X; PTEs enforce U access.
-    asm volatile("csrw pmpaddr0, %0\ncsrw pmpcfg0, %1" ::"r"(all_memory), "r"(permission) : "memory");
+    // Started harts set up their own part (ok_rv64_secondary_execution).
+    if (riscv::Clint::hart_id() != 0)
+        return Status::unsupported("native virt execution initializes on boot hart 0");
+    // boot.S already did; probes that link this backend alone rely on it here.
+    asm volatile("mv tp, %0" : : "r"(&ok_rv64_cpu_blocks[0]) : "memory");
+    allow_user_memory();
     initialized = true;
     return Status::success();
 }
@@ -154,12 +191,16 @@ Result<AddressSpace> create_space(MappingView mappings)
     for (const auto &page : mappings)
         if (!admissible(page))
             return Status::invalid_argument("invalid Sv39 user mapping");
-    auto entry = spaces.acquire();
+    auto entry = [] {
+        smp::ScopedSpinLock guard(spaces_lock);
+        return spaces.acquire();
+    }();
     if (!entry)
         return entry.status();
     auto &space = entry.value()->space;
     auto fail = [&](Status status) {
         static_cast<void>(release_tables(space));
+        smp::ScopedSpinLock guard(spaces_lock);
         static_cast<void>(spaces.release(space));
         return status;
     };
@@ -196,8 +237,6 @@ Status remap(const AddressSpace &space, const PageMapping &mapping)
     auto *stored = lookup(space);
     if (stored == nullptr)
         return Status::invalid_argument("stale native address space");
-    if (entering)
-        return Status::busy("cannot remap an executing address space");
     if (!admissible(mapping) || mapping.flags == 0)
         return Status::invalid_argument("invalid Sv39 user remap");
     const auto middle = stored->middle->entries[(mapping.virtual_address >> 21) & 511u];
@@ -206,19 +245,21 @@ Status remap(const AddressSpace &space, const PageMapping &mapping)
     auto &entry = reinterpret_cast<Table *>((middle >> 10) << 12)->entries[(mapping.virtual_address >> 12) & 511u];
     if ((entry & pte_valid) == 0)
         return Status::not_found("native user page has no translation");
-    // Native entry executes sfence.vma before it switches to U-mode.
+    // Every other hart in this space leaves U-mode first; its next entry, like
+    // this hart's, executes sfence.vma before it switches to U-mode.
+    static_cast<void>(smp::quiesce_root(space.root));
     entry = leaf_entry(mapping);
     asm volatile("fence rw,rw\nfence.i" ::: "memory");
     return Status::success();
 }
 Status destroy_space(AddressSpace &space)
 {
-    if (entering)
-        return Status::busy("cannot destroy an executing address space");
     auto *stored = lookup(space);
     if (stored == nullptr)
         return Status::invalid_argument("stale native address space");
+    static_cast<void>(smp::quiesce_root(space.root));
     const auto released = release_tables(*stored);
+    smp::ScopedSpinLock guard(spaces_lock);
     const auto retired = spaces.release(*stored);
     space = {};
     return !released ? released : retired;
@@ -231,24 +272,31 @@ UserFrame initial_frame(uptr entry, uptr stack)
     frame.registers[2] = stack;
     return frame;
 }
-// CLINT mtime, the counter mtimecmp compares against.
-u64 machine_time()
+// An interrupt in user mode. The boot hart's timer is the system tick, a
+// secondary's only its local tick. An IPI is acknowledged at the CLINT. A
+// device line (boot hart only) is claimed from the PLIC and its top half run
+// once the interrupt service owns the PLIC, otherwise only completed.
+void complete_irq(Trap &trap, const CpuBlock &cpu)
 {
-    return *reinterpret_cast<volatile u64 *>(uptr{0x200bff8});
-}
-// A device interrupt in user mode: claim the PLIC source and run its top half
-// once the interrupt service owns the PLIC, otherwise only complete it.
-void complete_irq(Trap &trap)
-{
-    if (trap.kind == TrapKind::timer)
+    if (trap.kind == TrapKind::timer && cpu.logical != 0)
+        smp::local_tick();
+    else if (trap.kind == TrapKind::timer)
     {
-        const u64 now = machine_time();
+        const u64 now = riscv::Clint::time();
         interrupt::record_timer_latency(interrupt::TimerWake::user,
-                                        now > ok_rv_user_deadline ? now - ok_rv_user_deadline : 0,
+                                        now > cpu.user_deadline ? now - cpu.user_deadline : 0,
                                         arch::clock_frequency());
         ok_interrupt_tick();
     }
     if (trap.kind != TrapKind::interrupt)
+        return;
+    if ((trap.error_code & 0xff) == 3)
+    {
+        riscv::Clint::clear_software();
+        static_cast<void>(smp::receive_ipi());
+        return;
+    }
+    if (cpu.logical != 0)
         return;
     auto &claim = *reinterpret_cast<volatile u32 *>(uptr{0x0c200004});
     const u32 source = claim;
@@ -262,28 +310,35 @@ void complete_irq(Trap &trap)
 }
 static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack_top)
 {
-    auto *stored = lookup(space);
-    if (!initialized || stored == nullptr)
+    if (!initialized)
         return Status::not_initialized("native address space is unavailable");
-    if (entering)
+    auto &cpu = this_cpu();
+    if (cpu.executing.load(std::memory_order_relaxed))
         return Status::busy("nested native entry is unsupported");
-    const auto *entry = mapping(*stored, frame.pc);
-    // Like Linux, the stack need not be mapped; only an access to it faults (a
-    // detached musl thread unmaps its own stack before its exit syscall).
-    if (entry == nullptr || !(entry->flags & page_execute) || (frame.pc & 1) != 0 || frame.sp <= user_begin ||
-        frame.sp > user_end)
-        return Status::invalid_argument("invalid user entry frame");
+    {
+        smp::ScopedSpinLock guard(spaces_lock);
+        auto *stored = lookup(space);
+        if (stored == nullptr)
+            return Status::not_initialized("native address space is unavailable");
+        const auto *entry = mapping(*stored, frame.pc);
+        // Like Linux, the stack need not be mapped; only an access to it faults (a
+        // detached musl thread unmaps its own stack before its exit syscall).
+        if (entry == nullptr || !(entry->flags & page_execute) || (frame.pc & 1) != 0 || frame.sp <= user_begin ||
+            frame.sp > user_end)
+            return Status::invalid_argument("invalid user entry frame");
+    }
     uptr saved_status;
     asm volatile("csrrc %0, mstatus, %1" : "=r"(saved_status) : "r"(uptr{8}) : "memory");
-    entering = true;
-    // User mode takes the machine timer and, once the interrupt service owns the
-    // PLIC, machine external interrupts.
-    ok_rv_user_mie = interrupt::platform_irqs_started() ? 0x880 : 0x80;
+    cpu.executing.store(true, std::memory_order_release);
+    // User mode takes this hart's timer and IPIs and, on the boot hart once the
+    // interrupt service owns the PLIC, machine external interrupts.
+    cpu.user_mie = riscv::mie_mtie | riscv::mie_msie |
+                   (cpu.logical == 0 && interrupt::platform_irqs_started() ? riscv::mie_meie : 0);
     Trap trap{};
     const uptr satp = (uptr{8} << 60) | (space.root >> 12);
     ok_rv64_enter_native(&frame, satp, &trap, stack_top);
-    entering = false;
-    complete_irq(trap);
+    cpu.executing.store(false, std::memory_order_release);
+    complete_irq(trap, cpu);
     // The assembly restored the masked status; re-enable only on the service stack.
     asm volatile("csrs mstatus, %0" : : "r"(saved_status & uptr{8}) : "memory");
     return trap;
@@ -374,3 +429,21 @@ Status copy_to_user(const AddressSpace &space, uptr destination, const void *sou
     return Status::success();
 }
 } // namespace ok::arch::execution
+
+// Secondary-hart start (smp.cpp): the block a started hart's tp points at,
+// and that hart's own part of initialize(), which it runs first.
+extern "C" ok::uptr ok_rv64_cpu_block(ok::u32 cpu, ok::uptr hart) noexcept
+{
+    auto &block = ok_rv64_cpu_blocks[cpu];
+    block.logical = cpu;
+    block.hart = hart;
+    return reinterpret_cast<ok::uptr>(&block);
+}
+
+extern "C" void ok_rv64_secondary_execution() noexcept
+{
+    using namespace ok::arch;
+    asm volatile("csrw mie, zero" : : : "memory");
+    riscv::Clint::set_compare(~ok::u64{0});
+    execution::allow_user_memory();
+}

@@ -79,7 +79,11 @@ ok_rv64_enter_native:
     csrw satp, a1
     sfence.vma zero, zero
     fence.i
-    li t0, 0x2004000
+    # This hart's mtimecmp; tp is still the kernel's per-CPU block.
+    csrr t0, mhartid
+    slli t0, t0, 3
+    li t1, 0x2004000
+    add t0, t0, t1
     ld t1, 0(t0)
     sd t1, 192(sp)
     li t1, 0x200bff8
@@ -87,8 +91,7 @@ ok_rv64_enter_native:
     li t2, 100000
     add t1, t1, t2
     sd t1, 0(t0)
-    la t2, ok_rv_user_deadline
-    sd t1, 0(t2)
+    sd t1, 16(tp)
     ld t0, 120(sp)
     li t1, 0xe1808
     not t1, t1
@@ -96,8 +99,7 @@ ok_rv64_enter_native:
     li t1, 0x6080
     or t0, t0, t1
     csrw mstatus, t0
-    la t0, ok_rv_user_mie
-    ld t0, 0(t0)
+    ld t0, 8(tp)
     csrw mie, t0
     ld t6, 200(sp)
     ld t0, 256(t6)
@@ -278,8 +280,9 @@ ok_rv64_native_trap:
     li t3, 3
     j 5f
 2:
-    // Machine timer (cause 7) is the tick; any other interrupt is a device
-    // line the C side claims from the PLIC (TrapKind::interrupt).
+    // Machine timer (cause 7) is the tick; any other interrupt, an IPI
+    // (cause 3) or a device line, the C side acknowledges from the stored
+    // mcause (TrapKind::interrupt).
     andi t4, t2, 0xff
     li t3, 7
     beq t4, t3, 6f
@@ -300,7 +303,10 @@ ok_rv64_native_trap:
     sb t3, 0(t1)
     sd sp, 24(t1)
     csrw mie, zero
-    li t0, 0x2004000
+    csrr t0, mhartid
+    slli t0, t0, 3
+    li t1, 0x2004000
+    add t0, t0, t1
     ld t1, 192(sp)
     sd t1, 0(t0)
     ld t0, 152(sp)

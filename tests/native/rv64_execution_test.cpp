@@ -1,5 +1,8 @@
 #include "ok/arch/execution.hpp"
+#include "ok/arch/smp.hpp"
+#include "ok/smp/bringup.hpp"
 #include "execution_table_pages.hpp"
+#include "../../src/arch/riscv_common/clint.hpp"
 namespace hw = ok::arch::execution;
 using namespace ok;
 extern "C" const std::byte ok_rv64_probe_begin[], ok_rv64_probe_timer[], ok_rv64_probe_write_fault[],
@@ -33,7 +36,51 @@ uptr entry(const std::byte *label)
 {
     return hw::user_begin + static_cast<uptr>(label - ok_rv64_probe_begin);
 }
+// Bounded on the CLINT's 10 MHz mtime, so a hart that never answers fails.
+template <typename Done> bool wait_for(Done done)
+{
+    const u64 start = arch::riscv::Clint::time();
+    while (!done())
+        if (arch::riscv::Clint::time() - start > 20'000'000)
+            return done();
+    return true;
+}
+
+// Hart 1's share: it runs the counting loop in its own space until hart 0
+// asks it to stop, and reports how each entry ended.
+alignas(16) std::array<std::byte, 16384> hart_one_stack{};
+hw::AddressSpace hart_one_space{};
+std::atomic<u32> hart_one_phase{}; // 1 run, 2 stop, 3 stopped
+std::atomic<u32> hart_one_timers{}, hart_one_ipis{}, hart_one_other{};
+std::atomic<uptr> hart_one_count{};
+std::atomic<bool> hart_one_identity{};
 } // namespace
+extern "C" [[noreturn]] void ok_smp_secondary_main(smp::CpuId cpu)
+{
+    auto &record = smp::cpu_record(cpu);
+    hart_one_identity.store(smp::current_cpu() == cpu, std::memory_order_relaxed);
+    record.reported_id.store(static_cast<uptr>(arch::smp::current_hardware_id()), std::memory_order_release);
+    record.state.store(static_cast<u8>(smp::CpuState::online), std::memory_order_release);
+    while (hart_one_phase.load(std::memory_order_acquire) == 0)
+        arch::ArchOperations::spin_pause();
+    auto frame = hw::initial_frame(entry(ok_rv64_probe_timer), hw::user_begin + 0x2000 - 16);
+    while (hart_one_phase.load(std::memory_order_acquire) == 1)
+    {
+        smp::begin_user(hart_one_space.root);
+        const auto trap = hw::enter(hart_one_space, frame);
+        smp::end_user();
+        if (trap && trap.value().kind == hw::TrapKind::timer)
+            hart_one_timers.fetch_add(1, std::memory_order_relaxed);
+        else if (trap && trap.value().kind == hw::TrapKind::interrupt && trap.value().vector == 3)
+            hart_one_ipis.fetch_add(1, std::memory_order_relaxed);
+        else
+            hart_one_other.fetch_add(1, std::memory_order_relaxed);
+    }
+    hart_one_count.store(frame.registers[8], std::memory_order_relaxed);
+    hart_one_phase.store(3, std::memory_order_release);
+    for (;;)
+        arch::smp::wait_local();
+}
 extern "C" void *memcpy(void *to, const void *from, usize size)
 {
     auto *out = static_cast<volatile std::byte *>(to);
@@ -48,6 +95,23 @@ extern "C" void *memset(void *to, int value, usize size)
     for (usize i = 0; i < size; ++i)
         out[i] = static_cast<u8>(value);
     return to;
+}
+// The DTB parser's string compares.
+extern "C" int memcmp(const void *left, const void *right, usize size)
+{
+    const auto *a = static_cast<const volatile u8 *>(left), *b = static_cast<const volatile u8 *>(right);
+    for (usize i = 0; i < size; ++i)
+        if (a[i] != b[i])
+            return a[i] < b[i] ? -1 : 1;
+    return 0;
+}
+extern "C" void *memchr(const void *from, int value, usize size)
+{
+    const auto *in = static_cast<const volatile u8 *>(from);
+    for (usize i = 0; i < size; ++i)
+        if (in[i] == static_cast<u8>(value))
+            return const_cast<u8 *>(const_cast<const u8 *>(in + i));
+    return nullptr;
 }
 extern "C" [[noreturn]] void kernel_main()
 {
@@ -125,6 +189,48 @@ extern "C" [[noreturn]] void kernel_main()
     check(hw::copy_from_user(second.value(), &copied, hw::user_begin + 0x1000, sizeof(copied)).ok() && copied == 1,
           "second space survived other user writes");
     emit("RV64_NATIVE address_spaces=pass\n");
+    // Hart 1 from the DTB, released through its start mailbox and MSIP, runs
+    // user code in the second space while this hart runs its own; remapping
+    // that space first sends hart 1 out of U-mode with an IPI.
+    boot::CpuTopologyMap harts{};
+    check(arch::smp::discover(harts).ok() && harts.count == 2 && harts.method == boot::CpuStartMethod::riscv_msip &&
+              harts.boot_known && harts.cpus[harts.boot_index].hardware_id == 0,
+          "hart discovery");
+    check(arch::smp::prepare_boot_cpu(harts).ok(), "boot hart IPI setup");
+    smp::detail::ipi_sender = &arch::smp::send_ipi;
+    auto &hart_one = smp::cpu_record(1);
+    hart_one.hardware_id = 1;
+    hart_one_space = second.value();
+    const auto stack_lower = reinterpret_cast<uptr>(hart_one_stack.data());
+    check(arch::smp::start(1, 1, stack_lower, stack_lower + hart_one_stack.size()).ok(), "hart start request");
+    check(wait_for([&] {
+              return hart_one.state.load(std::memory_order_acquire) == static_cast<u8>(smp::CpuState::online);
+          }) && hart_one.reported_id.load(std::memory_order_acquire) == 1 &&
+              hart_one_identity.load(std::memory_order_relaxed),
+          "hart 1 runs kernel code with its own block");
+    smp::detail::online.store(0b11, std::memory_order_release);
+    hart_one_phase.store(1, std::memory_order_release);
+    check(wait_for([&] { return hart_one.local_ticks.load(std::memory_order_relaxed) >= 2; }), "hart 1 local timer");
+    trap = hw::enter(space, memory_a);
+    check(trap && trap.value().kind == hw::TrapKind::syscall && memory_a.registers[10] == value + 3,
+          "user entry beside hart 1");
+    // The shootdown waits only for an open user window, which hart 1 leaves
+    // for microseconds per 10 ms quantum; retry until one was waited for.
+    for (usize attempt = 0; attempt < 100 && smp::cpu_record(0).shootdowns.load() == 0; ++attempt)
+        check(hw::remap(second.value(), other_pages[1]).ok(), "remap beside hart 1");
+    check(smp::cpu_record(0).shootdowns.load() != 0 &&
+              wait_for([&] { return hart_one_ipis.load(std::memory_order_relaxed) != 0; }),
+          "shootdown IPI takes hart 1 out of U-mode");
+    hart_one_phase.store(2, std::memory_order_release);
+    check(wait_for([&] { return hart_one_phase.load(std::memory_order_acquire) == 3; }) &&
+              hart_one_timers.load() >= 2 && hart_one_other.load() == 0 && hart_one_count.load() != 0 &&
+              smp::cpu_record(0).local_ticks.load() == 0,
+          "hart 1 user traps");
+    const auto received = hart_one.ipis_received.load(std::memory_order_acquire);
+    smp::send_ipi(1, smp::ipi_ping);
+    check(wait_for([&] { return hart_one.ipis_received.load(std::memory_order_acquire) != received; }),
+          "IPI wakes hart 1's idle wait");
+    emit("RV64_NATIVE harts=2 start=pass local_timer=pass shootdown=pass idle_ipi=pass\n");
     check(!hw::copy_to_user(space, hw::user_begin, &value, sizeof(value)), "reject read-only copy");
     check(!hw::user_range(space, hw::user_begin + 0x1fff, 2, true), "reject unmapped boundary");
     check(hw::copy_from_user(space, nullptr, 0, 0).ok(), "empty null copy");

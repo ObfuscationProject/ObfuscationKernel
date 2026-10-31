@@ -67,10 +67,17 @@ void NativeInstructions<Architecture::rv64>::restore_interrupts(uptr saved) noex
 #endif
 }
 
-// Every profile reports the boot CPU until per-CPU registers are installed.
+// The logical id heads the per-CPU block tp points at (src/arch/rv64/
+// execution.cpp); boot.S leaves tp 0 in images without the native backend.
 u32 NativeInstructions<Architecture::rv64>::cpu_index() noexcept
 {
+#if defined(OK_KERNEL_FREESTANDING) && defined(__riscv)
+    const uptr *block;
+    asm("mv %0, tp" : "=r"(block));
+    return block != nullptr ? static_cast<u32>(*block) : 0;
+#else
     return 0;
+#endif
 }
 
 } // namespace ok::arch::detail
