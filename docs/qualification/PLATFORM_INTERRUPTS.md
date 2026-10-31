@@ -499,6 +499,31 @@ root's provisional timestamp.
   in between ended the wait, or the next user quantum, at once. They now
   write the count first; the minimum became 65 µs (idle) and 99 µs (user).
 
+### Pre-merge review
+
+Two review rounds over the whole WT1.2 diff, each finding checked by an
+independent skeptic, found these, fixed before the merge:
+
+- `timer_create` returned the new id instead of 0.
+- A timer signal that `sigaction` discards was taken for a dequeue and
+  rearmed the timer; Linux leaves `ITIMER_REAL` expired and parks a periodic
+  POSIX timer's record until the signal is unignored, blocked or not. A
+  `SIGALRM` dequeued before the discard had already rearmed its timer.
+- A `SIGEV_THREAD_ID` timer's exiting target is settled while its queue can
+  still be read: a record still queued stalls the timer, one already dequeued
+  rearmed it. `alarm` returns an `unsigned int`.
+- Binding the PL011 cleared RX for a byte already waiting, which stopped
+  console input typed during boot on arm32 and aarch64.
+- A level UART with a full ring was taken again on every unmask, so a device
+  wait inside a system call spun until its I/O timeout; the ring now turns the
+  receive interrupt off while it holds a backlog.
+- A network post outlived a retired or unconfigured link and kept the loop
+  from idling; an undriven source's repost was dropped and let it idle with
+  frames left; a native start that failed after starting the service slowed
+  the rescue GUI's tick to one per 2048 waits.
+- ObfuscationOS: bottom halves acted on any interrupt of a shared INTx line,
+  not only their device's; a NIC restarted after `stop()` stayed silent.
+
 ## Limits
 
 - The runtime still rechecks its software waits (poll/select, UDP receives,
