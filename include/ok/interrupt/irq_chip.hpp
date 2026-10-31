@@ -19,10 +19,11 @@ enum class IrqTrigger : u8
     level,
 };
 
-// Static-dispatch contract for an interrupt controller backend. Each
-// architecture supplies one implementation (8259/APIC, GICv2, PLIC, EIOINTC,
-// MIPS CP0/i8259, MPIC) under src/arch/<arch>/irq_chip.cpp; generic code is
-// instantiated over it. No virtual call sits on the interrupt path.
+// Static-dispatch contract for an interrupt controller backend. Each profile
+// supplies one implementation (the 8259A pair, GICv2, the PLIC, EIOINTC with
+// PCH-PIC, Malta's 8259 pair, the MPIC), selected as PlatformIrqChip in
+// src/interrupt/platform_irq.cpp; generic code is instantiated over it. No
+// virtual call sits on the interrupt path.
 template <typename Chip>
 concept IrqChip = requires(Chip chip, const Chip cchip, IrqLine line, IrqTrigger trigger) {
     { chip.initialize() } -> std::same_as<Status>;

@@ -23,9 +23,11 @@ Slice 6: the gate evidence. This note grows with each slice.
   `wait_for_interrupt()` and statistics. Profiles without a controller driver
   keep the model chip; there `wait_for_interrupt()` returns false and the loop
   polls as before.
-- The kernel loop (`src/core/kernel_main.cpp`) starts the service once native
-  userland runs, because the trap vectors belong to the native backend. It
-  drains bottom halves on every iteration. When nothing was polled and the
+- The native runtime starts the service, because the trap vectors belong to
+  the native backend: since slice 6 it does so before it mounts the root
+  (slices 1–5 started it in the kernel loop once native userland ran). The
+  kernel loop (`src/core/kernel_main.cpp`) drains bottom halves on every
+  iteration. When nothing was polled and the
   runtime found no thread to run (`user::native::idle()`), it waits for an
   interrupt instead of spinning. The tick that preempts user code also ends
   the wait, so timed waits are checked at least once per tick.
@@ -47,7 +49,7 @@ Slice 6: the gate evidence. This note grows with each slice.
 | arm32, aarch64 | GICv2 (`src/arch/arm_common/gicv2.hpp`): SPIs 32–255, ICFGR edge/level, CPU 0 targets | Done. The kernel waits with CPSR.I set (WFI wakes on a pending IRQ regardless) and claims from GICC_IAR; a one-shot physical-timer PPI 30 at 100 Hz ends the wait. The user IRQ path completes only the timer PPI and reports other IDs as `TrapKind::interrupt`. PL011 receive is bound to ID 33 (SPI 1, level) |
 | rv64, rv32 | PLIC (`src/arch/riscv_common/plic.hpp`), hart 0 machine context: sources 1–127 | Done. The M-mode kernel waits with mstatus.MIE clear (WFI wakes on `mip & mie`) and a one-shot CLINT compare at 100 Hz, then claims from the PLIC. User mode enables MEIE once the service runs; the trap assembly separates the machine timer (cause 7) from device interrupts. NS16550 receive is bound to source 10 |
 | loongarch64 | EIOINTC with PCH-PIC (`src/arch/loongarch64/eiointc.hpp`): PCH-PIC inputs 0–31 forwarded to the same EIOINTC vectors, core 0, IP0 | Done. Masking clears the EIOINTC enable bit, unmasking re-delivers an asserted input; the core ISR is the claim and its write-one-to-clear the completion. The kernel idles with CRMD.IE clear (IDLE wakes on `ESTAT.IS & ECFG.LIE`) and a one-shot constant timer. User mode enables IP0 once the service runs. The UART is bound to PCH-PIC input 2 |
-| mips, mips64 | Malta's PIIX4 8259 pair (`Pic8259<MaltaPortIo, false>`) through the GT-64120 PCI I/O window, on CPU IP2 | Done. These pre-R6 cores leave WAIT only for an interrupt they can take, so `ok_mips_idle` sets IE with IM2 and IM7; the exception vector recognizes the idle window, resumes after WAIT with IE clear, and the C side claims the line with an OCW3 poll. The CP0 timer is the tick, so 8259 line 0 stays masked. User mode adds IM2 once the service runs; the o32/n64 capture readiness ignores that kernel-owned bit. COM1 receive is bound to line 4 |
+| mips, mips64 | Malta's PIIX4 8259 pair (`Pic8259<MaltaPortIo, false>`) through the GT-64120 PCI I/O window, on CPU IP2 | Done. These pre-R6 cores leave WAIT only for an interrupt they can take, so `ok_mips_idle` sets IE with IM2 and IM7; the exception vector recognizes the idle window, resumes after WAIT with IE clear, and the C side claims the line (slice 3: with one GT-64120 `GT_PCI0_IACK` read). The CP0 timer is the tick, so 8259 line 0 stays masked. User mode adds IM2 once the service runs; the o32/n64 capture readiness ignores that kernel-owned bit. COM1 receive is bound to line 4 |
 | ppc | Freescale MPIC (`src/arch/ppc/mpic.hpp`): sources 0–255 programmed with their own number as the vector, routed to CPU 0 | Done. e500 dozes on MSR[WE] with HID0[DOZE], but QEMU's BookE model wakes only for an interrupt MSR[EE] admits, so `ok_ppc_idle` sets EE for a short window and the IVOR4/IVOR10 vectors return past it with EE clear; the wait then claims with IACK. A one-shot decrementer is the tick. User-mode IVOR4 returns as `TrapKind::interrupt`; the private PPC readiness treats it like the decrementer (trap 0x500). The DUART is bound to source 42 |
 
 ## Ten-profile result
@@ -446,9 +448,10 @@ QEMU 10.2.0, ObfuscationOS `feat/irq-wait-time`, ABI 77:
   now link the platform clock.
 - All ten profiles: `xmake test`, the ext4 native boot, the interval timer
   probe, the clock probe and the shell gate (54 sh checks, 134/151 with the 8
-  reviewed failures) pass. In each gate run every block and entropy wait
-  completed after its interrupt: `block=` 1.18–1.58 million (3.03 million on
-  ppc) and `entropy=1076`, all with `polled` 0, and no interrupt was spurious
+  reviewed failures) pass. In each gate run every block and entropy wait was
+  on its bound line, reading the device once and then only after its own
+  interrupt: `block=` 1.18–1.58 million (3.03 million on ppc) and
+  `entropy=1076`, all with `polled` 0, and no interrupt was spurious
   or a controller error. The boot alone, root mount included, is
   `block=6585:0 entropy=1:0` on x86_64.
 - Input: five keys sent with QMP `send-key` reach the shell through served
