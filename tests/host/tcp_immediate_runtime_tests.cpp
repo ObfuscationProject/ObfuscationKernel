@@ -286,7 +286,10 @@ void listener_errors(Kernel &kernel, bool linux, u16 port)
     expect(invoke(kernel, group, 1, {static_cast<uptr>(fd), payload_pointer, 8}) == -107);
     expect(invoke(kernel, group, 48, {static_cast<uptr>(fd), OK_SHUT_WR}) == -107);
     expect(invoke(kernel, group, 42, {static_cast<uptr>(fd), address_pointer, 16}) == -22);
-    for (u32 deferred : {43u, 51u, 52u, 55u, 288u})
+    // Accept is implemented; an empty nonblocking listener would block.
+    for (u32 accept : {43u, 288u})
+        expect(invoke(kernel, group, accept, {static_cast<uptr>(fd), 0, 0}) == -11);
+    for (u32 deferred : {51u, 52u, 55u})
         expect(invoke(kernel, group, deferred, {static_cast<uptr>(fd), 0, 0}) == -95);
     expect(invoke(kernel, group, 3, {static_cast<uptr>(fd)}) == 0);
     retire(kernel, group);
