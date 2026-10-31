@@ -836,10 +836,19 @@ Status Kernel::activate_network()
     auto *active = extension();
     if (!active) return Status::unsupported("network extension is absent");
     auto config = active->network_interface(*this);
-    if (config) return native_udp_.configure(config.value());
-    if (config.status().code() != StatusCode::unsupported) return config.status();
-    auto link = active->network_link(*this); if (!link) return link.status();
-    return native_udp_.configure(link.value());
+    Status configured{};
+    if (config) configured = native_udp_.configure(config.value());
+    else if (config.status().code() != StatusCode::unsupported) return config.status();
+    else
+    {
+        auto link = active->network_link(*this); if (!link) return link.status();
+        configured = native_udp_.configure(link.value());
+    }
+    if (!configured) return configured;
+    // Neighbour, address and protocol timers run on the network clock from
+    // the first pass on, whichever socket family brought the link up.
+    auto now = native_tcp_now();
+    return now ? Status{} : now.status();
 }
 
 Result<u32> Kernel::native_tcp_iss(net::tcp::Endpoint local, net::tcp::Endpoint peer)
