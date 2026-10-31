@@ -305,6 +305,32 @@ generic wait queues. Keep packet parsing and checksums as constrained templates;
 one virtual boundary per device queue. Paired OS worktree `feat/net-services`.
 Depends on WT1.2.
 
+Status on `feat/net-core` (opened 2026-10-31). The starting point is a static
+peer link: the OS hands the kernel one local and one peer MAC/IPv4 pair, every
+other frame is dropped, ARP is answered but never learned, there is no ICMP,
+routing or IPv6, and the TCP core keeps one segment in flight. Slices, each
+with hosted model tests and the ten-profile freestanding compile
+(`scripts/test_net_core.py`), the protocol slices then on the fast lane and
+all ten profiles:
+1. Family-generic wire layer: an `AddressFamily` concept with IPv4 and IPv6
+   traits, the IPv6 parser (extension headers skipped, fragments refused),
+   generic UDP/TCP codecs, ICMPv4/ICMPv6 echo and error messages, neighbour
+   discovery messages and options, Ethernet/ARP builders
+   (`include/ok/net/ip.hpp`, `include/ok/net/icmp.hpp`).
+2. Neighbour cache (RFC 4861 states, shared by ARP and ND, bounded pending
+   packets) and a longest-prefix routing table per family.
+3. Interface layer: ingress demultiplexing, ARP and ND replies, ICMP echo and
+   errors, duplicate address detection and SLAAC from router advertisements,
+   egress through route and neighbour resolution, behind one virtual
+   `NetworkQueue` per device queue; replaces the static peer checks.
+4. General TCP: a sliding window with several segments in flight, a
+   retransmission queue, NewReno congestion control as a policy template,
+   fast retransmit and recovery, out-of-order reassembly, zero-window probes.
+5. IPv6 endpoints for TCP and UDP and `AF_INET6` sockets.
+6. Socket readiness through `sched::WaitQueue` wakes instead of rescans.
+7. Gate evidence with the paired OS worktree: ARP, ping, TCP and IPv6
+   neighbour discovery against QEMU user networking on ten profiles.
+
 ### WT2.4 `feat/storage-durable` (XL)
 
 Default journalled writer (JBD2 ordered mode), write-back through the page
