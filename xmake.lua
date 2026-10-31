@@ -150,7 +150,7 @@ local function qemu_test_argv(target)
 end
 
 function add_ok_kernel_sources(include_kernel_main)
-    add_files("src/boot/raw_handoff.cpp", "src/boot/fdt.cpp", "src/boot/boot_memory.cpp")
+    add_files("src/boot/raw_handoff.cpp", "src/boot/fdt.cpp", "src/boot/boot_memory.cpp", "src/boot/acpi_madt.cpp")
     add_files("src/core/*.cpp")
     -- Rescue applications are diagnostics: built with kernel_gui or debug test
     -- points; other builds link stand-ins that behave as never opened.

@@ -49,4 +49,21 @@ struct FdtMemoryMap
 // and page tables, and qualify addresses against the architecture/platform.
 Status parse_fdt_memory(std::span<const std::byte> blob, FdtMemoryMap &output);
 
+struct CpuTopologyMap;
+
+// Which binding the /cpus children follow: arm reg is an MPIDR affinity value
+// started through PSCI; riscv reg is a hart id released through CLINT MSIP.
+enum class FdtCpuFlavor : u8
+{
+    arm,
+    riscv,
+};
+
+// Parse /cpus, /psci and timebase-frequency of a complete FDT v17 blob into
+// ok/boot/cpu_topology.hpp's map. Success describes the CPUs and either a start
+// method or the reason the platform must run UP; the boot CPU is the header's
+// boot_cpuid_phys when it names an enabled CPU (otherwise the caller marks it).
+// Failure leaves output unchanged. Nothing is started and no pointer is retained.
+Status parse_fdt_cpus(std::span<const std::byte> blob, FdtCpuFlavor flavor, CpuTopologyMap &output);
+
 } // namespace ok::boot

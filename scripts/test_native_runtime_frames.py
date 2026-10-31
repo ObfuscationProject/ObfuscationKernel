@@ -151,7 +151,7 @@ def main():
         def freeze(path,name):
             dest=snap/name;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(path.read_bytes());hashes[name]=digest(dest);return dest
         freeze(Path(__file__),'run_native.py');freeze(stage/'scripts/test_native_firmware_handoff.py','test_native_firmware_handoff.py');freeze(stage/'scripts/native_firmware_profiles.json','build-profiles.json')
-        for name in ['include/ok/arch/types.hpp','include/ok/core/types.hpp','include/ok/core/fixed.hpp','include/ok/boot/e820.hpp','include/ok/boot/fdt.hpp','include/ok/boot/raw_handoff.hpp','src/boot/raw_handoff.cpp','src/boot/fdt.cpp',f'src/arch/{arch}/boot.S',f'src/arch/{arch}/linker.ld']:
+        for name in ['include/ok/arch/types.hpp','include/ok/core/types.hpp','include/ok/core/fixed.hpp','include/ok/boot/e820.hpp','include/ok/boot/fdt.hpp','include/ok/boot/cpu_topology.hpp','include/ok/smp/smp.hpp','include/ok/boot/raw_handoff.hpp','src/boot/raw_handoff.cpp','src/boot/fdt.cpp',f'src/arch/{arch}/boot.S',f'src/arch/{arch}/linker.ld']:
             freeze(root/name,name)
         freeze(stage/'include/ok/boot/firmware_handoff.hpp','include/ok/boot/firmware_handoff.hpp');freeze(stage/'tests/native/runtime_frame_probe.cpp','probe.cpp');freeze(stage/'include/ok/boot/qualified_memory.hpp','include/ok/boot/qualified_memory.hpp');freeze(stage/'include/ok/boot/qemu_entry_memory.hpp','include/ok/boot/qemu_entry_memory.hpp')
         for header in (root/'include').rglob('*.hpp'):
