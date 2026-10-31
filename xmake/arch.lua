@@ -218,6 +218,15 @@ function add_ok_arch_files()
     else
         add_files(path.join(os.projectdir(), "src/arch", "execution_stub.cpp"))
     end
+    -- Profiles that start secondary CPUs link their own smp.cpp (and smp.S).
+    if os.isfile(path.join(os.projectdir(), "src/arch", spec.source, "smp.cpp")) then
+        add_files(path.join(os.projectdir(), "src/arch", spec.source, "smp.cpp"))
+        if os.isfile(path.join(os.projectdir(), "src/arch", spec.source, "smp.S")) then
+            add_files(path.join(os.projectdir(), "src/arch", spec.source, "smp.S"))
+        end
+    else
+        add_files(path.join(os.projectdir(), "src/arch", "smp_stub.cpp"))
+    end
 end
 
 function add_ok_boot_files()

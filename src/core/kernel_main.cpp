@@ -3,6 +3,8 @@
 #include "ok/core/entry.hpp"
 #include "ok/core/native_shutdown.hpp"
 #include "ok/interrupt/platform.hpp"
+#include "ok/smp/bringup.hpp"
+#include "ok/smp/kernel_lock.hpp"
 #include "ok/arch/terminal_power.hpp"
 #include "ok/user/runtime.hpp"
 
@@ -153,9 +155,12 @@ namespace ok::detail
         bool waited = false;
         if (!did_work && !ok::interrupt::events_posted())
         {
+            // Other CPUs serve their threads while this one waits.
+            ok::smp::kernel_lock.unlock();
             waited = (!native_userland_started || ok::ok_userland_idle()) && ok::interrupt::wait_for_interrupt();
             if (!waited)
                 desktop_idle();
+            ok::smp::kernel_lock.lock();
         }
         // Without native userland the rescue GUI's tick is paced by loop passes,
         // and an idle pass now lasts until the next interrupt: tick once per wait.
@@ -180,12 +185,16 @@ extern "C" ok::fs::BootArchive ok_boot_archive() __attribute__((weak));
 
 extern "C" [[noreturn]] void kernel_main()
 {
+    // The boot CPU holds the kernel lock from here on except while it idles or
+    // runs user code; secondary CPUs take it once the runtime admits them.
+    ok::smp::kernel_lock.lock();
     ok_platform_console_init();
     ok_platform_display_clear();
 
     ok::KernelEntryConfig config{};
     config.kernel.architecture = ok::arch::configured_architecture();
     config.kernel.extension = ok_boot_extension != nullptr ? ok_boot_extension() : nullptr;
+    config.start_secondary_cpus = &ok::smp::start_secondary_cpus;
 
 #if defined(OK_ENABLE_TEST_POINTS)
     config.mode = ok::KernelBootMode::debug;

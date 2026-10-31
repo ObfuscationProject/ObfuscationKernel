@@ -33,6 +33,9 @@ struct KernelEntryConfig
     KernelBootMode mode{KernelBootMode::normal};
     KernelConfig kernel{};
     KernelDebugSink debug{};
+    // Secondary-CPU bring-up, run once after the kernel booted and before the
+    // debug report; null where nothing starts secondaries (hosted models).
+    Status (*start_secondary_cpus)(Kernel &kernel){};
 };
 
 struct KernelEntryResult

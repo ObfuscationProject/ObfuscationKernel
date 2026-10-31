@@ -128,6 +128,8 @@ struct PlatformLine
 // Architecture trap entry points, called with interrupts disabled.
 extern "C" void ok_interrupt_top_half(ok::interrupt::IrqLine line);
 extern "C" void ok_interrupt_tick();
+// An IPI reached the boot CPU: its idle wait ends as after a tick.
+extern "C" void ok_interrupt_wake();
 // Optional platform hook run once by start_platform_irqs() to bind the
 // platform's own devices (for example the console UART).
 extern "C" ok::Status ok_platform_bind_irqs() __attribute__((weak));

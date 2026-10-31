@@ -211,26 +211,15 @@ Status Kernel::boot(KernelConfig config)
     keyboard_driver_.set_mode(config_.modes.drivers);
     mouse_driver_.set_mode(config_.modes.drivers);
 
-    const auto hardware_threads = arch_->hardware_thread_count();
-    if (auto status = topology_.initialize(hardware_threads == 0 ? 1 : hardware_threads); !status.ok())
+    // Only the boot CPU runs until secondary bring-up started others for real;
+    // the profile's hardware thread count is metadata, not discovery.
+    if (auto status = topology_.initialize(1); !status.ok())
     {
         return status;
     }
     if (auto status = topology_.mark_online(0); !status.ok())
     {
         return status;
-    }
-    for (usize cpu = 1; cpu < topology_.cpu_count(); ++cpu)
-    {
-        const auto cpu_id = static_cast<smp::CpuId>(cpu);
-        if (auto status = topology_.mark_starting(cpu_id); !status.ok())
-        {
-            return status;
-        }
-        if (auto status = topology_.mark_online(cpu_id); !status.ok())
-        {
-            return status;
-        }
     }
     if (auto status = scheduler_.configure_cpus(topology_.cpu_count()); !status.ok())
     {
@@ -829,6 +818,29 @@ Result<u32> Kernel::native_tcp_iss(net::tcp::Endpoint local, net::tcp::Endpoint 
     u32 value{};
     for (const auto byte : bytes) value = (value << 8) | std::to_integer<u8>(byte);
     return value;
+}
+
+Status Kernel::publish_cpu_topology(usize discovered, u32 online_mask)
+{
+    if (discovered == 0 || discovered > smp::max_cpus || (online_mask & 1) == 0 ||
+        (discovered < 32 && (online_mask >> discovered) != 0))
+        return Status::invalid_argument("CPU topology does not hold the online CPUs");
+    if (auto status = topology_.initialize(discovered); !status.ok())
+        return status;
+    for (usize cpu = 0; cpu < discovered; ++cpu)
+    {
+        if ((online_mask & (u32{1} << cpu)) == 0)
+            continue;
+        const auto id = static_cast<smp::CpuId>(cpu);
+        if (cpu != 0)
+            if (auto status = topology_.mark_starting(id); !status.ok())
+                return status;
+        if (auto status = topology_.mark_online(id); !status.ok())
+            return status;
+    }
+    if (auto status = scheduler_.configure_cpus(discovered); !status.ok())
+        return status;
+    return scheduler_.set_online_cpus(online_mask);
 }
 
 Status Kernel::tick()

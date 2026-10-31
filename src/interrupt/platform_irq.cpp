@@ -586,3 +586,8 @@ extern "C" void ok_interrupt_tick()
     ++ok::interrupt::statistics.ticks;
     ok::interrupt::interrupted = true;
 }
+
+extern "C" void ok_interrupt_wake()
+{
+    ok::interrupt::interrupted = true;
+}
