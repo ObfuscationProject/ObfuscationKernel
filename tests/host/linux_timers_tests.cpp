@@ -18,6 +18,7 @@ void expect(bool value, std::source_location at = std::source_location::current(
 constexpr u64 ms = 1'000'000;
 constexpr uptr site = hw::user_begin + 1024, handler = hw::user_begin + 2048, scratch = hw::user_begin + 128;
 constexpr uptr spec = scratch + 256, old_spec = scratch + 320, event = scratch + 384, id_out = scratch + 512;
+constexpr uptr action_at = scratch + 576;
 using Op = lu::Operation;
 struct Group { sched::ProcessId pid{}; sched::ThreadId peer{}; };
 sched::ThreadControlBlock &thread(Kernel &kernel, u64 pid, u64 tid)
@@ -103,6 +104,21 @@ i64 call(Kernel &kernel, Group g, u64 tid, Op op, std::array<u64, 6> a)
     expect(native::private_timer_call(kernel, *kernel.scheduler().find(g.pid), t, result));
     return result;
 }
+// sigaction through the runtime's rt_sigaction, whose discard reaches the timers.
+void sigaction(Kernel &kernel, Group g, u32 signal, u64 disposition)
+{
+    using Codec = native::SignalActionCodec<lu::Profile::x86_64>;
+    sched::SignalAction next{}; next.handler = disposition;
+    if (disposition > 1) { next.flags = 0x04000004; next.restorer = handler + 4; }
+    const auto bytes = Codec::encode(next);
+    for (usize i = 0; i < bytes.size(); ++i) mock::memory[action_at - hw::user_begin + i] = bytes[i];
+    auto &t = thread(kernel, g.pid, g.pid); auto &f = t.native_frame;
+    f.registers[14] = *lu::Codec<lu::Profile::x86_64>::syscall_number(Op::rt_sigaction);
+    f.registers[9] = signal; f.registers[10] = action_at; f.registers[11] = 0; f.registers[5] = 8;
+    bool complete = true; i64 result = -999;
+    expect(native::private_signal_call(kernel, *kernel.scheduler().find(g.pid), t, complete, result) && complete &&
+           result == 0);
+}
 void service(Kernel &kernel, u64 at)
 {
     mock::now = at;
@@ -159,13 +175,21 @@ void itimer_real(Kernel &kernel)
     mock::now = 2200 * ms; itimerval(scratch, 10000, 10000);
     expect(call(kernel, g, g.pid, Op::setitimer, {0, scratch, 0}) == 0);
     service(kernel, 2210 * ms); expect(pending(kernel, g, 14));
-    action(kernel, g, 14, 1);
-    native::private_timer_discard(kernel, g.pid, 14); shared(kernel, g).discard(14);
-    action(kernel, g, 14);
+    sigaction(kernel, g, 14, 1); expect(!pending(kernel, g, 14));
+    sigaction(kernel, g, 14, handler);
     for (auto &t : kernel.scheduler().find(g.pid)->threads()) t.native_signal_mask = {};
     service(kernel, 2215 * ms); service(kernel, 2230 * ms); expect(!pending(kernel, g, 14));
     expect(call(kernel, g, g.pid, Op::getitimer, {0, scratch + 64}) == 0 && get(scratch + 72) == 10000 &&
            get(scratch + 80) == 0 && get(scratch + 88) == 0);
+    // A SIGALRM already dequeued rearmed the timer (Linux posixtimer_rearm_itimer);
+    // ignoring it afterwards discards nothing and the timer keeps running.
+    mock::now = 2300 * ms; itimerval(scratch, 10000, 10000);
+    expect(call(kernel, g, g.pid, Op::setitimer, {0, scratch, 0}) == 0);
+    service(kernel, 2310 * ms); expect(pending(kernel, g, 14) && take(kernel, g).signal == 14);
+    mock::now = 2312 * ms; sigaction(kernel, g, 14, 1); sigaction(kernel, g, 14, handler);
+    expect(call(kernel, g, g.pid, Op::getitimer, {0, scratch + 64}) == 0 && get(scratch + 88) == 8000);
+    service(kernel, 2320 * ms); expect(pending(kernel, g, 14) && take(kernel, g).signal == 14);
+    itimerval(scratch, 0, 0); expect(call(kernel, g, g.pid, Op::setitimer, {0, scratch, 0}) == 0);
     // alarm rounds the old remainder up and shares the timer with setitimer.
     action(kernel, g, 14, 0);
     mock::now = 3000 * ms; expect(call(kernel, g, g.pid, Op::alarm, {5}) == 0);
@@ -300,13 +324,13 @@ void posix_timers(Kernel &kernel)
     take(kernel, g);
     for (auto &t : kernel.scheduler().find(g.pid)->threads()) t.native_signal_mask.set(42);
     service(kernel, 13046 * ms); expect(pending(kernel, g, 42));
-    action(kernel, g, 42, 1);
-    for (auto &t : kernel.scheduler().find(g.pid)->threads()) t.native_signal_mask = {};
-    native::private_timer_discard(kernel, g.pid, 42); shared(kernel, g).discard(42);
+    // Still blocked: Linux keeps the record on its ignored list, not pending.
+    sigaction(kernel, g, 42, 1); expect(!pending(kernel, g, 42));
     const auto settled = native::private_timer_counters().dequeued;
     service(kernel, 13047 * ms); service(kernel, 13080 * ms);
     expect(!pending(kernel, g, 42) && native::private_timer_counters().dequeued == settled);
-    action(kernel, g, 42);
+    for (auto &t : kernel.scheduler().find(g.pid)->threads()) t.native_signal_mask = {};
+    sigaction(kernel, g, 42, handler);
     service(kernel, 13081 * ms);
     native::PrivateProcessQueue::Delivery requeued;
     expect(shared(kernel, g).peek({}, requeued) && requeued.info.timer == 10 && requeued.info.overrun == 4);
@@ -321,7 +345,20 @@ void posix_timers(Kernel &kernel)
     service(kernel, 13083 * ms); service(kernel, 13200 * ms);
     expect(native::private_timer_counters().dequeued == before_exit.dequeued &&
            native::private_timer_counters().signalled == before_exit.signalled);
-    peer.state = sched::ProcessState::runnable; peer.native_signal_mask = {};
+    peer.state = sched::ProcessState::runnable;
+    // A target that dequeued its record before exiting: the dequeue rearmed the
+    // timer, and timer_getoverrun reports what that record carried.
+    itimerspec(spec, 10 * ms, 1 * ms);
+    expect(call(kernel, g, g.pid, Op::timer_settime, {9, 0, spec, 0}) == 0);
+    service(kernel, 13201 * ms); service(kernel, 13232 * ms);
+    native::PrivateSignalQueue::Delivery exiting;
+    CHECK(native::private_signal_queue(peer)->peek({}, exiting) && native::private_signal_queue(peer)->consume(exiting));
+    expect(exiting.info.timer == 9 && exiting.info.overrun == 3);
+    const auto before_retire = native::private_timer_counters().dequeued;
+    native::private_signal_thread_retire(g.pid, g.peer, peer.entry_stack);
+    expect(native::private_timer_counters().dequeued == before_retire + 1);
+    expect(call(kernel, g, g.pid, Op::timer_getoverrun, {9}) == 3);
+    peer.native_signal_mask = {};
     // Eight timers per process; the ninth fails with EAGAIN.
     for (u32 id = 11; id < 14; ++id)
         expect(call(kernel, g, g.pid, Op::timer_create, {1, 0, id_out}) == 0 && get(id_out, 4) == id);

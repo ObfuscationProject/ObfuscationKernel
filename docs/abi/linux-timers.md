@@ -58,10 +58,12 @@ The reference is Linux 6.13.4 `kernel/time/itimer.c` and `posix-timers.c`.
   signal is unignored, then queues with the overrun it accumulated; an ignored
   `ITIMER_REAL` stops, keeping its interval for `getitimer`. A queued record
   that `sigaction` discards because its signal became ignored parks the same
-  way and queues again once the signal is unignored (`posixtimer_sig_ignore`);
-  a discarded `SIGALRM` was never dequeued, so `ITIMER_REAL` stays expired. A
-  timer whose `SIGEV_THREAD_ID` target exited stays signalled and never
-  rearms.
+  way, blocked or not, and queues again once the signal is unignored
+  (`posixtimer_sig_ignore`); a discarded `SIGALRM` was never dequeued, so
+  `ITIMER_REAL` stays expired, while one dequeued before the discard had
+  already rearmed it. A timer whose `SIGEV_THREAD_ID` target exited with its
+  record queued stays signalled and never rearms; one whose record the target
+  dequeued first rearmed at that dequeue.
 - `fork` inherits no timer. `exec` deletes the POSIX timers and their queued
   records and keeps `ITIMER_REAL`; the id sequence continues. Process exit
   deletes everything.
@@ -94,3 +96,7 @@ once a timer was armed.
   implemented.
 - `sigpending` stops showing a record that `timer_settime`/`timer_delete`
   dropped; Linux keeps it visible until the dequeue discards it.
+- An `ITIMER_REAL` stopped because its `SIGALRM` was ignored or discarded
+  stays stopped until `setitimer`; Linux restarts a periodic one when any later
+  `SIGALRM` (from `kill`, say) is dequeued from the process queue
+  (`posixtimer_rearm_itimer`).

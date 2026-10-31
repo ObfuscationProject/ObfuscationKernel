@@ -649,6 +649,9 @@ bool private_timer_call(Kernel &kernel, sched::ProcessControlBlock &process,
 bool private_timer_service(Kernel &kernel, u64 now);
 void private_timer_exec(sched::ProcessId pid);
 void private_timer_discard(Kernel &kernel, sched::ProcessId pid, u32 signal);
+void private_timer_thread_exit(sched::ProcessId pid, sched::ThreadId tid, const PrivateSignalQueue &queue);
+// The signal's action is ignored now (SIG_IGN, or a default that ignores it).
+bool private_signal_ignored(Kernel &kernel, sched::ProcessId pid, u32 signal);
 void private_timer_retire(sched::ProcessId pid);
 struct PrivateTimerCounters { u64 armed{}, expired{}, signalled{}, dequeued{}, retried{}; };
 PrivateTimerCounters private_timer_counters();

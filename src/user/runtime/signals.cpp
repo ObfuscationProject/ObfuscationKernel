@@ -677,6 +677,7 @@ void private_signal_thread_retire(sched::ProcessId pid, sched::ThreadId tid, mem
     if (!lease.pool || lease.slot >= private_signal_queues.size()) return;
     auto &queue = private_signal_queues[lease.slot];
     if (queue.identity() != PrivateSignalQueue::Identity{pid, tid, lease.generation}) return;
+    private_timer_thread_exit(pid, tid, queue);
     // Revoke borrowed views while preserving the non-repeating sequence counter.
     queue.retire();
     private_signal_altstacks[lease.slot].reset();
@@ -2100,6 +2101,14 @@ i64 native_process_kill(Kernel &kernel, const sched::ProcessControlBlock &sender
         [&](user::ProcessSignalSender origin, sched::ProcessId target, i32 signal) {
             return native_process_kill_one(kernel, origin, target, static_cast<u64>(signal));
         });
+}
+bool private_signal_ignored(Kernel &kernel, sched::ProcessId pid, u32 signal)
+{
+    using Codec = SignalActionCodec<private_signal_profile>;
+    auto *state = private_signal_process(kernel, pid);
+    if (!state) return false;
+    const auto *action = state->table.find(signal);
+    return !action || Codec::ignored(signal, *action);
 }
 PrivateTimerSend private_timer_signal(Kernel &kernel, sched::ProcessControlBlock &process,
                                       sched::ThreadId tid, sched::PendingSignalInfo info)
