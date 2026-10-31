@@ -267,6 +267,7 @@ class Kernel final
         return network_;
     }
     [[nodiscard]] net::NativeUdpService &native_udp() { return native_udp_; }
+    [[nodiscard]] net::EthernetInterface &network_interface() { return network_interface_; }
     [[nodiscard]] const net::NativeUdpExecutor &native_udp_executor() const { return native_udp_executor_; }
     [[nodiscard]] net::NativeTcpStreamService &native_tcp() { return native_tcp_; }
     [[nodiscard]] net::TcpStreamOperations &native_tcp_operations() { return native_tcp_operations_; }
@@ -377,6 +378,7 @@ class Kernel final
     fs::SimpleDiskFileSystem simplefs_;
     fs::VirtualFileSystem vfs_;
     net::NetworkStack network_;
+    net::EthernetInterface network_interface_;
     net::NativeUdpService native_udp_;
     net::NativeUdpExecutor native_udp_executor_;
     net::NativeTcpStreamService native_tcp_;

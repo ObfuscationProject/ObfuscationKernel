@@ -147,6 +147,7 @@ Kernel::Kernel() : arch_(&arch::arch_operations(arch::configured_architecture())
     native_tcp_(allocate_tcp_identity()), native_tcp_operations_(scheduler_, native_tcp_),
     native_tcp_waits_(scheduler_, native_tcp_)
 {
+    static_cast<void>(native_udp_.attach_interface(network_interface_));
     static_cast<void>(scheduler_.set_native_udp_service(native_udp_));
     static_cast<void>(scheduler_.set_native_tcp_service(native_tcp_));
     static_cast<void>(native_udp_executor_.use_shared_link());

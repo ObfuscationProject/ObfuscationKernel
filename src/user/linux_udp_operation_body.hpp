@@ -360,7 +360,7 @@ class OperationScratch final
                 {address_.data(), static_cast<usize>(request.address_length)});
             if (!peer) return status_error<Target>(peer.status());
             if (peer.value().family != Constants<Target>::af_inet) return error<Target>(Error::e_afnosupport);
-            if (peer.value().address != backend.service().link().peer_ip) return error<Target>(Error::e_netunreach);
+            if (!backend.service().reachable(peer.value().address)) return error<Target>(Error::e_netunreach);
             const auto connected = backend.service().connect(endpoint, peer.value().address, peer.value().port);
             return connected ? 0 : status_error<Target>(connected);
         }
@@ -430,7 +430,7 @@ class OperationScratch final
             if (value.family != Constants<Target>::af_inet &&
                 !(value.family == Constants<Target>::af_unspec && any(value.address)))
                 return error<Target>(Error::e_afnosupport);
-            if (!any(value.address) && value.address != backend.service().link().local_ip)
+            if (!any(value.address) && !backend.service().local_address(value.address))
                 return error<Target>(Error::e_addrnotavail);
             if (value.port && value.port < 1024) return error<Target>(Error::e_acces);
             const auto state = backend.service().binding(endpoint);
@@ -471,7 +471,7 @@ class OperationScratch final
                 if (value.family != Constants<Target>::af_inet && value.family != Constants<Target>::af_unspec)
                     return error<Target>(Error::e_afnosupport);
                 if (!value.port) return error<Target>(Error::e_inval);
-                if (value.address != backend.service().link().peer_ip) return error<Target>(Error::e_netunreach);
+                if (!backend.service().reachable(value.address)) return error<Target>(Error::e_netunreach);
             }
             else
             {
@@ -491,6 +491,8 @@ class OperationScratch final
                                                                {payload_.data(), count}, frame_);
             if (!built) return status_error<Target>(built.status());
             if (!access.live()) return error<Target>(Error::e_io);
+            // Held for neighbour resolution: the interface transmits it later.
+            if (!built.value()) return static_cast<i64>(count);
             const auto submitted = backend.submit({frame_.data(), built.value()});
             return submitted ? static_cast<i64>(count) : status_error<Target>(submitted);
         }

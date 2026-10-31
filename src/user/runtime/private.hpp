@@ -921,7 +921,7 @@ class TcpImmediateRuntime final
             if (request.operation == Call::bind)
             {
                 auto local = address(access, request); if (!local) return local.status();
-                if (local.value().address != kernel.native_udp().link().local_ip)
+                if (!kernel.native_udp().local_address(local.value().address))
                 { semantic_error = error(request, lu::UdpErrno::e_addrnotavail, 99); return Status::fault(); }
                 const auto status = service.bind(handle, local.value()); return status ? Result<usize>{0} : Result<usize>{status};
             }
@@ -945,7 +945,7 @@ class TcpImmediateRuntime final
                     return Status::fault();
                 }
                 auto peer = address(access, request); if (!peer) return peer.status();
-                if (peer.value().address != kernel.native_udp().link().peer_ip)
+                if (!kernel.native_udp().reachable(peer.value().address))
                 { semantic_error = error(request, lu::UdpErrno::e_netunreach, 101); return Status::fault(); }
                 auto now = kernel.native_tcp_now(); if (!now) return now.status();
                 if (!access.live()) return Status::denied("TCP connect lost image during clock acquisition");

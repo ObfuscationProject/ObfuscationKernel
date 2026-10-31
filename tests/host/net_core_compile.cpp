@@ -45,3 +45,13 @@ ok::usize compile_net_core_neighbour_tick(ok::net::NeighbourCache<ok::net::wire:
     auto due = cache.tick(now, out);
     return due ? due.value() : 0;
 }
+
+#include <ok/net/interface.hpp>
+
+ok::usize compile_net_core_interface(ok::net::EthernetInterface &nic, ok::net::wire::Bytes frame, ok::u64 now)
+{
+    auto received = nic.receive(frame, now);
+    if (received.family == ok::net::Delivery::ipv4 || received.family == ok::net::Delivery::ipv6) nic.unreachable(received);
+    static_cast<void>(nic.tick(now));
+    return nic.flush([](ok::net::wire::Bytes) { return true; }) + nic.control_pending();
+}

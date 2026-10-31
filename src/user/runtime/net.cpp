@@ -898,6 +898,8 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
         auto length = kernel.native_udp().build_datagram(handle.value(), destination,
             port, {payload.data(), static_cast<usize>(a[2])}, frame);
         if (!length) return error(length.status());
+        // Held for neighbour resolution: the interface transmits it later.
+        if (!length.value()) return static_cast<i64>(a[2]);
         if (auto status = extension->network_transmit(kernel, {frame.data(), length.value()}); !status)
             return error(status);
         return static_cast<i64>(a[2]);

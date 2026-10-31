@@ -33,7 +33,8 @@ Packet ethernet(const Packet &ip, bool wrong_peer = false)
     Packet out; out.length = ip.length + 14;
     for (usize byte = 0; byte < 6; ++byte)
     { out.bytes[byte] = std::byte{link.local_mac[byte]}; out.bytes[byte + 6] = std::byte{link.peer_mac[byte]}; }
-    if (wrong_peer) out.bytes[7] ^= std::byte{1};
+    // Addressed to another station: the interface filters it.
+    if (wrong_peer) out.bytes[1] ^= std::byte{1};
     wire::be16(out.bytes, 12, 0x0800);
     for (usize byte = 0; byte < ip.length; ++byte) out.bytes[byte + 14] = ip.bytes[byte];
     return out;
@@ -78,12 +79,15 @@ struct Fixture
 {
     sched::Scheduler scheduler{}; NativeTcpStreamService service{tcp::TableIdentity{next_identity++}};
     TcpStreamWaits waits{scheduler, service}; TcpStreamOperations operations{scheduler, service};
-    NativeUdpService udp{}; NativeTcpEthernetExecutor executor{}; Iss iss{};
+    EthernetInterface nic{}; NativeUdpService udp{}; NativeTcpEthernetExecutor executor{}; Iss iss{};
     arch::CpuContext context{arch::configured_arch_operations().make_kernel_context(4096, 32768)};
     u64 pid{};
     Fixture()
     {
-        CHECK(scheduler.set_native_tcp_service(service)); CHECK(waits.status()); CHECK(udp.configure(link));
+        CHECK(scheduler.set_native_tcp_service(service)); CHECK(waits.status()); CHECK(udp.attach_interface(nic));
+        // IPv4 only: IPv6 autoconfiguration frames are covered by net_interface_tests.
+        CHECK(nic.configure({link.local_mac, 1500, Ipv4Configuration{link.local_ip, 24, link.peer_ip, link.peer_mac}, false}));
+        CHECK(udp.configure(link));
         auto created = scheduler.create_process("tcp-owner", context); CHECK(created); pid = created.value();
         CHECK(scheduler.set_runnable(pid)); CHECK(scheduler.activate(pid));
     }
@@ -416,16 +420,16 @@ void ethernet_failure_controls()
         CHECK(!f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 0)); CHECK(f.executor.state().retired);
     }
     auto owner = fixture(); auto &f = *owner; Device device; device.credit = 0;
-    device.push(arp_request()); device.push(arp_request()); device.push(arp_request());
+    for (usize i = 0; i < NativeTcpEthernetExecutor::control_capacity + 1; ++i) device.push(arp_request());
     CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 10));
-    CHECK(f.executor.state().controls == 2 && f.executor.state().dropped == 1);
+    CHECK(f.executor.state().controls == 4 && f.executor.state().dropped_control == 1 && f.executor.state().dropped == 0);
     const auto calls = device.reaps; CHECK(!f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 9));
     CHECK(device.reaps == calls && !f.executor.state().retired);
     device.credit = 8; device.block_tx = true; CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 10));
-    CHECK(f.executor.state().controls == 2 && device.sent == 0);
+    CHECK(f.executor.state().controls == 4 && device.sent == 0);
     device.block_tx = false; CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 11));
-    CHECK(device.sent == 2 && f.executor.state().controls == 0);
-    for (usize i = 0; i < 2; ++i)
+    CHECK(device.sent == 4 && f.executor.state().controls == 0);
+    for (usize i = 0; i < 4; ++i)
     { auto eth = wire::ethernet(device.outgoing[i].view()); CHECK(eth && wire::arp(eth.value().payload).value().operation == 2); }
 }
 }
