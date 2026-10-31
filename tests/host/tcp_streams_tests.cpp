@@ -15,7 +15,7 @@ usize checks{};
 u64 next_identity{10000};
 #define CHECK(value) do { ++checks; if (!static_cast<bool>(value)) { std::fprintf(stderr, "TCP_STREAM_FAIL line=%d check=%zu: %s\n", __LINE__, checks, #value); std::abort(); } } while(false)
 constexpr tcp::Endpoint local{{192, 0, 2, 2}, 32001}, peer{{192, 0, 2, 1}, 8080};
-constexpr NativeUdpLink link{{2, 1, 2, 3, 4, 5}, {2, 6, 7, 8, 9, 10}, local.address, peer.address};
+constexpr NativeUdpLink link{{2, 1, 2, 3, 4, 5}, {2, 6, 7, 8, 9, 10}, local.address.ipv4(), peer.address.ipv4()};
 struct Iss { Result<u32> operator()(tcp::Endpoint, tcp::Endpoint) { return u32{700}; } };
 struct Packet
 {
@@ -24,7 +24,7 @@ struct Packet
 };
 Packet packet(tcp::Endpoint from, tcp::Endpoint to, u32 seq, u32 ack, u8 flags, wire::Bytes payload = {})
 {
-    Packet out; auto built = wire::build_tcp(out.bytes, from.address, to.address, 23, 64,
+    Packet out; auto built = wire::build_tcp(out.bytes, from.address.ipv4(), to.address.ipv4(), 23, 64,
         {from.port, to.port, seq, ack, flags, 4096}, {}, payload);
     CHECK(built); out.length = built.value(); return out;
 }

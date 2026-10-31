@@ -2,6 +2,7 @@
 
 #include <ok/net/tcp_wire.hpp>
 #include <ok/net/tcp_congestion.hpp>
+#include <ok/net/address.hpp>
 #include <limits>
 
 namespace ok::net::tcp
@@ -17,7 +18,7 @@ inline constexpr bool after(u32 a, u32 b) { return before(b, a); }
 inline constexpr bool between(u32 value, u32 first, u32 last)
 { return u32{last - first} < 0x80000000u && u32{value - first} <= u32{last - first}; }
 
-struct Endpoint { Ipv4 address{}; u16 port{}; bool operator==(const Endpoint &) const = default; };
+struct Endpoint { IpAddress address{}; u16 port{}; bool operator==(const Endpoint &) const = default; };
 enum class State : u8 { closed, listen, syn_sent, syn_received, established, fin_wait_1,
     fin_wait_2, close_wait, closing, last_ack, time_wait };
 enum class Failure : u8 { none, reset, refused, timed_out, aborted };
@@ -77,7 +78,8 @@ class Connection final
     Status active_open(Endpoint local, Endpoint peer, u32 iss, u64 now)
     {
         if (plan_.active || state_ != State::closed || rx_size_) return Status::busy("TCP control block is in use");
-        if (!valid_endpoint(local) || !valid_endpoint(peer)) return Status::invalid_argument("invalid TCP endpoints");
+        if (!valid_endpoint(local) || !valid_endpoint(peer) || local.address.family != peer.address.family)
+            return Status::invalid_argument("invalid TCP endpoints");
         if (now < last_now_) return Status::invalid_argument("TCP clock moved backward");
         reset_fields(); local_ = local; peer_ = peer; start_sequence(iss);
         state_ = State::syn_sent; pending_syn_ = true; last_now_ = now;
@@ -151,19 +153,31 @@ class Connection final
         write_shutdown_ = true; return Status::success();
     }
 
-    // This accepts complete IPv4 bytes, not caller-forged parsed fields. The
-    // unchanged codecs validate IP and mandatory TCP checksums before any state.
+    // This accepts complete IPv4 or IPv6 bytes, not caller-forged parsed
+    // fields. The codecs validate IP and mandatory TCP checksums before any state.
     Result<Ingress> receive(Bytes packet, u64 now)
     {
         if (plan_.active) return Status::busy("complete prepared TCP packet before ingress");
         if (aliases_self(packet)) return Status::invalid_argument("TCP ingress aliases control-block storage");
         if (now < last_now_) return Status::invalid_argument("TCP clock moved backward");
+        if (wire::ip_version(packet) == 6)
+        {
+            auto ip = wire::ipv6(packet); if (!ip) return ip.status();
+            auto tcp = wire::tcp<wire::Ipv6Family>(ip.value()); if (!tcp) return tcp.status();
+            return ingress(ip.value().source, ip.value().destination, tcp.value(), now);
+        }
         auto ip = wire::ipv4(packet); if (!ip) return ip.status();
         auto tcp = wire::tcp(ip.value()); if (!tcp) return tcp.status();
-        const auto &seg = tcp.value(); const auto &f = seg.fields;
-        if (ip.value().destination != local_.address || f.destination_port != local_.port || !f.source_port)
+        return ingress(ip.value().source, ip.value().destination, tcp.value(), now);
+    }
+
+  private:
+    Result<Ingress> ingress(const IpAddress &from, const IpAddress &to, const wire::Tcp &seg, u64 now)
+    {
+        const auto &f = seg.fields;
+        if (to != local_.address || f.destination_port != local_.port || !f.source_port)
             return Ingress::ignored;
-        const Endpoint source{ip.value().source, f.source_port};
+        const Endpoint source{from, f.source_port};
         if (!valid_endpoint(source) || (state_ != State::listen && source != peer_)) return Ingress::ignored;
         last_now_ = now;
         if (state_ == State::closed) return Ingress::ignored;
@@ -270,6 +284,7 @@ class Connection final
         consume(seg, now); return Ingress::accepted;
     }
 
+  public:
     Status tick(u64 now)
     {
         if (plan_.active) return Status::busy("complete prepared TCP packet before timer work");
@@ -321,8 +336,12 @@ class Connection final
         for (usize i = 0; i < next.payload; ++i) payload[i] = tx_[(tx_head_ + next.offset + i) % SendCapacity];
         const std::array<std::byte, 4> mss{std::byte{2}, std::byte{4},
             std::byte{static_cast<u8>(SegmentCapacity >> 8)}, std::byte{static_cast<u8>(SegmentCapacity)}};
-        auto built = wire::build_tcp(output, local_.address, next.destination.address, identification, 64,
-            next.fields, (next.fields.flags & tcp_syn) ? Bytes{mss} : Bytes{}, Bytes{payload.data(), next.payload});
+        const Bytes options = (next.fields.flags & tcp_syn) ? Bytes{mss} : Bytes{}, data{payload.data(), next.payload};
+        auto built = local_.address.v6()
+            ? wire::build_tcp<wire::Ipv6Family>(output, local_.address.ipv6(), next.destination.address.ipv6(), identification,
+                                                64, next.fields, options, data)
+            : wire::build_tcp(output, local_.address.ipv4(), next.destination.address.ipv4(), identification, 64,
+                              next.fields, options, data);
         if (!built) return built.status();
         next.token = ++next_token_; plan_ = next;
         return std::optional<PreparedPacket>{PreparedPacket{built.value(), plan_.token}};
@@ -377,8 +396,7 @@ class Connection final
     static constexpr u64 min64(u64 a, u64 b) { return a < b ? a : b; }
     static constexpr u64 deadline(u64 now, u64 delay)
     { return now > std::numeric_limits<u64>::max() - delay ? std::numeric_limits<u64>::max() : now + delay; }
-    static bool valid_endpoint(Endpoint ep)
-    { return ep.port && ep.address != Ipv4{} && ep.address[0] < 224 && ep.address[0] != 0; }
+    static bool valid_endpoint(Endpoint ep) { return ep.port && ep.address.unicast(); }
     bool aliases_self(Bytes input) const
     {
         if (input.empty()) return false;

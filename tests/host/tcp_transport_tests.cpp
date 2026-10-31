@@ -21,7 +21,7 @@ struct Packet
 Packet peer_packet(TcpFields fields, Bytes payload = {}, Bytes options = {}, Endpoint from = right, Endpoint to = left)
 {
     Packet p; fields.source_port = from.port; fields.destination_port = to.port;
-    auto n = build_tcp(p.bytes, from.address, to.address, 10, 64, fields, options, payload);
+    auto n = build_tcp(p.bytes, from.address.ipv4(), to.address.ipv4(), 10, 64, fields, options, payload);
     check(bool(n), "peer packet builder"); p.length = n.value(); return p;
 }
 template <typename C> Packet take(C &c, u64 now, bool accepted = true)

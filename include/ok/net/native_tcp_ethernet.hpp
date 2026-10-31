@@ -79,7 +79,7 @@ class NativeTcpEthernetExecutor final
             add(received_);
             const auto packet = nic->receive(wire::Bytes{incoming_.data(), received.value()}, now);
             if (packet.family == Delivery::control) continue;
-            if (packet.family != Delivery::ipv4) { add(dropped_); continue; }
+            if (packet.family != Delivery::ipv4 && packet.family != Delivery::ipv6) { add(dropped_); continue; }
             if (packet.protocol == wire::protocol_tcp)
             {
                 auto accepted = tcp.endpoints().ingest(packet.packet, now, iss);

@@ -14,6 +14,10 @@ bool zero(wire::Ipv4 address)
     for (u8 byte : address) if (byte) return false;
     return true;
 }
+IpAddress unspecified(Family family)
+{
+    return family == Family::ipv6 ? IpAddress{wire::Ipv6{}} : IpAddress{};
+}
 bool broadcast(wire::Mac address)
 {
     for (u8 byte : address) if (byte != 0xff) return false;
@@ -42,13 +46,15 @@ Status NativeUdpService::attach_interface(EthernetInterface &interface)
     interface_ = &interface;
     return Status::success();
 }
-bool NativeUdpService::reachable(wire::Ipv4 destination) const
+bool NativeUdpService::reachable(const IpAddress &destination) const
 {
-    return interface_ ? interface_->routable(destination) : destination == link_.peer_ip;
+    if (!interface_) return destination == link_.peer_ip;
+    return destination.v4() ? interface_->routable(destination.ipv4()) : interface_->routable(destination.ipv6());
 }
-bool NativeUdpService::local_address(wire::Ipv4 address) const
+bool NativeUdpService::local_address(const IpAddress &address) const
 {
-    return interface_ ? interface_->local(address) : address == link_.local_ip;
+    if (!interface_) return address == link_.local_ip;
+    return address.v4() ? interface_->local(address.ipv4()) : interface_->local(address.ipv6());
 }
 Status NativeUdpService::configure(NativeUdpLink link)
 {
@@ -80,9 +86,10 @@ const NativeUdpService::Socket *NativeUdpService::find(u32 handle) const
     return const_cast<NativeUdpService *>(this)->find(handle);
 }
 
-Result<u32> NativeUdpService::open()
+Result<u32> NativeUdpService::open(Family family)
 {
     if (auto state = status(); !state) return state;
+    if (family == Family::ipv6 && !interface_) return Status::unsupported("IPv6 UDP needs the network interface");
     for (usize i = 0; i < sockets_.size(); ++i)
     {
         auto &socket = sockets_[i];
@@ -95,10 +102,18 @@ Result<u32> NativeUdpService::open()
         const u32 generation = socket.generation + 1;
         socket = {};
         socket.used = true;
+        socket.family = family;
+        socket.address = socket.peer_address = unspecified(family);
         socket.generation = generation;
         return (generation << 8) | static_cast<u32>(i + 1);
     }
     return Status::no_memory("bounded UDP socket table is full");
+}
+Result<Family> NativeUdpService::family(u32 handle) const
+{
+    const auto *socket = find(handle);
+    if (!socket) return Status::bad_descriptor("stale UDP socket handle");
+    return socket->family;
 }
 Status NativeUdpService::close(u32 handle)
 {
@@ -127,29 +142,31 @@ Result<u16> NativeUdpService::ephemeral_port()
     }
     return Status::no_space("no ephemeral UDP port in the bounded probe window");
 }
-Status NativeUdpService::bind(u32 handle, wire::Ipv4 address, u16 port)
+Status NativeUdpService::bind(u32 handle, IpAddress address, u16 port)
 {
     auto *socket = find(handle);
     if (!socket) return Status::bad_descriptor("stale UDP socket handle");
+    if (address.family != socket->family) return Status::invalid_argument("UDP address family differs from the socket");
     if (auto state = status(); !state) return state;
     if (!configured_) return Status::not_initialized("UDP link is not configured");
-    if (port < 1024 || (!local_address(address) && !zero(address)))
+    if (port < 1024 || (!local_address(address) && !address.unspecified()))
         return Status::invalid_argument("unsupported local UDP address or port");
     if (socket->bound || port_used(port)) return Status::already_exists("UDP port is already bound");
     socket->address = address;
     socket->port = port;
     socket->bound = true;
     socket->port_locked = true;
-    if (!zero(address)) socket->address_locked = true;
+    if (!address.unspecified()) socket->address_locked = true;
     return Status::success();
 }
-Status NativeUdpService::bind_ephemeral(u32 handle, wire::Ipv4 address)
+Status NativeUdpService::bind_ephemeral(u32 handle, IpAddress address)
 {
     auto *socket = find(handle);
     if (!socket) return Status::bad_descriptor("stale UDP socket handle");
+    if (address.family != socket->family) return Status::invalid_argument("UDP address family differs from the socket");
     if (auto state = status(); !state) return state;
     if (!configured_) return Status::not_initialized("UDP link is not configured");
-    if (!local_address(address) && !zero(address))
+    if (!local_address(address) && !address.unspecified())
         return Status::invalid_argument("unsupported local UDP address");
     if (socket->bound) return Status::already_exists("UDP endpoint is already bound");
     const auto port = ephemeral_port();
@@ -157,7 +174,7 @@ Status NativeUdpService::bind_ephemeral(u32 handle, wire::Ipv4 address)
     socket->address = address;
     socket->port = port.value();
     socket->bound = true;
-    if (!zero(address)) socket->address_locked = true;
+    if (!address.unspecified()) socket->address_locked = true;
     return Status::success();
 }
 Status NativeUdpService::autobind(u32 handle)
@@ -173,16 +190,22 @@ Status NativeUdpService::autobind(u32 handle)
     socket->bound = true;
     return Status::success();
 }
-Status NativeUdpService::connect(u32 handle, wire::Ipv4 address, u16 port)
+Status NativeUdpService::connect(u32 handle, IpAddress address, u16 port)
 {
     auto *socket = find(handle);
     if (!socket) return Status::bad_descriptor("stale UDP socket handle");
+    if (address.family != socket->family) return Status::invalid_argument("UDP address family differs from the socket");
     if (auto state = status(); !state) return state;
     if (!configured_) return Status::not_initialized("UDP link is not configured");
     if (!reachable(address))
         return Status::invalid_argument("UDP peer has no route");
     if (auto state = autobind(handle); !state) return state;
-    if (zero(socket->address)) socket->address = link_.local_ip;
+    if (socket->address.unspecified())
+    {
+        auto source = local_source(*socket, address);
+        if (!source) return source.status();
+        socket->address = source.value();
+    }
     socket->peer_address = address;
     socket->peer_port = port;
     socket->associated = true;
@@ -195,9 +218,9 @@ Status NativeUdpService::disconnect(u32 handle)
     if (auto state = status(); !state) return state;
     if (!configured_) return Status::not_initialized("UDP link is not configured");
     socket->associated = false;
-    socket->peer_address = {};
+    socket->peer_address = unspecified(socket->family);
     socket->peer_port = 0;
-    if (!socket->address_locked) socket->address = {};
+    if (!socket->address_locked) socket->address = unspecified(socket->family);
     if (!socket->port_locked)
     {
         socket->bound = false;
@@ -205,18 +228,29 @@ Status NativeUdpService::disconnect(u32 handle)
     }
     return Status::success();
 }
-Result<usize> NativeUdpService::build_datagram(u32 handle, wire::Ipv4 destination, u16 port,
+Result<IpAddress> NativeUdpService::local_source(const Socket &socket, const IpAddress &destination) const
+{
+    if (socket.family == Family::ipv4 || !interface_) return IpAddress{link_.local_ip};
+    if (!socket.address.unspecified()) return socket.address;
+    auto source = interface_->source(destination.ipv6());
+    if (!source) return source.status();
+    return IpAddress{source.value()};
+}
+Result<usize> NativeUdpService::build_datagram(u32 handle, IpAddress destination, u16 port,
                                                 wire::Bytes payload, std::span<std::byte> frame)
 {
     auto *socket = find(handle);
     if (!socket) return Status::bad_descriptor("stale UDP socket handle");
     if (auto state = status(); !state) return state;
     if (!configured_) return Status::not_initialized("UDP link is not configured");
+    if (destination.family != socket->family) return Status::invalid_argument("UDP address family differs from the socket");
     if (!reachable(destination))
         return Status::invalid_argument("UDP destination has no route");
-    if (payload.size() > datagram_capacity)
-        return Status::message_size("UDP datagram exceeds the unfragmented IPv4 MTU");
-    const usize packet_size = 28 + payload.size();
+    const bool v6 = socket->family == Family::ipv6;
+    const usize header = v6 ? 48 : 28;
+    if (payload.size() > datagram_capacity || header + payload.size() > 1500)
+        return Status::message_size("UDP datagram exceeds the unfragmented MTU");
+    const usize packet_size = header + payload.size();
     const usize frame_size = 14 + packet_size > 60 ? 14 + packet_size : 60;
     if (frame.size() < frame_size) return Status::overflow("UDP frame output capacity is too small");
     if (overlap(payload, frame, frame_size)) return Status::invalid_argument("UDP payload aliases the frame output");
@@ -227,16 +261,21 @@ Result<usize> NativeUdpService::build_datagram(u32 handle, wire::Ipv4 destinatio
         if (!available) return available.status();
         source_port = available.value();
     }
-    const auto built = wire::build_udp(frame.subspan(14, packet_size), link_.local_ip,
-        destination, source_port, port, next_identifier_, 64, payload);
+    auto source = local_source(*socket, destination);
+    if (!source) return source.status();
+    const auto built = v6
+        ? wire::build_udp<wire::Ipv6Family>(frame.subspan(14, packet_size), source.value().ipv6(), destination.ipv6(),
+                                            source_port, port, 0, 64, payload)
+        : wire::build_udp(frame.subspan(14, packet_size), link_.local_ip, destination.ipv4(), source_port, port,
+                          next_identifier_, 64, payload);
     if (!built) return built.status();
     if (!socket->bound)
     {
-        socket->address = link_.local_ip;
+        if (!v6) socket->address = link_.local_ip;
         socket->port = source_port;
         socket->bound = true;
     }
-    ++next_identifier_;
+    if (!v6) ++next_identifier_;
     if (interface_) return interface_->output(frame, packet_size);
     put_mac(frame, 0, link_.peer_mac);
     put_mac(frame, 6, link_.local_mac);
@@ -283,7 +322,7 @@ Result<NativeUdpFrame> NativeUdpService::ingest(wire::Bytes frame, std::span<std
     if (!udp || !udp.value().checksum_present || udp.value().payload.size() > datagram_capacity ||
         wire::be16(ip.value().payload, 4) != ip.value().payload.size())
         return drop();
-    auto queued = queue(ip.value(), udp.value());
+    auto queued = queue(ip.value().source, ip.value().destination, udp.value());
     if (queued && queued.value().kind == NativeUdpFrameKind::unbound) return drop();
     return queued;
 }
@@ -291,32 +330,46 @@ Result<NativeUdpFrame> NativeUdpService::deliver(wire::Bytes packet)
 {
     if (auto state = status(); !state) return state;
     if (!configured_ || !interface_) return Status::not_initialized("UDP interface is not configured");
-    const auto ip = wire::ipv4(packet);
-    if (!ip || !ip.value().ttl) return drop();
-    const auto udp = wire::udp(ip.value());
+    IpAddress source{}, destination{};
+    Result<wire::Udp> udp{Status::invalid_argument()};
+    wire::Bytes transport{};
+    if (wire::ip_version(packet) == 6)
+    {
+        const auto ip = wire::ipv6(packet);
+        if (!ip || !ip.value().hop_limit) return drop();
+        source = ip.value().source; destination = ip.value().destination; transport = ip.value().payload;
+        udp = wire::udp<wire::Ipv6Family>(ip.value());
+    }
+    else
+    {
+        const auto ip = wire::ipv4(packet);
+        if (!ip || !ip.value().ttl) return drop();
+        source = ip.value().source; destination = ip.value().destination; transport = ip.value().payload;
+        udp = wire::udp(ip.value());
+    }
     // The receive queue keeps the static profile's requirements: a checksum
     // and no trailing bytes after the datagram.
     if (!udp || !udp.value().checksum_present || udp.value().payload.size() > datagram_capacity ||
-        wire::be16(ip.value().payload, 4) != ip.value().payload.size())
+        wire::be16(transport, 4) != transport.size())
         return drop();
-    auto queued = queue(ip.value(), udp.value());
+    auto queued = queue(source, destination, udp.value());
     if (queued && queued.value().kind == NativeUdpFrameKind::unbound && dropped_frames_ != ~u64{0}) ++dropped_frames_;
     return queued;
 }
-Result<NativeUdpFrame> NativeUdpService::queue(const wire::Ipv4Packet &ip, const wire::Udp &udp)
+Result<NativeUdpFrame> NativeUdpService::queue(const IpAddress &source, const IpAddress &destination, const wire::Udp &udp)
 {
     for (usize index = 0; index < sockets_.size(); ++index)
     {
         auto &socket = sockets_[index];
-        if (socket.used && socket.bound && socket.port == udp.destination_port)
+        if (socket.used && socket.bound && socket.family == destination.family && socket.port == udp.destination_port)
         {
-            if ((socket.address != wire::Ipv4{} && socket.address != ip.destination) ||
-                (socket.associated && (socket.peer_address != ip.source ||
+            if ((!socket.address.unspecified() && socket.address != destination) ||
+                (socket.associated && (socket.peer_address != source ||
                  (socket.peer_port && socket.peer_port != udp.source_port)))) return drop();
             if (socket.count == queue_capacity) return drop();
             if (!readiness_sequence_.advance()) return status();
             auto &queued = socket.queue[(socket.head + socket.count) % queue_capacity];
-            queued.source = ip.source;
+            queued.source = source;
             queued.source_port = udp.source_port;
             queued.size = udp.payload.size();
             for (usize i = 0; i < queued.size; ++i) queued.bytes[i] = udp.payload[i];

@@ -1,4 +1,4 @@
-#include <ok/net/tcp_transport.hpp>
+#include <ok/net/tcp_endpoints.hpp>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -8,6 +8,7 @@
 using namespace ok;
 using namespace ok::net::tcp;
 using namespace ok::net::wire;
+using ok::net::IpAddress;
 
 namespace
 {
@@ -17,6 +18,8 @@ usize checks{};
     std::abort(); } } while (false)
 
 constexpr Endpoint left{{10, 0, 0, 2}, 32001}, right{{10, 0, 0, 3}, 8080};
+const Endpoint left6{IpAddress{Ipv6{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2}}, 32001};
+const Endpoint right6{IpAddress{Ipv6{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3}}, 8080};
 struct Packet
 {
     std::array<std::byte, 1500> bytes{}; usize length{};
@@ -26,7 +29,7 @@ struct Packet
 Packet peer(TcpFields fields, Bytes payload = {})
 {
     Packet p; fields.source_port = right.port; fields.destination_port = left.port;
-    auto n = build_tcp(p.bytes, right.address, left.address, 10, 64, fields, {}, payload); CHECK(n);
+    auto n = build_tcp(p.bytes, right.address.ipv4(), left.address.ipv4(), 10, 64, fields, {}, payload); CHECK(n);
     p.length = n.value(); return p;
 }
 template <class C> std::optional<Packet> next(C &c, u64 now)
@@ -212,9 +215,46 @@ void zero_window_probe()
     CHECK(sent == 3000 - 2145 && rest[0].fields.sequence == iss + 1 + 2145);
 }
 
+// IPv6 segments carry the same state machine; the table demultiplexes both
+// families and refuses mixed endpoints.
+void ipv6_endpoints()
+{
+    Connection<> mixed;
+    CHECK(!mixed.active_open(left6, right, 1, 0) && !mixed.active_open(left, right6, 1, 0));
+    Connection<> client; CHECK(client.active_open(left6, right6, 100, 0));
+    auto syn = take(client, 0);
+    CHECK(ip_version(syn.view()) == 6);
+    auto ip = ipv6(syn.view()); CHECK(ip && ip.value().source == left6.address.ipv6() && ip.value().destination == right6.address.ipv6());
+    auto segment = tcp<Ipv6Family>(ip.value()); CHECK(segment && segment.value().fields.flags == tcp_syn);
+    EndpointTable<> table{TableIdentity{77}};
+    auto listener = table.listen(right6, 2); CHECK(listener);
+    struct Iss { Result<u32> operator()(Endpoint, Endpoint) { return u32{9000}; } } iss;
+    auto ingested = table.ingest(syn.view(), 1, iss);
+    CHECK(ingested && ingested.value().allocated && !ingested.value().dropped);
+    // An IPv4 SYN for the same port does not reach the IPv6 listener.
+    Connection<> v4; CHECK(v4.active_open(left, Endpoint{IpAddress{10, 0, 0, 3}, 8080}, 5, 0));
+    auto syn4 = take(v4, 0);
+    auto other = table.ingest(syn4.view(), 2, iss); CHECK(other && !other.value().matched && other.value().dropped);
+    std::array<std::byte, EndpointTable<>::packet_capacity> out{};
+    auto prepared = table.prepare(out, 3); CHECK(prepared && prepared.value());
+    auto synack_ip = ipv6({out.data(), prepared.value()->length}); CHECK(synack_ip);
+    auto synack = tcp<Ipv6Family>(synack_ip.value());
+    CHECK(synack && synack.value().fields.flags == (tcp_syn | tcp_ack) && synack.value().fields.acknowledgment == 101);
+    CHECK(table.complete(prepared.value()->ticket, true, 3));
+    Packet reply; reply.length = prepared.value()->length;
+    for (usize i = 0; i < reply.length; ++i) reply.bytes[i] = out[i];
+    input(client, reply, 4);
+    CHECK(client.snapshot().state == State::established);
+    auto final = take(client, 4);
+    CHECK(table.ingest(final.view(), 5, iss));
+    auto child = table.accept(listener.value()); CHECK(child);
+    auto state = table.state(child.value()); CHECK(state && state.value().peer == left6 && state.value().local == right6);
+    CHECK(state.value().transport.state == State::established);
+}
+
 // Two endpoints over a channel that drops and reorders: the whole stream and
 // both FINs arrive intact.
-void lossy_transfer(u32 seed, u32 drop_percent)
+void lossy_transfer(u32 seed, u32 drop_percent, Endpoint left, Endpoint right)
 {
     Connection<8192, 4096, 536> a, b;
     CHECK(b.passive_open(right, 7000, 0) && a.active_open(left, right, 100, 0));
@@ -279,8 +319,10 @@ int main()
     timeout_goes_back();
     reassembly();
     zero_window_probe();
-    lossy_transfer(1, 0);
-    for (u32 seed = 2; seed < 12; ++seed) lossy_transfer(seed, 10);
-    lossy_transfer(99, 25);
+    lossy_transfer(1, 0, left, right);
+    for (u32 seed = 2; seed < 12; ++seed) lossy_transfer(seed, 10, left, right);
+    lossy_transfer(99, 25, left, right);
+    for (u32 seed = 20; seed < 24; ++seed) lossy_transfer(seed, 10, left6, right6);
+    ipv6_endpoints();
     std::printf("PASS tcp window scope=model checks=%zu\n", checks);
 }

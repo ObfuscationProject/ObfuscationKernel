@@ -98,7 +98,7 @@ class NativeTcpStreamService final
     {
         auto *entry = find(handle); if (!entry) return stale();
         if (entry->endpoint || entry->local.port) return Status::invalid_argument("TCP stream is already bound or started");
-        if (!local.port || (!local.address[0] || local.address[0] >= 224)) return Status::invalid_argument("TCP bind requires a specified unicast endpoint");
+        if (!local.port || !local.address.unicast()) return Status::invalid_argument("TCP bind requires a specified unicast endpoint");
         auto reserved = table_.local_reserved(local); if (!reserved) return reserved.status();
         if (reserved.value()) return Status::already_exists("TCP local endpoint is reserved by protocol ownership");
         for (const auto &other : streams_)

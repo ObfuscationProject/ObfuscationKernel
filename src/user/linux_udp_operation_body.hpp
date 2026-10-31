@@ -382,14 +382,14 @@ class OperationScratch final
                 if (!peer.value().associated || !peer.value().port)
                     return -static_cast<i64>(Constants<Target>::not_connected_errno_number());
                 value.port = peer.value().port;
-                value.address = peer.value().address;
+                value.address = peer.value().address.ipv4();
             }
             else
             {
                 const auto binding = backend.service().binding(endpoint);
                 if (!binding) return status_error<Target>(binding.status());
                 value.port = binding.value().port;
-                value.address = binding.value().address;
+                value.address = binding.value().address.ipv4();
             }
             std::array<u8, 16> name{};
             if (auto status = lu::UdpWire<Target>::encode_address(name, value); !status)
@@ -478,7 +478,7 @@ class OperationScratch final
                 const auto peer = backend.service().peer(endpoint);
                 if (!peer) return status_error<Target>(peer.status());
                 if (!peer.value().associated) return error<Target>(Error::e_destaddrreq);
-                value = {static_cast<u16>(Constants<Target>::af_inet), peer.value().port, peer.value().address};
+                value = {static_cast<u16>(Constants<Target>::af_inet), peer.value().port, peer.value().address.ipv4()};
             }
             if (request.count > payload_.size()) return error<Target>(Error::e_msgsize);
             if (!access.live()) return error<Target>(Error::e_io);

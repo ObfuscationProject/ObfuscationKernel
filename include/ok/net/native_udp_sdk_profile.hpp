@@ -41,17 +41,17 @@ static_assert(!std::is_copy_constructible_v<NativeUdpExecutor>);
 static_assert(!std::is_move_constructible_v<NativeUdpExecutor>);
 static_assert(std::is_same_v<decltype(NativeUdpFrame::queued_handle), u32>);
 static_assert(std::is_same_v<decltype(&NativeUdpService::bind_ephemeral),
-                           Status (NativeUdpService::*)(u32, wire::Ipv4)>);
+                           Status (NativeUdpService::*)(u32, IpAddress)>);
 static_assert(std::is_same_v<decltype(&NativeUdpService::autobind),
                            Status (NativeUdpService::*)(u32)>);
 static_assert(std::is_same_v<decltype(&NativeUdpService::connect),
-                           Status (NativeUdpService::*)(u32, wire::Ipv4, u16)>);
+                           Status (NativeUdpService::*)(u32, IpAddress, u16)>);
 static_assert(std::is_same_v<decltype(&NativeUdpService::disconnect),
                            Status (NativeUdpService::*)(u32)>);
 static_assert(std::is_same_v<decltype(&NativeUdpService::peer),
                            Result<NativeUdpPeerSnapshot> (NativeUdpService::*)(u32) const>);
 static_assert(std::is_same_v<decltype(NativeUdpPeerSnapshot::associated), bool>);
-static_assert(std::is_same_v<decltype(NativeUdpPeerSnapshot::address), wire::Ipv4>);
+static_assert(std::is_same_v<decltype(NativeUdpPeerSnapshot::address), IpAddress>);
 static_assert(std::is_same_v<decltype(NativeUdpPeerSnapshot::port), u16>);
 static_assert(std::is_trivially_copyable_v<NativeUdpPeerSnapshot>);
 static_assert(std::is_standard_layout_v<NativeUdpPeerSnapshot>);

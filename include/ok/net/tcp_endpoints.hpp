@@ -70,7 +70,8 @@ class EndpointTable final
     using Core = Connection<SendBytes, ReceiveBytes, SegmentBytes>;
   public:
     static constexpr u64 retirement_ms = 240000;
-    static constexpr usize packet_capacity = 20 + 24 + SegmentBytes;
+    // An IPv6 header, a SYN's options and one segment.
+    static constexpr usize packet_capacity = 40 + 24 + SegmentBytes;
     explicit EndpointTable(TableIdentity identity, EndpointLimits limits = {}) : identity_{identity.value}, limits_{limits}
     { if (!identity_ || !limits.generation_max || !limits.readiness_max || !limits.transmit_max ||
         !limits.reference_max || !limits.accept_operation_max) retired_ = true; }
@@ -323,10 +324,20 @@ class EndpointTable final
     {
         if (auto s = command_time(now); !s) return s;
         if (aliases(packet)) return Status::invalid_argument("TCP endpoint ingress aliases owner table");
-        auto ip = wire::ipv4(packet); if (!ip) return ip.status();
-        auto parsed = wire::tcp(ip.value()); if (!parsed) return parsed.status();
-        const auto &fields = parsed.value().fields;
-        const Endpoint local{ip.value().destination, fields.destination_port}, peer{ip.value().source, fields.source_port};
+        IpAddress from{}, to{}; TcpFields fields{};
+        if (wire::ip_version(packet) == 6)
+        {
+            auto ip = wire::ipv6(packet); if (!ip) return ip.status();
+            auto parsed = wire::tcp<wire::Ipv6Family>(ip.value()); if (!parsed) return parsed.status();
+            from = ip.value().source; to = ip.value().destination; fields = parsed.value().fields;
+        }
+        else
+        {
+            auto ip = wire::ipv4(packet); if (!ip) return ip.status();
+            auto parsed = wire::tcp(ip.value()); if (!parsed) return parsed.status();
+            from = ip.value().source; to = ip.value().destination; fields = parsed.value().fields;
+        }
+        const Endpoint local{to, fields.destination_port}, peer{from, fields.source_port};
         if (!valid(local) || !valid(peer)) return IngressResult{false, false, true};
         if (auto *slot = tuple(local, peer))
         {
@@ -437,7 +448,7 @@ class EndpointTable final
         bool used{}, exhausted{}, terminal{};
     };
     static Status stale() { return Status::not_found("stale or unowned TCP endpoint handle"); }
-    static bool valid(Endpoint ep) { return ep.port && ep.address[0] && ep.address[0] < 224; }
+    static bool valid(Endpoint ep) { return ep.port && ep.address.unicast(); }
     static u64 deadline(u64 now, u64 delay) { return now > ~u64{0} - delay ? ~u64{0} : now + delay; }
     bool aliases(Bytes bytes) const
     {

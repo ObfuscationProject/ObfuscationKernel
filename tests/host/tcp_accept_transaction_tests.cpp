@@ -22,7 +22,7 @@ struct Packet
 Packet packet(u32 sequence, u32 acknowledgment, u8 flags)
 {
     Packet out;
-    auto built = wire::build_tcp(out.bytes, peer.address, server.address, 1, 64,
+    auto built = wire::build_tcp(out.bytes, peer.address.ipv4(), server.address.ipv4(), 1, 64,
         {peer.port, server.port, sequence, acknowledgment, flags, 4096}, {}, {});
     CHECK(built); out.length = built.value(); return out;
 }
@@ -186,7 +186,7 @@ template <lu::Profile Selected> void profile_controls()
         CHECK(prepared); auto accepted = prepared.value().commit(); CHECK(accepted);
         const auto *slot = f.process().fd_table().entry(accepted.value()); const auto *open = f.scheduler.open_description(slot->description);
         CHECK(slot->close_on_exec && open->flags == (2 | TcpStreamOperations::nonblock));
-        std::array<u8, 16> expected{}; CHECK(Wire::encode_address(expected, {2, peer.port, peer.address}));
+        std::array<u8, 16> expected{}; CHECK(Wire::encode_address(expected, {2, peer.port, peer.address.ipv4()}));
         for (usize index = 0; index < static_cast<usize>(size < 16 ? size : 16); ++index) CHECK(copy.bytes[512 + index] == std::byte{expected[index]});
         CHECK(copy.bytes[512 + static_cast<usize>(size < 16 ? size : 16)] == std::byte{0x5a});
         std::array<u8, 4> reported{}; for (usize index = 0; index < 4; ++index) reported[index] = std::to_integer<u8>(copy.bytes[256 + index]);

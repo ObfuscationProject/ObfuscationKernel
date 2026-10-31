@@ -74,7 +74,7 @@ class TcpAcceptCopied final
         {
             std::array<u8, 16> record{};
             const auto peer = operation.peer();
-            if (auto status = Wire::encode_address(record, {2, peer.port, peer.address}); !status) return status;
+            if (auto status = Wire::encode_address(record, {2, peer.port, peer.address.ipv4()}); !status) return status;
             std::array<std::byte, 16> bytes{};
             for (usize at = 0; at < bytes.size(); ++at) bytes[at] = std::byte{record[at]};
             if (prefix)

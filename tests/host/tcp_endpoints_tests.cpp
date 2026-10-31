@@ -18,7 +18,7 @@ struct Packet
 };
 Packet packet(Endpoint from, Endpoint to, u32 sequence, u32 acknowledgment, u8 flags, u16 window = 4096, Bytes payload = {})
 {
-    Packet p; auto result = build_tcp(p.bytes, from.address, to.address, 1, 64,
+    Packet p; auto result = build_tcp(p.bytes, from.address.ipv4(), to.address.ipv4(), 1, 64,
         {from.port, to.port, sequence, acknowledgment, flags, window}, {}, payload);
     check(bool(result), "independent peer packet build"); p.length = result.value(); return p;
 }

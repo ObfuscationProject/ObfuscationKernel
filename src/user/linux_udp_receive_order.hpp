@@ -53,7 +53,7 @@ class ReceiveScratch final
         // Finish all borrowed reads before consume, including the source fields.
         for (usize at = 0; at < actual; ++at) payload_[at] = packet.payload[at];
         if (auto status = abi::linux_user::Ipv4SocketAddressCodec<Target>::encode(
-                source_, {2, packet.source_port, packet.source}); !status) return status;
+                source_, {2, packet.source_port, packet.source.ipv4()}); !status) return status;
         if (!(output.flags & peek))
             if (auto status = service.consume(original_endpoint); !status) return status;
         const usize copied = output.count < actual ? static_cast<usize>(output.count) : actual;

@@ -30,7 +30,9 @@ FLAGS = {
     'ppc': ['-msoft-float', '-msdata=none'],
 }
 # Each hosted model test is its own binary with its own main.
-TESTS = ('net_ip_tests', 'net_neighbour_route_tests', 'net_interface_tests', 'tcp_window_tests')
+TESTS = ('net_ip_tests', 'net_neighbour_route_tests', 'net_interface_tests', 'tcp_window_tests', 'net_udp_tests')
+# Kernel sources a hosted test links besides its own file.
+SOURCES = {'net_udp_tests': ('src/net/native_udp.cpp',)}
 sha = lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
 
 def main():
@@ -47,6 +49,9 @@ def main():
     for name in (*(test + '.cpp' for test in TESTS), 'net_core_compile.cpp'):
         (source / 'tests/host').mkdir(parents=True, exist_ok=True)
         shutil.copy2(root / 'tests/host' / name, source / 'tests/host' / name)
+    for name in sorted({path for paths in SOURCES.values() for path in paths}):
+        (source / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(root / name, source / name)
     inputs = {str(f.relative_to(source)): sha(f) for f in sorted(source.rglob('*')) if f.is_file()}
     result = dict(status='running', scope='hosted byte/model tests and freestanding objects only',
                   sanitized=a.sanitize, source_files=inputs, script_sha256=sha(__file__),
@@ -76,6 +81,7 @@ def main():
             lines += ['target(' + json.dumps(test) + ')', 'set_kind("binary")', 'set_targetdir("bin")',
                       'add_includedirs("include")', 'add_defines("OK_ARCH_TARGET_X86_64")',
                       'add_files("tests/host/' + test + '.cpp")',
+                      *('add_files(' + json.dumps(path) + ')' for path in SOURCES.get(test, ())),
                       'add_cxxflags("-O1","-g","-Wall","-Wextra","-Wpedantic","-Werror",{force=true})']
             if a.sanitize:
                 lines += ['add_cxxflags("-fsanitize=address,undefined","-fno-sanitize-recover=all",'
