@@ -52,8 +52,9 @@ class ReceiveScratch final
             return Status::io_error("Linux UDP service packet exceeds owned scratch");
         // Finish all borrowed reads before consume, including the source fields.
         for (usize at = 0; at < actual; ++at) payload_[at] = packet.payload[at];
-        if (auto status = abi::linux_user::Ipv4SocketAddressCodec<Target>::encode(
-                source_, {2, packet.source_port, packet.source.ipv4()}); !status) return status;
+        const auto source = abi::linux_user::encode_socket_name<Target>(packet.source, packet.source_port);
+        if (!source) return source.status();
+        source_ = source.value();
         if (!(output.flags & peek))
             if (auto status = service.consume(original_endpoint); !status) return status;
         const usize copied = output.count < actual ? static_cast<usize>(output.count) : actual;
@@ -70,15 +71,15 @@ class ReceiveScratch final
             if (!access.live()) return Status::fault("Linux UDP receive image access expired");
             const i32 capacity = std::bit_cast<i32>(read_length<Target>());
             if (capacity < 0) return Status::invalid_argument("negative Linux UDP source capacity");
-            const usize prefix = static_cast<u32>(capacity) < source_.size()
-                ? static_cast<u32>(capacity) : source_.size();
+            const usize prefix = static_cast<u32>(capacity) < source_.size
+                ? static_cast<u32>(capacity) : source_.size;
             if (prefix)
             {
-                const auto *bytes = reinterpret_cast<const std::byte *>(source_.data());
+                const auto *bytes = reinterpret_cast<const std::byte *>(source_.bytes.data());
                 if (auto status = access.write(output.source, {bytes, prefix}); !status) return status;
                 if (!access.live()) return Status::fault("Linux UDP receive image access expired");
             }
-            write_length<Target>(16);
+            write_length<Target>(static_cast<u32>(source_.size));
             if (auto status = access.write(output.source_length, length_); !status) return status;
             if (!access.live()) return Status::fault("Linux UDP receive image access expired");
         }
@@ -118,7 +119,7 @@ class ReceiveScratch final
     }
     bool busy_{};
     std::array<std::byte, net::NativeUdpService::datagram_capacity> payload_{};
-    std::array<u8, 16> source_{};
+    abi::linux_user::SocketName source_{};
     std::array<std::byte, 4> length_{};
 };
 

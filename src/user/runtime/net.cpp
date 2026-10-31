@@ -102,11 +102,22 @@ Status retire_native_udp_receives_for_exec(Kernel &kernel, sched::ProcessId pid)
 }
 namespace
 {
+// A stale handle keeps the IPv4 record size; its peek fails first.
+bool native_udp_ipv6(Kernel &kernel, u32 endpoint)
+{
+    const auto family = kernel.native_udp().family(endpoint);
+    return family && family.value() == net::Family::ipv6;
+}
+usize native_udp_name_size(Kernel &kernel, u32 endpoint)
+{
+    return native_udp_ipv6(kernel, endpoint) ? sizeof(ok_sockaddr_in6) : sizeof(ok_sockaddr_in);
+}
 Result<usize> copy_native_udp_datagram(Kernel &kernel, const hw::AddressSpace &space,
     u32 endpoint, const SyscallOrigins::NativeUdpReceiveRequest &operation)
 {
+    const usize name_size = native_udp_name_size(kernel, endpoint);
     if (operation.flags || (!!operation.source_address != !!operation.source_length) ||
-        (operation.source_address ? operation.source_capacity < sizeof(ok_sockaddr_in) : operation.source_capacity != 0))
+        (operation.source_address ? operation.source_capacity < name_size : operation.source_capacity != 0))
         return Status::invalid_argument("invalid copied native UDP receive request");
     const auto received = kernel.native_udp().peek(endpoint);
     if (!received)
@@ -120,12 +131,25 @@ Result<usize> copy_native_udp_datagram(Kernel &kernel, const hw::AddressSpace &s
     // Preflight every effective destination before publishing any output.
     if ((copied && !hw::user_range(space, operation.output, copied, true)) ||
         (operation.source_address &&
-         (!hw::user_range(space, operation.source_address, sizeof(ok_sockaddr_in), true) ||
+         (!hw::user_range(space, operation.source_address, name_size, true) ||
           !hw::user_range(space, operation.source_length, sizeof(u32), true))))
         return Status::fault("native UDP receive output is not writable");
     if (copied && !hw::copy_to_user(space, operation.output, received.value().payload.data(), copied))
         return Status::fault("native UDP payload publication failed");
-    if (operation.source_address)
+    if (operation.source_address && received.value().source.v6())
+    {
+        ok_sockaddr_in6 source{};
+        source.family = OK_AF_INET6;
+        source.port_be[0] = static_cast<u8>(received.value().source_port >> 8);
+        source.port_be[1] = static_cast<u8>(received.value().source_port);
+        for (usize at = 0; at < 16; ++at) source.address[at] = received.value().source[at];
+        source.scope_id = net::wire::link_local(received.value().source.ipv6()) ? 1u : 0u;
+        constexpr u32 actual = sizeof(source);
+        if (!hw::copy_to_user(space, operation.source_address, &source, sizeof(source)) ||
+            !hw::copy_to_user(space, operation.source_length, &actual, sizeof(actual)))
+            return Status::fault("native UDP source publication failed");
+    }
+    else if (operation.source_address)
     {
         ok_sockaddr_in source{};
         source.family = OK_AF_INET;
@@ -818,7 +842,7 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
     // Native UAPI numbers and sockaddr layout are not Linux ABI values on
     // the ten supported targets. A Linux decoder must be added separately.
     if (process->resources().personality != Personality::native) return -38;
-    static_assert(sizeof(ok_sockaddr_in) == 16);
+    static_assert(sizeof(ok_sockaddr_in) == 16 && sizeof(ok_sockaddr_in6) == 28);
     auto socket_description = [&](u64 descriptor) -> Result<u16> {
         if (descriptor > static_cast<u64>(__INT32_MAX__))
             return Status::bad_descriptor("native UDP descriptor is out of range");
@@ -840,10 +864,23 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
             if (byte) return Status::invalid_argument("native UDP address has nonzero reserved bytes");
         return address;
     };
+    // Exact native records: an IPv6 socket takes only a 28-byte AF_INET6 one.
+    // A mapped address is EINVAL for bind and ENETUNREACH for sendto (v6-only).
+    struct Endpoint6 { net::IpAddress address{}; u16 port{}; i64 error{}; };
+    auto ipv6_from_user = [&](u64 pointer, u64 length, i64 mapped) -> Endpoint6 {
+        if (length != sizeof(ok_sockaddr_in6)) return {.error = -OK_EINVAL};
+        ok_sockaddr_in6 address{};
+        if (!hw::copy_from_user(space, &address, pointer, sizeof(address))) return {.error = -OK_EFAULT};
+        if (address.family != OK_AF_INET6) return {.error = -OK_EAFNOSUPPORT};
+        net::wire::Ipv6 bytes{};
+        for (usize at = 0; at < bytes.size(); ++at) bytes[at] = address.address[at];
+        if (net::wire::ipv4_mapped(bytes)) return {.error = mapped};
+        return {bytes, static_cast<u16>((u16{address.port_be[0]} << 8) | address.port_be[1]), 0};
+    };
     if (number == N::socket)
     {
         constexpr u64 allowed = OK_SOCK_DGRAM | OK_SOCK_NONBLOCK | OK_SOCK_CLOEXEC;
-        if (a[0] != OK_AF_INET || (a[1] & ~allowed) ||
+        if ((a[0] != OK_AF_INET && a[0] != OK_AF_INET6) || (a[1] & ~allowed) ||
             (a[1] & OK_SOCK_DGRAM) != OK_SOCK_DGRAM ||
             (a[2] != 0 && a[2] != OK_IPPROTO_UDP)) return -22;
         if (auto status = kernel.native_udp_executor().status(); !status) return error(status);
@@ -856,7 +893,7 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
             if (auto status = kernel.native_udp().configure(link.value()); !status)
                 return error(status);
         }
-        auto opened = kernel.native_udp().open();
+        auto opened = kernel.native_udp().open(a[0] == OK_AF_INET6 ? net::Family::ipv6 : net::Family::ipv4);
         if (!opened) return error(opened.status());
         auto fd = kernel.posix().install_native_udp(opened.value(), (a[1] & OK_SOCK_CLOEXEC) != 0, (a[1] & OK_SOCK_NONBLOCK) != 0);
         if (!fd)
@@ -869,6 +906,12 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
     const auto description_id = socket_description(a[0]);
     if (!description_id) return error(description_id.status());
     const Result<u32> handle = kernel.scheduler().open_description(description_id.value())->native_udp_handle;
+    const bool ipv6 = handle && native_udp_ipv6(kernel, handle.value());
+    if (number == N::bind && ipv6)
+    {
+        const auto local = ipv6_from_user(a[1], a[2], -OK_EINVAL);
+        return local.error ? local.error : error(kernel.native_udp().bind(handle.value(), local.address, local.port));
+    }
     if (number == N::bind)
     {
         auto address = address_from_user(a[1], a[2]);
@@ -886,15 +929,26 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
         if (a[3]) return -22;
         if (auto status = kernel.native_udp_executor().status(); !status) return error(status);
         if (a[2] > net::NativeUdpService::datagram_capacity) return -90;
-        auto address = address_from_user(a[4], a[5]);
-        if (!address) return error(address.status());
+        net::IpAddress destination{};
+        u16 port{};
+        if (ipv6)
+        {
+            const auto peer = ipv6_from_user(a[4], a[5], -OK_ENETUNREACH);
+            if (peer.error) return peer.error;
+            destination = peer.address;
+            port = peer.port;
+        }
+        else
+        {
+            auto address = address_from_user(a[4], a[5]);
+            if (!address) return error(address.status());
+            port = static_cast<u16>((u16{address.value().port_be[0]} << 8) | address.value().port_be[1]);
+            destination = net::wire::Ipv4{address.value().address[0], address.value().address[1],
+                                          address.value().address[2], address.value().address[3]};
+        }
         std::array<std::byte, net::NativeUdpService::datagram_capacity> payload{};
         if (!hw::copy_from_user(space, payload.data(), a[1], static_cast<usize>(a[2]))) return -14;
         std::array<std::byte, net::NativeUdpService::frame_capacity> frame{};
-        const auto port = static_cast<u16>((u16{address.value().port_be[0]} << 8) |
-                                           address.value().port_be[1]);
-        const net::wire::Ipv4 destination{address.value().address[0], address.value().address[1],
-                                           address.value().address[2], address.value().address[3]};
         auto length = kernel.native_udp().build_datagram(handle.value(), destination,
             port, {payload.data(), static_cast<usize>(a[2])}, frame);
         if (!length) return error(length.status());
@@ -910,8 +964,9 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
     if (a[4])
     {
         if (!hw::copy_from_user(space, &address_capacity, a[5], sizeof(address_capacity))) return -14;
-        if (address_capacity < sizeof(ok_sockaddr_in)) return -22;
-        if (!hw::user_range(space, a[4], sizeof(ok_sockaddr_in), true) ||
+        const usize name_size = ipv6 ? sizeof(ok_sockaddr_in6) : sizeof(ok_sockaddr_in);
+        if (address_capacity < name_size) return -22;
+        if (!hw::user_range(space, a[4], name_size, true) ||
             !hw::user_range(space, a[5], sizeof(address_capacity), true)) return -14;
     }
     const SyscallOrigins::NativeUdpReceiveRequest request{
