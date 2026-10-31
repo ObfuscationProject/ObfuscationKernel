@@ -160,13 +160,14 @@ kernel main loop (`src/core/kernel_main.cpp`) still polls network, userland,
 console and input, device IRQs stay masked, and the OS virtio drivers spin on
 their used rings with `VIRTQ_AVAIL_F_NO_INTERRUPT`. Slices, each validated on
 the fast lane and then all ten profiles:
-Slices 1–4 are done on all ten profiles
+Slices 1–5 are done on all ten profiles
 ([PLATFORM_INTERRUPTS](qualification/PLATFORM_INTERRUPTS.md)): the console UART,
 virtio block, net and RNG (paired OS worktree) and the kernel's virtio-mmio and
 PS/2 input complete through interrupts. The kernel loop serves the console,
 input and network event sources only after their interrupt posted them, and
-waits record what woke them. loongarch64's virtio-pci input is still polled.
-Slices 5–6 remain.
+waits record what woke them. Linux processes have `ITIMER_REAL` and the
+`timer_create` family ([linux-timers](abi/linux-timers.md)). loongarch64's
+virtio-pci input is still polled. Slice 6 remains.
 1. Interrupt core: kernel-mode IRQ entry with interrupts enabled only inside
    an idle wait, a per-architecture `PlatformIrqChip` selected at compile time
    behind `IrqChip`, a bounded top half that records the line, and a deferred

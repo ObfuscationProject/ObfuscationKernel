@@ -50,3 +50,10 @@ device's events (`event_wake_source()`); the scheduler counts ready and timed
 out waits by source. `OK_IRQ_EVENTS` reports each event source as
 `driven:posted:served:polled` and the wake counts; see
 `docs/qualification/PLATFORM_INTERRUPTS.md`.
+
+## Interval timers
+
+Linux processes' `ITIMER_REAL` and POSIX timers (`src/user/runtime/timers.cpp`)
+expire in the runtime step, so the tick that ends an idle wait also serves
+them; their signals use the pending-signal queues and rearm on dequeue. See
+[Linux interval timers](../abi/linux-timers.md).

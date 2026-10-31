@@ -3,7 +3,8 @@
 WT1.2 `feat/irq-wait-time` (Kernel issue #4). Slices 1 and 2: the interrupt
 core and one controller per profile. Slice 3: device completion through
 interrupts. Slice 4: event sources and wake sources, so that waits are woken
-from interrupts and no device is polled. This note grows with each slice.
+from interrupts and no device is polled. Slice 5: Linux interval timers. This
+note grows with each slice.
 
 ## Design
 
@@ -262,6 +263,90 @@ Results (QEMU 10.2.0, ObfuscationOS `feat/irq-wait-time`, ABI 77):
   blocking socket, and its wait is the run's interrupt wake.
 - ObfuscationOS artifact tests: 1321 run, OK (34 skipped).
 
+## Slice 5: interval timers
+
+[Linux interval timers](../abi/linux-timers.md) gives the contract.
+
+- Calls: `setitimer`, `getitimer` and `alarm` (`ITIMER_REAL`), and
+  `timer_create`, `timer_settime`, `timer_gettime`, `timer_getoverrun` and
+  `timer_delete` with their time32/time64 forms, generated and crosschecked
+  against Linux 6.13.4 on ten profiles (`alarm` on the five that have it).
+- `time::IntervalTimer` (`ok/time/interval_timer.hpp`) keeps the Linux 6.13
+  contract: one queued signal per expiry, an interval timer rearms when that
+  signal is dequeued, and the intervals it missed are the signal's overrun.
+- Signal records: `PendingSignalInfo` carries the timer id, overrun and
+  sigevent value; `SI_TIMER` is -2, -3 on MIPS. The siginfo codec and every
+  frame backend write `si_tid`, `si_overrun` and `si_value`; `SIGALRM` as
+  `SI_KERNEL`, which is how Linux delivers an `ITIMER_REAL` expiry, now
+  reaches handler frames.
+- Service: each runtime step reads the clocks, expires due timers before
+  interruptible waits are chosen, queues their signals with the `kill` and
+  `tgkill` admission, keeps a queued record's overrun current and rearms a
+  timer whose record left its queue. The idle wait needs nothing new: the
+  tick ends it and the next step expires the timer, so granularity is the
+  100 Hz tick.
+- The guest probe found that every backend refused to resume a thread whose
+  stack pointer was unmapped, and the runtime then ended its process. A
+  detached musl thread, such as the `SIGEV_THREAD` helper, unmaps its stack
+  and calls `exit` without touching it, so its exit killed the process.
+  Entry no longer requires a mapped stack, nor on MIPS an 8-byte aligned one
+  (musl's o32 exit path points `sp` at its code); an access through it still
+  faults.
+- `OK_TIMERS scope=hardware armed=… expired=… signalled=… rearmed=…
+  retried=…` follows `OK_IRQ_EVENTS` once a timer was armed.
+
+Results (QEMU 10.2.0, ObfuscationOS `feat/irq-wait-time`, ABI 77):
+
+- Hosted (`scope=model`): `scripts/test_irq_wait_time.py` adds the timer
+  model (expiry, dequeue rearm, overrun, forwarding, saturation), the wire
+  records of four profiles, the queue records and `SI_TIMER` siginfo.
+  `scripts/test_linux_timers.py` runs the calls through the actual runtime
+  with hosted copies and a model clock (220 checks): `ITIMER_REAL` one-shot,
+  periodic while blocked and ignored, `alarm` rounding, ids and refused
+  sigevents, an x86_64 SA_SIGINFO frame with `SI_TIMER`, overrun across a
+  dequeue, reprogramming and deletion of a queued record, `SIGEV_NONE`,
+  `SIGEV_THREAD_ID`, an owed expiry, a parked ignored timer, `CLOCK_REALTIME`
+  absolute and relative, exec and retirement. Both pass with sanitizers.
+  The hosted suite passes with the toolchain runners (142 runners), whose
+  native execution probes now enter with an unmapped stack.
+- All ten profiles: `xmake test`, the ext4 native boot, the shell gate
+  (54 sh checks, 134/151 with the 8 reviewed failures) and the ObfuscationOS
+  guest probe `tests/musl/linux_timers.c` pass. The probe checks `alarm`,
+  one-shot and periodic `ITIMER_REAL` with `SI_KERNEL`, `EINTR` from
+  `nanosleep`, `SIGEV_SIGNAL` with `si_timerid` and `si_value`, the overrun of
+  a periodic 10 ms timer blocked for 105 ms and `timer_getoverrun`,
+  `SIGEV_NONE`, musl's `SIGEV_THREAD`, a `TIMER_ABSTIME` `CLOCK_REALTIME`
+  expiry, and the fork and exec rules. ObfuscationOS artifact tests: 1321
+  run, OK (34 skipped).
+
+Guest probe lines (`TIMERS_PASS`): the one-shot `ITIMER_REAL` handler ran
+3.6–12.4 ms after its 50 ms expiry, as the tick serves it; the blocked 10 ms
+timer reported 9 or 10 overruns over 105 ms; musl's `SIGEV_THREAD` ran its
+function 3 or 4 times before the timer was deleted. Every profile reports
+`OK_TIMERS armed=12 expired=14 signalled=14 rearmed=9 retried=0` (15/15/10
+when a fourth `SIGEV_THREAD` expiry fit in). The shell gate ran beside a
+second lane and the hosted suite, so its times are not comparable with slice 4;
+rerun on x86_64 without them it takes 113.1 s (111.4 s in slice 4).
+
+| Profile | Probe checks | One-shot late | Overruns | Shell gate |
+| --- | --- | --- | --- | --- |
+| i386 | 74 | 12.4 ms | 9 | 133.0 s |
+| x86_64 | 74 | 3.6 ms | 9 | 197.7 s |
+| aarch64 | 75 | 11.8 ms | 9 | 140.6 s |
+| arm32 | 74 | 4.9 ms | 10 | 141.6 s |
+| rv64 | 75 | 10.6 ms | 9 | 131.3 s |
+| rv32 | 75 | 3.8 ms | 10 | 137.2 s |
+| loongarch64 | 75 | 8.9 ms | 10 | 123.0 s |
+| mips | 74 | 7.0 ms | 9 | 177.7 s |
+| mips64 | 74 | 9.8 ms | 9 | 233.8 s |
+| ppc | 74 | 8.0 ms | 10 | 325.8 s |
+
+The probe count differs by one where the `SIGEV_THREAD` wait looped once more.
+On every profile no interrupt was spurious or a controller error. Before the
+entry fix the probe died on every profile when the `SIGEV_THREAD` helper
+exited (`enter=failed`), and on mips, after the first fix, for the misaligned
+`sp` musl's o32 exit path sets.
+
 ## Limits
 
 - loongarch64's virtio-pci keyboard and mouse stay polled. Bound, the
@@ -273,5 +358,9 @@ Results (QEMU 10.2.0, ObfuscationOS `feat/irq-wait-time`, ABI 77):
   to the event that readied them.
 - Wake attribution is by readiness kind: a socket wait made ready by queued
   data is credited to the link even if the data arrived before it slept.
-- Wait granularity is the 100 Hz tick; no one-shot deadline programming.
+- Wait and timer granularity is the 100 Hz tick; no one-shot deadline
+  programming.
+- `ITIMER_VIRTUAL`, `ITIMER_PROF` and CPU-time clocks are refused: there is
+  no CPU-time accounting. Other limits of the timer calls are in
+  [Linux interval timers](../abi/linux-timers.md).
 - No local APIC or I/O APIC; the 8259 only.
