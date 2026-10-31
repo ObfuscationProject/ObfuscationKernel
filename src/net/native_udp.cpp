@@ -74,6 +74,20 @@ Status NativeUdpService::configure(NativeUdpLink link)
     return Status::success();
 }
 
+Status NativeUdpService::configure(const InterfaceConfig &config)
+{
+    if (auto state = status(); !state) return state;
+    if (configured_) return Status::already_exists("UDP link is already configured");
+    if (!interface_) return Status::not_initialized("UDP interface configuration needs an attached interface");
+    if (!config.ipv4) return Status::invalid_argument("UDP interface configuration needs an IPv4 address");
+    if (!interface_->configured())
+        if (auto status = interface_->configure(config); !status) return status;
+    link_ = {};
+    link_.local_mac = config.mac; link_.local_ip = config.ipv4->address;
+    configured_ = true;
+    return Status::success();
+}
+
 NativeUdpService::Socket *NativeUdpService::find(u32 handle)
 {
     const u32 index = handle & 0xffu;

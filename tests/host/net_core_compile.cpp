@@ -67,3 +67,12 @@ ok::usize compile_net_core_tcp(ok::net::tcp::Connection<> &connection, ok::net::
     static_cast<void>(connection.complete_transmit(prepared.value()->token, true, now));
     return prepared.value()->length + connection.snapshot().congestion_window;
 }
+
+#include <ok/net/probe.hpp>
+
+void compile_net_core_probe(ok::net::LinkProbe &probe, ok::net::EthernetInterface &nic,
+                            ok::net::NativeTcpStreamService &service, ok::u64 now)
+{
+    struct Iss { ok::Result<ok::u32> operator()(ok::net::tcp::Endpoint, ok::net::tcp::Endpoint) { return ok::u32{1}; } } iss;
+    probe.step(nic, service, now, iss, [](std::string_view) {});
+}

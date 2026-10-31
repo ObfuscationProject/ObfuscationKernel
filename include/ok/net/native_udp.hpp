@@ -89,6 +89,9 @@ class NativeUdpService final
     Status attach_interface(EthernetInterface &interface);
     [[nodiscard]] EthernetInterface *interface() const { return interface_; }
     Status configure(NativeUdpLink link);
+    // Interface mode only: the attached interface takes `config`; the static
+    // peer fields stay unset and every route comes from the interface.
+    Status configure(const InterfaceConfig &config);
     [[nodiscard]] bool reachable(const IpAddress &destination) const;
     [[nodiscard]] bool local_address(const IpAddress &address) const;
     // A socket's family is fixed at open; addresses of the other family are

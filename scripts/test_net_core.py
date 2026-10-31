@@ -30,7 +30,7 @@ FLAGS = {
     'ppc': ['-msoft-float', '-msdata=none'],
 }
 # Each hosted model test is its own binary with its own main.
-TESTS = ('net_ip_tests', 'net_neighbour_route_tests', 'net_interface_tests', 'tcp_window_tests', 'net_udp_tests')
+TESTS = ('net_ip_tests', 'net_neighbour_route_tests', 'net_interface_tests', 'tcp_window_tests', 'net_udp_tests', 'net_probe_tests')
 # Kernel sources a hosted test links besides its own file.
 SOURCES = {'net_udp_tests': ('src/net/native_udp.cpp',)}
 sha = lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
