@@ -5,6 +5,7 @@
 #include "ok/fs/fat.hpp"
 #include "ok/fs/fat_fs.hpp"
 #include "ok/fs/storage.hpp"
+#include "ok/net/interface.hpp"
 #include "ok/net/native_udp.hpp"
 #include "ok/net/wire.hpp"
 #include "ok/syscall/linux.hpp"
@@ -552,6 +553,82 @@ Status test_native_udp_association_model()
         ? Status{} : Status::fault("native UDP association stale handle model failed");
 }
 
+// Reached Debug interface model: frames are built and consumed in memory, so
+// this executes ARP, neighbour discovery, echo and routed egress on the target
+// CPU without a NIC, a peer or user sockets.
+Status test_network_interface_model()
+{
+    using namespace net;
+    using V4 = wire::Ipv4Family;
+    using V6 = wire::Ipv6Family;
+    static EthernetInterface nic;
+    static std::array<std::byte, EthernetInterface::frame_capacity> frame{};
+    const wire::Mac self{0x52, 0x54, 0, 0x12, 0x34, 0x56}, router{0x52, 0x55, 0x0a, 0, 2, 2};
+    const wire::Ipv4 self4{10, 0, 2, 15}, router4{10, 0, 2, 2}, host4{10, 0, 2, 3};
+    const auto self6 = wire::link_local_from_mac(self), router6 = wire::link_local_from_mac(router);
+    if (auto status = nic.configure({self, 1500, Ipv4Configuration{self4, 24, router4, {}}, true}); !status) return status;
+    const auto fail = [](const char *what) { return Status::fault(what); };
+    const auto pop = [&]() -> std::optional<wire::Ethernet> {
+        auto next = nic.control(); if (!next) return {};
+        for (usize i = 0; i < next->size(); ++i) frame[i] = (*next)[i];
+        auto parsed = wire::ethernet({frame.data(), next->size()}); nic.pop_control();
+        return parsed ? std::optional<wire::Ethernet>{parsed.value()} : std::nullopt;
+    };
+    // Link-local DAD, then the first router solicitation.
+    if (auto status = nic.tick(0); !status) return status;
+    auto probe = pop(); if (!probe || probe->type != wire::ethertype_ipv6) return fail("interface sent no DAD probe");
+    if (auto status = nic.tick(1000); !status) return status;
+    if (!nic.local(self6) || !pop()) return fail("interface link-local DAD or solicitation failed");
+    // ARP: a request for us is answered and the router learned.
+    std::array<std::byte, 64> input{};
+    auto built = wire::build_arp(std::span{input}.subspan(14), 1, router, router4, {}, self4);
+    if (!built || !wire::build_ethernet(input, wire::broadcast_mac, router, wire::ethertype_arp, 28)) return fail("ARP fixture");
+    if (nic.receive({input.data(), 60}, 1100).family != Delivery::control) return fail("interface ignored an ARP request");
+    auto reply = pop();
+    auto arp = reply ? wire::arp(reply->payload) : Result<wire::Arp>{Status::not_found()};
+    if (!arp || arp.value().operation != 2 || arp.value().target_mac != router || !nic.arp().find(router4))
+        return fail("interface ARP reply or learning failed");
+    // Echo over IPv4 and IPv6.
+    std::array<std::byte, 128> echo{};
+    const std::array<std::byte, 4> data{std::byte{'p'}, std::byte{'i'}, std::byte{'n'}, std::byte{'g'}};
+    auto request = wire::build_icmp<V4>(std::span{echo}.subspan(14), router4, self4, 64, 1, wire::icmpv4::echo_request, 0, 0x00010002, data);
+    if (!request || !wire::build_ethernet(echo, self, router, wire::ethertype_ipv4, request.value())) return fail("echo fixture");
+    if (nic.receive({echo.data(), 60}, 1200).family != Delivery::control) return fail("interface ignored an IPv4 echo");
+    auto answer = pop();
+    auto ip = answer ? wire::ipv4(answer->payload) : Result<wire::Ipv4Packet>{Status::not_found()};
+    auto message = ip ? wire::icmp<V4>(ip.value()) : Result<wire::Icmp>{Status::not_found()};
+    if (!message || message.value().type != wire::icmpv4::echo_reply || message.value().rest != 0x00010002)
+        return fail("interface IPv4 echo reply failed");
+    request = wire::build_icmp<V6>(std::span{echo}.subspan(14), router6, self6, 64, 0, wire::icmpv6::echo_request, 0, 0x00030004, data);
+    if (!request || !wire::build_ethernet(echo, self, router, wire::ethertype_ipv6, request.value())) return fail("echo6 fixture");
+    if (nic.receive({echo.data(), 14 + request.value()}, 1300).family != Delivery::control) return fail("interface ignored an IPv6 echo");
+    // The router is unknown over IPv6: the reply waits for its advertisement.
+    if (nic.control() || nic.neighbours().pending() != 1) return fail("interface did not hold the IPv6 reply");
+    if (auto status = nic.tick(1300); !status) return status;
+    auto solicitation = pop();
+    if (!solicitation || solicitation->destination != wire::multicast_mac(wire::solicited_node(router6)))
+        return fail("interface sent no neighbour solicitation");
+    auto advert = wire::build_neighbor_advertisement(std::span{echo}.subspan(14), router6, self6, router6, true, true, true, router);
+    if (!advert || !wire::build_ethernet(echo, self, router, wire::ethertype_ipv6, advert.value())) return fail("NA fixture");
+    nic.receive({echo.data(), 14 + advert.value()}, 1400);
+    usize released = 0;
+    nic.flush([&](wire::Bytes out) {
+        auto e = wire::ethernet(out); auto v6 = e ? wire::ipv6(e.value().payload) : Result<wire::Ipv6Packet>{Status::not_found()};
+        auto m = v6 ? wire::icmp<V6>(v6.value()) : Result<wire::Icmp>{Status::not_found()};
+        released += m && m.value().type == wire::icmpv6::echo_reply && e.value().destination == router;
+        return true; });
+    if (released != 1) return fail("interface did not release the resolved IPv6 reply");
+    // Routed egress: off-link through the gateway, on-link resolved by ARP.
+    auto datagram = wire::build_udp<V4>(std::span{frame}.subspan(14), self4, {93, 184, 216, 34}, 1000, 53, 2, 64, data);
+    auto out = datagram ? nic.output(frame, datagram.value()) : Result<usize>{datagram.status()};
+    if (!out || out.value() != 60 || wire::ethernet({frame.data(), 60}).value().destination != router)
+        return fail("interface gateway egress failed");
+    datagram = wire::build_udp<V4>(std::span{frame}.subspan(14), self4, host4, 1000, 53, 3, 64, data);
+    out = datagram ? nic.output(frame, datagram.value()) : Result<usize>{datagram.status()};
+    if (!out || out.value() || nic.arp().pending() != 1) return fail("interface did not hold on-link egress");
+    return nic.tick(1500) && pop() ? Status{} : fail("interface sent no ARP request");
+}
+
 Status test_storage(Kernel &kernel)
 {
     if (auto status = test::test_cache_failure(); !status) return status;
@@ -747,6 +824,10 @@ Status run_network_storage_roadmap_tests(Kernel &kernel, KernelTestReport &repor
         return status;
     }
     if (auto status = test_native_udp_association_model(); !status.ok())
+    {
+        return status;
+    }
+    if (auto status = test_network_interface_model(); !status.ok())
     {
         return status;
     }
