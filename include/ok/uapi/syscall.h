@@ -249,6 +249,7 @@
 // Native diagnostic sockaddr_in uses native family and network-order port/IP
 // bytes. It is deliberately not an alias of any Linux personality structure.
 #define OK_AF_INET 2U
+#define OK_AF_INET6 10U
 #define OK_AF_UNIX 1U
 #define OK_SOCK_STREAM 1U
 #define OK_SOCK_DGRAM 2U
@@ -287,6 +288,16 @@ struct ok_sockaddr_in
     uint8_t port_be[2];
     uint8_t address[4];
     uint8_t reserved[8];
+};
+// Linux sockaddr_in6 byte layout. Input flowinfo and scope_id are ignored;
+// output scope_id is 1 for a link-local address (the one interface), else 0.
+struct ok_sockaddr_in6
+{
+    uint16_t family;
+    uint8_t port_be[2];
+    uint8_t flowinfo_be[4];
+    uint8_t address[16];
+    uint32_t scope_id;
 };
 typedef uint32_t ok_socklen_t; // Native accept address capacity and full output size.
 
