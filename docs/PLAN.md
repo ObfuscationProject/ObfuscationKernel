@@ -330,6 +330,13 @@ all ten profiles:
 6. Socket readiness through `sched::WaitQueue` wakes instead of rescans.
 7. Gate evidence with the paired OS worktree: ARP, ping, TCP and IPv6
    neighbour discovery against QEMU user networking on ten profiles.
+Slices 1–4 are done ([NET_CORE](qualification/NET_CORE.md)): the kernel
+answers ARP, neighbour discovery and echo over both families, autoconfigures
+IPv6, routes and resolves egress, and its TCP runs a NewReno sliding window
+with reassembly. They change exported headers (the interface member of
+`Kernel`, `NativeUdpFrameKind::unbound`, the TCP snapshot), so the merge
+bumps the module ABI; the paired OS peers must also skip the link-control
+frames (DAD, router solicitation) the interface now sends at link start.
 
 ### WT2.4 `feat/storage-durable` (XL)
 

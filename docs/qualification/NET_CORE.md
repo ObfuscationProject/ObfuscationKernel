@@ -2,7 +2,8 @@
 
 WT2.3 `feat/net-core`. Slice 1: the family-generic wire layer. Slice 2: the
 neighbour cache and routing tables. Slice 3: the Ethernet interface and the
-executor running through it. This note grows with each slice.
+executor running through it. Slice 4: general TCP. This note grows with each
+slice.
 
 ## Design
 
@@ -50,8 +51,26 @@ executor running through it. This note grows with each slice.
   routable IPv4 peer is admitted, not only the static one.
 - Without an attached interface `NativeUdpService` keeps the static peer
   profile; only the standalone `NativeUdpExecutor` (hosted tests) uses it.
+- `tcp::Connection` (`tcp_transport.hpp`) sends several segments at once,
+  bounded by the peer window and the congestion window of its static
+  `Congestion` policy (`tcp_congestion.hpp`; the `CongestionControl` concept
+  and `NewReno`: RFC 5681 initial window, slow start by at most one segment
+  per ACK, congestion avoidance, RFC 6582 fast recovery). The send ring keeps
+  every byte until it is acknowledged. One retransmission timer covers
+  SND.UNA to SND.MAX; a timeout resends the first segment, backs the RTO off,
+  collapses the window to one segment and resends the rest from SND.UNA as
+  the window reopens (no RTT samples from resent data, Karn). The third
+  duplicate ACK retransmits the first segment and enters recovery; partial
+  ACKs retransmit the next hole. Segments beyond RCV.NXT are kept in the
+  receive ring (four ranges) and joined when the gap fills, including a kept
+  FIN. A zero window is probed with one byte after one RTO; a timed-out
+  probe keeps the congestion window. The handshake, token protocol, RST and
+  TIME_WAIT rules are unchanged.
 
 ## Not yet
+
+- TCP: no window scaling, timestamps, SACK or delayed ACKs; the peer MSS
+  bounds segments but there is no path MTU discovery.
 
 - IPv6 transport sockets: IPv6 TCP and UDP packets reach the executor but no
   service accepts them (slice 5); ICMP errors are not delivered to sockets.
@@ -69,6 +88,14 @@ executor running through it. This note grows with each slice.
   with ASan/UBSan, and compiles `tests/host/net_core_compile.cpp` freestanding
   for all ten profiles. `tests/host/tcp_streams_tests.cpp` drives the
   executor through an attached interface.
+- TCP: `tcp_window_tests` (in `test_net_core.py`) covers window growth,
+  peer-window limits, fast retransmit and recovery, timeout go-back, Karn,
+  reassembly with more ranges than records, zero-window probes and twelve
+  transfers of 30 000 bytes between two connections over a channel that
+  reorders and drops 0, 10 or 25 % of packets. The existing transport,
+  endpoint and stream suites (`tests/host/tcp_streams_xmake.lua`) pass; the
+  out-of-order case of `tcp_transport_tests` now expects the kept segment to
+  join.
 - Kernel: `test_network_interface_model` (network/storage roadmap test
   points) runs ARP, echo over both families, neighbour solicitation and
   release of a held reply, and routed egress inside `kernel_main`. It is a

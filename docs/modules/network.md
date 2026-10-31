@@ -23,6 +23,7 @@ Layers:
   the rescue shell and task manager.
 
 Limits: IPv4 sockets only (IPv6 packets are answered at the ICMPv6/ND level),
-one interface, no fragmentation, no forwarding. The TCP core keeps one
-segment in flight. Design notes and evidence:
+one interface, no fragmentation, no forwarding. TCP sends a sliding window
+under NewReno congestion control, reassembles out-of-order segments and
+probes zero windows; it has no window scaling, timestamps or SACK. Design notes and evidence:
 [NET_CORE](../qualification/NET_CORE.md).

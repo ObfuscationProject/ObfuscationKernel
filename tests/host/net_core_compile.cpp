@@ -55,3 +55,15 @@ ok::usize compile_net_core_interface(ok::net::EthernetInterface &nic, ok::net::w
     static_cast<void>(nic.tick(now));
     return nic.flush([](ok::net::wire::Bytes) { return true; }) + nic.control_pending();
 }
+
+#include <ok/net/tcp_transport.hpp>
+
+ok::usize compile_net_core_tcp(ok::net::tcp::Connection<> &connection, ok::net::wire::Bytes packet,
+                               std::span<std::byte> output, ok::u64 now)
+{
+    static_cast<void>(connection.receive(packet, now));
+    auto prepared = connection.prepare(output, now);
+    if (!prepared || !prepared.value()) return 0;
+    static_cast<void>(connection.complete_transmit(prepared.value()->token, true, now));
+    return prepared.value()->length + connection.snapshot().congestion_window;
+}
