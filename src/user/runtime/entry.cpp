@@ -878,6 +878,19 @@ Status start(Kernel &kernel, fs::BootArchive archive)
         return Status::unsupported("native execution backend is unavailable");
     if (!archive.data || !archive.initial_program)
         return Status::invalid_argument("missing boot archive");
+    // Device interrupts arrive through the backend's trap vectors, so the
+    // backend and the interrupt service start before the root is mounted:
+    // the root's disk and the entropy source then complete through their
+    // lines instead of being polled.
+    if (auto status = hw::initialize(); !status.ok())
+        return status;
+    // A controller that cannot start leaves the devices polled.
+    if (auto status = interrupt::start_platform_irqs(); !status.ok())
+    {
+        emit("OK_IRQ_FAIL ");
+        emit(status.message());
+        emit("\n");
+    }
     if (auto status = fs::mount_archive(kernel.vfs(), {archive.data, archive.size}); !status.ok())
         return status;
     if (ok_boot_filesystem != nullptr)
@@ -891,8 +904,6 @@ Status start(Kernel &kernel, fs::BootArchive archive)
     if (auto status = kernel.posix().activate(0); !status.ok())
         return status;
     if (auto status = kernel.posix().chdir("/"); !status.ok())
-        return status;
-    if (auto status = hw::initialize(); !status.ok())
         return status;
     // Allocation becomes possible only after supervisor mappings are established.
     if (auto status = activate_pool(&kernel); !status) return status;

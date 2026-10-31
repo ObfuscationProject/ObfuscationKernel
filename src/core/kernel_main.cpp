@@ -95,14 +95,8 @@ namespace ok::detail
         }
     };
     // Device interrupts and the idle wait need the native backend's trap
-    // vectors, so they start only with native userland.
-    if (native_userland_started)
-        if (auto status = ok::interrupt::start_platform_irqs(); !status.ok())
-        {
-            platform_write("OK_IRQ_FAIL ");
-            platform_write(status.message());
-            platform_write("\n");
-        }
+    // vectors, so the native runtime starts the interrupt service before it
+    // mounts the root.
     ok::u64 ui_tick_counter = 0;
     for (;;)
     {
@@ -154,9 +148,10 @@ namespace ok::detail
         }
         // With nothing runnable and no event left to serve, wait for a tick or
         // a device line instead of spinning; profiles without a controller
-        // driver keep polling.
+        // driver, or whose native runtime did not start the service, keep
+        // polling.
         if (!did_work && !ok::interrupt::events_posted() &&
-            !(native_userland_started && ok::ok_userland_idle() && ok::interrupt::wait_for_interrupt()))
+            !((!native_userland_started || ok::ok_userland_idle()) && ok::interrupt::wait_for_interrupt()))
         {
             desktop_idle();
         }
