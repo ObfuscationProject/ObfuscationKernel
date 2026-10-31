@@ -15,6 +15,8 @@ header the units share; it declares exactly what crosses a unit boundary.
 | `runtime/pty.cpp` | Raw PTY pair I/O continuations and their owners |
 | `runtime/net.cpp` | Native and Linux UDP receive owners, TCP immediate operations, native UDP socket calls |
 | `runtime/signals.cpp` | Private signal delivery, frames and waits, signal interruption of blocking calls, per-architecture signal state |
+| `runtime/timers.cpp` | Linux interval timers: `ITIMER_REAL`, `alarm` and the `timer_create` family, their expiry service and signal records |
+| `runtime/interrupts.cpp` | The interrupt report (`OK_IRQ_PLATFORM`, `OK_IRQ_EVENTS`, `OK_IRQ_COMPLETIONS`, `OK_TIMER_LATENCY`, `OK_TIMERS`) |
 | `runtime/entry.cpp` | `start`/`step`, user entry through entry-stack leases, syscall dispatch |
 
 Self-contained helpers that hosted tests also include stay as headers beside the

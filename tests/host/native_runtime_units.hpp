@@ -12,4 +12,5 @@
 #include "../../src/user/runtime/net.cpp"
 #include "../../src/user/runtime/signals.cpp"
 #include "../../src/user/runtime/timers.cpp"
+#include "../../src/user/runtime/interrupts.cpp"
 #include "../../src/user/runtime/entry.cpp"
