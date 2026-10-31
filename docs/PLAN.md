@@ -297,6 +297,31 @@ group, SIGTTIN/SIGTTOU/SIGHUP, devpts-style PTY allocation on top of the existin
 raw PTY pairs and console lease. Paired OS worktree `feat/getty-login`. Depends
 on WT1.2.
 
+Status: in progress on `feat/tty-jobctl` (paired OS worktree
+`feat/getty-login`). The contract the OS builds against is
+[tty](modules/tty.md); each of its sections names the slice that lands it.
+Until S9, existing `syscall.h` and `signal.h` lines, the profile markers,
+module ABI 78 and UAPI 0.16.0 stay unchanged, so the unmodified OS consumes
+every intermediate SDK; new native job-control constants go into
+`ok/uapi/job_control.h`. The console keeps its raw-compatible termios default,
+raw `OK_SYS_PTY_PAIR` pairs keep the v1 hangup contract, and the 8 PTY slots
+are shared with `/dev/ptmx`. Slices:
+- S0: native PTY suites and the terminal SDK contract as hosted runners; the
+  contract published.
+- S1: termios values, the N_TTY template and generated Linux termios/ioctl
+  codecs (no wiring).
+- S2: stop/continue overlay and delivery; admission still refuses.
+- S3: signal generation, native SIG_DFL/SIG_IGN, WUNTRACED/WCONTINUED waits,
+  SIGCHLD stop reports, orphaned-group HUP+CONT.
+- S4: the console as a terminal object with N_TTY and terminal-control
+  dispatch; ISIG and SIGWINCH.
+- S5: PTY slaves as terminals, open counts, PTY ioctls, ptmx hangup data rules.
+- S6: `/dev/tty`, `/dev/console`, `/dev/ptmx` and `/dev/pts/N` in devfs and the
+  terminal open path.
+- S7: Linux PTY I/O and poll, EINTR/SA_RESTART on terminal waits, PTY VTIME.
+- S8: SIGTTIN/SIGTTOU background gates, TOSTOP, every hangup, TIOCNOTTY.
+- S9: SDK markers and UAPI 0.17 (S9a), module ABI 79 (S9b).
+
 ### WT2.3 `feat/net-core` (XL)
 
 ICMP, neighbour cache, routing table, general TCP (retransmission, windows,
