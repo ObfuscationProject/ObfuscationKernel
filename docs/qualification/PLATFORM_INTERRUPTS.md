@@ -487,9 +487,11 @@ root's provisional timestamp.
 | ppc | +5.5 (−30.1 … +32.9) | provisional | 164 / 1,704 / 35,858 | 257: 131 / 2,359 / 4,900 |
 
 - Drift: every profile is within ±6 ppm except mips64 at +21 ppm, whose
-  Count frequency comes from polling Malta RTC update edges over one second
-  (mips measured +3 ppm with the same code); every strict bound lies within
-  ±52 ppm. The probe's brackets were at most a few milliseconds wide.
+  Count frequency comes from polling Malta RTC update edges over one second;
+  every strict bound lies within ±52 ppm. The probe's brackets were at most a
+  few milliseconds wide. Across runs mips and mips64 measured +3 to +22 ppm
+  (the merge candidate's run: mips +21.8, mips64 +20.7, bounds up to +59) and
+  the other eight stayed within ±6 ppm.
 - Latency: the median timer interrupt is observed 53–164 µs after its expiry,
   the 99th percentile within 0.1–2.4 ms. Minima are 7–98 µs. Maxima of
   milliseconds are QEMU threads the host did not schedule, and appear on

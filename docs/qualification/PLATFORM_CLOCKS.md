@@ -73,14 +73,16 @@ acceptance must then run the OS SDK consumer in both modes on all ten profiles,
 including a sole sleeping process resuming, clock advancement during repeated
 short syscalls, sibling progress and absolute-deadline behavior. MIPS native
 runs additionally establish that the RTC reference is reachable; PC runs
-establish real PIT calibration.
+establish real PIT calibration. This backend alone does not establish signal
+interruption, realtime adjustment, CPU clocks, time64 or complete POSIX P04.
 
 ObfuscationOS `scripts/test_clock_drift.py` (WT1.2 slice 6) measures the
 calibration: it brackets 13 guest `CLOCK_MONOTONIC` samples over 120 s with
-the host's clock. On all ten profiles the drift is within ±6 ppm except
-mips64 at +21 ppm (Malta's RTC-edge calibration), every strict bound within
-±52 ppm; per-profile figures are in
-[PLATFORM_INTERRUPTS](PLATFORM_INTERRUPTS.md). Under TCG the counters follow
-QEMU's virtual clock, so this checks the frequency the kernel uses, not an
-oscillator. This backend alone does not establish signal
-interruption, realtime adjustment, CPU clocks, time64 or complete POSIX P04.
+the host's clock. On the eight profiles whose frequency is a board contract,
+an architectural register or the PC's PIT calibration, the drift was within
+±6 ppm in every run. mips and mips64 measured between +3 and +22 ppm across
+runs, the spread of polling Malta's RTC update edges for one second; every
+strict bound stayed within ±60 ppm, inside the test's 100 ppm limit.
+Per-profile figures are in [PLATFORM_INTERRUPTS](PLATFORM_INTERRUPTS.md).
+Under TCG the counters follow QEMU's virtual clock, so this checks the
+frequency the kernel uses, not an oscillator.
