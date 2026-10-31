@@ -198,7 +198,14 @@ void waiter_copy_and_close()
     CHECK(!f.waits.observe(ticket) && f.scheduler.open_description(id)->references == 2);
     auto forged = ticket; ++forged.generation; CHECK(!f.waits.observe(forged) && !f.waits.cancel(forged));
     const std::array payload{std::byte{'a'}, std::byte{'b'}, std::byte{'c'}};
+    // The waiter sits in its endpoint's queue: passes without a readiness
+    // change evaluate nothing; the segment's edge evaluates it exactly once.
+    CHECK(f.waits.stats().queued >= 1 && f.waits.poll() && f.waits.poll());
+    const auto evaluated = f.waits.stats().evaluated;
+    CHECK(f.waits.poll() && f.waits.stats().evaluated == evaluated);
+    CHECK(f.waits.observe(ticket).value().completion == sched::WaitCompletion::none);
     f.ingress(packet(peer, local, 201, 101, tcp_ack, payload), 2); CHECK(f.waits.poll());
+    CHECK(f.waits.stats().evaluated == evaluated + 1);
     CHECK(f.waits.observe(ticket).value().completion == sched::WaitCompletion::ready);
     Copy copy; copy.preflight_fail = true;
     CHECK(!f.operations.read(f.pid, fd, 4096, 3, copy)); CHECK(f.service.readiness(stream).value().readable_bytes == 3);

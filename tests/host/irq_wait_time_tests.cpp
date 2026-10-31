@@ -113,6 +113,35 @@ static void check_wait_queue()
     CHECK(a.completion() == sched::WaitCompletion::timeout && b.completion() == sched::WaitCompletion::timeout);
 }
 
+// Registrations armed elsewhere (the scheduler) are enlisted, possibly in
+// several queues; a wait completed through one queue leaves stale entries
+// that never touch the registration's next wait.
+static void check_wait_queue_enlist()
+{
+    sched::WaitQueue<2> first, second;
+    sched::WaitRegistration a, b;
+    CHECK(first.enlist(a).code() == StatusCode::invalid_argument);
+    auto ta = a.arm(1, 10); auto tb = b.arm(1, 11);
+    CHECK(ta && tb && first.enlist(a) && second.enlist(a) && first.enlist(b));
+    CHECK(first.enlist(a).code() == StatusCode::already_exists && first.waiting() == 2);
+    CHECK(second.wake_one(sched::WakeSource::interrupt) && a.completion() == sched::WaitCompletion::ready);
+    // The stale entry for a is skipped; b is the next live waiter.
+    auto again = a.arm(1, 10); CHECK(again);
+    CHECK(first.wake_one(sched::WakeSource::interrupt) && b.completion() == sched::WaitCompletion::ready);
+    CHECK(a.pending(again.value()) && first.waiting() == 0);
+    // notify keeps waiters its visitor declines and drops the ones it took.
+    CHECK(first.enlist(a));
+    usize seen = 0;
+    CHECK(first.notify([&](sched::WaitTicket t) { ++seen; return t != again.value(); }) == 0 && seen == 1);
+    CHECK(first.waiting() == 1 && a.pending(again.value()));
+    CHECK(a.complete(again.value(), sched::WaitCompletion::ready));
+    seen = 0;
+    CHECK(first.notify([&](sched::WaitTicket) { ++seen; return true; }) == 0 && seen == 0 && first.waiting() == 0);
+    // A full queue counts stale entries as free.
+    auto t1 = a.arm(1, 10); auto t2 = b.arm(1, 11); CHECK(t1 && t2 && second.enlist(a) && second.enlist(b));
+    CHECK(a.cancel() && second.prune() == 1 && second.waiting() == 1);
+}
+
 static void check_wake_source()
 {
     sched::WaitRegistration registration;
@@ -450,6 +479,7 @@ int main()
 {
     check_irq_router();
     check_wait_queue();
+    check_wait_queue_enlist();
     check_wake_source();
     check_event_sources();
     check_console_ring();

@@ -8,7 +8,9 @@ using TaskState = ProcessState;
 using Task = ThreadControlBlock;
 using Thread = ThreadControlBlock;
 using Process = ProcessControlBlock;
-class WaitQueue final
+// Process-granular blocking list of the legacy roadmap model; thread waits
+// use sched::WaitQueue<N> (wait_queue.hpp).
+class PidWaitQueue final
 {
   public:
     Status block(ProcessId pid);

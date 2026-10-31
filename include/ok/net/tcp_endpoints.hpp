@@ -70,6 +70,7 @@ class EndpointTable final
     using Core = Connection<SendBytes, ReceiveBytes, SegmentBytes>;
   public:
     static constexpr u64 retirement_ms = 240000;
+    static constexpr usize connection_slots = Connections, listener_slots = Listeners;
     // An IPv6 header, a SYN's options and one segment.
     static constexpr usize packet_capacity = 40 + 24 + SegmentBytes;
     explicit EndpointTable(TableIdentity identity, EndpointLimits limits = {}) : identity_{identity.value}, limits_{limits}
@@ -255,6 +256,20 @@ class EndpointTable final
         settle(ticket.child.slot, now_);
         return {};
     }
+    // Visits each handle whose readiness moved (sequence, terminal or
+    // reclamation) since the previous call, once; readiness waiters are
+    // re-evaluated only for these instead of on every pass.
+    template <class Visit>
+        requires requires(Visit &visit, Handle handle) { visit(handle); }
+    usize take_changed(Visit &&visit)
+    {
+        usize count = 0;
+        for (usize i = 0; i < Connections; ++i)
+            if (connections_[i].changed) { connections_[i].changed = false; visit(connection_handle(i)); ++count; }
+        for (usize i = 0; i < Listeners; ++i)
+            if (listeners_[i].changed) { listeners_[i].changed = false; visit(listener_handle(i)); ++count; }
+        return count;
+    }
     [[nodiscard]] Result<Readiness> readiness(Handle handle) const
     {
         Readiness out{}; out.handle = handle;
@@ -424,10 +439,10 @@ class EndpointTable final
             pending_ = false; ticket_ = {};
         }
         retired_ = true;
-        for (auto &owner : listeners_) { owner.used = false; owner.references = 0; }
+        for (auto &owner : listeners_) { owner.used = false; owner.references = 0; owner.changed = true; }
         for (auto &slot : connections_) if (slot.used)
         {
-            slot.terminal = true; slot.parent = false; slot.queue_order = 0;
+            slot.terminal = true; slot.parent = false; slot.queue_order = 0; slot.changed = true;
             static_cast<void>(slot.core.abort());
             if (!slot.references) reclaim(slot);
         }
@@ -440,12 +455,12 @@ class EndpointTable final
         Core core{}; u64 generation{}, sequence{}, parent_generation{}, queue_order{}, retire_deadline{};
         u64 accept_operation{}, accept_queue_order{};
         u32 references{}; usize parent_slot{};
-        bool used{}, exhausted{}, terminal{}, parent{}, closing{}, abort_pending{};
+        bool used{}, exhausted{}, terminal{}, parent{}, closing{}, abort_pending{}, changed{};
     };
     struct ListenerSlot
     {
         Endpoint local{}; u64 generation{}, sequence{}; usize backlog{}, accept_holds{}; u32 references{};
-        bool used{}, exhausted{}, terminal{};
+        bool used{}, exhausted{}, terminal{}, changed{};
     };
     static Status stale() { return Status::not_found("stale or unowned TCP endpoint handle"); }
     static bool valid(Endpoint ep) { return ep.port && ep.address.unicast(); }
@@ -521,17 +536,18 @@ class EndpointTable final
     }
     void bump(ConnectionSlot &slot)
     {
+        slot.changed = true;
         if (slot.terminal) return;
         if (slot.sequence == limits_.readiness_max) { slot.terminal = true; slot.abort_pending = true; }
         else ++slot.sequence;
     }
     void bump(ListenerSlot &slot)
-    { if (!slot.terminal) { if (slot.sequence == limits_.readiness_max) slot.terminal = true; else ++slot.sequence; } }
+    { slot.changed = true; if (!slot.terminal) { if (slot.sequence == limits_.readiness_max) slot.terminal = true; else ++slot.sequence; } }
     bool ensure_connection(usize i)
     {
         auto &slot = connections_[i];
         if (slot.terminal || slot.sequence == limits_.readiness_max)
-        { slot.terminal = true; slot.abort_pending = true; settle(i, now_); return false; }
+        { slot.terminal = true; slot.abort_pending = true; slot.changed = true; settle(i, now_); return false; }
         return true;
     }
     bool ensure_listener(usize i)
@@ -548,6 +564,7 @@ class EndpointTable final
     }
     void reclaim(ConnectionSlot &slot)
     {
+        slot.changed = true;
         // Protocol retirement can consume the queue edge while a copied accept
         // still owns its exact generation. Only cancellation retires that hold.
         if (slot.accept_operation)
