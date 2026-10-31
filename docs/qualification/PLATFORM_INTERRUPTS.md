@@ -3,8 +3,8 @@
 WT1.2 `feat/irq-wait-time` (Kernel issue #4). Slices 1 and 2: the interrupt
 core and one controller per profile. Slice 3: device completion through
 interrupts. Slice 4: event sources and wake sources, so that waits are woken
-from interrupts and no device is polled. Slice 5: Linux interval timers. This
-note grows with each slice.
+from interrupts and no device is polled. Slice 5: Linux interval timers.
+Slice 6: the gate evidence. This note grows with each slice.
 
 ## Design
 
@@ -347,11 +347,157 @@ entry fix the probe died on every profile when the `SIGEV_THREAD` helper
 exited (`enter=failed`), and on mips, after the first fix, for the misaligned
 `sp` musl's o32 exit path sets.
 
+## Slice 6: gate evidence
+
+The WT1.2 exit gate asks for three things on ten profiles: no polling loop in
+the block, net and input paths, the clock's drift against QEMU's wall time,
+and a measured timer interrupt latency.
+
+### No polling loop
+
+What each path waits on once the interrupt service runs:
+
+| Path | Completion | Evidence |
+| --- | --- | --- |
+| Block (ObfuscationOS virtio-blk) | A request sleeps in `wait_for_interrupt()` and rechecks the used ring only after its own line fired | `OK_IRQ_COMPLETIONS block=interrupt:polled` |
+| Entropy (virtio-rng) | The same | `entropy=…` |
+| Net transmit (virtio-net) | A blocking transmit waits like a block request; reaping and receive run in kernel passes the NIC's interrupt posted | `transmit=…`, `OK_IRQ_EVENTS network=driven:posted:served:polled` |
+| Input (PS/2, virtio-mmio, virtio-pci) | The loop reads the devices only after their interrupt posted the input source | `input=…` |
+| Console | Slice 4: the UART is read by its bottom half | `console=…` |
+
+The gaps the gate found, now closed:
+
+- Boot. The root was mounted, and the entropy pool seeded, before the
+  service started, so those requests were polled. The native runtime now
+  initializes its backend (the trap vectors) and starts the service before it
+  mounts the archive and the root; the kernel loop no longer starts it.
+- loongarch64 input. Bound, the virtio-pci keyboard no longer storms on the
+  current controller code: five keys give ten interrupts on PCH-PIC input 18
+  and the input source is served after each. The storm seen in slice 3 does
+  not reproduce, also without the change below, so its cause was not
+  isolated. The mouse's probe used to scan the keyboard's slot first,
+  reprogram its BARs and select its configuration after `DRIVER_OK`, which
+  raises a configuration-change interrupt; probes now skip a slot another
+  instance owns. Once bound only the bottom half reads the ISR.
+- Network. The NIC used to bind its line at its first receive, inside the
+  kernel's first network pass, which therefore polled. It binds as the link
+  starts and posts the network source once for frames used before.
+- Explicit polling. ObfuscationOS `virtio_polling` builds polled drivers for
+  comparisons. Otherwise a driver polls only without the service or when its
+  line cannot be bound, and `count_device_wait()` makes every such wait
+  visible.
+
+Loops that remain are not device completion: the virtio reset handshake
+rereads the status register until the device reports zero (bounded by the
+I/O timeout, as Linux's `vp_reset` rereads it), boot calibration polls its
+reference counter, and UART transmit waits for the holding register.
+
+### Timer interrupt latency
+
+`record_timer_latency()` takes, for each timer interrupt the kernel takes,
+how many counter ticks after its programmed expiry the kernel observed it.
+`OK_TIMER_LATENCY scope=hardware unit=ns idle=… user=…` reports, for the
+tick that ends the idle wait and for the tick that preempts user code, the
+samples, minimum, median, 99th percentile and maximum. The histogram
+(`time::LatencyHistogram`) has eight buckets per power of two, so the
+percentiles are bucket bounds within an eighth of their value; the minimum
+and maximum are exact.
+
+| Profiles | Expiry | Observed |
+| --- | --- | --- |
+| i386, x86_64 | PIT channel 0, now in mode 2 (the rate generator Linux programs): IRQ 0 rises as the count reloads | the count latched in the handler; modulo one 10 ms period |
+| arm32, aarch64 | `CNTP_CVAL`, which keeps the expiry after the timer is disabled | `CNTPCT` |
+| rv64, rv32 | the `mtimecmp` value the idle wait or the entry assembly programmed (`ok_rv_user_deadline`) | CLINT `mtime` |
+| loongarch64 | the stable counter at the TCFG write plus InitVal | `rdtime.d` |
+| mips, mips64 | CP0 Compare | CP0 Count |
+| ppc | the timebase at the decrementer write plus its count | the timebase |
+
+The idle wait observes the tick after the core leaves WFI, HLT, IDLE, WAIT or
+doze; a user tick is observed in the trap path's C code, after the entry
+assembly saved the user state. Each figure therefore includes the trap
+entry, and under QEMU's TCG the time to the next translation-block boundary
+and the host's scheduling of QEMU's threads.
+
+### Clock drift
+
+ObfuscationOS `tests/musl/clock_drift.c` and `scripts/test_clock_drift.py`
+sample the guest's `CLOCK_MONOTONIC` and `CLOCK_REALTIME` on request, 13
+times over 120 s, and bracket each sample with the host's monotonic and wall
+clocks read before the request and after the answer. The fitted drift and a
+strict bound from the first and last brackets must lie within 100 ppm. Under
+TCG the guest counters follow QEMU's virtual clock, which follows the host's,
+so this measures the kernel's counter frequency and conversion.
+
+The first x86_64 run failed at −502 ppm (bound −524 to −480), and i386 at
+−686 ppm: the TSC was calibrated against a 50 ms PIT countdown polled for its
+end, and a vCPU stall during that poll went straight into the frequency.
+Bracketed latch reads over 200 ms fixed it
+([PLATFORM_CLOCKS](PLATFORM_CLOCKS.md)); x86_64 then measured −1.9 ppm.
+
+### Results
+
+QEMU 10.2.0, ObfuscationOS `feat/irq-wait-time`, ABI 77:
+
+- Hosted (`scope=model`): `scripts/test_irq_wait_time.py` adds the tick
+  conversion on the boards' rates, the histogram's buckets, percentiles and
+  saturation, and the service's latency and wait counters; it passes plain
+  and with sanitizers. The hosted suite passes with the toolchain runners
+  (142 runners); the seven native execution probes of the non-PC backends
+  now link the platform clock.
+- All ten profiles: `xmake test`, the ext4 native boot, the interval timer
+  probe, the clock probe and the shell gate (54 sh checks, 134/151 with the 8
+  reviewed failures) pass. In each gate run every block and entropy wait
+  completed after its interrupt: `block=` 1.18–1.58 million (3.03 million on
+  ppc) and `entropy=1076`, all with `polled` 0, and no interrupt was spurious
+  or a controller error. The boot alone, root mount included, is
+  `block=6585:0 entropy=1:0` on x86_64.
+- Input: five keys sent with QMP `send-key` reach the shell through served
+  posts and no polled pass on all seven profiles with an input device,
+  loongarch64 included (`input=1:22:21:0` on x86, `1:16:16:0` on the virt
+  boards).
+- Network: ObfuscationOS `scripts/test_native_udp_socket.py` passes on x86_64
+  with `network=1:8:8:0`, every pass served after a NIC interrupt (slice 4:
+  `1:7:7:1`, one pass polled before the driver bound its line), and its
+  blocking transmit completed through the interrupt (`transmit=1:0`).
+- x86_64 shell gate on an idle host: 115.5 and 109.4 s in two runs (111.4 s in
+  slice 4, 113.1 s in slice 5).
+
+Clock and latency figures come from the clock probe run: 120 s of a mostly
+idle guest (9,000–16,000 idle ticks) and the probe's 3 s of user code without
+system calls (235–429 user ticks), each beside a second lane on the host. The
+wall clock offset is a claim only where an RTC anchors it (the PL031 on
+aarch64 and arm32, Goldfish on rv64 and rv32; QEMU starts both from a
+whole-second date, so they lag by under a second); elsewhere it is the
+root's provisional timestamp.
+
+| Profile | Drift ppm (bound) | Wall offset | Idle tick p50 / p99 / max µs | User ticks: p50 / p99 / max µs |
+| --- | --- | --- | --- | --- |
+| i386 | +3.3 (−22.5 … +31.1) | provisional | 90 / 197 / 6,436 | 374: 115 / 983 / 4,533 |
+| x86_64 | −1.9 (−25.7 … +31.5) | provisional | 106 / 393 / 8,529 | 378: 90 / 1,311 / 2,584 |
+| aarch64 | +0.6 (−25.6 … +28.7) | −520 ms | 98 / 197 / 4,769 | 263: 90 / 229 / 317 |
+| arm32 | −0.7 (−30.1 … +26.3) | −880 ms | 90 / 180 / 2,343 | 235: 107 / 180 / 220 |
+| rv64 | +0.1 (−21.9 … +21.6) | −330 ms | 107 / 180 / 1,289 | 242: 107 / 295 / 304 |
+| rv32 | +2.5 (−32.3 … +39.3) | −641 ms | 107 / 197 / 7,889 | 237: 107 / 197 / 311 |
+| loongarch64 | +3.3 (−21.0 … +19.8) | provisional | 98 / 1,180 / 12,678 | 255: 115 / 180 / 209 |
+| mips | +3.3 (−25.4 … +32.9) | provisional | 53 / 123 / 9,935 | 429: 53 / 295 / 342 |
+| mips64 | +21.2 (−9.6 … +51.2) | provisional | 61 / 164 / 1,680 | 419: 53 / 98 / 146 |
+| ppc | +5.5 (−30.1 … +32.9) | provisional | 164 / 1,704 / 35,858 | 257: 131 / 2,359 / 4,900 |
+
+- Drift: every profile is within ±6 ppm except mips64 at +21 ppm, whose
+  Count frequency comes from polling Malta RTC update edges over one second
+  (mips measured +3 ppm with the same code); every strict bound lies within
+  ±52 ppm. The probe's brackets were at most a few milliseconds wide.
+- Latency: the median timer interrupt is observed 53–164 µs after its expiry,
+  the 99th percentile within 0.1–2.4 ms. Minima are 7–98 µs. Maxima of
+  milliseconds are QEMU threads the host did not schedule, and appear on
+  every profile.
+- ppc first reported 0 ns minima: both of its timer paths cleared TSR[DIS]
+  before writing the new decrementer count, so an older count that ran out
+  in between ended the wait, or the next user quantum, at once. They now
+  write the count first; the minimum became 65 µs (idle) and 99 µs (user).
+
 ## Limits
 
-- loongarch64's virtio-pci keyboard and mouse stay polled. Bound, the
-  keyboard's INTx (PCH-PIC input 18) kept re-asserting after each ISR read
-  and the guest made no progress; the cause is not found yet.
 - The runtime still rechecks its software waits (poll/select, UDP receives,
   futex and sleep deadlines) on every step after any wake. The device behind
   them is touched only after its interrupt, but the waits are not yet linked
@@ -359,7 +505,13 @@ exited (`enter=failed`), and on mips, after the first fix, for the misaligned
 - Wake attribution is by readiness kind: a socket wait made ready by queued
   data is credited to the link even if the data arrived before it slept.
 - Wait and timer granularity is the 100 Hz tick; no one-shot deadline
-  programming.
+  programming. The measured latency is that of the tick's interrupt; a sleep
+  or interval timer still ends up to one tick late.
+- Latency and drift are single-CPU QEMU TCG evidence on a shared host, not a
+  hardware claim. x86's PIT reading is modulo one 10 ms period.
+- The wall clock follows an RTC only on aarch64, arm32, rv64 and rv32. The
+  MC146818 and DS1338 are not qualified, and loongarch64's LS7A read is
+  refused because nothing enables its TOY oscillator under `-kernel`.
 - `ITIMER_VIRTUAL`, `ITIMER_PROF` and CPU-time clocks are refused: there is
   no CPU-time accounting. Other limits of the timer calls are in
   [Linux interval timers](../abi/linux-timers.md).

@@ -27,7 +27,16 @@ run the bound handlers (up to four per line) and unmask the line, and it
 waits for an interrupt when no thread is runnable and no device event is left
 to serve. `TrapKind::interrupt` reports a device line that preempted user
 code. `virtio_mmio_line()` and `pci_intx_line()` give drivers their board's
-line.
+line. The native runtime initializes its backend (the trap vectors) and
+starts the service before it mounts the root, so the root's disk and the
+entropy source complete through their lines from the first request.
+
+`count_device_wait()` records how a driver's wait for its device completed
+(after the device's interrupt, or polled), and `record_timer_latency()` how
+long after its programmed expiry each timer interrupt was observed, for the
+idle wait's tick and the tick that preempts user code
+(`time::LatencyHistogram`, `ok/time/latency_histogram.hpp`). The interrupt
+report prints both as `OK_IRQ_COMPLETIONS` and `OK_TIMER_LATENCY`.
 
 ## Device event sources
 
