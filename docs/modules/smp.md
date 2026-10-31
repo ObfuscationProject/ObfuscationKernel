@@ -12,7 +12,39 @@ bring-up and scheduler code a concrete SMP contract.
 - `numa_aware`: CPU records carry NUMA domain placement for future allocators.
 
 `SpinLock`, `ScopedSpinLock`, and `PerCpu<T>` provide the minimal primitives
-needed by shared kernel modules without dynamic allocation.
+needed by shared kernel modules without dynamic allocation. `SpinLock` is an
+unranked leaf lock: test-and-test-and-set, pausing with the architecture's
+`spin_pause` hint while it waits.
+
+## CPU primitives and ranked locks
+
+Every `NativeInstructions` profile provides `save_and_disable_interrupts`,
+`restore_interrupts`, `spin_pause` and `cpu_index`. The save returns the mask
+state at the kernel's privilege level (x86 IF, AArch64 DAIF.I, ARM32 CPSR.I,
+RISC-V `mstatus.MIE` because the kernel runs in machine mode, LoongArch
+CRMD.IE, MIPS Status.IE, PPC MSR[EE]) and restore re-enables only when that
+state was enabled. Hosted builds save 0 and restore nothing. `cpu_index` is 0 on
+every profile: no AP runs yet, and `ok::smp::current_cpu()` (`ok/smp/cpu.hpp`)
+returns it. Hosted model tests instead set a thread's CPU with
+`ScopedHostedCpu`.
+
+`RankedSpinLock<LockRank>` (`ok/smp/lock.hpp`) records its owner as CPU + 1. A
+CPU takes ranked locks in strictly increasing `LockRank`. `RankedSpinGuard`
+masks interrupts before acquiring and restores them after releasing;
+`RankedSpinLock::Guard` is for callers that already masked them. Debug kernels
+define `OK_LOCK_DEBUG`, which keeps a per-CPU record of up to eight holds and
+reports these violations to `lock_rank_violation`: a rank not above every held
+rank, a self-deadlock (reported before spinning, and `lock()` returns without
+the lock), an unlock by a CPU that does not own the lock, an unlock out of LIFO
+order, and nesting past the record. `try_lock` skips the order check because it
+cannot deadlock, but its hold is recorded. `lock_violation_handler` is null by
+default, so violations are only counted per CPU. Release builds compile the
+checks out.
+
+`scripts/test_smp_locks.py` is a hosted model suite (scope=model) where host
+threads stand in for CPUs. The debug test point `smp/ranked-lock-order` takes
+two ranked locks on the boot CPU only. Neither shows AP startup, IPIs or
+hardware SMP execution.
 
 ## CPU discovery
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ok/arch/arch.hpp"
 #include "ok/core/types.hpp"
 
 #include <array>
@@ -87,6 +88,8 @@ template <typename T, usize Capacity = max_cpus> class PerCpu final
     std::array<T, Capacity> values_{};
 };
 
+// Unranked leaf lock: it takes no other lock while held. Ranked locks with
+// debug order checks live in ok/smp/lock.hpp.
 class SpinLock final
 {
   public:
@@ -94,7 +97,10 @@ class SpinLock final
     {
         while (flag_.test_and_set(std::memory_order_acquire))
         {
-            std::atomic_signal_fence(std::memory_order_seq_cst);
+            while (flag_.test(std::memory_order_relaxed))
+            {
+                arch::ArchOperations::spin_pause();
+            }
         }
     }
 

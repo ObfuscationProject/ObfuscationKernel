@@ -276,6 +276,13 @@ function add_ok_debug_test_points()
     end
 end
 
+-- Ranked spin lock order, owner and LIFO checks (ok/smp/lock.hpp).
+function add_ok_debug_lock_checks()
+    if is_mode("debug") then
+        add_defines("OK_LOCK_DEBUG")
+    end
+end
+
 function add_ok_kernel_gui_option()
     add_options("kernel_gui")
     if has_config("kernel_gui") then

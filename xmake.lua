@@ -269,6 +269,7 @@ target("okernel")
     add_ok_terminal_poweroff_policy()
     add_ok_native_fork_policy()
     add_ok_debug_test_points()
+    add_ok_debug_lock_checks()
     if get_config("private_futex_peer_fixture") and is_mode("debug") then
         add_defines("OK_PRIVATE_FUTEX_PEER_FIXTURE")
     end
@@ -344,6 +345,7 @@ target("okernel_image")
     add_ok_terminal_poweroff_policy()
     add_ok_native_fork_policy()
     add_ok_debug_test_points()
+    add_ok_debug_lock_checks()
     if get_config("private_futex_peer_fixture") and is_mode("debug") then
         add_defines("OK_PRIVATE_FUTEX_PEER_FIXTURE")
     end
