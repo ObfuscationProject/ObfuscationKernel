@@ -39,7 +39,7 @@ extern const uint32_t ok_mount_wire_cpp[] = {
     (uint32_t)-14
 };
 
-static_assert(ok::kernel_module_abi_version == 77);
+static_assert(ok::kernel_module_abi_version == 78);
 extern ok::Status mount_compile_snapshot(ok::u32, ok::fs::MountSnapshot &);
 extern bool mount_compile_range(ok::u64, ok::usize);
 extern bool mount_compile_copy(ok::u64, std::span<const ok::u8>);

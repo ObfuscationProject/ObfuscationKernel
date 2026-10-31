@@ -1,4 +1,4 @@
-"""SDK77 producer/consumer raw PTY admission models; no target execution."""
+"""SDK78 producer/consumer raw PTY admission models; no target execution."""
 from pathlib import Path
 import hashlib
 import importlib.util
@@ -37,7 +37,7 @@ class NativePtySdkContract(unittest.TestCase):
             # fixture. They make no SchedulerState or execution claim.
             source = (PROFILE if name == PRODUCER.NATIVE_PTY_PROFILE_HEADER else
                       FIXTURES.UAPI_HEADER if name == 'ok/uapi/syscall.h' else
-                      'inline constexpr u32 kernel_module_abi_version = 77;\n'
+                      'inline constexpr u32 kernel_module_abi_version = 78;\n'
                       if name == 'ok/core/module.hpp' else name)
             path.write_text(source)
         self.profile = self.headers / PRODUCER.NATIVE_PTY_PROFILE_HEADER
@@ -48,7 +48,7 @@ class NativePtySdkContract(unittest.TestCase):
         PRODUCER.validate_native_pty_profile(self.headers)
         CONSUMER.validate_native_pty_profile(self.headers)
 
-    def refused(self, diagnostic='(?:native PTY|ABI77|UAPI 0.16.0)'):
+    def refused(self, diagnostic='(?:native PTY|ABI78|UAPI 0.16.0)'):
         for validator in (PRODUCER.validate_native_pty_profile,
                           CONSUMER.validate_native_pty_profile):
             with self.assertRaisesRegex(ValueError, diagnostic):
@@ -102,7 +102,7 @@ class NativePtySdkContract(unittest.TestCase):
             self.profile.write_text(PROFILE.replace(line, mutated))
             with self.subTest(line=line):
                 self.refused()
-        self.profile.write_text(PROFILE.replace('module_abi = 77', 'module_abi = 73'))
+        self.profile.write_text(PROFILE.replace('module_abi = 78', 'module_abi = 73'))
         self.refused()
 
     def test_preprocessor_literals_and_malformed_duplicates_are_refused(self):
@@ -136,11 +136,11 @@ class NativePtySdkContract(unittest.TestCase):
         self.accepted()
 
     def test_mixed_module_and_uapi_cohorts_are_refused(self):
-        for version in (76, 78):
+        for version in (77, 79):
             self.module.write_text(f'inline constexpr u32 kernel_module_abi_version = {version};\n')
             with self.subTest(module_abi=version):
-                self.refused('ABI77')
-        self.module.write_text('inline constexpr u32 kernel_module_abi_version = 77;\n')
+                self.refused('ABI78')
+        self.module.write_text('inline constexpr u32 kernel_module_abi_version = 78;\n')
         for version in (15, 17):
             self.uapi.write_text(FIXTURES.UAPI_HEADER.replace('MINOR 16', f'MINOR {version}'))
             with self.subTest(uapi_minor=version):
@@ -190,13 +190,13 @@ class NativePtySdkContract(unittest.TestCase):
     def test_full_consumer_refuses_rehashed_stale_and_mixed_contracts(self):
         fixture = self.full_fixture()
         for relative, old, new in (
-                (PRODUCER.NATIVE_PTY_PROFILE_HEADER, 'module_abi = 77', 'module_abi = 73'),
+                (PRODUCER.NATIVE_PTY_PROFILE_HEADER, 'module_abi = 78', 'module_abi = 73'),
                 (PRODUCER.NATIVE_PTY_PROFILE_HEADER, 'native_pty_termios = 0', 'native_pty_termios = 1'),
                 ('ok/uapi/syscall.h', 'OK_SYS_PTY_PAIR 1035ULL', 'OK_SYS_PTY_PAIR 1036ULL'),
                 ('ok/uapi/syscall.h', 'MINOR 16', 'MINOR 15'),
-                ('ok/core/module.hpp', 'version = 77', 'version = 76'),
-                ('ok/user/native_sessions_profile.hpp', 'module_abi = 77', 'module_abi = 73'),
-                ('ok/user/native_console_control_profile.hpp', 'module_abi = 77', 'module_abi = 73')):
+                ('ok/core/module.hpp', 'version = 78', 'version = 77'),
+                ('ok/user/native_sessions_profile.hpp', 'module_abi = 78', 'module_abi = 73'),
+                ('ok/user/native_console_control_profile.hpp', 'module_abi = 78', 'module_abi = 73')):
             name = 'include/' + relative
             path = fixture.sdk / name
             original = path.read_text()
@@ -227,7 +227,7 @@ class NativePtySdkContract(unittest.TestCase):
             construct.assert_not_called()
             path.write_bytes(original)
         profile = args.headers / PRODUCER.NATIVE_PTY_PROFILE_HEADER
-        for source in ('', PROFILE.replace('module_abi = 77', 'module_abi = 73')):
+        for source in ('', PROFILE.replace('module_abi = 78', 'module_abi = 73')):
             profile.write_text(source)
             with patch.object(PRODUCER, 'construct_boot_archive') as construct, \
                     self.subTest(source=source), self.assertRaisesRegex(ValueError, 'native PTY'):

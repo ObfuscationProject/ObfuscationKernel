@@ -5,7 +5,7 @@ namespace ok::user
 {
 inline constexpr std::string_view native_pty_profile = "bootcpu-native-raw-pair-ofd-waits-drain-eof-eio-v1";
 inline constexpr u32 native_pty_version = 1;
-inline constexpr u32 native_pty_module_abi = 77;
+inline constexpr u32 native_pty_module_abi = 78;
 inline constexpr u32 native_pty_pair_capacity = 8;
 inline constexpr u32 native_pty_queue_capacity = 4096;
 inline constexpr u32 native_pty_generation_bits = 64;

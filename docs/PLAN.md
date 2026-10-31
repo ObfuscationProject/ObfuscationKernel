@@ -172,6 +172,9 @@ is polled in a shell gate run (`OK_IRQ_COMPLETIONS`), the monotonic clock
 drifts within 100 ppm of the host's on every profile (the PC TSC calibration
 was 500–700 ppm off and is fixed), and timer interrupt latency is measured for
 idle and user ticks (`OK_TIMER_LATENCY`).
+Merge: the exported interrupt, wait, signal-record and timer declarations bump
+the module ABI once to 78 (`docs/modules/modules.md`); the paired OS worktree
+consumes SDK 78 and merges right after the kernel.
 1. Interrupt core: kernel-mode IRQ entry with interrupts enabled only inside
    an idle wait, a per-architecture `PlatformIrqChip` selected at compile time
    behind `IrqChip`, a bounded top half that records the line, and a deferred

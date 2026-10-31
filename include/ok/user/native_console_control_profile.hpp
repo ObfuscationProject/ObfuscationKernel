@@ -5,7 +5,7 @@ namespace ok::user
 {
 inline constexpr std::string_view native_console_control_profile = "bootcpu-lease-epoch-explicit-session-foreground-eio-pid32-ioctl-v1";
 inline constexpr u32 native_console_control_version = 1;
-inline constexpr u32 native_console_control_module_abi = 77;
+inline constexpr u32 native_console_control_module_abi = 78;
 inline constexpr u32 native_console_control_serialized_boot_cpu = 1;
 inline constexpr u32 native_console_control_lease_epoch = 1;
 inline constexpr u32 native_console_control_explicit_acquire = 1;

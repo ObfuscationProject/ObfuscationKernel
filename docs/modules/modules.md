@@ -12,7 +12,7 @@ Each module exposes a `ModuleManifest` with:
 - dependency, exported-service, and required-service lists;
 - `ModuleExecution`, either `inline_core` or `kernel_process`;
 - `ModuleThreading`, either `single_threaded` or `per_cpu`;
-- `abi_version`, currently `kernel_module_abi_version == 77`;
+- `abi_version`, currently `kernel_module_abi_version == 78`;
 - a capability mask declaring service export/use, kernel-process ownership,
   per-CPU workers, user ABI, driver ABI, or GUI behavior;
 - `ModuleRestartPolicy`;
@@ -107,6 +107,26 @@ Roadmap tests cover:
 - the built-in module graph used by the kernel debug suite.
 
 ## ABI history
+
+ABI78 (`feat/irq-wait-time`, WT1.2) changes exported declarations:
+`ok/interrupt/irq_chip.hpp` replaces the scaffold with the `IrqChip` concept and
+`IrqRouter<Chip>` (top half, bottom-half drain, shared lines), and the new
+`ok/interrupt/platform.hpp` exports the boot-CPU interrupt service
+(`start_platform_irqs`, `bind_platform_irq`, `wait_for_interrupt`, statistics),
+the `EventSource` calls, `record_timer_latency`/`timer_latency`,
+`count_device_wait`, and the board routing `virtio_mmio_line`/`pci_intx_line`.
+`sched::WakeSource` moves to `ok/sched/wait_registration.hpp` and gains `poll`;
+`Scheduler::complete_wait`, `wake_waiters` and `console_input`, the TCP wait
+`poll`, `ok_userland_input` and `user::native::input` take a wake source, and
+`ok_userland_idle`, `user::native::idle` and `report_interrupts` are added.
+`TrapKind` gains `interrupt`. `sched::PendingSignalInfo` gains the timer id,
+overrun and value (40 bytes, 36 on 32-bit ABIs), with the matching signal frame
+`Info` fields and `native_signal_info.hpp` offsets; the generated Linux tables
+add the interval timer calls, with `ok/abi/linux_timer.hpp`,
+`ok/time/interval_timer.hpp` and `ok/time/latency_histogram.hpp` new.
+`arch::clock_frequency()` is added, and the qemu_virt input drivers gain
+interrupt acknowledgement. The public UAPI stays 0.16. Every exported module
+marker, the SDK manifest and the OS consumer declare 78 and refuse 77 and 79.
 
 ABI77 (`feat/linux-personality`, with `fix/ext4-node-cache` and
 `fix/mips-signal-resume`) changes exported declarations: `StatusCode` gains
