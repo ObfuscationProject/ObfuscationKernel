@@ -482,14 +482,14 @@ void drive_events(EventSource source)
     events[static_cast<usize>(source)].driven = true;
 }
 
-// An undriven source is polled on every pass anyway, so a consumer's repost
-// is dropped.
+// An undriven source is polled on every pass anyway; a consumer's repost (a
+// receive budget that stopped short) still keeps the loop from idling until
+// the next pass. Only a driven source's posts are counted.
 void post_event(EventSource source)
 {
     const auto index = static_cast<usize>(source);
-    if (!events[index].driven)
-        return;
-    ++events[index].posted;
+    if (events[index].driven)
+        ++events[index].posted;
     posted[index] = true;
 }
 
@@ -509,6 +509,11 @@ bool take_event(EventSource source)
     return true;
 }
 
+void discard_event(EventSource source)
+{
+    posted[static_cast<usize>(source)] = false;
+}
+
 bool event_driven(EventSource source)
 {
     return events[static_cast<usize>(source)].driven;
@@ -517,7 +522,7 @@ bool event_driven(EventSource source)
 bool events_posted()
 {
     for (usize index = 0; index < event_source_count; ++index)
-        if (events[index].driven && posted[index])
+        if (posted[index])
             return true;
     return false;
 }

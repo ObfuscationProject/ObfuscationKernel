@@ -150,11 +150,17 @@ namespace ok::detail
         // a device line instead of spinning; profiles without a controller
         // driver, or whose native runtime did not start the service, keep
         // polling.
-        if (!did_work && !ok::interrupt::events_posted() &&
-            !((!native_userland_started || ok::ok_userland_idle()) && ok::interrupt::wait_for_interrupt()))
+        bool waited = false;
+        if (!did_work && !ok::interrupt::events_posted())
         {
-            desktop_idle();
+            waited = (!native_userland_started || ok::ok_userland_idle()) && ok::interrupt::wait_for_interrupt();
+            if (!waited)
+                desktop_idle();
         }
+        // Without native userland the rescue GUI's tick is paced by loop passes,
+        // and an idle pass now lasts until the next interrupt: tick once per wait.
+        if (waited && !native_userland_started)
+            static_cast<void>(ok::ok_debug_shell_tick());
     }
 }
 

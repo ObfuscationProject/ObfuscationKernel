@@ -135,10 +135,12 @@ static void check_wake_source()
 static void check_event_sources()
 {
     using interrupt::EventSource;
-    // Undriven: served on every pass, posts dropped.
+    // Undriven: served on every pass; a repost is not counted but keeps the
+    // loop from idling until the next pass takes it.
     interrupt::post_event(EventSource::network);
-    CHECK(!interrupt::events_posted());
-    CHECK(interrupt::take_event(EventSource::network) && interrupt::take_event(EventSource::network));
+    CHECK(interrupt::events_posted());
+    CHECK(interrupt::take_event(EventSource::network) && !interrupt::events_posted());
+    CHECK(interrupt::take_event(EventSource::network));
     CHECK(interrupt::event_wake_source(EventSource::network) == sched::WakeSource::poll);
     auto stats = interrupt::event_statistics(EventSource::network);
     CHECK(!stats.driven && stats.posted == 0 && stats.served == 0 && stats.polled == 2);
@@ -151,8 +153,12 @@ static void check_event_sources()
     CHECK(interrupt::take_event(EventSource::network) && !interrupt::events_posted());
     CHECK(!interrupt::take_event(EventSource::network));
     CHECK(interrupt::event_wake_source(EventSource::network) == sched::WakeSource::interrupt);
+    // A consumer that cannot serve the source drops its post uncounted.
+    interrupt::post_event(EventSource::network);
+    interrupt::discard_event(EventSource::network);
+    CHECK(!interrupt::events_posted() && !interrupt::take_event(EventSource::network));
     stats = interrupt::event_statistics(EventSource::network);
-    CHECK(stats.driven && stats.posted == 2 && stats.served == 1 && stats.polled == 2);
+    CHECK(stats.driven && stats.posted == 3 && stats.served == 1 && stats.polled == 2);
     // Sources are independent.
     CHECK(!interrupt::event_driven(EventSource::input) && interrupt::take_event(EventSource::input));
 }
@@ -195,6 +201,22 @@ static void check_console_ring()
     for (int value = 0; value < 10; ++value)
         CHECK(interrupt::take_event(EventSource::console) && ring.take(read) == '0' + value);
     CHECK(!interrupt::take_event(EventSource::console));
+    // A level UART: a full ring with bytes left in the FIFO turns its receive
+    // interrupt off once, and take() turns it on again after emptying the FIFO.
+    int quiet_calls = 0;
+    bool quiet = false;
+    const auto set_quiet = [&](bool value) { ++quiet_calls; quiet = value; };
+    for (int value = 0; value < 6; ++value)
+        uart.receive('A' + value);
+    ring.fill(read, set_quiet);
+    CHECK(quiet && quiet_calls == 1);
+    ring.fill(read, set_quiet);
+    CHECK(quiet && quiet_calls == 1);
+    for (int value = 0; value < 4; ++value)
+        CHECK(interrupt::take_event(EventSource::console) && ring.take(read, set_quiet) == 'A' + value && quiet);
+    CHECK(interrupt::take_event(EventSource::console) && ring.take(read, set_quiet) == 'E' && !quiet && quiet_calls == 2);
+    CHECK(interrupt::take_event(EventSource::console) && ring.take(read, set_quiet) == 'F');
+    CHECK(!interrupt::take_event(EventSource::console) && quiet_calls == 2);
 }
 
 static void check_calibrated_clock()

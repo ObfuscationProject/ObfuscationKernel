@@ -48,7 +48,8 @@ bool wait_for_interrupt();
 // the loop serves the source only after a post, never by polling the device.
 // A source that is not driven (no bound line, or before start_platform_irqs())
 // is polled on every pass. A consumer that stops before the source is empty
-// (a budget, a one-byte step) posts it again.
+// (a budget, a one-byte step) posts it again, which also keeps the loop from
+// idling while an undriven source has work left.
 enum class EventSource : u8
 {
     console,
@@ -67,8 +68,11 @@ void drive_events(EventSource source);
 void post_event(EventSource source);
 // True when the loop should serve `source` on this pass; consumes a post.
 [[nodiscard]] bool take_event(EventSource source);
+// Drops a post a consumer cannot serve (its link retired), without counting a
+// served or polled pass.
+void discard_event(EventSource source);
 [[nodiscard]] bool event_driven(EventSource source);
-// A driven source has a post the loop has not taken yet.
+// A source has a post the loop has not taken yet.
 [[nodiscard]] bool events_posted();
 // The wake source a waiter made ready by `source`'s events is credited to.
 [[nodiscard]] sched::WakeSource event_wake_source(EventSource source);
@@ -87,8 +91,10 @@ void record_timer_latency(TimerWake wake, u64 late, u64 frequency);
 [[nodiscard]] const time::LatencyHistogram &timer_latency(TimerWake wake);
 
 // Driver waits for a device (a block or entropy request, a blocking transmit)
-// by how they completed: after the device's own interrupt, or by polling,
-// before the service started or with polling selected.
+// by how they waited: on the device's bound line, reading the device once and
+// then only after its own interrupt (a completion the first read already saw
+// counts here too), or by polling, before the service started, without a line
+// or with polling selected.
 enum class DeviceWait : u8
 {
     block,

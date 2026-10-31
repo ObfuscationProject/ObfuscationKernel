@@ -306,9 +306,16 @@ int read_uart()
 // UARTICR write after the drain would also clear the RX interrupt of a byte
 // that arrived meanwhile, and the PL011 raises RX again only when its FIFO
 // goes from empty to one byte, so that byte would wait forever.
+// The line is level: a full ring masks RX and the receive timeout until the
+// console has drained the backlog.
+void quiet_uart(bool quiet)
+{
+    const auto mask = mmio32(uart_imsc);
+    mmio32(uart_imsc) = quiet ? mask & ~uart_receive_interrupts : mask | uart_receive_interrupts;
+}
 void uart_interrupt(void *, ok::interrupt::IrqLine)
 {
-    uart_ring.fill(read_uart);
+    uart_ring.fill(read_uart, quiet_uart);
 }
 } // namespace
 
@@ -328,10 +335,13 @@ extern "C" ok::Status ok_platform_bind_irqs()
     mmio32(uart_icr) = uart_receive_interrupts;
     mmio32(uart_imsc) = mmio32(uart_imsc) | uart_receive_interrupts;
     ok::interrupt::drive_events(ok::interrupt::EventSource::console);
+    // Bytes that arrived before the bind: the ICR write cleared their RX, and
+    // the PL011 raises it again only when its FIFO goes from empty to one byte.
+    uart_ring.fill(read_uart, quiet_uart);
     return ok::Status::success();
 }
 
 extern "C" int ok_platform_console_poll()
 {
-    return uart_ring.take(read_uart);
+    return uart_ring.take(read_uart, quiet_uart);
 }

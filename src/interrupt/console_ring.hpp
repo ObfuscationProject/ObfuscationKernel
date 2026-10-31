@@ -14,17 +14,33 @@ namespace ok::interrupt
 // FIFO; take() refills from it once the ring is empty, because an edge line
 // does not fire again for bytes that were already waiting. Until the console
 // is driven take() reads the UART itself. Boot CPU, interrupts disabled.
+//
+// A level-triggered UART keeps its line asserted while bytes wait, so a full
+// ring would be interrupted again as soon as its line is unmasked, and a device
+// wait inside a system call (which drains bottom halves but not the console)
+// would spin on it. Those UARTs pass `quiet`: quiet(true) turns their receive
+// interrupt off while the ring is full and bytes are left behind, and
+// quiet(false) turns it back on once take() has emptied the FIFO.
+struct NoQuiet
+{
+    void operator()(bool) const {}
+};
 template <usize Capacity> class ConsoleRing final
 {
   public:
-    template <typename Read> void fill(Read read)
+    template <typename Read, typename Quiet = NoQuiet> void fill(Read read, Quiet quiet = {})
     {
         refill(read);
+        if (backlog_ && !quiet_)
+        {
+            quiet(true);
+            quiet_ = true;
+        }
         if (head_ != tail_)
             post_event(EventSource::console);
     }
 
-    template <typename Read> int take(Read read)
+    template <typename Read, typename Quiet = NoQuiet> int take(Read read, Quiet quiet = {})
     {
         if (head_ == tail_)
         {
@@ -33,6 +49,11 @@ template <usize Capacity> class ConsoleRing final
             if (!backlog_)
                 return -1;
             refill(read);
+            if (!backlog_ && quiet_)
+            {
+                quiet(false);
+                quiet_ = false;
+            }
             if (head_ == tail_)
                 return -1;
         }
@@ -62,6 +83,7 @@ template <usize Capacity> class ConsoleRing final
     usize head_{0};
     usize tail_{0};
     bool backlog_{false};
+    bool quiet_{false};
 };
 
 } // namespace ok::interrupt

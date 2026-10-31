@@ -184,6 +184,9 @@ void terminal_priority(Kernel &kernel)
     const auto g=create(kernel); const auto object=arm(kernel,g); caught(kernel,g); enqueue(kernel,g);
     expect(!kernel.poll_network()); // Absent transport retires the actual executor.
     expect(kernel.native_udp_executor().state().failed);
+    // A network post after retirement is dropped, not left to keep the loop awake.
+    interrupt::post_event(interrupt::EventSource::network);
+    expect(!kernel.poll_network() && !interrupt::events_posted());
     expect(!native::private_linux_udp_signal_ready(kernel,process(kernel,g),thread(kernel,g)));
     CHECK(native::scan_linux_udp_receives(kernel)); CHECK(kernel.scheduler().activate_thread(g.pid,g.pid));
     CHECK(native::resume_linux_udp_receive(kernel,process(kernel,g),thread(kernel,g),object));

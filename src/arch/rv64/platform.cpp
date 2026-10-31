@@ -297,9 +297,15 @@ int read_uart()
     return static_cast<int>(mmio8(uart_rbr_thr));
 }
 
+// The line is level: a full ring turns the received-data interrupt off until
+// the console has drained the backlog.
+void quiet_uart(bool quiet)
+{
+    mmio8(uart_ier) = quiet ? 0x00 : 0x01;
+}
 void uart_interrupt(void *, ok::interrupt::IrqLine)
 {
-    uart_ring.fill(read_uart);
+    uart_ring.fill(read_uart, quiet_uart);
 }
 } // namespace
 
@@ -323,5 +329,5 @@ extern "C" ok::Status ok_platform_bind_irqs()
 
 extern "C" int ok_platform_console_poll()
 {
-    return uart_ring.take(read_uart);
+    return uart_ring.take(read_uart, quiet_uart);
 }
