@@ -219,7 +219,10 @@ password.
   With no foreground group nothing is sent.
 - IXON VSTOP/VSTART stop and start PTY slave output; the console ignores
   output stop.
-- `TCSETS*` switching ICANON flushes, or pushes pending input as a line.
+- `TCSETS*` that changes ICANON discards no input, as Linux
+  `n_tty_set_termios`: turning ICANON off makes every buffered byte readable,
+  turning it on with input buffered ends that input as one line. Only
+  `TCSETSF`, TCIFLUSH and an ISIG character without NOFLSH discard input.
 - Console output is synchronous: `write` and `writev` return the full count
   after OPOST.
 - `OK_SYS_CONSOLE_FLUSH` also flushes the console line discipline's input.
