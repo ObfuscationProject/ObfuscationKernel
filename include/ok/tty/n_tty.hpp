@@ -81,6 +81,8 @@ class NTty final
         }
         if (result.consumed)
             ++revision_;
+        if (echo_rebase_)
+            rebase_columns();
         result.echoed = echo_written_ != echoed;
         result.became_readable = !readable && poll_readable(termios);
         return result;
@@ -100,6 +102,10 @@ class NTty final
                 break;
             ++result.consumed;
         }
+        // The owner flushes echo before program output (as n_tty_write does),
+        // so with no echo pending the output moved the written cursor too.
+        if (!echo_size_)
+            sync_written_columns();
         return result;
     }
 
@@ -109,12 +115,10 @@ class NTty final
         for (; count < out.size() && echo_size_; ++count)
         {
             out[count] = echo_[echo_head_];
-            erase(echo_[echo_head_]);
-            echo_head_ = (echo_head_ + 1) % EchoCapacity;
-            --echo_size_;
+            write_echo_byte();
         }
         if (!echo_size_)
-            echo_head_ = 0;
+            settle_echo();
         return count;
     }
 
@@ -128,15 +132,13 @@ class NTty final
             usize taken = sink.put(std::span<const std::byte>{echo_.data() + echo_head_, run});
             taken = taken < run ? taken : run;
             for (usize index = 0; index < taken; ++index)
-                erase(echo_[echo_head_ + index]);
-            echo_head_ = (echo_head_ + taken) % EchoCapacity;
-            echo_size_ -= taken;
+                write_echo_byte();
             total += taken;
             if (taken < run)
                 break;
         }
         if (!echo_size_)
-            echo_head_ = 0;
+            settle_echo();
         return total;
     }
 
@@ -285,6 +287,7 @@ class NTty final
         clear_echo();
         lnext_ = false;
         column_ = canon_column_ = 0;
+        sync_written_columns();
         output_stopped_ = false;
     }
 
@@ -463,29 +466,126 @@ class NTty final
             canon_head_ = read_head_;
     }
 
-    // Echo is generated through the output path at once, so columns are exact.
-    constexpr void push_echo(u8 value)
+    // Echo is generated through the output path at once, so column_ is where
+    // the cursor stands once all pending echo is written. Like Linux, which
+    // moves its column only for echo it writes, the written_* columns follow
+    // the bytes the owner takes; echo that is discarded (ISIG flush) or
+    // dropped (ring overflow) never moves the cursor. Each echo byte records
+    // how it moves the columns so a partial take stays exact.
+    static constexpr u8 echo_plain = 0, echo_inert = 1, echo_home = 2, echo_set_canon = 4;
+
+    // The column effect of one written echo byte (do_output_char, replayed).
+    static constexpr void advance(u32 &column, u32 &canon, u8 value, u8 effect)
     {
+        if (effect & echo_set_canon)
+            canon = column;
+        if ((effect & 3) == echo_inert)
+            return;
+        if ((effect & 3) == echo_home)
+        {
+            column = canon = 0;
+            return;
+        }
+        switch (value)
+        {
+        case '\n':
+            canon = column;
+            break;
+        case '\r':
+            column = canon = 0;
+            break;
+        case '\t':
+            column += 8 - (column & 7);
+            break;
+        case '\b':
+            if (column)
+                --column;
+            break;
+        default:
+            if (!control(value))
+                ++column;
+            break;
+        }
+    }
+    constexpr void push_echo(u8 value, u8 effect = echo_plain)
+    {
+        if (canon_mark_)
+        {
+            effect |= echo_set_canon;
+            canon_mark_ = false;
+        }
         if (echo_size_ == EchoCapacity)
         {
             echo_[echo_head_] = std::byte{};
+            echo_effect_[echo_head_] = 0;
             echo_head_ = (echo_head_ + 1) % EchoCapacity;
             --echo_size_;
             ++echo_discarded_;
+            echo_rebase_ = true;
         }
-        echo_[(echo_head_ + echo_size_) % EchoCapacity] = std::byte{value};
+        const usize slot = (echo_head_ + echo_size_) % EchoCapacity;
+        echo_[slot] = std::byte{value};
+        echo_effect_[slot] = effect;
         ++echo_size_;
         ++echo_written_;
+    }
+    // The owner took the oldest pending byte: it is written.
+    constexpr void write_echo_byte()
+    {
+        advance(written_column_, written_canon_column_, static_cast<u8>(echo_[echo_head_]), echo_effect_[echo_head_]);
+        erase(echo_[echo_head_]);
+        echo_effect_[echo_head_] = 0;
+        echo_head_ = (echo_head_ + 1) % EchoCapacity;
+        --echo_size_;
+    }
+    constexpr void settle_echo()
+    {
+        echo_head_ = 0;
+        sync_written_columns();
+    }
+    constexpr void sync_written_columns()
+    {
+        written_column_ = column_;
+        written_canon_column_ = canon_column_;
+    }
+    // After dropped echo: the cursor once the remaining echo is written.
+    constexpr void rebase_columns()
+    {
+        column_ = written_column_;
+        canon_column_ = written_canon_column_;
+        for (usize index = 0; index < echo_size_; ++index)
+        {
+            const usize slot = (echo_head_ + index) % EchoCapacity;
+            advance(column_, canon_column_, static_cast<u8>(echo_[slot]), echo_effect_[slot]);
+        }
+        echo_rebase_ = false;
     }
     constexpr void clear_echo()
     {
         for (auto &byte : echo_)
             erase(byte);
+        echo_effect_ = {};
         echo_head_ = echo_size_ = 0;
+        canon_mark_ = echo_rebase_ = false;
+    }
+    // ISIG flush: pending echo is discarded unwritten, the cursor stays put.
+    constexpr void discard_echo()
+    {
+        clear_echo();
+        column_ = written_column_;
+        canon_column_ = written_canon_column_;
     }
     constexpr void echo_raw(const Termios &termios, u8 value)
     {
-        output_char(termios, value, EchoCapacity, [&](u8 byte) { push_echo(byte); });
+        const u32 out = termios.oflag;
+        output_char(termios, value, EchoCapacity, [&](u8 byte) {
+            u8 effect = echo_plain;
+            if (!(out & oflag::opost) || continuation(termios, byte))
+                effect = echo_inert;
+            else if (byte == '\n')
+                effect = (out & oflag::onlret) ? echo_home : value == '\r' ? echo_inert : echo_plain;
+            push_echo(byte, effect);
+        });
     }
     constexpr void echo_char(const Termios &termios, u8 value)
     {
@@ -498,11 +598,21 @@ class NTty final
         }
         echo_raw(termios, value);
     }
+    // n_tty echo_set_canon_col: the line start column, applied with the echo.
     constexpr void echo_visible(const Termios &termios, u8 value)
     {
         if (canon_head_ == read_head_)
+        {
             canon_column_ = column_;
+            canon_mark_ = true;
+        }
         echo_char(termios, value);
+        if (canon_mark_)
+        {
+            canon_mark_ = false;
+            if (!echo_size_)
+                written_canon_column_ = canon_column_;
+        }
     }
 
     // do_output_char: the produced byte count, or -1 when `space` is too small.
@@ -728,7 +838,7 @@ class NTty final
                 if (!(local & lflag::noflsh))
                 {
                     flush_input();
-                    clear_echo();
+                    discard_echo();
                     result.flush_peer_output = true;
                 }
                 if ((input & iflag::ixon) && output_stopped_)
@@ -792,8 +902,9 @@ class NTty final
     std::array<std::byte, EchoCapacity> echo_{};
     usize read_head_{}, read_tail_{}, canon_head_{};
     usize echo_head_{}, echo_size_{};
-    u32 column_{}, canon_column_{};
-    bool lnext_{}, output_stopped_{};
+    std::array<u8, EchoCapacity> echo_effect_{};
+    u32 column_{}, canon_column_{}, written_column_{}, written_canon_column_{};
+    bool lnext_{}, output_stopped_{}, canon_mark_{}, echo_rebase_{};
     u64 revision_{}, received_{}, echo_written_{};
     u32 echo_discarded_{}, overruns_{};
 };

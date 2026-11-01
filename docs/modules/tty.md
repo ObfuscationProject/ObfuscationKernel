@@ -213,7 +213,10 @@ password.
 - VMIN/VTIME follow POSIX. A VMIN read is admitted atomically when enough bytes
   are present; competing readers do not consume bytes progressively.
 - Echo goes through OPOST; its ring holds 512 bytes and drops (and counts) the
-  oldest bytes on overflow. A terminal write first flushes pending echo.
+  oldest bytes on overflow. A terminal write first flushes pending echo. As
+  in Linux, the output column moves only for echo that is written (taken by
+  the terminal): echo discarded by an ISIG flush or dropped on overflow
+  leaves it where it was.
 - ISIG: VINTR → SIGINT, VQUIT → SIGQUIT, VSUSP → SIGTSTP, to the foreground
   group. Unless NOFLSH is set, input and the peer's queued output are flushed.
   With no foreground group nothing is sent.
@@ -447,7 +450,7 @@ profile string and version above keeps its current value.
 | 6 | 8 PTYs, shared with raw pairs. | planned (S5, S6) |
 | 7 | No console vhangup. VTIME on the console is treated as 0. IXON output stop works on PTY slaves only. | planned (S4, S8) |
 | 8 | VMIN reads are admitted atomically. | landed (S1) |
-| 9 | Echo overflow and console overrun drop bytes and are counted. | landed (S1); planned (S4) |
+| 9 | Echo overflow and console overrun drop bytes and are counted. Echo kept after a drop keeps the OPOST expansion (XTABS, tab-erase width) computed when it was generated. | landed (S1); planned (S4) |
 | 10 | A PTY master cannot be a controlling terminal. | planned (S5) |
 | 11 | Native `stat` has no rdev, and there is no `ttyname` (no `/proc`). | planned (S6) |
 | 12 | After a hangup and a later re-acquire by the leader, members forked earlier see the new ctty. | planned (S8) |

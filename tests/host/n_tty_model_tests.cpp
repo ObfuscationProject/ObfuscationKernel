@@ -474,6 +474,48 @@ bool echo_ring_and_sink()
     return true;
 }
 
+// Linux moves its column only for echo it writes: echo discarded by an ISIG
+// flush or dropped from a full ring never moves the cursor.
+bool echo_columns()
+{
+    const Termios termios = linux_std_termios();
+    Tty tty{};
+    tty.receive(termios, bytes("abc\x03"), 1, false);
+    CHECK(echo_of(tty) == "^C" && tty.column() == 2);
+    tty.receive(termios, bytes("\t\x7f"), 1, false); // the line starts at column 2
+    CHECK(echo_of(tty) == "\t\b\b\b\b\b\b" && tty.column() == 2);
+    // Only the bytes the owner took count; a UTF-8 continuation byte has no width.
+    Termios utf8 = termios;
+    utf8.iflag |= iflag::iutf8;
+    Tty partial{};
+    partial.receive(utf8, bytes("a\xc3\xa9x"), 1, false);
+    std::array<std::byte, 3> three{};
+    CHECK(partial.take_echo(three) == 3);
+    partial.receive(utf8, bytes("\x03"), 1, false);
+    CHECK(echo_of(partial) == "^C" && partial.column() == 4);
+    // Without OPOST echo does not move the column at all.
+    Termios raw_echo = termios;
+    raw_echo.oflag &= ~oflag::opost;
+    Tty plain{};
+    plain.receive(raw_echo, bytes("\tab"), 1, false);
+    std::array<std::byte, 1> one{};
+    CHECK(plain.take_echo(one) == 1);
+    plain.receive(raw_echo, bytes("\x03"), 1, false);
+    CHECK(echo_of(plain) == "^C" && plain.column() == 2);
+    // Program output written while no echo is pending moves the cursor too.
+    Tty output{};
+    std::array<std::byte, 8> out{};
+    output.process_output(termios, bytes("abc"), out);
+    output.receive(termios, bytes("x\x03"), 1, false);
+    CHECK(echo_of(output) == "^C" && output.column() == 5);
+    // Echo dropped from the full ring: the column counts the 512 bytes kept.
+    Tty flood{};
+    flood.receive(termios, bytes(std::string(600, 'e')), 1, false);
+    CHECK(flood.echo_pending() == 512 && flood.column() == 512);
+    CHECK(echo_of(flood) == std::string(512, 'e') && flood.column() == 512);
+    return true;
+}
+
 // Independent reference for canonical input with ASCII (no tab) data under
 // OPOST|ONLCR|ICRNL, with randomly chosen echo, ISIG and IEXTEN flags.
 struct Reference
@@ -779,7 +821,7 @@ int main()
         return 1;
     if (!utf8_erase() || !isig_and_flow() || !input_mapping() || !output_processing() || !vmin_vtime())
         return 1;
-    if (!switching_and_capacity() || !echo_ring_and_sink() || !differential(steps) || !raw_equivalence(steps))
+    if (!switching_and_capacity() || !echo_ring_and_sink() || !echo_columns() || !differential(steps) || !raw_equivalence(steps))
         return 1;
     if (constant_initialized.buffered() != 0)
         return 1;
