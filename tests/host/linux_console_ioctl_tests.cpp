@@ -1,4 +1,5 @@
 #include "ok/abi/linux_console_ioctl.hpp"
+#include "ok/abi/linux_termios.hpp"
 
 #include <array>
 #include <cstdio>
@@ -43,6 +44,18 @@ template <Profile P> bool profile()
         auto decoded = Console::decode(words);
         CHECK(!decoded && decoded.status().code() == StatusCode::not_terminal);
     }
+    // TCGETS is not a console control, but the terminal codec decodes it, and
+    // both codecs agree on the four console controls.
+    using Terminal = TtyIoctlCodec<P>;
+    const u32 tcgets = mips ? 0x540du : P == Profile::ppc ? 0x402c7413u : 0x5401u;
+    CHECK(Terminal::operation(tcgets) == TerminalIoctl::get_attributes);
+    CHECK(Terminal::operation(0x5401u) == (mips || P == Profile::ppc ? std::nullopt
+                                                                       : std::optional{TerminalIoctl::get_attributes}));
+    for (usize index = 0; index < expected.size(); ++index)
+        CHECK(Terminal::number(static_cast<TerminalIoctl>(index)) == expected[index]);
+    const std::array<u64, 3> tcgets_words{3, tcgets, 0x1000};
+    CHECK(Terminal::decode(tcgets_words) && Terminal::decode(tcgets_words).value().operation == TerminalIoctl::get_attributes);
+    CHECK(!Console::decode(tcgets_words));
     const std::array<u64, 4> too_many{0, expected[0], 0, 0};
     CHECK(!Console::decode(too_many));
     CHECK(Console::scalar_argument(0x12345678ffffffffULL) == -1);
