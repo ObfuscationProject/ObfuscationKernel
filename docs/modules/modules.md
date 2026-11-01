@@ -121,8 +121,11 @@ packet capacity covers an IPv6 header. `NativeUdpService` sockets carry a
 `IpAddress`, and `NativeUdpFrameKind` gains `unbound`. `sched::WaitQueue`
 gains `enlist`, `notify` and `prune`, the legacy process-granular queue
 becomes `sched::PidWaitQueue`, and `TcpStreamWaits` gains `stats`. The public
-UAPI stays 0.16. Every exported module marker, the SDK manifest and the OS
-consumer declare 79 and refuse 78 and 80.
+UAPI stays 0.16 with a compatible addition: `OK_AF_INET6` and
+`ok_sockaddr_in6`. `TcpStreamSnapshot` gains the socket family, the stream
+`open` calls take it, and `ok/abi/linux_udp_address.hpp` gains the
+`sockaddr_in6` codec and `encode_socket_name`. Every exported module marker,
+the SDK manifest and the OS consumer declare 79 and refuse 78 and 80.
 
 ABI78 (`feat/irq-wait-time`, WT1.2) changes exported declarations:
 `ok/interrupt/irq_chip.hpp` replaces the scaffold with the `IrqChip` concept and

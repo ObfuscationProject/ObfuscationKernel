@@ -29,14 +29,14 @@ class TcpStreamOperations final
     TcpStreamOperations(TcpStreamOperations &&) = delete;
     TcpStreamOperations &operator=(TcpStreamOperations &&) = delete;
     [[nodiscard]] Status status() const { return failure_; }
-    Result<i32> open(u64 pid, bool nonblocking = false, bool close_on_exec = false)
+    Result<i32> open(u64 pid, bool nonblocking = false, bool close_on_exec = false, Family family = Family::ipv4)
     {
         if (mutating_) return Status::busy("TCP operation is not reentrant");
         Mutation mutation{mutating_};
         auto *process = canonical(pid); if (!process) return Status::denied("TCP process/service is not canonical");
         auto fd = vacant(*process); if (!fd) return fd.status();
         auto id = scheduler_.allocate_description({}); if (!id) return id.status();
-        auto stream = service_.open();
+        auto stream = service_.open(family);
         if (!stream) { *scheduler_.open_description(id.value()) = {}; return stream.status(); }
         return publish(*process, fd.value(), id.value(), stream.value(), nonblocking, close_on_exec);
     }
@@ -196,11 +196,12 @@ class LinuxTcpStreamAdapter final
     explicit LinuxTcpStreamAdapter(TcpStreamOperations &operations) : operations_{operations} {}
     Result<i32> socket(u64 pid, i32 domain, u32 type, i32 protocol)
     {
-        if (domain != 2 || (protocol != 0 && protocol != 6) ||
+        if ((domain != 2 && domain != 10) || (protocol != 0 && protocol != 6) ||
             (type & Constants::sock_type_mask) != Constants::sock_stream ||
             (type & ~(Constants::sock_type_mask | Constants::sock_nonblock | Constants::sock_cloexec)))
             return Status::unsupported("Linux TCP socket parameters are outside the stream profile");
-        return operations_.open(pid, type & Constants::sock_nonblock, type & Constants::sock_cloexec);
+        return operations_.open(pid, type & Constants::sock_nonblock, type & Constants::sock_cloexec,
+                                domain == 10 ? Family::ipv6 : Family::ipv4);
     }
     template <TcpUserCopy Copy>
     Status bind(u64 pid, i32 fd, u64 address, i32 length, Copy &copy)
@@ -267,7 +268,9 @@ class LinuxTcpStreamAdapter final
     Status address_operation(u64 pid, i32 fd, u64 address, i32 length, Copy &copy, Action &&action)
     {
         return operations_.with_stream(pid, fd, [&](TcpStreamHandle handle) -> Status {
-            if (length < 16 || length > 128) return Status::invalid_argument("Linux TCP sockaddr length is invalid");
+            const auto stream = operations_.service().snapshot(handle);
+            const bool v6 = stream && stream.value().family == Family::ipv6;
+            if (length < (v6 ? 24 : 16) || length > 128) return Status::invalid_argument("Linux TCP sockaddr length is invalid");
             const usize count = static_cast<usize>(length);
             if (address > abi::linux_user::Codec<Selected>::word_mask - (count - 1))
                 return Status::fault("Linux TCP address interval exceeds target word");
@@ -277,6 +280,14 @@ class LinuxTcpStreamAdapter final
             if (auto status = copy.read(address, std::span{bytes}.first(count)); !status) return status;
             std::array<u8, 128> copied{};
             for (usize i = 0; i < count; ++i) copied[i] = std::to_integer<u8>(bytes[i]);
+            if (v6)
+            {
+                // Model status only: the runtime reports EAFNOSUPPORT/ENETUNREACH.
+                auto decoded = Wire::decode_ipv6_address(std::span{copied}.first(count)); if (!decoded) return decoded.status();
+                if (decoded.value().family != Constants::af_inet6 || wire::ipv4_mapped(decoded.value().address))
+                    return Status::unsupported("Linux TCP address is not a v6-only IPv6 endpoint");
+                return action(handle, tcp::Endpoint{decoded.value().address, decoded.value().port});
+            }
             auto decoded = Wire::decode_address(std::span{copied}.first(count)); if (!decoded) return decoded.status();
             if (decoded.value().family != 2) return Status::unsupported("Linux TCP address family is not IPv4");
             return action(handle, tcp::Endpoint{decoded.value().address, decoded.value().port});

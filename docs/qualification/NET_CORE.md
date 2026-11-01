@@ -3,8 +3,9 @@
 WT2.3 `feat/net-core`. Slice 1: the family-generic wire layer. Slice 2: the
 neighbour cache and routing tables. Slice 3: the Ethernet interface and the
 executor running through it. Slice 4: general TCP. Slice 5: IPv6 transport
-endpoints. Slice 6: readiness through wait queues. Slice 7: the link probe and
-its QEMU evidence. This note grows with each slice.
+endpoints and `AF_INET6` sockets. Slice 6: readiness through wait queues.
+Slice 7: the link probe and its QEMU evidence. This note grows with each
+slice.
 
 ## Design
 
@@ -44,8 +45,8 @@ its QEMU evidence. This note grows with each slice.
 - The kernel owns one interface. `NativeUdpService::configure` configures it
   from the OS link: the local address as a /24, the peer as default gateway
   and permanent neighbour, and IPv6 autoconfiguration. The shared Ethernet
-  executor passes every received frame to the interface, delivers IPv4 TCP
-  and UDP packets to their services, and transmits control frames, released
+  executor passes every received frame to the interface, delivers IPv4 and
+  IPv6 TCP and UDP packets to their services, and transmits control frames, released
   packets and TCP segments in that order within its credit. A held or
   unroutable TCP segment counts as sent; retransmission recovers it. UDP and
   TCP bind/connect ask the interface for local addresses and routes, so any
@@ -90,13 +91,44 @@ its QEMU evidence. This note grows with each slice.
   `OK_NET_LINK`, `OK_NET_ARP`, `OK_NET_PING`, `OK_NET_IPV6`, `OK_NET_TCP` and
   `OK_NET_PROBE`.
 
+## AF_INET6 sockets
+
+- `socket(AF_INET6, SOCK_DGRAM|SOCK_STREAM)` opens a `NativeUdpService`
+  socket or a `NativeTcpStreamService` stream of `Family::ipv6`; the stream
+  records its family at open, so an unbound stream already refuses IPv4
+  endpoints. `AF_INET6` is 10 on all ten Linux profiles
+  (`udp_af_inet6` in `linux_udp_data.hpp`) and `OK_AF_INET6` natively.
+- Records: `Ipv6SocketAddressCodec` reads and writes the 28-byte
+  `sockaddr_in6` (family and scope_id in profile byte order, port and
+  flowinfo in network order) and accepts the 24-byte RFC 2133 form as input.
+  `encode_socket_name` selects `sockaddr_in` or `sockaddr_in6` by address
+  family for getsockname, getpeername, recvfrom and accept; outputs report
+  28 and truncate to the caller's capacity. Output flowinfo is 0 and scope_id
+  is 1 for a link-local address, else 0; input flowinfo and scope_id are
+  ignored. The native `ok_sockaddr_in6` has the same layout and requires
+  exactly 28 bytes.
+- IPv6 sockets behave like Linux sockets with `IPV6_V6ONLY` set. Linux
+  personality: a record shorter than 24 bytes is EINVAL; bind and connect
+  refuse a non-`AF_INET6` record with EAFNOSUPPORT; sendto with an
+  `AF_INET` record is ENETUNREACH, with an unknown family EINVAL and with
+  `AF_UNSPEC` uses the connected peer (`udpv6_sendmsg`). An IPv4-mapped
+  address is EINVAL for bind and ENETUNREACH for connect and sendto. UDP
+  `AF_UNSPEC` connect still disconnects. Native personality: a record of
+  another size is EINVAL, another family EAFNOSUPPORT, mapped addresses as
+  above.
+- IPv4 sockets keep their record rules unchanged, including an `AF_INET6`
+  record to an IPv4 socket (Linux UDP EAFNOSUPPORT, Linux TCP EOPNOTSUPP,
+  native EINVAL).
+
 ## Not yet
 
 - TCP: no window scaling, timestamps, SACK or delayed ACKs; the peer MSS
   bounds segments but there is no path MTU discovery.
 
 - ICMP errors are not delivered to sockets; UDP receive waits and poll/select
-  over sockets still rescan rather than wait on per-socket queues.
+  over sockets still rescan rather than wait on per-socket queues. TCP
+  getsockname/getpeername are still deferred (EOPNOTSUPP) for both families;
+  their records would come from `encode_socket_name`.
 - The OS's default image keeps the static link (gateway as a permanent
   neighbour); only its `net_probe` image uses the routed interface. DHCP and
   a configurable address belong to OS services.
@@ -119,6 +151,16 @@ its QEMU evidence. This note grows with each slice.
   endpoint and stream suites (`tests/host/tcp_streams_xmake.lua`) pass; the
   out-of-order case of `tcp_transport_tests` now expects the kept segment to
   join.
+- Sockets (scope=model, hosted): `linux_udp_address_tests` (sockaddr_in6
+  vectors and name records on all ten profiles), `linux_udp_receive_order_tests`
+  and `linux_udp_operation_body_tests` (family rules, lengths, truncation and
+  an IPv6 send, neighbour-resolved resend, receive and connect on all ten
+  profiles), `native_udp_receive_tests` (native AF_INET6 bind and recvfrom
+  through the runtime), `tcp_streams_tests` and `tcp_accept_transaction_tests`
+  (stream family, IPv6 connect and accept, 28-byte accept records on ten
+  profiles) and `tcp_immediate_runtime_tests` (both personalities: v6-only
+  record rules, an IPv6 connect after neighbour discovery and an accept4
+  over the hosted link). None of them executes a guest or a NIC.
 - Kernel: `test_network_interface_model` (network/storage roadmap test
   points) runs ARP, echo over both families, neighbour solicitation and
   release of a held reply, and routed egress inside `kernel_main`. It is a

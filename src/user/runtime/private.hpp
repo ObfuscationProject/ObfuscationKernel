@@ -863,9 +863,27 @@ class TcpImmediateRuntime final
         auto number = mapped_error(access, result.status());
         return number ? Result<lu::Return>{lu::Return{0, number.value()}} : Result<lu::Return>{number.status()};
     }
-    static Result<net::tcp::Endpoint> address(Access &access, const Request &request)
+    // An IPv6 stream is v6-only: an AF_INET record is EAFNOSUPPORT and a
+    // mapped address is `mapped` (EINVAL for bind, ENETUNREACH for connect).
+    static Result<net::tcp::Endpoint> address(Access &access, const Request &request, net::Family family,
+                                              u32 mapped, u32 &semantic)
     {
         const i32 length = static_cast<i32>(static_cast<u32>(request.arguments[2]));
+        if (family == net::Family::ipv6)
+        {
+            if (length < 24 || length > 128 || (!request.linux && length != 28))
+                return Status::invalid_argument("TCP sockaddr_in6 length is outside this profile");
+            std::array<std::byte, 128> bytes{};
+            if (auto status = access.read(request.arguments[1], std::span{bytes}.first(static_cast<usize>(length))); !status) return status;
+            std::array<u8, 128> copied{};
+            for (usize at = 0; at < static_cast<usize>(length); ++at) copied[at] = std::to_integer<u8>(bytes[at]);
+            auto endpoint = lu::UdpWire<lu::configured_native_profile()>::decode_ipv6_address(std::span{copied}.first(static_cast<usize>(length)));
+            if (!endpoint) return endpoint.status();
+            if (endpoint.value().family != Constants::af_inet6) semantic = error(request, lu::UdpErrno::e_afnosupport, 97);
+            else if (net::wire::ipv4_mapped(endpoint.value().address)) semantic = mapped;
+            if (semantic) return Status::fault();
+            return net::tcp::Endpoint{endpoint.value().address, endpoint.value().port};
+        }
         if (length < 16 || length > 128 || (!request.linux && length != 16))
             return Status::invalid_argument("TCP sockaddr length is outside this profile");
         std::array<std::byte, 128> bytes{};
@@ -888,14 +906,16 @@ class TcpImmediateRuntime final
             const u32 nonblock = request.linux ? Constants::sock_nonblock : OK_SOCK_NONBLOCK;
             const u32 cloexec = request.linux ? Constants::sock_cloexec : OK_SOCK_CLOEXEC;
             const u32 mask = request.linux ? Constants::sock_type_mask : 0xf;
-            if (static_cast<i32>(static_cast<u32>(a[0])) != 2)
+            const i32 domain = static_cast<i32>(static_cast<u32>(a[0]));
+            if (domain != 2 && domain != 10)
                 return lu::Return{0, error(request, lu::UdpErrno::e_afnosupport, 97)};
             if ((type & mask) != stream || (type & ~(mask | nonblock | cloexec)) ||
                 (static_cast<i32>(static_cast<u32>(a[2])) != 0 && static_cast<i32>(static_cast<u32>(a[2])) != 6))
                 return lu::Return{0, error(request, lu::UdpErrno::e_opnotsupp, 95)};
             if (auto status = kernel.activate_native_tcp(); !status) return translated(access, status);
             if (!access.live()) return Status::denied("TCP socket lost image during link activation");
-            auto opened = kernel.native_tcp_operations().open(pid, type & nonblock, type & cloexec);
+            auto opened = kernel.native_tcp_operations().open(pid, type & nonblock, type & cloexec,
+                domain == 10 ? net::Family::ipv6 : net::Family::ipv4);
             return translated(access, opened ? Result<usize>{static_cast<usize>(opened.value())} : Result<usize>{opened.status()});
         }
         const i32 fd = static_cast<i32>(static_cast<u32>(a[0]));
@@ -920,7 +940,10 @@ class TcpImmediateRuntime final
             }
             if (request.operation == Call::bind)
             {
-                auto local = address(access, request); if (!local) return local.status();
+                const auto stream = service.snapshot(handle);
+                const auto family = stream ? stream.value().family : net::Family::ipv4;
+                auto local = address(access, request, family, error(request, lu::UdpErrno::e_inval, 22), semantic_error);
+                if (!local) return local.status();
                 if (!kernel.native_udp().local_address(local.value().address))
                 { semantic_error = error(request, lu::UdpErrno::e_addrnotavail, 99); return Status::fault(); }
                 const auto status = service.bind(handle, local.value()); return status ? Result<usize>{0} : Result<usize>{status};
@@ -944,7 +967,9 @@ class TcpImmediateRuntime final
                         ? tcp_error(request, lu::tcp_errno_ealready, 114) : tcp_error(request, lu::tcp_errno_eisconn, 106);
                     return Status::fault();
                 }
-                auto peer = address(access, request); if (!peer) return peer.status();
+                auto peer = address(access, request, state.value().family,
+                    error(request, lu::UdpErrno::e_netunreach, 101), semantic_error);
+                if (!peer) return peer.status();
                 if (!kernel.native_udp().reachable(peer.value().address))
                 { semantic_error = error(request, lu::UdpErrno::e_netunreach, 101); return Status::fault(); }
                 auto now = kernel.native_tcp_now(); if (!now) return now.status();

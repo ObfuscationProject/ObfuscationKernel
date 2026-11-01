@@ -40,6 +40,9 @@ class TcpAcceptCopied final
         auto admitted = operations_.begin_accept(pid, fd, flags & nonblock, flags & cloexec);
         if (!admitted) return admitted.status();
         auto &operation = admitted.value();
+        // A child has its listener's family, so the name size is known now.
+        const auto listener = operations_.service().snapshot(original.handle());
+        const usize record = listener && listener.value().family == Family::ipv6 ? 28 : 16;
         usize prefix{};
         if (address)
         {
@@ -53,7 +56,7 @@ class TcpAcceptCopied final
             for (usize at = 0; at < copied.size(); ++at) copied[at] = std::to_integer<u8>(length[at]);
             auto supplied = Wire::decode_socklen(copied);
             if (!supplied || supplied.value() < 0) return Status::invalid_argument("TCP accept socklen capacity is negative or malformed");
-            prefix = static_cast<usize>(supplied.value()) < 16 ? static_cast<usize>(supplied.value()) : 16;
+            prefix = static_cast<usize>(supplied.value()) < record ? static_cast<usize>(supplied.value()) : record;
             if (prefix)
             {
                 if (auto status = interval(address, prefix); !status) return status;
@@ -72,18 +75,19 @@ class TcpAcceptCopied final
                 : Result<PreparedTcpAccept>{prepared};
         if (address)
         {
-            std::array<u8, 16> record{};
             const auto peer = operation.peer();
-            if (auto status = Wire::encode_address(record, {2, peer.port, peer.address.ipv4()}); !status) return status;
-            std::array<std::byte, 16> bytes{};
-            for (usize at = 0; at < bytes.size(); ++at) bytes[at] = std::byte{record[at]};
+            const auto name = abi::linux_user::encode_socket_name<Selected>(peer.address, peer.port);
+            if (!name) return name.status();
+            if (name.value().size != record) return Status::fault("TCP accepted peer family differs from its listener");
+            std::array<std::byte, 28> bytes{};
+            for (usize at = 0; at < record; ++at) bytes[at] = std::byte{name.value().bytes[at]};
             if (prefix)
             {
                 if (auto status = copy.write(address, std::span{bytes}.first(prefix)); !status) return status;
                 if (!authority() || !operation.live()) return lost();
             }
             std::array<u8, 4> length{};
-            if (auto status = Wire::encode_socklen(length, 16); !status) return status;
+            if (auto status = Wire::encode_socklen(length, static_cast<u32>(record)); !status) return status;
             std::array<std::byte, 4> output{};
             for (usize at = 0; at < output.size(); ++at) output[at] = std::byte{length[at]};
             if (auto status = copy.write(length_address, output); !status) return status;

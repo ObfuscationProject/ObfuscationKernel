@@ -196,7 +196,38 @@ template <Profile Target> void aliases_and_callbacks()
         f.enqueue(0);Memory fresh;CHECK(f.scratch.receive<Target>(f.service,f.endpoint,fresh,{}));
     }
 }
-template <Profile Target> void profile() { sizes<Target>();faults<Target>();aliases_and_callbacks<Target>(); }
+// An IPv6 socket reports a 28-byte sockaddr_in6 source with Linux truncation.
+template <Profile Target> void ipv6_sources()
+{
+    EthernetInterface nic{};NativeUdpService service{};ReceiveScratch scratch{};
+    CHECK(service.attach_interface(nic));CHECK(service.configure(udp_link));
+    CHECK(nic.tick(0)&&nic.tick(1000));while (nic.control()) nic.pop_control();
+    const auto self=wire::link_local_from_mac(udp_link.local_mac),router=wire::link_local_from_mac(udp_link.peer_mac);
+    const auto opened=service.open(Family::ipv6);CHECK(opened);const u32 endpoint=opened.value();
+    CHECK(service.bind(endpoint,IpAddress{wire::Ipv6{}},40000));
+    const std::array<std::byte,5> data{std::byte{1},std::byte{2},std::byte{3},std::byte{4},std::byte{5}};
+    for (u32 capacity:{u32{0},u32{1},u32{16},u32{27},u32{28},u32{29},u32{128}})
+    {
+        std::array<std::byte,128> packet{};
+        const auto built=wire::build_udp<wire::Ipv6Family>(packet,router,self,41000,40000,0,64,data);CHECK(built);
+        const auto queued=service.deliver({packet.data(),built.value()});CHECK(queued&&queued.value().kind==NativeUdpFrameKind::udp_queued);
+        Memory memory;memory.put_length<Target>(length_at,capacity);
+        const auto value=scratch.receive<Target>(service,endpoint,memory,{payload_at,5,source_at,length_at,0});
+        CHECK(value&&value.value()==5&&memory.get_length<Target>(length_at)==28);
+        const auto expected=encode_socket_name<Target>(IpAddress{router},41000);CHECK(expected&&expected.value().size==28);
+        const usize prefix=capacity<28?capacity:28;
+        for (usize at=0;at<prefix;++at) CHECK(memory.bytes[source_at+at]==std::byte{expected.value().bytes[at]});
+        CHECK(memory.bytes[source_at+prefix]==std::byte{0xa5}&&memory.calls==(prefix?4:3));
+        if (capacity>=28)
+        {
+            const auto source=Ipv6SocketAddressCodec<Target>::decode(
+                {reinterpret_cast<const u8 *>(memory.bytes.data()+source_at),28});
+            CHECK(source&&source.value().family==10&&source.value().port==41000&&source.value().address==router);
+            CHECK(source.value().flowinfo==0&&source.value().scope_id==1);
+        }
+    }
+}
+template <Profile Target> void profile() { sizes<Target>();faults<Target>();aliases_and_callbacks<Target>();ipv6_sources<Target>(); }
 int main()
 {
     profile<Profile::i386>();profile<Profile::x86_64>();profile<Profile::aarch64>();profile<Profile::arm32>();

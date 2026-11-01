@@ -9,6 +9,8 @@ enum class UdpMessage : u8 { batch, cmsg_cloexec, confirm, ctrunc, dontroute, do
 enum class UdpErrno : u8 { e_acces, e_addrinuse, e_addrnotavail, e_afnosupport, e_again, e_badf, e_destaddrreq, e_fault, e_inval, e_io, e_mfile, e_msgsize, e_netdown, e_netunreach, e_nfile, e_nobufs, e_nomem, e_nosys, e_notsock, e_opnotsupp, e_overflow, e_protonosupport, e_socktnosupport, e_wouldblock, count };
 inline constexpr u32 udp_af_unspec = 0U;
 inline constexpr u32 udp_af_inet = 2U;
+// Linux include/linux/socket.h: AF_INET6 is 10 on all ten profiles.
+inline constexpr u32 udp_af_inet6 = 10U;
 inline constexpr u32 udp_protocol = 17U;
 inline constexpr usize udp_sockaddr_input_limit = 128;
 inline constexpr std::array<u32, 4> udp_subcalls{1U, 2U, 11U, 12U};
