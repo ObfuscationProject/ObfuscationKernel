@@ -136,6 +136,7 @@ Status NativeUdpService::close(u32 handle)
     const u32 generation = socket->generation;
     *socket = {};
     socket->generation = generation;
+    socket->changed = true;
     return Status::success();
 }
 bool NativeUdpService::port_used(u16 port) const
@@ -387,7 +388,7 @@ Result<NativeUdpFrame> NativeUdpService::queue(const IpAddress &source, const Ip
             queued.source_port = udp.source_port;
             queued.size = udp.payload.size();
             for (usize i = 0; i < queued.size; ++i) queued.bytes[i] = udp.payload[i];
-            ++socket.count;
+            ++socket.count; socket.changed = true;
             return NativeUdpFrame{NativeUdpFrameKind::udp_queued, 0,
                 (socket.generation << 8) | static_cast<u32>(index + 1)};
         }

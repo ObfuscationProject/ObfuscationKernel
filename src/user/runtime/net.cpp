@@ -9,6 +9,30 @@ static_assert(std::is_nothrow_copy_constructible_v<NativeUdpReceiveWait>);
 static_assert(std::is_nothrow_destructible_v<NativeUdpReceiveWait>);
 constinit NativeUdpReceiveObjects native_udp_receive_objects{page_pool, native_udp_receive_capacity};
 std::array<PollWaitIndex, native_udp_receive_capacity> native_udp_receive_waits{};
+namespace
+{
+// Receive waiters of each UDP socket (native and Linux), woken by
+// notify_udp_receives when the socket's readiness moved. A full queue switches
+// to re-evaluating every waiter on every pass, the behaviour before queues.
+constexpr usize udp_queue_capacity = 16;
+std::array<sched::WaitQueue<udp_queue_capacity>, net::NativeUdpService::socket_capacity> udp_receive_queues{};
+bool udp_receive_rescan{};
+u64 udp_executor_seen{};
+UdpWaitCounters udp_wait_counters{};
+sched::WaitQueue<udp_queue_capacity> &udp_receive_queue(u32 endpoint)
+{
+    const u32 index = endpoint & 0xffu;
+    return udp_receive_queues[index && index <= udp_receive_queues.size() ? index - 1 : 0];
+}
+void enlist_udp_receive(Kernel &kernel, sched::ProcessId pid, sched::ThreadId tid, u32 endpoint)
+{
+    auto *thread = kernel.scheduler().find_thread(pid, tid);
+    if (!thread || !thread->wait_registration.active()) return;
+    const auto status = udp_receive_queue(endpoint).enlist(thread->wait_registration);
+    if (status) ++udp_wait_counters.queued;
+    else if (status.code() != StatusCode::already_exists) { udp_receive_rescan = true; ++udp_wait_counters.unqueued; }
+}
+} // namespace
 using LinuxUdpReceiveAdmissionToken = LinuxUdpReceiveAdmission<lu::configured_native_profile()>;
 using LinuxUdpReceiveTransferCoordinator = LinuxUdpReceiveCoordinator<lu::configured_native_profile()>;
 static_assert(!std::is_copy_constructible_v<LinuxUdpReceiveWait>);
@@ -179,9 +203,26 @@ Status native_udp_receive_post_arm(Kernel &kernel, const NativeUdpReceiveWait &w
 {
     const auto ready = kernel.native_udp_executor().readiness(kernel.native_udp(), wait.endpoint);
     if (!ready || !ready.value().may_wait(wait.observed_receive, wait.observed_executor))
+    {
         if (!kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::ready, udp_wake_source(ready)))
             return native_udp_receive_invariant(Status::fault("UDP receive post-arm ticket changed"));
+        return {};
+    }
+    enlist_udp_receive(kernel, wait.pid, wait.tid, wait.endpoint);
     return {};
+}
+// Completes a native receive wait whose condition no longer allows waiting.
+Result<bool> evaluate_native_udp_receive(Kernel &kernel, const NativeUdpReceiveWait &wait)
+{
+    ++udp_wait_counters.evaluated;
+    const auto ready = kernel.native_udp_executor().readiness(kernel.native_udp(), wait.endpoint);
+    const auto *description = kernel.scheduler().open_description(wait.retained_description);
+    if (ready && description && !(description->flags & posix::o_NONBLOCK) &&
+        ready.value().may_wait(wait.observed_receive, wait.observed_executor))
+        return false;
+    if (!kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::ready, udp_wake_source(ready)))
+        return native_udp_receive_invariant(Status::fault("UDP receive scan lost its exact ticket"));
+    return true;
 }
 i64 begin_native_udp_receive(Kernel &kernel, sched::ProcessControlBlock &process,
     sched::ThreadControlBlock &thread, u16 description_id,
@@ -333,14 +374,14 @@ Status scan_native_udp_receives(Kernel &kernel)
         }
         else
         {
-            const auto ready = kernel.native_udp_executor().readiness(kernel.native_udp(), wait.endpoint);
+            // Readiness is the queue's business (notify_udp_receives); a pass
+            // still notices a description that became nonblocking or closed.
             const auto *description = kernel.scheduler().open_description(wait.retained_description);
-            if (!ready || !description || (description->flags & posix::o_NONBLOCK) ||
-                !ready.value().may_wait(wait.observed_receive, wait.observed_executor))
-                if (!kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::ready, udp_wake_source(ready)))
+            if (udp_receive_rescan || !description || (description->flags & posix::o_NONBLOCK))
+                if (auto evaluated = evaluate_native_udp_receive(kernel, wait); !evaluated)
                 {
                     retire_native_udp_receive(kernel, object);
-                    return native_udp_receive_invariant(Status::fault("UDP receive scan lost its exact ticket"));
+                    return evaluated.status();
                 }
         }
         if (!runtime_failure) return runtime_failure;
@@ -589,6 +630,8 @@ class LinuxUdpReceiveAccess final
         }
     return failure;
 }
+
+UdpWaitCounters udp_wait_statistics() { return udp_wait_counters; }
 [[maybe_unused]] Status retire_linux_udp_receives_for_exec(Kernel &kernel, sched::ProcessId pid)
 { return retire_linux_udp_receives(kernel, pid, {}, LinuxUdpReceiveRetirement::exec); }
 
@@ -675,8 +718,12 @@ Status linux_udp_receive_post_arm(Kernel &kernel, const LinuxUdpReceiveWait &wai
     const auto *description = kernel.scheduler().open_description(wait.retained_description);
     if (!ready || !description || (description->flags & posix::o_NONBLOCK) ||
         !ready.value().may_wait(wait.observed_receive, wait.observed_executor))
+    {
         if (!kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::ready, udp_wake_source(ready)))
             return linux_udp_receive_invariant(Status::fault("Linux UDP receive post-arm lost exact ticket"));
+        return {};
+    }
+    enlist_udp_receive(kernel, wait.pid, wait.tid, wait.endpoint);
     return {};
 }
 [[maybe_unused]] Result<LinuxUdpReceiveBegin> begin_linux_udp_receive(Kernel &kernel,
@@ -829,9 +876,64 @@ Status linux_udp_receive_post_arm(Kernel &kernel, const LinuxUdpReceiveWait &wai
                 wait.phase == LinuxUdpReceivePhase::captured_staged ? sched::WaitCompletion::none : cause))
             return fail(Status::denied("Linux UDP receive scan lost current captured owner"));
         if (wait.phase == LinuxUdpReceivePhase::published && thread->wait_registration.active())
-            if (auto status = linux_udp_receive_post_arm(kernel, wait); !status) return fail(status);
+        {
+            // Readiness is the queue's business (notify_udp_receives); a pass
+            // still notices a description that became nonblocking or closed.
+            const auto *description = kernel.scheduler().open_description(wait.retained_description);
+            if (udp_receive_rescan || !description || (description->flags & posix::o_NONBLOCK))
+                if (auto status = linux_udp_receive_post_arm(kernel, wait); !status) return fail(status);
+        }
     }
     return {};
+}
+
+// Re-evaluates the receive waiters of UDP sockets whose readiness moved since
+// the previous pass, or of every socket once the executor's own readiness
+// moved (a link failure ends every wait).
+Status notify_udp_receives(Kernel &kernel)
+{
+    const u64 executor = kernel.native_udp_executor().state().readiness_sequence;
+    const bool all = executor != udp_executor_seen;
+    udp_executor_seen = executor;
+    Status failure{};
+    const auto evaluate = [&](sched::WaitTicket ticket) -> bool {
+        if (!failure) return false;
+        for (const auto &entry : native_udp_receive_waits)
+        {
+            if (!entry.pid) continue;
+            auto resolved = native_udp_receive_objects.resolve(entry.object);
+            if (!resolved || resolved.value()->ticket != ticket) continue;
+            const auto &wait = *resolved.value();
+            if (wait.phase != NativeUdpOwnerPhase::published) return true;
+            auto evaluated = evaluate_native_udp_receive(kernel, wait);
+            if (!evaluated) { failure = evaluated.status(); return false; }
+            return evaluated.value();
+        }
+        for (const auto &entry : linux_udp_receive_waits)
+        {
+            if (!entry.pid || !entry.object.pool) continue;
+            auto resolved = linux_udp_receive_objects.resolve(entry.object);
+            if (!resolved || resolved.value()->ticket != ticket) continue;
+            const auto &wait = *resolved.value();
+            if (wait.phase != LinuxUdpReceivePhase::published) return true;
+            ++udp_wait_counters.evaluated;
+            if (auto status = linux_udp_receive_post_arm(kernel, wait); !status) { failure = status; return false; }
+            const auto *thread = kernel.scheduler().find_thread(wait.pid, wait.tid);
+            return !thread || !thread->wait_registration.pending(ticket);
+        }
+        return true;
+    };
+    kernel.native_udp().take_changed([&](u32 handle) { if (!all) udp_receive_queue(handle).notify(evaluate); });
+    if (all) for (auto &queue : udp_receive_queues) queue.notify(evaluate);
+    if (udp_receive_rescan)
+    {
+        bool waiting = false;
+        for (const auto &queue : udp_receive_queues) waiting = waiting || queue.waiting();
+        for (const auto &entry : native_udp_receive_waits) waiting = waiting || entry.pid;
+        for (const auto &entry : linux_udp_receive_waits) waiting = waiting || entry.pid;
+        if (!waiting) udp_receive_rescan = false;
+    }
+    return failure;
 }
 
 i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::ThreadControlBlock *caller,

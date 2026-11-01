@@ -912,6 +912,7 @@ Status start(Kernel &kernel, fs::BootArchive archive)
     if (auto status = entry_stacks.activate(entry_stack_arena); !status) return status;
     emit_pool_stats();
     emit_entry_stack_stats();
+    report_network_waits(kernel);
 #ifdef OK_ENABLE_TEST_POINTS
     if (auto status = check_runtime_objects(); !status) return status;
     emit_pool_stats();
@@ -996,6 +997,8 @@ bool step(Kernel &kernel)
     static_cast<void>(kernel.scheduler().reap_orphans());
 #endif
     if (!runtime_failure) { started = false; return false; }
+    if (auto status = notify_udp_receives(kernel); !status)
+    { runtime_failure = status; started = false; return false; }
     if (auto status = scan_native_udp_receives(kernel); !status)
     { runtime_failure = status; started = false; return false; }
     if (auto status = scan_linux_udp_receives(kernel); !status)

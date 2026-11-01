@@ -122,6 +122,21 @@ class NativeUdpService final
     Result<NativeUdpDatagram> peek(u32 handle) const;
     Status consume(u32 handle);
     [[nodiscard]] usize active_sockets() const;
+    // Visits each socket handle whose receive readiness moved (a datagram was
+    // queued or the socket closed) since the previous call, once.
+    template <class Visit>
+        requires requires(Visit &visit, u32 handle) { visit(handle); }
+    usize take_changed(Visit &&visit)
+    {
+        usize count = 0;
+        for (usize i = 0; i < sockets_.size(); ++i)
+            if (sockets_[i].changed)
+            {
+                sockets_[i].changed = false;
+                visit((sockets_[i].generation << 8) | static_cast<u32>(i + 1)); ++count;
+            }
+        return count;
+    }
     [[nodiscard]] u64 dropped_frames() const { return dropped_frames_; }
     [[nodiscard]] const NativeUdpLink &link() const { return link_; }
     [[nodiscard]] bool configured() const { return configured_; }
@@ -141,7 +156,7 @@ class NativeUdpService final
     };
     struct Socket
     {
-        bool used{}, bound{}, retired{}, associated{}, address_locked{}, port_locked{};
+        bool used{}, bound{}, retired{}, associated{}, address_locked{}, port_locked{}, changed{};
         Family family{Family::ipv4};
         u32 generation{};
         u16 port{};

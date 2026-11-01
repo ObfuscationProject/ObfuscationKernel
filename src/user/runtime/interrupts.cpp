@@ -83,4 +83,23 @@ void report_interrupts()
     emit("\n");
 #endif
 }
+// How socket waits were woken (OK_NET_WAITS): waiters enlisted in their
+// socket's wait queue, readiness evaluations, and waiters that found their
+// queue full; once any socket wait was queued.
+inline namespace runtime_detail
+{
+void report_network_waits(Kernel &kernel)
+{
+    const auto tcp = kernel.native_tcp_waits().stats();
+    const auto udp = udp_wait_statistics();
+    if (!tcp.queued && !tcp.unqueued && !udp.queued && !udp.unqueued) return;
+    emit_line("OK_NET_WAITS scope=hardware tcp_queued="); emit_number(tcp.queued);
+    emit(" tcp_evaluated="); emit_number(tcp.evaluated);
+    emit(" tcp_unqueued="); emit_number(tcp.unqueued);
+    emit(" udp_queued="); emit_number(udp.queued);
+    emit(" udp_evaluated="); emit_number(udp.evaluated);
+    emit(" udp_unqueued="); emit_number(udp.unqueued);
+    emit("\n");
+}
+} // namespace runtime_detail
 } // namespace ok::user::native

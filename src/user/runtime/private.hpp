@@ -560,6 +560,12 @@ Status retire_native_udp_receives_for_exec(Kernel &kernel, sched::ProcessId pid)
 i64 resume_native_udp_receive(Kernel &kernel, sched::ProcessControlBlock &process,
                              memory::ObjectHandle object, bool &complete);
 Status scan_native_udp_receives(Kernel &kernel);
+Status notify_udp_receives(Kernel &kernel);
+// Socket receive waits enlisted in their socket's queue, readiness
+// evaluations, and waits that found their queue full (forcing rescans).
+struct UdpWaitCounters { u64 queued{}, evaluated{}, unqueued{}; };
+UdpWaitCounters udp_wait_statistics();
+void report_network_waits(Kernel &kernel);
 RobustWalkReport retire_robust(Kernel &kernel, sched::ProcessControlBlock &process,
                               sched::ThreadLocalState &tls, sched::ThreadId owner);
 void clear_child_tid(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadLocalState &tls, bool peers);

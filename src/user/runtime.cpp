@@ -300,6 +300,7 @@ void finish(Kernel &kernel, sched::ProcessId pid, i32 code, u8 signal)
         if (!runtime_failure) return runtime_failure;
         emit_pool_stats();
         emit_entry_stack_stats();
+        report_network_waits(kernel);
         for (auto &thread : process->threads())
         {
             thread.native_deadline.cancel();
@@ -672,6 +673,7 @@ void release_process(Kernel &kernel, u64 pid)
         clear_group_tids(kernel, *process);
         release(process->resources().native_space, process->resources().native_pages);
         emit_entry_stack_stats();
+        report_network_waits(kernel);
         for (auto &thread : process->threads())
         {
             thread.native_deadline.cancel();
