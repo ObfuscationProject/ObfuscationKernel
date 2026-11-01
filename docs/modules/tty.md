@@ -14,8 +14,10 @@ Current behaviour, which every planned section replaces:
 - `OK_SYS_PTY_PAIR` creates raw native PTY pairs (8 slots, 4096-byte queues)
   with the v1 hangup rules of §8. Linux PTY I/O returns EOPNOTSUPP.
 - Every other terminal request returns ENOTTY, so `isatty()` is false.
-- Native signals are TERM and KILL only. There is no stop or continue state and
-  no WUNTRACED/WCONTINUED reporting.
+- Native signals are TERM and KILL only. The stop overlay of §9.3 exists, but
+  kill, tkill, tgkill, group and timer signals still refuse stop and continue
+  signals, so nothing can stop a process yet. There is no
+  WUNTRACED/WCONTINUED reporting.
 - `OK_TTY` (`fs::TtyDevice`) is a VFS roadmap model. It is not a terminal and is
   not part of this contract.
 
@@ -250,16 +252,23 @@ personalities on MIPS, a signal with no counterpart gives EINVAL.
 | SIGTTOU | 22 | 27 |
 | SIGWINCH | 28 | 20 |
 
-### 9.2 Default actions — planned (S2 delivery; S3 generation)
+### 9.2 Default actions — landed (S2 delivery); planned (S3 generation)
 
 CHLD, WINCH and URG are ignored. CONT continues. STOP, TSTP, TTIN and TTOU
 stop. Every other signal terminates. No core-dump bit is set.
 
-### 9.3 Stop and continue — planned (S2 overlay; S3 generation)
+Landed in S2: a queued default STOP/TSTP/TTIN/TTOU is consumed by Linux
+delivery without a frame and stops the process. A pending default stop or a
+default-ignored signal never interrupts a wait (pipe, child, futex, poll,
+sleep, UDP, sigsuspend); a stop that only threads parked in waits can take is
+applied at the next scheduler step, and those waits stay armed.
+
+### 9.3 Stop and continue — landed (S2 overlay); planned (S3 generation)
 
 - A stop is a per-process overlay: the process is never entered while stopped.
   Kernel waits it started still complete, and their results are published when
-  it resumes.
+  it resumes. (Landed in S2, together with the orphaned-group discard below;
+  the remaining items arrive with signal generation in S3.)
 - Generating SIGCONT continues the process even if SIGCONT is ignored or
   blocked, and discards pending STOP/TSTP/TTIN/TTOU. Generating any stop signal
   discards a pending SIGCONT.
@@ -445,3 +454,11 @@ the UNIX rights regressions). `test_tty_sdk_contract.py` runs the PTY and
 console-input SDK contract suites against the given consumer and prints
 `TTY_SDK_CONTRACT_PASS suites=2 guest=0`; the hosted suite lists it under
 `inputs`. Each slice adds its runners here.
+
+S2 adds `python3 -B scripts/test_job_control_model.py --output <dir>`, which
+prints `JOB_CONTROL_MODEL_PASS profiles=10 numberings=2 orphan_cases=<n>
+guest=0`: Linux generic and MIPS numbering by name, default actions, codes 5/6
+and the SI_KERNEL set on all ten profiles, the actual scheduler stop overlay,
+and the orphaned-group rule against a brute-force oracle over every parent,
+group and session assignment of five processes. The debug test point
+`job-control / scheduler-overlay-orphan-model` is the same kind of model.

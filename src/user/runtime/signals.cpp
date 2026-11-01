@@ -976,6 +976,18 @@ bool private_signal_deliver(Kernel &kernel, sched::ProcessControlBlock &process,
             return true;
         }
         if (result == R::ignored) continue;
+        if (result == R::stop)
+        {
+            // Consumed. TSTP, TTIN and TTOU to an orphaned group are dropped.
+            if (private_jobctl_discard_stop(kernel, process, signal)) continue;
+            // A suspend restarts with no handler run. Rearm before the stop:
+            // the overlay refuses activation of a stopped process.
+            if (signal_waits.saved(thread))
+                static_cast<void>(private_signal_wait_rearm_delivery(kernel, process, thread));
+            else if (poll_signal_masks.saved(thread)) poll_signal_masks.restore(thread);
+            private_jobctl_stop(kernel, process, signal);
+            return false;
+        }
         if (result == R::terminate) finish(kernel, process.pid(), 0, static_cast<u8>(signal));
         else
         {
@@ -1071,7 +1083,7 @@ bool private_pipe_signal_select(Kernel &kernel, const sched::ProcessControlBlock
     {
         const auto *action = actions->find(out.pending.info.signal);
         if (!action) return false;
-        if (PrivateSignalDelivery::Actions::ignored(out.pending.info.signal, *action))
+        if (!PrivateSignalDelivery::Actions::interrupts(out.pending.info.signal, *action))
         { blocked.set(out.pending.info.signal); continue; }
         if (!PrivateSignalDelivery::supported(*action)) return false;
         out.action = *action;
@@ -1204,7 +1216,7 @@ bool private_pipe_write_signal_select(Kernel &kernel, const sched::ProcessContro
     {
         const auto *action = actions->find(out.pending.info.signal);
         if (!action) return false;
-        if (PrivateSignalDelivery::Actions::ignored(out.pending.info.signal, *action))
+        if (!PrivateSignalDelivery::Actions::interrupts(out.pending.info.signal, *action))
         { blocked.set(out.pending.info.signal); continue; }
         if (!PrivateSignalDelivery::supported(*action)) return false;
         out.action = *action;
@@ -1338,7 +1350,7 @@ bool private_child_signal_select(Kernel &kernel, const sched::ProcessControlBloc
     {
         const auto *action = actions->find(out.pending.info.signal);
         if (!action) return false;
-        if (PrivateSignalDelivery::Actions::ignored(out.pending.info.signal, *action))
+        if (!PrivateSignalDelivery::Actions::interrupts(out.pending.info.signal, *action))
         { blocked.set(out.pending.info.signal); continue; }
         if (!PrivateSignalDelivery::supported(*action)) return false;
         out.action = *action;
@@ -1472,7 +1484,7 @@ bool private_futex_signal_select(Kernel &kernel, const sched::ProcessControlBloc
     {
         const auto *action = actions->find(out.pending.info.signal);
         if (!action) return false;
-        if (PrivateSignalDelivery::Actions::ignored(out.pending.info.signal, *action))
+        if (!PrivateSignalDelivery::Actions::interrupts(out.pending.info.signal, *action))
         { blocked.set(out.pending.info.signal); continue; }
         if (!PrivateSignalDelivery::supported(*action)) return false;
         out.action = *action;
@@ -1610,7 +1622,7 @@ bool private_poll_signal_select(Kernel &kernel, const sched::ProcessControlBlock
     {
         const auto *action = actions->find(out.pending.info.signal);
         if (!action) return false;
-        if (PrivateSignalDelivery::Actions::ignored(out.pending.info.signal, *action))
+        if (!PrivateSignalDelivery::Actions::interrupts(out.pending.info.signal, *action))
         { blocked.set(out.pending.info.signal); continue; }
         if (!PrivateSignalDelivery::supported(*action)) return false;
         out.action = *action;
@@ -1756,6 +1768,9 @@ PrivateSignalWaitSelection private_signal_wait_select(Kernel &kernel, const sche
             // work. Normal return delivery drains it without a handler frame.
             selected.outcome = PrivateSignalWaitOutcome::interrupted; return selected;
         }
+        // A default stop leaves the wait armed; private_jobctl_settle stops the process.
+        if (!PrivateSignalDelivery::Actions::interrupts(selected.pending.info.signal, *action))
+        { blocked.set(selected.pending.info.signal); continue; }
         if (action->handler == sched::SignalAction::default_handler)
         { selected.outcome = PrivateSignalWaitOutcome::fatal; return selected; }
         if (!PrivateSignalDelivery::supported(*action)) return {};
@@ -2563,7 +2578,7 @@ bool private_linux_udp_signal_select(Kernel &kernel, const sched::ProcessControl
     {
         const auto *action = actions->find(out.pending.info.signal);
         if (!action) return false;
-        if (PrivateSignalDelivery::Actions::ignored(out.pending.info.signal, *action))
+        if (!PrivateSignalDelivery::Actions::interrupts(out.pending.info.signal, *action))
         { blocked.set(out.pending.info.signal); continue; }
         if (!PrivateSignalDelivery::supported(*action)) return false;
         out.action = *action;

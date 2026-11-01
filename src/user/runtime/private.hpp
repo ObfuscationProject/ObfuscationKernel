@@ -658,6 +658,12 @@ PrivateTimerCounters private_timer_counters();
 Status private_child_exit_commit(Kernel &kernel, PrivateChildExit::Completion &completion);
 
 bool private_child_reap(Kernel &kernel);
+// Job control (jobctl.cpp). Delivery consumed a default stop: an orphaned
+// group discards TSTP/TTIN/TTOU, otherwise the process stops. The settle pass
+// applies a pending default stop that only threads parked in waits can take.
+bool private_jobctl_discard_stop(Kernel &kernel, const sched::ProcessControlBlock &process, u32 signal);
+void private_jobctl_stop(Kernel &kernel, sched::ProcessControlBlock &process, u32 signal);
+void private_jobctl_settle(Kernel &kernel);
 #endif
 void queue_pipe_sigpipe(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadId tid);
 bool finish_futex(Kernel &kernel, memory::ObjectHandle object, sched::WaitCompletion cause, i64 result);

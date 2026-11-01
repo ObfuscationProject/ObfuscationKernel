@@ -97,8 +97,9 @@ struct LinuxSleepInterruption
     }
 };
 
-// Ignored pending work must not hide a lower-priority caught signal, but neither
-// selecting nor skipping it completes a wait or consumes a signal ticket.
+// Ignored or default-stop pending work must not hide a lower-priority caught
+// signal, but neither selecting nor skipping it completes a wait or consumes
+// a signal ticket. A default stop leaves the sleep armed while stopped.
 template <abi::linux_user::Profile Profile, typename Queue, typename Supported>
 [[nodiscard]] bool sleep_interrupting_signal(const Queue &queue, const sched::SignalActionTable &actions,
                                              sched::SignalMask blocked, Supported &&supported)
@@ -109,7 +110,7 @@ template <abi::linux_user::Profile Profile, typename Queue, typename Supported>
     {
         const auto *action = actions.find(ticket.info.signal);
         if (!action) return false;
-        if (Codec::ignored(ticket.info.signal, *action))
+        if (!Codec::interrupts(ticket.info.signal, *action))
         { blocked.set(ticket.info.signal); continue; }
         return std::forward<Supported>(supported)(*action);
     }

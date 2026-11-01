@@ -1084,6 +1084,10 @@ bool step(Kernel &kernel)
                 else
                     waiting_deadline = true;
             }
+#ifdef OK_PRIVATE_POLL_MASK
+    // A stop never interrupts a wait; settle the ones only parked threads can take.
+    private_jobctl_settle(kernel);
+#endif
     if (!runtime_failure || !started) { started = false; return false; }
     struct Candidate { sched::ProcessId pid{}; sched::ThreadId tid{}; };
     auto before = [](Candidate left, Candidate right) {
@@ -1092,8 +1096,9 @@ bool step(Kernel &kernel)
     Candidate chosen{}, first{};
     for (const auto &candidate : kernel.scheduler().processes())
     {
-        if (candidate.state() != sched::ProcessState::runnable && candidate.state() != sched::ProcessState::running &&
-            candidate.state() != sched::ProcessState::blocked)
+        // A stopped process is never entered; its waits still complete above.
+        if ((candidate.state() != sched::ProcessState::runnable && candidate.state() != sched::ProcessState::running &&
+             candidate.state() != sched::ProcessState::blocked) || candidate.job_control().stopped)
             continue;
         for (const auto &thread : candidate.threads())
         {

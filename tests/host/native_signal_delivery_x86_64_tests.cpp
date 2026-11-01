@@ -99,7 +99,15 @@ void no_handler_paths(){
  {Fixture f;f.enqueue(10);f.blocked.set(10);const auto before=f.frame;CHECK(f.deliver()==DeliveryResult::none&&f.signal==0xaabbccdd&&equal_frame(before,f.frame)&&f.memory.stores.empty()&&f.pending.pending_mask().contains(10));}
  for(u32 sig:{1U,9U,10U,11U,31U,32U,64U}){Fixture f;f.enqueue(sig);const auto before=f.frame;CHECK(f.deliver()==DeliveryResult::terminate&&f.signal==sig&&!f.pending.pending_mask().contains(sig)&&equal_frame(before,f.frame)&&f.memory.stores.empty());}
  for(u32 sig:{17U,18U,23U,28U}){Fixture f;f.enqueue(sig);const auto before=f.frame;CHECK(f.deliver()==DeliveryResult::ignored&&f.signal==sig&&!f.pending.pending_mask().contains(sig)&&equal_frame(before,f.frame)&&f.memory.stores.empty());}
- for(u32 sig:{19U,20U,21U,22U}){Fixture f;f.enqueue(sig);const auto before=f.frame;CHECK(f.deliver()==DeliveryResult::unsupported&&f.signal==sig&&f.pending.pending_mask().contains(sig)&&equal_frame(before,f.frame)&&f.memory.stores.empty());}
+ // A default STOP/TSTP/TTIN/TTOU is consumed as a stop; frame, mask and actions stay unchanged.
+ for(u32 sig:{19U,20U,21U,22U}){Fixture f;f.enqueue(sig);f.blocked.set(12);const auto before=f.frame;const auto blocked=f.blocked;const auto actions=f.actions;CHECK(f.deliver()==DeliveryResult::stop&&f.signal==sig&&!f.pending.pending_mask().contains(sig)&&equal_frame(before,f.frame)&&f.blocked==blocked&&f.actions==actions&&f.memory.stores.empty());CHECK(f.deliver()==DeliveryResult::none);}
+ // SIG_IGN drops TSTP/TTIN/TTOU and a handler runs; neither stops.
+ for(u32 sig:{20U,21U,22U}){
+  {Fixture f;f.enqueue(sig);f.actions.find(sig)->handler=1;CHECK(f.deliver()==DeliveryResult::ignored&&f.signal==sig&&!f.pending.pending_mask().contains(sig)&&f.memory.stores.empty());}
+  {Fixture f;f.caught(sig);f.enqueue(sig);CHECK(f.deliver()==DeliveryResult::handler&&f.signal==sig&&!f.pending.pending_mask().contains(sig)&&f.memory.get(f.frame.sp+312,4)==sig);}
+ }
+ // A stop behind a blocked lower signal is still selected; the blocked one stays queued.
+ {Fixture f;f.enqueue(10);f.blocked.set(10);f.enqueue(20);CHECK(f.deliver()==DeliveryResult::stop&&f.signal==20&&f.pending.pending_mask().contains(10));}
  {Fixture f;f.enqueue(64);f.actions.find(64)->handler=1;CHECK(f.deliver()==DeliveryResult::ignored&&!f.pending.pending_mask().contains(64)&&f.memory.stores.empty());}
  {Fixture f;f.enqueue(10);CHECK(f.pending.enqueue({10,0,111,222})==Queue::Enqueue::coalesced);f.caught(10);CHECK(f.deliver()==DeliveryResult::handler);CHECK(f.memory.get(f.frame.sp+328,4)==99);}
 }
