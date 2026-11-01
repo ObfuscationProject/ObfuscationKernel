@@ -31,8 +31,8 @@ UAPI placement:
 
 | Header | Content | Slice |
 |---|---|---|
-| `ok/uapi/termios.h` (new) | `struct ok_termios`, `struct ok_winsize`, flag and cc macros, `OK_TCIFLUSH/OK_TCOFLUSH/OK_TCIOFLUSH` | S1 |
-| `ok/uapi/syscall.h` (additive defines only) | `OK_TCGETS` … `OK_TIOCNOTTY` (S1), `OK_TIOCGPTN`, `OK_TIOCSPTLCK` (S5), `OK_O_NOCTTY`, `OK_EINTR`, `OK_ENXIO`, `OK_ENOSPC`, `OK_PTS_MAJOR`, `OK_PTS_CAPACITY` (S6) | S1, S5, S6 |
+| `ok/uapi/termios.h` (new) | `struct ok_termios`, `struct ok_winsize`, flag and cc macros, `OK_TCIFLUSH/OK_TCOFLUSH/OK_TCIOFLUSH` | landed (S1) |
+| `ok/uapi/syscall.h` (additive defines only) | `OK_TCGETS` … `OK_TIOCNOTTY` (S1), `OK_TIOCGPTN`, `OK_TIOCSPTLCK` (S5), `OK_O_NOCTTY`, `OK_EINTR`, `OK_ENXIO`, `OK_ENOSPC`, `OK_PTS_MAJOR`, `OK_PTS_CAPACITY` (S6) | landed (S1); planned (S5, S6) |
 | `ok/uapi/job_control.h` (new; C, include guard only) | native signal numbers other than KILL and TERM, `OK_SIG_DFL`, `OK_SIG_IGN`, `struct ok_sigaction`, `OK_NATIVE_SIGNAL_ACTION_VERSION`, `OK_WNOHANG`, `OK_WUNTRACED`, `OK_WCONTINUED` | S3 |
 | `ok/uapi/signal.h` | unchanged until S9; S9 decides whether `job_control.h` folds into it with UAPI 0.17 | S9 |
 
@@ -110,7 +110,7 @@ strict decimal only. An entry disappears when its master's last open closes.
   group, and the association is cleared. From another member: only that
   process detaches. Not the caller's ctty, or a master: ENOTTY.
 
-## 5. ioctl requests — planned (S1 codecs; S4 console; S5 PTY; S8 gate)
+## 5. ioctl requests — codecs landed (S1); planned (S4 console; S5 PTY; S8 gate)
 
 Error order: (1) EBADF; (2) ENOTTY for a non-terminal fd, an unknown request,
 or a request invalid on this side; (3) association checks; (4) job-control
@@ -146,7 +146,7 @@ Every other request gives ENOTTY, including TCXONC, TCGETS2, TIOCPKT, TIOCSTI,
 TIOCGPTPEER and TIOCOUTQ. On a hung-up ptmx slave every ioctl gives EIO except
 TIOCSPGRP, which gives ENOTTY.
 
-## 6. termios — planned (S1 values; S4 console; S5 PTY)
+## 6. termios — values landed (S1); planned (S4 console; S5 PTY)
 
 Native `struct ok_termios` is `{u32 c_iflag, c_oflag, c_cflag, c_lflag; u8
 c_line; u8 c_cc[19];}`: 36 bytes, target endian, identical on all ten profiles.
@@ -191,7 +191,7 @@ behaviour (CR→LF, no echo, byte at a time) and stays the kernel default
 permanently: a getty sets cooked mode itself, and login clears ECHO for the
 password.
 
-## 7. N_TTY behaviour — planned (S1 model; S4 console; S5 PTY; S7 PTY VTIME)
+## 7. N_TTY behaviour — model landed (S1); planned (S4 console; S5 PTY; S7 PTY VTIME)
 
 - The read buffer is 4096 bytes. In canonical mode one slot is reserved for
   the line terminator, so the longest line is 4095 bytes plus the terminator.
@@ -390,7 +390,7 @@ Beyond §3 and §5:
 | ENOSPC | 28 | no free PTY slot |
 | EOPNOTSUPP | 95 | see §9.8 |
 
-## 12. Capacities — planned (S1, S5)
+## 12. Capacities — N_TTY and termios landed (S1); planned (S5)
 
 | Item | Value |
 |---|---|
@@ -434,8 +434,8 @@ profile string and version above keeps its current value.
 | 5 | No devpts filesystem: no mount options, no `newinstance`, no `/dev/pts/ptmx`. `st_dev(/dev/pts/N) == st_dev(/dev)`. The gid policy is the opener's egid. | planned (S6) |
 | 6 | 8 PTYs, shared with raw pairs. | planned (S5, S6) |
 | 7 | No console vhangup. VTIME on the console is treated as 0. IXON output stop works on PTY slaves only. | planned (S4, S8) |
-| 8 | VMIN reads are admitted atomically. | planned (S1) |
-| 9 | Echo overflow and console overrun drop bytes and are counted. | planned (S1, S4) |
+| 8 | VMIN reads are admitted atomically. | landed (S1) |
+| 9 | Echo overflow and console overrun drop bytes and are counted. | landed (S1); planned (S4) |
 | 10 | A PTY master cannot be a controlling terminal. | planned (S5) |
 | 11 | Native `stat` has no rdev, and there is no `ttyname` (no `/proc`). | planned (S6) |
 | 12 | After a hangup and a later re-acquire by the leader, members forked earlier see the new ctty. | planned (S8) |
@@ -448,6 +448,8 @@ Hosted runners (model/hosted evidence only):
 ```sh
 python3 -B scripts/test_native_pty.py --output <dir>
 python3 -B scripts/test_tty_sdk_contract.py --output <dir> --os-root <ObfuscationOS checkout>
+python3 -B scripts/test_n_tty_model.py --output <dir>
+python3 -B scripts/test_terminal_codec.py --output <dir>
 ```
 
 `test_native_pty.py` builds every target of `tests/host/native_pty/xmake.lua`
@@ -458,7 +460,31 @@ binary's exact completion line (`PRIVATE_PTY_ACTUAL_OFD`,
 the UNIX rights regressions). `test_tty_sdk_contract.py` runs the PTY and
 console-input SDK contract suites against the given consumer and prints
 `TTY_SDK_CONTRACT_PASS suites=2 guest=0`; the hosted suite lists it under
-`inputs`. Each slice adds its runners here.
+`inputs`.
+
+S1 (value layer; nothing under `src/` uses it yet):
+
+- `include/ok/tty/termios.hpp`: `Termios`, `WinSize`, `ForeignResidue`,
+  `linux_std_termios()`, `console_compat_termios()`, `raw_pair_termios()` and
+  the 36-byte `NativeTermiosWire<BigEndian>`.
+- `include/ok/tty/n_tty.hpp`: the constant-initializable `NTty<4096, 512>`
+  template. It reports signals, flushes and readiness to its owner, returns
+  VMIN/VTIME waits and timer lengths instead of keeping a clock, and leaves
+  echo and output bytes for the owner to move.
+- `include/ok/abi/linux_termios.hpp`: `TermiosCodec<Profile>` and
+  `TtyIoctlCodec<Profile>` over the generated tables (codec revision 3).
+- `test_n_tty_model.py` requires `N_TTY_MODEL_PASS canonical=4096 echo=512
+  model_steps=100000 utf8_erase=1 isig=1 vmin_vtime=1 opost=1
+  raw_equivalence=1 constexpr=1 guest=0`: directed Linux n_tty cases, a seeded
+  differential run against a string reference, and `raw_pair_termios()` as a
+  4096-byte FIFO.
+- `test_terminal_codec.py` requires `TERMINAL_CODEC_PASS linux_profiles=10
+  termios_layouts=3 roundtrip=1 residue=1 native_wire_endians=2 hosted=1
+  guest=0`. It also compiles `ok/uapi/termios.h` as C and compares its macros
+  with the generated asm-generic values. The header uses `_Static_assert`, so
+  it is C only; C++ code uses `ok/tty/termios.hpp`.
+- Debug test points `tty/n-tty-line-discipline-model` and
+  `tty/termios-codec-model` (configured profile) are models booted in QEMU.
 
 S2 adds `python3 -B scripts/test_job_control_model.py --output <dir>`, which
 prints `JOB_CONTROL_MODEL_PASS profiles=10 numberings=2 orphan_cases=<n>
@@ -467,3 +493,5 @@ and the SI_KERNEL set on all ten profiles, the actual scheduler stop overlay,
 and the orphaned-group rule against a brute-force oracle over every parent,
 group and session assignment of five processes. The debug test point
 `job-control / scheduler-overlay-orphan-model` is the same kind of model.
+
+Each slice adds its runners here.
