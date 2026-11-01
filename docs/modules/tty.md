@@ -261,7 +261,12 @@ Landed in S2: a queued default STOP/TSTP/TTIN/TTOU is consumed by Linux
 delivery without a frame and stops the process. A pending default stop or a
 default-ignored signal never interrupts a wait (pipe, child, futex, poll,
 sleep, UDP, sigsuspend); a stop that only threads parked in waits can take is
-applied at the next scheduler step, and those waits stay armed.
+applied at the next scheduler step, and those waits stay armed. That step takes
+the stop only when it is the signal the thread would dequeue next (directed
+queue, then shared, lowest number first, ignored signals passed over), so a
+lower-numbered fatal or caught signal is delivered first. A ppoll or pselect
+interrupted by a caught signal keeps its temporary mask across a stop, and the
+handler runs under it after the continue.
 
 ### 9.3 Stop and continue — landed (S2 overlay); planned (S3 generation)
 

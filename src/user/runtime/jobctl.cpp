@@ -13,42 +13,31 @@ inline namespace runtime_detail
 namespace
 {
 using JobActions = SignalActionCodec<private_signal_profile>;
-constexpr std::array<u32, 4> jobctl_stop_signals{JobActions::stop_signal, JobActions::tstp_signal,
-                                                 JobActions::ttin_signal, JobActions::ttou_signal};
+using JobPendingView = SignalPendingView<PrivateSignalQueue, PrivateProcessQueue>;
 
-// A mask that admits only `signal`.
-sched::SignalMask jobctl_only(u32 signal)
-{
-    sched::SignalMask mask;
-    for (auto &word : mask.words) word = ~u64{0};
-    mask.set(signal, false);
-    return mask;
-}
-
-// Consume a pending default stop that `thread` would take, from its directed
-// queue first, then the shared queue. `shared` is the shared pending mask.
+// Consume a pending default stop only when it is the signal `thread` would
+// dequeue next in Linux order (directed queue, then shared, lowest number
+// first). Ignored entries are passed over as get_signal discards them; a lower
+// fatal or caught signal comes first and the wait selectors deliver it.
 // Returns the signal, or 0.
-u32 jobctl_take_stop(PrivateSignalActions &state, const sched::SignalMask &shared, sched::ThreadControlBlock &thread)
+u32 jobctl_take_stop(PrivateSignalActions &state, sched::ThreadControlBlock &thread)
 {
-    const auto *wait = signal_waits.real_blocked(thread) ? signal_waits.find(thread) : nullptr;
-    auto *directed = private_signal_queue(thread);
-    const auto mine = directed ? directed->pending_mask() : sched::SignalMask{};
-    for (const auto signal : jobctl_stop_signals)
+    JobPendingView view{private_signal_queue(thread), &state.shared};
+    if (!view) return 0;
+    auto blocked = thread.native_signal_mask;
+    // sigtimedwait dequeues a signal it waits for instead of stopping.
+    if (signal_waits.real_blocked(thread))
+        if (const auto *wait = signal_waits.find(thread))
+            for (usize i = 0; i < blocked.words.size(); ++i) blocked.words[i] |= wait->request.wanted.words[i];
+    JobPendingView::Delivery next;
+    while (view.peek(blocked, next))
     {
-        if (!shared.contains(signal) && !mine.contains(signal)) continue;
+        const auto signal = next.info.signal;
         const auto *action = state.table.find(signal);
-        if (!action || action->handler != sched::SignalAction::default_handler ||
-            thread.native_signal_mask.contains(signal)) continue;
-        // sigtimedwait dequeues a signal it waits for instead of stopping.
-        if (wait && wait->request.wanted.contains(signal)) continue;
-        const auto only = jobctl_only(signal);
-        if (directed)
-        {
-            PrivateSignalQueue::Delivery ticket;
-            if (directed->peek(only, ticket)) return directed->consume(ticket) ? signal : 0;
-        }
-        PrivateProcessQueue::Delivery ticket;
-        if (state.shared.peek(only, ticket)) return state.shared.consume(ticket) ? signal : 0;
+        if (!action) return 0;
+        if (JobActions::ignored(signal, *action)) { blocked.set(signal); continue; }
+        if (action->handler != sched::SignalAction::default_handler || !JobActions::default_stop(signal)) return 0;
+        return view.consume(next) ? signal : 0;
     }
     return 0;
 }
@@ -80,11 +69,10 @@ void private_jobctl_settle(Kernel &kernel)
             continue;
         auto *state = private_signal_find(process.pid());
         if (!state) continue;
-        const auto shared = state->shared.pending_mask();
         for (auto &thread : process.threads())
         {
             if (!thread.native_active || thread.state != sched::ProcessState::blocked) continue;
-            const auto signal = jobctl_take_stop(*state, shared, thread);
+            const auto signal = jobctl_take_stop(*state, thread);
             if (!signal || private_jobctl_discard_stop(kernel, process, signal)) continue;
             private_jobctl_stop(kernel, process, signal);
             break;
