@@ -120,6 +120,14 @@ bool defaults()
 bool canonical_lines_and_eof()
 {
     const Termios termios = cooked();
+    {
+        // Input::echoed reports new echo; ECHO clear produces none.
+        Tty echoing{};
+        CHECK(echoing.receive(termios, bytes("a"), 1, false).echoed);
+        Termios silent = termios;
+        silent.lflag &= ~lflag::echo;
+        CHECK(!echoing.receive(silent, bytes("b"), 1, false).echoed && echoing.echo_pending() == 1);
+    }
     Tty tty{};
     CHECK(tty.plan_read(termios, 8, false, false).wait == Tty::ReadWait::input);
     CHECK(tty.plan_read(termios, 8, true, false).wait == Tty::ReadWait::would_block);
@@ -210,6 +218,15 @@ bool lnext_and_reprint()
     CHECK(echo_of(tty) == "^R\r\na^Cb^?");
     tty.receive(termios, bytes("\n"), 1, false);
     CHECK(read_now(tty, termios, 8) == std::string("a\x03" "b\x7f\n"));
+    echo_of(tty);
+    // An ICANON change cancels a pending LNEXT (n_tty_set_termios).
+    tty.receive(termios, bytes("\x16"), 1, false);
+    Termios plain = termios;
+    plain.lflag &= ~lflag::icanon;
+    tty.set_termios(termios, plain);
+    tty.set_termios(plain, termios);
+    tty.receive(termios, bytes("\x7f\n"), 1, false);
+    CHECK(read_now(tty, termios, 8) == "\n");
     echo_of(tty);
     // An input flush (TCIFLUSH, TCSETSF) keeps a pending LNEXT, as Linux
     // reset_buffer_flags does; a hangup clears it.
@@ -333,6 +350,10 @@ bool output_processing()
     termios.oflag = oflag::opost | oflag::onlret;
     tty.process_output(termios, bytes("zz\n"), out);
     CHECK(tty.column() == 0);
+    // OCRNL with ONLRET: CR becomes NL and returns the column to 0.
+    termios.oflag = oflag::opost | oflag::ocrnl | oflag::onlret;
+    result = tty.process_output(termios, bytes("ab\r"), out);
+    CHECK(text(result.produced) == "ab\n" && tty.column() == 0);
     // IUTF8 continuation bytes do not advance the column.
     termios.oflag = oflag::opost;
     termios.iflag = iflag::iutf8;
@@ -342,6 +363,20 @@ bool output_processing()
     termios.oflag = oflag::onlcr;
     result = tty.process_output(termios, bytes("\n\r\t"), out);
     CHECK(text(result.produced) == "\n\r\t");
+    // A hangup resets both the column and the line start column: a tab typed
+    // with ECHO clear and erased with ECHO set backs up from column 0.
+    Tty line{};
+    const Termios echoing = cooked();
+    line.process_output(echoing, bytes("abc"), out);
+    line.receive(echoing, bytes("x"), 1, false); // the line starts at column 3
+    CHECK(line.column() == 4);
+    line.hangup();
+    CHECK(line.column() == 0);
+    Termios silent = echoing;
+    silent.lflag &= ~lflag::echo;
+    line.receive(silent, bytes("\t"), 1, false);
+    line.receive(echoing, bytes("\x7f"), 1, false);
+    CHECK(echo_of(line) == std::string(8, '\b'));
     return true;
 }
 
@@ -780,9 +815,11 @@ bool raw_equivalence(usize steps)
             std::string input(random() % 700, '\0');
             for (auto &c : input)
                 c = static_cast<char>(random());
+            const bool was_empty = fifo.empty();
             const auto received = tty.receive(termios, bytes(input), 0, false);
             const usize accepted = input.size() < 4096 - fifo.size() ? input.size() : 4096 - fifo.size();
             CHECK(received.consumed == accepted && received.signal_count == 0 && !received.echoed);
+            CHECK(received.became_readable == (was_empty && accepted > 0));
             fifo.insert(fifo.end(), input.begin(), input.begin() + static_cast<long>(accepted));
         }
         else
