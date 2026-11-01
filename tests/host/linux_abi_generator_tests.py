@@ -10,7 +10,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from generate_linux_abi import (PROFILES, definitions, generate, linux_numbers, number,
                                 ioctl_definitions, ioctl_integer, ioctl_layout,
-                                console_ioctl_numbers, checked_console_ioctls)
+                                console_ioctl_numbers, checked_console_ioctls, checked_tty_ioctls,
+                                termios_profile, TERMIOS_SINGLE, TERMIOS_CC,
+                                TERMIOS_LINUX_ONLY, TTY_IOCTLS)
 
 LINUX_IOCTL = """
 #define _IOC_NRBITS 8
@@ -63,7 +65,7 @@ class LinuxAbiGeneratorTests(unittest.TestCase):
     def test_console_ioctl_profiles_errno_and_source_pins(self):
         manifest = json.loads((ROOT / 'docs/abi/linux-profiles.json').read_text())
         self.assertEqual(len(manifest['profiles']), 10)
-        self.assertEqual(manifest['codec_revision'], 2)
+        self.assertEqual(manifest['codec_revision'], 3)
         for row in manifest['profiles']:
             arch = row['architecture']
             mips = arch in ('mips', 'mips64')
@@ -386,6 +388,147 @@ class LinuxAbiGeneratorTests(unittest.TestCase):
                      'sigaltstack', 'sigqueue'):
             self.assertIn('musl/src/signal/' + name + '.c', manifest['source_file_sha256'])
         self.assertIn('musl/src/thread/pthread_kill.c', manifest['source_file_sha256'])
+
+
+GENERIC_TTY_IOCTL = """
+#define TCGETS 0x5401
+#define TCSETS 0x5402
+#define TCSETSW 0x5403
+#define TCSETSF 0x5404
+#define TCSBRK 0x5409
+#define TCFLSH 0x540B
+#define TIOCGWINSZ 0x5413
+#define TIOCSWINSZ 0x5414
+#define TIOCNOTTY 0x5422
+#define FIONREAD 0x541B
+#define TIOCINQ FIONREAD
+#define TIOCGPTN _IOR('T', 0x30, unsigned int)
+#define TIOCSPTLCK _IOW('T', 0x31, int)
+"""
+PPC_TTY_IOCTL = """
+#define TCGETS _IOR('t', 19, char[44])
+#define TCSETS _IOW('t', 20, char[44])
+#define TCSETSW _IOW('t', 21, char[44])
+#define TCSETSF _IOW('t', 22, char[44])
+#define TCSBRK _IO('t', 29)
+#define TCFLSH _IO('t', 31)
+#define TIOCGWINSZ _IOR('t', 104, char[8])
+#define TIOCSWINSZ _IOW('t', 103, char[8])
+#define TIOCNOTTY 0x5422
+#define FIONREAD _IOR('f', 127, int)
+#define TIOCGPTN _IOR('T', 0x30, unsigned int)
+#define TIOCSPTLCK _IOW('T', 0x31, int)
+"""
+LINUX_IO = '#define _IO(type,nr) _IOC(_IOC_NONE,(type),(nr),0)\n'
+MUSL_IO = '#define _IO(a,b) _IOC(_IOC_NONE,(a),(b),0)\n'
+# asm-generic values of every name the generator maps.
+GENERIC_TERMIOS = dict(
+    IGNBRK=0x1, BRKINT=0x2, IGNPAR=0x4, PARMRK=0x8, INPCK=0x10, ISTRIP=0x20, INLCR=0x40, IGNCR=0x80, ICRNL=0x100,
+    IUCLC=0x200, IXON=0x400, IXANY=0x800, IXOFF=0x1000, IMAXBEL=0x2000, IUTF8=0x4000, OPOST=0x1, OLCUC=0x2,
+    ONLCR=0x4, OCRNL=0x8, ONOCR=0x10, ONLRET=0x20, OFILL=0x40, OFDEL=0x80, NLDLY=0x100, NL0=0, NL1=0x100,
+    CRDLY=0x600, CR0=0, CR1=0x200, CR2=0x400, CR3=0x600, TABDLY=0x1800, TAB0=0, TAB1=0x800, TAB2=0x1000,
+    TAB3=0x1800, BSDLY=0x2000, BS0=0, BS1=0x2000, VTDLY=0x4000, VT0=0, VT1=0x4000, FFDLY=0x8000, FF0=0,
+    FF1=0x8000, CSTOPB=0x40, CREAD=0x80, PARENB=0x100, PARODD=0x200, HUPCL=0x400, CLOCAL=0x800,
+    ADDRB=0x20000000, CMSPAR=0x40000000, CRTSCTS=0x80000000, CBAUD=0x100f, CSIZE=0x30, CS5=0, CS6=0x10,
+    CS7=0x20, CS8=0x30, CIBAUD=0x100f0000, IBSHIFT=16, BOTHER=0x1000, ISIG=0x1, ICANON=0x2, XCASE=0x4,
+    ECHO=0x8, ECHOE=0x10, ECHOK=0x20, ECHONL=0x40, NOFLSH=0x80, TOSTOP=0x100, ECHOCTL=0x200, ECHOPRT=0x400,
+    ECHOKE=0x800, FLUSHO=0x1000, PENDIN=0x4000, IEXTEN=0x8000, EXTPROC=0x10000)
+GENERIC_TERMIOS.update({name: index for index, name in enumerate(TERMIOS_CC)})
+GENERIC_TERMIOS.update({name: value for name, value in zip(
+    ['B0', 'B50', 'B75', 'B110', 'B134', 'B150', 'B200', 'B300', 'B600', 'B1200', 'B1800', 'B2400', 'B4800',
+     'B9600', 'B19200', 'B38400'], range(16))})
+GENERIC_TERMIOS.update({name: 0x1001 + index for index, name in enumerate(
+    ['B57600', 'B115200', 'B230400', 'B460800', 'B500000', 'B576000', 'B921600', 'B1000000', 'B1152000',
+     'B1500000', 'B2000000', 'B2500000', 'B3000000', 'B3500000', 'B4000000'])})
+
+
+def termios_source(values, nccs, *, musl=False, skip=()):
+    struct = ('typedef unsigned char cc_t;\ntypedef unsigned int tcflag_t;\n'
+              'struct termios {\n tcflag_t c_iflag;\n tcflag_t c_oflag;\n tcflag_t c_cflag;\n'
+              ' tcflag_t c_lflag;\n cc_t c_line;\n cc_t c_cc[NCCS];\n' +
+              (' unsigned int __c_ispeed, __c_ospeed;\n' if musl else '') + '};\n'
+              'struct winsize {\n unsigned short ws_row;\n unsigned short ws_col;\n'
+              ' unsigned short ws_xpixel;\n unsigned short ws_ypixel;\n};\n')
+    macros = ''.join(f'#define {name} {value:#x}\n' for name, value in values.items() if name not in skip)
+    return [f'#define NCCS {nccs}\n' + struct + macros]
+
+
+class LinuxTerminalGeneratorTests(unittest.TestCase):
+    def test_terminal_requests_layouts_and_maps_per_profile(self):
+        manifest = json.loads((ROOT / 'docs/abi/linux-profiles.json').read_text())
+        for row in manifest['profiles']:
+            arch = row['architecture']
+            mips, ppc = arch in ('mips', 'mips64'), arch == 'ppc'
+            with self.subTest(architecture=arch):
+                expected = ((0x540d, 0x540e, 0x540f, 0x5410, 0x5405, 0x5407, 0x40087468, 0x80087467, 0x5471,
+                             0x467f, 0x40045430, 0x80045431) if mips else
+                            (0x402c7413, 0x802c7414, 0x802c7415, 0x802c7416, 0x2000741d, 0x2000741f, 0x40087468,
+                             0x80087467, 0x5422, 0x4004667f, 0x40045430, 0x80045431) if ppc else
+                            (0x5401, 0x5402, 0x5403, 0x5404, 0x5409, 0x540b, 0x5413, 0x5414, 0x5422, 0x541b,
+                             0x80045430, 0x40045431))
+                self.assertEqual(tuple(row['tty_ioctl_numbers'].values()), expected)
+                self.assertEqual(list(row['tty_ioctl_numbers']), list(TTY_IOCTLS))
+                self.assertEqual(row['linux_tty_ioctl_crosschecks'], list(TTY_IOCTLS))
+                layout = row['termios_layout']
+                self.assertEqual((layout['bytes'], layout['nccs'], layout['line_offset'], layout['cc_offset'],
+                                  layout['speed_offset'], layout['winsize_bytes']),
+                                 (44, 19, 35, 16, 36, 8) if ppc else (40, 23, 16, 17, 0, 8) if mips else
+                                 (36, 19, 16, 17, 0, 8))
+                self.assertEqual((layout['musl_bytes'], layout['musl_nccs']), (44, 19) if ppc else (60, 32))
+                self.assertEqual(row['termios_unnamed_cc_slots'], [11, 18, 19, 20, 21, 22] if mips else [17, 18])
+                self.assertEqual(row['termios_values']['TOSTOP'], 0x400000 if ppc else 0x8000 if mips else 0x100)
+                self.assertEqual(row['termios_cc_slots']['VMIN'], 5 if ppc else 4 if mips else 6)
+                self.assertEqual(row['linux_only_termios'], sorted(TERMIOS_LINUX_ONLY))
+                for name in list(TERMIOS_CC) + [n for names in TERMIOS_SINGLE.values() for n in names]:
+                    if name not in TERMIOS_LINUX_ONLY:
+                        self.assertIn(name, row['linux_termios_crosschecks'])
+                for name in ('ENXIO', 'ENOSPC'):
+                    self.assertIn(name, row['linux_errno_crosschecks'])
+                self.assertEqual(row['errno_numbers']['ENXIO'], 6)
+                self.assertEqual(row['errno_numbers']['ENOSPC'], 28)
+        for name in ('linux/include/uapi/asm-generic/termbits.h', 'linux/include/uapi/asm-generic/termbits-common.h',
+                     'linux/arch/mips/include/uapi/asm/termbits.h', 'linux/arch/powerpc/include/uapi/asm/termbits.h',
+                     'musl/src/termios/tcgetattr.c', 'musl/src/termios/tcsetattr.c',
+                     'musl/arch/generic/bits/termios.h', 'musl/arch/mips/bits/termios.h',
+                     'musl/arch/powerpc/bits/termios.h'):
+            self.assertIn(name, manifest['source_file_sha256'])
+
+    def test_terminal_ioctl_sizes_come_only_from_the_checked_table(self):
+        values = checked_tty_ioctls(GENERIC_TTY_IOCTL, LINUX_IOCTL + LINUX_IO, None,
+                                    MUSL_IOCTL + MUSL_IO + GENERIC_TTY_IOCTL, 36, 8)
+        self.assertEqual(values['TIOCGPTN'], 0x80045430)
+        self.assertEqual(values['TCFLSH'], 0x540b)
+        musl = MUSL_IOCTL.replace('<<30', '<<29').replace('_IOC_NONE 0U', '_IOC_NONE 1U') \
+            .replace('_IOC_WRITE 1U', '_IOC_WRITE 4U')
+        values = checked_tty_ioctls(PPC_TTY_IOCTL, LINUX_IOCTL + LINUX_IO, LINUX_IOCTL_OVERRIDE,
+                                    musl + MUSL_IO + PPC_TTY_IOCTL, 44, 8)
+        self.assertEqual((values['TCGETS'], values['TCSBRK'], values['FIONREAD']), (0x402c7413, 0x2000741d, 0x4004667f))
+        for bad in ("_IOR('t', 19, char[40])", "_IOR('t', 19, struct termios2)", "_IOR('t', 19, long)",
+                    "_IOWR('t', 19, char[44])"):
+            with self.subTest(expression=bad), self.assertRaises(ValueError):
+                checked_tty_ioctls(PPC_TTY_IOCTL.replace("_IOR('t', 19, char[44])", bad), LINUX_IOCTL + LINUX_IO,
+                                   LINUX_IOCTL_OVERRIDE, musl + MUSL_IO + PPC_TTY_IOCTL, 44, 8)
+        with self.assertRaisesRegex(ValueError, 'terminal ioctl command mismatch'):
+            checked_tty_ioctls(GENERIC_TTY_IOCTL, LINUX_IOCTL + LINUX_IO, None,
+                               MUSL_IOCTL + MUSL_IO + GENERIC_TTY_IOCTL.replace('0x5413', '0x5412'), 36, 8)
+
+    def test_termios_linux_musl_disagreement_fails(self):
+        linux = termios_source(GENERIC_TERMIOS, 19)
+        musl = termios_source(GENERIC_TERMIOS, 32, musl=True, skip=TERMIOS_LINUX_ONLY)
+        table = termios_profile(linux, musl)
+        self.assertEqual((table['bytes'], table['nccs'], table['musl_bytes']), (36, 19, 60))
+        self.assertEqual(table['linux_only'], sorted(TERMIOS_LINUX_ONLY))
+        for name, value in (('ECHO', 0x4), ('VMIN', 5), ('B115200', 0x1003), ('CSIZE', 0x70)):
+            changed = dict(GENERIC_TERMIOS, **{name: value})
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                termios_profile(linux, termios_source(changed, 32, musl=True, skip=TERMIOS_LINUX_ONLY))
+        with self.assertRaisesRegex(ValueError, 'missing musl termios name'):
+            termios_profile(linux, termios_source(GENERIC_TERMIOS, 32, musl=True, skip=('IUTF8', 'ADDRB', 'BOTHER')))
+        with self.assertRaisesRegex(ValueError, 'prefix-compatible'):
+            termios_profile(linux, termios_source(GENERIC_TERMIOS, 17, musl=True, skip=TERMIOS_LINUX_ONLY))
+        with self.assertRaisesRegex(ValueError, 'distinct bit'):
+            termios_profile(termios_source(dict(GENERIC_TERMIOS, ECHO=0x18), 19),
+                            termios_source(dict(GENERIC_TERMIOS, ECHO=0x18), 32, musl=True, skip=TERMIOS_LINUX_ONLY))
 
 
 if __name__ == '__main__':

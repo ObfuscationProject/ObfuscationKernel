@@ -46,6 +46,40 @@ OPERATIONS += ['getitimer', 'setitimer', 'alarm', 'timer_create', 'timer_settime
 ERRORS += ['ESRCH']
 ERRORS += ['ENOTTY']
 CONSOLE_IOCTLS = ['TIOCSCTTY', 'TIOCGSID', 'TIOCGPGRP', 'TIOCSPGRP']
+ERRORS += ['ENXIO', 'ENOSPC']
+# Order is the generated TtyIoctlOperation order.
+TTY_IOCTLS = {'TCGETS': 'get_attributes', 'TCSETS': 'set_now', 'TCSETSW': 'set_drain', 'TCSETSF': 'set_flush',
+              'TCSBRK': 'drain_break', 'TCFLSH': 'flush', 'TIOCGWINSZ': 'get_window', 'TIOCSWINSZ': 'set_window',
+              'TIOCNOTTY': 'detach', 'FIONREAD': 'input_pending', 'TIOCGPTN': 'get_pty_number',
+              'TIOCSPTLCK': 'set_pty_lock'}
+# Generic termios names. Each named value becomes one map row; group values are
+# matched under their group mask, so profiles with wider groups keep the extra
+# encodings in the residue. CIBAUD rows are the CBAUD rows shifted by IBSHIFT.
+TERMIOS_SINGLE = {
+    'iflag': ['IGNBRK', 'BRKINT', 'IGNPAR', 'PARMRK', 'INPCK', 'ISTRIP', 'INLCR', 'IGNCR', 'ICRNL', 'IUCLC',
+              'IXON', 'IXANY', 'IXOFF', 'IMAXBEL', 'IUTF8'],
+    'oflag': ['OPOST', 'OLCUC', 'ONLCR', 'OCRNL', 'ONOCR', 'ONLRET', 'OFILL', 'OFDEL'],
+    'cflag': ['CSTOPB', 'CREAD', 'PARENB', 'PARODD', 'HUPCL', 'CLOCAL', 'ADDRB', 'CMSPAR', 'CRTSCTS'],
+    'lflag': ['ISIG', 'ICANON', 'XCASE', 'ECHO', 'ECHOE', 'ECHOK', 'ECHONL', 'NOFLSH', 'TOSTOP', 'ECHOCTL',
+              'ECHOPRT', 'ECHOKE', 'FLUSHO', 'PENDIN', 'IEXTEN', 'EXTPROC'],
+}
+TERMIOS_BAUDS = ['B0', 'B50', 'B75', 'B110', 'B134', 'B150', 'B200', 'B300', 'B600', 'B1200', 'B1800', 'B2400',
+                 'B4800', 'B9600', 'B19200', 'B38400', 'B57600', 'B115200', 'B230400', 'B460800', 'B500000',
+                 'B576000', 'B921600', 'B1000000', 'B1152000', 'B1500000', 'B2000000', 'B2500000', 'B3000000',
+                 'B3500000', 'B4000000', 'BOTHER']
+TERMIOS_GROUPS = {
+    'oflag': [('NLDLY', ['NL0', 'NL1']), ('CRDLY', ['CR0', 'CR1', 'CR2', 'CR3']),
+              ('TABDLY', ['TAB0', 'TAB1', 'TAB2', 'TAB3']), ('BSDLY', ['BS0', 'BS1']),
+              ('VTDLY', ['VT0', 'VT1']), ('FFDLY', ['FF0', 'FF1'])],
+    'cflag': [('CBAUD', TERMIOS_BAUDS), ('CSIZE', ['CS5', 'CS6', 'CS7', 'CS8'])],
+}
+TERMIOS_FIELDS = ['iflag', 'oflag', 'cflag', 'lflag']
+TERMIOS_CC = ['VINTR', 'VQUIT', 'VERASE', 'VKILL', 'VEOF', 'VTIME', 'VMIN', 'VSWTC', 'VSTART', 'VSTOP', 'VSUSP',
+              'VEOL', 'VREPRINT', 'VDISCARD', 'VWERASE', 'VLNEXT', 'VEOL2']
+# musl 1.2.5 defines neither; every other termios name must agree with musl.
+TERMIOS_LINUX_ONLY = {'BOTHER': 'termios2 speed selector; musl has no BOTHER',
+                      'ADDRB': 'address bit added in Linux 6.0; musl has no ADDRB'}
+TERMIOS_TYPE_BYTES = {'unsigned char': 1, 'unsigned short': 2, 'unsigned int': 4}
 LINUX_FILES = ['Makefile', 'fs/select.c', 'kernel/signal.c', 'include/uapi/asm-generic/poll.h', 'arch/mips/include/uapi/asm/poll.h', 'arch/mips/include/uapi/asm/signal.h', 'include/uapi/linux/time_types.h', 'include/uapi/asm-generic/siginfo.h', 'include/uapi/linux/wait.h', 'kernel/time/time.c', 'fs/file.c', 'fs/read_write.c', 'kernel/time/hrtimer.c', 'kernel/time/posix-timers.c', 'include/linux/ktime.h', 'fs/fcntl.c', 'include/uapi/asm-generic/fcntl.h', 'fs/d_path.c', 'fs/namei.c', 'fs/open.c', 'include/uapi/linux/fs.h', 'include/uapi/asm-generic/posix_types.h', 'arch/mips/kernel/scall32-o32.S', 'arch/mips/include/uapi/asm/errno.h', 'arch/powerpc/include/asm/syscall.h', 'arch/arm/include/uapi/asm/unistd.h', 'fs/pipe.c', 'arch/mips/kernel/syscall.c', 'fs/inode.c', 'include/linux/types.h', 'fs/stat.c', 'include/uapi/linux/stat.h', 'arch/x86/include/uapi/asm/stat.h', 'include/uapi/asm-generic/stat.h']
 
 
@@ -56,6 +90,11 @@ LINUX_FILES += ['fs/ioctl.c', 'drivers/tty/tty_jobctrl.c', 'drivers/tty/tty_io.c
                 'include/uapi/asm-generic/ioctl.h', 'include/uapi/asm-generic/ioctls.h',
                 'arch/mips/include/uapi/asm/ioctl.h', 'arch/mips/include/uapi/asm/ioctls.h',
                 'arch/powerpc/include/uapi/asm/ioctl.h', 'arch/powerpc/include/uapi/asm/ioctls.h']
+LINUX_FILES += ['include/uapi/asm-generic/termbits.h', 'include/uapi/asm-generic/termbits-common.h',
+                'include/uapi/asm-generic/termios.h', 'arch/mips/include/uapi/asm/termbits.h',
+                'arch/powerpc/include/uapi/asm/termbits.h', 'arch/mips/include/uapi/asm/termios.h',
+                'arch/powerpc/include/uapi/asm/termios.h', 'drivers/tty/tty_ioctl.c', 'drivers/tty/n_tty.c',
+                'drivers/tty/tty_baudrate.c']
 
 
 def sha(data):
@@ -96,7 +135,7 @@ def ioctl_definitions(data):
         raise ValueError('unbalanced checked ioctl source comment')
     data = re.sub(r'//[^\n]*', '', data).replace('\\\n', '')
     objects, functions = {}, {}
-    relevant = set(CONSOLE_IOCTLS) | {'_IOC', '_IOR', '_IOW', '_IOC_TYPECHECK',
+    relevant = set(CONSOLE_IOCTLS) | set(TTY_IOCTLS) | {'_IOC', '_IO', '_IOR', '_IOW', '_IOC_TYPECHECK',
         '_IOC_NRBITS', '_IOC_TYPEBITS', '_IOC_SIZEBITS', '_IOC_DIRBITS',
         '_IOC_NRSHIFT', '_IOC_TYPESHIFT', '_IOC_SIZESHIFT', '_IOC_DIRSHIFT',
         '_IOC_NONE', '_IOC_READ', '_IOC_WRITE'}
@@ -176,27 +215,47 @@ def ioctl_layout(generic, override=None, *, musl=False):
     return layout
 
 
-def console_ioctl_numbers(header, layout):
+def ioctl_numbers(header, layout, names, sizes, *, allow_none=False):
+    """Encode literal, _IO and _IOR/_IOW requests; argument sizes come only from `sizes`."""
     macros, _ = ioctl_definitions(header)
     result = {}
-    for name in CONSOLE_IOCTLS:
+    for name in names:
         expression = macros.get(name, '')
         if re.fullmatch(r'(?:0[xX][0-9a-fA-F]+|[0-9]+)[uU]?', expression):
             result[name] = ioctl_integer(expression, {})
             continue
-        match = re.fullmatch(r"_IO([RW])\(\s*'([A-Za-z])'\s*,\s*(0[xX][0-9a-fA-F]+|[0-9]+)\s*,\s*int\s*\)", expression)
-        if match is None:
-            raise ValueError('unsupported checked console ioctl: ' + name + '=' + expression)
-        kind, character, sequence = match.groups()
-        sequence = ioctl_integer(sequence, {})
-        if sequence > 255:
-            raise ValueError('console ioctl sequence exceeds source field')
-        result[name] = ((layout['read' if kind == 'R' else 'write'] << layout['dir_shift']) |
-                        (ord(character) << layout['type_shift']) | (sequence << layout['nr_shift']) |
-                        (4 << layout['size_shift']))
-    if len(set(result.values())) != len(CONSOLE_IOCTLS):
-        raise ValueError('checked console ioctl commands collide')
+        sequence = r"'([A-Za-z])'\s*,\s*(0[xX][0-9a-fA-F]+|[0-9]+)"
+        bare = re.fullmatch(r"_IO\(\s*" + sequence + r"\s*\)", expression) if allow_none else None
+        match = re.fullmatch(r"_IO([RW])\(\s*" + sequence + r"\s*,\s*([A-Za-z_][A-Za-z_0-9 ]*?(?:\[[0-9]+\])?)\s*\)",
+                             expression)
+        if bare is not None:
+            kind, (character, number_text), size = 'none', bare.groups(), 0
+        elif match is not None:
+            direction, character, number_text, argument = match.groups()
+            kind = 'read' if direction == 'R' else 'write'
+            argument = re.sub(r'\s+', ' ', argument)
+            if argument not in sizes:
+                raise ValueError('unchecked ioctl argument type: ' + name + '=' + expression)
+            size = sizes[argument]
+        else:
+            raise ValueError('unsupported checked ioctl: ' + name + '=' + expression)
+        number_value = ioctl_integer(number_text, {})
+        if number_value > 255:
+            raise ValueError('ioctl sequence exceeds source field: ' + name)
+        if size >= 1 << layout['size_bits']:
+            raise ValueError('ioctl argument size exceeds source field: ' + name)
+        result[name] = ((layout[kind] << layout['dir_shift']) | (ord(character) << layout['type_shift']) |
+                        (number_value << layout['nr_shift']) | (size << layout['size_shift']))
+    if len(set(result.values())) != len(names):
+        raise ValueError('checked ioctl commands collide')
     return result
+
+
+def console_ioctl_numbers(header, layout):
+    try:
+        return ioctl_numbers(header, layout, CONSOLE_IOCTLS, {'int': 4})
+    except ValueError as error:
+        raise ValueError(str(error).replace('checked ioctl', 'checked console ioctl')) from None
 
 
 def checked_console_ioctls(linux_header, linux_generic, linux_override, musl_header):
@@ -207,6 +266,222 @@ def checked_console_ioctls(linux_header, linux_generic, linux_override, musl_hea
     if values != console_ioctl_numbers(musl_header, layout):
         raise ValueError('Linux/musl console ioctl command mismatch')
     return values
+
+
+def tty_ioctl_sizes(termios_bytes, winsize_bytes):
+    """The only argument spellings accepted for terminal requests, with their checked sizes."""
+    return {'int': 4, 'unsigned int': 4, 'struct winsize': winsize_bytes, f'char[{winsize_bytes}]': winsize_bytes,
+            'struct termios': termios_bytes, f'char[{termios_bytes}]': termios_bytes}
+
+
+def checked_tty_ioctls(linux_header, linux_generic, linux_override, musl_header, termios_bytes, winsize_bytes):
+    layout = ioctl_layout(linux_generic, linux_override)
+    if layout != ioctl_layout(musl_header, musl=True):
+        raise ValueError('Linux/musl terminal ioctl layout mismatch')
+    for source, expected in ((linux_generic, (('type', 'nr'), '_IOC(_IOC_NONE,(type),(nr),0)')),
+                             (musl_header, (('a', 'b'), '_IOC(_IOC_NONE,(a),(b),0)'))):
+        if ioctl_definitions(source)[1].get('_IO') != expected:
+            raise ValueError('unsupported checked _IO definition')
+    sizes = tty_ioctl_sizes(termios_bytes, winsize_bytes)
+    values = ioctl_numbers(linux_header, layout, list(TTY_IOCTLS), sizes, allow_none=True)
+    if values != ioctl_numbers(musl_header, layout, list(TTY_IOCTLS), sizes, allow_none=True):
+        raise ValueError('Linux/musl terminal ioctl command mismatch')
+    return values
+
+
+def termios_definitions(*sources):
+    """Read object-like macros and typedefs of termios headers in order.
+
+    Comments and `#if 0` blocks are removed, `#undef` is honoured, and any other
+    conditional contributes all of its definitions (the generator wants the
+    _GNU_SOURCE view). A redefinition without `#undef` must repeat the body.
+    """
+    macros, typedefs = {}, {}
+    for data in sources:
+        data = re.sub(r'/\*.*?\*/', ' ', data, flags=re.S)
+        if '/*' in data or '*/' in data:
+            raise ValueError('unbalanced checked termios source comment')
+        data = re.sub(r'//[^\n]*', '', data).replace('\\\n', '')
+        disabled = 0
+        for line in data.splitlines():
+            directive = re.match(r'\s*#\s*(\w+)\s*(.*)', line)
+            if directive and directive[1] in ('if', 'ifdef', 'ifndef'):
+                if disabled or (directive[1] == 'if' and directive[2].strip() == '0'):
+                    disabled += 1
+                continue
+            if directive and directive[1] in ('else', 'elif') and disabled:
+                raise ValueError('unsupported #else in a disabled termios source block')
+            if directive and directive[1] == 'endif':
+                disabled = max(disabled - 1, 0)
+                continue
+            if disabled:
+                continue
+            if directive and directive[1] == 'undef':
+                macros.pop(directive[2].strip(), None)
+                continue
+            if directive and directive[1] == 'define':
+                match = re.fullmatch(r'([A-Za-z_]\w*)[ \t]+(\S[^\n]*?)\s*', directive[2])
+                if match is None:
+                    continue
+                name, body = match.groups()
+                if name in macros and macros[name] != body:
+                    raise ValueError('conflicting termios macro redefinition: ' + name)
+                macros[name] = body
+                continue
+            typedef = re.fullmatch(r'\s*typedef\s+(unsigned\s+(?:int|char|short))\s+(\w+)\s*;\s*', line)
+            if typedef:
+                typedefs[typedef[2]] = re.sub(r'\s+', ' ', typedef[1])
+    return macros, typedefs
+
+
+def termios_integer(name, macros, seen=()):
+    if name not in macros:
+        return None
+    if name in seen:
+        raise ValueError('cyclic termios macro ' + name)
+    body = macros[name].strip()
+    while body.startswith('(') and body.endswith(')'):
+        body = body[1:-1].strip()
+    literal = re.fullmatch(r'(0[xX][0-9a-fA-F]+|0[0-7]*|[1-9][0-9]*)[uU]?[lL]{0,2}', body)
+    if literal:
+        text = literal[1]
+        value = int(text, 16) if text[:2].lower() == '0x' else int(text, 8) if text.startswith('0') else int(text)
+    elif re.fullmatch(r'[A-Za-z_]\w*', body):
+        value = termios_integer(body, macros, (*seen, name))
+        if value is None:
+            raise ValueError('unresolved termios macro alias: ' + name + '=' + body)
+    else:
+        raise ValueError(f'unsupported termios macro expression {name}={body}')
+    if value < 0 or value > 0xffffffff:
+        raise ValueError('termios macro outside unsigned32 range: ' + name)
+    return value
+
+
+def struct_layout(data, struct, typedefs, macros):
+    """Natural-alignment layout of one struct; every member type must be a checked typedef."""
+    data = re.sub(r'/\*.*?\*/', ' ', data, flags=re.S)
+    bodies = re.findall(r'\b(?:struct|STRUCT)\s+' + struct + r'\s*\{(.*?)\}\s*;', data, flags=re.S)
+    if len(bodies) != 1:
+        raise ValueError('expected exactly one struct ' + struct)
+    offset, alignment, members = 0, 1, {}
+    for declaration in (part.strip() for part in bodies[0].split(';')):
+        if not declaration:
+            continue
+        match = re.fullmatch(r'((?:unsigned\s+)?\w+)\s+(\w+(?:\s*,\s*\w+)*)\s*(?:\[\s*(\w+)\s*\])?', declaration)
+        if match is None:
+            raise ValueError('unsupported struct ' + struct + ' member: ' + declaration)
+        spelled, names, count = match.groups()
+        spelled = typedefs.get(spelled, re.sub(r'\s+', ' ', spelled))
+        if spelled not in TERMIOS_TYPE_BYTES:
+            raise ValueError('unchecked struct ' + struct + ' member type: ' + declaration)
+        size = TERMIOS_TYPE_BYTES[spelled]
+        elements = 1 if count is None else (int(count) if count.isdigit() else termios_integer(count, macros))
+        if not elements:
+            raise ValueError('unresolved struct ' + struct + ' array bound: ' + declaration)
+        for member in re.split(r'\s*,\s*', names):
+            offset = (offset + size - 1) // size * size
+            alignment = max(alignment, size)
+            members[member.lstrip('_')] = (offset, size, elements)
+            offset += size * elements
+    return members, (offset + alignment - 1) // alignment * alignment
+
+
+def termios_profile(linux_sources, musl_sources):
+    """Cross-check one Linux termbits family against its musl port and return its tables."""
+    tables = []
+    for sources in (linux_sources, musl_sources):
+        macros, typedefs = termios_definitions(*sources)
+        members, size = struct_layout('\n'.join(sources), 'termios', typedefs, macros)
+        expected = {'c_iflag': 0, 'c_oflag': 4, 'c_cflag': 8, 'c_lflag': 12}
+        if any(members.get(name, (None,))[0] != offset or members[name][1:] != (4, 1)
+               for name, offset in expected.items()):
+            raise ValueError('termios flag words are not four leading unsigned32 fields')
+        if members.get('c_line', (0, 0, 0))[1:] != (1, 1) or members.get('c_cc', (0, 0, 0))[1] != 1:
+            raise ValueError('termios c_line/c_cc are not bytes')
+        speeds = [members.get(name) for name in ('c_ispeed', 'c_ospeed')]
+        if set(members) - set(expected) - {'c_line', 'c_cc', 'c_ispeed', 'c_ospeed'}:
+            raise ValueError('unexpected termios member')
+        if (speeds[0] is None) != (speeds[1] is None) or \
+                (speeds[0] is not None and (speeds[0][1:] != (4, 1) or speeds[1][0] != speeds[0][0] + 4)):
+            raise ValueError('unsupported termios speed words')
+        window, window_bytes = struct_layout('\n'.join(sources), 'winsize', typedefs, macros)
+        if [value[1:] for value in window.values()] != [(2, 1)] * 4:
+            raise ValueError('winsize is not four unsigned shorts')
+        tables.append(dict(macros=macros, members=members, size=size, nccs=members['c_cc'][2],
+                           speed=speeds[0][0] if speeds[0] else 0, window=window_bytes))
+    linux, musl = tables
+    if any(linux['members'][name][0] != musl['members'][name][0] for name in ('c_line', 'c_cc')) or \
+            musl['nccs'] < linux['nccs'] or musl['size'] < linux['size'] or \
+            (linux['speed'] and linux['speed'] != musl['speed']) or linux['window'] != musl['window']:
+        raise ValueError('musl struct termios is not a prefix-compatible superset of the Linux kernel struct')
+    checked, linux_only = [], []
+
+    def value(name):
+        result = termios_integer(name, linux['macros'])
+        if result is None:
+            raise ValueError('missing Linux termios name ' + name)
+        other = termios_integer(name, musl['macros'])
+        if other is None:
+            if name not in TERMIOS_LINUX_ONLY:
+                raise ValueError('missing musl termios name ' + name)
+            linux_only.append(name)
+        elif other != result:
+            raise ValueError(f'Linux/musl termios mismatch: {name}: {result:#x} != {other:#x}')
+        else:
+            checked.append(name)
+        return result
+
+    cc = {name: value(name) for name in TERMIOS_CC}
+    if len(set(cc.values())) != len(cc) or max(cc.values()) >= linux['nccs']:
+        raise ValueError('termios control character slots collide or exceed NCCS')
+    masks, values = {}, {}
+    ibshift = termios_integer('IBSHIFT', linux['macros'])
+    for field in TERMIOS_FIELDS:
+        used = 0
+        for name in TERMIOS_SINGLE[field]:
+            bit = value(name)
+            values[name] = (field, bit, bit)
+            if bit.bit_count() != 1 or bit & used:
+                raise ValueError('termios single flag is not a distinct bit: ' + name)
+            used |= values[name][1]
+        groups = list(TERMIOS_GROUPS.get(field, []))
+        if field == 'cflag':
+            groups.append(('CIBAUD', None))
+        for group, names in groups:
+            mask = value(group)
+            if mask & used:
+                raise ValueError('termios group overlaps another flag: ' + group)
+            used |= mask
+            masks[group] = (field, mask)
+            if names is None:
+                if ibshift is None or mask != masks['CBAUD'][1] << ibshift or \
+                        termios_integer('CIBAUD', musl['macros']) != termios_integer('CBAUD', musl['macros']) << ibshift:
+                    raise ValueError('CIBAUD is not CBAUD shifted by IBSHIFT')
+                for baud in TERMIOS_BAUDS:
+                    values['CIBAUD_' + baud] = (field, mask, values[baud][2] << ibshift)
+                continue
+            seen = set()
+            for name in names:
+                encoded = value(name)
+                if encoded & ~mask or encoded in seen:
+                    raise ValueError('termios group value outside its mask or repeated: ' + name)
+                seen.add(encoded)
+                values[name] = (field, mask, encoded)
+    return dict(bytes=linux['size'], nccs=linux['nccs'], line_offset=linux['members']['c_line'][0],
+                cc_offset=linux['members']['c_cc'][0], speed_offset=linux['speed'], winsize_bytes=linux['window'],
+                musl_bytes=musl['size'], musl_nccs=musl['nccs'], cc=cc, masks=masks, values=values,
+                checked=checked, linux_only=sorted(set(linux_only)))
+
+
+def termios_rows(generic, profile):
+    """One row per generic name: generic mask/value and the profile's mask/value."""
+    rows = []
+    for name, (field, mask, encoded) in generic['values'].items():
+        other_field, other_mask, other_value = profile['values'][name]
+        if other_field != field:
+            raise ValueError('termios name changes field across profiles: ' + name)
+        rows.append((name, field, mask, encoded, other_mask, other_value))
+    return rows
 
 
 
@@ -331,6 +606,30 @@ def generate(archive_path: Path, linux: Path):
         read('src/internal/pthread_impl.h')
         for wrapper in ('pthread_create', 'pthread_mutex_trylock', 'pthread_mutexattr_setrobust'):
             read('src/thread/' + wrapper + '.c')
+        # musl passes its own struct termios straight to TCGETS and TCSETS+act,
+        # so the kernel copies exactly its own struct size into a musl prefix.
+        tcgetattr = re.sub(r'\s+', '', read('src/termios/tcgetattr.c'))
+        tcsetattr = re.sub(r'\s+', '', read('src/termios/tcsetattr.c'))
+        if 'ioctl(fd,TCGETS,tio)' not in tcgetattr or 'if(act<0||act>2)' not in tcsetattr or \
+                'returnioctl(fd,TCSETS+act,tio);' not in tcsetattr:
+            raise ValueError('musl tcgetattr/tcsetattr no longer pass struct termios to TCGETS/TCSETS+act')
+        musl_termios = read('include/termios.h')
+        musl_alltypes = read('include/alltypes.h.in')
+        linux_common = (linux / 'include/uapi/asm-generic/termbits-common.h').read_text()
+
+        def linux_termios(family):
+            base = 'arch/' + family + '/include/uapi/asm/' if family else 'include/uapi/asm-generic/'
+            termbits = (linux / (base + 'termbits.h')).read_text()
+            if '#include <asm-generic/termbits-common.h>' not in termbits:
+                raise ValueError('Linux termbits no longer includes termbits-common.h: ' + base)
+            return [linux_common, termbits, (linux / (base + 'termios.h')).read_text()]
+
+        def musl_bits(port):
+            try:
+                return read(f'arch/{port}/bits/termios.h')
+            except KeyError:
+                return read('arch/generic/bits/termios.h')
+        generic_termios = termios_profile(linux_termios(None), [musl_termios, musl_bits('generic'), musl_alltypes])
         rows = []
         for arch, port, width, big, nr, ret, regs, error, align, labels in PROFILES:
             macros = definitions(read(f'arch/{port}/bits/syscall.h.in'))
@@ -357,11 +656,31 @@ def generate(archive_path: Path, linux: Path):
             ioctls = checked_console_ioctls((linux / (ioctl_base + 'ioctls.h')).read_text(),
                 (linux / 'include/uapi/asm-generic/ioctl.h').read_text(),
                 (linux / (ioctl_base + 'ioctl.h')).read_text() if ioctl_family else None, ioctl_header)
+            termios = termios_profile(linux_termios(ioctl_family), [musl_termios, musl_bits(port), musl_alltypes])
+            tty_ioctls = checked_tty_ioctls((linux / (ioctl_base + 'ioctls.h')).read_text(),
+                (linux / 'include/uapi/asm-generic/ioctl.h').read_text(),
+                (linux / (ioctl_base + 'ioctl.h')).read_text() if ioctl_family else None, ioctl_header,
+                termios['bytes'], termios['winsize_bytes'])
+            if len(set(tty_ioctls.values()) | set(ioctls.values())) != len(tty_ioctls) + len(ioctls):
+                raise ValueError('terminal and console ioctl commands collide: ' + arch)
+            if (tty_ioctls['TCSETSW'], tty_ioctls['TCSETSF']) != (tty_ioctls['TCSETS'] + 1, tty_ioctls['TCSETS'] + 2):
+                raise ValueError('musl TCSETS+act does not reach TCSETSW/TCSETSF: ' + arch)
+            named_slots = set(termios['cc'].values())
             rows.append({'architecture':arch,'musl_port':port,'word_bytes':width,'byte_order':'big' if big else 'little',
                          'number_register':nr,'return_register':ret,'argument_registers':regs,'register_labels':labels,
                          'error_convention':error,'aligned_64bit_pairs':align,'syscall_numbers':numbers,'errno_numbers':errors,
                          'console_ioctl_numbers':ioctls,'console_ioctl_pid_bytes':4,
                          'linux_ioctl_crosschecks':list(ioctls),
+                         'tty_ioctl_numbers':tty_ioctls,'linux_tty_ioctl_crosschecks':list(tty_ioctls),
+                         'termios_layout':{key:termios[key] for key in ('bytes','nccs','line_offset','cc_offset',
+                                           'speed_offset','winsize_bytes','musl_bytes','musl_nccs')},
+                         'termios_cc_slots':termios['cc'],
+                         'termios_unnamed_cc_slots':[slot for slot in range(termios['nccs']) if slot not in named_slots],
+                         'termios_group_masks':{name:mask for name,(field,mask) in termios['masks'].items()},
+                         'termios_values':{name:encoded for name,(field,mask,encoded) in termios['values'].items()},
+                         'termios_map':termios_rows(generic_termios, termios),
+                         'linux_termios_crosschecks':list(dict.fromkeys(termios['checked'])),
+                         'linux_only_termios':termios['linux_only'],
                          'kernel_timespec_bytes':16,'kernel_timespec_nsec_value_bits':width * 8,'kernel_timespec_nsec_high32_input_ignored':width == 4,
                          'linux_qualification':'unqualified','execution':'host-codec-model-only'})
     linux_files = set(LINUX_FILES)
@@ -416,7 +735,13 @@ def generate(archive_path: Path, linux: Path):
     version = (linux / 'Makefile').read_text()
     if not all(re.search(r'^' + key + r'\s*=\s*' + value + r'\s*$', version, re.M) for key,value in [('VERSION','6'),('PATCHLEVEL','13'),('SUBLEVEL','4')]):
         raise ValueError('Linux source must be 6.13.4')
-    manifest = {'schema_version':1,'codec_revision':2,'scope':'bootstrap-codec-model-only','musl_version':MUSL_VERSION,'musl_archive_sha256':MUSL_SHA256,
+    termios_map_rows = len(rows[0]['termios_map'])
+    if any([row[:2] for row in profile['termios_map']] != [row[:2] for row in rows[0]['termios_map']] for profile in rows):
+        raise ValueError('termios map rows differ in order across profiles')
+    # The header carries the rows; the manifest keeps the values they are built from.
+    maps = [{name: (field, mask, encoded, other_mask, other_value)
+             for name, field, mask, encoded, other_mask, other_value in profile.pop('termios_map')} for profile in rows]
+    manifest = {'schema_version':1,'codec_revision':3,'scope':'bootstrap-codec-model-only','musl_version':MUSL_VERSION,'musl_archive_sha256':MUSL_SHA256,
                 'linux_reference_version':'6.13.4','linux_source_provenance':'local inspected files; full upstream archive authenticity not established',
                 'source_file_sha256':dict(sorted(source_hashes.items())), 'profiles':rows,
                 'limitations':['No native Linux personality, trap adapter, dispatch or guest musl execution.',
@@ -424,23 +749,49 @@ def generate(archive_path: Path, linux: Path):
                                'MIPS O32 indirect syscall and seven/eight-argument calls are outside this six-argument batch.',
                                'Legacy time structures and __kernel_timespec are distinct from musl public struct timespec padding.',
                                'Full stat, signal frames, TLS/auxv, remaining errno/flags/syscalls and architecture qualification remain open.',
-                               'Register snapshots use DWARF integer numbering on x86, ISA integer register numbering elsewhere; they are not existing trap structures.']}
+                               'Register snapshots use DWARF integer numbering on x86, ISA integer register numbering elsewhere; they are not existing trap structures.',
+                               'Termios maps cover named flag values only; other encodings, unnamed control slots and the PPC speed words are not interpreted.',
+                               'BOTHER and ADDRB are Linux-only names (musl 1.2.5 defines neither); musl and Linux disagree on PPC CBAUDEX, which the map does not use.']}
     lines = ['#pragma once', '', '// Generated by scripts/generate_linux_abi.py; do not edit numbers manually.', '// Source identity and qualification gaps: docs/abi/linux-profiles.json.', '#include "ok/core/types.hpp"', '#include <array>', '', 'namespace ok::abi::linux_user', '{',
              'enum class Profile : u8 { ' + ', '.join(row['architecture'] for row in rows) + ', count };',
              'enum class Operation : u8 { ' + ', '.join(OPERATIONS) + ', count };',
              'enum class Error : u8 { ' + ', '.join('e_' + name[1:].lower() for name in ERRORS) + ', count };',
              'enum class ConsoleIoctlOperation : u8 { acquire, get_sid, get_pgrp, set_pgrp, count };',
+             'enum class TtyIoctlOperation : u8 { ' + ', '.join(TTY_IOCTLS.values()) + ', count };',
+             'enum class TermiosField : u8 { ' + ', '.join(TERMIOS_FIELDS) + ' };',
+             'enum class TermiosName : u8 { ' + ', '.join(name.lower() for name in maps[0]) + ', count };',
+             'struct TermiosLayout', '{', '    u8 bytes;', '    u8 nccs;', '    u8 line_offset;', '    u8 cc_offset;',
+             '    u8 speed_offset; // 0: no speed words', '};',
+             'struct TermiosMapRow', '{', '    TermiosField field;', '    u32 generic_mask;', '    u32 generic_value;',
+             '    u32 profile_mask;', '    u32 profile_value;', '};',
+             'inline constexpr u8 absent_termios_slot = 0xffU;',
+             'inline constexpr usize termios_named_slots = ' + str(len(TERMIOS_CC)) + ';',
              'enum class ErrorConvention : u8 { negative, mips_a3, ppc_cr0_so };',
              'inline constexpr u32 unavailable_number = 0xffffffffU;',
              'struct ProfileData', '{', '    const char *name;', '    u8 word_bytes;', '    bool big_endian;', '    u8 number_register;', '    u8 return_register;', '    std::array<i8, 6> argument_registers;', '    ErrorConvention error_convention;', '    bool aligned_64bit_pairs;',
              '    std::array<u32, static_cast<usize>(Operation::count)> numbers;', '    std::array<u32, static_cast<usize>(Error::count)> errors;',
-             '    std::array<u32, static_cast<usize>(ConsoleIoctlOperation::count)> console_ioctls;', '};',
+             '    std::array<u32, static_cast<usize>(ConsoleIoctlOperation::count)> console_ioctls;',
+             '    std::array<u32, static_cast<usize>(TtyIoctlOperation::count)> tty_ioctls;',
+             '    TermiosLayout termios;', '    std::array<u8, termios_named_slots> termios_slots;', '};',
              'inline constexpr std::array<ProfileData, static_cast<usize>(Profile::count)> profiles{{']
     for row in rows:
         lines += ['    {"' + row['architecture'] + '", ' + str(row['word_bytes']) + ', ' + str(row['byte_order']=='big').lower() + ', ' + str(row['number_register']) + ', ' + str(row['return_register']) + ', {' + ', '.join(map(str,row['argument_registers'])) + '}, ErrorConvention::' + row['error_convention'] + ', ' + str(row['aligned_64bit_pairs']).lower() + ',',
                   '     {' + ', '.join('unavailable_number' if value is None else str(value) + 'U' for value in row['syscall_numbers'].values()) + '},',
                   '     {' + ', '.join(str(value) + 'U' for value in row['errno_numbers'].values()) + '},',
-                  '     {' + ', '.join(str(value) + 'U' for value in row['console_ioctl_numbers'].values()) + '}},']
+                  '     {' + ', '.join(str(value) + 'U' for value in row['console_ioctl_numbers'].values()) + '},',
+                  '     {' + ', '.join(hex(value) + 'U' for value in row['tty_ioctl_numbers'].values()) + '},',
+                  '     {' + ', '.join(str(row['termios_layout'][key]) for key in
+                                      ('bytes', 'nccs', 'line_offset', 'cc_offset', 'speed_offset')) + '},',
+                  '     {' + ', '.join(str(value) for value in row['termios_cc_slots'].values()) + '}},']
+    lines += ['}};', 'inline constexpr usize termios_map_rows = ' + str(termios_map_rows) + ';',
+              '// One row per TermiosName; profiles index the same rows.',
+              'inline constexpr std::array<std::array<TermiosMapRow, termios_map_rows>, static_cast<usize>(Profile::count)> termios_maps{{']
+    for row, termios_map in zip(rows, maps):
+        entries = ['{TermiosField::' + field + ', ' + ', '.join(hex(value) + 'U' for value in values) + '}'
+                   for field, *values in termios_map.values()]
+        lines += ['    {{ // ' + row['architecture']]
+        lines += ['        ' + ', '.join(entries[index:index + 3]) + ',' for index in range(0, len(entries), 3)]
+        lines += ['    }},']
     lines += ['}};', '} // namespace ok::abi::linux_user', '']
     return '\n'.join(lines), json.dumps(manifest,indent=2) + '\n'
 
