@@ -93,6 +93,12 @@ inline Status check_termios_codec_model()
     tty::ForeignResidue residue{};
     if (!Codec::encode_termios(standard, {}, copy) || !Codec::decode_termios(copy, back, residue) || back != standard)
         return Status::fault("configured Linux termios codec does not round-trip tty_std_termios");
+    // The /dev/ptmx default is tty_std_termios without HUPCL (Linux pts init_termios).
+    const tty::Termios pty = tty::linux_pty_termios();
+    if (pty.cflag != (tty::cflag::b38400 | tty::cflag::cs8 | tty::cflag::cread) ||
+        !Codec::encode_termios(pty, {}, copy) ||
+        tty::wire::load<TermiosCodec<profile>::big_endian, 4>(copy, 8) != (ppc ? 0xb0fU : 0xbfU))
+        return Status::fault("configured Linux pty default termios differs from pts init_termios");
     if (Codec::decode_termios({wire.data(), Codec::termios_bytes - 1}, back, residue))
         return Status::fault("configured Linux termios codec accepted a short copy");
     const u32 tcgets = mips ? 0x540dU : ppc ? 0x402c7413U : 0x5401U;

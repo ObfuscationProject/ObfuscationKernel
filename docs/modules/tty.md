@@ -182,7 +182,7 @@ VDISCARD, CBAUD reprogramming.
 | Terminal | iflag | oflag | cflag | lflag | Window |
 |---|---|---|---|---|---|
 | Console (`console_compat`; reset on lease claim, revoke and retire) | ICRNL | 0 | B115200\|CS8\|CREAD\|CLOCAL | 0 | 24×80 |
-| `/dev/ptmx` pairs (`tty_std_termios`) | ICRNL\|IXON | OPOST\|ONLCR | B38400\|CS8\|CREAD\|HUPCL | ISIG\|ICANON\|ECHO\|ECHOE\|ECHOK\|ECHOCTL\|ECHOKE\|IEXTEN | 0×0 |
+| `/dev/ptmx` pairs (pts `init_termios`: `tty_std_termios` without HUPCL) | ICRNL\|IXON | OPOST\|ONLCR | B38400\|CS8\|CREAD | ISIG\|ICANON\|ECHO\|ECHOE\|ECHOK\|ECHOCTL\|ECHOKE\|IEXTEN | 0×0 |
 | `OK_SYS_PTY_PAIR` raw pairs (`cfmakeraw(tty_std)`) | 0 | ONLCR (OPOST off) | B38400\|CS8\|CREAD\|HUPCL | ECHOE\|ECHOK\|ECHOCTL\|ECHOKE | 0×0 |
 
 All three use the standard cc set: ^C ^\ DEL ^U ^D, VTIME 0, VMIN 1, ^Q ^S ^Z,

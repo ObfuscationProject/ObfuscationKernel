@@ -91,7 +91,7 @@ enum class TerminalSignal : u8 { hup, interrupt, quit, suspend, cont, ttin, ttou
             0x00, 0x12, 0x0f, 0x17, 0x16, 0x00, 0x00, 0x00};
 }
 
-// Linux tty_std_termios: the default of /dev/ptmx pairs.
+// Linux tty_std_termios (drivers/tty/tty_io.c).
 [[nodiscard]] constexpr Termios linux_std_termios()
 {
     return {iflag::icrnl | iflag::ixon, oflag::opost | oflag::onlcr,
@@ -99,6 +99,16 @@ enum class TerminalSignal : u8 { hup, interrupt, quit, suspend, cont, ttin, ttou
             lflag::isig | lflag::icanon | lflag::echo | lflag::echoe | lflag::echok | lflag::echoctl |
                 lflag::echoke | lflag::iexten,
             0, standard_cc()};
+}
+
+// The default of /dev/ptmx pairs: Linux unix98 pts init_termios, which is
+// tty_std_termios with c_cflag B38400|CS8|CREAD (HUPCL cleared). TCGETS on the
+// master reads this slave termios.
+[[nodiscard]] constexpr Termios linux_pty_termios()
+{
+    Termios termios = linux_std_termios();
+    termios.cflag = cflag::b38400 | cflag::cs8 | cflag::cread;
+    return termios;
 }
 
 // musl/glibc cfmakeraw.

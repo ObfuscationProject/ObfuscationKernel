@@ -147,6 +147,11 @@ template <Profile P> bool profile(std::set<std::array<u8, 5>> &layouts)
     CHECK(standard[cc + (ppc ? 12 : 10)] == 0x1a);          // VSUSP
     if constexpr (ppc)
         CHECK(load<big>(standard, 36) == 38400 && load<big>(standard, 40) == 38400);
+    // A fresh Linux pty reports the pts init_termios: HUPCL clear.
+    const auto pty = encoded<P>(tty::linux_pty_termios());
+    CHECK(load<big>(pty, 8) == (ppc ? 0xb0fU : 0xbfU) && load<big>(pty, 0) == iflag && load<big>(pty, 12) == lflag);
+    if constexpr (ppc)
+        CHECK(load<big>(pty, 36) == 38400 && load<big>(pty, 40) == 38400);
     // TOSTOP and NOFLSH travel to their profile bits.
     tty::Termios stopped{};
     stopped.lflag = tty::lflag::tostop | tty::lflag::noflsh;

@@ -92,6 +92,11 @@ bool defaults()
           standard[Cc::kill] == 0x15 && standard[Cc::eof] == 4 && standard[Cc::time] == 0 &&
           standard[Cc::min] == 1 && standard[Cc::susp] == 0x1a && standard[Cc::werase] == 0x17 &&
           standard[Cc::lnext] == 0x16 && standard[Cc::reprint] == 0x12 && standard[Cc::eol] == 0);
+    // /dev/ptmx pairs: tty_std_termios without HUPCL, as Linux unix98_pty_init.
+    const Termios pty = linux_pty_termios();
+    CHECK(pty.cflag == (cflag::b38400 | cflag::cs8 | cflag::cread) && output_baud(pty) == 38400);
+    CHECK(pty.iflag == standard.iflag && pty.oflag == standard.oflag && pty.lflag == standard.lflag &&
+          pty.cc == standard.cc && pty.line == 0);
     const Termios raw = raw_pair_termios();
     CHECK(raw.iflag == 0 && raw.oflag == oflag::onlcr && raw.cflag == standard.cflag);
     CHECK(raw.lflag == (lflag::echoe | lflag::echok | lflag::echoctl | lflag::echoke));
