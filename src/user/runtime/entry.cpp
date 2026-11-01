@@ -911,8 +911,8 @@ Status start(Kernel &kernel, fs::BootArchive archive)
     if (auto status = kernel.scheduler().set_shared_memory_files(shared_files); !status) return status;
     if (auto status = entry_stacks.activate(entry_stack_arena); !status) return status;
     emit_pool_stats();
+    tcp_wait_stats = &kernel.native_tcp_waits().stats();
     emit_entry_stack_stats();
-    report_network_waits(kernel);
 #ifdef OK_ENABLE_TEST_POINTS
     if (auto status = check_runtime_objects(); !status) return status;
     emit_pool_stats();

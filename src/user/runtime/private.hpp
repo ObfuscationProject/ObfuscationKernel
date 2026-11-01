@@ -565,7 +565,9 @@ Status notify_udp_receives(Kernel &kernel);
 // evaluations, and waits that found their queue full (forcing rescans).
 struct UdpWaitCounters { u64 queued{}, evaluated{}, unqueued{}; };
 UdpWaitCounters udp_wait_statistics();
-void report_network_waits(Kernel &kernel);
+// The kernel's TCP wait counters, bound when the runtime starts.
+extern const net::TcpWaitStats *tcp_wait_stats;
+void report_network_waits();
 RobustWalkReport retire_robust(Kernel &kernel, sched::ProcessControlBlock &process,
                               sched::ThreadLocalState &tls, sched::ThreadId owner);
 void clear_child_tid(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadLocalState &tls, bool peers);

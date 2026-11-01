@@ -10,7 +10,9 @@ namespace ok::user::native
 // How the kernel loop idled, what the platform lines delivered, how the device
 // event sources were served (driven:posted:served:polled) and what woke the
 // waits that completed ready or timed out; once the interrupt service runs.
-void report_interrupts()
+namespace
+{
+void report_interrupt_lines()
 {
     if (!interrupt::platform_irqs_started()) return;
     const auto irqs = interrupt::platform_irq_statistics();
@@ -86,11 +88,18 @@ void report_interrupts()
 // How socket waits were woken (OK_NET_WAITS): waiters enlisted in their
 // socket's wait queue, readiness evaluations, and waiters that found their
 // queue full; once any socket wait was queued.
+} // namespace
+void report_interrupts()
+{
+    report_interrupt_lines();
+    report_network_waits();
+}
 inline namespace runtime_detail
 {
-void report_network_waits(Kernel &kernel)
+constinit const net::TcpWaitStats *tcp_wait_stats{};
+void report_network_waits()
 {
-    const auto tcp = kernel.native_tcp_waits().stats();
+    const auto tcp = tcp_wait_stats ? *tcp_wait_stats : net::TcpWaitStats{};
     const auto udp = udp_wait_statistics();
     if (!tcp.queued && !tcp.unqueued && !udp.queued && !udp.unqueued) return;
     emit_line("OK_NET_WAITS scope=hardware tcp_queued="); emit_number(tcp.queued);
