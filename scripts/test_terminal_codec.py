@@ -19,9 +19,9 @@ import subprocess
 
 MARKER = (r'TERMINAL_CODEC_PASS linux_profiles=10 termios_layouts=3 roundtrip=1 residue=1 '
           r'native_wire_endians=2 hosted=1 guest=0')
-SOURCES = ('tests/host/terminal_codec_tests.cpp', 'include/ok/abi/linux_termios.hpp',
-           'include/ok/abi/linux_profile_data.hpp', 'include/ok/tty/termios.hpp', 'include/ok/uapi/termios.h',
-           'include/ok/uapi/syscall.h', 'docs/abi/linux-profiles.json')
+SOURCES = ('tests/host/terminal_codec_tests.cpp', 'include/ok/abi/linux_termios.hpp', 'include/ok/abi/linux_user.hpp',
+           'include/ok/abi/linux_profile_data.hpp', 'include/ok/core/types.hpp', 'include/ok/tty/termios.hpp',
+           'include/ok/uapi/termios.h', 'include/ok/uapi/syscall.h', 'docs/abi/linux-profiles.json')
 SCOPE = 'Hosted copied-byte terminal codec model; no user pointer, terminal object, guest or hardware execution.'
 # The C view of the native struct: every member at its fixed offset, no padding.
 LAYOUT_CHECK = '''#include <stddef.h>
@@ -79,6 +79,22 @@ def check_native_values(root):
     return len(macros)
 
 
+def check_pins(root, cxx, sources):
+    """Every project header the compiled sources include is pinned in SOURCES."""
+    included = set()
+    for source in sources:
+        result = subprocess.run([*shlex.split(cxx), '-std=c++23', '-I' + str(root / 'include'), '-MM', str(source)],
+                                check=True, capture_output=True, text=True)
+        for token in result.stdout.replace('\\\n', ' ').split()[1:]:
+            path = Path(token).resolve()
+            if path.is_relative_to(root):
+                included.add(path.relative_to(root).as_posix())
+    missing = sorted(included - set(SOURCES))
+    if missing:
+        raise ValueError('compiled headers missing from SOURCES: ' + ', '.join(missing))
+    return len(included)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
@@ -109,6 +125,7 @@ def main():
                         '-Werror', '-I' + str(root / 'include'), '-c', str(header_cxx), '-o',
                         str(output / 'header_cxx.o')], check=True)
         state['cxx_header_checked'] = True
+        state['pinned_headers_checked'] = check_pins(root, args.cxx, (root / SOURCES[0], header_cxx))
         subprocess.run([*shlex.split(args.cxx), '-std=c++23', '-O2', '-Wall', '-Wextra', '-Wpedantic', '-Werror',
                         *flags, '-I' + str(root / 'include'), str(root / SOURCES[0]), '-o', str(binary)], check=True)
         result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, timeout=600)
