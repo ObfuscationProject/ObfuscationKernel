@@ -984,7 +984,9 @@ bool private_signal_deliver(Kernel &kernel, sched::ProcessControlBlock &process,
             // the overlay refuses activation of a stopped process.
             if (signal_waits.saved(thread))
                 static_cast<void>(private_signal_wait_rearm_delivery(kernel, process, thread));
-            else if (poll_signal_masks.saved(thread)) poll_signal_masks.restore(thread);
+            // An interrupted ppoll/pselect keeps its record and temporary mask
+            // across the stop (Linux TIF_RESTORE_SIGMASK): after the continue,
+            // delivery under that mask commits a handler or restores at none.
             private_jobctl_stop(kernel, process, signal);
             return false;
         }

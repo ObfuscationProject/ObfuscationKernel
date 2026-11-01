@@ -270,6 +270,32 @@ void nested_wait(Kernel &kernel)
     expect(t->native_signal_mask.words==old_mask().words && !native::poll_signal_masks.find(*t));retire(kernel,g);
 }
 
+// A caught WINCH interrupts the call, then a lower-numbered default STOP is
+// delivered first. As with Linux TIF_RESTORE_SIGMASK, the record and the
+// temporary mask survive the stop, so the WINCH handler runs after the
+// continue with the original mask saved in its frame.
+void stop_keeps_temporary_mask(Kernel &kernel,bool select)
+{
+    auto g=create(kernel);auto pipes=kernel.posix().pipe(0);CHECK(pipes);
+    auto *p=kernel.scheduler().find(g.pid);auto *t=kernel.scheduler().find_thread(g.pid,g.waiter);
+    auto original=old_mask();original.set(28);t->native_signal_mask=original;caught(kernel,g,28);
+    invoke(kernel,g,pipes.value()[0],select);enqueue(kernel,g,28);
+    expect(native::private_poll_signal_complete(kernel,*p,*t));
+    expect(t->native_frame.registers[14]==static_cast<u64>(-4) && native::poll_signal_masks.saved(*t));
+    enqueue(kernel,g,19);expect(!native::private_signal_deliver(kernel,*p,*t));
+    expect(p->job_control().stopped && p->job_control().stop_signal==19);
+    expect(native::poll_signal_masks.saved(*t) && native::poll_signal_masks.saved(*t)->words==original.words);
+    expect(t->native_signal_mask.words==temporary_mask().words);
+    expect(kernel.scheduler().continue_process(g.pid));
+    expect(native::private_signal_deliver(kernel,*p,*t));const auto frame=t->native_frame;
+    expect(frame.pc==handler && saved_mask(frame)==original.words[0] && !native::poll_signal_masks.find(*t));
+    auto handler_mask=temporary_mask();handler_mask.set(15);handler_mask.set(28);
+    expect(t->native_signal_mask.words==handler_mask.words);
+    sigreturn(kernel,g,frame);expect(t->native_signal_mask.words==original.words);
+    expect(t->native_frame.pc==site+2 && t->native_frame.registers[14]==static_cast<u64>(-4));
+    retire(kernel,g);
+}
+
 template<lu::Profile P>
 void adapter_masks(Kernel &kernel,usize number_slot,std::array<int,6> slots)
 {
@@ -328,6 +354,7 @@ int main()
         for(unsigned error=1;error<6;++error)invalid(kernel,select,error);
     }
     for(bool select:{false,true})blocks_until_normal_return(kernel,select);
+    for(bool select:{false,true})stop_keeps_temporary_mask(kernel,select);
     nested_wait(kernel);interrupted_fault(kernel);ignored_after_completion(kernel);
     for(bool frame_fault:{false,true})fatal(kernel,frame_fault);
     for(unsigned mode=0;mode<4;++mode)cleanup(kernel,mode);
