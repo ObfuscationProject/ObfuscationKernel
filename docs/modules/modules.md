@@ -118,7 +118,8 @@ ABI79 (`feat/net-core`, WT2.3) changes exported declarations: the new
 out-of-order and recovery fields; `EndpointTable` gains `take_changed` and its
 packet capacity covers an IPv6 header. `NativeUdpService` sockets carry a
 `Family`, its address parameters, binding, peer and datagram snapshots use
-`IpAddress`, and `NativeUdpFrameKind` gains `unbound`. `sched::WaitQueue`
+`IpAddress`, `NativeUdpFrameKind` gains `unbound` and the service gains
+`take_changed`. `sched::WaitQueue`
 gains `enlist`, `notify` and `prune`, the legacy process-granular queue
 becomes `sched::PidWaitQueue`, and `TcpStreamWaits` gains `stats`. The public
 UAPI stays 0.16 with a compatible addition: `OK_AF_INET6` and
