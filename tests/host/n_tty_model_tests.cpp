@@ -364,6 +364,11 @@ bool vmin_vtime()
     plan = tty.plan_read(termios, 8, false, true);
     CHECK(plan.wait == W::none && plan.copy == 0);
     CHECK(tty.plan_read(termios, 8, true, false).wait == W::would_block);
+    tty.receive(termios, bytes("abc"), 0, false); // with data buffered it returns at once, no timer
+    plan = tty.plan_read(termios, 8, false, false);
+    CHECK(plan.wait == W::none && plan.copy == 3 && plan.consume == 3 && plan.timer_deciseconds == 0);
+    CHECK(tty.plan_read(termios, 2, false, false).copy == 2); // capped by the request
+    tty.flush_input();
     set(3, 0); // counted read without timer
     plan = tty.plan_read(termios, 8, false, false);
     CHECK(plan.wait == W::input && !tty.poll_readable(termios));

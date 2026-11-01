@@ -70,10 +70,15 @@ inline Status check_n_tty_line_discipline_model()
     timed[tty::Cc::min] = 0;
     timed[tty::Cc::time] = 3;
     line.hangup();
-    const auto plan = line.plan_read(timed, 8, false, false);
+    auto plan = line.plan_read(timed, 8, false, false);
     if (plan.wait != tty::NTty<256, 32>::ReadWait::timeout || plan.timer_deciseconds != 3 ||
         !line.cleared_outside_live_bytes())
         return Status::fault("N_TTY VTIME plan or hangup wipe differs");
+    // VMIN 0 with input buffered returns at once without a timer.
+    line.receive(timed, bytes("x"), 0, false);
+    plan = line.plan_read(timed, 8, false, false);
+    if (plan.wait != tty::NTty<256, 32>::ReadWait::none || plan.copy != 1)
+        return Status::fault("N_TTY VTIME read with input buffered must not wait");
     return {};
 }
 
