@@ -21,7 +21,7 @@ struct Packet
 Packet peer_packet(TcpFields fields, Bytes payload = {}, Bytes options = {}, Endpoint from = right, Endpoint to = left)
 {
     Packet p; fields.source_port = from.port; fields.destination_port = to.port;
-    auto n = build_tcp(p.bytes, from.address, to.address, 10, 64, fields, options, payload);
+    auto n = build_tcp(p.bytes, from.address.ipv4(), to.address.ipv4(), 10, 64, fields, options, payload);
     check(bool(n), "peer packet builder"); p.length = n.value(); return p;
 }
 template <typename C> Packet take(C &c, u64 now, bool accepted = true)
@@ -153,10 +153,12 @@ void receive_flow_and_close()
     Connection<32, 8, 8> c; establish(c, 100, 0xfffffffcu);
     std::array<std::byte, 6> text{std::byte{'a'}, std::byte{'b'}, std::byte{'c'}, std::byte{'d'}, std::byte{'e'}, std::byte{'f'}};
     auto out_of_order = peer_packet({0, 0, 0xffffffffu, 101, tcp_ack, 32}, text); input(c, out_of_order, 101);
-    check(c.snapshot().receive_buffered == 0, "out-of-order payload not fabricated");
+    check(c.snapshot().receive_buffered == 0 && c.snapshot().out_of_order == 6, "out-of-order payload kept but not readable");
     check(take(c, 101).parsed().fields.acknowledgment == 0xfffffffdu, "out-of-order cumulative ACK");
     auto first = peer_packet({0, 0, 0xfffffffdu, 101, tcp_ack, 32}, text); input(c, first, 102); first.bytes.fill(std::byte{0});
-    check(c.snapshot().receive_next == 3 && c.snapshot().receive_buffered == 6, "receive sequence wraps and copies payload");
+    // The gap filled: the kept segment joins, limited to the eight-byte window.
+    check(c.snapshot().receive_next == 5 && c.snapshot().receive_buffered == 8 && c.snapshot().out_of_order == 0,
+          "receive sequence wraps and joins the kept segment");
     take(c, 102);
     auto overlap = peer_packet({0, 0, 1, 101, tcp_ack, 32}, Bytes{text.data(), 4}); input(c, overlap, 103);
     check(c.snapshot().receive_buffered == 8 && c.snapshot().receive_next == 5, "overlap trimmed to free receive capacity");
@@ -164,7 +166,8 @@ void receive_flow_and_close()
     auto cannot = peer_packet({0, 0, 5, 101, tcp_ack | tcp_fin, 32}); input(c, cannot, 104);
     check(!c.snapshot().eof, "zero receive window cannot consume FIN"); take(c, 104);
     std::array<std::byte, 8> read{}; auto n = c.read(read); check(bool(n) && n.value() == 8, "application drains copied receive ring");
-    check(read[0] == std::byte{'a'} && read[6] == std::byte{'c'}, "overlap delivers each new byte exactly once");
+    check(read[0] == std::byte{'a'} && read[2] == std::byte{'c'} && read[6] == std::byte{'e'} && read[7] == std::byte{'f'},
+          "each byte is delivered once, the first copy kept");
     check(take(c, 105).parsed().fields.window == 8, "read announces receive window reopening");
     auto fin = peer_packet({0, 0, 5, 101, tcp_ack | tcp_fin, 32}); input(c, fin, 106);
     check(c.snapshot().state == State::close_wait && c.snapshot().eof, "peer FIN half closes read side");

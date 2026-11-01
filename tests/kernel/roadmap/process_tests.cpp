@@ -241,7 +241,7 @@ Status verify_elf_loader(arch::Architecture architecture, std::span<const std::b
 
 Status verify_wait_queue()
 {
-    sched::WaitQueue queue;
+    sched::PidWaitQueue queue;
     if (auto status = queue.block(42); !status.ok())
     {
         return status;

@@ -4,13 +4,23 @@
 namespace ok::abi::linux_user
 {
 template class Ipv4SocketAddressCodec<Profile::i386>;
+template class Ipv6SocketAddressCodec<Profile::i386>;
 template class Ipv4SocketAddressCodec<Profile::x86_64>;
+template class Ipv6SocketAddressCodec<Profile::x86_64>;
 template class Ipv4SocketAddressCodec<Profile::aarch64>;
+template class Ipv6SocketAddressCodec<Profile::aarch64>;
 template class Ipv4SocketAddressCodec<Profile::arm32>;
+template class Ipv6SocketAddressCodec<Profile::arm32>;
 template class Ipv4SocketAddressCodec<Profile::rv64>;
+template class Ipv6SocketAddressCodec<Profile::rv64>;
 template class Ipv4SocketAddressCodec<Profile::rv32>;
+template class Ipv6SocketAddressCodec<Profile::rv32>;
 template class Ipv4SocketAddressCodec<Profile::loongarch64>;
+template class Ipv6SocketAddressCodec<Profile::loongarch64>;
 template class Ipv4SocketAddressCodec<Profile::mips>;
+template class Ipv6SocketAddressCodec<Profile::mips>;
 template class Ipv4SocketAddressCodec<Profile::mips64>;
+template class Ipv6SocketAddressCodec<Profile::mips64>;
 template class Ipv4SocketAddressCodec<Profile::ppc>;
+template class Ipv6SocketAddressCodec<Profile::ppc>;
 }

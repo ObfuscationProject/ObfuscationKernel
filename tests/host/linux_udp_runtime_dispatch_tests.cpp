@@ -116,7 +116,7 @@ void socket_and_bind(Kernel &kernel, Group &group)
     expect(!(plain_open->flags & posix::o_NONBLOCK) && !plain_slot->close_on_exec);
     CHECK(kernel.posix().activate(group.pid)); CHECK(kernel.posix().close(static_cast<i32>(plain)));
     expect(kernel.native_udp().active_sockets() == before);
-    expect(invoke(kernel, group, lu::UdpCall::socket, {10, C::sock_dgram | C::sock_nonblock, 17}) == error(E::e_afnosupport));
+    expect(invoke(kernel, group, lu::UdpCall::socket, {3, C::sock_dgram | C::sock_nonblock, 17}) == error(E::e_afnosupport));
     const auto fd = invoke(kernel, group, lu::UdpCall::socket,
         {2, C::sock_dgram | C::sock_nonblock | C::sock_cloexec, 17}); expect(fd >= 3);
     group.fd = static_cast<i32>(fd);
