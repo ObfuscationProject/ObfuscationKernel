@@ -56,6 +56,10 @@ struct LockDebugCpu
     u8 depth{0};
     std::array<LockRank, lock_debug_capacity> ranks{};
     std::array<const void *, lock_debug_capacity> locks{};
+    // Self-deadlocking lock() calls that returned without the lock; the
+    // matching unlock() consumes one instead of releasing the outer hold.
+    u8 refused_depth{0};
+    std::array<const void *, lock_debug_capacity> refused{};
     u64 violations{0};
 };
 
@@ -104,6 +108,9 @@ namespace detail
     if (owned)
     {
         lock_rank_violation({LockViolationKind::self_deadlock, rank, rank, lock, cpu});
+        auto &record = lock_debug_cpus[cpu];
+        if (record.refused_depth < lock_debug_capacity)
+            record.refused[record.refused_depth++] = lock;
         return false;
     }
     const auto &record = lock_debug_cpus[cpu];
@@ -118,6 +125,23 @@ namespace detail
     if (holds && highest >= rank)
         lock_rank_violation({LockViolationKind::order, highest, rank, lock, cpu});
     return true;
+}
+
+// True when this unlock() matches a refused self-deadlocking lock().
+[[nodiscard]] inline bool lock_debug_consume_refused(const void *lock, CpuId cpu) noexcept
+{
+    if (cpu >= max_cpus)
+        return false;
+    auto &record = lock_debug_cpus[cpu];
+    for (usize index = record.refused_depth; index != 0; --index)
+        if (record.refused[index - 1] == lock)
+        {
+            for (usize next = index; next < record.refused_depth; ++next)
+                record.refused[next - 1] = record.refused[next];
+            --record.refused_depth;
+            return true;
+        }
+    return false;
 }
 
 inline void lock_debug_acquired(const void *lock, LockRank rank, CpuId cpu) noexcept
@@ -210,6 +234,8 @@ template <LockRank Rank> class RankedSpinLock final
             lock_rank_violation({LockViolationKind::not_owner, Rank, Rank, this, cpu});
             return;
         }
+        if (detail::lock_debug_consume_refused(this, cpu))
+            return;
         detail::lock_debug_released(this, Rank, cpu);
 #endif
         owner_.store(0, std::memory_order_relaxed);

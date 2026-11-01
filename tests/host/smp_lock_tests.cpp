@@ -297,6 +297,10 @@ void check_self_deadlock()
                         &lock, 1),
                "self-deadlock not reported");
         expect(lock.owned_by_current_cpu() && record(1).depth == 1, "self-deadlock changed the hold");
+        // The refused lock()'s unlock() keeps the outer hold; the outer one releases it.
+        lock.unlock();
+        expect(lock.owned_by_current_cpu() && record(1).depth == 1 && reports.count == 1,
+               "the refused lock()'s unlock released the outer hold");
         lock.unlock();
         expect(!lock.owned_by_current_cpu() && reports.count == 1, "unlock after a self-deadlock report failed");
     });

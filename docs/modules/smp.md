@@ -34,8 +34,8 @@ masks interrupts before acquiring and restores them after releasing;
 `RankedSpinLock::Guard` is for callers that already masked them. Debug kernels
 define `OK_LOCK_DEBUG`, which keeps a per-CPU record of up to eight holds and
 reports these violations to `lock_rank_violation`: a rank not above every held
-rank, a self-deadlock (reported before spinning, and `lock()` returns without
-the lock), an unlock by a CPU that does not own the lock, an unlock out of LIFO
+rank, a self-deadlock (reported before spinning; `lock()` returns without
+the lock and its matching `unlock()` leaves the outer hold in place), an unlock by a CPU that does not own the lock, an unlock out of LIFO
 order, and nesting past the record. `try_lock` skips the order check because it
 cannot deadlock, but its hold is recorded. `lock_violation_handler` is null by
 default, so violations are only counted per CPU. Release builds compile the
