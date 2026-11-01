@@ -2,8 +2,9 @@
 
 WT2.3 `feat/net-core`. Slice 1: the family-generic wire layer. Slice 2: the
 neighbour cache and routing tables. Slice 3: the Ethernet interface and the
-executor running through it. Slice 4: general TCP. This note grows with each
-slice.
+executor running through it. Slice 4: general TCP. Slice 5: IPv6 transport
+endpoints. Slice 6: readiness through wait queues. Slice 7: the link probe and
+its QEMU evidence. This note grows with each slice.
 
 ## Design
 
@@ -66,19 +67,41 @@ slice.
   FIN. A zero window is probed with one byte after one RTO; a timed-out
   probe keeps the congestion window. The handshake, token protocol, RST and
   TIME_WAIT rules are unchanged.
+- `net::IpAddress` (`address.hpp`) holds either family. `tcp::Endpoint` uses
+  it: the connection and the endpoint table parse and build IPv4 and IPv6
+  segments and refuse mixed endpoints. `NativeUdpService` sockets carry a
+  family fixed at open; IPv6 sockets send through the interface with a
+  source selected for the destination, and the executor delivers IPv6 TCP and
+  UDP packets.
+- `sched::WaitQueue` enlists registrations the scheduler armed (also in
+  several queues) and keeps each entry's ticket, so a wait completed
+  elsewhere leaves only a stale entry; `notify` offers live waiters to the
+  condition's owner. The TCP endpoint table records which slots' readiness
+  moved (`take_changed`); `TcpStreamWaits` enlists each waiter in its
+  endpoint's queue and re-evaluates readiness only for changed endpoints.
+  Descriptor, lost-thread and deadline checks still run on every pass.
+- `KernelExtension::network_interface` lets the distribution configure the
+  interface (address, prefix, gateway resolved through ARP, IPv6);
+  `Kernel::activate_network` prefers it to the static link and starts the
+  network clock. `KernelExtension::network_probe` asks for `LinkProbe`
+  (`probe.hpp`): at the first network pass the kernel brings the link up,
+  pings the IPv4 gateway and the IPv6 router, reports the autoconfigured
+  addresses and exchanges bytes with a TCP echo service, printing
+  `OK_NET_LINK`, `OK_NET_ARP`, `OK_NET_PING`, `OK_NET_IPV6`, `OK_NET_TCP` and
+  `OK_NET_PROBE`.
 
 ## Not yet
 
 - TCP: no window scaling, timestamps, SACK or delayed ACKs; the peer MSS
   bounds segments but there is no path MTU discovery.
 
-- IPv6 transport sockets: IPv6 TCP and UDP packets reach the executor but no
-  service accepts them (slice 5); ICMP errors are not delivered to sockets.
-- The OS still supplies a static link; a configuration with prefix and
-  gateway, and DHCP, belong to the paired OS worktree.
-- Peers that answer only the exact UDP frame sequence (the OS
-  `test_native_udp_socket.py` peer) now also see DAD and router solicitation
-  frames at link start; the paired OS worktree skips link-control frames.
+- ICMP errors are not delivered to sockets; UDP receive waits and poll/select
+  over sockets still rescan rather than wait on per-socket queues.
+- The OS's default image keeps the static link (gateway as a permanent
+  neighbour); only its `net_probe` image uses the routed interface. DHCP and
+  a configurable address belong to OS services.
+- QEMU user networking is unavailable with the pinned QEMU (no slirp), so the
+  device evidence uses a scripted peer, not a third-party stack.
 
 ## Evidence
 
@@ -100,3 +123,21 @@ slice.
   points) runs ARP, echo over both families, neighbour solicitation and
   release of a held reply, and routed egress inside `kernel_main`. It is a
   model test executed on the target CPU, not a NIC or peer test.
+- IPv6 transport: `tcp_window_tests` runs four lossy transfers between IPv6
+  endpoints and accepts an IPv6 connection through the endpoint table;
+  `net_udp_tests` runs both socket families through the UDP service and the
+  interface (held, resolved and routed sends, family mismatches).
+- Wait queues: `irq_wait_time_tests` covers enlisting, stale entries,
+  `notify` and multi-queue enlistment; `tcp_streams_tests` checks that a
+  pass without a readiness change evaluates no waiter and that a segment's
+  edge evaluates it once.
+- Probe: `net_probe_tests` runs `LinkProbe` against a scripted slirp-like
+  gateway (exact marker text), also with ten percent TCP loss each way.
+- QEMU device execution (paired OS `feat/net-services`):
+  `scripts/test_net_probe.py` boots a `net_probe=y` distribution image on a
+  socket netdev against the OS's scripted peer (`tools/net_probe_peer.py`:
+  ARP, ICMPv4/ICMPv6 echo, router and neighbour advertisements, a
+  retransmitting TCP echo). On x86_64 the guest resolved the gateway, pinged
+  it (21 ms), autoconfigured `2001:db8:1:0:11:22ff:fe33:4455`, pinged the
+  router and echoed 8192 TCP bytes; with ten percent TCP loss the transfer
+  completed after retransmissions with the congestion window collapsed.
