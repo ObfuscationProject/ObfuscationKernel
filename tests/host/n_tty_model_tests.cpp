@@ -399,13 +399,15 @@ bool switching_and_capacity()
     tty.receive(raw, bytes("xy"), 0, false);
     CHECK(!tty.set_termios(raw, canonical) && tty.poll_readable(canonical));
     CHECK(read_now(tty, canonical, 8) == "cxy");
-    // The longest canonical line is capacity - 1 bytes plus the terminator.
+    // Linux n_tty_receive_buf_common: without a complete line, canonical input
+    // past capacity - 1 keeps overwriting the last slot. IMAXBEL has no effect
+    // in Linux, and with ECHO clear nothing reaches the terminal.
     Termios bell = canonical;
     bell.iflag |= iflag::imaxbel;
     auto received = tty.receive(bell, bytes(std::string(5000, 'a')), 1, false);
-    CHECK(received.consumed == 5000 && received.dropped && tty.buffered() == 4095);
-    CHECK(tty.room(bell) == 1 && tty.echo_pending() == 512); // BEL for each drop, ring bounded
-    echo_of(tty);
+    CHECK(received.consumed == 5000 && !received.dropped && tty.buffered() == 4096);
+    CHECK(tty.room(bell) == 1 && tty.echo_pending() == 0);
+    // The first erase takes back the newest byte and then erases one more.
     tty.receive(bell, bytes("\x7f\x7f" "bb\n"), 1, false);
     CHECK(tty.buffered() == 4096 && tty.inq(bell) == 4096 && tty.room(bell) == 0);
     // With a complete line in a full buffer further input applies backpressure.
@@ -415,6 +417,27 @@ bool switching_and_capacity()
     CHECK(received.consumed == 1 && received.dropped && tty.overruns() == 1);
     const std::string line = read_now(tty, bell, 5000);
     CHECK(line.size() == 4096 && line.substr(4092) == "abb\n");
+    // With a complete line queued, input stops one slot short: neither a
+    // terminator nor an erase is taken until a read makes room.
+    tty.receive(canonical, bytes("a\n"), 1, false);
+    received = tty.receive(canonical, bytes(std::string(5000, 'x')), 1, false);
+    CHECK(received.consumed == 4093 && tty.buffered() == 4095 && tty.room(canonical) == 0);
+    CHECK(tty.receive(canonical, bytes("\n"), 1, false).consumed == 0);
+    CHECK(tty.receive(canonical, bytes("\x7f"), 1, false).consumed == 0);
+    CHECK(tty.inq(canonical) == 2 && tty.buffered() == 4095 && read_now(tty, canonical, 8) == "a\n");
+    CHECK(tty.receive(canonical, bytes("\n"), 1, false).consumed == 1);
+    CHECK(read_now(tty, canonical, 5000) == std::string(4093, 'x') + "\n");
+    // Under ECHO every byte past the capacity is echoed; an erase at the full
+    // buffer silently drops the newest byte, then rubs out the one before.
+    NTty<64, 512> small{};
+    Termios echoing = cooked();
+    echoing.iflag |= iflag::imaxbel;
+    const auto overflowed = small.receive(echoing, bytes(std::string(70, 'e')), 1, false);
+    CHECK(overflowed.consumed == 70 && small.buffered() == 64 && echo_of(small) == std::string(70, 'e'));
+    small.receive(echoing, bytes("\x7f"), 1, false);
+    CHECK(small.buffered() == 62 && echo_of(small) == "\b \b");
+    small.receive(echoing, bytes("\n"), 1, false);
+    CHECK(read_now(small, echoing, 100) == std::string(62, 'e') + "\n");
     // Non-canonical: backpressure at the full buffer, or an overrun.
     received = tty.receive(raw, bytes(std::string(5000, 'r')), 0, false);
     CHECK(received.consumed == 4096 && tty.room(raw) == 0 && tty.inq(raw) == 4096);
@@ -497,19 +520,8 @@ struct Reference
         for (int i = 0; i < count; ++i)
             echo += "\b \b";
     }
-    // Returns false for backpressure.
     bool store(const Termios &t, unsigned char c, bool terminator, bool eof, int echo_mode)
     {
-        const usize u = used();
-        const bool fits = terminator ? u < 4096 : u + 1 < 4096;
-        if (!fits)
-        {
-            if (!lines.empty())
-                return false;
-            if (t.iflag & iflag::imaxbel)
-                echo += '\a';
-            return true;
-        }
         if (echo_mode == 1 && (t.lflag & lflag::echo))
             echo_char(t, c);
         if (echo_mode == 2 && (t.lflag & (lflag::echo | lflag::echonl)))
@@ -523,9 +535,19 @@ struct Reference
         }
         return true;
     }
+    // Returns false for backpressure. At 4095 bytes input waits while a line is
+    // queued; otherwise a byte at 4096 first takes back the newest one (Linux
+    // n_tty_receive_buf_common). IMAXBEL has no effect.
     bool receive(const Termios &t, unsigned char c)
     {
         const bool echo_on = t.lflag & lflag::echo, ext = t.lflag & lflag::iexten;
+        if (used() + 1 >= 4096)
+        {
+            if (!lines.empty())
+                return false;
+            if (used() == 4096)
+                partial.pop_back();
+        }
         if (lnext)
         {
             if (!store(t, c, false, false, 1))

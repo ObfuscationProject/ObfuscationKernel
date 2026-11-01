@@ -174,14 +174,15 @@ encoding without a name.
 
 | Acted on | Flags |
 |---|---|
-| iflag | ISTRIP, INLCR, IGNCR, ICRNL, IXON (PTY slaves only), IMAXBEL, IUTF8 |
+| iflag | ISTRIP, INLCR, IGNCR, ICRNL, IXON (PTY slaves only), IUTF8 |
 | oflag | OPOST, ONLCR, OCRNL, ONOCR, ONLRET, TAB3/XTABS |
 | lflag | ISIG, ICANON, ECHO, ECHOE, ECHOK, ECHONL, ECHOCTL, ECHOKE, NOFLSH, TOSTOP, IEXTEN |
 | cc | VINTR, VQUIT, VSUSP, VEOF, VEOL, VEOL2, VERASE, VKILL, VWERASE, VLNEXT, VREPRINT, VSTART, VSTOP, VMIN, VTIME (PTY only; the console treats VTIME as 0) |
 
 Stored but not acted on: PARMRK, INPCK, IGNPAR, BRKINT, IGNBRK, IUCLC, IXANY,
-IXOFF, OLCUC, fill and delay bits, XCASE, ECHOPRT, FLUSHO, PENDIN, EXTPROC,
-VDISCARD, CBAUD reprogramming.
+IXOFF, IMAXBEL (Linux n_tty never rings on overflow either), OLCUC, fill and
+delay bits, XCASE, ECHOPRT, FLUSHO, PENDIN, EXTPROC, VDISCARD, CBAUD
+reprogramming.
 
 | Terminal | iflag | oflag | cflag | lflag | Window |
 |---|---|---|---|---|---|
@@ -197,12 +198,16 @@ password.
 
 ## 7. N_TTY behaviour — model landed (S1); planned (S4 console; S5 PTY; S7 PTY VTIME)
 
-- The read buffer is 4096 bytes. In canonical mode one slot is reserved for
-  the line terminator, so the longest line is 4095 bytes plus the terminator.
-  Beyond that, ordinary bytes are dropped (BEL under IMAXBEL) while erase,
-  kill, newline and EOF still work.
-- In non-canonical mode a full buffer applies backpressure to a PTY master
-  writer. On the console it drops the byte and counts an overrun.
+- The read buffer is 4096 bytes, and canonical input follows Linux
+  `n_tty_receive_buf_common`. Once 4095 bytes are buffered, every byte waits
+  while a complete line is queued. Without one, input goes on, and a byte
+  arriving at a full buffer first takes back the newest stored byte. So an
+  ordinary byte overwrites the last slot (and is echoed under ECHO), erase,
+  kill, newline and EOF keep working, and the longest line is 4095 bytes plus
+  the terminator.
+- In non-canonical mode a full buffer (4096 bytes, §14) applies backpressure
+  to a PTY master writer, as does canonical input that has to wait. On the
+  console such a byte is dropped and counted as an overrun.
 - A canonical read returns at most one line. VEOF at the start of a line
   returns 0.
 - VMIN/VTIME follow POSIX. A VMIN read is admitted atomically when enough bytes
@@ -444,6 +449,7 @@ profile string and version above keeps its current value.
 | 11 | Native `stat` has no rdev, and there is no `ttyname` (no `/proc`). | planned (S6) |
 | 12 | After a hangup and a later re-acquire by the leader, members forked earlier see the new ctty. | planned (S8) |
 | 13 | pid 1 gets EIO instead of a restart loop on background terminal access. | planned (S8) |
+| 14 | Non-canonical input fills all 4096 bytes of the read buffer (Linux stops at 4095), so raw pairs keep their 4096-byte queue. | landed (S1) |
 
 ## Tests
 

@@ -309,8 +309,9 @@ class NTty final
         return count;
     }
 
-    // Bytes a writer may push now (master writability). Canonical input keeps
-    // one slot for the terminator but always accepts editing of a partial line.
+    // Bytes a writer may push now (master writability), as n_tty receive_room:
+    // canonical input stops one slot short, but without a complete line it
+    // always takes one more byte (which overwrites the last slot).
     [[nodiscard]] constexpr usize room(const Termios &termios) const
     {
         const usize used = read_head_ - read_tail_;
@@ -342,8 +343,6 @@ class NTty final
     }
 
   private:
-    enum class Store : u8 { stored, dropped, full };
-
     [[nodiscard]] static constexpr usize mask(usize index) { return index & (ReadCapacity - 1); }
     [[nodiscard]] static constexpr bool control(u8 value) { return value < 0x20 || value == 0x7f; }
     [[nodiscard]] static constexpr bool continuation(const Termios &termios, u8 value)
@@ -422,17 +421,36 @@ class NTty final
                (is(termios, Cc::intr, value) || is(termios, Cc::quit, value) || is(termios, Cc::susp, value));
     }
 
-    // Room for one byte. An ordinary canonical byte keeps a slot for the
-    // terminator; without a complete line it is dropped rather than blocking,
-    // so erase, kill and newline still reach a full line.
-    [[nodiscard]] constexpr Store room_for(const Termios &termios, bool terminator) const
+    // No room for a byte: backpressure (false), or a counted overrun.
+    constexpr bool full(bool drop_when_full, Input &result)
+    {
+        if (!drop_when_full)
+            return false;
+        ++overruns_;
+        result.dropped = true;
+        return true;
+    }
+
+    // n_tty_receive_buf_common: once canonical input reaches the last slot it
+    // goes on only while no line is queued, and a byte arriving at a full
+    // buffer first takes back the newest stored byte, so every special
+    // character still works and an ordinary byte overwrites the last slot.
+    // With a line queued every byte waits.
+    constexpr bool canonical_room(const Termios &termios)
     {
         const usize used = read_head_ - read_tail_;
-        if (!(termios.lflag & lflag::icanon))
-            return used < ReadCapacity ? Store::stored : Store::full;
-        if (terminator ? used < ReadCapacity : used + 1 < ReadCapacity)
-            return Store::stored;
-        return canon_head_ == read_tail_ ? Store::dropped : Store::full;
+        if (!(termios.lflag & lflag::icanon) || used + 1 < ReadCapacity)
+            return true;
+        if (canon_head_ != read_tail_)
+            return false;
+        if (used == ReadCapacity)
+        {
+            --read_head_;
+            erase(read_[mask(read_head_)]);
+            set_line_end(read_head_, false);
+            ++revision_;
+        }
+        return true;
     }
 
     constexpr void put(u8 value, bool terminator)
@@ -654,22 +672,13 @@ class NTty final
     // ECHONL) or not at all (the EOF mark).
     enum class Echo : u8 { visible, newline_raw, line, none };
 
-    // Stores one byte with its echo; false means backpressure.
+    // Stores one byte with its echo; false means backpressure. Canonical room
+    // was settled before the byte was processed.
     constexpr bool store(const Termios &termios, u8 value, bool terminator, bool drop_when_full, Input &result,
                          Echo mode)
     {
-        const Store room = room_for(termios, terminator);
-        if (room == Store::full && !drop_when_full)
-            return false;
-        if (room != Store::stored)
-        {
-            if (room == Store::full)
-                ++overruns_;
-            else if (termios.iflag & iflag::imaxbel)
-                echo_raw(termios, '\a');
-            result.dropped = true;
-            return true;
-        }
+        if (read_head_ - read_tail_ >= ReadCapacity)
+            return full(drop_when_full, result);
         const u32 local = termios.lflag;
         if (mode == Echo::line ? (local & (lflag::echo | lflag::echonl)) : mode != Echo::none && (local & lflag::echo))
         {
@@ -685,6 +694,8 @@ class NTty final
 
     constexpr bool receive_byte(const Termios &termios, u8 value, usize budget, bool drop_when_full, Input &result)
     {
+        if (!canonical_room(termios))
+            return full(drop_when_full, result);
         const u32 input = termios.iflag, local = termios.lflag;
         if (input & iflag::istrip)
             value &= 0x7f;
