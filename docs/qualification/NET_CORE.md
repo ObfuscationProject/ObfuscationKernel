@@ -183,3 +183,9 @@ slice.
   it (21 ms), autoconfigured `2001:db8:1:0:11:22ff:fe33:4455`, pinged the
   router and echoed 8192 TCP bytes; with ten percent TCP loss the transfer
   completed after retransmissions with the congestion window collapsed.
+  At kernel 956c7be (OS 6f1a208) the same run passes on all ten profiles,
+  clean and with ten percent TCP loss, after `xmake test` on each; the
+  native UDP socket test (x86_64) reports its blocking receive enlisted and
+  evaluated once (`OK_NET_WAITS`). Receipts: ObfuscationEvidence
+  `receipts/ObfuscationKernel@956c7be/feat/net-core/` (`device-probe-matrix`,
+  `hosted`).
