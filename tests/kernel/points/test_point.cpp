@@ -28,6 +28,7 @@
 #include "guarded_read_checks.hpp"
 #include "mount_retention_checks.hpp"
 #include "mount_snapshot_checks.hpp"
+#include "n_tty_checks.hpp"
 #include <array>
 #include <span>
 #endif
@@ -512,6 +513,10 @@ Result<usize> run_kernel_test_points(Kernel &kernel)
     if (auto status = runner.check_status("console-input", "lease-authority-model", tests::check_console_input_lease_model()); !status.ok())
         return status;
     if (auto status = runner.check_status("console-control", "scalar-copy-wire-model", tests::check_console_control_wire_model()); !status.ok())
+        return status;
+    if (auto status = runner.check_status("tty", "n-tty-line-discipline-model", tests::check_n_tty_line_discipline_model()); !status.ok())
+        return status;
+    if (auto status = runner.check_status("tty", "termios-codec-model", tests::check_termios_codec_model()); !status.ok())
         return status;
 
     if (auto status = runner.check_status("futex-wake-operation", "algorithm-model", tests::check_futex_wake_operation_algorithm()); !status.ok())
