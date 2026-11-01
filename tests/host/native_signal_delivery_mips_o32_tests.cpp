@@ -360,7 +360,10 @@ template <K Kind> void returns() {
           x.stack == s && !limited.pending_mask().contains(8));
   }
   for (i32 sig = 1; sig <= 128; ++sig) {
-    CHECK(C::valid_info({sig, 128, 0, 0}) == (sig == 8 || sig == 14)); // FPE; ITIMER_REAL SIGALRM
+    // FPE; ITIMER_REAL SIGALRM; kernel terminal and orphan signals in MIPS
+    // numbering: HUP, INT, QUIT, WINCH 20, TSTP 24, CONT 25, TTIN 26, TTOU 27.
+    CHECK(C::valid_info({sig, 128, 0, 0}) == (sig == 8 || sig == 14 || sig == 1 || sig == 2 || sig == 3 ||
+                                              sig == 20 || sig == 24 || sig == 25 || sig == 26 || sig == 27));
     CHECK(!C::valid_info({sig, 128, 1, 0}) && !C::valid_info({sig, 128, 0, 1}));
   }
 }

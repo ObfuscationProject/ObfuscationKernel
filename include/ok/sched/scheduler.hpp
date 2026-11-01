@@ -14,6 +14,7 @@
 #include "ok/sched/deadline.hpp"
 #include "ok/sched/console_input.hpp"
 #include "ok/sched/console_control.hpp"
+#include "ok/sched/job_control.hpp"
 #include "ok/sched/wait_registration.hpp"
 #include "ok/smp/smp.hpp"
 #include "ok/user/user.hpp"
@@ -166,6 +167,7 @@ class ProcessControlBlock
     {
         termination_signal_ = signal;
     }
+    [[nodiscard]] const JobControlState &job_control() const { return job_; }
     [[nodiscard]] i32 wait_status() const
     {
         return termination_signal_ != 0 ? static_cast<i32>(termination_signal_)
@@ -337,6 +339,7 @@ class ProcessControlBlock
     StaticVector<ProcessId, max_process_children> children_{};
     i32 exit_code_{0};
     u8 termination_signal_{0};
+    JobControlState job_{}; // Only the scheduler stops or continues a process.
     FixedString<max_process_name> name_{};
     ProcessState state_{ProcessState::created};
     bool background_{false};
@@ -590,6 +593,19 @@ class SchedulerState
     Status configure_cpus(usize cpu_count);
     Status set_runnable(ProcessId pid);
     Status block_process(ProcessId pid);
+    // Job-control overlay (job_control.inc). A stopped process keeps its
+    // threads and waits; the runtime never enters it until it is continued.
+    // `signal` is in the process's own numbering. Stopping an already stopped
+    // process succeeds without change; a zombie gives already_exists.
+    Status stop_process(ProcessId pid, u8 signal);
+    // Returns true when the process was stopped.
+    bool continue_process(ProcessId pid);
+    void consume_job_report(ProcessId pid, bool stop);
+    [[nodiscard]] u16 stopped_processes() const { return stopped_count_; }
+    [[nodiscard]] bool process_group_orphaned(ProcessId group, ProcessId ignored = 0) const;
+    [[nodiscard]] bool process_group_has_stopped(ProcessId group) const;
+    // Child-wait key of a process-group selector; pid keys stay below 2^32.
+    [[nodiscard]] static constexpr u64 child_group_wait_key(ProcessId group) { return (u64{1} << 32) | group; }
 
     [[nodiscard]] ProcessId current_pid() const
     {
@@ -637,12 +653,14 @@ class SchedulerState
     void clear_current(ProcessId pid);
     Status reparent_children_on_exit(ProcessId pid);
     Status finish_process(ProcessId pid, i32 code, u8 signal);
+    void wake_job_waiters(const ProcessControlBlock &process);
     [[nodiscard]] ProcessControlBlock *console_caller();
     void retire_console_process(ProcessId pid);
     void cancel_console_epoch(u32 epoch);
     private_pty::RawPtyTable<> pty_transport_{}; // One stable table; handles never cross scheduler domains.
     ConsoleInputLease console_input_{};
     std::array<u64, wake_source_count> wakes_{};
+    u16 stopped_count_{};
     struct ConsoleTerminal
     {
         u32 epoch{};

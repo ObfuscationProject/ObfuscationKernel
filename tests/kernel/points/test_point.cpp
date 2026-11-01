@@ -14,6 +14,7 @@
 #include "realtime_checks.hpp"
 #include "native_credentials_checks.hpp"
 #include "process_sessions_checks.hpp"
+#include "job_control_checks.hpp"
 #include "archive_directory_checks.hpp"
 #include "console_input_checks.hpp"
 #include "console_control_checks.hpp"
@@ -542,6 +543,8 @@ Result<usize> run_kernel_test_points(Kernel &kernel)
     if (auto status = runner.check_status("native-credentials", "PCB-copy-model", tests::check_native_credentials_model()); !status.ok())
         return status;
     if (auto status = runner.check_status("process-sessions", "scheduler-lifecycle-model", tests::check_process_sessions_model(kernel.scheduler())); !status.ok())
+        return status;
+    if (auto status = runner.check_status("job-control", "scheduler-overlay-orphan-model", tests::check_job_control_model(kernel.scheduler())); !status.ok())
         return status;
 
     if (auto status = test_architecture_profiles(runner); !status.ok())

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ok/sched/pending_signals.hpp"
+#include "ok/user/job_control_signals.hpp"
 #include "ok/user/native_signal_mask.hpp"
 
 namespace ok::user::native
@@ -33,6 +34,14 @@ struct SignalInfoCodec
                                             info.timer, info.overrun, info.value};
         return value.valid(maximum_signal);
     }
+    // Terminal, hangup and orphan signals the kernel sends as SI_KERNEL, in
+    // this profile's numbering.
+    [[nodiscard]] static constexpr bool kernel_terminal_signal(u32 signal)
+    {
+        constexpr const auto &n = job::linux_numbering<Profile>;
+        return signal == n.hup || signal == n.interrupt || signal == n.quit || signal == n.tstp ||
+            signal == n.ttin || signal == n.ttou || signal == n.cont || signal == n.window;
+    }
     // Preserve existing frame-specific SI_KERNEL admission. Synchronous wait
     // accepts every valid zero-payload SI_KERNEL record, not just FPE. An
     // ITIMER_REAL expiry is SIGALRM sent as SI_KERNEL (Linux it_real_fn).
@@ -40,7 +49,8 @@ struct SignalInfoCodec
     [[nodiscard]] static constexpr bool frame_valid(const Info &info)
     {
         return valid(info) && (info.code != 128 || (AllowKernelFpe && info.signal == 8) ||
-                               static_cast<u32>(info.signal) == alarm_signal);
+                               static_cast<u32>(info.signal) == alarm_signal ||
+                               kernel_terminal_signal(static_cast<u32>(info.signal)));
     }
     template <typename Info>
     [[nodiscard]] static constexpr bool encode(const Info &info, std::array<std::byte, bytes> &out)
@@ -67,7 +77,8 @@ struct SignalInfoCodec
         }
         put(pid_offset, info.sender_pid);
         put(uid_offset, info.sender_uid);
-        if (info.code == 1 || info.code == 2) put(status_offset, static_cast<u32>(info.child_status));
+        if (info.code == 1 || info.code == 2 || info.code == 5 || info.code == 6)
+            put(status_offset, static_cast<u32>(info.child_status));
         // True user/system CPU accounting is not implemented by this private
         // prerequisite. Clock fields, unused union bytes and errno stay zero.
         out = next;

@@ -59,11 +59,13 @@ inline constexpr const Numbering &linux_numbering =
     return DefaultAction::terminate;
 }
 
-// Realtime numbers (32 and up) are shared up to the smaller maximum. Returns 0
-// when the signal is out of range or has no counterpart in `to`.
+// Identity within one numbering. Across numberings, realtime numbers (32 and
+// up) are shared up to the smaller maximum. Returns 0 when the signal is out
+// of range or has no counterpart in `to`.
 [[nodiscard]] constexpr u32 translate(const Numbering &from, const Numbering &to, u32 signal)
 {
     if (!signal || signal > from.max) return 0;
+    if (from.max == to.max && from.to_generic == to.to_generic) return signal;
     if (signal >= 32) return signal <= to.max ? signal : 0;
     const u32 generic_number = from.to_generic[signal];
     if (!generic_number) return 0;

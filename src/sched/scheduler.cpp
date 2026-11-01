@@ -39,7 +39,7 @@ bool process_has_runnable_thread(const ProcessControlBlock &process)
 
 bool process_allowed_on(const ProcessControlBlock &process, smp::CpuId cpu, ProcessId current)
 {
-    if (!process.can_run_on(cpu))
+    if (!process.can_run_on(cpu) || process.job_control().stopped)
     {
         return false;
     }
@@ -1140,7 +1140,7 @@ Status SchedulerState::activate_thread(ProcessId pid, ThreadId tid, smp::CpuId c
     auto *process = find(pid);
     if (!tid || cpu >= cpu_count_ || !process ||
         (process->state() != ProcessState::runnable && process->state() != ProcessState::running) ||
-        !process->can_run_on(cpu))
+        !process->can_run_on(cpu) || process->job_.stopped)
         return Status::invalid_argument("thread owner cannot be activated");
     auto selected = dispatch_selected(cpu, pid, tid);
     return selected ? Status::success() : selected.status();
@@ -1394,6 +1394,8 @@ Status SchedulerState::finish_process(ProcessId pid, i32 code, u8 signal)
     process->set_exit_code(code);
     process->set_termination_signal(signal);
     process->set_state(ProcessState::zombie);
+    if (process->job_.stopped) --stopped_count_;
+    process->job_ = {};
     for (auto &thread : process->threads())
     {
         thread.native_deadline.cancel();
@@ -1407,6 +1409,7 @@ Status SchedulerState::finish_process(ProcessId pid, i32 code, u8 signal)
     clear_current(pid);
     wake_waiters(ThreadWaitReason::child, pid);
     wake_waiters(ThreadWaitReason::child, 0);
+    wake_waiters(ThreadWaitReason::child, child_group_wait_key(process->process_group_id()));
     return Status::success();
 }
 Status SchedulerState::reparent_children_on_exit(ProcessId pid)
@@ -1873,6 +1876,7 @@ void SchedulerState::wake_waiters(ThreadWaitReason reason, u64 key, WakeSource s
 }
 
 #include "console_input.inc"
+#include "job_control.inc"
 Status SchedulerState::close_shutdown_admission()
 {
     if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission was already closed");

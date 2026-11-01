@@ -133,6 +133,12 @@ std::string_view process_state_label(sched::ProcessState state)
     return "?";
 }
 
+// A stopped process keeps its scheduler state; the job-control overlay wins.
+std::string_view process_display_state(const sched::ProcessControlBlock &process)
+{
+    return process.job_control().stopped ? "stop" : process_state_label(process.state());
+}
+
 std::string_view scheduler_mode_label(sched::SchedulingMode mode)
 {
     switch (mode)
@@ -159,7 +165,7 @@ template <usize Capacity> Status append_process_line(FixedString<Capacity> &out,
     {
         return status;
     }
-    if (auto status = append_padded(out, process_state_label(process.state()), 4); !status.ok())
+    if (auto status = append_padded(out, process_display_state(process), 4); !status.ok())
     {
         return status;
     }
@@ -794,7 +800,7 @@ Status KernelTaskManager::render_top_tui(Kernel &kernel, FixedString<4096> &out)
         {
             return status;
         }
-        if (auto status = append_padded(out, process_state_label(process.state()), 4); !status.ok())
+        if (auto status = append_padded(out, process_display_state(process), 4); !status.ok())
         {
             return status;
         }

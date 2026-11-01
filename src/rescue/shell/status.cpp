@@ -311,7 +311,8 @@ Status KernelDebugShell::command_processes(std::string_view)
             continue;
         }
         FixedString<4> state;
-        if (auto status = state.append(process_state_label(process.state())); !status.ok())
+        const auto label = process.job_control().stopped ? std::string_view{"T"} : process_state_label(process.state());
+        if (auto status = state.append(label); !status.ok())
         {
             return status;
         }
