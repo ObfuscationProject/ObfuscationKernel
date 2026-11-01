@@ -210,6 +210,18 @@ bool lnext_and_reprint()
     CHECK(echo_of(tty) == "^R\r\na^Cb^?");
     tty.receive(termios, bytes("\n"), 1, false);
     CHECK(read_now(tty, termios, 8) == std::string("a\x03" "b\x7f\n"));
+    echo_of(tty);
+    // An input flush (TCIFLUSH, TCSETSF) keeps a pending LNEXT, as Linux
+    // reset_buffer_flags does; a hangup clears it.
+    tty.receive(termios, bytes("\x16"), 1, false);
+    tty.flush_input();
+    tty.receive(termios, bytes("\x7f\n"), 1, false);
+    CHECK(read_now(tty, termios, 8) == "\x7f\n");
+    echo_of(tty);
+    tty.receive(termios, bytes("\x16"), 1, false);
+    tty.hangup();
+    tty.receive(termios, bytes("\x7f\n"), 1, false);
+    CHECK(read_now(tty, termios, 8) == "\n");
     return true;
 }
 

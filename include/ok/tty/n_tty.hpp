@@ -266,22 +266,24 @@ class NTty final
         return !readable && poll_readable(next);
     }
 
-    // TCIFLUSH / TCSETSF / ISIG flush: discards (and clears) unread input.
+    // TCIFLUSH / TCSETSF / ISIG flush: discards (and clears) unread input. A
+    // pending LNEXT survives, as with Linux reset_buffer_flags.
     constexpr void flush_input()
     {
         for (; read_tail_ != read_head_; ++read_tail_)
             erase(read_[mask(read_tail_)]);
         line_end_ = {};
         read_head_ = read_tail_ = canon_head_ = 0;
-        lnext_ = false;
         ++revision_;
     }
 
-    // Hangup: input and echo are discarded and cleared, columns and flow reset.
+    // Hangup: input and echo are discarded and cleared, LNEXT, columns and flow
+    // reset (Linux reopens the line discipline with fresh state).
     constexpr void hangup()
     {
         flush_input();
         clear_echo();
+        lnext_ = false;
         column_ = canon_column_ = 0;
         output_stopped_ = false;
     }
