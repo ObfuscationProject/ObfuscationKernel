@@ -59,6 +59,28 @@ template <bool Big> u32 load(const std::array<u8, 64> &bytes, usize offset)
     return tty::wire::load<Big, 4>(bytes, offset);
 }
 
+// Linux PPC speed word for a CBAUD-sized field (tty_baudrate.c: CBAUDEX 0,
+// BOTHER 0x1f, 31 table entries): BOTHER keeps the copied word.
+u32 linux_ppc_rate(u32 bits, u32 copied)
+{
+    constexpr std::array<u32, 31> table{0,       50,      75,      110,     134,     150,     200,     300,
+                                        600,     1200,    1800,    2400,    4800,    9600,    19200,   38400,
+                                        57600,   115200,  230400,  460800,  500000,  576000,  921600,  1000000,
+                                        1152000, 1500000, 2000000, 2500000, 3000000, 3500000, 4000000};
+    if (bits == 0x1f)
+        return copied;
+    return bits < table.size() ? table[bits] : 0;
+}
+
+// The c_ispeed/c_ospeed Linux set_termios stores for copied PPC bytes.
+std::pair<u32, u32> linux_ppc_speeds(const std::array<u8, 64> &bytes)
+{
+    const u32 cflag = load<true>(bytes, 8);
+    const u32 output = linux_ppc_rate(cflag & 0xff, load<true>(bytes, 40));
+    const u32 input_bits = (cflag >> 16) & 0xff;
+    return {input_bits ? linux_ppc_rate(input_bits, load<true>(bytes, 36)) : output, output};
+}
+
 // A termios whose every field uses named values only.
 tty::Termios random_named(std::mt19937_64 &random)
 {
@@ -169,12 +191,22 @@ template <Profile P> bool profile(std::set<std::array<u8, 5>> &layouts)
         CHECK(back == original && residue.flags == (std::array<u32, 4>{}) && residue.cc_count == Wire::unnamed.count);
     }
     // Residue: arbitrary kernel bytes survive decode/encode, except the PPC speed
-    // words, which are recomputed from CBAUD and ignored on input.
+    // words, which are recomputed as Linux set_termios does.
     for (usize round = 0; round < 2000; ++round)
     {
         std::array<u8, 64> bytes{};
         for (usize index = 0; index < layout.bytes; ++index)
             bytes[index] = static_cast<u8>(random());
+        if constexpr (ppc)
+        {
+            // Hit BOTHER and B0 in both rate fields often (cflag bits 0-7 and 16-23).
+            if (round % 5 == 0)
+                bytes[11] = 0x1f;
+            if (round % 5 == 1)
+                bytes[9] = 0x1f;
+            if (round % 5 == 2)
+                bytes[9] = 0;
+        }
         tty::Termios value{};
         tty::ForeignResidue residue{};
         CHECK(Wire::decode({bytes.data(), layout.bytes}, value, residue));
@@ -184,15 +216,40 @@ template <Profile P> bool profile(std::set<std::array<u8, 5>> &layouts)
         CHECK(std::equal(bytes.begin(), bytes.begin() + static_cast<long>(compared), again.begin()));
         if constexpr (ppc)
         {
-            CHECK(load<big>(again, 36) == tty::input_baud(value) && load<big>(again, 40) == tty::output_baud(value));
+            const auto [input, output] = linux_ppc_speeds(bytes);
+            CHECK(load<big>(again, 36) == input && load<big>(again, 40) == output);
+            // Speed words never change the flags; they matter only for BOTHER.
             std::array<u8, 64> speeds = bytes;
             speeds[36] ^= 0xff;
             speeds[43] ^= 0x55;
             tty::Termios other{};
             tty::ForeignResidue other_residue{};
             CHECK(Wire::decode({speeds.data(), layout.bytes}, other, other_residue));
-            CHECK(other == value && other_residue == residue);
+            CHECK(other == value && other_residue.flags == residue.flags && other_residue.cc == residue.cc);
+            const bool bother = (bytes[11] == 0x1f) || (bytes[9] == 0x1f);
+            CHECK((other_residue == residue) == !bother);
         }
+    }
+    if constexpr (ppc)
+    {
+        // Directed Linux speed words: a custom BOTHER rate (the only way on PPC,
+        // which has no TCSETS2), an unnamed CIBAUD encoding, CIBAUD B0 under BOTHER.
+        const auto speeds_of = [](u32 cflag, u32 input, u32 output) {
+            std::array<u8, 64> bytes = encoded<P>(tty::linux_std_termios());
+            tty::wire::store<true, 4>(bytes, 8, cflag);
+            tty::wire::store<true, 4>(bytes, 36, input);
+            tty::wire::store<true, 4>(bytes, 40, output);
+            tty::Termios value{};
+            tty::ForeignResidue residue{};
+            std::array<u8, 64> again{};
+            const bool ok = Wire::decode({bytes.data(), 44}, value, residue) && Wire::encode(value, residue, {again.data(), 44});
+            return std::array<u32, 4>{ok, load<true>(again, 8), load<true>(again, 36), load<true>(again, 40)};
+        };
+        CHECK(speeds_of(0x1fU | 0x300U | 0x800U, 250000, 250000) == (std::array<u32, 4>{1, 0xb1f, 250000, 250000}));
+        CHECK(speeds_of(0x0020000dU, 1, 2) == (std::array<u32, 4>{1, 0x0020000d, 0, 9600}));
+        CHECK(speeds_of(0x1fU, 123, 250000) == (std::array<u32, 4>{1, 0x1f, 250000, 250000}));
+        CHECK(speeds_of(0x001f000dU, 77, 5) == (std::array<u32, 4>{1, 0x001f000d, 77, 9600}));
+        CHECK(speeds_of(0x00ff00ffU, 3, 4) == (std::array<u32, 4>{1, 0x00ff00ff, 0, 0}));
     }
     if constexpr (mips)
     {

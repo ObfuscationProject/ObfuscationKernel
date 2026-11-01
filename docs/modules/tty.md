@@ -162,11 +162,15 @@ musl's larger struct.
 |---|---|---|---|---|---|
 | Generic | 36 | 19 | 16 | 17 | — |
 | MIPS/MIPS64 | 40 | 23 | 16 | 17 | — |
-| PPC | 44 | 19 | 35 | 16 | at 36 and 40 (written from CBAUD, ignored on input) |
+| PPC | 44 | 19 | 35 | 16 | at 36 and 40 (as Linux `set_termios` stores them, see below) |
 
 Flag values are mapped through generated tables. Bits and slots without a
 generic name (MIPS VDSUSP and slots 18-22, unknown bits) round-trip through
-Linux TCGETS/TCSETS only, via the residue.
+Linux TCGETS/TCSETS only, via the residue. PPC has no TCSETS2, so its speed
+words follow `tty_termios_baud_rate`/`tty_termios_input_baud_rate`: the rate
+of CBAUD and CIBAUD (CIBAUD B0 is the output rate), the copied word for
+BOTHER (kept in the residue, so custom rates round-trip), and 0 for an
+encoding without a name.
 
 | Acted on | Flags |
 |---|---|

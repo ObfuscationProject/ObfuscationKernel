@@ -78,6 +78,7 @@ struct ForeignResidue
     std::array<u32, 4> flags{}; // iflag, oflag, cflag, lflag
     std::array<u8, 8> cc{};      // unnamed slots in ascending slot order
     u8 cc_count{};
+    std::array<u32, 2> speeds{}; // PPC c_ispeed, c_ospeed copied with a BOTHER rate
     constexpr bool operator==(const ForeignResidue &) const = default;
 };
 

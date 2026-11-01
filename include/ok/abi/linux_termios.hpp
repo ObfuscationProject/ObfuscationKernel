@@ -106,6 +106,14 @@ struct TermiosCodec final
     static_assert(layout.nccs >= termios_named_slots && layout.cc_offset + layout.nccs <= termios_bytes &&
                   layout.line_offset < termios_bytes && termios_bytes <= 64);
     static_assert(!layout.speed_offset || layout.speed_offset + 8 == termios_bytes);
+    // Profile CIBAUD bits; a value there without a generic name stays in the residue.
+    static constexpr u32 cibaud_profile_mask = [] {
+        u32 mask = 0;
+        for (const auto &row : rows)
+            if (row.field == TermiosField::cflag && row.generic_mask == tty::cflag::cibaud)
+                mask |= row.profile_mask;
+        return mask;
+    }();
 
     [[nodiscard]] static constexpr Status decode(std::span<const u8> in, tty::Termios &termios,
                                                  tty::ForeignResidue &residue)
@@ -133,7 +141,15 @@ struct TermiosCodec final
         for (usize index = 0; index < unnamed.count; ++index)
             foreign.cc[index] = in[layout.cc_offset + unnamed.slots[index]];
         foreign.cc_count = static_cast<u8>(unnamed.count);
-        // PPC speed words are recomputed from CBAUD on output and ignored here.
+        // PPC speed words: Linux set_termios recomputes them from CBAUD/CIBAUD
+        // and keeps the copied word only for a BOTHER rate.
+        if constexpr (layout.speed_offset != 0)
+        {
+            if ((result.cflag & tty::cflag::cbaud) == tty::cflag::bother)
+                foreign.speeds[1] = tty::wire::load<big_endian, 4>(in, layout.speed_offset + 4);
+            if ((result.cflag & tty::cflag::cibaud) >> tty::cflag::ibshift == tty::cflag::bother)
+                foreign.speeds[0] = tty::wire::load<big_endian, 4>(in, layout.speed_offset);
+        }
         termios = result;
         residue = foreign;
         return Status::success();
@@ -162,8 +178,17 @@ struct TermiosCodec final
             out[layout.cc_offset + unnamed.slots[index]] = index < residue.cc_count ? residue.cc[index] : 0;
         if constexpr (layout.speed_offset != 0)
         {
-            tty::wire::store<big_endian, 4>(out, layout.speed_offset, tty::input_baud(termios));
-            tty::wire::store<big_endian, 4>(out, layout.speed_offset + 4, tty::output_baud(termios));
+            // tty_termios_baud_rate / tty_termios_input_baud_rate: CIBAUD B0 is the
+            // output rate, BOTHER the copied word, an unnamed encoding 0.
+            const u32 output =
+                (termios.cflag & tty::cflag::cbaud) == tty::cflag::bother ? residue.speeds[1] : tty::output_baud(termios);
+            const u32 input_bits = (termios.cflag & tty::cflag::cibaud) >> tty::cflag::ibshift;
+            const u32 input = (residue.flags[2] & cibaud_profile_mask) ? 0
+                              : input_bits == tty::cflag::bother  ? residue.speeds[0]
+                              : input_bits                        ? tty::baud_rate(input_bits)
+                                                                  : output;
+            tty::wire::store<big_endian, 4>(out, layout.speed_offset, input);
+            tty::wire::store<big_endian, 4>(out, layout.speed_offset + 4, output);
         }
         return Status::success();
     }
