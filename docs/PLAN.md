@@ -330,13 +330,23 @@ all ten profiles:
 6. Socket readiness through `sched::WaitQueue` wakes instead of rescans.
 7. Gate evidence with the paired OS worktree: ARP, ping, TCP and IPv6
    neighbour discovery against QEMU user networking on ten profiles.
-Slices 1–4 are done ([NET_CORE](qualification/NET_CORE.md)): the kernel
+All seven slices are done ([NET_CORE](qualification/NET_CORE.md)). The kernel
 answers ARP, neighbour discovery and echo over both families, autoconfigures
-IPv6, routes and resolves egress, and its TCP runs a NewReno sliding window
-with reassembly. They change exported headers (the interface member of
-`Kernel`, `NativeUdpFrameKind::unbound`, the TCP snapshot), so the merge
-bumps the module ABI; the paired OS peers must also skip the link-control
-frames (DAD, router solicitation) the interface now sends at link start.
+IPv6, routes and resolves egress, runs a NewReno sliding-window TCP with
+reassembly, offers `AF_INET6` datagram and stream sockets (IPv6-only
+semantics) in both personalities, and wakes TCP stream and UDP receive
+waiters through per-socket `sched::WaitQueue`s (`OK_NET_WAITS`).
+Distributions can configure the interface (`network_interface`) and ask for
+the kernel link probe (`network_probe`, `OK_NET_*` markers). Gate evidence:
+the paired OS `net_probe` image passes the probe on all ten profiles under
+QEMU against a scripted external peer (gateway ARP, IPv4 and IPv6 ping,
+SLAAC, an 8 KiB TCP echo, also with ten percent TCP loss); QEMU's user
+networking is not built into the pinned QEMU. Still open: ICMP errors to
+sockets, poll/select over sockets on queues, TCP getsockname/getpeername.
+Merge: the exported headers bump the module ABI once to 79
+(`docs/modules/modules.md`); the paired OS worktree `feat/net-services`
+consumes SDK 79 and merges right after the kernel. `feat/tty-jobctl` also
+plans 79; whichever merges second takes 80.
 
 ### WT2.4 `feat/storage-durable` (XL)
 
