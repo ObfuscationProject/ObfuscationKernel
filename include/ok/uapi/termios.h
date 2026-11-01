@@ -30,8 +30,13 @@ struct ok_winsize {
     uint16_t ws_ypixel;
 };
 
+#ifdef __cplusplus
+static_assert(sizeof(struct ok_termios) == 36, "struct ok_termios must be 36 bytes");
+static_assert(sizeof(struct ok_winsize) == 8, "struct ok_winsize must be 8 bytes");
+#else
 _Static_assert(sizeof(struct ok_termios) == 36, "struct ok_termios must be 36 bytes");
 _Static_assert(sizeof(struct ok_winsize) == 8, "struct ok_winsize must be 8 bytes");
+#endif
 
 /* c_cc indices */
 #define OK_VINTR 0

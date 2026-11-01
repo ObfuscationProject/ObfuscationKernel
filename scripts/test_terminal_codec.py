@@ -3,8 +3,9 @@
 
 Copied-byte codec evidence only: the native 36-byte termios wire on both
 endiannesses, the generated Linux TermiosCodec/TtyIoctlCodec on all ten
-profiles, and the C layout of ok/uapi/termios.h. The native termios macros are
-compared with the asm-generic values the ABI generator read from Linux 6.13.4.
+profiles, and the layout of ok/uapi/termios.h compiled as C and as C++. The
+native termios macros are compared with the asm-generic values the ABI
+generator read from Linux 6.13.4.
 No user pointer, terminal object, guest or hardware is involved.
 """
 from pathlib import Path
@@ -33,6 +34,18 @@ _Static_assert(offsetof(struct ok_termios, c_cc) == 17, "c_cc");
 _Static_assert(offsetof(struct ok_winsize, ws_ypixel) == 6, "ws_ypixel");
 _Static_assert(OK_NCCS == 19 && OK_TCIFLUSH == 0 && OK_TCOFLUSH == 1 && OK_TCIOFLUSH == 2, "selectors");
 int ok_termios_layout_checked;
+'''
+# The same header from freestanding C++ (kernel and OS C++ consumers), checked
+# against the kernel-neutral termios values.
+CXX_CHECK = '''#include "ok/uapi/termios.h"
+#include "ok/tty/termios.hpp"
+static_assert(sizeof(ok_termios) == 36 && sizeof(ok_winsize) == 8);
+static_assert(OK_NCCS == ok::tty::nccs && OK_VLNEXT == static_cast<unsigned>(ok::tty::Cc::lnext));
+static_assert(OK_ICRNL == ok::tty::iflag::icrnl && OK_IUTF8 == ok::tty::iflag::iutf8);
+static_assert(OK_ONLCR == ok::tty::oflag::onlcr && OK_XTABS == ok::tty::oflag::xtabs);
+static_assert(OK_CBAUD == ok::tty::cflag::cbaud && OK_HUPCL == ok::tty::cflag::hupcl);
+static_assert(OK_ICANON == ok::tty::lflag::icanon && OK_IEXTEN == ok::tty::lflag::iexten);
+int ok_termios_cxx_checked;
 '''
 
 
@@ -90,6 +103,12 @@ def main():
         subprocess.run([*shlex.split(args.cc), '-std=c11', '-ffreestanding', '-Wall', '-Wextra', '-Wpedantic',
                         '-Werror', '-I' + str(root / 'include'), '-c', str(layout), '-o', str(output / 'layout.o')],
                        check=True)
+        header_cxx = output / 'termios_header.cpp'
+        header_cxx.write_text(CXX_CHECK)
+        subprocess.run([*shlex.split(args.cxx), '-std=c++23', '-ffreestanding', '-Wall', '-Wextra', '-Wpedantic',
+                        '-Werror', '-I' + str(root / 'include'), '-c', str(header_cxx), '-o',
+                        str(output / 'header_cxx.o')], check=True)
+        state['cxx_header_checked'] = True
         subprocess.run([*shlex.split(args.cxx), '-std=c++23', '-O2', '-Wall', '-Wextra', '-Wpedantic', '-Werror',
                         *flags, '-I' + str(root / 'include'), str(root / SOURCES[0]), '-o', str(binary)], check=True)
         result = subprocess.run([str(binary)], check=True, capture_output=True, text=True, timeout=600)

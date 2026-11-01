@@ -480,9 +480,9 @@ S1 (value layer; nothing under `src/` uses it yet):
   4096-byte FIFO.
 - `test_terminal_codec.py` requires `TERMINAL_CODEC_PASS linux_profiles=10
   termios_layouts=3 roundtrip=1 residue=1 native_wire_endians=2 hosted=1
-  guest=0`. It also compiles `ok/uapi/termios.h` as C and compares its macros
-  with the generated asm-generic values. The header uses `_Static_assert`, so
-  it is C only; C++ code uses `ok/tty/termios.hpp`.
+  guest=0`. It also compiles `ok/uapi/termios.h` as freestanding C11 and as
+  freestanding C++23 (checked against `ok/tty/termios.hpp`), compares its
+  macros with the generated asm-generic values.
 - Debug test points `tty/n-tty-line-discipline-model` and
   `tty/termios-codec-model` (configured profile) are models booted in QEMU.
 
