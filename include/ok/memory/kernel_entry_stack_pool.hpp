@@ -188,6 +188,19 @@ class KernelEntryStackPool final : private NonCopyable
         return records_[handle.slot].top;
     }
 
+    // Whether this exact lease is the one active on `cpu`: what deactivate_entry
+    // requires, checked before an eviction commits to deactivating it.
+    [[nodiscard]] Status validate_active(KernelEntryStackHandle handle, KernelEntryStackOwner owner, u16 cpu) const
+    {
+        if (auto status = validate(handle, owner); !status)
+            return status;
+        const auto &record = records_[handle.slot];
+        if (cpu >= smp::max_cpus || record.state != State::active || record.cpu != cpu ||
+            active_slot_[cpu] != handle.slot)
+            return Status::not_found("entry stack lease is not active on this CPU");
+        return Status::success();
+    }
+
     Result<u64> inactive_epoch(KernelEntryStackHandle handle, KernelEntryStackOwner owner)
     {
         if (auto status = validate_inactive(handle, owner); !status) return status;

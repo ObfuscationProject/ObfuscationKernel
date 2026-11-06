@@ -854,6 +854,10 @@ class VfsImageRetirement final : private NonCopyable
         }
         if (vfs_continuations.pending_count(pid_) != requests)
             return Status::fault("VFS image retirement found a request without its canonical old thread");
+        // Consume accepts a leader that receives a new lease only without a
+        // request; refuse that here, while exec can still be refused.
+        if (!records_[0].lease.pool && records_[0].handle.request)
+            return Status::fault("VFS image retirement found a leaseless leader request");
         requests_ = requests;
         prepared_ = true;
         return {};
@@ -1108,12 +1112,37 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     for (const auto &old_thread : process->threads())
         if (old_thread.entry_stack.pool) previous_signal_slots[previous_signal_count++] = old_thread.entry_stack.slot;
 #endif
-    // Sibling threads still running on other CPUs leave those entries first:
-    // replacement releases their leases.
-    for (const auto &old_thread : process->threads())
-        if (auto status = evict_thread(kernel, old_thread); !status) return error(status);
+    // Everything that can refuse the exec runs while sibling threads still run
+    // on other CPUs. Evicting one discards its entry, so it would lose its user
+    // progress if the exec then failed: after eviction only commits remain,
+    // and those fail only on an invariant breach, which stops the runtime.
+    if (auto status = kernel.scheduler().preflight_replace_image(pid, context); !status)
+        return error(status);
+    EntryStackPlan entry_plan;
+    if (auto status = prepare_entry_stacks(entry_stacks, *process, entry_plan); !status)
+        return error(status);
+    const std::span<const sched::ThreadControlBlock> old_threads{process->threads().begin(), process->threads().size()};
+    EvictionPlan eviction;
+    if (auto status = prepare_eviction(pid, process->resources().native_space.root, old_threads, eviction); !status)
+        return error(status);
+    if (auto status = validate_evicted_leases(old_threads, eviction); !status) return error(status);
+    if (auto status = prepare_cancel_futex(pid); !status) return error(status);
+    if (auto status = prepare_native_udp_receives_for_exec(pid); !status) return error(status);
+    if (auto status = prepare_linux_udp_receives_for_exec(pid); !status) return error(status);
+    if (auto status = syscall_origins.preflight_prepare(entry_plan.leader().handle); !status)
+        return error(status);
+    // The point of no return: siblings leave the other CPUs, and replacement
+    // releases their leases.
+    if (auto status = commit_eviction(kernel, eviction); !status)
+    {
+        static_cast<void>(image.value().retain_for_diagnosis());
+        runtime_failure = status;
+        started = false;
+        complete = false;
+        return 0;
+    }
     bool vfs_retired{};
-    const auto replaced = replace_entry_stacks(entry_stacks, *process,
+    const auto replaced = commit_entry_stacks(entry_stacks, *process, entry_plan,
         [&] {
             return kernel.posix().exec(pid, context, image.value().memory);
         }, [&] {
@@ -1148,7 +1177,14 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     {
         if (!replaced.committed)
         {
-            return error(replaced.status);
+            // The leases are back in their TCBs. Without an evicted sibling the
+            // old image simply continues; an evicted one lost its entry.
+            if (!eviction.cpus) return error(replaced.status);
+            static_cast<void>(image.value().retain_for_diagnosis());
+            runtime_failure = replaced.status;
+            started = false;
+            complete = false;
+            return 0;
         }
         // Exec cannot return to the old image after scheduler commit. Keep
         // both VM generations and every unreleased lease for diagnosis.

@@ -118,6 +118,23 @@ void retire_native_udp_receives(Kernel &kernel, sched::ProcessId pid,
         if (entry.pid == pid && (!tid || entry.tid == *tid))
             retire_native_udp_receive(kernel, entry.object);
 }
+Status prepare_native_udp_receives_for_exec(sched::ProcessId pid)
+{
+    // The membership checks of retire_native_udp_receive, made while exec can
+    // still be refused; a breach stops the runtime there as it does here.
+    for (const auto &entry : native_udp_receive_waits)
+    {
+        if (entry.pid != pid || !entry.object.pool) continue;
+        if (entry.object.pool != &native_udp_receive_objects)
+            return native_udp_receive_invariant(Status::fault("foreign UDP receive object"));
+        auto resolved = native_udp_receive_objects.resolve(entry.object);
+        if (!resolved) return native_udp_receive_invariant(resolved.status());
+        const auto &owned = *resolved.value();
+        if (owned.pid != entry.pid || owned.tid != entry.tid || owned.phase == NativeUdpOwnerPhase::taken)
+            return native_udp_receive_invariant(Status::fault("UDP receive membership changed"));
+    }
+    return Status::success();
+}
 Status retire_native_udp_receives_for_exec(Kernel &kernel, sched::ProcessId pid)
 {
     // Called after scheduler commit while every old entry lease remains escrowed.
@@ -634,6 +651,24 @@ class LinuxUdpReceiveAccess final
 UdpWaitCounters udp_wait_statistics() { return udp_wait_counters; }
 [[maybe_unused]] Status retire_linux_udp_receives_for_exec(Kernel &kernel, sched::ProcessId pid)
 { return retire_linux_udp_receives(kernel, pid, {}, LinuxUdpReceiveRetirement::exec); }
+[[maybe_unused]] Status prepare_linux_udp_receives_for_exec(sched::ProcessId pid)
+{
+    // The checks retire_linux_udp_receive makes before it detaches anything.
+    for (const auto &entry : linux_udp_receive_waits)
+    {
+        if (entry.pid != pid || !entry.object.pool) continue;
+        if (entry.object.pool != &linux_udp_receive_objects)
+            return linux_udp_receive_invariant(Status::fault("foreign Linux UDP receive object"));
+        auto resolved = linux_udp_receive_objects.resolve(entry.object);
+        if (!resolved) return linux_udp_receive_invariant(resolved.status());
+        const auto &owned = *resolved.value();
+        if (owned.pid != entry.pid || owned.tid != entry.tid || owned.phase == LinuxUdpReceivePhase::taken)
+            return linux_udp_receive_invariant(Status::fault("Linux UDP receive membership changed"));
+        if (owned.capture && syscall_origins.linux_udp_receive_borrowed(*owned.capture))
+            return linux_udp_receive_invariant(Status::busy("Linux UDP receive retirement must end current borrow first"));
+    }
+    return {};
+}
 
 Status linux_udp_receive_start_status()
 {

@@ -162,6 +162,20 @@ Status cancel_futex(Kernel &kernel, memory::ObjectHandle object, std::string_vie
 #endif
     return Status::success();
 }
+Status prepare_cancel_futex(sched::ProcessId pid)
+{
+    // cancel_futex stops the runtime on an object it cannot resolve; exec
+    // finds that breach before it evicts sibling threads.
+    for (const auto &entry : futex_waits)
+        if (entry.pid == pid)
+            if (auto resolved = futex_objects.resolve(entry.object); !resolved)
+            {
+                runtime_failure = resolved.status();
+                started = false;
+                return resolved.status();
+            }
+    return Status::success();
+}
 Status cancel_futex(Kernel &kernel, sched::ProcessId pid)
 {
     for (const auto &entry : futex_waits)

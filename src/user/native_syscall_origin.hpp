@@ -326,6 +326,16 @@ class SyscallOriginTable final : private NonCopyable
         record.identity.image = ++image_sequence_;
         return Status::success();
     }
+    // The checks prepare makes of a lease's record, for exec to make before it
+    // evicts sibling threads; prepare itself runs once the old image retired.
+    [[nodiscard]] Status preflight_prepare(Handle lease) const
+    {
+        if (lease.pool != pool_ || lease.slot >= capacity)
+            return Status::invalid_argument("syscall origin prepare names a foreign lease");
+        if (records_[lease.slot].linux_udp_borrows) return Status::busy("syscall origin prepare has a live Linux UDP borrow");
+        if (image_sequence_ == ~u64{0}) return Status::overflow("syscall origin image sequence exhausted");
+        return Status::success();
+    }
     struct Ownership
     {
         usize prepared{}, live{}, bound{}, borrows{}, pending{};

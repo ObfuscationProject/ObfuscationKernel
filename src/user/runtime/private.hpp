@@ -165,8 +165,24 @@ extern std::atomic<bool> secondary_admission;
 // CPU runs user code (src/user/runtime/smp.cpp).
 Result<hw::Trap> enter_unlocked(hw::AddressSpace &space, hw::UserFrame &frame, const hw::KernelEntryStackView &view,
                                 memory::KernelEntryStackHandle lease, u64 pid, u64 tid);
-// Takes over the entry of every other CPU that is running `thread`, so its
-// lease and address space can be retired.
+// Takes over the entry of every other CPU that is running a thread, so its
+// lease and address space can be retired. Planning can refuse and changes
+// nothing; a plan's commit fails only on an invariant breach (a damaged
+// lease), and it still revokes every planned entry.
+struct EvictionPlan
+{
+    sched::ProcessId pid{};
+    uptr root{};
+    u32 cpus{};
+};
+// Plans every thread of `threads` (all of process `pid`) that another CPU runs.
+Status prepare_eviction(sched::ProcessId pid, uptr root, std::span<const sched::ThreadControlBlock> threads,
+                        EvictionPlan &plan);
+// Whether every leased thread of `threads` is inactive once `plan` commits:
+// planned ones run on the lease their TCB names, the others are inactive.
+Status validate_evicted_leases(std::span<const sched::ThreadControlBlock> threads, const EvictionPlan &plan);
+Status commit_eviction(Kernel &kernel, const EvictionPlan &plan);
+// Plans and commits the eviction of one thread.
 Status evict_thread(Kernel &kernel, const sched::ThreadControlBlock &thread);
 #ifdef OK_PRIVATE_MIPS_O32_SIGNAL
 // The backend owns capability/capture tokens; this table owns per-lease state.
@@ -472,6 +488,8 @@ Status retire_linux_udp_receives(Kernel &kernel, sched::ProcessId pid,
 [[maybe_unused]] memory::ObjectHandle futex_object(sched::ProcessId pid, sched::ThreadId tid);
 Status cancel_futex(Kernel &kernel, memory::ObjectHandle object, std::string_view reason = "cancelled", i64 result = -4);
 Status cancel_futex(Kernel &kernel, sched::ProcessId pid);
+// Exec's check, before it evicts siblings, that cancel_futex(pid) will succeed.
+Status prepare_cancel_futex(sched::ProcessId pid);
 
 [[maybe_unused]] memory::ObjectHandle poll_object(sched::ProcessId pid, sched::ThreadId tid);
 u64 poll_syscall_number(const hw::UserFrame &frame, bool select_sets);
@@ -573,6 +591,8 @@ memory::ObjectHandle native_udp_receive_object(sched::ProcessId pid, sched::Thre
 void retire_native_udp_receives(Kernel &kernel, sched::ProcessId pid,
                                std::optional<sched::ThreadId> tid = {});
 Status retire_native_udp_receives_for_exec(Kernel &kernel, sched::ProcessId pid);
+// Exec's check, before it evicts siblings, that the retirement above will succeed.
+Status prepare_native_udp_receives_for_exec(sched::ProcessId pid);
 i64 resume_native_udp_receive(Kernel &kernel, sched::ProcessControlBlock &process,
                              memory::ObjectHandle object, bool &complete);
 Status scan_native_udp_receives(Kernel &kernel);
@@ -1081,6 +1101,7 @@ SyscallOrigins::LinuxUdpReceiveBinding linux_udp_receive_binding(memory::ObjectH
 [[maybe_unused]] Status retire_linux_udp_receives(Kernel &kernel, sched::ProcessId pid,
     std::optional<sched::ThreadId> tid, LinuxUdpReceiveRetirement cause);
 [[maybe_unused]] Status retire_linux_udp_receives_for_exec(Kernel &kernel, sched::ProcessId pid);
+[[maybe_unused]] Status prepare_linux_udp_receives_for_exec(sched::ProcessId pid);
 
 Status linux_udp_receive_start_status();
 

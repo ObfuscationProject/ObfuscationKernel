@@ -1495,12 +1495,12 @@ Result<ProcessId> SchedulerState::create_session(ProcessId caller)
     if (console_input_.inherit(process->console_epoch_)) cancel_console_epoch(process->console_epoch_);
     return caller;
 }
-Status SchedulerState::replace_image(ProcessId pid, arch::CpuContext context, const MemoryMap &memory)
+Status SchedulerState::preflight_replace_image(ProcessId pid, const arch::CpuContext &context) const
 {
     if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
     if (auto status = arch::validate_architecture(context.architecture); !status.ok())
         return status;
-    auto *process = find(pid);
+    const auto *process = find(pid);
     if (process == nullptr)
         return Status::not_found("process not found");
     if (process->resources().unix_receive_operations || process->resources().prepared_descriptor_operations)
@@ -1512,6 +1512,12 @@ Status SchedulerState::replace_image(ProcessId pid, arch::CpuContext context, co
     bool live = false;
     for (const auto &thread : process->threads()) live |= thread.state != ProcessState::exited;
     if (!live) return Status::invalid_argument("cannot exec a retired thread group");
+    return Status::success();
+}
+Status SchedulerState::replace_image(ProcessId pid, arch::CpuContext context, const MemoryMap &memory)
+{
+    if (auto status = preflight_replace_image(pid, context); !status) return status;
+    auto *process = find(pid);
     for (const auto &thread : process->threads())
         if (thread.entry_stack.pool || thread.kernel_stack_top)
             return Status::busy("entry stack references must be escrowed before exec");

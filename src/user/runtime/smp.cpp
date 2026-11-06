@@ -63,29 +63,77 @@ Result<hw::Trap> enter_unlocked(hw::AddressSpace &space, hw::UserFrame &frame, c
     return trap;
 }
 
-Status evict_thread(Kernel &kernel, const sched::ThreadControlBlock &thread)
+Status prepare_eviction(sched::ProcessId pid, uptr root, std::span<const sched::ThreadControlBlock> threads,
+                        EvictionPlan &plan)
 {
+    plan = {pid, root, 0};
     const auto self = smp::current_cpu();
-    u32 running = 0;
-    for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
-        if (cpu != self && !cpu_entries[cpu].revoked && cpu_entries[cpu].pid == thread.owner &&
-            cpu_entries[cpu].tid == thread.tid)
-            running |= u32{1} << cpu;
-    if (!running) return {};
-    // Every CPU in this address space leaves user mode. Each then waits for the
-    // kernel lock this CPU holds, so its lease is no longer in use.
-    const auto *process = kernel.scheduler().find(thread.owner);
-    smp::quiesce_root(process ? process->resources().native_space.root : 0);
     for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
     {
-        if ((running & (u32{1} << cpu)) == 0) continue;
-        auto &entry = cpu_entries[cpu];
-        if (auto status = entry_stacks.deactivate_entry(entry.lease, {entry.pid, entry.tid}, cpu); !status)
+        const auto &entry = cpu_entries[cpu];
+        if (cpu == self || entry.revoked || entry.pid != pid) continue;
+        const sched::ThreadControlBlock *thread{};
+        for (const auto &member : threads)
+            if (member.owner == pid && member.tid == entry.tid) thread = &member;
+        if (!thread) continue;
+        // The pool has this lease active on that CPU, so deactivating it
+        // cannot be refused.
+        if (auto status = entry_stacks.validate_active(entry.lease, {entry.pid, entry.tid}, cpu); !status)
             return status;
+        plan.cpus |= u32{1} << cpu;
+    }
+    return {};
+}
+
+Status validate_evicted_leases(std::span<const sched::ThreadControlBlock> threads, const EvictionPlan &plan)
+{
+    for (const auto &thread : threads)
+    {
+        if (!thread.entry_stack.pool) continue;
+        bool planned = false;
+        for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
+        {
+            if ((plan.cpus & (u32{1} << cpu)) == 0 || cpu_entries[cpu].tid != thread.tid) continue;
+            // The CPU runs the thread on the lease its TCB names.
+            if (cpu_entries[cpu].lease != thread.entry_stack)
+                return Status::fault("CPU entry does not name its thread's lease");
+            planned = true;
+        }
+        if (!planned)
+            if (auto status = entry_stacks.validate_inactive(thread.entry_stack, {thread.owner, thread.tid}); !status)
+                return status;
+    }
+    return {};
+}
+
+Status commit_eviction(Kernel &kernel, const EvictionPlan &plan)
+{
+    if (!plan.cpus) return {};
+    // Every CPU in this address space leaves user mode. Each then waits for the
+    // kernel lock this CPU holds, so its lease is no longer in use.
+    smp::quiesce_root(plan.root);
+    Status failure{};
+    for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
+    {
+        if ((plan.cpus & (u32{1} << cpu)) == 0) continue;
+        auto &entry = cpu_entries[cpu];
+        // A damaged lease is still revoked and quarantined; finish the others.
+        if (auto status = entry_stacks.deactivate_entry(entry.lease, {entry.pid, entry.tid}, cpu); !status && failure)
+            failure = status;
         static_cast<void>(kernel.scheduler().clear_on_cpu(entry.pid, entry.tid, cpu));
         entry.revoked = true;
     }
-    return {};
+    return failure;
+}
+
+Status evict_thread(Kernel &kernel, const sched::ThreadControlBlock &thread)
+{
+    const auto *process = kernel.scheduler().find(thread.owner);
+    EvictionPlan plan;
+    if (auto status = prepare_eviction(thread.owner, process ? process->resources().native_space.root : 0,
+                                       {&thread, 1}, plan); !status)
+        return status;
+    return commit_eviction(kernel, plan);
 }
 } // namespace runtime_detail
 } // namespace ok::user::native

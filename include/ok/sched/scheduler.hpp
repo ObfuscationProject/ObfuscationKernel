@@ -486,6 +486,9 @@ class SchedulerState
     [[nodiscard]] Result<ProcessId> session_id(ProcessId caller, i32 pid) const;
     Status set_process_group(ProcessId caller, i32 pid, i32 pgid);
     [[nodiscard]] Result<ProcessId> create_session(ProcessId caller);
+    // Every check replace_image makes before it changes anything, except the
+    // entry stack escrow: exec runs it before evicting sibling threads.
+    [[nodiscard]] Status preflight_replace_image(ProcessId pid, const arch::CpuContext &context) const;
     Status replace_image(ProcessId pid, arch::CpuContext context, const MemoryMap &memory);
     Status exit_process(ProcessId pid, i32 code);
     Status terminate_process(ProcessId pid, u8 signal);
