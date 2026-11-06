@@ -1,6 +1,15 @@
 #include "ok/arch/execution.hpp"
+#include "ok/arch/smp.hpp"
+#include "ok/boot/boot_memory.hpp"
+#include "ok/boot/cpu_topology.hpp"
+#include "ok/boot/fdt.hpp"
+#include "ok/boot/raw_handoff.hpp"
+#include "ok/memory/kernel_entry_stack_pool.hpp"
+#include "ok/smp/bringup.hpp"
 #include "execution_table_pages.hpp"
 #include "../../src/arch/tlb_tags.hpp"
+
+#include <atomic>
 
 using namespace ok;
 namespace native = ok::arch::execution;
@@ -75,9 +84,12 @@ void store_through_user(native::AddressSpace &space, u64 value)
 }
 
 // More spaces than this CPU has ASID slots, created and retired in turn like
-// mmap churn: tags roll over and are reused, yet each space stores only into
-// its own frame (three frames rotate, so a reused tag's stale entry would name
-// another one), and the next entry after a remap stores into the new frame.
+// mmap churn: tags roll over and are reused, each space stores into its own
+// frame (three frames rotate), and the next entry after a remap stores into
+// the new frame. This runs the tagged entry path, its tlbi aside1 encoding and
+// the rollover; it cannot catch a missing invalidation under QEMU TCG, which
+// drops its whole TLB whenever TTBR0's ASID changes. Stale-entry detection is
+// the hosted model's (scripts/test_tlb_tags.py).
 alignas(4096) u8 churn_data[3][4096]{};
 alignas(4096) u8 churn_stack[4096]{};
 alignas(4096) u8 remap_target[4096]{};
@@ -107,12 +119,16 @@ void check_tag_churn(native::AddressSpace &kept, const u8 *kept_data)
     }
     store_through_user(kept, 0x11);
     require(kept_data[0] == 0x11, "long-lived space before remap");
+    const auto before_remap = native::tlb_tag_report(1);
     require(native::remap(kept, {data_va, reinterpret_cast<uptr>(remap_target), native::page_read | native::page_write})
                 .ok(),
             "remap long-lived data page");
     store_through_user(kept, 0x22);
     require(remap_target[0] == 0x22 && kept_data[0] == 0x11, "next entry after a remap uses the new frame");
     const auto after = native::tlb_tag_report(1);
+    // Of the two entries after the remap, the first invalidates the space's
+    // ASID (its generation moved) and the second keeps it.
+    require(after.invalidations == before_remap.invalidations + 1, "one ASID invalidation for the remap");
     require(after.supported && after.asid_bits >= 8 && !after.pcid && after.rollovers >= before.rollovers + 2,
             "ASID tags rolled over");
     if (after.asid_bits == 16)
@@ -120,6 +136,253 @@ void check_tag_churn(native::AddressSpace &kept, const u8 *kept_data)
     else
         print("OK_NATIVE_TLB scope=hardware asid=8");
     print(" churn=pass rollover=pass remap=pass\n");
+}
+
+u64 counter()
+{
+    u64 value;
+    asm volatile("isb; mrs %0, cntpct_el0" : "=r"(value));
+    return value;
+}
+// Bounded by the architectural counter, so a CPU that never answers fails.
+template <typename Done> bool wait_for(Done done, u64 milliseconds)
+{
+    u64 frequency;
+    asm volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
+    const auto start = counter(), limit = frequency / 1000 * milliseconds;
+    while (!done())
+    {
+        if (counter() - start > limit)
+            return done();
+        ok::arch::ArchOperations::spin_pause();
+    }
+    return true;
+}
+
+// A secondary CPU started through PSCI CPU_ON runs EL0 code in its own space
+// on an owned entry stack while the boot CPU runs in another. `secondary_lock`
+// stands in for the kernel lock: a CPU opens its user window under it, and a
+// translation change holds it. After the boot CPU remapped the secondary's
+// data page (a shootdown), the secondary enters that space again and must
+// store into the new frame: the lazy path of a CPU that cached the old
+// translation under its own ASID and left.
+alignas(4096) u8 data_c[4096]{};
+alignas(4096) u8 data_c_replacement[4096]{};
+alignas(4096) u8 stack_c[4096]{};
+alignas(4096) u8 data_d[4096]{};
+alignas(4096) u8 stack_d[4096]{};
+alignas(16) u8 secondary_stack[64 * 1024]{};
+alignas(4096) std::byte entry_arena[memory::KernelEntryStackPool::arena_bytes]{};
+constinit memory::KernelEntryStackPool entry_pool{};
+constexpr memory::KernelEntryStackOwner secondary_owner{1, 2};
+constinit native::KernelEntryStackView secondary_view{};
+constinit ok::smp::SpinLock secondary_lock{};
+enum SecondaryPhase : u32
+{
+    secondary_idle,
+    secondary_started,
+    secondary_user_loop,
+    secondary_done,
+    secondary_failed,
+};
+constinit std::atomic<u32> secondary_phase{};
+constinit std::atomic<bool> secondary_stop{};
+native::AddressSpace secondary_space{};
+struct SecondaryResult
+{
+    u32 cpu_index{~0u};
+    bool syscalls{};
+    bool remote_store{};
+    native::Trap local_timer{};
+    native::Trap ipi{};
+    usize timer_traps{};
+};
+SecondaryResult secondary_result{};
+
+Result<native::Trap> secondary_enter(native::UserFrame &frame)
+{
+    secondary_lock.lock();
+    ok::smp::begin_user(secondary_space.root);
+    secondary_lock.unlock();
+    auto trap = native::enter_owned(secondary_space, frame, secondary_view);
+    ok::smp::end_user();
+    return trap;
+}
+// The user program's two syscalls from its start; the second follows its store
+// of `value` at data_va. False on any other outcome.
+bool secondary_store(native::UserFrame &frame, u64 value)
+{
+    native::Trap trap{};
+    for (usize attempt = 0; attempt < 128; ++attempt)
+    {
+        auto next = secondary_enter(frame);
+        if (!next) return false;
+        if ((trap = next.value()).kind != native::TrapKind::timer) break;
+    }
+    if (trap.kind != native::TrapKind::syscall || native::syscall(frame).number != 0x1234)
+        return false;
+    native::set_return_value(frame, value);
+    for (usize attempt = 0; attempt < 128; ++attempt)
+    {
+        auto next = secondary_enter(frame);
+        if (!next) return false;
+        if ((trap = next.value()).kind != native::TrapKind::timer) break;
+    }
+    return trap.kind == native::TrapKind::syscall && native::syscall(frame).number == 0x2345;
+}
+
+void secondary_run()
+{
+    auto &result = secondary_result;
+    result.cpu_index = ok::smp::current_cpu();
+    auto frame = native::initial_frame(code_va, native::user_end);
+    result.syscalls = secondary_store(frame, 13) && data_c[0] == 13;
+    if (!result.syscalls) return;
+    // The user loop that follows makes no syscall: only the local timer or an
+    // IPI can end an entry.
+    for (;;)
+    {
+        auto next = secondary_enter(frame);
+        if (!next) return;
+        if (next.value().kind == native::TrapKind::timer)
+        {
+            ++result.timer_traps;
+            result.local_timer = next.value();
+            secondary_phase.store(secondary_user_loop, std::memory_order_release);
+        }
+        else if (next.value().kind == native::TrapKind::interrupt)
+            result.ipi = next.value();
+        else
+            return;
+        secondary_lock.lock();
+        const bool stop = secondary_stop.load(std::memory_order_acquire);
+        secondary_lock.unlock();
+        if (stop) break;
+    }
+    frame = native::initial_frame(code_va, native::user_end);
+    result.remote_store = secondary_store(frame, 0x31);
+    secondary_phase.store(secondary_done, std::memory_order_release);
+}
+
+// Skipped with one CPU. The device tree comes straight from the boot handoff;
+// this probe does not build the kernel's qualified boot memory.
+void check_secondary_cpu()
+{
+    const auto &handoff = ok::boot::raw_boot_handoff();
+    const uptr blob = handoff.captured ? handoff.arguments[0] : 0;
+    require(blob != 0 && (blob & 7) == 0, "device tree in the boot handoff");
+    const auto *fdt = reinterpret_cast<const u8 *>(blob);
+    const u32 size = (u32{fdt[4]} << 24) | (u32{fdt[5]} << 16) | (u32{fdt[6]} << 8) | u32{fdt[7]};
+    ok::boot::CpuTopologyMap map{};
+    require(size <= ok::boot::max_fdt_bytes &&
+                ok::boot::parse_fdt_cpus({reinterpret_cast<const std::byte *>(blob), size},
+                                         ok::boot::FdtCpuFlavor::arm, map)
+                    .ok(),
+            "CPU discovery");
+    if (map.count < 2 || map.method == ok::boot::CpuStartMethod::none)
+    {
+        print("OK_NATIVE_SMP scope=hardware secondary=skipped reason=single-cpu\n");
+        return;
+    }
+    require(ok::boot::mark_boot_cpu(map, ok::arch::smp::current_hardware_id()), "boot CPU in the device tree");
+    usize secondary = map.count;
+    for (usize i = 0; i < map.count && secondary == map.count; ++i)
+        if (i != map.boot_index && map.cpus[i].enabled)
+            secondary = i;
+    require(secondary < map.count, "an enabled secondary CPU");
+    const auto hardware_id = map.cpus[secondary].hardware_id;
+    require(ok::arch::smp::prepare_boot_cpu(map).ok(), "boot CPU GIC interface");
+
+    const native::PageMapping mappings_boot[] = {
+        {code_va, reinterpret_cast<uptr>(code), native::page_read | native::page_execute},
+        {data_va, reinterpret_cast<uptr>(data_d), native::page_read | native::page_write},
+        {stack_va, reinterpret_cast<uptr>(stack_d), native::page_read | native::page_write},
+    };
+    const native::PageMapping mappings_secondary[] = {
+        {code_va, reinterpret_cast<uptr>(code), native::page_read | native::page_execute},
+        {data_va, reinterpret_cast<uptr>(data_c), native::page_read | native::page_write},
+        {stack_va, reinterpret_cast<uptr>(stack_c), native::page_read | native::page_write},
+    };
+    auto boot_result = native::create_space(mappings_boot);
+    auto secondary_result_space = native::create_space(mappings_secondary);
+    require(boot_result.ok() && secondary_result_space.ok(), "create per-CPU test spaces");
+    auto boot_space = boot_result.value();
+    secondary_space = secondary_result_space.value();
+
+    // A secondary's block has no entry stack of its own: lease one for it.
+    require(entry_pool.activate(entry_arena).ok(), "entry stack pool");
+    const auto lease = entry_pool.reserve(secondary_owner);
+    require(lease.ok(), "secondary entry stack lease");
+    const auto active = entry_pool.activate_entry(lease.value(), secondary_owner, 1);
+    require(active.ok(), "secondary entry stack activation");
+    secondary_view = active.value();
+
+    auto &record = ok::smp::cpu_record(1);
+    record.hardware_id = hardware_id;
+    record.stack_lower = reinterpret_cast<uptr>(secondary_stack);
+    record.stack_top = reinterpret_cast<uptr>(secondary_stack + sizeof(secondary_stack));
+    ok::smp::detail::ipi_sender = &ok::arch::smp::send_ipi;
+    require(ok::arch::smp::start(1, hardware_id, record.stack_lower, record.stack_top).ok(), "PSCI CPU_ON");
+    require(wait_for([&] { return secondary_phase.load(std::memory_order_acquire) >= secondary_started; }, 2000) &&
+                record.reported_id.load(std::memory_order_acquire) == hardware_id,
+            "secondary ran C++ and reported its own MPIDR");
+    ok::smp::detail::online.store(3, std::memory_order_release);
+    require(wait_for([&] { return secondary_phase.load(std::memory_order_acquire) >= secondary_user_loop; }, 2000),
+            "secondary entered EL0 and its local timer preempted it");
+    const auto boot_tags = native::tlb_tag_report(1);
+    const auto secondary_tags = native::tlb_tag_report(2);
+    require(secondary_tags.supported && secondary_tags.asid_bits == boot_tags.asid_bits &&
+                secondary_tags.invalidations != 0,
+            "secondary sized its own ASIDs and entered under one");
+
+    // The boot CPU runs its own space meanwhile.
+    store_through_user(boot_space, 17);
+    require(data_d[0] == 17 && data_c[0] == 13, "concurrent spaces keep distinct backing");
+
+    // The remap waits until the secondary, kicked by an IPI, left the space.
+    // Between two entries the secondary is outside its window for a moment and
+    // nothing is waited for: retry until a remap waited.
+    const auto received = record.ipis_received.load(std::memory_order_acquire);
+    const auto shootdowns = ok::smp::cpu_record(0).shootdowns.load(std::memory_order_relaxed);
+    const native::PageMapping replacement{data_va, reinterpret_cast<uptr>(data_c_replacement),
+                                          native::page_read | native::page_write};
+    bool remapped = true, waited = false, generation_even = true;
+    for (usize attempt = 0; attempt < 100 && !waited; ++attempt)
+    {
+        secondary_lock.lock();
+        remapped = native::remap(secondary_space, replacement).ok() && remapped;
+        waited = ok::smp::cpu_record(0).shootdowns.load(std::memory_order_relaxed) != shootdowns;
+        generation_even = (record.user_generation.load(std::memory_order_acquire) & 1) == 0 && generation_even;
+        if (waited) secondary_stop.store(true, std::memory_order_release);
+        secondary_lock.unlock();
+    }
+    require(remapped && waited && generation_even, "remap quiesced the secondary's user window");
+    require(wait_for([&] { return secondary_phase.load(std::memory_order_acquire) == secondary_done; }, 2000),
+            "secondary finished its user entries");
+    const auto &result = secondary_result;
+    require(result.cpu_index == 1 && ok::smp::current_cpu() == 0, "per-CPU logical ids");
+    require(result.syscalls, "secondary EL0 syscalls and return values");
+    require(result.local_timer.kind == native::TrapKind::timer && result.local_timer.vector == 30 &&
+                record.local_ticks.load(std::memory_order_relaxed) >= result.timer_traps,
+            "local physical timer preempts the secondary");
+    require(result.ipi.kind == native::TrapKind::interrupt && result.ipi.vector < 16 &&
+                record.ipis_received.load(std::memory_order_acquire) > received,
+            "IPI preempts the secondary");
+    require(result.remote_store && data_c_replacement[0] == 0x31 && data_c[0] == 13,
+            "the secondary's next entry after the remap stores into the new frame");
+    const auto after = native::tlb_tag_report(2);
+    require(after.invalidations > secondary_tags.invalidations,
+            "the secondary invalidated its ASID for the moved generation");
+    require(entry_pool.deactivate_entry(lease.value(), secondary_owner, 1).ok() &&
+                entry_pool.release(lease.value(), secondary_owner).ok(),
+            "release the secondary's entry stack");
+    require(native::destroy_space(boot_space).ok() && native::destroy_space(secondary_space).ok(),
+            "release per-CPU test spaces");
+    if (after.asid_bits == 16)
+        print("OK_NATIVE_SMP scope=hardware cpus=2 asid=16");
+    else
+        print("OK_NATIVE_SMP scope=hardware cpus=2 asid=8");
+    print(" secondary_user=pass syscall=pass local_timer=pass ipi=pass shootdown=pass remote_remap=pass\n");
 }
 
 void check_fault(native::AddressSpace &space, const u8 *entry, native::TrapKind kind, uptr address, uptr error_class)
@@ -131,6 +394,28 @@ void check_fault(native::AddressSpace &space, const u8 *entry, native::TrapKind 
     require((trap.error_code >> 26) == error_class, "unexpected hardware exception class");
 }
 } // namespace
+
+// The secondary's C++ entry after PSCI CPU_ON and its per-CPU setup.
+extern "C" [[noreturn]] void ok_smp_secondary_main(ok::smp::CpuId cpu)
+{
+    auto &record = ok::smp::cpu_record(cpu);
+    record.reported_id.store(static_cast<uptr>(ok::arch::smp::current_hardware_id()), std::memory_order_release);
+    record.state.store(static_cast<u8>(ok::smp::CpuState::online), std::memory_order_release);
+    secondary_phase.store(secondary_started, std::memory_order_release);
+    secondary_run();
+    if (secondary_phase.load(std::memory_order_acquire) != secondary_done)
+        secondary_phase.store(secondary_failed, std::memory_order_release);
+    for (;;)
+        ok::arch::smp::wait_local();
+}
+
+// smp.cpp's discover() reads the kernel's qualified boot memory, which this
+// probe does not build; check_secondary_cpu parses the device tree itself.
+const ok::boot::KernelBootMemory &ok::boot::kernel_boot_memory()
+{
+    static const KernelBootMemory none{};
+    return none;
+}
 
 extern "C" void ok_platform_console_write_char(char value)
 {
@@ -150,6 +435,23 @@ extern "C" void *memcpy(void *destination, const void *source, usize count)
     for (usize i = 0; i < count; ++i)
         out_bytes[i] = in_bytes[i];
     return destination;
+}
+// The device tree parser's string compares.
+extern "C" int memcmp(const void *left, const void *right, usize size)
+{
+    const auto *a = static_cast<const u8 *>(left), *b = static_cast<const u8 *>(right);
+    for (usize i = 0; i < size; ++i)
+        if (a[i] != b[i])
+            return a[i] < b[i] ? -1 : 1;
+    return 0;
+}
+extern "C" void *memchr(const void *from, int value, usize size)
+{
+    const auto *in = static_cast<const u8 *>(from);
+    for (usize i = 0; i < size; ++i)
+        if (in[i] == static_cast<u8>(value))
+            return const_cast<u8 *>(in + i);
+    return nullptr;
 }
 
 extern "C" [[noreturn]] void kernel_main()
@@ -230,6 +532,7 @@ extern "C" [[noreturn]] void kernel_main()
     require(native::destroy_space(space_a).ok() && native::destroy_space(space_b).ok(),
             "release native address spaces");
     require(!native::user_range(space_a, data_va, 1), "stale address-space handle rejected");
+    check_secondary_cpu();
     print("OK_NATIVE_TEST_PASS scope=hardware architecture=aarch64\n");
     finish(true);
 }

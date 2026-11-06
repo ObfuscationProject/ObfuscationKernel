@@ -65,9 +65,12 @@ u64 count_through_user(hw::AddressSpace &space)
 }
 
 // More spaces than this hart has ASID slots, created and retired in turn like
-// mmap churn: tags roll over and are reused, yet each space counts only in its
-// own frame (three frames rotate, so a reused tag's stale entry would name
-// another one), and the next entry after a remap counts in the new frame.
+// mmap churn: tags roll over and are reused, each space counts in its own
+// frame (three frames rotate), and the next entry after a remap counts in the
+// new frame. This runs the tagged entry path, sfence.vma by ASID and the
+// rollover; it cannot catch a missing invalidation under QEMU TCG, which
+// drops its whole TLB on every satp write. Stale-entry detection is the hosted
+// model's (scripts/test_tlb_tags.py).
 alignas(4096) std::array<std::array<u64, 512>, 3> churn_data{};
 alignas(4096) std::array<u64, 512> kept_data{}, remap_target{};
 void check_tag_churn()
@@ -101,9 +104,15 @@ void check_tag_churn()
     }
     remap_target[0] = 500;
     kept_pages[1].physical_address = reinterpret_cast<uptr>(remap_target.data());
+    const auto before_remap = hw::tlb_tag_report(1);
     check(hw::remap(kept, kept_pages[1]).ok(), "remap long-lived page");
     check(count_through_user(kept) == 501 && remap_target[0] == 501 && kept_data[0] == kept_count,
           "next entry after a remap uses the new frame");
+    // The first entry after the remap fences the space's ASID (its generation
+    // moved); later entries keep it.
+    check(count_through_user(kept) == 502 &&
+              hw::tlb_tag_report(1).invalidations == before_remap.invalidations + (before_remap.asid_bits ? 1 : 0),
+          "one ASID invalidation for the remap");
     check(hw::destroy_space(kept).ok(), "retire long-lived space");
     const auto after = hw::tlb_tag_report(1);
     check(after.supported && !after.pcid &&
@@ -117,14 +126,37 @@ void check_tag_churn()
         emit("RV64_NATIVE tlb_asid=narrow churn=pass rollover=pass remap=pass\n");
 }
 
-// Hart 1's share: it runs the counting loop in its own space until hart 0
-// asks it to stop, and reports how each entry ended.
+// Hart 1's share: one pass of the memory probe in its own space, then the
+// counting loop until hart 0 asks it to stop, reporting how each entry ended,
+// then one more memory pass. Hart 0 remapped the counted page meanwhile, so
+// that last pass must count in the new frame: the path of a hart that cached
+// the old translation (under its own ASID, where it has them) and left.
 alignas(16) std::array<std::byte, 16384> hart_one_stack{};
+alignas(4096) std::array<u64, 512> hart_one_target{};
 hw::AddressSpace hart_one_space{};
 std::atomic<u32> hart_one_phase{}; // 1 run, 2 stop, 3 stopped
 std::atomic<u32> hart_one_timers{}, hart_one_ipis{}, hart_one_other{};
-std::atomic<uptr> hart_one_count{};
+std::atomic<uptr> hart_one_count{}, hart_one_before{}, hart_one_after{};
 std::atomic<bool> hart_one_identity{};
+// One memory pass on hart 1, inside its user window: the sum it reports, or 0
+// when an entry ended otherwise.
+u64 hart_one_memory_pass()
+{
+    auto frame = hw::initial_frame(entry(ok_rv64_probe_memory), hw::user_begin + 0x2000 - 16);
+    for (usize attempt = 0; attempt < 128; ++attempt)
+    {
+        smp::begin_user(hart_one_space.root);
+        const auto trap = hw::enter(hart_one_space, frame);
+        smp::end_user();
+        if (!trap)
+            return 0;
+        if (trap.value().kind == hw::TrapKind::syscall)
+            return frame.registers[10];
+        if (trap.value().kind != hw::TrapKind::timer && trap.value().kind != hw::TrapKind::interrupt)
+            return 0;
+    }
+    return 0;
+}
 } // namespace
 extern "C" [[noreturn]] void ok_smp_secondary_main(smp::CpuId cpu)
 {
@@ -134,6 +166,7 @@ extern "C" [[noreturn]] void ok_smp_secondary_main(smp::CpuId cpu)
     record.state.store(static_cast<u8>(smp::CpuState::online), std::memory_order_release);
     while (hart_one_phase.load(std::memory_order_acquire) == 0)
         arch::ArchOperations::spin_pause();
+    hart_one_before.store(hart_one_memory_pass(), std::memory_order_release);
     auto frame = hw::initial_frame(entry(ok_rv64_probe_timer), hw::user_begin + 0x2000 - 16);
     while (hart_one_phase.load(std::memory_order_acquire) == 1)
     {
@@ -148,6 +181,7 @@ extern "C" [[noreturn]] void ok_smp_secondary_main(smp::CpuId cpu)
             hart_one_other.fetch_add(1, std::memory_order_relaxed);
     }
     hart_one_count.store(frame.registers[8], std::memory_order_relaxed);
+    hart_one_after.store(hart_one_memory_pass(), std::memory_order_relaxed);
     hart_one_phase.store(3, std::memory_order_release);
     for (;;)
         arch::smp::wait_local();
@@ -282,12 +316,21 @@ extern "C" [[noreturn]] void kernel_main()
           "hart 1 runs kernel code with its own block");
     smp::detail::online.store(0b11, std::memory_order_release);
     hart_one_phase.store(1, std::memory_order_release);
-    check(wait_for([&] { return hart_one.local_ticks.load(std::memory_order_relaxed) >= 2; }), "hart 1 local timer");
+    check(wait_for([&] { return hart_one.local_ticks.load(std::memory_order_relaxed) >= 2; }) &&
+              hart_one_before.load(std::memory_order_acquire) == 2,
+          "hart 1 local timer and memory pass");
+    const auto boot_tags = hw::tlb_tag_report(1);
+    const auto hart_one_tags = hw::tlb_tag_report(2);
+    check(hart_one_tags.supported && hart_one_tags.asid_bits == boot_tags.asid_bits &&
+              (hart_one_tags.invalidations != 0) == (hart_one_tags.asid_bits != 0),
+          "hart 1 probed its own ASIDLEN");
     trap = hw::enter(space, memory_a);
     check(trap && trap.value().kind == hw::TrapKind::syscall && memory_a.registers[10] == value + 3,
           "user entry beside hart 1");
     // The shootdown waits only for an open user window, which hart 1 leaves
     // for microseconds per 10 ms quantum; retry until one was waited for.
+    hart_one_target[0] = 700;
+    other_pages[1].physical_address = reinterpret_cast<uptr>(hart_one_target.data());
     for (usize attempt = 0; attempt < 100 && smp::cpu_record(0).shootdowns.load() == 0; ++attempt)
         check(hw::remap(second.value(), other_pages[1]).ok(), "remap beside hart 1");
     check(smp::cpu_record(0).shootdowns.load() != 0 &&
@@ -298,11 +341,18 @@ extern "C" [[noreturn]] void kernel_main()
               hart_one_timers.load() >= 2 && hart_one_other.load() == 0 && hart_one_count.load() != 0 &&
               smp::cpu_record(0).local_ticks.load() == 0,
           "hart 1 user traps");
+    check(hart_one_after.load(std::memory_order_relaxed) == 701 && hart_one_target[0] == 701 &&
+              reinterpret_cast<const u64 *>(other_stack.data())[0] == 2,
+          "hart 1's next entry after the remap counts in the new frame");
+    const auto hart_one_after_tags = hw::tlb_tag_report(2);
+    check(hart_one_after_tags.asid_bits != 0 ? hart_one_after_tags.invalidations > hart_one_tags.invalidations
+                                             : hart_one_after_tags.invalidations == 0,
+          "hart 1 invalidated its ASID for the moved generation");
     const auto received = hart_one.ipis_received.load(std::memory_order_acquire);
     smp::send_ipi(1, smp::ipi_ping);
     check(wait_for([&] { return hart_one.ipis_received.load(std::memory_order_acquire) != received; }),
           "IPI wakes hart 1's idle wait");
-    emit("RV64_NATIVE harts=2 start=pass local_timer=pass shootdown=pass idle_ipi=pass\n");
+    emit("RV64_NATIVE harts=2 start=pass local_timer=pass shootdown=pass remote_remap=pass idle_ipi=pass\n");
     check(!hw::copy_to_user(space, hw::user_begin, &value, sizeof(value)), "reject read-only copy");
     check(!hw::user_range(space, hw::user_begin + 0x1fff, 2, true), "reject unmapped boundary");
     check(hw::copy_from_user(space, nullptr, 0, 0).ok(), "empty null copy");

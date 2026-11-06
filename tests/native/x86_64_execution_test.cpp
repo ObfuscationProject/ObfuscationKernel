@@ -108,10 +108,11 @@ void store_through_user(native::AddressSpace &space, u64 value)
 }
 
 // More spaces than a CPU has PCID slots, created and retired in turn like
-// mmap churn: with PCIDs the tags roll over and are reused, yet each space
-// stores only into its own frame (three frames rotate, so a reused tag's stale
-// entry would name another one), and the next entry after a remap stores into
-// the new frame. Without PCIDs every entry flushes and no tag rolls over.
+// mmap churn: with PCIDs the tags roll over and are reused, each space stores
+// into its own frame (three frames rotate), and the next entry after a remap
+// stores into the new frame. Without PCIDs every entry flushes and no tag
+// rolls over. This runs the entry paths; QEMU TCG has no PCID, and a missing
+// invalidation is detected only by the hosted model (scripts/test_tlb_tags.py).
 alignas(4096) u8 churn_data[3][4096]{};
 alignas(4096) u8 churn_stack[4096]{};
 alignas(4096) u8 remap_target[4096]{};
@@ -141,12 +142,17 @@ void check_tag_churn(native::AddressSpace &kept, const u8 *kept_data)
     }
     store_through_user(kept, 0x11);
     require(kept_data[0] == 0x11, "long-lived space before remap");
+    const auto before_remap = native::tlb_tag_report(1);
     require(native::remap(kept, {data_va, reinterpret_cast<uptr>(remap_target), native::page_read | native::page_write})
                 .ok(),
             "remap long-lived data page");
     store_through_user(kept, 0x22);
     require(remap_target[0] == 0x22 && kept_data[0] == 0x11, "next entry after a remap uses the new frame");
     const auto after = native::tlb_tag_report(1);
+    // With PCIDs, the first of the two entries after the remap loads CR3
+    // without the keep bit (the generation moved) and the second keeps it.
+    require(after.invalidations == before_remap.invalidations + (after.pcid ? 1 : 0),
+            "one PCID invalidation for the remap");
     require(after.supported && (after.pcid ? after.asid_bits == 12 && after.rollovers >= before.rollovers + 2
                                            : after.asid_bits == 0 && after.rollovers == 0),
             "PCID tags rolled over, or every entry flushed");
@@ -158,7 +164,10 @@ void check_tag_churn(native::AddressSpace &kept, const u8 *kept_data)
 
 // A secondary CPU runs ring-3 code in its own space while the boot CPU runs in
 // another. `secondary_lock` stands in for the kernel lock: a CPU opens its
-// user window under it, and a translation change holds it.
+// user window under it, and a translation change holds it. After the boot CPU
+// remapped the secondary's data page (a shootdown), the secondary enters that
+// space again and must store into the new frame: the path of a CPU that cached
+// the old translation (under its PCID, where it has them) and left.
 alignas(4096) u8 data_c[4096]{};
 alignas(4096) u8 data_c_replacement[4096]{};
 alignas(4096) u8 stack_c[4096]{};
@@ -179,6 +188,7 @@ struct SecondaryResult
 {
     u32 cpu_index{~0u};
     bool syscalls{};
+    bool remote_store{};
     native::Trap local_timer{};
     native::Trap ipi{};
     usize timer_traps{};
@@ -195,31 +205,38 @@ Result<native::Trap> secondary_enter(native::UserFrame &frame)
     return trap;
 }
 
-void secondary_run()
+// The user program's two syscalls from its start; the second follows its store
+// of `value` at data_va. False on any other outcome.
+bool secondary_store(native::UserFrame &frame, u64 value)
 {
-    auto &result = secondary_result;
-    result.cpu_index = ok::smp::current_cpu();
-    auto frame = native::initial_frame(code_va, native::user_end);
     native::Trap trap{};
     for (usize attempt = 0; attempt < 128; ++attempt)
     {
         auto next = secondary_enter(frame);
-        if (!next) return;
+        if (!next) return false;
         if ((trap = next.value()).kind != native::TrapKind::timer) break;
     }
     const auto call = native::syscall(frame);
     if (trap.kind != native::TrapKind::syscall || call.number != 0x1234 || call.arguments[0] != 0x23 ||
         call.arguments[1] != 42)
-        return;
-    native::set_return_value(frame, 13);
+        return false;
+    native::set_return_value(frame, value);
     for (usize attempt = 0; attempt < 128; ++attempt)
     {
         auto next = secondary_enter(frame);
-        if (!next) return;
+        if (!next) return false;
         if ((trap = next.value()).kind != native::TrapKind::timer) break;
     }
-    result.syscalls = trap.kind == native::TrapKind::syscall && native::syscall(frame).number == 0x2345 &&
-                      data_c[0] == 13;
+    return trap.kind == native::TrapKind::syscall && native::syscall(frame).number == 0x2345;
+}
+
+void secondary_run()
+{
+    auto &result = secondary_result;
+    result.cpu_index = ok::smp::current_cpu();
+    auto frame = native::initial_frame(code_va, native::user_end);
+    result.syscalls = secondary_store(frame, 13) && data_c[0] == 13;
+    if (!result.syscalls) return;
     // The user loop that follows makes no syscall: only the local timer or an
     // IPI can end an entry.
     for (;;)
@@ -241,12 +258,15 @@ void secondary_run()
         secondary_lock.unlock();
         if (stop) break;
     }
+    frame = native::initial_frame(code_va, native::user_end);
+    result.remote_store = secondary_store(frame, 0x31);
     secondary_phase.store(secondary_done, std::memory_order_release);
 }
 
 // Two CPUs in ring 3 at once on per-CPU entry state: syscalls, the local APIC
 // timer and an IPI on the secondary; the PIT through LINT0 on the boot CPU; a
-// remap that waits until the secondary left the space. Skipped on one CPU.
+// remap that waits until the secondary left the space, and the secondary's
+// next entry into it. Skipped on one CPU.
 void check_secondary_cpu()
 {
     ok::boot::CpuTopologyMap map{};
@@ -295,6 +315,11 @@ void check_secondary_cpu()
     require(wait_for([&] { return secondary_phase.load(std::memory_order_acquire) >= secondary_user_loop; },
                      2'000'000'000),
             "secondary entered ring 3 and its local timer preempted it");
+    const auto boot_tags = native::tlb_tag_report(1);
+    const auto secondary_tags = native::tlb_tag_report(2);
+    require(secondary_tags.supported && secondary_tags.asid_bits == boot_tags.asid_bits &&
+                secondary_tags.pcid == boot_tags.pcid && (secondary_tags.invalidations != 0) == secondary_tags.pcid,
+            "secondary configured its own PCIDs, or stays untagged like the boot CPU");
 
     // The boot CPU runs its own space meanwhile; the PIT still arrives as
     // ExtINT through LINT0 with the local APIC enabled.
@@ -334,6 +359,11 @@ void check_secondary_cpu()
     require(result.ipi.kind == native::TrapKind::interrupt && result.ipi.vector == 0xf0 &&
                 record.ipis_received.load(std::memory_order_acquire) > received,
             "IPI preempts the secondary");
+    require(result.remote_store && data_c_replacement[0] == 0x31 && data_c[0] == 13,
+            "the secondary's next entry after the remap stores into the new frame");
+    const auto after = native::tlb_tag_report(2);
+    require(after.pcid ? after.invalidations > secondary_tags.invalidations : after.invalidations == 0,
+            "the secondary invalidated its PCID for the moved generation");
     require(result.local_timer.kernel_stack_pointer != 0 && trap.kernel_stack_pointer != 0 &&
                 result.local_timer.kernel_stack_pointer != timer.value().kernel_stack_pointer,
             "each CPU traps onto its own kernel stack");
@@ -353,9 +383,10 @@ void check_secondary_cpu()
     };
     require(is("sync") || is("adjusted") || is("offset"), "verified TSC handshake with the secondary");
     print("OK_NATIVE_SMP scope=hardware cpus=2 secondary_user=pass syscall=pass local_timer=pass ipi=pass "
-          "shootdown=pass boot_pit=pass tsc=");
+          "shootdown=pass remote_remap=pass boot_pit=pass tsc=");
     print(tsc);
-    print("\n");
+    print("
+");
 }
 
 void check_fault(native::AddressSpace &space, const u8 *entry, native::TrapKind kind, uptr address, uptr error_mask)
