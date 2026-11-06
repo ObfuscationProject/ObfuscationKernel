@@ -219,11 +219,6 @@ memory::ObjectHandle child_wait_object(sched::ProcessId pid, sched::ThreadId tid
 }
 namespace
 {
-u64 child_wait_key(const ChildWaitRequest &request)
-{
-    if (request.group) return sched::SchedulerState::child_group_wait_key(request.group);
-    return request.selector == -1 ? 0 : static_cast<u32>(request.selector);
-}
 bool child_wait_output_valid(const sched::ProcessControlBlock &process, const ChildWaitRequest &request)
 {
     return !request.siginfo && !request.output ? true :
@@ -243,14 +238,14 @@ i64 child_wait_probe(Kernel &kernel, sched::ProcessId pid, const ChildWaitReques
         if (!child || child->parent_pid() != pid) continue;
         // A group selector compares the child's group now, not at call time.
         if (request.group && child->process_group_id() != request.group) continue;
+        const bool dead = child->state() == sched::ProcessState::zombie || child->state() == sched::ProcessState::exited;
+        // Linux wait_task_zombie: without WEXITED a zombie is skipped and
+        // leaves ECHILD in place; it can never become reportable.
+        if (dead && !request.exited) continue;
         eligible = true;
         const auto &job = child->job_control();
         ChildWaitReport kind{};
-        if (child->state() == sched::ProcessState::zombie || child->state() == sched::ProcessState::exited)
-        {
-            if (!request.exited) continue;
-            kind = ChildWaitReport::exited;
-        }
+        if (dead) kind = ChildWaitReport::exited;
         else if (request.stopped && job.stopped && job.stop_report) kind = ChildWaitReport::stopped;
         else if (request.continued && job.continue_report) kind = ChildWaitReport::continued;
         else continue;

@@ -24,6 +24,13 @@ struct ChildWaitRequest
     u32 raw_options{};  // Exact options word, revalidated by the restart binding.
     [[nodiscard]] constexpr bool operator==(const ChildWaitRequest &) const = default;
 };
+// The scheduler wait key of a blocked request: the group key, any child (0),
+// or the child pid. Shared by the wait service and its restart binding.
+[[nodiscard]] constexpr u64 child_wait_key(const ChildWaitRequest &request)
+{
+    if (request.group) return sched::SchedulerState::child_group_wait_key(request.group);
+    return request.selector == -1 ? 0 : static_cast<u32>(request.selector);
+}
 // Which report a ready child carries.
 enum class ChildWaitReport : u8 { exited, stopped, continued };
 i64 begin_child_wait(Kernel &kernel, sched::ProcessId pid, const ChildWaitRequest &request, bool &complete);

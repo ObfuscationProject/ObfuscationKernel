@@ -1404,15 +1404,27 @@ class SyscallOriginTable final : private NonCopyable
         if (!thread || !thread->syscall_pending || thread->wait_registration.ticket() != binding.ticket) return false;
         return thread->wait_registration.active()
             ? thread->state == sched::ProcessState::blocked && thread->wait_reason == sched::ThreadWaitReason::child &&
-                thread->wait_key == (binding.operation.selector == -1 ? 0 : static_cast<u32>(binding.operation.selector))
+                thread->wait_key == child_wait_key(binding.operation)
             : thread->wait_registration.completion() == sched::WaitCompletion::ready;
     }
     [[nodiscard]] static bool valid_binding(const Identity &identity, const ChildBinding &binding)
     {
         return binding.object.pool && binding.ticket.generation && binding.request &&
             binding.request <= binding.ticket.generation && binding.ticket.owner == identity.pid &&
-            binding.ticket.thread == identity.tid && !binding.operation.nohang &&
-            (binding.operation.selector == -1 || binding.operation.selector > 0);
+            binding.ticket.thread == identity.tid && !binding.operation.nohang && child_wait_shape(binding.operation);
+    }
+    // The selector, group and waitid idtype agree as the Linux decoders build them.
+    [[nodiscard]] static constexpr bool child_wait_shape(const ChildWaitRequest &o)
+    {
+        if (o.siginfo)
+            return o.idtype == 0 ? o.selector == -1 && !o.group
+                 : o.idtype == 1 ? o.selector > 0 && !o.group
+                 : o.idtype == 2 && o.group && o.selector >= 0 &&
+                   (o.selector == 0 || o.group == static_cast<u32>(o.selector));
+        if (o.nowait || o.idtype) return false;
+        if (o.selector == -1 || o.selector > 0) return !o.group;
+        if (o.selector == 0) return o.group != 0;
+        return o.group == static_cast<u32>(-static_cast<i64>(o.selector));
     }
     [[nodiscard]] bool current_owner(sched::SchedulerState *scheduler,
         const sched::ProcessResources &resources, const Record &record, Space space) const

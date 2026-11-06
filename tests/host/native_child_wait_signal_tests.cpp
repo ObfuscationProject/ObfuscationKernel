@@ -82,9 +82,11 @@ void sigreturn(Kernel &kernel,Group g,hw::UserFrame saved)
     t->native_frame=saved;t->native_frame.sp+=8;t->native_frame.registers[14]=15;
     bool complete=true;i64 result=-999;expect(native::private_signal_call(kernel,*p,*t,complete,result));expect(!complete&&result==0);
 }
-void publication(Kernel &kernel,bool restart,bool ready,bool any)
+// Selector modes: the child, any child, -pgid and 0 (the caller's group).
+i32 selector_of(Group g,unsigned mode){return mode==0?static_cast<i32>(g.child):mode==1?-1:mode==2?-static_cast<i32>(g.pid):0;}
+void publication(Kernel &kernel,bool restart,bool ready,unsigned mode)
 {
-    const auto g=create(kernel);arm(kernel,g,any?-1:static_cast<i32>(g.child));caught(kernel,g,!restart);enqueue(kernel,g);caught(kernel,g,restart);
+    const auto g=create(kernel);const auto selector=selector_of(g,mode);arm(kernel,g,selector);caught(kernel,g,!restart);enqueue(kernel,g);caught(kernel,g,restart);
     auto *p=kernel.scheduler().find(g.pid);auto *t=kernel.scheduler().find_thread(g.pid,g.waiter);
     const auto object=native::child_wait_object(g.pid,g.waiter);const auto wait=*native::child_wait_objects.resolve(object).value();
     const auto origin=native::syscall_origins.identity(*p,*t);const auto before=t->native_frame;
@@ -100,7 +102,7 @@ void publication(Kernel &kernel,bool restart,bool ready,bool any)
     expect(!native::private_child_signal_complete(kernel,*p,*t));expect(native::private_signal_deliver(kernel,*p,*t));
     const auto outer=t->native_frame;expect(outer.pc==handler);sigreturn(kernel,g,outer);
     expect(t->native_frame.pc==(restart?site:site+2));expect(!native::child_wait_object(g.pid,g.waiter).pool);
-    if(restart){arm(kernel,g,any?-1:static_cast<i32>(g.child),false);const auto next=*native::child_wait_objects.resolve(native::child_wait_object(g.pid,g.waiter)).value();expect(next.ticket.generation>wait.ticket.generation);}
+    if(restart){arm(kernel,g,selector,false);const auto next=*native::child_wait_objects.resolve(native::child_wait_object(g.pid,g.waiter)).value();expect(next.ticket.generation>wait.ticket.generation);}
     retire(kernel,g);
 }
 void eligibility(Kernel &kernel,unsigned mode)
@@ -209,6 +211,29 @@ void ignored_and_late(Kernel &kernel)
     t=kernel.scheduler().find_thread(g.pid,g.waiter);expect(t->syscall_pending&&native::child_wait_object(g.pid,g.waiter).pool);
     mock::entry_trap={hw::TrapKind::timer};expect(native::step(kernel));expect(mock::last_frame.pc==handler&&!t->syscall_pending);retire(kernel,g);
 }
+// RV32 waitid without WEXITED: a zombie is no candidate (Linux
+// wait_task_zombie leaves ECHILD), so the call fails at once instead of
+// returning 0 or blocking on a child that can never be reported.
+void waitid_zombie(Kernel &kernel)
+{
+    constexpr auto P=lu::Profile::rv32;
+    const auto g=create(kernel);CHECK(kernel.scheduler().exit_process(g.child,5));
+    auto call=[&](u32 idtype,u32 id,u32 options){
+        hw::UserFrame f{};f.sp=hw::user_begin+7168;f.pc=site+4;f.registers[17]=*lu::Codec<P>::syscall_number(lu::Operation::waitid);
+        f.registers[10]=idtype;f.registers[11]=id;f.registers[12]=output;f.registers[13]=options;f.registers[14]=0;
+        activate(kernel,g);bool complete=true;
+        const auto result=user::linux_bootstrap::dispatch<P>(kernel,g.pid,f,complete,[](hw::Syscall,bool &)->i64{std::abort();});
+        expect(complete);return result;
+    };
+    for(u32 idtype:{0U,1U,2U})
+    {
+        const u32 id=idtype==1?g.child:idtype==2?g.pid:0;
+        expect(call(idtype,id,3)==-10&&call(idtype,id,2)==-10&&call(idtype,id,8|1)==-10);
+    }
+    expect(kernel.scheduler().find(g.child)&&!native::child_wait_object(g.pid,g.waiter).pool);
+    expect(call(0,0,4|1)==0&&!kernel.scheduler().find(g.child));
+    retire(kernel,g);
+}
 template<lu::Profile P> void adapters(Kernel &kernel,usize number,std::array<int,6> slots)
 {
     using Codec=lu::Codec<P>;using Origin=native::SyscallOriginTable<P>;using Restart=native::RestartAdapter<P>;
@@ -293,11 +318,11 @@ template<lu::Profile P> void adapters(Kernel &kernel,usize number,std::array<int
 int main()
 {
     static Kernel kernel;CHECK(kernel.boot({}));CHECK(native::entry_stacks.activate(native::entry_stack_arena));
-    for(bool restart:{false,true})for(bool ready:{false,true})for(bool any:{false,true})publication(kernel,restart,ready,any);
+    for(bool restart:{false,true})for(bool ready:{false,true})for(unsigned mode=0;mode<4;++mode)publication(kernel,restart,ready,mode);
     for(unsigned mode=0;mode<12;++mode)eligibility(kernel,mode);
     for(unsigned mode=0;mode<4;++mode)precedence(kernel,mode);
     for(bool signal:{false,true})peer_rearm(kernel,signal);
-    nested(kernel);sender(kernel);ignored_and_late(kernel);for(unsigned mode=0;mode<5;++mode)teardown(kernel,mode);
+    nested(kernel);sender(kernel);ignored_and_late(kernel);waitid_zombie(kernel);for(unsigned mode=0;mode<5;++mode)teardown(kernel,mode);
     adapters<lu::Profile::i386>(kernel,7,{4,6,5,1,0,2});adapters<lu::Profile::x86_64>(kernel,14,{9,10,11,5,7,6});
     adapters<lu::Profile::aarch64>(kernel,8,{0,1,2,3,4,5});adapters<lu::Profile::arm32>(kernel,7,{0,1,2,3,4,5});
     adapters<lu::Profile::rv64>(kernel,17,{10,11,12,13,14,15});adapters<lu::Profile::rv32>(kernel,17,{10,11,12,13,14,15});

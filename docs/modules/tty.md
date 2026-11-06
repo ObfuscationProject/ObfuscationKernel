@@ -331,7 +331,11 @@ handler runs under it after the continue.
   unchanged, with the termination signal translated to the parent's numbering.
 - RV32 `waitid`: WEXITED 4, WSTOPPED 2, WCONTINUED 8, WNOWAIT 0x01000000;
   P_PID, P_PGID (0 = own group) and P_ALL. Other profiles keep ENOSYS. A group
-  selector compares each child's group when the wait is checked.
+  selector compares each child's group when the wait is checked. Without
+  WEXITED a zombie child is no candidate, so a caller with only zombies gets
+  ECHILD instead of 0 or a wait.
+- A blocked group wait (selector 0 or −pgid, P_PGID) is interrupted by a
+  caught signal like any child wait: EINTR, or a restart under SA_RESTART.
 - Native wait4 takes `OK_WNOHANG`, `OK_WUNTRACED` and `OK_WCONTINUED` from
   `ok/uapi/job_control.h`, with the same values.
 
