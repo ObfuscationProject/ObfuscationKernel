@@ -2127,7 +2127,7 @@ bool private_signal_ignored(Kernel &kernel, sched::ProcessId pid, u32 signal)
     return !action || Codec::ignored(signal, *action);
 }
 PrivateTimerSend private_timer_signal(Kernel &kernel, sched::ProcessControlBlock &process,
-                                      sched::ThreadId tid, sched::PendingSignalInfo info)
+                                      sched::ThreadId tid, sched::PendingSignalInfo info, bool replay)
 {
     using Codec = SignalActionCodec<private_signal_profile>;
     const auto signal = info.signal;
@@ -2156,7 +2156,7 @@ PrivateTimerSend private_timer_signal(Kernel &kernel, sched::ProcessControlBlock
     }
     // Process-directed timers, and job-control signals of thread timers, go
     // through the generation core as kernel senders.
-    switch (private_generate_signal(kernel, process, {info, tid, tid != 0, true}))
+    switch (private_generate_signal(kernel, process, {info, tid, tid != 0, true, replay}))
     {
     case JobSignalOutcome::accepted: return PrivateTimerSend::sent;
     case JobSignalOutcome::ignored: return PrivateTimerSend::ignored;

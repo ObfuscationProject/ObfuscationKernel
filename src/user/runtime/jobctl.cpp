@@ -101,7 +101,8 @@ bool jobctl_owe(const PrivateSignalActions &state, u32 signal)
     return false;
 }
 
-// Linux flush_sigqueue_mask for one signal: shared, every thread and owed.
+// Linux flush_sigqueue_mask for one signal: shared, every thread, owed kernel
+// signals and owed timer expiries (Linux queued their records at expiry).
 void jobctl_discard(PrivateSignalActions &state, sched::ProcessControlBlock &process, u32 signal)
 {
     state.shared.discard(signal);
@@ -109,6 +110,7 @@ void jobctl_discard(PrivateSignalActions &state, sched::ProcessControlBlock &pro
         if (jobctl_live(thread))
             if (auto *queue = private_signal_queue(thread)) queue->discard(signal);
     private_jobctl_discard_owed(process.pid(), signal);
+    private_timer_discard_owed(process.pid(), signal);
 }
 
 // CLD_STOPPED/CLD_CONTINUED to a Linux parent; `status` carries the signal in

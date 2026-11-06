@@ -43,9 +43,11 @@ The reference is Linux 6.13.4 `kernel/time/itimer.c` and `posix-timers.c`.
   `si_value`, to the process or its `SIGEV_THREAD_ID` thread. Admission is
   that of `kill` and `tgkill`: an ignored, unblocked signal is dropped, and an
   expiry no thread can take yet (every unblocked thread in a wait that does
-  not admit signals) stays owed and is retried on the next step. Init drops
-  an unblocked `SIG_DFL` terminating expiry, process- or thread-directed
-  (`SIGNAL_UNKILLABLE`).
+  not admit signals) stays owed and is retried on the next step. A SIGCONT or
+  stop expiry applies its job-control effects once (a retry only queues), and
+  the opposite CONT or stop discards an owed expiry like a queued record, so
+  an interval timer rearms as at a dequeue. Init drops an unblocked `SIG_DFL`
+  terminating expiry, process- or thread-directed (`SIGNAL_UNKILLABLE`).
 - Rearm: an interval timer rearms when its signal is dequeued, forwarding its
   expiry on the original grid past that time; the intervals it skipped are the
   `si_overrun` of that signal and `timer_getoverrun` afterwards (clamped to

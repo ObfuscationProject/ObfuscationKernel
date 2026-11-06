@@ -579,6 +579,30 @@ void acted_not_refused(Kernel &kernel)
     release(kernel, sender); release(kernel, pid);
 }
 
+// A timer retry neither repeats its CONT side effects nor survives the
+// opposite stop, which flushes the record Linux queued at expiry.
+void timer_retry(Kernel &kernel)
+{
+    const auto pid = create(kernel), sender = create(kernel);
+    handle(kernel, pid, 18);
+    const auto id = arm_timer(kernel, pid, 18);
+    const auto ticket = park(kernel, pid);
+    expect(linux_kill(kernel, sender, pid, 19) == 0 && linux_kill(kernel, sender, pid, 18) == 0);
+    expect(!job(kernel, pid).stopped && shared(pid).pending_mask().contains(18));
+    // The expiry coalesces with the pending CONT and stays owed to its timer.
+    timer_service(kernel);
+    expect(native::private_timer_counters().retried > 0);
+    expect(linux_kill(kernel, sender, pid, 19) == 0 && job(kernel, pid).stopped);
+    expect(!shared(pid).pending_mask().contains(18));
+    for (unsigned i = 0; i < 3; ++i) timer_service(kernel);
+    expect(job(kernel, pid).stopped && !shared(pid).pending_mask().contains(18));
+    expect(linux_kill(kernel, sender, pid, 18) == 0);
+    unpark(kernel, pid, ticket);
+    drain(pid);
+    expect(linux_call(kernel, pid, lu::Operation::timer_delete, {id}) == 0);
+    release(kernel, sender); release(kernel, pid);
+}
+
 // Shutdown's terminate path completes a stopped process.
 void shutdown_stopped(Kernel &kernel)
 {
@@ -615,6 +639,7 @@ int main()
     orphan_pass(kernel, false);
     owed(kernel);
     acted_not_refused(kernel);
+    timer_retry(kernel);
     shutdown_stopped(kernel);
     expect(native::runtime_status().ok() && kernel.scheduler().stopped_processes() == 0);
     expect(kernel.scheduler().find(init)->state() != sched::ProcessState::zombie);

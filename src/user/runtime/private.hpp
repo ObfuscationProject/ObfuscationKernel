@@ -660,13 +660,17 @@ bool private_signal_call(Kernel &kernel, sched::ProcessControlBlock &process,
 // Interval timers (timers.cpp). An expiry signal is sent, dropped as ignored
 // or by a departed target, or stays owed to the timer until a later step.
 enum class PrivateTimerSend : u8 { sent, ignored, departed, retry };
+// `replay`: a retry whose CONT/stop side effects already ran.
 PrivateTimerSend private_timer_signal(Kernel &kernel, sched::ProcessControlBlock &process,
-                                      sched::ThreadId tid, sched::PendingSignalInfo info);
+                                      sched::ThreadId tid, sched::PendingSignalInfo info, bool replay = false);
 bool private_timer_call(Kernel &kernel, sched::ProcessControlBlock &process,
                         sched::ThreadControlBlock &thread, i64 &result);
 bool private_timer_service(Kernel &kernel, u64 now);
 void private_timer_exec(sched::ProcessId pid);
 void private_timer_discard(Kernel &kernel, sched::ProcessId pid, u32 signal);
+// A CONT or stop discarded `signal`: an expiry still owed to its timer goes
+// with the queued records (Linux flushed the record it queued at expiry).
+void private_timer_discard_owed(sched::ProcessId pid, u32 signal);
 void private_timer_thread_exit(sched::ProcessId pid, sched::ThreadId tid, const PrivateSignalQueue &queue);
 // The signal's action is ignored now (SIG_IGN, or a default that ignores it).
 bool private_signal_ignored(Kernel &kernel, sched::ProcessId pid, u32 signal);
@@ -698,7 +702,7 @@ struct JobSignalRequest
     sched::ThreadId named{};   // Its mask decides ignored generation; 0 names the leader.
     bool directed{};           // Only `named` may take the signal (tkill, tgkill, SIGEV_THREAD_ID).
     bool kernel{};             // A caught signal no thread can take now is retried, not refused.
-    bool replay{};             // Owed drain: the CONT/stop side effects already ran.
+    bool replay{};             // Owed retry: the CONT/stop side effects already ran.
 };
 JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBlock &recipient,
                                          const JobSignalRequest &request);
