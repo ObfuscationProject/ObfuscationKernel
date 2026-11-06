@@ -632,7 +632,7 @@ waits and RV32 `waitid` without WEXITED before that section.
 S4 adds two runners on the actual runtime (x86_64 hosted backends):
 
 - `python3 -B scripts/test_terminal_control.py --output <dir>` prints
-  `TERMINAL_CONTROL_PASS native_requests=13 linux_profiles=10 console=1
+  `TERMINAL_CONTROL_PASS native_requests=15 linux_profiles=10 console=1
   error_order=1 hosted=1 guest=0`: the shared dispatch's error order (EBADF,
   ENOTTY, association, copy-in EFAULT, control errors, EOVERFLOW, copy-out
   EFAULT) and exact copy sizes for the native wire on both endiannesses and all
@@ -652,5 +652,25 @@ S4 adds two runners on the actual runtime (x86_64 hosted backends):
 `noecho=1` (the 4096-byte ldisc replaced the lease's 256-byte ring), and
 `test_native_console_control.py` covers the termios, window, flush, FIONREAD
 and TCSBRK rows and TIOCSCTTY without EOPNOTSUPP.
+
+S5 extends existing runners (hosted model and runtime evidence only):
+
+- `test_native_pty.py` requires `PRIVATE_RAW_PTY_OWNER cases=<n> checks=<n>
+  model_steps=100000 open_counts=1 raw_termios=1 status=passed`. The deque
+  oracle now drives raw and ptmx-style pairs (the latter switched to raw
+  termios) through creation, counted slave opens, locks, retirement and
+  hangup, and directed cases cover raw termios, canonical echo, ISIG and its
+  outbox backpressure, IXON, echo waiting for master room, TCFLSH, slave
+  reopen and the hangup discard. `native_pty_ofd_tests.cpp` checks
+  `terminal_audit` after every operation, refuses PTY endpoints in
+  `allocate_description` (EINVAL), sees both raw ends as terminal
+  descriptions, counts several slave descriptions across dup, fork and
+  SCM_RIGHTS, and frees a slot only at zero opens.
+- `test_native_tty.py` adds `pty=1 canonical_echo=1 ptmx_hangup_discard=1
+  raw_drain=1 ptn_lock=1` before `hosted=1 guest=0`.
+- `test_terminal_control.py` maps `OK_TIOCGPTN` and `OK_TIOCSPTLCK` natively
+  (`native_requests=15`).
+- The `native-pty/scheduler-OFD-ownership-model` debug point also runs a
+  ptmx-style pair (counted opens, canonical echo, hangup discard).
 
 Each slice adds its runners here.

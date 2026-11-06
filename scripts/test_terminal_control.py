@@ -52,7 +52,7 @@ def main():
   for arch in arches:
    run([xmake,'build','-P',source,'-j2','-v','terminal-control-'+arch],arch+'-build')
    binary=source/'bin'/('terminal-control-'+arch);output=run([binary],arch+'-run')
-   if not re.search(r'^TERMINAL_CONTROL_PASS native_requests=13 linux_profiles=10 console=1 error_order=1 hosted=1 guest=0$',output,re.M):raise ValueError('missing exact success marker')
+   if not re.search(r'^TERMINAL_CONTROL_PASS native_requests=15 linux_profiles=10 console=1 error_order=1 hosted=1 guest=0$',output,re.M):raise ValueError('missing exact success marker')
    record['rows'].append(dict(architecture=arch,status='passed',binary_sha256=sha(binary),output=output.strip()));save();print('PASS',arch,'hosted terminal ioctl dispatch (native wire, ten Linux encodings, console)',flush=True)
   for name,digest in record['source_sha256'].items():
    if sha(source/name)!=digest:raise ValueError('retained source changed: '+name)
