@@ -42,6 +42,7 @@ HEADERS = (
     'include/ok/fs/mount_retention.hpp',
     'include/ok/fs/mount_snapshot.hpp',
     'include/ok/fs/persistent_sync_profile.hpp',
+    'include/ok/fs/terminal_node.hpp',
     'include/ok/fs/vfs.hpp',
     'include/ok/memory/charges.hpp',
     'include/ok/memory/frames.hpp',
