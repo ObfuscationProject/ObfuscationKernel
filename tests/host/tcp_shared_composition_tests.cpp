@@ -21,7 +21,7 @@ struct Packet
 };
 Packet packet(u32 seq,u32 ack,u8 flags)
 {
-    Packet out; auto built=wire::build_tcp(out.bytes,peer.address,server.address,1,64,{peer.port,server.port,seq,ack,flags,4096},{},{});
+    Packet out; auto built=wire::build_tcp(out.bytes,peer.address.ipv4(),server.address.ipv4(),1,64,{peer.port,server.port,seq,ack,flags,4096},{},{});
     CHECK(built);out.length=built.value();return out;
 }
 struct Iss { Result<u32> operator()(tcp::Endpoint,tcp::Endpoint) { return u32{500}; } };

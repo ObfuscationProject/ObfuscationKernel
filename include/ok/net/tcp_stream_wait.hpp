@@ -1,6 +1,7 @@
 #pragma once
 #include <ok/net/native_tcp_stream.hpp>
 #include <ok/sched/scheduler.hpp>
+#include <ok/sched/wait_queue.hpp>
 
 namespace ok::net
 {
@@ -12,10 +13,17 @@ struct TcpWaitSnapshot
 
 // Real scheduler registrations, serialized with endpoint and descriptor work.
 // Copy failure leaves a ready record intact until the caller explicitly finishes.
+// Each waiter is enlisted in its endpoint's wait queue; a pass re-evaluates
+// readiness only for endpoints whose readiness moved. Descriptor changes,
+// lost threads and deadlines are bookkeeping checked on every pass.
+struct TcpWaitStats { u64 queued{}, evaluated{}, unqueued{}; };
+
 class TcpStreamWaits final
 {
   public:
     static constexpr usize capacity = 32;
+    using Table = NativeTcpStreamService::Table;
+    static constexpr usize queue_count = Table::connection_slots + Table::listener_slots;
     TcpStreamWaits(sched::SchedulerState &scheduler, NativeTcpStreamService &service)
         : scheduler_{scheduler}, service_{service}
     {
@@ -31,6 +39,7 @@ class TcpStreamWaits final
     TcpStreamWaits &operator=(TcpStreamWaits &&) = delete;
     ~TcpStreamWaits() { static_cast<void>(shutdown()); }
     [[nodiscard]] Status status() const { return status_; }
+    [[nodiscard]] const TcpWaitStats &stats() const { return stats_; }
     [[nodiscard]] usize records() const
     { usize count{}; for (const auto &record : waits_) count += record.used; return count; }
     Result<sched::WaitTicket> arm(u64 pid, i32 fd, u8 interests, std::optional<u64> deadline = {})
@@ -65,6 +74,12 @@ class TcpStreamWaits final
         ready = service_.readiness(stream);
         if (!ready || !ready.value().may_wait(record->endpoint, record->observed, interests))
             complete(*record, sched::WaitCompletion::ready);
+        else
+        {
+            // Without a queue slot the waiter is re-evaluated on every pass.
+            record->queued = bool(queue(record->endpoint).enlist(thread->wait_registration));
+            add(record->queued ? stats_.queued : stats_.unqueued);
+        }
         return ticket.value();
     }
     [[nodiscard]] Result<TcpWaitSnapshot> observe(sched::WaitTicket ticket) const
@@ -94,6 +109,12 @@ class TcpStreamWaits final
     Status poll(sched::WakeSource source = sched::WakeSource::thread)
     {
         if (!status_) return status_;
+        service_.endpoints().take_changed([&](tcp::Handle handle) {
+            queue(handle).notify([&](sched::WaitTicket ticket) {
+                auto *record = find(ticket);
+                return !record || record->completion != sched::WaitCompletion::none || evaluate(*record, source);
+            });
+        });
         for (auto &record : waits_) if (record.used && record.completion == sched::WaitCompletion::none)
         {
             auto *thread = scheduler_.find_thread(record.ticket.owner, record.ticket.thread);
@@ -106,14 +127,9 @@ class TcpStreamWaits final
                 continue;
             }
             const auto *open = scheduler_.open_description(record.description);
-            const auto ready = service_.readiness(record.stream);
-            if (!open || open->native_tcp_handle != record.stream || (open->flags & nonblock) || !ready ||
-                !ready.value().may_wait(record.endpoint, record.observed, record.interests))
-            {
-                const bool received = open && ready &&
-                    (ready.value().readable() || ready.value().writable() || ready.value().connect_complete);
-                complete(record, sched::WaitCompletion::ready, received ? source : sched::WakeSource::thread);
-            }
+            if (!open || open->native_tcp_handle != record.stream || (open->flags & nonblock))
+                complete(record, sched::WaitCompletion::ready);
+            else if (!record.queued && evaluate(record, source)) continue;
             else if (record.deadline && service_.now() >= *record.deadline)
                 complete(record, sched::WaitCompletion::timeout);
         }
@@ -146,12 +162,32 @@ class TcpStreamWaits final
         u16 description{sched::invalid_description}; i32 fd{}; u8 interests{};
         u64 observed{}; tcp::Handle endpoint{}; std::optional<u64> deadline{};
         sched::WaitCompletion completion{};
+        bool queued{};
     };
     Record *find(sched::WaitTicket ticket)
     { for (auto &record : waits_) if (record.used && record.ticket == ticket) return &record; return nullptr; }
     const Record *find(sched::WaitTicket ticket) const
     { return const_cast<TcpStreamWaits *>(this)->find(ticket); }
     Status remember(Status status) { if (!status && status_) status_ = status; return status; }
+    static void add(u64 &value) { if (value != ~u64{0}) ++value; }
+    sched::WaitQueue<capacity> &queue(tcp::Handle handle)
+    {
+        const usize index = handle.kind == tcp::HandleKind::connection ? handle.slot : Table::connection_slots + handle.slot;
+        return queues_[index < queue_count ? index : 0];
+    }
+    // Completes the waiter when its condition no longer allows waiting; the
+    // source is credited only when the stream became readable, writable or connected.
+    bool evaluate(Record &record, sched::WakeSource source)
+    {
+        add(stats_.evaluated);
+        const auto *open = scheduler_.open_description(record.description);
+        const auto ready = service_.readiness(record.stream);
+        if (open && ready && ready.value().may_wait(record.endpoint, record.observed, record.interests)) return false;
+        const bool received = open && ready &&
+            (ready.value().readable() || ready.value().writable() || ready.value().connect_complete);
+        complete(record, sched::WaitCompletion::ready, received ? source : sched::WakeSource::thread);
+        return true;
+    }
     void release_pin(Record &record)
     {
         if (!record.held) return;
@@ -179,6 +215,7 @@ class TcpStreamWaits final
         }
     }
     sched::SchedulerState &scheduler_; NativeTcpStreamService &service_;
-    std::array<Record, capacity> waits_{}; Status status_{}; bool bound_{true};
+    std::array<Record, capacity> waits_{}; std::array<sched::WaitQueue<capacity>, queue_count> queues_{};
+    TcpWaitStats stats_{}; Status status_{}; bool bound_{true};
 };
 }

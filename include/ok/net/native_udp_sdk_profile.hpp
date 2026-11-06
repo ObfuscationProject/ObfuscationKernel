@@ -13,7 +13,7 @@ namespace ok::net
 inline constexpr std::string_view native_udp_profile = "bootcpu-static-peer-ipv4-polling-captured-connected-zero-send-v3";
 inline constexpr std::string_view linux_udp_profile = "bootcpu-static-peer-ipv4-captured-connected-zero-send-v3";
 inline constexpr std::string_view native_udp_connected_profile = "bounded-static-peer-association-zero-destination-output-v2";
-inline constexpr u32 native_udp_module_abi = 78;
+inline constexpr u32 native_udp_module_abi = 79;
 inline constexpr usize native_udp_socket_capacity = 16;
 inline constexpr usize native_udp_queue_capacity = 2;
 inline constexpr usize native_udp_datagram_capacity = 1472;
@@ -41,17 +41,17 @@ static_assert(!std::is_copy_constructible_v<NativeUdpExecutor>);
 static_assert(!std::is_move_constructible_v<NativeUdpExecutor>);
 static_assert(std::is_same_v<decltype(NativeUdpFrame::queued_handle), u32>);
 static_assert(std::is_same_v<decltype(&NativeUdpService::bind_ephemeral),
-                           Status (NativeUdpService::*)(u32, wire::Ipv4)>);
+                           Status (NativeUdpService::*)(u32, IpAddress)>);
 static_assert(std::is_same_v<decltype(&NativeUdpService::autobind),
                            Status (NativeUdpService::*)(u32)>);
 static_assert(std::is_same_v<decltype(&NativeUdpService::connect),
-                           Status (NativeUdpService::*)(u32, wire::Ipv4, u16)>);
+                           Status (NativeUdpService::*)(u32, IpAddress, u16)>);
 static_assert(std::is_same_v<decltype(&NativeUdpService::disconnect),
                            Status (NativeUdpService::*)(u32)>);
 static_assert(std::is_same_v<decltype(&NativeUdpService::peer),
                            Result<NativeUdpPeerSnapshot> (NativeUdpService::*)(u32) const>);
 static_assert(std::is_same_v<decltype(NativeUdpPeerSnapshot::associated), bool>);
-static_assert(std::is_same_v<decltype(NativeUdpPeerSnapshot::address), wire::Ipv4>);
+static_assert(std::is_same_v<decltype(NativeUdpPeerSnapshot::address), IpAddress>);
 static_assert(std::is_same_v<decltype(NativeUdpPeerSnapshot::port), u16>);
 static_assert(std::is_trivially_copyable_v<NativeUdpPeerSnapshot>);
 static_assert(std::is_standard_layout_v<NativeUdpPeerSnapshot>);

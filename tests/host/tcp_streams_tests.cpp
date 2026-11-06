@@ -15,7 +15,7 @@ usize checks{};
 u64 next_identity{10000};
 #define CHECK(value) do { ++checks; if (!static_cast<bool>(value)) { std::fprintf(stderr, "TCP_STREAM_FAIL line=%d check=%zu: %s\n", __LINE__, checks, #value); std::abort(); } } while(false)
 constexpr tcp::Endpoint local{{192, 0, 2, 2}, 32001}, peer{{192, 0, 2, 1}, 8080};
-constexpr NativeUdpLink link{{2, 1, 2, 3, 4, 5}, {2, 6, 7, 8, 9, 10}, local.address, peer.address};
+constexpr NativeUdpLink link{{2, 1, 2, 3, 4, 5}, {2, 6, 7, 8, 9, 10}, local.address.ipv4(), peer.address.ipv4()};
 struct Iss { Result<u32> operator()(tcp::Endpoint, tcp::Endpoint) { return u32{700}; } };
 struct Packet
 {
@@ -24,7 +24,7 @@ struct Packet
 };
 Packet packet(tcp::Endpoint from, tcp::Endpoint to, u32 seq, u32 ack, u8 flags, wire::Bytes payload = {})
 {
-    Packet out; auto built = wire::build_tcp(out.bytes, from.address, to.address, 23, 64,
+    Packet out; auto built = wire::build_tcp(out.bytes, from.address.ipv4(), to.address.ipv4(), 23, 64,
         {from.port, to.port, seq, ack, flags, 4096}, {}, payload);
     CHECK(built); out.length = built.value(); return out;
 }
@@ -33,7 +33,8 @@ Packet ethernet(const Packet &ip, bool wrong_peer = false)
     Packet out; out.length = ip.length + 14;
     for (usize byte = 0; byte < 6; ++byte)
     { out.bytes[byte] = std::byte{link.local_mac[byte]}; out.bytes[byte + 6] = std::byte{link.peer_mac[byte]}; }
-    if (wrong_peer) out.bytes[7] ^= std::byte{1};
+    // Addressed to another station: the interface filters it.
+    if (wrong_peer) out.bytes[1] ^= std::byte{1};
     wire::be16(out.bytes, 12, 0x0800);
     for (usize byte = 0; byte < ip.length; ++byte) out.bytes[byte + 14] = ip.bytes[byte];
     return out;
@@ -78,12 +79,15 @@ struct Fixture
 {
     sched::Scheduler scheduler{}; NativeTcpStreamService service{tcp::TableIdentity{next_identity++}};
     TcpStreamWaits waits{scheduler, service}; TcpStreamOperations operations{scheduler, service};
-    NativeUdpService udp{}; NativeTcpEthernetExecutor executor{}; Iss iss{};
+    EthernetInterface nic{}; NativeUdpService udp{}; NativeTcpEthernetExecutor executor{}; Iss iss{};
     arch::CpuContext context{arch::configured_arch_operations().make_kernel_context(4096, 32768)};
     u64 pid{};
     Fixture()
     {
-        CHECK(scheduler.set_native_tcp_service(service)); CHECK(waits.status()); CHECK(udp.configure(link));
+        CHECK(scheduler.set_native_tcp_service(service)); CHECK(waits.status()); CHECK(udp.attach_interface(nic));
+        // IPv4 only: IPv6 autoconfiguration frames are covered by net_interface_tests.
+        CHECK(nic.configure({link.local_mac, 1500, Ipv4Configuration{link.local_ip, 24, link.peer_ip, link.peer_mac}, false}));
+        CHECK(udp.configure(link));
         auto created = scheduler.create_process("tcp-owner", context); CHECK(created); pid = created.value();
         CHECK(scheduler.set_runnable(pid)); CHECK(scheduler.activate(pid));
     }
@@ -194,7 +198,14 @@ void waiter_copy_and_close()
     CHECK(!f.waits.observe(ticket) && f.scheduler.open_description(id)->references == 2);
     auto forged = ticket; ++forged.generation; CHECK(!f.waits.observe(forged) && !f.waits.cancel(forged));
     const std::array payload{std::byte{'a'}, std::byte{'b'}, std::byte{'c'}};
+    // The waiter sits in its endpoint's queue: passes without a readiness
+    // change evaluate nothing; the segment's edge evaluates it exactly once.
+    CHECK(f.waits.stats().queued >= 1 && f.waits.poll() && f.waits.poll());
+    const auto evaluated = f.waits.stats().evaluated;
+    CHECK(f.waits.poll() && f.waits.stats().evaluated == evaluated);
+    CHECK(f.waits.observe(ticket).value().completion == sched::WaitCompletion::none);
     f.ingress(packet(peer, local, 201, 101, tcp_ack, payload), 2); CHECK(f.waits.poll());
+    CHECK(f.waits.stats().evaluated == evaluated + 1);
     CHECK(f.waits.observe(ticket).value().completion == sched::WaitCompletion::ready);
     Copy copy; copy.preflight_fail = true;
     CHECK(!f.operations.read(f.pid, fd, 4096, 3, copy)); CHECK(f.service.readiness(stream).value().readable_bytes == 3);
@@ -322,6 +333,77 @@ template <abi::linux_user::Profile Profile> void linux_profile()
         CHECK(frame.integer[profile.return_register] == error);
     const auto unchanged = frame.integer; CHECK(!adapter.encode_result(frame, Status::interrupted())); CHECK(frame.integer == unchanged);
 }
+// AF_INET6 streams keep their socket() family from open, before any bind.
+template <abi::linux_user::Profile Profile> void linux_ipv6_profile()
+{
+    using Constants = abi::linux_user::UdpConstants<Profile>;
+    namespace lu = abi::linux_user;
+    constexpr wire::Ipv6 self{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2};
+    constexpr wire::Ipv6 remote{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    constexpr wire::Ipv6 mapped{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 2};
+    constexpr tcp::Endpoint local6{self, 32001}, peer6{remote, 8080};
+    auto owner = fixture(); auto &f = *owner; LinuxTcpStreamAdapter<Profile> adapter{f.operations}; Copy copy;
+    auto opened = adapter.socket(f.pid, 10, Constants::sock_stream | Constants::sock_nonblock, 0);
+    CHECK(opened); const auto fd = opened.value(); auto handle = f.stream(fd);
+    auto state = f.service.snapshot(handle);
+    CHECK(state && state.value().family == Family::ipv6 && state.value().local.address.v6() && state.value().local.address.unspecified());
+    CHECK(!adapter.socket(f.pid, 3, Constants::sock_stream, 0));
+    const auto record = [&](u16 family, const wire::Ipv6 &address, u16 port) {
+        std::array<u8, 28> bytes{};
+        CHECK(lu::Ipv6SocketAddressCodec<Profile>::encode(bytes, {family, port, 0, address, 0}));
+        for (usize i = 0; i < bytes.size(); ++i) copy.bytes[i] = std::byte{bytes[i]};
+    };
+    // Short, foreign-family and mapped records leave the stream unbound.
+    record(10, self, 32001);
+    CHECK(adapter.bind(f.pid, fd, 4096, 16, copy).code() == StatusCode::invalid_argument);
+    CHECK(adapter.bind(f.pid, fd, 4096, 23, copy).code() == StatusCode::invalid_argument);
+    record(2, self, 32001); CHECK(adapter.bind(f.pid, fd, 4096, 28, copy).code() == StatusCode::unsupported);
+    record(10, mapped, 32001); CHECK(adapter.bind(f.pid, fd, 4096, 28, copy).code() == StatusCode::unsupported);
+    CHECK(f.operations.bind(f.pid, fd, local).code() == StatusCode::invalid_argument);
+    CHECK(f.service.snapshot(handle).value().local.port == 0);
+    record(10, self, 32001); CHECK(adapter.bind(f.pid, fd, 4096, 24, copy));
+    CHECK(f.service.snapshot(handle).value().local == local6);
+    CHECK(f.operations.connect(f.pid, fd, peer, 100, 0).code() == StatusCode::invalid_argument);
+    record(2, remote, 8080); CHECK(adapter.connect(f.pid, fd, 4096, 28, copy, 100, 0).code() == StatusCode::unsupported);
+    record(10, remote, 8080); CHECK(adapter.connect(f.pid, fd, 4096, 28, copy, 100, 0));
+    auto syn = f.take(0); auto ip = wire::ipv6(syn.view()); CHECK(ip && ip.value().source == self && ip.value().destination == remote);
+    auto segment = wire::tcp<wire::Ipv6Family>(ip.value()); CHECK(segment && segment.value().fields.flags == tcp_syn);
+    CHECK(segment.value().fields.destination_port == 8080 && segment.value().fields.sequence == 100);
+    Packet ack; auto built = wire::build_tcp<wire::Ipv6Family>(ack.bytes, remote, self, 23, 64,
+        {8080, 32001, 200, 101, static_cast<u8>(tcp_syn | tcp_ack), 4096}, {}, {});
+    CHECK(built); ack.length = built.value(); f.ingress(ack, 1); f.take(1);
+    CHECK(f.service.readiness(handle).value().connect_complete);
+    CHECK(f.service.endpoints().state(*f.service.snapshot(handle).value().endpoint).value().peer == peer6);
+    // An IPv4 stream keeps its IPv4-only record rule for AF_INET6 input.
+    auto v4 = adapter.socket(f.pid, 2, Constants::sock_stream, 0); CHECK(v4);
+    CHECK(f.service.snapshot(f.stream(v4.value())).value().family == Family::ipv4);
+    record(10, self, 32002); CHECK(adapter.bind(f.pid, v4.value(), 4096, 28, copy).code() == StatusCode::unsupported);
+    CHECK(f.scheduler.close_descriptor(f.process().resources(), v4.value()));
+    CHECK(f.scheduler.close_descriptor(f.process().resources(), fd));
+}
+// An accepted child inherits the listener family.
+void ipv6_accept()
+{
+    constexpr wire::Ipv6 self{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2};
+    constexpr wire::Ipv6 remote{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    constexpr tcp::Endpoint server{self, 8080}, client{remote, 40000};
+    auto owner = fixture(); auto &f = *owner;
+    auto listener = f.operations.open(f.pid, true, false, Family::ipv6); CHECK(listener);
+    CHECK(f.operations.bind(f.pid, listener.value(), server)); CHECK(f.operations.listen(f.pid, listener.value(), 2));
+    Packet syn; auto built = wire::build_tcp<wire::Ipv6Family>(syn.bytes, remote, self, 1, 64, {40000, 8080, 10, 0, tcp_syn, 4096}, {}, {});
+    CHECK(built); syn.length = built.value(); f.ingress(syn, 0);
+    auto reply = f.take(0); auto ip = wire::ipv6(reply.view()); CHECK(ip);
+    auto segment = wire::tcp<wire::Ipv6Family>(ip.value()); CHECK(segment && segment.value().fields.flags == (tcp_syn | tcp_ack));
+    Packet ack; built = wire::build_tcp<wire::Ipv6Family>(ack.bytes, remote, self, 2, 64,
+        {40000, 8080, 11, segment.value().fields.sequence + 1, tcp_ack, 4096}, {}, {});
+    CHECK(built); ack.length = built.value(); f.ingress(ack, 1);
+    auto accepted = f.operations.accept(f.pid, listener.value()); CHECK(accepted);
+    auto child = f.service.snapshot(f.stream(accepted.value()));
+    CHECK(child && child.value().family == Family::ipv6 && child.value().local == server);
+    CHECK(f.service.endpoints().state(*child.value().endpoint).value().peer == client);
+    CHECK(f.scheduler.close_descriptor(f.process().resources(), accepted.value()));
+    CHECK(f.scheduler.close_descriptor(f.process().resources(), listener.value()));
+}
 struct Device
 {
     std::array<Packet, 8> incoming{}, outgoing{}; usize first{}, count{}, sent{}, reaps{}, receives{};
@@ -416,16 +498,16 @@ void ethernet_failure_controls()
         CHECK(!f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 0)); CHECK(f.executor.state().retired);
     }
     auto owner = fixture(); auto &f = *owner; Device device; device.credit = 0;
-    device.push(arp_request()); device.push(arp_request()); device.push(arp_request());
+    for (usize i = 0; i < NativeTcpEthernetExecutor::control_capacity + 1; ++i) device.push(arp_request());
     CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 10));
-    CHECK(f.executor.state().controls == 2 && f.executor.state().dropped == 1);
+    CHECK(f.executor.state().controls == 4 && f.executor.state().dropped_control == 1 && f.executor.state().dropped == 0);
     const auto calls = device.reaps; CHECK(!f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 9));
     CHECK(device.reaps == calls && !f.executor.state().retired);
     device.credit = 8; device.block_tx = true; CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 10));
-    CHECK(f.executor.state().controls == 2 && device.sent == 0);
+    CHECK(f.executor.state().controls == 4 && device.sent == 0);
     device.block_tx = false; CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 11));
-    CHECK(device.sent == 2 && f.executor.state().controls == 0);
-    for (usize i = 0; i < 2; ++i)
+    CHECK(device.sent == 4 && f.executor.state().controls == 0);
+    for (usize i = 0; i < 4; ++i)
     { auto eth = wire::ethernet(device.outgoing[i].view()); CHECK(eth && wire::arp(eth.value().payload).value().operation == 2); }
 }
 }
@@ -437,6 +519,12 @@ int main()
     linux_profile<abi::linux_user::Profile::rv64>(); linux_profile<abi::linux_user::Profile::rv32>();
     linux_profile<abi::linux_user::Profile::loongarch64>(); linux_profile<abi::linux_user::Profile::mips>();
     linux_profile<abi::linux_user::Profile::mips64>(); linux_profile<abi::linux_user::Profile::ppc>();
+    linux_ipv6_profile<abi::linux_user::Profile::i386>(); linux_ipv6_profile<abi::linux_user::Profile::x86_64>();
+    linux_ipv6_profile<abi::linux_user::Profile::aarch64>(); linux_ipv6_profile<abi::linux_user::Profile::arm32>();
+    linux_ipv6_profile<abi::linux_user::Profile::rv64>(); linux_ipv6_profile<abi::linux_user::Profile::rv32>();
+    linux_ipv6_profile<abi::linux_user::Profile::loongarch64>(); linux_ipv6_profile<abi::linux_user::Profile::mips>();
+    linux_ipv6_profile<abi::linux_user::Profile::mips64>(); linux_ipv6_profile<abi::linux_user::Profile::ppc>();
+    ipv6_accept();
     ethernet_integration(); ethernet_link_passes(); ethernet_failure_controls();
     std::printf("TCP_STREAMS_HOSTED_PASS checks=%zu real_scheduler=1 guest_execution=0 socket_execution=0 nic_execution=0\n", checks);
 }

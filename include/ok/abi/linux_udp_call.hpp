@@ -37,6 +37,7 @@ class UdpConstants final
     static constexpr const UdpProfileData &data = udp_profiles[static_cast<usize>(Selected)];
     static constexpr u32 af_unspec = udp_af_unspec;
     static constexpr u32 af_inet = udp_af_inet;
+    static constexpr u32 af_inet6 = udp_af_inet6;
     static constexpr u32 protocol_udp = udp_protocol;
     static constexpr u32 sock_stream = data.socket[0];
     static constexpr u32 sock_dgram = data.socket[1];
@@ -259,6 +260,14 @@ class UdpWire final
     [[nodiscard]] static Status encode_address(std::span<u8> bytes, Ipv4SocketAddress value)
     {
         return Ipv4SocketAddressCodec<Selected>::encode(bytes, value);
+    }
+    // A record of 24..27 bytes omits scope_id, which Linux then reads as 0.
+    [[nodiscard]] static Result<Ipv6SocketAddress> decode_ipv6_address(std::span<const u8> copied)
+    {
+        using Address = Ipv6SocketAddressCodec<Selected>;
+        if (copied.size() < Address::minimum_size || copied.size() > UdpConstants<Selected>::sockaddr_input_limit)
+            return Status::invalid_argument("Linux copied address length is outside IPv6 bounds");
+        return Address::decode(copied.first(copied.size() < Address::record_size ? Address::minimum_size : Address::record_size));
     }
     // Negative capacities are preserved; their operation-specific timing is later.
     [[nodiscard]] static Result<i32> decode_socklen(std::span<const u8> bytes)

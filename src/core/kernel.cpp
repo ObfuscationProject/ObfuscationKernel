@@ -10,6 +10,9 @@
 #include "ok/user/runtime.hpp"
 #include "../user/native_lifecycle.hpp"
 
+// Weak like the runtime's: hosted builds of this unit have no console.
+extern "C" void ok_platform_console_write_char(char) __attribute__((weak));
+
 namespace ok
 {
 namespace
@@ -148,6 +151,7 @@ Kernel::Kernel() : arch_(&arch::arch_operations(arch::configured_architecture())
     native_tcp_(allocate_tcp_identity()), native_tcp_operations_(scheduler_, native_tcp_),
     native_tcp_waits_(scheduler_, native_tcp_)
 {
+    static_cast<void>(native_udp_.attach_interface(network_interface_));
     static_cast<void>(scheduler_.set_native_udp_service(native_udp_));
     static_cast<void>(scheduler_.set_native_tcp_service(native_tcp_));
     static_cast<void>(native_udp_executor_.use_shared_link());
@@ -706,6 +710,14 @@ Status Kernel::poll_network()
         drop_post();
         return retire_native_link(Status{existing.cause, "common Ethernet link is retired"});
     }
+    if (!network_probe_queried_ && extension())
+    {
+        // A distribution that asks for the link probe gets its link brought up
+        // at the first pass, before any socket call would.
+        network_probe_queried_ = true;
+        auto plan = extension()->network_probe(*this);
+        if (plan && activate_network()) network_probe_.arm(plan.value());
+    }
     if (!native_udp_.configured())
     {
         drop_post();
@@ -753,6 +765,11 @@ Status Kernel::poll_network()
     const auto state = native_ethernet_executor_.state();
     if (state.receive_backlog)
         interrupt::post_event(EventSource::network);
+    if (network_probe_.armed() && !state.retired)
+        network_probe_.step(network_interface_, native_tcp_, now, iss,
+                            [](std::string_view text) {
+                                if (ok_platform_console_write_char) for (char c : text) ok_platform_console_write_char(c);
+                            });
     const auto observed = native_udp_executor_.observe_shared_link(state.credit, state.controls, state.dropped_control,
         state.retired ? Status{state.cause, "common Ethernet link is retired"} : Status{});
     if (!observed)
@@ -798,13 +815,28 @@ Status Kernel::activate_native_tcp()
     if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
     if (auto status = native_udp_executor_.status(); !status) return status;
     if (auto status = native_tcp_.endpoints().status(); !status) return status;
-    if (!native_udp_.configured())
+    if (auto status = activate_network(); !status) return status;
+    auto now = native_tcp_now();
+    return now ? Status{} : now.status();
+}
+
+Status Kernel::activate_network()
+{
+    if (native_udp_.configured()) return Status::success();
+    auto *active = extension();
+    if (!active) return Status::unsupported("network extension is absent");
+    auto config = active->network_interface(*this);
+    Status configured{};
+    if (config) configured = native_udp_.configure(config.value());
+    else if (config.status().code() != StatusCode::unsupported) return config.status();
+    else
     {
-        auto *active = extension();
-        if (!active) return Status::unsupported("TCP network extension is absent");
         auto link = active->network_link(*this); if (!link) return link.status();
-        if (auto status = native_udp_.configure(link.value()); !status) return status;
+        configured = native_udp_.configure(link.value());
     }
+    if (!configured) return configured;
+    // Neighbour, address and protocol timers run on the network clock from
+    // the first pass on, whichever socket family brought the link up.
     auto now = native_tcp_now();
     return now ? Status{} : now.status();
 }

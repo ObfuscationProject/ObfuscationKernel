@@ -5,6 +5,7 @@
 #include "ok/sched/wait_registration.hpp"
 
 #include <array>
+#include <concepts>
 
 namespace ok::sched
 {
@@ -18,6 +19,13 @@ namespace ok::sched
 // run from an interrupt top half: the queue does no allocation, no blocking and
 // no callback. Serialised caller for now; the IRQ-safe lock arrives with the
 // irq-wait-time worktree's lock ranks and SMP with feat/smp-bringup.
+//
+// A registration the scheduler armed is enlisted instead of prepared; one
+// registration may be enlisted in several queues (a thread waiting on several
+// sockets). Each entry keeps the ticket it was enlisted with: once any queue or
+// the scheduler completes that wait, the remaining entries are stale and are
+// dropped, never applied to a later wait of the same thread. notify() lets the
+// condition's owner decide per waiter, e.g. complete it through the scheduler.
 template <usize Capacity> class WaitQueue final : private NonCopyable
 {
   public:
@@ -28,26 +36,35 @@ template <usize Capacity> class WaitQueue final : private NonCopyable
         auto ticket = registration.arm(owner, thread);
         if (!ticket)
             return ticket.status();
-        for (usize i = 0; i < Capacity; ++i)
+        if (!attach(registration, ticket.value()))
         {
-            if (slots_[i] == nullptr)
-            {
-                slots_[i] = &registration;
-                ++count_;
-                return ticket;
-            }
+            registration.cancel();
+            return Status{StatusCode::overflow, "wait queue slots inconsistent"};
         }
-        registration.cancel();
-        return Status{StatusCode::overflow, "wait queue slots inconsistent"};
+        return ticket;
+    }
+
+    Status enlist(WaitRegistration &registration)
+    {
+        if (!registration.active())
+            return Status{StatusCode::invalid_argument, "only an armed registration can be enlisted"};
+        for (const auto &slot : slots_)
+            if (slot.registration == &registration && slot.ticket == registration.ticket())
+                return Status{StatusCode::already_exists, "registration is already enlisted"};
+        prune();
+        if (count_ == Capacity)
+            return Status{StatusCode::overflow, "wait queue capacity exhausted"};
+        return attach(registration, registration.ticket()) ? Status{}
+            : Status{StatusCode::overflow, "wait queue slots inconsistent"};
     }
 
     bool cancel(WaitTicket ticket)
     {
         for (usize i = 0; i < Capacity; ++i)
         {
-            if (slots_[i] != nullptr && slots_[i]->pending(ticket))
+            if (live(i) && slots_[i].ticket == ticket)
             {
-                slots_[i]->complete(ticket, WaitCompletion::cancelled);
+                slots_[i].registration->complete(ticket, WaitCompletion::cancelled);
                 detach(i);
                 return true;
             }
@@ -61,9 +78,10 @@ template <usize Capacity> class WaitQueue final : private NonCopyable
         for (usize scanned = 0; scanned < Capacity; ++scanned)
         {
             const usize i = (oldest_ + scanned) % Capacity;
-            if (slots_[i] == nullptr)
+            if (slots_[i].registration == nullptr)
                 continue;
-            slots_[i]->complete(slots_[i]->ticket(), completion, source);
+            if (!live(i)) { detach(i); continue; }
+            slots_[i].registration->complete(slots_[i].ticket, completion, source);
             detach(i);
             oldest_ = (i + 1) % Capacity;
             ++wakes_[static_cast<usize>(source)];
@@ -80,6 +98,36 @@ template <usize Capacity> class WaitQueue final : private NonCopyable
         return woken;
     }
 
+    // Offers each live waiter, oldest first, to `visit(ticket)`, which returns
+    // true when it completed (or abandoned) the waiter and false to keep it
+    // queued. Stale entries are dropped. Returns the number removed.
+    template <class Visit>
+        requires requires(Visit &visit, WaitTicket ticket) { { visit(ticket) } -> std::same_as<bool>; }
+    usize notify(Visit &&visit)
+    {
+        usize removed = 0;
+        for (usize scanned = 0; scanned < Capacity; ++scanned)
+        {
+            const usize i = (oldest_ + scanned) % Capacity;
+            if (slots_[i].registration == nullptr)
+                continue;
+            if (!live(i)) { detach(i); continue; }
+            const auto ticket = slots_[i].ticket;
+            if (!visit(ticket)) continue;
+            detach(i); ++removed;
+        }
+        return removed;
+    }
+
+    // Drops entries whose wait already completed elsewhere.
+    usize prune()
+    {
+        usize dropped = 0;
+        for (usize i = 0; i < Capacity; ++i)
+            if (slots_[i].registration != nullptr && !live(i)) { detach(i); ++dropped; }
+        return dropped;
+    }
+
     [[nodiscard]] usize waiting() const
     {
         return count_;
@@ -90,12 +138,32 @@ template <usize Capacity> class WaitQueue final : private NonCopyable
     }
 
   private:
+    struct Slot
+    {
+        WaitRegistration *registration{};
+        WaitTicket ticket{};
+    };
+    bool live(usize index) const
+    {
+        return slots_[index].registration != nullptr && slots_[index].registration->pending(slots_[index].ticket);
+    }
+    bool attach(WaitRegistration &registration, WaitTicket ticket)
+    {
+        for (auto &slot : slots_)
+            if (slot.registration == nullptr)
+            {
+                slot = {&registration, ticket};
+                ++count_;
+                return true;
+            }
+        return false;
+    }
     void detach(usize index)
     {
-        slots_[index] = nullptr;
+        slots_[index] = {};
         --count_;
     }
-    std::array<WaitRegistration *, Capacity> slots_{};
+    std::array<Slot, Capacity> slots_{};
     std::array<usize, wake_source_count> wakes_{};
     usize count_{0};
     usize oldest_{0};

@@ -117,6 +117,9 @@ class Kernel final
     Status publish_cpu_topology(usize discovered, u32 online_mask);
     Status poll_network();
     Status activate_native_tcp();
+    // Configures the link once: the distribution's interface configuration
+    // when it has one, else its static link.
+    Status activate_network();
     Result<u64> native_tcp_now();
     Result<u32> native_tcp_iss(net::tcp::Endpoint local, net::tcp::Endpoint peer);
     Result<sched::ProcessId> create_ui_process(std::string_view name, uptr entry, uptr stack_top,
@@ -270,6 +273,7 @@ class Kernel final
         return network_;
     }
     [[nodiscard]] net::NativeUdpService &native_udp() { return native_udp_; }
+    [[nodiscard]] net::EthernetInterface &network_interface() { return network_interface_; }
     [[nodiscard]] const net::NativeUdpExecutor &native_udp_executor() const { return native_udp_executor_; }
     [[nodiscard]] net::NativeTcpStreamService &native_tcp() { return native_tcp_; }
     [[nodiscard]] net::TcpStreamOperations &native_tcp_operations() { return native_tcp_operations_; }
@@ -344,6 +348,7 @@ class Kernel final
     u64 native_tcp_clock_generation_{};
     u64 native_tcp_last_nanoseconds_{};
     bool network_poll_active_{};
+    bool network_probe_queried_{};
     bool shutdown_admission_closed_{};
     bool shutdown_stop_started_{};
     bool shutdown_producers_stopped_{};
@@ -380,6 +385,7 @@ class Kernel final
     fs::SimpleDiskFileSystem simplefs_;
     fs::VirtualFileSystem vfs_;
     net::NetworkStack network_;
+    net::EthernetInterface network_interface_;
     net::NativeUdpService native_udp_;
     net::NativeUdpExecutor native_udp_executor_;
     net::NativeTcpStreamService native_tcp_;
@@ -387,6 +393,7 @@ class Kernel final
     net::TcpStreamOperations native_tcp_operations_;
     net::TcpStreamWaits native_tcp_waits_;
     net::NativeTcpEthernetExecutor native_ethernet_executor_;
+    net::LinkProbe network_probe_;
     ModuleManager kernel_modules_;
     driver::DriverManager drivers_;
     posix::PosixService posix_;

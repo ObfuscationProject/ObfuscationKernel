@@ -13,17 +13,23 @@ usize checks{};
 u64 identity{61000};
 #define CHECK(value) do { ++checks; if (!static_cast<bool>(value)) { std::fprintf(stderr, "TCP_ACCEPT_TRANSACTION_FAIL line=%d check=%zu: %s\n", __LINE__, checks, #value); std::abort(); } } while(false)
 constexpr tcp::Endpoint server{{10, 0, 0, 2}, 8080}, peer{{10, 0, 0, 3}, 32001};
+constexpr wire::Ipv6 server_ip6{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2};
+constexpr wire::Ipv6 peer_ip6{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3};
+constexpr tcp::Endpoint server6{server_ip6, 8080}, peer6{peer_ip6, 32001};
 struct Iss { Result<u32> operator()(tcp::Endpoint, tcp::Endpoint) { return u32{500}; } };
 struct Packet
 {
     std::array<std::byte, 1500> bytes{}; usize length{};
     wire::Bytes view() const { return {bytes.data(), length}; }
 };
-Packet packet(u32 sequence, u32 acknowledgment, u8 flags)
+Packet packet(u32 sequence, u32 acknowledgment, u8 flags, bool v6 = false)
 {
     Packet out;
-    auto built = wire::build_tcp(out.bytes, peer.address, server.address, 1, 64,
-        {peer.port, server.port, sequence, acknowledgment, flags, 4096}, {}, {});
+    auto built = v6
+        ? wire::build_tcp<wire::Ipv6Family>(out.bytes, peer_ip6, server_ip6, 1, 64,
+            {peer6.port, server6.port, sequence, acknowledgment, flags, 4096}, {}, {})
+        : wire::build_tcp(out.bytes, peer.address.ipv4(), server.address.ipv4(), 1, 64,
+            {peer.port, server.port, sequence, acknowledgment, flags, 4096}, {}, {});
     CHECK(built); out.length = built.value(); return out;
 }
 struct Fixture
@@ -33,26 +39,28 @@ struct Fixture
     TcpStreamOperations operations{scheduler, service};
     arch::CpuContext context{arch::configured_arch_operations().make_kernel_context(4096, 32768)};
     Status failure{};
-    u64 pid{}; i32 fd{}; u16 id{}; TcpStreamHandle listener{};
-    explicit Fixture(TcpStreamCapacity capacity = {}) : service{tcp::TableIdentity{identity++}, capacity}
+    u64 pid{}; i32 fd{}; u16 id{}; TcpStreamHandle listener{}; bool v6{};
+    explicit Fixture(TcpStreamCapacity capacity = {}, bool ipv6 = false) : service{tcp::TableIdentity{identity++}, capacity}, v6{ipv6}
     {
         CHECK(scheduler.set_native_tcp_service(service));
         auto created = scheduler.create_process("accept-owner", context); CHECK(created); pid = created.value();
         CHECK(scheduler.set_runnable(pid)); CHECK(scheduler.activate(pid));
-        auto opened = operations.open(pid, true, true); CHECK(opened); fd = opened.value();
+        auto opened = operations.open(pid, true, true, v6 ? Family::ipv6 : Family::ipv4); CHECK(opened); fd = opened.value();
         id = process().fd_table().entry(fd)->description; listener = scheduler.open_description(id)->native_tcp_handle;
-        CHECK(operations.bind(pid, fd, server)); CHECK(operations.listen(pid, fd, 2));
+        CHECK(operations.bind(pid, fd, v6 ? server6 : server)); CHECK(operations.listen(pid, fd, 2));
     }
     ~Fixture()
     { CHECK(operations.status()); CHECK(failure); CHECK(scheduler.drain_all_resources()); CHECK(service.endpoints().retire()); }
     sched::ProcessControlBlock &process() { return *scheduler.find(pid); }
     void completed()
     {
-        Iss iss; auto syn = service.endpoints().ingest(packet(10, 0, wire::tcp_syn).view(), 0, iss); CHECK(syn && syn.value().matched);
+        Iss iss; auto syn = service.endpoints().ingest(packet(10, 0, wire::tcp_syn, v6).view(), 0, iss); CHECK(syn && syn.value().matched);
         Packet out; auto response = service.endpoints().prepare(out.bytes, 0); CHECK(response && response.value());
         out.length = response.value()->length; CHECK(service.endpoints().complete(response.value()->ticket, true, 0));
-        auto ip = wire::ipv4(out.view()); CHECK(ip); auto tcp = wire::tcp(ip.value()); CHECK(tcp);
-        auto ack = service.endpoints().ingest(packet(11, tcp.value().fields.sequence + 1, wire::tcp_ack).view(), 1, iss);
+        u32 sequence{};
+        if (v6) { auto ip = wire::ipv6(out.view()); CHECK(ip); auto tcp = wire::tcp<wire::Ipv6Family>(ip.value()); CHECK(tcp); sequence = tcp.value().fields.sequence; }
+        else { auto ip = wire::ipv4(out.view()); CHECK(ip); auto tcp = wire::tcp(ip.value()); CHECK(tcp); sequence = tcp.value().fields.sequence; }
+        auto ack = service.endpoints().ingest(packet(11, sequence + 1, wire::tcp_ack, v6).view(), 1, iss);
         CHECK(ack && ack.value().matched); CHECK(service.endpoints().pools().unaccepted == 1);
     }
     void capture(user::native::TcpOriginalDescription &original)
@@ -173,6 +181,37 @@ void callback_refusal_and_reinstallation()
             CHECK(f.scheduler.open_description(f.id)->references == 1);
         }
 }
+// An IPv6 listener reports a 28-byte sockaddr_in6 peer with Linux truncation;
+// the accepted stream keeps the listener family.
+template <lu::Profile Selected> void ipv6_profile_controls()
+{
+    using Wire = lu::UdpWire<Selected>;
+    for (i32 size : {0, 3, 16, 27, 28, 64})
+    {
+        auto owner = std::make_unique<Fixture>(TcpStreamCapacity{}, true); auto &f = *owner; f.completed();
+        Original original{f.scheduler, f.service, f.failure}; f.capture(original);
+        Copy copy; copy.bytes.fill(std::byte{0x5a}); copy.length<Selected>(size);
+        TcpAcceptCopied<Selected> adapter{f.operations};
+        auto prepared = adapter.prepare(f.pid, f.fd, 4608, 4352, 0, true, true, copy, original);
+        CHECK(prepared); auto accepted = prepared.value().commit(); CHECK(accepted);
+        const auto *slot = f.process().fd_table().entry(accepted.value());
+        auto child = f.service.snapshot(f.scheduler.open_description(slot->description)->native_tcp_handle);
+        CHECK(child && child.value().family == Family::ipv6 && child.value().local == server6);
+        const auto expected = lu::encode_socket_name<Selected>(peer6.address, peer6.port); CHECK(expected && expected.value().size == 28);
+        const usize prefix = static_cast<usize>(size < 28 ? size : 28);
+        for (usize index = 0; index < prefix; ++index) CHECK(copy.bytes[512 + index] == std::byte{expected.value().bytes[index]});
+        CHECK(copy.bytes[512 + prefix] == std::byte{0x5a});
+        std::array<u8, 4> reported{}; for (usize index = 0; index < 4; ++index) reported[index] = std::to_integer<u8>(copy.bytes[256 + index]);
+        CHECK(Wire::decode_socklen(reported).value() == 28); CHECK(prepared.value().retire()); CHECK(original.release());
+        if (size == 64)
+        {
+            std::array<u8, 28> record{}; for (usize index = 0; index < 28; ++index) record[index] = std::to_integer<u8>(copy.bytes[512 + index]);
+            auto decoded = lu::Ipv6SocketAddressCodec<Selected>::decode(record);
+            CHECK(decoded && decoded.value().family == 10 && decoded.value().port == 32001);
+            CHECK(decoded.value().address == peer_ip6 && decoded.value().scope_id == 1);
+        }
+    }
+}
 template <lu::Profile Selected> void profile_controls()
 {
     using Wire = lu::UdpWire<Selected>; using Constants = lu::UdpConstants<Selected>;
@@ -186,7 +225,7 @@ template <lu::Profile Selected> void profile_controls()
         CHECK(prepared); auto accepted = prepared.value().commit(); CHECK(accepted);
         const auto *slot = f.process().fd_table().entry(accepted.value()); const auto *open = f.scheduler.open_description(slot->description);
         CHECK(slot->close_on_exec && open->flags == (2 | TcpStreamOperations::nonblock));
-        std::array<u8, 16> expected{}; CHECK(Wire::encode_address(expected, {2, peer.port, peer.address}));
+        std::array<u8, 16> expected{}; CHECK(Wire::encode_address(expected, {2, peer.port, peer.address.ipv4()}));
         for (usize index = 0; index < static_cast<usize>(size < 16 ? size : 16); ++index) CHECK(copy.bytes[512 + index] == std::byte{expected[index]});
         CHECK(copy.bytes[512 + static_cast<usize>(size < 16 ? size : 16)] == std::byte{0x5a});
         std::array<u8, 4> reported{}; for (usize index = 0; index < 4; ++index) reported[index] = std::to_integer<u8>(copy.bytes[256 + index]);
@@ -284,6 +323,10 @@ int main()
     profile_controls<lu::Profile::i386>(); profile_controls<lu::Profile::x86_64>(); profile_controls<lu::Profile::aarch64>();
     profile_controls<lu::Profile::arm32>(); profile_controls<lu::Profile::rv64>(); profile_controls<lu::Profile::rv32>();
     profile_controls<lu::Profile::loongarch64>(); profile_controls<lu::Profile::mips>(); profile_controls<lu::Profile::mips64>(); profile_controls<lu::Profile::ppc>();
+    ipv6_profile_controls<lu::Profile::i386>(); ipv6_profile_controls<lu::Profile::x86_64>(); ipv6_profile_controls<lu::Profile::aarch64>();
+    ipv6_profile_controls<lu::Profile::arm32>(); ipv6_profile_controls<lu::Profile::rv64>(); ipv6_profile_controls<lu::Profile::rv32>();
+    ipv6_profile_controls<lu::Profile::loongarch64>(); ipv6_profile_controls<lu::Profile::mips>(); ipv6_profile_controls<lu::Profile::mips64>();
+    ipv6_profile_controls<lu::Profile::ppc>();
     capacity_and_shared_tokens(); reset_and_descriptor_commit_refusal();
     std::printf("TCP_ACCEPT_TRANSACTION_PASS checks=%zu profiles=10 syscall_execution=0 device_execution=0\n", checks);
 }
