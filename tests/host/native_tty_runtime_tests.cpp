@@ -567,14 +567,15 @@ bool ptn_lock(Kernel &kernel, const PtySession &p, i32 &master, i32 &slave)
     expect(fd_ioctl(kernel, p.shell, master, OK_TIOCGPGRP, argument_at) == 0 && int_at(argument_at) == 0);
     expect(fd_ioctl(kernel, p.shell, master, OK_TIOCGSID, argument_at) == -25); // No session.
     expect(bind_fd(kernel, p.shell, [&](u16 id) { return scheduler.bind_pty_slave(id, pts).ok(); }) < 0); // Locked.
-    // A dormant slave: the master's reads wait and its writes fail.
-    expect(pty_write(kernel, p.shell, master, "x") == -5);
-    expect(pty_poll(kernel, p.shell, master, OK_POLLIN) == 0);
+    // A dormant slave: the master's reads wait; its writes are kept for the
+    // slave's first open (Linux counts the master's slave reference).
+    expect(pty_poll(kernel, p.shell, master, OK_POLLIN | OK_POLLOUT) == OK_POLLOUT);
+    expect(pty_write(kernel, p.shell, master, "early\n") == 6 && pty_read(kernel, p.shell, master) == "early\r\n");
     const i32 unlock = 0;
     std::memcpy(user(argument_at), &unlock, 4);
     expect(fd_ioctl(kernel, p.shell, master, OK_TIOCSPTLCK, argument_at) == 0);
     slave = bind_fd(kernel, p.shell, [&](u16 id) { return scheduler.bind_pty_slave(id, pts).ok(); });
-    expect(slave >= 0);
+    expect(slave >= 0 && pty_read(kernel, p.shell, slave) == "early\n");
     expect(fd_ioctl(kernel, p.shell, slave, OK_TIOCSPTLCK, argument_at) == -25);
     expect(fd_ioctl(kernel, p.shell, master, OK_TIOCSPTLCK, 0) == -14); // Copy-in after the checks.
     // ptmx pairs use the pts termios: cooked with echo.

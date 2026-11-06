@@ -462,8 +462,10 @@ class RawPtyTable final
         std::uint8_t wakes = 0;
         if (handle.side == Side::master)
         {
-            // Linux n_tty_write: no open slave (dormant or closed) is EIO.
-            if (!pair->slave_opens) return Status::io_error("PTY slave is not open");
+            // A raw pair's master write fails once its slave closed. A ptmx slave's
+            // count includes the master's reference (Linux pty_common_install), so
+            // its master writes into the slave ldisc while it is dormant or closed.
+            if (!pair->multiplexed && !pair->slave_opens) return Status::io_error("raw PTY slave was closed");
             std::size_t consumed = 0;
             bool readable = false, flush_peer_output = false, start_output = false;
             while (consumed < input.size())
@@ -559,9 +561,9 @@ class RawPtyTable final
             result.buffered = pair->master_input.size;
             result.outgoing_available = room;
             result.readable = pair->master_input.size || slave_closed(*pair);
-            result.writable = pair->slave_opens && room;
+            result.writable = (pair->multiplexed || pair->slave_opens) && room;
             result.hangup = slave_closed(*pair);
-            result.write_error = !pair->slave_opens;
+            result.write_error = !pair->multiplexed && !pair->slave_opens;
             return result;
         }
         const bool gone = !pair->master_opens;

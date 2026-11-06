@@ -361,8 +361,9 @@ void deterministic_model_comparison()
             const bool master = (next_random() & 1) != 0;
             const auto handle = master ? state.handles.master : state.handles.slave;
             const bool local_alive = state.used && (master ? state.master : state.slave);
-            // A master writes only to an open slave; a slave only while the master lives.
-            const bool peer_open = state.used && (master ? state.slave != 0 : state.master != 0);
+            // A raw master writes only to an open slave, a ptmx master always (the
+            // slave keeps it for an open); a slave only while the master lives.
+            const bool peer_open = state.used && (master ? state.multiplexed || state.slave != 0 : state.master != 0);
             const bool slave_closed = state.seen && !state.slave;
             auto &incoming = master ? state.master_input : state.slave_input;
             auto &outgoing = master ? state.slave_input : state.master_input;
@@ -456,9 +457,9 @@ void deterministic_model_comparison()
                 if (master)
                 {
                     CHECK(actual.value().readable == (!incoming.empty() || closed));
-                    CHECK(actual.value().writable == (state.slave && outgoing.size() != capacity));
+                    CHECK(actual.value().writable == ((state.multiplexed || state.slave) && outgoing.size() != capacity));
                     CHECK(actual.value().hangup == closed && !actual.value().error);
-                    CHECK(actual.value().write_error == !state.slave);
+                    CHECK(actual.value().write_error == (!state.multiplexed && !state.slave));
                 }
                 else
                 {
@@ -596,12 +597,13 @@ void multiplexed_terminal_semantics()
     auto audit = table.audit();
     CHECK(audit.live_pairs == 1 && audit.master_opens == 1 && !audit.slave_opens && audit.dormant_slaves == 1);
     CHECK(audit.locked_pairs == 1 && audit.live_endpoints == 1);
-    // Dormant: master reads block, writes EIO, no hangup.
+    // Dormant: master reads block, no hangup; master writes go into the slave's
+    // input for its first open (Linux counts the master's slave reference).
     std::array<std::byte, 4> scratch{};
     CHECK(table.read(master, scratch).status().code() == StatusCode::would_block);
-    CHECK(table.write(master, text("a")).status().code() == StatusCode::io_error);
     auto ready = table.readiness(master).value();
-    CHECK(!ready.readable && !ready.writable && !ready.hangup && !ready.error && ready.write_error);
+    CHECK(!ready.readable && ready.writable && !ready.hangup && !ready.error && !ready.write_error);
+    CHECK(table.write(master, text("early\n")).value().bytes == 6 && drain(table, master) == "early\r\n");
     CHECK(table.readiness(slave).status().code() == StatusCode::bad_descriptor);
     CHECK(table.admit_open(slave).code() == StatusCode::io_error); // Locked.
     CHECK(table.index(master).value() == master.slot);
@@ -610,6 +612,7 @@ void multiplexed_terminal_semantics()
     CHECK(table.set_locked(slave, true).code() == StatusCode::not_terminal);
     CHECK(table.index(slave).status().code() == StatusCode::not_terminal);
     audit = table.audit(); CHECK(audit.slave_opens == 2 && !audit.dormant_slaves && !audit.locked_pairs);
+    CHECK(drain(table, slave) == "early\n");
     // Canonical input with echo through OPOST into the master queue.
     auto written = table.write(master, text("hex\x7flo\r"));
     CHECK(written && written.value().bytes == 7);
@@ -673,14 +676,16 @@ void multiplexed_terminal_semantics()
     static_cast<void>(drain(table, master)); CHECK(table.write(slave, text("t")));
     CHECK(table.retire(slave)); CHECK(table.retire(slave).value().slave_retired);
     ready = table.readiness(master).value();
-    CHECK(ready.readable && ready.hangup && !ready.writable && ready.write_error);
+    CHECK(ready.readable && ready.hangup && ready.writable && !ready.write_error);
     CHECK(drain(table, master) == "t" && table.read(master, scratch).status().code() == StatusCode::io_error);
-    CHECK(table.write(master, text("x")).status().code() == StatusCode::io_error);
-    CHECK(terminal->ldisc.buffered() == 5 && terminal->session == 7 && table.audit().cleared_outside_live_bytes);
+    // The master still writes into the closed slave's input; its echo drains, then EIO again.
+    CHECK(table.write(master, text("x\n")).value().bytes == 2 && drain(table, master) == "x\r\n");
+    CHECK(table.read(master, scratch).status().code() == StatusCode::io_error);
+    CHECK(terminal->ldisc.buffered() == 7 && terminal->session == 7 && table.audit().cleared_outside_live_bytes);
     // Relocking refuses new opens only; unlocked, the slave reopens with its input.
     CHECK(table.set_locked(master, true)); CHECK(table.admit_open(slave).code() == StatusCode::io_error);
     CHECK(table.set_locked(master, false)); CHECK(table.attach(slave).changed);
-    CHECK(!table.readiness(master).value().hangup && drain(table, slave) == "kept\n");
+    CHECK(!table.readiness(master).value().hangup && drain(table, slave) == "kept\n" && drain(table, slave) == "x\n");
     // The master's last close hangs the slave up: input discarded, reads 0,
     // writes EIO, poll IN|OUT|ERR|HUP, no new opens.
     CHECK(table.write(master, text("lost\n")) && table.write(master, text("partial")));

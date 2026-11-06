@@ -520,7 +520,7 @@ Applies to poll and select in both personalities.
 | Endpoint | Readable | Writable | Error and hangup |
 |---|---|---|---|
 | Slave | a line (canonical), or ≥ 1 byte / VMIN (raw); or hung up | room and echo flushed, and not hung up (ptmx hung up: IN\|OUT\|ERR\|HUP) | per §8 |
-| Master | queued output; or slave closed | slave open and ldisc room | HUP when the slave is closed |
+| Master | queued output; or slave closed | ldisc room, and the slave open (raw pair) | HUP when the slave is closed; a raw pair's closed slave is a write error |
 | Console | ldisc readable, for lease members | always | no foreground-based POLLERR |
 
 ## 11. errno summary — constants landed (S6)
@@ -530,7 +530,7 @@ Beyond §3 and §5:
 | errno | Value | Meaning |
 |---|---|---|
 | EINTR | 4 | Linux handler interruption |
-| EIO | 5 | background read when ignored/blocked/orphaned; hung-up slave write or ioctl; master write with no open slave; locked slave open |
+| EIO | 5 | background read when ignored/blocked/orphaned; hung-up slave write or ioctl; raw-pair master write after the slave closed; locked slave open |
 | ENXIO | 6 | `/dev/tty` without a ctty |
 | ENOTTY | 25 | non-terminal fd; unknown request; TIOCSPGRP gate EIO |
 | ENOSPC | 28 | no free PTY slot |
