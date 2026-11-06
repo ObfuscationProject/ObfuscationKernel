@@ -1451,6 +1451,9 @@ template <lu::Profile Profile> Status complete(hw::UserFrame &frame, i64 result)
     using Codec = lu::Codec<Profile>;
     using Bridge = lu::NativeBridge<Profile>;
     using Operation = lu::Operation;
+    // Terminal opens return ENXIO and ENOSPC unchanged: both are one number on
+    // every profile, MIPS included.
+    static_assert(*Codec::errno_number(lu::Error::e_nxio) == 6 && *Codec::errno_number(lu::Error::e_nospc) == 28);
     if constexpr (Codec::profile.word_bytes == 4 &&
                   Codec::profile.error_convention == lu::ErrorConvention::negative)
     {
