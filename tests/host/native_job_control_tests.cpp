@@ -194,9 +194,14 @@ void linux_stop_continue(Kernel &kernel)
     handle(kernel, child, 10);
     expect(linux_kill(kernel, parent, child, 19) == 0 && job(kernel, child).stopped);
     expect(linux_kill(kernel, parent, child, 10) == 0 && shared(child).pending_mask().contains(10));
-    // A terminating default sent to a stopped process is decided at once.
-    expect(linux_kill(kernel, parent, child, 15) == 0 && native::private_signal_find(child)->deferred_fatal == 15);
-    native::private_signal_find(child)->deferred_fatal = 0;
+    // A terminating default sent to a stopped process stays pending until the
+    // continue (Linux wants_signal); the process stays stopped.
+    expect(linux_kill(kernel, parent, child, 15) == 0 && !native::private_signal_find(child)->deferred_fatal);
+    expect(shared(child).pending_mask().contains(15) && job(kernel, child).stopped);
+    native::private_process_signal_fatal(kernel);
+    expect(job(kernel, child).stopped && kernel.scheduler().find(child)->state() != sched::ProcessState::zombie);
+    expect(linux_call(kernel, parent, lu::Operation::wait4, {negative(child), status_at, 3, 0}) == static_cast<i64>(child));
+    expect(status_word() == ((19U << 8) | 0x7f));
     expect(linux_kill(kernel, parent, child, 9) == 0 && native::private_signal_find(child)->group_kill);
     native::private_process_signal_fatal(kernel);
     expect(kernel.scheduler().find(child)->state() == sched::ProcessState::zombie);
@@ -205,6 +210,22 @@ void linux_stop_continue(Kernel &kernel)
     expect(status_word() == 9 && !kernel.scheduler().find(child));
     drain(parent);
     release(kernel, parent);
+}
+
+// A terminating default held by a stopped process acts once it is continued.
+void stopped_fatal(Kernel &kernel)
+{
+    const auto parent = create(kernel);
+    const auto child = fork(kernel, parent);
+    grouped(kernel, parent, child);
+    expect(linux_kill(kernel, parent, child, 19) == 0 && linux_kill(kernel, parent, child, 1) == 0);
+    expect(job(kernel, child).stopped && shared(child).pending_mask().contains(1));
+    expect(linux_kill(kernel, parent, child, 18) == 0 && !job(kernel, child).stopped);
+    auto &process = *kernel.scheduler().find(child);
+    expect(!native::private_signal_deliver(kernel, process, *kernel.scheduler().find_thread(child, child)));
+    expect(process.state() == sched::ProcessState::zombie && process.wait_status() == 1);
+    drain(parent);
+    release(kernel, child); release(kernel, parent);
 }
 
 // SA_NOCLDSTOP, SIG_DFL and blocked SIGCHLD; a native parent waits without a signal.
@@ -285,9 +306,16 @@ void native_dispositions(Kernel &kernel)
     release(kernel, grandchild);
     // A native process has no SIGCHLD disposition: a default-ignored signal does nothing.
     expect(native_kill(kernel, parent, child, OK_SIGWINCH) == 0 && !native::private_signal_find(child)->deferred_fatal);
-    // A terminating default is decided at generation; the first fatal wins.
+    // A terminating default is decided at generation; the first fatal wins. A
+    // stopped process applies it only after SIGCONT.
+    expect(native_kill(kernel, parent, child, OK_SIGSTOP) == 0 && job(kernel, child).stopped);
     expect(native_kill(kernel, parent, child, OK_SIGINT) == 0 && native_kill(kernel, parent, child, OK_SIGHUP) == 0);
     expect(native::private_signal_find(child)->deferred_fatal == OK_SIGINT);
+    native::private_process_signal_fatal(kernel);
+    expect(job(kernel, child).stopped && kernel.scheduler().find(child)->state() != sched::ProcessState::zombie);
+    expect(native_kill(kernel, parent, child, OK_SIGCONT) == 0 && !job(kernel, child).stopped);
+    // A process condemned by a fatal signal no longer stops.
+    expect(native_kill(kernel, parent, child, OK_SIGSTOP) == 0 && !job(kernel, child).stopped);
     native::private_process_signal_fatal(kernel);
     expect(kernel.scheduler().find(child)->wait_status() == OK_SIGINT);
     expect(native_call(kernel, parent, N::wait4, {child, status_at, 0, 0}) == static_cast<i64>(child) &&
@@ -361,19 +389,16 @@ void orphan_pass(Kernel &kernel, bool caught)
     raw_exit(kernel, leader, leader, 0, true);
     expect(kernel.scheduler().find(member)->parent_pid() == sched::user_init_pid);
     expect(!job(kernel, member).stopped && job(kernel, member).continue_report);
-    if (caught)
+    // HUP reached the stopped member first, so it waits in the queue (caught
+    // or not) and acts after the continue.
+    expect(shared(member).pending_mask().contains(1) && !native::private_signal_find(member)->deferred_fatal);
+    if (!caught)
     {
-        // The caught HUP waits in the queue and runs after the continue.
-        expect(shared(member).pending_mask().contains(1) && !native::private_signal_find(member)->deferred_fatal);
-        release(kernel, member);
+        auto &process = *kernel.scheduler().find(member);
+        expect(!native::private_signal_deliver(kernel, process, *kernel.scheduler().find_thread(member, member)));
+        expect(process.wait_status() == 1);
     }
-    else
-    {
-        expect(native::private_signal_find(member)->deferred_fatal == 1);
-        native::private_process_signal_fatal(kernel);
-        expect(kernel.scheduler().find(member)->wait_status() == 1);
-        release(kernel, member);
-    }
+    release(kernel, member);
     CHECK(kernel.scheduler().reap_process(leader));
 }
 
@@ -457,6 +482,7 @@ int main()
     CHECK(native::entry_stacks.activate(native::entry_stack_arena));
     const auto init = create_init(kernel);
     linux_stop_continue(kernel);
+    stopped_fatal(kernel);
     notifications(kernel);
     native_dispositions(kernel);
     protections(kernel, init);

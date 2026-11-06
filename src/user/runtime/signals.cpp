@@ -2138,12 +2138,17 @@ void private_process_signal_fatal(Kernel &kernel)
         if (state.pid && (state.group_kill || state.deferred_fatal))
         {
             const auto pid = state.pid;
+            const auto *process = kernel.scheduler().find(pid);
+            const bool live = process && process->state() != sched::ProcessState::zombie &&
+                              process->state() != sched::ProcessState::exited;
+            // Only SIGKILL acts on a stopped process; a native fatal default
+            // waits for SIGCONT (Linux keeps it pending until then).
+            if (live && !state.group_kill && state.deferred_fatal != OK_SIGKILL && process->job_control().stopped)
+                continue;
             const auto signal = state.group_kill ? u8{9} : state.deferred_fatal;
             state.group_kill = false;
             state.deferred_fatal = 0;
-            const auto *process = kernel.scheduler().find(pid);
-            if (!process || process->state() == sched::ProcessState::zombie ||
-                process->state() == sched::ProcessState::exited)
+            if (!live)
             {
                 private_signal_retire(pid);
                 continue;

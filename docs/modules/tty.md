@@ -291,15 +291,18 @@ handler runs under it after the continue.
 - Generating SIGCONT continues the process even if SIGCONT is ignored or
   blocked, and discards pending STOP/TSTP/TTIN/TTOU. Generating any stop signal
   discards a pending SIGCONT.
-- SIGKILL acts on a stopped process.
+- Only SIGKILL acts on a stopped process. Any other signal sent to a stopped
+  Linux process, terminating defaults included, stays pending and acts after
+  the continue (Linux `wants_signal`); a stopped native process applies its
+  recorded terminating default after the continue. A process already
+  condemned by a fatal signal no longer stops.
 - A stop applies when the signal is generated, if it is deliverable then: some
   thread does not block it and no signal that thread would dequeue first is
   pending. Otherwise it is queued and applies when delivery or the settle pass
   reaches it.
-- A terminating default sent to a stopped process, or to a Linux process none
-  of whose unblocking threads can take a signal now, terminates it at the next
-  step (Linux `complete_signal` fatal shortcut). A caught signal sent to a
-  stopped process stays pending until the continue.
+- A terminating default sent to a running Linux process none of whose
+  unblocking threads can take a signal now terminates it at the next step
+  (Linux `complete_signal` fatal shortcut).
 - TSTP/TTIN/TTOU sent to an orphaned group are discarded. SIGSTOP never is.
 - Init (pid 1) ignores SIG_DFL terminating and stopping signals, KILL included.
   Native kill of pid 1 stays EPERM.
@@ -454,7 +457,7 @@ profile string and version above keeps its current value.
 |---|---|---|
 | 1 | A stop applies at generation when deliverable. While stopped, `sigtimedwait`, `epoll_wait` and similar calls keep waiting instead of returning EINTR on continue. | landed (S2, S3) |
 | 2 | Kernel signals to threads in waits that cannot be interrupted are retried (owed) and not visible in `sigpending`. | landed (S3) |
-| 3 | Native personality: SIG_DFL/SIG_IGN only, no masks, SIGCHLD SIG_IGN refused, tgkill to native refused. A native child sends no SIGCHLD. | landed (S3) |
+| 3 | Native personality: SIG_DFL/SIG_IGN only, no masks, SIGCHLD SIG_IGN refused, tgkill to native refused. A native child sends no SIGCHLD. A native recipient records the first terminating default at generation instead of queueing it. | landed (S3) |
 | 4 | No ptrace stops, no `kill(-1)`, no core bit. `waitid` is RV32-only. | landed (S3) |
 | 5 | No devpts filesystem: no mount options, no `newinstance`, no `/dev/pts/ptmx`. `st_dev(/dev/pts/N) == st_dev(/dev)`. The gid policy is the opener's egid. | planned (S6) |
 | 6 | 8 PTYs, shared with raw pairs. | planned (S5, S6) |
@@ -525,7 +528,7 @@ S3 adds `python3 -B scripts/test_native_job_control.py --output <dir>`, which
 prints `NATIVE_JOB_CONTROL_RUNTIME_PASS native_calls=<n> linux_calls=<n>
 profiles=10 hosted=1 guest=0`. It drives the actual runtime (one translation
 unit, x86_64 hosted backends): Linux kill, tkill and group stop/continue and
-native kill for both personalities, the CONT/stop discards, KILL and fatal
+native kill for both personalities, the CONT/stop discards, KILL and held fatal
 defaults while stopped, a stopped thread never entered by `step()`, wait4 on
 selectors 0 and -pgid, SA_NOCLDSTOP and blocked SIGCHLD, native
 `rt_sigaction` error order and fork inheritance, init protection,

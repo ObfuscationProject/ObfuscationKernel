@@ -327,9 +327,11 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
     if (ignored && !(linux && named && jobctl_blocks(*named, signal))) return JobSignalOutcome::ignored;
     // 7. A default stop applies now when deliverable; an orphaned group drops
     // TSTP, TTIN and TTOU. Otherwise it stays pending for delivery or settle.
+    // A process already condemned by a fatal signal does not stop.
     const bool stop = default_action && kind == job::DefaultAction::stop;
     if (stop)
     {
+        if (state->group_kill || state->deferred_fatal) return JobSignalOutcome::ignored;
         if (signal != numbering.stop && scheduler.process_group_orphaned(recipient.process_group_id()))
             return JobSignalOutcome::ignored;
         bool now = !linux;
@@ -345,15 +347,17 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
         return jobctl_enqueue(kernel, *state, recipient, request.directed ? named : nullptr, request.info);
     }
     // 8. Native processes never queue: a terminating default is decided now
-    // and the first fatal signal wins (KILL above always wins).
+    // and the first fatal signal wins (KILL above always wins). A stopped
+    // native process applies it only after SIGCONT (private_process_signal_fatal).
     if (!linux)
     {
         if (!state->deferred_fatal) state->deferred_fatal = static_cast<u8>(signal);
         return JobSignalOutcome::accepted;
     }
     // 9. Linux: queue for a thread that can take it. A stopped process takes
-    // every signal after SIGCONT; a terminating default no thread can take now
-    // (or sent to a stopped process) is the complete_signal fatal shortcut.
+    // every signal after SIGCONT, so it stays pending (Linux wants_signal).
+    // A terminating default that no thread of a running process can take now
+    // is the complete_signal fatal shortcut.
     bool unblocked = false, qualified = false;
     for (auto &thread : recipient.threads())
     {
@@ -363,14 +367,15 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
         qualified |= thread.state == sched::ProcessState::runnable || thread.state == sched::ProcessState::running ||
                      private_signal_admit_blocked(kernel, recipient, thread);
     }
-    const bool stopped = recipient.job_control().stopped;
-    if (!ignored && unblocked && default_action && kind == job::DefaultAction::terminate && (!qualified || stopped))
+    if (!ignored && unblocked && !qualified && !recipient.job_control().stopped)
     {
-        if (!state->deferred_fatal) state->deferred_fatal = static_cast<u8>(signal);
-        return JobSignalOutcome::accepted;
-    }
-    if (!ignored && unblocked && !qualified && !stopped)
+        if (default_action && kind == job::DefaultAction::terminate)
+        {
+            if (!state->deferred_fatal) state->deferred_fatal = static_cast<u8>(signal);
+            return JobSignalOutcome::accepted;
+        }
         return request.kernel ? JobSignalOutcome::retry : JobSignalOutcome::refused;
+    }
     return jobctl_enqueue(kernel, *state, recipient, request.directed ? named : nullptr, request.info);
 }
 
