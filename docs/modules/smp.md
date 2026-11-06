@@ -1,9 +1,11 @@
 # SMP
 
 `ok::smp::CpuTopology` tracks boot, starting, online, halted, and offline CPUs.
-The scheduler records per-CPU current process state and can schedule a process on
-a specific CPU. This is still a cooperative model, but it gives architecture
-bring-up and scheduler code a concrete SMP contract.
+The kernel starts with the boot CPU online; secondary bring-up publishes the
+CPUs it discovered and the ones that came online (`Kernel::publish_cpu_topology`).
+x86_64, aarch64 and rv64 start secondaries and run native threads on them; the
+other seven profiles report UP. `docs/qualification/SMP_BRINGUP.md` records the
+results and limits.
 
 `TopologyMode` describes the CPU topology policy:
 
@@ -116,3 +118,74 @@ again for runners without that path. Only CPU 0 has the unowned diagnostic
 entry stack; a secondary enters user code only through `enter_owned`.
 `remap()` and `destroy_space()` call `quiesce_root` before tables change, and
 code cache maintenance uses `ic ialluis`.
+
+## Bring-up
+
+`ok::smp::start_secondary_cpus` (`src/smp/bringup.cpp`) runs once on the boot
+CPU, after the debug suite or right after kernel boot in release mode. It
+discovers the CPUs through `ok/arch/smp.hpp` (each SMP profile's
+`src/arch/<arch>/smp.cpp`; `src/arch/smp_stub.cpp` elsewhere). With more than
+one, it initializes the execution backend and clock early, gives every enabled
+secondary 256 KiB of frame-allocator stack and starts it. A secondary counts
+online only once it ran `ok_smp_secondary_main` and published the hardware id
+it read from its own registers; bring-up then sends each one an IPI and waits
+for it. It prints, before `OK_TEST_PASS`:
+
+```
+OK_SMP scope=hardware cpus=<discovered> online=<online> ap_start=<method> ipi=<pass|fail|unsupported> [reason=<token>]
+```
+
+`ok/smp/bringup.hpp` keeps the per-CPU `CpuRecord`s header-inline (state,
+started and reported ids, stack bounds, IPI reasons, counters) with
+`send_ipi`, `receive_ipi`, `local_tick` and the user-window protocol:
+`begin_user(root)` and `end_user()` bracket the time a CPU may run user code
+under a translation root, and `quiesce_root(root)` sends every other CPU in
+such a window an IPI and waits until the window closed. Backends call it
+before a translation changes or its tables are freed.
+
+Device interrupts, their top halves, `ok_interrupt_tick()` and the timer
+latency histogram stay on CPU 0. `interrupt::wait_for_interrupt()` returns
+false on any other CPU, so a driver that waits for its device inside a syscall
+there polls the completion instead.
+
+## x86_64 secondary CPUs
+
+Discovery reads the ACPI MADT through the identity map (fw_cfg's CPU count
+only bounds it) and marks the boot CPU by its own APIC id. A 16-bit trampoline
+copied to 0x8000 takes each AP to long mode on the boot PML4 (INIT, 10 ms,
+SIPI, a second SIPI only if it has not arrived). Every CPU has a per-CPU block
+reached through `GS_BASE` with its own GDT, TSS, #DF stack and default rsp0
+stack; user GS goes through `IA32_KERNEL_GS_BASE` and `swapgs` on every CPL3
+transition. The xAPIC page is mapped uncached in the boot tables. The boot CPU
+keeps the 8259 and PIT (LINT0 ExtINT, LINT1 NMI); IPIs use vector 0xF0 and each
+AP's local timer is the LAPIC timer at 0xEF, calibrated once against the TSC.
+
+## RISC-V harts
+
+`docs/arch/rv64.md` describes the M-mode hart start: under `-bios none` every
+hart enters `_start`; harts other than 0 park without a stack and are released
+through their CLINT MSIP (`ap_start=clint-msip`), which also carries IPIs. tp
+names the per-CPU block. rv32 keeps its secondary harts parked.
+
+## Native threads on several CPUs
+
+The kernel lock (`ok/smp/kernel_lock.hpp`, rank `big_kernel`) serializes all
+kernel work; each CPU's loop releases it only while it runs user code or
+idles. `src/user/runtime/smp.cpp` installs the shared capture's entry: it
+records the CPU's entry, opens the user window, releases the lock, runs the
+thread on a copy of its frame and takes the lock again; the capture then looks
+the process and thread up again by id. A CPU that retires a thread running
+elsewhere first takes that CPU's entry over (`evict_thread`). Secondaries
+contend for the lock only once the runtime admitted them, and each runs
+`ok_smp_secondary_step` from `ok_smp_secondary_main`.
+
+With one CPU online `step()` keeps the `(pid, tid)` round robin. With
+secondaries online it places every runnable thread that is off-CPU on the run
+queue of its CPU (`enqueue_thread`), takes the next entry from this CPU's queue
+or steals one (`dequeue_thread`), dispatches it with `mark_on_cpu` and sends an
+idle CPU it handed work a reschedule IPI. The entry stack pool keeps one active
+lease per CPU; the scheduler's no-argument current thread and activation act
+for the calling CPU. With more than one CPU online the interrupt report ends
+with `OK_SMP_CPUS scope=hardware online=N cpuK=<user entries>:<local
+ticks>:<IPIs received>:<IPIs sent>:<shootdowns waited for>`.
+

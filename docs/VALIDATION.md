@@ -2,8 +2,8 @@
 
 Validated locally on 2026-09-19 with GCC 14.2 cross compilers and QEMU system
 emulators. `scope=hardware` identifies actual guest CPU execution and device
-transactions under QEMU. It does not certify physical machines, hardware SMP
-or full POSIX conformance. Hosted models are listed separately.
+transactions under QEMU. It does not certify physical machines, SMP on physical
+CPUs or full POSIX conformance. Hosted models are listed separately.
 
 ## Current acceptance
 
@@ -59,8 +59,10 @@ applications without claiming modeled CPU slots are executing hardware cores.
 - Mount points and their ancestors cannot be renamed. Retained directories that
   are removed/replaced/covered are unreachable by pathname; relative operations
   and getcwd return ENOENT. Reconstructed paths have a 95-byte limit.
-- Native execution and storage currently use the boot CPU; physical-board DMA,
-  IOMMU, noncoherent cache maintenance and hardware SMP are unvalidated.
+- x86_64, aarch64 and rv64 run native threads on two to four QEMU vCPUs under
+  one kernel lock (`docs/qualification/SMP_BRINGUP.md`); the other profiles
+  run on the boot CPU. Physical-board DMA, IOMMU, noncoherent cache
+  maintenance and SMP on physical CPUs are unvalidated.
 - The retained MIPS CPUs lack hardware NX. LoongArch's strict branch-to-NX probe
   hit a recursive emulator fault on the QEMU 8.2.2 used for that probe; the entry
   guard passes and NX bits remain set. SysToolchain now pins QEMU 10.2.0, and the

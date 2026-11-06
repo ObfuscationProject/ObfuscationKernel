@@ -290,6 +290,30 @@ run queues in `BasicScheduler`; IPIs; TLB shootdown; lock ranks with debug
 checking; per-CPU storage. Other profiles report UP honestly. Exit: 2–4 vCPU
 concurrent filesystem/socket/fork stress on three profiles. Depends on WT1.1, WT1.2.
 
+Status on `feat/smp-bringup` (paired OS worktree `feat/smp-bringup`; results
+and limits in [SMP_BRINGUP](qualification/SMP_BRINGUP.md)):
+- x86_64 starts APs with INIT-SIPI-SIPI (ACPI MADT), aarch64 with PSCI CPU_ON
+  through the DT conduit (hvc or smc), rv64 by releasing parked harts through
+  the CLINT MSIP. The rv64 kernel runs in machine mode with `-bios none`, so no
+  SBI firmware exists: the plan's SBI HSM is an HSM-shaped start inside the
+  kernel (`ap_start=clint-msip`). A CPU counts online only after it ran kernel
+  code and reported its own hardware id; `OK_SMP scope=hardware` reports the
+  result. The seven other profiles report UP; rv32, mips and mips64 park the
+  extra CPUs their QEMU machines start.
+- IPIs (xAPIC, GICv2 SGI, CLINT MSIP), per-CPU local timers and per-CPU
+  execution state (GS_BASE with swapgs, TPIDR_EL1, tp); TLB shootdown waits for
+  every CPU whose user window uses the changed translation root.
+- Ranked spin locks with debug order checks; one big kernel lock serializes
+  kernel work while user code runs on every online CPU; per-CPU run queues in
+  `BasicScheduler` with placement and stealing; per-CPU entry stack leases;
+  a CPU retiring a thread running elsewhere takes over its entry.
+- Exit gate met under QEMU 10.2.0 TCG: `scripts/test_smp_stress.py` (OS) passes
+  three runs each with 2 and 4 vCPUs on x86_64, aarch64 and rv64, with user code
+  on every CPU.
+Carried forward: kernel work stays serialized by one lock; device interrupts
+stay on CPU 0; futex wake-op/requeue user-word updates are not atomic against
+other CPUs; no ASIDs, no hotplug.
+
 ### WT2.2 `feat/tty-jobctl` (L)
 
 termios, N_TTY line discipline, controlling terminal and foreground process
