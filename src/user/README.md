@@ -22,7 +22,8 @@ header the units share; it declares exactly what crosses a unit boundary.
 Self-contained helpers that hosted tests also include stay as headers beside the
 units: `native_syscall_origin.hpp`, `native_shared_capture.hpp`,
 `native_syscall_restart_publication.hpp`, `native_poll_mask.hpp`,
-`linux_udp_*.hpp`, `tcp_*.hpp` and `signals/*.hpp`.
+`futex_word.hpp` (atomic futex user-word operations through
+`execution::user_word`), `linux_udp_*.hpp`, `tcp_*.hpp` and `signals/*.hpp`.
 
 Architecture signal frames, delivery, sigreturn decoding and the private
 readiness state live in one `include/ok/arch/<arch>/signal.hpp` per

@@ -8,7 +8,7 @@ static usize checks;
 #define CHECK(x) do { ++checks; if (!(x)) { std::fprintf(stderr,"%d: %s\n",__LINE__,#x); std::abort(); } } while (false)
 template <lu::Profile P> struct Memory
 {
-    static constexpr bool serialized_native_execution=true;
+    static constexpr bool indivisible_owner_update=true;
     static constexpr usize word=RobustListCodec<P>::word_bytes;
     static constexpr bool be=RobustListCodec<P>::big_endian;
     std::array<std::byte,8192> bytes{};
