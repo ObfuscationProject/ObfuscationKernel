@@ -12,7 +12,9 @@ namespace ok::arch::execution
 // doubles when full and is released once its last space retires, so no slot
 // count is fixed. Generations come from one sequence that outlives the table:
 // a stale handle never matches a later space, even one whose root reuses the
-// same frame. Serialized boot-CPU use, like the backends.
+// same frame. Mutation is serialized by the caller (the kernel lock); a
+// backend whose entries look spaces up without that lock also holds its own
+// space lock around grow/release and those lookups.
 template <typename Space> class SpaceTable
 {
   public:

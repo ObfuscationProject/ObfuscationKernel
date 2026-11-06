@@ -11,7 +11,12 @@
 // which covers CPUs that ran the space earlier and left; quiesce_root still
 // covers CPUs inside a user window. Hardware never uses entries of a tag that
 // is not current, and a tag becomes current for another space only after it
-// was invalidated, so a retired space's leftover entries are unreachable.
+// was invalidated, so a retired space's leftover entries are unreachable. That
+// covers walk caches too: every exit returns to the kernel's tag, so no CPU
+// walks a retired space's freed tables, and each invalidation used here (x86
+// CR3 load without the keep bit, Arm TLBI ASIDE1, RISC-V SFENCE.VMA with an
+// ASID) also drops the paging-structure entries cached under that tag, which
+// Linux relies on as well when it frees page tables.
 namespace ok::arch::detail
 {
 
@@ -117,13 +122,15 @@ namespace ok::arch::execution
 
 // The user TLB mode of the CPUs in a mask, for the OK_SMP_TLB line: the
 // narrowest tag width among them (0: untagged), whether every one of them
-// tags with x86 PCIDs, and their tag rollovers so far.
+// tags with x86 PCIDs, and their tag rollovers and per-tag invalidations so
+// far (the probes check that a CPU acted on another CPU's remap).
 struct TlbTagReport
 {
     bool supported{};
     u32 asid_bits{};
     bool pcid{};
     u64 rollovers{};
+    u64 invalidations{};
 };
 // x86_64, aarch64 and rv64 define it; profiles without secondary CPUs report
 // unsupported (src/arch/smp_stub.cpp).
@@ -141,6 +148,7 @@ template <typename CacheOf>
             const auto &cache = cache_of(cpu);
             report.asid_bits = cache.bits() < report.asid_bits ? cache.bits() : report.asid_bits;
             report.rollovers += cache.rollovers();
+            report.invalidations += cache.invalidations();
         }
     report.pcid = pcid && report.asid_bits != 0;
     return report;

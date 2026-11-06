@@ -56,8 +56,9 @@ constexpr uptr ram_end = 0x80000000;
 constexpr u32 timer_irq = arm::GicV2::timer_ppi;
 // 39-bit VA, 4 KiB granule, inner-shareable WBWA tables, 40-bit physical
 // addresses, and TTBR1 disabled. QEMU virt RAM and MMIO stay identity mapped.
-// TTBR0 holds the ASID (A1 clear); TCR.AS selects 16-bit ASIDs where the CPU
-// has them.
+// TTBR0 holds the ASID (A1 clear). Each CPU sets TCR.AS (16-bit ASIDs) from
+// its own ID_AA64MMFR0_EL1, so a CPU never sets a RES0 bit or reports a width
+// it does not use.
 constexpr u64 tcr = 25 | (u64{1} << 8) | (u64{1} << 10) | (u64{3} << 12) | (u64{1} << 23) | (u64{2} << 32);
 constexpr u64 tcr_asid16 = u64{1} << 36;
 constexpr unsigned ttbr_asid_shift = 48;
@@ -95,7 +96,6 @@ Table kernel_root{};
 Table kernel_directory{};
 bool initialized = false;
 u64 timer_period = 0;
-u64 translation_control = tcr;
 alignas(16) u8 interrupt_stack[64 * 1024]{};
 
 CpuBlock &this_cpu()
@@ -131,12 +131,17 @@ void select_root(uptr root)
 {
     asm volatile("dsb ishst; msr ttbr0_el1, %0; isb; tlbi vmalle1is; dsb ish; isb" : : "r"(root) : "memory");
 }
-// ID_AA64MMFR0_EL1.ASIDBits: 2 means 16-bit ASIDs, 0 the 8-bit minimum.
+// This CPU's ID_AA64MMFR0_EL1.ASIDBits: 2 means 16-bit ASIDs, 0 the 8-bit
+// minimum.
 u32 asid_bits()
 {
     u64 features;
     asm volatile("mrs %0, id_aa64mmfr0_el1" : "=r"(features));
     return ((features >> 4) & 15) == 2 ? 16 : 8;
+}
+u64 translation_control(u32 bits)
+{
+    return tcr | (bits == 16 ? tcr_asid16 : 0);
 }
 // This CPU's user translation for one entry. The ASID's stale entries go
 // first, while TTBR0 still selects the kernel's ASID 0, so no walk can refill
@@ -296,10 +301,9 @@ Status initialize()
     boot_cpu.stack_top = reinterpret_cast<uptr>(interrupt_stack + sizeof(interrupt_stack));
     const u64 vectors = reinterpret_cast<uptr>(ok_arm_execution_vectors);
     const auto bits = asid_bits();
-    translation_control = tcr | (bits == 16 ? tcr_asid16 : 0);
     asm volatile("msr vbar_el1, %0; msr mair_el1, %1; msr tcr_el1, %2; msr cpacr_el1, %3; isb"
                  :
-                 : "r"(vectors), "r"(mair), "r"(translation_control), "r"(fp_control)
+                 : "r"(vectors), "r"(mair), "r"(translation_control(bits)), "r"(fp_control)
                  : "memory");
     // The one broadcast invalidation: from here on every CPU starts clean and
     // user entries invalidate only their own ASIDs.
@@ -633,7 +637,8 @@ extern "C" [[noreturn]] void ok_arm_execution_kernel_fault(u64 vector)
 namespace ok::arch::aarch64
 {
 // A secondary CPU shares the boot CPU's translation and vectors; its block
-// has no unowned entry stack.
+// has no unowned entry stack. It starts with 8-bit ASIDs (only the kernel's
+// ASID 0 is used before its first user entry) and widens them itself.
 Status prepare_secondary(ok::smp::CpuId cpu, SecondaryStart &start)
 {
     using namespace execution;
@@ -646,7 +651,7 @@ Status prepare_secondary(ok::smp::CpuId cpu, SecondaryStart &start)
     block.cpu = cpu;
     start.cpu_block = reinterpret_cast<uptr>(&block);
     start.mair = mair;
-    start.tcr = translation_control;
+    start.tcr = tcr;
     start.vbar = reinterpret_cast<uptr>(ok_arm_execution_vectors);
     start.cpacr = fp_control;
     start.ttbr0 = reinterpret_cast<uptr>(&kernel_root);
@@ -656,6 +661,15 @@ Status prepare_secondary(ok::smp::CpuId cpu, SecondaryStart &start)
 
 void prepare_local_tlb_tags()
 {
-    execution::this_cpu().tlb_tags.configure(execution::asid_bits());
+    using namespace execution;
+    const auto bits = asid_bits();
+    // TLB entries may hold the ASID size they were cached under: drop this
+    // CPU's (kernel ASID 0 only) after the change.
+    if (bits == 16)
+        asm volatile("msr tcr_el1, %0; isb; tlbi vmalle1; dsb nsh; isb"
+                     :
+                     : "r"(translation_control(bits))
+                     : "memory");
+    this_cpu().tlb_tags.configure(bits);
 }
 } // namespace ok::arch::aarch64

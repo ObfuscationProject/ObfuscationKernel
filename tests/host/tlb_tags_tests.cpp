@@ -89,7 +89,7 @@ void check_selection()
 }
 
 // The OK_SMP_TLB summary: the narrowest width among the named CPUs, PCIDs
-// only when every one of them is tagged, rollovers summed.
+// only when every one of them is tagged, rollovers and invalidations summed.
 void check_report()
 {
     std::array<TlbTagCache<2>, 4> caches;
@@ -106,11 +106,13 @@ void check_report()
     auto cache_of = [&](u32 cpu) -> const TlbTagCache<2> & { return caches[cpu]; };
     using ok::arch::execution::summarize_tlb_tags;
     auto report = summarize_tlb_tags(0b0011, caches.size(), false, cache_of);
-    assert(report.supported && report.asid_bits == 8 && !report.pcid && report.rollovers == 1);
+    // Three new spaces on two tags: each one invalidated the tag it took.
+    assert(report.supported && report.asid_bits == 8 && !report.pcid && report.rollovers == 1 &&
+           report.invalidations == 3);
     report = summarize_tlb_tags(0b0101, caches.size(), false, cache_of);
     assert(report.asid_bits == 0 && !report.pcid);
     report = summarize_tlb_tags(0b1000, caches.size(), true, cache_of);
-    assert(report.asid_bits == 12 && report.pcid && report.rollovers == 0);
+    assert(report.asid_bits == 12 && report.pcid && report.rollovers == 0 && report.invalidations == 0);
     report = summarize_tlb_tags(0b1100, caches.size(), true, cache_of);
     assert(report.asid_bits == 0 && !report.pcid);
     // CPUs beyond the backend's count are never read.
