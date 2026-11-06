@@ -352,7 +352,9 @@ Native `rt_sigaction(sig, act, oact, 8)` checks, in order:
 
 `struct ok_sigaction {u64 handler, flags, mask;}` is 24 bytes and lives in
 `ok/uapi/job_control.h` with `OK_NATIVE_SIGNAL_ACTION_VERSION`. SIG_IGN is
-inherited across fork and kept across exec. `rt_sigprocmask` stays a no-op and
+inherited across fork and kept across exec, except that a SIGCHLD SIG_IGN
+inherited from a Linux image reverts to SIG_DFL on exec into the native
+personality (native has no autoreap). `rt_sigprocmask` stays a no-op and
 native processes have no masks, so a native program that "blocks" SIGTTOU is
 stopped; it must ignore the signal instead. Native recipients accept every
 signal: terminating defaults terminate, stop defaults stop. `tgkill` of a
@@ -402,7 +404,9 @@ is landed (S3); the terminal events that use it arrive in S4, S5 and S8.
   has no effect. SIGCONT and the stop signals are the exception: their
   discards and the continue happen at generation, so they are queued and the
   call returns 0. The kernel's own signals in that case are retried (owed)
-  until such a wait completes and are not shown by `rt_sigpending`.
+  until such a wait completes and are not shown by `rt_sigpending`; owed
+  signals survive an exec in the same personality and are dropped by an exec
+  into the other one.
 - `kill(-1)` returns EOPNOTSUPP.
 
 ## 10. Readiness — planned (S4 console; S5 native PTY; S7 Linux poll; S8 console POLLERR)
@@ -466,8 +470,8 @@ profile string and version above keeps its current value.
 | # | Deviation | Status |
 |---|---|---|
 | 1 | A stop applies at generation when deliverable. While stopped, `sigtimedwait`, `epoll_wait` and similar calls keep waiting instead of returning EINTR on continue. | landed (S2, S3) |
-| 2 | Kernel signals to threads in waits that cannot be interrupted are retried (owed) and not visible in `sigpending`. A user's caught signal other than SIGCONT and the stops gets EOPNOTSUPP in that case. | landed (S3) |
-| 3 | Native personality: SIG_DFL/SIG_IGN only, no masks, SIGCHLD SIG_IGN refused, tgkill to native refused. A native child sends no SIGCHLD. A native recipient records the first terminating default at generation instead of queueing it. | landed (S3) |
+| 2 | Kernel signals to threads in waits that cannot be interrupted are retried (owed) and not visible in `sigpending`; an exec into the other personality drops them. A user's caught signal other than SIGCONT and the stops gets EOPNOTSUPP in that case. | landed (S3) |
+| 3 | Native personality: SIG_DFL/SIG_IGN only, no masks, SIGCHLD SIG_IGN refused (an inherited one reverts at exec), tgkill to native refused. A native child sends no SIGCHLD. A native recipient records the first terminating default at generation instead of queueing it. | landed (S3) |
 | 4 | No ptrace stops, no `kill(-1)`, no core bit. `waitid` is RV32-only. | landed (S3) |
 | 5 | No devpts filesystem: no mount options, no `newinstance`, no `/dev/pts/ptmx`. `st_dev(/dev/pts/N) == st_dev(/dev)`. The gid policy is the opener's egid. | planned (S6) |
 | 6 | 8 PTYs, shared with raw pairs. | planned (S5, S6) |

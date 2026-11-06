@@ -725,8 +725,9 @@ bool private_jobctl_admit_blocked(Kernel &kernel, const sched::ProcessControlBlo
 // Kernel-originated signals (Linux SEND_SIG_PRIV): SI_KERNEL, no permission
 // check, `signal` in native numbering and translated per recipient. A caught
 // signal that only threads in uninterruptible waits could take is owed and
-// retried by private_jobctl_service at every step until a wait completes; an
-// exec (epoch change), exit, SIG_IGN or the opposite CONT/stop drops it.
+// retried by private_jobctl_service at every step until a wait completes.
+// Exit, pid-slot reuse (epoch change), an exec into another personality,
+// SIG_IGN or the opposite CONT/stop drops it; a same-personality exec keeps it.
 enum class KernelSignalSend : u8 { sent, ignored, departed, owed };
 KernelSignalSend send_kernel_process_signal(Kernel &kernel, sched::ProcessId pid, u32 signal);
 struct KernelGroupSignal { u8 matched{}, sent{}, ignored{}, departed{}, owed{}; };
@@ -741,7 +742,8 @@ bool private_signal_ignored_or_blocked(Kernel &kernel, const sched::ProcessContr
 bool private_group_orphaned(Kernel &kernel, sched::ProcessId group);
 // Native rt_sigaction: SIG_DFL and SIG_IGN only (ok/uapi/job_control.h).
 i64 native_signal_action(Kernel &kernel, sched::ProcessControlBlock &process, const std::array<uptr, 6> &arguments);
-// Exec across personalities keeps SIG_IGN under the new numbering (MIPS).
+// Exec: SIG_IGN kept under the new numbering (MIPS), except SIGCHLD in a
+// native image; owed kernel signals dropped on a personality change.
 void private_jobctl_exec(Kernel &kernel, sched::ProcessControlBlock &process, Personality previous);
 // The exit commit: init adoption, then (S4) the terminal outbox, then the
 // orphaned-group pass sending SIGHUP and SIGCONT (Linux kill_orphaned_pgrp).

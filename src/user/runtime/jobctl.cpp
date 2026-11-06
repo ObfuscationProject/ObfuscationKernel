@@ -518,17 +518,26 @@ i64 native_signal_action(Kernel &kernel, sched::ProcessControlBlock &process, co
 
 void private_jobctl_exec(Kernel &kernel, sched::ProcessControlBlock &process, Personality previous)
 {
-    const auto &from = private_job_numbering(previous), &to = jobctl_numbering(process);
-    if (&from == &to) return;
     auto *state = private_signal_find(process.pid());
     if (!state) return;
-    // Exec already reset every action other than SIG_IGN.
-    sched::SignalActionTable next{};
-    for (u32 signal = 1; signal <= from.max; ++signal)
-        if (state->table.find(signal)->handler == sched::SignalAction::ignored_handler)
-            if (const auto translated = job::translate(from, to, signal))
-                next.find(translated)->handler = sched::SignalAction::ignored_handler;
-    state->table = next;
+    const auto personality = process.resources().personality;
+    // Owed signals survive an exec in the same personality, like Linux shared
+    // pending signals; a personality change drops them with their numbering.
+    if (personality != previous) private_jobctl_retire(process.pid());
+    const auto &from = private_job_numbering(previous), &to = jobctl_numbering(process);
+    if (&from != &to)
+    {
+        // Exec already reset every action other than SIG_IGN.
+        sched::SignalActionTable next{};
+        for (u32 signal = 1; signal <= from.max; ++signal)
+            if (state->table.find(signal)->handler == sched::SignalAction::ignored_handler)
+                if (const auto translated = job::translate(from, to, signal))
+                    next.find(translated)->handler = sched::SignalAction::ignored_handler;
+        state->table = next;
+    }
+    // The native personality has no SIGCHLD SIG_IGN (no autoreap, section 9.5):
+    // an inherited one reverts to SIG_DFL.
+    if (personality != Personality::linux) *state->table.find(job::native.child) = {};
     static_cast<void>(kernel);
 }
 

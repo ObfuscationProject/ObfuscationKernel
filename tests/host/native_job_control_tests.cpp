@@ -503,8 +503,9 @@ void orphan_pass(Kernel &kernel, bool caught)
     CHECK(kernel.scheduler().reap_process(leader));
 }
 
-// Kernel senders: a caught signal no thread can take is owed and drained in
-// order once a wait completes; SIG_IGN, CONT and an epoch change drop it.
+// Kernel senders: a caught signal no thread can take is owed and drained once
+// a wait completes; SIG_IGN, CONT, pid-slot reuse and an exec into another
+// personality drop it, a same-personality exec keeps it.
 void owed(Kernel &kernel)
 {
     const auto pid = create(kernel);
@@ -533,13 +534,34 @@ void owed(Kernel &kernel)
     expect(linux_call(kernel, pid, lu::Operation::rt_sigaction, {1, act_at, 0, 8}) == 0);
     handle(kernel, pid, 1);
     expect(!native::private_jobctl_service(kernel) && !shared(pid).pending_mask().contains(1));
-    // A new signal epoch (exec) drops it as well.
+    // A new signal epoch (the pid slot reused) drops it as well.
     ticket = park(kernel, pid);
     expect(native::send_kernel_process_signal(kernel, pid, OK_SIGHUP) == native::KernelSignalSend::owed);
     ++native::private_signal_find(pid)->epoch;
     static_cast<void>(native::private_jobctl_service(kernel));
     --native::private_signal_find(pid)->epoch;
     unpark(kernel, pid, ticket);
+    expect(!native::private_jobctl_service(kernel) && !shared(pid).pending_mask().contains(1));
+    // The exec hook: a same-personality exec keeps it (Linux shared pending)...
+    auto &process = *kernel.scheduler().find(pid);
+    ticket = park(kernel, pid);
+    expect(native::send_kernel_process_signal(kernel, pid, OK_SIGHUP) == native::KernelSignalSend::owed);
+    native::private_jobctl_exec(kernel, process, sched::UserPersonality::linux);
+    unpark(kernel, pid, ticket);
+    expect(!native::private_jobctl_service(kernel) && shared(pid).pending_mask().contains(1));
+    drain(pid);
+    // ...and an exec into the native personality drops it, and resets an
+    // inherited SIGCHLD SIG_IGN that the native contract refuses.
+    ticket = park(kernel, pid);
+    expect(native::send_kernel_process_signal(kernel, pid, OK_SIGHUP) == native::KernelSignalSend::owed);
+    handle(kernel, pid, sigchld, 1); handle(kernel, pid, 2, 1);
+    process.resources().personality = sched::UserPersonality::native;
+    native::private_jobctl_exec(kernel, process, sched::UserPersonality::linux);
+    unpark(kernel, pid, ticket);
+    expect(native_call(kernel, pid, N::rt_sigaction, {OK_SIGCHLD, 0, old_at, 8}) == 0 && get64(old_at) == OK_SIG_DFL);
+    expect(native_call(kernel, pid, N::rt_sigaction, {OK_SIGINT, 0, old_at, 8}) == 0 && get64(old_at) == OK_SIG_IGN);
+    process.resources().personality = sched::UserPersonality::linux;
+    handle(kernel, pid, 2, 0);
     expect(!native::private_jobctl_service(kernel) && !shared(pid).pending_mask().contains(1));
     // A user kill of the same signal is refused instead (EOPNOTSUPP).
     ticket = park(kernel, pid);
