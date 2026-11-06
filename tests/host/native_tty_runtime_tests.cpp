@@ -1,7 +1,9 @@
-// The console terminal in the actual runtime: N_TTY ingress, echo and OPOST
+// Terminals in the actual runtime. The console: N_TTY ingress, echo and OPOST
 // output observed through the platform console callback, ISIG and SIGWINCH as
-// kernel signals, flushes, large writev and prepared reads. Hosted trap and
-// mapping backends; no guest execution.
+// kernel signals, flushes, large writev and prepared reads. PTYs: slave
+// acquisition, ISIG and SIGWINCH from either end, canonical echo into the
+// master, raw-pair drain, TIOCGPTN/TIOCSPTLCK and the ptmx hangup. Hosted trap
+// and mapping backends; no guest execution.
 #define OK_NATIVE_MODEL_MEMORY_BYTES 32768
 #define OK_NATIVE_SIGNAL_RUNTIME 1
 #define OK_SYSCALL_ORIGIN_MODEL 1
@@ -302,6 +304,214 @@ bool efault_keeps_input(Kernel &kernel, const Session &s)
     expect(*user(read_at) == std::byte{'q'} && *user(read_at + 8) == std::byte{'r'});
     return true;
 }
+// PTY descriptors in the actual runtime. Calls run with a pending syscall, as
+// PTY I/O continuations require.
+i64 pty_call(Kernel &kernel, u64 pid, N number, std::array<uptr, 6> arguments)
+{
+    activate(kernel, pid, pid);
+    auto *thread = kernel.scheduler().find_thread(pid, pid);
+    thread->syscall_pending = true;
+    bool complete = true;
+    const auto result = native::dispatch(kernel, pid, {static_cast<uptr>(number), arguments}, complete);
+    expect(complete);
+    thread->syscall_pending = false;
+    return result;
+}
+i64 fd_ioctl(Kernel &kernel, u64 pid, i32 fd, u64 request, uptr argument = 0)
+{
+    return pty_call(kernel, pid, N::ioctl, {static_cast<uptr>(fd), static_cast<uptr>(request), argument});
+}
+std::array<i32, 2> raw_pair(Kernel &kernel, u64 pid)
+{
+    expect(pty_call(kernel, pid, N::pty_pair, {argument_at, 0}) == 0);
+    std::array<i32, 2> fds{};
+    std::memcpy(fds.data(), user(argument_at), sizeof(fds));
+    return fds;
+}
+i64 pty_write(Kernel &kernel, u64 pid, i32 fd, std::string_view text)
+{
+    std::memcpy(user(text_at), text.data(), text.size());
+    return pty_call(kernel, pid, N::write, {static_cast<uptr>(fd), text_at, text.size()});
+}
+std::string pty_read(Kernel &kernel, u64 pid, i32 fd, usize count = 64)
+{
+    const auto result = pty_call(kernel, pid, N::read, {static_cast<uptr>(fd), read_at, count});
+    expect(result >= 0);
+    return {reinterpret_cast<const char *>(user(read_at)), static_cast<usize>(result > 0 ? result : 0)};
+}
+i16 pty_poll(Kernel &kernel, u64 pid, i32 fd, i16 events)
+{
+    ok_pollfd request{fd, events, 0};
+    std::memcpy(user(argument_at), &request, sizeof(request));
+    expect(pty_call(kernel, pid, N::poll, {argument_at, 1, 0}) >= 0);
+    std::memcpy(&request, user(argument_at), sizeof(request));
+    return request.revents;
+}
+// The S6 devfs open path in miniature: a fresh description, pinned, bound,
+// installed at the lowest free fd and unpinned.
+template <typename Bind> i32 bind_fd(Kernel &kernel, u64 pid, Bind bind)
+{
+    auto &scheduler = kernel.scheduler();
+    const auto made = scheduler.allocate_description({.readable = true, .writable = true, .flags = 2u}); CHECK(made);
+    CHECK(scheduler.retain_description(made.value()));
+    auto &resources = scheduler.find(pid)->resources();
+    i32 fd = 0;
+    while (resources.files.contains(fd)) ++fd;
+    const bool bound = static_cast<bool>(bind(made.value()));
+    if (bound) CHECK(scheduler.install_descriptor(resources, fd, made.value()));
+    CHECK(scheduler.release_description(made.value()));
+    CHECK(scheduler.terminal_audit());
+    return bound ? fd : -1;
+}
+i32 int_at(uptr address) { i32 value{}; std::memcpy(&value, user(address), 4); return value; }
+
+struct PtySession
+{
+    u64 shell{}, job{};
+};
+
+// A session leader acquires a raw pair's slave; ISIG and SIGWINCH reach its
+// foreground job; the master is never a controlling terminal.
+PtySession pty_session(Kernel &kernel, const Session &s, std::array<i32, 2> &fds)
+{
+    auto &scheduler = kernel.scheduler();
+    PtySession p{};
+    p.shell = fork(kernel, s.init);
+    scheduler.find(p.shell)->threads()[0].native_active = true;
+    expect(native_call(kernel, p.shell, N::setsid, {}) == static_cast<i64>(p.shell));
+    fds = raw_pair(kernel, p.shell);
+    expect(fd_ioctl(kernel, p.shell, fds[0], OK_TIOCSCTTY) == -25);
+    expect(fd_ioctl(kernel, p.shell, fds[1], OK_TIOCGSID, argument_at) == -25); // Not yet its ctty.
+    expect(fd_ioctl(kernel, p.shell, fds[1], OK_TIOCSCTTY) == 0);
+    expect(fd_ioctl(kernel, p.shell, fds[1], OK_TIOCSCTTY) == 0); // Already this leader's terminal.
+    expect(fd_ioctl(kernel, p.shell, fds[1], OK_TIOCGSID, argument_at) == 0 && int_at(argument_at) == static_cast<i32>(p.shell));
+    expect(fd_ioctl(kernel, p.shell, fds[0], OK_TIOCGPGRP, argument_at) == 0 && int_at(argument_at) == static_cast<i32>(p.shell));
+    // A session leader with a terminal cannot take the console or another PTY.
+    const auto other = raw_pair(kernel, p.shell);
+    expect(fd_ioctl(kernel, p.shell, other[1], OK_TIOCSCTTY) == -1);
+    expect(pty_call(kernel, p.shell, N::close, {static_cast<uptr>(other[0])}) == 0);
+    expect(pty_call(kernel, p.shell, N::close, {static_cast<uptr>(other[1])}) == 0);
+    p.job = fork(kernel, p.shell);
+    scheduler.find(p.job)->threads()[0].native_active = true;
+    expect(native_call(kernel, p.shell, N::setpgid, {p.job, p.job}) == 0);
+    scheduler.find(p.job)->resources().personality = sched::UserPersonality::linux;
+    for (const u32 signal : {u32{OK_SIGINT}, u32{OK_SIGWINCH}}) handle(kernel, p.job, signal);
+    std::memcpy(user(argument_at), &p.job, 4);
+    expect(fd_ioctl(kernel, p.shell, fds[1], OK_TIOCSPGRP, argument_at) == 0);
+    return p;
+}
+
+bool pty_terminal(Kernel &kernel, const Session &s, PtySession &p, std::array<i32, 2> &fds)
+{
+    p = pty_session(kernel, s, fds);
+    // Raw pairs start with raw termios; the master reads and sets its slave's.
+    mock::memory.fill(std::byte{});
+    expect(fd_ioctl(kernel, p.shell, fds[0], OK_TCGETS, argument_at) == 0);
+    tty::Termios termios{};
+    tty::ForeignResidue residue{};
+    expect(Wire::decode({reinterpret_cast<const u8 *>(user(argument_at)), 36}, termios, residue).ok());
+    expect(termios == tty::raw_pair_termios());
+    std::array<u8, 36> bytes{};
+    expect(Wire::encode(tty::linux_pty_termios(), {}, bytes).ok());
+    std::memcpy(user(argument_at), bytes.data(), bytes.size());
+    expect(fd_ioctl(kernel, p.shell, fds[0], OK_TCSETS, argument_at) == 0);
+    const auto subject = kernel.posix().terminal_descriptor(fds[1]); CHECK(subject);
+    auto *terminal = kernel.scheduler().terminal(subject.value().terminal);
+    expect(terminal->termios == tty::linux_pty_termios() && terminal->foreground == p.job);
+    // ISIG from master input goes to the foreground job at once.
+    expect(pty_write(kernel, p.shell, fds[0], "ab\x03") == 3);
+    i32 code{};
+    expect(take_signal(p.job, &code) == OK_SIGINT && code == 128 && !take_signal(p.shell) && !terminal->outbox_count);
+    // The flush discards the uncommitted echo of "ab" (Linux isig reset_buffer_flags).
+    expect(pty_read(kernel, p.shell, fds[0]) == "^C");
+    // SIGWINCH on a changed size, through either end.
+    std::array<u16, 4> window{30, 90, 0, 0};
+    std::memcpy(user(argument_at), window.data(), sizeof(window));
+    expect(fd_ioctl(kernel, p.shell, fds[0], OK_TIOCSWINSZ, argument_at) == 0);
+    expect(take_signal(p.job) == OK_SIGWINCH);
+    mock::memory.fill(std::byte{});
+    expect(fd_ioctl(kernel, p.job, fds[1], OK_TIOCGWINSZ, argument_at) == 0);
+    expect(std::memcmp(user(argument_at), window.data(), sizeof(window)) == 0);
+    // FIONREAD per side; TIOCGPTN is refused on a raw master and on a slave.
+    expect(pty_write(kernel, p.shell, fds[1], "out") == 3);
+    expect(fd_ioctl(kernel, p.shell, fds[0], OK_FIONREAD, argument_at) == 0 && int_at(argument_at) == 3);
+    expect(fd_ioctl(kernel, p.shell, fds[0], OK_TIOCGPTN, argument_at) == -25);
+    expect(fd_ioctl(kernel, p.shell, fds[1], OK_TIOCGPTN, argument_at) == -25);
+    expect(fd_ioctl(kernel, p.shell, fds[0], OK_TCFLSH, 2) == 0 && pty_poll(kernel, p.shell, fds[0], OK_POLLIN) == 0);
+    return true;
+}
+
+bool canonical_echo(Kernel &kernel, const PtySession &p, const std::array<i32, 2> &fds)
+{
+    expect(pty_write(kernel, p.shell, fds[0], "hel\x7flo\r") == 7);
+    expect(pty_read(kernel, p.shell, fds[0]) == "hel\b \blo\r\n");
+    expect(pty_read(kernel, p.shell, fds[1]) == "helo\n");
+    // A partial line does not satisfy the slave; OPOST expands slave output.
+    expect(pty_write(kernel, p.shell, fds[0], "wait") == 4 && pty_read(kernel, p.shell, fds[0]) == "wait");
+    expect(pty_poll(kernel, p.shell, fds[1], OK_POLLIN) == 0);
+    expect(pty_write(kernel, p.shell, fds[1], "a\nb") == 3 && pty_read(kernel, p.shell, fds[0]) == "a\r\nb");
+    expect(fd_ioctl(kernel, p.shell, fds[1], OK_TCFLSH, 0) == 0);
+    return true;
+}
+
+bool raw_drain(Kernel &kernel, const PtySession &p)
+{
+    // OK_SYS_PTY_PAIR keeps v1: the slave drains then reads EOF, writes EIO,
+    // polls HUP|ERR with IN while data remains and never OUT.
+    const auto fds = raw_pair(kernel, p.shell);
+    expect(pty_write(kernel, p.shell, fds[0], "abc") == 3);
+    expect(pty_call(kernel, p.shell, N::close, {static_cast<uptr>(fds[0])}) == 0);
+    expect(pty_poll(kernel, p.shell, fds[1], OK_POLLIN | OK_POLLOUT) == (OK_POLLIN | OK_POLLHUP | OK_POLLERR));
+    expect(pty_read(kernel, p.shell, fds[1]) == "abc" && pty_read(kernel, p.shell, fds[1]).empty());
+    expect(pty_write(kernel, p.shell, fds[1], "x") == -5);
+    expect(fd_ioctl(kernel, p.shell, fds[1], OK_TCGETS, argument_at) == 0); // Not hung up.
+    expect(pty_call(kernel, p.shell, N::close, {static_cast<uptr>(fds[1])}) == 0);
+    return true;
+}
+
+bool ptn_lock(Kernel &kernel, const PtySession &p, i32 &master, i32 &slave)
+{
+    auto &scheduler = kernel.scheduler();
+    sched::private_pty::Handle handle{};
+    master = bind_fd(kernel, p.shell, [&](u16 id) {
+        const auto bound = scheduler.bind_pty_multiplexer(id);
+        if (bound) handle = bound.value();
+        return bound.ok();
+    });
+    expect(master >= 0);
+    const sched::private_pty::Handle pts{handle.slot, handle.generation, sched::private_pty::Side::slave};
+    expect(fd_ioctl(kernel, p.shell, master, OK_TIOCGPTN, argument_at) == 0 && int_at(argument_at) == handle.slot);
+    expect(bind_fd(kernel, p.shell, [&](u16 id) { return scheduler.bind_pty_slave(id, pts).ok(); }) < 0); // Locked.
+    // A dormant slave: the master's reads wait and its writes fail.
+    expect(pty_write(kernel, p.shell, master, "x") == -5);
+    expect(pty_poll(kernel, p.shell, master, OK_POLLIN) == 0);
+    const i32 unlock = 0;
+    std::memcpy(user(argument_at), &unlock, 4);
+    expect(fd_ioctl(kernel, p.shell, master, OK_TIOCSPTLCK, argument_at) == 0);
+    slave = bind_fd(kernel, p.shell, [&](u16 id) { return scheduler.bind_pty_slave(id, pts).ok(); });
+    expect(slave >= 0);
+    expect(fd_ioctl(kernel, p.shell, slave, OK_TIOCSPTLCK, argument_at) == -25);
+    expect(fd_ioctl(kernel, p.shell, master, OK_TIOCSPTLCK, 0) == -14); // Copy-in after the checks.
+    // ptmx pairs use the pts termios: cooked with echo.
+    expect(pty_write(kernel, p.shell, master, "pt\r") == 3 && pty_read(kernel, p.shell, master) == "pt\r\n");
+    expect(pty_read(kernel, p.shell, slave) == "pt\n");
+    return true;
+}
+
+bool ptmx_hangup_discard(Kernel &kernel, const PtySession &p, i32 master, i32 slave)
+{
+    expect(pty_write(kernel, p.shell, master, "lost\n") == 5);
+    expect(pty_call(kernel, p.shell, N::close, {static_cast<uptr>(master)}) == 0);
+    expect(pty_read(kernel, p.shell, slave).empty());
+    expect(pty_write(kernel, p.shell, slave, "x") == -5);
+    expect(fd_ioctl(kernel, p.shell, slave, OK_TCGETS, argument_at) == -5);
+    expect(fd_ioctl(kernel, p.shell, slave, OK_TIOCSPGRP, argument_at) == -25);
+    expect(pty_poll(kernel, p.shell, slave, OK_POLLIN | OK_POLLOUT) ==
+           (OK_POLLIN | OK_POLLOUT | OK_POLLERR | OK_POLLHUP));
+    expect(pty_call(kernel, p.shell, N::close, {static_cast<uptr>(slave)}) == 0);
+    expect(kernel.scheduler().terminal_audit().ok());
+    return true;
+}
 } // namespace
 
 int main()
@@ -324,8 +534,19 @@ int main()
     type("left");
     expect(native_call(kernel, session.init, N::console_revoke, {session.epoch}) == 0);
     expect(console.termios == tty::console_compat_termios() && !console.ldisc.buffered() && !console.session);
+    PtySession pty{};
+    std::array<i32, 2> fds{};
+    i32 master = -1, slave = -1;
+    const bool terminal = pty_terminal(kernel, session, pty, fds);
+    const bool echoed = canonical_echo(kernel, pty, fds);
+    const bool drained = raw_drain(kernel, pty);
+    const bool locked = ptn_lock(kernel, pty, master, slave);
+    const bool discarded = ptmx_hangup_discard(kernel, pty, master, slave);
+    expect(kernel.scheduler().pty_audit().live_pairs == 1 && kernel.scheduler().terminal_audit().ok());
     expect(native::runtime_status().ok());
     std::printf("NATIVE_TTY_RUNTIME_PASS console=1 compat_default=%d icanon=%d echo=%d isig=%d winch=%d flush=%d "
-                "writev_8k=%d efault_keeps_input=%d hosted=1 guest=0\n",
-                compat, canonical, canonical, signals, window, flushed, large, kept);
+                "writev_8k=%d efault_keeps_input=%d pty=%d canonical_echo=%d ptmx_hangup_discard=%d raw_drain=%d "
+                "ptn_lock=%d hosted=1 guest=0\n",
+                compat, canonical, canonical, signals, window, flushed, large, kept, terminal, echoed, discarded, drained,
+                locked);
 }

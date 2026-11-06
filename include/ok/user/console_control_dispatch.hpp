@@ -95,6 +95,8 @@ static_assert(TerminalCodec<NativeTerminalCodec<false>> && TerminalCodec<NativeT
     case OK_TIOCGWINSZ: return Operation::get_window;
     case OK_TIOCSWINSZ: return Operation::set_window;
     case OK_FIONREAD: return Operation::input_pending;
+    case OK_TIOCGPTN: return Operation::get_pty_number;
+    case OK_TIOCSPTLCK: return Operation::set_pty_lock;
     default: return {};
     }
 }
