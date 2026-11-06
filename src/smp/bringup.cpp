@@ -203,9 +203,15 @@ extern "C" [[noreturn]] void ok_smp_secondary_main(ok::smp::CpuId cpu)
     record.reported_id.store(static_cast<ok::uptr>(ok::arch::smp::current_hardware_id()), std::memory_order_release);
     // A CPU the boot CPU already gave up on stays out: it never serves threads
     // and stays outside the online mask that IPIs and shootdowns cover.
+#if defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1)
     auto starting = static_cast<ok::u8>(CpuState::starting);
     const bool admitted = record.state.compare_exchange_strong(starting, static_cast<ok::u8>(CpuState::online),
                                                                std::memory_order_acq_rel);
+#else
+    // i386 has no CMPXCHG and runs UP (smp_stub starts no secondary), so
+    // this entry is unreachable there; it must still link.
+    const bool admitted = false;
+#endif
     for (;;)
     {
         if (admitted && (online_mask() & (ok::u32{1} << cpu)) != 0 && ok_smp_secondary_step != nullptr &&
