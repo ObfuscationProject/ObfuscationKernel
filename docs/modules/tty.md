@@ -644,12 +644,14 @@ S4 adds two runners on the actual runtime (x86_64 hosted backends):
   on every profile.
 - `python3 -B scripts/test_native_tty.py --output <dir>` prints
   `NATIVE_TTY_RUNTIME_PASS console=1 compat_default=1 icanon=1 echo=1 isig=1
-  winch=1 flush=1 writev_8k=1 efault_keeps_input=1 hosted=1 guest=0`, observing
+  winch=1 flush=1 writev_8k=1 efault_keeps_input=1 vmin_wake=1 hosted=1 guest=0`,
+  observing
   console output through a mock `ok_platform_console_write_char`: the compat
   default (no echo, no ONLCR, CR read as LF), canonical input with erase echo
   and VEOF, ISIG to the foreground group (NOFLSH, ISIG off, ^Z stop), SIGWINCH,
-  `OK_SYS_CONSOLE_FLUSH`/TCFLSH/TCSETSF, repeated 8 KiB writevs, and EFAULT on
-  read and readv keeping the input.
+  `OK_SYS_CONSOLE_FLUSH`/TCFLSH/TCSETSF, repeated 8 KiB writevs, EFAULT on
+  read and readv keeping the input, and non-canonical reads woken by every
+  buffered byte and by a TCSETS that lowers VMIN.
 
 `test_console_input.py` now requires `ntty_compat_default=1` instead of
 `noecho=1` (the 4096-byte ldisc replaced the lease's 256-byte ring), and

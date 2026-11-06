@@ -283,8 +283,11 @@ Result<TerminalReply> SchedulerState::terminal_control(const TerminalSubject &su
         const auto old = tty.termios;
         tty.termios = request.termios;
         tty.residue = request.residue;
-        const bool readable = tty.ldisc.set_termios(old, request.termios);
-        if (!console || readable) terminal_changed(subject.terminal);
+        // Like n_tty_set_termios, wake readers and writers on every change:
+        // readers re-plan (the console under console_read_termios(), which the
+        // ldisc's readability ignores) and re-block when still unmet.
+        static_cast<void>(tty.ldisc.set_termios(old, request.termios));
+        terminal_changed(subject.terminal);
     };
     const auto flush_input = [&] {
         tty.ldisc.flush_input();
@@ -433,7 +436,10 @@ TerminalLdisc::Input SchedulerState::console_input(char value, WakeSource source
     for (usize index = 0; index < input.signal_count; ++index)
         for (const auto signal : isig)
             if (input.signals[index] == signal) static_cast<void>(console.owe(console.foreground, signal, true));
-    if (input.became_readable) wake_waiters(ThreadWaitReason::console_read, console_input_.epoch(), source);
+    // Non-canonical readers wake on any buffered data (Linux __receive_buf):
+    // their plan needs min(VMIN, count) bytes with VTIME taken as 0.
+    const bool raw_data = !(console.termios.lflag & tty::lflag::icanon) && input.consumed && console.ldisc.buffered();
+    if (input.became_readable || raw_data) wake_waiters(ThreadWaitReason::console_read, console_input_.epoch(), source);
     return input;
 }
 

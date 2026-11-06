@@ -519,6 +519,57 @@ bool ptmx_hangup_discard(Kernel &kernel, const PtySession &p, i32 master, i32 sl
     expect(kernel.scheduler().terminal_audit().ok());
     return true;
 }
+
+// Non-canonical console reads plan with VTIME taken as 0 and need
+// min(VMIN, count) bytes, so readers wake on every buffered byte and after
+// every termios change (n_tty __receive_buf and n_tty_set_termios).
+bool vmin_wake(Kernel &kernel, const Session &s)
+{
+    const auto *reader = kernel.scheduler().find_thread(s.login, s.login);
+    const auto blocked = [&] {
+        return reader->state == sched::ProcessState::blocked &&
+               reader->wait_reason == sched::ThreadWaitReason::console_read;
+    };
+    const auto block = [&](usize count) {
+        bool pending = false;
+        expect(native_call(kernel, s.login, N::read, {0, read_at, count}, &pending) == -11 && pending && blocked());
+    };
+    auto termios = tty::linux_std_termios();
+    termios.lflag &= ~(tty::lflag::icanon | tty::lflag::echo);
+    termios[tty::Cc::min] = 5;
+    termios[tty::Cc::time] = 3;
+    set_termios(kernel, s.login, termios);
+    // VMIN 5, VTIME 3: each byte wakes the reader, which re-blocks until the fifth.
+    for (const char value : std::string_view{"abcd"})
+    {
+        block(10);
+        type({&value, 1});
+        expect(!blocked());
+    }
+    block(10);
+    type("e");
+    expect(!blocked() && read_text(kernel, s.login, 10) == "abcde");
+    // VMIN 5, VTIME 0: a read of 2 returns after the second byte.
+    termios[tty::Cc::time] = 0;
+    set_termios(kernel, s.login, termios);
+    block(2);
+    type("x");
+    expect(!blocked());
+    block(2);
+    type("y");
+    expect(!blocked() && read_text(kernel, s.login, 2) == "xy");
+    // Lowering VMIN below the buffered count wakes the reader, although the
+    // ldisc was already poll-readable under the stored VTIME.
+    termios[tty::Cc::time] = 3;
+    set_termios(kernel, s.login, termios);
+    type("pqr");
+    block(10);
+    termios[tty::Cc::min] = 2;
+    set_termios(kernel, s.job, termios);
+    expect(!blocked() && read_text(kernel, s.login, 10) == "pqr");
+    take_output();
+    return true;
+}
 } // namespace
 
 int main()
@@ -535,6 +586,7 @@ int main()
     const bool flushed = flush(kernel, session);
     const bool large = writev_8k(kernel, session);
     const bool kept = efault_keeps_input(kernel, session);
+    const bool vmin = vmin_wake(kernel, session);
     // Revocation resets the whole terminal, ldisc and window included.
     auto &console = kernel.scheduler().console_terminal();
     set_termios(kernel, session.login, tty::linux_std_termios());
@@ -552,8 +604,8 @@ int main()
     expect(kernel.scheduler().pty_audit().live_pairs == 1 && kernel.scheduler().terminal_audit().ok());
     expect(native::runtime_status().ok());
     std::printf("NATIVE_TTY_RUNTIME_PASS console=1 compat_default=%d icanon=%d echo=%d isig=%d winch=%d flush=%d "
-                "writev_8k=%d efault_keeps_input=%d pty=%d canonical_echo=%d ptmx_hangup_discard=%d raw_drain=%d "
-                "ptn_lock=%d hosted=1 guest=0\n",
-                compat, canonical, canonical, signals, window, flushed, large, kept, terminal, echoed, discarded, drained,
-                locked);
+                "writev_8k=%d efault_keeps_input=%d vmin_wake=%d pty=%d canonical_echo=%d ptmx_hangup_discard=%d "
+                "raw_drain=%d ptn_lock=%d hosted=1 guest=0\n",
+                compat, canonical, canonical, signals, window, flushed, large, kept, vmin, terminal, echoed, discarded,
+                drained, locked);
 }
