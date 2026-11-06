@@ -188,7 +188,14 @@ void linux_profile(Kernel &kernel, Pid login, Pid peer)
     CHECK(dispatch(0, *Tty::number(T::input_pending), output) == 0);
     CHECK(Tty::decode_int({reinterpret_cast<const u8 *>(mock::memory.data()) + 128, 4}).value() == 0);
     CHECK(dispatch(0, *Tty::number(T::drain_break), 1) == 0);
-    CHECK(dispatch(0, *Tty::number(T::flush), high | 2) == 0);
+    // The TCFLSH selector is the whole word: high bits are EINVAL and flush nothing.
+    constexpr bool wide = lu::Codec<Profile>::profile.word_bytes == 8;
+    auto &console = kernel.scheduler().console_terminal();
+    const std::array<std::byte, 1> pending{std::byte{'z'}};
+    static_cast<void>(console.ldisc.receive(console.termios, pending, 0, true));
+    CHECK(dispatch(0, *Tty::number(T::flush), high | 2) == (wide ? -22 : 0));
+    CHECK(console.ldisc.buffered() == (wide ? 1u : 0u));
+    CHECK(dispatch(0, *Tty::number(T::flush), 2) == 0 && !console.ldisc.buffered());
     CHECK(dispatch(0, *Tty::number(T::flush), 3) == -22);
     for (const auto refused : {T::detach, T::get_pty_number, T::set_pty_lock})
         CHECK(dispatch(0, *Tty::number(refused), output) == -25);
@@ -237,6 +244,9 @@ void terminal_rows(Kernel &kernel, Pid login, Pid peer)
     CHECK(ioctl(kernel, login, OK_TCSETSF, output) == 0 && !console.ldisc.buffered());
     native::input('y'); native::input('\n');
     CHECK(ioctl(kernel, login, OK_TCFLSH, 1) == 0 && console.ldisc.buffered() == 2);
+    constexpr bool wide = sizeof(uptr) == 8; // The native selector is the whole word too.
+    CHECK(ioctl(kernel, login, OK_TCFLSH, static_cast<uptr>(u64{1} << 32)) == (wide ? -22 : 0));
+    CHECK(console.ldisc.buffered() == (wide ? 2u : 0u));
     CHECK(ioctl(kernel, login, OK_TCFLSH, 3) == -22 && ioctl(kernel, login, OK_TCFLSH, 0) == 0);
     CHECK(!console.ldisc.buffered() && ioctl(kernel, login, OK_TCSBRK, 1) == 0);
     std::memcpy(mock::memory.data() + 128, bytes.data(), bytes.size());

@@ -95,7 +95,9 @@ template <class Codec> void error_order()
         seam.control = {};
         if (kind == Kind::scalar)
         {
-            CHECK(run(operation, 0xffffffff00000002ULL) == 0 && seen.scalar == 2 && untouched() == false);
+            // Only TCFLSH keeps the whole word, so its high bits reach control as invalid.
+            CHECK(run(operation, 0xffffffff00000002ULL) == 0 && seen.scalar == (operation == Op::flush ? -1 : 2) &&
+                  untouched() == false);
             CHECK(run(operation, 0xffffffffULL) == 0 && seen.scalar == -1);
         }
         if (kind == Kind::int_out)

@@ -471,10 +471,8 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
         using TerminalOperation = sched::ConsoleControlOperation;
         std::optional<TerminalOperation> selected;
         if (const auto operation = Ioctl::operation(a[1])) selected = static_cast<TerminalOperation>(*operation);
-        const u64 argument = selected && console_control::argument(*selected) == lu::TerminalArgument::scalar
-            ? static_cast<u32>(Ioctl::scalar_argument(a[2])) : a[2] & Codec::word_mask;
         return console_control::dispatch<Ioctl>(
-            Ioctl::scalar_argument(a[0]), selected, argument,
+            Ioctl::scalar_argument(a[0]), selected, a[2] & Codec::word_mask,
             [&](i32 fd) { return kernel.posix().terminal_descriptor(fd); },
             [&](const sched::TerminalSubject &subject, TerminalOperation operation) {
                 return kernel.posix().terminal_check(subject, operation);

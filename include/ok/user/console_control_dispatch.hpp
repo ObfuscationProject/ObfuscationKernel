@@ -124,7 +124,10 @@ i64 dispatch(i32 fd, std::optional<Operation> operation, u64 address, Describe &
     switch (kind)
     {
     case Argument::scalar:
-        request.scalar = std::bit_cast<i32>(static_cast<u32>(address));
+        // TIOCSCTTY takes an int; the TCFLSH selector is the whole word
+        // (Linux __tty_perform_flush), so high bits make it invalid.
+        request.scalar = *operation == Operation::flush && address > 0xffffffffULL
+            ? -1 : std::bit_cast<i32>(static_cast<u32>(address));
         break;
     case Argument::int_in:
     {

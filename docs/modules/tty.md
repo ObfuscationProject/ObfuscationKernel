@@ -161,7 +161,7 @@ for everything except TCGETS and TIOCGWINSZ.
 | TCSETSW | 0x5403 | 0x5403 | 0x540f | 0x802c7415 | in termios | yes |
 | TCSETSF | 0x5404 | 0x5404 | 0x5410 | 0x802c7416 | in termios; flush input first | yes |
 | TCSBRK | 0x5409 | 0x5409 | 0x5405 | 0x2000741d | scalar; completes at once | yes |
-| TCFLSH | 0x540b | 0x540b | 0x5407 | 0x2000741f | scalar 0..2, else EINVAL | yes |
+| TCFLSH | 0x540b | 0x540b | 0x5407 | 0x2000741f | scalar 0..2 over the whole word, else EINVAL | yes |
 | TIOCGWINSZ | 0x5413 | 0x5413 | 0x40087468 | 0x40087468 | out 8 bytes | no |
 | TIOCSWINSZ | 0x5414 | 0x5414 | 0x80087467 | 0x80087467 | in 8 bytes; SIGWINCH to the foreground on change | no |
 | FIONREAD | 0x541b | 0x541b | 0x467f | 0x4004667f | out int | no |
