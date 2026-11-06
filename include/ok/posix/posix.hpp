@@ -25,6 +25,7 @@ inline constexpr u32 o_APPEND = 0x0008;
 inline constexpr u32 o_NONBLOCK = 0x0800;
 inline constexpr u32 o_CREAT = 0x0040;
 inline constexpr u32 o_EXCL = 0x0080;
+inline constexpr u32 o_NOCTTY = 0x0100;
 inline constexpr u32 o_NOFOLLOW = 0x020000;
 inline constexpr u32 o_TRUNC = 0x0200;
 inline constexpr u32 o_CLOEXEC = 0x080000;

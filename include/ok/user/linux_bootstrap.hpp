@@ -1284,8 +1284,8 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
         FixedString<256> path;
         if (auto status = copy_pathname(space, static_cast<uptr>(a[relative ? 1 : 0]), path); !status.ok())
             return -syscall::ErrnoMapper::errno_for(status);
-        // No controlling-terminal acquisition exists in the common descriptor
-        // service, so O_NOCTTY imposes no additional action here.
+        // O_NOCTTY is decoded into the native flag: the common service skips
+        // the automatic controlling-terminal acquisition of a /dev/pts open.
         auto opened = kernel.posix().openat_limited(dirfd, path.view(), request.value().native_flags,
                                                     mode & 07777u, Open::max_regular_size(request.value()));
         return opened ? static_cast<i64>(opened.value()) : -syscall::ErrnoMapper::errno_for(opened.status());

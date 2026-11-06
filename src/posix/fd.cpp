@@ -63,7 +63,7 @@ Result<Fd> PosixService::openat_limited(Fd dirfd, std::string_view path, u32 fla
         return Status::not_initialized("POSIX service not initialized");
     }
     constexpr u32 allowed = o_WRONLY | o_RDWR | o_APPEND | o_NONBLOCK | o_CREAT | o_EXCL |
-                            o_NOFOLLOW | o_TRUNC | o_CLOEXEC | o_DIRECTORY;
+                            o_NOFOLLOW | o_TRUNC | o_CLOEXEC | o_DIRECTORY | o_NOCTTY;
     if ((flags & ~allowed) != 0 || (flags & 3u) == 3u ||
         (flags & (o_CREAT | o_DIRECTORY)) == (o_CREAT | o_DIRECTORY))
         return Status::invalid_argument("unsupported open flags or access mode");
@@ -170,7 +170,7 @@ Result<Fd> PosixService::openat_limited(Fd dirfd, std::string_view path, u32 fla
     entry.readable = is_readable(flags);
     entry.writable = is_writable(flags);
     entry.large_file = max_regular_size > 0x7fff'ffffu;
-    entry.flags = flags & ~o_CLOEXEC;
+    entry.flags = flags & ~(o_CLOEXEC | o_NOCTTY);
     // Append changes each write's destination, never the initial read position.
     // write() obtains the current EOF immediately before every append write.
     entry.offset = 0;
