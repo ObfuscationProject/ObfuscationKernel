@@ -473,6 +473,14 @@ Status copy_to_user(const AddressSpace &space, uptr destination, const void *sou
     }
     return Status::success();
 }
+Result<u32 *> user_word(const AddressSpace &space, uptr address, bool write)
+{
+    if (address % sizeof(u32))
+        return Status::invalid_argument("user word is misaligned");
+    if (!user_range(space, address, sizeof(u32), write))
+        return Status::fault("user word is not mapped with the requested access");
+    return reinterpret_cast<u32 *>(mapping(*lookup(space), address)->physical_address + (address & (page_size - 1)));
+}
 } // namespace ok::arch::execution
 
 // Secondary-hart start (smp.cpp): the block a started hart's tp points at,
