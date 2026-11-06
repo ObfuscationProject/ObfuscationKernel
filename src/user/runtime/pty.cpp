@@ -169,6 +169,28 @@ Result<usize> attempt_pty_io(Kernel &kernel, sched::ProcessControlBlock &process
     if (auto status = gather_pty_suffix(space, {buffer.data(), count}, wait); !status) return status;
     return kernel.scheduler().write_pty_description(wait.description, {buffer.data(), count});
 }
+// A write goes on while it makes progress, sending ISIG signals after each
+// pass. A master write stopped by a full signal outbox retries once after the
+// drain freed it: the drain ran before any wait registered, so nothing would
+// wake a parked writer later. Returns the bytes of this call or the last error.
+Result<usize> attempt_pty_write(Kernel &kernel, sched::ProcessControlBlock &process, PtyWait &wait)
+{
+    const usize start = wait.committed;
+    bool retry = true;
+    while (true)
+    {
+        auto transferred = attempt_pty_io(kernel, process, wait);
+        const bool drained = tty_drain_outbox(kernel);
+        if (!transferred)
+        {
+            if (retry && drained && transferred.status().code() == StatusCode::would_block) { retry = false; continue; }
+            return transferred;
+        }
+        wait.committed += transferred.value();
+        retry = true;
+        if (!transferred.value() || wait.committed == wait.count) return wait.committed - start;
+    }
+}
 } // namespace
 i64 resume_pty_io(Kernel &kernel, sched::ProcessControlBlock &process,
                   memory::ObjectHandle object, bool &complete)
@@ -186,9 +208,7 @@ i64 resume_pty_io(Kernel &kernel, sched::ProcessControlBlock &process,
         const auto result = pty_terminal_result(wait, failure);
         cancel_pty_wait(kernel, object, "interrupted", result); return result;
     }
-    auto transferred = attempt_pty_io(kernel, process, wait);
-    if (wait.writing) tty_drain_outbox(kernel); // ISIG from master input.
-    if (transferred && wait.writing) wait.committed += transferred.value();
+    auto transferred = wait.writing ? attempt_pty_write(kernel, process, wait) : attempt_pty_io(kernel, process, wait);
     const auto *description = kernel.scheduler().open_description(wait.description);
     const bool blocking = description && !(description->flags & posix::o_NONBLOCK);
     if (blocking && ((transferred && wait.writing && wait.committed < wait.count) ||
@@ -224,9 +244,7 @@ i64 begin_pty_io(Kernel &kernel, sched::ProcessControlBlock &process, sched::Thr
     initial.lease = thread->entry_stack; initial.frame = thread->native_frame;
     initial.address = address; initial.count = count; initial.fd = fd; initial.description = description_id;
     initial.endpoint = description->pty_endpoint; initial.vectors = vectors; initial.writing = writing;
-    auto transferred = attempt_pty_io(kernel, process, initial);
-    if (writing) tty_drain_outbox(kernel); // ISIG from master input.
-    if (transferred && writing) initial.committed = transferred.value();
+    auto transferred = writing ? attempt_pty_write(kernel, process, initial) : attempt_pty_io(kernel, process, initial);
     const bool blocking = !(description->flags & posix::o_NONBLOCK);
     if ((transferred && (!writing || initial.committed == count || !blocking)) ||
         (!transferred && (transferred.status().code() != StatusCode::would_block || !blocking)))

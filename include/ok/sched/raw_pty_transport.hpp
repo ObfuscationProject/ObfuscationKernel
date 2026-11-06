@@ -464,25 +464,37 @@ class RawPtyTable final
         {
             // Linux n_tty_write: no open slave (dormant or closed) is EIO.
             if (!pair->slave_opens) return Status::io_error("PTY slave is not open");
-            const auto received = terminal.ldisc.receive(terminal.termios, input, terminal.outbox_room(), false);
-            if (!received.consumed) return Status::would_block("PTY slave input is full");
-            for (std::size_t index = 0; index < received.signal_count; ++index)
-                static_cast<void>(terminal.owe(terminal.foreground, received.signals[index], true));
+            std::size_t consumed = 0;
+            bool readable = false, flush_peer_output = false, start_output = false;
+            while (consumed < input.size())
+            {
+                // The budget counts signal characters, but repeats share one outbox
+                // entry: a pass stopped at the budget goes on with the room left.
+                const auto budget = terminal.outbox_room();
+                const auto received = terminal.ldisc.receive(terminal.termios, input.subspan(consumed), budget, false);
+                for (std::size_t index = 0; index < received.signal_count; ++index)
+                    static_cast<void>(terminal.owe(terminal.foreground, received.signals[index], true));
+                consumed += received.consumed;
+                readable = readable || received.became_readable;
+                flush_peer_output = flush_peer_output || received.flush_peer_output;
+                start_output = start_output || received.start_output;
+                if (!received.consumed || received.signal_count < budget) break;
+            }
+            if (!consumed) return Status::would_block("PTY slave input is full");
             // Slave readers wake on every stored byte in non-canonical mode (Linux
             // __receive_buf; their plan may need fewer than VMIN bytes) and on a
             // completed line or EOF in canonical mode.
-            if (received.became_readable ||
-                (!(terminal.termios.lflag & tty::lflag::icanon) && terminal.ldisc.buffered()))
+            if (readable || (!(terminal.termios.lflag & tty::lflag::icanon) && terminal.ldisc.buffered()))
                 wakes |= wake_slave_read;
-            if (received.flush_peer_output && pair->master_input.size)
+            if (flush_peer_output && pair->master_input.size)
             {
                 pair->master_input.clear();
                 wakes |= wake_slave_write;
             }
-            if (received.start_output) wakes |= wake_slave_write;
+            if (start_output) wakes |= wake_slave_write;
             if (flush_echo(*pair)) wakes |= wake_master_read;
             advance_revision(*pair);
-            return Transfer{received.consumed, observe(handle.slot, *pair, true, wakes)};
+            return Transfer{consumed, observe(handle.slot, *pair, true, wakes)};
         }
         if (!pair->master_opens) return Status::io_error("raw PTY peer retired");
         // n_tty_write: pending echo leaves first; output stopped by IXON waits.

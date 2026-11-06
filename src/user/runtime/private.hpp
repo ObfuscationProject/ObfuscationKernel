@@ -561,7 +561,8 @@ i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched:
                      bool &complete);
 // Native terminal ioctls (struct ok_termios); Linux uses TtyIoctlCodec in linux_bootstrap.hpp.
 i64 tty_terminal_control(Kernel &kernel, sched::ProcessControlBlock &process, const std::array<uptr, 6> &arguments);
-void tty_drain_outbox(Kernel &kernel);
+// Sends queued terminal signals; true when any outbox held entries.
+bool tty_drain_outbox(Kernel &kernel);
 
 memory::ObjectHandle child_wait_object(sched::ProcessId pid, sched::ThreadId tid);
 // Return a ready child PID, ECHILD, EFAULT, zero for WNOHANG, or EAGAIN

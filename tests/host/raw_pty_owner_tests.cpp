@@ -632,6 +632,17 @@ void multiplexed_terminal_semantics()
     CHECK(written && written.value().change.wakes & wake_slave_write);
     CHECK(terminal->outbox_count == 1 && terminal->outbox[0] == (sched::TerminalOutboxEntry{9, tty::TerminalSignal::interrupt, true}));
     CHECK(drain(table, master) == "^C" && !terminal->ldisc.buffered());
+    // Repeated signal characters share one outbox entry: a write of more than
+    // the outbox capacity is taken whole, with or without a foreground group.
+    while (terminal->outbox_count) static_cast<void>(terminal->take_outbox());
+    written = table.write(master, text("\x03\x03\x03\x03\x03\x03\x03\x03\x03\x03\x03\x1c"));
+    CHECK(written && written.value().bytes == 12 && terminal->outbox_count == 2);
+    CHECK(terminal->outbox[1] == (sched::TerminalOutboxEntry{9, tty::TerminalSignal::quit, true}));
+    while (terminal->outbox_count) static_cast<void>(terminal->take_outbox());
+    terminal->foreground = 0;
+    CHECK(table.write(master, text("\x03\x03\x03\x03\x03\x03\x03\x03\x03")).value().bytes == 9 && !terminal->outbox_count);
+    terminal->foreground = 9;
+    static_cast<void>(drain(table, master));
     // A full outbox stops master input at the signal character (backpressure).
     for (sched::ProcessId target = 100; terminal->outbox_count < sched::terminal_outbox_capacity; ++target)
         CHECK(terminal->owe(target, tty::TerminalSignal::winch, false));

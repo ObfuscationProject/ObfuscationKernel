@@ -65,13 +65,15 @@ Result<usize> tty_user_ranges(const hw::AddressSpace &space, std::span<const Pip
 }
 } // namespace
 
-void tty_drain_outbox(Kernel &kernel)
+bool tty_drain_outbox(Kernel &kernel)
 {
     auto &scheduler = kernel.scheduler();
+    bool drained = false;
     for (usize index = 0; index < sched::SchedulerState::terminal_count; ++index)
     {
         auto &terminal = scheduler.terminal_storage(index);
         if (!terminal.outbox_count) continue;
+        drained = true;
 #ifdef OK_PRIVATE_POLL_MASK
         // Each send may run exit and stop paths that queue again; stay bounded.
         for (usize sent = 0; terminal.outbox_count && sent < 4 * sched::terminal_outbox_capacity; ++sent)
@@ -89,6 +91,7 @@ void tty_drain_outbox(Kernel &kernel)
             scheduler.wake_waiters(sched::ThreadWaitReason::pty_write,
                 sched::SchedulerState::pty_wait_key({static_cast<u16>(index - 1), 1, sched::private_pty::Side::master}));
     }
+    return drained;
 }
 
 void tty_console_input(Kernel &kernel, char value, sched::WakeSource source)

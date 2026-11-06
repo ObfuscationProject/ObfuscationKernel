@@ -427,6 +427,20 @@ bool pty_terminal(Kernel &kernel, const Session &s, PtySession &p, std::array<i3
     expect(take_signal(p.job, &code) == OK_SIGINT && code == 128 && !take_signal(p.shell) && !terminal->outbox_count);
     // The flush discards the uncommitted echo of "ab" (Linux isig reset_buffer_flags).
     expect(pty_read(kernel, p.shell, fds[0]) == "^C");
+    // More signal characters than the outbox holds finish in one blocking write,
+    // and a write refused by a full outbox goes on once the runtime drained it:
+    // no later event would wake a writer parked there.
+    expect(pty_write(kernel, p.shell, fds[0], std::string(9, '\x03')) == 9);
+    usize interrupts = 0;
+    for (u32 signal = take_signal(p.job); signal; signal = take_signal(p.job)) interrupts += signal == OK_SIGINT ? 1 : 100;
+    expect(interrupts >= 1 && interrupts < 100 && !terminal->outbox_count);
+    for (const auto text : {std::string_view{"\x03"}, std::string_view{"k\x03"}})
+    {
+        for (sched::ProcessId target = 9000; terminal->outbox_count < sched::terminal_outbox_capacity; ++target)
+            expect(terminal->owe(target, tty::TerminalSignal::winch, false));
+        expect(pty_write(kernel, p.shell, fds[0], text) == static_cast<i64>(text.size()) && take_signal(p.job) == OK_SIGINT);
+        expect(!terminal->outbox_count && pty_read(kernel, p.shell, fds[0]).ends_with("^C"));
+    }
     // SIGWINCH on a changed size, through either end.
     std::array<u16, 4> window{30, 90, 0, 0};
     std::memcpy(user(argument_at), window.data(), sizeof(window));
