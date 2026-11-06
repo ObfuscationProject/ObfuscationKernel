@@ -46,8 +46,10 @@ _start:
     or $0x03, %eax
     mov %eax, boot_pdpt
 
-    // The 2 MiB holding the xAPIC registers (0xfee00000), uncached (PCD|PWT).
-    // User spaces copy these supervisor entries, so traps on a user CR3 reach it.
+    // The 2 MiB holding the I/O APIC (0xfec00000) and the 2 MiB holding the
+    // xAPIC registers (0xfee00000), uncached (PCD|PWT). User spaces copy these
+    // supervisor entries, so traps on a user CR3 reach both.
+    movl $0xfec0009b, boot_pd_high + 502 * 8
     movl $0xfee0009b, boot_pd_high + 503 * 8
     mov $boot_pd_high, %eax
     or $0x03, %eax

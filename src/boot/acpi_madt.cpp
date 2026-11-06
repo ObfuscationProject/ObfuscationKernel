@@ -145,6 +145,7 @@ class MadtParser final
         if (madt.size() < madt_header_bytes)
             return invalid("ACPI MADT is truncated");
         map_.local_apic_address = le32(madt.data() + 36);
+        interrupts_.pcat_compat = (le32(madt.data() + 40) & 1) != 0;
         bool override_seen = false;
         for (usize offset = madt_header_bytes; offset < madt.size();)
         {
@@ -163,6 +164,23 @@ class MadtParser final
                 if (id != 0xff)
                     if (auto status = add(id, le32(entry + 4)); !status.ok())
                         return status;
+            }
+            else if (type == 1) // I/O APIC
+            {
+                if (length < 12)
+                    return invalid("ACPI MADT I/O APIC entry is truncated");
+                if (auto status = add_io_apic({std::to_integer<u8>(entry[2]), le32(entry + 4), le32(entry + 8)});
+                    !status.ok())
+                    return status;
+            }
+            else if (type == 2) // Interrupt Source Override
+            {
+                if (length < 10)
+                    return invalid("ACPI MADT interrupt source override is truncated");
+                if (auto status = add_override(std::to_integer<u8>(entry[2]), std::to_integer<u8>(entry[3]),
+                                               le32(entry + 4), le16(entry + 8));
+                    !status.ok())
+                    return status;
             }
             else if (type == 5) // Local APIC Address Override
             {
@@ -199,6 +217,10 @@ class MadtParser final
     {
         return map_;
     }
+    [[nodiscard]] const MadtInterrupts &interrupts() const
+    {
+        return interrupts_;
+    }
 
   private:
     // Flags bit 0 is Enabled; bit 1 (ACPI 6.3) is Online Capable. A processor
@@ -229,7 +251,46 @@ class MadtParser final
         return Status::success();
     }
 
+    Status add_io_apic(IoApicDescription io_apic)
+    {
+        if (io_apic.address == 0)
+            return invalid("ACPI MADT I/O APIC has no address");
+        for (usize i = 0; i < interrupts_.io_apic_count; ++i)
+            if (interrupts_.io_apics[i].id == io_apic.id || interrupts_.io_apics[i].address == io_apic.address)
+                return invalid("ACPI MADT describes an I/O APIC twice");
+        if (interrupts_.io_apic_count == interrupts_.io_apics.size())
+        {
+            interrupts_.truncated = true;
+            return Status::success();
+        }
+        interrupts_.io_apics[interrupts_.io_apic_count++] = io_apic;
+        return Status::success();
+    }
+
+    // MPS INTI flags: polarity in bits 1:0 and trigger mode in bits 3:2, each
+    // 0 (conforms to the bus), 1 (active high, edge) or 3 (active low,
+    // level); 2 is reserved. The ISA bus is edge-triggered and active high.
+    Status add_override(u8 bus, u8 source, u32 gsi, u16 flags)
+    {
+        if (bus != 0)
+            return invalid("ACPI MADT interrupt source override names a bus other than ISA");
+        if (source >= MadtInterrupts::isa_irqs)
+            return invalid("ACPI MADT interrupt source override names no ISA IRQ");
+        const unsigned polarity = flags & 3, trigger = (flags >> 2) & 3;
+        if (polarity == 2 || trigger == 2)
+            return invalid("ACPI MADT interrupt source override has reserved flags");
+        if (interrupts_.overridden[source])
+            return invalid("ACPI MADT overrides an ISA IRQ twice");
+        for (u8 irq = 0; irq < MadtInterrupts::isa_irqs; ++irq)
+            if (interrupts_.overridden[irq] && interrupts_.isa[irq].gsi == gsi)
+                return invalid("ACPI MADT overrides two ISA IRQs onto one GSI");
+        interrupts_.overridden[source] = true;
+        interrupts_.isa[source] = {gsi, trigger == 3, polarity == 3};
+        return Status::success();
+    }
+
     CpuTopologyMap map_{};
+    MadtInterrupts interrupts_{};
     std::array<bool, smp::max_cpus> recorded_x2apic_{};
 };
 
@@ -248,7 +309,7 @@ Status find_acpi_rsdp(PhysicalReader reader, u64 &rsdp)
     return Status::not_found("ACPI RSDP not found");
 }
 
-Status parse_acpi_madt(PhysicalReader reader, u64 rsdp_address, CpuTopologyMap &output)
+Status parse_acpi_madt(PhysicalReader reader, u64 rsdp_address, CpuTopologyMap &output, MadtInterrupts *interrupts)
 {
     Rsdp rsdp;
     if (auto status = read_rsdp(reader, rsdp_address, rsdp); !status.ok())
@@ -290,6 +351,8 @@ Status parse_acpi_madt(PhysicalReader reader, u64 rsdp_address, CpuTopologyMap &
     if (auto status = parser.run(madt); !status.ok())
         return status;
     output = parser.map();
+    if (interrupts != nullptr)
+        *interrupts = parser.interrupts();
     return Status::success();
 }
 

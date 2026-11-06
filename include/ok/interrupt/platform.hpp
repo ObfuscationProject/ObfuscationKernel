@@ -16,9 +16,10 @@ namespace ok::interrupt
 // call is made with interrupts disabled.
 //
 // Routing: on a controller that can target CPUs (GICv2 on aarch64, the PLIC
-// on rv64) a line bound while N CPUs are online goes to the (line mod N)-th
-// online CPU in logical order; others deliver to CPU 0 (the 8259 pairs, the
-// uniprocessor profiles).
+// on rv64, the I/O APIC on x86_64) a line bound while N CPUs are online goes
+// to the (line mod N)-th online CPU in logical order; others deliver to CPU 0
+// (the 8259 pairs, including x86_64's fallback when the MADT describes no I/O
+// APIC, and the uniprocessor profiles).
 struct IrqStatistics
 {
     usize waits{0};
@@ -48,7 +49,7 @@ void claim_platform_irq();
 // the wait with an IPI. Returns at once when a line is already pending, and
 // false without waiting when the profile cannot idle on interrupts or this
 // is a secondary CPU of a profile whose device lines reach CPU 0 only
-// (x86_64). A caller holding the kernel lock keeps holding it.
+// (x86_64 on the 8259 pair). A caller holding the kernel lock keeps holding it.
 bool wait_for_interrupt();
 // The boot CPU's kernel loop idle (kernel lock released): as
 // wait_for_interrupt(), but a top half on another CPU does not end it. That
@@ -159,7 +160,8 @@ struct PlatformLine
 [[nodiscard]] Result<PlatformLine> virtio_mmio_line(usize slot);
 // PCI bus 0 device `device`, interrupt pin `pin` (1 = INTA .. 4 = INTD).
 // `interrupt_line` is its configuration register 0x3c, which only boards whose
-// firmware routes INTx (the PC's SeaBIOS) fill in.
+// firmware routes INTx (the PC's SeaBIOS) fill in. On x86_64 routing through
+// the I/O APIC the line is the GSI that ISA IRQ reaches (MADT overrides).
 [[nodiscard]] Result<PlatformLine> pci_intx_line(u8 device, u8 pin, u8 interrupt_line);
 
 } // namespace ok::interrupt

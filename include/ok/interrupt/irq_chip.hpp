@@ -22,8 +22,9 @@ enum class IrqTrigger : u8
 };
 
 // Static-dispatch contract for an interrupt controller backend. Each profile
-// supplies one implementation (the 8259A pair, GICv2, the PLIC, EIOINTC with
-// PCH-PIC, Malta's 8259 pair, the MPIC), selected as PlatformIrqChip in
+// supplies one implementation (the 8259A pair, x86_64's I/O APIC with the 8259
+// pair as fallback, GICv2, the PLIC, EIOINTC with PCH-PIC, Malta's 8259 pair,
+// the MPIC), selected as PlatformIrqChip in
 // src/interrupt/platform_irq.cpp; generic code is instantiated over it. No
 // virtual call sits on the interrupt path.
 template <typename Chip>
@@ -39,7 +40,8 @@ concept IrqChip = requires(Chip chip, const Chip cchip, IrqLine line, IrqTrigger
 };
 
 // A controller that can deliver a line to one chosen CPU (GICv2 ITARGETSR,
-// the PLIC's per-hart contexts). The router calls route() with its lock held.
+// the PLIC's per-hart contexts, I/O APIC destinations). The router calls
+// route() with its lock held.
 template <typename Chip>
 concept RoutableIrqChip = IrqChip<Chip> && requires(Chip chip, IrqLine line, smp::CpuId cpu) {
     { chip.route(line, cpu) } -> std::same_as<Status>;
@@ -157,6 +159,12 @@ using IrqHandler = void (*)(void *context, IrqLine line);
 // line's handlers, and the line stays masked from its top half until they
 // returned. Handlers of different lines, and unbind() against a running
 // handler, are serialized by the caller (the kernel lock).
+//
+// A chip that drops edges arriving while a line is masked (the x86 I/O APIC;
+// loses_masked_edges()) keeps its edge-triggered lines unmasked instead: an
+// edge during the bottom half runs another top half, which marks the line
+// pending again, and its handlers run once more. Two drains of such a line on
+// different CPUs are then serialized by the caller (the kernel lock) as well.
 template <IrqChip Chip> class IrqRouter final : private NonCopyable
 {
   public:
@@ -274,7 +282,7 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
             }
             else
             {
-                if (!chip_.acknowledge(line).ok() || !chip_.mask(line).ok())
+                if (!chip_.acknowledge(line).ok() || (masks_in_top_half(lines_[line]) && !chip_.mask(line).ok()))
                     bump(controller_errors_);
                 bump(delivered_[line]);
                 lines_[line].pending.store(true, std::memory_order_release);
@@ -365,6 +373,13 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
     static void bump(std::atomic<usize> &counter)
     {
         counter.store(counter.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    }
+    [[nodiscard]] bool masks_in_top_half(const Line &entry) const
+    {
+        if constexpr (requires { { chip_.loses_masked_edges() } -> std::convertible_to<bool>; })
+            return entry.trigger == IrqTrigger::level || !chip_.loses_masked_edges();
+        else
+            return true;
     }
     static void reset(Line &entry)
     {

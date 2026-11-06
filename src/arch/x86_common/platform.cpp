@@ -3,6 +3,7 @@
 #include "ok/core/entry.hpp"
 #include "ok/driver/qemu_virt/ramfb.hpp"
 #include "../../interrupt/console_ring.hpp"
+#include "../../interrupt/isa_irq.hpp"
 
 namespace
 {
@@ -548,19 +549,26 @@ void ps2_interrupt(void *, ok::interrupt::IrqLine)
 {
     ok::interrupt::post_event(ok::interrupt::EventSource::input);
 }
+
+// ISA IRQ `irq` (edge-triggered) through whichever controller routes it.
+ok::Status bind_isa_irq(ok::u8 irq, ok::interrupt::IrqHandler handler)
+{
+    const auto line = ok::interrupt::isa_irq_line(irq, ok::interrupt::IrqTrigger::edge);
+    if (!line)
+        return line.status();
+    return ok::interrupt::bind_platform_irq(line.value().line, line.value().trigger, handler, nullptr);
+}
 } // namespace
 
 extern "C" ok::Status ok_platform_bind_irqs()
 {
-    if (auto status = ok::interrupt::bind_platform_irq(4, ok::interrupt::IrqTrigger::edge, com1_interrupt, nullptr);
-        !status.ok())
+    if (auto status = bind_isa_irq(4, com1_interrupt); !status.ok())
         return status;
     outb(com1 + 1, 0x01); // Received-data-available interrupt; MCR OUT2 already routes it.
     ok::interrupt::drive_events(ok::interrupt::EventSource::console);
     ok::u8 config = 0;
     if (ps2_read_config(config) &&
-        ok::interrupt::bind_platform_irq(1, ok::interrupt::IrqTrigger::edge, ps2_interrupt, nullptr) &&
-        ok::interrupt::bind_platform_irq(12, ok::interrupt::IrqTrigger::edge, ps2_interrupt, nullptr) &&
+        bind_isa_irq(1, ps2_interrupt) && bind_isa_irq(12, ps2_interrupt) &&
         ps2_write_config(static_cast<ok::u8>(config | ps2_config_keyboard_irq | ps2_config_aux_irq)))
     {
         ok::interrupt::drive_events(ok::interrupt::EventSource::input);

@@ -1,9 +1,12 @@
 #include "ok/arch/clock.hpp"
 #include "ok/arch/execution.hpp"
 #include "ok/arch/smp.hpp"
+#include "ok/interrupt/platform.hpp"
 #include "ok/smp/bringup.hpp"
 #include "execution_table_pages.hpp"
 #include "../../src/arch/tlb_tags.hpp"
+#include "../../src/arch/x86_64/ioapic.hpp"
+#include "../../src/interrupt/isa_irq.hpp"
 
 #include <atomic>
 
@@ -388,6 +391,253 @@ void check_secondary_cpu()
     print("\n");
 }
 
+// The 16550's transmitter-empty interrupt (ISA IRQ 4) is a device line the
+// probe raises at will: enabling it in IER raises the line while THR is
+// empty, and the bottom half disables it again. Nothing is printed while it
+// is enabled, since every transmitted byte would raise it once more.
+namespace ioapic = ok::arch::x86::ioapic;
+constexpr u8 uart_irq = 4;
+constinit std::atomic<u32> uart_serviced{};
+void raise_uart_line()
+{
+    out(0x3f9, 0x02);
+}
+void uart_service(void *, interrupt::IrqLine)
+{
+    out(0x3f9, 0);
+    uart_serviced.fetch_add(1, std::memory_order_relaxed);
+}
+[[nodiscard]] usize delivered_on(ok::smp::CpuId cpu)
+{
+    return interrupt::platform_irq_cpu_statistics(cpu).delivered;
+}
+
+// CPU 1's share: user entries during which it raises the line routed to it
+// from its kernel side, then idle waits, then a device wait as a driver
+// inside a syscall would make one.
+enum DevicePhase : u32
+{
+    device_none,
+    device_user,
+    device_user_done,
+    device_idle,
+    device_wait,
+    device_woken,
+};
+constinit std::atomic<u32> device_phase{};
+constinit std::atomic<bool> device_raise{}, device_stop{};
+constinit std::atomic<u32> device_traps{}, device_other{};
+constinit interrupt::IrqLine uart_line{};
+native::AddressSpace device_space{};
+
+void secondary_devices()
+{
+    while (device_phase.load(std::memory_order_acquire) != device_user)
+        ok::arch::smp::wait_local();
+    auto frame = native::initial_frame(code_va, native::user_end);
+    while (!device_stop.load(std::memory_order_acquire))
+    {
+        const auto next = native::enter(device_space, frame);
+        if (!next)
+        {
+            device_other.fetch_add(1, std::memory_order_relaxed);
+            break;
+        }
+        const auto &trap = next.value();
+        if (trap.kind == native::TrapKind::interrupt && trap.vector == ioapic::vector_base + uart_line)
+            device_traps.fetch_add(1, std::memory_order_relaxed);
+        else if (trap.kind != native::TrapKind::syscall && trap.kind != native::TrapKind::timer &&
+                 trap.kind != native::TrapKind::interrupt)
+            device_other.fetch_add(1, std::memory_order_relaxed);
+        if (device_raise.exchange(false, std::memory_order_acq_rel))
+        {
+            // Long enough for the boot CPU to halt in its wait first. The
+            // line reaches this CPU at its next user entry.
+            static_cast<void>(wait_for([] { return false; }, 2'000'000));
+            raise_uart_line();
+        }
+    }
+    device_phase.store(device_user_done, std::memory_order_release);
+    // One device wait each time the boot CPU asks for one.
+    for (;;)
+    {
+        while (device_phase.load(std::memory_order_acquire) != device_wait)
+            ok::arch::smp::wait_local();
+        while (!interrupt::platform_irq_pending())
+            if (!interrupt::wait_for_interrupt())
+            {
+                device_other.fetch_add(1, std::memory_order_relaxed);
+                break;
+            }
+        device_phase.store(device_woken, std::memory_order_release);
+    }
+}
+
+// Whether the top half that ended a wait also sent its IPI: the target took
+// it (it may still be pending while the target runs masked, so `serve` opens
+// interrupt windows meanwhile), or the sender sent none because the target
+// was between two waits then, which is no lost wake (a waiter checks for
+// pending lines after it publishes itself). The caller then tries again.
+enum class WakeIpi
+{
+    received,
+    not_sent,
+};
+template <typename Serve>
+WakeIpi wake_ipi(const ok::smp::CpuRecord &target, uptr received, const ok::smp::CpuRecord &sender, uptr sent,
+                 Serve serve)
+{
+    if (wait_for(
+            [&] {
+                serve();
+                return target.ipis_received.load(std::memory_order_acquire) != received;
+            },
+            50'000'000))
+        return WakeIpi::received;
+    require(sender.ipis_sent.load(std::memory_order_acquire) == sent, "a wake IPI was sent but never taken");
+    return WakeIpi::not_sent;
+}
+constexpr usize wake_attempts = 8;
+
+// The interrupt service on the I/O APIC the MADT describes: the 8259 pair and
+// LINT0 masked, the PIT on its GSI to the boot CPU, the COM1 line delivered to
+// whichever CPU it is routed to. With a secondary CPU online the line reaches
+// it in ring 3 and in its idle wait, and a top half on the boot CPU ends the
+// secondary's device wait with an IPI.
+void check_device_interrupts()
+{
+    const bool secondary = secondary_phase.load(std::memory_order_acquire) == secondary_done;
+    ok::smp::detail::ipi_wake = []() noexcept { ok_interrupt_wake(); };
+    require(interrupt::start_platform_irqs().ok() && ioapic::active(), "interrupt service on the I/O APIC");
+    const auto line = interrupt::isa_irq_line(uart_irq, interrupt::IrqTrigger::edge);
+    require(line.ok() && line.value().line == ioapic::firmware.isa_irq(uart_irq).gsi, "COM1 GSI from the MADT");
+    uart_line = line.value().line;
+    require(interrupt::bind_platform_irq(uart_line, line.value().trigger, uart_service, nullptr).ok() &&
+                interrupt::platform_irq_target(uart_line) == 0,
+            "bind the COM1 line");
+
+    // The boot CPU halts in its interrupt wait and takes the line there.
+    raise_uart_line();
+    while (!interrupt::platform_irq_pending())
+        require(interrupt::wait_for_interrupt(), "boot CPU interrupt wait");
+    require(delivered_on(0) == 1 && interrupt::drain_platform_irqs() == 1 && uart_serviced.load() == 1,
+            "the boot CPU's wait runs the I/O APIC line's top half");
+
+    // The PIT now preempts user code through its GSI.
+    const native::PageMapping mappings[] = {
+        {code_va, reinterpret_cast<uptr>(code), native::page_read | native::page_execute},
+        {data_va, reinterpret_cast<uptr>(data_a), native::page_read | native::page_write},
+        {stack_va, reinterpret_cast<uptr>(stack_a), native::page_read | native::page_write},
+    };
+    auto boot_result = native::create_space(mappings);
+    require(boot_result.ok(), "create the I/O APIC test space");
+    auto boot_space = boot_result.value();
+    auto frame = native::initial_frame(code_va, native::user_end);
+    native::Trap tick{};
+    for (usize attempt = 0; attempt < 16 && tick.kind != native::TrapKind::timer; ++attempt)
+    {
+        const auto next = native::enter(boot_space, frame);
+        require(next.ok(), "enter for the PIT check");
+        tick = next.value();
+    }
+    require(tick.kind == native::TrapKind::timer && tick.vector == ioapic::vector_base + ioapic::tick_gsi &&
+                ioapic::tick_gsi == ioapic::firmware.isa_irq(0).gsi,
+            "the PIT preempts user code on its GSI");
+    require(native::destroy_space(boot_space).ok(), "release the I/O APIC test space");
+    print("OK_NATIVE_IOAPIC scope=hardware boot_wait=pass pit_gsi=pass uart_gsi=pass\n");
+    if (!secondary)
+        return;
+
+    const native::PageMapping secondary_mappings[] = {
+        {code_va, reinterpret_cast<uptr>(code), native::page_read | native::page_execute},
+        {data_va, reinterpret_cast<uptr>(data_c), native::page_read | native::page_write},
+        {stack_va, reinterpret_cast<uptr>(stack_c), native::page_read | native::page_write},
+    };
+    auto secondary_result_space = native::create_space(secondary_mappings);
+    require(secondary_result_space.ok(), "create the secondary device space");
+    device_space = secondary_result_space.value();
+    auto &boot = ok::smp::cpu_record(0);
+    auto &record = ok::smp::cpu_record(1);
+
+    // CPU 1's user trap takes the line routed to it and runs the top half,
+    // whose IPI ends the boot CPU's interrupt wait; the boot CPU drains.
+    require(interrupt::retarget_platform_irq(uart_line, 1).ok() && interrupt::platform_irq_target(uart_line) == 1,
+            "route the COM1 line to CPU 1");
+    device_phase.store(device_user, std::memory_order_release);
+    u32 serviced = 1;
+    for (usize attempt = 1;; ++attempt)
+    {
+        const auto boot_ipis = boot.ipis_received.load();
+        const auto sent = record.ipis_sent.load();
+        device_raise.store(true, std::memory_order_release);
+        while (!interrupt::platform_irq_pending())
+            require(interrupt::wait_for_interrupt(), "boot CPU interrupt wait");
+        require(wait_for([&] { return device_traps.load() == attempt; }, 2'000'000'000) &&
+                    delivered_on(1) == attempt && delivered_on(0) == 1,
+                "CPU 1's user trap runs the top half");
+        const auto woken = wake_ipi(boot, boot_ipis, record, sent, [] { interrupt::serve_local_interrupts(); });
+        require(interrupt::drain_platform_irqs() == 1 && uart_serviced.load() == ++serviced &&
+                    !interrupt::platform_irq_pending(),
+                "the boot CPU drains CPU 1's line");
+        if (woken == WakeIpi::received)
+            break;
+        require(attempt < wake_attempts, "the top half wakes the boot CPU with an IPI");
+    }
+    device_stop.store(true, std::memory_order_release);
+    require(wait_for([] { return device_phase.load(std::memory_order_acquire) == device_user_done; },
+                     2'000'000'000) &&
+                device_other.load() == 0,
+            "CPU 1 left ring 3");
+
+    // CPU 1's idle wait takes the line and runs the top half.
+    device_phase.store(device_idle, std::memory_order_release);
+    const auto secondary_delivered = delivered_on(1);
+    raise_uart_line();
+    while (!interrupt::platform_irq_pending())
+        require(interrupt::wait_for_interrupt(), "boot CPU interrupt wait");
+    require(delivered_on(1) == secondary_delivered + 1 && delivered_on(0) == 1 &&
+                interrupt::drain_platform_irqs() == 1 && uart_serviced.load() == ++serviced,
+            "CPU 1's idle wait runs the top half");
+
+    // CPU 1 waits for a device the way a driver inside a syscall does. The
+    // line now goes to the boot CPU, which takes it with interrupts masked
+    // (as a CPU spinning for the kernel lock does); its top half ends CPU 1's
+    // wait with an IPI.
+    require(interrupt::retarget_platform_irq(uart_line, 0).ok() && interrupt::platform_irq_target(uart_line) == 0,
+            "route the COM1 line back to the boot CPU");
+    for (usize attempt = 1;; ++attempt)
+    {
+        const auto waits = interrupt::platform_irq_cpu_statistics(1).waits;
+        const auto secondary_ipis = record.ipis_received.load();
+        const auto sent = boot.ipis_sent.load();
+        device_phase.store(device_wait, std::memory_order_release);
+        require(wait_for([&] { return interrupt::platform_irq_cpu_statistics(1).waits != waits; }, 2'000'000'000),
+                "CPU 1 halts in its device wait");
+        raise_uart_line();
+        require(wait_for(
+                    [&] {
+                        interrupt::serve_local_interrupts();
+                        return delivered_on(0) == 1 + attempt;
+                    },
+                    2'000'000'000),
+                "the boot CPU serves the line while spinning");
+        require(wait_for([] { return device_phase.load(std::memory_order_acquire) == device_woken; },
+                         2'000'000'000) &&
+                    device_other.load() == 0,
+                "the boot CPU's top half ends CPU 1's device wait");
+        // CPU 1 takes an IPI still pending in its next wait_local().
+        const auto woken = wake_ipi(record, secondary_ipis, boot, sent, [] {});
+        require(interrupt::drain_platform_irqs() == 1 && uart_serviced.load() == ++serviced &&
+                    delivered_on(1) == secondary_delivered + 1,
+                "drain after the secondary device wait");
+        if (woken == WakeIpi::received)
+            break;
+        require(attempt < wake_attempts, "the boot CPU's top half ends CPU 1's device wait with an IPI");
+    }
+    print("OK_NATIVE_IOAPIC scope=hardware cpus=2 user_top_half=pass wake_ipi=pass idle_top_half=pass "
+          "secondary_device_wait=pass spin_serve=pass\n");
+}
+
 void check_fault(native::AddressSpace &space, const u8 *entry, native::TrapKind kind, uptr address, uptr error_mask)
 {
     auto frame = native::initial_frame(code_va + static_cast<uptr>(entry - ok_native_user_begin), native::user_end);
@@ -408,6 +658,8 @@ extern "C" [[noreturn]] void ok_smp_secondary_main(ok::smp::CpuId cpu)
     secondary_run();
     if (secondary_phase.load(std::memory_order_acquire) != secondary_done)
         secondary_phase.store(secondary_failed, std::memory_order_release);
+    else
+        secondary_devices();
     for (;;)
         ok::arch::smp::wait_local();
 }
@@ -569,6 +821,7 @@ extern "C" [[noreturn]] void kernel_main()
     require(native::destroy_space(dense_space).ok(), "retire remapped dense table");
     print("OK_NATIVE_DENSE none=pass unmap=pass remap=pass failure=pass\n");
     check_secondary_cpu();
+    check_device_interrupts();
     print("OK_NATIVE_TEST_PASS scope=hardware architecture=x86_64\n");
     finish(true);
 }

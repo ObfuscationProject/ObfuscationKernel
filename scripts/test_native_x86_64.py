@@ -29,8 +29,8 @@ def main() -> int:
     flags = ["-std=c++23", "-O2", "-mno-red-zone", "-ffreestanding", "-fno-builtin", "-fno-exceptions",
              "-fno-stack-protector", "-fno-use-cxa-atexit", "-fno-threadsafe-statics", "-fno-pic", "-fno-pie",
              "-Wall", "-Wextra", "-Werror", "-I", str(project / "include")]
-    # The backend and the secondary-CPU start path read per-CPU state as in the
-    # kernel; the interrupt service stays in its model configuration.
+    # The backend, the secondary-CPU start path and the interrupt service (on
+    # the I/O APIC) run as in the kernel.
     kernel = ["-DOK_KERNEL_FREESTANDING", "-DOK_ARCH_TARGET_X86_64"]
     objects = []
     for name, source in (("boot", "src/arch/x86_64/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/x86_64/execution.cpp"), ("irq", "src/interrupt/platform_irq.cpp"),
@@ -41,7 +41,7 @@ def main() -> int:
                          ("test", "tests/native/x86_64_execution_test.cpp")):
         target = out / (name + ".o")
         command = [gxx, *flags] if source.endswith(".cpp") else [gcc]
-        if name in ("execution", "ops", "smp", "clock", "acpi", "test"):
+        if name in ("execution", "ops", "smp", "clock", "acpi", "irq", "test"):
             command += kernel
         source_path = project / source
         if name == "boot" and args.poison_bootstrap_tables:
@@ -89,6 +89,10 @@ def main() -> int:
         raise RuntimeError("native hardware test did not run its TLB tag churn")
     if args.smp > 1 and "OK_NATIVE_SMP scope=hardware cpus=2 " not in output:
         raise RuntimeError("native hardware test did not run user code on a secondary CPU")
+    if "OK_NATIVE_IOAPIC scope=hardware boot_wait=pass" not in output:
+        raise RuntimeError("native hardware test did not take a device line through the I/O APIC")
+    if args.smp > 1 and "OK_NATIVE_IOAPIC scope=hardware cpus=2 " not in output:
+        raise RuntimeError("native hardware test did not deliver a device line to a secondary CPU")
     return 0
 
 

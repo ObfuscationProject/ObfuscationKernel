@@ -1,6 +1,7 @@
 #include "ok/arch/smp.hpp"
 
 #include "cpu_local.hpp"
+#include "ioapic.hpp"
 #include "lapic.hpp"
 #include "ok/arch/clock.hpp"
 #include "ok/boot/acpi.hpp"
@@ -36,9 +37,6 @@ constexpr u32 delivery_init_assert = 0xc500;
 constexpr u32 delivery_init_deassert = 0x8500;
 constexpr u32 delivery_startup = 0x0600;
 constexpr u32 delivery_fixed = 0x4000;
-constexpr u32 delivery_extint = 0x700;
-constexpr u32 delivery_nmi = 0x400;
-constexpr u32 apic_software_enable = 0x100;
 constexpr u32 timer_divide_16 = 0x3;
 
 // smp.S's parameter block.
@@ -138,14 +136,15 @@ Status calibrate_timer()
     return Status::success();
 }
 
-// A secondary takes only its periodic local timer and IPIs.
+// A secondary takes its periodic local timer, IPIs and the I/O APIC lines
+// routed to it; never the 8259's ExtINT.
 void prepare_secondary_apic() noexcept
 {
     lapic::reg(lapic::task_priority) = 0;
-    lapic::reg(lapic::lvt_lint0) = lapic::lvt_masked | delivery_extint;
-    lapic::reg(lapic::lvt_lint1) = lapic::lvt_masked | delivery_nmi;
+    lapic::reg(lapic::lvt_lint0) = lapic::lvt_masked | lapic::delivery_extint;
+    lapic::reg(lapic::lvt_lint1) = lapic::lvt_masked | lapic::delivery_nmi;
     lapic::reg(lapic::lvt_error) = lapic::lvt_masked;
-    lapic::reg(lapic::spurious) = apic_software_enable | lapic::spurious_vector;
+    lapic::reg(lapic::spurious) = lapic::software_enable | lapic::spurious_vector;
     lapic::reg(lapic::timer_divide) = timer_divide_16;
     lapic::reg(lapic::lvt_timer) = lapic::timer_periodic | lapic::timer_vector;
     lapic::reg(lapic::timer_initial) = lapic::timer_period;
@@ -485,14 +484,23 @@ Status discover(boot::CpuTopologyMap &map)
     if (!boot::find_acpi_rsdp(reader, rsdp))
         return up("acpi-absent");
     boot::CpuTopologyMap parsed{};
-    if (auto status = boot::parse_acpi_madt(reader, rsdp, parsed); !status)
+    boot::MadtInterrupts interrupts{};
+    if (auto status = boot::parse_acpi_madt(reader, rsdp, parsed, &interrupts); !status)
         return status;
+    // Only the xAPIC page boot.S maps can start and interrupt CPUs, and only
+    // then can the interrupt service route through the I/O APIC, on
+    // uniprocessor boots too.
+    const u64 apic_base = read_msr(0x1b);
+    const bool xapic = parsed.local_apic_address == lapic::base && (apic_base & ~u64{0xfff}) == lapic::base &&
+                       (apic_base & (u64{1} << 11)) != 0 && (apic_base & (u64{1} << 10)) == 0;
+    if (xapic)
+    {
+        x86::ioapic::firmware = interrupts;
+        x86::ioapic::described = true;
+    }
     if (parsed.method != boot::CpuStartMethod::x86_sipi)
         return up(parsed.up_reason.empty() ? std::string_view{"single-cpu"} : parsed.up_reason);
-    // Only the xAPIC page boot.S maps can start and interrupt CPUs.
-    const u64 apic_base = read_msr(0x1b);
-    if (parsed.local_apic_address != lapic::base || (apic_base & ~u64{0xfff}) != lapic::base ||
-        (apic_base & (u64{1} << 11)) == 0 || (apic_base & (u64{1} << 10)) != 0)
+    if (!xapic)
         return up("xapic-unavailable");
     for (usize i = 0; i < parsed.count; ++i)
         if (parsed.cpus[i].enabled && parsed.cpus[i].hardware_id > 0xfe)
@@ -514,14 +522,15 @@ Status prepare_boot_cpu(const boot::CpuTopologyMap &)
 {
     execution::x86::ok_x86_cpu_locals[0].apic_id = current_hardware_id();
     boot_tsc_features = tsc_features();
-    // The 8259 keeps delivering through LINT0 as ExtINT, which needs no local
-    // APIC EOI, so the PIT tick and device lines stay on this CPU.
+    // Until the interrupt service switches to the I/O APIC, the 8259 keeps
+    // delivering the PIT tick and device lines to this CPU through LINT0 as
+    // ExtINT, which needs no local APIC EOI.
     lapic::reg(lapic::task_priority) = 0;
     lapic::reg(lapic::lvt_timer) = lapic::lvt_masked | lapic::timer_vector;
     lapic::reg(lapic::lvt_error) = lapic::lvt_masked;
-    lapic::reg(lapic::lvt_lint0) = delivery_extint;
-    lapic::reg(lapic::lvt_lint1) = delivery_nmi;
-    lapic::reg(lapic::spurious) = apic_software_enable | lapic::spurious_vector;
+    lapic::reg(lapic::lvt_lint0) = lapic::delivery_extint;
+    lapic::reg(lapic::lvt_lint1) = lapic::delivery_nmi;
+    lapic::reg(lapic::spurious) = lapic::software_enable | lapic::spurious_vector;
     return calibrate_timer();
 }
 

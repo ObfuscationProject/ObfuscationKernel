@@ -272,6 +272,32 @@ static CpuTopologyMap poisoned()
     return map;
 }
 
+static boot::MadtInterrupts poisoned_interrupts()
+{
+    boot::MadtInterrupts interrupts{};
+    interrupts.io_apic_count = 1;
+    interrupts.io_apics[0] = {7, 0x1234000, 99};
+    interrupts.overridden[3] = true;
+    interrupts.isa[3] = {44, true, true};
+    interrupts.truncated = true;
+    return interrupts;
+}
+
+static bool same(const boot::MadtInterrupts &a, const boot::MadtInterrupts &b)
+{
+    if (a.io_apic_count != b.io_apic_count || a.pcat_compat != b.pcat_compat || a.truncated != b.truncated)
+        return false;
+    for (usize i = 0; i < a.io_apics.size(); ++i)
+        if (a.io_apics[i].id != b.io_apics[i].id || a.io_apics[i].address != b.io_apics[i].address ||
+            a.io_apics[i].gsi_base != b.io_apics[i].gsi_base)
+            return false;
+    for (usize i = 0; i < a.isa.size(); ++i)
+        if (a.overridden[i] != b.overridden[i] || a.isa[i].gsi != b.isa[i].gsi || a.isa[i].level != b.isa[i].level ||
+            a.isa[i].active_low != b.isa[i].active_low)
+            return false;
+    return true;
+}
+
 static bool same(const CpuTopologyMap &a, const CpuTopologyMap &b)
 {
     if (a.count != b.count || a.boot_index != b.boot_index || a.boot_known != b.boot_known || a.method != b.method ||
@@ -634,11 +660,40 @@ static void x2apic(Bytes &out, u32 id, u32 flags, u32 uid)
     le(out, flags, 4);
     le(out, uid, 4);
 }
-static Bytes madt(const Bytes &entries, u32 local_apic = 0xfee00000)
+static void io_apic(Bytes &out, u8 id, u32 address, u32 gsi_base)
+{
+    le(out, 1, 1);
+    le(out, 12, 1);
+    le(out, id, 1);
+    le(out, 0, 1);
+    le(out, address, 4);
+    le(out, gsi_base, 4);
+}
+static void source_override(Bytes &out, u8 source, u32 gsi, u16 flags, u8 bus = 0)
+{
+    le(out, 2, 1);
+    le(out, 10, 1);
+    le(out, bus, 1);
+    le(out, source, 1);
+    le(out, gsi, 4);
+    le(out, flags, 2);
+}
+// What QEMU's pc machine describes: one I/O APIC at 0xfec00000 from GSI 0,
+// the PIT's IRQ 0 on GSI 2, and the PCI-routable ISA IRQs level active high.
+static Bytes qemu_pc_interrupts()
+{
+    Bytes entries;
+    io_apic(entries, 0, 0xfec00000, 0);
+    source_override(entries, 0, 2, 0);
+    for (u8 irq : {5, 9, 10, 11})
+        source_override(entries, irq, irq, 0xd);
+    return entries;
+}
+static Bytes madt(const Bytes &entries, u32 local_apic = 0xfee00000, u32 flags = 1)
 {
     Bytes body;
     le(body, local_apic, 4);
-    le(body, 1, 4); // PCAT_COMPAT
+    le(body, flags, 4); // PCAT_COMPAT
     body.insert(body.end(), entries.begin(), entries.end());
     return sdt("APIC", body);
 }
@@ -697,7 +752,10 @@ static void acpi_fails(Memory &memory, u64 rsdp_address, StatusCode expected)
     ++acpi_cases;
     auto map = poisoned();
     const auto before = map;
-    const auto status = boot::parse_acpi_madt(memory.reader(), rsdp_address, map);
+    auto interrupts = poisoned_interrupts();
+    const auto interrupts_before = interrupts;
+    const auto status = boot::parse_acpi_madt(memory.reader(), rsdp_address, map, &interrupts);
+    assert(same(interrupts, interrupts_before));
     if (status || status.code() != expected)
         std::fprintf(stderr, "ACPI expected code %u, got %u (%.*s)\n", static_cast<unsigned>(expected),
                      static_cast<unsigned>(status.code()), static_cast<int>(status.message().size()),
@@ -943,6 +1001,103 @@ static void acpi_checks()
         acpi_fails(memory, at, StatusCode::fault);
     }
 
+    // I/O APICs and interrupt source overrides.
+    {
+        Bytes entries = enabled_lapics(2);
+        const auto described = qemu_pc_interrupts();
+        entries.insert(entries.end(), described.begin(), described.end());
+        memory = with_root(good_root, madt(entries));
+        boot::MadtInterrupts interrupts = poisoned_interrupts();
+        CpuTopologyMap parsed{};
+        assert(boot::parse_acpi_madt(memory.reader(), at, parsed, &interrupts) && parsed.count == 2);
+        ++acpi_cases;
+        assert(interrupts.io_apic_count == 1 && interrupts.io_apics[0].address == 0xfec00000 &&
+               interrupts.io_apics[0].id == 0 && interrupts.io_apics[0].gsi_base == 0);
+        assert(interrupts.pcat_compat && !interrupts.truncated);
+        // IRQ 0 moved to GSI 2 and conforms (edge, active high); 10 is level
+        // active high; 4 has no override and keeps its number.
+        const auto pit = interrupts.isa_irq(0);
+        assert(pit.gsi == 2 && !pit.level && !pit.active_low);
+        const auto pci = interrupts.isa_irq(10);
+        assert(pci.gsi == 10 && pci.level && !pci.active_low);
+        const auto uart = interrupts.isa_irq(4);
+        assert(uart.gsi == 4 && !uart.level && !uart.active_low && !interrupts.overridden[4]);
+        // By GSI: 2 is the PIT's, 11 the override's, 4 the ISA default, and a
+        // GSI no ISA IRQ reaches is a PCI line, level active low.
+        assert(interrupts.gsi(2).gsi == 2 && !interrupts.gsi(2).level);
+        assert(interrupts.gsi(11).level && !interrupts.gsi(11).active_low);
+        assert(!interrupts.gsi(4).level && !interrupts.gsi(4).active_low);
+        assert(interrupts.gsi(0).level && interrupts.gsi(0).active_low);
+        assert(interrupts.gsi(20).level && interrupts.gsi(20).active_low && interrupts.gsi(20).gsi == 20);
+        // Without the pointer the CPU map is the same.
+        CpuTopologyMap plain{};
+        assert(boot::parse_acpi_madt(memory.reader(), at, plain) && same(plain, parsed));
+        ++acpi_cases;
+
+        // Explicit flags, no 8259 pair, and more I/O APICs than are recorded.
+        Bytes more = enabled_lapics(1);
+        source_override(more, 9, 21, 0x7); // Active low (3), edge (1).
+        for (u8 id = 0; id < boot::MadtInterrupts::max_io_apics + 1; ++id)
+            io_apic(more, id, 0xfec00000 + 0x1000 * id, 24 * id);
+        memory = with_root(good_root, madt(more, 0xfee00000, 0));
+        interrupts = {};
+        assert(boot::parse_acpi_madt(memory.reader(), at, parsed, &interrupts));
+        ++acpi_cases;
+        assert(interrupts.truncated && interrupts.io_apic_count == boot::MadtInterrupts::max_io_apics);
+        assert(interrupts.io_apics[3].gsi_base == 72 && !interrupts.pcat_compat);
+        assert(interrupts.isa_irq(9).gsi == 21 && !interrupts.isa_irq(9).level && interrupts.isa_irq(9).active_low);
+        assert(interrupts.gsi(21).active_low && !interrupts.gsi(21).level);
+        // GSI 9 no longer carries ISA IRQ 9: it is a PCI line.
+        assert(interrupts.gsi(9).level && interrupts.gsi(9).active_low);
+    }
+    auto interrupt_variant = [&](auto &&add) {
+        Bytes entries = enabled_lapics(2);
+        add(entries);
+        return with_root(good_root, madt(entries));
+    };
+    memory = interrupt_variant([](Bytes &t) {
+        io_apic(t, 0, 0xfec00000, 0);
+        t[t.size() - 11] = std::byte{11};
+        t.pop_back();
+    });
+    acpi_fails(memory, at, StatusCode::invalid_argument); // Short I/O APIC entry.
+    memory = interrupt_variant([](Bytes &t) { io_apic(t, 0, 0, 0); });
+    acpi_fails(memory, at, StatusCode::invalid_argument); // I/O APIC without an address.
+    memory = interrupt_variant([](Bytes &t) {
+        io_apic(t, 0, 0xfec00000, 0);
+        io_apic(t, 0, 0xfec01000, 24);
+    });
+    acpi_fails(memory, at, StatusCode::invalid_argument); // Duplicate I/O APIC id.
+    memory = interrupt_variant([](Bytes &t) {
+        io_apic(t, 0, 0xfec00000, 0);
+        io_apic(t, 1, 0xfec00000, 24);
+    });
+    acpi_fails(memory, at, StatusCode::invalid_argument); // Duplicate I/O APIC address.
+    memory = interrupt_variant([](Bytes &t) {
+        source_override(t, 0, 2, 0);
+        t[t.size() - 9] = std::byte{9};
+        t.pop_back();
+    });
+    acpi_fails(memory, at, StatusCode::invalid_argument); // Short override.
+    memory = interrupt_variant([](Bytes &t) { source_override(t, 0, 2, 0, 1); });
+    acpi_fails(memory, at, StatusCode::invalid_argument); // Not the ISA bus.
+    memory = interrupt_variant([](Bytes &t) { source_override(t, 16, 16, 0); });
+    acpi_fails(memory, at, StatusCode::invalid_argument); // No ISA IRQ.
+    memory = interrupt_variant([](Bytes &t) { source_override(t, 9, 9, 0x2); });
+    acpi_fails(memory, at, StatusCode::invalid_argument); // Reserved polarity.
+    memory = interrupt_variant([](Bytes &t) { source_override(t, 9, 9, 0x8); });
+    acpi_fails(memory, at, StatusCode::invalid_argument); // Reserved trigger mode.
+    memory = interrupt_variant([](Bytes &t) {
+        source_override(t, 9, 9, 0xd);
+        source_override(t, 9, 19, 0xd);
+    });
+    acpi_fails(memory, at, StatusCode::invalid_argument); // One IRQ overridden twice.
+    memory = interrupt_variant([](Bytes &t) {
+        source_override(t, 0, 2, 0);
+        source_override(t, 3, 2, 0);
+    });
+    acpi_fails(memory, at, StatusCode::invalid_argument); // Two IRQs onto one GSI.
+
     // No reader at all.
     CpuTopologyMap map_none{};
     assert(boot::find_acpi_rsdp({}, found).code() == StatusCode::not_found);
@@ -950,7 +1105,10 @@ static void acpi_checks()
     acpi_cases += 2;
 
     // Hostile bytes inside a checksummed MADT exercise entry parsing.
-    const auto base_madt = madt(enabled_lapics(4));
+    auto fuzz_entries = enabled_lapics(4);
+    const auto fuzz_interrupts = qemu_pc_interrupts();
+    fuzz_entries.insert(fuzz_entries.end(), fuzz_interrupts.begin(), fuzz_interrupts.end());
+    const auto base_madt = madt(fuzz_entries);
     u64 random = 0xacb1;
     for (unsigned i = 0; i < 10000; ++i)
     {
@@ -962,12 +1120,17 @@ static void acpi_checks()
         memory = with_root(good_root, table);
         auto result = poisoned();
         const auto before = result;
-        if (!boot::parse_acpi_madt(memory.reader(), at, result))
+        auto interrupts = poisoned_interrupts();
+        const auto interrupts_before = interrupts;
+        if (!boot::parse_acpi_madt(memory.reader(), at, result, &interrupts))
         {
-            assert(same(result, before));
+            assert(same(result, before) && same(interrupts, interrupts_before));
             continue;
         }
         assert(result.count && result.count <= result.cpus.size() && result.local_apic_address);
+        assert(interrupts.io_apic_count <= interrupts.io_apics.size());
+        for (usize j = 0; j < interrupts.io_apic_count; ++j)
+            assert(interrupts.io_apics[j].address != 0);
         assert(result.up_reason.empty() == (result.method != CpuStartMethod::none));
     }
 }

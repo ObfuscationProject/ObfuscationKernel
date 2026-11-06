@@ -4,8 +4,9 @@
 
 // The xAPIC register page. boot.S maps its 2 MiB uncached at the same virtual
 // address, and user spaces inherit that supervisor mapping, so the trap path
-// acknowledges on any translation. Only SMP bring-up enables the boot CPU's
-// local APIC; uniprocessor boots keep the 8259 and PIT alone.
+// acknowledges on any translation. SMP bring-up enables the boot CPU's local
+// APIC for IPIs; the interrupt service enables it on every boot that switches
+// to the I/O APIC (ioapic.hpp), and other boots keep the 8259 and PIT alone.
 namespace ok::arch::x86::lapic
 {
 
@@ -32,6 +33,9 @@ enum Register : u32
 };
 
 inline constexpr u32 lvt_masked = 1u << 16;
+inline constexpr u32 delivery_extint = 0x700;
+inline constexpr u32 delivery_nmi = 0x400;
+inline constexpr u32 software_enable = 0x100;
 inline constexpr u32 timer_periodic = 1u << 17;
 inline constexpr u32 delivery_pending = 1u << 12;
 

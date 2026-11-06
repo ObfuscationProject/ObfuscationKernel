@@ -1,4 +1,5 @@
 #include "cpu_local.hpp"
+#include "ioapic.hpp"
 #include "lapic.hpp"
 #include "ok/arch/execution_spaces.hpp"
 #include "ok/interrupt/platform.hpp"
@@ -13,6 +14,7 @@ using x86::this_cpu;
 namespace
 {
 namespace lapic = arch::x86::lapic;
+namespace ioapic = arch::x86::ioapic;
 constexpr u64 present = 1;
 constexpr u64 writable = 2;
 constexpr u64 user = 4;
@@ -109,7 +111,7 @@ extern "C" void ok_x86_trap_239();
 extern "C" void ok_x86_trap_240();
 extern "C" void ok_x86_trap_255();
 extern "C" void ok_x86_trap_unexpected();
-extern "C" const uptr ok_x86_execution_vectors[48];
+extern "C" const uptr ok_x86_execution_vectors[ioapic::vector_base + ioapic::max_lines];
 extern "C" void ok_platform_console_write_char(char);
 
 void outb(u16 port, u8 value)
@@ -182,23 +184,35 @@ u64 pit_tick_late()
     const u16 count = static_cast<u16>(low | (u16{inb(0x40)} << 8));
     return count != 0 && count <= pit_divisor ? pit_divisor - count : 0;
 }
-// Vector 32 is the PIT tick; 33..47 are platform lines whose top half the
-// interrupt service runs once it has started. Before that, only acknowledge.
-// The kernel takes interrupts only in the idle wait. The 8259 reaches the boot
-// CPU alone, and everything here is boot-CPU state.
+[[nodiscard]] bool platform_vector(uptr vector)
+{
+    return vector >= ioapic::vector_base && vector < ioapic::vector_base + ioapic::max_lines;
+}
+// Vectors 32..63 are platform lines (ioapic.hpp): the PIT tick, which reaches
+// the boot CPU only, and lines whose top half the interrupt service runs once
+// it has started; before that they are only acknowledged. The 8259 pair
+// completes at its own ports, the I/O APIC at this CPU's local APIC. The
+// kernel takes interrupts only in its explicit waits (halt_until_interrupt,
+// wait_local, serve_local_interrupts).
 void complete_irq(uptr vector, interrupt::TimerWake wake)
 {
-    if (vector < 32 || vector >= 48)
+    if (!platform_vector(vector))
         return;
-    if (vector == 32)
+    const bool apic = ioapic::active();
+    if (vector == ioapic::tick_vector())
     {
         interrupt::record_timer_latency(wake, pit_tick_late(), pit_frequency);
         ok_interrupt_tick();
     }
-    if (vector == 32 || !interrupt::platform_irqs_started())
-        acknowledge_irq(vector);
+    else if (interrupt::platform_irqs_started())
+    {
+        ok_interrupt_top_half(static_cast<interrupt::IrqLine>(vector - ioapic::vector_base));
+        return;
+    }
+    if (apic)
+        lapic::end_of_interrupt();
     else
-        ok_interrupt_top_half(static_cast<interrupt::IrqLine>(vector - 32));
+        acknowledge_irq(vector);
 }
 // The local APIC timer and IPIs, on whatever translation trapped. False for
 // any other vector.
@@ -407,7 +421,7 @@ Status initialize()
 
     for (usize i = 0; i < 256; ++i)
         install_gate(i, reinterpret_cast<uptr>(ok_x86_trap_unexpected));
-    for (usize i = 0; i < 48; ++i)
+    for (usize i = 0; i < ioapic::vector_base + ioapic::max_lines; ++i)
         install_gate(i, ok_x86_execution_vectors[i], i == 8 ? 1 : 0);
     install_gate(lapic::timer_vector, reinterpret_cast<uptr>(ok_x86_trap_239));
     install_gate(lapic::ipi_vector, reinterpret_cast<uptr>(ok_x86_trap_240));
@@ -661,7 +675,8 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     if (stack_top) cpu.tss.rsp[0] = stack_top;
     cpu.stack_top = cpu.tss.rsp[0];
     const auto old_root = read_cr3();
-    // The 8259 belongs to the boot CPU; secondaries take only local interrupts.
+    // Before the interrupt service starts, the 8259 delivers the tick alone, to
+    // the boot CPU; secondaries take only local interrupts then.
     const bool boot = cpu.logical == 0;
     const auto old_master = boot ? inb(0x21) : u8{};
     const auto old_slave = boot ? inb(0xa1) : u8{};
@@ -732,28 +747,34 @@ extern "C" void ok_x86_execution_trap(const SavedTrap *saved)
     if (saved->vector == 14)
         asm volatile("mov %%cr2, %0" : "=r"(fault_address));
     const auto vector = saved->vector;
-    cpu.last_trap = {vector == 256                                 ? TrapKind::syscall
-                     : vector == 32 || vector == lapic::timer_vector ? TrapKind::timer
-                     : vector == 14                                  ? TrapKind::page_fault
-                     : (vector > 32 && vector < 48) || vector == lapic::ipi_vector ||
-                             vector == lapic::spurious_vector
+    cpu.last_trap = {vector == 256                                                   ? TrapKind::syscall
+                     : vector == ioapic::tick_vector() || vector == lapic::timer_vector ? TrapKind::timer
+                     : vector == 14                                                    ? TrapKind::page_fault
+                     : platform_vector(vector) || vector == lapic::ipi_vector || vector == lapic::spurious_vector
                          ? TrapKind::interrupt
                          : TrapKind::exception,
                      static_cast<u32>(vector), saved->error, fault_address, reinterpret_cast<uptr>(saved)};
-    if (!complete_local(vector) && cpu.logical == 0)
+    // A device line routed to this CPU runs its top half here, on any CPU.
+    if (!complete_local(vector))
         complete_irq(vector, interrupt::TimerWake::user);
 }
 
+// Interrupts the kernel takes in its explicit waits, on any CPU: the tick,
+// device lines routed here, the local timer and IPIs. A secondary CPU's local
+// timer ends its interrupt wait, as an IPI does (receive_ipi()).
 extern "C" void ok_x86_execution_kernel_trap(const SavedTrap *saved)
 {
-    if (saved->vector >= 32 && saved->vector < 48)
+    if (platform_vector(saved->vector))
     {
-        if (this_cpu().logical == 0)
-            complete_irq(saved->vector, interrupt::TimerWake::idle);
+        complete_irq(saved->vector, interrupt::TimerWake::idle);
         return;
     }
     if (complete_local(saved->vector))
+    {
+        if (saved->vector == lapic::timer_vector)
+            ok_interrupt_wake();
         return;
+    }
     console("OK_NATIVE_KERNEL_FAULT vector=");
     console_hex(saved->vector);
     console(" pc=");

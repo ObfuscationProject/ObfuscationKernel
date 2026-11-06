@@ -1,10 +1,14 @@
 #include "ok/interrupt/platform.hpp"
+#include "isa_irq.hpp"
 #include "ok/arch/clock.hpp"
 #include "ok/smp/bringup.hpp"
 #include "ok/smp/cpu.hpp"
 #include "ok/smp/kernel_lock.hpp"
 
-#if defined(OK_KERNEL_FREESTANDING) && (defined(__x86_64__) || defined(__i386__))
+#if defined(OK_KERNEL_FREESTANDING) && defined(__x86_64__)
+#include "../arch/x86_64/ioapic.hpp"
+#define OK_PLATFORM_IRQ_WAIT 1
+#elif defined(OK_KERNEL_FREESTANDING) && defined(__i386__)
 #include "pic8259.hpp"
 #define OK_PLATFORM_IRQ_WAIT 1
 #elif defined(OK_KERNEL_FREESTANDING) && (defined(__arm__) || defined(__aarch64__))
@@ -33,7 +37,10 @@ namespace
 {
 // Static dispatch: each profile names its controller here. Profiles without a
 // controller driver keep the model chip and never idle on interrupts.
-#if defined(OK_PLATFORM_IRQ_WAIT) && (defined(__x86_64__) || defined(__i386__))
+#if defined(OK_PLATFORM_IRQ_WAIT) && defined(__x86_64__)
+// The I/O APIC, or the 8259 pair when the MADT describes none.
+using PlatformIrqChip = arch::x86::PcIrqChip;
+#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__i386__)
 using PlatformIrqChip = Pic8259<X86PortIo>;
 #elif defined(OK_PLATFORM_IRQ_WAIT) && (defined(__arm__) || defined(__aarch64__))
 using PlatformIrqChip = arch::arm::GicV2;
@@ -82,13 +89,19 @@ using PlatformIrqChip = arch::ppc::Mpic;
 using PlatformIrqChip = ModelIrqChip;
 #endif
 
-// Profiles whose device lines reach secondary CPUs, which therefore wait for
-// devices there too. x86_64 keeps the 8259 on CPU 0 for now.
+// Whether device lines reach secondary CPUs, which therefore wait for devices
+// there too: on aarch64 and rv64 always, on x86_64 once the interrupt service
+// routes through the I/O APIC (not with the 8259 fallback).
+[[nodiscard]] bool secondary_device_lines()
+{
 #if defined(OK_PLATFORM_IRQ_WAIT) && (defined(__aarch64__) || (defined(__riscv) && __riscv_xlen == 64))
-constexpr bool secondary_device_lines = true;
+    return true;
+#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__x86_64__)
+    return arch::x86::ioapic::active();
 #else
-constexpr bool secondary_device_lines = false;
+    return false;
 #endif
+}
 
 constinit PlatformIrqChip chip{};
 constinit IrqRouter<PlatformIrqChip> router{chip};
@@ -468,7 +481,7 @@ usize retarget_platform_irqs_away(smp::CpuId cpu)
 
 void serve_local_interrupts()
 {
-    if (!secondary_device_lines)
+    if (!secondary_device_lines())
         return;
 #if defined(OK_PLATFORM_IRQ_WAIT) && defined(__aarch64__)
     // ISR_EL1.I shows a pending IRQ whatever the mask, without touching the
@@ -500,6 +513,11 @@ void serve_local_interrupts()
             PlatformIrqChip::complete(acknowledge);
         }
     }
+#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__x86_64__)
+    // The local APIC holds what is pending for this CPU; a one-instruction
+    // interrupt window (STI's shadow covers the NOP) lets the kernel trap
+    // take it: device lines, IPIs, the local timer, the tick on CPU 0.
+    asm volatile("sti; nop; cli" : : : "memory");
 #elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__riscv) && __riscv_xlen == 64
     // mip shows the pending lines whatever mie and mstatus.MIE say.
     uptr pending;
@@ -520,7 +538,7 @@ void lock_kernel_serving_interrupts()
     auto &lock = smp::kernel_lock;
     // Only a CPU that may hold a line some kernel-lock holder waits for
     // needs to serve while it spins; lock() reports a self-deadlock.
-    if (!secondary_device_lines || smp::online_cpus() < 2 || lock.owned_by_current_cpu())
+    if (!secondary_device_lines() || smp::online_cpus() < 2 || lock.owned_by_current_cpu())
     {
         lock.lock();
         return;
@@ -591,7 +609,7 @@ bool wait_for_interrupt()
     // Where device lines reach CPU 0 only, a secondary CPU waiting for a
     // device (a driver inside a syscall, holding the kernel lock) polls.
     if (!platform_irqs_started() || !platform_irqs_supported() ||
-        (smp::current_cpu() != 0 && !secondary_device_lines))
+        (smp::current_cpu() != 0 && !secondary_device_lines()))
         return false;
     return wait_here(true);
 }
@@ -636,11 +654,22 @@ Result<PlatformLine> pci_intx_line(u8 device, u8 pin, u8 interrupt_line)
         return Status::invalid_argument("PCI interrupt pin or device out of range");
     const unsigned intx = pin - 1u;
 #if defined(OK_PLATFORM_IRQ_WAIT) && (defined(__x86_64__) || defined(__i386__))
-    // SeaBIOS routes the PIIX3 PIRQs and records the 8259 line in 0x3c.
+    // SeaBIOS routes the PIIX3 PIRQs and records the ISA IRQ in 0x3c; through
+    // the I/O APIC that IRQ arrives on the GSI its override names.
     static_cast<void>(device);
     static_cast<void>(intx);
     if (interrupt_line == 0 || interrupt_line >= 16 || interrupt_line == 2)
         return Status::not_found("firmware left the PCI interrupt line unrouted");
+#if defined(__x86_64__)
+    if (arch::x86::ioapic::active())
+    {
+        // A PCI interrupt is level-triggered unless an override says the bus
+        // delivers it otherwise.
+        const auto wiring = arch::x86::ioapic::firmware.isa_irq(interrupt_line);
+        const bool level = wiring.level || !arch::x86::ioapic::firmware.overridden[interrupt_line];
+        return PlatformLine{static_cast<IrqLine>(wiring.gsi), level ? IrqTrigger::level : IrqTrigger::edge};
+    }
+#endif
     return PlatformLine{interrupt_line, IrqTrigger::level};
 #elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__loongarch64)
     // GPEX swizzles INTx onto PCH-PIC inputs 16..19.
@@ -673,6 +702,25 @@ Result<PlatformLine> pci_intx_line(u8 device, u8 pin, u8 interrupt_line)
     return Status::not_found("no PCI interrupt routing on this platform");
 #endif
 }
+
+#if defined(OK_PLATFORM_IRQ_WAIT) && (defined(__x86_64__) || defined(__i386__))
+Result<PlatformLine> isa_irq_line(u8 irq, IrqTrigger trigger)
+{
+    if (irq >= 16 || irq == 0 || irq == 2)
+        return Status::invalid_argument("ISA IRQ is the tick, the cascade or out of range");
+#if defined(__x86_64__)
+    if (arch::x86::ioapic::active())
+    {
+        const auto &firmware = arch::x86::ioapic::firmware;
+        const auto wiring = firmware.isa_irq(irq);
+        if (firmware.overridden[irq])
+            trigger = wiring.level ? IrqTrigger::level : IrqTrigger::edge;
+        return PlatformLine{static_cast<IrqLine>(wiring.gsi), trigger};
+    }
+#endif
+    return PlatformLine{irq, trigger};
+}
+#endif
 
 namespace
 {
