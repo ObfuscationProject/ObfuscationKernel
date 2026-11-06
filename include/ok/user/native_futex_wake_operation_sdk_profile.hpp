@@ -31,6 +31,8 @@ inline constexpr usize native_futex_wake_operation_comparison_count = 6;
 inline constexpr usize native_futex_wake_operation_wake_passes = 2;
 inline constexpr usize native_futex_wake_operation_key_domains = 2;
 inline constexpr usize native_futex_wake_operation_nonpositive_wake_minimum = 1;
+// 1: atomic with respect to every CPU that can run user code on this profile
+// (a hardware RMW, or plain access on a profile that starts no secondary CPU).
 inline constexpr u32 native_futex_wake_operation_smp_atomic = 1;
 inline constexpr u32 native_futex_wake_operation_file_backed = 0;
 inline constexpr u32 native_futex_wake_operation_cross_process_clone_vm = 0;

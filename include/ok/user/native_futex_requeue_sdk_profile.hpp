@@ -34,6 +34,8 @@ inline constexpr u32 native_futex_requeue_same_key_sequence_preserved = 1;
 inline constexpr u32 native_futex_requeue_zero_wake_minimum = 0;
 inline constexpr u32 native_futex_requeue_signed_negative_counts_rejected = 1;
 inline constexpr u32 native_futex_requeue_transfer_pin_owners_retained = 1;
+// 1: the compare is atomic with respect to every CPU that can run user code
+// on this profile (a hardware load on every profile).
 inline constexpr u32 native_futex_requeue_smp_atomic = 1;
 inline constexpr u32 native_futex_requeue_priority_inheritance = 0;
 inline constexpr u32 native_futex_requeue_realtime_priority = 0;

@@ -20,9 +20,11 @@ namespace ok::user::native
 // A 32-bit compare-exchange is inline on every profile except i386, which has
 // no CMPXCHG and runs UP: there kernel code with interrupts masked is
 // indivisible against user code, so plain aligned loads and stores suffice.
+// The SDK's smp_atomic = 1 relies on this; a profile that starts secondary
+// CPUs (OK_ARCH_SMP_START) must have the hardware operation.
 #if defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4)
 inline constexpr bool futex_word_hardware_atomic = true;
-#elif defined(OK_ARCH_TARGET_I386)
+#elif defined(OK_ARCH_TARGET_I386) && !defined(OK_ARCH_SMP_START)
 inline constexpr bool futex_word_hardware_atomic = false;
 #else
 #error "futex word operations need a 32-bit compare-exchange on a profile that may run SMP"

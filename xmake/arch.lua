@@ -219,7 +219,9 @@ function add_ok_arch_files()
         add_files(path.join(os.projectdir(), "src/arch", "execution_stub.cpp"))
     end
     -- Profiles that start secondary CPUs link their own smp.cpp (and smp.S).
+    -- OK_ARCH_SMP_START lets code that relies on a UP profile refuse to build.
     if os.isfile(path.join(os.projectdir(), "src/arch", spec.source, "smp.cpp")) then
+        add_defines("OK_ARCH_SMP_START")
         add_files(path.join(os.projectdir(), "src/arch", spec.source, "smp.cpp"))
         if os.isfile(path.join(os.projectdir(), "src/arch", spec.source, "smp.S")) then
             add_files(path.join(os.projectdir(), "src/arch", spec.source, "smp.S"))

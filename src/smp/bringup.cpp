@@ -229,10 +229,12 @@ extern "C" [[noreturn]] void ok_smp_secondary_main(ok::smp::CpuId cpu)
     auto starting = static_cast<ok::u8>(CpuState::starting);
     const bool admitted = record.state.compare_exchange_strong(starting, static_cast<ok::u8>(CpuState::online),
                                                                std::memory_order_acq_rel);
-#else
+#elif !defined(OK_ARCH_SMP_START)
     // i386 has no CMPXCHG and runs UP (smp_stub starts no secondary), so
     // this entry is unreachable there; it must still link.
     const bool admitted = false;
+#else
+#error "a profile that starts secondary CPUs needs a byte compare-exchange"
 #endif
     for (;;)
     {

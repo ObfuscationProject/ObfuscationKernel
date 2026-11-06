@@ -49,13 +49,15 @@ struct FutexRequeueRequest
 // Ordinary operations on shared anonymous backing use the allocator owner,
 // frame index, generation and aligned word offset, retained by a waiter pin.
 // File mappings and cross-process CLONE_VM need a separate backing-key service.
-// All admission/execution/completion remains serialized on the boot CPU.
+// Calls run on any CPU; the kernel lock serializes the futex queues, and WAIT
+// compares the user word with one atomic load under that lock.
 i64 futex(Kernel &kernel, sched::ProcessId pid, const FutexRequest &request, bool &complete);
-// Serialized read/modify/write followed by conditional wakes. This operation
-// registers no wait and is not an SMP atomic user-memory implementation.
+// One atomic read-modify-write of the second word, then conditional wakes.
+// This operation registers no wait.
 i64 futex_wake_operation(Kernel &kernel, sched::ProcessId pid, const FutexWakeOperationRequest &request);
-// Non-PI requeue retains the original WAIT continuation. Equal-priority ordering
-// is serialized on CPU0; Linux bucket collisions, RT priority and SMP are gaps.
+// Non-PI requeue retains the original WAIT continuation. CMP_REQUEUE compares
+// with one atomic load; the kernel lock orders equal-priority waiters. Linux
+// bucket collisions, PI and RT priority are gaps.
 i64 futex_requeue(Kernel &kernel, sched::ProcessId pid, const FutexRequeueRequest &request);
 inline i64 private_futex(Kernel &kernel, sched::ProcessId pid, const FutexRequest &request, bool &complete)
 {
