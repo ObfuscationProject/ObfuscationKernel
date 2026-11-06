@@ -97,10 +97,11 @@ class FutexWakeOperationSdkContract(unittest.TestCase):
                               ('wake_passes = 2', 'wake_passes = 1'),
                               ('key_domains = 2', 'key_domains = 3'),
                               ('nonpositive_wake_minimum = 1', 'nonpositive_wake_minimum = 0'),
-                              ('smp_atomic = 0', 'smp_atomic = 1'),
+                              ('smp_atomic = 1', 'smp_atomic = 0'),
                               ('file_backed = 0', 'file_backed = 1'),
                               ('cross_process_clone_vm = 0', 'cross_process_clone_vm = 1'),
-                              (PRODUCER.FUTEX_WAKE_OPERATION_PROFILE, 'smp-file-backed-full-posix-v1')):
+                              (PRODUCER.FUTEX_WAKE_OPERATION_PROFILE, 'smp-file-backed-full-posix-v1'),
+                              (PRODUCER.FUTEX_WAKE_OPERATION_PROFILE, 'bootcpu-serialized-two-key-private-anonymous-shared-signed-wrap-legacy-count-v1')):
             self.profile.write_text(PROFILE.replace(before, after))
             with self.subTest(before=before, after=after):
                 self.refused()

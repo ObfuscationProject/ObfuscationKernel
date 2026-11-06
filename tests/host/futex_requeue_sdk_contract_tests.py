@@ -104,12 +104,13 @@ class FutexRequeueSdkContract(unittest.TestCase):
                 ('native_futex_requeue_zero_wake_minimum = 0', 'native_futex_requeue_zero_wake_minimum = 1'),
                 ('native_futex_requeue_signed_negative_counts_rejected = 1', 'native_futex_requeue_signed_negative_counts_rejected = 2'),
                 ('native_futex_requeue_transfer_pin_owners_retained = 1', 'native_futex_requeue_transfer_pin_owners_retained = 2'),
-                ('native_futex_requeue_smp_atomic = 0', 'native_futex_requeue_smp_atomic = 1'),
+                ('native_futex_requeue_smp_atomic = 1', 'native_futex_requeue_smp_atomic = 0'),
                 ('native_futex_requeue_priority_inheritance = 0', 'native_futex_requeue_priority_inheritance = 1'),
                 ('native_futex_requeue_realtime_priority = 0', 'native_futex_requeue_realtime_priority = 1'),
                 ('native_futex_requeue_file_backed = 0', 'native_futex_requeue_file_backed = 1'),
                 ('native_futex_requeue_cross_process_clone_vm = 0', 'native_futex_requeue_cross_process_clone_vm = 1'),
-                (PRODUCER.FUTEX_REQUEUE_PROFILE, "smp-file-backed-full-posix-v1")):
+                (PRODUCER.FUTEX_REQUEUE_PROFILE, "smp-file-backed-full-posix-v1"),
+                (PRODUCER.FUTEX_REQUEUE_PROFILE, "bootcpu-nonpi-read-keys-signed-counts-exact-origin-ticket-sequence-owned-transfer-v1")):
             self.profile.write_text(PROFILE.replace(before, after))
             with self.subTest(before=before, after=after):
                 self.refused()
@@ -160,7 +161,7 @@ class FutexRequeueSdkContract(unittest.TestCase):
         path = fixture.sdk / name
         for source in (DECLARATIONS.replace('module_abi = 79', 'module_abi = 66'),
                        DECLARATIONS.replace('module_abi = 79', 'module_abi = 80'),
-                       DECLARATIONS.replace('native_futex_requeue_smp_atomic = 0', 'native_futex_requeue_smp_atomic = 1'),
+                       DECLARATIONS.replace('native_futex_requeue_smp_atomic = 1', 'native_futex_requeue_smp_atomic = 0'),
                        DECLARATIONS.replace('native_futex_requeue_transfer_pin_owners_retained = 1', 'native_futex_requeue_transfer_pin_owners_retained = 0'),
                        DECLARATIONS + DECLARATIONS):
             path.write_text(source)
