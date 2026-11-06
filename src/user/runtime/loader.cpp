@@ -1,5 +1,6 @@
 // ELF admission, the initial stack (argv/envp/auxv), image installation and exec.
 #include "private.hpp"
+#include <bit>
 
 namespace ok::user::native
 {
@@ -854,10 +855,6 @@ class VfsImageRetirement final : private NonCopyable
         }
         if (vfs_continuations.pending_count(pid_) != requests)
             return Status::fault("VFS image retirement found a request without its canonical old thread");
-        // Consume accepts a leader that receives a new lease only without a
-        // request; refuse that here, while exec can still be refused.
-        if (!records_[0].lease.pool && records_[0].handle.request)
-            return Status::fault("VFS image retirement found a leaseless leader request");
         requests_ = requests;
         prepared_ = true;
         return {};
@@ -1115,7 +1112,15 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     // Everything that can refuse the exec runs while sibling threads still run
     // on other CPUs. Evicting one discards its entry, so it would lose its user
     // progress if the exec then failed: after eviction only commits remain,
-    // and those fail only on an invariant breach, which stops the runtime.
+    // and those fail only on an invariant breach, which stops the runtime
+    // without resuming the caller's frame, so it receives no error.
+    const auto stop = [&](Status status) -> i64 {
+        static_cast<void>(image.value().retain_for_diagnosis());
+        runtime_failure = status;
+        started = false;
+        complete = false;
+        return 0;
+    };
     if (auto status = kernel.scheduler().preflight_replace_image(pid, context); !status)
         return error(status);
     EntryStackPlan entry_plan;
@@ -1126,20 +1131,21 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     if (auto status = prepare_eviction(pid, process->resources().native_space.root, old_threads, eviction); !status)
         return error(status);
     if (auto status = validate_evicted_leases(old_threads, eviction); !status) return error(status);
-    if (auto status = prepare_cancel_futex(pid); !status) return error(status);
-    if (auto status = prepare_native_udp_receives_for_exec(pid); !status) return error(status);
-    if (auto status = prepare_linux_udp_receives_for_exec(pid); !status) return error(status);
-    if (auto status = syscall_origins.preflight_prepare(entry_plan.leader().handle); !status)
-        return error(status);
+    // These predict retirement and install steps whose failure is an invariant
+    // breach that stops the runtime; finding it first stops it the same way.
+    if (auto status = prepare_cancel_futex(pid); !status) return stop(status);
+    if (auto status = prepare_native_udp_receives_for_exec(pid); !status) return stop(status);
+    if (auto status = prepare_linux_udp_receives_for_exec(pid); !status) return stop(status);
+    if (auto status = syscall_origins.preflight_prepare(entry_plan.leader().handle); !status) return stop(status);
+    if (auto status = vfs_continuations.preflight_prepare(entry_plan.leader().handle); !status) return stop(status);
     // The point of no return: siblings leave the other CPUs, and replacement
     // releases their leases.
-    if (auto status = commit_eviction(kernel, eviction); !status)
+    if (auto status = commit_eviction(kernel, eviction); !status) return stop(status);
+    // Only an exec that took other CPUs' entries over reports it (never on one CPU).
+    if (eviction.cpus)
     {
-        static_cast<void>(image.value().retain_for_diagnosis());
-        runtime_failure = status;
-        started = false;
-        complete = false;
-        return 0;
+        emit("OK_NATIVE_EXEC_EVICT pid="); emit_number(pid); emit(" tid="); emit_number(calling_tid);
+        emit(" evicted="); emit_number(static_cast<u64>(std::popcount(eviction.cpus))); emit("\n");
     }
     bool vfs_retired{};
     const auto replaced = commit_entry_stacks(entry_stacks, *process, entry_plan,
@@ -1180,11 +1186,7 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
             // The leases are back in their TCBs. Without an evicted sibling the
             // old image simply continues; an evicted one lost its entry.
             if (!eviction.cpus) return error(replaced.status);
-            static_cast<void>(image.value().retain_for_diagnosis());
-            runtime_failure = replaced.status;
-            started = false;
-            complete = false;
-            return 0;
+            return stop(replaced.status);
         }
         // Exec cannot return to the old image after scheduler commit. Keep
         // both VM generations and every unreleased lease for diagnosis.

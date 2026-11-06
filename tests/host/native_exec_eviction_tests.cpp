@@ -3,7 +3,31 @@
 // its runtime entry record, active lease and scheduler slot are set the way
 // enter_unlocked and the scheduler leave them; no second CPU executes.
 #define OK_SYSCALL_ORIGIN_MODEL 1
+#define OK_NATIVE_VFS_CONTINUATION_MODEL 1
 #include "native_clock_model.hpp"
+namespace ok::user::native
+{
+struct SyscallOriginTestAccess
+{
+    static u16 &borrows(SyscallOrigins &table, memory::KernelEntryStackHandle lease)
+    { return table.records_[lease.slot].linux_udp_borrows; }
+    static u64 &images(SyscallOrigins &table) { return table.image_sequence_; }
+};
+struct VfsStatContinuationTestAccess
+{
+    template <typename Table> static u64 &images(Table &table) { return table.images_; }
+};
+} // namespace ok::user::native
+namespace console
+{
+std::array<char, 4096> text{};
+usize size{};
+std::string_view view() { return {text.data(), size}; }
+} // namespace console
+extern "C" void ok_platform_console_write_char(char value)
+{
+    if (console::size < console::text.size()) console::text[console::size++] = value;
+}
 namespace
 {
 usize checks{};
@@ -99,8 +123,20 @@ i64 exec(Kernel &kernel, sched::ProcessId pid, sched::ThreadId caller, bool &com
 {
     EXPECT(kernel.scheduler().activate_thread(pid, caller)); EXPECT(kernel.posix().activate(pid));
     complete = true;
+    console::size = 0;
     return native::dispatch(kernel, pid, {OK_SYS_EXECVE, {path_address, 0, 0, 0, 0, 0}}, complete);
 }
+// The last exec reported taking another CPU's entry over, for exactly this caller.
+bool evict_reported(sched::ProcessId pid, sched::ThreadId caller)
+{
+    std::array<char, 96> line{};
+    const auto length = std::snprintf(line.data(), line.size(), "OK_NATIVE_EXEC_EVICT pid=%llu tid=%llu evicted=1\n",
+                                      static_cast<unsigned long long>(pid), static_cast<unsigned long long>(caller));
+    const std::string_view expected{line.data(), static_cast<usize>(length)};
+    const auto at = console::view().find(expected);
+    return at != std::string_view::npos && console::view().find("OK_NATIVE_EXEC_EVICT", at + 1) == std::string_view::npos;
+}
+bool nothing_reported() { return console::view().find("OK_NATIVE_EXEC_EVICT") == std::string_view::npos; }
 
 struct Snapshot
 {
@@ -118,7 +154,7 @@ Snapshot snapshot(Kernel &kernel, sched::ProcessId pid, sched::ThreadId tid)
             running.native_frame.pc, running.kernel_stack_top, running.on_cpu, native::entry_stacks.accounting()};
 }
 // Nothing of the thread another CPU runs, or of the group, changed.
-void untouched(Kernel &kernel, sched::ProcessId pid, sched::ThreadId tid, const Snapshot &before)
+void untouched(Kernel &kernel, sched::ProcessId pid, sched::ThreadId tid, const Snapshot &before, bool running = true)
 {
     const auto after = snapshot(kernel, pid, tid);
     EXPECT(native::same_space(after.space, before.space) && after.threads == before.threads);
@@ -129,7 +165,7 @@ void untouched(Kernel &kernel, sched::ProcessId pid, sched::ThreadId tid, const 
     EXPECT(native::entry_stacks.active_on(other_cpu) && after.stacks.active_slots == 1);
     EXPECT(after.stacks.leased_slots == before.stacks.leased_slots);
     EXPECT(after.stacks.reservations == before.stacks.reservations && after.stacks.quarantined_slots == 0);
-    EXPECT(native::runtime_status().ok() && native::started);
+    if (running) EXPECT(native::runtime_status().ok() && native::started);
 }
 
 void retire(Kernel &kernel, sched::ProcessId pid)
@@ -148,17 +184,17 @@ void refused_exec_keeps_sibling(Kernel &kernel)
     bool complete{};
     // Scheduler preflight: a prepared UNIX receive refuses exec.
     process(kernel, g.pid).resources().unix_receive_operations = 1;
-    EXPECT(exec(kernel, g.pid, g.pid, complete) < 0 && complete);
+    EXPECT(exec(kernel, g.pid, g.pid, complete) < 0 && complete && nothing_reported());
     process(kernel, g.pid).resources().unix_receive_operations = 0;
     untouched(kernel, g.pid, g.sibling, before);
     // Entry stack preparation: the caller's stack top disagrees with its lease.
     thread(kernel, g.pid, g.pid).kernel_stack_top ^= 16;
-    EXPECT(exec(kernel, g.pid, g.pid, complete) < 0 && complete);
+    EXPECT(exec(kernel, g.pid, g.pid, complete) < 0 && complete && nothing_reported());
     thread(kernel, g.pid, g.pid).kernel_stack_top ^= 16;
     untouched(kernel, g.pid, g.sibling, before);
     // Eviction preparation: a CPU entry that does not name the thread's lease.
     native::cpu_entries[other_cpu].lease.generation ^= 1;
-    EXPECT(exec(kernel, g.pid, g.pid, complete) < 0 && complete);
+    EXPECT(exec(kernel, g.pid, g.pid, complete) < 0 && complete && nothing_reported());
     native::cpu_entries[other_cpu].lease.generation ^= 1;
     untouched(kernel, g.pid, g.sibling, before);
     // The sibling's entry completes normally and the group exits as usual.
@@ -177,7 +213,7 @@ void exec_evicts_sibling(Kernel &kernel)
     run_elsewhere(kernel, g.pid, g.sibling);
     const auto stacks = native::entry_stacks.accounting();
     bool complete{};
-    EXPECT(exec(kernel, g.pid, g.pid, complete) == 0 && !complete);
+    EXPECT(exec(kernel, g.pid, g.pid, complete) == 0 && !complete && evict_reported(g.pid, g.pid));
     EXPECT(native::runtime_status().ok() && native::started);
     auto &p = process(kernel, g.pid);
     EXPECT(p.threads().size() == 1 && p.threads()[0].tid == g.pid && p.threads()[0].entry_stack == leader_lease);
@@ -199,7 +235,7 @@ void exec_evicts_leader(Kernel &kernel)
     const auto caller_lease = thread(kernel, g.pid, g.sibling).entry_stack;
     run_elsewhere(kernel, g.pid, g.pid);
     bool complete{};
-    EXPECT(exec(kernel, g.pid, g.sibling, complete) == 0 && !complete);
+    EXPECT(exec(kernel, g.pid, g.sibling, complete) == 0 && !complete && evict_reported(g.pid, g.sibling));
     EXPECT(native::runtime_status().ok() && native::started);
     auto &p = process(kernel, g.pid);
     EXPECT(p.threads().size() == 1 && p.threads()[0].tid == g.pid && p.threads()[0].entry_stack == leader_lease);
@@ -216,8 +252,116 @@ void exec_without_other_cpu(Kernel &kernel)
 {
     const auto g = create(kernel);
     bool complete{};
-    EXPECT(exec(kernel, g.pid, g.sibling, complete) == 0 && !complete);
+    EXPECT(exec(kernel, g.pid, g.sibling, complete) == 0 && !complete && nothing_reported());
     EXPECT(process(kernel, g.pid).threads().size() == 1 && native::cpu_entries[other_cpu].pid == 0);
+    retire(kernel, g.pid);
+}
+
+// The checks that predict a retirement or install step fail only on an
+// invariant breach. They stop the runtime as that step's failure did after the
+// scheduler commit: exec returns without writing the caller's frame. Nothing
+// was evicted or committed, so the sibling and the group are as they were.
+void expect_stopped(Kernel &kernel, sched::ProcessId pid, sched::ThreadId caller, bool elsewhere)
+{
+    const auto space = process(kernel, pid).resources().native_space;
+    const auto threads = process(kernel, pid).threads().size();
+    const auto pc = thread(kernel, pid, caller).native_frame.pc;
+    bool complete{};
+    EXPECT(exec(kernel, pid, caller, complete) == 0 && !complete && nothing_reported());
+    EXPECT(!native::runtime_status().ok() && !native::started);
+    EXPECT(native::same_space(process(kernel, pid).resources().native_space, space));
+    EXPECT(process(kernel, pid).threads().size() == threads && thread(kernel, pid, caller).native_frame.pc == pc);
+    EXPECT(native::cpu_entries[other_cpu].pid == (elsewhere ? pid : 0) && !native::cpu_entries[other_cpu].revoked);
+    native::runtime_failure = Status::success();
+    native::started = true;
+}
+void breach_before_eviction_stops(Kernel &kernel)
+{
+    const auto g = create(kernel);
+    thread(kernel, g.pid, g.sibling).native_frame.pc = hw::user_begin + 0x123;
+    run_elsewhere(kernel, g.pid, g.sibling);
+    const auto before = snapshot(kernel, g.pid, g.sibling);
+    const auto leader_lease = thread(kernel, g.pid, g.pid).entry_stack;
+    // A futex wait whose object no longer resolves (cancel_futex).
+    auto &futex = native::futex_waits.back();
+    futex = {g.pid, g.sibling, {&native::futex_objects, 0, 0, ~u64{0}}};
+    expect_stopped(kernel, g.pid, g.pid, true);
+    untouched(kernel, g.pid, g.sibling, before);
+    futex = {};
+    // A native UDP receive whose object no longer resolves.
+    auto &udp = native::native_udp_receive_waits.back();
+    udp = {g.pid, g.sibling, {&native::native_udp_receive_objects, 0, 0, ~u64{0}}};
+    expect_stopped(kernel, g.pid, g.pid, true);
+    untouched(kernel, g.pid, g.sibling, before);
+    udp = {};
+    // A live Linux UDP borrow on the new leader's syscall origin record.
+    auto &borrows = native::SyscallOriginTestAccess::borrows(native::syscall_origins, leader_lease);
+    borrows = 1;
+    expect_stopped(kernel, g.pid, g.pid, true);
+    untouched(kernel, g.pid, g.sibling, before);
+    borrows = 0;
+    // Exhausted syscall origin and VFS continuation image sequences.
+    auto &origin_images = native::SyscallOriginTestAccess::images(native::syscall_origins);
+    const auto origin_saved = std::exchange(origin_images, ~u64{0});
+    expect_stopped(kernel, g.pid, g.pid, true);
+    untouched(kernel, g.pid, g.sibling, before);
+    origin_images = origin_saved;
+    auto &vfs_images = native::VfsStatContinuationTestAccess::images(native::vfs_continuations);
+    const auto vfs_saved = std::exchange(vfs_images, ~u64{0});
+    expect_stopped(kernel, g.pid, g.pid, true);
+    untouched(kernel, g.pid, g.sibling, before);
+    vfs_images = vfs_saved;
+    return_elsewhere(kernel, g.pid, g.sibling, false);
+    EXPECT(thread(kernel, g.pid, g.sibling).native_frame.pc == hw::user_begin + 0x123);
+    // On one CPU the same breach stops the runtime the same way.
+    futex = {g.pid, g.sibling, {&native::futex_objects, 0, 0, ~u64{0}}};
+    expect_stopped(kernel, g.pid, g.sibling, false);
+    futex = {};
+    retire(kernel, g.pid);
+}
+
+// The one refusal a program can reach after its leader exited: no entry stack
+// lease is left for the new leader. The sibling on the other CPU keeps its
+// entry; once a lease is free the same exec evicts it and succeeds.
+void leaseless_leader_exec(Kernel &kernel)
+{
+    const auto g = create(kernel);
+    auto caller = kernel.scheduler().create_thread_prepared(g.pid, thread(kernel, g.pid, g.pid).context,
+        [](auto &created) { created.native_active = true; return native::prepare_native_thread(created); });
+    EXPECT(caller);
+    EXPECT(native::retire_native_thread(thread(kernel, g.pid, g.pid)));
+    EXPECT(kernel.scheduler().exit_thread(g.pid, g.pid));
+    const auto sibling_lease = thread(kernel, g.pid, g.sibling).entry_stack;
+    const auto caller_lease = thread(kernel, g.pid, caller.value()).entry_stack;
+    run_elsewhere(kernel, g.pid, g.sibling);
+    const auto before = snapshot(kernel, g.pid, g.sibling);
+    std::array<memory::KernelEntryStackHandle, memory::KernelEntryStackPool::capacity> holds{};
+    usize held{};
+    for (; held < holds.size(); ++held)
+    {
+        auto reserved = native::entry_stacks.reserve({1000 + held, 1000 + held});
+        if (!reserved) break;
+        holds[held] = reserved.value();
+    }
+    EXPECT(held && native::entry_stacks.accounting().leased_slots == memory::KernelEntryStackPool::capacity);
+    const auto full = snapshot(kernel, g.pid, g.sibling);
+    bool complete{};
+    const auto refused = exec(kernel, g.pid, caller.value(), complete);
+    EXPECT(refused < 0 && complete && nothing_reported());
+    untouched(kernel, g.pid, g.sibling, full);
+    EXPECT(native::entry_stacks.accounting().releases == full.stacks.releases);
+    for (usize i = 0; i < held; ++i) EXPECT(native::entry_stacks.release(holds[i], {1000 + i, 1000 + i}));
+    EXPECT(native::entry_stacks.accounting().leased_slots == before.stacks.leased_slots);
+    EXPECT(exec(kernel, g.pid, caller.value(), complete) == 0 && !complete && evict_reported(g.pid, caller.value()));
+    EXPECT(native::runtime_status().ok() && native::started);
+    auto &p = process(kernel, g.pid);
+    EXPECT(p.threads().size() == 1 && p.threads()[0].tid == g.pid && p.threads()[0].entry_stack.pool);
+    EXPECT(p.threads()[0].entry_stack != sibling_lease && p.threads()[0].entry_stack != caller_lease);
+    EXPECT(!native::entry_stacks.validate_inactive(sibling_lease, {g.pid, g.sibling}));
+    EXPECT(!native::entry_stacks.validate_inactive(caller_lease, {g.pid, caller.value()}));
+    EXPECT(native::entry_stacks.accounting().active_slots == 0 &&
+           native::entry_stacks.accounting().leased_slots == before.stacks.leased_slots - 1);
+    return_elsewhere(kernel, g.pid, g.sibling, true);
     retire(kernel, g.pid);
 }
 } // namespace
@@ -234,6 +378,8 @@ int main()
     exec_evicts_sibling(kernel);
     exec_evicts_leader(kernel);
     exec_without_other_cpu(kernel);
+    breach_before_eviction_stops(kernel);
+    leaseless_leader_exec(kernel);
     const auto stacks = native::entry_stacks.accounting();
     EXPECT(!stacks.leased_slots && !stacks.active_slots && !stacks.quarantined_slots);
     EXPECT(stacks.reservations == stacks.releases && native::runtime_status().ok());

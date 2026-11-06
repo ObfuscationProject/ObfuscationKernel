@@ -48,6 +48,15 @@ class VfsStatContinuation final : private NonCopyable
         record.image = ++images_;
         return {};
     }
+    // What prepare checks that exec's retirement does not settle first (it
+    // cancels a pending request), for exec to check before it evicts siblings.
+    [[nodiscard]] Status preflight_prepare(Lease lease) const
+    {
+        if (lease.pool != pool_ || lease.slot >= capacity)
+            return Status::invalid_argument("VFS continuation prepare names a foreign lease");
+        if (images_ == ~u64{0}) return Status::overflow("VFS continuation image sequence exhausted");
+        return {};
+    }
 
     class CaptureStage final
     {
