@@ -593,7 +593,9 @@ struct PrivateSignalActions
     sched::SignalActionTable table{};
     PrivateProcessQueue shared{};
     bool group_kill{};
-    u8 native_termination{};
+    // A fatal default decided at generation (native recipients, and Linux
+    // recipients that cannot take it in a thread); applied at the next step.
+    u8 deferred_fatal{};
     ChildExitLineage lineage{};
 };
 extern std::array<PrivateSignalActions, sched::max_processes> private_signal_actions;
@@ -675,11 +677,72 @@ Status private_child_exit_commit(Kernel &kernel, PrivateChildExit::Completion &c
 
 bool private_child_reap(Kernel &kernel);
 // Job control (jobctl.cpp). Delivery consumed a default stop: an orphaned
-// group discards TSTP/TTIN/TTOU, otherwise the process stops. The settle pass
-// applies a pending default stop that only threads parked in waits can take.
+// group (or init) discards TSTP/TTIN/TTOU, otherwise the process stops and its
+// parent is notified. The settle pass applies a pending default stop that only
+// threads parked in waits can take.
 bool private_jobctl_discard_stop(Kernel &kernel, const sched::ProcessControlBlock &process, u32 signal);
 void private_jobctl_stop(Kernel &kernel, sched::ProcessControlBlock &process, u32 signal);
 void private_jobctl_settle(Kernel &kernel);
+i64 private_signal_wait_enqueue(Kernel &kernel, sched::ProcessControlBlock &recipient, sched::ThreadControlBlock &target,
+                                sched::PendingSignalInfo info);
+bool private_signal_admit_blocked(Kernel &kernel, const sched::ProcessControlBlock &recipient,
+                                  const sched::ThreadControlBlock &target);
+// The generation core (Linux prepare_signal/complete_signal order) shared by
+// kill, tkill/tgkill, group kill, process timers and kernel senders. The
+// signal in `info` is in the recipient's numbering; callers have done lookup,
+// range, permission and the zero probe.
+enum class JobSignalOutcome : u8 { accepted, ignored, departed, retry, refused, exhausted, full, invalid, unavailable };
+struct JobSignalRequest
+{
+    sched::PendingSignalInfo info{};
+    sched::ThreadId named{};   // Its mask decides ignored generation; 0 names the leader.
+    bool directed{};           // Only `named` may take the signal (tkill, tgkill, SIGEV_THREAD_ID).
+    bool kernel{};             // A caught signal no thread can take now is retried, not refused.
+    bool replay{};             // Owed drain: the CONT/stop side effects already ran.
+};
+JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBlock &recipient,
+                                         const JobSignalRequest &request);
+// kill/tkill/tgkill errno of an outcome.
+[[nodiscard]] constexpr i64 private_job_signal_result(JobSignalOutcome outcome)
+{
+    switch (outcome)
+    {
+    case JobSignalOutcome::accepted: case JobSignalOutcome::ignored: case JobSignalOutcome::departed: return 0;
+    case JobSignalOutcome::full: return -11;
+    case JobSignalOutcome::invalid: return -22;
+    case JobSignalOutcome::exhausted: case JobSignalOutcome::unavailable: return -12;
+    default: return -95;
+    }
+}
+// tkill/tgkill admission of a blocked target: job-control signals and stopped
+// targets reach the generation core without interrupting the wait.
+bool private_jobctl_admit_blocked(Kernel &kernel, const sched::ProcessControlBlock &recipient,
+                                  const sched::ThreadControlBlock &target, i32 signal);
+// Kernel-originated signals (Linux SEND_SIG_PRIV): SI_KERNEL, no permission
+// check, `signal` in native numbering and translated per recipient. A caught
+// signal that only threads in uninterruptible waits could take is owed and
+// retried by private_jobctl_service at every step until a wait completes; an
+// exec (epoch change), exit, SIG_IGN or the opposite CONT/stop drops it.
+enum class KernelSignalSend : u8 { sent, ignored, departed, owed };
+KernelSignalSend send_kernel_process_signal(Kernel &kernel, sched::ProcessId pid, u32 signal);
+struct KernelGroupSignal { u8 matched{}, sent{}, ignored{}, departed{}, owed{}; };
+KernelGroupSignal send_kernel_group_signal(Kernel &kernel, sched::ProcessId group, u32 signal);
+bool private_jobctl_service(Kernel &kernel);
+void private_jobctl_retire(sched::ProcessId pid);
+void private_jobctl_discard_owed(sched::ProcessId pid, u32 signal);
+// Linux is_ignored(): SIG_IGN or blocked by `thread`; native processes have
+// SIG_IGN only. `signal` is in native numbering.
+bool private_signal_ignored_or_blocked(Kernel &kernel, const sched::ProcessControlBlock &process,
+                                       const sched::ThreadControlBlock &thread, u32 signal);
+bool private_group_orphaned(Kernel &kernel, sched::ProcessId group);
+// Native rt_sigaction: SIG_DFL and SIG_IGN only (ok/uapi/job_control.h).
+i64 native_signal_action(Kernel &kernel, sched::ProcessControlBlock &process, const std::array<uptr, 6> &arguments);
+// Exec across personalities keeps SIG_IGN under the new numbering (MIPS).
+void private_jobctl_exec(Kernel &kernel, sched::ProcessControlBlock &process, Personality previous);
+// The exit commit: init adoption, then (S4) the terminal outbox, then the
+// orphaned-group pass sending SIGHUP and SIGCONT (Linux kill_orphaned_pgrp).
+Status private_exit_commit(Kernel &kernel, sched::ProcessId pid, const PrivateChildExit::Completion &completion,
+                           const PrivateChildExit::Adoption &adoption);
 #endif
 void queue_pipe_sigpipe(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadId tid);
 bool finish_futex(Kernel &kernel, memory::ObjectHandle object, sched::WaitCompletion cause, i64 result);

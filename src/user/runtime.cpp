@@ -314,7 +314,7 @@ void finish(Kernel &kernel, sched::ProcessId pid, i32 code, u8 signal)
     const auto status = child_exit_transaction(cleanup, transition,
         [&] {
             if (auto status = private_child_exit_commit(kernel, completion); !status) return status;
-            return PrivateChildExit::commit_adoption(kernel.scheduler(), adoption, private_signal_find);
+            return private_exit_commit(kernel, pid, completion, adoption);
         });
 #else
     auto status = cleanup();
@@ -531,7 +531,7 @@ NativeShutdownReport shutdown_report(Kernel &kernel)
 #ifdef OK_PRIVATE_POLL_MASK
     for (const auto &entry : private_signal_actions)
     {
-        result.signal_owners += entry.pid || entry.shared.identity().process || entry.group_kill || entry.native_termination;
+        result.signal_owners += entry.pid || entry.shared.identity().process || entry.group_kill || entry.deferred_fatal;
         for (auto word : entry.shared.pending_mask().words) result.signal_owners += word != 0;
     }
     for (usize i = 0; i < private_signal_queues.size(); ++i)

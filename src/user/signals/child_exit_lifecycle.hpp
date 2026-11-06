@@ -198,6 +198,54 @@ struct ChildExitLifecycle
         return Status::success();
     }
 
+    // CLD_STOPPED or CLD_CONTINUED (Linux do_notify_parent_cldstop). Lineage
+    // and ownership are validated as prepare does. Only a Linux child of a
+    // Linux parent notifies, and only when SIGCHLD is caught or blocked by the
+    // parent's lineage thread, not SIG_IGN and without SA_NOCLDSTOP. `status`
+    // already carries the signal in the parent's numbering.
+    template <typename Lookup, typename RealBlocked>
+    [[nodiscard]] static Status notify_job_state(sched::SchedulerState &scheduler, sched::ProcessId pid,
+                                                 sched::ChildExitStatus status, Lookup &&lookup,
+                                                 RealBlocked &&real_blocked, Notification &notification)
+    {
+        notification = Notification::skipped;
+        const auto *child = scheduler.find(pid);
+        if (!child || completed(*child)) return Status::not_found("private child job state owner");
+        if ((status.code() != 5 && status.code() != 6) || !status.valid(Actions::max_signal))
+            return Status::invalid_argument("private child job state cause");
+        if (child->state() == State::created || child->resources().personality != sched::UserPersonality::linux ||
+            !child->parent_pid())
+            return Status::success();
+        const auto *parent = scheduler.find(child->parent_pid());
+        if (!parent || completed(*parent)) return Status::fault("private child job state parent missing");
+        if (parent->resources().personality != sched::UserPersonality::linux) return Status::success();
+        const auto *owner = lookup(pid);
+        auto *recipient = lookup(child->parent_pid());
+        if (!owns(owner, pid) || !owns(recipient, child->parent_pid()) ||
+            owner->lineage.parent != child->parent_pid() || owner->lineage.parent_epoch != recipient->epoch)
+            return Status::fault("private child job state lineage");
+        usize links = 0;
+        for (const auto id : parent->children()) links += id == pid;
+        const auto *thread = scheduler.find_thread(child->parent_pid(), owner->lineage.parent_tid);
+        if (links != 1 || !thread || !thread->native_active || thread->state == State::exited)
+            return Status::fault("private child job state named parent thread");
+        const auto *action = recipient->table.find(Actions::child_signal);
+        if (!action) return Status::fault("private child job state disposition");
+        if (action->handler == sched::SignalAction::ignored_handler || (action->flags & Actions::no_child_stop))
+            return Status::success();
+        const auto *real = real_blocked(*thread);
+        if (action->handler == sched::SignalAction::default_handler &&
+            !thread->native_signal_mask.contains(Actions::child_signal) &&
+            !(real && real->contains(Actions::child_signal)))
+            return Status::success();
+        const auto result = recipient->shared.enqueue_child_exit(status, static_cast<u32>(pid), child->credentials().uid);
+        using QueueResult = decltype(result);
+        if (result == QueueResult::queued) notification = Notification::queued;
+        else if (result == QueueResult::coalesced) notification = Notification::coalesced;
+        else return Status::fault("private child job state pending capacity");
+        return Status::success();
+    }
+
     template <typename Lookup>
     [[nodiscard]] static Status commit(sched::SchedulerState &scheduler, Completion &completion,
                                        Lookup &&lookup, Notification &notification)

@@ -7,7 +7,7 @@ namespace
 using user::Credentials;
 using user::directed_signal_permitted;
 using user::find_directed_signal_target;
-unsigned profiles{}, deliveries{}, permissions{};
+unsigned profiles{}, deliveries{}, permissions{}, same_session_deliveries{};
 
 template <lu::Profile P>
 void queues(Kernel &kernel,sched::ProcessId destination)
@@ -130,9 +130,26 @@ void admission(Kernel &kernel,sched::ProcessId source,sched::ProcessId destinati
     thread->native_active=true;thread->state=sched::ProcessState::blocked;
     CHECK(call(true,0,destination,0)==0 && call(true,0,destination,10)==-95);
     thread->state=sched::ProcessState::runnable;
-    for(u32 stop:{Codec::stop_signal,Codec::mips?24U:20U,Codec::mips?26U:21U,
-                 Codec::mips?27U:22U,Codec::mips?25U:18U})CHECK(call(true,0,destination,stop)==-95);
     CHECK(deliveries==initial);
+    // Stop and continue signals reach the delivery callback, which owns their
+    // job-control effects.
+    for(u32 stop:{Codec::stop_signal,Codec::mips?24U:20U,Codec::mips?26U:21U,
+                 Codec::mips?27U:22U,Codec::mips?25U:18U})CHECK(call(true,0,destination,stop)==0 && sent.signal==stop);
+    CHECK(deliveries==initial+5);
+    // A blocked target is admitted only by the callback, which sees the signal.
+    thread->state=sched::ProcessState::blocked;
+    auto admit_continue=[&](const auto &,const auto &,i32 signal){return signal==static_cast<i32>(Codec::continue_signal);};
+    std::array<u64,6> blocked{destination,Codec::continue_signal};
+    CHECK(user::send_directed_signal<P>(scheduler,*sender,true,blocked,deliver,admit_continue)==0);
+    blocked[1]=10;CHECK(user::send_directed_signal<P>(scheduler,*sender,true,blocked,deliver,admit_continue)==-95);
+    thread->state=sched::ProcessState::runnable;
+    // SIGCONT crosses credentials inside the sender's session only.
+    recipient->set_credentials(denied);
+    CHECK(call(true,0,destination,10)==-1);
+    const bool same_session=sender->session_id()==recipient->session_id();
+    CHECK(call(true,0,destination,Codec::continue_signal)==(same_session?0:-1));
+    recipient->set_credentials(to);
+    const unsigned extra=1+same_session;same_session_deliveries=same_session;
     const u64 high=u64{0x12345678}<<32;
     CHECK(call(false,high|destination,high|destination,high)==0);
     CHECK(call(true,0,high|destination,high|10)==0);
@@ -140,7 +157,10 @@ void admission(Kernel &kernel,sched::ProcessId source,sched::ProcessId destinati
     const auto snapshot=sent;sender->set_credentials(user::root_credentials());
     CHECK(sent==snapshot);sender->set_credentials(from);
     CHECK(call(false,destination,destination,Codec::max_signal)==0);
-    CHECK(sent.signal==Codec::max_signal && deliveries==initial+2 && thread->native_signal_mask==mask);
+    CHECK(sent.signal==Codec::max_signal && deliveries==initial+7+extra && thread->native_signal_mask==mask);
+    CHECK(user::continue_signal_permitted(Codec::continue_signal,Codec::continue_signal,7,7) &&
+          !user::continue_signal_permitted(Codec::continue_signal,Codec::continue_signal,7,8) &&
+          !user::continue_signal_permitted(10,Codec::continue_signal,7,7));
     queues<P>(kernel,destination);
     ++profiles;
 }
@@ -198,6 +218,6 @@ int main()
     admission<lu::Profile::mips64>(kernel,source.value(),destination.value());
     admission<lu::Profile::ppc>(kernel,source.value(),destination.value());
     lifecycle(kernel,source.value(),destination.value(),context);
-    CHECK(profiles==10 && permissions==13 && deliveries==20);
-    std::puts("DIRECTED_SIGNAL_MODEL_PASS profiles=10 permission_vectors=13 callback_deliveries=20 lifecycle=1 guest=0");
+    CHECK(profiles==10 && permissions==13 && deliveries==80+10*same_session_deliveries);
+    std::printf("DIRECTED_SIGNAL_MODEL_PASS profiles=10 permission_vectors=13 callback_deliveries=%u lifecycle=1 guest=0\n",deliveries);
 }

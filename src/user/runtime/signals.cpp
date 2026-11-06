@@ -626,7 +626,7 @@ PrivateSignalActions *private_signal_process(Kernel &kernel, sched::ProcessId pi
             entry.pid = pid;
             entry.table = {};
             entry.group_kill = false;
-            entry.native_termination = 0;
+            entry.deferred_fatal = 0;
             entry.lineage = {};
             return &entry;
         }
@@ -648,6 +648,7 @@ PrivateProcessQueue *private_signal_shared(Kernel &kernel, sched::ProcessId pid)
 void private_signal_retire(sched::ProcessId pid)
 {
     private_timer_retire(pid);
+    private_jobctl_retire(pid);
     for (auto &entry : private_signal_actions)
         if (entry.pid == pid)
         {
@@ -655,7 +656,7 @@ void private_signal_retire(sched::ProcessId pid)
             entry.pid = 0;
             entry.table = {};
             entry.group_kill = false;
-            entry.native_termination = 0;
+            entry.deferred_fatal = 0;
             entry.lineage = {};
             return;
         }
@@ -1973,6 +1974,7 @@ bool private_signal_wait_rearm_delivery(Kernel &kernel, sched::ProcessControlBlo
     private_signal_wait_trace_rearm(*r, old, thread, "delivery");
     return false; // The caller must not enter user mode after rearming.
 }
+} // namespace
 i64 private_signal_wait_enqueue(Kernel &kernel, sched::ProcessControlBlock &recipient, sched::ThreadControlBlock &target,
                                  sched::PendingSignalInfo info)
 {
@@ -2009,6 +2011,10 @@ bool private_signal_admit_blocked(Kernel &kernel, const sched::ProcessControlBlo
            private_futex_signal_owned(kernel, recipient, target, futex) ||
            private_poll_signal_owned(kernel, recipient, target, poll);
 }
+namespace
+{
+// Linux kill_pid_info for one process. The signal is in the Linux numbering;
+// a native recipient takes its native counterpart.
 i64 private_process_kill_one(Kernel &kernel, user::ProcessSignalSender sender, u64 raw_pid, u64 raw_signal)
 {
     using Codec = SignalActionCodec<private_signal_profile>;
@@ -2019,54 +2025,22 @@ i64 private_process_kill_one(Kernel &kernel, user::ProcessSignalSender sender, u
     if (!target) return -3;
     if (signal < 0 || signal > static_cast<i32>(Codec::max_signal)) return -22;
     if (!user::directed_signal_permitted(sender.credentials, target.process->credentials(),
-                                        sender.pid == target.process->pid())) return -1;
+                                        sender.pid == target.process->pid()) &&
+        !user::continue_signal_permitted(static_cast<u32>(signal), Codec::continue_signal, sender.session,
+                                         target.process->session_id())) return -1;
     if (!signal) return 0;
     auto &recipient = *target.process;
     if (recipient.state() == sched::ProcessState::zombie || recipient.state() == sched::ProcessState::exited)
         return 0;
-    if (recipient.resources().personality != Personality::linux) return -95;
-    if (signal == static_cast<i32>(Codec::stop_signal) || signal == static_cast<i32>(Codec::tstp_signal) ||
-        signal == static_cast<i32>(Codec::ttin_signal) || signal == static_cast<i32>(Codec::ttou_signal) ||
-        signal == static_cast<i32>(Codec::continue_signal)) return -95;
-    auto *state = private_signal_process(kernel, recipient.pid());
-    if (!state) return -12;
-    if (signal == 9)
-    {
-        // Service on the next serialized step, before any user/wait completion.
-        // Self-kill must not retire the caller while its syscall is publishing.
-        state->group_kill = true;
-        return 0;
-    }
-    const auto *action = state->table.find(static_cast<u32>(signal));
-    if (!action) return -22;
-    const bool ignored = Codec::ignored(static_cast<u32>(signal), *action);
-    // Linux prepare_signal examines the named task, not a chosen recipient or
-    // an intersection across siblings. A poll saved return mask is not real_blocked.
-    const auto *real = signal_waits.real_blocked(*target.thread);
-    if (ignored && !target.thread->native_signal_mask.contains(static_cast<u32>(signal)) &&
-        !(real && real->contains(static_cast<u32>(signal)))) return 0;
-    bool live = false, unblocked = false, qualified = false;
-    for (const auto &peer : recipient.threads())
-    {
-        if (peer.state == sched::ProcessState::exited || !peer.native_active) continue;
-        live = true;
-        if (peer.native_signal_mask.contains(static_cast<u32>(signal))) continue;
-        unblocked = true;
-        qualified |= peer.state == sched::ProcessState::runnable || peer.state == sched::ProcessState::running ||
-                     private_signal_admit_blocked(kernel, recipient, peer);
-    }
-    if (!live || (!ignored && unblocked && !qualified)) return -95;
-    const auto enqueued = state->shared.enqueue({static_cast<u32>(signal), 0,
-        static_cast<u32>(sender.pid), sender.credentials.uid});
-    if (enqueued == PrivateProcessQueue::Enqueue::exhausted)
-    {
-        runtime_failure = Status::fault("private process signal sequence exhausted");
-        started = false;
-        return -12;
-    }
-    return enqueued == PrivateProcessQueue::Enqueue::queued || enqueued == PrivateProcessQueue::Enqueue::coalesced
-        ? 0 : -22;
+    if (recipient.execution() != sched::ProcessExecution::user_process) return -95;
+    const auto translated = job::translate(private_job_numbering(Personality::linux),
+                                           private_job_numbering(recipient.resources().personality),
+                                           static_cast<u32>(signal));
+    if (!translated) return -22;
+    return private_job_signal_result(private_generate_signal(kernel, recipient,
+        {{translated, 0, static_cast<u32>(sender.pid), sender.credentials.uid}, target.thread->tid}));
 }
+// Native kill for one process: native numbers, translated for a Linux recipient.
 i64 native_process_kill_one(Kernel &kernel, user::ProcessSignalSender sender, u64 raw_pid, u64 raw_signal)
 {
     const auto pid = static_cast<i32>(raw_pid);
@@ -2076,26 +2050,18 @@ i64 native_process_kill_one(Kernel &kernel, user::ProcessSignalSender sender, u6
     if (!recipient) return -3;
     if (signal < 0 || signal > OK_NATIVE_SIGNAL_MAX) return -22;
     if (!user::directed_signal_permitted(sender.credentials, recipient->credentials(),
-                                        sender.pid == recipient->pid())) return -1;
+                                        sender.pid == recipient->pid()) &&
+        !user::continue_signal_permitted(static_cast<u32>(signal), OK_SIGCONT, sender.session,
+                                         recipient->session_id())) return -1;
     if (recipient->execution() != sched::ProcessExecution::user_process) return -95;
     if (!signal || recipient->state() == sched::ProcessState::zombie ||
         recipient->state() == sched::ProcessState::exited) return 0;
-    if (signal != OK_SIGTERM && signal != OK_SIGKILL) return -95;
     if (recipient->pid() == sched::user_init_pid) return -1;
-    // These two numbers have the same meaning on every retained Linux ABI.
-    if (recipient->resources().personality == Personality::linux)
-        return private_process_kill_one(kernel, sender, raw_pid, raw_signal);
-    bool live = false;
-    for (const auto &thread : recipient->threads())
-        live |= thread.native_active && thread.state != sched::ProcessState::exited;
-    if (!live) return -95;
-    auto *state = private_signal_process(kernel, recipient->pid());
-    if (!state) return -12;
-    // Commit on the next service step, after the sender's saved return frame.
-    // A later TERM must not replace an already accepted uncatchable KILL.
-    if (state->native_termination != OK_SIGKILL)
-        state->native_termination = static_cast<u8>(signal);
-    return 0;
+    const auto translated = job::translate(job::native, private_job_numbering(recipient->resources().personality),
+                                           static_cast<u32>(signal));
+    if (!translated) return -22;
+    return private_job_signal_result(private_generate_signal(kernel, *recipient,
+        {{translated, 0, static_cast<u32>(sender.pid), sender.credentials.uid}}));
 }
 i64 private_process_kill(Kernel &kernel, const sched::ProcessControlBlock &sender, u64 raw_pid, u64 raw_signal)
 {
@@ -2105,7 +2071,7 @@ i64 private_process_kill(Kernel &kernel, const sched::ProcessControlBlock &sende
     return user::send_process_group_signal<SignalActionCodec<private_signal_profile>::max_signal>(
         kernel.scheduler(), captured, raw_pid, raw_signal,
         [&](user::ProcessSignalSender origin, sched::ProcessId target, i32 signal) {
-            return native_process_kill_one(kernel, origin, target, static_cast<u64>(signal));
+            return private_process_kill_one(kernel, origin, target, static_cast<u64>(signal));
         });
 }
 } // namespace
@@ -2136,16 +2102,12 @@ PrivateTimerSend private_timer_signal(Kernel &kernel, sched::ProcessControlBlock
         process.resources().personality != Personality::linux) return PrivateTimerSend::departed;
     auto *state = private_signal_process(kernel, process.pid());
     if (!state) return PrivateTimerSend::retry;
-    // Job control remains an explicit runtime gate; such a timer signal is dropped.
-    if (signal == Codec::stop_signal || signal == Codec::tstp_signal || signal == Codec::ttin_signal ||
-        signal == Codec::ttou_signal || signal == Codec::continue_signal) return PrivateTimerSend::ignored;
     const auto *action = state->table.find(signal);
     if (!action) return PrivateTimerSend::ignored;
-    const bool ignored = Codec::ignored(signal, *action);
-    const bool timer = info.code == sched::PendingSignalInfo::timer_code(Codec::max_signal);
-    if (tid)
+    if (tid && !Codec::stop_or_continue(signal))
     {
         // SIGEV_THREAD_ID follows the tgkill admission of its target.
+        const bool ignored = Codec::ignored(signal, *action);
         auto *target = kernel.scheduler().find_thread(process.pid(), tid);
         if (!target || target->state == sched::ProcessState::exited || !target->native_active)
             return PrivateTimerSend::departed;
@@ -2159,48 +2121,26 @@ PrivateTimerSend private_timer_signal(Kernel &kernel, sched::ProcessControlBlock
         return queue->enqueue_timer(signal, info.timer, info.overrun, info.value) == PrivateSignalQueue::Enqueue::queued
             ? PrivateTimerSend::sent : PrivateTimerSend::retry;
     }
-    if (signal == 9)
+    // Process-directed timers, and job-control signals of thread timers, go
+    // through the generation core as kernel senders.
+    switch (private_generate_signal(kernel, process, {info, tid, tid != 0, true}))
     {
-        state->group_kill = true;
-        return PrivateTimerSend::sent;
+    case JobSignalOutcome::accepted: return PrivateTimerSend::sent;
+    case JobSignalOutcome::ignored: return PrivateTimerSend::ignored;
+    case JobSignalOutcome::departed: return PrivateTimerSend::departed;
+    default: return PrivateTimerSend::retry;
     }
-    // Process-directed timers follow the kill admission against the leader.
-    const auto target = user::find_directed_signal_target(kernel.scheduler(), 0, process.pid());
-    if (!target) return PrivateTimerSend::departed;
-    const auto *real = signal_waits.real_blocked(*target.thread);
-    if (ignored && !target.thread->native_signal_mask.contains(signal) && !(real && real->contains(signal)))
-        return PrivateTimerSend::ignored;
-    bool live = false, unblocked = false, qualified = false;
-    for (const auto &peer : process.threads())
-    {
-        if (peer.state == sched::ProcessState::exited || !peer.native_active) continue;
-        live = true;
-        if (peer.native_signal_mask.contains(signal)) continue;
-        unblocked = true;
-        qualified |= peer.state == sched::ProcessState::runnable || peer.state == sched::ProcessState::running ||
-                     private_signal_admit_blocked(kernel, process, peer);
-    }
-    if (!live) return PrivateTimerSend::departed;
-    if (!ignored && unblocked && !qualified) return PrivateTimerSend::retry;
-    const auto result = timer ? state->shared.enqueue_timer(signal, info.timer, info.overrun, info.value)
-                              : state->shared.enqueue_kernel(signal);
-    // A legacy timer record coalesced into another pending occurrence was not
-    // queued; Linux keeps a timer's own record, so the expiry stays owed.
-    if (result == PrivateProcessQueue::Queue::Enqueue::queued ||
-        (!timer && result == PrivateProcessQueue::Queue::Enqueue::coalesced))
-        return PrivateTimerSend::sent;
-    return PrivateTimerSend::retry;
 }
 void private_process_signal_fatal(Kernel &kernel)
 {
     // Stable side-table iteration survives group teardown and PCB compaction.
     for (auto &state : private_signal_actions)
-        if (state.pid && (state.group_kill || state.native_termination))
+        if (state.pid && (state.group_kill || state.deferred_fatal))
         {
             const auto pid = state.pid;
-            const auto signal = state.group_kill ? u8{9} : state.native_termination;
+            const auto signal = state.group_kill ? u8{9} : state.deferred_fatal;
             state.group_kill = false;
-            state.native_termination = 0;
+            state.deferred_fatal = 0;
             const auto *process = kernel.scheduler().find(pid);
             if (!process || process->state() == sched::ProcessState::zombie ||
                 process->state() == sched::ProcessState::exited)
@@ -2263,9 +2203,9 @@ bool private_signal_call(Kernel &kernel, sched::ProcessControlBlock &process,
             is(Operation::tkill), arguments,
             [&](sched::ProcessControlBlock &recipient, sched::ThreadControlBlock &target,
                 sched::PendingSignalInfo info) -> i64 {
-                return private_signal_wait_enqueue(kernel, recipient, target, info);
-            }, [&](const sched::ProcessControlBlock &recipient, const sched::ThreadControlBlock &target) {
-                return private_signal_admit_blocked(kernel, recipient, target);
+                return private_job_signal_result(private_generate_signal(kernel, recipient, {info, target.tid, true}));
+            }, [&](const sched::ProcessControlBlock &recipient, const sched::ThreadControlBlock &target, i32 signal) {
+                return private_jobctl_admit_blocked(kernel, recipient, target, signal);
             });
         return true;
     }
@@ -2300,6 +2240,7 @@ bool private_signal_call(Kernel &kernel, sched::ProcessControlBlock &process,
         result = update_signal_action<private_signal_profile>(*actions, static_cast<i32>(a[0]), a[1], a[2], a[3],
             read, write, [&](u32 signal) noexcept {
                 private_timer_discard(kernel, process.pid(), signal);
+                private_jobctl_discard_owed(process.pid(), signal);
                 shared->discard(signal);
                 for (auto &peer : process.threads())
                     if (auto *pending = private_signal_queue(peer)) pending->discard(signal);

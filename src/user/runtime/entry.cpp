@@ -104,6 +104,10 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
             [&](Status failure) { if (runtime_failure) runtime_failure = failure; });
         return result ? static_cast<i64>(result.value()) : error(result.status());
     }
+#ifdef OK_PRIVATE_POLL_MASK
+    if (number == N::rt_sigaction && process->resources().personality == Personality::native)
+        return native_signal_action(kernel, *process, a);
+#endif
     if (number == N::ioctl)
         return console_control::dispatch<std::endian::native == std::endian::big>(
             static_cast<i32>(a[0]), console_control::native_operation(a[1]), a[2],
@@ -1024,6 +1028,8 @@ bool step(Kernel &kernel)
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
     // Expired timers queue their signals before interruptible waits are chosen.
     waiting_deadline |= private_timer_service(kernel, now.value());
+    // Kernel signals owed to waits that could not take them retry here.
+    private_jobctl_service(kernel);
     if (!runtime_failure) { started = false; return false; }
 #endif
     for (const auto &entry : poll_waits)

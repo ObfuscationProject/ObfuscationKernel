@@ -93,7 +93,7 @@ void enqueue(Kernel &kernel, Group group, u32 signal = 10)
             return user::enqueue_directed_signal<lu::Profile::x86_64>(recipient, target, info,
                 [&](sched::ProcessId pid) { return native::private_signal_table(kernel, pid); },
                 [&](sched::ThreadControlBlock &owner) { return native::private_signal_queue(owner); });
-        }, [&](const sched::ProcessControlBlock &recipient, const sched::ThreadControlBlock &target) {
+        }, [&](const sched::ProcessControlBlock &recipient, const sched::ThreadControlBlock &target, i32) {
             return native::private_signal_admit_blocked(kernel, recipient, target);
         });
     expect(result == 0);
