@@ -21,8 +21,10 @@ Current behaviour, which the remaining planned sections replace:
   raw pairs move bytes exactly as the former 4096-byte queues (S5). PTY
   descriptors serve the terminal requests of §5 in both personalities; Linux
   PTY read, write and poll still return EOPNOTSUPP until S7. ptmx-style pairs
-  (§8) exist behind the scheduler bind calls and become reachable through
-  `/dev/ptmx` in S6.
+  (§8) are opened through `/dev/ptmx` and `/dev/pts/N` (S6).
+- The kernel `DeviceFileSystem` carries `/dev/tty`, `/dev/console`,
+  `/dev/ptmx` and `/dev/pts` (§2, §3, S6). `/dev/pts` lists nothing until the
+  OS calls `attach_terminals(vfs)`; the terminal nodes open either way.
 - Job control (§9.1-§9.5, §9.8 and the orphan row of §9.7) is landed: every
   signal number reaches native and Linux recipients, stops and continues are
   reported through WUNTRACED/WCONTINUED and SIGCHLD, and native programs have
@@ -43,7 +45,7 @@ UAPI placement:
 | Header | Content | Slice |
 |---|---|---|
 | `ok/uapi/termios.h` (new) | `struct ok_termios`, `struct ok_winsize`, flag and cc macros, `OK_TCIFLUSH/OK_TCOFLUSH/OK_TCIOFLUSH` | landed (S1) |
-| `ok/uapi/syscall.h` (additive defines only) | `OK_TCGETS` … `OK_TIOCNOTTY` (S1), `OK_TIOCGPTN`, `OK_TIOCSPTLCK` (S5), `OK_O_NOCTTY`, `OK_EINTR`, `OK_ENXIO`, `OK_ENOSPC`, `OK_PTS_MAJOR`, `OK_PTS_CAPACITY` (S6) | landed (S1); planned (S5, S6) |
+| `ok/uapi/syscall.h` (additive defines only) | `OK_TCGETS` … `OK_TIOCNOTTY` (S1), `OK_TIOCGPTN`, `OK_TIOCSPTLCK` (S5), `OK_O_NOCTTY`, `OK_EINTR`, `OK_ENXIO`, `OK_ENOSPC`, `OK_PTS_MAJOR`, `OK_PTS_CAPACITY` (S6) | landed (S1, S5, S6) |
 | `ok/uapi/job_control.h` (new; C, include guard only) | native signal numbers other than KILL and TERM, `OK_SIG_DFL`, `OK_SIG_IGN`, `struct ok_sigaction`, `OK_NATIVE_SIGNAL_ACTION_VERSION`, `OK_WNOHANG`, `OK_WUNTRACED`, `OK_WCONTINUED` | S3 |
 | `ok/uapi/signal.h` | unchanged until S9; S9 decides whether `job_control.h` folds into it with UAPI 0.17 | S9 |
 
@@ -82,11 +84,12 @@ names its slave's terminal with side `pty_master`. On the x86_64 host build the
 `SchedulerState` grows by 14848 bytes (8 × 1856: each pair holds a 5968-byte
 terminal instead of its 4 KiB slave queue).
 
-## 2. Device nodes — planned (S6)
+## 2. Device nodes — landed (S6)
 
 The nodes live in the kernel `DeviceFileSystem`. The OS mounts it at `/dev`
 and calls `attach_terminals(vfs)` before mounting; nothing is mounted at
-`/dev/pts`.
+`/dev/pts`. Without the call `/dev/pts` lists nothing, while `/dev/tty`,
+`/dev/console` and `/dev/ptmx` still open and `stat` reports their numbers.
 
 | Path | Type | rdev | Inode | Mode | Owner |
 |---|---|---|---|---|---|
@@ -100,7 +103,20 @@ and calls `attach_terminals(vfs)` before mounting; nothing is mounted at
 `/dev/pts` lists every allocated index, locked ones included. Lookup accepts
 strict decimal only. An entry disappears when its master's last open closes.
 
-## 3. Opening — planned (S6)
+Landed (S6): `ok/fs/terminal_node.hpp` defines `TerminalNodeKind`,
+`TerminalNode`, `PtsEntryView` and the constant-initializable
+`TerminalNamespace` that the scheduler owns and alone publishes (pair creation,
+TIOCSPTLCK, the master's last close, chmod and chown). `PosixService::initialize`
+attaches it to the VFS (`VirtualFileSystem::attach_terminal_namespace`), and
+`DeviceFileSystem::attach_terminals(vfs)` links the device filesystem to it and
+records it as the provider whose device number terminal descriptors report.
+`fs::Node::terminal_node()` is the one new virtual: the device filesystem's
+terminal nodes report their kind, a pts entry also its index and generation,
+and every other node reports none. Device nodes, the memory devices included,
+carry their own number in `FileAttributes::special` (`Attribute::special_device`).
+Terminal nodes are names only: their `read` and `write` are unsupported, and
+open always converts them (§3).
+## 3. Opening — landed (S6)
 
 - `/dev/ptmx` allocates a pair and returns the master. The slave is locked and
   dormant, owned by the opener's euid:egid with mode 0620; `grantpt` is a no-op.
@@ -120,8 +136,29 @@ strict decimal only. An entry disappears when its master's last open closes.
   included.
 - Native `OK_O_NOCTTY` is `0x0100`; Linux `O_NOCTTY` is decoded per profile.
   musl maps ENOSPC from `posix_openpt` to EAGAIN.
+- `fstat` of a terminal description reports the node it was opened from
+  (`/dev/tty`, `/dev/console`, `/dev/ptmx` or `/dev/pts/N`; the boot stdio
+  report `/dev/console`); inode, device and timestamps need the attached device
+  filesystem to be mounted, otherwise the attribute-free status remains (and
+  Linux stat of it stays unsupported). Raw pairs keep their 0600 status. Linux
+  `stat`, `fstat` and `statx` write `st_rdev`/`stx_rdev_*` for device nodes on
+  all ten profiles; native stat has no rdev (§14 row 11).
+- `fchmod`/`fchown` of a `/dev/pts/N` descriptor and `chmod`/`chown` of the
+  path change the entry: chmod by the owner or root, chown by root only.
+  `/dev/ptmx`, `/dev/tty` and `/dev/console` are fixed (EOPNOTSUPP).
 
-## 4. Controlling terminal and foreground group — landed (S4 console, S5 PTY); planned (gates and TIOCNOTTY S8; `/dev/tty` S6)
+Landed (S6): `PosixService::openat_limited` converts a node whose
+`terminal_node()` is not none after the mode check, by
+`SchedulerState::open_terminal(pid, description, request)`
+(`ok/sched/terminal_open.hpp`), which takes the fresh provider-free description
+holding only the opener's pin, re-validates the node (index, generation,
+lock, liveness) and runs every check before its first change; an install
+failure releases the pin, which retires the open and removes a new pair's
+entry. The description records the node in `terminal_origin`; I/O dispatch
+never reads it. `terminal_status(description)` serves fstat,
+`change_pts_mode`/`change_pts_owner` serve chmod and chown, and
+`pts_node(description)` names a slave's entry.
+## 4. Controlling terminal and foreground group — landed (S4 console, S5 PTY); `/dev/tty` landed (S6); planned (gates and TIOCNOTTY S8)
 
 - **Derivation.** A process's ctty is the terminal whose session equals its
   session ID, unless the process detached itself with TIOCNOTTY as a
@@ -275,7 +312,7 @@ Until S7 a PTY read that would arm the VTIME timer waits for input instead.
   faulting buffer loses no input (§14 row 17).
 - `OK_SYS_CONSOLE_FLUSH` also flushes the console line discipline's input.
 
-## 8. PTY pair states — data and open counts landed (S5); planned (S6 `/dev/pts`; S8 signals)
+## 8. PTY pair states — data and open counts landed (S5); `/dev/pts` landed (S6); planned (S8 signals)
 
 | Event | ptmx pair (Linux semantics) | `OK_SYS_PTY_PAIR` raw pair (v1, unchanged) |
 |---|---|---|
@@ -486,7 +523,7 @@ Applies to poll and select in both personalities.
 | Master | queued output; or slave closed | slave open and ldisc room | HUP when the slave is closed |
 | Console | ldisc readable, for lease members | always | no foreground-based POLLERR |
 
-## 11. errno summary — planned (S6 constants)
+## 11. errno summary — constants landed (S6)
 
 Beyond §3 and §5:
 
@@ -540,13 +577,13 @@ profile string and version above keeps its current value.
 | 2 | Kernel signals to threads in waits that cannot be interrupted are retried (owed) and not visible in `sigpending`; an exec into the other personality drops them. A user's caught signal other than SIGCONT and the stops gets EOPNOTSUPP in that case. | landed (S3) |
 | 3 | Native personality: SIG_DFL/SIG_IGN only, no masks, SIGCHLD SIG_IGN refused (an inherited one reverts at exec), tgkill to native refused. A native child sends no SIGCHLD. A native recipient records the first terminating default at generation instead of queueing it. | landed (S3) |
 | 4 | No ptrace stops, no `kill(-1)`, no core bit. `waitid` is RV32-only. | landed (S3) |
-| 5 | No devpts filesystem: no mount options, no `newinstance`, no `/dev/pts/ptmx`. `st_dev(/dev/pts/N) == st_dev(/dev)`. The gid policy is the opener's egid. | planned (S6) |
-| 6 | 8 PTYs, shared with raw pairs. | landed (S5); `/dev/ptmx` planned (S6) |
+| 5 | No devpts filesystem: no mount options, no `newinstance`, no `/dev/pts/ptmx`. `st_dev(/dev/pts/N) == st_dev(/dev)`. The gid policy is the opener's egid. | landed (S6) |
+| 6 | 8 PTYs, shared with raw pairs. | landed (S5, S6) |
 | 7 | No console vhangup. VTIME on the console is treated as 0. IXON output stop works on PTY slaves only. | VTIME landed (S4); IXON landed (S5); planned (S8) |
 | 8 | VMIN reads are admitted atomically. | landed (S1) |
 | 9 | Echo overflow and console overrun drop bytes and are counted. Echo kept after a drop keeps the OPOST expansion (XTABS, tab-erase width) computed when it was generated. | landed (S1, S4) |
 | 10 | A PTY master cannot be a controlling terminal. | landed (S5) |
-| 11 | Native `stat` has no rdev, and there is no `ttyname` (no `/proc`). | planned (S6) |
+| 11 | Native `stat` has no rdev, and there is no `ttyname` (no `/proc`). Linux `stat` reports `st_rdev`; the OS names a slave by the path it opened or by TIOCGPTN. | landed (S6) |
 | 12 | After a hangup and a later re-acquire by the leader, members forked earlier see the new ctty. | planned (S8) |
 | 13 | pid 1 gets EIO instead of a restart loop on background terminal access. | planned (S8) |
 | 14 | Non-canonical input fills all 4096 bytes of the read buffer (Linux stops at 4095), so raw pairs keep their 4096-byte queue. | landed (S1) |
@@ -682,5 +719,31 @@ S5 extends existing runners (hosted model and runtime evidence only):
   (`native_requests=15`).
 - The `native-pty/scheduler-OFD-ownership-model` debug point also runs a
   ptmx-style pair (counted opens, canonical echo, hangup discard).
+
+S6 adds two runners (hosted model evidence only) and extends one:
+
+- `python3 -B scripts/test_devfs_terminals.py --output <dir>` prints
+  `DEVFS_TERMINAL_MODEL_PASS nodes=7 pts_capacity=8 locked_listed=1
+  strict_lookup=1 constinit=1 guest=0`: the root's seven entries with their
+  numbers, inodes and modes, a `constinit` instance, an empty `/dev/pts`
+  without a namespace, locked entries listed, strict decimal lookup, stale
+  references (ENOENT), single attachment, and the filesystem mounted in an
+  actual VFS whose POSIX service attached the scheduler's namespace.
+- `python3 -B scripts/test_tty_open.py --output <dir>` prints `TTY_OPEN_PASS
+  checks=<n> profiles=10 hosted=1 guest=0`. Through the actual PosixService,
+  scheduler and VFS with the device filesystem mounted: `/dev/ptmx` and its
+  index, the locked slave (EACCES before EIO), unlock and the lowest fd 0,
+  O_NOCTTY, data both ways, the acquisition matrix (leader, write-only,
+  non-leader, leader with a ctty, owned slave, O_NOCTTY), `/dev/tty` ENXIO then
+  the acquired endpoint, a detached member ENXIO, `/dev/console` without
+  acquisition, the errno order, ENOSPC on the ninth pair and with a raw pair
+  live, EMFILE before ENOSPC, rollback of an uninstalled open, fstat of every
+  kind, pts chmod/chown by descriptor and path, the master's close removing the
+  entry, and on all ten Linux profiles O_NOCTTY decoding, F_GETFL and
+  `st_rdev`/`stx_rdev_*` at the offsets of
+  `docs/abi/linux-stat-target-layouts.json`.
+- `test_linux_openat.py` checks that F_GETFL omits O_NOCTTY on all ten profiles.
+- Debug test points `devfs/terminal-namespace-model` and
+  `tty-open/ptmx-pts-ctty-model` are models booted in QEMU.
 
 Each slice adds its runners here.
