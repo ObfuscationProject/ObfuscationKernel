@@ -1,11 +1,41 @@
 #include "ok/arch/execution_spaces.hpp"
 #include "ok/interrupt/platform.hpp"
 #include "ok/arch/clock.hpp"
+#include "ok/smp/bringup.hpp"
+#include "../arm_common/gicv2.hpp"
+#include "secondary.hpp"
 
 #include <cstddef>
 
 namespace ok::arch::execution
 {
+
+// Everything one entry owns lives in its CPU's block, which TPIDR_EL1 names
+// on every CPU; tables, vectors and the timer period are shared and fixed
+// once initialize() ran. NativeInstructions<aarch64>::cpu_index() reads `cpu`.
+struct alignas(64) CpuBlock
+{
+    u32 cpu{};
+    uptr resume_sp{};
+    // SP_EL1 while user code runs: the owned entry stack, or CPU 0's
+    // interrupt stack for an unowned diagnostic entry.
+    uptr stack_top{};
+    UserFrame *active_frame{};
+    bool executing{};
+    Trap last_trap{};
+    alignas(64) u8 kernel_fp[512]{};
+};
+static_assert(offsetof(CpuBlock, cpu) == 0);
+static_assert(offsetof(CpuBlock, resume_sp) == 8);
+static_assert(offsetof(CpuBlock, stack_top) == 16);
+static_assert(offsetof(CpuBlock, active_frame) == 24);
+static_assert(offsetof(CpuBlock, kernel_fp) == 128);
+
+extern "C"
+{
+    constinit CpuBlock ok_aarch64_cpu_blocks[ok::smp::max_cpus]{};
+}
+
 namespace
 {
 constexpr u64 valid = 1;
@@ -20,9 +50,19 @@ constexpr u64 user_xn = u64{1} << 54;
 constexpr u64 address_mask = 0x0000fffffffff000ULL;
 constexpr uptr ram_begin = 0x40000000;
 constexpr uptr ram_end = 0x80000000;
-constexpr uptr gic_distributor = 0x08000000;
-constexpr uptr gic_cpu = 0x08010000;
-constexpr u32 timer_irq = 30;
+constexpr u32 timer_irq = arm::GicV2::timer_ppi;
+// 39-bit VA, 4 KiB granule, inner-shareable WBWA tables, 40-bit physical
+// addresses, and TTBR1 disabled. QEMU virt RAM and MMIO stay identity mapped.
+constexpr u64 tcr = 25 | (u64{1} << 8) | (u64{1} << 10) | (u64{3} << 12) | (u64{1} << 23) | (u64{2} << 32);
+constexpr u64 mair = 0xff00;
+constexpr u64 fp_control = u64{3} << 20;
+// A secondary CPU's SCTLR_EL1 is UNKNOWN at reset, so it is written whole: the
+// MMU and both caches, stack alignment checks, EL0 WFI/WFE untrapped as the
+// boot CPU's reset value has them, and the ARMv8.0 RES1 bits.
+constexpr u64 secondary_control = (u64{1} << 0) | (u64{1} << 2) | (u64{1} << 3) | (u64{1} << 4) |
+                                  (u64{1} << 12) | (u64{1} << 16) | (u64{1} << 18) | (u64{1} << 11) |
+                                  (u64{1} << 20) | (u64{1} << 22) | (u64{1} << 23) | (u64{1} << 28) |
+                                  (u64{1} << 29);
 
 struct alignas(page_size) Table
 {
@@ -40,10 +80,15 @@ constinit SpaceTable<Space> spaces;
 Table kernel_root{};
 Table kernel_directory{};
 bool initialized = false;
-bool executing = false;
-Trap last_trap{};
 u64 timer_period = 0;
 alignas(16) u8 interrupt_stack[64 * 1024]{};
+
+CpuBlock &this_cpu()
+{
+    uptr block;
+    asm("mrs %0, tpidr_el1" : "=r"(block));
+    return *reinterpret_cast<CpuBlock *>(block);
+}
 
 extern "C" void ok_arm_execution_enter(UserFrame *);
 extern "C" void ok_arm_execution_vectors();
@@ -56,10 +101,6 @@ static_assert(offsetof(UserFrame, fs_base) == 280);
 static_assert(offsetof(UserFrame, gs_base) == 288);
 static_assert(offsetof(UserFrame, fp_state) == 304);
 
-volatile u32 &mmio(uptr address)
-{
-    return *reinterpret_cast<volatile u32 *>(address);
-}
 void console(std::string_view text)
 {
     for (char value : text)
@@ -172,14 +213,6 @@ void clean_code(uptr address)
 }
 } // namespace
 
-extern "C"
-{
-    uptr ok_arm_execution_resume_sp = 0;
-    uptr ok_arm_execution_stack_top = 0;
-    UserFrame *ok_arm_execution_active_frame = nullptr;
-    alignas(16) u8 ok_arm_execution_kernel_fp[512]{};
-}
-
 bool supported() noexcept
 {
     return true;
@@ -188,7 +221,8 @@ bool supported() noexcept
 OwnershipReport ownership_report() noexcept
 {
     OwnershipReport report{};
-    report.executing = executing || ok_arm_execution_active_frame != nullptr || ok_arm_execution_resume_sp != 0;
+    for (const auto &block : ok_aarch64_cpu_blocks)
+        report.executing = report.executing || block.executing || block.active_frame != nullptr || block.resume_sp != 0;
     spaces.each([&](const Space &value, uptr root) {
         ++report.address_spaces;
         report.table_pages += 2 + value.tables;
@@ -213,14 +247,12 @@ Status initialize()
         return Status::unsupported("AArch64 native setup requires the boot identity environment");
     u64 saved_mask;
     asm volatile("mrs %0, daif; msr daifset, #0xf" : "=r"(saved_mask) : : "memory");
+    // Runners without boot.S's kernel path still enter on CPU 0's block.
+    auto &boot_cpu = ok_aarch64_cpu_blocks[0];
+    asm volatile("msr tpidr_el1, %0" : : "r"(&boot_cpu) : "memory");
     populate_kernel(kernel_root, kernel_directory);
-    ok_arm_execution_stack_top = reinterpret_cast<uptr>(interrupt_stack + sizeof(interrupt_stack));
+    boot_cpu.stack_top = reinterpret_cast<uptr>(interrupt_stack + sizeof(interrupt_stack));
     const u64 vectors = reinterpret_cast<uptr>(ok_arm_execution_vectors);
-    // 39-bit VA, 4 KiB granule, inner-shareable WBWA tables, 40-bit physical
-    // addresses, and TTBR1 disabled. QEMU virt RAM and MMIO stay identity mapped.
-    const u64 tcr = 25 | (u64{1} << 8) | (u64{1} << 10) | (u64{3} << 12) | (u64{1} << 23) | (u64{2} << 32);
-    const u64 mair = 0xff00;
-    const u64 fp_control = u64{3} << 20;
     asm volatile("msr vbar_el1, %0; msr mair_el1, %1; msr tcr_el1, %2; msr cpacr_el1, %3; isb"
                  :
                  : "r"(vectors), "r"(mair), "r"(tcr), "r"(fp_control)
@@ -229,16 +261,11 @@ Status initialize()
     control |= (u64{1} << 0) | (u64{1} << 2) | (u64{1} << 12); // MMU, data cache, instruction cache.
     asm volatile("ic iallu; dsb sy; isb; msr sctlr_el1, %0; isb" : : "r"(control) : "memory");
 
-    // QEMU virt's GICv2 private physical timer interrupt. Other device IRQs stay
-    // masked until a driver explicitly establishes its own hardware IRQ path.
-    mmio(gic_distributor + 0x180) = 0xffffffff;
-    mmio(gic_distributor + 0x280) = 0xffffffff;
-    *reinterpret_cast<volatile u8 *>(gic_distributor + 0x400 + timer_irq) = 0x80;
-    mmio(gic_distributor + 0x100) = u32{1} << timer_irq;
-    mmio(gic_distributor) = 1;
-    mmio(gic_cpu + 4) = 0xff;
-    mmio(gic_cpu + 8) = 0;
-    mmio(gic_cpu) = 1;
+    // QEMU virt's GICv2 private physical timer interrupt and the IPI SGI. Other
+    // device IRQs stay masked until a driver explicitly establishes its own
+    // hardware IRQ path.
+    arm::GicV2::reset_cpu_lines();
+    arm::GicV2::enable_distributor();
     asm volatile("mrs %0, cntfrq_el0; msr cntp_ctl_el0, xzr; dsb sy" : "=r"(timer_period) : : "memory");
     timer_period /= 100;
     if (timer_period == 0)
@@ -291,8 +318,9 @@ Result<AddressSpace> create_space(MappingView mappings)
         if ((mapping.flags & page_execute) != 0)
             clean_code(mapping.physical_address);
     }
-    // Table stores must be visible to the walker before the root is selected.
-    asm volatile("dsb ish; ic iallu; dsb ish; isb" : : : "memory");
+    // Table stores must be visible to the walker before the root is selected,
+    // and new code to every CPU's instruction fetch.
+    asm volatile("dsb ish; ic ialluis; dsb ish; isb" : : : "memory");
     entry.value()->root = reinterpret_cast<uptr>(value.root);
     return spaces.handle(*entry.value());
 }
@@ -302,7 +330,7 @@ Status remap(const AddressSpace &space, const PageMapping &mapping)
     auto *value = storage(space);
     if (value == nullptr)
         return Status::not_found("native address-space handle is stale");
-    if (executing)
+    if (this_cpu().executing)
         return Status::busy("cannot remap an address space during native execution");
     if (!admissible(mapping) || mapping.flags == 0)
         return Status::invalid_argument("invalid native user-page remap");
@@ -314,11 +342,13 @@ Status remap(const AddressSpace &space, const PageMapping &mapping)
         return Status::not_found("native user page has no translation");
     if ((mapping.flags & page_execute) != 0)
         clean_code(mapping.physical_address);
-    // Break before make; the next entry's select_root invalidates the stage-1 TLB.
+    // Every other CPU leaves this root's user windows first; each entry's
+    // select_root invalidates the stage-1 TLB on all CPUs. Break before make.
+    static_cast<void>(ok::smp::quiesce_root(space.root));
     entry = 0;
     asm volatile("dsb ishst" : : : "memory");
     entry = leaf_entry(mapping);
-    asm volatile("dsb ish; ic iallu; dsb ish; isb" : : : "memory");
+    asm volatile("dsb ish; ic ialluis; dsb ish; isb" : : : "memory");
     return Status::success();
 }
 
@@ -327,8 +357,9 @@ Status destroy_space(AddressSpace &space)
     auto *value = storage(space);
     if (value == nullptr)
         return Status::not_found("native address-space handle is stale");
-    if (executing)
+    if (this_cpu().executing)
         return Status::busy("cannot destroy an address space during native execution");
+    static_cast<void>(ok::smp::quiesce_root(space.root));
     const auto released = release_tables(*value);
     const auto retired = spaces.release(*value);
     space = {};
@@ -410,8 +441,11 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
 {
     if (!initialized || storage(space) == nullptr)
         return Status::not_initialized("native address space is unavailable");
-    if (executing)
-        return Status::busy("native backend currently supports one executing CPU");
+    auto &cpu = this_cpu();
+    if (cpu.executing)
+        return Status::busy("this CPU already executes native code");
+    if (!stack_top && !cpu.stack_top)
+        return Status::invalid_argument("a secondary CPU enters native code only on an owned kernel stack");
     const auto code = lookup(space, frame.pc);
     // Like Linux, the stack need not be mapped; only an access to it faults (a
     // detached musl thread unmaps its own stack before its exit syscall).
@@ -424,20 +458,20 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     frame.flags &= 0xf0000000; // Preserve NZCV only; always EL0t with IRQs enabled.
     u64 saved_mask;
     asm volatile("mrs %0, daif; msr daifset, #0xf" : "=r"(saved_mask) : : "memory");
-    const auto old_stack_top = ok_arm_execution_stack_top;
-    if (stack_top) ok_arm_execution_stack_top = stack_top;
-    executing = true;
+    const auto old_stack_top = cpu.stack_top;
+    if (stack_top) cpu.stack_top = stack_top;
+    cpu.executing = true;
     select_root(space.root);
     asm volatile("msr cntp_tval_el0, %0; msr cntp_ctl_el0, %1; isb" : : "r"(timer_period), "r"(u64{1}) : "memory");
     ok_arm_execution_enter(&frame);
     asm volatile("msr cntp_ctl_el0, xzr; isb" : : : "memory");
     select_root(reinterpret_cast<uptr>(&kernel_root));
-    executing = false;
-    ok_arm_execution_active_frame = nullptr;
-    ok_arm_execution_resume_sp = 0;
-    ok_arm_execution_stack_top = old_stack_top;
+    cpu.executing = false;
+    cpu.active_frame = nullptr;
+    cpu.resume_sp = 0;
+    cpu.stack_top = old_stack_top;
     asm volatile("msr daif, %0" : : "r"(saved_mask) : "memory");
-    return last_trap;
+    return cpu.last_trap;
 }
 
 Result<Trap> enter(AddressSpace &space, UserFrame &frame)
@@ -460,33 +494,50 @@ extern "C" void ok_arm_execution_trap(u64 vector, uptr capture_sp)
 {
     u64 syndrome, fault_address;
     asm volatile("mrs %0, esr_el1; mrs %1, far_el1" : "=r"(syndrome), "=r"(fault_address));
+    auto &cpu = this_cpu();
     if (vector == 9)
     {
-        const auto acknowledge = mmio(gic_cpu + 0xc);
+        using arm::GicV2;
+        const auto acknowledge = GicV2::claim();
         const auto irq = acknowledge & 0x3ff;
         asm volatile("msr cntp_ctl_el0, xzr; isb" : : : "memory");
-        // The timer completes here; any other ID is a device line whose top
-        // half masks and completes it once the interrupt service runs.
-        if (irq == timer_irq)
+        // The timer and IPIs complete here; any other ID is a device line whose
+        // top half masks and completes it once the interrupt service runs.
+        // Device lines and the global tick belong to CPU 0; the others take
+        // only their local timer and IPIs.
+        if (irq < 16)
+        {
+            // The sender's reasons are read after the claim; the SGI's EOI
+            // carries the source CPU bits of the full IAR value.
+            asm volatile("dmb ish" : : : "memory");
+            GicV2::complete(acknowledge);
+            static_cast<void>(ok::smp::receive_ipi());
+        }
+        else if (irq == timer_irq && cpu.cpu != 0)
+        {
+            GicV2::complete(acknowledge);
+            ok::smp::local_tick();
+        }
+        else if (irq == timer_irq)
         {
             // CNTP_CVAL keeps the user quantum's expiry.
             u64 compare, count;
             asm volatile("mrs %0, cntp_cval_el0; mrs %1, cntpct_el0" : "=r"(compare), "=r"(count));
             interrupt::record_timer_latency(interrupt::TimerWake::user, count > compare ? count - compare : 0,
                                             arch::clock_frequency());
-            mmio(gic_cpu + 0x10) = acknowledge;
+            GicV2::complete(acknowledge);
             ok_interrupt_tick();
         }
-        else if (irq < 1020 && interrupt::platform_irqs_started())
+        else if (irq < 1020 && cpu.cpu == 0 && interrupt::platform_irqs_started())
             ok_interrupt_top_half(static_cast<interrupt::IrqLine>(irq));
         else if (irq < 1020)
-            mmio(gic_cpu + 0x10) = acknowledge;
-        last_trap = {irq == timer_irq ? TrapKind::timer : TrapKind::interrupt, irq, 0, 0, capture_sp};
+            GicV2::complete(acknowledge);
+        cpu.last_trap = {irq == timer_irq ? TrapKind::timer : TrapKind::interrupt, irq, 0, 0, capture_sp};
         return;
     }
     const auto exception_class = (syndrome >> 26) & 0x3f;
     const bool page_fault = exception_class == 0x20 || exception_class == 0x24;
-    last_trap = {vector == 8 && exception_class == 0x15 ? TrapKind::syscall
+    cpu.last_trap = {vector == 8 && exception_class == 0x15 ? TrapKind::syscall
                  : page_fault                           ? TrapKind::page_fault
                                                         : TrapKind::exception,
                  static_cast<u32>(exception_class), syndrome, page_fault ? fault_address : 0, capture_sp};
@@ -509,3 +560,28 @@ extern "C" [[noreturn]] void ok_arm_execution_kernel_fault(u64 vector)
         asm volatile("msr daifset, #0xf; wfe" : : : "memory");
 }
 } // namespace ok::arch::execution
+
+namespace ok::arch::aarch64
+{
+// A secondary CPU shares the boot CPU's translation and vectors; its block
+// has no unowned entry stack.
+Status prepare_secondary(ok::smp::CpuId cpu, SecondaryStart &start)
+{
+    using namespace execution;
+    if (!initialized)
+        return Status::not_initialized("native execution backend is not initialized");
+    if (cpu == 0 || cpu >= ok::smp::max_cpus)
+        return Status::invalid_argument("not a secondary CPU");
+    auto &block = ok_aarch64_cpu_blocks[cpu];
+    block = {};
+    block.cpu = cpu;
+    start.cpu_block = reinterpret_cast<uptr>(&block);
+    start.mair = mair;
+    start.tcr = tcr;
+    start.vbar = reinterpret_cast<uptr>(ok_arm_execution_vectors);
+    start.cpacr = fp_control;
+    start.ttbr0 = reinterpret_cast<uptr>(&kernel_root);
+    start.sctlr = secondary_control;
+    return Status::success();
+}
+} // namespace ok::arch::aarch64

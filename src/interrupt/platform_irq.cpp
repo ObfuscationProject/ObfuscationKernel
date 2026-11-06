@@ -6,6 +6,7 @@
 #define OK_PLATFORM_IRQ_WAIT 1
 #elif defined(OK_KERNEL_FREESTANDING) && (defined(__arm__) || defined(__aarch64__))
 #include "../arch/arm_common/gicv2.hpp"
+#include "ok/smp/bringup.hpp"
 #define OK_PLATFORM_IRQ_WAIT 1
 #elif defined(OK_KERNEL_FREESTANDING) && defined(__riscv)
 #include "../arch/riscv_common/clint.hpp"
@@ -165,7 +166,15 @@ void halt_until_interrupt()
     if (id == PlatformIrqChip::spurious_id)
         return;
     disarm_idle_tick();
-    if (id == PlatformIrqChip::timer_ppi)
+    if (id < 16)
+    {
+        // An IPI. Its reasons are read only after the claim; the SGI's EOI
+        // carries the source CPU bits of the full IAR value.
+        asm volatile("dmb ish" : : : "memory");
+        PlatformIrqChip::complete(acknowledge);
+        static_cast<void>(smp::receive_ipi());
+    }
+    else if (id == PlatformIrqChip::timer_ppi)
     {
         record_timer_latency(TimerWake::idle, idle_tick_late(), arch::clock_frequency());
         PlatformIrqChip::complete(acknowledge);

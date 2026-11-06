@@ -71,7 +71,19 @@ template <> struct NativeInstructions<Architecture::aarch64>
     {
         spin_pause_hint();
     }
-    static u32 cpu_index() noexcept;
+    // Inline for the same reason: the logical id heads the per-CPU block that
+    // TPIDR_EL1 names from boot.S on (src/arch/aarch64/execution.cpp).
+    static u32 cpu_index() noexcept
+    {
+#if defined(OK_KERNEL_FREESTANDING) && defined(__aarch64__)
+        uptr block;
+        asm("mrs %0, tpidr_el1" : "=r"(block));
+        // Images without the native backend have no block.
+        return block != 0 ? *reinterpret_cast<const u32 *>(block) : 0;
+#else
+        return 0;
+#endif
+    }
 };
 
 template <> struct NativeInstructions<Architecture::arm32>

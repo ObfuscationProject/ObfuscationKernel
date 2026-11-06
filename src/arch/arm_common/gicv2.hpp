@@ -9,29 +9,66 @@ namespace ok::arch::arm
 {
 
 // QEMU virt's GICv2 (distributor 0x08000000, CPU interface 0x08010000). Lines
-// are interrupt IDs: SPIs 32..255 are bindable; SGIs and PPIs are not, and the
-// physical timer PPI 30 stays enabled for the tick. The trap path or the idle
-// wait claims an interrupt from GICC_IAR before the top half runs, so
-// acknowledge() has nothing left to do and end_of_interrupt() writes GICC_EOIR.
+// are interrupt IDs: SPIs 32..255 are bindable and target CPU 0; SGIs and PPIs
+// are not, and every CPU keeps its banked physical timer PPI 30 and the IPI
+// SGI enabled. The trap path or the idle wait claims an interrupt from
+// GICC_IAR before the top half runs, so acknowledge() has nothing left to do
+// and end_of_interrupt() writes GICC_EOIR.
 class GicV2 final
 {
   public:
     static constexpr uptr distributor = 0x08000000;
     static constexpr uptr cpu_interface = 0x08010000;
     static constexpr interrupt::IrqLine timer_ppi = 30;
+    static constexpr u32 ipi_sgi = 1;
     static constexpr u32 spurious_id = 1023;
 
+    // The distributor, once on CPU 0; each CPU enables its own lines.
     Status initialize()
     {
         for (usize word = 1; word < line_count() / 32; ++word)
             reg(distributor + 0x180 + 4 * word) = 0xffffffffu;
-        byte(distributor + 0x400 + timer_ppi) = 0x80;
-        reg(distributor + 0x100) = 1u << timer_ppi;
-        reg(distributor) = reg(distributor) | 1u;
-        reg(cpu_interface + 4) = 0xff;
-        reg(cpu_interface) = reg(cpu_interface) | 1u;
+        enable_distributor();
+        enable_cpu_lines();
         initialized_ = true;
         return Status::success();
+    }
+    static void enable_distributor()
+    {
+        reg(distributor) = reg(distributor) | 1u;
+    }
+    // This CPU's banked view: the timer PPI and the IPI SGI at one priority,
+    // every priority admitted, and its CPU interface on.
+    static void enable_cpu_lines()
+    {
+        byte(distributor + 0x400 + timer_ppi) = 0x80;
+        byte(distributor + 0x400 + ipi_sgi) = 0x80;
+        reg(distributor + 0x100) = (1u << timer_ppi) | (1u << ipi_sgi);
+        reg(cpu_interface + 4) = 0xff;
+        reg(cpu_interface) = reg(cpu_interface) | 1u;
+    }
+    // Discards the banked SGI/PPI state this CPU started with, then enables
+    // its lines.
+    static void reset_cpu_lines()
+    {
+        reg(distributor + 0x180) = 0xffffffffu;
+        reg(distributor + 0x280) = 0xffffffffu;
+        for (usize word = 0; word < 4; ++word)
+            reg(distributor + 0xf10 + 4 * word) = 0xffffffffu;
+        reg(cpu_interface + 8) = 0;
+        enable_cpu_lines();
+    }
+    // The interface number of the calling CPU: GICD_ITARGETSR0 is banked and
+    // reads as that CPU's own target bit. Zero on a uniprocessor GIC.
+    static u32 cpu_target_mask()
+    {
+        return byte(distributor + 0x800);
+    }
+    // Raises the IPI SGI on the CPU interfaces in `targets`. Stores before it
+    // must already be visible (dsb ishst).
+    static void raise_ipi(u32 targets)
+    {
+        reg(distributor + 0xf00) = ((targets & 0xffu) << 16) | ipi_sgi;
     }
     Status configure(interrupt::IrqLine line, interrupt::IrqTrigger trigger)
     {

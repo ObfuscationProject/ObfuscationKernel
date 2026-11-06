@@ -67,10 +67,4 @@ void NativeInstructions<Architecture::aarch64>::restore_interrupts(uptr saved) n
 #endif
 }
 
-// Every profile reports the boot CPU until per-CPU registers are installed.
-u32 NativeInstructions<Architecture::aarch64>::cpu_index() noexcept
-{
-    return 0;
-}
-
 } // namespace ok::arch::detail

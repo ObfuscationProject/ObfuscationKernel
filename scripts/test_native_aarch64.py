@@ -32,6 +32,9 @@ def main() -> int:
                          ("test", "tests/native/aarch64_execution_test.cpp")):
         target = out / (name + ".o")
         command = [gxx, *flags] if source.endswith(".cpp") else [gcc]
+        if name == "execution":
+            # Kernel code: smp::current_cpu() reads the per-CPU block.
+            command.append("-DOK_KERNEL_FREESTANDING")
         subprocess.run([*command, "-c", str(project/source), "-o", str(target)], check=True)
         objects.append(str(target))
     elf, image = out/"kernel.elf", out/"kernel.bin"
