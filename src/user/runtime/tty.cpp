@@ -1,6 +1,6 @@
 // Terminals in the runtime: console ingress with echo, console output through
 // OPOST, prepared console reads, terminal ioctls for the native personality,
-// and the terminal signal outbox (docs/modules/tty.md). The scheduler owns the
+// and the signal outboxes of the console and every PTY slave (docs/modules/tty.md). The scheduler owns the
 // terminal objects; this unit moves their bytes to the serial port and turns
 // queued terminal signals into kernel-originated signals.
 #include "private.hpp"
@@ -67,19 +67,28 @@ Result<usize> tty_user_ranges(const hw::AddressSpace &space, std::span<const Pip
 
 void tty_drain_outbox(Kernel &kernel)
 {
-    auto &terminal = kernel.scheduler().console_terminal();
-#ifdef OK_PRIVATE_POLL_MASK
-    // Each send may run exit and stop paths that queue again; stay bounded.
-    for (usize sent = 0; terminal.outbox_count && sent < 4 * sched::terminal_outbox_capacity; ++sent)
+    auto &scheduler = kernel.scheduler();
+    for (usize index = 0; index < sched::SchedulerState::terminal_count; ++index)
     {
-        const auto entry = terminal.take_outbox();
-        const auto signal = tty_native_signal(entry.signal);
-        if (entry.group) static_cast<void>(send_kernel_group_signal(kernel, entry.target, signal));
-        else static_cast<void>(send_kernel_process_signal(kernel, entry.target, signal));
-    }
+        auto &terminal = scheduler.terminal_storage(index);
+        if (!terminal.outbox_count) continue;
+#ifdef OK_PRIVATE_POLL_MASK
+        // Each send may run exit and stop paths that queue again; stay bounded.
+        for (usize sent = 0; terminal.outbox_count && sent < 4 * sched::terminal_outbox_capacity; ++sent)
+        {
+            const auto entry = terminal.take_outbox();
+            const auto signal = tty_native_signal(entry.signal);
+            if (entry.group) static_cast<void>(send_kernel_group_signal(kernel, entry.target, signal));
+            else static_cast<void>(send_kernel_process_signal(kernel, entry.target, signal));
+        }
 #else
-    while (terminal.outbox_count) static_cast<void>(terminal.take_outbox());
+        while (terminal.outbox_count) static_cast<void>(terminal.take_outbox());
 #endif
+        // A master writer stopped at a full outbox (ISIG budget) may go on.
+        if (index)
+            scheduler.wake_waiters(sched::ThreadWaitReason::pty_write,
+                sched::SchedulerState::pty_wait_key({static_cast<u16>(index - 1), 1, sched::private_pty::Side::master}));
+    }
 }
 
 void tty_console_input(Kernel &kernel, char value, sched::WakeSource source)

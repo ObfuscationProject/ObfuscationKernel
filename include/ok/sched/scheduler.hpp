@@ -521,6 +521,19 @@ class SchedulerState
     Result<usize> write_pty_description(u16 description, std::span<const std::byte> input);
     Result<private_pty::Readiness> pty_description_readiness(u16 description) const;
     [[nodiscard]] private_pty::Audit pty_audit() const { return pty_transport_.audit(); }
+    // ptmx-style pairs (docs/modules/tty.md section 8). The devfs open path
+    // (S6) binds a fresh provider-free description that holds exactly one
+    // reference; each bound description owns one endpoint open, shared by dup,
+    // fork and SCM_RIGHTS, and its final release retires that open.
+    // bind_pty_multiplexer creates the pair (slave locked and dormant) and
+    // returns the master endpoint; bind_pty_slave admits one more slave open.
+    Result<private_pty::Handle> bind_pty_multiplexer(u16 description);
+    Status bind_pty_slave(u16 description, private_pty::Handle slave);
+    [[nodiscard]] Result<u32> pty_index(u16 description) const;
+    Status set_pty_lock(u16 description, bool locked);
+    // Each endpoint's open count equals the descriptions bound to it, outside
+    // an unpublished prepared raw pair (whose opens precede publication).
+    [[nodiscard]] Status terminal_audit() const;
     // Each successful retain owns one reference, released exactly once. A pin
     // keeps the ID, backing node and pipe endpoint alive across fd close/reuse.
     Status retain_description(u16 id);
@@ -601,6 +614,11 @@ class SchedulerState
     // Terminals (docs/modules/tty.md sections 1, 4 and 5). The console is
     // terminal 0; the runtime moves echo and output and drains the outbox.
     [[nodiscard]] Terminal *terminal(TerminalRef ref);
+    [[nodiscard]] const Terminal *terminal(TerminalRef ref) const;
+    // Every terminal's storage by index (0 console, 1 + slot), live or not,
+    // for the outbox drain.
+    static constexpr usize terminal_count = 1 + private_pty::RawPtyTable<>::pair_capacity;
+    [[nodiscard]] Terminal &terminal_storage(usize index);
     [[nodiscard]] Terminal &console_terminal() { return console_terminal_; }
     [[nodiscard]] const Terminal &console_terminal() const { return console_terminal_; }
     [[nodiscard]] Result<TerminalSubject> terminal_subject(u16 description) const;
@@ -681,6 +699,9 @@ class SchedulerState
     void cancel_console_epoch(u32 epoch);
     void reset_console_terminal();
     [[nodiscard]] tty::Termios console_read_termios() const;
+    void wake_pty(private_pty::Handle endpoint, u8 wakes);
+    Status pty_terminal_check(const TerminalSubject &subject, ConsoleControlOperation operation);
+    void terminal_changed(TerminalRef ref);
     private_pty::RawPtyTable<> pty_transport_{}; // One stable table; handles never cross scheduler domains.
     ConsoleInputLease console_input_{};
     std::array<u64, wake_source_count> wakes_{};
@@ -788,5 +809,7 @@ static_assert(max_unix_endpoints == unix_pathname_endpoint_capacity);
 static_assert(max_unix_backlog == unix_pathname_backlog_capacity);
 static_assert(SchedulerPolicy<RoundRobinPolicy>);
 static_assert(!std::is_polymorphic_v<Scheduler>);
+static_assert(std::is_same_v<private_pty::RawPtyTable<>::SlaveTerminal, Terminal>,
+              "every kernel PTY slave is a Terminal with the kernel line discipline");
 
 } // namespace ok::sched

@@ -1,4 +1,4 @@
-// Raw PTY pair I/O continuations and their owners.
+// PTY pair I/O continuations and their owners (raw pairs and ptmx-style pairs).
 #include "private.hpp"
 
 namespace ok::user::native
@@ -135,8 +135,12 @@ Result<usize> attempt_pty_io(Kernel &kernel, sched::ProcessControlBlock &process
             auto &preview = prepared.value();
             if (preview.endpoint() != wait.endpoint)
             { preview.cancel(); return Status::bad_descriptor("PTY preview endpoint changed"); }
-            const auto count = preview.bytes().size();
-            if (!pipe_scatter(space, wait.address, preview.bytes(), wait.vectors))
+            // The plan is copied out first and consumed only after the copy worked.
+            std::array<std::byte, sched::private_pty::RawPtyTable<>::queue_capacity> staged{};
+            const auto count = preview.size();
+            if (preview.copy({staged.data(), count}) != count)
+            { preview.cancel(); return Status::busy("PTY preview changed before copy-out"); }
+            if (!pipe_scatter(space, wait.address, {staged.data(), count}, wait.vectors))
             { preview.cancel(); return Status::fault("PTY output copy failed before dequeue"); }
             auto consumed = kernel.scheduler().commit_pty_read(preview);
             if (!consumed || consumed.value() != count)
@@ -154,11 +158,14 @@ Result<usize> attempt_pty_io(Kernel &kernel, sched::ProcessControlBlock &process
     std::array<std::byte, sched::private_pty::RawPtyTable<>::queue_capacity> buffer{};
     auto readiness = kernel.scheduler().pty_description_readiness(wait.description);
     if (!readiness) return readiness.status();
-    if (readiness.value().hangup) return Status::io_error("PTY peer retired");
+    if (readiness.value().write_error) return Status::io_error("PTY peer retired");
     if (!readiness.value().writable) return Status::would_block("PTY outgoing queue is full");
     usize count = wait.count - wait.committed;
     if (count > buffer.size()) count = buffer.size();
-    if (count > readiness.value().outgoing_available) count = readiness.value().outgoing_available;
+    // The slave's N_TTY decides how much master input it takes (editing
+    // bytes need no room); slave output is bounded by the master queue.
+    if (wait.endpoint.side == sched::private_pty::Side::slave && count > readiness.value().outgoing_available)
+        count = readiness.value().outgoing_available;
     if (auto status = gather_pty_suffix(space, {buffer.data(), count}, wait); !status) return status;
     return kernel.scheduler().write_pty_description(wait.description, {buffer.data(), count});
 }
@@ -180,6 +187,7 @@ i64 resume_pty_io(Kernel &kernel, sched::ProcessControlBlock &process,
         cancel_pty_wait(kernel, object, "interrupted", result); return result;
     }
     auto transferred = attempt_pty_io(kernel, process, wait);
+    if (wait.writing) tty_drain_outbox(kernel); // ISIG from master input.
     if (transferred && wait.writing) wait.committed += transferred.value();
     const auto *description = kernel.scheduler().open_description(wait.description);
     const bool blocking = description && !(description->flags & posix::o_NONBLOCK);
@@ -217,6 +225,7 @@ i64 begin_pty_io(Kernel &kernel, sched::ProcessControlBlock &process, sched::Thr
     initial.address = address; initial.count = count; initial.fd = fd; initial.description = description_id;
     initial.endpoint = description->pty_endpoint; initial.vectors = vectors; initial.writing = writing;
     auto transferred = attempt_pty_io(kernel, process, initial);
+    if (writing) tty_drain_outbox(kernel); // ISIG from master input.
     if (transferred && writing) initial.committed = transferred.value();
     const bool blocking = !(description->flags & posix::o_NONBLOCK);
     if ((transferred && (!writing || initial.committed == count || !blocking)) ||

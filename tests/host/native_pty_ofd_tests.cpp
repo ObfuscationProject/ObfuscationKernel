@@ -37,6 +37,7 @@ struct Fixture
     }
     ~Fixture()
     {
+        CHECK(scheduler.terminal_audit());
         CHECK(scheduler.drain_all_resources()); CHECK(!scheduler.open_description_count());
         const auto audit = scheduler.pty_audit(); CHECK(!audit.live_pairs && !audit.live_endpoints);
         CHECK(!audit.buffered_bytes && audit.cleared_outside_live_bytes);
@@ -46,7 +47,38 @@ struct Fixture
     std::array<i32, 2> pair(u32 flags = 0)
     {
         auto operation = scheduler.prepare_pty_pair(pid, flags); CHECK(operation && operation.value().validate());
-        const auto fds = operation.value().descriptors(); operation.value().publish_checked(); return fds;
+        const auto fds = operation.value().descriptors(); operation.value().publish_checked();
+        CHECK(scheduler.terminal_audit()); return fds;
+    }
+    // The S6 open path in miniature: a fresh description pinned once, bound,
+    // installed at the lowest free fd, then unpinned.
+    template <typename Bind> Result<i32> open(Bind bind)
+    {
+        const auto made = scheduler.allocate_description({.readable = true, .writable = true, .flags = 2u});
+        if (!made) return made.status();
+        const auto id = made.value();
+        CHECK(scheduler.retain_description(id));
+        i32 fd = 0;
+        while (resources().files.contains(fd)) ++fd;
+        Status status = bind(id);
+        if (status) status = scheduler.install_descriptor(resources(), fd, id);
+        CHECK(scheduler.release_description(id));
+        CHECK(scheduler.terminal_audit());
+        if (!status) return status;
+        return fd;
+    }
+    Result<i32> ptmx(sched::private_pty::Handle *master = nullptr)
+    {
+        return open([&](u16 id) -> Status {
+            const auto bound = scheduler.bind_pty_multiplexer(id);
+            if (!bound) return bound.status();
+            if (master) *master = bound.value();
+            return {};
+        });
+    }
+    Result<i32> pts(sched::private_pty::Handle slave)
+    {
+        return open([&](u16 id) { return scheduler.bind_pty_slave(id, slave); });
     }
 };
 template <typename Test> void run(const char *name, Test test)
@@ -208,7 +240,8 @@ void provider_exclusivity_stat_seek_and_controls(Fixture &f)
 {
     const auto pair = f.pair(); const auto id = f.id(pair[0]);
     auto copy = *f.scheduler.open_description(id);
-    CHECK(f.scheduler.allocate_description(copy).status().code() == StatusCode::already_exists);
+    // Only a prepared pair or a PTY bind creates a PTY description (one open each).
+    CHECK(f.scheduler.allocate_description(copy).status().code() == StatusCode::invalid_argument);
     copy.console = true;
     CHECK(f.scheduler.allocate_description(copy).status().code() == StatusCode::invalid_argument);
     const auto metadata = f.posix.fstat(pair[0]); CHECK(metadata);
@@ -218,7 +251,14 @@ void provider_exclusivity_stat_seek_and_controls(Fixture &f)
     std::array<std::byte, 1> out{};
     CHECK(f.posix.pread(pair[0], out, 0).status().code() == StatusCode::not_seekable);
     CHECK(f.posix.pwrite(pair[0], bytes("x"), 0).status().code() == StatusCode::not_seekable);
-    CHECK(f.posix.terminal_descriptor(pair[0]).status().code() == StatusCode::not_terminal);
+    // Both ends are terminal descriptions of the slave's terminal (S5).
+    const auto master_subject = f.posix.terminal_descriptor(pair[0]);
+    const auto slave_subject = f.posix.terminal_descriptor(pair[1]);
+    CHECK(master_subject && slave_subject && master_subject.value().terminal == slave_subject.value().terminal);
+    CHECK(master_subject.value().side == sched::TerminalSide::pty_master);
+    CHECK(slave_subject.value().side == sched::TerminalSide::pty_slave);
+    CHECK(slave_subject.value().terminal.index == f.scheduler.open_description(id)->pty_endpoint.slot + 1);
+    CHECK(f.scheduler.terminal(slave_subject.value().terminal)->termios == tty::raw_pair_termios());
     CHECK(f.posix.close(pair[1]));
     const auto ready = f.posix.ready_events(pair[0], posix::ReadyEvents::none); CHECK(ready);
     CHECK(ready.value().events == posix::ReadyEvents::hangup); // HUP does not need a requested bit.
@@ -277,15 +317,16 @@ void checked_read_canonical_hold_and_copy_refusal(Fixture &f)
     for (usize prefix = 0; prefix <= 7; ++prefix)
     {
         auto preview = f.scheduler.prepare_pty_read(slave, 32); CHECK(preview);
-        CHECK(preview.value().bytes().size() == 7);
+        CHECK(preview.value().size() == 7);
         std::array<std::byte, 7> target{};
-        for (usize i = 0; i < prefix; ++i) target[i] = preview.value().bytes()[i];
+        CHECK(preview.value().copy({target.data(), prefix}) == prefix);
         preview.value().cancel(); // Checked user copy refused at this prefix.
         CHECK(f.scheduler.commit_pty_read(preview.value()).status().code() == StatusCode::busy);
         CHECK(f.scheduler.pty_description_readiness(slave).value().buffered == 7);
     }
     auto preview = f.scheduler.prepare_pty_read(slave, 32); CHECK(preview);
-    CHECK(preview.value().bytes()[0] == std::byte{'p'} && preview.value().bytes()[6] == std::byte{'e'});
+    std::array<std::byte, 7> copied{}; CHECK(preview.value().copy(copied) == 7);
+    CHECK(copied[0] == std::byte{'p'} && copied[6] == std::byte{'e'});
     CHECK(f.scheduler.commit_pty_read(preview.value()).value() == 7);
     CHECK(f.scheduler.commit_pty_read(preview.value()).status().code() == StatusCode::busy);
     CHECK(f.scheduler.prepare_pty_read(slave, 1).status().code() == StatusCode::would_block);
@@ -322,7 +363,7 @@ void actual_wait_ticket_read_write_wakes(Fixture &f)
     auto refused = f.scheduler.prepare_pty_read(slave, 1); CHECK(refused);
     refused.value().cancel(); CHECK(pending(writer.value()));
     auto copied = f.scheduler.prepare_pty_read(slave, 1); CHECK(copied);
-    CHECK(copied.value().bytes()[0] == std::byte{'w'});
+    std::array<std::byte, 1> first{}; CHECK(copied.value().copy(first) == 1 && first[0] == std::byte{'w'});
     CHECK(f.scheduler.commit_pty_read(copied.value()).value() == 1); ready(writer.value());
     CHECK(f.scheduler.read_pty_description(slave, output).value() == 4095);
     CHECK(f.scheduler.write_pty_description(master, input).value() == input.size());
@@ -371,6 +412,95 @@ void final_ofd_release_wakes_both_sides_and_classes(Fixture &f)
     CHECK(sched::SchedulerState::pty_wait_key(replacement) == sched::SchedulerState::pty_wait_key(master_handle));
     CHECK(replacement != master_handle); // The packed wake key cannot authorize an endpoint identity.
 }
+sched::private_pty::Handle slave_of(sched::private_pty::Handle master)
+{ return {master.slot, master.generation, sched::private_pty::Side::slave}; }
+void counted_slave_opens_and_slot_lifetime(Fixture &f)
+{
+    using sched::private_pty::Side;
+    sched::private_pty::Handle master_handle{};
+    const auto master = f.ptmx(&master_handle); CHECK(master && master_handle.side == Side::master);
+    const auto slave = slave_of(master_handle);
+    auto audit = f.scheduler.pty_audit();
+    CHECK(audit.live_pairs == 1 && audit.master_opens == 1 && !audit.slave_opens && audit.dormant_slaves == 1);
+    CHECK(audit.locked_pairs == 1);
+    CHECK(f.scheduler.pty_index(f.id(master.value())).value() == master_handle.slot);
+    CHECK(f.pts(slave).status().code() == StatusCode::io_error); // Locked; nothing leaked.
+    CHECK(f.scheduler.pty_audit().slave_opens == 0 && f.scheduler.terminal_audit());
+    CHECK(f.scheduler.set_pty_lock(f.id(master.value()), false));
+    // A bind needs a fresh, singly pinned, provider-free description.
+    CHECK(f.scheduler.bind_pty_slave(f.id(master.value()), slave).code() == StatusCode::invalid_argument);
+    CHECK(f.scheduler.bind_pty_slave(1, slave).code() == StatusCode::invalid_argument);
+    const auto first = f.pts(slave), second = f.pts(slave); CHECK(first && second);
+    CHECK(f.id(first.value()) != f.id(second.value()));
+    CHECK(f.scheduler.pty_index(f.id(first.value())).status().code() == StatusCode::not_terminal);
+    CHECK(f.scheduler.set_pty_lock(f.id(first.value()), true).code() == StatusCode::not_terminal);
+    audit = f.scheduler.pty_audit(); CHECK(audit.slave_opens == 2 && !audit.dormant_slaves && !audit.locked_pairs);
+    // dup, fork and SCM_RIGHTS share descriptions: open counts stay.
+    const auto duplicate = f.posix.duplicate(first.value()); CHECK(duplicate);
+    CHECK(f.scheduler.pty_audit().slave_opens == 2 && f.scheduler.terminal_audit());
+    const auto child = f.scheduler.fork_process(f.pid, false); CHECK(child);
+    CHECK(f.scheduler.pty_audit().slave_opens == 2 && f.scheduler.pty_audit().master_opens == 1);
+    CHECK(f.scheduler.terminal_audit());
+    const auto sockets = f.posix.unix_socketpair(0); CHECK(sockets);
+    const std::array<i32, 2> rights{second.value(), master.value()};
+    CHECK(f.posix.send_unix_rights(sockets.value()[0], bytes("r"), rights));
+    CHECK(f.posix.close(second.value()));
+    CHECK(f.scheduler.pty_audit().slave_opens == 2 && f.scheduler.terminal_audit());
+    // Canonical echo goes back to the master; each slave description reads the terminal.
+    CHECK(f.posix.write(master.value(), bytes("hi\r")).value() == 3);
+    std::array<std::byte, 16> output{};
+    CHECK(f.posix.read(master.value(), output).value() == 4 && output[2] == std::byte{'\r'});
+    CHECK(f.posix.read(duplicate.value(), output).value() == 3 && output[2] == std::byte{'\n'});
+    // Closing descriptions retires opens only at each description's final reference.
+    CHECK(f.posix.close(first.value())); CHECK(f.posix.close(duplicate.value()));
+    CHECK(f.scheduler.pty_audit().slave_opens == 2); // The child still holds both.
+    CHECK(f.scheduler.exit_process(child.value(), 0)); CHECK(f.scheduler.reap_process(child.value()));
+    CHECK(f.scheduler.pty_audit().slave_opens == 1 && f.scheduler.terminal_audit()); // SCM_RIGHTS holds one.
+    CHECK(f.posix.close(sockets.value()[0])); CHECK(f.posix.close(sockets.value()[1]));
+    audit = f.scheduler.pty_audit();
+    CHECK(!audit.slave_opens && audit.master_opens == 1 && audit.live_pairs == 1 && f.scheduler.terminal_audit());
+    // Closed slave: master read EIO with HUP; a reopen goes on.
+    CHECK(f.posix.read(master.value(), output).status().code() == StatusCode::io_error);
+    const auto again = f.pts(slave); CHECK(again);
+    CHECK(f.posix.write(again.value(), bytes("x")).value() == 1);
+    // The master's last close hangs the slave up; the slot lives until opens 0.
+    CHECK(f.posix.write(master.value(), bytes("lost\n")).value() == 5);
+    CHECK(f.posix.close(master.value()));
+    CHECK(f.scheduler.pty_audit().live_pairs == 1 && f.scheduler.terminal_audit());
+    CHECK(f.pts(slave).status().code() == StatusCode::io_error);
+    CHECK(f.posix.read(again.value(), output).value() == 0);
+    CHECK(f.posix.write(again.value(), bytes("x")).status().code() == StatusCode::io_error);
+    const auto hung = f.posix.terminal_descriptor(again.value()); CHECK(hung);
+    CHECK(f.scheduler.terminal(hung.value().terminal)->hung_up);
+    CHECK(f.posix.close(again.value()));
+    CHECK(!f.scheduler.pty_audit().live_pairs && f.scheduler.terminal_audit());
+    CHECK(f.pts(slave).status().code() == StatusCode::not_found);
+    // A master closed while dormant frees its slot; raw and ptmx share the eight slots.
+    const auto dormant = f.ptmx(); CHECK(dormant); CHECK(f.posix.close(dormant.value()));
+    CHECK(!f.scheduler.pty_audit().live_pairs);
+    std::array<std::array<i32, 2>, 4> raw{};
+    for (auto &pair : raw) pair = f.pair();
+    std::array<i32, 4> multiplexed{};
+    for (auto &fd : multiplexed) { const auto made = f.ptmx(); CHECK(made); fd = made.value(); }
+    CHECK(f.ptmx().status().code() == StatusCode::system_file_limit);
+    CHECK(f.scheduler.terminal_audit());
+    for (const auto &pair : raw) { CHECK(f.posix.close(pair[0])); CHECK(f.posix.close(pair[1])); }
+    for (const auto fd : multiplexed) CHECK(f.posix.close(fd));
+}
+void raw_slave_extra_open_and_bind_refusals(Fixture &f)
+{
+    const auto pair = f.pair();
+    const auto slave = f.scheduler.open_description(f.id(pair[1]))->pty_endpoint;
+    const auto master = f.scheduler.open_description(f.id(pair[0]))->pty_endpoint;
+    CHECK(f.scheduler.pty_index(f.id(pair[0])).status().code() == StatusCode::not_terminal);
+    CHECK(f.pts(master).status().code() == StatusCode::invalid_argument);
+    const auto extra = f.pts(slave); CHECK(extra); // A /dev/tty open of an open raw slave.
+    CHECK(f.scheduler.pty_audit().slave_opens == 2);
+    CHECK(f.posix.close(pair[1])); CHECK(f.posix.close(extra.value()));
+    CHECK(f.pts(slave).status().code() == StatusCode::io_error); // A raw slave never reopens.
+    CHECK(f.posix.read(pair[0], std::span<std::byte>{}).value() == 0);
+    CHECK(f.posix.close(pair[0])); CHECK(!f.scheduler.pty_audit().live_pairs);
+}
 int main()
 {
     run("prepared-real-reservations-rollback", prepared_lifetime_and_rollback);
@@ -386,5 +516,7 @@ int main()
     run("checked-read-canonical-hold-copy-refusal", checked_read_canonical_hold_and_copy_refusal);
     run("actual-wait-ticket-read-write-wakes", actual_wait_ticket_read_write_wakes);
     run("final-ofd-release-wakes-both-sides-classes", final_ofd_release_wakes_both_sides_and_classes);
+    run("counted-slave-opens-slot-lifetime", counted_slave_opens_and_slot_lifetime);
+    run("raw-slave-extra-open-bind-refusals", raw_slave_extra_open_and_bind_refusals);
     std::printf("PRIVATE_PTY_ACTUAL_OFD cases=%zu checks=%zu status=passed\n", cases, checks);
 }

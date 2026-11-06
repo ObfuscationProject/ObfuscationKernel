@@ -53,12 +53,15 @@ struct TerminalOutboxEntry
     constexpr bool operator==(const TerminalOutboxEntry &) const = default;
 };
 
-struct Terminal
+// The line discipline is a parameter only so that the private PTY owner model
+// can run with small queues; every kernel terminal is a Terminal.
+template <class Ldisc>
+struct BasicTerminal
 {
     tty::Termios termios{};
     tty::ForeignResidue residue{};
     tty::WinSize window{};
-    TerminalLdisc ldisc{};
+    Ldisc ldisc{};
     ProcessId session{}, foreground{};
     u32 console_epoch{}; // Console only: the lease epoch the association belongs to.
     std::array<TerminalOutboxEntry, terminal_outbox_capacity> outbox{};
@@ -105,5 +108,6 @@ struct Terminal
         return entry;
     }
 };
+using Terminal = BasicTerminal<TerminalLdisc>;
 
 } // namespace ok::sched

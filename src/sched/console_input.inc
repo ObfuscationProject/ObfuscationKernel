@@ -106,13 +106,33 @@ Status SchedulerState::console_read_authority(ProcessId pid, u32 expected_epoch)
 
 Terminal *SchedulerState::terminal(TerminalRef ref)
 {
-    return ref == console_terminal_ref ? &console_terminal_ : nullptr;
+    if (ref == console_terminal_ref) return &console_terminal_;
+    if (!ref.valid() || !ref.index) return nullptr;
+    return pty_transport_.terminal(static_cast<u16>(ref.index - 1), ref.generation);
+}
+
+const Terminal *SchedulerState::terminal(TerminalRef ref) const
+{
+    return const_cast<SchedulerState *>(this)->terminal(ref);
+}
+
+Terminal &SchedulerState::terminal_storage(usize index)
+{
+    return index ? pty_transport_.terminal_storage(static_cast<u16>(index - 1)) : console_terminal_;
 }
 
 Result<TerminalSubject> SchedulerState::terminal_subject(u16 description) const
 {
     const auto *open = open_description(description);
     if (!open || !open->used) return Status::bad_descriptor("bad terminal descriptor");
+    if (const auto endpoint = open->pty_endpoint)
+    {
+        // A master names its slave's terminal (Linux real_tty).
+        const TerminalRef ref{static_cast<u16>(endpoint.slot + 1), endpoint.generation};
+        return TerminalSubject{description, ref,
+                               endpoint.side == private_pty::Side::master ? TerminalSide::pty_master
+                                                                          : TerminalSide::pty_slave};
+    }
     if (!open->console && !open->input_console)
         return Status::not_terminal("descriptor is not a terminal description");
     return TerminalSubject{description, console_terminal_ref, TerminalSide::console};
@@ -124,19 +144,25 @@ std::optional<TerminalRef> SchedulerState::controlling_terminal(const ProcessCon
     if (console_terminal_.session == process.session_id() && console_terminal_.console_epoch &&
         console_terminal_.console_epoch == console_input_.epoch() && console_input_.active())
         return console_terminal_ref;
+    for (u16 slot = 0; slot < private_pty::RawPtyTable<>::pair_capacity; ++slot)
+    {
+        const TerminalRef ref{static_cast<u16>(slot + 1), pty_transport_.live_generation(slot)};
+        if (const auto *candidate = terminal(ref); candidate && candidate->session == process.session_id()) return ref;
+    }
     return std::nullopt;
 }
 
 TerminalJobFacts SchedulerState::terminal_job_facts(ProcessId pid, TerminalRef ref) const
 {
     const auto *process = find(pid);
-    if (!process || ref != console_terminal_ref) return {};
+    const auto *target = terminal(ref);
+    if (!process || !target) return {};
     const auto ctty = controlling_terminal(*process);
     TerminalJobFacts facts{};
     facts.is_ctty = ctty && *ctty == ref;
-    facts.has_foreground = console_terminal_.foreground != 0;
+    facts.has_foreground = target->foreground != 0;
     facts.pgrp = process->process_group_id();
-    facts.in_foreground = facts.has_foreground && facts.pgrp == console_terminal_.foreground;
+    facts.in_foreground = facts.has_foreground && facts.pgrp == target->foreground;
     return facts;
 }
 
@@ -172,7 +198,7 @@ Status SchedulerState::acquire_terminal(TerminalRef ref, ProcessControlBlock &ca
 Status SchedulerState::terminal_check(const TerminalSubject &subject, ConsoleControlOperation operation)
 {
     using Op = ConsoleControlOperation;
-    if (subject.terminal != console_terminal_ref) return Status::not_terminal("terminal is not available");
+    if (subject.terminal != console_terminal_ref) return pty_terminal_check(subject, operation);
     switch (operation)
     {
     case Op::detach: case Op::get_pty_number: case Op::set_pty_lock: case Op::count:
@@ -190,41 +216,97 @@ Status SchedulerState::terminal_check(const TerminalSubject &subject, ConsoleCon
     return {};
 }
 
+// PTY descriptors (docs/modules/tty.md sections 4, 5 and 8). A hung-up ptmx
+// slave refuses everything with EIO but TIOCSPGRP (ENOTTY), as Linux
+// hung_up_tty_ioctl. A master is never a controlling terminal (deviation 10);
+// TIOCGPTN and TIOCSPTLCK need a ptmx master (raw masters are not in /dev/pts).
+Status SchedulerState::pty_terminal_check(const TerminalSubject &subject, ConsoleControlOperation operation)
+{
+    using Op = ConsoleControlOperation;
+    const auto *target = terminal(subject.terminal);
+    const auto *open = open_description(subject.description);
+    if (!target || !open || !open->pty_endpoint) return Status::not_terminal("terminal is not available");
+    const bool master = subject.side == TerminalSide::pty_master;
+    if (!master && target->hung_up)
+        return operation == Op::set_foreground ? Status::not_terminal("terminal was hung up")
+                                               : Status::io_error("terminal was hung up");
+    switch (operation)
+    {
+    case Op::count: case Op::detach: // TIOCNOTTY arrives with S8.
+        return Status::not_terminal("terminal request is not available");
+    case Op::acquire:
+        if (master) return Status::not_terminal("a PTY master is not a controlling terminal");
+        break;
+    case Op::get_pty_number: case Op::set_pty_lock:
+        if (const auto index = pty_transport_.index(open->pty_endpoint); !index) return index.status();
+        return {};
+    default:
+        break;
+    }
+    const bool needs_caller = operation == Op::acquire || operation == Op::set_foreground ||
+        (!master && (operation == Op::get_session || operation == Op::get_foreground));
+    auto *caller = console_caller();
+    if (needs_caller && !caller) return Status::not_terminal("terminal request has no running caller");
+    if (!master && (operation == Op::get_session || operation == Op::get_foreground))
+        if (const auto ctty = controlling_terminal(*caller); !ctty || *ctty != subject.terminal)
+            return Status::not_terminal("terminal is not the caller's controlling terminal");
+    if (operation == Op::get_session && !target->session) return Status::not_terminal("terminal has no session");
+    return {};
+}
+
+void SchedulerState::terminal_changed(TerminalRef ref)
+{
+    // Linux n_tty_set_termios and flushes wake readers and writers unconditionally.
+    if (ref == console_terminal_ref)
+        wake_waiters(ThreadWaitReason::console_read, console_input_.epoch());
+    else
+        wake_pty({static_cast<u16>(ref.index - 1), ref.generation, private_pty::Side::slave},
+                 private_pty::wake_slave_read | private_pty::wake_slave_write | private_pty::wake_master_write);
+}
+
 Result<TerminalReply> SchedulerState::terminal_control(const TerminalSubject &subject, const TerminalRequest &request)
 {
     using Op = ConsoleControlOperation;
     if (auto status = terminal_check(subject, request.operation); !status) return status;
-    auto &console = console_terminal_;
+    auto *target = terminal(subject.terminal);
+    if (!target) return Status::not_terminal("terminal is not available");
+    auto &tty = *target;
+    const bool console = subject.terminal == console_terminal_ref;
+    const auto *open = open_description(subject.description);
+    const auto endpoint = open ? open->pty_endpoint : private_pty::Handle{};
     TerminalReply reply{};
     const auto set_attributes = [&] {
-        const auto old = console.termios;
-        console.termios = request.termios;
-        console.residue = request.residue;
-        if (console.ldisc.set_termios(old, request.termios))
-            wake_waiters(ThreadWaitReason::console_read, console_input_.epoch());
+        const auto old = tty.termios;
+        tty.termios = request.termios;
+        tty.residue = request.residue;
+        const bool readable = tty.ldisc.set_termios(old, request.termios);
+        if (!console || readable) terminal_changed(subject.terminal);
+    };
+    const auto flush_input = [&] {
+        tty.ldisc.flush_input();
+        if (!console) terminal_changed(subject.terminal);
     };
     switch (request.operation)
     {
     case Op::get_attributes:
-        reply.termios = console.termios;
-        reply.residue = console.residue;
+        reply.termios = tty.termios;
+        reply.residue = tty.residue;
         return reply;
     case Op::get_window:
-        reply.window = console.window;
+        reply.window = tty.window;
         return reply;
     case Op::acquire:
     {
         auto *caller = console_caller();
-        const auto *open = open_description(subject.description);
         if (auto status = acquire_terminal(subject.terminal, *caller, open && open->readable, AcquireMode::ioctl); !status)
             return status;
         return reply;
     }
     case Op::get_session:
-        reply.value = static_cast<i64>(console.session);
+        reply.value = static_cast<i64>(tty.session);
         return reply;
     case Op::get_foreground:
-        reply.value = static_cast<i64>(console.foreground);
+        reply.value = static_cast<i64>(tty.foreground);
         return reply;
     case Op::set_foreground:
     {
@@ -232,49 +314,79 @@ Result<TerminalReply> SchedulerState::terminal_control(const TerminalSubject &su
         const auto value = request.scalar;
         if (value < 0) return Status::invalid_argument("foreground group is negative");
         auto *caller = console_caller();
-        if (const auto ctty = controlling_terminal(*caller); !ctty || *ctty != console_terminal_ref)
-            return Status::not_terminal("console is not the caller's controlling terminal");
+        if (const auto ctty = controlling_terminal(*caller); !ctty || *ctty != subject.terminal)
+            return Status::not_terminal("terminal is not the caller's controlling terminal");
         bool group = false, same_session = false;
         // Retained zombie membership reserves a PGID until normal reap.
         for (const auto &member : processes_)
             if (member.process_group_id() == static_cast<ProcessId>(value))
             {
                 group = true;
-                same_session |= member.session_id() == console.session;
+                same_session |= member.session_id() == tty.session;
             }
         if (!value || !group) return Status::no_process("foreground group does not exist");
         if (!same_session) return Status::permission("foreground group belongs to another session");
         // Background callers are not gated before S8 (no SIGTTOU yet).
-        console.foreground = static_cast<ProcessId>(value);
-        cancel_console_epoch(console_input_.epoch());
+        tty.foreground = static_cast<ProcessId>(value);
+        if (console) cancel_console_epoch(console_input_.epoch());
         return reply;
     }
     case Op::set_flush:
-        console.ldisc.flush_input();
+        flush_input();
         set_attributes();
         return reply;
     case Op::set_now:
-    case Op::set_drain: // Console output is synchronous: nothing is left to drain.
+    case Op::set_drain: // Terminal output is never held back for the drain to wait on.
         set_attributes();
         return reply;
     case Op::drain_break:
         return reply;
     case Op::flush:
+    {
         if (request.scalar < 0 || request.scalar > 2) return Status::invalid_argument("TCFLSH queue selector");
-        if (request.scalar != static_cast<i32>(tty::FlushQueue::output)) console.ldisc.flush_input();
-        return reply;
-    case Op::set_window:
-        if (!(console.window == request.window))
+        const bool input = request.scalar != static_cast<i32>(tty::FlushQueue::output);
+        const bool output = request.scalar != static_cast<i32>(tty::FlushQueue::input);
+        if (console)
         {
-            console.window = request.window;
-            static_cast<void>(console.owe(console.foreground, tty::TerminalSignal::winch, true));
+            if (input) tty.ldisc.flush_input();
+            return reply;
+        }
+        const auto flushed = pty_transport_.flush(endpoint, input, output);
+        if (!flushed) return flushed.status();
+        wake_pty(endpoint, flushed.value().wakes);
+        return reply;
+    }
+    case Op::set_window:
+        if (!(tty.window == request.window))
+        {
+            tty.window = request.window;
+            static_cast<void>(tty.owe(tty.foreground, tty::TerminalSignal::winch, true));
         }
         return reply;
     case Op::input_pending:
-        reply.value = static_cast<i64>(console.ldisc.inq(console.termios));
+    {
+        if (console)
+        {
+            reply.value = static_cast<i64>(tty.ldisc.inq(tty.termios));
+            return reply;
+        }
+        const auto pending = pty_transport_.input_pending(endpoint);
+        if (!pending) return pending.status();
+        reply.value = static_cast<i64>(pending.value());
+        return reply;
+    }
+    case Op::get_pty_number:
+    {
+        const auto index = pty_transport_.index(endpoint);
+        if (!index) return index.status();
+        reply.value = index.value();
+        return reply;
+    }
+    case Op::set_pty_lock:
+        if (auto status = pty_transport_.set_locked(endpoint, request.scalar != 0); !status) return status;
         return reply;
     default:
-        return Status::not_terminal("terminal request is not available on the console");
+        return Status::not_terminal("terminal request is not available");
     }
 }
 

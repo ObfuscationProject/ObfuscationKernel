@@ -798,19 +798,10 @@ Result<u16> SchedulerState::allocate_description(OpenFileDescription description
         return Status::invalid_argument("new description cannot import prepared reservation authority");
     if (description.unix_queue_references)
         return Status::invalid_argument("new description cannot import UNIX queue ownership");
+    // Each bound PTY description owns one endpoint open, so only the prepared
+    // raw pair and the PTY bind calls create them.
     if (description.pty_endpoint)
-    {
-        if (!pty_transport_.readiness(description.pty_endpoint))
-            return Status::bad_descriptor("PTY description has no live canonical provider");
-        if (!description.readable || !description.writable || description.node || description.native_udp_handle ||
-            description.native_tcp_handle || description.native_shared_file || description.unix_endpoint ||
-            description.pipe != invalid_description || description.unix_write_pipe != invalid_description ||
-            description.console || description.input_console)
-            return Status::invalid_argument("PTY description cannot combine providers");
-        for (const auto &existing : descriptions_)
-            if (existing.used && existing.pty_endpoint == description.pty_endpoint)
-                return Status::already_exists("PTY endpoint already belongs to a canonical description");
-    }
+        return Status::invalid_argument("PTY descriptions are bound by a prepared pair or a PTY open");
     if (description.unix_endpoint)
     {
         const auto handle = description.unix_endpoint;
@@ -920,15 +911,12 @@ Status SchedulerState::release_description(u16 id)
         *open = {};
         if (pty_endpoint)
         {
+            // One open per final release. The master's last open hangs a ptmx
+            // slave up inside the table (data only); S8 adds the session
+            // leader's SIGHUP and SIGCONT here.
             const auto retired = pty_transport_.retire(pty_endpoint);
             if (!retired) result = retired.status();
-            auto master = pty_endpoint; master.side = private_pty::Side::master;
-            auto slave = pty_endpoint; slave.side = private_pty::Side::slave;
-            for (const auto endpoint : {master, slave})
-            {
-                wake_waiters(ThreadWaitReason::pty_read, pty_wait_key(endpoint));
-                wake_waiters(ThreadWaitReason::pty_write, pty_wait_key(endpoint));
-            }
+            wake_pty(pty_endpoint, private_pty::wake_all);
         }
         if (unix_endpoint)
             result = release_unix_endpoint(unix_endpoint);

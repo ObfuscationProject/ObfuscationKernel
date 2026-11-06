@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build and run every target of tests/host/native_pty/xmake.lua from a retained source snapshot.
 
-The suites exercise the raw PTY transport, its descriptor owners and the actual
+The suites exercise the PTY transport (raw and ptmx-style pairs, slave terminals), its descriptor owners and the actual
 hosted scheduler/runtime on mock trap/copy backends. Passing claims hosted model
 evidence only; no guest, hardware isolation, physical or SMP execution.
 """
@@ -23,7 +23,8 @@ MODE = 'debug'
 BINARIES = {
     'native-pty-ofd-tests': r'PRIVATE_PTY_ACTUAL_OFD cases=\d+ checks=\d+ status=passed',
     'native-pty-raw-owner-tests':
-        r'PRIVATE_RAW_PTY_OWNER cases=\d+ checks=\d+ model_steps=100000 status=passed',
+        r'PRIVATE_RAW_PTY_OWNER cases=\d+ checks=\d+ model_steps=100000 open_counts=1 raw_termios=1 '
+        r'status=passed',
     'native-pty-pair-dispatch-tests':
         r'NATIVE_PTY_PAIR_BOUNDARY_PASS profiles=\d+ checks=\d+ hosted_template_only=1',
     'native-pty-boot-checks-tests':
