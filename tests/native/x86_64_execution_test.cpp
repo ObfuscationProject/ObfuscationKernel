@@ -1,5 +1,10 @@
+#include "ok/arch/clock.hpp"
 #include "ok/arch/execution.hpp"
+#include "ok/arch/smp.hpp"
+#include "ok/smp/bringup.hpp"
 #include "execution_table_pages.hpp"
+
+#include <atomic>
 
 using namespace ok;
 namespace native = ok::arch::execution;
@@ -77,6 +82,206 @@ native::Trap next_non_timer(native::AddressSpace &space, native::UserFrame &fram
     require(false, "no forward progress after timer preemption");
     return {};
 }
+template <typename Done> bool wait_for(Done done, u64 timeout_ns)
+{
+    const auto start = ok::arch::monotonic_nanoseconds();
+    while (!done())
+    {
+        const auto now = ok::arch::monotonic_nanoseconds();
+        if (!start || !now || now.value() - start.value() >= timeout_ns)
+            return done();
+        ok::arch::ArchOperations::spin_pause();
+    }
+    return true;
+}
+
+// A secondary CPU runs ring-3 code in its own space while the boot CPU runs in
+// another. `secondary_lock` stands in for the kernel lock: a CPU opens its
+// user window under it, and a translation change holds it.
+alignas(4096) u8 data_c[4096]{};
+alignas(4096) u8 data_c_replacement[4096]{};
+alignas(4096) u8 stack_c[4096]{};
+alignas(16) u8 secondary_stack[64 * 1024]{};
+constinit ok::smp::SpinLock secondary_lock{};
+enum SecondaryPhase : u32
+{
+    secondary_idle,
+    secondary_started,
+    secondary_user_loop,
+    secondary_done,
+    secondary_failed,
+};
+constinit std::atomic<u32> secondary_phase{};
+constinit std::atomic<bool> secondary_stop{};
+native::AddressSpace secondary_space{};
+struct SecondaryResult
+{
+    u32 cpu_index{~0u};
+    bool syscalls{};
+    native::Trap local_timer{};
+    native::Trap ipi{};
+    usize timer_traps{};
+};
+SecondaryResult secondary_result{};
+
+Result<native::Trap> secondary_enter(native::UserFrame &frame)
+{
+    secondary_lock.lock();
+    ok::smp::begin_user(secondary_space.root);
+    secondary_lock.unlock();
+    auto trap = native::enter(secondary_space, frame);
+    ok::smp::end_user();
+    return trap;
+}
+
+void secondary_run()
+{
+    auto &result = secondary_result;
+    result.cpu_index = ok::smp::current_cpu();
+    auto frame = native::initial_frame(code_va, native::user_end);
+    native::Trap trap{};
+    for (usize attempt = 0; attempt < 128; ++attempt)
+    {
+        auto next = secondary_enter(frame);
+        if (!next) return;
+        if ((trap = next.value()).kind != native::TrapKind::timer) break;
+    }
+    const auto call = native::syscall(frame);
+    if (trap.kind != native::TrapKind::syscall || call.number != 0x1234 || call.arguments[0] != 0x23 ||
+        call.arguments[1] != 42)
+        return;
+    native::set_return_value(frame, 13);
+    for (usize attempt = 0; attempt < 128; ++attempt)
+    {
+        auto next = secondary_enter(frame);
+        if (!next) return;
+        if ((trap = next.value()).kind != native::TrapKind::timer) break;
+    }
+    result.syscalls = trap.kind == native::TrapKind::syscall && native::syscall(frame).number == 0x2345 &&
+                      data_c[0] == 13;
+    // The user loop that follows makes no syscall: only the local timer or an
+    // IPI can end an entry.
+    for (;;)
+    {
+        auto next = secondary_enter(frame);
+        if (!next) return;
+        if (next.value().kind == native::TrapKind::timer)
+        {
+            ++result.timer_traps;
+            result.local_timer = next.value();
+            secondary_phase.store(secondary_user_loop, std::memory_order_release);
+        }
+        else if (next.value().kind == native::TrapKind::interrupt)
+            result.ipi = next.value();
+        else
+            return;
+        secondary_lock.lock();
+        const bool stop = secondary_stop.load(std::memory_order_acquire);
+        secondary_lock.unlock();
+        if (stop) break;
+    }
+    secondary_phase.store(secondary_done, std::memory_order_release);
+}
+
+// Two CPUs in ring 3 at once on per-CPU entry state: syscalls, the local APIC
+// timer and an IPI on the secondary; the PIT through LINT0 on the boot CPU; a
+// remap that waits until the secondary left the space. Skipped on one CPU.
+void check_secondary_cpu()
+{
+    ok::boot::CpuTopologyMap map{};
+    require(ok::arch::smp::discover(map).ok(), "CPU discovery");
+    if (map.method != ok::boot::CpuStartMethod::x86_sipi)
+    {
+        print("OK_NATIVE_SMP scope=hardware secondary=skipped reason=single-cpu\n");
+        return;
+    }
+    usize secondary = map.count;
+    for (usize i = 0; i < map.count && secondary == map.count; ++i)
+        if (i != map.boot_index && map.cpus[i].enabled)
+            secondary = i;
+    require(secondary < map.count, "an enabled secondary CPU");
+    const auto hardware_id = map.cpus[secondary].hardware_id;
+    require(ok::arch::initialize_clock().ok(), "calibrated TSC clock");
+    require(ok::arch::smp::prepare_boot_cpu(map).ok(), "boot CPU local APIC and timer calibration");
+
+    const native::PageMapping mappings_boot[] = {
+        {code_va, reinterpret_cast<uptr>(code), native::page_read | native::page_execute},
+        {data_va, reinterpret_cast<uptr>(data_a), native::page_read | native::page_write},
+        {stack_va, reinterpret_cast<uptr>(stack_a), native::page_read | native::page_write},
+    };
+    const native::PageMapping mappings_secondary[] = {
+        {code_va, reinterpret_cast<uptr>(code), native::page_read | native::page_execute},
+        {data_va, reinterpret_cast<uptr>(data_c), native::page_read | native::page_write},
+        {stack_va, reinterpret_cast<uptr>(stack_c), native::page_read | native::page_write},
+    };
+    auto boot_result = native::create_space(mappings_boot);
+    auto secondary_result_space = native::create_space(mappings_secondary);
+    require(boot_result.ok() && secondary_result_space.ok(), "create per-CPU test spaces");
+    auto boot_space = boot_result.value();
+    secondary_space = secondary_result_space.value();
+
+    auto &record = ok::smp::cpu_record(1);
+    record.hardware_id = hardware_id;
+    record.stack_lower = reinterpret_cast<uptr>(secondary_stack);
+    record.stack_top = reinterpret_cast<uptr>(secondary_stack + sizeof(secondary_stack));
+    ok::smp::detail::ipi_sender = &ok::arch::smp::send_ipi;
+    require(ok::arch::smp::start(1, hardware_id, record.stack_lower, record.stack_top).ok(), "issue INIT-SIPI");
+    require(wait_for([&] { return secondary_phase.load(std::memory_order_acquire) >= secondary_started; },
+                     2'000'000'000) &&
+                record.reported_id.load(std::memory_order_acquire) == hardware_id,
+            "secondary ran C++ and reported its own APIC id");
+    ok::smp::detail::online.store(3, std::memory_order_release);
+    require(wait_for([&] { return secondary_phase.load(std::memory_order_acquire) >= secondary_user_loop; },
+                     2'000'000'000),
+            "secondary entered ring 3 and its local timer preempted it");
+
+    // The boot CPU runs its own space meanwhile; the PIT still arrives as
+    // ExtINT through LINT0 with the local APIC enabled.
+    auto frame = native::initial_frame(code_va, native::user_end);
+    auto trap = next_non_timer(boot_space, frame);
+    require(trap.kind == native::TrapKind::syscall && native::syscall(frame).number == 0x1234,
+            "boot CPU syscall while the secondary runs user code");
+    native::set_return_value(frame, 17);
+    trap = next_non_timer(boot_space, frame);
+    require(trap.kind == native::TrapKind::syscall && data_a[0] == 17 && data_c[0] == 13,
+            "concurrent spaces keep distinct backing");
+    auto timer = native::enter(boot_space, frame);
+    require(timer.ok() && timer.value().kind == native::TrapKind::timer && timer.value().vector == 32,
+            "PIT preempts the boot CPU through LINT0");
+
+    // The remap waits until the secondary, kicked by an IPI, left the space.
+    const auto shootdowns = ok::smp::cpu_record(0).shootdowns.load(std::memory_order_relaxed);
+    const auto received = record.ipis_received.load(std::memory_order_acquire);
+    secondary_lock.lock();
+    const native::PageMapping replacement{data_va, reinterpret_cast<uptr>(data_c_replacement),
+                                          native::page_read | native::page_write};
+    const bool remapped = native::remap(secondary_space, replacement).ok();
+    const bool waited = ok::smp::cpu_record(0).shootdowns.load(std::memory_order_relaxed) == shootdowns + 1;
+    const bool generation_even = (record.user_generation.load(std::memory_order_acquire) & 1) == 0;
+    secondary_stop.store(true, std::memory_order_release);
+    secondary_lock.unlock();
+    require(remapped && waited && generation_even, "remap quiesced the secondary's user window");
+    require(wait_for([&] { return secondary_phase.load(std::memory_order_acquire) == secondary_done; },
+                     2'000'000'000),
+            "secondary finished its user entries");
+    const auto &result = secondary_result;
+    require(result.cpu_index == 1 && ok::smp::current_cpu() == 0, "per-CPU logical ids");
+    require(result.syscalls, "secondary CPL3 syscalls and return values");
+    require(result.local_timer.kind == native::TrapKind::timer && result.local_timer.vector == 0xef &&
+                record.local_ticks.load(std::memory_order_relaxed) >= result.timer_traps,
+            "local APIC timer preempts the secondary");
+    require(result.ipi.kind == native::TrapKind::interrupt && result.ipi.vector == 0xf0 &&
+                record.ipis_received.load(std::memory_order_acquire) > received,
+            "IPI preempts the secondary");
+    require(result.local_timer.kernel_stack_pointer != 0 && trap.kernel_stack_pointer != 0 &&
+                result.local_timer.kernel_stack_pointer != timer.value().kernel_stack_pointer,
+            "each CPU traps onto its own kernel stack");
+    require(native::destroy_space(boot_space).ok() && native::destroy_space(secondary_space).ok(),
+            "release per-CPU test spaces");
+    print("OK_NATIVE_SMP scope=hardware cpus=2 secondary_user=pass syscall=pass local_timer=pass ipi=pass "
+          "shootdown=pass boot_pit=pass\n");
+}
+
 void check_fault(native::AddressSpace &space, const u8 *entry, native::TrapKind kind, uptr address, uptr error_mask)
 {
     auto frame = native::initial_frame(code_va + static_cast<uptr>(entry - ok_native_user_begin), native::user_end);
@@ -86,6 +291,20 @@ void check_fault(native::AddressSpace &space, const u8 *entry, native::TrapKind 
     require((trap.error_code & error_mask) == error_mask, "missing hardware page-fault error bits");
 }
 } // namespace
+
+// The secondary's C++ entry after the trampoline and its per-CPU setup.
+extern "C" [[noreturn]] void ok_smp_secondary_main(ok::smp::CpuId cpu)
+{
+    auto &record = ok::smp::cpu_record(cpu);
+    record.reported_id.store(static_cast<uptr>(ok::arch::smp::current_hardware_id()), std::memory_order_release);
+    record.state.store(static_cast<u8>(ok::smp::CpuState::online), std::memory_order_release);
+    secondary_phase.store(secondary_started, std::memory_order_release);
+    secondary_run();
+    if (secondary_phase.load(std::memory_order_acquire) != secondary_done)
+        secondary_phase.store(secondary_failed, std::memory_order_release);
+    for (;;)
+        ok::arch::smp::wait_local();
+}
 
 extern "C" void ok_platform_console_write_char(char value)
 {
@@ -242,6 +461,7 @@ extern "C" [[noreturn]] void kernel_main()
     native::probe::table_page_budget = native::probe::table_arena_pages;
     require(native::destroy_space(dense_space).ok(), "retire remapped dense table");
     print("OK_NATIVE_DENSE none=pass unmap=pass remap=pass failure=pass\n");
+    check_secondary_cpu();
     print("OK_NATIVE_TEST_PASS scope=hardware architecture=x86_64\n");
     finish(true);
 }

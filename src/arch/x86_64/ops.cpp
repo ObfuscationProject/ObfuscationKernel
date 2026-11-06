@@ -1,4 +1,5 @@
 #include "../ops_private.hpp"
+#include "cpu_local.hpp"
 
 namespace ok::arch::detail
 {
@@ -68,10 +69,17 @@ void NativeInstructions<Architecture::x86_64>::restore_interrupts(uptr saved) no
 #endif
 }
 
-// Every profile reports the boot CPU until per-CPU registers are installed.
+// In kernel mode GS_BASE holds the running CPU's block (cpu_local.hpp); boot.S
+// installs the boot CPU's before any C++ runs.
 u32 NativeInstructions<Architecture::x86_64>::cpu_index() noexcept
 {
+#if defined(OK_KERNEL_FREESTANDING) && defined(__x86_64__)
+    u32 index;
+    asm volatile("movl %%gs:%c1, %0" : "=r"(index) : "i"(execution::x86::cpu_logical_offset));
+    return index;
+#else
     return 0;
+#endif
 }
 
 } // namespace ok::arch::detail

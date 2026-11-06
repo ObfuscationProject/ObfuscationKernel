@@ -17,7 +17,9 @@ def main() -> int:
     parser.add_argument("--qemu", type=Path, default=Path("/usr/bin/qemu-system-x86_64"))
     parser.add_argument("--output", type=Path)
     parser.add_argument("--poison-bootstrap-tables", action="store_true",
-                        help="Fill the three boot page tables with nonzero RAM before bootstrap initialization")
+                        help="Fill the four boot page tables with nonzero RAM before bootstrap initialization")
+    parser.add_argument("--smp", type=int, default=1,
+                        help="QEMU CPUs; with two or more the probe also runs ring-3 code on a secondary CPU")
     args = parser.parse_args()
     project = Path(__file__).resolve().parents[1]
     out = args.output or project / "build/native-tests/x86_64"
@@ -27,12 +29,20 @@ def main() -> int:
     flags = ["-std=c++23", "-O2", "-mno-red-zone", "-ffreestanding", "-fno-builtin", "-fno-exceptions",
              "-fno-stack-protector", "-fno-use-cxa-atexit", "-fno-threadsafe-statics", "-fno-pic", "-fno-pie",
              "-Wall", "-Wextra", "-Werror", "-I", str(project / "include")]
+    # The backend and the secondary-CPU start path read per-CPU state as in the
+    # kernel; the interrupt service stays in its model configuration.
+    kernel = ["-DOK_KERNEL_FREESTANDING", "-DOK_ARCH_TARGET_X86_64"]
     objects = []
     for name, source in (("boot", "src/arch/x86_64/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/x86_64/execution.cpp"), ("irq", "src/interrupt/platform_irq.cpp"),
-                         ("entry", "src/arch/x86_64/execution.S"), ("user", "tests/native/x86_64_execution_user.S"),
+                         ("entry", "src/arch/x86_64/execution.S"), ("ops", "src/arch/x86_64/ops.cpp"),
+                         ("smp", "src/arch/x86_64/smp.cpp"), ("trampoline", "src/arch/x86_64/smp.S"),
+                         ("clock", "src/arch/clock.cpp"), ("acpi", "src/boot/acpi_madt.cpp"),
+                         ("user", "tests/native/x86_64_execution_user.S"),
                          ("test", "tests/native/x86_64_execution_test.cpp")):
         target = out / (name + ".o")
         command = [gxx, *flags] if source.endswith(".cpp") else [gcc]
+        if name in ("execution", "ops", "smp", "clock", "acpi", "test"):
+            command += kernel
         source_path = project / source
         if name == "boot" and args.poison_bootstrap_tables:
             boot_source = source_path.read_text()
@@ -42,7 +52,7 @@ def main() -> int:
             # finished loading its padded payload. Production boot has no test
             # hooks and the normal native hardware assertions remain intact.
             injection = ("_start:\n    cld\n    mov $boot_pml4, %edi\n"
-                         "    mov $0xa5a5a5a5, %eax\n    mov $3072, %ecx\n"
+                         "    mov $0xa5a5a5a5, %eax\n    mov $4096, %ecx\n"
                          "    rep stosl\n")
             source_path = out / "boot-poisoned.S"
             source_path.write_text(boot_source.replace("_start:\n", injection, 1))
@@ -63,6 +73,8 @@ def main() -> int:
     command = [str(args.qemu), "-m", "128M", "-drive", f"file={image},format=raw,if=ide", "-boot", "c",
                "-display", "none", "-serial", "stdio", "-monitor", "none", "-no-reboot",
                "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"]
+    if args.smp > 1:
+        command += ["-smp", str(args.smp)]
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired as error:
@@ -73,6 +85,8 @@ def main() -> int:
     print(output, end="")
     if result.returncode != 33 or "OK_NATIVE_TEST_PASS scope=hardware" not in output:
         raise RuntimeError(f"native hardware test failed: QEMU exit {result.returncode}")
+    if args.smp > 1 and "OK_NATIVE_SMP scope=hardware cpus=2 " not in output:
+        raise RuntimeError("native hardware test did not run user code on a secondary CPU")
     return 0
 
 
