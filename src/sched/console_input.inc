@@ -251,6 +251,10 @@ Status SchedulerState::pty_terminal_check(const TerminalSubject &subject, Consol
         if (const auto ctty = controlling_terminal(*caller); !ctty || *ctty != subject.terminal)
             return Status::not_terminal("terminal is not the caller's controlling terminal");
     if (operation == Op::get_session && !target->session) return Status::not_terminal("terminal has no session");
+    // v1 raw-pair contract (OS native_pty_transport.c): a raw master whose slave
+    // has no session answers TIOCGPGRP with ENOTTY; Linux would report 0.
+    if (master && operation == Op::get_foreground && !target->session && !pty_transport_.index(open->pty_endpoint))
+        return Status::not_terminal("raw PTY slave has no session");
     return {};
 }
 

@@ -380,6 +380,9 @@ PtySession pty_session(Kernel &kernel, const Session &s, std::array<i32, 2> &fds
     scheduler.find(p.shell)->threads()[0].native_active = true;
     expect(native_call(kernel, p.shell, N::setsid, {}) == static_cast<i64>(p.shell));
     fds = raw_pair(kernel, p.shell);
+    // v1: TIOCGPGRP on either raw end of an unassociated pair is ENOTTY.
+    expect(fd_ioctl(kernel, p.shell, fds[0], OK_TIOCGPGRP, argument_at) == -25);
+    expect(fd_ioctl(kernel, p.shell, fds[1], OK_TIOCGPGRP, argument_at) == -25);
     expect(fd_ioctl(kernel, p.shell, fds[0], OK_TIOCSCTTY) == -25);
     expect(fd_ioctl(kernel, p.shell, fds[1], OK_TIOCGSID, argument_at) == -25); // Not yet its ctty.
     expect(fd_ioctl(kernel, p.shell, fds[1], OK_TIOCSCTTY) == 0);
@@ -482,6 +485,9 @@ bool ptn_lock(Kernel &kernel, const PtySession &p, i32 &master, i32 &slave)
     expect(master >= 0);
     const sched::private_pty::Handle pts{handle.slot, handle.generation, sched::private_pty::Side::slave};
     expect(fd_ioctl(kernel, p.shell, master, OK_TIOCGPTN, argument_at) == 0 && int_at(argument_at) == handle.slot);
+    // A ptmx master reports its slave's foreground without a check (Linux), 0 when none.
+    expect(fd_ioctl(kernel, p.shell, master, OK_TIOCGPGRP, argument_at) == 0 && int_at(argument_at) == 0);
+    expect(fd_ioctl(kernel, p.shell, master, OK_TIOCGSID, argument_at) == -25); // No session.
     expect(bind_fd(kernel, p.shell, [&](u16 id) { return scheduler.bind_pty_slave(id, pts).ok(); }) < 0); // Locked.
     // A dormant slave: the master's reads wait and its writes fail.
     expect(pty_write(kernel, p.shell, master, "x") == -5);

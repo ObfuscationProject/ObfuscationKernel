@@ -135,7 +135,9 @@ strict decimal only. An entry disappears when its master's last open closes.
   acquire. On a PTY master: ENOTTY.
 - **TIOCGPGRP / TIOCGSID.** On a slave or the console the terminal must be the
   caller's ctty, else ENOTTY; TIOCGSID with no session gives ENOTTY. On a master
-  there is no check and the value is the slave's. PIDs above INT32_MAX give
+  there is no check and the value is the slave's, except that a raw-pair master
+  whose slave has no session answers TIOCGPGRP with ENOTTY (the v1 raw contract
+  the OS native PTY fixture asserts; Linux reports 0). PIDs above INT32_MAX give
   EOVERFLOW.
 - **TIOCSPGRP** (gated, §9.6). Value < 0: EINVAL. Not the caller's ctty:
   ENOTTY. No such group: ESRCH. Group in another session: EPERM. A group stays
@@ -548,6 +550,7 @@ profile string and version above keeps its current value.
 | 12 | After a hangup and a later re-acquire by the leader, members forked earlier see the new ctty. | planned (S8) |
 | 13 | pid 1 gets EIO instead of a restart loop on background terminal access. | planned (S8) |
 | 14 | Non-canonical input fills all 4096 bytes of the read buffer (Linux stops at 4095), so raw pairs keep their 4096-byte queue. | landed (S1) |
+| 15 | A raw-pair (`OK_SYS_PTY_PAIR`) master whose slave has no session answers TIOCGPGRP with ENOTTY instead of 0, keeping the v1 raw contract. | landed (S5) |
 | 15 | Init never takes the `complete_signal` fatal shortcut. Linux 6.13 does when the named thread blocks a SIG_DFL fatal signal that another init thread does not; here it stays queued and is dropped when dequeued. | landed (S3) |
 | 16 | One console `write` or `writev` moves at most 64 KiB; a longer one returns a short count. | landed (S4) |
 
