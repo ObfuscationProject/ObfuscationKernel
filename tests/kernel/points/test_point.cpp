@@ -24,6 +24,7 @@
 #include "pipe_vector_checks.hpp"
 #include "unix_socketpair_checks.hpp"
 #include "native_pty_checks.hpp"
+#include "devfs_terminal_checks.hpp"
 #include "unix_path_checks.hpp"
 #include "guarded_read_checks.hpp"
 #include "mount_retention_checks.hpp"
@@ -538,6 +539,10 @@ Result<usize> run_kernel_test_points(Kernel &kernel)
     if (auto status = runner.check_status("unix-socketpair", "OFD-ownership-model", tests::check_unix_socketpair_ownership(kernel.scheduler())); !status.ok())
         return status;
     if (auto status = runner.check_status("native-pty", "scheduler-OFD-ownership-model", tests::check_native_pty_ownership_model(kernel.scheduler())); !status.ok())
+        return status;
+    if (auto status = runner.check_status("devfs", "terminal-namespace-model", tests::check_devfs_terminal_namespace_model()); !status.ok())
+        return status;
+    if (auto status = runner.check_status("tty-open", "ptmx-pts-ctty-model", tests::check_tty_open_model(kernel.scheduler())); !status.ok())
         return status;
     if (auto status = runner.check_status("pipe-write-fragment", "scheduler-model", tests::check_pipe_write_fragment(kernel.scheduler())); !status.ok())
         return status;
