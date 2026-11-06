@@ -503,14 +503,63 @@ void orphan_pass(Kernel &kernel, bool caught)
     CHECK(kernel.scheduler().reap_process(leader));
 }
 
+// Linux kill_orphaned_pgrp for the exiting process's own group: P leaves its
+// group G, whose other member is P's stopped child S. G is orphaned when P's
+// parent Q sits in another group of the session; a sibling S keeps it held.
+void own_group_orphan(Kernel &kernel, bool child_member)
+{
+    const auto q = create(kernel);
+    const auto p = fork(kernel, q);
+    const auto s = fork(kernel, child_member ? p : q);
+    CHECK(kernel.scheduler().set_process_group(p, 0, 0));
+    CHECK(kernel.scheduler().set_process_group(child_member ? p : q, static_cast<i32>(s), static_cast<i32>(p)));
+    handle(kernel, s, 1);
+    expect(!kernel.scheduler().process_group_orphaned(p));
+    expect(linux_kill(kernel, p, s, 19) == 0 && job(kernel, s).stopped);
+    raw_exit(kernel, p, p, 0, true);
+    if (child_member)
+    {
+        expect(kernel.scheduler().find(s)->parent_pid() == sched::user_init_pid);
+        expect(!job(kernel, s).stopped && job(kernel, s).continue_report && shared(s).pending_mask().contains(1));
+    }
+    else expect(job(kernel, s).stopped && !shared(s).pending_mask().contains(1));
+    CHECK(kernel.scheduler().reap_process(p));
+    drain(q);
+    release(kernel, s); release(kernel, q);
+}
+
 // Kernel senders: a caught signal no thread can take is owed and drained once
 // a wait completes; SIG_IGN, CONT, pid-slot reuse and an exec into another
 // personality drop it, a same-personality exec keeps it.
 void owed(Kernel &kernel)
 {
     const auto pid = create(kernel);
-    handle(kernel, pid, 1); handle(kernel, pid, 20);
+    handle(kernel, pid, 1); handle(kernel, pid, 20); handle(kernel, pid, 2);
+    // Several owed signals all drain in one pass.
     auto ticket = park(kernel, pid);
+    expect(native::send_kernel_process_signal(kernel, pid, OK_SIGHUP) == native::KernelSignalSend::owed);
+    expect(native::send_kernel_process_signal(kernel, pid, OK_SIGINT) == native::KernelSignalSend::owed);
+    unpark(kernel, pid, ticket);
+    expect(!native::private_jobctl_service(kernel));
+    expect(shared(pid).pending_mask().contains(1) && shared(pid).pending_mask().contains(2));
+    drain(pid);
+    expect(!native::private_jobctl_service(kernel) && !shared(pid).pending_mask().contains(1));
+    // A signal still without a taker stays owed while the others drain.
+    const auto helper = peer(kernel, pid);
+    auto &other = *kernel.scheduler().find_thread(pid, helper);
+    other.native_signal_mask.set(1); other.native_signal_mask.set(2);
+    ticket = park(kernel, pid);
+    expect(native::send_kernel_process_signal(kernel, pid, OK_SIGHUP) == native::KernelSignalSend::owed);
+    expect(native::send_kernel_process_signal(kernel, pid, OK_SIGINT) == native::KernelSignalSend::owed);
+    other.native_signal_mask = {}; other.native_signal_mask.set(2);
+    expect(!native::private_jobctl_service(kernel));
+    expect(shared(pid).pending_mask().contains(1) && !shared(pid).pending_mask().contains(2));
+    unpark(kernel, pid, ticket);
+    expect(!native::private_jobctl_service(kernel) && shared(pid).pending_mask().contains(2));
+    drain(pid);
+    // The helper blocks every signal used below from here on.
+    other.native_signal_mask.set(1); other.native_signal_mask.set(20);
+    ticket = park(kernel, pid);
     expect(native::send_kernel_process_signal(kernel, pid, OK_SIGHUP) == native::KernelSignalSend::owed);
     // A caught stop acted at generation, so it is queued rather than owed.
     expect(native::send_kernel_process_signal(kernel, pid, OK_SIGTSTP) == native::KernelSignalSend::sent);
@@ -680,6 +729,8 @@ int main()
     protections(kernel);
     orphan_pass(kernel, true);
     orphan_pass(kernel, false);
+    own_group_orphan(kernel, true);
+    own_group_orphan(kernel, false);
     owed(kernel);
     acted_not_refused(kernel);
     timer_retry(kernel);
