@@ -27,6 +27,19 @@ constinit std::atomic<bool> secondary_admission{};
 constinit std::array<bool, smp::max_cpus> runtime_step_active{};
 constinit std::array<bool, smp::max_cpus> runtime_idle{};
 
+Status require_cpu_service_stack()
+{
+#ifdef OK_KERNEL_FREESTANDING
+    const auto cpu = smp::current_cpu();
+    if (cpu == 0)
+        return arch::require_service_stack();
+    const auto &record = smp::cpu_record(cpu);
+    return arch::StackBounds{record.stack_lower, record.stack_top}.require(arch::read_instantaneous_stack_pointer(), 0);
+#else
+    return {};
+#endif
+}
+
 bool any_step_active()
 {
     for (const bool active : runtime_step_active)

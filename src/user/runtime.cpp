@@ -453,7 +453,7 @@ Status shutdown_outer_boundary(Kernel &kernel)
 {
     if (auto status = shutdown_runtime_owner(kernel); !status) return status;
 #ifdef OK_KERNEL_FREESTANDING
-    if (auto status = arch::require_service_stack(); !status) return status;
+    if (auto status = require_cpu_service_stack(); !status) return status;
 #endif
     if (any_step_active() || entry_stacks.accounting().active_slots)
         return Status::busy("native shutdown requires return from the complete runtime step");

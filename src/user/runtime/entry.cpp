@@ -869,7 +869,7 @@ Status start(Kernel &kernel, fs::BootArchive archive)
 #ifdef OK_KERNEL_FREESTANDING
     // Root selection and native services run on the original boot stack.
     // Bounds are a current-SP check, not faulting guards or a usage budget.
-    if (auto status = arch::require_service_stack(); !status) return status;
+    if (auto status = require_cpu_service_stack(); !status) return status;
 #endif
     if (shutdown_admission_closed || native_shutdown_pending())
         return Status::busy("native shutdown has closed runtime admission");
@@ -962,7 +962,7 @@ bool step(Kernel &kernel)
     { runtime_failure = Status::busy("native step is not reentrant"); started = false; return false; }
     RuntimeStepGuard step_guard;
 #ifdef OK_KERNEL_FREESTANDING
-    if (auto status = arch::require_service_stack(); !status)
+    if (auto status = require_cpu_service_stack(); !status)
     { runtime_failure = status; started = false; return false; }
 #endif
     // Retry retained owner/pin cleanup on the serialized boot-CPU service path.

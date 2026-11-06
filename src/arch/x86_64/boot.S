@@ -94,12 +94,17 @@ long_mode_entry:
     rep stosb
 
     // In kernel mode GS_BASE holds the running CPU's block; this is CPU 0's.
-    lea ok_x86_cpu_locals(%rip), %rax
+    // Stand-alone probes linked without the execution backend have none.
+    .weak ok_x86_cpu_locals
+    movabs $ok_x86_cpu_locals, %rax
+    test %rax, %rax
+    jz .Lno_cpu_block
     mov %rax, (%rax)
     mov %rax, %rdx
     shr $32, %rdx
     mov $0xc0000101, %ecx
     wrmsr
+.Lno_cpu_block:
 
     mov %esi, %edi
     mov %ebx, %esi
