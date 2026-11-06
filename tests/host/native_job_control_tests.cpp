@@ -603,6 +603,27 @@ void timer_retry(Kernel &kernel)
     release(kernel, sender); release(kernel, pid);
 }
 
+// A fatal default the owed drain decides in a step ends the process in that
+// step: its runnable thread is never entered again.
+void same_step_fatal(Kernel &kernel)
+{
+    const auto parent = create(kernel), pid = fork(kernel, parent);
+    handle(kernel, pid, 1);
+    const auto helper = peer(kernel, pid);
+    kernel.scheduler().find_thread(pid, helper)->native_signal_mask.set(1);
+    static_cast<void>(park(kernel, pid));
+    expect(native::send_kernel_process_signal(kernel, pid, OK_SIGHUP) == native::KernelSignalSend::owed);
+    handle(kernel, pid, 1, 0);
+    native::started = true;
+    static_cast<void>(native::step(kernel));
+    expect(native::runtime_status().ok());
+    expect(kernel.scheduler().find(pid)->state() == sched::ProcessState::zombie);
+    expect(kernel.scheduler().find(pid)->wait_status() == 1);
+    release(kernel, pid);
+    drain(parent);
+    release(kernel, parent);
+}
+
 // Shutdown's terminate path completes a stopped process.
 void shutdown_stopped(Kernel &kernel)
 {
@@ -640,6 +661,7 @@ int main()
     owed(kernel);
     acted_not_refused(kernel);
     timer_retry(kernel);
+    same_step_fatal(kernel);
     shutdown_stopped(kernel);
     expect(native::runtime_status().ok() && kernel.scheduler().stopped_processes() == 0);
     expect(kernel.scheduler().find(init)->state() != sched::ProcessState::zombie);

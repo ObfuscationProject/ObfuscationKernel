@@ -1030,6 +1030,9 @@ bool step(Kernel &kernel)
     waiting_deadline |= private_timer_service(kernel, now.value());
     // Kernel signals owed to waits that could not take them retry here.
     private_jobctl_service(kernel);
+    // A fatal decision either service made applies before any thread of that
+    // process is entered (Linux complete_signal kills every thread at once).
+    private_process_signal_fatal(kernel);
     if (!runtime_failure) { started = false; return false; }
 #endif
     for (const auto &entry : poll_waits)

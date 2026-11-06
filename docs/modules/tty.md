@@ -301,8 +301,9 @@ handler runs under it after the continue.
   pending. Otherwise it is queued and applies when delivery or the settle pass
   reaches it.
 - A terminating default sent to a running Linux process none of whose
-  unblocking threads can take a signal now terminates it at the next step
-  (Linux `complete_signal` fatal shortcut).
+  unblocking threads can take a signal now terminates it (Linux
+  `complete_signal` fatal shortcut) before any of its threads runs again,
+  also when a timer or an owed kernel signal decided it.
 - TSTP/TTIN/TTOU in an orphaned group are discarded when they would apply: at
   generation when deliverable, otherwise when dequeued (a blocked one stays
   pending for `rt_sigpending` and `sigtimedwait`). SIGSTOP never is.
