@@ -230,7 +230,9 @@ template<lu::Profile P> void adapters(Kernel &kernel,usize number,std::array<int
     bool complete=true;auto f=setup(g.child,1);mock::memory.fill(std::byte{0x5a});
     expect(call(f,complete)==0&&complete);expect(!native::child_wait_object(g.pid,g.waiter).pool);
     for(usize i=0;i<(siginfo?128:4);++i)expect(mock::memory[output-hw::user_begin+i]==(siginfo?std::byte{}:std::byte{0x5a}));
-    f=setup(g.child,2);expect(call(f,complete)==-22&&complete);
+    // WUNTRACED (WSTOPPED for waitid) is accepted; an unknown option is not.
+    f=setup(g.child,3);expect(call(f,complete)==0&&complete);
+    f=setup(g.child,0x10);expect(call(f,complete)==-22&&complete);
     f=setup(g.child,0,hw::user_begin+8191);expect(call(f,complete)==-14&&complete);expect(kernel.scheduler().find(g.child)!=nullptr);
     f=setup(g.child,0);auto *t=kernel.scheduler().find_thread(g.pid,g.waiter);t->syscall_pending=true;
     expect(call(f,complete)==-11&&!complete);const auto object=native::child_wait_object(g.pid,g.waiter);
@@ -269,6 +271,7 @@ template<lu::Profile P> void adapters(Kernel &kernel,usize number,std::array<int
         auto identity=origins.identity(*p,*thread);expect(identity.capture!=0);expect(Restart::family(capture)==Restart::Family::child_wait);
         activate(kernel,group);thread->syscall_pending=true;auto ticket=kernel.scheduler().register_current_wait(sched::ThreadWaitReason::child,any?0:group.child);CHECK(ticket);
         typename Origin::ChildBinding binding{{&origins,1,1,1},ticket.value(),ticket.value().generation,{any?-1:static_cast<i32>(group.child),output,false,siginfo,Codec::profile.big_endian}};
+        if(siginfo){binding.operation.idtype=any?0:1;binding.operation.raw_options=4;}
         auto bad=binding;++bad.operation.output;expect(!origins.bind(identity,capture,bad));expect(origins.bind(identity,capture,binding));
         expect(!origins.validate_bound(identity,capture,typename Origin::PipeBinding{}));
         for(unsigned mutation=0;mutation<9;++mutation)

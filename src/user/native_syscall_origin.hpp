@@ -624,15 +624,15 @@ class SyscallOriginTable final : private NonCopyable
             {
                 const auto number = Adapter::Codec::syscall_number(abi::linux_user::Operation::waitid);
                 if (Selected != abi::linux_user::Profile::rv32 || !number || call.value().number != *number ||
-                    static_cast<u32>(a[0]) != (operation.selector == -1 ? 0U : 1U) ||
-                    (operation.selector != -1 && static_cast<u32>(a[1]) != static_cast<u32>(operation.selector)) ||
-                    a[2] != operation.output || static_cast<u32>(a[3]) != 4 || a[4]) return false;
+                    static_cast<u32>(a[0]) != operation.idtype ||
+                    (operation.idtype && static_cast<u32>(a[1]) != static_cast<u32>(operation.selector)) ||
+                    a[2] != operation.output || static_cast<u32>(a[3]) != operation.raw_options || a[4]) return false;
             }
             else
             {
                 const auto number = Adapter::Codec::syscall_number(abi::linux_user::Operation::wait4);
                 if (!number || call.value().number != *number || static_cast<i32>(a[0]) != operation.selector ||
-                    a[1] != operation.output || static_cast<u32>(a[2]) || a[3]) return false;
+                    a[1] != operation.output || static_cast<u32>(a[2]) != operation.raw_options || a[3]) return false;
             }
         }
         bound_record<Binding>(*record) = binding;

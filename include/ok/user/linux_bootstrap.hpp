@@ -1235,25 +1235,44 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
     if (is(Operation::execve)) return shared(syscall::Number::execve);
     if (is(Operation::wait4))
     {
-        // Linux pid_t/options remain 32-bit scalars on LP64.
-        if ((static_cast<u32>(a[2]) & ~1U) || a[3]) return -22;
-        const native::ChildWaitRequest request{static_cast<i32>(a[0]), static_cast<uptr>(a[1]),
-            (static_cast<u32>(a[2]) & 1U) != 0, false, Codec::profile.big_endian};
+        // Linux pid_t/options remain 32-bit scalars on LP64. WNOHANG 1,
+        // WUNTRACED 2 and WCONTINUED 8; rusage is not implemented.
+        const u32 options = static_cast<u32>(a[2]);
+        const i32 selector = static_cast<i32>(a[0]);
+        if ((options & ~11U) || a[3]) return -22;
+        if (selector == (-2147483647 - 1)) return -3;
+        native::ChildWaitRequest request{selector, static_cast<uptr>(a[1]), (options & 1U) != 0, false,
+            Codec::profile.big_endian};
+        // Selector 0 names the caller's group when the call is made.
+        if (selector == 0) request.group = process->process_group_id();
+        else if (selector < -1) request.group = static_cast<u32>(-static_cast<i64>(selector));
+        request.stopped = (options & 2U) != 0;
+        request.continued = (options & 8U) != 0;
+        request.raw_options = options;
         return native::begin_child_wait(kernel, pid, request, complete);
     }
     if (is(Operation::waitid))
     {
-        // RV32 musl implements waitpid through waitid. This remains the
-        // WEXITED/P_ALL/P_PID subset; no groups, rusage, stops or WNOWAIT.
+        // RV32 musl implements waitpid through waitid: P_ALL, P_PID and
+        // P_PGID (0 = the caller's group); WEXITED 4, WSTOPPED 2, WCONTINUED
+        // 8, WNOHANG 1 and WNOWAIT 0x01000000. No rusage.
         if constexpr (Profile != lu::Profile::rv32) return -38;
         else
         {
             const u32 kind = static_cast<u32>(a[0]), id = static_cast<u32>(a[1]);
             const u32 options = static_cast<u32>(a[3]);
-            if (kind > 1 || (kind == 1 && (id == 0 || id > 0x7fffffffU)) ||
-                (options & ~5U) || !(options & 4U) || a[4]) return -22;
-            const native::ChildWaitRequest request{kind == 0 ? -1 : static_cast<i32>(id),
+            constexpr u32 nowait = 0x01000000U;
+            if (kind > 2 || (kind == 1 && (id == 0 || id > 0x7fffffffU)) || (kind == 2 && id > 0x7fffffffU) ||
+                (options & ~(15U | nowait)) || !(options & 14U) || a[4]) return -22;
+            native::ChildWaitRequest request{kind == 0 ? -1 : static_cast<i32>(id),
                 static_cast<uptr>(a[2]), (options & 1U) != 0, true, Codec::profile.big_endian};
+            if (kind == 2) request.group = id ? id : process->process_group_id();
+            request.exited = (options & 4U) != 0;
+            request.stopped = (options & 2U) != 0;
+            request.continued = (options & 8U) != 0;
+            request.nowait = (options & nowait) != 0;
+            request.idtype = static_cast<u8>(kind);
+            request.raw_options = options;
             return native::begin_child_wait(kernel, pid, request, complete);
         }
     }

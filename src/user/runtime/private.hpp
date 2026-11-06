@@ -4,6 +4,8 @@
 // exactly one definition in one unit, and all state is constant-initialized.
 #include "ok/user/native_signal_config.hpp"
 #include "ok/uapi/signal.h"
+#include "ok/uapi/job_control.h"
+#include "ok/user/job_control_signals.hpp"
 #include "../native_lifecycle.hpp"
 #include "../signals/private_signal_scheduler_relocation.hpp"
 #include "ok/user/native_signal_action.hpp"
@@ -114,6 +116,11 @@ namespace hw = arch::execution;
 namespace lu = abi::linux_user;
 using LinuxExec = lu::ExecBootstrap<lu::configured_native_profile()>;
 using Personality = sched::UserPersonality;
+// Job-control numbering of a personality; native numbers are Linux generic.
+[[nodiscard]] constexpr const job::Numbering &private_job_numbering(Personality personality)
+{
+    return personality == Personality::linux ? job::linux_numbering<lu::configured_native_profile()> : job::native;
+}
 void copy_bytes(void *dst, const void *src, usize size);
 using Pages = MappingPages;
 extern NativePagePool page_pool;
@@ -547,7 +554,8 @@ i64 begin_pty_io(Kernel &kernel, sched::ProcessControlBlock &process, sched::Thr
 memory::ObjectHandle child_wait_object(sched::ProcessId pid, sched::ThreadId tid);
 // Return a ready child PID, ECHILD, EFAULT, zero for WNOHANG, or EAGAIN
 // exclusively for a matching live child. Never retain a canonical PCB pointer.
-i64 child_wait_probe(Kernel &kernel, sched::ProcessId pid, const ChildWaitRequest &request);
+i64 child_wait_probe(Kernel &kernel, sched::ProcessId pid, const ChildWaitRequest &request,
+                     ChildWaitReport *report = nullptr);
 void cancel_child_wait(Kernel &kernel, memory::ObjectHandle object,
                        std::string_view outcome = "cancelled", i64 result = -125);
 void cancel_child_wait(Kernel &kernel, sched::ProcessId pid);

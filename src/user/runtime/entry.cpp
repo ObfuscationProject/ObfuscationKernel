@@ -445,8 +445,17 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         return exec_image(kernel, pid, process, calling_tid, space, a, complete);
     if (number == N::wait4)
     {
-        if ((a[2] & ~uptr{1}) || a[3]) return -22;
-        return begin_child_wait(kernel, pid, {static_cast<i32>(a[0]), a[1], (a[2] & 1) != 0}, complete);
+        constexpr uptr options = OK_WNOHANG | OK_WUNTRACED | OK_WCONTINUED;
+        const auto selector = static_cast<i32>(a[0]);
+        if ((a[2] & ~options) || a[3]) return -22;
+        if (selector == (-2147483647 - 1)) return -3;
+        ChildWaitRequest request{selector, a[1], (a[2] & OK_WNOHANG) != 0};
+        if (selector == 0) request.group = process->process_group_id();
+        else if (selector < -1) request.group = static_cast<u32>(-static_cast<i64>(selector));
+        request.stopped = (a[2] & OK_WUNTRACED) != 0;
+        request.continued = (a[2] & OK_WCONTINUED) != 0;
+        request.raw_options = static_cast<u32>(a[2]);
+        return begin_child_wait(kernel, pid, request, complete);
     }
 
     if (number == N::pipe || number == N::pipe2)
