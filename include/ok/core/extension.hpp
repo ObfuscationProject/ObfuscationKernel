@@ -5,6 +5,7 @@
 #include "ok/gui/gui.hpp"
 #include "ok/net/native_udp.hpp"
 #include "ok/net/native_udp_executor.hpp"
+#include "ok/net/probe.hpp"
 
 namespace ok
 {
@@ -74,6 +75,18 @@ class KernelExtension
     virtual Result<net::NativeUdpLink> network_link(Kernel &)
     {
         return Status::unsupported("distribution has no native UDP link");
+    }
+    // The interface configuration (address, prefix, gateway, IPv6). When a
+    // distribution provides it, the kernel uses it instead of network_link and
+    // resolves the gateway through ARP. Unsupported keeps the static link.
+    virtual Result<net::InterfaceConfig> network_interface(Kernel &)
+    {
+        return Status::unsupported("distribution has no interface configuration");
+    }
+    // A link self-test for the kernel to run once the link is up (diagnostics).
+    virtual Result<net::ProbePlan> network_probe(Kernel &)
+    {
+        return Status::unsupported("distribution requests no link probe");
     }
     virtual Result<usize> network_receive(Kernel &, std::span<std::byte>)
     {

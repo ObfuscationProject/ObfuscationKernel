@@ -250,6 +250,12 @@ class OperationScratch final
     static Status lost() { return Status::denied("Linux UDP operation image authority expired"); }
     static void record(Status status, Status &failure) { if (!status && failure) failure = status; }
     static bool any(net::wire::Ipv4 address) { return address == net::wire::Ipv4{}; }
+    // A stale handle keeps the IPv4 path, which reports it at its first use.
+    template <OperationBackend Backend> static bool ipv6(Backend &backend, u32 endpoint)
+    {
+        const auto family = backend.service().family(endpoint);
+        return family && family.value() == net::Family::ipv6;
+    }
 
     template <abi::linux_user::Profile Target, OperationAccess Access>
     static Status payload_range(Access &access, const abi::linux_user::UdpRequest &request)
@@ -292,7 +298,8 @@ class OperationScratch final
         if (request.call == lu::UdpCall::socket)
         {
             using C = Constants<Target>;
-            if (request.domain != static_cast<i32>(C::af_inet)) return error<Target>(Error::e_afnosupport);
+            if (request.domain != static_cast<i32>(C::af_inet) && request.domain != static_cast<i32>(C::af_inet6))
+                return error<Target>(Error::e_afnosupport);
             const u32 type = static_cast<u32>(request.type);
             if (type & ~(C::sock_type_mask | C::sock_nonblock | C::sock_cloexec))
                 return error<Target>(Error::e_inval);
@@ -311,7 +318,8 @@ class OperationScratch final
                 if (auto status = backend.service().configure(link.value()); !status)
                     return status_error<Target>(status);
             }
-            const auto endpoint = backend.service().open();
+            const auto endpoint = backend.service().open(
+                request.domain == static_cast<i32>(C::af_inet6) ? net::Family::ipv6 : net::Family::ipv4);
             if (!endpoint) return status_error<Target>(endpoint.status());
             if (!access.live())
             {
@@ -352,15 +360,30 @@ class OperationScratch final
                 const auto disconnected = backend.service().disconnect(endpoint);
                 return disconnected ? 0 : status_error<Target>(disconnected);
             }
-            // Unsupported families and short IPv4 records retain this reservation.
+            // Unsupported families and short records retain this reservation.
             const auto bound = backend.service().autobind(endpoint);
             if (!bound) return bound.code() == StatusCode::no_space
                 ? error<Target>(Error::e_again) : status_error<Target>(bound);
+            if (ipv6(backend, endpoint))
+            {
+                // __ip6_datagram_connect on a v6-only socket: AF_INET, then
+                // the RFC 2133 length, then any other family.
+                if (family.value() == Constants<Target>::af_inet) return error<Target>(Error::e_afnosupport);
+                const auto peer = lu::UdpWire<Target>::decode_ipv6_address(
+                    {address_.data(), static_cast<usize>(request.address_length)});
+                if (!peer) return status_error<Target>(peer.status());
+                if (peer.value().family != Constants<Target>::af_inet6) return error<Target>(Error::e_afnosupport);
+                const net::IpAddress address{peer.value().address};
+                if (net::wire::ipv4_mapped(peer.value().address) || !backend.service().reachable(address))
+                    return error<Target>(Error::e_netunreach);
+                const auto connected = backend.service().connect(endpoint, address, peer.value().port);
+                return connected ? 0 : status_error<Target>(connected);
+            }
             const auto peer = lu::UdpWire<Target>::decode_address(
                 {address_.data(), static_cast<usize>(request.address_length)});
             if (!peer) return status_error<Target>(peer.status());
             if (peer.value().family != Constants<Target>::af_inet) return error<Target>(Error::e_afnosupport);
-            if (peer.value().address != backend.service().link().peer_ip) return error<Target>(Error::e_netunreach);
+            if (!backend.service().reachable(peer.value().address)) return error<Target>(Error::e_netunreach);
             const auto connected = backend.service().connect(endpoint, peer.value().address, peer.value().port);
             return connected ? 0 : status_error<Target>(connected);
         }
@@ -374,26 +397,27 @@ class OperationScratch final
         {
             // Linux obtains the canonical name before reading user capacity.
             // The original retained OFD survives descriptor reuse in callbacks.
-            lu::Ipv4SocketAddress value{static_cast<u16>(Constants<Target>::af_inet), 0, {}};
+            // The snapshot address carries the socket family, bound or not.
+            net::IpAddress address{};
+            u16 port{};
             if (request.call == lu::UdpCall::getpeername)
             {
                 const auto peer = backend.service().peer(endpoint);
                 if (!peer) return status_error<Target>(peer.status());
                 if (!peer.value().associated || !peer.value().port)
                     return -static_cast<i64>(Constants<Target>::not_connected_errno_number());
-                value.port = peer.value().port;
-                value.address = peer.value().address;
+                address = peer.value().address;
+                port = peer.value().port;
             }
             else
             {
                 const auto binding = backend.service().binding(endpoint);
                 if (!binding) return status_error<Target>(binding.status());
-                value.port = binding.value().port;
-                value.address = binding.value().address;
+                address = binding.value().address;
+                port = binding.value().port;
             }
-            std::array<u8, 16> name{};
-            if (auto status = lu::UdpWire<Target>::encode_address(name, value); !status)
-                return status_error<Target>(status);
+            const auto name = lu::encode_socket_name<Target>(address, port);
+            if (!name) return status_error<Target>(name.status());
             std::array<u8, 4> length{};
             if (auto status = access.read(request.source_length,
                     {reinterpret_cast<std::byte *>(length.data()), length.size()}); !status)
@@ -402,16 +426,16 @@ class OperationScratch final
             const auto capacity = lu::UdpWire<Target>::decode_socklen(length);
             if (!capacity) return status_error<Target>(capacity.status());
             if (capacity.value() < 0) return error<Target>(Error::e_inval);
-            const usize count = static_cast<u32>(capacity.value()) < name.size()
-                ? static_cast<u32>(capacity.value()) : name.size();
+            const usize count = static_cast<u32>(capacity.value()) < name.value().size
+                ? static_cast<u32>(capacity.value()) : name.value().size;
             if (count)
             {
                 if (auto status = access.write(request.address,
-                        {reinterpret_cast<const std::byte *>(name.data()), count}); !status)
+                        {reinterpret_cast<const std::byte *>(name.value().bytes.data()), count}); !status)
                     return status_error<Target>(status);
                 if (!access.live() || !backend.current(process)) return error<Target>(Error::e_io);
             }
-            if (auto status = lu::UdpWire<Target>::encode_socklen(length, name.size()); !status)
+            if (auto status = lu::UdpWire<Target>::encode_socklen(length, name.value().size); !status)
                 return status_error<Target>(status);
             if (auto status = access.write(request.source_length,
                     {reinterpret_cast<const std::byte *>(length.data()), length.size()}); !status)
@@ -424,13 +448,14 @@ class OperationScratch final
             return error<Target>(Error::e_opnotsupp);
         if (request.call == lu::UdpCall::bind)
         {
+            if (ipv6(backend, endpoint)) return bind_ipv6<Target>(backend, access, request, endpoint);
             const auto local = address<Target>(access, request.address, request.address_length);
             if (!local) return status_error<Target>(local.status());
             const auto &value = local.value();
             if (value.family != Constants<Target>::af_inet &&
                 !(value.family == Constants<Target>::af_unspec && any(value.address)))
                 return error<Target>(Error::e_afnosupport);
-            if (!any(value.address) && value.address != backend.service().link().local_ip)
+            if (!any(value.address) && !backend.service().local_address(value.address))
                 return error<Target>(Error::e_addrnotavail);
             if (value.port && value.port < 1024) return error<Target>(Error::e_acces);
             const auto state = backend.service().binding(endpoint);
@@ -461,8 +486,16 @@ class OperationScratch final
             // The canonical port persists through these later protocol errors.
             if (request.count > 0xffffU) return error<Target>(Error::e_msgsize);
             if (request.flags & ~Constants<Target>::send_flags_mask()) return error<Target>(Error::e_opnotsupp);
-            lu::Ipv4SocketAddress value{};
-            if (request.address)
+            net::IpAddress destination{};
+            u16 port{};
+            if (ipv6(backend, endpoint))
+            {
+                const auto selected = ipv6_destination<Target>(backend, request, endpoint);
+                if (selected.error) return selected.error;
+                destination = selected.address;
+                port = selected.port;
+            }
+            else if (lu::Ipv4SocketAddress value{}; request.address)
             {
                 const auto peer = lu::UdpWire<Target>::decode_address(
                     {address_.data(), static_cast<usize>(request.address_length)});
@@ -471,14 +504,17 @@ class OperationScratch final
                 if (value.family != Constants<Target>::af_inet && value.family != Constants<Target>::af_unspec)
                     return error<Target>(Error::e_afnosupport);
                 if (!value.port) return error<Target>(Error::e_inval);
-                if (value.address != backend.service().link().peer_ip) return error<Target>(Error::e_netunreach);
+                if (!backend.service().reachable(value.address)) return error<Target>(Error::e_netunreach);
+                destination = value.address;
+                port = value.port;
             }
             else
             {
                 const auto peer = backend.service().peer(endpoint);
                 if (!peer) return status_error<Target>(peer.status());
                 if (!peer.value().associated) return error<Target>(Error::e_destaddrreq);
-                value = {static_cast<u16>(Constants<Target>::af_inet), peer.value().port, peer.value().address};
+                destination = peer.value().address;
+                port = peer.value().port;
             }
             if (request.count > payload_.size()) return error<Target>(Error::e_msgsize);
             if (!access.live()) return error<Target>(Error::e_io);
@@ -487,10 +523,12 @@ class OperationScratch final
                 return status_error<Target>(status);
             if (!access.live()) return error<Target>(Error::e_io);
             if (auto status = backend.executor_status(); !status) return error<Target>(Error::e_io);
-            const auto built = backend.service().build_datagram(endpoint, value.address, value.port,
+            const auto built = backend.service().build_datagram(endpoint, destination, port,
                                                                {payload_.data(), count}, frame_);
             if (!built) return status_error<Target>(built.status());
             if (!access.live()) return error<Target>(Error::e_io);
+            // Held for neighbour resolution: the interface transmits it later.
+            if (!built.value()) return static_cast<i64>(count);
             const auto submitted = backend.submit({frame_.data(), built.value()});
             return submitted ? static_cast<i64>(count) : status_error<Target>(submitted);
         }
@@ -506,6 +544,65 @@ class OperationScratch final
             return status_error<Target>(received.status());
         }
         return error<Target>(Error::e_nosys);
+    }
+
+    // inet6_bind_sk/__inet6_bind order for a v6-only socket; scope_id is
+    // ignored because the kernel has one interface.
+    template <abi::linux_user::Profile Target, OperationBackend Backend, OperationAccess Access>
+    i64 bind_ipv6(Backend &backend, Access &access, const abi::linux_user::UdpRequest &request, u32 endpoint)
+    {
+        if (auto status = copy_address(access, request.address, request.address_length); !status)
+            return status_error<Target>(status);
+        const auto local = abi::linux_user::UdpWire<Target>::decode_ipv6_address(
+            {address_.data(), static_cast<usize>(request.address_length)});
+        if (!local) return status_error<Target>(local.status());
+        if (local.value().family != Constants<Target>::af_inet6) return error<Target>(Error::e_afnosupport);
+        const u16 port = local.value().port;
+        if (port && port < 1024) return error<Target>(Error::e_acces);
+        const auto state = backend.service().binding(endpoint);
+        if (!state) return status_error<Target>(state.status());
+        if (state.value().bound || net::wire::ipv4_mapped(local.value().address)) return error<Target>(Error::e_inval);
+        const net::IpAddress address{local.value().address};
+        if (!address.unspecified() && !backend.service().local_address(address))
+            return error<Target>(Error::e_addrnotavail);
+        if (!access.live()) return error<Target>(Error::e_io);
+        const auto bound = port ? backend.service().bind(endpoint, address, port)
+                                : backend.service().bind_ephemeral(endpoint, address);
+        return bound ? 0 : bound.code() == StatusCode::already_exists || bound.code() == StatusCode::no_space
+            ? error<Target>(Error::e_addrinuse) : status_error<Target>(bound);
+    }
+
+    struct Destination { net::IpAddress address{}; u16 port{}; i64 error{}; };
+    // udpv6_sendmsg on a v6-only socket over the already copied sockaddr:
+    // AF_UNSPEC selects the peer, AF_INET and mapped addresses are unreachable.
+    template <abi::linux_user::Profile Target, OperationBackend Backend>
+    Destination ipv6_destination(Backend &backend, const abi::linux_user::UdpRequest &request, u32 endpoint)
+    {
+        namespace lu = abi::linux_user;
+        const std::span<const u8> copied{address_.data(), static_cast<usize>(request.address_length)};
+        bool peer = !request.address;
+        if (!peer)
+        {
+            const auto family = lu::UdpWire<Target>::decode_family(copied);
+            if (!family) return {.error = status_error<Target>(family.status())};
+            if (family.value() == Constants<Target>::af_inet) return {.error = error<Target>(Error::e_netunreach)};
+            if (family.value() == Constants<Target>::af_unspec) peer = true;
+            else if (family.value() != Constants<Target>::af_inet6) return {.error = error<Target>(Error::e_inval)};
+        }
+        if (peer)
+        {
+            const auto connected = backend.service().peer(endpoint);
+            if (!connected) return {.error = status_error<Target>(connected.status())};
+            if (!connected.value().associated) return {.error = error<Target>(Error::e_destaddrreq)};
+            return {connected.value().address, connected.value().port, 0};
+        }
+        const auto value = lu::UdpWire<Target>::decode_ipv6_address(copied);
+        if (!value) return {.error = status_error<Target>(value.status())};
+        if (net::wire::ipv4_mapped(value.value().address)) return {.error = error<Target>(Error::e_netunreach)};
+        if (!value.value().port) return {.error = error<Target>(Error::e_inval)};
+        const net::IpAddress address{value.value().address};
+        if (!backend.service().reachable(address)) return {.error = error<Target>(Error::e_netunreach)};
+        return {address, value.value().port, 0};
     }
 
     class ScratchScope final

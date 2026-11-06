@@ -9,6 +9,30 @@ static_assert(std::is_nothrow_copy_constructible_v<NativeUdpReceiveWait>);
 static_assert(std::is_nothrow_destructible_v<NativeUdpReceiveWait>);
 constinit NativeUdpReceiveObjects native_udp_receive_objects{page_pool, native_udp_receive_capacity};
 std::array<PollWaitIndex, native_udp_receive_capacity> native_udp_receive_waits{};
+namespace
+{
+// Receive waiters of each UDP socket (native and Linux), woken by
+// notify_udp_receives when the socket's readiness moved. A full queue switches
+// to re-evaluating every waiter on every pass, the behaviour before queues.
+constexpr usize udp_queue_capacity = 16;
+std::array<sched::WaitQueue<udp_queue_capacity>, net::NativeUdpService::socket_capacity> udp_receive_queues{};
+bool udp_receive_rescan{};
+u64 udp_executor_seen{};
+UdpWaitCounters udp_wait_counters{};
+sched::WaitQueue<udp_queue_capacity> &udp_receive_queue(u32 endpoint)
+{
+    const u32 index = endpoint & 0xffu;
+    return udp_receive_queues[index && index <= udp_receive_queues.size() ? index - 1 : 0];
+}
+void enlist_udp_receive(Kernel &kernel, sched::ProcessId pid, sched::ThreadId tid, u32 endpoint)
+{
+    auto *thread = kernel.scheduler().find_thread(pid, tid);
+    if (!thread || !thread->wait_registration.active()) return;
+    const auto status = udp_receive_queue(endpoint).enlist(thread->wait_registration);
+    if (status) ++udp_wait_counters.queued;
+    else if (status.code() != StatusCode::already_exists) { udp_receive_rescan = true; ++udp_wait_counters.unqueued; }
+}
+} // namespace
 using LinuxUdpReceiveAdmissionToken = LinuxUdpReceiveAdmission<lu::configured_native_profile()>;
 using LinuxUdpReceiveTransferCoordinator = LinuxUdpReceiveCoordinator<lu::configured_native_profile()>;
 static_assert(!std::is_copy_constructible_v<LinuxUdpReceiveWait>);
@@ -102,11 +126,22 @@ Status retire_native_udp_receives_for_exec(Kernel &kernel, sched::ProcessId pid)
 }
 namespace
 {
+// A stale handle keeps the IPv4 record size; its peek fails first.
+bool native_udp_ipv6(Kernel &kernel, u32 endpoint)
+{
+    const auto family = kernel.native_udp().family(endpoint);
+    return family && family.value() == net::Family::ipv6;
+}
+usize native_udp_name_size(Kernel &kernel, u32 endpoint)
+{
+    return native_udp_ipv6(kernel, endpoint) ? sizeof(ok_sockaddr_in6) : sizeof(ok_sockaddr_in);
+}
 Result<usize> copy_native_udp_datagram(Kernel &kernel, const hw::AddressSpace &space,
     u32 endpoint, const SyscallOrigins::NativeUdpReceiveRequest &operation)
 {
+    const usize name_size = native_udp_name_size(kernel, endpoint);
     if (operation.flags || (!!operation.source_address != !!operation.source_length) ||
-        (operation.source_address ? operation.source_capacity < sizeof(ok_sockaddr_in) : operation.source_capacity != 0))
+        (operation.source_address ? operation.source_capacity < name_size : operation.source_capacity != 0))
         return Status::invalid_argument("invalid copied native UDP receive request");
     const auto received = kernel.native_udp().peek(endpoint);
     if (!received)
@@ -120,12 +155,25 @@ Result<usize> copy_native_udp_datagram(Kernel &kernel, const hw::AddressSpace &s
     // Preflight every effective destination before publishing any output.
     if ((copied && !hw::user_range(space, operation.output, copied, true)) ||
         (operation.source_address &&
-         (!hw::user_range(space, operation.source_address, sizeof(ok_sockaddr_in), true) ||
+         (!hw::user_range(space, operation.source_address, name_size, true) ||
           !hw::user_range(space, operation.source_length, sizeof(u32), true))))
         return Status::fault("native UDP receive output is not writable");
     if (copied && !hw::copy_to_user(space, operation.output, received.value().payload.data(), copied))
         return Status::fault("native UDP payload publication failed");
-    if (operation.source_address)
+    if (operation.source_address && received.value().source.v6())
+    {
+        ok_sockaddr_in6 source{};
+        source.family = OK_AF_INET6;
+        source.port_be[0] = static_cast<u8>(received.value().source_port >> 8);
+        source.port_be[1] = static_cast<u8>(received.value().source_port);
+        for (usize at = 0; at < 16; ++at) source.address[at] = received.value().source[at];
+        source.scope_id = net::wire::link_local(received.value().source.ipv6()) ? 1u : 0u;
+        constexpr u32 actual = sizeof(source);
+        if (!hw::copy_to_user(space, operation.source_address, &source, sizeof(source)) ||
+            !hw::copy_to_user(space, operation.source_length, &actual, sizeof(actual)))
+            return Status::fault("native UDP source publication failed");
+    }
+    else if (operation.source_address)
     {
         ok_sockaddr_in source{};
         source.family = OK_AF_INET;
@@ -155,9 +203,26 @@ Status native_udp_receive_post_arm(Kernel &kernel, const NativeUdpReceiveWait &w
 {
     const auto ready = kernel.native_udp_executor().readiness(kernel.native_udp(), wait.endpoint);
     if (!ready || !ready.value().may_wait(wait.observed_receive, wait.observed_executor))
+    {
         if (!kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::ready, udp_wake_source(ready)))
             return native_udp_receive_invariant(Status::fault("UDP receive post-arm ticket changed"));
+        return {};
+    }
+    enlist_udp_receive(kernel, wait.pid, wait.tid, wait.endpoint);
     return {};
+}
+// Completes a native receive wait whose condition no longer allows waiting.
+Result<bool> evaluate_native_udp_receive(Kernel &kernel, const NativeUdpReceiveWait &wait)
+{
+    ++udp_wait_counters.evaluated;
+    const auto ready = kernel.native_udp_executor().readiness(kernel.native_udp(), wait.endpoint);
+    const auto *description = kernel.scheduler().open_description(wait.retained_description);
+    if (ready && description && !(description->flags & posix::o_NONBLOCK) &&
+        ready.value().may_wait(wait.observed_receive, wait.observed_executor))
+        return false;
+    if (!kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::ready, udp_wake_source(ready)))
+        return native_udp_receive_invariant(Status::fault("UDP receive scan lost its exact ticket"));
+    return true;
 }
 i64 begin_native_udp_receive(Kernel &kernel, sched::ProcessControlBlock &process,
     sched::ThreadControlBlock &thread, u16 description_id,
@@ -309,14 +374,14 @@ Status scan_native_udp_receives(Kernel &kernel)
         }
         else
         {
-            const auto ready = kernel.native_udp_executor().readiness(kernel.native_udp(), wait.endpoint);
+            // Readiness is the queue's business (notify_udp_receives); a pass
+            // still notices a description that became nonblocking or closed.
             const auto *description = kernel.scheduler().open_description(wait.retained_description);
-            if (!ready || !description || (description->flags & posix::o_NONBLOCK) ||
-                !ready.value().may_wait(wait.observed_receive, wait.observed_executor))
-                if (!kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::ready, udp_wake_source(ready)))
+            if (udp_receive_rescan || !description || (description->flags & posix::o_NONBLOCK))
+                if (auto evaluated = evaluate_native_udp_receive(kernel, wait); !evaluated)
                 {
                     retire_native_udp_receive(kernel, object);
-                    return native_udp_receive_invariant(Status::fault("UDP receive scan lost its exact ticket"));
+                    return evaluated.status();
                 }
         }
         if (!runtime_failure) return runtime_failure;
@@ -565,6 +630,8 @@ class LinuxUdpReceiveAccess final
         }
     return failure;
 }
+
+UdpWaitCounters udp_wait_statistics() { return udp_wait_counters; }
 [[maybe_unused]] Status retire_linux_udp_receives_for_exec(Kernel &kernel, sched::ProcessId pid)
 { return retire_linux_udp_receives(kernel, pid, {}, LinuxUdpReceiveRetirement::exec); }
 
@@ -651,8 +718,12 @@ Status linux_udp_receive_post_arm(Kernel &kernel, const LinuxUdpReceiveWait &wai
     const auto *description = kernel.scheduler().open_description(wait.retained_description);
     if (!ready || !description || (description->flags & posix::o_NONBLOCK) ||
         !ready.value().may_wait(wait.observed_receive, wait.observed_executor))
+    {
         if (!kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::ready, udp_wake_source(ready)))
             return linux_udp_receive_invariant(Status::fault("Linux UDP receive post-arm lost exact ticket"));
+        return {};
+    }
+    enlist_udp_receive(kernel, wait.pid, wait.tid, wait.endpoint);
     return {};
 }
 [[maybe_unused]] Result<LinuxUdpReceiveBegin> begin_linux_udp_receive(Kernel &kernel,
@@ -805,9 +876,64 @@ Status linux_udp_receive_post_arm(Kernel &kernel, const LinuxUdpReceiveWait &wai
                 wait.phase == LinuxUdpReceivePhase::captured_staged ? sched::WaitCompletion::none : cause))
             return fail(Status::denied("Linux UDP receive scan lost current captured owner"));
         if (wait.phase == LinuxUdpReceivePhase::published && thread->wait_registration.active())
-            if (auto status = linux_udp_receive_post_arm(kernel, wait); !status) return fail(status);
+        {
+            // Readiness is the queue's business (notify_udp_receives); a pass
+            // still notices a description that became nonblocking or closed.
+            const auto *description = kernel.scheduler().open_description(wait.retained_description);
+            if (udp_receive_rescan || !description || (description->flags & posix::o_NONBLOCK))
+                if (auto status = linux_udp_receive_post_arm(kernel, wait); !status) return fail(status);
+        }
     }
     return {};
+}
+
+// Re-evaluates the receive waiters of UDP sockets whose readiness moved since
+// the previous pass, or of every socket once the executor's own readiness
+// moved (a link failure ends every wait).
+Status notify_udp_receives(Kernel &kernel)
+{
+    const u64 executor = kernel.native_udp_executor().state().readiness_sequence;
+    const bool all = executor != udp_executor_seen;
+    udp_executor_seen = executor;
+    Status failure{};
+    const auto evaluate = [&](sched::WaitTicket ticket) -> bool {
+        if (!failure) return false;
+        for (const auto &entry : native_udp_receive_waits)
+        {
+            if (!entry.pid) continue;
+            auto resolved = native_udp_receive_objects.resolve(entry.object);
+            if (!resolved || resolved.value()->ticket != ticket) continue;
+            const auto &wait = *resolved.value();
+            if (wait.phase != NativeUdpOwnerPhase::published) return true;
+            auto evaluated = evaluate_native_udp_receive(kernel, wait);
+            if (!evaluated) { failure = evaluated.status(); return false; }
+            return evaluated.value();
+        }
+        for (const auto &entry : linux_udp_receive_waits)
+        {
+            if (!entry.pid || !entry.object.pool) continue;
+            auto resolved = linux_udp_receive_objects.resolve(entry.object);
+            if (!resolved || resolved.value()->ticket != ticket) continue;
+            const auto &wait = *resolved.value();
+            if (wait.phase != LinuxUdpReceivePhase::published) return true;
+            ++udp_wait_counters.evaluated;
+            if (auto status = linux_udp_receive_post_arm(kernel, wait); !status) { failure = status; return false; }
+            const auto *thread = kernel.scheduler().find_thread(wait.pid, wait.tid);
+            return !thread || !thread->wait_registration.pending(ticket);
+        }
+        return true;
+    };
+    kernel.native_udp().take_changed([&](u32 handle) { if (!all) udp_receive_queue(handle).notify(evaluate); });
+    if (all) for (auto &queue : udp_receive_queues) queue.notify(evaluate);
+    if (udp_receive_rescan)
+    {
+        bool waiting = false;
+        for (const auto &queue : udp_receive_queues) waiting = waiting || queue.waiting();
+        for (const auto &entry : native_udp_receive_waits) waiting = waiting || entry.pid;
+        for (const auto &entry : linux_udp_receive_waits) waiting = waiting || entry.pid;
+        if (!waiting) udp_receive_rescan = false;
+    }
+    return failure;
 }
 
 i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::ThreadControlBlock *caller,
@@ -818,7 +944,7 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
     // Native UAPI numbers and sockaddr layout are not Linux ABI values on
     // the ten supported targets. A Linux decoder must be added separately.
     if (process->resources().personality != Personality::native) return -38;
-    static_assert(sizeof(ok_sockaddr_in) == 16);
+    static_assert(sizeof(ok_sockaddr_in) == 16 && sizeof(ok_sockaddr_in6) == 28);
     auto socket_description = [&](u64 descriptor) -> Result<u16> {
         if (descriptor > static_cast<u64>(__INT32_MAX__))
             return Status::bad_descriptor("native UDP descriptor is out of range");
@@ -840,10 +966,23 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
             if (byte) return Status::invalid_argument("native UDP address has nonzero reserved bytes");
         return address;
     };
+    // Exact native records: an IPv6 socket takes only a 28-byte AF_INET6 one.
+    // A mapped address is EINVAL for bind and ENETUNREACH for sendto (v6-only).
+    struct Endpoint6 { net::IpAddress address{}; u16 port{}; i64 error{}; };
+    auto ipv6_from_user = [&](u64 pointer, u64 length, i64 mapped) -> Endpoint6 {
+        if (length != sizeof(ok_sockaddr_in6)) return {.error = -OK_EINVAL};
+        ok_sockaddr_in6 address{};
+        if (!hw::copy_from_user(space, &address, pointer, sizeof(address))) return {.error = -OK_EFAULT};
+        if (address.family != OK_AF_INET6) return {.error = -OK_EAFNOSUPPORT};
+        net::wire::Ipv6 bytes{};
+        for (usize at = 0; at < bytes.size(); ++at) bytes[at] = address.address[at];
+        if (net::wire::ipv4_mapped(bytes)) return {.error = mapped};
+        return {bytes, static_cast<u16>((u16{address.port_be[0]} << 8) | address.port_be[1]), 0};
+    };
     if (number == N::socket)
     {
         constexpr u64 allowed = OK_SOCK_DGRAM | OK_SOCK_NONBLOCK | OK_SOCK_CLOEXEC;
-        if (a[0] != OK_AF_INET || (a[1] & ~allowed) ||
+        if ((a[0] != OK_AF_INET && a[0] != OK_AF_INET6) || (a[1] & ~allowed) ||
             (a[1] & OK_SOCK_DGRAM) != OK_SOCK_DGRAM ||
             (a[2] != 0 && a[2] != OK_IPPROTO_UDP)) return -22;
         if (auto status = kernel.native_udp_executor().status(); !status) return error(status);
@@ -856,7 +995,7 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
             if (auto status = kernel.native_udp().configure(link.value()); !status)
                 return error(status);
         }
-        auto opened = kernel.native_udp().open();
+        auto opened = kernel.native_udp().open(a[0] == OK_AF_INET6 ? net::Family::ipv6 : net::Family::ipv4);
         if (!opened) return error(opened.status());
         auto fd = kernel.posix().install_native_udp(opened.value(), (a[1] & OK_SOCK_CLOEXEC) != 0, (a[1] & OK_SOCK_NONBLOCK) != 0);
         if (!fd)
@@ -869,6 +1008,12 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
     const auto description_id = socket_description(a[0]);
     if (!description_id) return error(description_id.status());
     const Result<u32> handle = kernel.scheduler().open_description(description_id.value())->native_udp_handle;
+    const bool ipv6 = handle && native_udp_ipv6(kernel, handle.value());
+    if (number == N::bind && ipv6)
+    {
+        const auto local = ipv6_from_user(a[1], a[2], -OK_EINVAL);
+        return local.error ? local.error : error(kernel.native_udp().bind(handle.value(), local.address, local.port));
+    }
     if (number == N::bind)
     {
         auto address = address_from_user(a[1], a[2]);
@@ -886,18 +1031,31 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
         if (a[3]) return -22;
         if (auto status = kernel.native_udp_executor().status(); !status) return error(status);
         if (a[2] > net::NativeUdpService::datagram_capacity) return -90;
-        auto address = address_from_user(a[4], a[5]);
-        if (!address) return error(address.status());
+        net::IpAddress destination{};
+        u16 port{};
+        if (ipv6)
+        {
+            const auto peer = ipv6_from_user(a[4], a[5], -OK_ENETUNREACH);
+            if (peer.error) return peer.error;
+            destination = peer.address;
+            port = peer.port;
+        }
+        else
+        {
+            auto address = address_from_user(a[4], a[5]);
+            if (!address) return error(address.status());
+            port = static_cast<u16>((u16{address.value().port_be[0]} << 8) | address.value().port_be[1]);
+            destination = net::wire::Ipv4{address.value().address[0], address.value().address[1],
+                                          address.value().address[2], address.value().address[3]};
+        }
         std::array<std::byte, net::NativeUdpService::datagram_capacity> payload{};
         if (!hw::copy_from_user(space, payload.data(), a[1], static_cast<usize>(a[2]))) return -14;
         std::array<std::byte, net::NativeUdpService::frame_capacity> frame{};
-        const auto port = static_cast<u16>((u16{address.value().port_be[0]} << 8) |
-                                           address.value().port_be[1]);
-        const net::wire::Ipv4 destination{address.value().address[0], address.value().address[1],
-                                           address.value().address[2], address.value().address[3]};
         auto length = kernel.native_udp().build_datagram(handle.value(), destination,
             port, {payload.data(), static_cast<usize>(a[2])}, frame);
         if (!length) return error(length.status());
+        // Held for neighbour resolution: the interface transmits it later.
+        if (!length.value()) return static_cast<i64>(a[2]);
         if (auto status = extension->network_transmit(kernel, {frame.data(), length.value()}); !status)
             return error(status);
         return static_cast<i64>(a[2]);
@@ -908,8 +1066,9 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
     if (a[4])
     {
         if (!hw::copy_from_user(space, &address_capacity, a[5], sizeof(address_capacity))) return -14;
-        if (address_capacity < sizeof(ok_sockaddr_in)) return -22;
-        if (!hw::user_range(space, a[4], sizeof(ok_sockaddr_in), true) ||
+        const usize name_size = ipv6 ? sizeof(ok_sockaddr_in6) : sizeof(ok_sockaddr_in);
+        if (address_capacity < name_size) return -22;
+        if (!hw::user_range(space, a[4], name_size, true) ||
             !hw::user_range(space, a[5], sizeof(address_capacity), true)) return -14;
     }
     const SyscallOrigins::NativeUdpReceiveRequest request{

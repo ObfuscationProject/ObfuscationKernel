@@ -26,7 +26,7 @@ struct Packet
 };
 Packet packet(tcp::Endpoint from, u32 seq, u32 ack, u8 flags)
 {
-    Packet out; auto built = wire::build_tcp(out.bytes, from.address, server.address, 1, 64,
+    Packet out; auto built = wire::build_tcp(out.bytes, from.address.ipv4(), server.address.ipv4(), 1, 64,
         {from.port, server.port, seq, ack, flags, 4096}, {}, {});
     CHECK(built); out.length = built.value(); return out;
 }

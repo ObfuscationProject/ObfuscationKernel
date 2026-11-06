@@ -217,7 +217,7 @@ Status MemoryMap::require_user_access(uptr address, usize length, usize permissi
                                                             : Status::denied("process memory access denied");
 }
 
-Status WaitQueue::block(ProcessId pid)
+Status PidWaitQueue::block(ProcessId pid)
 {
     if (blocked(pid))
     {
@@ -226,7 +226,7 @@ Status WaitQueue::block(ProcessId pid)
     return blocked_.push_back(pid);
 }
 
-Status WaitQueue::wake(ProcessId pid)
+Status PidWaitQueue::wake(ProcessId pid)
 {
     for (usize i = 0; i < blocked_.size(); ++i)
     {
@@ -238,7 +238,7 @@ Status WaitQueue::wake(ProcessId pid)
     return Status::not_found("process is not blocked on wait queue");
 }
 
-bool WaitQueue::blocked(ProcessId pid) const
+bool PidWaitQueue::blocked(ProcessId pid) const
 {
     for (const auto blocked_pid : blocked_)
     {

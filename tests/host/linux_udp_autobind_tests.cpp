@@ -152,7 +152,9 @@ template<lu::Profile P> void sockets()
                 .type=static_cast<i32>(type),.protocol=protocol}));CHECK(f.value==error<P>(expected));
         CHECK(memory.resets==1&&memory.calls==0&&f.network.active_sockets()==count);
     };
-    run(10,C::sock_dgram|C::sock_nonblock,0,lu::UdpErrno::e_afnosupport);
+    run(3,C::sock_dgram|C::sock_nonblock,0,lu::UdpErrno::e_afnosupport);
+    // AF_INET6 needs the attached interface this fixture omits.
+    run(10,C::sock_dgram|C::sock_nonblock,0,lu::UdpErrno::e_opnotsupp);
     run(2,C::sock_dgram|C::sock_nonblock|0x40000000,0,lu::UdpErrno::e_inval);
     run(2,C::sock_stream|C::sock_nonblock,0,lu::UdpErrno::e_socktnosupport);
     run(2,C::sock_dgram|C::sock_nonblock,6,lu::UdpErrno::e_protonosupport);

@@ -275,6 +275,56 @@ void committed_exec_retirement_order(Kernel &kernel)
         retire(kernel, g);
     }
 }
+// Native AF_INET6 takes exact 28-byte records; the IPv4 socket keeps its own.
+void ipv6_native_calls(Kernel &kernel)
+{
+    const auto g = create(kernel, 51020);
+    select(kernel, g);
+    auto call = [&](uptr number, std::array<uptr, 6> arguments) {
+        bool complete = true;
+        const auto value = native::dispatch(kernel, g.pid, {number, arguments}, complete);
+        expect(complete); return value;
+    };
+    constexpr uptr record = hw::user_begin + 768;
+    const auto self = net::wire::link_local_from_mac(udp_link.local_mac);
+    const auto router = net::wire::link_local_from_mac(udp_link.peer_mac);
+    const auto put = [](u16 family, u16 port, const net::wire::Ipv6 &address) {
+        ok_sockaddr_in6 value{family, {static_cast<u8>(port >> 8), static_cast<u8>(port)}, {1, 2, 3, 4}, {}, 9};
+        for (usize at = 0; at < 16; ++at) value.address[at] = address[at];
+        std::memcpy(mock::memory.data() + 768, &value, sizeof(value));
+    };
+    expect(call(OK_SYS_SOCKET, {3, OK_SOCK_DGRAM, 0, 0, 0, 0}) == -22);
+    const auto fd = call(OK_SYS_SOCKET, {OK_AF_INET6, OK_SOCK_DGRAM | OK_SOCK_NONBLOCK, OK_IPPROTO_UDP, 0, 0, 0});
+    expect(fd >= 3);
+    const net::wire::Ipv6 mapped{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 0, 2, 2};
+    put(OK_AF_INET6, 51021, {});
+    expect(call(OK_SYS_BIND, {static_cast<uptr>(fd), record, sizeof(ok_sockaddr_in), 0, 0, 0}) == -OK_EINVAL);
+    expect(call(OK_SYS_BIND, {static_cast<uptr>(fd), record, 24, 0, 0, 0}) == -OK_EINVAL);
+    put(OK_AF_INET, 51021, {});
+    expect(call(OK_SYS_BIND, {static_cast<uptr>(fd), record, sizeof(ok_sockaddr_in6), 0, 0, 0}) == -OK_EAFNOSUPPORT);
+    put(OK_AF_INET6, 51021, mapped);
+    expect(call(OK_SYS_BIND, {static_cast<uptr>(fd), record, sizeof(ok_sockaddr_in6), 0, 0, 0}) == -OK_EINVAL);
+    // An IPv4 socket keeps its exact sixteen-byte AF_INET rule.
+    put(OK_AF_INET6, 51021, {});
+    expect(call(OK_SYS_BIND, {static_cast<uptr>(g.fd), record, sizeof(ok_sockaddr_in6), 0, 0, 0}) == -OK_EINVAL);
+    expect(call(OK_SYS_BIND, {static_cast<uptr>(fd), record, sizeof(ok_sockaddr_in6), 0, 0, 0}) == 0);
+    std::array<std::byte, 128> packet{};
+    const auto built = net::wire::build_udp<net::wire::Ipv6Family>(packet, router, self, 41000, 51021, 0, 64, payload); CHECK(built);
+    const auto queued = kernel.native_udp().deliver({packet.data(), built.value()});
+    expect(queued && queued.value().kind == net::NativeUdpFrameKind::udp_queued);
+    u32 capacity = sizeof(ok_sockaddr_in);
+    std::memcpy(mock::memory.data() + 640, &capacity, sizeof(capacity));
+    expect(call(OK_SYS_RECVFROM, {static_cast<uptr>(fd), output, 8, 0, source_address, source_length}) == -OK_EINVAL);
+    capacity = sizeof(ok_sockaddr_in6);
+    std::memcpy(mock::memory.data() + 640, &capacity, sizeof(capacity));
+    expect(call(OK_SYS_RECVFROM, {static_cast<uptr>(fd), output, 8, 0, source_address, source_length}) == 3);
+    ok_sockaddr_in6 source{}; std::memcpy(&source, mock::memory.data() + 512, sizeof(source));
+    u32 actual{}; std::memcpy(&actual, mock::memory.data() + 640, sizeof(actual));
+    expect(actual == 28 && source.family == OK_AF_INET6 && source.port_be[0] == (41000 >> 8) && source.port_be[1] == (41000 & 0xff));
+    expect(source.scope_id == 1 && source.flowinfo_be[0] == 0 && std::memcmp(source.address, router.data(), 16) == 0);
+    expect(call(OK_SYS_RECVFROM, {static_cast<uptr>(fd), output, 8, 0, 0, 0}) == -11);
+    retire(kernel, g);
+}
 }
 int main()
 {
@@ -291,6 +341,7 @@ int main()
     zero_length_and_completion_causes(kernel);
     retirement_and_reused_object(kernel);
     committed_exec_retirement_order(kernel);
+    ipv6_native_calls(kernel);
     expect(kernel.native_udp().active_sockets() == 0);
     expect(native::entry_stacks.accounting().leased_slots == 0);
     const auto owners = native::native_udp_receive_objects.accounting();

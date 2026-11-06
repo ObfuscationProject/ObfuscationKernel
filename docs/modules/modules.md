@@ -12,7 +12,7 @@ Each module exposes a `ModuleManifest` with:
 - dependency, exported-service, and required-service lists;
 - `ModuleExecution`, either `inline_core` or `kernel_process`;
 - `ModuleThreading`, either `single_threaded` or `per_cpu`;
-- `abi_version`, currently `kernel_module_abi_version == 78`;
+- `abi_version`, currently `kernel_module_abi_version == 79`;
 - a capability mask declaring service export/use, kernel-process ownership,
   per-CPU workers, user ABI, driver ABI, or GUI behavior;
 - `ModuleRestartPolicy`;
@@ -107,6 +107,26 @@ Roadmap tests cover:
 - the built-in module graph used by the kernel debug suite.
 
 ## ABI history
+
+ABI79 (`feat/net-core`, WT2.3) changes exported declarations: the new
+`ok/net/ip.hpp`, `icmp.hpp`, `neighbour.hpp`, `route.hpp`, `interface.hpp`,
+`address.hpp`, `tcp_congestion.hpp` and `probe.hpp`; `Kernel` gains the
+`EthernetInterface` and `LinkProbe` members and `activate_network`;
+`KernelExtension` gains `network_interface` and `network_probe`.
+`tcp::Endpoint` holds a `net::IpAddress`, `tcp::Connection` takes a
+`CongestionControl` policy and its `Snapshot` gains the congestion, flight,
+out-of-order and recovery fields; `EndpointTable` gains `take_changed` and its
+packet capacity covers an IPv6 header. `NativeUdpService` sockets carry a
+`Family`, its address parameters, binding, peer and datagram snapshots use
+`IpAddress`, `NativeUdpFrameKind` gains `unbound` and the service gains
+`take_changed`. `sched::WaitQueue`
+gains `enlist`, `notify` and `prune`, the legacy process-granular queue
+becomes `sched::PidWaitQueue`, and `TcpStreamWaits` gains `stats`. The public
+UAPI stays 0.16 with a compatible addition: `OK_AF_INET6` and
+`ok_sockaddr_in6`. `TcpStreamSnapshot` gains the socket family, the stream
+`open` calls take it, and `ok/abi/linux_udp_address.hpp` gains the
+`sockaddr_in6` codec and `encode_socket_name`. Every exported module marker,
+the SDK manifest and the OS consumer declare 79 and refuse 78 and 80.
 
 ABI78 (`feat/irq-wait-time`, WT1.2) changes exported declarations:
 `ok/interrupt/irq_chip.hpp` replaces the scaffold with the `IrqChip` concept and

@@ -52,6 +52,12 @@ struct Memory
         CHECK(lu::UdpWire<P>::encode_address({reinterpret_cast<u8 *>(bytes.data()+address_at),16},{family,port,ip}));
         for(usize at=16;at<length;++at)bytes[address_at+at]=std::byte{0x9d};
     }
+    template<lu::Profile P> void address6(u16 family,u16 port,const net::wire::Ipv6 &ip,usize length=28)
+    {
+        CHECK(lu::Ipv6SocketAddressCodec<P>::encode({reinterpret_cast<u8 *>(bytes.data()+address_at),28},
+            {family,port,0x01020304u,ip,7}));
+        for(usize at=28;at<length;++at)bytes[address_at+at]=std::byte{0x9d};
+    }
     template<lu::Profile P> void length(u32 size)
     {
         CHECK(lu::UdpWire<P>::encode_socklen({reinterpret_cast<u8 *>(bytes.data()+length_at),4},size));
@@ -61,6 +67,7 @@ struct Memory
 struct Fixture
 {
     std::unique_ptr<sched::Scheduler> owner{std::make_unique<sched::Scheduler>()};
+    net::EthernetInterface nic{};
     net::NativeUdpService network,peer;
     udp::OperationScratch scratch;
     sched::ProcessId pid{};
@@ -75,11 +82,14 @@ struct Fixture
     u16 held_description{sched::invalid_description};
     std::array<std::byte,net::NativeUdpService::frame_capacity> transmitted{},incoming{},reply{};
     usize transmitted_size{};
-    explicit Fixture(bool configured=true)
+    // An attached interface admits IPv6 sockets and settles its link-local address.
+    explicit Fixture(bool configured=true,bool interface=false)
     {
         auto result=owner->create_user_process("udp-body-host-model",arch::configured_arch_operations().make_user_context(
             {arch::execution::user_begin,arch::execution::user_begin+4096}));CHECK(result);pid=result.value();
+        if(interface)CHECK(network.attach_interface(nic));
         if(configured)CHECK(network.configure(udp_link));
+        if(interface){CHECK(nic.tick(0)&&nic.tick(1000));while(nic.control())nic.pop_control();}
         CHECK(peer.configure({udp_link.peer_mac,udp_link.local_mac,udp_link.peer_ip,udp_link.local_ip}));
         CHECK(owner->set_native_udp_service(network));auto opened=peer.open();CHECK(opened);sender=opened.value();
         CHECK(peer.bind(sender,{},41000));
@@ -120,9 +130,9 @@ struct Fixture
         };
         return scratch.run_backend<P>(*this,process(),memory,decode,publish,release_failure);
     }
-    template<lu::Profile P> i32 socket(bool cloexec=false)
+    template<lu::Profile P> i32 socket(bool cloexec=false,i32 domain=2)
     {
-        Memory memory;CHECK(run<P>(memory,{.call=lu::UdpCall::socket,.domain=2,
+        Memory memory;CHECK(run<P>(memory,{.call=lu::UdpCall::socket,.domain=domain,
             .type=static_cast<i32>(lu::UdpConstants<P>::sock_dgram|lu::UdpConstants<P>::sock_nonblock|
                                   (cloexec?lu::UdpConstants<P>::sock_cloexec:0))}));
         CHECK(memory.resets==1);CHECK(value>=3);return static_cast<i32>(value);
@@ -152,7 +162,10 @@ template<lu::Profile P> void sockets()
                 .type=static_cast<i32>(type),.protocol=protocol}));CHECK(f.value==error<P>(expected));
         CHECK(memory.resets==1&&memory.calls==0&&f.network.active_sockets()==count);
     };
-    run(10,C::sock_dgram|C::sock_nonblock,0,lu::UdpErrno::e_afnosupport);
+    run(1,C::sock_dgram|C::sock_nonblock,0,lu::UdpErrno::e_afnosupport);
+    run(3,C::sock_dgram|C::sock_nonblock,0,lu::UdpErrno::e_afnosupport);
+    // Without the attached interface an IPv6 socket is refused before install.
+    run(10,C::sock_dgram|C::sock_nonblock,0,lu::UdpErrno::e_opnotsupp);
     run(2,C::sock_dgram|C::sock_nonblock|0x40000000,0,lu::UdpErrno::e_inval);
     run(2,C::sock_stream|C::sock_nonblock,0,lu::UdpErrno::e_socktnosupport);
     run(2,C::sock_dgram|C::sock_nonblock,6,lu::UdpErrno::e_protonosupport);
@@ -408,7 +421,147 @@ template<lu::Profile P> void completion_failure_order()
     CHECK(revoked.resets==1);
 }
 
-template<lu::Profile P> void profile() { sockets<P>();configure_first_socket<P>();binds<P>();sends_and_range<P>();receives<P>();lifetime<P>();bounded_description_and_nonblock<P>();copy_endpoint_stability<P>();completion_failure_order<P>(); }
+template<lu::Profile P> lu::Ipv6SocketAddress name6(const Memory &memory)
+{
+    auto length=lu::UdpWire<P>::decode_socklen({reinterpret_cast<const u8 *>(memory.bytes.data()+length_at),4});
+    CHECK(length&&length.value()==28);
+    auto value=lu::Ipv6SocketAddressCodec<P>::decode({reinterpret_cast<const u8 *>(memory.bytes.data()+address_at),28});
+    CHECK(value&&value.value().family==10&&value.value().flowinfo==0);return value.value();
+}
+
+// AF_INET6 sockets are v6-only. Family mismatches follow Linux with
+// IPV6_V6ONLY set: bind/connect EAFNOSUPPORT, sendto AF_INET ENETUNREACH.
+// Mapped addresses: bind EINVAL, connect/sendto ENETUNREACH.
+template<lu::Profile P> void ipv6_operations()
+{
+    namespace wire=net::wire;
+    const auto self=wire::link_local_from_mac(udp_link.local_mac),router=wire::link_local_from_mac(udp_link.peer_mac);
+    const wire::Ipv6 remote{0x20,0x01,0x0d,0xb8,0,0,0,0,0,0,0,0,0,0,0,9};
+    const wire::Ipv6 mapped{0,0,0,0,0,0,0,0,0,0,0xff,0xff,192,0,2,1};
+    Fixture f(true,true);const auto fd=f.socket<P>(false,10);CHECK(fd==3);
+    CHECK(f.network.family(f.endpoint()).value()==net::Family::ipv6);
+    const auto bind=[&](u16 family,u16 port,const wire::Ipv6 &ip,i32 length,lu::UdpErrno expected) {
+        Memory memory;memory.address6<P>(family,port,ip,128);
+        CHECK(f.run<P>(memory,{.call=lu::UdpCall::bind,.fd=3,.address=address_at,.address_length=length}));
+        CHECK(f.value==error<P>(expected));CHECK(!f.network.binding(f.endpoint()).value().bound);
+    };
+    bind(10,40000,{},16,lu::UdpErrno::e_inval);bind(10,40000,{},23,lu::UdpErrno::e_inval);
+    bind(10,40000,{},129,lu::UdpErrno::e_inval);
+    bind(2,40000,{},28,lu::UdpErrno::e_afnosupport);bind(0,40000,{},28,lu::UdpErrno::e_afnosupport);
+    bind(10,100,{},28,lu::UdpErrno::e_acces);bind(10,40000,mapped,28,lu::UdpErrno::e_inval);
+    bind(10,40000,remote,28,lu::UdpErrno::e_addrnotavail);bind(10,40000,router,28,lu::UdpErrno::e_addrnotavail);
+    {
+        Memory memory;memory.address<P>(2,40000,{});
+        CHECK(f.run<P>(memory,{.call=lu::UdpCall::bind,.fd=3,.address=address_at,.address_length=16}));
+        CHECK(f.value==error<P>(lu::UdpErrno::e_inval));
+    }
+    // An unbound name is the IPv6 any address.
+    Memory unbound;unbound.length<P>(128);
+    CHECK(f.run<P>(unbound,{.call=lu::UdpCall::getsockname,.fd=3,.address=address_at,.source_length=length_at}));
+    CHECK(f.value==0);auto name=name6<P>(unbound);CHECK(name.port==0&&name.address==wire::Ipv6{}&&name.scope_id==0);
+    // RFC 2133 length and ignored input scope_id.
+    Memory good;good.address6<P>(10,40000,self,24);
+    CHECK(f.run<P>(good,{.call=lu::UdpCall::bind,.fd=3,.address=address_at,.address_length=24}));CHECK(f.value==0);
+    Memory bound;bound.length<P>(28);
+    CHECK(f.run<P>(bound,{.call=lu::UdpCall::getsockname,.fd=3,.address=address_at,.source_length=length_at}));
+    name=name6<P>(bound);CHECK(f.value==0&&name.port==40000&&name.address==self&&name.scope_id==1);
+    for(u32 capacity:{0u,1u,16u,27u})
+    {
+        Memory memory;memory.bytes.fill(std::byte{0xa5});memory.length<P>(capacity);
+        CHECK(f.run<P>(memory,{.call=lu::UdpCall::getsockname,.fd=3,.address=address_at,.source_length=length_at}));
+        CHECK(f.value==0&&memory.calls==(capacity?3u:2u));
+        auto length=lu::UdpWire<P>::decode_socklen({reinterpret_cast<const u8 *>(memory.bytes.data()+length_at),4});
+        CHECK(length&&length.value()==28);
+        for(usize at=0;at<capacity;++at)CHECK(memory.bytes[address_at+at]==bound.bytes[address_at+at]);
+        CHECK(memory.bytes[address_at+capacity]==std::byte{0xa5});
+    }
+    Memory again;again.address6<P>(10,40001,{});
+    CHECK(f.run<P>(again,{.call=lu::UdpCall::bind,.fd=3,.address=address_at,.address_length=28}));
+    CHECK(f.value==error<P>(lu::UdpErrno::e_inval));
+    Memory none;none.length<P>(28);
+    CHECK(f.run<P>(none,{.call=lu::UdpCall::getpeername,.fd=3,.address=address_at,.source_length=length_at}));
+    CHECK(f.value==-static_cast<i64>(lu::UdpConstants<P>::not_connected_errno_number()));
+
+    const auto send=[&](u16 family,u16 port,const wire::Ipv6 &ip,i32 length,lu::UdpErrno expected,bool v4=false) {
+        Memory memory;if(v4)memory.address<P>(family,port,{192,0,2,1});else memory.address6<P>(family,port,ip,128);
+        const auto prior=f.submits;CHECK(f.run<P>(memory,{.call=lu::UdpCall::sendto,.fd=3,.payload=payload_at,.count=3,
+            .address=address_at,.address_length=length}));CHECK(f.value==error<P>(expected)&&f.submits==prior);
+    };
+    send(2,42000,{},16,lu::UdpErrno::e_netunreach,true);send(2,42000,{},28,lu::UdpErrno::e_netunreach);
+    send(3,42000,router,28,lu::UdpErrno::e_inval);send(10,42000,router,20,lu::UdpErrno::e_inval);
+    send(10,42000,router,1,lu::UdpErrno::e_inval);
+    send(10,42000,mapped,28,lu::UdpErrno::e_netunreach);send(10,0,router,28,lu::UdpErrno::e_inval);
+    send(10,42000,remote,28,lu::UdpErrno::e_netunreach);send(0,42000,router,28,lu::UdpErrno::e_destaddrreq);
+    // The first datagram waits for neighbour discovery; the advert releases it.
+    Memory held;held.address6<P>(10,42000,router,28);
+    CHECK(f.run<P>(held,{.call=lu::UdpCall::sendto,.fd=3,.payload=payload_at,.count=3,.address=address_at,.address_length=28}));
+    CHECK(f.value==3&&f.submits==0&&f.nic.neighbours().pending()==1);
+    CHECK(f.nic.tick(1100));while(f.nic.control())f.nic.pop_control();
+    std::array<std::byte,128> advert{};
+    auto na=wire::build_neighbor_advertisement(std::span{advert}.subspan(14),router,self,router,true,true,true,udp_link.peer_mac);
+    CHECK(na&&wire::build_ethernet(advert,udp_link.local_mac,udp_link.peer_mac,wire::ethertype_ipv6,na.value()));
+    f.nic.receive({advert.data(),14+na.value()},1200);
+    usize flushed{};f.nic.flush([&](wire::Bytes) { ++flushed;return true; });CHECK(flushed==1);
+    Memory resolved;resolved.address6<P>(10,42000,router,28);
+    for(usize at=0;at<3;++at)resolved.bytes[payload_at+at]=std::byte{static_cast<u8>(0x40+at)};
+    CHECK(f.run<P>(resolved,{.call=lu::UdpCall::sendto,.fd=3,.payload=payload_at,.count=3,.address=address_at,.address_length=28}));
+    CHECK(f.value==3&&f.submits==1);
+    {
+        auto ethernet=wire::ethernet({f.transmitted.data(),f.transmitted_size});CHECK(ethernet&&ethernet.value().destination==udp_link.peer_mac);
+        auto ip=wire::ipv6(ethernet.value().payload);CHECK(ip&&ip.value().source==self&&ip.value().destination==router);
+        auto packet=wire::udp<wire::Ipv6Family>(ip.value());CHECK(packet&&packet.value().source_port==40000&&packet.value().destination_port==42000);
+        CHECK(packet.value().payload.size()==3&&packet.value().payload[2]==std::byte{0x42});
+    }
+    // Receive reports the 28-byte source name and length.
+    const std::array<std::byte,4> data{std::byte{9},std::byte{8},std::byte{7},std::byte{6}};
+    std::array<std::byte,128> inbound{};
+    auto built=wire::build_udp<wire::Ipv6Family>(inbound,router,self,42000,40000,0,64,data);CHECK(built);
+    auto queued=f.network.deliver({inbound.data(),built.value()});CHECK(queued&&queued.value().kind==net::NativeUdpFrameKind::udp_queued);
+    Memory received;received.length<P>(128);
+    CHECK(f.run<P>(received,{.call=lu::UdpCall::recvfrom,.fd=3,.payload=payload_at,.count=13,.address=address_at,.source_length=length_at}));
+    CHECK(f.value==4&&received.bytes[payload_at+3]==std::byte{6});
+    name=name6<P>(received);CHECK(name.port==42000&&name.address==router&&name.scope_id==1);
+
+    const auto connect=[&](u16 family,u16 port,const wire::Ipv6 &ip,i32 length,lu::UdpErrno expected,bool v4=false) {
+        Memory memory;if(v4)memory.address<P>(family,port,{192,0,2,1});else memory.address6<P>(family,port,ip,128);
+        CHECK(f.run<P>(memory,{.call=lu::UdpCall::connect,.fd=3,.address=address_at,.address_length=length}));
+        CHECK(f.value==error<P>(expected)&&!f.network.peer(f.endpoint()).value().associated);
+    };
+    connect(2,42000,{},16,lu::UdpErrno::e_afnosupport,true);connect(2,42000,{},28,lu::UdpErrno::e_afnosupport);
+    connect(10,42000,router,23,lu::UdpErrno::e_inval);connect(10,42000,router,1,lu::UdpErrno::e_inval);
+    connect(3,42000,router,28,lu::UdpErrno::e_afnosupport);connect(10,42000,mapped,28,lu::UdpErrno::e_netunreach);
+    connect(10,42000,remote,28,lu::UdpErrno::e_netunreach);
+    Memory peer;peer.address6<P>(10,42000,router,28);
+    CHECK(f.run<P>(peer,{.call=lu::UdpCall::connect,.fd=3,.address=address_at,.address_length=28}));CHECK(f.value==0);
+    Memory named;named.length<P>(28);
+    CHECK(f.run<P>(named,{.call=lu::UdpCall::getpeername,.fd=3,.address=address_at,.source_length=length_at}));
+    name=name6<P>(named);CHECK(f.value==0&&name.port==42000&&name.address==router&&name.scope_id==1);
+    // Connected output with no address and with AF_UNSPEC both use the peer.
+    for(bool unspecified:{false,true})
+    {
+        Memory memory;memory.address6<P>(0,1,remote,28);const auto prior=f.submits;
+        CHECK(f.run<P>(memory,{.call=lu::UdpCall::sendto,.fd=3,.payload=payload_at,.count=2,
+            .address=unspecified?address_at:0,.address_length=unspecified?28:0}));CHECK(f.value==2&&f.submits==prior+1);
+    }
+    Memory disconnect;disconnect.address6<P>(0,0,{},28);
+    CHECK(f.run<P>(disconnect,{.call=lu::UdpCall::connect,.fd=3,.address=address_at,.address_length=2}));
+    CHECK(f.value==0&&!f.network.peer(f.endpoint()).value().associated);
+
+    // An IPv4 socket keeps its IPv4-only record rules for AF_INET6 input.
+    const auto v4=f.socket<P>();CHECK(v4==4);
+    for(auto call:{lu::UdpCall::bind,lu::UdpCall::connect,lu::UdpCall::sendto})
+    {
+        Memory memory;memory.address6<P>(10,42000,router,28);
+        CHECK(f.run<P>(memory,{.call=call,.fd=4,.payload=payload_at,.count=1,.address=address_at,.address_length=28}));
+        CHECK(f.value==error<P>(lu::UdpErrno::e_afnosupport));
+    }
+    Memory v4name;v4name.length<P>(128);
+    CHECK(f.run<P>(v4name,{.call=lu::UdpCall::getsockname,.fd=4,.address=address_at,.source_length=length_at}));
+    auto v4length=lu::UdpWire<P>::decode_socklen({reinterpret_cast<const u8 *>(v4name.bytes.data()+length_at),4});
+    CHECK(f.value==0&&v4length&&v4length.value()==16);
+}
+
+template<lu::Profile P> void profile() { sockets<P>();configure_first_socket<P>();binds<P>();sends_and_range<P>();receives<P>();lifetime<P>();bounded_description_and_nonblock<P>();copy_endpoint_stability<P>();completion_failure_order<P>();ipv6_operations<P>(); }
 int main()
 {
     profile<lu::Profile::i386>();profile<lu::Profile::x86_64>();profile<lu::Profile::aarch64>();profile<lu::Profile::arm32>();

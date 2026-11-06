@@ -23,7 +23,7 @@ struct Packet
 Packet packet(Endpoint peer, u32 sequence, u32 acknowledgment, u8 flags)
 {
     Packet out;
-    auto built = build_tcp(out.bytes, peer.address, server.address, 1, 64,
+    auto built = build_tcp(out.bytes, peer.address.ipv4(), server.address.ipv4(), 1, 64,
         {peer.port, server.port, sequence, acknowledgment, flags, 4096}, {}, {});
     check(bool(built), "independent peer packet construction"); out.length = built.value(); return out;
 }

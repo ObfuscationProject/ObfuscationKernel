@@ -1,6 +1,8 @@
 #pragma once
 
 #include "ok/net/wire.hpp"
+#include "ok/net/interface.hpp"
+#include "ok/net/address.hpp"
 #include "ok/net/native_udp_readiness_sequence.hpp"
 #include <array>
 #include <span>
@@ -16,7 +18,9 @@ struct NativeUdpLink
     wire::Ipv4 local_ip{}, peer_ip{};
 };
 
-enum class NativeUdpFrameKind : u8 { dropped, arp_reply, udp_queued };
+// `unbound`: a valid datagram no socket accepts (the caller may answer with
+// ICMP port unreachable).
+enum class NativeUdpFrameKind : u8 { dropped, arp_reply, udp_queued, unbound };
 struct NativeUdpFrame
 {
     NativeUdpFrameKind kind{NativeUdpFrameKind::dropped};
@@ -41,7 +45,7 @@ struct NativeUdpReadiness
 struct NativeUdpBindingSnapshot
 {
     bool bound{};
-    wire::Ipv4 address{};
+    IpAddress address{};
     u16 port{};
     [[nodiscard]] bool operator==(const NativeUdpBindingSnapshot &) const = default;
 };
@@ -49,14 +53,14 @@ struct NativeUdpBindingSnapshot
 struct NativeUdpPeerSnapshot
 {
     bool associated{};
-    wire::Ipv4 address{};
+    IpAddress address{};
     u16 port{};
     [[nodiscard]] bool operator==(const NativeUdpPeerSnapshot &) const = default;
 };
 
 struct NativeUdpDatagram
 {
-    wire::Ipv4 source{};
+    IpAddress source{};
     u16 source_port{};
     wire::Bytes payload{};
 };
@@ -77,19 +81,38 @@ class NativeUdpService final
     NativeUdpService(NativeUdpService &&) = delete;
     NativeUdpService &operator=(NativeUdpService &&) = delete;
 
+    // With an attached interface, configure() also configures it from the
+    // link: the local address as a /24, the peer as default gateway and
+    // permanent neighbour, plus IPv6 link-local autoconfiguration. Routing
+    // and neighbour resolution then replace the static peer checks; without
+    // one the service keeps the static peer profile.
+    Status attach_interface(EthernetInterface &interface);
+    [[nodiscard]] EthernetInterface *interface() const { return interface_; }
     Status configure(NativeUdpLink link);
-    Result<u32> open();
+    // Interface mode only: the attached interface takes `config`; the static
+    // peer fields stay unset and every route comes from the interface.
+    Status configure(const InterfaceConfig &config);
+    [[nodiscard]] bool reachable(const IpAddress &destination) const;
+    [[nodiscard]] bool local_address(const IpAddress &address) const;
+    // A socket's family is fixed at open; addresses of the other family are
+    // refused. IPv6 sockets need the attached interface.
+    Result<u32> open(Family family = Family::ipv4);
+    [[nodiscard]] Result<Family> family(u32 handle) const;
     Status close(u32 handle);
-    Status bind(u32 handle, wire::Ipv4 address, u16 port);
+    Status bind(u32 handle, IpAddress address, u16 port);
     // Explicit canonical reservation; existing bind/frame ordering is unchanged.
-    Status bind_ephemeral(u32 handle, wire::Ipv4 address);
+    Status bind_ephemeral(u32 handle, IpAddress address);
     // Implicit reservation preserves an explicit address retained by disconnect.
     Status autobind(u32 handle);
-    Status connect(u32 handle, wire::Ipv4 address, u16 port);
+    Status connect(u32 handle, IpAddress address, u16 port);
     Status disconnect(u32 handle);
-    Result<usize> build_datagram(u32 handle, wire::Ipv4 destination, u16 port,
+    // Returns the frame length to transmit, or 0 when the attached interface
+    // holds the packet for neighbour resolution (it is sent from there).
+    Result<usize> build_datagram(u32 handle, IpAddress destination, u16 port,
                                  wire::Bytes payload, std::span<std::byte> frame);
     Result<NativeUdpFrame> ingest(wire::Bytes frame, std::span<std::byte> reply);
+    // A complete IPv4 or IPv6 packet the interface accepted for a local address.
+    Result<NativeUdpFrame> deliver(wire::Bytes packet);
     // Pure copied receive snapshot, including zero-length datagrams. No device
     // I/O, binding, payload borrow or queue reservation is performed.
     Result<NativeUdpReadiness> readiness(u32 handle) const;
@@ -99,6 +122,21 @@ class NativeUdpService final
     Result<NativeUdpDatagram> peek(u32 handle) const;
     Status consume(u32 handle);
     [[nodiscard]] usize active_sockets() const;
+    // Visits each socket handle whose receive readiness moved (a datagram was
+    // queued or the socket closed) since the previous call, once.
+    template <class Visit>
+        requires requires(Visit &visit, u32 handle) { visit(handle); }
+    usize take_changed(Visit &&visit)
+    {
+        usize count = 0;
+        for (usize i = 0; i < sockets_.size(); ++i)
+            if (sockets_[i].changed)
+            {
+                sockets_[i].changed = false;
+                visit((sockets_[i].generation << 8) | static_cast<u32>(i + 1)); ++count;
+            }
+        return count;
+    }
     [[nodiscard]] u64 dropped_frames() const { return dropped_frames_; }
     [[nodiscard]] const NativeUdpLink &link() const { return link_; }
     [[nodiscard]] bool configured() const { return configured_; }
@@ -111,18 +149,19 @@ class NativeUdpService final
   private:
     struct Datagram
     {
-        wire::Ipv4 source{};
+        IpAddress source{};
         u16 source_port{};
         usize size{};
         std::array<std::byte, datagram_capacity> bytes{};
     };
     struct Socket
     {
-        bool used{}, bound{}, retired{}, associated{}, address_locked{}, port_locked{};
+        bool used{}, bound{}, retired{}, associated{}, address_locked{}, port_locked{}, changed{};
+        Family family{Family::ipv4};
         u32 generation{};
         u16 port{};
-        wire::Ipv4 address{};
-        wire::Ipv4 peer_address{};
+        IpAddress address{};
+        IpAddress peer_address{};
         u16 peer_port{};
         usize head{}, count{};
         std::array<Datagram, queue_capacity> queue{};
@@ -130,11 +169,14 @@ class NativeUdpService final
     [[nodiscard]] Socket *find(u32 handle);
     [[nodiscard]] const Socket *find(u32 handle) const;
     [[nodiscard]] bool port_used(u16 port) const;
+    [[nodiscard]] Result<IpAddress> local_source(const Socket &socket, const IpAddress &destination) const;
     [[nodiscard]] Result<u16> ephemeral_port();
     NativeUdpFrame drop();
+    Result<NativeUdpFrame> queue(const IpAddress &source, const IpAddress &destination, const wire::Udp &udp);
 
     std::array<Socket, socket_capacity> sockets_{};
     NativeUdpLink link_{};
+    EthernetInterface *interface_{};
     bool configured_{};
     u16 next_identifier_{0x9000};
     u16 next_ephemeral_{49152};
