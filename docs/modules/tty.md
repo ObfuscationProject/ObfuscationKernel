@@ -6,18 +6,24 @@ against it. Every section carries a status: **planned (Sn)** names the slice
 that lands it, and becomes **landed (Sn)** when that slice merges into this
 branch. Nothing below is implemented yet unless it is marked landed.
 
-Current behaviour, which every planned section replaces:
+Current behaviour, which the remaining planned sections replace:
 
-- The serial console is a lease (`OK_SYS_CONSOLE_CLAIM/REVOKE/FLUSH`) with four
-  controls: `OK_TIOCSCTTY`, `OK_TIOCGPGRP`, `OK_TIOCSPGRP` and `OK_TIOCGSID`.
-  Input is raw, never echoed, and CR becomes LF on the userland input path.
+- The serial console is a lease (`OK_SYS_CONSOLE_CLAIM/REVOKE/FLUSH`) over a
+  terminal object (S4): an N_TTY line discipline under the raw-compatible
+  `console_compat` termios (CR becomes LF through ICRNL, no echo, no ONLCR,
+  byte at a time). The console serves TCGETS, TCSETS/TCSETSW/TCSETSF, TCSBRK,
+  TCFLSH, TIOCGWINSZ, TIOCSWINSZ and FIONREAD besides `OK_TIOCSCTTY`,
+  `OK_TIOCGPGRP`, `OK_TIOCSPGRP` and `OK_TIOCGSID`, for both personalities, so
+  musl `isatty()` on a console descriptor is 1. Background console reads keep
+  returning EIO until S8.
 - `OK_SYS_PTY_PAIR` creates raw native PTY pairs (8 slots, 4096-byte queues)
-  with the v1 hangup rules of §8. Linux PTY I/O returns EOPNOTSUPP.
-- Every other terminal request returns ENOTTY, so `isatty()` is false.
+  with the v1 hangup rules of §8. Linux PTY I/O returns EOPNOTSUPP, and every
+  terminal request on a PTY descriptor returns ENOTTY (S5).
 - Job control (§9.1-§9.5, §9.8 and the orphan row of §9.7) is landed: every
   signal number reaches native and Linux recipients, stops and continues are
   reported through WUNTRACED/WCONTINUED and SIGCHLD, and native programs have
-  SIG_DFL/SIG_IGN. Nothing on a terminal generates a signal yet (S4, S5, S8).
+  SIG_DFL/SIG_IGN. On the console, ISIG characters and TIOCSWINSZ generate
+  signals (S4); PTYs follow in S5, gates and hangups in S8.
 - `OK_TTY` (`fs::TtyDevice`) is a VFS roadmap model. It is not a terminal and is
   not part of this contract.
 
@@ -40,13 +46,24 @@ Existing lines of `syscall.h` and `signal.h`, the profile marker headers, module
 ABI 78 and UAPI 0.16.0 stay unchanged until S9, so the unmodified ObfuscationOS
 consumer accepts every intermediate SDK.
 
-## 1. Terminal objects — planned (S4 console, S5 PTY)
+## 1. Terminal objects — landed (S4 console); planned (S5 PTY)
 
 There are nine terminal objects: the serial console and one per PTY slave (8
 slots). Each owns termios (stored in the asm-generic encoding plus a
 per-profile residue), a winsize, an N_TTY line discipline, a session and
 foreground process group, and a hung-up flag. A PTY master is not a terminal of
 its own: termios and window operations on a master act on its slave.
+
+Landed (S4): `ok/sched/terminal.hpp` defines `Terminal` (termios, residue,
+window, `NTty<4096, 512>` ldisc, session, foreground, console lease epoch, an
+8-entry signal outbox and the hung-up flag), `TerminalRef` (0 = console, 1 +
+slot = PTY slave), `TerminalSide`, `TerminalSubject` (keyed by the open file
+description) and `TerminalJobFacts`. The scheduler owns the console terminal
+and queues terminal signals in its outbox; the runtime drains the outbox at
+the top of every step, after every terminal path and in the exit commit
+(before the orphaned-group signals). Lease claim, revoke and retirement reset
+the whole console terminal: compat termios, wiped ldisc, 24×80 window, no
+association.
 
 ## 2. Device nodes — planned (S6)
 
@@ -87,7 +104,7 @@ strict decimal only. An entry disappears when its master's last open closes.
 - Native `OK_O_NOCTTY` is `0x0100`; Linux `O_NOCTTY` is decoded per profile.
   musl maps ENOSPC from `posix_openpt` to EAGAIN.
 
-## 4. Controlling terminal and foreground group — planned (S4, S5; gates and TIOCNOTTY S8; `/dev/tty` S6)
+## 4. Controlling terminal and foreground group — landed (S4 console); planned (S5 PTY; gates and TIOCNOTTY S8; `/dev/tty` S6)
 
 - **Derivation.** A process's ctty is the terminal whose session equals its
   session ID, unless the process detached itself with TIOCNOTTY as a
@@ -110,7 +127,7 @@ strict decimal only. An entry disappears when its master's last open closes.
   group, and the association is cleared. From another member: only that
   process detaches. Not the caller's ctty, or a master: ENOTTY.
 
-## 5. ioctl requests — codecs landed (S1); planned (S4 console; S5 PTY; S8 gate)
+## 5. ioctl requests — codecs landed (S1); console landed (S4); planned (S5 PTY; S8 gate)
 
 Error order: (1) EBADF; (2) ENOTTY for a non-terminal fd, an unknown request,
 or a request invalid on this side; (3) association checks; (4) job-control
@@ -146,7 +163,7 @@ Every other request gives ENOTTY, including TCXONC, TCGETS2, TIOCPKT, TIOCSTI,
 TIOCGPTPEER and TIOCOUTQ. On a hung-up ptmx slave every ioctl gives EIO except
 TIOCSPGRP, which gives ENOTTY.
 
-## 6. termios — values landed (S1); planned (S4 console; S5 PTY)
+## 6. termios — values landed (S1); console landed (S4); planned (S5 PTY)
 
 Native `struct ok_termios` is `{u32 c_iflag, c_oflag, c_cflag, c_lflag; u8
 c_line; u8 c_cc[19];}`: 36 bytes, target endian, identical on all ten profiles.
@@ -196,7 +213,7 @@ behaviour (CR→LF, no echo, byte at a time) and stays the kernel default
 permanently: a getty sets cooked mode itself, and login clears ECHO for the
 password.
 
-## 7. N_TTY behaviour — model landed (S1); planned (S4 console; S5 PTY; S7 PTY VTIME)
+## 7. N_TTY behaviour — model landed (S1); console landed (S4); planned (S5 PTY; S7 PTY VTIME)
 
 - The read buffer is 4096 bytes, and canonical input follows Linux
   `n_tty_receive_buf_common`. Once 4095 bytes are buffered, every byte waits
@@ -227,7 +244,9 @@ password.
   turning it on with input buffered ends that input as one line. Only
   `TCSETSF`, TCIFLUSH and an ISIG character without NOFLSH discard input.
 - Console output is synchronous: `write` and `writev` return the full count
-  after OPOST.
+  after OPOST, up to 64 KiB per call (a longer write returns 65536 and the
+  caller writes the rest). Console reads copy out before they consume, so a
+  faulting buffer loses no input.
 - `OK_SYS_CONSOLE_FLUSH` also flushes the console line discipline's input.
 
 ## 8. PTY pair states — planned (S5 data; S6 `/dev/pts`; S8 signals)
@@ -392,12 +411,14 @@ ctty, has a foreground group, and the caller is not in it.
 | TIOCNOTTY by the leader | SIGHUP then SIGCONT to the foreground group | planned (S8) |
 | Console lease revoke or retire | SIGHUP then SIGCONT to the console session leader, then the console terminal is reset | planned (S8) |
 | A process exit orphans a group with stopped members | SIGHUP then SIGCONT to that group, after any terminal hangup signals | landed (S3) |
-| Window size change | SIGWINCH to the foreground group | planned (S4 console, S5 PTY) |
+| Window size change | SIGWINCH to the foreground group | landed (S4 console); planned (S5 PTY) |
 
 Terminal and orphan signals are kernel-originated (SI_KERNEL, code 128). They
 bypass permission checks and are translated per recipient. The kernel sender
 API (`send_kernel_process_signal`, `send_kernel_group_signal`, native numbers)
-is landed (S3); the terminal events that use it arrive in S4, S5 and S8.
+is landed (S3). On the console, VINTR, VQUIT and VSUSP under ISIG send SIGINT,
+SIGQUIT and SIGTSTP to the foreground group, and a TIOCSWINSZ that changes the
+size sends SIGWINCH (S4); the PTY and hangup events arrive in S5 and S8.
 
 ### 9.8 Kill-path errors — landed (S3)
 
@@ -413,7 +434,7 @@ is landed (S3); the terminal events that use it arrive in S4, S5 and S8.
   into the other one.
 - `kill(-1)` returns EOPNOTSUPP.
 
-## 10. Readiness — planned (S4 console; S5 native PTY; S7 Linux poll; S8 console POLLERR)
+## 10. Readiness — console landed (S4); planned (S5 native PTY; S7 Linux poll; S8 console POLLERR)
 
 Applies to poll and select in both personalities.
 
@@ -479,15 +500,16 @@ profile string and version above keeps its current value.
 | 4 | No ptrace stops, no `kill(-1)`, no core bit. `waitid` is RV32-only. | landed (S3) |
 | 5 | No devpts filesystem: no mount options, no `newinstance`, no `/dev/pts/ptmx`. `st_dev(/dev/pts/N) == st_dev(/dev)`. The gid policy is the opener's egid. | planned (S6) |
 | 6 | 8 PTYs, shared with raw pairs. | planned (S5, S6) |
-| 7 | No console vhangup. VTIME on the console is treated as 0. IXON output stop works on PTY slaves only. | planned (S4, S8) |
+| 7 | No console vhangup. VTIME on the console is treated as 0. IXON output stop works on PTY slaves only. | VTIME landed (S4); planned (S5, S8) |
 | 8 | VMIN reads are admitted atomically. | landed (S1) |
-| 9 | Echo overflow and console overrun drop bytes and are counted. Echo kept after a drop keeps the OPOST expansion (XTABS, tab-erase width) computed when it was generated. | landed (S1); planned (S4) |
+| 9 | Echo overflow and console overrun drop bytes and are counted. Echo kept after a drop keeps the OPOST expansion (XTABS, tab-erase width) computed when it was generated. | landed (S1, S4) |
 | 10 | A PTY master cannot be a controlling terminal. | planned (S5) |
 | 11 | Native `stat` has no rdev, and there is no `ttyname` (no `/proc`). | planned (S6) |
 | 12 | After a hangup and a later re-acquire by the leader, members forked earlier see the new ctty. | planned (S8) |
 | 13 | pid 1 gets EIO instead of a restart loop on background terminal access. | planned (S8) |
 | 14 | Non-canonical input fills all 4096 bytes of the read buffer (Linux stops at 4095), so raw pairs keep their 4096-byte queue. | landed (S1) |
 | 15 | Init never takes the `complete_signal` fatal shortcut. Linux 6.13 does when the named thread blocks a SIG_DFL fatal signal that another init thread does not; here it stays queued and is dropped when dequeued. | landed (S3) |
+| 16 | One console `write` or `writev` moves at most 64 KiB; a longer one returns a short count. | landed (S4) |
 
 ## Tests
 
@@ -566,5 +588,29 @@ for numbering and translation only. `test_native_child_wait_signal.py`
 (quarantined in the hosted suite, whose all-profile adapter section still
 fails at origin capture) also covers caught-signal interruption of group
 waits and RV32 `waitid` without WEXITED before that section.
+
+S4 adds two runners on the actual runtime (x86_64 hosted backends):
+
+- `python3 -B scripts/test_terminal_control.py --output <dir>` prints
+  `TERMINAL_CONTROL_PASS native_requests=13 linux_profiles=10 console=1
+  error_order=1 hosted=1 guest=0`: the shared dispatch's error order (EBADF,
+  ENOTTY, association, copy-in EFAULT, control errors, EOVERFLOW, copy-out
+  EFAULT) and exact copy sizes for the native wire on both endiannesses and all
+  ten Linux encodings, the native request table, and a Linux TCSETS on the
+  actual console read back by native TCGETS and, byte for byte, by Linux TCGETS
+  on every profile.
+- `python3 -B scripts/test_native_tty.py --output <dir>` prints
+  `NATIVE_TTY_RUNTIME_PASS console=1 compat_default=1 icanon=1 echo=1 isig=1
+  winch=1 flush=1 writev_8k=1 efault_keeps_input=1 hosted=1 guest=0`, observing
+  console output through a mock `ok_platform_console_write_char`: the compat
+  default (no echo, no ONLCR, CR read as LF), canonical input with erase echo
+  and VEOF, ISIG to the foreground group (NOFLSH, ISIG off, ^Z stop), SIGWINCH,
+  `OK_SYS_CONSOLE_FLUSH`/TCFLSH/TCSETSF, repeated 8 KiB writevs, and EFAULT on
+  read and readv keeping the input.
+
+`test_console_input.py` now requires `ntty_compat_default=1` instead of
+`noecho=1` (the 4096-byte ldisc replaced the lease's 256-byte ring), and
+`test_native_console_control.py` covers the termios, window, flush, FIONREAD
+and TCSBRK rows and TIOCSCTTY without EOPNOTSUPP.
 
 Each slice adds its runners here.
