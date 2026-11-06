@@ -2,8 +2,75 @@
 
 #include "ok/sched/scheduler.hpp"
 
+#include <string_view>
+
 namespace ok::tests
 {
+// A ptmx-style pair through the S6 bind calls: counted slave opens, canonical
+// echo into the master, and the master's hangup discarding slave input.
+// `fds[2..4]` receive the master and two slave descriptors for cleanup.
+inline Status check_ptmx_terminal_model(sched::SchedulerState &scheduler, sched::ProcessControlBlock &owner,
+                                        std::array<i32, 5> &fds)
+{
+    auto &resources = owner.resources();
+    const auto bind = [&](usize side, auto &&attach) -> Status {
+        auto made = scheduler.allocate_description({.readable = true, .writable = true, .flags = 2u});
+        if (!made) return made.status();
+        const auto id = made.value();
+        if (auto status = scheduler.retain_description(id); !status) return status;
+        i32 fd = 3;
+        while (resources.files.contains(fd)) ++fd;
+        auto status = attach(id);
+        if (status) status = scheduler.install_descriptor(resources, fd, id);
+        if (status) fds[side] = fd;
+        if (auto released = scheduler.release_description(id); status && !released) status = released;
+        return status;
+    };
+    const auto description = [&](usize side) { return resources.files.entry(fds[side])->description; };
+    sched::private_pty::Handle master{};
+    if (auto status = bind(2, [&](u16 id) -> Status {
+            auto bound = scheduler.bind_pty_multiplexer(id);
+            if (bound) master = bound.value();
+            return bound.status();
+        }); !status) return status;
+    const sched::private_pty::Handle slave{master.slot, master.generation, sched::private_pty::Side::slave};
+    const auto open_slave = [&](u16 id) { return scheduler.bind_pty_slave(id, slave); };
+    const auto before = scheduler.pty_audit();
+    if (bind(3, open_slave).code() != StatusCode::io_error || !before.dormant_slaves || !before.locked_pairs)
+        return Status::fault("PTY boot ptmx slave was not locked and dormant");
+    if (auto status = scheduler.set_pty_lock(description(2), false); !status) return status;
+    if (auto status = bind(3, open_slave); !status) return status;
+    if (auto status = bind(4, open_slave); !status) return status;
+    if (scheduler.pty_audit().slave_opens != before.slave_opens + 2 || !scheduler.terminal_audit())
+        return Status::fault("PTY boot ptmx slave opens are not counted per description");
+    const auto bytes = [](std::string_view text) {
+        return std::span<const std::byte>{reinterpret_cast<const std::byte *>(text.data()), text.size()};
+    };
+    std::array<std::byte, 32> output{};
+    const auto read = [&](usize side) -> std::string_view {
+        const auto result = scheduler.read_pty_description(description(side), output);
+        return result ? std::string_view{reinterpret_cast<const char *>(output.data()), result.value()}
+                      : std::string_view{"<error>"};
+    };
+    const auto written = scheduler.write_pty_description(description(2), bytes("ab\x7f" "c\r"));
+    if (!written || written.value() != 5 || read(2) != "ab\b \bc\r\n" || read(4) != "ac\n")
+        return Status::fault("PTY boot ptmx canonical echo differs");
+    if (auto status = scheduler.close_descriptor(resources, std::exchange(fds[3], -1)); !status) return status;
+    if (!scheduler.write_pty_description(description(2), bytes("lost\n")) || !scheduler.terminal_audit())
+        return Status::fault("PTY boot ptmx slave closed with another open left");
+    if (auto status = scheduler.close_descriptor(resources, std::exchange(fds[2], -1)); !status) return status;
+    const auto hung = scheduler.pty_description_readiness(description(4));
+    const auto eof = scheduler.read_pty_description(description(4), output);
+    const auto refused = scheduler.write_pty_description(description(4), bytes("x"));
+    if (!hung || !hung.value().hangup || !hung.value().writable || hung.value().buffered || !eof || eof.value() ||
+        refused.status().code() != StatusCode::io_error)
+        return Status::fault("PTY boot ptmx hangup did not discard slave input");
+    if (auto status = scheduler.close_descriptor(resources, std::exchange(fds[4], -1)); !status) return status;
+    if (scheduler.pty_audit().live_pairs != before.live_pairs - 1 || !scheduler.terminal_audit())
+        return Status::fault("PTY boot ptmx slot outlived its last open");
+    return {};
+}
+
 // Actual scheduler/OFD ownership model only. No trap, user copy or guest claim.
 inline Status check_native_pty_ownership_model(sched::SchedulerState &scheduler)
 {
@@ -17,7 +84,7 @@ inline Status check_native_pty_ownership_model(sched::SchedulerState &scheduler)
     {
         sched::SchedulerState &owner;
         sched::ProcessId pid;
-        std::array<i32, 2> descriptors{-1, -1};
+        std::array<i32, 5> descriptors{-1, -1, -1, -1, -1}; // Raw pair, then ptmx master and two slaves.
         u16 retained{sched::invalid_description};
         Status close(usize side)
         {
@@ -36,7 +103,8 @@ inline Status check_native_pty_ownership_model(sched::SchedulerState &scheduler)
         {
             Status first{};
             auto remember = [&](Status result) { if (first && !result) first = result; };
-            remember(close(0)); remember(close(1)); remember(release());
+            for (usize side = 0; side < descriptors.size(); ++side) remember(close(side));
+            remember(release());
             remember(owner.kill_process(pid));
             return first;
         }
@@ -70,7 +138,8 @@ inline Status check_native_pty_ownership_model(sched::SchedulerState &scheduler)
         auto prepared = scheduler.prepare_pty_pair(pid, 0x0800u | 0x080000u);
         if (!prepared) return prepared.status();
         if (auto valid = prepared.value().validate(); !valid) return valid;
-        cleanup.descriptors = prepared.value().descriptors();
+        const auto raw = prepared.value().descriptors();
+        cleanup.descriptors[0] = raw[0]; cleanup.descriptors[1] = raw[1];
         prepared.value().publish_checked();
         const auto *master_slot = owner->resources().files.entry(cleanup.descriptors[0]);
         const auto *slave_slot = owner->resources().files.entry(cleanup.descriptors[1]);
@@ -122,13 +191,14 @@ inline Status check_native_pty_ownership_model(sched::SchedulerState &scheduler)
         auto reused = scheduler.prepare_pty_pair(pid);
         if (!reused) return reused.status();
         if (auto valid = reused.value().validate(); !valid) return valid;
-        cleanup.descriptors = reused.value().descriptors(); reused.value().publish_checked();
+        const auto again = reused.value().descriptors(); reused.value().publish_checked();
+        cleanup.descriptors[0] = again[0]; cleanup.descriptors[1] = again[1];
         const auto *new_slot = owner->resources().files.entry(cleanup.descriptors[0]);
         const auto *new_ofd = new_slot ? scheduler.open_description(new_slot->description) : nullptr;
         if (!new_ofd || new_ofd->pty_endpoint.slot != original.slot ||
             new_ofd->pty_endpoint.generation <= original.generation)
             return Status::fault("PTY boot provider slot reused an old generation");
-        return {};
+        return check_ptmx_terminal_model(scheduler, *owner, cleanup.descriptors);
     }();
     // Cleanup is checked even when an earlier assertion fails; no blanket drain
     // can hide leaked references or disturb other boot-test resources.
