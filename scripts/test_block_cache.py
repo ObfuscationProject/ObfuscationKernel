@@ -14,7 +14,7 @@ def main():
         shutil.copytree(root / "include", source / "include")
         paths = ["tests/host/block_cache_failure_tests.cpp", "tests/kernel/roadmap/block_cache_failure.hpp",
                  "src/fs/storage.cpp", "src/smp/smp.cpp", "src/arch/arch.cpp", "src/arch/terminal_power.cpp", "src/arch/x86_64/ops.cpp",
-                 "src/arch/x86_64/cpu_local.hpp", "src/arch/ops_private.hpp"]
+                 "src/arch/x86_64/cpu_local.hpp", "src/arch/tlb_tags.hpp", "src/arch/ops_private.hpp"]
         for name in paths:
             destination = source / name
             destination.parent.mkdir(parents=True, exist_ok=True)
