@@ -445,6 +445,19 @@ void protections(Kernel &kernel)
     CHECK(kernel.scheduler().set_credentials(parent, credentials));
     expect(linux_kill(kernel, parent, child, 15) == -1 && linux_kill(kernel, parent, child, 18) == 0);
     expect(!job(kernel, child).stopped);
+    // The same exception for native kill and tkill (send_directed_signal).
+    const auto restop = [&] {
+        auto root = credentials; root.uid = root.euid = root.suid = 0;
+        CHECK(kernel.scheduler().set_credentials(parent, root));
+        expect(linux_kill(kernel, parent, child, 19) == 0 && job(kernel, child).stopped);
+        CHECK(kernel.scheduler().set_credentials(parent, credentials));
+    };
+    restop();
+    expect(native_kill(kernel, parent, child, OK_SIGCONT) == 0 && !job(kernel, child).stopped);
+    restop();
+    expect(linux_call(kernel, parent, lu::Operation::tkill, {child, 18}) == 0 && !job(kernel, child).stopped);
+    expect(linux_call(kernel, parent, lu::Operation::tkill, {child, 10}) == -1);
+    drain(parent);
     expect(native_kill(kernel, parent, child, OK_SIGHUP) == -1);
     expect(linux_kill(kernel, parent, child, 19) == -1);
     const auto stranger = create(kernel);

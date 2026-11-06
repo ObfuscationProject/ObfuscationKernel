@@ -550,10 +550,21 @@ unit, x86_64 hosted backends): Linux kill, tkill and group stop/continue and
 native kill for both personalities, the CONT/stop discards, KILL and held fatal
 defaults while stopped, a stopped thread never entered by `step()`, wait4 on
 selectors 0 and -pgid, SA_NOCLDSTOP and blocked SIGCHLD, native
-`rt_sigaction` error order and fork inheritance, init protection,
-same-session SIGCONT, the orphaned-group TSTP drop and exit-time SIGHUP then
-SIGCONT, owed kernel signals (drain order, CONT/SIG_IGN/epoch drops) and
+`rt_sigaction` error order and fork inheritance, init protection in
+`sig_ignored` order (blocked signals queued then dropped, waits not completed,
+thread-directed timers, SIGPIPE, a second unblocking thread), same-session
+SIGCONT for kill, native kill and tkill, the orphaned-group TSTP drop at
+generation and at dequeue, exit-time SIGHUP then SIGCONT for adopted
+children's groups and the exiting process's own group, caught SIGCONT and
+stops queued rather than refused, owed kernel signals (several drained in one
+pass, a partial retry keeping the rest, CONT/SIG_IGN/pid-reuse drops, kept by
+a same-personality exec, dropped by a personality change, which also resets
+SIGCHLD SIG_IGN), a timer retry that neither repeats its CONT nor survives the
+opposite stop, a fatal decision applied in the step that made it, and
 shutdown's terminate path with a stopped process. The ten profiles are covered
-for numbering and translation only.
+for numbering and translation only. `test_native_child_wait_signal.py`
+(quarantined in the hosted suite, whose all-profile adapter section still
+fails at origin capture) also covers caught-signal interruption of group
+waits and RV32 `waitid` without WEXITED before that section.
 
 Each slice adds its runners here.

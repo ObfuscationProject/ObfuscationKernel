@@ -51,7 +51,7 @@ def main():
   for arch in arches:
    run([xmake,'build','-P',source,'-j2','-v','directed-signals-'+arch],arch+'-build')
    binary=source/'bin'/('directed-signals-'+arch);output=run([binary],arch+'-run')
-   expected='DIRECTED_SIGNAL_MODEL_PASS profiles=10 permission_vectors=13 callback_deliveries=80 lifecycle=1 guest=0'
+   expected='DIRECTED_SIGNAL_MODEL_PASS profiles=10 permission_vectors=13 callback_deliveries=90 lifecycle=1 guest=0'
    if expected not in output:raise ValueError('missing exact runtime pressure success marker')
    record['rows'].append(dict(architecture=arch,status='passed',binary_sha256=sha(binary),output=output.strip()));save();print('PASS',arch,'hosted all-ten directed signal admission',flush=True)
   for name,digest in record['source_sha256'].items():
