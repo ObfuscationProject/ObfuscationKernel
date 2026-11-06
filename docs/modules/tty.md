@@ -304,8 +304,13 @@ handler runs under it after the continue.
   unblocking threads can take a signal now terminates it at the next step
   (Linux `complete_signal` fatal shortcut).
 - TSTP/TTIN/TTOU sent to an orphaned group are discarded. SIGSTOP never is.
-- Init (pid 1) ignores SIG_DFL terminating and stopping signals, KILL included.
-  Native kill of pid 1 stays EPERM.
+- Init (pid 1) follows Linux `SIGNAL_UNKILLABLE` in `sig_ignored` order: a
+  SIG_DFL terminating or stopping signal, KILL and STOP included, is ignored
+  at generation unless the named thread blocks it; a blocked one is queued,
+  never completes a wait, and is dropped when dequeued. The CONT/stop
+  discards still run first. This covers kill, tkill/tgkill, POSIX timers
+  (process- and thread-directed), SIGPIPE and kernel senders. Native kill of
+  pid 1 stays EPERM.
 - SIGCONT may be sent to any process in the sender's session, whatever the
   credentials.
 
@@ -388,7 +393,7 @@ is landed (S3); the terminal events that use it arrive in S4, S5 and S8.
 ### 9.8 Kill-path errors — landed (S3)
 
 - kill, tkill and tgkill accept every signal number. Init (pid 1) is
-  protected as in §9.3 for every sender, timers included.
+  protected as in §9.3 for every sender, timers and SIGPIPE included.
 - A caught signal sent by a user to a running Linux process whose unblocked
   threads are all in waits that cannot be interrupted returns EOPNOTSUPP and
   has no effect. SIGCONT and the stop signals are the exception: their
@@ -471,6 +476,7 @@ profile string and version above keeps its current value.
 | 12 | After a hangup and a later re-acquire by the leader, members forked earlier see the new ctty. | planned (S8) |
 | 13 | pid 1 gets EIO instead of a restart loop on background terminal access. | planned (S8) |
 | 14 | Non-canonical input fills all 4096 bytes of the read buffer (Linux stops at 4095), so raw pairs keep their 4096-byte queue. | landed (S1) |
+| 15 | Init never takes the `complete_signal` fatal shortcut. Linux 6.13 does when the named thread blocks a SIG_DFL fatal signal that another init thread does not; here it stays queued and is dropped when dequeued. | landed (S3) |
 
 ## Tests
 

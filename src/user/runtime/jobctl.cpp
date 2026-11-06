@@ -294,15 +294,12 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
     const auto action = *state->table.find(signal);
     const bool default_action = action.handler == sched::SignalAction::default_handler;
     const auto kind = job::default_action(numbering, signal);
-    // 2. Init (SIGNAL_UNKILLABLE) ignores terminating and stopping defaults, KILL included.
-    if (pid == sched::user_init_pid && default_action &&
-        (kind == job::DefaultAction::terminate || kind == job::DefaultAction::stop))
-        return JobSignalOutcome::ignored;
+    const bool init = pid == sched::user_init_pid;
     if (!request.replay)
     {
-        // 3. Any stop discards a pending SIGCONT, whatever its action.
+        // 2. Any stop discards a pending SIGCONT, whatever its action.
         if (job::stop_family(numbering, signal)) jobctl_discard(*state, recipient, numbering.cont);
-        // 4. SIGCONT discards pending stops and continues, even ignored or blocked.
+        // 3. SIGCONT discards pending stops and continues, even ignored or blocked.
         else if (signal == numbering.cont)
         {
             for (const auto stop : {numbering.stop, numbering.tstp, numbering.ttin, numbering.ttou})
@@ -311,9 +308,10 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
                 jobctl_notify_parent(kernel, recipient, sched::ChildExitStatus::continued(numbering.cont));
         }
     }
-    // 5. SIGKILL acts at the next step, stopped or not.
+    // 4. SIGKILL acts at the next step, stopped or not; init ignores it.
     if (signal == numbering.kill)
     {
+        if (init) return JobSignalOutcome::ignored;
         if (linux) state->group_kill = true;
         else state->deferred_fatal = static_cast<u8>(signal);
         return JobSignalOutcome::accepted;
@@ -322,12 +320,18 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
     if (!named && !request.directed)
         for (auto &thread : recipient.threads()) if (jobctl_live(thread)) { named = &thread; break; }
     if (request.directed && (!named || !jobctl_live(*named))) return JobSignalOutcome::departed;
-    // 6. Ignored, unless the named task blocks it (Linux prepare_signal).
+    const bool named_blocks = linux && named && jobctl_blocks(*named, signal);
+    // 5. Ignored, unless the named task blocks it (Linux sig_ignored). Init
+    // (SIGNAL_UNKILLABLE) ignores terminating and stopping defaults under the
+    // same rule; a blocked one is queued and dropped when dequeued.
     const bool ignored = jobctl_ignored(numbering, signal, action);
-    if (ignored && !(linux && named && jobctl_blocks(*named, signal))) return JobSignalOutcome::ignored;
-    // 7. A default stop applies now when deliverable; an orphaned group drops
-    // TSTP, TTIN and TTOU. Otherwise it stays pending for delivery or settle.
-    // A process already condemned by a fatal signal does not stop.
+    if (ignored && !named_blocks) return JobSignalOutcome::ignored;
+    if (init && default_action && !named_blocks &&
+        (kind == job::DefaultAction::terminate || kind == job::DefaultAction::stop))
+        return JobSignalOutcome::ignored;
+    // 6. A default stop applies now when deliverable; an orphaned group drops
+    // TSTP, TTIN and TTOU, and init never stops. Otherwise it stays pending
+    // for delivery or settle. A process already condemned does not stop.
     const bool stop = default_action && kind == job::DefaultAction::stop;
     if (stop)
     {
@@ -341,12 +345,13 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
                 if ((now = jobctl_takes_now(*state, thread, signal, false))) break;
         if (now)
         {
+            if (init) return JobSignalOutcome::ignored;
             private_jobctl_stop(kernel, recipient, signal);
             return JobSignalOutcome::accepted;
         }
         return jobctl_enqueue(kernel, *state, recipient, request.directed ? named : nullptr, request.info);
     }
-    // 8. Native processes never queue: a terminating default is decided now
+    // 7. Native processes never queue: a terminating default is decided now
     // and the first fatal signal wins (KILL above always wins). A stopped
     // native process applies it only after SIGCONT (private_process_signal_fatal).
     if (!linux)
@@ -354,11 +359,11 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
         if (!state->deferred_fatal) state->deferred_fatal = static_cast<u8>(signal);
         return JobSignalOutcome::accepted;
     }
-    // 9. Linux: queue for a thread that can take it. A stopped process takes
+    // 8. Linux: queue for a thread that can take it. A stopped process takes
     // every signal after SIGCONT, so it stays pending (Linux wants_signal).
     // A terminating default that no thread of a running process can take now
-    // is the complete_signal fatal shortcut. CONT and the stops already acted
-    // above, so they are queued rather than refused.
+    // is the complete_signal fatal shortcut (never for init). CONT and the
+    // stops already acted above, so they are queued rather than refused.
     bool unblocked = false, qualified = false;
     for (auto &thread : recipient.threads())
     {
@@ -370,13 +375,14 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
     }
     if (!ignored && unblocked && !qualified && !recipient.job_control().stopped)
     {
-        if (default_action && kind == job::DefaultAction::terminate)
+        if (!init && default_action && kind == job::DefaultAction::terminate)
         {
             if (!state->deferred_fatal) state->deferred_fatal = static_cast<u8>(signal);
             return JobSignalOutcome::accepted;
         }
         const bool acted = !request.replay && (signal == numbering.cont || job::stop_family(numbering, signal));
-        if (!acted) return request.kernel ? JobSignalOutcome::retry : JobSignalOutcome::refused;
+        if (!acted && !(init && default_action))
+            return request.kernel ? JobSignalOutcome::retry : JobSignalOutcome::refused;
     }
     return jobctl_enqueue(kernel, *state, recipient, request.directed ? named : nullptr, request.info);
 }

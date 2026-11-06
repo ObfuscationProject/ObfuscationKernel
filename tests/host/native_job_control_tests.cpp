@@ -10,6 +10,7 @@ namespace
 using N = syscall::Number;
 using Codec = native::SignalActionCodec<lu::Profile::x86_64>;
 constexpr uptr status_at = hw::user_begin + 384, act_at = hw::user_begin + 448, old_at = hw::user_begin + 480;
+constexpr uptr event_at = hw::user_begin + 576, spec_at = hw::user_begin + 640, id_at = hw::user_begin + 672;
 constexpr u64 marker = 0x51ab1e;
 usize native_calls{}, linux_calls{}, profiles{};
 
@@ -61,6 +62,23 @@ u32 status_word()
 void put64(uptr address, u64 value)
 {
     for (usize i = 0; i < 8; ++i) mock::memory[address - hw::user_begin + i] = static_cast<std::byte>(value >> (8 * i));
+}
+// A one-shot POSIX timer of `pid` (x86_64 sigevent): `signal`, process-directed
+// or to `tid`, armed TIMER_ABSTIME at 1 ns so the next service expires it.
+u32 arm_timer(Kernel &kernel, u64 pid, u32 signal, u32 tid = 0)
+{
+    for (usize i = 0; i < 64; ++i) mock::memory[event_at - hw::user_begin + i] = std::byte{};
+    put64(event_at, 0x77); put64(event_at + 8, signal | (u64{tid ? 4U : 0U} << 32)); put64(event_at + 16, tid);
+    expect(linux_call(kernel, pid, lu::Operation::timer_create, {1, event_at, id_at}) == 0);
+    const auto id = static_cast<u32>(mock::memory[id_at - hw::user_begin]);
+    put64(spec_at, 0); put64(spec_at + 8, 0); put64(spec_at + 16, 0); put64(spec_at + 24, 1);
+    expect(linux_call(kernel, pid, lu::Operation::timer_settime, {id, 1, spec_at, 0}) == 0);
+    return id;
+}
+void timer_service(Kernel &kernel)
+{
+    static_cast<void>(native::private_timer_service(kernel, 1000000));
+    expect(native::runtime_status().ok());
 }
 u64 get64(uptr address)
 {
@@ -331,8 +349,10 @@ void native_dispositions(Kernel &kernel)
     release(kernel, other); release(kernel, parent);
 }
 
-// Init protection, same-session SIGCONT and the orphaned-group TSTP drop.
-void protections(Kernel &kernel, u64 init)
+// Init (SIGNAL_UNKILLABLE) in Linux sig_ignored order: unblocked SIG_DFL
+// terminating and stopping signals are dropped at generation from every
+// sender, blocked ones are queued and dropped when dequeued.
+void init_protection(Kernel &kernel, u64 init)
 {
     const auto parent = create(kernel);
     expect(linux_kill(kernel, parent, init, 15) == 0 && linux_kill(kernel, parent, init, 19) == 0);
@@ -341,6 +361,79 @@ void protections(Kernel &kernel, u64 init)
     expect(!job(kernel, init).stopped && !state->group_kill && !state->deferred_fatal);
     expect(!state->shared.pending_mask().contains(15) && !state->shared.pending_mask().contains(20));
     expect(native_kill(kernel, parent, init, OK_SIGCONT) == -1);
+    auto &process = *kernel.scheduler().find(init);
+    auto &thread = *kernel.scheduler().find_thread(init, init);
+    auto *queue = native::private_signal_queue(thread);
+    // Blocked: queued (rt_sigpending sees it), then dropped by delivery.
+    thread.native_signal_mask.set(15);
+    expect(linux_kill(kernel, parent, init, 15) == 0 && state->shared.pending_mask().contains(15));
+    thread.native_signal_mask = {};
+    expect(native::private_signal_deliver(kernel, process, thread) && !state->shared.pending_mask().contains(15));
+    // Queued while caught, delivered after a reset to SIG_DFL: dropped.
+    handle(kernel, init, 10);
+    expect(linux_kill(kernel, parent, init, 10) == 0 && state->shared.pending_mask().contains(10));
+    handle(kernel, init, 10, 0);
+    expect(native::private_signal_deliver(kernel, process, thread) && !state->shared.pending_mask().contains(10));
+    // SIGSTOP is ignored but still discards a pending SIGCONT first.
+    handle(kernel, init, 18); thread.native_signal_mask.set(18);
+    expect(linux_kill(kernel, parent, init, 18) == 0 && state->shared.pending_mask().contains(18));
+    expect(linux_kill(kernel, parent, init, 19) == 0 && !state->shared.pending_mask().contains(18));
+    thread.native_signal_mask = {}; handle(kernel, init, 18, 0);
+    // A wait is never completed by a signal init drops (Linux restarts the
+    // call); a caught signal still ends it, and once unblocked the other is
+    // dropped by delivery.
+    thread.native_signal_mask.set(15);
+    expect(linux_kill(kernel, parent, init, 15) == 0 && state->shared.pending_mask().contains(15));
+    put64(act_at, 0);
+    activate(kernel, init, init);
+    const auto saved = thread.native_frame;
+    thread.native_frame.registers[14] = *lu::Codec<lu::Profile::x86_64>::syscall_number(lu::Operation::rt_sigsuspend);
+    thread.native_frame.registers[9] = act_at; thread.native_frame.registers[10] = 8;
+    bool complete = true; i64 result = -999; thread.syscall_pending = true;
+    expect(native::private_signal_call(kernel, process, thread, complete, result) && !complete && result == 0);
+    expect(!native::private_signal_wait_ready(kernel, process, thread, 0));
+    handle(kernel, init, 10);
+    expect(linux_kill(kernel, parent, init, 10) == 0 && native::private_signal_wait_ready(kernel, process, thread, 0));
+    static_cast<void>(native::private_signal_wait_complete(kernel, process, thread, 0));
+    expect(native::private_signal_deliver(kernel, process, thread) && thread.native_frame.pc == handler);
+    thread.native_frame = saved; thread.native_signal_mask = {}; handle(kernel, init, 10, 0);
+    expect(state->shared.pending_mask().contains(15) && native::private_signal_deliver(kernel, process, thread));
+    expect(!state->shared.pending_mask().contains(15) && process.state() != sched::ProcessState::zombie);
+    // Thread-directed timers: SIGTERM and SIGKILL at SIG_DFL are dropped.
+    for (u32 signal : {15U, 9U})
+    {
+        const auto id = arm_timer(kernel, init, signal, static_cast<u32>(init));
+        timer_service(kernel);
+        expect(!queue->pending_mask().contains(signal) && process.state() != sched::ProcessState::zombie);
+        expect(linux_call(kernel, init, lu::Operation::timer_delete, {id}) == 0);
+    }
+    // SIGPIPE at SIG_DFL: init only sees EPIPE.
+    activate(kernel, init, init); thread.syscall_pending = true;
+    native::queue_pipe_sigpipe(kernel, process, init);
+    thread.syscall_pending = false;
+    expect(native::runtime_status().ok() && !queue->pending_mask().contains(13));
+    expect(native::private_signal_deliver(kernel, process, thread) && process.state() != sched::ProcessState::zombie);
+    // A TERM the leader blocks while another thread, parked, does not: queued,
+    // never the complete_signal fatal shortcut, and dropped once dequeued.
+    const auto helper = peer(kernel, init);
+    activate(kernel, init, helper);
+    auto wait = kernel.scheduler().register_current_wait(sched::ThreadWaitReason::console_read, 0); CHECK(wait);
+    auto &parked = *kernel.scheduler().find_thread(init, helper);
+    parked.syscall_pending = true;
+    thread.native_signal_mask.set(15);
+    expect(linux_kill(kernel, parent, init, 15) == 0 && !state->deferred_fatal && state->shared.pending_mask().contains(15));
+    thread.native_signal_mask = {};
+    expect(native::private_signal_deliver(kernel, process, thread) && !state->shared.pending_mask().contains(15));
+    CHECK(kernel.scheduler().complete_wait(wait.value(), sched::WaitCompletion::ready));
+    parked.syscall_pending = false;
+    if (parked.state == sched::ProcessState::blocked) parked.state = sched::ProcessState::runnable;
+    release(kernel, parent);
+}
+
+// Same-session SIGCONT and the orphaned-group TSTP drop.
+void protections(Kernel &kernel)
+{
+    const auto parent = create(kernel);
     // SIGCONT crosses credentials inside the session only.
     const auto child = fork(kernel, parent);
     grouped(kernel, parent, child);
@@ -508,7 +601,8 @@ int main()
     stopped_fatal(kernel);
     notifications(kernel);
     native_dispositions(kernel);
-    protections(kernel, init);
+    init_protection(kernel, init);
+    protections(kernel);
     orphan_pass(kernel, true);
     orphan_pass(kernel, false);
     owed(kernel);

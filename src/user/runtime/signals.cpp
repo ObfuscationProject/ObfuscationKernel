@@ -634,6 +634,27 @@ PrivateSignalActions *private_signal_process(Kernel &kernel, sched::ProcessId pi
 }
 namespace
 {
+// Linux SIGNAL_UNKILLABLE: init drops a SIG_DFL signal whose default would
+// terminate it (KILL included); stops are dropped by private_jobctl_discard_stop.
+bool private_init_drops(const sched::ProcessControlBlock &process, u32 signal, const sched::SignalAction &action)
+{
+    using Codec = SignalActionCodec<private_signal_profile>;
+    return process.pid() == sched::user_init_pid && action.handler == sched::SignalAction::default_handler &&
+           !Codec::default_ignored(signal) && !Codec::default_stop(signal);
+}
+// The mask a wait selector applies: init's droppable signals interrupt nothing
+// (Linux restarts the call after get_signal drops them); delivery drops them.
+sched::SignalMask private_signal_wake_mask(const sched::ProcessControlBlock &process,
+                                           const sched::ThreadControlBlock &thread,
+                                           const sched::SignalActionTable &actions)
+{
+    auto blocked = thread.native_signal_mask;
+    if (process.pid() == sched::user_init_pid)
+        for (u32 signal = 1; signal <= SignalActionCodec<private_signal_profile>::max_signal; ++signal)
+            if (const auto *action = actions.find(signal); action && private_init_drops(process, signal, *action))
+                blocked.set(signal);
+    return blocked;
+}
 sched::SignalActionTable *private_signal_table(Kernel &kernel, sched::ProcessId pid)
 {
     auto *entry = private_signal_process(kernel, pid);
@@ -878,6 +899,18 @@ bool private_signal_deliver(Kernel &kernel, sched::ProcessControlBlock &process,
     }
     for (;;)
     {
+        if (process.pid() == sched::user_init_pid)
+        {
+            // Linux get_signal drops init's SIG_DFL fatal signals at dequeue.
+            PrivateSignalView::Delivery next;
+            const auto *action = queue.peek(thread.native_signal_mask, next) ? actions->find(next.info.signal) : nullptr;
+            if (action && private_init_drops(process, next.info.signal, *action))
+            {
+                if (!queue.consume(next))
+                { runtime_failure = Status::fault("private init signal drop lost owner"); started = false; return false; }
+                continue;
+            }
+        }
         u32 signal{};
         u64 restorer{};
         if (!private_signal_restorer(process, restorer))
@@ -1008,7 +1041,7 @@ bool private_sleep_signal_ready(Kernel &kernel, const sched::ProcessControlBlock
     const auto queue = private_signal_pending(kernel, process, thread);
     const auto *actions = private_signal_table(kernel, process.pid());
     return queue && actions && sleep_interrupting_signal<private_signal_profile>(queue, *actions,
-        thread.native_signal_mask, [](const sched::SignalAction &action) { return PrivateSignalDelivery::supported(action); });
+        private_signal_wake_mask(process, thread, *actions), [](const sched::SignalAction &action) { return PrivateSignalDelivery::supported(action); });
 }
 bool private_sleep_signal_complete(Kernel &kernel, sched::ProcessControlBlock &process,
                                    sched::ThreadControlBlock &thread)
@@ -1081,7 +1114,7 @@ bool private_pipe_signal_select(Kernel &kernel, const sched::ProcessControlBlock
     auto queue = private_signal_pending(kernel, process, thread);
     const auto *actions = private_signal_table(kernel, process.pid());
     if (!queue || !actions) return false;
-    auto blocked = thread.native_signal_mask;
+    auto blocked = private_signal_wake_mask(process, thread, *actions);
     while (queue.peek(blocked, out.pending))
     {
         const auto *action = actions->find(out.pending.info.signal);
@@ -1214,7 +1247,7 @@ bool private_pipe_write_signal_select(Kernel &kernel, const sched::ProcessContro
     auto queue = private_signal_pending(kernel, process, thread);
     const auto *actions = private_signal_table(kernel, process.pid());
     if (!queue || !actions) return false;
-    auto blocked = thread.native_signal_mask;
+    auto blocked = private_signal_wake_mask(process, thread, *actions);
     while (queue.peek(blocked, out.pending))
     {
         const auto *action = actions->find(out.pending.info.signal);
@@ -1348,7 +1381,7 @@ bool private_child_signal_select(Kernel &kernel, const sched::ProcessControlBloc
     auto queue = private_signal_pending(kernel, process, thread);
     const auto *actions = private_signal_table(kernel, process.pid());
     if (!queue || !actions) return false;
-    auto blocked = thread.native_signal_mask;
+    auto blocked = private_signal_wake_mask(process, thread, *actions);
     while (queue.peek(blocked, out.pending))
     {
         const auto *action = actions->find(out.pending.info.signal);
@@ -1482,7 +1515,7 @@ bool private_futex_signal_select(Kernel &kernel, const sched::ProcessControlBloc
     auto queue = private_signal_pending(kernel, process, thread);
     const auto *actions = private_signal_table(kernel, process.pid());
     if (!queue || !actions) return false;
-    auto blocked = thread.native_signal_mask;
+    auto blocked = private_signal_wake_mask(process, thread, *actions);
     while (queue.peek(blocked, out.pending))
     {
         const auto *action = actions->find(out.pending.info.signal);
@@ -1620,7 +1653,7 @@ bool private_poll_signal_select(Kernel &kernel, const sched::ProcessControlBlock
     auto queue = private_signal_pending(kernel, process, thread);
     const auto *actions = private_signal_table(kernel, process.pid());
     if (!queue || !actions) return false;
-    auto blocked = thread.native_signal_mask;
+    auto blocked = private_signal_wake_mask(process, thread, *actions);
     while (queue.peek(blocked, out.pending))
     {
         const auto *action = actions->find(out.pending.info.signal);
@@ -1758,7 +1791,7 @@ PrivateSignalWaitSelection private_signal_wait_select(Kernel &kernel, const sche
     }
     const auto *actions = private_signal_table(kernel, process.pid());
     if (!actions) return {};
-    auto blocked = thread.native_signal_mask;
+    auto blocked = private_signal_wake_mask(process, thread, *actions);
     while (pending.peek(blocked, selected.pending))
     {
         const auto *action = actions->find(selected.pending.info.signal);
@@ -2114,8 +2147,8 @@ PrivateTimerSend private_timer_signal(Kernel &kernel, sched::ProcessControlBlock
         if (target->state == sched::ProcessState::blocked && !private_signal_admit_blocked(kernel, process, *target))
             return PrivateTimerSend::retry;
         const auto *real = signal_waits.real_blocked(*target);
-        if (ignored && !target->native_signal_mask.contains(signal) && !(real && real->contains(signal)))
-            return PrivateTimerSend::ignored;
+        const bool blocks = target->native_signal_mask.contains(signal) || (real && real->contains(signal));
+        if ((ignored || private_init_drops(process, signal, *action)) && !blocks) return PrivateTimerSend::ignored;
         auto *queue = private_signal_queue(*target);
         if (!queue) return PrivateTimerSend::retry;
         return queue->enqueue_timer(signal, info.timer, info.overrun, info.value) == PrivateSignalQueue::Enqueue::queued
@@ -2430,6 +2463,10 @@ void queue_pipe_sigpipe(Kernel &kernel, sched::ProcessControlBlock &process, sch
     }
     // Linux pipe_write uses send_sig(SIGPIPE, current, 0): SI_USER, group PID,
     // real UID. Existing standard pending work retains its original payload.
+    // Init ignores an unblocked SIG_DFL SIGPIPE (sig_task_ignored) and gets EPIPE.
+    if (const auto *actions = private_signal_table(kernel, process.pid());
+        actions && private_init_drops(process, 13, *actions->find(13)) && !thread->native_signal_mask.contains(13))
+        return;
     const auto result = user::enqueue_directed_signal<private_signal_profile>(process, *thread,
         {13, 0, static_cast<u32>(process.pid()), process.credentials().uid},
         [&](sched::ProcessId pid) { return private_signal_table(kernel, pid); },
@@ -2521,7 +2558,7 @@ bool private_linux_udp_signal_select(Kernel &kernel, const sched::ProcessControl
     auto queue = private_signal_pending(kernel, process, thread);
     const auto *actions = private_signal_table(kernel, process.pid());
     if (!queue || !actions) return false;
-    auto blocked = thread.native_signal_mask;
+    auto blocked = private_signal_wake_mask(process, thread, *actions);
     while (queue.peek(blocked, out.pending))
     {
         const auto *action = actions->find(out.pending.info.signal);
