@@ -29,6 +29,8 @@
 #define OK_TIOCNOTTY 0x5422U
 #define OK_TIOCGPTN 0x80045430U
 #define OK_TIOCSPTLCK 0x40045431U
+#define OK_PTS_MAJOR 136U
+#define OK_PTS_CAPACITY 8U
 #define OK_NATIVE_PERSISTENT_SYNC_VERSION 1
 #define OK_NATIVE_POWER_VERSION 1
 #define OK_NATIVE_METADATA_VERSION 1
@@ -229,7 +231,9 @@
 #define OK_EPERM 1
 #define OK_ENOENT 2
 #define OK_ESRCH 3
+#define OK_EINTR 4
 #define OK_EIO 5
+#define OK_ENXIO 6
 #define OK_EBADF 9
 #define OK_EAGAIN 11
 #define OK_ENOMEM 12
@@ -238,6 +242,7 @@
 #define OK_EEXIST 17
 #define OK_EINVAL 22
 #define OK_ENOTTY 25
+#define OK_ENOSPC 28
 #define OK_EPIPE 32
 #define OK_ENOSYS 38
 #define OK_ELOOP 40
@@ -319,6 +324,7 @@ typedef uint32_t ok_socklen_t; // Native accept address capacity and full output
 #define OK_O_APPEND 0x0008U
 #define OK_O_CREAT 0x0040U
 #define OK_O_EXCL 0x0080U
+#define OK_O_NOCTTY 0x0100U
 #define OK_O_TRUNC 0x0200U
 #define OK_O_NONBLOCK 0x0800U
 #define OK_O_CLOEXEC 0x080000U
