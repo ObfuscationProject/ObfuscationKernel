@@ -468,7 +468,12 @@ class RawPtyTable final
             if (!received.consumed) return Status::would_block("PTY slave input is full");
             for (std::size_t index = 0; index < received.signal_count; ++index)
                 static_cast<void>(terminal.owe(terminal.foreground, received.signals[index], true));
-            wakes = wake_slave_read;
+            // Slave readers wake on every stored byte in non-canonical mode (Linux
+            // __receive_buf; their plan may need fewer than VMIN bytes) and on a
+            // completed line or EOF in canonical mode.
+            if (received.became_readable ||
+                (!(terminal.termios.lflag & tty::lflag::icanon) && terminal.ldisc.buffered()))
+                wakes |= wake_slave_read;
             if (received.flush_peer_output && pair->master_input.size)
             {
                 pair->master_input.clear();

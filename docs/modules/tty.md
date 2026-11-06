@@ -550,10 +550,10 @@ profile string and version above keeps its current value.
 | 12 | After a hangup and a later re-acquire by the leader, members forked earlier see the new ctty. | planned (S8) |
 | 13 | pid 1 gets EIO instead of a restart loop on background terminal access. | planned (S8) |
 | 14 | Non-canonical input fills all 4096 bytes of the read buffer (Linux stops at 4095), so raw pairs keep their 4096-byte queue. | landed (S1) |
-| 15 | A raw-pair (`OK_SYS_PTY_PAIR`) master whose slave has no session answers TIOCGPGRP with ENOTTY instead of 0, keeping the v1 raw contract. | landed (S5) |
 | 15 | Init never takes the `complete_signal` fatal shortcut. Linux 6.13 does when the named thread blocks a SIG_DFL fatal signal that another init thread does not; here it stays queued and is dropped when dequeued. | landed (S3) |
 | 16 | One console `write` or `writev` moves at most 64 KiB; a longer one returns a short count. | landed (S4) |
 | 17 | A console `read` or `readv` whose user buffer faults returns EFAULT and consumes no input: every vector range is checked first and the input is consumed only after every copy succeeded. Linux `iterate_tty_read` lets `n_tty_read` consume into a kernel buffer before `copy_to_iter`, so it returns the bytes copied before the fault, or EFAULT when none were, and the rest of that input is lost. | landed (S4) |
+| 18 | A raw-pair (`OK_SYS_PTY_PAIR`) master whose slave has no session answers TIOCGPGRP with ENOTTY instead of 0, keeping the v1 raw contract. | landed (S5) |
 
 ## Tests
 
@@ -673,7 +673,11 @@ S5 extends existing runners (hosted model and runtime evidence only):
   descriptions, counts several slave descriptions across dup, fork and
   SCM_RIGHTS, and frees a slot only at zero opens.
 - `test_native_tty.py` adds `pty=1 canonical_echo=1 ptmx_hangup_discard=1
-  raw_drain=1 ptn_lock=1` before `hosted=1 guest=0`.
+  raw_drain=1 ptn_lock=1` before `hosted=1 guest=0`; `vmin_wake=1` also covers
+  PTY slave readers.
+- PTY slave readers wake as console readers do: on every stored byte in
+  non-canonical mode, on a completed line or EOF in canonical mode, and after
+  every termios change (Linux `__receive_buf`, `n_tty_set_termios`).
 - `test_terminal_control.py` maps `OK_TIOCGPTN` and `OK_TIOCSPTLCK` natively
   (`native_requests=15`).
 - The `native-pty/scheduler-OFD-ownership-model` debug point also runs a

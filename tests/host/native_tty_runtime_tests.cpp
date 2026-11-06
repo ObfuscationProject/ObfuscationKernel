@@ -445,6 +445,70 @@ bool pty_terminal(Kernel &kernel, const Session &s, PtySession &p, std::array<i3
     return true;
 }
 
+// PTY slave readers follow the console wake rule: every stored byte in
+// non-canonical mode, a completed line in canonical mode, every termios change.
+bool pty_wakes(Kernel &kernel, const PtySession &p, const std::array<i32, 2> &fds)
+{
+    auto &scheduler = kernel.scheduler();
+    const auto *reader = scheduler.find_thread(p.shell, p.shell);
+    const auto master = scheduler.find(p.shell)->resources().files.entry(fds[0])->description;
+    const auto blocked = [&] {
+        return reader->state == sched::ProcessState::blocked && reader->wait_reason == sched::ThreadWaitReason::pty_read;
+    };
+    const auto block = [&] {
+        activate(kernel, p.shell, p.shell);
+        scheduler.find_thread(p.shell, p.shell)->syscall_pending = true;
+        bool complete = true;
+        expect(native::dispatch(kernel, p.shell, {static_cast<uptr>(N::read), {static_cast<uptr>(fds[1]), read_at, 10}},
+                                complete) == -11 && !complete && blocked());
+    };
+    // A woken reader re-plans: -11 when still unmet, else the bytes.
+    const auto resume = [&] {
+        activate(kernel, p.shell, p.shell);
+        bool complete = true;
+        const auto result = native::dispatch(kernel, p.shell, {static_cast<uptr>(N::read), {~uptr{0}, 0, 0}}, complete);
+        if (complete) scheduler.find_thread(p.shell, p.shell)->syscall_pending = false;
+        return result;
+    };
+    const auto master_input = [&](std::string_view text) {
+        expect(scheduler.write_pty_description(master, {reinterpret_cast<const std::byte *>(text.data()), text.size()})
+                   .value() == text.size());
+    };
+    const auto set = [&](const tty::Termios &termios) {
+        std::array<u8, 36> bytes{};
+        expect(Wire::encode(termios, {}, bytes).ok());
+        std::memcpy(user(argument_at), bytes.data(), bytes.size());
+        expect(fd_ioctl(kernel, p.job, fds[0], OK_TCSETS, argument_at) == 0); // Through the master, by another process.
+    };
+    auto raw = tty::linux_pty_termios();
+    raw.lflag &= ~(tty::lflag::icanon | tty::lflag::echo);
+    raw[tty::Cc::min] = 3;
+    set(raw);
+    block();
+    master_input("a"); expect(!blocked() && resume() == -11 && blocked());
+    master_input("b"); expect(!blocked() && resume() == -11 && blocked());
+    master_input("c"); expect(!blocked() && resume() == 3);
+    expect(std::string_view{reinterpret_cast<const char *>(user(read_at)), 3} == "abc");
+    // Canonical: a partial line leaves the reader asleep; the newline wakes it.
+    auto cooked = tty::linux_pty_termios();
+    cooked.lflag &= ~tty::lflag::echo;
+    set(cooked);
+    block();
+    master_input("xy"); expect(blocked());
+    master_input("\n"); expect(!blocked() && resume() == 3);
+    // Lowering VMIN to the buffered count wakes the reader.
+    raw[tty::Cc::min] = 5;
+    set(raw);
+    master_input("pq");
+    block();
+    raw[tty::Cc::min] = 2;
+    set(raw);
+    expect(!blocked() && resume() == 2);
+    expect(std::string_view{reinterpret_cast<const char *>(user(read_at)), 2} == "pq");
+    set(tty::linux_pty_termios());
+    return true;
+}
+
 bool canonical_echo(Kernel &kernel, const PtySession &p, const std::array<i32, 2> &fds)
 {
     expect(pty_write(kernel, p.shell, fds[0], "hel\x7flo\r") == 7);
@@ -597,6 +661,7 @@ int main()
     std::array<i32, 2> fds{};
     i32 master = -1, slave = -1;
     const bool terminal = pty_terminal(kernel, session, pty, fds);
+    const bool woken = pty_wakes(kernel, pty, fds);
     const bool echoed = canonical_echo(kernel, pty, fds);
     const bool drained = raw_drain(kernel, pty);
     const bool locked = ptn_lock(kernel, pty, master, slave);
@@ -606,6 +671,6 @@ int main()
     std::printf("NATIVE_TTY_RUNTIME_PASS console=1 compat_default=%d icanon=%d echo=%d isig=%d winch=%d flush=%d "
                 "writev_8k=%d efault_keeps_input=%d vmin_wake=%d pty=%d canonical_echo=%d ptmx_hangup_discard=%d "
                 "raw_drain=%d ptn_lock=%d hosted=1 guest=0\n",
-                compat, canonical, canonical, signals, window, flushed, large, kept, vmin, terminal, echoed, discarded,
+                compat, canonical, canonical, signals, window, flushed, large, kept, vmin && woken, terminal, echoed, discarded,
                 drained, locked);
 }
