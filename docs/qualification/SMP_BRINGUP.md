@@ -132,28 +132,51 @@ consumes this tree's debug SDK. `scripts/qemu_distro.py` takes `--smp N`.
 - Exit gate: `scripts/test_smp_stress.py` boots the scratch ext4 root and runs
   the static musl probe `tests/musl/smp_stress.c` (6 workers x 40 rounds: files
   in private and one shared directory with fsync/rename/readback, AF_UNIX
-  socketpair ping-pong with a forked peer, fork plus exec or exit). It requires
-  `OK_SMP scope=hardware cpus=N online=N`, `SMP_STRESS_PASS` with the exact
-  counts, and user entries during the probe on every online CPU. Three runs
-  per configuration, all pass:
+  socketpair ping-pong with a forked peer, fork plus exec or exit, and a
+  thread that keeps writing its own pages while the worker maps,
+  write-protects and unmaps others, so the address space changes under a
+  thread running on another CPU). It requires `OK_SMP scope=hardware cpus=N
+  online=N`, `SMP_STRESS_PASS` with the exact counts, and user entries during
+  the probe on every online CPU. Three runs per configuration, all pass
+  (kernel at c0f82db):
 
-| Profile | vCPUs | Runs | Guest seconds | User entries per CPU (first run) |
-| --- | --- | --- | --- | --- |
-| x86_64 | 2 | 3/3 | 49.4, 54.4, 49.9 | 17494, 17222 |
-| x86_64 | 4 | 3/3 | 72.6, 92.8, 92.4 | 10434, 12272, 11328, 12751 |
-| aarch64 | 2 | 3/3 | 50.6, 42.5, 34.0 | 15077, 14541 |
-| aarch64 | 4 | 3/3 | 39.8, 37.3, 37.0 | 7304, 7074, 7857, 6799 |
-| rv64 | 2 | 3/3 | 30.5, 31.7, 30.2 | 15644, 13950 |
-| rv64 | 4 | 3/3 | 33.1, 32.2, 30.2 | 7466, 7272, 7427, 7702 |
+| Profile | vCPUs | Runs | Guest seconds | User entries per CPU (first run) | Shootdowns waited per CPU (first run) |
+| --- | --- | --- | --- | --- | --- |
+| x86_64 | 2 | 3/3 | 35.6, 36.3, 36.7 | 22880, 23535 | 481, 832 |
+| x86_64 | 4 | 3/3 | 33.7, 33.8, 34.0 | 12222, 13885, 12441, 13969 | 224, 426, 415, 561 |
+| aarch64 | 2 | 3/3 | 50.9, 47.4, 45.8 | 23273, 19103 | 726, 413 |
+| aarch64 | 4 | 3/3 | 41.5, 41.4, 40.3 | 10786, 9593, 10600, 10653 | 292, 447, 529, 542 |
+| rv64 | 2 | 3/3 | 39.0, 43.3, 40.7 | 20858, 24109 | 164, 843 |
+| rv64 | 4 | 3/3 | 34.2, 33.6, 34.1 | 10123, 10385, 10803, 11592 | 222, 458, 603, 619 |
 
   Every run reports `files=480 messages=960 forks=480`. The same probe passes on
   one vCPU (x86_64, 42.6 s).
-- Two defects found by the gate and fixed before these runs: a driver waiting
+- Defects found by the gate and fixed before these runs: a driver waiting
   for its device inside a syscall on a secondary halted holding the kernel
   lock for an interrupt only CPU 0 takes (`wait_for_interrupt()` now returns
   false off CPU 0, so the driver polls there), and the model `Kernel::tick()`
   replaced the current thread of a secondary in its user window (it now
   schedules only the calling CPU).
+
+## Pre-merge review
+
+An adversarial review (one reviewer each for x86_64, aarch64, rv64 with the
+generic layer, and the runtime; one skeptic per finding) confirmed four
+findings, fixed except the exec one listed under Limits:
+
+- A sibling's `mmap`, `munmap` or `mprotect` replaces the address space while
+  another thread of the process runs on another CPU; the capture failed that
+  entry and killed the process. It now takes the live space after the entry.
+  The stress probe's address-space phase covers it.
+- The shared monotonic clock jumped centuries forward when the CPU holding the
+  kernel lock read a TSC behind the previous reader's, and later invalidated
+  itself; a backward 64-bit step now stalls it.
+- Shutdown reservation and native termination refused while any other CPU
+  ran user code; they now check the calling CPU's own entry.
+- Exec evicts siblings before its fallible steps (Limits).
+
+A secondary the boot CPU gave up on (late or with a mismatched id) now stays
+out of the online state; the review rated that hardening.
 
 ## Limits
 
@@ -164,8 +187,12 @@ consumes this tree's debug SDK. `scripts/qemu_distro.py` takes `--smp N`.
 - No CPU hotplug, no ASIDs or PCIDs (every entry flushes the user TLB), and
   device interrupts are not balanced across CPUs: they stay on CPU 0, and a
   device wait on a secondary CPU polls.
-- The stress gate runs single-threaded processes, so its runs report no
-  shootdowns; shootdown is exercised by the x86_64 and rv64 execution probes.
-  The aarch64 probe still runs on one CPU.
+- Exec evicts the siblings of the calling thread before steps that can still
+  fail; if exec then fails, an evicted sibling resumes from the frame it had
+  before its last user entry.
+- x86 bring-up does not check that the APs' TSCs are synchronized with the
+  BSP's (invariant TSC, IA32_TSC_ADJUST). A CPU whose TSC runs behind stalls
+  the shared monotonic clock until it catches up instead of moving it
+  backward; under QEMU TCG every vCPU reads the same TSC.
 - Every profile runs on QEMU TCG only; nothing here is evidence for physical
   CPUs.
