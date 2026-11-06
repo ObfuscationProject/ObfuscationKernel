@@ -18,6 +18,11 @@ std::string_view start_method_name(const boot::CpuTopologyMap &) noexcept
     return "unsupported";
 }
 
+std::string_view clock_sync_name() noexcept
+{
+    return {};
+}
+
 Status prepare_boot_cpu(const boot::CpuTopologyMap &)
 {
     return Status::unsupported("this profile starts no secondary CPUs");

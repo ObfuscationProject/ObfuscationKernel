@@ -63,6 +63,11 @@ void emit_report()
         console(" reason=");
         console(report.reason);
     }
+    if (const auto tsc = arch::smp::clock_sync_name(); !tsc.empty())
+    {
+        console(" tsc=");
+        console(tsc);
+    }
     console("\n");
 }
 

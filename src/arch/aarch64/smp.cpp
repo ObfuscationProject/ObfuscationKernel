@@ -120,6 +120,11 @@ std::string_view start_method_name(const boot::CpuTopologyMap &map) noexcept
     }
 }
 
+std::string_view clock_sync_name() noexcept
+{
+    return {}; // The generic timer's system counter is shared by architecture.
+}
+
 Status prepare_boot_cpu(const boot::CpuTopologyMap &map)
 {
     if (map.method != boot::CpuStartMethod::psci_hvc && map.method != boot::CpuStartMethod::psci_smc)

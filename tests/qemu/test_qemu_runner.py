@@ -354,9 +354,40 @@ class QemuRunnerValidationTests(unittest.TestCase):
         for arch in qemu_test.SMP_QEMU_ARCHES:
             with self.subTest(arch=arch):
                 line = "OK_SMP scope=hardware cpus=4 online=4 ap_start=psci ipi=pass"
+                if arch in qemu_test.TSC_SYNC_QEMU_ARCHES:
+                    line += " tsc=sync"
                 code, stdout, stderr = self.validate_smp(arch, make_smp_output(arch, line), 4)
                 self.assertEqual(code, 0, stderr)
                 self.assertIn(f"OK_QEMU_SMP_TEST arch={arch} smp=4 cpus=4 online=4", stdout)
+
+    def test_x86_64_smp_report_names_its_tsc_synchronization(self) -> None:
+        self.assertEqual(qemu_test.TSC_SYNC_QEMU_ARCHES, ("x86_64",))
+        base = "OK_SMP scope=hardware cpus=2 online=2 ap_start=sipi ipi=pass"
+        for result in ("sync", "adjusted", "offset", "unsynced"):
+            with self.subTest(result=result):
+                code, stdout, stderr = self.validate_smp("x86_64", make_smp_output("x86_64", f"{base} tsc={result}"), 2)
+                self.assertEqual(code, 0, stderr)
+                self.assertIn(f"OK_QEMU_SMP_TEST arch=x86_64 smp=2 cpus=2 online=2 ap_start=sipi ipi=pass tsc={result}",
+                              stdout)
+        for line in (base, f"{base} tsc=", f"{base} tsc=skewed"):
+            with self.subTest(line=line):
+                code, stdout, stderr = self.validate_smp("x86_64", make_smp_output("x86_64", line), 2)
+                self.assertEqual(code, 14)
+                self.assertIn("tsc=", stderr)
+                self.assertNotIn("OK_QEMU_SMP_TEST", stdout)
+
+    def test_tsc_field_is_optional_on_shared_counter_profiles(self) -> None:
+        for arch in ("aarch64", "rv64"):
+            line = "OK_SMP scope=hardware cpus=2 online=2 ap_start=psci ipi=pass"
+            with self.subTest(arch=arch):
+                code, stdout, stderr = self.validate_smp(arch, make_smp_output(arch, line), 2)
+                self.assertEqual(code, 0, stderr)
+                self.assertNotIn("tsc=", stdout)
+                code, stdout, stderr = self.validate_smp(arch, make_smp_output(arch, line + " tsc=sync"), 2)
+                self.assertEqual(code, 0, stderr)
+                self.assertIn("tsc=sync", stdout)
+                code, _, _ = self.validate_smp(arch, make_smp_output(arch, line + " tsc=bogus"), 2)
+                self.assertEqual(code, 14)
 
     def test_smp_profiles_reject_partial_bringup_or_failed_ipi(self) -> None:
         rejected = (

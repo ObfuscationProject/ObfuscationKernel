@@ -78,6 +78,11 @@ std::string_view start_method_name(const boot::CpuTopologyMap &) noexcept
     return "clint-msip";
 }
 
+std::string_view clock_sync_name() noexcept
+{
+    return {}; // Every hart reads the one CLINT mtime.
+}
+
 Status prepare_boot_cpu(const boot::CpuTopologyMap &map)
 {
     if (map.method != boot::CpuStartMethod::riscv_msip)

@@ -3,6 +3,10 @@
 
 #include <atomic>
 
+#if defined(OK_ARCH_TARGET_X86_64)
+#include "x86_64/cpu_local.hpp"
+#endif
+
 namespace ok::arch
 {
 namespace
@@ -52,6 +56,10 @@ struct PlatformClock
     }
     static u64 read()
     {
+#if defined(OK_ARCH_TARGET_X86_64)
+        // This CPU's TSC, corrected to the boot CPU's at bring-up.
+        return execution::x86::clock_counter();
+#else
         // CPUID works on both retained PC CPU profiles; i386 does not require
         // SSE2/LFENCE. Serialize older instructions before sampling the TSC.
         u32 a = 0, b, c, d;
@@ -59,6 +67,7 @@ struct PlatformClock
         u32 low, high;
         asm volatile("rdtsc" : "=a"(low), "=d"(high) : : "memory");
         return (u64{high} << 32) | low;
+#endif
     }
     // One latched read of PIT channel 2 between two TSC samples: the count
     // was latched at some point inside the bracket.

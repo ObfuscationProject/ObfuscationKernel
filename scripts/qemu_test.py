@@ -45,6 +45,9 @@ CAPABILITIES_BY_ARCH = {
 # The hardware OK_SMP line must precede OK_TEST_PASS: run_until_marker stops
 # reading there on every profile without a debug exit device.
 SMP_QEMU_ARCHES = ("x86_64", "aarch64", "rv64")
+# Profiles whose OK_SMP line names the TSC synchronization result (tsc=).
+TSC_SYNC_QEMU_ARCHES = ("x86_64",)
+TSC_SYNC_RESULTS = ("sync", "adjusted", "offset", "unsynced")
 MAX_QEMU_CPUS = 8
 
 
@@ -366,8 +369,17 @@ def validate_smp(arch: str, lines: list[str], cpus: int) -> int:
         wanted = " ".join(f"{key}={value}" for key, value in expected.items())
         print(f"debug kernel SMP report mismatch for -smp {cpus}: expected {wanted}, got {reported}", file=sys.stderr)
         return 14
+    # How the started CPUs' TSCs agree with the boot CPU's; x86_64 reports it
+    # once a secondary started, other profiles read one shared counter.
+    tsc = fields.get("tsc")
+    if (tsc is None and arch in TSC_SYNC_QEMU_ARCHES and int(fields.get("online", "1")) > 1) or (
+            tsc is not None and tsc not in TSC_SYNC_RESULTS):
+        print(f"debug kernel SMP report for -smp {cpus} has tsc={tsc or 'missing'}, expected one of "
+              f"{','.join(TSC_SYNC_RESULTS)}", file=sys.stderr)
+        return 14
     reason = f" reason={fields['reason']}" if "reason" in fields else ""
-    print(f"OK_QEMU_SMP_TEST arch={arch} smp={cpus} {reported}{reason}")
+    sync = f" tsc={tsc}" if tsc is not None else ""
+    print(f"OK_QEMU_SMP_TEST arch={arch} smp={cpus} {reported}{reason}{sync}")
     return 0
 
 

@@ -40,6 +40,12 @@ option("kernel_gui")
     set_description("Enable the normal-mode kernel GUI desktop")
 option_end()
 
+option("x86_tsc_skew_test")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Debug x86_64 only: CPU 1 rewinds its TSC before bring-up's TSC handshake must correct it")
+option_end()
+
 option("systoolchain_dir")
     set_showmenu(true)
     set_description("Use an existing SysToolchain installation instead of resolving the package")
@@ -96,6 +102,20 @@ end
 local function add_ok_native_fork_policy()
     if get_config("native_cow_fork") then
         add_defines("OK_NATIVE_COW_FORK")
+    end
+end
+
+rule("ok-x86-tsc-skew-test")
+    on_load(function (target)
+        assert(target:values("ok.arch") == "x86_64" and is_mode("debug"),
+            "x86_tsc_skew_test requires an x86_64 Debug build")
+    end)
+rule_end()
+
+local function add_ok_tsc_skew_test()
+    if get_config("x86_tsc_skew_test") then
+        add_rules("ok-x86-tsc-skew-test")
+        add_defines("OK_X86_TSC_SKEW_TEST")
     end
 end
 
@@ -268,6 +288,7 @@ target("okernel")
     add_ok_terminal_reboot_policy()
     add_ok_terminal_poweroff_policy()
     add_ok_native_fork_policy()
+    add_ok_tsc_skew_test()
     add_ok_debug_test_points()
     add_ok_debug_lock_checks()
     if get_config("private_futex_peer_fixture") and is_mode("debug") then
@@ -344,6 +365,7 @@ target("okernel_image")
     add_ok_terminal_reboot_policy()
     add_ok_terminal_poweroff_policy()
     add_ok_native_fork_policy()
+    add_ok_tsc_skew_test()
     add_ok_debug_test_points()
     add_ok_debug_lock_checks()
     if get_config("private_futex_peer_fixture") and is_mode("debug") then
