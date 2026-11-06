@@ -221,8 +221,9 @@ input not yet read by the slave). TIOCGPTN and TIOCSPTLCK on a raw-pair master
 give ENOTTY: raw pairs never appear in `/dev/pts`.
 
 Every other request gives ENOTTY, including TCXONC, TCGETS2, TIOCPKT, TIOCSTI,
-TIOCGPTPEER and TIOCOUTQ. On a hung-up ptmx slave every ioctl gives EIO except
-TIOCSPGRP, which gives ENOTTY.
+TIOCGPTPEER and TIOCOUTQ. On a hung-up ptmx slave every request in the table
+gives EIO except TIOCSPGRP, which gives ENOTTY; an unknown request still gives
+ENOTTY at step 2 (§14 row 19).
 
 ## 6. termios — values landed (S1); console landed (S4); PTY landed (S5)
 
@@ -318,10 +319,14 @@ Until S7 a PTY read that would arm the VTIME timer waits for input instead.
 
 | Event | ptmx pair (Linux semantics) | `OK_SYS_PTY_PAIR` raw pair (v1, unchanged) |
 |---|---|---|
-| Slave never opened (dormant) | master read blocks; master write EIO | n/a (both ends open at creation) |
-| Slave's last close | master drains, then EIO; POLLHUP. Slave input and session are kept; the slave may be reopened while unlocked and the master lives. | master drains, then EIO; POLLHUP |
-| Master's last close | `/dev/pts/N` disappears. The slave discards input and reads 0; writes EIO; ioctls EIO (TIOCSPGRP ENOTTY); poll IN\|OUT\|ERR\|HUP. SIGHUP then SIGCONT go to the session leader, and the session's ctty is cleared. | slave drains, then EOF; poll HUP\|ERR, plus IN while data remains, never OUT. Session hangup signals as for ptmx. |
+| Slave never opened (dormant) | master read blocks; master write accepted into the slave's input, kept for its first open; POLLOUT while there is room | n/a (both ends open at creation) |
+| Slave's last close | master drains, then EIO; POLLHUP. Master writes are still accepted (POLLOUT while there is room). Slave input and session are kept; the slave may be reopened while unlocked and the master lives. | master drains, then EIO; master write EIO; POLLHUP, never OUT |
+| Master's last close | `/dev/pts/N` disappears. The slave discards input and reads 0; writes EIO; requests EIO (TIOCSPGRP and unknown requests ENOTTY); poll IN\|OUT\|ERR\|HUP. SIGHUP then SIGCONT go to the session leader, and the session's ctty is cleared. | slave drains, then EOF: a non-canonical slave returns what it holds even below VMIN, an unterminated canonical line is not returned (as Linux). Writes EIO; poll IN\|HUP\|ERR (IN stays set after the drain), never OUT. Session hangup signals as for ptmx. |
 | Both sides at 0 opens | slot freed | slot freed |
+
+A ptmx master writes into its slave whatever the slave's state because Linux
+counts the master's reference in the slave's open count (`pty_common_install`),
+so `n_tty_write`'s closed-peer EIO never applies while the master lives.
 
 A slave can have several open descriptions. fork, dup and SCM_RIGHTS share
 descriptions and do not change open counts. TIOCSPTLCK relocking only refuses
@@ -593,6 +598,7 @@ profile string and version above keeps its current value.
 | 16 | One console `write` or `writev` moves at most 64 KiB; a longer one returns a short count. | landed (S4) |
 | 17 | A console `read` or `readv` whose user buffer faults returns EFAULT and consumes no input: every vector range is checked first and the input is consumed only after every copy succeeded. Linux `iterate_tty_read` lets `n_tty_read` consume into a kernel buffer before `copy_to_iter`, so it returns the bytes copied before the fault, or EFAULT when none were, and the rest of that input is lost. | landed (S4) |
 | 18 | A raw-pair (`OK_SYS_PTY_PAIR`) master whose slave has no session answers TIOCGPGRP with ENOTTY instead of 0, keeping the v1 raw contract. | landed (S5) |
+| 19 | A hung-up ptmx slave answers an unknown request with ENOTTY; Linux `hung_up_tty_ioctl` gives EIO for every request except TIOCSPGRP. | landed (S5) |
 
 ## Tests
 
@@ -705,15 +711,24 @@ S5 extends existing runners (hosted model and runtime evidence only):
   oracle now drives raw and ptmx-style pairs (the latter switched to raw
   termios) through creation, counted slave opens, locks, retirement and
   hangup, and directed cases cover raw termios, canonical echo, ISIG and its
-  outbox backpressure, IXON, echo waiting for master room, TCFLSH, slave
-  reopen and the hangup discard. `native_pty_ofd_tests.cpp` checks
-  `terminal_audit` after every operation, refuses PTY endpoints in
+  outbox backpressure (repeated signal characters beyond the outbox capacity
+  in one write), IXON, echo waiting for master room, TCFLSH, ptmx master
+  writes before the slave's first open and after its close, slave reopen, the
+  hangup discard, and O_NONBLOCK and post-hangup slave reads below VMIN.
+  `native_pty_ofd_tests.cpp` checks `terminal_audit` after every pair creation
+  and description open, at fixture teardown and after each open-count change
+  of the counted-slave case; it refuses PTY endpoints in
   `allocate_description` (EINVAL), sees both raw ends as terminal
   descriptions, counts several slave descriptions across dup, fork and
   SCM_RIGHTS, and frees a slot only at zero opens.
 - `test_native_tty.py` adds `pty=1 canonical_echo=1 ptmx_hangup_discard=1
   raw_drain=1 ptn_lock=1` before `hosted=1 guest=0`; `vmin_wake=1` also covers
-  PTY slave readers.
+  PTY slave readers. `pty=1` includes blocking master writes of nine ^C and of
+  ^C into a full signal outbox, which complete in the call; `ptn_lock=1` a
+  master write before the slave's first open, read later by the slave;
+  `raw_drain=1` O_NONBLOCK reads below VMIN and a blocked reader below VMIN
+  draining after the master's close; `ptmx_hangup_discard=1` ENOTTY for an
+  unknown request on the hung-up slave.
 - PTY slave readers wake as console readers do: on every stored byte in
   non-canonical mode, on a completed line or EOF in canonical mode, and after
   every termios change (Linux `__receive_buf`, `n_tty_set_termios`).

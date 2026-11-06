@@ -633,6 +633,7 @@ bool ptmx_hangup_discard(Kernel &kernel, const PtySession &p, i32 master, i32 sl
     expect(pty_write(kernel, p.shell, slave, "x") == -5);
     expect(fd_ioctl(kernel, p.shell, slave, OK_TCGETS, argument_at) == -5);
     expect(fd_ioctl(kernel, p.shell, slave, OK_TIOCSPGRP, argument_at) == -25);
+    expect(fd_ioctl(kernel, p.shell, slave, 0x4f4b0000u) == -25); // Unknown request: ENOTTY (tty.md §14).
     expect(pty_poll(kernel, p.shell, slave, OK_POLLIN | OK_POLLOUT) ==
            (OK_POLLIN | OK_POLLOUT | OK_POLLERR | OK_POLLHUP));
     expect(pty_call(kernel, p.shell, N::close, {static_cast<uptr>(slave)}) == 0);
