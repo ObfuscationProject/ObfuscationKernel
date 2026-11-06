@@ -7,9 +7,14 @@
 #include "ok/abi/linux_timer.hpp"
 #include "ok/user/native_signal_info.hpp"
 #include "interrupt/console_ring.hpp"
+#include "ok/smp/bringup.hpp"
+#include "ok/smp/cpu.hpp"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
+#include <vector>
 
 using namespace ok;
 
@@ -90,6 +95,106 @@ static void check_irq_router()
                       &many[interrupt::IrqRouter<interrupt::ModelIrqChip>::max_line_handlers]).code() ==
           StatusCode::overflow);
     CHECK(router.controller_errors() == 0);
+}
+
+// Routing on a chip that can target CPUs: the first bind places the line, a
+// shared handler keeps it there, retarget moves it, unbind forgets it.
+static void check_irq_routing()
+{
+    interrupt::ModelIrqChip chip;
+    interrupt::IrqRouter<interrupt::ModelIrqChip> router(chip);
+    CHECK(chip.initialize().ok());
+    Serviced first{.chip = &chip}, second{.chip = &chip};
+    CHECK(router.bind(4, interrupt::IrqTrigger::level, service, &first, 3).ok());
+    CHECK(router.target(4) == 3 && chip.routed(4) == 3 && !chip.masked(4));
+    CHECK(router.bind(4, interrupt::IrqTrigger::level, service, &second, 1).ok());
+    CHECK(router.target(4) == 3 && chip.routed(4) == 3);
+    // A CPU the chip cannot reach falls back to CPU 0.
+    CHECK(router.bind(6, interrupt::IrqTrigger::edge, service, &first, smp::max_cpus).ok());
+    CHECK(router.target(6) == 0 && chip.routed(6) == 0);
+    CHECK(router.retarget(4, 1).ok() && router.target(4) == 1 && chip.routed(4) == 1 && !chip.masked(4));
+    CHECK(router.retarget(4, smp::max_cpus).code() == StatusCode::invalid_argument && router.target(4) == 1);
+    CHECK(router.retarget(9, 1).code() == StatusCode::not_found);
+    // Pending state survives a move; the drain still services it once.
+    router.top_half(4);
+    CHECK(router.retarget(4, 2).ok() && router.pending() && chip.masked(4));
+    CHECK(router.drain() == 1 && first.calls == 1 && second.calls == 1 && !chip.masked(4));
+    CHECK(router.unbind(4, service, &first).ok() && router.unbind(4, service, &second).ok());
+    CHECK(!router.bound(4) && router.target(4) == 0);
+}
+
+// Model threads stand in for CPUs: one takes top halves of three lines while
+// three others drain. A line's handlers never run on two threads at once, the
+// line stays masked while they run, and every top half is serviced.
+struct ConcurrentLine
+{
+    interrupt::ModelIrqChip *chip{nullptr};
+    std::atomic<int> running{0};
+    std::atomic<usize> calls{0};
+    std::atomic<bool> overlapped{false}, unmasked{false};
+};
+static void concurrent_service(void *context, interrupt::IrqLine line)
+{
+    auto &state = *static_cast<ConcurrentLine *>(context);
+    if (state.running.fetch_add(1) != 0)
+        state.overlapped = true;
+    if (!state.chip->masked(line))
+        state.unmasked = true;
+    // Long enough for another drainer to try the same line.
+    std::this_thread::yield();
+    state.calls.fetch_add(1);
+    state.running.fetch_sub(1);
+}
+
+static void check_irq_router_concurrency()
+{
+    interrupt::ModelIrqChip chip;
+    interrupt::IrqRouter<interrupt::ModelIrqChip> router(chip);
+    CHECK(chip.initialize().ok());
+    std::array<ConcurrentLine, 3> lines{};
+    for (usize index = 0; index < lines.size(); ++index)
+    {
+        lines[index].chip = &chip;
+        CHECK(router.bind(static_cast<interrupt::IrqLine>(10 + index), interrupt::IrqTrigger::level,
+                          concurrent_service, &lines[index], static_cast<smp::CpuId>(index))
+                  .ok());
+    }
+    constexpr usize rounds = 20000;
+    std::atomic<bool> producing{true};
+    std::atomic<usize> drained{0};
+    std::vector<std::thread> drainers;
+    for (smp::CpuId cpu = 1; cpu <= 3; ++cpu)
+        drainers.emplace_back([&, cpu] {
+            smp::ScopedHostedCpu hosted(cpu);
+            while (producing.load() || router.pending())
+                drained.fetch_add(router.drain());
+        });
+    {
+        smp::ScopedHostedCpu hosted(0);
+        // The device raises a line only while it is unmasked, as a controller
+        // delivers it only then.
+        for (usize round = 0; round < rounds; ++round)
+        {
+            const auto line = static_cast<interrupt::IrqLine>(10 + round % lines.size());
+            if (!chip.masked(line))
+                CHECK(router.top_half(line));
+        }
+        producing = false;
+    }
+    for (auto &thread : drainers)
+        thread.join();
+    drained.fetch_add(router.drain());
+    usize delivered = 0, serviced = 0;
+    for (usize index = 0; index < lines.size(); ++index)
+    {
+        const auto line = static_cast<interrupt::IrqLine>(10 + index);
+        CHECK(!lines[index].overlapped && !lines[index].unmasked && !chip.masked(line));
+        CHECK(router.serviced(line) == lines[index].calls && router.delivered(line) == lines[index].calls);
+        delivered += router.delivered(line);
+        serviced += lines[index].calls;
+    }
+    CHECK(delivered == serviced && drained == serviced && serviced != 0 && !router.pending());
+    CHECK(router.controller_errors() == 0 && router.spurious() == 0);
 }
 
 static void check_wait_queue()
@@ -190,6 +295,37 @@ static void check_event_sources()
     CHECK(stats.driven && stats.posted == 3 && stats.served == 1 && stats.polled == 2);
     // Sources are independent.
     CHECK(!interrupt::event_driven(EventSource::input) && interrupt::take_event(EventSource::input));
+}
+
+// A post from a CPU other than the consumer sends the consumer one IPI per
+// idle-to-posted change; the consumer's own posts send none.
+static std::array<usize, smp::max_cpus> model_ipis{};
+static void check_event_consumer_ipi()
+{
+    using interrupt::EventSource;
+    smp::detail::online.store(0b11);
+    smp::detail::ipi_sender = [](smp::CpuId cpu, u64) noexcept { ++model_ipis[cpu]; };
+    interrupt::drive_events(EventSource::console);
+    {
+        smp::ScopedHostedCpu secondary(1);
+        interrupt::post_event(EventSource::console);
+        interrupt::post_event(EventSource::console);
+        CHECK(model_ipis[0] == 1 && model_ipis[1] == 0);
+        CHECK((smp::cpu_record(0).ipi_pending.exchange(0) & smp::ipi_device) != 0);
+    }
+    CHECK(interrupt::take_event(EventSource::console) && !interrupt::take_event(EventSource::console));
+    interrupt::post_event(EventSource::console);
+    CHECK(model_ipis[0] == 1);
+    CHECK(interrupt::take_event(EventSource::console));
+    {
+        smp::ScopedHostedCpu secondary(1);
+        interrupt::post_event(EventSource::console);
+        CHECK(model_ipis[0] == 2);
+    }
+    CHECK(interrupt::take_event(EventSource::console));
+    smp::detail::ipi_sender = nullptr;
+    smp::detail::online.store(1);
+    smp::cpu_record(0).ipi_pending.store(0);
 }
 
 struct ModelUart
@@ -478,11 +614,15 @@ static void check_latency_histogram()
 int main()
 {
     check_irq_router();
+    check_irq_routing();
+    check_irq_router_concurrency();
     check_wait_queue();
     check_wait_queue_enlist();
     check_wake_source();
     check_event_sources();
     check_console_ring();
+    // Drives the console source, which check_console_ring() expects undriven.
+    check_event_consumer_ipi();
     check_calibrated_clock();
     check_interval_timer();
     check_timer_codec();

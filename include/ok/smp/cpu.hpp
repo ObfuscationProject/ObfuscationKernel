@@ -5,7 +5,7 @@
 namespace ok::smp
 {
 
-#if !defined(OK_KERNEL_FREESTANDING)
+#if !defined(OK_KERNEL_FREESTANDING) && __STDC_HOSTED__
 namespace detail
 {
 // Hosted model tests stand a thread in for a CPU; nothing here runs on hardware.
@@ -36,8 +36,13 @@ class ScopedHostedCpu final
 {
 #if defined(OK_KERNEL_FREESTANDING)
     return static_cast<CpuId>(arch::ArchOperations::cpu_index());
-#else
+#elif __STDC_HOSTED__
     return detail::hosted_cpu;
+#else
+    // A freestanding unit outside the kernel (a hardware probe's model
+    // configuration) has neither the kernel's per-CPU block nor thread-local
+    // storage; it runs as CPU 0.
+    return 0;
 #endif
 }
 

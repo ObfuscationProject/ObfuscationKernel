@@ -20,6 +20,7 @@ enum IpiReason : u32
     ipi_kick = 1,       // leave user mode: a shootdown or remote state change
     ipi_reschedule = 2, // work was queued for this CPU
     ipi_ping = 4,       // bring-up delivery check
+    ipi_device = 8,     // a device line or event source this CPU waits for became pending
 };
 
 // What one CPU publishes for the others. `reported_id` is read by that CPU from
@@ -61,8 +62,8 @@ inline constinit std::atomic<usize> discovered{1};
 // Bring-up installs the architecture's IPI sender; until then, and in hosted
 // models, nothing is sent.
 inline constinit void (*ipi_sender)(CpuId cpu, u64 hardware_id) noexcept {};
-// Wakes the boot CPU's idle wait (the interrupt service installs it).
-inline constinit void (*boot_wake)() noexcept {};
+// Ends the receiving CPU's interrupt wait (the interrupt service installs it).
+inline constinit void (*ipi_wake)() noexcept {};
 } // namespace detail
 
 [[nodiscard]] inline CpuRecord &cpu_record(CpuId cpu) noexcept
@@ -110,8 +111,8 @@ inline u32 receive_ipi() noexcept
     auto &record = cpu_record(cpu);
     const auto reasons = record.ipi_pending.exchange(0, std::memory_order_acquire);
     record.ipis_received.fetch_add(1, std::memory_order_release);
-    if (cpu == 0 && detail::boot_wake != nullptr)
-        detail::boot_wake();
+    if (detail::ipi_wake != nullptr)
+        detail::ipi_wake();
     return reasons;
 }
 

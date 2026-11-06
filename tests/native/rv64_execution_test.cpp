@@ -1,5 +1,6 @@
 #include "ok/arch/execution.hpp"
 #include "ok/arch/smp.hpp"
+#include "ok/interrupt/platform.hpp"
 #include "ok/smp/bringup.hpp"
 #include "execution_table_pages.hpp"
 #include "../../src/arch/riscv_common/clint.hpp"
@@ -126,18 +127,36 @@ void check_tag_churn()
         emit("RV64_NATIVE tlb_asid=narrow churn=pass rollover=pass remap=pass\n");
 }
 
+// The 16550's transmitter-empty interrupt (PLIC source 10) is a device line
+// the probe raises at will: enabling it in IER asserts the line while THR is
+// empty, and the bottom half disables it again.
+constexpr interrupt::IrqLine uart_line = 10;
+std::atomic<u32> uart_serviced{};
+void raise_uart_line()
+{
+    *reinterpret_cast<volatile u8 *>(0x10000001) = 0x02;
+}
+void uart_service(void *, interrupt::IrqLine)
+{
+    *reinterpret_cast<volatile u8 *>(0x10000001) = 0;
+    uart_serviced.fetch_add(1, std::memory_order_relaxed);
+}
+
 // Hart 1's share: one pass of the memory probe in its own space, then the
-// counting loop until hart 0 asks it to stop, reporting how each entry ended,
-// then one more memory pass. Hart 0 remapped the counted page meanwhile, so
-// that last pass must count in the new frame: the path of a hart that cached
-// the old translation (under its own ASID, where it has them) and left.
+// counting loop until hart 0 asks it to stop, reporting how each entry ended
+// (asked to, it raises the UART line from its kernel side), then one more
+// memory pass. Hart 0 remapped the counted page meanwhile, so that last pass
+// must count in the new frame: the path of a hart that cached the old
+// translation (under its own ASID, where it has them) and left. Stopped, it
+// idles; in phase 4 it waits for a device interrupt as a driver inside a
+// syscall would.
 alignas(16) std::array<std::byte, 16384> hart_one_stack{};
 alignas(4096) std::array<u64, 512> hart_one_target{};
 hw::AddressSpace hart_one_space{};
-std::atomic<u32> hart_one_phase{}; // 1 run, 2 stop, 3 stopped
-std::atomic<u32> hart_one_timers{}, hart_one_ipis{}, hart_one_other{};
+std::atomic<u32> hart_one_phase{}; // 1 run, 2 stop, 3 stopped, 4 device wait, 5 woken
+std::atomic<u32> hart_one_timers{}, hart_one_ipis{}, hart_one_devices{}, hart_one_other{};
 std::atomic<uptr> hart_one_count{}, hart_one_before{}, hart_one_after{};
-std::atomic<bool> hart_one_identity{};
+std::atomic<bool> hart_one_identity{}, hart_one_raise{};
 // One memory pass on hart 1, inside its user window: the sum it reports, or 0
 // when an entry ended otherwise.
 u64 hart_one_memory_pass()
@@ -177,12 +196,27 @@ extern "C" [[noreturn]] void ok_smp_secondary_main(smp::CpuId cpu)
             hart_one_timers.fetch_add(1, std::memory_order_relaxed);
         else if (trap && trap.value().kind == hw::TrapKind::interrupt && trap.value().vector == 3)
             hart_one_ipis.fetch_add(1, std::memory_order_relaxed);
+        else if (trap && trap.value().kind == hw::TrapKind::interrupt && trap.value().vector == uart_line)
+            hart_one_devices.fetch_add(1, std::memory_order_relaxed);
         else
             hart_one_other.fetch_add(1, std::memory_order_relaxed);
+        if (hart_one_raise.exchange(false, std::memory_order_acq_rel))
+        {
+            // Long enough for hart 0 to halt in its wait first.
+            const u64 start = arch::riscv::Clint::time();
+            while (arch::riscv::Clint::time() - start < 20'000)
+                arch::ArchOperations::spin_pause();
+            raise_uart_line();
+        }
     }
     hart_one_count.store(frame.registers[8], std::memory_order_relaxed);
     hart_one_after.store(hart_one_memory_pass(), std::memory_order_relaxed);
     hart_one_phase.store(3, std::memory_order_release);
+    while (hart_one_phase.load(std::memory_order_acquire) != 4)
+        arch::smp::wait_local();
+    while (!interrupt::platform_irq_pending())
+        check(interrupt::wait_for_interrupt(), "a secondary hart waits for a device line");
+    hart_one_phase.store(5, std::memory_order_release);
     for (;;)
         arch::smp::wait_local();
 }
@@ -336,6 +370,26 @@ extern "C" [[noreturn]] void kernel_main()
     check(smp::cpu_record(0).shootdowns.load() != 0 &&
               wait_for([&] { return hart_one_ipis.load(std::memory_order_relaxed) != 0; }),
           "shootdown IPI takes hart 1 out of U-mode");
+    // A device line routed to hart 1: its user trap claims the line through
+    // hart 1's PLIC context and runs the top half there, which ends hart 0's
+    // interrupt wait with an IPI; hart 0 runs the bottom half.
+    smp::detail::ipi_wake = []() noexcept { ok_interrupt_wake(); };
+    check(interrupt::start_platform_irqs().ok(), "interrupt service");
+    check(interrupt::bind_platform_irq(uart_line, interrupt::IrqTrigger::level, uart_service, nullptr).ok() &&
+              interrupt::retarget_platform_irq(uart_line, 1).ok() && interrupt::platform_irq_target(uart_line) == 1,
+          "route the UART line to hart 1");
+    const auto boot_ipis = smp::cpu_record(0).ipis_received.load();
+    hart_one_raise.store(true, std::memory_order_release);
+    while (!interrupt::platform_irq_pending())
+        check(interrupt::wait_for_interrupt(), "boot hart interrupt wait");
+    check(wait_for([&] { return hart_one_devices.load() != 0; }) &&
+              interrupt::platform_irq_cpu_statistics(1).delivered == 1 &&
+              interrupt::platform_irq_cpu_statistics(0).delivered == 0,
+          "hart 1's user trap runs the top half");
+    check(smp::cpu_record(0).ipis_received.load() != boot_ipis, "the top half wakes hart 0 with an IPI");
+    check(interrupt::drain_platform_irqs() == 1 && uart_serviced.load() == 1 && !interrupt::platform_irq_pending(),
+          "hart 0 drains hart 1's line");
+    emit("RV64_NATIVE device_route=hart1 user_top_half=pass wake_ipi=pass\n");
     hart_one_phase.store(2, std::memory_order_release);
     check(wait_for([&] { return hart_one_phase.load(std::memory_order_acquire) == 3; }) &&
               hart_one_timers.load() >= 2 && hart_one_other.load() == 0 && hart_one_count.load() != 0 &&
@@ -353,6 +407,38 @@ extern "C" [[noreturn]] void kernel_main()
     check(wait_for([&] { return hart_one.ipis_received.load(std::memory_order_acquire) != received; }),
           "IPI wakes hart 1's idle wait");
     emit("RV64_NATIVE harts=2 start=pass local_timer=pass shootdown=pass remote_remap=pass idle_ipi=pass\n");
+    // Hart 1's idle wait claims the line routed to it and runs the top half.
+    raise_uart_line();
+    while (!interrupt::platform_irq_pending())
+        check(interrupt::wait_for_interrupt(), "boot hart interrupt wait");
+    check(interrupt::platform_irq_cpu_statistics(1).delivered == 2 &&
+              interrupt::platform_irq_cpu_statistics(0).delivered == 0 && interrupt::drain_platform_irqs() == 1 &&
+              uart_serviced.load() == 2,
+          "hart 1's idle wait runs the top half");
+    // Hart 1 waits for a device the way a driver inside a syscall does. The
+    // line now goes to hart 0, which takes it with interrupts masked (as a
+    // CPU spinning for the kernel lock does); its top half ends hart 1's wait
+    // with an IPI.
+    check(interrupt::retarget_platform_irq(uart_line, 0).ok() && interrupt::platform_irq_target(uart_line) == 0,
+          "route the UART line to hart 0");
+    const auto waits = interrupt::platform_irq_cpu_statistics(1).waits;
+    const auto secondary_ipis = hart_one.ipis_received.load();
+    hart_one_phase.store(4, std::memory_order_release);
+    check(wait_for([&] { return interrupt::platform_irq_cpu_statistics(1).waits != waits; }),
+          "hart 1 halts in its device wait");
+    raise_uart_line();
+    check(wait_for([&] {
+              interrupt::serve_local_interrupts();
+              return interrupt::platform_irq_cpu_statistics(0).delivered != 0;
+          }),
+          "hart 0 serves the line while spinning");
+    check(wait_for([&] { return hart_one_phase.load(std::memory_order_acquire) == 5; }) &&
+              hart_one.ipis_received.load() != secondary_ipis,
+          "hart 0's top half ends hart 1's device wait with an IPI");
+    check(interrupt::drain_platform_irqs() == 1 && uart_serviced.load() == 3 &&
+              interrupt::platform_irq_cpu_statistics(0).delivered == 1,
+          "drain after the secondary device wait");
+    emit("RV64_NATIVE idle_top_half=pass secondary_device_wait=pass spin_serve=pass\n");
     check(!hw::copy_to_user(space, hw::user_begin, &value, sizeof(value)), "reject read-only copy");
     check(!hw::user_range(space, hw::user_begin + 0x1fff, 2, true), "reject unmapped boundary");
     check(hw::copy_from_user(space, nullptr, 0, 0).ok(), "empty null copy");

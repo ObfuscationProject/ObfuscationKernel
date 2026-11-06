@@ -7,11 +7,18 @@
 namespace ok::interrupt
 {
 
-// Boot-CPU platform interrupt service over the profile's PlatformIrqChip.
-// Top halves arrive from the architecture trap paths with interrupts
-// disabled; the kernel loop drains bottom halves and idles in
-// wait_for_interrupt() when nothing is runnable. Every call is made with
-// interrupts disabled.
+// Platform interrupt service over the profile's PlatformIrqChip. Top halves
+// arrive from the architecture trap paths of the CPU a line is routed to,
+// with interrupts disabled. Bottom halves run under the kernel lock on any CPU
+// that drains: the boot CPU's kernel loop, a secondary CPU's runtime step and
+// a driver waiting inside a syscall. The boot CPU's loop consumes the event
+// sources and idles in idle_until_interrupt() when nothing is runnable. Every
+// call is made with interrupts disabled.
+//
+// Routing: on a controller that can target CPUs (GICv2 on aarch64, the PLIC
+// on rv64) a line bound while N CPUs are online goes to the (line mod N)-th
+// online CPU in logical order; others deliver to CPU 0 (the 8259 pairs, the
+// uniprocessor profiles).
 struct IrqStatistics
 {
     usize waits{0};
@@ -29,20 +36,47 @@ Status start_platform_irqs();
 [[nodiscard]] bool platform_irqs_supported();
 Status bind_platform_irq(IrqLine line, IrqTrigger trigger, IrqHandler handler, void *context);
 Status unbind_platform_irq(IrqLine line, IrqHandler handler, void *context);
+// Runs pending bottom halves; the caller holds the kernel lock.
 usize drain_platform_irqs();
 // From a user-mode TrapKind::interrupt on boards whose trap path does not claim
 // the line itself (Malta): claims the controller's pending line and runs its
 // top half. A no-op elsewhere.
 void claim_platform_irq();
 [[nodiscard]] bool platform_irq_pending();
-// Enables interrupts, halts until one has been taken and disables them again.
-// Returns false without waiting when the profile cannot idle on interrupts,
-// and on every CPU but CPU 0, which alone takes device lines.
+// Halts this CPU, interrupts masked, until it took a device line, a tick (its
+// local timer on a secondary CPU) or an IPI; a top half another CPU runs ends
+// the wait with an IPI. Returns at once when a line is already pending, and
+// false without waiting when the profile cannot idle on interrupts or this
+// is a secondary CPU of a profile whose device lines reach CPU 0 only
+// (x86_64). A caller holding the kernel lock keeps holding it.
 bool wait_for_interrupt();
+// The boot CPU's kernel loop idle (kernel lock released): as
+// wait_for_interrupt(), but a top half on another CPU does not end it. That
+// CPU drains its line itself, and the bottom halves' event posts reach CPU 0
+// as IPIs.
+bool idle_until_interrupt();
 [[nodiscard]] IrqStatistics platform_irq_statistics();
+// One CPU's share: `delivered` top halves it ran, `serviced` lines it drained,
+// `waits` it entered, `ticks` (CPU 0 only).
+[[nodiscard]] IrqStatistics platform_irq_cpu_statistics(smp::CpuId cpu);
 // Interrupts delivered to `line` so far (top halves run).
 [[nodiscard]] usize platform_irq_delivered(IrqLine line);
 [[nodiscard]] bool platform_irq_bound(IrqLine line);
+// The CPU a bound line is delivered to.
+[[nodiscard]] smp::CpuId platform_irq_target(IrqLine line);
+// Moves a bound line to `cpu` (an online CPU), on controllers that route.
+Status retarget_platform_irq(IrqLine line, smp::CpuId cpu);
+// Before `cpu` goes offline: spreads its lines over the other online CPUs.
+// An interrupt `cpu` already claimed still runs its top half there. Returns
+// the lines moved.
+usize retarget_platform_irqs_away(smp::CpuId cpu);
+// Runs the top halves of interrupts pending at this CPU's controller
+// interface, and takes its IPIs, without waiting. For a CPU spinning with
+// interrupts masked, so that lines routed to it are not stalled.
+void serve_local_interrupts();
+// Takes the kernel lock; while another CPU holds it, serves this CPU's
+// interrupts (a holder may wait for a line routed here).
+void lock_kernel_serving_interrupts();
 
 // Device event sources the kernel loop serves. A driver whose line is bound
 // calls drive_events() once; from then on its bottom half posts the source and
@@ -65,7 +99,11 @@ struct EventStatistics
     usize served{0}; // Passes that served a post.
     usize polled{0}; // Passes that polled the source before it was driven.
 };
+// The CPU whose kernel loop serves the event sources.
+inline constexpr smp::CpuId event_consumer = 0;
 void drive_events(EventSource source);
+// A post from another CPU that finds the source idle sends the consumer an
+// IPI, so its idle wait ends.
 void post_event(EventSource source);
 // True when the loop should serve `source` on this pass; consumes a post.
 [[nodiscard]] bool take_event(EventSource source);
@@ -129,7 +167,7 @@ struct PlatformLine
 // Architecture trap entry points, called with interrupts disabled.
 extern "C" void ok_interrupt_top_half(ok::interrupt::IrqLine line);
 extern "C" void ok_interrupt_tick();
-// An IPI reached the boot CPU: its idle wait ends as after a tick.
+// An IPI reached this CPU: its interrupt wait ends as after a tick.
 extern "C" void ok_interrupt_wake();
 // Optional platform hook run once by start_platform_irqs() to bind the
 // platform's own devices (for example the console UART).

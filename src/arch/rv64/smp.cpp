@@ -2,8 +2,10 @@
 
 #include "ok/boot/fdt.hpp"
 #include "ok/boot/raw_handoff.hpp"
+#include "ok/interrupt/platform.hpp"
 #include "ok/smp/bringup.hpp"
 #include "../riscv_common/clint.hpp"
+#include "../riscv_common/plic.hpp"
 
 #include <atomic>
 #include <span>
@@ -116,19 +118,28 @@ void send_ipi(ok::smp::CpuId, u64 hardware_id) noexcept
     Clint::raise_software(hardware_id);
 }
 
-// MIE stays clear: WFI wakes on mip & mie, and the wait reads mip itself.
+// MIE stays clear: WFI wakes on mip & mie, and the wait reads mip itself. Once
+// the interrupt service owns the PLIC, a device line routed to this hart also
+// ends the wait and runs its top half.
 void wait_local() noexcept
 {
-    using riscv::mie_msie, riscv::mie_mtie;
+    using riscv::mie_meie, riscv::mie_msie, riscv::mie_mtie;
+    const bool devices = ok::interrupt::platform_irqs_started();
     Clint::set_compare(Clint::time() + local_tick_interval);
     uptr pending;
-    asm volatile("csrw mie, %1\nwfi\ncsrr %0, mip\ncsrw mie, zero" : "=r"(pending) : "r"(mie_mtie | mie_msie) : "memory");
+    asm volatile("csrw mie, %1\nwfi\ncsrr %0, mip\ncsrw mie, zero"
+                 : "=r"(pending)
+                 : "r"(mie_mtie | mie_msie | (devices ? mie_meie : 0))
+                 : "memory");
     Clint::set_compare(~u64{0});
     if (pending & mie_msie)
     {
         Clint::clear_software();
         static_cast<void>(ok::smp::receive_ipi());
     }
+    if (devices && (pending & mie_meie))
+        if (const u32 source = riscv::Plic::claim(); source != 0)
+            ok_interrupt_top_half(static_cast<ok::interrupt::IrqLine>(source));
     if (pending & mie_mtie)
         ok::smp::local_tick();
 }

@@ -1,18 +1,18 @@
 #include "ok/interrupt/platform.hpp"
 #include "ok/arch/clock.hpp"
+#include "ok/smp/bringup.hpp"
 #include "ok/smp/cpu.hpp"
+#include "ok/smp/kernel_lock.hpp"
 
 #if defined(OK_KERNEL_FREESTANDING) && (defined(__x86_64__) || defined(__i386__))
 #include "pic8259.hpp"
 #define OK_PLATFORM_IRQ_WAIT 1
 #elif defined(OK_KERNEL_FREESTANDING) && (defined(__arm__) || defined(__aarch64__))
 #include "../arch/arm_common/gicv2.hpp"
-#include "ok/smp/bringup.hpp"
 #define OK_PLATFORM_IRQ_WAIT 1
 #elif defined(OK_KERNEL_FREESTANDING) && defined(__riscv)
 #include "../arch/riscv_common/clint.hpp"
 #include "../arch/riscv_common/plic.hpp"
-#include "ok/smp/bringup.hpp"
 #define OK_PLATFORM_IRQ_WAIT 1
 #elif defined(OK_KERNEL_FREESTANDING) && defined(__loongarch64)
 #include "../arch/loongarch64/eiointc.hpp"
@@ -82,11 +82,76 @@ using PlatformIrqChip = arch::ppc::Mpic;
 using PlatformIrqChip = ModelIrqChip;
 #endif
 
+// Profiles whose device lines reach secondary CPUs, which therefore wait for
+// devices there too. x86_64 keeps the 8259 on CPU 0 for now.
+#if defined(OK_PLATFORM_IRQ_WAIT) && (defined(__aarch64__) || (defined(__riscv) && __riscv_xlen == 64))
+constexpr bool secondary_device_lines = true;
+#else
+constexpr bool secondary_device_lines = false;
+#endif
+
 constinit PlatformIrqChip chip{};
 constinit IrqRouter<PlatformIrqChip> router{chip};
-constinit IrqStatistics statistics{};
-bool started{false};
-volatile bool interrupted{false};
+constinit std::atomic<bool> started{false};
+
+// One CPU's interrupt state. Only that CPU writes it, with interrupts masked;
+// other CPUs read the counters for the report and `waiting` to wake it.
+struct alignas(64) CpuInterrupts
+{
+    std::atomic<usize> waits{};
+    std::atomic<usize> ticks{};
+    std::atomic<usize> delivered{};
+    std::atomic<usize> serviced{};
+    // Set by a top half, tick or IPI this CPU took; ends its wait.
+    std::atomic<bool> woken{};
+    // Inside wait_for_interrupt(): a top half on another CPU sends an IPI.
+    std::atomic<bool> waiting{};
+};
+constinit std::array<CpuInterrupts, smp::max_cpus> cpu_interrupts{};
+
+CpuInterrupts &local_interrupts()
+{
+    return cpu_interrupts[smp::current_cpu() < smp::max_cpus ? smp::current_cpu() : 0];
+}
+
+// Owner-written counters: a load and a store, no read-modify-write atomic.
+void bump(std::atomic<usize> &counter, usize amount = 1)
+{
+    counter.store(counter.load(std::memory_order_relaxed) + amount, std::memory_order_relaxed);
+}
+
+// A top half made a line pending: every other CPU waiting in
+// wait_for_interrupt() may need it (a driver holding the kernel lock drains
+// only on its own CPU), so each gets an IPI. The fence orders the pending
+// store before the `waiting` loads, against the waiter's opposite order.
+void wake_waiters(smp::CpuId self)
+{
+    const u32 others = smp::online_mask() & ~(u32{1} << self);
+    if (others == 0)
+        return;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
+        if ((others & (u32{1} << cpu)) != 0 && cpu_interrupts[cpu].waiting.load(std::memory_order_relaxed))
+            smp::send_ipi(cpu, smp::ipi_device);
+}
+
+// Routing policy: the (line mod N)-th of the N online CPUs in `allowed`, in
+// logical order. Deterministic for a given set of online CPUs, and it spreads
+// consecutive lines (the virtio-mmio slots) over all of them.
+smp::CpuId spread_target(IrqLine line, u32 allowed)
+{
+    allowed &= smp::online_mask();
+    usize count = 0;
+    for (u32 mask = allowed; mask != 0; mask &= mask - 1)
+        ++count;
+    if (count == 0)
+        return 0;
+    usize index = line % count;
+    for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
+        if ((allowed & (u32{1} << cpu)) != 0 && index-- == 0)
+            return cpu;
+    return 0;
+}
 
 #if defined(OK_PLATFORM_IRQ_WAIT) && defined(__arm__)
 // The physical timer (PPI 30) as a one-shot idle tick at 100 Hz. The native
@@ -160,6 +225,7 @@ void halt_until_interrupt()
 #elif defined(OK_PLATFORM_IRQ_WAIT) && (defined(__arm__) || defined(__aarch64__))
     // WFI wakes on a pending IRQ even with the IRQ mask set, so the kernel
     // waits masked and claims the interrupt from the GIC instead of taking it.
+    // The timer is CPU 0's tick and a secondary CPU's local tick.
     arm_idle_tick();
     asm volatile("dsb sy\nwfi" : : : "memory");
     const u32 acknowledge = PlatformIrqChip::claim();
@@ -175,14 +241,22 @@ void halt_until_interrupt()
         PlatformIrqChip::complete(acknowledge);
         static_cast<void>(smp::receive_ipi());
     }
+    else if (id == PlatformIrqChip::timer_ppi && smp::current_cpu() != 0)
+    {
+        PlatformIrqChip::complete(acknowledge);
+        smp::local_tick();
+        ok_interrupt_wake();
+    }
     else if (id == PlatformIrqChip::timer_ppi)
     {
         record_timer_latency(TimerWake::idle, idle_tick_late(), arch::clock_frequency());
         PlatformIrqChip::complete(acknowledge);
         ok_interrupt_tick();
     }
-    else
+    else if (id >= 32 && id < 1020)
         ok_interrupt_top_half(static_cast<IrqLine>(id));
+    else if (id < 1020)
+        PlatformIrqChip::complete(acknowledge);
 #elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__riscv)
     // In M-mode WFI wakes when mip & mie is nonzero whatever mstatus.MIE says;
     // MIE stays clear, so nothing traps and the wait claims from the PLIC.
@@ -204,6 +278,12 @@ void halt_until_interrupt()
     {
         if (const u32 source = PlatformIrqChip::claim(); source != 0)
             ok_interrupt_top_half(static_cast<IrqLine>(source));
+    }
+    else if ((pending & mie_mtie) && smp::current_cpu() != 0)
+    {
+        // A secondary hart's timer is its local tick.
+        smp::local_tick();
+        ok_interrupt_wake();
     }
     else if (pending & mie_mtie)
     {
@@ -310,13 +390,15 @@ void halt_until_interrupt()
 
 } // namespace
 
+// Boot CPU, once, after secondary bring-up: the controller is initialized for
+// every CPU then online.
 Status start_platform_irqs()
 {
-    if (started)
+    if (started.load(std::memory_order_relaxed))
         return Status::success();
     if (auto status = chip.initialize(); !status.ok())
         return status;
-    started = true;
+    started.store(true, std::memory_order_release);
     if (ok_platform_bind_irqs != nullptr)
         return ok_platform_bind_irqs();
     return Status::success();
@@ -324,7 +406,7 @@ Status start_platform_irqs()
 
 bool platform_irqs_started()
 {
-    return started;
+    return started.load(std::memory_order_acquire);
 }
 
 bool platform_irqs_supported()
@@ -338,9 +420,9 @@ bool platform_irqs_supported()
 
 Status bind_platform_irq(IrqLine line, IrqTrigger trigger, IrqHandler handler, void *context)
 {
-    if (!started)
+    if (!platform_irqs_started())
         return Status::not_initialized("platform interrupts are not started");
-    return router.bind(line, trigger, handler, context);
+    return router.bind(line, trigger, handler, context, spread_target(line, ~u32{0}));
 }
 
 Status unbind_platform_irq(IrqLine line, IrqHandler handler, void *context)
@@ -351,8 +433,103 @@ Status unbind_platform_irq(IrqLine line, IrqHandler handler, void *context)
 usize drain_platform_irqs()
 {
     const usize serviced = router.drain();
-    statistics.serviced += serviced;
+    if (serviced != 0)
+        bump(local_interrupts().serviced, serviced);
     return serviced;
+}
+
+smp::CpuId platform_irq_target(IrqLine line)
+{
+    return router.target(line);
+}
+
+Status retarget_platform_irq(IrqLine line, smp::CpuId cpu)
+{
+    if (cpu >= smp::max_cpus || (smp::online_mask() & (u32{1} << cpu)) == 0)
+        return Status::invalid_argument("interrupt target CPU is not online");
+    return router.retarget(line, cpu);
+}
+
+usize retarget_platform_irqs_away(smp::CpuId cpu)
+{
+    usize moved = 0;
+    const u32 others = cpu < smp::max_cpus ? ~(u32{1} << cpu) : ~u32{0};
+    for (usize line = 0; line < max_irq_lines; ++line)
+    {
+        const auto id = static_cast<IrqLine>(line);
+        if (!router.bound(id) || router.target(id) != cpu)
+            continue;
+        const auto target = spread_target(id, others);
+        if (target != cpu && router.retarget(id, target).ok())
+            ++moved;
+    }
+    return moved;
+}
+
+void serve_local_interrupts()
+{
+    if (!secondary_device_lines)
+        return;
+#if defined(OK_PLATFORM_IRQ_WAIT) && defined(__aarch64__)
+    // ISR_EL1.I shows a pending IRQ whatever the mask, without touching the
+    // GIC; only then is the interrupt claimed. A few claims per call bound it.
+    for (usize claims = 0; claims < 4; ++claims)
+    {
+        u64 status;
+        asm volatile("mrs %0, isr_el1" : "=r"(status));
+        if ((status & 0x80) == 0)
+            return;
+        const u32 acknowledge = PlatformIrqChip::claim();
+        const u32 id = acknowledge & 0x3ff;
+        if (id >= 1020)
+            return;
+        if (id < 16)
+        {
+            asm volatile("dmb ish" : : : "memory");
+            PlatformIrqChip::complete(acknowledge);
+            static_cast<void>(smp::receive_ipi());
+        }
+        else if (id >= 32 && platform_irqs_started())
+            ok_interrupt_top_half(static_cast<IrqLine>(id));
+        else
+        {
+            // A timer left running (it is disarmed outside waits and user
+            // entries) or an unused PPI.
+            if (id == PlatformIrqChip::timer_ppi)
+                disarm_idle_tick();
+            PlatformIrqChip::complete(acknowledge);
+        }
+    }
+#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__riscv) && __riscv_xlen == 64
+    // mip shows the pending lines whatever mie and mstatus.MIE say.
+    uptr pending;
+    asm volatile("csrr %0, mip" : "=r"(pending));
+    if (pending & mie_msie)
+    {
+        Clint::clear_software();
+        static_cast<void>(smp::receive_ipi());
+    }
+    if ((pending & mie_meie) && platform_irqs_started())
+        if (const u32 source = PlatformIrqChip::claim(); source != 0)
+            ok_interrupt_top_half(static_cast<IrqLine>(source));
+#endif
+}
+
+void lock_kernel_serving_interrupts()
+{
+    auto &lock = smp::kernel_lock;
+    // Only a CPU that may hold a line some kernel-lock holder waits for
+    // needs to serve while it spins; lock() reports a self-deadlock.
+    if (!secondary_device_lines || smp::online_cpus() < 2 || lock.owned_by_current_cpu())
+    {
+        lock.lock();
+        return;
+    }
+    while (!lock.try_lock())
+    {
+        serve_local_interrupts();
+        arch::ArchOperations::spin_pause();
+    }
 }
 
 bool platform_irq_pending()
@@ -365,33 +542,65 @@ bool platform_irq_pending()
 void claim_platform_irq()
 {
 #if defined(OK_PLATFORM_IRQ_WAIT) && defined(__mips__)
-    if (!started)
+    if (!platform_irqs_started())
         return;
     if (const u32 line = PlatformIrqChip::poll(); line < 16)
         ok_interrupt_top_half(static_cast<IrqLine>(line));
 #elif defined(OK_PLATFORM_IRQ_WAIT) && (defined(__powerpc__) || defined(__PPC__))
-    if (!started)
+    if (!platform_irqs_started())
         return;
     if (const u32 vector = PlatformIrqChip::claim(); vector < 256)
         ok_interrupt_top_half(static_cast<IrqLine>(vector));
 #endif
 }
 
+namespace
+{
+// `device`: the caller waits for a line it will drain itself, so top halves
+// on other CPUs end the wait (wake_waiters).
+bool wait_here(bool device)
+{
+    auto &self = local_interrupts();
+    // Published before the pending check, against a top half on another CPU
+    // that stores pending and then reads `waiting`. A wake that arrives after
+    // the publication is an IPI still pending at this CPU's controller, so
+    // the halt below takes it.
+    self.woken.store(false, std::memory_order_relaxed);
+    if (device)
+    {
+        self.waiting.store(true, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+    }
+    if (router.pending())
+    {
+        self.waiting.store(false, std::memory_order_relaxed);
+        return true;
+    }
+    bump(self.waits);
+    // A tick, a top half or an IPI sets the flag; any other wake (an NMI, a
+    // spurious claim) halts again rather than returning with nothing to do.
+    while (!self.woken.load(std::memory_order_relaxed))
+        halt_until_interrupt();
+    self.waiting.store(false, std::memory_order_relaxed);
+    return true;
+}
+} // namespace
+
 bool wait_for_interrupt()
 {
-    // Device lines reach CPU 0 only. A secondary CPU waiting for a device
-    // (a driver inside a syscall, holding the kernel lock) polls instead.
-    if (!started || !platform_irqs_supported() || smp::current_cpu() != 0)
+    // Where device lines reach CPU 0 only, a secondary CPU waiting for a
+    // device (a driver inside a syscall, holding the kernel lock) polls.
+    if (!platform_irqs_started() || !platform_irqs_supported() ||
+        (smp::current_cpu() != 0 && !secondary_device_lines))
         return false;
-    if (router.pending())
-        return true;
-    interrupted = false;
-    ++statistics.waits;
-    // A tick or a device top half sets the flag; any other wake (an NMI)
-    // halts again rather than returning to a loop with nothing to do.
-    while (!interrupted)
-        halt_until_interrupt();
-    return true;
+    return wait_here(true);
+}
+
+bool idle_until_interrupt()
+{
+    if (!platform_irqs_started() || !platform_irqs_supported())
+        return false;
+    return wait_here(false);
 }
 
 usize platform_irq_delivered(IrqLine line)
@@ -467,8 +676,10 @@ Result<PlatformLine> pci_intx_line(u8 device, u8 pin, u8 interrupt_line)
 
 namespace
 {
+// The statistics change under the kernel lock (drivers, bottom halves and the
+// consumer all hold it); `posted` is also read by an idle consumer.
 constinit std::array<EventStatistics, event_source_count> events{};
-constinit std::array<bool, event_source_count> posted{};
+constinit std::array<std::atomic<bool>, event_source_count> posted{};
 } // namespace
 
 void drive_events(EventSource source)
@@ -478,13 +689,17 @@ void drive_events(EventSource source)
 
 // An undriven source is polled on every pass anyway; a consumer's repost (a
 // receive budget that stopped short) still keeps the loop from idling until
-// the next pass. Only a driven source's posts are counted.
+// the next pass. Only a driven source's posts are counted. The post that
+// finds the source idle, made on another CPU, sends the consumer an IPI: one
+// for a burst, and an idle wait the consumer enters later still sees it
+// pending at its controller.
 void post_event(EventSource source)
 {
     const auto index = static_cast<usize>(source);
     if (events[index].driven)
         ++events[index].posted;
-    posted[index] = true;
+    if (!posted[index].exchange(true, std::memory_order_acq_rel) && smp::current_cpu() != event_consumer)
+        smp::send_ipi(event_consumer, smp::ipi_device);
 }
 
 bool take_event(EventSource source)
@@ -492,20 +707,19 @@ bool take_event(EventSource source)
     const auto index = static_cast<usize>(source);
     if (!events[index].driven)
     {
-        posted[index] = false;
+        posted[index].store(false, std::memory_order_relaxed);
         ++events[index].polled;
         return true;
     }
-    if (!posted[index])
+    if (!posted[index].exchange(false, std::memory_order_acq_rel))
         return false;
-    posted[index] = false;
     ++events[index].served;
     return true;
 }
 
 void discard_event(EventSource source)
 {
-    posted[static_cast<usize>(source)] = false;
+    posted[static_cast<usize>(source)].store(false, std::memory_order_relaxed);
 }
 
 bool event_driven(EventSource source)
@@ -516,7 +730,7 @@ bool event_driven(EventSource source)
 bool events_posted()
 {
     for (usize index = 0; index < event_source_count; ++index)
-        if (posted[index])
+        if (posted[index].load(std::memory_order_acquire))
             return true;
     return false;
 }
@@ -533,6 +747,8 @@ EventStatistics event_statistics(EventSource source)
 
 namespace
 {
+// Timer latency is recorded by CPU 0's tick paths only; device waits are
+// counted by drivers under the kernel lock.
 constinit std::array<time::LatencyHistogram, 2> timer_latencies{};
 constinit std::array<DeviceWaitStatistics, device_wait_count> device_waits{};
 } // namespace
@@ -558,9 +774,30 @@ DeviceWaitStatistics device_wait_statistics(DeviceWait device)
     return device_waits[static_cast<usize>(device)];
 }
 
+IrqStatistics platform_irq_cpu_statistics(smp::CpuId cpu)
+{
+    if (cpu >= smp::max_cpus)
+        return {};
+    const auto &record = cpu_interrupts[cpu];
+    return {
+        .waits = record.waits.load(std::memory_order_relaxed),
+        .ticks = record.ticks.load(std::memory_order_relaxed),
+        .delivered = record.delivered.load(std::memory_order_relaxed),
+        .serviced = record.serviced.load(std::memory_order_relaxed),
+    };
+}
+
 IrqStatistics platform_irq_statistics()
 {
-    IrqStatistics result = statistics;
+    IrqStatistics result{};
+    for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
+    {
+        const auto share = platform_irq_cpu_statistics(cpu);
+        result.waits += share.waits;
+        result.ticks += share.ticks;
+        result.delivered += share.delivered;
+        result.serviced += share.serviced;
+    }
     result.spurious = router.spurious();
     result.controller_errors = router.controller_errors();
     return result;
@@ -568,20 +805,27 @@ IrqStatistics platform_irq_statistics()
 
 } // namespace ok::interrupt
 
+// The current CPU took `line`: its top half runs here, this CPU's wait ends,
+// and other CPUs waiting in wait_for_interrupt() are sent an IPI.
 extern "C" void ok_interrupt_top_half(ok::interrupt::IrqLine line)
 {
-    ok::interrupt::router.top_half(line);
-    ++ok::interrupt::statistics.delivered;
-    ok::interrupt::interrupted = true;
+    using namespace ok::interrupt;
+    const bool pending = router.top_half(line);
+    auto &self = local_interrupts();
+    bump(self.delivered);
+    self.woken.store(true, std::memory_order_relaxed);
+    if (pending)
+        wake_waiters(ok::smp::current_cpu());
 }
 
 extern "C" void ok_interrupt_tick()
 {
-    ++ok::interrupt::statistics.ticks;
-    ok::interrupt::interrupted = true;
+    auto &self = ok::interrupt::local_interrupts();
+    ok::interrupt::bump(self.ticks);
+    self.woken.store(true, std::memory_order_relaxed);
 }
 
 extern "C" void ok_interrupt_wake()
 {
-    ok::interrupt::interrupted = true;
+    ok::interrupt::local_interrupts().woken.store(true, std::memory_order_relaxed);
 }

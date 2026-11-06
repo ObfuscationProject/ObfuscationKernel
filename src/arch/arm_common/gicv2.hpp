@@ -3,17 +3,19 @@
 #include "ok/core/types.hpp"
 #include "ok/interrupt/irq_chip.hpp"
 
+#include <array>
 #include <string_view>
 
 namespace ok::arch::arm
 {
 
 // QEMU virt's GICv2 (distributor 0x08000000, CPU interface 0x08010000). Lines
-// are interrupt IDs: SPIs 32..255 are bindable and target CPU 0; SGIs and PPIs
-// are not, and every CPU keeps its banked physical timer PPI 30 and the IPI
-// SGI enabled. The trap path or the idle wait claims an interrupt from
-// GICC_IAR before the top half runs, so acknowledge() has nothing left to do
-// and end_of_interrupt() writes GICC_EOIR.
+// are interrupt IDs: SPIs 32..255 are bindable and each targets the one CPU
+// route() names (GICD_ITARGETSR); SGIs and PPIs are not, and every CPU keeps
+// its banked physical timer PPI 30 and the IPI SGI enabled. The trap path or
+// the idle wait of the target CPU claims an interrupt from its GICC_IAR before
+// the top half runs, so acknowledge() has nothing left to do and
+// end_of_interrupt() writes that CPU's GICC_EOIR.
 class GicV2 final
 {
   public:
@@ -22,6 +24,20 @@ class GicV2 final
     static constexpr interrupt::IrqLine timer_ppi = 30;
     static constexpr u32 ipi_sgi = 1;
     static constexpr u32 spurious_id = 1023;
+    static constexpr u8 no_interface = 0xff;
+
+    // The CPU interface number of each logical CPU, recorded by the CPU itself
+    // (cpu_target_mask()). Logical CPU 0 defaults to interface 0, which is
+    // also what a uniprocessor GIC ignores.
+    static void set_cpu_interface(ok::smp::CpuId cpu, u8 interface_number)
+    {
+        if (cpu < ok::smp::max_cpus)
+            interfaces[cpu] = interface_number;
+    }
+    [[nodiscard]] static u8 cpu_interface_number(ok::smp::CpuId cpu)
+    {
+        return cpu < ok::smp::max_cpus ? interfaces[cpu] : no_interface;
+    }
 
     // The distributor, once on CPU 0; each CPU enables its own lines.
     Status initialize()
@@ -70,6 +86,8 @@ class GicV2 final
     {
         reg(distributor + 0xf00) = ((targets & 0xffu) << 16) | ipi_sgi;
     }
+    // GICD_ICFGR is a read-modify-write of 16 lines' fields: the router's
+    // lock serializes it.
     Status configure(interrupt::IrqLine line, interrupt::IrqTrigger trigger)
     {
         if (auto status = admit(line); !status.ok())
@@ -77,8 +95,19 @@ class GicV2 final
         const uptr config = distributor + 0xc00 + 4 * (line / 16);
         const u32 edge = 2u << (2 * (line % 16));
         reg(config) = trigger == interrupt::IrqTrigger::edge ? (reg(config) | edge) : (reg(config) & ~edge);
-        byte(distributor + 0x800 + line) = 0x01; // CPU 0.
         byte(distributor + 0x400 + line) = 0xa0;
+        return Status::success();
+    }
+    // One target CPU per line (one byte store): every other CPU's IAR never
+    // sees it, so no CPU wakes to read a spurious 1023.
+    Status route(interrupt::IrqLine line, ok::smp::CpuId cpu)
+    {
+        if (auto status = admit(line); !status.ok())
+            return status;
+        const u8 interface_number = cpu_interface_number(cpu);
+        if (interface_number >= 8)
+            return Status::invalid_argument("GIC has no CPU interface for this CPU");
+        byte(distributor + 0x800 + line) = static_cast<u8>(1u << interface_number);
         return Status::success();
     }
     Status mask(interrupt::IrqLine line)
@@ -141,6 +170,7 @@ class GicV2 final
             return Status::invalid_argument("GIC line is not a bindable SPI");
         return Status::success();
     }
+    static inline constinit std::array<u8, ok::smp::max_cpus> interfaces{};
     bool initialized_{false};
 };
 static_assert(interrupt::IrqChip<GicV2>);

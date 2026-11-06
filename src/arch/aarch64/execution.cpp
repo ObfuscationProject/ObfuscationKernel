@@ -584,8 +584,8 @@ extern "C" void ok_arm_execution_trap(u64 vector, uptr capture_sp)
         asm volatile("msr cntp_ctl_el0, xzr; isb" : : : "memory");
         // The timer and IPIs complete here; any other ID is a device line whose
         // top half masks and completes it once the interrupt service runs.
-        // Device lines and the global tick belong to CPU 0; the others take
-        // only their local timer and IPIs.
+        // A device line reaches whichever CPU it is routed to; the global
+        // tick belongs to CPU 0 and the others' timer is their local tick.
         if (irq < 16)
         {
             // The sender's reasons are read after the claim; the SGI's EOI
@@ -609,7 +609,7 @@ extern "C" void ok_arm_execution_trap(u64 vector, uptr capture_sp)
             GicV2::complete(acknowledge);
             ok_interrupt_tick();
         }
-        else if (irq < 1020 && cpu.cpu == 0 && interrupt::platform_irqs_started())
+        else if (irq >= 32 && irq < 1020 && interrupt::platform_irqs_started())
             ok_interrupt_top_half(static_cast<interrupt::IrqLine>(irq));
         else if (irq < 1020)
             GicV2::complete(acknowledge);

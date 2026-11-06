@@ -156,7 +156,7 @@ Status start_secondary_cpus(Kernel &kernel)
     if (auto status = arch::smp::prepare_boot_cpu(map); !status)
         return status;
     detail::ipi_sender = &arch::smp::send_ipi;
-    detail::boot_wake = []() noexcept { ok_interrupt_wake(); };
+    detail::ipi_wake = []() noexcept { ok_interrupt_wake(); };
 
     // Logical ids follow the firmware order with the boot CPU as 0.
     CpuId next = 1;

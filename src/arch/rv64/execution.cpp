@@ -3,6 +3,7 @@
 #include "ok/arch/clock.hpp"
 #include "ok/smp/bringup.hpp"
 #include "../riscv_common/clint.hpp"
+#include "../riscv_common/plic.hpp"
 #include "../tlb_tags.hpp"
 #include <cstddef>
 
@@ -311,8 +312,9 @@ UserFrame initial_frame(uptr entry, uptr stack)
 }
 // An interrupt in user mode. The boot hart's timer is the system tick, a
 // secondary's only its local tick. An IPI is acknowledged at the CLINT. A
-// device line (boot hart only) is claimed from the PLIC and its top half run
-// once the interrupt service owns the PLIC, otherwise only completed.
+// device line routed to this hart is claimed through its own PLIC context and
+// its top half run once the interrupt service owns the PLIC, otherwise only
+// completed.
 void complete_irq(Trap &trap, const CpuBlock &cpu)
 {
     if (trap.kind == TrapKind::timer && cpu.logical != 0)
@@ -333,17 +335,14 @@ void complete_irq(Trap &trap, const CpuBlock &cpu)
         static_cast<void>(smp::receive_ipi());
         return;
     }
-    if (cpu.logical != 0)
-        return;
-    auto &claim = *reinterpret_cast<volatile u32 *>(uptr{0x0c200004});
-    const u32 source = claim;
+    const u32 source = riscv::Plic::claim();
     trap.vector = source;
     if (source == 0)
         return;
     if (interrupt::platform_irqs_started())
         ok_interrupt_top_half(static_cast<interrupt::IrqLine>(source));
     else
-        claim = source;
+        riscv::Plic::complete(source);
 }
 static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack_top)
 {
@@ -369,10 +368,9 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     uptr saved_status;
     asm volatile("csrrc %0, mstatus, %1" : "=r"(saved_status) : "r"(uptr{8}) : "memory");
     cpu.executing.store(true, std::memory_order_release);
-    // User mode takes this hart's timer and IPIs and, on the boot hart once the
-    // interrupt service owns the PLIC, machine external interrupts.
-    cpu.user_mie = riscv::mie_mtie | riscv::mie_msie |
-                   (cpu.logical == 0 && interrupt::platform_irqs_started() ? riscv::mie_meie : 0);
+    // User mode takes this hart's timer and IPIs and, once the interrupt
+    // service owns the PLIC, the device lines routed to this hart.
+    cpu.user_mie = riscv::mie_mtie | riscv::mie_msie | (interrupt::platform_irqs_started() ? riscv::mie_meie : 0);
     Trap trap{};
     uptr satp = (uptr{8} << 60) | (space.root >> 12), fence = ~uptr{0};
     if (cpu.tlb_tags.tagged())

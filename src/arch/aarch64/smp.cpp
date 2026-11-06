@@ -1,6 +1,7 @@
 #include "ok/arch/smp.hpp"
 #include "ok/boot/boot_memory.hpp"
 #include "ok/boot/fdt.hpp"
+#include "ok/interrupt/platform.hpp"
 #include "ok/smp/bringup.hpp"
 #include "../arm_common/gicv2.hpp"
 #include "secondary.hpp"
@@ -24,11 +25,10 @@ constexpr u64 mpidr_affinity = 0xff00ffffff;
 // The kernel's identity-mapped Normal RAM, where the device tree must lie.
 constexpr uptr ram_begin = 0x40000000;
 constexpr uptr ram_end = 0x80000000;
-constexpr u8 no_interface = 0xff;
+constexpr u8 no_interface = GicV2::no_interface;
 
 constinit boot::CpuStartMethod conduit{boot::CpuStartMethod::none};
 constinit u32 cpu_on{};
-constinit std::array<u8, ok::smp::max_cpus> interfaces{};
 constinit std::array<aarch64::SecondaryStart, ok::smp::max_cpus> starts{};
 
 // SMCCC: x0..x3 carry the call, x0 the result; x4..x17 may be clobbered.
@@ -129,11 +129,12 @@ Status prepare_boot_cpu(const boot::CpuTopologyMap &map)
 {
     if (map.method != boot::CpuStartMethod::psci_hvc && map.method != boot::CpuStartMethod::psci_smc)
         return Status::unsupported("secondary CPUs start only through PSCI");
-    interfaces.fill(no_interface);
+    for (ok::smp::CpuId cpu = 0; cpu < ok::smp::max_cpus; ++cpu)
+        GicV2::set_cpu_interface(cpu, no_interface);
     // execution::initialize() reset this CPU's banked lines; the IPI SGI stays on.
     GicV2::enable_cpu_lines();
-    interfaces[0] = own_interface();
-    if (interfaces[0] == no_interface)
+    GicV2::set_cpu_interface(0, own_interface());
+    if (GicV2::cpu_interface_number(0) == no_interface)
         return Status::unsupported("the GIC names no CPU interface for the boot CPU");
     conduit = map.method;
     cpu_on = map.psci_cpu_on;
@@ -169,18 +170,20 @@ Status start(ok::smp::CpuId cpu, u64 hardware_id, uptr, uptr stack_top)
 
 void send_ipi(ok::smp::CpuId cpu, u64) noexcept
 {
-    if (cpu >= ok::smp::max_cpus || interfaces[cpu] == no_interface)
+    const auto interface_number = GicV2::cpu_interface_number(cpu);
+    if (interface_number >= 8)
         return;
     // The reasons stored in the target's record are visible before the SGI.
     asm volatile("dsb ishst" : : : "memory");
-    GicV2::raise_ipi(u32{1} << interfaces[cpu]);
+    GicV2::raise_ipi(u32{1} << interface_number);
 }
 
 void wait_local() noexcept
 {
     // Like the boot CPU's idle wait: WFI wakes on a pending IRQ with IRQs
     // masked, and the wait claims it from this CPU's interface. A one-shot
-    // 100 Hz local timer bounds it.
+    // 100 Hz local timer bounds it. A device line routed here runs its top
+    // half once the interrupt service owns the GIC.
     u64 frequency;
     asm volatile("mrs %0, cntfrq_el0" : "=r"(frequency));
     asm volatile("msr cntp_tval_el0, %0; msr cntp_ctl_el0, %1; isb" : : "r"(frequency / 100), "r"(u64{1}) : "memory");
@@ -196,6 +199,8 @@ void wait_local() noexcept
         GicV2::complete(acknowledge);
         static_cast<void>(ok::smp::receive_ipi());
     }
+    else if (id >= 32 && id < 1020 && ok::interrupt::platform_irqs_started())
+        ok_interrupt_top_half(static_cast<ok::interrupt::IrqLine>(id));
     else
     {
         if (id < 1020)
@@ -213,7 +218,7 @@ extern "C" [[noreturn]] void ok_aarch64_secondary_start(ok::smp::CpuId cpu)
 {
     using namespace ok::arch::smp;
     GicV2::reset_cpu_lines();
-    interfaces[cpu] = own_interface();
+    GicV2::set_cpu_interface(cpu, own_interface());
     asm volatile("msr cntp_ctl_el0, xzr; isb" : : : "memory");
     ok::arch::aarch64::prepare_local_tlb_tags();
     ok_smp_secondary_main(cpu);

@@ -1,7 +1,8 @@
 // The interrupt report: how the kernel loop idled, what the platform lines and
 // device event sources did, how driver waits completed, timer interrupt latency
 // and the interval timer counters (OK_IRQ_PLATFORM, OK_IRQ_EVENTS,
-// OK_IRQ_COMPLETIONS, OK_TIMER_LATENCY, OK_TIMERS).
+// OK_IRQ_COMPLETIONS, OK_TIMER_LATENCY, OK_TIMERS), and with secondary CPUs
+// what each CPU did (OK_SMP_CPUS, OK_SMP_IRQS).
 #include "private.hpp"
 #include "ok/interrupt/platform.hpp"
 #include "ok/smp/bringup.hpp"
@@ -101,6 +102,27 @@ void report_interrupt_lines()
         emit(":"); emit_number(record.ipis_received.load(std::memory_order_relaxed));
         emit(":"); emit_number(record.ipis_sent.load(std::memory_order_relaxed));
         emit(":"); emit_number(record.shootdowns.load(std::memory_order_relaxed));
+    }
+    // Where device interrupts were served: per CPU, top halves run there,
+    // lines whose bottom halves it drained and interrupt waits it entered;
+    // then each bound line as line@target CPU.
+    emit("\nOK_SMP_IRQS scope=hardware");
+    for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
+    {
+        if ((smp::online_mask() & (u32{1} << cpu)) == 0) continue;
+        const auto share = interrupt::platform_irq_cpu_statistics(cpu);
+        emit(" cpu"); emit_number(cpu); emit("="); emit_number(share.delivered);
+        emit(":"); emit_number(share.serviced); emit(":"); emit_number(share.waits);
+    }
+    emit(" routes=");
+    first = true;
+    for (usize line = 0; line < interrupt::max_irq_lines; ++line)
+    {
+        const auto id = static_cast<interrupt::IrqLine>(line);
+        if (!interrupt::platform_irq_bound(id)) continue;
+        if (!first) emit(",");
+        first = false;
+        emit_number(line); emit("@"); emit_number(interrupt::platform_irq_target(id));
     }
     emit("\n");
 }

@@ -2,6 +2,7 @@
 // except while it runs user code; the entry it is in then is recorded here so
 // that a CPU retiring that thread can take the entry over.
 #include "private.hpp"
+#include "ok/interrupt/platform.hpp"
 #include "ok/smp/bringup.hpp"
 #include "ok/smp/kernel_lock.hpp"
 
@@ -56,7 +57,8 @@ Result<hw::Trap> enter_unlocked(hw::AddressSpace &space, hw::UserFrame &frame, c
     smp::kernel_lock.unlock();
     auto trap = hw::enter_owned(space, frame, view);
     smp::end_user();
-    smp::kernel_lock.lock();
+    // The holder may wait for a device line routed to this CPU.
+    interrupt::lock_kernel_serving_interrupts();
     const bool revoked = entry.revoked;
     entry = {};
     if (revoked) return Status::no_process("another CPU retired this thread during its user entry");
@@ -139,13 +141,30 @@ Status evict_thread(Kernel &kernel, const sched::ThreadControlBlock &thread)
 } // namespace ok::user::native
 
 // A secondary CPU's share of the native runtime: one step under the kernel
-// lock. False when it found nothing to run, so the CPU idles until its local
-// timer or an IPI.
+// lock, after the device bottom halves pending on any CPU. False when it found
+// nothing to run, so the CPU idles until its local timer, an IPI or a device
+// line routed to it.
 extern "C" bool ok_smp_secondary_step(ok::smp::CpuId cpu)
 {
     using namespace ok::user::native;
-    if (!secondary_admission.load(std::memory_order_acquire)) return false;
-    ok::smp::RankedSpinLock<ok::smp::LockRank::big_kernel>::Guard guard(ok::smp::kernel_lock);
+    if (!secondary_admission.load(std::memory_order_acquire))
+    {
+        // Not serving threads yet: drain a line this CPU took only while the
+        // kernel lock is free (the boot CPU idles), since that idle wait does
+        // not end for top halves taken here.
+        if (ok::interrupt::platform_irq_pending() && ok::smp::kernel_lock.try_lock())
+        {
+            static_cast<void>(ok::interrupt::drain_platform_irqs());
+            ok::smp::kernel_lock.unlock();
+        }
+        return false;
+    }
+    ok::interrupt::lock_kernel_serving_interrupts();
+    struct Unlock
+    {
+        ~Unlock() { ok::smp::kernel_lock.unlock(); }
+    } unlock;
+    static_cast<void>(ok::interrupt::drain_platform_irqs());
     if (!started || runtime_kernel == nullptr) return false;
     const bool stepped = step(*runtime_kernel);
     return stepped && !runtime_idle[cpu];

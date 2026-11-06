@@ -157,10 +157,10 @@ namespace ok::detail
         {
             // Other CPUs serve their threads while this one waits.
             ok::smp::kernel_lock.unlock();
-            waited = (!native_userland_started || ok::ok_userland_idle()) && ok::interrupt::wait_for_interrupt();
+            waited = (!native_userland_started || ok::ok_userland_idle()) && ok::interrupt::idle_until_interrupt();
             if (!waited)
                 desktop_idle();
-            ok::smp::kernel_lock.lock();
+            ok::interrupt::lock_kernel_serving_interrupts();
         }
         // Without native userland the rescue GUI's tick is paced by loop passes,
         // and an idle pass now lasts until the next interrupt: tick once per wait.
