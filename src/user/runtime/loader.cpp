@@ -1,6 +1,5 @@
 // ELF admission, the initial stack (argv/envp/auxv), image installation and exec.
 #include "private.hpp"
-#include <bit>
 
 namespace ok::user::native
 {
@@ -1144,8 +1143,12 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     // Only an exec that took other CPUs' entries over reports it (never on one CPU).
     if (eviction.cpus)
     {
+        // Counted per CPU: std::popcount calls a libgcc helper that the
+        // mips64 kernel cannot link.
+        u64 evicted{};
+        for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu) evicted += (eviction.cpus >> cpu) & 1;
         emit("OK_NATIVE_EXEC_EVICT pid="); emit_number(pid); emit(" tid="); emit_number(calling_tid);
-        emit(" evicted="); emit_number(static_cast<u64>(std::popcount(eviction.cpus))); emit("\n");
+        emit(" evicted="); emit_number(evicted); emit("\n");
     }
     bool vfs_retired{};
     const auto replaced = commit_entry_stacks(entry_stacks, *process, entry_plan,
