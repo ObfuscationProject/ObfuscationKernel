@@ -272,7 +272,7 @@ Until S7 a PTY read that would arm the VTIME timer waits for input instead.
 - Console output is synchronous: `write` and `writev` return the full count
   after OPOST, up to 64 KiB per call (a longer write returns 65536 and the
   caller writes the rest). Console reads copy out before they consume, so a
-  faulting buffer loses no input.
+  faulting buffer loses no input (§14 row 17).
 - `OK_SYS_CONSOLE_FLUSH` also flushes the console line discipline's input.
 
 ## 8. PTY pair states — data and open counts landed (S5); planned (S6 `/dev/pts`; S8 signals)
@@ -553,6 +553,7 @@ profile string and version above keeps its current value.
 | 15 | A raw-pair (`OK_SYS_PTY_PAIR`) master whose slave has no session answers TIOCGPGRP with ENOTTY instead of 0, keeping the v1 raw contract. | landed (S5) |
 | 15 | Init never takes the `complete_signal` fatal shortcut. Linux 6.13 does when the named thread blocks a SIG_DFL fatal signal that another init thread does not; here it stays queued and is dropped when dequeued. | landed (S3) |
 | 16 | One console `write` or `writev` moves at most 64 KiB; a longer one returns a short count. | landed (S4) |
+| 17 | A console `read` or `readv` whose user buffer faults returns EFAULT and consumes no input: every vector range is checked first and the input is consumed only after every copy succeeded. Linux `iterate_tty_read` lets `n_tty_read` consume into a kernel buffer before `copy_to_iter`, so it returns the bytes copied before the fault, or EFAULT when none were, and the rest of that input is lost. | landed (S4) |
 
 ## Tests
 
