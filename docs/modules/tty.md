@@ -14,10 +14,10 @@ Current behaviour, which every planned section replaces:
 - `OK_SYS_PTY_PAIR` creates raw native PTY pairs (8 slots, 4096-byte queues)
   with the v1 hangup rules of §8. Linux PTY I/O returns EOPNOTSUPP.
 - Every other terminal request returns ENOTTY, so `isatty()` is false.
-- Native signals are TERM and KILL only. The stop overlay of §9.3 exists, but
-  kill, tkill, tgkill, group and timer signals still refuse stop and continue
-  signals, so nothing can stop a process yet. There is no
-  WUNTRACED/WCONTINUED reporting.
+- Job control (§9.1-§9.5, §9.8 and the orphan row of §9.7) is landed: every
+  signal number reaches native and Linux recipients, stops and continues are
+  reported through WUNTRACED/WCONTINUED and SIGCHLD, and native programs have
+  SIG_DFL/SIG_IGN. Nothing on a terminal generates a signal yet (S4, S5, S8).
 - `OK_TTY` (`fs::TtyDevice`) is a VFS roadmap model. It is not a terminal and is
   not part of this contract.
 
@@ -245,7 +245,7 @@ new slave opens.
 
 ## 9. Job control
 
-### 9.1 Numbers — planned (S3)
+### 9.1 Numbers — landed (S3)
 
 Native numbers are uniform on all ten profiles. `OK_SIGKILL` and `OK_SIGTERM`
 stay in `ok/uapi/signal.h`; the others are defined in `ok/uapi/job_control.h`.
@@ -267,7 +267,7 @@ personalities on MIPS, a signal with no counterpart gives EINVAL.
 | SIGTTOU | 22 | 27 |
 | SIGWINCH | 28 | 20 |
 
-### 9.2 Default actions — landed (S2 delivery); planned (S3 generation)
+### 9.2 Default actions — landed (S2 delivery, S3 generation)
 
 CHLD, WINCH and URG are ignored. CONT continues. STOP, TSTP, TTIN and TTOU
 stop. Every other signal terminates. No core-dump bit is set.
@@ -283,41 +283,48 @@ lower-numbered fatal or caught signal is delivered first. A ppoll or pselect
 interrupted by a caught signal keeps its temporary mask across a stop, and the
 handler runs under it after the continue.
 
-### 9.3 Stop and continue — landed (S2 overlay); planned (S3 generation)
+### 9.3 Stop and continue — landed (S2 overlay, S3 generation)
 
 - A stop is a per-process overlay: the process is never entered while stopped.
   Kernel waits it started still complete, and their results are published when
-  it resumes. (Landed in S2, together with the orphaned-group discard below;
-  the remaining items arrive with signal generation in S3.)
+  it resumes.
 - Generating SIGCONT continues the process even if SIGCONT is ignored or
   blocked, and discards pending STOP/TSTP/TTIN/TTOU. Generating any stop signal
   discards a pending SIGCONT.
 - SIGKILL acts on a stopped process.
-- A stop applies when the signal is generated, if it is deliverable then;
-  otherwise when it becomes unblocked.
+- A stop applies when the signal is generated, if it is deliverable then: some
+  thread does not block it and no signal that thread would dequeue first is
+  pending. Otherwise it is queued and applies when delivery or the settle pass
+  reaches it.
+- A terminating default sent to a stopped process, or to a Linux process none
+  of whose unblocking threads can take a signal now, terminates it at the next
+  step (Linux `complete_signal` fatal shortcut). A caught signal sent to a
+  stopped process stays pending until the continue.
 - TSTP/TTIN/TTOU sent to an orphaned group are discarded. SIGSTOP never is.
 - Init (pid 1) ignores SIG_DFL terminating and stopping signals, KILL included.
   Native kill of pid 1 stays EPERM.
 - SIGCONT may be sent to any process in the sender's session, whatever the
   credentials.
 
-### 9.4 SIGCHLD and waits — planned (S3)
+### 9.4 SIGCHLD and waits — landed (S3)
 
 - The parent receives SIGCHLD with CLD_STOPPED (5) or CLD_CONTINUED (6),
   status = the signal in the parent's numbering, unless the parent is native,
   its SIGCHLD action is SIG_IGN, SA_NOCLDSTOP (1) is set, or SIGCHLD is neither
-  caught nor blocked. CLD_CONTINUED is queued when SIGCONT is generated.
+  caught nor blocked. CLD_CONTINUED is queued when SIGCONT is generated. Like
+  exit notifications, a native child sends no SIGCHLD; its waits still report.
 - wait4 options are WNOHANG 1, WUNTRACED 2 and WCONTINUED 8; anything else is
   EINVAL. Selectors: pid, −1, 0 (the caller's group at call time) and −pgid;
   INT_MIN gives ESRCH. `rusage` stays EINVAL.
 - Status: stopped `(sig<<8)|0x7f`; continued `0xffff`; exit and termination
   unchanged, with the termination signal translated to the parent's numbering.
 - RV32 `waitid`: WEXITED 4, WSTOPPED 2, WCONTINUED 8, WNOWAIT 0x01000000;
-  P_PID, P_PGID (0 = own group) and P_ALL. Other profiles keep ENOSYS.
+  P_PID, P_PGID (0 = own group) and P_ALL. Other profiles keep ENOSYS. A group
+  selector compares each child's group when the wait is checked.
 - Native wait4 takes `OK_WNOHANG`, `OK_WUNTRACED` and `OK_WCONTINUED` from
   `ok/uapi/job_control.h`, with the same values.
 
-### 9.5 Native dispositions — planned (S3)
+### 9.5 Native dispositions — landed (S3)
 
 Native `rt_sigaction(sig, act, oact, 8)` checks, in order:
 
@@ -367,15 +374,18 @@ ctty, has a foreground group, and the caller is not in it.
 | Session leader exit, ctty is the console | SIGHUP to the foreground group; association cleared; no console vhangup | planned (S8) |
 | TIOCNOTTY by the leader | SIGHUP then SIGCONT to the foreground group | planned (S8) |
 | Console lease revoke or retire | SIGHUP then SIGCONT to the console session leader, then the console terminal is reset | planned (S8) |
-| A process exit orphans a group with stopped members | SIGHUP then SIGCONT to that group, after any terminal hangup signals | planned (S3) |
+| A process exit orphans a group with stopped members | SIGHUP then SIGCONT to that group, after any terminal hangup signals | landed (S3) |
 | Window size change | SIGWINCH to the foreground group | planned (S4 console, S5 PTY) |
 
 Terminal and orphan signals are kernel-originated (SI_KERNEL, code 128). They
-bypass permission checks and are translated per recipient.
+bypass permission checks and are translated per recipient. The kernel sender
+API (`send_kernel_process_signal`, `send_kernel_group_signal`, native numbers)
+is landed (S3); the terminal events that use it arrive in S4, S5 and S8.
 
-### 9.8 Kill-path errors — planned (S3)
+### 9.8 Kill-path errors — landed (S3)
 
-- kill, tkill and tgkill accept every signal number.
+- kill, tkill and tgkill accept every signal number. Init (pid 1) is
+  protected as in §9.3 for every sender, timers included.
 - A caught signal sent by a user to a Linux process whose unblocked threads
   are all in waits that cannot be interrupted still returns EOPNOTSUPP. The
   kernel's own signals are retried until such a wait completes and are not
@@ -442,10 +452,10 @@ profile string and version above keeps its current value.
 
 | # | Deviation | Status |
 |---|---|---|
-| 1 | A stop applies at generation. While stopped, `sigtimedwait`, `epoll_wait` and similar calls keep waiting instead of returning EINTR on continue. | planned (S2, S3) |
-| 2 | Kernel signals to threads in waits that cannot be interrupted are retried (owed) and not visible in `sigpending`. | planned (S3) |
-| 3 | Native personality: SIG_DFL/SIG_IGN only, no masks, SIGCHLD SIG_IGN refused, tgkill to native refused. | planned (S3) |
-| 4 | No ptrace stops, no `kill(-1)`, no core bit. `waitid` is RV32-only. | planned (S3) |
+| 1 | A stop applies at generation when deliverable. While stopped, `sigtimedwait`, `epoll_wait` and similar calls keep waiting instead of returning EINTR on continue. | landed (S2, S3) |
+| 2 | Kernel signals to threads in waits that cannot be interrupted are retried (owed) and not visible in `sigpending`. | landed (S3) |
+| 3 | Native personality: SIG_DFL/SIG_IGN only, no masks, SIGCHLD SIG_IGN refused, tgkill to native refused. A native child sends no SIGCHLD. | landed (S3) |
+| 4 | No ptrace stops, no `kill(-1)`, no core bit. `waitid` is RV32-only. | landed (S3) |
 | 5 | No devpts filesystem: no mount options, no `newinstance`, no `/dev/pts/ptmx`. `st_dev(/dev/pts/N) == st_dev(/dev)`. The gid policy is the opener's egid. | planned (S6) |
 | 6 | 8 PTYs, shared with raw pairs. | planned (S5, S6) |
 | 7 | No console vhangup. VTIME on the console is treated as 0. IXON output stop works on PTY slaves only. | planned (S4, S8) |
@@ -510,5 +520,18 @@ and the SI_KERNEL set on all ten profiles, the actual scheduler stop overlay,
 and the orphaned-group rule against a brute-force oracle over every parent,
 group and session assignment of five processes. The debug test point
 `job-control / scheduler-overlay-orphan-model` is the same kind of model.
+
+S3 adds `python3 -B scripts/test_native_job_control.py --output <dir>`, which
+prints `NATIVE_JOB_CONTROL_RUNTIME_PASS native_calls=<n> linux_calls=<n>
+profiles=10 hosted=1 guest=0`. It drives the actual runtime (one translation
+unit, x86_64 hosted backends): Linux kill, tkill and group stop/continue and
+native kill for both personalities, the CONT/stop discards, KILL and fatal
+defaults while stopped, a stopped thread never entered by `step()`, wait4 on
+selectors 0 and -pgid, SA_NOCLDSTOP and blocked SIGCHLD, native
+`rt_sigaction` error order and fork inheritance, init protection,
+same-session SIGCONT, the orphaned-group TSTP drop and exit-time SIGHUP then
+SIGCONT, owed kernel signals (drain order, CONT/SIG_IGN/epoch drops) and
+shutdown's terminate path with a stopped process. The ten profiles are covered
+for numbering and translation only.
 
 Each slice adds its runners here.
