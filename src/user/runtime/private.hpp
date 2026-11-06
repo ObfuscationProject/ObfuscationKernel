@@ -550,6 +550,18 @@ i64 resume_pty_io(Kernel &kernel, sched::ProcessControlBlock &process,
 i64 begin_pty_io(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadId tid,
                  i32 fd, u16 description_id, uptr address, usize count, bool writing,
                  bool &complete, const PipeVectors &vectors = {});
+// Terminals (tty.cpp). Console ingress runs the line discipline and emits its
+// echo; writes go through OPOST and return the full count (at most 64 KiB per
+// call); reads copy out before they consume. Every path drains the terminal
+// outbox, as do the top of step() and the exit commit.
+void tty_console_input(Kernel &kernel, char value, sched::WakeSource source);
+i64 tty_console_write(Kernel &kernel, sched::ProcessControlBlock &process, std::span<const PipeVector> vectors);
+i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &caller,
+                     const sched::OpenFileDescription &description, std::span<const PipeVector> vectors,
+                     bool &complete);
+// Native terminal ioctls (struct ok_termios); Linux uses TtyIoctlCodec in linux_bootstrap.hpp.
+i64 tty_terminal_control(Kernel &kernel, sched::ProcessControlBlock &process, const std::array<uptr, 6> &arguments);
+void tty_drain_outbox(Kernel &kernel);
 
 memory::ObjectHandle child_wait_object(sched::ProcessId pid, sched::ThreadId tid);
 // Return a ready child PID, ECHILD, EFAULT, zero for WNOHANG, or EAGAIN
@@ -745,7 +757,7 @@ i64 native_signal_action(Kernel &kernel, sched::ProcessControlBlock &process, co
 // Exec: SIG_IGN kept under the new numbering (MIPS), except SIGCHLD in a
 // native image; owed kernel signals dropped on a personality change.
 void private_jobctl_exec(Kernel &kernel, sched::ProcessControlBlock &process, Personality previous);
-// The exit commit: init adoption, then (S4) the terminal outbox, then the
+// The exit commit: init adoption, then the terminal outbox, then the
 // orphaned-group pass sending SIGHUP and SIGCONT (Linux kill_orphaned_pgrp).
 Status private_exit_commit(Kernel &kernel, sched::ProcessId pid, const PrivateChildExit::Completion &completion,
                            const PrivateChildExit::Adoption &adoption);

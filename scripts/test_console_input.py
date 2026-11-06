@@ -51,7 +51,7 @@ def main():
   for arch in arches:
    run([xmake,'build','-P',source,'-j2','-v','console-input-lease-'+arch],arch+'-build')
    binary=source/'bin'/('console-input-lease-'+arch);output=run([binary],arch+'-run')
-   expected='NATIVE_CONSOLE_LEASE_MODEL_PASS default_closed=1 pid1_authority=1 read_readv_poll=1 linux=1 fork_exec=1 revoke_epoch=1 adoption=1 noecho=1 ingress_bound=1024 guest=0'
+   expected='NATIVE_CONSOLE_LEASE_MODEL_PASS default_closed=1 pid1_authority=1 read_readv_poll=1 linux=1 fork_exec=1 revoke_epoch=1 adoption=1 ntty_compat_default=1 ingress_bound=1024 guest=0'
    if expected not in output:raise ValueError('missing exact runtime pressure success marker')
    record['rows'].append(dict(architecture=arch,status='passed',binary_sha256=sha(binary),output=output.strip()));save();print('PASS',arch,'hosted console lease dispatch',flush=True)
   for name,digest in record['source_sha256'].items():

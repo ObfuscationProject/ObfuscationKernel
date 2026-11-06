@@ -14,6 +14,7 @@
 #include "ok/sched/deadline.hpp"
 #include "ok/sched/console_input.hpp"
 #include "ok/sched/console_control.hpp"
+#include "ok/sched/terminal.hpp"
 #include "ok/sched/job_control.hpp"
 #include "ok/sched/wait_registration.hpp"
 #include "ok/smp/smp.hpp"
@@ -215,6 +216,7 @@ class ProcessControlBlock
         return pid_;
     }
     [[nodiscard]] u32 console_epoch() const { return console_epoch_; }
+    [[nodiscard]] bool ctty_detached() const { return ctty_detached_; }
     [[nodiscard]] std::string_view name() const
     {
         return name_.view();
@@ -333,6 +335,7 @@ class ProcessControlBlock
     ProcessId parent_pid_{0};
     ProcessGroup group_{};
     Session session_{};
+    bool ctty_detached_{}; // TIOCNOTTY by a non-leader (S8); fork inherits, setsid clears.
     bool has_execed_{}; // Successful image replacement since this process was forked.
     SignalState signals_{};
     ProcessResources resources_{};
@@ -582,12 +585,31 @@ class SchedulerState
     Status flush_console(u32 expected_epoch);
     [[nodiscard]] bool console_authorized(ProcessId pid, u32 expected_epoch = 0) const;
     [[nodiscard]] Status console_read_authority(ProcessId pid, u32 expected_epoch = 0) const;
-    Result<i64> console_control(ConsoleControlOperation operation, i32 value = 0);
     [[nodiscard]] bool console_readable(ProcessId pid, u32 expected_epoch) const;
     [[nodiscard]] Status shutdown_console_status() const;
-    Result<usize> read_console(ProcessId pid, u32 expected_epoch, std::span<std::byte> output);
+    // Console reads are planned, copied by the caller, then committed, so a
+    // failed copy-out consumes nothing. A plan that must wait gives would_block.
+    Result<TerminalLdisc::ReadPlan> prepare_console_read(ProcessId pid, u32 expected_epoch, usize count,
+                                                         bool nonblocking);
+    usize preview_console_read(const TerminalLdisc::ReadPlan &plan, std::span<std::byte> output,
+                               usize offset) const;
+    Status commit_console_read(const TerminalLdisc::ReadPlan &plan);
+    // One ingress byte through the console line discipline. ISIG signals go to
+    // the console outbox; echo stays in the ldisc for the runtime to emit.
     // `source` is the console's: interrupt once its UART line is bound.
-    void console_input(char value, WakeSource source = WakeSource::thread);
+    TerminalLdisc::Input console_input(char value, WakeSource source = WakeSource::thread);
+    // Terminals (docs/modules/tty.md sections 1, 4 and 5). The console is
+    // terminal 0; the runtime moves echo and output and drains the outbox.
+    [[nodiscard]] Terminal *terminal(TerminalRef ref);
+    [[nodiscard]] Terminal &console_terminal() { return console_terminal_; }
+    [[nodiscard]] const Terminal &console_terminal() const { return console_terminal_; }
+    [[nodiscard]] Result<TerminalSubject> terminal_subject(u16 description) const;
+    [[nodiscard]] std::optional<TerminalRef> controlling_terminal(const ProcessControlBlock &process) const;
+    [[nodiscard]] TerminalJobFacts terminal_job_facts(ProcessId pid, TerminalRef ref) const;
+    Status acquire_terminal(TerminalRef ref, ProcessControlBlock &caller, bool readable, AcquireMode mode);
+    // Association checks of the running caller; they precede every copy-in.
+    Status terminal_check(const TerminalSubject &subject, ConsoleControlOperation operation);
+    Result<TerminalReply> terminal_control(const TerminalSubject &subject, const TerminalRequest &request);
     // Trusted runtime ingress failure closes ownership before returning to userland.
     void abort_console_input();
     Status configure_cpus(usize cpu_count);
@@ -657,15 +679,13 @@ class SchedulerState
     [[nodiscard]] ProcessControlBlock *console_caller();
     void retire_console_process(ProcessId pid);
     void cancel_console_epoch(u32 epoch);
+    void reset_console_terminal();
+    [[nodiscard]] tty::Termios console_read_termios() const;
     private_pty::RawPtyTable<> pty_transport_{}; // One stable table; handles never cross scheduler domains.
     ConsoleInputLease console_input_{};
     std::array<u64, wake_source_count> wakes_{};
     u16 stopped_count_{};
-    struct ConsoleTerminal
-    {
-        u32 epoch{};
-        ProcessId session{}, foreground{};
-    } console_terminal_{};
+    Terminal console_terminal_{};
     [[nodiscard]] bool pipe_has_endpoint(u16 pipe, bool writable) const;
     friend class UnixReceive;
     friend class UnixAccept;

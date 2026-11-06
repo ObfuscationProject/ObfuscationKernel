@@ -13,7 +13,7 @@ from pathlib import Path
 # lines), diagnostics output that is runtime.cpp's own responsibility. New
 # responsibilities go into units: WT1.2's interval timers and interrupt report.
 LIMITS = {"lines": 688, "includes": 1}
-UNITS = ("loader", "vm", "wait", "futex", "pipe", "pty", "net", "signals", "jobctl", "timers", "interrupts", "entry")
+UNITS = ("loader", "vm", "wait", "futex", "pipe", "pty", "tty", "net", "signals", "jobctl", "timers", "interrupts", "entry")
 ROOT = Path(__file__).resolve().parents[1]
 
 

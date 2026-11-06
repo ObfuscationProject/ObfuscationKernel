@@ -1005,19 +1005,22 @@ Result<i64> PosixService::ioctl(Fd fd, u64, u64)
     return Status::not_terminal("ioctl request is not implemented for this descriptor");
 }
 
-Status PosixService::console_control_descriptor(Fd fd) const
+Result<sched::TerminalSubject> PosixService::terminal_descriptor(Fd fd) const
 {
-    const auto *entry = descriptor(fd);
-    if (!entry || !entry->used) return Status::bad_descriptor("bad console descriptor");
-    if (!entry->console && !entry->input_console)
-        return Status::not_terminal("descriptor is not a native console description");
-    return {};
+    const auto *slot = resources().files.entry(fd);
+    if (!scheduler_ || !slot || !slot->used) return Status::bad_descriptor("bad terminal descriptor");
+    return scheduler_->terminal_subject(slot->description);
 }
 
-Result<i64> PosixService::console_control(Fd fd, sched::ConsoleControlOperation operation, i32 value)
+Status PosixService::terminal_check(const sched::TerminalSubject &subject, sched::ConsoleControlOperation operation)
 {
-    if (auto status = console_control_descriptor(fd); !status) return status;
-    return scheduler_->console_control(operation, value);
+    return scheduler_->terminal_check(subject, operation);
+}
+
+Result<sched::TerminalReply> PosixService::terminal_control(const sched::TerminalSubject &subject,
+                                                            const sched::TerminalRequest &request)
+{
+    return scheduler_->terminal_control(subject, request);
 }
 
 Result<FileStatus> PosixService::fstat(Fd fd) const

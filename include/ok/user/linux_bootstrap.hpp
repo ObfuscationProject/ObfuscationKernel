@@ -467,27 +467,23 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
     const auto &a = decoded.value().arguments;
     if (is(Operation::ioctl))
     {
-        using Ioctl = lu::ConsoleIoctlCodec<Profile>;
-        std::optional<sched::ConsoleControlOperation> selected;
-        if (const auto operation = Ioctl::operation(a[1]))
-            switch (*operation)
-            {
-            case lu::ConsoleIoctlOperation::acquire: selected = sched::ConsoleControlOperation::acquire; break;
-            case lu::ConsoleIoctlOperation::get_sid: selected = sched::ConsoleControlOperation::get_session; break;
-            case lu::ConsoleIoctlOperation::get_pgrp: selected = sched::ConsoleControlOperation::get_foreground; break;
-            case lu::ConsoleIoctlOperation::set_pgrp: selected = sched::ConsoleControlOperation::set_foreground; break;
-            default: break;
-            }
-        const u64 argument = selected == sched::ConsoleControlOperation::acquire
+        using Ioctl = lu::TtyIoctlCodec<Profile>;
+        using TerminalOperation = sched::ConsoleControlOperation;
+        std::optional<TerminalOperation> selected;
+        if (const auto operation = Ioctl::operation(a[1])) selected = static_cast<TerminalOperation>(*operation);
+        const u64 argument = selected && console_control::argument(*selected) == lu::TerminalArgument::scalar
             ? static_cast<u32>(Ioctl::scalar_argument(a[2])) : a[2] & Codec::word_mask;
-        return console_control::dispatch<Codec::profile.big_endian>(
+        return console_control::dispatch<Ioctl>(
             Ioctl::scalar_argument(a[0]), selected, argument,
-            [&](i32 fd) { return kernel.posix().console_control_descriptor(fd); },
-            [&](i32 fd, sched::ConsoleControlOperation operation, i32 value) {
-                return kernel.posix().console_control(fd, operation, value);
+            [&](i32 fd) { return kernel.posix().terminal_descriptor(fd); },
+            [&](const sched::TerminalSubject &subject, TerminalOperation operation) {
+                return kernel.posix().terminal_check(subject, operation);
             },
             [&](u64 address, std::span<u8> bytes) {
                 return hw::copy_from_user(space, bytes.data(), static_cast<uptr>(address), bytes.size());
+            },
+            [&](const sched::TerminalSubject &subject, const sched::TerminalRequest &request) {
+                return kernel.posix().terminal_control(subject, request);
             },
             [&](u64 address, usize bytes) { return hw::user_range(space, static_cast<uptr>(address), bytes, true); },
             [&](u64 address, std::span<const u8> bytes) {

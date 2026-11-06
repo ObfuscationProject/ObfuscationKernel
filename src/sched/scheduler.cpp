@@ -731,6 +731,7 @@ SchedulerState::SchedulerState()
     descriptions_[2] =
         OpenFileDescription{.used = true, .writable = true, .console = true, .flags = 1u, .path = FixedString<96>{"stderr"}};
     initialize_resources(boot_resources_);
+    reset_console_terminal();
 }
 
 void SchedulerState::initialize_resources(ProcessResources &resources)
@@ -1215,6 +1216,7 @@ Result<ProcessId> SchedulerState::fork_process(ProcessId parent, bool publish)
     child->session_ = source->session_;
     child->has_execed_ = false;
     child->console_epoch_ = console_input_.inherit(source->console_epoch_);
+    child->ctty_detached_ = source->ctty_detached_;
     child->set_credentials(source->credentials());
     child->set_execution(source->execution());
     child->set_address_space_id(next_address_space_id_++);
@@ -1303,6 +1305,7 @@ Result<ProcessId> SchedulerState::create_session(ProcessId caller)
             return Status::permission("calling process identity already names a process group");
     process->session_.id = caller;
     process->group_.id = caller;
+    process->ctty_detached_ = false;
     if (console_input_.inherit(process->console_epoch_)) cancel_console_epoch(process->console_epoch_);
     return caller;
 }

@@ -218,7 +218,7 @@ void provider_exclusivity_stat_seek_and_controls(Fixture &f)
     std::array<std::byte, 1> out{};
     CHECK(f.posix.pread(pair[0], out, 0).status().code() == StatusCode::not_seekable);
     CHECK(f.posix.pwrite(pair[0], bytes("x"), 0).status().code() == StatusCode::not_seekable);
-    CHECK(f.posix.console_control_descriptor(pair[0]).code() == StatusCode::not_terminal);
+    CHECK(f.posix.terminal_descriptor(pair[0]).status().code() == StatusCode::not_terminal);
     CHECK(f.posix.close(pair[1]));
     const auto ready = f.posix.ready_events(pair[0], posix::ReadyEvents::none); CHECK(ready);
     CHECK(ready.value().events == posix::ReadyEvents::hangup); // HUP does not need a requested bit.

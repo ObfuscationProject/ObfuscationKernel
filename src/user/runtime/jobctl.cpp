@@ -546,7 +546,9 @@ Status private_exit_commit(Kernel &kernel, sched::ProcessId pid, const PrivateCh
 {
     if (auto status = PrivateChildExit::commit_adoption(kernel.scheduler(), adoption, private_signal_find); !status)
         return status;
-    // The terminal outbox drains here (S4), before the orphan signals (R11).
+    // Terminal signals precede the orphan signals (Linux disassociate_ctty runs
+    // before kill_orphaned_pgrp).
+    tty_drain_outbox(kernel);
     jobctl_orphan_pass(kernel, pid, completion.parent, adoption);
     return runtime_failure;
 }

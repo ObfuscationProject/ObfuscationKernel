@@ -164,7 +164,101 @@ void linux_profile(Kernel &kernel, Pid login, Pid peer)
     CHECK(Ioctl::encode_pid(expected, static_cast<i32>(login)));
     std::memcpy(mock::memory.data() + 128, expected.data(), expected.size());
     CHECK(dispatch(0, setter, output) == 0);
+    // Terminal requests copy exactly the profile's kernel struct sizes.
+    using Tty = lu::TtyIoctlCodec<Profile>;
+    using T = lu::TerminalIoctl;
+    mock::memory.fill(std::byte{0xa5});
+    CHECK(dispatch(0, *Tty::number(T::get_attributes), output) == 0);
+    CHECK(mock::memory[127] == std::byte{0xa5} && mock::memory[128 + Tty::termios_bytes] == std::byte{0xa5});
+    tty::Termios termios{};
+    tty::ForeignResidue residue{};
+    CHECK(Tty::decode_termios({reinterpret_cast<const u8 *>(mock::memory.data()) + 128, Tty::termios_bytes},
+                              termios, residue));
+    CHECK(termios == tty::console_compat_termios());
+    CHECK(dispatch(0, *Tty::number(T::set_now), output) == 0 && mock::last_input_size == Tty::termios_bytes);
+    CHECK(dispatch(0, *Tty::number(T::set_drain) | high, output) == 0);
+    CHECK(dispatch(0, *Tty::number(T::set_flush), endpoint) == -14);
+    CHECK(kernel.scheduler().console_terminal().termios == tty::console_compat_termios());
+    mock::memory.fill(std::byte{0xa5});
+    CHECK(dispatch(0, *Tty::number(T::get_window), output) == 0);
+    tty::WinSize window{};
+    CHECK(Tty::decode_window({reinterpret_cast<const u8 *>(mock::memory.data()) + 128, 8}, window));
+    CHECK(window == tty::console_window() && mock::memory[136] == std::byte{0xa5});
+    CHECK(dispatch(0, *Tty::number(T::set_window), output) == 0); // Unchanged: no SIGWINCH.
+    CHECK(dispatch(0, *Tty::number(T::input_pending), output) == 0);
+    CHECK(Tty::decode_int({reinterpret_cast<const u8 *>(mock::memory.data()) + 128, 4}).value() == 0);
+    CHECK(dispatch(0, *Tty::number(T::drain_break), 1) == 0);
+    CHECK(dispatch(0, *Tty::number(T::flush), high | 2) == 0);
+    CHECK(dispatch(0, *Tty::number(T::flush), 3) == -22);
+    for (const auto refused : {T::detach, T::get_pty_number, T::set_pty_lock})
+        CHECK(dispatch(0, *Tty::number(refused), output) == -25);
+    CHECK(Ioctl::encode_pid(expected, static_cast<i32>(login)));
+    std::memcpy(mock::memory.data() + 128, expected.data(), expected.size());
     process->resources().personality = sched::UserPersonality::native;
+}
+
+// struct ok_termios, ok_winsize and int on the console (native wire).
+void terminal_rows(Kernel &kernel, Pid login, Pid peer)
+{
+    auto &console = kernel.scheduler().console_terminal();
+    mock::memory.fill(std::byte{0xa5});
+    CHECK(ioctl(kernel, login, OK_TCGETS, output) == 0 && mock::memory[128 + 36] == std::byte{0xa5});
+    tty::Termios termios{};
+    tty::ForeignResidue residue{};
+    using Wire = tty::NativeTermiosWire<std::endian::native == std::endian::big>;
+    const auto stored = [&] {
+        return std::span<const u8>{reinterpret_cast<const u8 *>(mock::memory.data()) + 128, 36};
+    };
+    CHECK(Wire::decode(stored(), termios, residue) && termios == tty::console_compat_termios());
+    // A caller outside the lease reads attributes and window only; the
+    // association check precedes the copy-in.
+    CHECK(ioctl(kernel, 1, OK_TCGETS, output) == 0 && ioctl(kernel, 1, OK_TIOCGWINSZ, output, 1) == 0);
+    for (const u64 request : {OK_TCSETS, OK_TCSETSW, OK_TCSETSF, OK_TCSBRK, OK_TCFLSH, OK_TIOCSWINSZ, OK_FIONREAD,
+                              OK_TIOCSPGRP, OK_TIOCGPGRP, OK_TIOCSCTTY})
+        CHECK(ioctl(kernel, 1, request, hw::user_end) == -25);
+    CHECK(ioctl(kernel, login, OK_TCSETS, hw::user_end) == -14);
+    CHECK(ioctl(kernel, login, OK_TIOCNOTTY) == -25 && ioctl(kernel, login, 0x80045430U, output) == -25);
+    // Cooked mode: ICANON holds input until a line ends; FIONREAD counts complete lines.
+    auto cooked = tty::console_compat_termios();
+    cooked.lflag |= tty::lflag::icanon;
+    std::array<u8, 36> bytes{};
+    CHECK(Wire::encode(cooked, {}, bytes));
+    std::memcpy(mock::memory.data() + 128, bytes.data(), bytes.size());
+    CHECK(ioctl(kernel, login, OK_TCSETS, output) == 0 && console.termios == cooked);
+    native::input('h'); native::input('i');
+    CHECK(ioctl(kernel, login, OK_FIONREAD, output) == 0 && loaded_pid() == 0);
+    CHECK(invoke(kernel, login, N::read, {0, output, 8}) == std::pair(i64{-11}, false));
+    native::input('\r');
+    CHECK(ioctl(kernel, login, OK_FIONREAD, output) == 0 && loaded_pid() == 3);
+    CHECK(call(kernel, login, N::read, {0, output, 8}) == 3 && std::memcmp(mock::memory.data() + 128, "hi\n", 3) == 0);
+    // TCSETSF and TCFLSH discard input; TCSETSW and TCSBRK complete at once.
+    native::input('x'); native::input('\n');
+    std::memcpy(mock::memory.data() + 128, bytes.data(), bytes.size());
+    CHECK(ioctl(kernel, login, OK_TCSETSF, output) == 0 && !console.ldisc.buffered());
+    native::input('y'); native::input('\n');
+    CHECK(ioctl(kernel, login, OK_TCFLSH, 1) == 0 && console.ldisc.buffered() == 2);
+    CHECK(ioctl(kernel, login, OK_TCFLSH, 3) == -22 && ioctl(kernel, login, OK_TCFLSH, 0) == 0);
+    CHECK(!console.ldisc.buffered() && ioctl(kernel, login, OK_TCSBRK, 1) == 0);
+    std::memcpy(mock::memory.data() + 128, bytes.data(), bytes.size());
+    CHECK(ioctl(kernel, login, OK_TCSETSW, output) == 0);
+    // ICANON off with a partial line makes it readable (n_tty_set_termios).
+    native::input('p');
+    CHECK(Wire::encode(tty::console_compat_termios(), {}, bytes));
+    std::memcpy(mock::memory.data() + 128, bytes.data(), bytes.size());
+    CHECK(ioctl(kernel, login, OK_TCSETS, output) == 0 && console.termios == tty::console_compat_termios());
+    CHECK(call(kernel, login, N::read, {0, output, 8}) == 1 && mock::memory[128] == std::byte{'p'});
+    // Window: 24x80 by default; a change queues SIGWINCH for the foreground group.
+    CHECK(ioctl(kernel, login, OK_TIOCGWINSZ, output) == 0);
+    std::array<u16, 4> window{};
+    std::memcpy(window.data(), mock::memory.data() + 128, sizeof(window));
+    CHECK(window[0] == 24 && window[1] == 80 && window[2] == 0 && window[3] == 0);
+    window = {50, 132, 0, 0};
+    std::memcpy(mock::memory.data() + 128, window.data(), sizeof(window));
+    CHECK(ioctl(kernel, peer, OK_TIOCSWINSZ, output) == 0 && console.window == (tty::WinSize{50, 132, 0, 0}));
+    CHECK(!console.outbox_count); // Drained by the native ioctl path.
+    window = {24, 80, 0, 0};
+    std::memcpy(mock::memory.data() + 128, window.data(), sizeof(window));
+    CHECK(ioctl(kernel, login, OK_TIOCSWINSZ, output) == 0 && console.window == tty::console_window());
 }
 
 void readiness_handoff(Kernel &kernel, Pid login, Pid peer)
@@ -314,13 +408,16 @@ void lifecycle(Kernel &kernel)
     CHECK(ioctl(kernel, login, ~u64{0}, hw::user_end, 99) == -9);
     CHECK(ioctl(kernel, login, ~u64{0}, hw::user_end) == -25);
     CHECK(ioctl(kernel, login, OK_TIOCGSID, output) == -25);
-    CHECK(ioctl(kernel, login, OK_TIOCSCTTY, 1) == -95);
+    // TIOCSCTTY needs a session leader whatever its argument (no -95 any more).
+    CHECK(ioctl(kernel, login, OK_TIOCSCTTY, 1) == -1);
     CHECK(ioctl(kernel, login, OK_TIOCSCTTY) == -1);
     native::runtime_kernel = &kernel;
     native::input('p');
     CHECK(call(kernel, login, N::read, {0, output, 1}) == 1 && mock::memory[128] == std::byte{'p'});
     CHECK(call(kernel, login, N::setsid) == static_cast<i64>(login));
-    CHECK(ioctl(kernel, login, OK_TIOCSCTTY) == 0);
+    CHECK(ioctl(kernel, login, OK_TIOCSCTTY, 0, 1) == -1); // stdout is not readable.
+    CHECK(ioctl(kernel, login, OK_TIOCSCTTY, 1) == 0);      // Forced on an unowned console.
+    CHECK(ioctl(kernel, login, OK_TIOCSCTTY) == 0);         // Already the controlling terminal.
     mock::memory.fill(std::byte{0xa5});
     CHECK(ioctl(kernel, login, OK_TIOCGSID, output) == 0 && loaded_pid() == static_cast<i32>(login));
     CHECK(mock::memory[127] == std::byte{0xa5} && mock::memory[132] == std::byte{0xa5});
@@ -371,6 +468,7 @@ void lifecycle(Kernel &kernel)
     CHECK(call(kernel, detached, N::read, {0, output, 1}) == -5);
     CHECK(ioctl(kernel, detached, OK_TIOCGSID, output) == -25);
     CHECK(ioctl(kernel, detached, OK_TIOCSCTTY) == -1);
+    CHECK(ioctl(kernel, detached, OK_TIOCSCTTY, 1) == -1); // Forced on an owned console: no capabilities.
     CHECK(scheduler.console_authorized(login));
     // Same-session ordinary users may hand foreground authority back to the shell.
     scheduler.find(peer)->set_credentials({.uid=1000,.gid=1000,.euid=1000,.egid=1000,.suid=1000,.sgid=1000});
@@ -386,6 +484,7 @@ void lifecycle(Kernel &kernel)
     linux_profile<lu::Profile::mips>(kernel, login, peer);
     linux_profile<lu::Profile::mips64>(kernel, login, peer);
     linux_profile<lu::Profile::ppc>(kernel, login, peer);
+    terminal_rows(kernel, login, peer);
     readiness_handoff(kernel, login, peer);
     foreground_group_lifetime(kernel, login);
     CHECK(call(kernel, 1, N::console_revoke, {static_cast<uptr>(epoch)}) == 0);

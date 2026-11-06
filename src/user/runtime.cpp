@@ -683,6 +683,6 @@ void release_process(Kernel &kernel, u64 pid)
 void input(char value, sched::WakeSource source)
 {
     if (!shutdown_admission_closed && !native_shutdown_pending() && runtime_kernel != nullptr)
-        runtime_kernel->scheduler().console_input(value, source);
+        tty_console_input(*runtime_kernel, value, source);
 }
 } // namespace ok::user::native

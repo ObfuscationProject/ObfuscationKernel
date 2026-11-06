@@ -296,8 +296,11 @@ class PosixService final
                      fs::TimestampChange modification, u32 flags = 0);
     Result<i64> fcntl(Fd fd, u32 command, u64 argument);
     Result<i64> ioctl(Fd fd, u64 request, u64 argument);
-    [[nodiscard]] Status console_control_descriptor(Fd fd) const;
-    Result<i64> console_control(Fd fd, sched::ConsoleControlOperation operation, i32 value = 0);
+    // Terminal ioctl subjects are keyed by the open file description.
+    [[nodiscard]] Result<sched::TerminalSubject> terminal_descriptor(Fd fd) const;
+    Status terminal_check(const sched::TerminalSubject &subject, sched::ConsoleControlOperation operation);
+    Result<sched::TerminalReply> terminal_control(const sched::TerminalSubject &subject,
+                                                  const sched::TerminalRequest &request);
     [[nodiscard]] Result<std::string_view> current_directory();
     [[nodiscard]] std::string_view getcwd()
     {
