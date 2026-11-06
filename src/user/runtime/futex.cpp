@@ -233,7 +233,8 @@ struct FutexUserWords
 } // namespace
 struct RobustUserAccess
 {
-    // compare_exchange32 is one atomic compare-exchange on the backing frame.
+    // load32 and compare_exchange32 are single atomic operations on the
+    // backing frame.
     static constexpr bool indivisible_owner_update = true;
     Kernel &kernel;
     sched::ProcessControlBlock &process;
@@ -243,6 +244,12 @@ struct RobustUserAccess
     {
         return hw::copy_from_user(process.resources().native_space, bytes.data(),
             static_cast<uptr>(address), bytes.size());
+    }
+    Result<u32> load32(u64 address)
+    {
+        const auto pointer = static_cast<uptr>(address);
+        if (pointer % sizeof(u32)) return Status::fault("robust owner word is not aligned");
+        return futex_word_load(FutexUserWords{process.resources().native_space}, pointer, big_endian);
     }
     Result<u32> compare_exchange32(u64 address, u32 expected, u32 desired)
     {

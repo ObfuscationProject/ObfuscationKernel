@@ -8,6 +8,7 @@ struct Access
 {
     static constexpr bool indivisible_owner_update=true;
     Status read(u64,std::span<std::byte>);
+    Result<u32> load32(u64);
     Result<u32> compare_exchange32(u64,u32,u32);
     void wake_one(u64);
 };

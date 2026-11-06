@@ -13,7 +13,7 @@ template <lu::Profile P> struct Memory
     static constexpr bool be=RobustListCodec<P>::big_endian;
     std::array<std::byte,8192> bytes{};
     u64 denied_read=~u64{0},denied_write=~u64{0};
-    usize reads{},compares{},wakes{};
+    usize reads{},loads{},compares{},wakes{};
     u64 last_wake{};
     bool race{};
     void put(u64 address,u64 value,usize size=word)
@@ -27,6 +27,15 @@ template <lu::Profile P> struct Memory
            (address<=denied_read && denied_read-address<out.size()))return Status::fault();
         for(usize i=0;i<out.size();++i)out[i]=bytes[address+i];
         return Status::success();
+    }
+    // The owner word is loaded as one aligned 32-bit word, never byte-copied.
+    Result<u32> load32(u64 address)
+    {
+        ++loads;
+        CHECK(address%4==0);
+        if(address>bytes.size() || 4>bytes.size()-address ||
+           (address<=denied_read && denied_read-address<4))return Status::fault();
+        return static_cast<u32>(get(address,4));
     }
     Result<u32> compare_exchange32(u64 address,u32 expected,u32 value)
     {
@@ -53,6 +62,8 @@ template <lu::Profile P> void profile()
         CHECK(r.stop==RobustStop::complete && r.visited==1 && r.marked==1);
         CHECK(m.get(272,4)==((flags&robust_waiters)|robust_owner_died));
         CHECK(m.wakes==static_cast<usize>(bool(flags&robust_waiters)) && m.compares==1);
+        // Three head words and one next link are copied; the owner is loaded.
+        CHECK(m.reads==4 && m.loads==1);
     }
     {M m;m.head(256);m.put(256,64);m.put(272,99|robust_waiters,4);auto r=retire_robust_list<P>(64,17,m);CHECK(r.marked==0 && !m.wakes && !m.compares && m.get(272,4)==(99|robust_waiters));}
     for(u32 flags:{u32{0},robust_waiters,robust_owner_died,robust_waiters|robust_owner_died})
@@ -69,7 +80,7 @@ template <lu::Profile P> void profile()
     {M m;m.head(256,16,512);m.put(272,17|robust_waiters,4);m.put(528,17,4);m.denied_read=256;auto r=retire_robust_list<P>(64,17,m);CHECK(r.stop==RobustStop::node_fault && r.marked==1 && m.get(528,4)==17 && m.wakes==1);}
     {M m;m.head(256);m.put(256,64);m.put(272,17,4);m.denied_write=272;auto r=retire_robust_list<P>(64,17,m);CHECK(r.stop==RobustStop::word_fault && m.get(272,4)==17 && !m.wakes);}
     {M m;m.head(256,17);m.put(256,64);auto r=retire_robust_list<P>(64,17,m);CHECK(r.stop==RobustStop::word_fault && !m.compares);}
-    {M m;m.head(256);m.put(256,64);m.put(272,17|robust_waiters,4);m.race=true;auto r=retire_robust_list<P>(64,17,m);CHECK(r.stop==RobustStop::complete && !r.marked && m.compares==1 && m.get(272,4)==98 && !m.wakes);}
+    {M m;m.head(256);m.put(256,64);m.put(272,17|robust_waiters,4);m.race=true;auto r=retire_robust_list<P>(64,17,m);CHECK(r.stop==RobustStop::complete && !r.marked && m.compares==1 && m.get(272,4)==98 && !m.wakes && m.loads==2);}
     {M m;m.head(256,16,512);m.put(256,256);m.put(272,17,4);m.put(528,17|robust_waiters,4);auto r=retire_robust_list<P>(64,17,m);CHECK(r.stop==RobustStop::limit && r.visited==2048 && r.marked==2 && m.wakes==1 && m.compares==2);}
     // The current lock is handled before rejecting an inaccessible next link.
     // A failed current-owner copy, however, terminates before pending handling.
