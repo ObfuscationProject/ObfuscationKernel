@@ -152,58 +152,51 @@ void prepare_secondary_apic() noexcept
 }
 
 // TSC synchronization. Each starting CPU answers the boot CPU's commands over
-// one channel before it enters ok_smp_secondary_main; the boot CPU measures
-// the offset and corrects it (tsc_sync.hpp decides how). Starts are serial,
-// so one channel serves every CPU in turn.
+// its own channel before it enters ok_smp_secondary_main; the boot CPU
+// measures the offset and corrects it (tsc_sync.hpp decides how). A CPU whose
+// clock cannot be verified is not admitted: it parks before it reads the
+// clock, so its counter never moves the shared clock's floor.
 constexpr u32 msr_tsc_adjust = 0x3b;
-constexpr u32 feature_tsc_adjust = 1; // CPUID.7.0:EBX[1]
-constexpr u32 feature_invariant = 2;  // CPUID.80000007:EDX[8]
-constexpr u64 sync_ready_timeout_ns = 1'000'000'000;
+constexpr u32 feature_tsc_adjust = 1u << 0; // CPUID.7.0:EBX[1]
+constexpr u32 feature_invariant = 1u << 1;  // CPUID.80000007:EDX[8]
+constexpr u32 skew_tsc = 1u << 2;           // the debug knob's IA32_TSC write took
+constexpr u32 skew_software = 1u << 3;      // ...or its rewind went into the offset
+constexpr u32 sync_ready = 1u << 31;
+// As long as bring-up waits for a started CPU to come online.
+constexpr u64 sync_ready_timeout_ns = 2'000'000'000;
 constexpr u64 sync_answer_timeout_ns = 100'000'000;
 constexpr u64 sync_slack_ns = 100;
+// A tighter bound than this cannot be had (vCPU preemption, SMIs): the offset
+// is unknown, not small.
+constexpr u64 sync_max_error_ns = 50'000;
 
 enum SyncOp : u32
 {
     sync_sample = 1,
     sync_adjust = 2,
     sync_add_offset = 3,
-    sync_finish = 4,
+    sync_finish = 4, // admitted: leave and enter the kernel
 };
 
 // The boot CPU writes the first line, the starting CPU the second, so each
-// round moves one line each way.
+// round moves one line each way. One channel per CPU: a CPU the boot CPU gave
+// up on can only write its own. The boot CPU posts a command only after the
+// previous one's answer and abandons the CPU on silence, so a command and its
+// argument are never rewritten while the CPU may still read them.
 struct TscChannel
 {
-    alignas(64) std::atomic<u32> target{}; // the CPU being synchronized, 0 for none
-    std::atomic<u32> command{};            // sequence << 3 | SyncOp
+    alignas(64) std::atomic<u32> open{}; // the boot CPU still talks to this CPU
+    std::atomic<u32> command{};          // sequence << 3 | SyncOp
     std::atomic<u64> argument{};
-    alignas(64) std::atomic<u32> ready{};  // the target's id once it follows commands
-    std::atomic<u32> features{};
-    std::atomic<u32> answer{};             // answer_tag(sequence, cpu) | refused
+    alignas(64) std::atomic<u32> ready{}; // sync_ready | features | skew_*
+    std::atomic<u32> answer{};            // sequence << 1 | refused
     std::atomic<u64> reading{};
 };
-constinit TscChannel tsc_channel{};
-static_assert(ok::smp::max_cpus <= 16);
-
-// The answering CPU is part of the tag, so a CPU the boot CPU gave up on
-// cannot answer for the next one.
-constexpr u32 answer_tag(u32 sequence, ok::smp::CpuId cpu) noexcept
-{
-    return sequence << 5 | u32{cpu} << 1;
-}
+constinit TscChannel tsc_channels[ok::smp::max_cpus]{};
 u32 boot_tsc_features{};
-// The worst verdict over the CPUs synchronized so far, if any.
-bool tsc_synchronized{};
-tsc::Verdict tsc_verdict{};
-#if defined(OK_X86_TSC_SKEW_TEST)
-enum SkewInjected : u8
-{
-    skew_none,
-    skew_tsc,      // the IA32_TSC write took
-    skew_software, // the CPU ignored it; its clock offset carries the rewind
-};
-constinit std::atomic<u8> skew_injected{};
-#endif
+// Boot CPU only: which CPUs the handshake ran for, and their verdicts.
+u32 tsc_measured{};
+tsc::Verdict tsc_verdicts[ok::smp::max_cpus]{};
 
 u32 tsc_features() noexcept
 {
@@ -231,65 +224,72 @@ u64 cycles_for(u64 nanoseconds) noexcept
     return clock_frequency() / 1000 * nanoseconds / 1'000'000 + 1;
 }
 
+// A handshake reading: the clock counter taken after every earlier load
+// completed. LFENCE alone does not order RDTSC on AMD CPUs that leave it
+// non-serializing (this kernel does not set DE_CFG[1]); MFENCE does, there
+// and on Intel with the LFENCE that follows. Ordinary clock reads need no
+// such fence: the shared floor orders them across CPUs.
+u64 handshake_counter() noexcept
+{
+    asm volatile("mfence" : : : "memory");
+    return execution::x86::clock_counter();
+}
+
 // The boot CPU's side of tsc::SyncLink.
 class BootLink
 {
   public:
-    BootLink(ok::smp::CpuId cpu, bool can_adjust, u64 timeout) noexcept
-        : cpu_(cpu), can_adjust_(can_adjust), timeout_(timeout)
+    BootLink(TscChannel &channel, bool can_adjust, u64 timeout) noexcept
+        : channel_(channel), can_adjust_(can_adjust), timeout_(timeout)
     {
     }
     bool round(tsc::Round &round) noexcept
     {
-        round.before = execution::x86::clock_counter();
-        if (!post(sync_sample, 0))
+        round.before = handshake_counter();
+        if (post(sync_sample, 0) != tsc::Reply::done)
             return false;
-        round.after = execution::x86::clock_counter();
-        round.remote = tsc_channel.reading.load(std::memory_order_relaxed);
+        round.after = handshake_counter();
+        round.remote = channel_.reading.load(std::memory_order_relaxed);
         return true;
     }
     [[nodiscard]] bool can_adjust() const noexcept
     {
         return can_adjust_;
     }
-    bool adjust(i64 delta) noexcept
+    tsc::Reply adjust(i64 delta) noexcept
     {
-        return post(sync_adjust, static_cast<u64>(delta)) && !refused_;
+        return post(sync_adjust, static_cast<u64>(delta));
     }
-    bool add_offset(i64 offset) noexcept
+    tsc::Reply add_offset(i64 offset) noexcept
     {
-        return post(sync_add_offset, static_cast<u64>(offset)) && !refused_;
+        return post(sync_add_offset, static_cast<u64>(offset));
     }
-    bool finish() noexcept
+    bool admit() noexcept
     {
-        return post(sync_finish, 0);
+        return post(sync_finish, 0) == tsc::Reply::done;
     }
 
   private:
     // Waits for the answer on the raw TSC: the boot CPU's offset is zero.
-    bool post(SyncOp op, u64 argument) noexcept
+    tsc::Reply post(SyncOp op, u64 argument) noexcept
     {
         const u32 sequence = ++sequence_;
-        tsc_channel.argument.store(argument, std::memory_order_relaxed);
-        tsc_channel.command.store(sequence << 3 | op, std::memory_order_release);
+        channel_.argument.store(argument, std::memory_order_relaxed);
+        channel_.command.store(sequence << 3 | op, std::memory_order_release);
         const u64 start = read_tsc();
         for (;;)
         {
-            const u32 answer = tsc_channel.answer.load(std::memory_order_acquire);
-            if ((answer & ~1u) == answer_tag(sequence, cpu_))
-            {
-                refused_ = (answer & 1) != 0;
-                return true;
-            }
+            const u32 answer = channel_.answer.load(std::memory_order_acquire);
+            if (answer >> 1 == sequence)
+                return (answer & 1) != 0 ? tsc::Reply::refused : tsc::Reply::done;
             if (read_tsc() - start >= timeout_)
-                return false;
+                return tsc::Reply::silent;
             ArchOperations::spin_pause();
         }
     }
 
-    ok::smp::CpuId cpu_{};
+    TscChannel &channel_;
     bool can_adjust_{};
-    bool refused_{};
     u64 timeout_{};
     u32 sequence_{};
 };
@@ -319,8 +319,9 @@ void console_signed(i64 value) noexcept
 }
 
 // One line per started CPU, in TSC cycles: the first measurement, the
-// corrections and the last measurement.
-void report_tsc(ok::smp::CpuId cpu, u32 features, const tsc::Outcome &outcome) noexcept
+// corrections, the last measurement and what it was allowed beyond its bound.
+// A CPU that never joined reports only its result.
+void report_tsc(ok::smp::CpuId cpu, u32 features, const tsc::Outcome &outcome, const tsc::Policy &policy) noexcept
 {
     console("OK_TSC_SYNC scope=hardware cpu=");
     console_signed(cpu);
@@ -330,12 +331,14 @@ void report_tsc(ok::smp::CpuId cpu, u32 features, const tsc::Outcome &outcome) n
     console((features & feature_tsc_adjust) != 0 ? " tsc_adjust=1" : " tsc_adjust=0");
 #if defined(OK_X86_TSC_SKEW_TEST)
     console(" skew_test=");
-    console(cpu != 1 ? "none" : skew_injected.load(std::memory_order_relaxed) == skew_tsc ? "tsc" : "software");
+    console((features & skew_tsc) != 0 ? "tsc" : (features & skew_software) != 0 ? "software" : "none");
 #endif
     const auto field = [](std::string_view name, i64 value) {
         console(name);
         console_signed(value);
     };
+    field(" slack=", static_cast<i64>(policy.slack));
+    field(" max_error=", static_cast<i64>(policy.max_error));
     if (outcome.initial.valid())
     {
         field(" offset=", outcome.initial.offset);
@@ -347,90 +350,96 @@ void report_tsc(ok::smp::CpuId cpu, u32 features, const tsc::Outcome &outcome) n
     {
         field(" residual=", outcome.final.offset);
         field(" residual_error=", static_cast<i64>(outcome.final.error));
+        field(" tolerance=", static_cast<i64>(outcome.tolerance));
     }
     console("\n");
 }
 
-// The boot CPU's half, after the STARTUP IPIs: the CPU joins the channel
-// within the ready timeout or is reported unsynced.
-void synchronize_tsc(ok::smp::CpuId cpu) noexcept
+// The boot CPU's half, after the STARTUP IPIs: the CPU joins its channel
+// within the ready timeout, or it is unsynced. Only a verified CPU is told
+// to enter the kernel; any other finds its channel closed and parks.
+tsc::Verdict synchronize_tsc(ok::smp::CpuId cpu) noexcept
 {
-    auto &channel = tsc_channel;
+    auto &channel = tsc_channels[cpu];
     const u64 timeout = cycles_for(sync_answer_timeout_ns);
     const u64 ready_timeout = cycles_for(sync_ready_timeout_ns);
+    const tsc::Policy policy{.rounds = 64,
+                             .attempts = 16,
+                             .slack = cycles_for(sync_slack_ns),
+                             .max_error = cycles_for(sync_max_error_ns)};
     const u64 start = read_tsc();
-    while (channel.ready.load(std::memory_order_acquire) != cpu && read_tsc() - start < ready_timeout)
+    u32 ready = 0;
+    while ((ready = channel.ready.load(std::memory_order_acquire)) == 0 && read_tsc() - start < ready_timeout)
         ArchOperations::spin_pause();
     tsc::Outcome outcome{};
-    u32 features = boot_tsc_features;
-    if (channel.ready.load(std::memory_order_acquire) == cpu)
+    u32 features = ready;
+    if (ready != 0)
     {
-        features &= channel.features.load(std::memory_order_relaxed);
-        BootLink link{cpu, (features & feature_tsc_adjust) != 0, timeout};
-        outcome = tsc::synchronize(link, {.rounds = 64, .slack = cycles_for(sync_slack_ns)});
-        if (!link.finish())
+        features = ready & (boot_tsc_features | skew_tsc | skew_software); // what both CPUs have
+        BootLink link{channel, (features & feature_tsc_adjust) != 0, timeout};
+        outcome = tsc::synchronize(link, policy);
+        if (outcome.verdict != tsc::Verdict::unsynced && !link.admit())
             outcome.verdict = tsc::Verdict::unsynced;
     }
-    // A CPU still following (it stopped answering) leaves on seeing this.
-    channel.target.store(0, std::memory_order_release);
-    tsc_verdict = tsc_synchronized ? tsc::worse(tsc_verdict, outcome.verdict) : outcome.verdict;
-    tsc_synchronized = true;
-    report_tsc(cpu, features, outcome);
+    channel.open.store(0, std::memory_order_release);
+    tsc_measured |= u32{1} << cpu;
+    tsc_verdicts[cpu] = outcome.verdict;
+    report_tsc(cpu, features, outcome, policy);
+    return outcome.verdict;
 }
 
 #if defined(OK_X86_TSC_SKEW_TEST)
 // Debug knob: CPU 1 enters the handshake with its TSC rewound to 0x10 (where
 // IA32_TSC_ADJUST exists, the write moves it too). A CPU that ignores the
 // write (QEMU TCG does) gets the same rewind in its clock reads' offset.
-void inject_skew(ok::smp::CpuId cpu) noexcept
+// Returns which of the two happened.
+u32 inject_skew(ok::smp::CpuId cpu) noexcept
 {
     if (cpu != 1)
-        return;
+        return 0;
     constexpr u32 msr_tsc = 0x10;
     constexpr u64 rewound = 0x10;
     const u64 before = execution::x86::read_tsc_ordered();
     write_msr(msr_tsc, rewound);
     const u64 after = execution::x86::read_tsc_ordered();
     if (after < before / 2)
-    {
-        skew_injected.store(skew_tsc, std::memory_order_relaxed);
-        return;
-    }
+        return skew_tsc;
     execution::x86::this_cpu().tsc_offset = after - rewound;
-    skew_injected.store(skew_software, std::memory_order_relaxed);
+    return skew_software;
 }
 #endif
 
 // The starting CPU's half, on its own CpuLocal: answer until the boot CPU
-// finishes or gives up on this CPU.
-void follow_tsc_sync(ok::smp::CpuId cpu) noexcept
+// admits this CPU (true) or closes the channel (false).
+bool follow_tsc_sync(ok::smp::CpuId cpu) noexcept
 {
-    auto &channel = tsc_channel;
-    if (channel.target.load(std::memory_order_acquire) != cpu)
-        return;
+    auto &channel = tsc_channels[cpu];
+    if (channel.open.load(std::memory_order_acquire) == 0)
+        return false;
+    u32 features = tsc_features();
 #if defined(OK_X86_TSC_SKEW_TEST)
-    inject_skew(cpu);
+    features |= inject_skew(cpu);
 #endif
-    const u32 features = tsc_features();
-    channel.features.store(features, std::memory_order_relaxed);
-    channel.ready.store(cpu, std::memory_order_release);
+    channel.ready.store(sync_ready | features, std::memory_order_release);
     u32 seen = 0;
     for (;;)
     {
         u32 command;
         while ((command = channel.command.load(std::memory_order_acquire)) >> 3 == seen)
         {
-            if (channel.target.load(std::memory_order_acquire) != cpu)
-                return;
+            if (channel.open.load(std::memory_order_acquire) == 0)
+                return false;
             ArchOperations::spin_pause();
         }
+        if (channel.open.load(std::memory_order_acquire) == 0)
+            return false;
         seen = command >> 3;
         bool refused = false;
         const auto argument = channel.argument.load(std::memory_order_relaxed);
         switch (command & 7)
         {
         case sync_sample:
-            channel.reading.store(execution::x86::clock_counter(), std::memory_order_relaxed);
+            channel.reading.store(handshake_counter(), std::memory_order_relaxed);
             break;
         case sync_adjust:
             // TSC_ADJUST moves the TSC by the same amount it changes by.
@@ -445,10 +454,18 @@ void follow_tsc_sync(ok::smp::CpuId cpu) noexcept
         default:
             break;
         }
-        channel.answer.store(answer_tag(seen, cpu) | (refused ? 1u : 0u), std::memory_order_release);
+        channel.answer.store(seen << 1 | (refused ? 1u : 0u), std::memory_order_release);
         if ((command & 7) == sync_finish)
-            return;
+            return true;
     }
+}
+
+// Where a CPU the boot CPU did not admit stays: no clock reads, no record
+// updates; only INIT takes it out.
+[[noreturn]] void park() noexcept
+{
+    for (;;)
+        asm volatile("cli; hlt" : : : "memory");
 }
 
 } // namespace
@@ -540,10 +557,11 @@ Status start(ok::smp::CpuId cpu, u64 hardware_id, uptr, uptr stack_top)
     parameters.entry = reinterpret_cast<uptr>(&ok_x86_smp_secondary_entry);
     parameters.stack = stack_top;
     parameters.cpu = cpu;
-    tsc_channel.command.store(0, std::memory_order_relaxed);
-    tsc_channel.ready.store(0, std::memory_order_relaxed);
-    tsc_channel.answer.store(0, std::memory_order_relaxed);
-    tsc_channel.target.store(cpu, std::memory_order_release);
+    auto &channel = tsc_channels[cpu];
+    channel.command.store(0, std::memory_order_relaxed);
+    channel.ready.store(0, std::memory_order_relaxed);
+    channel.answer.store(0, std::memory_order_relaxed);
+    channel.open.store(1, std::memory_order_release);
     asm volatile("mfence" : : : "memory");
 
     // INIT, then STARTUP at the trampoline page; a second STARTUP only if the
@@ -559,15 +577,23 @@ Status start(ok::smp::CpuId cpu, u64 hardware_id, uptr, uptr stack_top)
         send_icr(hardware_id, delivery_startup | vector);
         delay_ns(200'000);
     }
-    // A CPU whose TSC cannot be verified still starts: the shared clock's
-    // floor keeps time from going back on it.
-    synchronize_tsc(cpu);
+    // Fail closed: a CPU whose clock is not verified stays parked, and
+    // bring-up marks it offline.
+    if (synchronize_tsc(cpu) == tsc::Verdict::unsynced)
+        return Status::io_error("x86 secondary TSC was not synchronized");
     return Status::success();
 }
 
 std::string_view clock_sync_name() noexcept
 {
-    return tsc_synchronized ? tsc::name(tsc_verdict) : std::string_view{};
+    const u32 mask = tsc_measured & ok::smp::online_mask();
+    if (mask == 0)
+        return {};
+    auto worst = tsc::Verdict::sync;
+    for (ok::smp::CpuId cpu = 0; cpu < ok::smp::max_cpus; ++cpu)
+        if ((mask & (u32{1} << cpu)) != 0)
+            worst = tsc::worse(worst, tsc_verdicts[cpu]);
+    return tsc::name(worst);
 }
 
 void send_ipi(ok::smp::CpuId, u64 hardware_id) noexcept
@@ -593,7 +619,8 @@ extern "C" [[noreturn]] void ok_x86_smp_secondary_entry(ok::smp::CpuId cpu)
     const ok::u32 mxcsr = 0x1f80;
     asm volatile("fninit; ldmxcsr %0" : : "m"(mxcsr) : "memory");
     ok::arch::execution::x86::load_cpu(cpu);
-    ok::arch::smp::follow_tsc_sync(cpu);
+    if (!ok::arch::smp::follow_tsc_sync(cpu))
+        ok::arch::smp::park();
     ok::arch::smp::prepare_secondary_apic();
     ok_smp_secondary_main(cpu);
 }

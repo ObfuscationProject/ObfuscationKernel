@@ -51,8 +51,11 @@ extern "C" CpuLocal ok_x86_cpu_locals[ok::smp::max_cpus];
     return *self;
 }
 
-// The TSC, read after earlier instructions and before later ones; unlike the
-// CPUID the i386 clock serializes with, LFENCE causes no VM exit.
+// The TSC, read after earlier instructions and before later ones where LFENCE
+// is dispatch-serializing (Intel; AMD only with DE_CFG[1], which this kernel
+// does not set). Unlike the CPUID the i386 clock serializes with, LFENCE
+// causes no VM exit. The shared clock's floor, not this fence, orders
+// readings across CPUs; the TSC handshake adds MFENCE (smp.cpp).
 [[nodiscard]] inline u64 read_tsc_ordered() noexcept
 {
     u32 low, high;

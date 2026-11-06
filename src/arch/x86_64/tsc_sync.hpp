@@ -112,22 +112,32 @@ enum class Verdict : u8
 
 struct Policy
 {
-    u32 rounds{64};
-    u64 slack{}; // cycles of offset tolerated beyond the bound
+    u32 rounds{64};         // rounds per measurement
+    u32 attempts{1};        // measurements tried until one is tight enough
+    u64 slack{};            // cycles of offset tolerated beyond the bound
+    u64 max_error{~u64{0}}; // a wider bound proves nothing either way
+};
+
+// How the target took a correction.
+enum class Reply : u8
+{
+    done,
+    refused, // it answered and changed nothing
+    silent,  // no answer in time: the change may or may not have taken
 };
 
 // The boot CPU's side of the channel to the target.
 // - round: one ping-pong; false once the target stopped answering.
 // - can_adjust: both CPUs have IA32_TSC_ADJUST.
-// - adjust(delta): the target adds `delta` to its TSC; false if refused.
+// - adjust(delta): the target adds `delta` to its TSC.
 // - add_offset(value): the target's clock reads subtract `value` more from
 //   then on.
 template <typename Link>
 concept SyncLink = requires(Link &link, Round &round, i64 value) {
     { link.round(round) } -> std::same_as<bool>;
     { link.can_adjust() } -> std::same_as<bool>;
-    { link.adjust(value) } -> std::same_as<bool>;
-    { link.add_offset(value) } -> std::same_as<bool>;
+    { link.adjust(value) } -> std::same_as<Reply>;
+    { link.add_offset(value) } -> std::same_as<Reply>;
 };
 
 struct Outcome
@@ -135,20 +145,28 @@ struct Outcome
     Verdict verdict{Verdict::unsynced};
     Estimate initial{}; // before any correction
     Estimate final{};   // the last measurement
-    i64 adjusted{};     // added to the target's TSC
-    i64 offset{};       // added to what the target's clock reads subtract
+    i64 adjusted{};     // sent to the target's TSC_ADJUST
+    i64 offset{};       // sent to what the target's clock reads subtract
+    u64 tolerance{};    // the offset `final` was allowed beyond its bound
 };
 
-// Up to `rounds` rounds; invalid if the target stopped answering.
-template <SyncLink Link> [[nodiscard]] Estimate measure(Link &link, u32 rounds)
+// The tightest round over up to `attempts` measurements of `rounds` rounds,
+// stopping at the first one within `max_error`; invalid if the target
+// stopped answering.
+template <SyncLink Link> [[nodiscard]] Estimate measure(Link &link, const Policy &policy)
 {
     Estimator estimator{};
-    for (u32 i = 0; i < rounds; ++i)
+    for (u32 attempt = 0; attempt == 0 || attempt < policy.attempts; ++attempt)
     {
-        Round round{};
-        if (!link.round(round))
-            return {};
-        estimator.add(round);
+        for (u32 i = 0; i < policy.rounds; ++i)
+        {
+            Round round{};
+            if (!link.round(round))
+                return {};
+            estimator.add(round);
+        }
+        if (estimator.estimate().error <= policy.max_error)
+            break;
     }
     return estimator.estimate();
 }
@@ -157,12 +175,21 @@ template <SyncLink Link> [[nodiscard]] Estimate measure(Link &link, u32 rounds)
 // IA32_TSC_ADJUST, else (or if that did not take) offset its clock reads, and
 // verify each correction by measuring again. A correction can leave a residue
 // as large as the bound of the measurement it was based on, so verification
-// tolerates that bound on top of the slack.
+// tolerates that bound on top of the slack. A measurement looser than
+// `max_error` or a correction left unanswered ends it unsynced: nothing more
+// is sent, and the caller must not trust the target's clock.
 template <SyncLink Link> [[nodiscard]] Outcome synchronize(Link &link, const Policy &policy)
 {
     Outcome outcome{};
-    outcome.initial = outcome.final = measure(link, policy.rounds);
-    if (!outcome.initial.valid())
+    const auto tight = [&](const Estimate &estimate) { return estimate.valid() && estimate.error <= policy.max_error; };
+    const auto verified = [&](const Estimate &basis) {
+        outcome.final = measure(link, policy);
+        outcome.tolerance = saturating_add(policy.slack, basis.error);
+        return tight(outcome.final) && within(outcome.final, outcome.tolerance);
+    };
+    outcome.initial = outcome.final = measure(link, policy);
+    outcome.tolerance = policy.slack;
+    if (!tight(outcome.initial))
         return outcome;
     if (within(outcome.initial, policy.slack))
     {
@@ -171,24 +198,32 @@ template <SyncLink Link> [[nodiscard]] Outcome synchronize(Link &link, const Pol
     }
     constexpr i64 lowest = static_cast<i64>(u64{1} << 63);
     auto basis = outcome.initial;
-    if (basis.offset != lowest && link.can_adjust() && link.adjust(-basis.offset))
+    if (basis.offset != lowest && link.can_adjust())
     {
-        outcome.adjusted = -basis.offset;
-        outcome.final = measure(link, policy.rounds);
-        if (!outcome.final.valid())
-            return outcome;
-        if (within(outcome.final, saturating_add(policy.slack, basis.error)))
+        const auto reply = link.adjust(-basis.offset);
+        if (reply == Reply::silent)
         {
-            outcome.verdict = Verdict::adjusted;
+            outcome.adjusted = -basis.offset;
             return outcome;
         }
-        basis = outcome.final;
+        if (reply == Reply::done)
+        {
+            outcome.adjusted = -basis.offset;
+            if (verified(basis))
+            {
+                outcome.verdict = Verdict::adjusted;
+                return outcome;
+            }
+            if (!tight(outcome.final))
+                return outcome;
+            basis = outcome.final;
+        }
     }
-    if (!link.add_offset(basis.offset))
+    const auto reply = link.add_offset(basis.offset);
+    if (reply == Reply::refused)
         return outcome;
     outcome.offset = basis.offset;
-    outcome.final = measure(link, policy.rounds);
-    if (within(outcome.final, saturating_add(policy.slack, basis.error)))
+    if (reply == Reply::done && verified(basis))
         outcome.verdict = Verdict::offset;
     return outcome;
 }

@@ -166,6 +166,10 @@ local function qemu_test_argv(target)
         table.insert(argv, "--smp")
         table.insert(argv, tostring(math.floor(cpus)))
     end
+    -- The skewed CPU must then be found and corrected, not reported in sync.
+    if get_config("x86_tsc_skew_test") then
+        table.insert(argv, "--tsc-skew-test")
+    end
     return argv
 end
 

@@ -1257,8 +1257,25 @@ void test_memory_limits_and_fork_inheritance()
     CHECK(sched::MemoryLimits::update(child_limits.data, {4096, 4096}, false) == 0);
     CHECK(parent_limits.data.current == 32 * 4096);
 }
+// Steps on different CPUs publish clock readings in any order; an older one
+// never moves the POSIX clock back, while the resolution follows the latest.
+void test_monotonic_time_moves_forward_only()
+{
+    static Fixture f;
+    f.posix.set_monotonic_time(5'000'000'123, 1000);
+    CHECK(f.posix.clock_gettime().seconds == 5 && f.posix.clock_gettime().nanoseconds == 123);
+    f.posix.set_monotonic_time(4'999'999'999, 1);
+    CHECK(f.posix.clock_gettime().seconds == 5 && f.posix.clock_gettime().nanoseconds == 123);
+    CHECK(f.posix.clock_getres().nanoseconds == 1);
+    f.posix.set_monotonic_time(5'000'000'123, 1);
+    CHECK(f.posix.clock_gettime().nanoseconds == 123);
+    f.posix.set_monotonic_time(6'000'000'000, 1);
+    CHECK(f.posix.clock_gettime().seconds == 6 && f.posix.clock_gettime().nanoseconds == 0);
+}
+
 int main()
 {
+    test_monotonic_time_moves_forward_only();
     test_unix_socketpair_lifetime_and_streams();
     test_fork_capacity_and_tid_identity();
     test_open_admission_and_errors();

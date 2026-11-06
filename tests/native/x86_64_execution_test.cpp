@@ -278,9 +278,19 @@ void check_secondary_cpu()
             "each CPU traps onto its own kernel stack");
     require(native::destroy_space(boot_space).ok() && native::destroy_space(secondary_space).ok(),
             "release per-CPU test spaces");
-    // The start ran the TSC handshake before the secondary's C++ entry.
+    // The start ran the TSC handshake before the secondary's C++ entry and
+    // admitted only a verified clock.
     const auto tsc = ok::arch::smp::clock_sync_name();
-    require(!tsc.empty(), "TSC handshake with the secondary");
+    // Compared by hand: this probe links no memcmp.
+    const auto is = [&](std::string_view name) {
+        if (tsc.size() != name.size())
+            return false;
+        for (usize i = 0; i < name.size(); ++i)
+            if (tsc[i] != name[i])
+                return false;
+        return true;
+    };
+    require(is("sync") || is("adjusted") || is("offset"), "verified TSC handshake with the secondary");
     print("OK_NATIVE_SMP scope=hardware cpus=2 secondary_user=pass syscall=pass local_timer=pass ipi=pass "
           "shootdown=pass boot_pit=pass tsc=");
     print(tsc);

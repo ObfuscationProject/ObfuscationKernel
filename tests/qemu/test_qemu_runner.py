@@ -177,6 +177,22 @@ def make_smp_output(arch: str, smp_line: str | None) -> str:
     output = make_output(arch) + "OK_SMP scope=model topology=pass per_cpu=pass ap_start=unsupported\n"
     return output + (smp_line + "\n" if smp_line else "")
 
+def tsc_line(cpu: int, result: str = "sync", offset: int = 165, error: int = 552, residual: int | None = None,
+             residual_error: int | None = None, tolerance: int | None = None, skew: str | None = None) -> str:
+    """An x86_64 OK_TSC_SYNC line as the kernel prints it (cycles; 100 ns slack, 50 us bound at ~3 GHz)."""
+    skew_field = f" skew_test={skew}" if skew is not None else ""
+    residual = offset if residual is None else residual
+    residual_error = error if residual_error is None else residual_error
+    tolerance = 301 if tolerance is None else tolerance
+    return (f"OK_TSC_SYNC scope=hardware cpu={cpu} result={result} invariant=0 tsc_adjust=0{skew_field} slack=301 "
+            f"max_error=150001 offset={offset} error={error} adjusted=0 software={offset if result == 'offset' else 0} "
+            f"residual={residual} residual_error={residual_error} tolerance={tolerance}\n")
+
+
+def tsc_lines(secondaries: int) -> str:
+    return "".join(tsc_line(cpu) for cpu in range(1, secondaries + 1))
+
+
 def make_output(arch: str, fields: dict[str, str] | None = None, include_display_text: bool = True) -> str:
     merged = {
         "arch": arch,
@@ -336,11 +352,11 @@ class QemuRunnerValidationTests(unittest.TestCase):
         self.assertIn("scope.OK_MODULES=unspecified", summary)
         self.assertIn("scope.OK_IRQ=absent", summary)
 
-    def validate_smp(self, arch: str, output: str, cpus: int) -> tuple[int, str, str]:
+    def validate_smp(self, arch: str, output: str, cpus: int, tsc_skew_test: bool = False) -> tuple[int, str, str]:
         stdout = io.StringIO()
         stderr = io.StringIO()
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            code = qemu_test.validate_output(arch, output, 0, False, cpus)
+            code = qemu_test.validate_output(arch, output, 0, False, cpus, tsc_skew_test)
         return code, stdout.getvalue(), stderr.getvalue()
 
     def test_single_cpu_run_ignores_missing_hardware_smp_marker(self) -> None:
@@ -355,7 +371,7 @@ class QemuRunnerValidationTests(unittest.TestCase):
             with self.subTest(arch=arch):
                 line = "OK_SMP scope=hardware cpus=4 online=4 ap_start=psci ipi=pass"
                 if arch in qemu_test.TSC_SYNC_QEMU_ARCHES:
-                    line += " tsc=sync"
+                    line = tsc_lines(3) + line + " tsc=sync"
                 code, stdout, stderr = self.validate_smp(arch, make_smp_output(arch, line), 4)
                 self.assertEqual(code, 0, stderr)
                 self.assertIn(f"OK_QEMU_SMP_TEST arch={arch} smp=4 cpus=4 online=4", stdout)
@@ -363,18 +379,74 @@ class QemuRunnerValidationTests(unittest.TestCase):
     def test_x86_64_smp_report_names_its_tsc_synchronization(self) -> None:
         self.assertEqual(qemu_test.TSC_SYNC_QEMU_ARCHES, ("x86_64",))
         base = "OK_SMP scope=hardware cpus=2 online=2 ap_start=sipi ipi=pass"
-        for result in ("sync", "adjusted", "offset", "unsynced"):
-            with self.subTest(result=result):
-                code, stdout, stderr = self.validate_smp("x86_64", make_smp_output("x86_64", f"{base} tsc={result}"), 2)
-                self.assertEqual(code, 0, stderr)
-                self.assertIn(f"OK_QEMU_SMP_TEST arch=x86_64 smp=2 cpus=2 online=2 ap_start=sipi ipi=pass tsc={result}",
-                              stdout)
-        for line in (base, f"{base} tsc=", f"{base} tsc=skewed"):
+        code, stdout, stderr = self.validate_smp("x86_64", make_smp_output("x86_64", tsc_lines(1) + base + " tsc=sync"),
+                                                 2)
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("OK_QEMU_SMP_TEST arch=x86_64 smp=2 cpus=2 online=2 ap_start=sipi ipi=pass tsc=sync", stdout)
+        # Missing or unknown, an unsynced CPU (never admitted, so never online),
+        # or a correction where every QEMU vCPU reads one counter.
+        for line in (base, f"{base} tsc=", f"{base} tsc=skewed", f"{base} tsc=unsynced", f"{base} tsc=offset"):
             with self.subTest(line=line):
-                code, stdout, stderr = self.validate_smp("x86_64", make_smp_output("x86_64", line), 2)
+                output = make_smp_output("x86_64", tsc_lines(1) + line)
+                code, stdout, stderr = self.validate_smp("x86_64", output, 2)
                 self.assertEqual(code, 14)
-                self.assertIn("tsc=", stderr)
+                self.assertIn("tsc", stderr)
                 self.assertNotIn("OK_QEMU_SMP_TEST", stdout)
+
+    def test_x86_64_tsc_lines_must_back_the_smp_field(self) -> None:
+        smp = "OK_SMP scope=hardware cpus=3 online=3 ap_start=sipi ipi=pass tsc=sync"
+        broken = {
+            "missing cpu": tsc_line(1),
+            "duplicate cpu": tsc_line(1) + tsc_line(1) + tsc_line(2),
+            "unsynced cpu": tsc_line(1) + tsc_line(2, result="unsynced"),
+            "corrected cpu": tsc_line(1) + tsc_line(2, result="offset", offset=-90_000, residual=10),
+            "sync beyond bound": tsc_line(1) + tsc_line(2, offset=900, error=500),
+            "too wide": tsc_line(1) + tsc_line(2, error=200_000),
+            "no fields": tsc_line(1) + "OK_TSC_SYNC scope=hardware cpu=2 result=sync\n",
+        }
+        for name, lines in broken.items():
+            with self.subTest(name=name):
+                code, stdout, stderr = self.validate_smp("x86_64", make_smp_output("x86_64", lines + smp), 3)
+                self.assertEqual(code, 14, stdout)
+                self.assertIn("TSC synchronization", stderr)
+        code, _, stderr = self.validate_smp("x86_64", make_smp_output("x86_64", tsc_lines(2) + smp), 3)
+        self.assertEqual(code, 0, stderr)
+        # The model-scope line of a hosted run is not a hardware report.
+        model = "OK_TSC_SYNC scope=model estimator=pass decisions=pass sweep=pass\n"
+        code, _, stderr = self.validate_smp("x86_64", make_smp_output("x86_64", model + tsc_lines(2) + smp), 3)
+        self.assertEqual(code, 0, stderr)
+
+    def test_x86_64_skew_knob_requires_a_detected_and_corrected_cpu(self) -> None:
+        smp = "OK_SMP scope=hardware cpus=4 online=4 ap_start=sipi ipi=pass tsc={}"
+        corrected = tsc_line(1, result="offset", skew="software", offset=-25_090_269_788, error=778, residual=-279,
+                             residual_error=596, tolerance=1079)
+        others = tsc_line(2, skew="none") + tsc_line(3, skew="none")
+        code, stdout, stderr = self.validate_smp(
+            "x86_64", make_smp_output("x86_64", corrected + others + smp.format("offset")), 4, True)
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("tsc=offset", stdout)
+        adjusted = corrected.replace("result=offset", "result=adjusted").replace("skew_test=software", "skew_test=tsc")
+        code, _, stderr = self.validate_smp(
+            "x86_64", make_smp_output("x86_64", adjusted + others + smp.format("adjusted")), 4, True)
+        self.assertEqual(code, 0, stderr)
+        broken = {
+            "undetected": (tsc_line(1, skew="software") + others, "sync"),
+            "knob absent": (tsc_line(1) + tsc_line(2) + tsc_line(3), "sync"),
+            "knob did not run": (corrected.replace("skew_test=software", "skew_test=none") + others, "offset"),
+            "residual too large": (corrected.replace("residual=-279", "residual=-5000") + others, "offset"),
+            "summary disagrees": (corrected + others, "sync"),
+            "other cpu corrected": (corrected + tsc_line(2, result="offset", skew="none", offset=-90_000, residual=3)
+                                    + tsc_line(3, skew="none"), "offset"),
+        }
+        for name, (lines, summary) in broken.items():
+            with self.subTest(name=name):
+                code, _, stderr = self.validate_smp(
+                    "x86_64", make_smp_output("x86_64", lines + smp.format(summary)), 4, True)
+                self.assertEqual(code, 14, name)
+                self.assertIn("TSC synchronization", stderr)
+        # Without the knob the same corrected CPU fails: QEMU vCPUs share one counter.
+        code, _, _ = self.validate_smp("x86_64", make_smp_output("x86_64", corrected + others + smp.format("offset")), 4)
+        self.assertEqual(code, 14)
 
     def test_tsc_field_is_optional_on_shared_counter_profiles(self) -> None:
         for arch in ("aarch64", "rv64"):
@@ -386,8 +458,9 @@ class QemuRunnerValidationTests(unittest.TestCase):
                 code, stdout, stderr = self.validate_smp(arch, make_smp_output(arch, line + " tsc=sync"), 2)
                 self.assertEqual(code, 0, stderr)
                 self.assertIn("tsc=sync", stdout)
-                code, _, _ = self.validate_smp(arch, make_smp_output(arch, line + " tsc=bogus"), 2)
-                self.assertEqual(code, 14)
+                for value in ("bogus", "unsynced"):
+                    code, _, _ = self.validate_smp(arch, make_smp_output(arch, f"{line} tsc={value}"), 2)
+                    self.assertEqual(code, 14)
 
     def test_smp_profiles_reject_partial_bringup_or_failed_ipi(self) -> None:
         rejected = (

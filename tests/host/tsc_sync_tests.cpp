@@ -29,8 +29,9 @@ struct Random
 };
 
 // Two CPUs in boot-CPU cycles. The target's clock reads its TSC (boot TSC +
-// skew + whatever TSC_ADJUST added) minus its software offset. Each message
-// takes a random delay; `outbound` and `inbound` add a fixed one-way cost.
+// skew + drift + whatever TSC_ADJUST added) minus its software offset. Each
+// message takes a random delay; `outbound` and `inbound` add a fixed one-way
+// cost, and `wide_rounds` rounds first take `stall` more each.
 struct Pair
 {
     i64 skew{};
@@ -40,10 +41,16 @@ struct Pair
     bool has_adjust{};
     bool adjust_takes{true}; // false: the MSR write is accepted but ignored
     bool offset_accepted{true};
-    u32 answers{~u32{0}};     // rounds answered before the target goes silent
+    bool adjust_answers{true}; // false: the change takes, the answer is late
+    bool offset_answers{true};
+    u32 answers{~u32{0}}; // rounds answered before the target goes silent
+    u32 wide_rounds{};
+    u64 stall{};
+    i64 drift_ppm{}; // the target's counter runs this much faster
     Random random{0x9e3779b97f4a7c15};
 
-    u64 now{1'000'000'000'000};
+    u64 start{1'000'000'000'000};
+    u64 now{start};
     i64 adjusted{};
     i64 software{};
     u32 rounds{};
@@ -52,17 +59,18 @@ struct Pair
 
     [[nodiscard]] i64 residual() const
     {
-        return skew + adjusted - software;
+        return skew + static_cast<i64>(now - start) * drift_ppm / 1'000'000 + adjusted - software;
     }
     bool round(tsc::Round &round)
     {
         if (rounds == answers)
             return false;
+        const u64 extra = rounds < wide_rounds ? stall : 0;
         ++rounds;
         round.before = now;
-        now += outbound + random.below(noise);
+        now += outbound + random.below(noise) + extra / 2;
         round.remote = now + static_cast<u64>(residual());
-        now += inbound + random.below(noise);
+        now += inbound + random.below(noise) + extra - extra / 2;
         round.after = now;
         now += random.below(noise);
         return true;
@@ -71,38 +79,40 @@ struct Pair
     {
         return has_adjust;
     }
-    bool adjust(i64 delta)
+    tsc::Reply adjust(i64 delta)
     {
         ++adjust_calls;
         if (!has_adjust)
-            return false;
+            return tsc::Reply::refused;
         if (adjust_takes)
             adjusted += delta;
-        return true;
+        return adjust_answers ? tsc::Reply::done : tsc::Reply::silent;
     }
-    bool add_offset(i64 value)
+    tsc::Reply add_offset(i64 value)
     {
         ++offset_calls;
         if (!offset_accepted)
-            return false;
+            return tsc::Reply::refused;
         software += value;
-        return true;
+        return offset_answers ? tsc::Reply::done : tsc::Reply::silent;
     }
 };
 static_assert(tsc::SyncLink<Pair>);
 
-constexpr tsc::Policy policy{.rounds = 64, .slack = 200};
+constexpr tsc::Policy policy{.rounds = 64, .attempts = 4, .slack = 200, .max_error = 20'000};
 
 // After a verified verdict the true residue is within the last estimate's
-// error of that estimate, which passed with its own error, the slack and the
-// error of the measurement the correction was based on (at most half the
-// widest possible round).
+// error of that estimate, which passed with its own error plus the tolerance:
+// the slack and the error of the measurement the correction was based on
+// (at most half the widest possible round, and never above max_error).
 void require_bounded(const Pair &pair, const tsc::Outcome &outcome)
 {
     assert(outcome.verdict != tsc::Verdict::unsynced);
     const u64 widest = (pair.outbound + pair.inbound + 2 * pair.noise) / 2 + 1;
     assert(outcome.initial.error <= widest && outcome.final.error <= widest);
-    assert(tsc::magnitude(pair.residual()) <= 2 * outcome.final.error + policy.slack + widest);
+    assert(outcome.final.error <= policy.max_error && outcome.tolerance <= policy.slack + policy.max_error);
+    assert(outcome.tolerance <= policy.slack + widest);
+    assert(tsc::magnitude(pair.residual()) <= 2 * outcome.final.error + outcome.tolerance);
 }
 
 void estimator()
@@ -273,19 +283,88 @@ void decisions()
                 return true;
             }
             bool can_adjust() const { return true; }
-            bool adjust(i64)
+            tsc::Reply adjust(i64)
             {
                 ++adjust_calls;
-                return true;
+                return tsc::Reply::done;
             }
-            bool add_offset(i64 value)
+            tsc::Reply add_offset(i64 value)
             {
                 lag -= static_cast<u64>(value);
-                return true;
+                return tsc::Reply::done;
             }
         } extreme;
         const auto outcome = tsc::synchronize(extreme, policy);
         assert(extreme.adjust_calls == 0 && outcome.verdict == tsc::Verdict::offset && extreme.lag == 0);
+    }
+    {
+        // The adjustment takes but its answer comes too late: the boot CPU
+        // cannot tell whether it took, so it sends nothing more (in
+        // particular no software offset on top) and measures no more.
+        Pair pair{.skew = 5'000'000, .has_adjust = true, .adjust_answers = false};
+        const auto outcome = tsc::synchronize(pair, policy);
+        assert(outcome.verdict == tsc::Verdict::unsynced && outcome.adjusted == -outcome.initial.offset);
+        assert(pair.adjust_calls == 1 && pair.offset_calls == 0 && pair.rounds == policy.rounds);
+    }
+    {
+        // The same for a late software offset.
+        Pair pair{.skew = 5'000'000, .offset_answers = false};
+        const auto outcome = tsc::synchronize(pair, policy);
+        assert(outcome.verdict == tsc::Verdict::unsynced && pair.offset_calls == 1 && pair.rounds == policy.rounds);
+    }
+    {
+        // A late answer to an adjustment that did not take: still no second
+        // correction.
+        Pair pair{.skew = -9'000'000, .has_adjust = true, .adjust_takes = false, .adjust_answers = false};
+        const auto outcome = tsc::synchronize(pair, policy);
+        assert(outcome.verdict == tsc::Verdict::unsynced && pair.offset_calls == 0 && pair.software == 0);
+    }
+    {
+        // Every round wider than max_error: an offset that hides inside the
+        // bound is not "sync", and nothing is corrected.
+        Pair pair{.skew = 15'000, .noise = 0, .wide_rounds = ~u32{0}, .stall = 2 * policy.max_error + 2};
+        const auto outcome = tsc::synchronize(pair, policy);
+        assert(tsc::within(outcome.initial, policy.slack) && outcome.initial.error > policy.max_error);
+        assert(outcome.verdict == tsc::Verdict::unsynced && pair.adjust_calls == 0 && pair.offset_calls == 0);
+        assert(pair.rounds == policy.rounds * policy.attempts);
+    }
+    {
+        // Wide rounds for the first two measurements only: the third is tight
+        // enough and decides.
+        Pair pair{.noise = 0, .wide_rounds = 2 * policy.rounds, .stall = 2 * policy.max_error + 2};
+        const auto outcome = tsc::synchronize(pair, policy);
+        assert(outcome.verdict == tsc::Verdict::sync && pair.rounds == 3 * policy.rounds);
+        assert(outcome.initial.error <= policy.max_error && outcome.initial.rounds == 3 * policy.rounds);
+    }
+    {
+        // A tight first measurement, then the target stalls on every round:
+        // the correction cannot be verified.
+        Pair pair{.skew = 5'000'000, .noise = 0, .stall = 2 * policy.max_error + 2};
+        struct LateStall : Pair
+        {
+            bool round(tsc::Round &round)
+            {
+                wide_rounds = rounds >= policy.rounds ? ~u32{0} : 0;
+                return Pair::round(round);
+            }
+        } late{pair};
+        const auto outcome = tsc::synchronize(late, policy);
+        assert(outcome.verdict == tsc::Verdict::unsynced && late.offset_calls == 1);
+        assert(outcome.final.valid() && outcome.final.error > policy.max_error);
+    }
+    {
+        // A slow rate difference is corrected like a skew...
+        Pair pair{.skew = 1'000'000, .drift_ppm = 1};
+        const auto outcome = tsc::synchronize(pair, policy);
+        assert(outcome.verdict == tsc::Verdict::offset);
+        require_bounded(pair, outcome);
+    }
+    {
+        // ...but a counter that runs 5% fast moves away faster than either
+        // correction can be verified.
+        Pair pair{.skew = 1'000'000, .has_adjust = true, .drift_ppm = 50'000};
+        const auto outcome = tsc::synchronize(pair, policy);
+        assert(outcome.verdict == tsc::Verdict::unsynced && pair.adjust_calls == 1 && pair.offset_calls == 1);
     }
 }
 

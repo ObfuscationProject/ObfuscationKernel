@@ -29,9 +29,9 @@ Status prepare_boot_cpu(const boot::CpuTopologyMap &map);
 // ok_smp_secondary_main(cpu). Returns once the start request was issued.
 Status start(ok::smp::CpuId cpu, u64 hardware_id, uptr stack_lower, uptr stack_top);
 // How the started CPUs' clock counters agree with the boot CPU's, for the
-// OK_SMP line's tsc= field (x86_64: sync, adjusted, offset or unsynced, the
-// worst over the started CPUs), or empty where every CPU reads one counter or
-// none was started.
+// OK_SMP line's tsc= field (x86_64: sync, adjusted or offset, the worst over
+// the online secondaries; start() fails for a CPU it could not verify), or
+// empty where every CPU reads one counter or no secondary is online.
 [[nodiscard]] std::string_view clock_sync_name() noexcept;
 // Raise the IPI line of `cpu`; the reasons are already in its record.
 void send_ipi(ok::smp::CpuId cpu, u64 hardware_id) noexcept;

@@ -45,9 +45,12 @@ CAPABILITIES_BY_ARCH = {
 # The hardware OK_SMP line must precede OK_TEST_PASS: run_until_marker stops
 # reading there on every profile without a debug exit device.
 SMP_QEMU_ARCHES = ("x86_64", "aarch64", "rv64")
-# Profiles whose OK_SMP line names the TSC synchronization result (tsc=).
+# Profiles whose OK_SMP line names the TSC synchronization result (tsc=),
+# with one OK_TSC_SYNC line per started secondary before it.
 TSC_SYNC_QEMU_ARCHES = ("x86_64",)
 TSC_SYNC_RESULTS = ("sync", "adjusted", "offset", "unsynced")
+# The kernel admits only a verified CPU, so an online one is never unsynced.
+TSC_SYNC_VERIFIED = ("sync", "adjusted", "offset")
 MAX_QEMU_CPUS = 8
 
 
@@ -355,7 +358,59 @@ def hardware_smp_fields(lines: list[str]) -> dict[str, str] | None:
     return None
 
 
-def validate_smp(arch: str, lines: list[str], cpus: int) -> int:
+def tsc_sync_problem(lines: list[str], cpus: int, tsc: str, skew_test: bool) -> str | None:
+    """Check the per-CPU OK_TSC_SYNC lines behind OK_SMP's tsc= field.
+
+    Under QEMU TCG every vCPU reads one host counter, so each secondary must
+    measure in sync. With the x86_tsc_skew_test knob CPU 1 starts skewed and
+    must be detected and corrected (offset or adjusted) to a residual within
+    the bound the kernel verified, plus its own measurement error.
+    """
+    reports: dict[int, dict[str, str]] = {}
+    for line in lines:
+        if line.startswith("OK_TSC_SYNC "):
+            fields = parse_fields(line)
+            if fields.get("scope") == "hardware" and fields.get("cpu", "").isdigit():
+                if int(fields["cpu"]) in reports:
+                    return f"cpu {fields['cpu']} reported twice"
+                reports[int(fields["cpu"])] = fields
+    if sorted(reports) != list(range(1, cpus)):
+        return f"expected one OK_TSC_SYNC line for each of cpus 1..{cpus - 1}, got {sorted(reports)}"
+    worst = "sync"
+    for cpu, fields in sorted(reports.items()):
+        result = fields.get("result")
+        if result not in TSC_SYNC_VERIFIED:
+            return f"cpu {cpu} result={result}"
+        if TSC_SYNC_VERIFIED.index(result) > TSC_SYNC_VERIFIED.index(worst):
+            worst = result
+        try:
+            slack, max_error = int(fields["slack"]), int(fields["max_error"])
+            offset, error = int(fields["offset"]), int(fields["error"])
+            residual, residual_error = int(fields["residual"]), int(fields["residual_error"])
+            tolerance = int(fields["tolerance"])
+        except (KeyError, ValueError):
+            return f"cpu {cpu} lacks its measurement fields"
+        skewed = skew_test and cpu == 1
+        if skewed:
+            if fields.get("skew_test") not in ("tsc", "software"):
+                return f"cpu 1 skew_test={fields.get('skew_test')}, expected the knob to have skewed it"
+            if result == "sync" or abs(offset) <= error + slack:
+                return f"cpu 1 skew went undetected: result={result} offset={offset} error={error}"
+        elif result != "sync":
+            return f"cpu {cpu} result={result}; every QEMU vCPU reads one counter"
+        # The kernel's own acceptance test, recomputed from what it printed.
+        if max(error, residual_error) > max_error:
+            return f"cpu {cpu} measured with error={error} residual_error={residual_error} above {max_error}"
+        if result == "sync" and abs(offset) > error + slack:
+            return f"cpu {cpu} sync with offset={offset} beyond error={error} + slack={slack}"
+        if result != "sync" and abs(residual) > residual_error + tolerance:
+            return f"cpu {cpu} residual={residual} beyond residual_error={residual_error} + tolerance={tolerance}"
+    if worst != tsc:
+        return f"OK_SMP tsc={tsc} but the worst OK_TSC_SYNC result is {worst}"
+    return None
+
+
+def validate_smp(arch: str, lines: list[str], cpus: int, tsc_skew_test: bool = False) -> int:
     fields = hardware_smp_fields(lines)
     if fields is None:
         print(f"debug kernel did not report OK_SMP scope=hardware for -smp {cpus}", file=sys.stderr)
@@ -373,17 +428,23 @@ def validate_smp(arch: str, lines: list[str], cpus: int) -> int:
     # once a secondary started, other profiles read one shared counter.
     tsc = fields.get("tsc")
     if (tsc is None and arch in TSC_SYNC_QEMU_ARCHES and int(fields.get("online", "1")) > 1) or (
-            tsc is not None and tsc not in TSC_SYNC_RESULTS):
+            tsc is not None and tsc not in TSC_SYNC_VERIFIED):
         print(f"debug kernel SMP report for -smp {cpus} has tsc={tsc or 'missing'}, expected one of "
-              f"{','.join(TSC_SYNC_RESULTS)}", file=sys.stderr)
+              f"{','.join(TSC_SYNC_VERIFIED)}", file=sys.stderr)
         return 14
+    if arch in TSC_SYNC_QEMU_ARCHES and tsc is not None:
+        problem = tsc_sync_problem(lines, cpus, tsc, tsc_skew_test)
+        if problem:
+            print(f"debug kernel TSC synchronization for -smp {cpus}: {problem}", file=sys.stderr)
+            return 14
     reason = f" reason={fields['reason']}" if "reason" in fields else ""
     sync = f" tsc={tsc}" if tsc is not None else ""
     print(f"OK_QEMU_SMP_TEST arch={arch} smp={cpus} {reported}{reason}{sync}")
     return 0
 
 
-def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: bool, cpus: int = 1) -> int:
+def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: bool, cpus: int = 1,
+                    tsc_skew_test: bool = False) -> int:
     lines = output.splitlines()
     fail_lines = [line for line in lines if line.startswith("OK_TEST_FAIL ")]
     if fail_lines:
@@ -445,7 +506,7 @@ def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: 
         return 10
     print(f"OK_QEMU_NET_TEST arch={arch} udp=pass tcp=pass")
     if cpus > 1:
-        return validate_smp(arch, lines, cpus)
+        return validate_smp(arch, lines, cpus, tsc_skew_test)
     return 0
 
 
@@ -551,6 +612,9 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=DEFAULT_QEMU_TIMEOUT_SECONDS)
     parser.add_argument("--smp", type=smp_cpu_count, default=1,
                         help=f"QEMU vCPU count (1..{MAX_QEMU_CPUS}); above 1 requires the hardware OK_SMP marker")
+    parser.add_argument("--tsc-skew-test", action="store_true",
+                        help="the x86_64 kernel was built with x86_tsc_skew_test: CPU 1 must be found skewed "
+                             "and corrected")
     args = parser.parse_args()
 
     arch = normalize_arch(args.arch)
@@ -593,7 +657,8 @@ def main() -> int:
         print(result.stdout, end="")
     if result.stderr:
         print(result.stderr, end="", file=sys.stderr)
-    validation_code = validate_output(arch, result.stdout, result.returncode, use_debug_exit, args.smp)
+    validation_code = validate_output(arch, result.stdout, result.returncode, use_debug_exit, args.smp,
+                                      args.tsc_skew_test)
     write_summary(kernel, arch, result.stdout, result.returncode, validation_code, args.smp)
     return validation_code
 
