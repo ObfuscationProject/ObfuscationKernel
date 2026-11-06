@@ -437,6 +437,7 @@ bool pty_terminal(Kernel &kernel, const Session &s, PtySession &p, std::array<i3
     expect(fd_ioctl(kernel, p.shell, fds[0], OK_FIONREAD, argument_at) == 0 && int_at(argument_at) == 3);
     expect(fd_ioctl(kernel, p.shell, fds[0], OK_TIOCGPTN, argument_at) == -25);
     expect(fd_ioctl(kernel, p.shell, fds[1], OK_TIOCGPTN, argument_at) == -25);
+    expect(fd_ioctl(kernel, p.shell, fds[0], OK_TIOCSPTLCK, 0) == -25); // ENOTTY precedes the copy-in.
     expect(fd_ioctl(kernel, p.shell, fds[0], OK_TCFLSH, 2) == 0 && pty_poll(kernel, p.shell, fds[0], OK_POLLIN) == 0);
     return true;
 }
