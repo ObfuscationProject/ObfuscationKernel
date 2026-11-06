@@ -15,6 +15,7 @@
 #include "ok/sched/console_input.hpp"
 #include "ok/sched/console_control.hpp"
 #include "ok/sched/terminal.hpp"
+#include "ok/sched/terminal_open.hpp"
 #include "ok/sched/job_control.hpp"
 #include "ok/sched/wait_registration.hpp"
 #include "ok/smp/smp.hpp"
@@ -330,6 +331,7 @@ class ProcessControlBlock
 
   private:
     friend class SchedulerState;
+    friend struct ProcessTestAccess; // Hosted tests only.
     ProcessId pid_{0};
     u32 console_epoch_{}; // Only the scheduler may issue or inherit membership.
     ProcessId parent_pid_{0};
@@ -534,6 +536,26 @@ class SchedulerState
     // Each endpoint's open count equals the descriptions bound to it, outside
     // an unpublished prepared raw pair (whose opens precede publication).
     [[nodiscard]] Status terminal_audit() const;
+    // Terminal device nodes (docs/modules/tty.md sections 2 and 3). open()
+    // binds a fresh provider-free description holding exactly one reference;
+    // every check precedes the first change, and the node is re-validated
+    // here (index, generation, lock and liveness), never trusted. /dev/tty is
+    // the caller's derived controlling terminal or no_device (ENXIO);
+    // /dev/console never acquires; /dev/ptmx gives no_space (ENOSPC) when every
+    // pair slot, raw pairs included, is in use; a /dev/pts/N open without
+    // O_NOCTTY by a session leader without a terminal acquires an unowned,
+    // readable slave (Linux tty_open_proc_set_tty).
+    Result<TerminalOpenResult> open_terminal(ProcessId pid, u16 description, const TerminalOpenRequest &request);
+    // The node a terminal description reports to fstat; not_terminal for raw
+    // pairs and every other description.
+    [[nodiscard]] Result<TerminalStatus> terminal_status(u16 description) const;
+    // chmod and chown of a /dev/pts entry (owner or root; chown root only).
+    Status change_pts_mode(fs::TerminalNode node, u32 mode, user::Credentials caller);
+    Status change_pts_owner(fs::TerminalNode node, u32 uid, u32 gid, user::Credentials caller);
+    // The entry a description bound to a ptmx slave names; not_terminal otherwise.
+    [[nodiscard]] Result<fs::TerminalNode> pts_node(u16 description) const;
+    [[nodiscard]] fs::TerminalNamespace &terminal_namespace() { return terminal_namespace_; }
+    [[nodiscard]] const fs::TerminalNamespace &terminal_namespace() const { return terminal_namespace_; }
     // Each successful retain owns one reference, released exactly once. A pin
     // keeps the ID, backing node and pipe endpoint alive across fd close/reuse.
     Status retain_description(u16 id);
@@ -702,11 +724,13 @@ class SchedulerState
     void wake_pty(private_pty::Handle endpoint, u8 wakes);
     Status pty_terminal_check(const TerminalSubject &subject, ConsoleControlOperation operation);
     void terminal_changed(TerminalRef ref);
+    Result<private_pty::Handle> bind_pty_multiplexer(u16 description, u32 uid, u32 gid);
     private_pty::RawPtyTable<> pty_transport_{}; // One stable table; handles never cross scheduler domains.
     ConsoleInputLease console_input_{};
     std::array<u64, wake_source_count> wakes_{};
     u16 stopped_count_{};
     Terminal console_terminal_{};
+    fs::TerminalNamespace terminal_namespace_{};
     [[nodiscard]] bool pipe_has_endpoint(u16 pipe, bool writable) const;
     friend class UnixReceive;
     friend class UnixAccept;
@@ -809,6 +833,8 @@ static_assert(max_unix_endpoints == unix_pathname_endpoint_capacity);
 static_assert(max_unix_backlog == unix_pathname_backlog_capacity);
 static_assert(SchedulerPolicy<RoundRobinPolicy>);
 static_assert(!std::is_polymorphic_v<Scheduler>);
+static_assert(fs::pts_capacity == private_pty::RawPtyTable<>::pair_capacity,
+              "every PTY pair slot has one /dev/pts entry");
 static_assert(std::is_same_v<private_pty::RawPtyTable<>::SlaveTerminal, Terminal>,
               "every kernel PTY slave is a Terminal with the kernel line discipline");
 

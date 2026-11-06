@@ -5,6 +5,7 @@
 #include "ok/net/native_tcp_stream.hpp"
 #include "ok/user/native_shared_files.hpp"
 #include "ok/fs/vfs.hpp"
+#include "ok/fs/mode_policy.hpp"
 #if defined(OK_NATIVE_SIGNAL_RUNTIME)
 #include "../user/signals/private_signal_scheduler_relocation.hpp"
 #endif
@@ -916,6 +917,9 @@ Status SchedulerState::release_description(u16 id)
             // leader's SIGHUP and SIGCONT here.
             const auto retired = pty_transport_.retire(pty_endpoint);
             if (!retired) result = retired.status();
+            // Linux devpts_pty_kill: /dev/pts/N goes with the master's last open.
+            else if (pty_endpoint.side == private_pty::Side::master && retired.value().master_retired)
+                terminal_namespace_.remove(pty_endpoint.slot, pty_endpoint.generation);
             wake_pty(pty_endpoint, private_pty::wake_all);
         }
         if (unix_endpoint)
@@ -1790,6 +1794,7 @@ Result<usize> SchedulerState::write_pipe_fragment(u16 pipe, std::span<const std:
 #include "unix_path.inc"
 #include "descriptor_reservation.inc"
 #include "pty_pair.inc"
+#include "terminal_open.inc"
 Status SchedulerState::block_current(ThreadWaitReason reason, u64 key)
 {
     auto registration = register_current_wait(reason, key);

@@ -62,6 +62,7 @@ HEADERS = (
     'include/ok/sched/scheduler.hpp',
     'include/ok/sched/signal_mask.hpp',
     'include/ok/sched/terminal.hpp',
+    'include/ok/sched/terminal_open.hpp',
     'include/ok/sched/unix_pathname_sdk_profile.hpp',
     'include/ok/sched/unix_rights.hpp',
     'include/ok/sched/wait_registration.hpp',

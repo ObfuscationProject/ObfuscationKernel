@@ -145,12 +145,19 @@ bool pty_bindable(const OpenFileDescription *open)
 } // namespace
 Result<private_pty::Handle> SchedulerState::bind_pty_multiplexer(u16 id)
 {
+    return bind_pty_multiplexer(id, 0, 0);
+}
+// The new pair is listed in /dev/pts at once, locked, owned by uid:gid.
+Result<private_pty::Handle> SchedulerState::bind_pty_multiplexer(u16 id, u32 uid, u32 gid)
+{
     if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
     auto *open = open_description(id);
     if (!pty_bindable(open)) return Status::invalid_argument("PTY open needs a fresh provider-free description");
     auto master = pty_transport_.create_multiplexed();
     if (!master) return master.status();
     open->pty_endpoint = master.value();
+    terminal_namespace_.publish(master.value().slot, {.generation = master.value().generation, .uid = uid, .gid = gid,
+                                                      .mode = fs::pts_default_mode, .present = true, .locked = true});
     return master.value();
 }
 Status SchedulerState::bind_pty_slave(u16 id, private_pty::Handle slave)
@@ -177,7 +184,9 @@ Status SchedulerState::set_pty_lock(u16 id, bool locked)
 {
     const auto *open = open_description(id);
     if (!open || !open->used || !open->pty_endpoint) return Status::not_terminal("description is not a PTY master");
-    return pty_transport_.set_locked(open->pty_endpoint, locked);
+    if (auto status = pty_transport_.set_locked(open->pty_endpoint, locked); !status) return status;
+    terminal_namespace_.set_locked(open->pty_endpoint.slot, open->pty_endpoint.generation, locked);
+    return {};
 }
 Status SchedulerState::terminal_audit() const
 {
