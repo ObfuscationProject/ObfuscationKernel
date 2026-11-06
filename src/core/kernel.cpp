@@ -1,4 +1,5 @@
 #include "ok/core/kernel.hpp"
+#include "ok/smp/bringup.hpp"
 #include "ok/arch/terminal_power.hpp"
 #include "ok/core/entry.hpp"
 #include "ok/net/native_udp_sdk_profile.hpp"
@@ -852,11 +853,14 @@ Status Kernel::tick()
     }
     ++kernel_tick_count_;
 
+    // Each CPU schedules its own slot: a started secondary may be running a
+    // native thread there right now.
     for (usize i = 0; i < topology_.cpu_count(); ++i)
     {
         const auto cpu = static_cast<smp::CpuId>(i);
         const auto *info = topology_.cpu(cpu);
-        if (info == nullptr || !cpu_accepts_work(info->state))
+        if (info == nullptr || !cpu_accepts_work(info->state) ||
+            (smp::online_cpus() > 1 && cpu != smp::current_cpu()))
         {
             continue;
         }

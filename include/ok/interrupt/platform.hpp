@@ -36,7 +36,8 @@ usize drain_platform_irqs();
 void claim_platform_irq();
 [[nodiscard]] bool platform_irq_pending();
 // Enables interrupts, halts until one has been taken and disables them again.
-// Returns false without waiting when the profile cannot idle on interrupts.
+// Returns false without waiting when the profile cannot idle on interrupts,
+// and on every CPU but CPU 0, which alone takes device lines.
 bool wait_for_interrupt();
 [[nodiscard]] IrqStatistics platform_irq_statistics();
 // Interrupts delivered to `line` so far (top halves run).

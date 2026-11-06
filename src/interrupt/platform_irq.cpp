@@ -1,5 +1,6 @@
 #include "ok/interrupt/platform.hpp"
 #include "ok/arch/clock.hpp"
+#include "ok/smp/cpu.hpp"
 
 #if defined(OK_KERNEL_FREESTANDING) && (defined(__x86_64__) || defined(__i386__))
 #include "pic8259.hpp"
@@ -378,7 +379,9 @@ void claim_platform_irq()
 
 bool wait_for_interrupt()
 {
-    if (!started || !platform_irqs_supported())
+    // Device lines reach CPU 0 only. A secondary CPU waiting for a device
+    // (a driver inside a syscall, holding the kernel lock) polls instead.
+    if (!started || !platform_irqs_supported() || smp::current_cpu() != 0)
         return false;
     if (router.pending())
         return true;
