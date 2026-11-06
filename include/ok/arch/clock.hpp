@@ -6,9 +6,11 @@
 namespace ok::arch
 {
 
-// A boot-CPU clock for the supported QEMU platform profile. The epoch is the
-// first successful initialization, not civil time. Initialization is idempotent.
-// Calls must be serialized on the boot CPU; this is not an SMP clock contract.
+// The platform clock for the supported QEMU platform profile. The epoch is the
+// first successful initialization, not civil time. Initialization is idempotent
+// and runs on the boot CPU. On the profiles that start secondary CPUs (x86_64,
+// aarch64, rv64) any CPU may read monotonic time without a lock, and no reading
+// is below one returned earlier on any CPU; elsewhere reads stay serialized.
 Status initialize_clock();
 [[nodiscard]] Result<u64> monotonic_nanoseconds();
 [[nodiscard]] Result<time::MonotonicPoint> monotonic_sample();

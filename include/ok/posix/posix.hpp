@@ -345,7 +345,10 @@ class PosixService final
     }
     void set_monotonic_time(u64 nanoseconds, u64 resolution)
     {
-        monotonic_ticks_ = nanoseconds;
+        // Steps on different CPUs publish here; an older reading never
+        // moves the clock back.
+        if (nanoseconds > monotonic_ticks_)
+            monotonic_ticks_ = nanoseconds;
         clock_resolution_ = resolution;
     }
     [[nodiscard]] u32 umask(u32 mask);

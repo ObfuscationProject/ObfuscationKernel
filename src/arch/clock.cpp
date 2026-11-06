@@ -1,15 +1,40 @@
 #include "ok/arch/clock.hpp"
 #include "clock_counter.hpp"
 
+#include <atomic>
+
 namespace ok::arch
 {
 namespace
 {
 
-detail::CounterClock clock_state{};
+// The profiles that start secondary CPUs read the clock on every CPU; the
+// others keep the accumulating conversion their narrow counters need, under
+// the callers' serialization.
+#if defined(OK_ARCH_TARGET_X86_64) || defined(OK_ARCH_TARGET_AARCH64) || defined(OK_ARCH_TARGET_RV64)
+constinit detail::SharedCounterClock clock_state{};
+#else
+constinit detail::CounterClock clock_state{};
+#endif
 bool clock_attempted{};
-bool clock_invalidated{};
+// Readers on any CPU see the failure once `clock_invalidated` is set; the
+// first CPU to fail writes it.
+std::atomic<bool> clock_invalidated{};
+std::atomic_flag clock_invalidating{};
 Status clock_failure{Status::not_initialized("platform clock is not initialized")};
+
+[[nodiscard]] bool invalidated() noexcept
+{
+    return clock_invalidated.load(std::memory_order_acquire);
+}
+
+void fail_clock(Status reason) noexcept
+{
+    if (clock_invalidating.test_and_set(std::memory_order_acq_rel))
+        return;
+    clock_failure = reason;
+    clock_invalidated.store(true, std::memory_order_release);
+}
 
 #if defined(OK_ARCH_TARGET_X86_64) || defined(OK_ARCH_TARGET_I386)
 struct PlatformClock
@@ -273,7 +298,7 @@ struct PlatformClock
 
 Status initialize_clock()
 {
-    if (clock_invalidated)
+    if (invalidated())
         return clock_failure;
     if (clock_state.initialized())
         return Status::success();
@@ -288,16 +313,13 @@ Status initialize_clock()
 
 Result<u64> monotonic_nanoseconds()
 {
-    if (clock_invalidated)
+    if (invalidated())
         return clock_failure;
     if (!clock_state.initialized())
         return clock_failure;
     auto result = clock_state.sample(PlatformClock::read());
     if (!result)
-    {
-        clock_failure = result.status();
-        clock_invalidated = true;
-    }
+        fail_clock(result.status());
     return result;
 }
 
@@ -312,26 +334,22 @@ Result<time::MonotonicPoint> monotonic_sample()
 
 void invalidate_clock()
 {
-    if (!clock_invalidated)
-    {
-        clock_failure = Status::io_error("platform clock continuity invalidated");
-        clock_invalidated = true;
-    }
+    fail_clock(Status::io_error("platform clock continuity invalidated"));
 }
 
 Status clock_status()
 {
-    return clock_invalidated || !clock_state.initialized() ? clock_failure : Status::success();
+    return invalidated() || !clock_state.initialized() ? clock_failure : Status::success();
 }
 
 u64 clock_resolution_ns()
 {
-    return clock_invalidated ? 0 : clock_state.resolution();
+    return invalidated() ? 0 : clock_state.resolution();
 }
 
 u64 clock_frequency()
 {
-    return clock_invalidated ? 0 : clock_state.frequency();
+    return invalidated() ? 0 : clock_state.frequency();
 }
 
 } // namespace ok::arch
