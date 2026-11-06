@@ -218,12 +218,15 @@ class NTty final
         return plan;
     }
 
-    // Copies the planned bytes without consuming them.
-    constexpr usize preview(const ReadPlan &plan, std::span<std::byte> out) const
+    // Copies planned bytes from `offset` on without consuming them, so an owner
+    // can move a large read in chunks and consume only after every copy worked.
+    constexpr usize preview(const ReadPlan &plan, std::span<std::byte> out, usize offset = 0) const
     {
-        const usize count = plan.copy < out.size() ? plan.copy : out.size();
+        if (offset >= plan.copy)
+            return 0;
+        const usize count = plan.copy - offset < out.size() ? plan.copy - offset : out.size();
         for (usize index = 0; index < count; ++index)
-            out[index] = std::byte{at(read_tail_ + index)};
+            out[index] = std::byte{at(read_tail_ + offset + index)};
         return count;
     }
 
