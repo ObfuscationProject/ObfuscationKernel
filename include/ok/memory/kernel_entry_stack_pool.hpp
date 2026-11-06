@@ -209,6 +209,11 @@ class KernelEntryStackPool final : private NonCopyable
         return record.epoch;
     }
 
+    [[nodiscard]] bool active_on(u16 cpu) const
+    {
+        return cpu < smp::max_cpus && active_slot_[cpu] != capacity;
+    }
+
     [[nodiscard]] KernelEntryStackAccounting accounting() const
     {
         usize active = 0;

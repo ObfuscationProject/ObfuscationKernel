@@ -35,9 +35,18 @@ int main()
     assert(wide.initialize(1000000000, ~u64{0} - 9));
     assert(wide.sample(10).value() == 20);
 
+    // Another CPU's counter behind the last reader's stalls the clock
+    // instead of wrapping it forward.
+    CounterClock skewed;
+    assert(skewed.initialize(1000000000, 5000));
+    assert(skewed.sample(6000).value() == 1000);
+    assert(skewed.sample(5500).value() == 1000);
+    assert(skewed.sample(6000).value() == 1000);
+    assert(skewed.sample(7000).value() == 2000);
+
     CounterClock exhausted;
     assert(exhausted.initialize(1, 0));
-    assert(exhausted.sample(~u64{0}).status().code() == ok::StatusCode::overflow);
+    assert(exhausted.sample(u64{1} << 62).status().code() == ok::StatusCode::overflow);
     assert(exhausted.sample(1).value() == 1000000000); // Failure does not publish partial state.
     assert(exhausted.resolution() == 1000000000);
 

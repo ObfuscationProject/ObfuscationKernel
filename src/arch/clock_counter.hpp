@@ -30,6 +30,11 @@ class CounterClock final
             return Status::not_initialized("platform clock is not initialized");
         const auto current = counter & mask_;
         const auto delta = (current - previous_) & mask_;
+        // A 64-bit step past half its range is no wrap but a CPU whose own
+        // counter (the x86 TSC) runs behind the last reader's: time stands
+        // still until that counter catches up.
+        if (mask_ == max_value && delta > max_value / 2)
+            return elapsed_;
         const auto seconds = delta / frequency_;
         const auto fraction = (delta % frequency_) * nanoseconds_per_second + remainder_;
         const auto partial = fraction / frequency_;

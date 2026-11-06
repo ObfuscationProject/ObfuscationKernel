@@ -426,7 +426,7 @@ Status shutdown_preflight(Kernel &kernel, ShutdownOwner owner)
     if (!started || shutdown_admission_closed)
         return Status::busy("native shutdown runtime is not accepting a reservation");
     if (auto status = original_init_state(kernel); !status) return status;
-    if (entry_stacks.accounting().active_slots)
+    if (entry_stacks.active_on(smp::current_cpu()))
         return Status::busy("native shutdown reservation has an active entry");
     // Service children remain admissible until the OS has quiesced them.
     const auto report = shutdown_report(kernel);
@@ -635,7 +635,7 @@ Status terminate_native_process(Kernel &kernel, u64 pid, u8 signal)
         return Status::not_initialized("native termination requires its service owner");
     if (!runtime_failure) return runtime_failure;
     if (!started) return Status::not_initialized("native termination requires a running service");
-    if (entry_stacks.accounting().active_slots)
+    if (entry_stacks.active_on(smp::current_cpu()))
         return Status::busy("native termination requires an inactive entry boundary");
     if (!process->resources().native_space.root || process->resources().native_pages.empty())
         return Status::invalid_argument("native termination requires a retained address space");

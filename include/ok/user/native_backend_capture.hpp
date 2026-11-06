@@ -86,8 +86,12 @@ class BackendCapture final : private NonCopyable
         thread->native_frame = frame;
         const auto after = pool_->active_epoch(lease, {pid, tid}, view);
         if (!after || after.value() != epoch.value() || !canonical(scheduler, *process, *thread) ||
-            thread->entry_stack != lease || !same_space(space, process->resources().native_space))
+            thread->entry_stack != lease)
             return Status::denied("shared backend capture changed canonical owner or lease");
+        // A sibling on another CPU may have replaced the address space while
+        // this thread ran (mmap, munmap, mprotect): the old tables were
+        // quiesced before they were freed, and the trap belongs to the live one.
+        space = process->resources().native_space;
         if (!trap) return trap.status();
         const auto stack = trap.value().kernel_stack_pointer;
         const bool required = trap.value().kind == arch::execution::TrapKind::syscall ||

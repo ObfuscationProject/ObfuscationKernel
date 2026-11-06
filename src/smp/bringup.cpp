@@ -201,10 +201,15 @@ extern "C" [[noreturn]] void ok_smp_secondary_main(ok::smp::CpuId cpu)
     using namespace ok::smp;
     auto &record = cpu_record(cpu);
     record.reported_id.store(static_cast<ok::uptr>(ok::arch::smp::current_hardware_id()), std::memory_order_release);
-    record.state.store(static_cast<ok::u8>(CpuState::online), std::memory_order_release);
+    // A CPU the boot CPU already gave up on stays out: it never serves threads
+    // and stays outside the online mask that IPIs and shootdowns cover.
+    auto starting = static_cast<ok::u8>(CpuState::starting);
+    const bool admitted = record.state.compare_exchange_strong(starting, static_cast<ok::u8>(CpuState::online),
+                                                               std::memory_order_acq_rel);
     for (;;)
     {
-        if (ok_smp_secondary_step != nullptr && ok_smp_secondary_step(cpu))
+        if (admitted && (online_mask() & (ok::u32{1} << cpu)) != 0 && ok_smp_secondary_step != nullptr &&
+            ok_smp_secondary_step(cpu))
             continue;
         ok::arch::smp::wait_local();
     }
