@@ -389,10 +389,12 @@ is landed (S3); the terminal events that use it arrive in S4, S5 and S8.
 
 - kill, tkill and tgkill accept every signal number. Init (pid 1) is
   protected as in §9.3 for every sender, timers included.
-- A caught signal sent by a user to a Linux process whose unblocked threads
-  are all in waits that cannot be interrupted still returns EOPNOTSUPP. The
-  kernel's own signals are retried until such a wait completes and are not
-  shown by `rt_sigpending`.
+- A caught signal sent by a user to a running Linux process whose unblocked
+  threads are all in waits that cannot be interrupted returns EOPNOTSUPP and
+  has no effect. SIGCONT and the stop signals are the exception: their
+  discards and the continue happen at generation, so they are queued and the
+  call returns 0. The kernel's own signals in that case are retried (owed)
+  until such a wait completes and are not shown by `rt_sigpending`.
 - `kill(-1)` returns EOPNOTSUPP.
 
 ## 10. Readiness — planned (S4 console; S5 native PTY; S7 Linux poll; S8 console POLLERR)
@@ -456,7 +458,7 @@ profile string and version above keeps its current value.
 | # | Deviation | Status |
 |---|---|---|
 | 1 | A stop applies at generation when deliverable. While stopped, `sigtimedwait`, `epoll_wait` and similar calls keep waiting instead of returning EINTR on continue. | landed (S2, S3) |
-| 2 | Kernel signals to threads in waits that cannot be interrupted are retried (owed) and not visible in `sigpending`. | landed (S3) |
+| 2 | Kernel signals to threads in waits that cannot be interrupted are retried (owed) and not visible in `sigpending`. A user's caught signal other than SIGCONT and the stops gets EOPNOTSUPP in that case. | landed (S3) |
 | 3 | Native personality: SIG_DFL/SIG_IGN only, no masks, SIGCHLD SIG_IGN refused, tgkill to native refused. A native child sends no SIGCHLD. A native recipient records the first terminating default at generation instead of queueing it. | landed (S3) |
 | 4 | No ptrace stops, no `kill(-1)`, no core bit. `waitid` is RV32-only. | landed (S3) |
 | 5 | No devpts filesystem: no mount options, no `newinstance`, no `/dev/pts/ptmx`. `st_dev(/dev/pts/N) == st_dev(/dev)`. The gid policy is the opener's egid. | planned (S6) |

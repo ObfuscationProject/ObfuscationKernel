@@ -410,10 +410,11 @@ void owed(Kernel &kernel)
     handle(kernel, pid, 1); handle(kernel, pid, 20);
     auto ticket = park(kernel, pid);
     expect(native::send_kernel_process_signal(kernel, pid, OK_SIGHUP) == native::KernelSignalSend::owed);
-    expect(native::send_kernel_process_signal(kernel, pid, OK_SIGTSTP) == native::KernelSignalSend::owed);
-    expect(!shared(pid).pending_mask().contains(1) && !shared(pid).pending_mask().contains(20));
+    // A caught stop acted at generation, so it is queued rather than owed.
+    expect(native::send_kernel_process_signal(kernel, pid, OK_SIGTSTP) == native::KernelSignalSend::sent);
+    expect(!shared(pid).pending_mask().contains(1) && shared(pid).pending_mask().contains(20));
     expect(!native::private_jobctl_service(kernel) && !shared(pid).pending_mask().contains(1));
-    // CONT discards the owed TSTP; SIGCONT itself is ignored by default.
+    // CONT discards the queued TSTP; SIGCONT itself is ignored by default.
     expect(native::send_kernel_process_signal(kernel, pid, OK_SIGCONT) == native::KernelSignalSend::ignored);
     unpark(kernel, pid, ticket);
     expect(!native::private_jobctl_service(kernel));
@@ -455,6 +456,28 @@ void owed(Kernel &kernel)
     release(kernel, pid);
 }
 
+// A caught CONT or stop has acted at generation (discards, continue), so a
+// user sender gets 0 and the signal is queued, even when no thread can take
+// it now; other caught signals still refuse.
+void acted_not_refused(Kernel &kernel)
+{
+    const auto pid = create(kernel), sender = create(kernel);
+    handle(kernel, pid, 1); handle(kernel, pid, 18); handle(kernel, pid, 20);
+    const auto ticket = park(kernel, pid);
+    expect(linux_kill(kernel, sender, pid, 19) == 0 && job(kernel, pid).stopped);
+    expect(linux_kill(kernel, sender, pid, 18) == 0 && !job(kernel, pid).stopped && job(kernel, pid).continue_report);
+    expect(shared(pid).pending_mask().contains(18));
+    expect(linux_kill(kernel, sender, pid, 20) == 0 && shared(pid).pending_mask().contains(20));
+    expect(!shared(pid).pending_mask().contains(18));
+    expect(linux_call(kernel, sender, lu::Operation::tkill, {pid, 18}) == 0);
+    expect(!shared(pid).pending_mask().contains(20) && native::private_signal_queue(
+        *kernel.scheduler().find_thread(pid, pid))->pending_mask().contains(18));
+    expect(linux_kill(kernel, sender, negative(pid), 18) == 0 && shared(pid).pending_mask().contains(18));
+    expect(linux_kill(kernel, sender, pid, 1) == -95);
+    unpark(kernel, pid, ticket);
+    release(kernel, sender); release(kernel, pid);
+}
+
 // Shutdown's terminate path completes a stopped process.
 void shutdown_stopped(Kernel &kernel)
 {
@@ -489,6 +512,7 @@ int main()
     orphan_pass(kernel, true);
     orphan_pass(kernel, false);
     owed(kernel);
+    acted_not_refused(kernel);
     shutdown_stopped(kernel);
     expect(native::runtime_status().ok() && kernel.scheduler().stopped_processes() == 0);
     expect(kernel.scheduler().find(init)->state() != sched::ProcessState::zombie);

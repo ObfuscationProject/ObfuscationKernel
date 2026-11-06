@@ -357,7 +357,8 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
     // 9. Linux: queue for a thread that can take it. A stopped process takes
     // every signal after SIGCONT, so it stays pending (Linux wants_signal).
     // A terminating default that no thread of a running process can take now
-    // is the complete_signal fatal shortcut.
+    // is the complete_signal fatal shortcut. CONT and the stops already acted
+    // above, so they are queued rather than refused.
     bool unblocked = false, qualified = false;
     for (auto &thread : recipient.threads())
     {
@@ -374,7 +375,8 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
             if (!state->deferred_fatal) state->deferred_fatal = static_cast<u8>(signal);
             return JobSignalOutcome::accepted;
         }
-        return request.kernel ? JobSignalOutcome::retry : JobSignalOutcome::refused;
+        const bool acted = !request.replay && (signal == numbering.cont || job::stop_family(numbering, signal));
+        if (!acted) return request.kernel ? JobSignalOutcome::retry : JobSignalOutcome::refused;
     }
     return jobctl_enqueue(kernel, *state, recipient, request.directed ? named : nullptr, request.info);
 }
