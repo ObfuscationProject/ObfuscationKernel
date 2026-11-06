@@ -311,6 +311,7 @@ class PosixService final
     Result<FileStatus> stat(std::string_view path);
     Result<FileStatus> statat(Fd dirfd, std::string_view path, u32 flags = 0);
     Result<FileStatus> fstat(Fd fd) const;
+    [[nodiscard]] FileStatus terminal_file_status(const sched::TerminalStatus &terminal) const;
     Result<usize> getdents64(Fd fd, std::span<std::byte> out);
     // The serialized consumer copies one complete record; it cannot yield or
     // reenter descriptor operations. Cursor commit follows successful copying.

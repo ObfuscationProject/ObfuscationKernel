@@ -3,6 +3,9 @@ namespace ok::posix
 {
 Status PosixService::initialize(fs::VirtualFileSystem &vfs, driver::ConsoleDriver &console, sched::Scheduler &scheduler)
 {
+    // The device filesystem reaches the scheduler's /dev/pts entries through
+    // the VFS (DeviceFileSystem::attach_terminals).
+    if (auto status = vfs.attach_terminal_namespace(scheduler.terminal_namespace()); !status) return status;
     vfs_ = &vfs;
     console_ = &console;
     scheduler_ = &scheduler;
