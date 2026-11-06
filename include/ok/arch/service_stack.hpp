@@ -2,6 +2,7 @@
 
 #include "ok/arch/instantaneous_sp.hpp"
 #include "ok/arch/stack_bounds.hpp"
+#include "ok/smp/bringup.hpp"
 
 extern "C"
 {
@@ -21,10 +22,21 @@ namespace ok::arch
 // Check the current instruction's SP, including its compiler frame. This does
 // not reserve the suffix or survive a stack/domain switch. Callers that need a
 // durable capability still require a mapping and execution-lifetime producer.
+// The boot CPU's service stack is the linked boot stack; a secondary CPU's is
+// the stack bring-up allocated for it.
+[[nodiscard]] inline StackBounds current_service_stack_bounds() noexcept
+{
+    const auto cpu = smp::current_cpu();
+    if (cpu == 0)
+        return linked_service_stack_bounds();
+    const auto &record = smp::cpu_record(cpu);
+    return {record.stack_lower, record.stack_top};
+}
+
 [[nodiscard, gnu::always_inline]] inline Status require_service_stack(usize suffix_bytes = 0) noexcept
 {
     const auto sp = read_instantaneous_stack_pointer();
-    return linked_service_stack_bounds().require(sp, suffix_bytes);
+    return current_service_stack_bounds().require(sp, suffix_bytes);
 }
 
 } // namespace ok::arch
