@@ -553,7 +553,8 @@ Status start(ok::smp::CpuId cpu, u64 hardware_id, uptr, uptr stack_top)
     parameters.arrived = 0;
     parameters.cr0 = cr0;
     parameters.cr3 = cr3;
-    parameters.cr4 = cr4;
+    // CR4.PCIDE faults outside long mode; load_cpu sets it on the new CPU.
+    parameters.cr4 = cr4 & ~(uptr{1} << 17);
     parameters.entry = reinterpret_cast<uptr>(&ok_x86_smp_secondary_entry);
     parameters.stack = stack_top;
     parameters.cpu = cpu;

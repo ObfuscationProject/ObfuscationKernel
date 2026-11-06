@@ -1,4 +1,5 @@
 #include "ok/arch/smp.hpp"
+#include "tlb_tags.hpp"
 
 // Profiles without a secondary-CPU start path run on the boot CPU alone.
 namespace ok::arch::smp
@@ -47,3 +48,14 @@ void wait_local() noexcept
 }
 
 } // namespace ok::arch::smp
+
+namespace ok::arch::execution
+{
+
+// One CPU and no OK_SMP_TLB line: the entry path keeps its own TLB handling.
+TlbTagReport tlb_tag_report(u32) noexcept
+{
+    return {};
+}
+
+} // namespace ok::arch::execution

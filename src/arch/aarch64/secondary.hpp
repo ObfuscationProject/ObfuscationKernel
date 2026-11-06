@@ -32,5 +32,8 @@ static_assert(offsetof(SecondaryStart, entry) == 64 && offsetof(SecondaryStart, 
 // Resets logical CPU `cpu`'s per-CPU block and fills the kernel translation,
 // vectors and system control values of `start`. Needs an initialized backend.
 Status prepare_secondary(ok::smp::CpuId cpu, SecondaryStart &start);
+// On the started CPU itself, before its first user entry: size its ASID
+// tags from its own ID_AA64MMFR0_EL1.
+void prepare_local_tlb_tags();
 
 } // namespace ok::arch::aarch64

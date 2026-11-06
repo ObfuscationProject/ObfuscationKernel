@@ -123,8 +123,9 @@ inline void local_tick() noexcept
 
 // The current CPU opens and closes a window in which it may run user code
 // under `root`. Open it while holding what a translation change also holds,
-// before the entry; close it after the switch back to the kernel translation,
-// which discarded the user TLB.
+// before the entry; close it after the switch back to the kernel translation.
+// User translations may stay cached past the window (ASIDs, PCIDs): the
+// backend revalidates them at the CPU's next entry into that space.
 inline void begin_user(uptr root) noexcept
 {
     auto &record = cpu_record(current_cpu());
@@ -143,7 +144,9 @@ inline void end_user() noexcept
 // Before a translation under `root` changes or its tables are freed: send
 // every other CPU whose window uses `root` (all windows for root 0) out of
 // user mode and wait until that window closed. The waiting CPU must not hold
-// anything those CPUs need to leave user mode. Returns the CPUs waited for.
+// anything those CPUs need to leave user mode. CPUs outside a window are never
+// waited for; what they cached earlier is the backend's to invalidate at their
+// next entry. Returns the CPUs waited for.
 inline u32 quiesce_root(uptr root) noexcept
 {
     const auto mask = online_mask();

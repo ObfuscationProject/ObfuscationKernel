@@ -215,5 +215,6 @@ extern "C" [[noreturn]] void ok_aarch64_secondary_start(ok::smp::CpuId cpu)
     GicV2::reset_cpu_lines();
     interfaces[cpu] = own_interface();
     asm volatile("msr cntp_ctl_el0, xzr; isb" : : : "memory");
+    ok::arch::aarch64::prepare_local_tlb_tags();
     ok_smp_secondary_main(cpu);
 }

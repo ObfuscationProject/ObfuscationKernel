@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../tlb_tags.hpp"
 #include "ok/arch/execution.hpp"
 #include "ok/smp/smp.hpp"
 
@@ -39,6 +40,8 @@ struct alignas(64) CpuLocal
     // This CPU's TSC minus the boot CPU's, as bring-up measured it when
     // IA32_TSC_ADJUST could not remove it; clock reads subtract it.
     u64 tsc_offset{};
+    // PCIDs this CPU gives user spaces; untagged without CR4.PCIDE.
+    ok::arch::detail::CpuTlbTags tlb_tags{};
 };
 inline constexpr usize cpu_logical_offset = 8;
 

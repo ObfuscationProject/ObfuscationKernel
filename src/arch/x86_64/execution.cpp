@@ -38,11 +38,18 @@ struct Space
     Table *pdpt{};
     Table *directory{};
     usize tables{};
+    detail::TlbSpaceTag tlb{};
 };
 constinit SpaceTable<Space> spaces;
 // Entries validate their space without the kernel lock while the CPU holding
-// it may grow or shrink the slot table.
+// it may grow or shrink the slot table. It also serializes space ids and TLB
+// generations.
 constinit smp::SpinLock spaces_lock{};
+constinit detail::TlbSpaceIds space_ids{};
+// CR4.PCIDE: CR3[11:0] names the PCID, and bit 63 of a CR3 load keeps the
+// loaded PCID's cached translations. The kernel's translation is PCID 0.
+constexpr uptr cr4_pcide = uptr{1} << 17;
+constexpr uptr cr3_keep = uptr{1} << 63;
 u64 kernel_pdpt[512]{};
 bool initialized = false;
 
@@ -138,6 +145,12 @@ uptr read_cr3()
 void write_cr3(uptr value)
 {
     asm volatile("mov %0, %%cr3" : : "r"(value) : "memory");
+}
+bool pcid_supported()
+{
+    u32 a = 1, b, c, d;
+    asm volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
+    return (c & (1u << 17)) != 0;
 }
 void console(std::string_view text)
 {
@@ -336,12 +349,26 @@ void load_cpu(smp::CpuId id)
     asm volatile("mov %%cr0, %0" : "=r"(cr0));
     cr0 |= uptr{1} << 16; // Supervisor writes also respect read-only PTEs.
     asm volatile("mov %0, %%cr0; clts" : : "r"(cr0) : "memory");
+    // PCIDs where the CPU has them. Setting PCIDE needs long mode and CR3[11:0]
+    // clear, which the boot PML4 load guarantees on every CPU.
+    uptr cr4;
+    asm volatile("mov %%cr4, %0" : "=r"(cr4));
+    const bool pcid = pcid_supported();
+    if (pcid && (cr4 & cr4_pcide) == 0)
+        asm volatile("mov %0, %%cr4" : : "r"(cr4 | cr4_pcide) : "memory");
+    cpu.tlb_tags.configure(pcid ? 12 : 0);
 }
 } // namespace x86
 
 bool supported() noexcept
 {
     return true;
+}
+
+TlbTagReport tlb_tag_report(u32 online_mask) noexcept
+{
+    return summarize_tlb_tags(online_mask, smp::max_cpus, true,
+                              [](u32 cpu) -> const auto & { return x86::ok_x86_cpu_locals[cpu].tlb_tags; });
 }
 
 OwnershipReport ownership_report() noexcept
@@ -429,9 +456,11 @@ Result<AddressSpace> create_space(MappingView mappings)
     for (const auto &mapping : mappings)
         if (!admissible(mapping))
             return Status::invalid_argument("invalid native user-page mapping or writable executable page");
-    auto entry = [&] {
+    auto entry = [&]() -> Result<SpaceTable<Space>::Entry *> {
         smp::ScopedSpinLock guard(spaces_lock);
-        return spaces.acquire();
+        auto acquired = spaces.acquire();
+        if (acquired) acquired.value()->space.tlb = space_ids.issue();
+        return acquired;
     }();
     if (!entry)
         return entry.status();
@@ -487,10 +516,13 @@ Status remap(const AddressSpace &space, const PageMapping &mapping)
     auto &entry = reinterpret_cast<Table *>(directory_entry & address_mask)->entries[(mapping.virtual_address >> 12) & 511];
     if ((entry & present) == 0)
         return Status::not_found("native user page has no translation");
-    // Every CPU running this space leaves it first. Its next entry, like ours,
-    // reloads CR3, which drops these non-global translations.
+    // Every CPU running this space leaves it first. A CPU that cached the old
+    // translation drops it at its next entry: an untagged CR3 load flushes
+    // it, and a PCID whose generation moved is loaded without the keep bit.
     smp::quiesce_root(space.root);
     entry = leaf_entry(mapping);
+    smp::ScopedSpinLock guard(spaces_lock);
+    value->tlb.changed();
     return Status::success();
 }
 
@@ -598,11 +630,14 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     if (cpu.executing)
         return Status::busy("this CPU is already executing native code");
     u64 code;
+    detail::TlbSpaceTag tlb;
     {
         smp::ScopedSpinLock guard(spaces_lock);
-        if (storage(space) == nullptr)
+        const auto *value = storage(space);
+        if (value == nullptr)
             return Status::not_initialized("native address space is unavailable");
         code = lookup(space, frame.pc);
+        tlb = value->tlb;
     }
     // Like Linux, the stack need not be mapped; only an access to it faults (a
     // detached musl thread unmaps its own stack before its exit syscall).
@@ -632,9 +667,19 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     }
     write_msr(0xc0000100, frame.fs_base);
     write_msr(0xc0000102, frame.gs_base); // GS_BASE after the swapgs to user mode.
-    write_cr3(space.root);
+    // Untagged, each CR3 load flushes every non-global translation. With
+    // PCIDs, the space's PCID keeps its entries unless this CPU must drop
+    // them, and the kernel's PCID 0 keeps its own across the entry.
+    const bool tagged = cpu.tlb_tags.tagged();
+    if (tagged)
+    {
+        const auto selection = cpu.tlb_tags.select(tlb);
+        write_cr3(space.root | selection.tag | (selection.invalidate ? 0 : cr3_keep));
+    }
+    else
+        write_cr3(space.root);
     ok_x86_execution_enter(&frame);
-    write_cr3(old_root);
+    write_cr3(tagged ? old_root | cr3_keep : old_root);
     if (!routed)
     {
         outb(0x21, old_master);

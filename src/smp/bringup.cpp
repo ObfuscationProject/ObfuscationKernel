@@ -8,6 +8,7 @@
 #include "ok/core/kernel.hpp"
 #include "ok/memory/memory.hpp"
 #include "ok/smp/cpu.hpp"
+#include "../arch/tlb_tags.hpp"
 
 #include <array>
 
@@ -69,6 +70,21 @@ void emit_report()
         console(tsc);
     }
     console("\n");
+}
+
+// How user entries treat the TLB on the started CPUs: the narrowest ASID width
+// (none: every entry flushes the user TLB) and whether x86 PCIDs carry it.
+void emit_tlb_report(u32 online)
+{
+    const auto tags = arch::execution::tlb_tag_report(online);
+    if (!tags.supported)
+        return;
+    console("OK_SMP_TLB scope=hardware asid=");
+    if (tags.asid_bits == 0)
+        console("none");
+    else
+        console_number(tags.asid_bits);
+    console(tags.pcid ? " pcid=on\n" : " pcid=off\n");
 }
 
 // Spins until `done` holds or `timeout_ns` passed on the boot CPU's clock.
@@ -196,6 +212,7 @@ Status start_secondary_cpus(Kernel &kernel)
     if (report.online != map.count)
         report.reason = "secondary-start-failed";
     emit_report();
+    emit_tlb_report(started_mask);
     return Status::success();
 }
 

@@ -3,6 +3,7 @@
 #include "ok/arch/clock.hpp"
 #include "ok/smp/bringup.hpp"
 #include "../riscv_common/clint.hpp"
+#include "../tlb_tags.hpp"
 #include <cstddef>
 
 namespace ok::arch::execution
@@ -24,11 +25,15 @@ struct Space
     Table *middle{};
     MappingView mappings{};
     usize leaves{};
+    detail::TlbSpaceTag tlb{};
 };
 constinit SpaceTable<Space> spaces;
 // Entries look a space up without the kernel lock; growing or retiring the
-// slot table under that lock must not move the table under such a lookup.
+// slot table under that lock must not move the table under such a lookup. It
+// also serializes space ids and TLB generations.
 constinit smp::SpinLock spaces_lock{};
+constinit detail::TlbSpaceIds space_ids{};
+constexpr unsigned satp_asid_shift = 44;
 bool initialized{false};
 
 Space *lookup(const AddressSpace &space)
@@ -94,7 +99,9 @@ u64 leaf_entry(const PageMapping &page)
         flags |= pte_execute;
     return static_cast<u64>(page.physical_address >> 2) | flags;
 }
-extern "C" void ok_rv64_enter_native(UserFrame *frame, uptr satp, Trap *trap, uptr stack_top);
+// `fence`: 0 keeps the TLB, ~0 flushes it whole on entry and exit (untagged),
+// anything else is the ASID whose entries go before U-mode runs.
+extern "C" void ok_rv64_enter_native(UserFrame *frame, uptr satp, Trap *trap, uptr stack_top, uptr fence);
 // One hart's entry state, reached through tp: boot.S points hart 0 at the
 // first block and a started hart gets its block from the start mailbox. The
 // logical id comes first (ops.cpp reads it); the entry assembly reads the user
@@ -106,6 +113,8 @@ struct alignas(64) CpuBlock
     u64 user_deadline{};
     uptr hart{};
     std::atomic<bool> executing{};
+    // The satp ASIDs this hart gives user spaces; untagged without ASIDLEN.
+    detail::CpuTlbTags tlb_tags{};
 };
 static_assert(offsetof(CpuBlock, logical) == 0 && offsetof(CpuBlock, user_mie) == 8 &&
               offsetof(CpuBlock, user_deadline) == 16);
@@ -143,12 +152,34 @@ void allow_user_memory()
     const uptr permission = 0x1f;
     asm volatile("csrw pmpaddr0, %0\ncsrw pmpcfg0, %1" ::"r"(all_memory), "r"(permission) : "memory");
 }
+// ASIDLEN is WARL: write ones to the whole ASID field and count what sticks,
+// lowest bits first. The M-mode kernel never translates, so a transient Sv39
+// satp with no root is harmless.
+void prepare_tlb_tags(CpuBlock &cpu)
+{
+    uptr saved, probed;
+    const uptr probe = (uptr{8} << 60) | (uptr{0xffff} << satp_asid_shift);
+    asm volatile("csrr %0, satp\ncsrw satp, %2\ncsrr %1, satp\ncsrw satp, %0\nsfence.vma zero, zero"
+                 : "=&r"(saved), "=&r"(probed)
+                 : "r"(probe)
+                 : "memory");
+    u32 bits = 0;
+    while (bits < 16 && ((probed >> (satp_asid_shift + bits)) & 1) != 0)
+        ++bits;
+    cpu.tlb_tags.configure(bits);
+}
 } // namespace
 
 bool supported() noexcept
 {
     return true;
 }
+TlbTagReport tlb_tag_report(u32 online_mask) noexcept
+{
+    return summarize_tlb_tags(online_mask, smp::max_cpus, false,
+                              [](u32 cpu) -> const auto & { return ok_rv64_cpu_blocks[cpu].tlb_tags; });
+}
+
 OwnershipReport ownership_report() noexcept
 {
     OwnershipReport report{};
@@ -179,6 +210,7 @@ Status initialize()
     // boot.S already did; probes that link this backend alone rely on it here.
     asm volatile("mv tp, %0" : : "r"(&ok_rv64_cpu_blocks[0]) : "memory");
     allow_user_memory();
+    prepare_tlb_tags(ok_rv64_cpu_blocks[0]);
     initialized = true;
     return Status::success();
 }
@@ -191,9 +223,11 @@ Result<AddressSpace> create_space(MappingView mappings)
     for (const auto &page : mappings)
         if (!admissible(page))
             return Status::invalid_argument("invalid Sv39 user mapping");
-    auto entry = [] {
+    auto entry = []() -> Result<SpaceTable<Space>::Entry *> {
         smp::ScopedSpinLock guard(spaces_lock);
-        return spaces.acquire();
+        auto acquired = spaces.acquire();
+        if (acquired) acquired.value()->space.tlb = space_ids.issue();
+        return acquired;
     }();
     if (!entry)
         return entry.status();
@@ -245,11 +279,14 @@ Status remap(const AddressSpace &space, const PageMapping &mapping)
     auto &entry = reinterpret_cast<Table *>((middle >> 10) << 12)->entries[(mapping.virtual_address >> 12) & 511u];
     if ((entry & pte_valid) == 0)
         return Status::not_found("native user page has no translation");
-    // Every other hart in this space leaves U-mode first; its next entry, like
-    // this hart's, executes sfence.vma before it switches to U-mode.
+    // Every other hart in this space leaves U-mode first. A hart that cached
+    // the old entry fences it at its next entry: untagged harts fence every
+    // entry, and a tagged one fences the ASID once the generation moved.
     static_cast<void>(smp::quiesce_root(space.root));
     entry = leaf_entry(mapping);
     asm volatile("fence rw,rw\nfence.i" ::: "memory");
+    smp::ScopedSpinLock guard(spaces_lock);
+    stored->tlb.changed();
     return Status::success();
 }
 Status destroy_space(AddressSpace &space)
@@ -315,11 +352,13 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     auto &cpu = this_cpu();
     if (cpu.executing.load(std::memory_order_relaxed))
         return Status::busy("nested native entry is unsupported");
+    detail::TlbSpaceTag tlb;
     {
         smp::ScopedSpinLock guard(spaces_lock);
         auto *stored = lookup(space);
         if (stored == nullptr)
             return Status::not_initialized("native address space is unavailable");
+        tlb = stored->tlb;
         const auto *entry = mapping(*stored, frame.pc);
         // Like Linux, the stack need not be mapped; only an access to it faults (a
         // detached musl thread unmaps its own stack before its exit syscall).
@@ -335,8 +374,14 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     cpu.user_mie = riscv::mie_mtie | riscv::mie_msie |
                    (cpu.logical == 0 && interrupt::platform_irqs_started() ? riscv::mie_meie : 0);
     Trap trap{};
-    const uptr satp = (uptr{8} << 60) | (space.root >> 12);
-    ok_rv64_enter_native(&frame, satp, &trap, stack_top);
+    uptr satp = (uptr{8} << 60) | (space.root >> 12), fence = ~uptr{0};
+    if (cpu.tlb_tags.tagged())
+    {
+        const auto selection = cpu.tlb_tags.select(tlb);
+        satp |= uptr{selection.tag} << satp_asid_shift;
+        fence = selection.invalidate ? selection.tag : 0;
+    }
+    ok_rv64_enter_native(&frame, satp, &trap, stack_top, fence);
     cpu.executing.store(false, std::memory_order_release);
     complete_irq(trap, cpu);
     // The assembly restored the masked status; re-enable only on the service stack.
@@ -446,4 +491,5 @@ extern "C" void ok_rv64_secondary_execution() noexcept
     asm volatile("csrw mie, zero" : : : "memory");
     riscv::Clint::set_compare(~ok::u64{0});
     execution::allow_user_memory();
+    execution::prepare_tlb_tags(execution::this_cpu());
 }

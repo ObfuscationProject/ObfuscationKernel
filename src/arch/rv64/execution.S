@@ -77,7 +77,16 @@ ok_rv64_enter_native:
     csrw mtvec, t0
     csrw mscratch, sp
     csrw satp, a1
+    # a4 (see execution.cpp): keep, flush all, or fence one ASID.
+    sd a4, 360(sp)
+    beqz a4, .Lfenced
+    li t0, -1
+    bne a4, t0, .Lfence_asid
     sfence.vma zero, zero
+    j .Lfenced
+.Lfence_asid:
+    sfence.vma zero, a4
+.Lfenced:
     fence.i
     # This hart's mtimecmp; tp is still the kernel's per-CPU block.
     csrr t0, mhartid
@@ -311,7 +320,12 @@ ok_rv64_native_trap:
     sd t1, 0(t0)
     ld t0, 152(sp)
     csrw satp, t0
+    # An untagged entry also flushes on exit; tagged entries stay cached.
+    ld t0, 360(sp)
+    addi t0, t0, 1
+    bnez t0, .Lkeep_user_tlb
     sfence.vma zero, zero
+.Lkeep_user_tlb:
     ld t0, 120(sp)
     li t1, 0x6000
     and t0, t0, t1

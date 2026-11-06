@@ -3,6 +3,7 @@
 #include "ok/arch/clock.hpp"
 #include "ok/smp/bringup.hpp"
 #include "../arm_common/gicv2.hpp"
+#include "../tlb_tags.hpp"
 #include "secondary.hpp"
 
 #include <cstddef>
@@ -24,6 +25,8 @@ struct alignas(64) CpuBlock
     bool executing{};
     Trap last_trap{};
     alignas(64) u8 kernel_fp[512]{};
+    // The ASIDs this CPU gives user spaces.
+    detail::CpuTlbTags tlb_tags{};
 };
 static_assert(offsetof(CpuBlock, cpu) == 0);
 static_assert(offsetof(CpuBlock, resume_sp) == 8);
@@ -53,7 +56,11 @@ constexpr uptr ram_end = 0x80000000;
 constexpr u32 timer_irq = arm::GicV2::timer_ppi;
 // 39-bit VA, 4 KiB granule, inner-shareable WBWA tables, 40-bit physical
 // addresses, and TTBR1 disabled. QEMU virt RAM and MMIO stay identity mapped.
+// TTBR0 holds the ASID (A1 clear); TCR.AS selects 16-bit ASIDs where the CPU
+// has them.
 constexpr u64 tcr = 25 | (u64{1} << 8) | (u64{1} << 10) | (u64{3} << 12) | (u64{1} << 23) | (u64{2} << 32);
+constexpr u64 tcr_asid16 = u64{1} << 36;
+constexpr unsigned ttbr_asid_shift = 48;
 constexpr u64 mair = 0xff00;
 constexpr u64 fp_control = u64{3} << 20;
 // A secondary CPU's SCTLR_EL1 is UNKNOWN at reset, so it is written whole: the
@@ -75,12 +82,20 @@ struct Space
     Table *root{};
     Table *directory{};
     usize tables{};
+    detail::TlbSpaceTag tlb{};
 };
 constinit SpaceTable<Space> spaces;
+// Entries look a space up without the kernel lock, while the CPU holding it
+// may grow or release the slot table. It also serializes space ids and TLB
+// generations.
+constinit smp::SpinLock spaces_lock{};
+constinit detail::TlbSpaceIds space_ids{};
+// The kernel translation is ASID 0 and maps only global entries.
 Table kernel_root{};
 Table kernel_directory{};
 bool initialized = false;
 u64 timer_period = 0;
+u64 translation_control = tcr;
 alignas(16) u8 interrupt_stack[64 * 1024]{};
 
 CpuBlock &this_cpu()
@@ -115,6 +130,27 @@ void console_hex(uptr value)
 void select_root(uptr root)
 {
     asm volatile("dsb ishst; msr ttbr0_el1, %0; isb; tlbi vmalle1is; dsb ish; isb" : : "r"(root) : "memory");
+}
+// ID_AA64MMFR0_EL1.ASIDBits: 2 means 16-bit ASIDs, 0 the 8-bit minimum.
+u32 asid_bits()
+{
+    u64 features;
+    asm volatile("mrs %0, id_aa64mmfr0_el1" : "=r"(features));
+    return ((features >> 4) & 15) == 2 ? 16 : 8;
+}
+// This CPU's user translation for one entry. The ASID's stale entries go
+// first, while TTBR0 still selects the kernel's ASID 0, so no walk can refill
+// them in between; the switch itself invalidates nothing.
+void select_user_root(uptr root, detail::TlbSelection selection)
+{
+    const u64 asid = u64{selection.tag} << ttbr_asid_shift;
+    if (selection.invalidate)
+        asm volatile("tlbi aside1, %0; dsb nsh" : : "r"(asid) : "memory");
+    asm volatile("dsb ishst; msr ttbr0_el1, %0; isb" : : "r"(root | asid) : "memory");
+}
+void select_kernel_root()
+{
+    asm volatile("msr ttbr0_el1, %0; isb" : : "r"(reinterpret_cast<uptr>(&kernel_root)) : "memory");
 }
 void populate_kernel(Table &root, Table &directory)
 {
@@ -218,6 +254,12 @@ bool supported() noexcept
     return true;
 }
 
+TlbTagReport tlb_tag_report(u32 online_mask) noexcept
+{
+    return summarize_tlb_tags(online_mask, ok::smp::max_cpus, false,
+                              [](u32 cpu) -> const auto & { return ok_aarch64_cpu_blocks[cpu].tlb_tags; });
+}
+
 OwnershipReport ownership_report() noexcept
 {
     OwnershipReport report{};
@@ -253,11 +295,16 @@ Status initialize()
     populate_kernel(kernel_root, kernel_directory);
     boot_cpu.stack_top = reinterpret_cast<uptr>(interrupt_stack + sizeof(interrupt_stack));
     const u64 vectors = reinterpret_cast<uptr>(ok_arm_execution_vectors);
+    const auto bits = asid_bits();
+    translation_control = tcr | (bits == 16 ? tcr_asid16 : 0);
     asm volatile("msr vbar_el1, %0; msr mair_el1, %1; msr tcr_el1, %2; msr cpacr_el1, %3; isb"
                  :
-                 : "r"(vectors), "r"(mair), "r"(tcr), "r"(fp_control)
+                 : "r"(vectors), "r"(mair), "r"(translation_control), "r"(fp_control)
                  : "memory");
+    // The one broadcast invalidation: from here on every CPU starts clean and
+    // user entries invalidate only their own ASIDs.
     select_root(reinterpret_cast<uptr>(&kernel_root));
+    boot_cpu.tlb_tags.configure(bits);
     control |= (u64{1} << 0) | (u64{1} << 2) | (u64{1} << 12); // MMU, data cache, instruction cache.
     asm volatile("ic iallu; dsb sy; isb; msr sctlr_el1, %0; isb" : : "r"(control) : "memory");
 
@@ -284,12 +331,18 @@ Result<AddressSpace> create_space(MappingView mappings)
     for (const auto &mapping : mappings)
         if (!admissible(mapping))
             return Status::invalid_argument("invalid native user-page mapping or writable executable page");
-    auto entry = spaces.acquire();
+    auto entry = [&]() -> Result<SpaceTable<Space>::Entry *> {
+        smp::ScopedSpinLock guard(spaces_lock);
+        auto acquired = spaces.acquire();
+        if (acquired) acquired.value()->space.tlb = space_ids.issue();
+        return acquired;
+    }();
     if (!entry)
         return entry.status();
     auto &value = entry.value()->space;
     auto fail = [&](Status status) {
         static_cast<void>(release_tables(value));
+        smp::ScopedSpinLock guard(spaces_lock);
         static_cast<void>(spaces.release(value));
         return status;
     };
@@ -342,13 +395,16 @@ Status remap(const AddressSpace &space, const PageMapping &mapping)
         return Status::not_found("native user page has no translation");
     if ((mapping.flags & page_execute) != 0)
         clean_code(mapping.physical_address);
-    // Every other CPU leaves this root's user windows first; each entry's
-    // select_root invalidates the stage-1 TLB on all CPUs. Break before make.
+    // Every other CPU leaves this root's user windows first. Break before
+    // make; no CPU runs this space meanwhile, and one that cached the old
+    // entry invalidates its ASID at its next entry, once the generation moved.
     static_cast<void>(ok::smp::quiesce_root(space.root));
     entry = 0;
     asm volatile("dsb ishst" : : : "memory");
     entry = leaf_entry(mapping);
     asm volatile("dsb ish; ic ialluis; dsb ish; isb" : : : "memory");
+    smp::ScopedSpinLock guard(spaces_lock);
+    value->tlb.changed();
     return Status::success();
 }
 
@@ -361,7 +417,11 @@ Status destroy_space(AddressSpace &space)
         return Status::busy("cannot destroy an address space during native execution");
     static_cast<void>(ok::smp::quiesce_root(space.root));
     const auto released = release_tables(*value);
-    const auto retired = spaces.release(*value);
+    Status retired;
+    {
+        smp::ScopedSpinLock guard(spaces_lock);
+        retired = spaces.release(*value);
+    }
     space = {};
     return !released ? released : retired;
 }
@@ -439,14 +499,23 @@ Status copy_to_user(const AddressSpace &space, uptr destination, const void *sou
 
 static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack_top)
 {
-    if (!initialized || storage(space) == nullptr)
+    if (!initialized)
         return Status::not_initialized("native address space is unavailable");
     auto &cpu = this_cpu();
     if (cpu.executing)
         return Status::busy("this CPU already executes native code");
     if (!stack_top && !cpu.stack_top)
         return Status::invalid_argument("a secondary CPU enters native code only on an owned kernel stack");
-    const auto code = lookup(space, frame.pc);
+    u64 code;
+    detail::TlbSpaceTag tlb;
+    {
+        smp::ScopedSpinLock guard(spaces_lock);
+        const auto *value = storage(space);
+        if (value == nullptr)
+            return Status::not_initialized("native address space is unavailable");
+        code = lookup(space, frame.pc);
+        tlb = value->tlb;
+    }
     // Like Linux, the stack need not be mapped; only an access to it faults (a
     // detached musl thread unmaps its own stack before its exit syscall).
     if (!permits(code, false) || (code & user_xn) != 0 || (frame.pc & 3) != 0 || frame.sp <= user_begin ||
@@ -461,11 +530,11 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     const auto old_stack_top = cpu.stack_top;
     if (stack_top) cpu.stack_top = stack_top;
     cpu.executing = true;
-    select_root(space.root);
+    select_user_root(space.root, cpu.tlb_tags.select(tlb));
     asm volatile("msr cntp_tval_el0, %0; msr cntp_ctl_el0, %1; isb" : : "r"(timer_period), "r"(u64{1}) : "memory");
     ok_arm_execution_enter(&frame);
     asm volatile("msr cntp_ctl_el0, xzr; isb" : : : "memory");
-    select_root(reinterpret_cast<uptr>(&kernel_root));
+    select_kernel_root();
     cpu.executing = false;
     cpu.active_frame = nullptr;
     cpu.resume_sp = 0;
@@ -577,11 +646,16 @@ Status prepare_secondary(ok::smp::CpuId cpu, SecondaryStart &start)
     block.cpu = cpu;
     start.cpu_block = reinterpret_cast<uptr>(&block);
     start.mair = mair;
-    start.tcr = tcr;
+    start.tcr = translation_control;
     start.vbar = reinterpret_cast<uptr>(ok_arm_execution_vectors);
     start.cpacr = fp_control;
     start.ttbr0 = reinterpret_cast<uptr>(&kernel_root);
     start.sctlr = secondary_control;
     return Status::success();
+}
+
+void prepare_local_tlb_tags()
+{
+    execution::this_cpu().tlb_tags.configure(execution::asid_bits());
 }
 } // namespace ok::arch::aarch64
