@@ -8,6 +8,7 @@ namespace ok::fs
 enum class Attribute : u32
 {
     inode = 1, device = 2, access_time = 4, modification_time = 8, change_time = 16, blocks512 = 32,
+    special_device = 64, // A device node's own number (st_rdev).
 };
 // kernel_fixed: a kernel-defined node (devfs) with constant epoch timestamps.
 enum class TimestampSource : u8 { unavailable, readonly_ext4, maintained_ext4, kernel_fixed };
@@ -27,6 +28,7 @@ struct FileAttributes
     u64 inode{};
     FilesystemDevice device{};
     u32 valid{};
+    FilesystemDevice special{}; // Valid with Attribute::special_device, device nodes only.
     EpochTimestamp access{}, modification{}, change{};
     [[nodiscard]] bool has(Attribute field) const { return (valid & static_cast<u32>(field)) != 0; }
     void mark(Attribute field) { valid |= static_cast<u32>(field); }

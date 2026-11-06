@@ -33,7 +33,8 @@ struct StatCodec final
         if (auto checked = validate(status); !checked) return checked;
         if (layout == StatLayout::kernel_stat)
         {
-            if (status.attributes.device.major > 0xfff || status.attributes.device.minor > 0xfffff)
+            if (status.attributes.device.major > 0xfff || status.attributes.device.minor > 0xfffff ||
+                status.attributes.special.major > 0xfff || status.attributes.special.minor > 0xfffff)
                 return Status::overflow("Linux stat device number");
             if (static_cast<u64>(status.size) > 0x7fffffffffffffffull || status.blocks > 0x7fffffffffffffffull)
                 return Status::overflow("Linux signed stat size or block count");
@@ -50,6 +51,8 @@ struct StatCodec final
             }
         };
         const auto &attributes = status.attributes;
+        // st_rdev: a device node's own number, zero for everything else.
+        const auto special = attributes.has(fs::Attribute::special_device) ? attributes.special : fs::FilesystemDevice{};
         const auto stamp = [&](usize offset, usize width, const fs::EpochTimestamp &time) {
             put(offset,8,static_cast<u64>(time.seconds)); put(offset+8,width,time.nanoseconds);
         };
@@ -62,21 +65,27 @@ struct StatCodec final
             put(20,4,status.uid); put(24,4,status.gid); put(28,2,status.mode);
             put(32,8,attributes.inode); put(40,8,status.size); put(48,8,status.blocks);
             stamp(64,4,attributes.access); stamp(96,4,attributes.change); stamp(112,4,attributes.modification);
+            put(128,4,special.major); put(132,4,special.minor);
             put(136,4,attributes.device.major); put(140,4,attributes.device.minor);
         }
         else
         {
-            const u64 minor = attributes.device.minor;
-            const u64 device = (minor & 255) | (u64{attributes.device.major} << 8) | ((minor & ~u64{255}) << 12);
-            put(0,8,device); put(8,8,attributes.inode);
+            // Linux new_encode_dev.
+            const auto encode_device = [](fs::FilesystemDevice number) {
+                const u64 minor = number.minor;
+                return (minor & 255) | (u64{number.major} << 8) | ((minor & ~u64{255}) << 12);
+            };
+            put(0,8,encode_device(attributes.device)); put(8,8,attributes.inode);
             if constexpr (Target == Profile::x86_64)
             {
                 put(16,8,status.link_count); put(24,4,status.mode); put(28,4,status.uid); put(32,4,status.gid);
+                put(40,8,encode_device(special));
                 put(56,8,status.block_size);
             }
             else
             {
                 put(16,4,status.mode); put(20,4,status.link_count); put(24,4,status.uid); put(28,4,status.gid);
+                put(32,8,encode_device(special));
                 put(56,4,status.block_size);
             }
             put(48,8,status.size); put(64,8,status.blocks);
@@ -96,6 +105,8 @@ struct StatCodec final
             (status.type == fs::NodeType::device && mode_type == fs::mode_character_device);
         if (!type_matches) return Status::unsupported("Linux stat provider type unavailable");
         const auto &a = status.attributes;
+        if (a.has(fs::Attribute::special_device) && status.type != fs::NodeType::device)
+            return Status::unsupported("Linux stat device number on a non-device node");
         if (!a.has(fs::Attribute::blocks512))
             return Status::unsupported("Linux stat allocated-512 count unavailable");
         if (static_cast<u64>(status.size) > 0x7fffffffffffffffull || status.blocks > 0x7fffffffffffffffull ||
