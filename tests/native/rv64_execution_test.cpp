@@ -3,6 +3,7 @@
 #include "ok/smp/bringup.hpp"
 #include "execution_table_pages.hpp"
 #include "../../src/arch/riscv_common/clint.hpp"
+#include "../../src/arch/tlb_tags.hpp"
 namespace hw = ok::arch::execution;
 using namespace ok;
 extern "C" const std::byte ok_rv64_probe_begin[], ok_rv64_probe_timer[], ok_rv64_probe_write_fault[],
@@ -44,6 +45,76 @@ template <typename Done> bool wait_for(Done done)
         if (arch::riscv::Clint::time() - start > 20'000'000)
             return done();
     return true;
+}
+
+// One pass of the memory probe: it adds one to the word at user_begin+0x1000
+// and reports the sum.
+u64 count_through_user(hw::AddressSpace &space)
+{
+    auto frame = hw::initial_frame(entry(ok_rv64_probe_memory), hw::user_begin + 0x2000 - 16);
+    for (usize attempt = 0; attempt < 128; ++attempt)
+    {
+        const auto trap = hw::enter(space, frame);
+        check(trap.ok(), "tag churn entry");
+        if (trap.value().kind == hw::TrapKind::syscall)
+            return frame.registers[10];
+        check(trap.value().kind == hw::TrapKind::timer, "tag churn trap");
+    }
+    check(false, "tag churn made no progress");
+    return 0;
+}
+
+// More spaces than this hart has ASID slots, created and retired in turn like
+// mmap churn: tags roll over and are reused, yet each space counts only in its
+// own frame (three frames rotate, so a reused tag's stale entry would name
+// another one), and the next entry after a remap counts in the new frame.
+alignas(4096) std::array<std::array<u64, 512>, 3> churn_data{};
+alignas(4096) std::array<u64, 512> kept_data{}, remap_target{};
+void check_tag_churn()
+{
+    constexpr usize spaces = 2 * arch::detail::tlb_tag_slots + 5;
+    const auto before = hw::tlb_tag_report(1);
+    // A space keeps viewing its mapping records; the runtime rewrites them
+    // with a remap, as this does.
+    static std::array<hw::PageMapping, 2> kept_pages{
+        {{hw::user_begin, reinterpret_cast<uptr>(code.data()), hw::page_read | hw::page_execute},
+         {hw::user_begin + 0x1000, reinterpret_cast<uptr>(kept_data.data()), hw::page_read | hw::page_write}}};
+    auto kept_result = hw::create_space(kept_pages);
+    check(kept_result.ok(), "create long-lived space");
+    auto kept = kept_result.value();
+    u64 kept_count = 0;
+    for (usize i = 0; i < spaces; ++i)
+    {
+        auto &data = churn_data[i % 3];
+        data[0] = 1000 * (i + 1);
+        auto pages = kept_pages;
+        pages[1].physical_address = reinterpret_cast<uptr>(data.data());
+        auto created = hw::create_space(pages);
+        check(created.ok(), "create tag churn space");
+        auto space = created.value();
+        check(count_through_user(space) == 1000 * (i + 1) + 1 && data[0] == 1000 * (i + 1) + 1,
+              "tag churn space counts in its own frame");
+        check(hw::destroy_space(space).ok(), "retire tag churn space");
+        if (i % 7 == 0)
+            check(count_through_user(kept) == ++kept_count && kept_data[0] == kept_count,
+                  "long-lived space keeps its frame across rollovers");
+    }
+    remap_target[0] = 500;
+    kept_pages[1].physical_address = reinterpret_cast<uptr>(remap_target.data());
+    check(hw::remap(kept, kept_pages[1]).ok(), "remap long-lived page");
+    check(count_through_user(kept) == 501 && remap_target[0] == 501 && kept_data[0] == kept_count,
+          "next entry after a remap uses the new frame");
+    check(hw::destroy_space(kept).ok(), "retire long-lived space");
+    const auto after = hw::tlb_tag_report(1);
+    check(after.supported && !after.pcid &&
+              (after.asid_bits == 0 ? after.rollovers == 0 : after.rollovers >= before.rollovers + 2),
+          "ASID tags rolled over, or every entry flushed");
+    if (after.asid_bits == 16)
+        emit("RV64_NATIVE tlb_asid=16 churn=pass rollover=pass remap=pass\n");
+    else if (after.asid_bits == 0)
+        emit("RV64_NATIVE tlb_asid=none churn=pass remap=pass\n");
+    else
+        emit("RV64_NATIVE tlb_asid=narrow churn=pass rollover=pass remap=pass\n");
 }
 
 // Hart 1's share: it runs the counting loop in its own space until hart 0
@@ -189,6 +260,7 @@ extern "C" [[noreturn]] void kernel_main()
     check(hw::copy_from_user(second.value(), &copied, hw::user_begin + 0x1000, sizeof(copied)).ok() && copied == 1,
           "second space survived other user writes");
     emit("RV64_NATIVE address_spaces=pass\n");
+    check_tag_churn();
     // Hart 1 from the DTB, released through its start mailbox and MSIP, runs
     // user code in the second space while this hart runs its own; remapping
     // that space first sends hart 1 out of U-mode with an IPI.

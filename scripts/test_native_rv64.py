@@ -35,7 +35,8 @@ def main() -> int:
     serial = result.stdout + result.stderr
     (output / "serial.log").write_text(serial)
     print(serial, end="")
-    if result.returncode != 0 or "RV64_NATIVE_PASS scope=hardware" not in serial:
+    if result.returncode != 0 or "RV64_NATIVE_PASS scope=hardware" not in serial or \
+            "RV64_NATIVE tlb_asid=" not in serial:
         raise RuntimeError(f"RV64 native hardware probe failed: QEMU exit {result.returncode}")
     return 0
 

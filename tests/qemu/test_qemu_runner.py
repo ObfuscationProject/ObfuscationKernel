@@ -173,9 +173,23 @@ def single_cpu_qemu_command(arch: str, qemu: Path, kernel: Path, display: str, d
     return command
 
 
-def make_smp_output(arch: str, smp_line: str | None) -> str:
+_DEFAULT_TLB = object()
+
+
+def make_smp_output(arch: str, smp_line: str | None, tlb_line: "str | None | object" = _DEFAULT_TLB) -> str:
+    """Boot output with an OK_SMP line; SMP profiles get their QEMU TLB line unless one (or None) is given."""
+    if tlb_line is _DEFAULT_TLB:
+        tlb_line = QEMU_TLB_LINES.get(arch)
     output = make_output(arch) + "OK_SMP scope=model topology=pass per_cpu=pass ap_start=unsupported\n"
-    return output + (smp_line + "\n" if smp_line else "")
+    return output + "".join(line + "\n" for line in (smp_line, tlb_line) if line)
+
+
+# The TLB line each SMP profile prints under its QEMU CPU model.
+QEMU_TLB_LINES = {
+    "x86_64": "OK_SMP_TLB scope=hardware asid=none pcid=off",
+    "aarch64": "OK_SMP_TLB scope=hardware asid=16 pcid=off",
+    "rv64": "OK_SMP_TLB scope=hardware asid=16 pcid=off",
+}
 
 def tsc_line(cpu: int, result: str = "sync", offset: int = 165, error: int = 552, residual: int | None = None,
              residual_error: int | None = None, tolerance: int | None = None, skew: str | None = None) -> str:
@@ -372,9 +386,45 @@ class QemuRunnerValidationTests(unittest.TestCase):
                 line = "OK_SMP scope=hardware cpus=4 online=4 ap_start=psci ipi=pass"
                 if arch in qemu_test.TSC_SYNC_QEMU_ARCHES:
                     line = tsc_lines(3) + line + " tsc=sync"
-                code, stdout, stderr = self.validate_smp(arch, make_smp_output(arch, line), 4)
+                code, stdout, stderr = self.validate_smp(arch, make_smp_output(arch, line, QEMU_TLB_LINES[arch]), 4)
                 self.assertEqual(code, 0, stderr)
                 self.assertIn(f"OK_QEMU_SMP_TEST arch={arch} smp=4 cpus=4 online=4", stdout)
+                fields = QEMU_TLB_LINES[arch].split()[2:]
+                self.assertIn(f"tlb_{fields[0]} {fields[1]}", stdout)
+
+    def test_smp_profiles_require_a_consistent_tlb_report(self) -> None:
+        base = "OK_SMP scope=hardware cpus=2 online=2 ap_start=sipi ipi=pass"
+        accepted = {
+            "x86_64": ("asid=none pcid=off", "asid=12 pcid=on"),
+            "aarch64": ("asid=8 pcid=off", "asid=16 pcid=off"),
+            "rv64": ("asid=none pcid=off", "asid=9 pcid=off", "asid=16 pcid=off"),
+        }
+        rejected = {
+            "x86_64": ("asid=none pcid=on", "asid=12 pcid=off", "asid=16 pcid=off", "pcid=off", "asid=none"),
+            "aarch64": ("asid=none pcid=off", "asid=12 pcid=on", "asid=16 pcid=on", "asid=16"),
+            "rv64": ("asid=17 pcid=off", "asid=16 pcid=on", "asid=0 pcid=off", "pcid=off"),
+        }
+        for arch in qemu_test.SMP_QEMU_ARCHES:
+            line = tsc_lines(1) + base + " tsc=sync" if arch in qemu_test.TSC_SYNC_QEMU_ARCHES else base
+            for mode in accepted[arch]:
+                with self.subTest(arch=arch, mode=mode):
+                    output = make_smp_output(arch, line, f"OK_SMP_TLB scope=hardware {mode}")
+                    code, stdout, stderr = self.validate_smp(arch, output, 2)
+                    self.assertEqual(code, 0, stderr)
+                    self.assertIn(f"tlb_{mode}", stdout)
+            for mode in rejected[arch]:
+                with self.subTest(arch=arch, mode=mode):
+                    output = make_smp_output(arch, line, f"OK_SMP_TLB scope=hardware {mode}")
+                    code, stdout, stderr = self.validate_smp(arch, output, 2)
+                    self.assertEqual(code, 14)
+                    self.assertIn("TLB report invalid", stderr)
+                    self.assertNotIn("OK_QEMU_SMP_TEST", stdout)
+            with self.subTest(arch=arch, mode="missing"):
+                for tlb in (None, "OK_SMP_TLB scope=model asid=16 pcid=off"):
+                    code, stdout, stderr = self.validate_smp(arch, make_smp_output(arch, line, tlb), 2)
+                    self.assertEqual(code, 14)
+                    self.assertIn("did not report OK_SMP_TLB scope=hardware for -smp 2", stderr)
+                    self.assertNotIn("OK_QEMU_SMP_TEST", stdout)
 
     def test_x86_64_smp_report_names_its_tsc_synchronization(self) -> None:
         self.assertEqual(qemu_test.TSC_SYNC_QEMU_ARCHES, ("x86_64",))
@@ -474,7 +524,7 @@ class QemuRunnerValidationTests(unittest.TestCase):
         for arch in qemu_test.SMP_QEMU_ARCHES:
             for line in rejected:
                 with self.subTest(arch=arch, line=line):
-                    code, stdout, stderr = self.validate_smp(arch, make_smp_output(arch, line), 2)
+                    code, stdout, stderr = self.validate_smp(arch, make_smp_output(arch, line, QEMU_TLB_LINES[arch]), 2)
                     self.assertEqual(code, 14)
                     self.assertIn("-smp 2", stderr)
                     self.assertNotIn("OK_QEMU_SMP_TEST", stdout)
@@ -499,6 +549,7 @@ class QemuRunnerValidationTests(unittest.TestCase):
                 self.assertEqual(code, 0, stderr)
                 self.assertIn(f"OK_QEMU_SMP_TEST arch={arch} smp=2", stdout)
                 self.assertIn("reason=no_ap_start", stdout)
+                self.assertNotIn("tlb_asid", stdout)
             for line in claimed:
                 with self.subTest(arch=arch, line=line):
                     code, _, _ = self.validate_smp(arch, make_smp_output(arch, line), 2)
@@ -508,10 +559,14 @@ class QemuRunnerValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             kernel = Path(tmp) / "kernel.bin"
             kernel.write_bytes(b"ok")
-            output = make_smp_output("aarch64", "OK_SMP scope=hardware cpus=2 online=2 ap_start=psci ipi=pass")
+            output = make_smp_output("aarch64", "OK_SMP scope=hardware cpus=2 online=2 ap_start=psci ipi=pass",
+                                     QEMU_TLB_LINES["aarch64"])
             qemu_test.write_summary(kernel, "aarch64", output, 0, 0, 2)
             summary = (kernel.parent / "qemu-test-summary.txt").read_text(encoding="utf-8").splitlines()
         self.assertIn("smp.cpus=2", summary)
+        self.assertIn("marker.OK_SMP_TLB=present", summary)
+        self.assertIn("smp.tlb.asid=16", summary)
+        self.assertIn("smp.tlb.pcid=off", summary)
         self.assertIn("marker.OK_SMP=present", summary)
         self.assertIn("scopes.OK_SMP=model,hardware", summary)
         self.assertIn("marker.OK_SMP_HARDWARE=present", summary)
@@ -522,14 +577,15 @@ class QemuRunnerValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             kernel = Path(tmp) / "kernel.bin"
             kernel.write_bytes(b"ok")
-            qemu_test.write_summary(kernel, "x86_64", make_smp_output("x86_64", None), 0, 0)
+            qemu_test.write_summary(kernel, "x86_64", make_smp_output("x86_64", None, None), 0, 0)
             summary = (kernel.parent / "qemu-test-summary.txt").read_text(encoding="utf-8").splitlines()
         self.assertIn("smp.cpus=1", summary)
         self.assertIn("scope.OK_SMP=model", summary)
         self.assertIn("scopes.OK_SMP=model", summary)
         self.assertIn("scopes.OK_IRQ=absent", summary)
         self.assertIn("marker.OK_SMP_HARDWARE=missing", summary)
-        self.assertFalse(any(line.startswith("smp.hardware.") for line in summary))
+        self.assertIn("marker.OK_SMP_TLB=missing", summary)
+        self.assertFalse(any(line.startswith(("smp.hardware.", "smp.tlb.")) for line in summary))
 
     def test_default_qemu_command_matches_single_cpu_builder(self) -> None:
         for arch in qemu_test.BOOTABLE_QEMU_ARCHES:

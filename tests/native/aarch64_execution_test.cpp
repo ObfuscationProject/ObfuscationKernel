@@ -1,5 +1,6 @@
 #include "ok/arch/execution.hpp"
 #include "execution_table_pages.hpp"
+#include "../../src/arch/tlb_tags.hpp"
 
 using namespace ok;
 namespace native = ok::arch::execution;
@@ -62,6 +63,65 @@ native::Trap next_non_timer(native::AddressSpace &space, native::UserFrame &fram
     require(false, "no forward progress after timer preemption");
     return {};
 }
+// One run of the user program's two syscalls; it stores `value` at data_va.
+void store_through_user(native::AddressSpace &space, u64 value)
+{
+    auto frame = native::initial_frame(code_va, native::user_end);
+    auto trap = next_non_timer(space, frame);
+    require(trap.kind == native::TrapKind::syscall && native::syscall(frame).number == 0x1234, "tag churn entry");
+    native::set_return_value(frame, value);
+    trap = next_non_timer(space, frame);
+    require(trap.kind == native::TrapKind::syscall && native::syscall(frame).number == 0x2345, "tag churn store");
+}
+
+// More spaces than this CPU has ASID slots, created and retired in turn like
+// mmap churn: tags roll over and are reused, yet each space stores only into
+// its own frame (three frames rotate, so a reused tag's stale entry would name
+// another one), and the next entry after a remap stores into the new frame.
+alignas(4096) u8 churn_data[3][4096]{};
+alignas(4096) u8 churn_stack[4096]{};
+alignas(4096) u8 remap_target[4096]{};
+void check_tag_churn(native::AddressSpace &kept, const u8 *kept_data)
+{
+    constexpr usize spaces = 2 * ok::arch::detail::tlb_tag_slots + 5;
+    const auto before = native::tlb_tag_report(1);
+    for (usize i = 0; i < spaces; ++i)
+    {
+        auto *data = churn_data[i % 3];
+        const native::PageMapping mappings[] = {
+            {code_va, reinterpret_cast<uptr>(code), native::page_read | native::page_execute},
+            {data_va, reinterpret_cast<uptr>(data), native::page_read | native::page_write},
+            {stack_va, reinterpret_cast<uptr>(churn_stack), native::page_read | native::page_write},
+        };
+        auto created = native::create_space(mappings);
+        require(created.ok(), "create tag churn space");
+        auto space = created.value();
+        store_through_user(space, 0x100 + i);
+        require(data[0] == static_cast<u8>(i) && data[1] == 1, "tag churn space stores into its own frame");
+        require(native::destroy_space(space).ok(), "retire tag churn space");
+        if (i % 7 == 0)
+        {
+            store_through_user(kept, 0x40 + i);
+            require(kept_data[0] == static_cast<u8>(0x40 + i), "long-lived space keeps its frame across rollovers");
+        }
+    }
+    store_through_user(kept, 0x11);
+    require(kept_data[0] == 0x11, "long-lived space before remap");
+    require(native::remap(kept, {data_va, reinterpret_cast<uptr>(remap_target), native::page_read | native::page_write})
+                .ok(),
+            "remap long-lived data page");
+    store_through_user(kept, 0x22);
+    require(remap_target[0] == 0x22 && kept_data[0] == 0x11, "next entry after a remap uses the new frame");
+    const auto after = native::tlb_tag_report(1);
+    require(after.supported && after.asid_bits >= 8 && !after.pcid && after.rollovers >= before.rollovers + 2,
+            "ASID tags rolled over");
+    if (after.asid_bits == 16)
+        print("OK_NATIVE_TLB scope=hardware asid=16");
+    else
+        print("OK_NATIVE_TLB scope=hardware asid=8");
+    print(" churn=pass rollover=pass remap=pass\n");
+}
+
 void check_fault(native::AddressSpace &space, const u8 *entry, native::TrapKind kind, uptr address, uptr error_class)
 {
     auto frame = native::initial_frame(code_va + static_cast<uptr>(entry - ok_native_user_begin), native::user_end);
@@ -152,6 +212,7 @@ extern "C" [[noreturn]] void kernel_main()
     require(trap.kind == native::TrapKind::syscall && data_b[0] == 11 && data_a[0] == 7,
             "same virtual address has distinct physical process storage");
     print("OK_NATIVE_TEST address_spaces=pass simd=pass\n");
+    check_tag_churn(space_b, data_b);
     auto timer = native::enter(space_a, frame_a);
     require(timer.ok() && timer.value().kind == native::TrapKind::timer && timer.value().vector == 30,
             "architectural timer preempts non-cooperative user loop");

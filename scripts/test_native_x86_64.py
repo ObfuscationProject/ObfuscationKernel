@@ -85,6 +85,8 @@ def main() -> int:
     print(output, end="")
     if result.returncode != 33 or "OK_NATIVE_TEST_PASS scope=hardware" not in output:
         raise RuntimeError(f"native hardware test failed: QEMU exit {result.returncode}")
+    if "OK_NATIVE_TLB scope=hardware " not in output:
+        raise RuntimeError("native hardware test did not run its TLB tag churn")
     if args.smp > 1 and "OK_NATIVE_SMP scope=hardware cpus=2 " not in output:
         raise RuntimeError("native hardware test did not run user code on a secondary CPU")
     return 0

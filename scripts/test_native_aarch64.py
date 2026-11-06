@@ -55,7 +55,8 @@ def main() -> int:
             raise RuntimeError(f"native {entry_level} hardware test timed out") from error
         (out/f"serial-{entry_level}.log").write_text(output)
         print(f"entry_level={entry_level}\n{output}", end="")
-        if result.returncode != 0 or "OK_NATIVE_TEST_PASS scope=hardware architecture=aarch64" not in output:
+        if result.returncode != 0 or "OK_NATIVE_TEST_PASS scope=hardware architecture=aarch64" not in output or \
+                "OK_NATIVE_TLB scope=hardware asid=" not in output:
             raise RuntimeError(f"native {entry_level} hardware test failed: QEMU exit {result.returncode}")
     return 0
 

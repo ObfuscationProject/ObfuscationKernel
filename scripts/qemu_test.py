@@ -52,6 +52,13 @@ TSC_SYNC_RESULTS = ("sync", "adjusted", "offset", "unsynced")
 # The kernel admits only a verified CPU, so an online one is never unsynced.
 TSC_SYNC_VERIFIED = ("sync", "adjusted", "offset")
 MAX_QEMU_CPUS = 8
+# What OK_SMP_TLB may report on each SMP profile: ASID widths (none: every
+# entry flushes the user TLB) and whether x86 PCIDs carry the tags.
+SMP_TLB_MODES = {
+    "x86_64": {("none", "off"), ("12", "on")},
+    "aarch64": {("8", "off"), ("16", "off")},
+    "rv64": {("none", "off"), *((str(bits), "off") for bits in range(1, 17))},
+}
 
 
 class QemuConfigurationError(RuntimeError):
@@ -358,6 +365,15 @@ def hardware_smp_fields(lines: list[str]) -> dict[str, str] | None:
     return None
 
 
+def hardware_tlb_fields(lines: list[str]) -> dict[str, str] | None:
+    for line in reversed(lines):
+        if line.startswith("OK_SMP_TLB "):
+            fields = parse_fields(line)
+            if fields.get("scope") == "hardware":
+                return fields
+    return None
+
+
 def tsc_sync_problem(lines: list[str], cpus: int, tsc: str, skew_test: bool) -> str | None:
     """Check the per-CPU OK_TSC_SYNC lines behind OK_SMP's tsc= field.
 
@@ -439,7 +455,18 @@ def validate_smp(arch: str, lines: list[str], cpus: int, tsc_skew_test: bool = F
             return 14
     reason = f" reason={fields['reason']}" if "reason" in fields else ""
     sync = f" tsc={tsc}" if tsc is not None else ""
-    print(f"OK_QEMU_SMP_TEST arch={arch} smp={cpus} {reported}{reason}{sync}")
+    tlb = ""
+    if arch in SMP_QEMU_ARCHES:
+        tlb_fields = hardware_tlb_fields(lines)
+        if tlb_fields is None:
+            print(f"debug kernel did not report OK_SMP_TLB scope=hardware for -smp {cpus}", file=sys.stderr)
+            return 14
+        mode = (tlb_fields.get("asid", "missing"), tlb_fields.get("pcid", "missing"))
+        if mode not in SMP_TLB_MODES[arch]:
+            print(f"debug kernel TLB report invalid for {arch}: asid={mode[0]} pcid={mode[1]}", file=sys.stderr)
+            return 14
+        tlb = f" tlb_asid={mode[0]} pcid={mode[1]}"
+    print(f"OK_QEMU_SMP_TEST arch={arch} smp={cpus} {reported}{reason}{sync}{tlb}")
     return 0
 
 
@@ -537,6 +564,7 @@ def write_summary(
         "OK_BLOCK",
         "OK_EXT4_READONLY",
         "OK_SMP",
+        "OK_SMP_TLB",
         "OK_IRQ",
         "OK_PREEMPT",
         "OK_TEST_FAIL",
@@ -556,6 +584,7 @@ def write_summary(
         for marker in roadmap_markers
     }
     smp_hardware = hardware_smp_fields(lines)
+    smp_tlb = hardware_tlb_fields(lines)
     coverage = coverage_statuses(arch, fields)
     with summary.open("w", encoding="utf-8") as handle:
         handle.write(f"arch={arch}\n")
@@ -581,6 +610,8 @@ def write_summary(
         handle.write(f"marker.OK_SMP_HARDWARE={'present' if smp_hardware is not None else 'missing'}\n")
         for key in sorted(smp_hardware or {}):
             handle.write(f"smp.hardware.{key}={smp_hardware[key]}\n")
+        for key in sorted(smp_tlb or {}):
+            handle.write(f"smp.tlb.{key}={smp_tlb[key]}\n")
 
 
 def parse_fields(line: str) -> dict[str, str]:
