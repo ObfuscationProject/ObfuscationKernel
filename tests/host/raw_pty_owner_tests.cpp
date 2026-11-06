@@ -583,6 +583,38 @@ void raw_termios_and_open_counts()
     CHECK(table.admit_open(Handle{}).code() == StatusCode::bad_descriptor);
 }
 
+// Non-canonical slave reads below VMIN: an O_NONBLOCK read takes what is
+// buffered (POSIX, n_tty_read), and after the master's last close a raw slave
+// drains it before EOF. An unterminated canonical line is never returned.
+void slave_vmin_nonblocking_and_drain(std::uint8_t vtime)
+{
+    RawPtyTable<2, 64> table; auto pair = make(table);
+    auto *terminal = table.terminal(pair.slave.slot, pair.slave.generation);
+    terminal->termios[tty::Cc::min] = 4; terminal->termios[tty::Cc::time] = vtime;
+    std::array<std::byte, 8> output{};
+    CHECK(table.read(pair.slave, output, true).status().code() == StatusCode::would_block); // Empty: EAGAIN.
+    CHECK(table.write(pair.master, text("ab")).value().bytes == 2);
+    CHECK(table.read(pair.slave, output).status().code() == StatusCode::would_block);
+    CHECK(table.prepare_read(pair.slave, 8).status().code() == StatusCode::would_block);
+    auto preview = table.prepare_read(pair.slave, 8, true); CHECK(preview && preview.value().size() == 2);
+    preview.value().cancel();
+    const auto taken = table.read(pair.slave, output, true);
+    CHECK(taken && taken.value().bytes == 2 && output[1] == std::byte{'b'});
+    CHECK(table.write(pair.master, text("cd")).value().bytes == 2);
+    CHECK(table.retire(pair.master).value().master_retired);
+    CHECK(table.readiness(pair.slave).value().readable && table.input_pending(pair.slave).value() == 2);
+    CHECK(drain(table, pair.slave) == "cd" && drain(table, pair.slave).empty());
+    CHECK(!table.readiness(pair.slave).value().buffered && table.audit().cleared_outside_live_bytes);
+    CHECK(table.retire(pair.slave).value().pair_freed); empty(table);
+    pair = make(table);
+    terminal = table.terminal(pair.slave.slot, pair.slave.generation);
+    terminal->termios.lflag |= tty::lflag::icanon;
+    CHECK(table.write(pair.master, text("xy")).value().bytes == 2);
+    CHECK(table.retire(pair.master).value().master_retired);
+    CHECK(drain(table, pair.slave).empty() && terminal->ldisc.buffered() == 2);
+    CHECK(table.retire(pair.slave).value().pair_freed); empty(table);
+}
+
 // ptmx-style pairs: dormant, locked, counted opens, N_TTY between the ends,
 // slave reopen keeping input and session, and the master's hangup.
 void multiplexed_terminal_semantics()
@@ -735,6 +767,8 @@ int main()
     run("checked-read-preview-saturation-closure", checked_read_preview_saturation_and_peer_retirement);
     run("raw-termios-and-open-counts", raw_termios_and_open_counts);
     run("multiplexed-terminal-semantics", multiplexed_terminal_semantics);
+    run("slave-vmin-nonblocking-and-drain", [] { slave_vmin_nonblocking_and_drain(0); });
+    run("slave-vtime-nonblocking-and-drain", [] { slave_vmin_nonblocking_and_drain(5); });
     run("independent-deque-model-100000-steps", deterministic_model_comparison);
     std::printf("PRIVATE_RAW_PTY_OWNER cases=%zu checks=%zu model_steps=100000 open_counts=1 raw_termios=1 "
                 "status=passed\n", cases, checks);

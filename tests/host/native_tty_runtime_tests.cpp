@@ -536,6 +536,47 @@ bool canonical_echo(Kernel &kernel, const PtySession &p, const std::array<i32, 2
     return true;
 }
 
+// Non-canonical slave reads below VMIN: an O_NONBLOCK read takes what is
+// buffered (n_tty_read), and the master's last close wakes a blocked reader,
+// which drains what is buffered before EOF.
+bool raw_vmin_drain(Kernel &kernel, const PtySession &p)
+{
+    auto &scheduler = kernel.scheduler();
+    expect(pty_call(kernel, p.shell, N::pty_pair, {argument_at, posix::o_NONBLOCK}) == 0);
+    std::array<i32, 2> fds{};
+    std::memcpy(fds.data(), user(argument_at), sizeof(fds));
+    auto termios = tty::raw_pair_termios();
+    termios[tty::Cc::min] = 4;
+    std::array<u8, 36> bytes{};
+    expect(Wire::encode(termios, {}, bytes).ok());
+    std::memcpy(user(argument_at), bytes.data(), bytes.size());
+    expect(fd_ioctl(kernel, p.shell, fds[1], OK_TCSETS, argument_at) == 0);
+    expect(pty_call(kernel, p.shell, N::read, {static_cast<uptr>(fds[1]), read_at, 10}) == -11);
+    expect(pty_write(kernel, p.shell, fds[0], "ab") == 2 && pty_read(kernel, p.shell, fds[1], 10) == "ab");
+    expect(pty_call(kernel, p.shell, N::read, {static_cast<uptr>(fds[1]), read_at, 10}) == -11);
+    // The same pair made blocking: a reader below VMIN parks until the master closes.
+    const auto slave = scheduler.find(p.shell)->resources().files.entry(fds[1])->description;
+    scheduler.open_description(slave)->flags &= ~posix::o_NONBLOCK;
+    expect(pty_write(kernel, p.shell, fds[0], "cd") == 2);
+    const auto *reader = scheduler.find_thread(p.shell, p.shell);
+    activate(kernel, p.shell, p.shell);
+    scheduler.find_thread(p.shell, p.shell)->syscall_pending = true;
+    bool complete = true;
+    expect(native::dispatch(kernel, p.shell, {static_cast<uptr>(N::read), {static_cast<uptr>(fds[1]), read_at, 10}},
+                            complete) == -11 && !complete);
+    expect(reader->state == sched::ProcessState::blocked && reader->wait_reason == sched::ThreadWaitReason::pty_read);
+    expect(scheduler.close_descriptor(scheduler.find(p.shell)->resources(), fds[0]).ok());
+    expect(reader->state != sched::ProcessState::blocked);
+    activate(kernel, p.shell, p.shell);
+    expect(native::dispatch(kernel, p.shell, {static_cast<uptr>(N::read), {~uptr{0}, 0, 0}}, complete) == 2);
+    scheduler.find_thread(p.shell, p.shell)->syscall_pending = false;
+    expect(std::string_view{reinterpret_cast<const char *>(user(read_at)), 2} == "cd");
+    expect(pty_read(kernel, p.shell, fds[1]).empty());
+    expect(pty_call(kernel, p.shell, N::close, {static_cast<uptr>(fds[1])}) == 0);
+    expect(scheduler.terminal_audit().ok());
+    return true;
+}
+
 bool raw_drain(Kernel &kernel, const PtySession &p)
 {
     // OK_SYS_PTY_PAIR keeps v1: the slave drains then reads EOF, writes EIO,
@@ -548,7 +589,7 @@ bool raw_drain(Kernel &kernel, const PtySession &p)
     expect(pty_write(kernel, p.shell, fds[1], "x") == -5);
     expect(fd_ioctl(kernel, p.shell, fds[1], OK_TCGETS, argument_at) == 0); // Not hung up.
     expect(pty_call(kernel, p.shell, N::close, {static_cast<uptr>(fds[1])}) == 0);
-    return true;
+    return raw_vmin_drain(kernel, p);
 }
 
 bool ptn_lock(Kernel &kernel, const PtySession &p, i32 &master, i32 &slave)

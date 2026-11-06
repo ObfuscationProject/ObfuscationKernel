@@ -232,7 +232,7 @@ class RawPtyTable final
         pair.used = pair.locked = false;
     }
     // What a read of `count` bytes may take now; an empty plan is EOF.
-    [[nodiscard]] static Result<Plan> plan(const Pair &pair, Side side, std::size_t count)
+    [[nodiscard]] static Result<Plan> plan(const Pair &pair, Side side, std::size_t count, bool nonblocking)
     {
         Plan result{};
         if (side == Side::master)
@@ -247,10 +247,17 @@ class RawPtyTable final
             return result;
         }
         const auto &terminal = pair.slave;
-        result = terminal.ldisc.plan_read(terminal.termios, count, false, false);
+        result = terminal.ldisc.plan_read(terminal.termios, count, nonblocking, false);
         if (result.wait == Ldisc::ReadWait::none) return result;
-        // After the master's last close: a raw slave has drained, a hung-up one was discarded.
-        if (!pair.master_opens) return Plan{.revision = result.revision};
+        if (!pair.master_opens)
+        {
+            // After the master's last close a raw slave drains what it holds below
+            // VMIN (Linux n_tty_read copies before its other-side-closed check),
+            // then reads EOF; a hung-up ptmx slave's input was discarded.
+            const auto drained = terminal.ldisc.plan_read(terminal.termios, count, true, false);
+            if (drained.wait == Ldisc::ReadWait::none && drained.consume) return drained;
+            return Plan{.revision = result.revision};
+        }
         return Status::would_block("PTY slave input is not ready");
     }
     [[nodiscard]] static std::size_t copy(const Pair &pair, Side side, const Plan &planned, std::span<std::byte> output,
@@ -334,12 +341,13 @@ class RawPtyTable final
 
     // A retained canonical OFD must outlive this preview. Copy-out precedes
     // commit; a failed/partial copy can cancel without consuming any input.
-    [[nodiscard]] Result<PreparedRead> prepare_read(Handle handle, std::size_t count)
+    // A nonblocking slave read takes what is buffered below VMIN (POSIX, n_tty_read).
+    [[nodiscard]] Result<PreparedRead> prepare_read(Handle handle, std::size_t count, bool nonblocking = false)
     {
         auto *pair = resolve(handle);
         if (!pair) return Status::bad_descriptor("invalid raw PTY endpoint");
         if (!count) return PreparedRead{*this, handle, pair->revision, Plan{}};
-        auto planned = plan(*pair, handle.side, count);
+        auto planned = plan(*pair, handle.side, count, nonblocking);
         if (!planned) return planned.status();
         // Diagnostic saturated revisions cannot authorize a deferred consume.
         if (planned.value().consume && pair->revision == RevisionLimit)
@@ -443,12 +451,12 @@ class RawPtyTable final
         if (slot >= pairs_.size() || !pairs_[slot].used || !pairs_[slot].multiplexed) return {};
         return {slot, pairs_[slot].generation, Side::slave};
     }
-    [[nodiscard]] Result<Transfer> read(Handle handle, std::span<std::byte> output)
+    [[nodiscard]] Result<Transfer> read(Handle handle, std::span<std::byte> output, bool nonblocking = false)
     {
         auto *pair = resolve(handle);
         if (!pair) return Status::bad_descriptor("invalid raw PTY endpoint");
         if (output.empty()) return Transfer{0, observe(handle.slot, *pair, false)};
-        const auto planned = plan(*pair, handle.side, output.size());
+        const auto planned = plan(*pair, handle.side, output.size(), nonblocking);
         if (!planned) return planned.status();
         static_cast<void>(copy(*pair, handle.side, planned.value(), output, 0));
         return consume(handle, *pair, planned.value());

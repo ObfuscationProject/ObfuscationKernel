@@ -90,12 +90,17 @@ void SchedulerState::wake_pty(private_pty::Handle endpoint, u8 wakes)
     if (wakes & private_pty::wake_slave_read) wake_waiters(ThreadWaitReason::pty_read, pty_wait_key(slave));
     if (wakes & private_pty::wake_slave_write) wake_waiters(ThreadWaitReason::pty_write, pty_wait_key(slave));
 }
+namespace
+{
+// O_NONBLOCK of the description: a slave read then takes what is below VMIN.
+bool pty_nonblocking(const OpenFileDescription &open) { return (open.flags & 0x0800u) != 0; }
+} // namespace
 Result<usize> SchedulerState::read_pty_description(u16 id, std::span<std::byte> output)
 {
     auto *open = open_description(id);
     if (!open || !open->references || open->reservation || !open->readable || !open->pty_endpoint)
         return Status::bad_descriptor("description is not a readable retained raw PTY");
-    auto result = pty_transport_.read(open->pty_endpoint, output);
+    auto result = pty_transport_.read(open->pty_endpoint, output, pty_nonblocking(*open));
     if (!result) return result.status();
     wake_pty(open->pty_endpoint, result.value().change.wakes);
     return result.value().bytes;
@@ -118,7 +123,7 @@ Result<SchedulerState::PreparedPtyRead> SchedulerState::prepare_pty_read(u16 id,
     auto *open = open_description(id);
     if (!open || !open->references || open->reservation || !open->readable || !open->pty_endpoint)
         return Status::bad_descriptor("description is not a readable retained raw PTY");
-    return pty_transport_.prepare_read(open->pty_endpoint, count);
+    return pty_transport_.prepare_read(open->pty_endpoint, count, pty_nonblocking(*open));
 }
 Result<usize> SchedulerState::commit_pty_read(PreparedPtyRead &preview)
 {

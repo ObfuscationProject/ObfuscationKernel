@@ -291,7 +291,9 @@ Until S7 a PTY read that would arm the VTIME timer waits for input instead.
 - A canonical read returns at most one line. VEOF at the start of a line
   returns 0.
 - VMIN/VTIME follow POSIX. A VMIN read is admitted atomically when enough bytes
-  are present; competing readers do not consume bytes progressively.
+  are present; competing readers do not consume bytes progressively. An
+  O_NONBLOCK read returns the bytes buffered below VMIN, and EAGAIN only when
+  none are (console and PTY slaves, Linux `n_tty_read`).
 - Echo goes through OPOST; its ring holds 512 bytes and drops (and counts) the
   oldest bytes on overflow. A terminal write first flushes pending echo. As
   in Linux, the output column moves only for echo that is written (taken by
