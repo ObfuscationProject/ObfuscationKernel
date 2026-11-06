@@ -303,7 +303,9 @@ handler runs under it after the continue.
 - A terminating default sent to a running Linux process none of whose
   unblocking threads can take a signal now terminates it at the next step
   (Linux `complete_signal` fatal shortcut).
-- TSTP/TTIN/TTOU sent to an orphaned group are discarded. SIGSTOP never is.
+- TSTP/TTIN/TTOU in an orphaned group are discarded when they would apply: at
+  generation when deliverable, otherwise when dequeued (a blocked one stays
+  pending for `rt_sigpending` and `sigtimedwait`). SIGSTOP never is.
 - Init (pid 1) follows Linux `SIGNAL_UNKILLABLE` in `sig_ignored` order: a
   SIG_DFL terminating or stopping signal, KILL and STOP included, is ignored
   at generation unless the named thread blocks it; a blocked one is queued,

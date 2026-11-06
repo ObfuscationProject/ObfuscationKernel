@@ -457,6 +457,14 @@ void protections(Kernel &kernel)
     expect(!native::private_group_orphaned(kernel, child));
     expect(linux_kill(kernel, parent, stranger, 20) == 0 && !job(kernel, stranger).stopped);
     expect(native_kill(kernel, parent, stranger, OK_SIGTTIN) == 0 && !job(kernel, stranger).stopped);
+    expect(!shared(stranger).pending_mask().contains(20));
+    // Blocked, it stays pending (Linux drops it only at dequeue), then is dropped.
+    auto &lone = *kernel.scheduler().find_thread(stranger, stranger);
+    lone.native_signal_mask.set(20);
+    expect(linux_kill(kernel, parent, stranger, 20) == 0 && shared(stranger).pending_mask().contains(20));
+    lone.native_signal_mask = {};
+    expect(native::private_signal_deliver(kernel, *kernel.scheduler().find(stranger), lone));
+    expect(!job(kernel, stranger).stopped && !shared(stranger).pending_mask().contains(20));
     expect(linux_kill(kernel, parent, stranger, 19) == 0 && job(kernel, stranger).stopped);
     expect(linux_kill(kernel, parent, stranger, 18) == 0 && !job(kernel, stranger).stopped);
     // The TTY layer's ignored-or-blocked question takes native numbers.

@@ -329,27 +329,23 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
     if (init && default_action && !named_blocks &&
         (kind == job::DefaultAction::terminate || kind == job::DefaultAction::stop))
         return JobSignalOutcome::ignored;
-    // 6. A default stop applies now when deliverable; an orphaned group drops
-    // TSTP, TTIN and TTOU, and init never stops. Otherwise it stays pending
-    // for delivery or settle. A process already condemned does not stop.
+    // 6. A default stop applies now when deliverable. Linux get_signal drops a
+    // deliverable TSTP/TTIN/TTOU in an orphaned group (and any stop of init);
+    // otherwise it stays pending for delivery or settle, which apply the same
+    // drop. A process already condemned by a fatal signal does not stop.
     const bool stop = default_action && kind == job::DefaultAction::stop;
     if (stop)
     {
         if (state->group_kill || state->deferred_fatal) return JobSignalOutcome::ignored;
-        if (signal != numbering.stop && scheduler.process_group_orphaned(recipient.process_group_id()))
-            return JobSignalOutcome::ignored;
         bool now = !linux;
         if (linux && request.directed) now = jobctl_takes_now(*state, *named, signal, true);
         else if (linux)
             for (auto &thread : recipient.threads())
                 if ((now = jobctl_takes_now(*state, thread, signal, false))) break;
-        if (now)
-        {
-            if (init) return JobSignalOutcome::ignored;
-            private_jobctl_stop(kernel, recipient, signal);
-            return JobSignalOutcome::accepted;
-        }
-        return jobctl_enqueue(kernel, *state, recipient, request.directed ? named : nullptr, request.info);
+        if (!now) return jobctl_enqueue(kernel, *state, recipient, request.directed ? named : nullptr, request.info);
+        if (private_jobctl_discard_stop(kernel, recipient, signal)) return JobSignalOutcome::ignored;
+        private_jobctl_stop(kernel, recipient, signal);
+        return JobSignalOutcome::accepted;
     }
     // 7. Native processes never queue: a terminating default is decided now
     // and the first fatal signal wins (KILL above always wins). A stopped
