@@ -3,10 +3,10 @@
 // signals interrupting blocked PTY and console reads and PTY writes (EINTR,
 // SA_RESTART through the captured syscall origin, the committed count of a
 // partial write), the kill admission of such a wait, terminating defaults,
-// readiness (the call moves a byte now) winning over a pending signal, PTY
-// VTIME timers through the actual step(), and the job-control park of a
-// background member (EINTR, and an SA_RESTART restart of TCSETS). Hosted trap,
-// copy and mapping backends; no guest execution.
+// readiness (the call moves a byte now) winning over a pending signal, signals
+// that do not interrupt, PTY VTIME timers through the actual step(), and the
+// job-control park of a background member (EINTR, and an SA_RESTART restart of
+// TCSETS). Hosted trap, copy and mapping backends; no guest execution.
 #define OK_NATIVE_MODEL_MEMORY_BYTES 32768
 #define OK_NATIVE_SIGNAL_RUNTIME 1
 #define OK_SYSCALL_ORIGIN_MODEL 1
@@ -345,6 +345,29 @@ void pty_write_readiness_wins(Kernel &kernel)
         expect(thread_of(kernel, pid, writer).native_frame.pc == handler);
         release(kernel, pid);
     }
+}
+
+// An ignored signal and a default stop queued during the wait do not interrupt
+// it; a caught signal queued after them does.
+void pty_non_interrupting(Kernel &kernel)
+{
+    u64 reader{}; const auto pid = linux_process(kernel, reader);
+    const auto fds = make_pair(kernel, pid);
+    auto *ignored = native::private_signal_table(kernel, pid)->find(12); CHECK(ignored);
+    *ignored = {}; ignored->handler = sched::SignalAction::ignored_handler;
+    enter(kernel, pid, reader, linux_read, fds[1], read_at, 10);
+    auto &thread = thread_of(kernel, pid, reader);
+    auto &process = *kernel.scheduler().find(pid);
+    enqueue(kernel, pid, reader, OK_SIGTSTP);
+    enqueue(kernel, pid, reader, 12);
+    expect(native::private_terminal_signal_owned(kernel, process, thread));
+    expect(!native::private_terminal_signal_ready(kernel, process, thread));
+    expect(pending(kernel, pid, reader) && native::pty_wait_object(pid, reader).pool);
+    caught(kernel, pid, 27, false);
+    enqueue(kernel, pid, reader, 27);
+    expect(native::private_terminal_signal_complete(kernel, process, thread));
+    expect(!pending(kernel, pid, reader) && result_of(kernel, pid, reader) == -4 && !native::pty_wait_object(pid, reader).pool);
+    release(kernel, pid);
 }
 
 // A Linux job in the console's foreground group (native init and login).
@@ -696,6 +719,7 @@ int main()
     pty_write_expansion(kernel, sender);
     pty_master_signal_character(kernel);
     pty_write_readiness_wins(kernel);
+    pty_non_interrupting(kernel);
     const auto init = create_init(kernel);
     console_read_signal(kernel, init, false);
     console_read_signal(kernel, init, true);
