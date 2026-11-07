@@ -340,16 +340,22 @@ void check_secondary_cpu()
             "PIT preempts the boot CPU through LINT0");
 
     // The remap waits until the secondary, kicked by an IPI, left the space.
+    // Between two entries the secondary is outside its window for a moment and
+    // nothing is waited for: retry until a remap waited.
     const auto shootdowns = ok::smp::cpu_record(0).shootdowns.load(std::memory_order_relaxed);
     const auto received = record.ipis_received.load(std::memory_order_acquire);
-    secondary_lock.lock();
     const native::PageMapping replacement{data_va, reinterpret_cast<uptr>(data_c_replacement),
                                           native::page_read | native::page_write};
-    const bool remapped = native::remap(secondary_space, replacement).ok();
-    const bool waited = ok::smp::cpu_record(0).shootdowns.load(std::memory_order_relaxed) == shootdowns + 1;
-    const bool generation_even = (record.user_generation.load(std::memory_order_acquire) & 1) == 0;
-    secondary_stop.store(true, std::memory_order_release);
-    secondary_lock.unlock();
+    bool remapped = true, waited = false, generation_even = true;
+    for (usize attempt = 0; attempt < 100 && !waited; ++attempt)
+    {
+        secondary_lock.lock();
+        remapped = native::remap(secondary_space, replacement).ok() && remapped;
+        waited = ok::smp::cpu_record(0).shootdowns.load(std::memory_order_relaxed) != shootdowns;
+        generation_even = (record.user_generation.load(std::memory_order_acquire) & 1) == 0 && generation_even;
+        if (waited) secondary_stop.store(true, std::memory_order_release);
+        secondary_lock.unlock();
+    }
     require(remapped && waited && generation_even, "remap quiesced the secondary's user window");
     require(wait_for([&] { return secondary_phase.load(std::memory_order_acquire) == secondary_done; },
                      2'000'000'000),
