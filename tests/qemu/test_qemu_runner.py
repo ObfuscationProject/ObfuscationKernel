@@ -529,6 +529,62 @@ class QemuRunnerValidationTests(unittest.TestCase):
                     self.assertIn("-smp 2", stderr)
                     self.assertNotIn("OK_QEMU_SMP_TEST", stdout)
 
+    def test_hotplug_lines_are_checked_when_present(self) -> None:
+        boot = "OK_SMP_HOTPLUG_BOOT scope=hardware cpu=1 stop=pass parked_ipi=pass restart=pass ipi=pass"
+        cycles = "OK_SMP_HOTPLUG scope=hardware cycles=12 failures=0 cpu=3"
+        for arch in qemu_test.SMP_QEMU_ARCHES:
+            line = "OK_SMP scope=hardware cpus=4 online=4 ap_start=psci ipi=pass"
+            if arch in qemu_test.TSC_SYNC_QEMU_ARCHES:
+                line = tsc_lines(3) + line + " tsc=sync"
+            base = make_smp_output(arch, line, QEMU_TLB_LINES[arch])
+            with self.subTest(arch=arch, case="absent"):
+                code, stdout, stderr = self.validate_smp(arch, base, 4)
+                self.assertEqual(code, 0, stderr)
+                self.assertNotIn("hotplug", stdout)
+            with self.subTest(arch=arch, case="both"):
+                code, stdout, stderr = self.validate_smp(arch, base + boot + "\n" + cycles + "\n", 4)
+                self.assertEqual(code, 0, stderr)
+                self.assertIn("hotplug_boot=pass hotplug_cycles=12", stdout)
+            rejected = (
+                boot.replace("restart=pass", "restart=fail"),
+                boot.replace("ipi=pass", "ipi=fail"),
+                boot.replace("parked_ipi=pass", "parked_ipi=fail"),
+                boot.replace(" stop=pass", ""),
+                boot.replace("cpu=1", "cpu=2"),
+                boot.replace("scope=hardware", "scope=model"),
+                boot + "\n" + boot,
+                cycles.replace("cycles=12", "cycles=0"),
+                cycles.replace("failures=0", "failures=1"),
+                cycles.replace("cpu=3", "cpu=0"),
+                cycles.replace("cpu=3", "cpu=4"),
+                cycles.replace(" failures=0", ""),
+                cycles + "\n" + cycles,
+            )
+            for extra in rejected:
+                with self.subTest(arch=arch, extra=extra):
+                    code, stdout, stderr = self.validate_smp(arch, base + extra + "\n", 4)
+                    self.assertEqual(code, 14)
+                    self.assertIn("CPU hotplug for -smp 4", stderr)
+                    self.assertNotIn("OK_QEMU_SMP_TEST", stdout)
+        # A UP profile never stops a CPU.
+        honest = "OK_SMP scope=hardware cpus=2 online=1 ap_start=unsupported ipi=unsupported reason=no_ap_start"
+        code, _, stderr = self.validate_smp("arm32", make_smp_output("arm32", honest) + boot + "\n", 2)
+        self.assertEqual(code, 14)
+        self.assertIn("starts no secondary CPU", stderr)
+
+    def test_summary_records_hotplug_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            kernel = Path(tmp) / "kernel.bin"
+            kernel.write_bytes(b"ok")
+            output = make_smp_output("rv64", "OK_SMP scope=hardware cpus=2 online=2 ap_start=clint-msip ipi=pass",
+                                     QEMU_TLB_LINES["rv64"])
+            output += "OK_SMP_HOTPLUG_BOOT scope=hardware cpu=1 stop=pass parked_ipi=pass restart=pass ipi=pass\n"
+            qemu_test.write_summary(kernel, "rv64", output, 0, 0, 2)
+            summary = (kernel.parent / "qemu-test-summary.txt").read_text(encoding="utf-8").splitlines()
+        self.assertIn("smp.hotplug_boot.restart=pass", summary)
+        self.assertIn("smp.hotplug_boot.cpu=1", summary)
+        self.assertFalse(any(line.startswith("smp.hotplug.") for line in summary))
+
     def test_smp_run_without_hardware_marker_names_the_marker(self) -> None:
         code, _, stderr = self.validate_smp("x86_64", make_smp_output("x86_64", None), 2)
         self.assertEqual(code, 14)
