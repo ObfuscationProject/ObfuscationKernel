@@ -635,9 +635,9 @@ profile string and version above keeps its current value.
 | 16 | One console `write` or `writev` moves at most 64 KiB; a longer one returns a short count. | landed (S4) |
 | 17 | A console `read` or `readv` whose user buffer faults returns EFAULT and consumes no input: every vector range is checked first and the input is consumed only after every copy succeeded. Linux `iterate_tty_read` lets `n_tty_read` consume into a kernel buffer before `copy_to_iter`, so it returns the bytes copied before the fault, or EFAULT when none were, and the rest of that input is lost. | landed (S4) |
 | 18 | A raw-pair (`OK_SYS_PTY_PAIR`) master whose slave has no session answers TIOCGPGRP with ENOTTY instead of 0, keeping the v1 raw contract. | landed (S5) |
-| 19 | A caught signal during a PTY slave read below VMIN returns EINTR and leaves the buffered bytes for the next read; Linux copies bytes as they arrive and returns their count. | landed (S7) |
 | 19 | A hung-up ptmx slave answers an unknown request with ENOTTY; Linux `hung_up_tty_ioctl` gives EIO for every request except TIOCSPGRP. | landed (S5) |
 | 20 | `/dev/ptmx`, `/dev/tty` and `/dev/console` are fixed: `chmod`/`fchmod` by any caller and root `chown`/`fchown` return EOPNOTSUPP, and so do these calls on a ptmx master, `/dev/tty` or `/dev/console` descriptor or the boot stdio. Linux devtmpfs accepts them (0), or gives EPERM to a non-owner chmod. A non-root chown gets EPERM, as on Linux. | landed (S6) |
+| 21 | A caught signal during a PTY slave read below VMIN returns EINTR and leaves the buffered bytes for the next read; Linux copies bytes as they arrive and returns their count. | landed (S7) |
 
 ## Tests
 
