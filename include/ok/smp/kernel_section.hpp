@@ -268,6 +268,26 @@ inline bool require_drained(u64 pid, const char *site) noexcept
     return true;
 }
 
+// Annotation forms of the two contracts for kernel-state sites (A2, A3):
+// checked and counted where OK_LOCK_DEBUG is defined, nothing otherwise.
+inline void check_exclusive([[maybe_unused]] const char *site) noexcept
+{
+    if constexpr (lock_debug_enabled)
+        static_cast<void>(require_exclusive(site));
+}
+
+inline void check_drained([[maybe_unused]] u64 pid, [[maybe_unused]] const char *site) noexcept
+{
+    if constexpr (lock_debug_enabled)
+        static_cast<void>(require_drained(pid, site));
+}
+
+// An exclusive-state violation found by its own rule (A9, A10).
+inline void count_exclusive_violation(const char *site) noexcept
+{
+    detail::section_assert(&SectionCpu::exclusive_asserts, site);
+}
+
 // The ranked locks this CPU holds, where OK_LOCK_DEBUG records them.
 inline bool require_lock_depth([[maybe_unused]] usize expected, [[maybe_unused]] const char *site) noexcept
 {

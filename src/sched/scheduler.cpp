@@ -146,6 +146,7 @@ Result<ProcessId> RoundRobinPolicy::pick_next(std::span<const ProcessControlBloc
 
 Result<ProcessId> SchedulerState::create_process(std::string_view name, arch::CpuContext initial_context)
 {
+    smp::check_exclusive("SchedulerState::create_process");
     if (next_task_id_ > max_task_id)
         return Status::overflow("process or thread identity exhausted");
     auto result = create_process_with_pid(next_task_id_, name, initial_context);
@@ -156,6 +157,7 @@ Result<ProcessId> SchedulerState::create_process(std::string_view name, arch::Cp
 Result<ProcessId> SchedulerState::create_process_with_pid(ProcessId pid, std::string_view name,
                                                            arch::CpuContext initial_context)
 {
+    smp::check_exclusive("SchedulerState::create_process_with_pid");
     if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
     if (processes_.full())
     {
@@ -188,6 +190,7 @@ Result<ProcessId> SchedulerState::create_process_with_pid(ProcessId pid, std::st
 
 Result<ProcessId> SchedulerState::create_init_process(arch::CpuContext initial_context)
 {
+    smp::check_exclusive("SchedulerState::create_init_process");
     if (initial_context.mode != arch::PrivilegeMode::user)
         return Status::invalid_argument("init requires user execution");
     auto pid = create_process_with_pid(user_init_pid, "init", initial_context);
@@ -201,6 +204,7 @@ Result<ProcessId> SchedulerState::create_init_process(arch::CpuContext initial_c
 
 Result<ProcessId> SchedulerState::create_user_process(std::string_view name, arch::CpuContext initial_context)
 {
+    smp::check_exclusive("SchedulerState::create_user_process");
     auto pid = create_process(name, initial_context);
     if (!pid)
     {
@@ -218,6 +222,7 @@ Result<ProcessId> SchedulerState::create_user_process(std::string_view name, arc
 
 Result<ProcessId> SchedulerState::create_background_process(std::string_view name, arch::CpuContext initial_context)
 {
+    smp::check_exclusive("SchedulerState::create_background_process");
     auto pid = create_process(name, initial_context);
     if (!pid)
     {
@@ -238,6 +243,7 @@ Result<ProcessId> SchedulerState::create_background_process(std::string_view nam
 
 Result<ThreadId> SchedulerState::create_thread(ProcessId pid, arch::CpuContext initial_context)
 {
+    smp::check_exclusive("SchedulerState::create_thread");
     // Generic kernel/model threads have no native entry resources to prepare.
     return create_thread_prepared(pid, initial_context,
         [](ThreadControlBlock &) { return Status::success(); });
@@ -245,6 +251,8 @@ Result<ThreadId> SchedulerState::create_thread(ProcessId pid, arch::CpuContext i
 
 Result<usize> SchedulerState::exit_thread(ProcessId pid, ThreadId tid, smp::CpuId cpu)
 {
+    smp::check_exclusive("SchedulerState::exit_thread");
+    smp::check_drained(pid, "SchedulerState::exit_thread");
     if (cpu >= cpu_count_)
         return Status::invalid_argument("thread retirement CPU is invalid");
     auto *process = find(pid);
@@ -458,6 +466,7 @@ Status SchedulerState::set_online_cpus(u32 mask)
 
 Status SchedulerState::enqueue_thread(ProcessId pid, ThreadId tid)
 {
+    smp::check_exclusive("SchedulerState::enqueue_thread");
     if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
     auto *process = find(pid);
     auto *thread = find_thread(pid, tid);
@@ -521,6 +530,7 @@ bool SchedulerState::eligible_on(ThreadRef ref, smp::CpuId queue, smp::CpuId cpu
 
 std::optional<ThreadRef> SchedulerState::dequeue_thread(smp::CpuId cpu)
 {
+    smp::check_exclusive("SchedulerState::dequeue_thread");
     if (shutdown_admission_closed_ || !cpu_online(cpu))
         return std::nullopt;
     auto &own = run_queues_.get(cpu);
@@ -573,6 +583,7 @@ std::optional<ThreadRef> SchedulerState::dequeue_thread(smp::CpuId cpu)
 
 Status SchedulerState::mark_on_cpu(ProcessId pid, ThreadId tid, smp::CpuId cpu)
 {
+    smp::check_exclusive("SchedulerState::mark_on_cpu");
     if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
     if (!cpu_online(cpu))
         return Status::invalid_argument("thread CPU is not online");
@@ -595,6 +606,8 @@ Status SchedulerState::mark_on_cpu(ProcessId pid, ThreadId tid, smp::CpuId cpu)
 
 Status SchedulerState::clear_on_cpu(ProcessId pid, ThreadId tid, smp::CpuId cpu)
 {
+    smp::check_exclusive("SchedulerState::clear_on_cpu");
+    smp::check_drained(pid, "SchedulerState::clear_on_cpu");
     if (cpu >= cpu_count_)
         return Status::invalid_argument("thread CPU is not configured");
     auto *process = find(pid);
@@ -635,6 +648,11 @@ void SchedulerState::vacate_cpu_slot(usize cpu)
 
 void SchedulerState::occupy_cpu(smp::CpuId cpu, ProcessControlBlock &process, ThreadControlBlock &thread)
 {
+    // Once secondary CPUs are admitted, a CPU fills only its own slot: a
+    // section on another CPU reads its bound caller, never a remote write.
+    if constexpr (smp::lock_debug_enabled)
+        if (smp::exclusive_armed.load(std::memory_order_relaxed) && cpu != smp::current_cpu())
+            smp::count_exclusive_violation("SchedulerState::occupy_cpu on another CPU");
     if (const auto previous = current_thread_by_cpu_[cpu]; previous != 0 && previous != thread.tid)
         if (auto *old = find_thread(current_by_cpu_[cpu], previous); old && old->on_cpu == cpu)
             old->on_cpu = no_cpu;
@@ -822,6 +840,7 @@ ThreadId SchedulerState::current_tid(smp::CpuId cpu) const
 
 ProcessControlBlock *SchedulerState::find(ProcessId pid)
 {
+    smp::check_exclusive("SchedulerState::find");
     for (auto &process : processes_)
     {
         if (process.pid() == pid)
@@ -834,6 +853,7 @@ ProcessControlBlock *SchedulerState::find(ProcessId pid)
 
 const ProcessControlBlock *SchedulerState::find(ProcessId pid) const
 {
+    smp::check_exclusive("SchedulerState::find");
     for (const auto &process : processes_)
     {
         if (process.pid() == pid)
@@ -945,6 +965,21 @@ const OpenFileDescription *SchedulerState::open_description(u16 id) const
 {
     return id < descriptions_.size() && descriptions_[id].used ? &descriptions_[id] : nullptr;
 }
+DescriptionPositionLock *SchedulerState::position_lock(const OpenFileDescription *description)
+{
+    const auto base = reinterpret_cast<uptr>(descriptions_.data());
+    const auto address = reinterpret_cast<uptr>(description);
+    if (address < base || address - base >= sizeof(descriptions_) || (address - base) % sizeof(OpenFileDescription))
+        return nullptr;
+    return &positions_[(address - base) / sizeof(OpenFileDescription)];
+}
+ProcessId SchedulerState::resources_owner(const ProcessResources &resources) const
+{
+    for (const auto &process : processes_)
+        if (&process.resources() == &resources)
+            return process.pid();
+    return 0;
+}
 Status SchedulerState::set_native_udp_service(net::NativeUdpService &service)
 {
     if (native_udp_service_ == &service) return Status::success();
@@ -989,6 +1024,7 @@ Status SchedulerState::set_shared_memory_files(user::native::SharedMemoryFiles &
 }
 Result<u16> SchedulerState::allocate_description(OpenFileDescription description)
 {
+    smp::check_exclusive("SchedulerState::allocate_description");
     if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
     if (description.reservation)
         return Status::invalid_argument("new description cannot import prepared reservation authority");
@@ -1059,6 +1095,8 @@ Result<u16> SchedulerState::allocate_description(OpenFileDescription description
 }
 Status SchedulerState::install_descriptor(ProcessResources &resources, i32 fd, u16 description, bool close_on_exec)
 {
+    smp::check_exclusive("SchedulerState::install_descriptor");
+    smp::check_drained(resources_owner(resources), "SchedulerState::install_descriptor");
     if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
     auto *slot = resources.files.entry(fd);
     auto *open = open_description(description);
@@ -1080,6 +1118,7 @@ Status SchedulerState::install_descriptor(ProcessResources &resources, i32 fd, u
 }
 Status SchedulerState::retain_description(u16 id)
 {
+    smp::check_exclusive("SchedulerState::retain_description");
     if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
     auto *open = open_description(id);
     if (!open)
@@ -1096,6 +1135,7 @@ Status SchedulerState::retain_description(u16 id)
 }
 Status SchedulerState::release_description(u16 id)
 {
+    smp::check_exclusive("SchedulerState::release_description");
     auto *open = open_description(id);
     if (!open || !open->references)
         return Status::bad_descriptor("open description has no reference to release");
@@ -1177,6 +1217,8 @@ Status SchedulerState::release_description(u16 id)
 }
 Status SchedulerState::close_descriptor(ProcessResources &resources, i32 fd)
 {
+    smp::check_exclusive("SchedulerState::close_descriptor");
+    smp::check_drained(resources_owner(resources), "SchedulerState::close_descriptor");
     auto *slot = resources.files.entry(fd);
     if (slot == nullptr || !slot->used)
         return Status::invalid_argument("bad file descriptor");
@@ -1289,6 +1331,7 @@ usize SchedulerState::open_description_count() const
 }
 void SchedulerState::clear_current(ProcessId pid)
 {
+    smp::check_drained(pid, "SchedulerState::clear_current");
     if (current_pid_ == pid)
         current_pid_ = 0;
     for (usize cpu = 0; cpu < current_by_cpu_.size(); ++cpu)
@@ -1336,6 +1379,8 @@ Status SchedulerState::activate_thread(ProcessId pid, ThreadId tid, smp::CpuId c
 }
 Result<ProcessId> SchedulerState::fork_process(ProcessId parent, bool publish)
 {
+    smp::check_exclusive("SchedulerState::fork_process");
+    smp::check_drained(parent, "SchedulerState::fork_process");
     if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
     auto *source = find(parent);
     if (source == nullptr)
@@ -1516,6 +1561,8 @@ Status SchedulerState::preflight_replace_image(ProcessId pid, const arch::CpuCon
 }
 Status SchedulerState::replace_image(ProcessId pid, arch::CpuContext context, const MemoryMap &memory)
 {
+    smp::check_exclusive("SchedulerState::replace_image");
+    smp::check_drained(pid, "SchedulerState::replace_image");
     if (auto status = preflight_replace_image(pid, context); !status) return status;
     auto *process = find(pid);
     for (const auto &thread : process->threads())
@@ -1574,6 +1621,8 @@ Status SchedulerState::terminate_process(ProcessId pid, u8 signal)
 }
 Status SchedulerState::finish_process(ProcessId pid, i32 code, u8 signal)
 {
+    smp::check_exclusive("SchedulerState::finish_process");
+    smp::check_drained(pid, "SchedulerState::finish_process");
     auto *process = find(pid);
     if (process == nullptr)
         return Status::not_found("process not found");
@@ -1696,6 +1745,7 @@ Status SchedulerState::reparent_children(ProcessId from, ProcessId to)
 }
 Status SchedulerState::reap_process(ProcessId pid)
 {
+    smp::check_exclusive("SchedulerState::reap_process");
     if (active_unix_receives_ || active_descriptor_reservations_)
         return Status::busy("prepared UNIX receives prevent process compaction");
     // A dead init is a terminal boot condition; PID 1 is never recycled.
@@ -1711,6 +1761,9 @@ Status SchedulerState::reap_process(ProcessId pid)
             return Status::busy("thread entry stacks must be retired before reaping");
     if (process->resources().native_space.root != 0 || !process->resources().native_pages.empty())
         return Status::busy("native address space must be released before reaping");
+    // Compaction below moves every later PCB, so no kernel section of any
+    // process may still hold one: wait for them and commit their results.
+    smp::drain_all();
     retire_console_process(pid);
 #if defined(OK_NATIVE_SIGNAL_RUNTIME)
     if (auto status = user::native::private_signal_before_process_compaction(*this); !status)
@@ -1940,6 +1993,7 @@ Result<std::array<i32, 2>> SchedulerState::create_unix_socketpair(ProcessResourc
 }
 Result<usize> SchedulerState::read_pipe(u16 pipe, std::span<std::byte> out, bool nonblocking)
 {
+    smp::check_exclusive("SchedulerState::read_pipe");
     if (pipe >= pipes_.size() || !pipes_[pipe].used)
         return Status::invalid_argument("invalid pipe");
     if (out.empty())
@@ -1972,6 +2026,7 @@ Result<usize> SchedulerState::write_pipe(u16 pipe, std::span<const std::byte> in
 }
 Result<usize> SchedulerState::write_pipe_fragment(u16 pipe, std::span<const std::byte> in, bool atomic_request)
 {
+    smp::check_exclusive("SchedulerState::write_pipe_fragment");
     if (pipe >= pipes_.size() || !pipes_[pipe].used)
         return Status::invalid_argument("invalid pipe");
     if (in.empty())
@@ -2003,6 +2058,7 @@ Status SchedulerState::block_current(ThreadWaitReason reason, u64 key)
 }
 ThreadControlBlock *SchedulerState::find_thread(ProcessId pid, ThreadId tid)
 {
+    smp::check_exclusive("SchedulerState::find_thread");
     if (auto *process = find(pid))
         for (auto &thread : process->threads())
             if (thread.tid == tid)
@@ -2011,11 +2067,13 @@ ThreadControlBlock *SchedulerState::find_thread(ProcessId pid, ThreadId tid)
 }
 ThreadControlBlock *SchedulerState::current_thread()
 {
+    smp::check_exclusive("SchedulerState::current_thread");
     const auto cpu = smp::current_cpu();
     return find_thread(current_pid(cpu), current_tid(cpu));
 }
 Result<WaitTicket> SchedulerState::register_current_wait(ThreadWaitReason reason, u64 key)
 {
+    smp::check_exclusive("SchedulerState::register_current_wait");
     if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
     if (reason == ThreadWaitReason::none)
         return Status::invalid_argument("wait requires a reason");
@@ -2043,6 +2101,7 @@ Result<WaitTicket> SchedulerState::register_current_wait(ThreadWaitReason reason
 }
 bool SchedulerState::complete_wait(WaitTicket ticket, WaitCompletion completion, WakeSource source)
 {
+    smp::check_exclusive("SchedulerState::complete_wait");
     auto *process = find(ticket.owner);
     auto *thread = find_thread(ticket.owner, ticket.thread);
     if (!process || !thread || process->state() == ProcessState::zombie ||
@@ -2061,6 +2120,7 @@ bool SchedulerState::complete_wait(WaitTicket ticket, WaitCompletion completion,
 }
 void SchedulerState::wake_waiters(ThreadWaitReason reason, u64 key, WakeSource source)
 {
+    smp::check_exclusive("SchedulerState::wake_waiters");
     for (auto &process : processes_)
     {
         if (process.state() == ProcessState::zombie || process.state() == ProcessState::exited)
