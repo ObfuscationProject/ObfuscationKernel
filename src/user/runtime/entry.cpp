@@ -292,8 +292,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
             return -14;
         return error(user::set_realtime_checked(
             {requested.seconds, requested.nanoseconds}, process->credentials(),
-            [] { return arch::monotonic_sample(); },
-            [](time::EpochTime value, time::MonotonicPoint point) { return arch::set_realtime(value, point); }));
+            [](time::EpochTime value) { return arch::set_realtime_now(value); }));
     }
     if (number == N::clock_gettime || number == N::clock_getres)
     {

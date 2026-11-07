@@ -122,12 +122,30 @@ time::RealtimeInfo realtime_clock_info()
     return clock.info();
 }
 
-Status set_realtime(time::EpochTime value, time::MonotonicPoint point)
+namespace
 {
-    const RealtimeGuard guard(realtime_lock);
+// Holding realtime_lock.
+Status commit_locked(time::EpochTime value, time::MonotonicPoint point)
+{
     if (!clock_status())
         return Status::io_error("realtime setting requires a continuous platform clock");
     return clock.set(value, point, clock_resolution_ns());
+}
+} // namespace
+
+Status set_realtime(time::EpochTime value, time::MonotonicPoint point)
+{
+    const RealtimeGuard guard(realtime_lock);
+    return commit_locked(value, point);
+}
+
+Status set_realtime_now(time::EpochTime value)
+{
+    // The sample is taken inside the lock: a reading on another CPU (a kernel
+    // section's clock_gettime, an ext4 timestamp) cannot advance the anchor
+    // past it before the commit.
+    const RealtimeGuard guard(realtime_lock);
+    return time::commit_realtime_setting(value, [] { return monotonic_sample(); }, commit_locked);
 }
 
 } // namespace ok::arch

@@ -1293,8 +1293,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
             return -22;
         const auto status = user::set_realtime_checked(
             {value.value().seconds, value.value().nanoseconds}, process->credentials(),
-            [] { return arch::monotonic_sample(); },
-            [](time::EpochTime epoch, time::MonotonicPoint point) { return arch::set_realtime(epoch, point); });
+            [](time::EpochTime epoch) { return arch::set_realtime_now(epoch); });
         return status ? 0 : -syscall::ErrnoMapper::errno_for(status);
     }
     if (is(Operation::clock_gettime) || is(Operation::clock_gettime32) || is(Operation::clock_gettime64) ||

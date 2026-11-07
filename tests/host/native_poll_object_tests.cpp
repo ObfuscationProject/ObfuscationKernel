@@ -66,6 +66,12 @@ Status set_realtime(time::EpochTime epoch, time::MonotonicPoint point)
     return Status::success();
 }
 
+// The kernel samples inside the realtime lock; a hosted model is serialized.
+Status set_realtime_now(time::EpochTime epoch)
+{
+    return time::commit_realtime_setting(epoch, [] { return monotonic_sample(); }, set_realtime);
+}
+
 time::AnchorInfo realtime_info() { return {}; }
 Result<time::EpochTime> realtime()
 {
