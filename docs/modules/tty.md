@@ -310,10 +310,13 @@ password.
   none are (console and PTY slaves, Linux `n_tty_read`).
 - PTY slave VTIME (S7): with VMIN 0 one timer runs from the start of a
   blocking read, which returns 0 when it runs out; below VMIN the timer starts
-  with the first byte and restarts whenever new input arrives, and the read
-  returns the bytes it has when the timer runs out. The timer belongs to the
-  read: a caught signal interrupts the wait (§9.9). The console treats VTIME
-  as 0 (§14).
+  with the first byte and restarts whenever a byte is received, and the read
+  returns the bytes it has when the timer runs out. The read keeps the VTIME
+  in force when it first waited, as Linux `n_tty_read` does, so a TCSETS during
+  the wait neither restarts nor shortens its timer; VMIN is re-read on every
+  wakeup (a consequence of item 8 in §14). The timer belongs to the read: a
+  caught signal interrupts the wait (§9.9). The console treats VTIME as 0
+  (§14).
 - Echo goes through OPOST; its ring holds 512 bytes and drops (and counts) the
   oldest bytes on overflow. A terminal write first flushes pending echo. As
   in Linux, the output column moves only for echo that is written (taken by
@@ -339,7 +342,7 @@ password.
 | Event | ptmx pair (Linux semantics) | `OK_SYS_PTY_PAIR` raw pair (v1, unchanged) |
 |---|---|---|
 | Slave never opened (dormant) | master read blocks; master write accepted into the slave's input, kept for its first open; POLLOUT while there is room | n/a (both ends open at creation) |
-| Slave's last close | master drains, then EIO; POLLHUP. Master writes are still accepted (POLLOUT while there is room). Slave input and session are kept; the slave may be reopened while unlocked and the master lives. | master drains, then EIO; master write EIO; POLLHUP, never OUT |
+| Slave's last close | master drains, then EIO; POLLHUP without POLLIN (Linux `n_tty_poll`). Master writes are still accepted (POLLOUT while there is room). Slave input and session are kept; the slave may be reopened while unlocked and the master lives. | master drains, then EIO; master write EIO; POLLHUP, never OUT |
 | Master's last close | `/dev/pts/N` disappears. The slave discards input and reads 0; writes EIO; requests EIO (TIOCSPGRP and unknown requests ENOTTY); poll IN\|OUT\|ERR\|HUP. SIGHUP then SIGCONT go to the session leader, and the session's ctty is cleared. | slave drains, then EOF: a non-canonical slave returns what it holds even below VMIN, an unterminated canonical line is not returned (as Linux). Writes EIO; poll IN\|HUP\|ERR (IN stays set after the drain), never OUT. Session hangup signals as for ptmx. |
 | Both sides at 0 opens | slot freed | slot freed |
 
@@ -565,6 +568,7 @@ TIOCNOTTY from another member only detaches that member.
   until such a wait completes and are not shown by `rt_sigpending`; owed
   signals survive an exec in the same personality and are dropped by an exec
   into the other one.
+- `kill(-1)` returns EOPNOTSUPP.
 - Since S7 a Linux console read and PTY read or write blocked in its syscall
   is an interruptible wait (§9.9): a caught signal is accepted (0) and a
   kernel signal is sent, not owed.
@@ -577,8 +581,13 @@ continuation; a console read re-dispatches its frame and binds every wait it
 arms). Then, as for pipes:
 
 - Readiness wins: a PTY read whose data or EOF would complete it now, a PTY
-  write with room or a write error, a console read with lease authority whose
-  ldisc read would complete, completes normally before any pending signal.
+  write that would move its next byte now (room for the byte's whole OPOST
+  expansion; for a master, outbox room if it is an ISIG character) or fail at
+  once, and a console read with lease authority whose ldisc read of the call's
+  bytes would complete (min(VMIN, count) bytes, not the poll threshold),
+  completes normally before any pending signal. Poll POLLOUT stays room-based,
+  as in Linux. A non-canonical read below VMIN is not ready, so its bytes stay
+  buffered (§14 item 21).
 - Otherwise the first pending signal that interrupts (not ignored, not a
   default stop) decides. A terminating default ends the process. A handler
   gets EINTR, or with SA_RESTART the call is restarted from its captured
@@ -588,7 +597,6 @@ arms). Then, as for pipes:
 - Native processes have no handlers; their waits are ended by fatal signals
   at generation as before. A Linux wait whose origin could not be bound stays
   non-interruptible (§9.8).
-- `kill(-1)` returns EOPNOTSUPP.
 - Since S8 a Linux job-control park (§9.6) is a third terminal wait: it is
   never ready, so a caught signal always interrupts it (EINTR, or a restart
   under SA_RESTART); a continue or a foreground change ends it instead and
@@ -602,7 +610,7 @@ Applies to poll and select in both personalities; both share one PTY mapping
 | Endpoint | Readable | Writable | Error and hangup |
 |---|---|---|---|
 | Slave | a line (canonical), or ≥ 1 byte / VMIN (raw); or hung up | room and echo flushed, and not hung up (ptmx hung up: IN\|OUT\|ERR\|HUP) | per §8 |
-| Master | queued output; or slave closed | ldisc room, and the slave open (raw pair) | HUP when the slave is closed; a raw pair's closed slave is a write error |
+| Master | queued output; or a raw pair's slave closed | ldisc room, and the slave open (raw pair) | HUP when the slave is closed; a raw pair's closed slave is a write error |
 | Console | ldisc readable, for lease members | always, whatever the access mode (Linux `n_tty_poll`) | no foreground-based POLLERR |
 
 ## 11. errno summary — constants landed (S6)
@@ -662,7 +670,7 @@ profile string and version above keeps its current value.
 | 5 | No devpts filesystem: no mount options, no `newinstance`, no `/dev/pts/ptmx`. `st_dev(/dev/pts/N) == st_dev(/dev)`. The gid policy is the opener's egid. | landed (S6) |
 | 6 | 8 PTYs, shared with raw pairs. | landed (S5, S6) |
 | 7 | No console vhangup. VTIME on the console is treated as 0 (PTY slaves run it, S7). IXON output stop works on PTY slaves only. | VTIME landed (S4, S7); IXON landed (S5); hangup landed (S8) |
-| 8 | VMIN reads are admitted atomically. | landed (S1) |
+| 8 | VMIN reads are admitted atomically, and a blocked read re-reads VMIN when woken (a TCSETS that lowers VMIN can complete it; Linux keeps the VMIN of the read's start). Signal consequence: item 21. | landed (S1) |
 | 9 | Echo overflow and console overrun drop bytes and are counted. Echo kept after a drop keeps the OPOST expansion (XTABS, tab-erase width) computed when it was generated. | landed (S1, S4) |
 | 10 | A PTY master cannot be a controlling terminal. | landed (S5) |
 | 11 | Native `stat` has no rdev, and there is no `ttyname` (no `/proc`). Linux `stat` reports `st_rdev`; the OS names a slave by the path it opened or by TIOCGPTN. | landed (S6) |
@@ -675,7 +683,7 @@ profile string and version above keeps its current value.
 | 18 | A raw-pair (`OK_SYS_PTY_PAIR`) master whose slave has no session answers TIOCGPGRP with ENOTTY instead of 0, keeping the v1 raw contract. | landed (S5) |
 | 19 | A hung-up ptmx slave answers an unknown request with ENOTTY; Linux `hung_up_tty_ioctl` gives EIO for every request except TIOCSPGRP. | landed (S5) |
 | 20 | `/dev/ptmx`, `/dev/tty` and `/dev/console` are fixed: `chmod`/`fchmod` by any caller and root `chown`/`fchown` return EOPNOTSUPP, and so do these calls on a ptmx master, `/dev/tty` or `/dev/console` descriptor or the boot stdio. Linux devtmpfs accepts them (0), or gives EPERM to a non-owner chmod. A non-root chown gets EPERM, as on Linux. | landed (S6) |
-| 21 | A caught signal during a PTY slave read below VMIN returns EINTR and leaves the buffered bytes for the next read; Linux copies bytes as they arrive and returns their count. | landed (S7) |
+| 21 | A caught signal during a blocking non-canonical console or PTY slave read with fewer than VMIN bytes buffered (fewer than min(VMIN, count)) leaves those bytes for the next read. The read returns EINTR, or under SA_RESTART restarts and keeps waiting for VMIN bytes (a consequence of item 8). Linux `n_tty_read` copies the bytes as they arrive and returns their count, with or without SA_RESTART. | landed (S7) |
 | 22 | A session leader's exit hangs its terminal up before its descriptors close, so the foreground group gets SIGHUP alone even when the leader held the master's last descriptor; Linux closes the files first and then sends SIGHUP and SIGCONT to that group through `tty_old_pgrp`. | landed (S8) |
 | 23 | A zero-length read or write of a PTY slave returns 0 before the job-control check; Linux `n_tty_read` runs the check for a zero count too. | landed (S8) |
 
@@ -856,20 +864,31 @@ S7 adds one runner (hosted runtime evidence only) and extends one:
   On the actual runtime (x86_64 hosted backends, syscalls entered through
   `step()` with captured origins): Linux read, write and ppoll of raw-pair
   endpoints through `linux_bootstrap::dispatch` on all ten profiles (POLLOUT,
-  POLLIN, the master's IN|HUP and EIO after the slave's close); a blocked PTY
+  POLLIN, a raw pair master's IN|HUP and EIO after the slave's close); a blocked PTY
   read interrupted by a caught signal with EINTR and with SA_RESTART (the
   restarted read completes with data), through `step()` with a kernel SIGINT
   that is sent rather than owed, and the kill admission returning 0; data
   winning over a pending signal; a terminating default ending the process; a
   partial PTY write returning its committed count under SA_RESTART and a write
-  without progress restarting; a foreground Linux console read rebinding each
-  re-dispatched wait, then EINTR and SA_RESTART; VMIN 0 VTIME expiry returning
-  0, the interbyte timer restarting on new input, and a signal ending a timed
-  wait; Linux readv and an O_NONBLOCK read.
+  without progress restarting; a slave write whose CR LF does not fit the
+  master queue (room 1, poll still POLLOUT) interrupted with EINTR, restarted
+  under SA_RESTART and ended by a default SIGTERM through kill and `step()`; a
+  master ^C stopped by a full signal outbox interrupted; room and a write
+  error winning over a pending signal; an ignored signal and a default stop
+  not interrupting a read; a foreground Linux console read rebinding each
+  re-dispatched wait, then EINTR and SA_RESTART; a complete canonical line
+  and, with VMIN 4, one byte for a read of 1 winning over a pending signal,
+  while a read of 4 with one byte gets EINTR and keeps it; VMIN 0 VTIME expiry
+  returning 0, the interbyte timer restarting on every received byte (also
+  after a TCIFLUSH), a TCSETS during a timed wait keeping the read's VTIME, and
+  a signal ending a timed wait; Linux readv and an O_NONBLOCK read.
 - `test_native_pty.py`: the PTY runtime suite's Linux reads, writes, readv and
   writev move bytes (`OK_SYS_PTY_PAIR` stays ENOSYS for Linux), a Linux wait
   is cancelled when its owner changes personality, and select reports PTY
-  readiness instead of ENOSYS.
+  readiness instead of ENOSYS. The raw owner suite checks write progress (CR
+  LF and XTABS room, a master ^C with a full outbox, a gone peer), received
+  counts across a consume, a captured VTIME in `read_state` and
+  `prepare_read`, and a ptmx master without POLLIN after its slave closed.
 
 S8 (hosted runtime and model evidence only) extends existing runners:
 
