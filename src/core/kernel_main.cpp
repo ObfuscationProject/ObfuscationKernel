@@ -152,6 +152,8 @@ namespace ok::detail
         // a device line instead of spinning; profiles without a controller
         // driver, or whose native runtime did not start the service, keep
         // polling.
+        if (did_work)
+            ok::smp::bkl_mark_work();
         bool waited = false;
         if (!did_work && !ok::interrupt::events_posted())
         {
@@ -188,6 +190,7 @@ extern "C" [[noreturn]] void kernel_main()
     // The boot CPU holds the kernel lock from here on except while it idles or
     // runs user code; secondary CPUs take it once the runtime admits them.
     ok::smp::bkl_lock();
+    ok::smp::bkl_mark_work();
     ok_platform_console_init();
     ok_platform_display_clear();
 

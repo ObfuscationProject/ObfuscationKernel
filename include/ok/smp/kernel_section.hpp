@@ -25,16 +25,23 @@ namespace ok::smp
 // footprint, waits for the working ones and commits the returning ones
 // through section_commit_handler before it mutates anything.
 //
-// Mode bits (cpu_modes, ok/smp/lock.hpp): BKL_HELD, SECTION, SPINNING.
+// Mode bits (cpu_modes, ok/smp/lock.hpp): BKL_HELD, SECTION, SPINNING and
+// KERNEL_WORK.
 inline constexpr u32 mode_bkl_held = cpu_mode_bkl_held;
 inline constexpr u32 mode_section = cpu_mode_section;
 inline constexpr u32 mode_spinning = cpu_mode_spinning;
+inline constexpr u32 mode_kernel_work = cpu_mode_kernel_work;
 
-// Doing kernel work right now: holding the lock or in a section, not waiting.
+// Doing kernel work right now, not waiting: in a section, or holding the lock
+// in a stretch marked as work (bkl_mark_work), so an idle CPU scanning an
+// empty run queue under the lock does not count. A section's device polling
+// is the section's own I/O and counts.
 [[nodiscard]] inline bool productive(CpuId cpu) noexcept
 {
     const auto bits = cpu_mode(cpu);
-    return (bits & (mode_bkl_held | mode_section)) != 0 && (bits & mode_spinning) == 0;
+    if ((bits & mode_spinning) != 0)
+        return false;
+    return (bits & mode_section) != 0 || (bits & (mode_bkl_held | mode_kernel_work)) == (mode_bkl_held | mode_kernel_work);
 }
 
 [[nodiscard]] inline bool in_section(CpuId cpu) noexcept
@@ -376,6 +383,8 @@ template <typename Relock> inline void leave_section(i64 result, Relock &&relock
     bkl_count_done(self);
     record.store(SectionState::returning);
     relock();
+    // Committing the result is work of this stretch.
+    set_cpu_mode(self, mode_kernel_work);
     if (record.load() == SectionState::committed)
         detail::owner_add(stats.handoffs);
     else

@@ -197,9 +197,46 @@ void check_drain_scope()
 }
 
 // A section that never waited samples the others: a CPU holding the kernel
-// lock is productive, and its release moves its `done`.
+// lock in a stretch marked as work is productive, and the release of such a
+// stretch moves its `done`. An idle scan (a stretch never marked) is neither.
 void check_evidence()
 {
+    {
+        std::atomic<bool> pinned{false}, scanned{false}, finish{false};
+        const auto concurrent = total(&smp::SectionCpu::concurrent);
+        const auto witnessed = total(&smp::SectionCpu::witnessed);
+        std::thread owner([&] {
+            const smp::ScopedHostedCpu scoped(10);
+            smp::bkl_lock();
+            smp::enter_section(19, 190);
+            pinned.store(true);
+            wait_until(finish);
+            smp::leave_section(0);
+            smp::bkl_unlock();
+        });
+        wait_until(pinned);
+        std::thread idle([&] {
+            const smp::ScopedHostedCpu scoped(11);
+            smp::bkl_lock(); // An empty scan...
+            smp::bkl_unlock();
+            smp::bkl_lock(); // ...and another one in progress at the sample.
+            scanned.store(true);
+            wait_until(finish);
+            expect(eventually([] { return smp::section_records[10].load() != smp::SectionState::working; }),
+                   "the section did not end");
+            smp::bkl_unlock();
+        });
+        wait_until(scanned);
+        expect(!smp::productive(11), "a CPU scanning under the kernel lock counted as productive");
+        finish.store(true);
+        idle.join();
+        owner.join();
+        expect(total(&smp::SectionCpu::concurrent) == concurrent && total(&smp::SectionCpu::witnessed) == witnessed &&
+                   smp::section_cpus[10].max_parallel.load() == 1 && smp::section_cpus[10].spun.load() == 0,
+               "idle kernel-lock stretches counted as overlap");
+        expect(smp::bkl_cpus[11].done.load() == 0 && smp::bkl_cpus[10].done.load() == 2,
+               "done counted an idle stretch or missed the section and its commit");
+    }
     std::atomic<bool> pinned{false}, worked{false}, finish{false};
     const auto concurrent = total(&smp::SectionCpu::concurrent);
     const auto witnessed = total(&smp::SectionCpu::witnessed);
@@ -215,9 +252,11 @@ void check_evidence()
     wait_until(pinned);
     std::thread other([&] {
         const smp::ScopedHostedCpu scoped(5);
-        smp::bkl_lock(); // A whole stretch during the section...
+        smp::bkl_lock(); // A whole stretch of work during the section...
+        smp::bkl_mark_work();
         smp::bkl_unlock();
         smp::bkl_lock(); // ...and productive at the sample.
+        smp::bkl_mark_work();
         worked.store(true);
         wait_until(finish);
         expect(eventually([] { return smp::section_records[4].load() != smp::SectionState::working; }),

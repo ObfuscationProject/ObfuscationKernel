@@ -64,6 +64,8 @@ Result<hw::Trap> enter_unlocked(hw::AddressSpace &space, hw::UserFrame &frame, c
     smp::end_user();
     // The holder may wait for a device line routed to this CPU.
     interrupt::lock_kernel_serving_interrupts();
+    // This stretch serves the trap.
+    smp::bkl_mark_work();
     const bool revoked = entry.revoked;
     entry = {};
     if (revoked) return Status::no_process("another CPU retired this thread during its user entry");

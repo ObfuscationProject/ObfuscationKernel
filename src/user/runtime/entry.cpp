@@ -1204,6 +1204,8 @@ bool step(Kernel &kernel)
         runtime_idle[cpu] = true;
         return waiting_deadline;
     }
+    // Serving a thread: this kernel-lock stretch is work (overlap evidence).
+    smp::bkl_mark_work();
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
     if (auto *selected = kernel.scheduler().find_thread(chosen.pid, chosen.tid); selected)
     {

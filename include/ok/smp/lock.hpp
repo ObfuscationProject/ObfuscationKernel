@@ -61,6 +61,9 @@ inline constexpr usize lock_debug_capacity = 8;
 inline constexpr u32 cpu_mode_bkl_held = 1; // Holds the big kernel lock.
 inline constexpr u32 cpu_mode_section = 2;  // Runs a kernel section without it.
 inline constexpr u32 cpu_mode_spinning = 4; // Waits for a lock, a gate, a drain or a device.
+// Its kernel-lock stretch serves a thread, a device or a section result (not
+// an idle scan); set by bkl_mark_work, cleared at the release.
+inline constexpr u32 cpu_mode_kernel_work = 8;
 
 struct alignas(64) CpuMode
 {

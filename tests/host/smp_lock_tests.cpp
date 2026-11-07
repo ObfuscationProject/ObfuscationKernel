@@ -189,20 +189,31 @@ void check_hosted_cpu()
 
 // The big kernel lock helpers keep this CPU's mode bits and accounting: an
 // acquisition, a contended one (the waiter spins with SPINNING set) and a
-// completed stretch per release.
+// completed stretch per release of a stretch marked as work.
 void check_bkl_accounting()
 {
     auto &self = smp::bkl_cpus[0];
     const auto acquired = self.acquired.load(), contended = self.contended.load(), done = self.done.load();
+    // Without the lock the mark does nothing; an unmarked stretch (an idle
+    // scan) is an acquisition but no completed work.
+    smp::bkl_mark_work();
+    expect(smp::cpu_mode(0) == 0, "bkl_mark_work marked a CPU without the kernel lock");
+    smp::bkl_lock();
+    smp::bkl_unlock();
+    expect(self.acquired.load() == acquired + 1 && self.done.load() == done && smp::cpu_mode(0) == 0,
+           "an unmarked stretch counted as work");
     smp::bkl_lock();
     expect(smp::kernel_lock.owned_by_current_cpu() && (smp::cpu_mode(0) & smp::cpu_mode_bkl_held) != 0,
            "bkl_lock did not hold or mark BKL_HELD");
+    smp::bkl_mark_work();
+    expect((smp::cpu_mode(0) & smp::cpu_mode_kernel_work) != 0, "bkl_mark_work did not mark the stretch");
     std::atomic<bool> trying{false}, acquired_by_one{false};
     std::thread waiter([&] {
         const smp::ScopedHostedCpu scoped(1);
         expect(!smp::bkl_try_lock(), "bkl_try_lock took a held lock");
         trying.store(true);
         smp::bkl_lock();
+        smp::bkl_mark_work();
         acquired_by_one.store(true);
         smp::bkl_unlock();
     });
@@ -220,15 +231,16 @@ void check_bkl_accounting()
     waiter.join();
     expect(acquired_by_one.load() && smp::cpu_mode(1) == 0 && smp::cpu_mode(0) == 0,
            "mode bits left behind after release");
-    expect(self.acquired.load() == acquired + 1 && self.done.load() == done + 1, "holder accounting");
+    expect(self.acquired.load() == acquired + 2 && self.done.load() == done + 1, "holder accounting");
     const auto &other = smp::bkl_cpus[1];
     expect(other.acquired.load() >= 1 && other.contended.load() >= 1 && other.done.load() >= 1,
            "waiter accounting");
     {
         smp::BklGuard guard;
         expect(smp::kernel_lock.owned_by_current_cpu(), "BklGuard did not hold");
+        smp::bkl_mark_work();
     }
-    expect(!smp::kernel_lock.owned_by_current_cpu() && self.acquired.load() == acquired + 2 &&
+    expect(!smp::kernel_lock.owned_by_current_cpu() && self.acquired.load() == acquired + 3 &&
                self.done.load() == done + 2 && smp::cpu_mode(0) == 0,
            "BklGuard accounting");
     expect(smp::bkl_try_lock() && self.contended.load() == contended, "uncontended bkl_try_lock");

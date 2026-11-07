@@ -455,7 +455,10 @@ usize drain_platform_irqs()
         return 0;
     const usize serviced = router.drain();
     if (serviced != 0)
+    {
         bump(local_interrupts().serviced, serviced);
+        smp::bkl_mark_work();
+    }
     return serviced;
 }
 

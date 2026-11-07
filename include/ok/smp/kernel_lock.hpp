@@ -24,7 +24,9 @@ struct alignas(64) BklCpu
     std::atomic<uptr> acquired{};
     // Acquisitions that found the lock held elsewhere and waited.
     std::atomic<uptr> contended{};
-    // Completed kernel stretches: every release and every section end.
+    // Completed kernel work: every release of a stretch marked with
+    // bkl_mark_work, and every section end. An idle scan that found nothing
+    // to serve does not count.
     std::atomic<uptr> done{};
 };
 inline constinit std::array<BklCpu, max_cpus> bkl_cpus{};
@@ -70,11 +72,22 @@ inline void bkl_count_done(CpuId cpu) noexcept
         detail::owner_add(bkl_cpus[cpu].done);
 }
 
+// Marks this CPU's current kernel-lock stretch as work for the overlap
+// evidence (ok/smp/kernel_section.hpp): it serves a thread, a trap, a device's
+// bottom halves or a section result. Without the lock it does nothing.
+inline void bkl_mark_work() noexcept
+{
+    if (kernel_lock.owned_by_current_cpu())
+        set_cpu_mode(current_cpu(), cpu_mode_kernel_work);
+}
+
 inline void bkl_unlock() noexcept
 {
     const auto cpu = current_cpu();
-    clear_cpu_mode(cpu, cpu_mode_bkl_held);
-    bkl_count_done(cpu);
+    const bool worked = (cpu_mode(cpu) & cpu_mode_kernel_work) != 0;
+    clear_cpu_mode(cpu, cpu_mode_bkl_held | cpu_mode_kernel_work);
+    if (worked)
+        bkl_count_done(cpu);
     kernel_lock.unlock();
 }
 
