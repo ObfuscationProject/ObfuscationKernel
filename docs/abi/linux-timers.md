@@ -97,8 +97,6 @@ once a timer was armed.
 - A legacy-numbered timer signal holds one queue slot: a second timer (or a
   `kill`) with the same number waits until the first is dequeued, where Linux
   queues both records.
-- Job-control signals from a timer are dropped, as job control is not
-  implemented.
 - `sigpending` stops showing a record that `timer_settime`/`timer_delete`
   dropped; Linux keeps it visible until the dequeue discards it.
 - An `ITIMER_REAL` stopped because its `SIGALRM` was ignored or discarded

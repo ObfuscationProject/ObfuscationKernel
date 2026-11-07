@@ -207,8 +207,8 @@ void service_posix(Kernel &kernel, sched::ProcessControlBlock &process, PosixTim
         break;
     case PrivateTimerSend::ignored:
         // Linux parks an ignored interval timer until its signal is unignored
-        // (posixtimer_sig_ignore) and drops a one-shot expiry; a job-control
-        // signal is dropped, as job control is not implemented.
+        // (posixtimer_sig_ignore) and drops a one-shot expiry, including one
+        // that init drops as SIGNAL_UNKILLABLE.
         timer.owed = false;
         if (timer.timer.state() == TimerState::signalled && private_signal_ignored(kernel, process.pid(), timer.signal))
             timer.parked = true;
