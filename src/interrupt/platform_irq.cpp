@@ -133,19 +133,30 @@ void bump(std::atomic<usize> &counter, usize amount = 1)
     counter.store(counter.load(std::memory_order_relaxed) + amount, std::memory_order_relaxed);
 }
 
-// A top half made a line pending: every other CPU waiting in
+// A top half made `line` pending: every other CPU waiting in
 // wait_for_interrupt() may need it (a driver holding the kernel lock drains
 // only on its own CPU), so each gets an IPI. The fence orders the pending
 // store before the `waiting` loads, against the waiter's opposite order.
-void wake_waiters(smp::CpuId self)
+// Waiters hold the kernel lock, so there is at most one; a line bind() placed
+// then moves to it, and the completions it waits for next end its halt
+// directly instead of through another CPU's IPI.
+void wake_waiters(smp::CpuId self, IrqLine line)
 {
     const u32 others = smp::online_mask() & ~(u32{1} << self);
     if (others == 0)
         return;
     std::atomic_thread_fence(std::memory_order_seq_cst);
+    usize woken = 0;
+    smp::CpuId waiter = 0;
     for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
         if ((others & (u32{1} << cpu)) != 0 && cpu_interrupts[cpu].waiting.load(std::memory_order_relaxed))
+        {
             smp::send_ipi(cpu, smp::ipi_device);
+            waiter = cpu;
+            ++woken;
+        }
+    if (woken == 1)
+        static_cast<void>(router.follow(line, waiter));
 }
 
 // Routing policy: the (line mod N)-th of the N online CPUs in `allowed`, in
@@ -917,7 +928,7 @@ extern "C" void ok_interrupt_top_half(ok::interrupt::IrqLine line)
     bump(self.delivered);
     self.woken.store(true, std::memory_order_relaxed);
     if (pending)
-        wake_waiters(ok::smp::current_cpu());
+        wake_waiters(ok::smp::current_cpu(), line);
 }
 
 extern "C" void ok_interrupt_tick()

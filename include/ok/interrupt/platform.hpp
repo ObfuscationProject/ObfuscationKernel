@@ -19,7 +19,9 @@ namespace ok::interrupt
 // on rv64, the I/O APIC on x86_64) a line bound while N CPUs are online goes
 // to the (line mod N)-th online CPU in logical order; others deliver to CPU 0
 // (the 8259 pairs, including x86_64's fallback when the MADT describes no I/O
-// APIC, and the uniprocessor profiles).
+// APIC, and the uniprocessor profiles). A top half that has to wake a device
+// waiter on another CPU with an IPI moves its line to that CPU, unless
+// retarget_platform_irq() pinned the line.
 struct IrqStatistics
 {
     usize waits{0};
@@ -67,7 +69,8 @@ bool idle_until_interrupt();
 [[nodiscard]] bool platform_irq_bound(IrqLine line);
 // The CPU a bound line is delivered to.
 [[nodiscard]] smp::CpuId platform_irq_target(IrqLine line);
-// Moves a bound line to `cpu` (an online CPU), on controllers that route.
+// Moves a bound line to `cpu` (an online CPU), on controllers that route, and
+// pins it there: device waits no longer move it.
 Status retarget_platform_irq(IrqLine line, smp::CpuId cpu);
 // Before `cpu` goes offline: spreads its lines over the other online CPUs.
 // Called on `cpu` itself with interrupts masked, it then serves what its

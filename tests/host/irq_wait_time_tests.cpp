@@ -121,6 +121,15 @@ static void check_irq_routing()
     CHECK(router.drain() == 1 && first.calls == 1 && second.calls == 1 && !chip.masked(4));
     CHECK(router.unbind(4, service, &first).ok() && router.unbind(4, service, &second).ok());
     CHECK(!router.bound(4) && router.target(4) == 0);
+    // follow() moves a line bind() placed to its waiter, never a line
+    // retarget() pinned; a new bind places it afresh.
+    CHECK(router.bind(8, interrupt::IrqTrigger::level, service, &first, 2).ok() && router.target(8) == 2);
+    CHECK(router.follow(8, 1) && router.target(8) == 1 && chip.routed(8) == 1 && !router.follow(8, 1));
+    CHECK(router.retarget(8, 1).ok() && !router.follow(8, 3) && router.target(8) == 1 && chip.routed(8) == 1);
+    CHECK(!router.follow(9, 1) && !router.bound(9));
+    CHECK(router.unbind(8, service, &first).ok() && router.bind(8, interrupt::IrqTrigger::level, service, &first, 2).ok());
+    CHECK(router.follow(8, 3) && router.target(8) == 3 && chip.routed(8) == 3);
+    CHECK(router.unbind(8, service, &first).ok());
 }
 
 // Hotplug: retarget_away moves exactly the bound lines delivered to the

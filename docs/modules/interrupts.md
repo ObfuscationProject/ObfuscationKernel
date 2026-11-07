@@ -51,8 +51,12 @@ GICD_ITARGETSR, one target per line; the PLIC through hart h's M-mode context
 2h; the I/O APIC through each redirection entry's physical destination) a
 line bound while N CPUs are online goes to the (line mod N)-th online CPU in
 logical order. aarch64, rv64 and x86_64 route this way; arm32 and rv32 run
-one CPU, and i386 keeps the 8259 on CPU 0. `retarget_platform_irq()` moves
-one bound line. `retarget_platform_irqs_away(cpu)` prepares CPU hotplug: it
+one CPU, and i386 keeps the 8259 on CPU 0. A line follows its device waiter:
+when a top half has to end another CPU's `wait_for_interrupt()` with an IPI,
+it also moves its line there (`IrqRouter::follow()`), so the next completions
+of a driver that keeps waiting on that CPU end its halt directly; otherwise
+every remote completion costs an IPI. `retarget_platform_irq()` moves one
+bound line and pins it, and follow() leaves pinned lines alone. `retarget_platform_irqs_away(cpu)` prepares CPU hotplug: it
 decides and moves every line delivered to `cpu` under the router lock
 (`IrqRouter::retarget_away()`), spreading them over the other online CPUs.
 Called on `cpu` itself with interrupts masked, it then serves what that CPU's
