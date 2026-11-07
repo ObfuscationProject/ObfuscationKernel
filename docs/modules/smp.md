@@ -405,8 +405,11 @@ process's footprint, read-only, and state behind fine locks:
 - **Device waits** inside a section poll: `wait_for_interrupt()` returns
   false, `drain_platform_irqs()` runs nothing and `bind_platform_irq()`
   refuses (the last two count `exclusive_asserts`); `OK_IRQ_COMPLETIONS`
-  counts the wait as polled.
-  <!-- FINAL: describe the pending fix that lets a CPU polling a device inside a kernel section serve its own interrupt controller, once merged (commit sha). -->
+  counts the wait as polled. Before returning false, `wait_for_interrupt()`
+  serves the CPU's own controller, and the OS poll loop calls
+  `smp::serve_while_polling()` on every pass, so top halves of lines routed to
+  a polling CPU still run and wake a kernel-lock waiter elsewhere; bottom
+  halves stay under the lock.
 - The copy-on-write resolver refuses inside a section (`cow_refused`).
 
 Drains run before every other syscall of the process (the choke point in

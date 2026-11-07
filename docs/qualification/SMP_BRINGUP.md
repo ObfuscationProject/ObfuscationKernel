@@ -230,18 +230,23 @@ with `smp_atomic = 1`.
   and requeue suites.
 - OS `scripts/test_futex_smp_atomic.py`: the static musl probe races
   FUTEX_WAKE_OP updates of one word against user atomics on another CPU, then
-  checks a copy-on-write word after fork. Integrated tree, 20000 rounds:
+  checks a copy-on-write word after fork. Final tree (bf3c63c), 20000 rounds,
+  multi-threaded TCG (`smp-gates` receipt):
 
-| Profile | vCPUs | Result | `interleaved` |
+| Profile | vCPUs | Result | `alternated` |
 | --- | --- | --- | --- |
-| x86_64 | 2 | `FUTEX_SMP_ATOMIC_PASS` | 19975 |
-| x86_64 | 4 | `FUTEX_SMP_ATOMIC_PASS` | 19946 |
+| x86_64 | 2 | `FUTEX_SMP_ATOMIC_PASS` | 19999 |
+| x86_64 | 4 | `FUTEX_SMP_ATOMIC_PASS` | 19984 |
 | aarch64 | 2 | `FUTEX_SMP_ATOMIC_PASS` | 19998 |
-| aarch64 | 4 | `FUTEX_SMP_ATOMIC_PASS` | 19949 |
-| rv64 | 2 | <!-- FINAL: rv64 smp=2 futex gate result --> | <!-- FINAL --> |
-| rv64 | 4 | <!-- FINAL: rv64 smp=4 futex gate result --> | <!-- FINAL --> |
+| aarch64 | 4 | `FUTEX_SMP_ATOMIC_PASS` | 19922 |
+| rv64 | 2 | `FUTEX_SMP_ATOMIC_PASS` | 19990 |
+| rv64 | 4 | `FUTEX_SMP_ATOMIC_PASS` | 19964 |
 
-<!-- FINAL: replace `interleaved` with the honest overlap evidence the futex probe will report, and add the negative control (the probe losing updates on 023386b at 2 vCPUs) with its receipt path. -->
+`alternated` counts rounds in which kernel and user updates alternated; it
+does not prove they ran at the same instant. The evidence is the lost-update
+check: the same probe, run by the implementer against 023386b at 2 vCPUs, lost
+updates (`add-lost-update`) on all three profiles. That negative control is
+not part of the receipts.
 
 ### x86 TSC synchronization
 
@@ -263,7 +268,7 @@ profiles' monotonic clock samples without a lock above a shared floor.
   offset (`skew_test=software`), was measured as `offset=-23576246908
   error=400` and corrected to `result=offset residual=-101
   residual_error=407 tolerance=769`; `qemu_test.py --tsc-skew-test` accepts
-  it. <!-- FINAL: receipt path of the skew-knob run. -->
+  it (implementer run; not part of the receipts).
 
 ### User TLB tags
 
@@ -306,8 +311,11 @@ CPU's lines away for hotplug. The interrupt report adds `OK_SMP_IRQS`
 - OS `scripts/qemu_distro.py --smp N` requires the bound lines spread over at
   least two online CPUs on native SMP runs. Stress-gate examples at 4 vCPUs:
   x86_64 `routes=1@1,4@0,11@3,12@0`, aarch64
-  `routes=33@1,76@2,77@1,78@2,79@3`.
-  <!-- FINAL: qemu_distro acceptance runs (x86_64 at 1/2/4, aarch64 and rv64 at 2/4) on the integrated SDK and their receipt paths. -->
+  `routes=33@1,76@2,77@1,78@2,79@3`. A CPU polling a device inside a kernel
+  section serves its own controller's top halves on every poll pass
+  (`smp::serve_while_polling`, called by the OS poll loop), so a line routed
+  there reaches a kernel-lock waiter on another CPU; the native probes check it
+  (`section_wait_serve=pass section_poll_serve=pass` on all three).
 
 ### Kernel sections
 
@@ -336,24 +344,30 @@ evidence lines.
   two CPUs, `concurrent` and `witnessed` above 0 and `max_parallel >= 2`; on a
   debug kernel every assertion counter and shadow mismatch at 0. The receipt
   records QEMU's TCG thread mode from its thread names; every run below was
-  multi-threaded TCG. Integrated tree, one run each, all `SMP_STRESS_PASS
-  files=480 messages=960 forks=480`, `sections=completed=3362` (`read=960
-  write=960 lseek=960 fsync=480 clock_gettime=2`), `shadow=1/0` and every
-  assertion counter 0:
+  multi-threaded TCG. Final tree (bf3c63c), three runs per configuration,
+  all `SMP_STRESS_PASS files=480 messages=960 forks=480`,
+  `sections=completed=3362`, `shadow=1/0` and every assertion counter 0
+  (`smp-gates` receipt); ranges over the three runs:
 
-| Profile | vCPUs | Guest s | concurrent | witnessed | max_parallel | handoffs | spun | drain_waits | bkl_acquired | bkl_contended |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| x86_64 | 2 | 51.1 | 942 | 1645 | 2 | 106 | 203 | 43 | 93329 | 57993 |
-| x86_64 | 4 | 55.6 | 1530 | 2007 | 3 | 190 | 436 | 51 | 90218 | 80025 |
-| aarch64 | 2 | 45.2 | 962 | 1280 | 2 | 80 | 173 | 41 | 91569 | 53395 |
-| aarch64 | 4 | 37.7 | 1673 | 1734 | 3 | 276 | 413 | 102 | 86642 | 81350 |
-| rv64 | 2 | <!-- FINAL --> | | | | | | | | |
-| rv64 | 4 | <!-- FINAL --> | | | | | | | | |
+| Profile | vCPUs | Guest s | concurrent | witnessed | max_parallel |
+| --- | --- | --- | --- | --- | --- |
+| x86_64 | 1 | 68.1-71.0 | 0 | 0 | 1 |
+| x86_64 | 2 | 34.8-37.1 | 1001-1048 | 1357-1395 | 2 |
+| x86_64 | 4 | 34.5-37.2 | 1591-1681 | 1703-1792 | 3 |
+| aarch64 | 1 | 95.2-95.9 | 0 | 0 | 1 |
+| aarch64 | 2 | 53.5-58.6 | 996-1226 | 1117-1268 | 2 |
+| aarch64 | 4 | 47.3-48.2 | 1723-1768 | 1510-1630 | 3-4 |
+| rv64 | 1 | 83.4-84.7 | 0 | 0 | 1 |
+| rv64 | 2 | 40.0-42.6 | 1137-1211 | 1252-1282 | 2 |
+| rv64 | 4 | 31.0-31.6 | 1966-2027 | 1770-1795 | 3-4 |
 
-Guest seconds come from a host shared with other jobs and are not a speed-up
-measurement.
-
-<!-- FINAL: the smp_sections=n arm (no OK_SMP_KERNEL line), one release run per profile, the 1-vCPU runs, a guest-seconds comparison of both arms on a quiet host, and the receipt paths. -->
+- The `smp_sections=n` arm at 2 vCPUs passes on all three without an
+  `OK_SMP_KERNEL` line (x86_64 34.9 s, aarch64 51.8 s, rv64 43.1 s guest
+  time), and one release run per profile at 2 vCPUs passes the same section
+  requirements with `debug=0` (x86_64 33.4 s, aarch64 41.8 s, rv64 38.4 s).
+- Guest seconds with and without sections are about equal: sections overlap
+  other kernel work, but under TCG on this host that brings no measurable
+  speed-up of the stress run. Guest seconds are not a speed-up measurement.
 
 ### CPU hotplug
 
@@ -381,11 +395,23 @@ requires an IPI answer.
 | aarch64 | 725, 768 | 684, 735 |
 | rv64 | 725, 723 | 697, 675 |
 
-<!-- FINAL: the integrated hotplug gate (x86_64, aarch64, rv64 at 2 and 4 vCPUs) with the OS gate's checks for hotplug cycles during the probe and the release assertion counters, and the receipt paths. -->
+On the final tree (bf3c63c) the gate also requires the cycles to advance
+during the probe (against the last `OK_SMP_HOTPLUG` line before it), and a
+release kernel's always-counted assertions to be 0. Two runs per
+configuration, all `SMP_STRESS_PASS`, `failures=0`, every section requirement
+met (`smp-gates` receipt); cycles during the probe / in total:
+
+| Profile | 2 vCPUs (cpu=1) | 4 vCPUs (cpu=3) |
+| --- | --- | --- |
+| x86_64 | 378/393, 374/389 | 305/321, 309/325 |
+| aarch64 | 531/550, 525/544 | 385/404, 389/408 |
+| rv64 | 448/464, 460/477 | 289/305, 286/302 |
 
 ### Integrated validation
 
-<!-- FINAL: kernel sha of the integrated run (b28815c or the final merge) and the paired OS sha. -->
+Kernel bf3c63c (module ABI 80) with ObfuscationOS `feat/smp-bringup` 3ed4160,
+QEMU 10.2.0 TCG; receipts in ObfuscationEvidence `receipts/ObfuscationKernel@bf3c63c/feat/smp-bringup/` (`kernel-lanes`, `smp-gates`,
+`native-probes`, `hosted-sdk`).
 
 - `xmake test` passes on all ten profiles with one CPU, and on x86_64,
   aarch64 and rv64 with `--qemu_smp=2` and `4`: `OK_QEMU_SMP_TEST ...
@@ -396,8 +422,13 @@ requires an IPI answer.
 - Native probes pass: x86_64 with one and two CPUs, aarch64 with two, rv64
   with two harts, arm32, rv32 and i386.
 - `tests/qemu/test_qemu_runner.py`: 39 tests.
-
-<!-- FINAL: OS gate totals, the receipt directory in ObfuscationEvidence and the module ABI number. -->
+- `xmake test`: the ten profiles once with one CPU and the three SMP profiles
+  three times each at 2 and 4 vCPUs, 28 of 28 lanes.
+- OS gates: 51 of 51 runs pass (27 sections-on stress runs at 1/2/4 vCPUs,
+  6 futex runs, 12 hotplug runs, 3 sections-off and 3 release runs).
+- ABI 80 SDK: the SDK contract tests, the OS tool suite (`Ran 1336 tests, OK
+  (skipped=34)`) and an x86_64 native distro boot (`OK_USERLAND
+  scope=hardware acceptance=pass`) against the exported SDK.
 
 ## Limits
 
@@ -413,8 +444,8 @@ requires an IPI answer.
   in parallel; each description serializes its own offset I/O; a process's
   other syscalls, every reap and every `O_APPEND` change wait for sections.
 - A driver waiting for its device under the kernel lock keeps the lock while
-  it halts; inside a section it polls.
-  <!-- FINAL: state what the pending fix changes for a CPU polling a device inside a kernel section (serving its own interrupt controller). -->
+  it halts; inside a section it polls, serving its own controller's top
+  halves on every pass. Bottom halves run only under the lock.
 - The futex queues stay under the kernel lock; file-backed keys,
   cross-process `CLONE_VM`, PI, realtime priority and lock-free queues remain
   gaps.

@@ -320,8 +320,11 @@ and limits in [SMP_BRINGUP](qualification/SMP_BRINGUP.md)):
   atomically (SDK `smp_atomic = 1`); x86 APs are admitted only after a
   verified TSC handshake; user TLB entries carry per-CPU ASIDs/PCIDs; secondary
   CPUs can be stopped and restarted (boot test point and the
-  `smp_hotplug_test` knob).
-  <!-- FINAL: integrated gate results, receipt paths and the module ABI number. -->
+  `smp_hotplug_test` knob). Module ABI 80. The final tree (kernel bf3c63c,
+  OS 3ed4160) passes 28 of 28 kernel lanes and 51 of 51 OS gate runs (stress
+  with sections at 1/2/4 vCPUs, hotplug, futex, sections-off and release
+  arms); receipts in ObfuscationEvidence
+  `receipts/ObfuscationKernel@bf3c63c/feat/smp-bringup/`.
 Carried forward: other kernel work (blocking calls, VFS namespace, pipes and
 sockets, fork/exec/exit, signals, memory mapping, futex queues, networking,
 bottom halves) stays under the big lock; ext4 runs one operation at a time per

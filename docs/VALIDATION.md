@@ -85,7 +85,9 @@ OS gates (paired worktree `wt/os-smp-bringup`, debug SDK of this tree):
   user atomics on another CPU and a copy-on-write word after fork
   (`FUTEX_SMP_ATOMIC_PASS`).
 
-<!-- FINAL: integrated gate totals and the ObfuscationEvidence receipt directory. -->
+Final WT2.1 tree (kernel bf3c63c, OS 3ed4160): 28 of 28 kernel lanes, 51 of
+51 OS gate runs and the native probes pass; receipts in ObfuscationEvidence
+`receipts/ObfuscationKernel@bf3c63c/feat/smp-bringup/`.
 
 ## Retained desktop validation
 
