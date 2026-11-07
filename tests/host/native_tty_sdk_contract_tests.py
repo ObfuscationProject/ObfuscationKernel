@@ -143,6 +143,29 @@ class NativeTtySdkContract(unittest.TestCase):
                     with self.subTest(header=relative, name=name, replacement=replacement):
                         self.refused(validator)
             path.write_text(good)
+        # A definition or record visible only to C++ consumers is refused: the
+        # language branches of termios.h may hold only matching assertions.
+        path = self.headers / 'ok/uapi/termios.h'
+        good = path.read_text()
+        cxx, c = '#ifdef __cplusplus\n', '#else\n'
+        moved = ['#define ' + name + ' ' + value + '\n' for name, value in PRODUCER.NATIVE_TERMIOS_DEFINES.items()]
+        moved += re.findall(r'struct ok_(?:termios|winsize) \{[^}]*\};\n', good)
+        self.assertEqual(len(moved), len(PRODUCER.NATIVE_TERMIOS_DEFINES) + len(PRODUCER.NATIVE_TERMIOS_RECORDS))
+        sources = [good.replace(text, '').replace(cxx, cxx + text) for text in moved]
+        sources += [good.replace(text, '').replace(c, c + text) for text in moved[:1] + moved[-1:]]
+        sources += [good.replace(text, '').replace(cxx, cxx + text).replace(c, c + text) for text in moved[:1]]
+        sources += [good.replace(cxx, cxx + 'typedef int ok_extra;\n'),
+                    good.replace(c, c + 'typedef int ok_extra;\n'),
+                    good.replace(cxx, cxx + 'static_assert(1, "x"); typedef int ok_extra;\n'),
+                    good.replace(cxx, cxx + 'static_assert(1, "x");\n'),
+                    re.sub(r'#else\n_Static_assert[^\n]*\n', '#else\n', good)]
+        for source in sources:
+            self.assertIn(cxx, source)
+            self.assertNotEqual(source, good)
+            path.write_text(source)
+            with self.subTest(header='ok/uapi/termios.h', branch=source[source.index(cxx):][:160]):
+                self.refused('validate_native_tty_profile')
+        path.write_text(good)
         for relative, old, new, validator in (
                 ('ok/uapi/termios.h', 'uint32_t c_lflag;', 'uint64_t c_lflag;', 'validate_native_tty_profile'),
                 ('ok/uapi/termios.h', 'uint8_t c_line;\n', '', 'validate_native_tty_profile'),

@@ -434,6 +434,21 @@ def uapi_contract_directives(path: Path, guard: str, conditions: list[str], labe
     if (found != conditions or directives[:2] != ["#ifndef " + guard, "#define " + guard] or
             directives[-1:] != ["#endif"] or any(re.match(r"#\s*undef\b", line) for line in directives)):
         raise ValueError(f"kernel SDK {label} UAPI must be unconditional within its include guard")
+    if "#ifdef __cplusplus" in conditions:
+        # The language branches may hold only matching assertions; every pinned
+        # definition and record must sit outside them, where C consumers see it.
+        lines = [" ".join(line.split()) for line in code.split("\n")]
+        start = lines.index("#ifdef __cplusplus")
+        middle = lines.index("#else", start)
+        end = lines.index("#endif", middle)
+        cxx = [line for line in lines[start + 1:middle] if line]
+        c = [line for line in lines[middle + 1:end] if line]
+        if (not cxx or any(not re.fullmatch(r"static_assert\([^;{}]*\);", line) for line in cxx) or
+                c != ["_S" + line[1:] for line in cxx]):
+            raise ValueError(f"kernel SDK {label} UAPI language branches may hold only matching assertions")
+        code = "\n".join("" if start <= index <= end else line
+                         for index, line in enumerate(code.split("\n")))
+        directives = [" ".join(line.split()) for line in code.split("\n") if line.lstrip().startswith("#")]
     return code, directives
 
 
