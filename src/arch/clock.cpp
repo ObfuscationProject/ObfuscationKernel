@@ -1,5 +1,6 @@
 #include "ok/arch/clock.hpp"
 #include "clock_counter.hpp"
+#include "ok/smp/lock.hpp"
 
 #include <atomic>
 
@@ -12,14 +13,20 @@ namespace ok::arch
 namespace
 {
 
-// The profiles that start secondary CPUs read the clock on every CPU; the
-// others keep the accumulating conversion their narrow counters need, under
-// the callers' serialization.
+// The profiles that start secondary CPUs read the clock on every CPU without
+// a lock: the conversion keeps no state above the shared floor. The others
+// keep the accumulating conversion their narrow counters need, under
+// clock_lock. Initialization takes clock_lock everywhere.
 #if defined(OK_ARCH_TARGET_X86_64) || defined(OK_ARCH_TARGET_AARCH64) || defined(OK_ARCH_TARGET_RV64)
+constexpr bool lock_free_samples = true;
 constinit detail::SharedCounterClock clock_state{};
 #else
+constexpr bool lock_free_samples = false;
 constinit detail::CounterClock clock_state{};
 #endif
+// Serializes initialization (clock_attempted, clock_failure, clock_state's
+// set-up) and, on the accumulating profiles, every sample.
+constinit smp::RankedSpinLock<smp::LockRank::monotonic_clock> clock_lock{};
 bool clock_attempted{};
 // Readers on any CPU see the failure once `clock_invalidated` is set; the
 // first CPU to fail writes it.
@@ -307,6 +314,7 @@ struct PlatformClock
 
 Status initialize_clock()
 {
+    const smp::RankedSpinLock<smp::LockRank::monotonic_clock>::Guard guard(clock_lock);
     if (invalidated())
         return clock_failure;
     if (clock_state.initialized())
@@ -326,10 +334,16 @@ Result<u64> monotonic_nanoseconds()
         return clock_failure;
     if (!clock_state.initialized())
         return clock_failure;
-    auto result = clock_state.sample(PlatformClock::read());
-    if (!result)
-        fail_clock(result.status());
-    return result;
+    auto sample = [] {
+        auto result = clock_state.sample(PlatformClock::read());
+        if (!result)
+            fail_clock(result.status());
+        return result;
+    };
+    if constexpr (lock_free_samples)
+        return sample();
+    const smp::RankedSpinLock<smp::LockRank::monotonic_clock>::Guard guard(clock_lock);
+    return sample();
 }
 
 Result<time::MonotonicPoint> monotonic_sample()
