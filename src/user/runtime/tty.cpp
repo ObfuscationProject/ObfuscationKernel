@@ -1,5 +1,6 @@
 // Terminals in the runtime: console ingress with echo, console output through
-// OPOST, prepared console reads, terminal ioctls for the native personality,
+// OPOST, prepared console reads (a Linux one binds its wait for signals), PTY
+// VTIME expiry, terminal ioctls for the native personality,
 // and the signal outboxes of the console and every PTY slave (docs/modules/tty.md). The scheduler owns the
 // terminal objects; this unit moves their bytes to the serial port and turns
 // queued terminal signals into kernel-originated signals.
@@ -136,7 +137,7 @@ i64 tty_console_write(Kernel &kernel, sched::ProcessControlBlock &process, std::
 
 i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &caller,
                      const sched::OpenFileDescription &description, std::span<const PipeVector> vectors,
-                     bool &complete)
+                     bool &complete, const std::array<uptr, 6> &arguments, bool vectored)
 {
     if (!description.readable) return -9;
     auto &space = process.resources().native_space;
@@ -150,11 +151,21 @@ i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched:
     {
         if (plan.status().code() != StatusCode::would_block || nonblocking) return error(plan.status());
         caller.console_wait_epoch = epoch;
-        if (auto status = scheduler.block_current(sched::ThreadWaitReason::console_read, epoch); !status)
+        auto ticket = scheduler.register_current_wait(sched::ThreadWaitReason::console_read, epoch);
+        if (!ticket)
         {
             caller.console_wait_epoch = 0;
-            return error(status);
+            return error(ticket.status());
         }
+        // A Linux read binds each wait of its re-dispatched call, so a caught
+        // signal can interrupt or restart it (terminal signal family).
+        if (process.resources().personality == Personality::linux)
+            if (const auto origin = syscall_origins.identity(process, caller); origin.capture)
+            {
+                const SyscallOrigins::ConsoleReadBinding binding{ticket.value(), static_cast<i32>(arguments[0]),
+                    arguments[1], arguments[2], epoch, vectored};
+                if (!syscall_origins.bind_console_read(origin, caller.native_frame, binding)) syscall_origins.revoke(caller);
+            }
         complete = false;
         return -11;
     }
@@ -177,6 +188,24 @@ i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched:
         return error(status);
     }
     return static_cast<i64>(plan.value().copy);
+}
+
+bool expire_tty_timers(Kernel &kernel, u64 now)
+{
+    bool pending = false;
+    for (const auto &entry : pty_waits)
+    {
+        if (!entry.pid) continue;
+        auto resolved = pty_wait_objects.resolve(entry.object);
+        if (!resolved) { runtime_failure = resolved.status(); continue; }
+        const auto &wait = *resolved.value();
+        const auto *thread = kernel.scheduler().find_thread(wait.pid, wait.tid);
+        if (!wait.deadline || !thread || !thread->wait_registration.pending(wait.ticket)) continue;
+        if (now < wait.deadline) { pending = true; continue; }
+        // The read retries with the timer expired (resume_pty_io).
+        static_cast<void>(kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::timeout));
+    }
+    return pending;
 }
 
 i64 tty_terminal_control(Kernel &kernel, sched::ProcessControlBlock &process, const std::array<uptr, 6> &a)

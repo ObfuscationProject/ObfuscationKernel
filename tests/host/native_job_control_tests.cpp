@@ -108,7 +108,8 @@ void drain(u64 pid)
     native::PrivateProcessQueue::Delivery ticket;
     while (shared(pid).peek({}, ticket)) CHECK(shared(pid).consume(ticket));
 }
-// Wait in a console read, which no signal interrupts.
+// Park in a console read without a bound syscall origin: no signal interrupts
+// it (a Linux read entered through a syscall binds one and is interruptible).
 sched::WaitTicket park(Kernel &kernel, u64 pid)
 {
     activate(kernel, pid, pid);

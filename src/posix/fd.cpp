@@ -364,8 +364,7 @@ Result<DescriptorReadiness> PosixService::poll_description(u16 id, ReadyEvents r
     DescriptorReadiness ready{};
     if (entry->pty_endpoint)
     {
-        if constexpr (Policy == ReadinessPolicy::linux)
-            return Status::unsupported("raw PTY Linux readiness is outside the native candidate");
+        // Both personalities share the terminal mapping (docs/modules/tty.md section 10).
         auto state = scheduler_->pty_description_readiness(id);
         if (!state) return state.status();
         if (state.value().readable) ready.events |= requested & ReadyEvents::readable;

@@ -552,6 +552,224 @@ Status private_exit_commit(Kernel &kernel, sched::ProcessId pid, const PrivateCh
     jobctl_orphan_pass(kernel, pid, completion.parent, adoption);
     return runtime_failure;
 }
+
+// Interruptible terminal waits of Linux processes (docs/modules/tty.md
+// section 9.9). One constrained family serves the PTY continuation (a
+// captured wait object) and the console read (its frame is re-dispatched),
+// with the same order as the pipe families: readiness first, then the first
+// pending signal that interrupts; a terminating default ends the process, a
+// handler gets EINTR (a partial write its count) or a restart under SA_RESTART.
+namespace
+{
+template <typename Binding>
+bool jobctl_publish_restart(sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread,
+                            const SyscallOrigins::Identity &origin, const Binding &binding)
+{
+#if defined(OK_PRIVATE_MIPS64_N64_SIGNAL) || defined(OK_PRIVATE_PPC32_SIGNAL)
+    using Publication = SyscallRestartPublication<private_signal_profile>;
+#ifdef OK_PRIVATE_MIPS64_N64_SIGNAL
+    auto *state = private_n64_state(process, thread);
+    const auto identity = private_n64_identity(process, thread);
+    const auto capability = private_n64_backend::capability();
+#else
+    auto *state = private_ppc_state(process, thread);
+    const auto identity = private_ppc_identity(process, thread);
+    const auto capability = private_ppc_backend::capability();
+#endif
+    if (!state) return false;
+    auto staged = Publication::stage(syscall_origins, origin, binding, *state, identity, thread.native_frame, capability);
+    return staged && Publication::commit(staged.value(), origin, binding, identity, thread.native_frame, capability);
+#else
+    static_cast<void>(process);
+    const auto permit = syscall_origins.prepare_restart(origin, thread.native_frame, binding);
+    if (!permit || !syscall_origins.consume_restart(permit.value(), origin, thread.native_frame, binding)) return false;
+    thread.native_frame = permit.value().plan().frame;
+    return true;
+#endif
+}
+
+template <typename Access>
+concept TerminalWaitAccess = requires(Kernel &kernel, const sched::ProcessControlBlock &process,
+                                      sched::ThreadControlBlock &thread, typename Access::Selection &selection,
+                                      const SyscallOrigins::Identity &origin) {
+    { Access::kind } -> std::convertible_to<std::string_view>;
+    // The thread's bound wait of this kind, owned by `origin`.
+    { Access::find(kernel, process, thread, origin, selection) } -> std::same_as<bool>;
+    // The call would complete now (data, EOF, room or an error).
+    { Access::ready_now(kernel, process, std::as_const(selection)) } -> std::same_as<bool>;
+    { Access::restartable(std::as_const(selection)) } -> std::same_as<bool>;
+    { Access::interrupted_result(std::as_const(selection)) } -> std::same_as<i64>;
+    { Access::with_binding(std::as_const(selection), [](const auto &) { return true; }) } -> std::same_as<bool>;
+    Access::retire(kernel, thread, std::as_const(selection), i64{});
+};
+
+struct PtyWaitAccess
+{
+    static constexpr std::string_view kind = "pty";
+    struct Selection { memory::ObjectHandle object{}; PtyWait wait{}; };
+    static bool find(Kernel &, const sched::ProcessControlBlock &process, const sched::ThreadControlBlock &thread,
+                     const SyscallOrigins::Identity &origin, Selection &out)
+    {
+        const auto object = pty_wait_object(process.pid(), thread.tid);
+        if (!object.pool) return false;
+        auto resolved = pty_wait_objects.resolve(object);
+        if (!resolved) return false;
+        const auto &wait = *resolved.value();
+        if (wait.pid != process.pid() || wait.tid != thread.tid || wait.personality != Personality::linux ||
+            !wait.origin || wait.origin != origin.capture) return false;
+        const bool bound = wait.writing
+            ? syscall_origins.validate_bound(origin, thread.native_frame, pty_write_origin_binding(object, wait))
+            : syscall_origins.validate_bound(origin, thread.native_frame, pty_read_origin_binding(object, wait));
+        if (!bound) return false;
+        out.object = object; out.wait = wait;
+        return true;
+    }
+    static bool ready_now(Kernel &kernel, const sched::ProcessControlBlock &, const Selection &selection)
+    {
+        const auto &wait = selection.wait;
+        if (wait.writing)
+        {
+            const auto readiness = kernel.scheduler().pty_description_readiness(wait.description);
+            return !readiness || readiness.value().writable || readiness.value().write_error;
+        }
+        const auto state = kernel.scheduler().pty_read_state(wait.description, wait.count);
+        return !state || state.value().wait == decltype(state.value().wait)::none;
+    }
+    static bool restartable(const Selection &selection) { return !selection.wait.committed; }
+    static i64 interrupted_result(const Selection &selection)
+    { return selection.wait.committed ? static_cast<i64>(selection.wait.committed) : -4; }
+    template <typename Visit> static bool with_binding(const Selection &selection, Visit &&visit)
+    {
+        return selection.wait.writing ? visit(pty_write_origin_binding(selection.object, selection.wait))
+                                      : visit(pty_read_origin_binding(selection.object, selection.wait));
+    }
+    static void retire(Kernel &kernel, sched::ThreadControlBlock &, const Selection &selection, i64 result)
+    { cancel_pty_wait(kernel, selection.object, "interrupted", result); }
+};
+
+struct ConsoleReadAccess
+{
+    static constexpr std::string_view kind = "console";
+    struct Selection { SyscallOrigins::ConsoleReadBinding binding{}; };
+    static bool find(Kernel &, const sched::ProcessControlBlock &, const sched::ThreadControlBlock &thread,
+                     const SyscallOrigins::Identity &origin, Selection &out)
+    {
+        if (!thread.console_wait_epoch) return false;
+        const auto bound = syscall_origins.bound_console_read(origin, thread.native_frame);
+        if (!bound || bound->epoch != thread.console_wait_epoch) return false;
+        out.binding = *bound;
+        return true;
+    }
+    // Lease authority and an ldisc read that would complete; the re-dispatch
+    // then reads. No foreground check: background reads are gated at entry.
+    static bool ready_now(Kernel &kernel, const sched::ProcessControlBlock &process, const Selection &selection)
+    {
+        return kernel.scheduler().console_read_authority(process.pid(), selection.binding.epoch).ok() &&
+            kernel.scheduler().console_readable(process.pid(), selection.binding.epoch);
+    }
+    static bool restartable(const Selection &) { return true; }
+    static i64 interrupted_result(const Selection &) { return -4; }
+    template <typename Visit> static bool with_binding(const Selection &selection, Visit &&visit)
+    { return visit(selection.binding); }
+    static void retire(Kernel &, sched::ThreadControlBlock &thread, const Selection &selection, i64)
+    {
+        syscall_origins.retire_terminal(thread.owner, thread.tid, selection.binding);
+        thread.console_wait_epoch = 0;
+    }
+};
+
+template <typename Access>
+    requires TerminalWaitAccess<Access>
+struct TerminalSignalFamily
+{
+    struct Selected
+    {
+        typename Access::Selection wait{};
+        SyscallOrigins::Identity origin{};
+        u32 signal{};
+        sched::SignalAction action{};
+    };
+    static bool owned(Kernel &kernel, const sched::ProcessControlBlock &process, const sched::ThreadControlBlock &thread,
+                      Selected &out)
+    {
+        if (kernel.scheduler().find(process.pid()) != &process ||
+            kernel.scheduler().find_thread(process.pid(), thread.tid) != &thread ||
+            process.resources().personality != Personality::linux || thread.owner != process.pid() ||
+            !thread.native_active || !thread.syscall_pending ||
+            process.state() == sched::ProcessState::zombie || process.state() == sched::ProcessState::exited ||
+            (thread.state != sched::ProcessState::blocked && thread.state != sched::ProcessState::runnable &&
+             thread.state != sched::ProcessState::running)) return false;
+        out.origin = syscall_origins.identity(process, thread);
+        return out.origin.capture && Access::find(kernel, process, thread, out.origin, out.wait);
+    }
+    static bool select(Kernel &kernel, const sched::ProcessControlBlock &process, const sched::ThreadControlBlock &thread,
+                       Selected &out)
+    {
+        return owned(kernel, process, thread, out) && !Access::ready_now(kernel, process, out.wait) &&
+            private_signal_interrupting(kernel, process, thread, out.signal, out.action);
+    }
+    static bool complete(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread)
+    {
+        Selected selected;
+        if (!select(kernel, process, thread, selected)) return false;
+        if (selected.action.handler == sched::SignalAction::default_handler)
+        {
+            finish(kernel, process.pid(), 0, static_cast<u8>(selected.signal));
+            return false;
+        }
+        constexpr u64 sa_restart = 0x10000000;
+        const bool restart = Access::restartable(selected.wait) && (selected.action.flags & sa_restart) != 0;
+        const i64 result = Access::interrupted_result(selected.wait);
+        const bool published = restart
+            ? Access::with_binding(selected.wait, [&](const auto &binding) {
+                  return jobctl_publish_restart(process, thread, selected.origin, binding);
+              })
+            : set_result(process, thread.native_frame, result).ok();
+        if (!published)
+        { runtime_failure = Status::fault("terminal signal publication lost owned origin"); started = false; return false; }
+        // No scheduler or user boundary occurs from selection through handler setup.
+        const auto ticket = thread.wait_registration.ticket();
+        if (thread.wait_registration.active() &&
+            !kernel.scheduler().complete_wait(ticket, sched::WaitCompletion::interrupted))
+        { runtime_failure = Status::fault("terminal signal lost current wait"); started = false; return false; }
+        Access::retire(kernel, thread, selected.wait, restart ? 0 : result);
+        thread.syscall_pending = false;
+        if (!runtime_failure) { started = false; return false; }
+#ifdef OK_ENABLE_TEST_POINTS
+        emit("OK_NATIVE_TERMINAL_SIGNAL pid="); emit_number(process.pid()); emit(" tid="); emit_number(thread.tid);
+        emit(" kind="); emit(Access::kind); emit(" wait="); emit_number(ticket.generation);
+        emit(" signal="); emit_number(selected.signal);
+        emit(restart ? " outcome=restart" : result > 0 ? " outcome=partial" : " outcome=eintr");
+        emit(" pc="); emit_number(thread.native_frame.pc); emit("\n");
+#endif
+        return true;
+    }
+};
+using PtySignalFamily = TerminalSignalFamily<PtyWaitAccess>;
+using ConsoleSignalFamily = TerminalSignalFamily<ConsoleReadAccess>;
+} // namespace
+
+bool private_terminal_signal_owned(Kernel &kernel, const sched::ProcessControlBlock &process,
+                                   const sched::ThreadControlBlock &thread)
+{
+    PtySignalFamily::Selected pty;
+    ConsoleSignalFamily::Selected console;
+    return PtySignalFamily::owned(kernel, process, thread, pty) || ConsoleSignalFamily::owned(kernel, process, thread, console);
+}
+bool private_terminal_signal_ready(Kernel &kernel, const sched::ProcessControlBlock &process,
+                                   const sched::ThreadControlBlock &thread)
+{
+    PtySignalFamily::Selected pty;
+    ConsoleSignalFamily::Selected console;
+    return PtySignalFamily::select(kernel, process, thread, pty) || ConsoleSignalFamily::select(kernel, process, thread, console);
+}
+bool private_terminal_signal_complete(Kernel &kernel, sched::ProcessControlBlock &process,
+                                      sched::ThreadControlBlock &thread)
+{
+    PtySignalFamily::Selected pty;
+    if (PtySignalFamily::owned(kernel, process, thread, pty)) return PtySignalFamily::complete(kernel, process, thread);
+    return ConsoleSignalFamily::complete(kernel, process, thread);
+}
 #endif
 } // namespace runtime_detail
 } // namespace ok::user::native

@@ -400,7 +400,15 @@ struct PtyWait
     sched::private_pty::Handle endpoint{};
     PipeVectors vectors{};
     bool writing{};
+    Personality personality{Personality::native}; // Captured at admission; the owner must keep it.
+    u64 origin{};          // Linux syscall origin capture that bound this wait (0: none).
+    u64 deadline{};        // VTIME expiry (monotonic ns), 0 when no timer runs.
+    usize received_mark{}; // Slave bytes visible when the interbyte timer was last armed.
+    u8 timer{};            // Armed VTIME length in deciseconds.
+    bool interbyte{};      // The timer restarts on new input (VMIN > 0).
 };
+SyscallOrigins::PtyReadBinding pty_read_origin_binding(memory::ObjectHandle object, const PtyWait &wait);
+SyscallOrigins::PtyWriteBinding pty_write_origin_binding(memory::ObjectHandle object, const PtyWait &wait);
 constexpr usize pty_wait_capacity = memory::KernelEntryStackPool::capacity;
 using PtyWaitObjectsLayout = memory::ObjectPool<PtyWait, NativePagePool, 1>;
 constexpr usize pty_wait_object_pages =
@@ -541,9 +549,15 @@ i64 resume_pipe_write(Kernel &kernel, sched::ProcessControlBlock &process,
                      memory::ObjectHandle object, bool &complete);
 i64 begin_pipe_write(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadId tid,
                     i32 fd, u16 description_id, uptr input, usize count, bool &complete, const PipeVectors &vectors = {});
-// This first PTY runtime is native-only.
+// PTY reads and writes of both personalities. A Linux wait binds its syscall
+// origin when armed, so a caught signal can interrupt or restart it.
 memory::ObjectHandle pty_wait_object(sched::ProcessId pid, sched::ThreadId tid);
 void cancel_pty_waits(Kernel &kernel, sched::ProcessId pid, sched::ThreadId tid = 0);
+// Retires one PTY wait object (the signal family's interruption).
+void cancel_pty_wait(Kernel &kernel, memory::ObjectHandle object, std::string_view outcome = "cancelled", i64 result = -125);
+// Completes PTY reads whose VTIME timer ran out (they retry with the timer
+// expired); true while a timer still runs.
+bool expire_tty_timers(Kernel &kernel, u64 now);
 void prune_pty_waits(Kernel &kernel);
 i64 resume_pty_io(Kernel &kernel, sched::ProcessControlBlock &process,
                   memory::ObjectHandle object, bool &complete);
@@ -556,9 +570,10 @@ i64 begin_pty_io(Kernel &kernel, sched::ProcessControlBlock &process, sched::Thr
 // outbox, as do the top of step() and the exit commit.
 void tty_console_input(Kernel &kernel, char value, sched::WakeSource source);
 i64 tty_console_write(Kernel &kernel, sched::ProcessControlBlock &process, std::span<const PipeVector> vectors);
+// `arguments`/`vectored`: the read or readv call a Linux wait binds.
 i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &caller,
                      const sched::OpenFileDescription &description, std::span<const PipeVector> vectors,
-                     bool &complete);
+                     bool &complete, const std::array<uptr, 6> &arguments, bool vectored);
 // Native terminal ioctls (struct ok_termios); Linux uses TtyIoctlCodec in linux_bootstrap.hpp.
 i64 tty_terminal_control(Kernel &kernel, sched::ProcessControlBlock &process, const std::array<uptr, 6> &arguments);
 // Sends queued terminal signals; true when any outbox held entries.
@@ -704,6 +719,20 @@ i64 private_signal_wait_enqueue(Kernel &kernel, sched::ProcessControlBlock &reci
                                 sched::PendingSignalInfo info);
 bool private_signal_admit_blocked(Kernel &kernel, const sched::ProcessControlBlock &recipient,
                                   const sched::ThreadControlBlock &target);
+// The first pending signal `thread` would take that interrupts a wait (not
+// ignored, not a default stop), when its action is supported.
+bool private_signal_interrupting(Kernel &kernel, const sched::ProcessControlBlock &process,
+                                 const sched::ThreadControlBlock &thread, u32 &signal, sched::SignalAction &action);
+// Terminal waits of Linux processes (jobctl.cpp): console reads and PTY reads
+// and writes whose syscall origin is bound. Data, EOF or room wins over a
+// signal; otherwise a caught signal gives EINTR (a partial write its count) or
+// a restart under SA_RESTART, and a terminating default ends the process.
+bool private_terminal_signal_owned(Kernel &kernel, const sched::ProcessControlBlock &process,
+                                   const sched::ThreadControlBlock &thread);
+bool private_terminal_signal_ready(Kernel &kernel, const sched::ProcessControlBlock &process,
+                                   const sched::ThreadControlBlock &thread);
+bool private_terminal_signal_complete(Kernel &kernel, sched::ProcessControlBlock &process,
+                                      sched::ThreadControlBlock &thread);
 // The generation core (Linux prepare_signal/complete_signal order) shared by
 // kill, tkill/tgkill, group kill, process timers and kernel senders. The
 // signal in `info` is in the recipient's numbering; callers have done lookup,

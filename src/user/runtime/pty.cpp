@@ -1,4 +1,7 @@
-// PTY pair I/O continuations and their owners (raw pairs and ptmx-style pairs).
+// PTY pair I/O continuations and their owners (raw pairs and ptmx-style pairs),
+// for both personalities. A Linux wait binds its syscall origin when armed; the
+// terminal signal family (jobctl.cpp) interrupts or restarts it. A read that
+// waits below VMIN or with VMIN 0 runs its VTIME timer (expire_tty_timers).
 #include "private.hpp"
 
 namespace ok::user::native
@@ -15,6 +18,15 @@ memory::ObjectHandle pty_wait_object(sched::ProcessId pid, sched::ThreadId tid)
     for (const auto &entry : pty_waits)
         if (entry.pid == pid && entry.tid == tid) return entry.object;
     return {};
+}
+SyscallOrigins::PtyReadBinding pty_read_origin_binding(memory::ObjectHandle object, const PtyWait &wait)
+{
+    return {object, wait.ticket, wait.request, wait.fd, wait.address, wait.count, wait.description, wait.endpoint, wait.vectors};
+}
+SyscallOrigins::PtyWriteBinding pty_write_origin_binding(memory::ObjectHandle object, const PtyWait &wait)
+{
+    return {object, wait.ticket, wait.request, wait.fd, wait.address, wait.count, wait.description, wait.endpoint,
+            wait.vectors, wait.committed};
 }
 namespace
 {
@@ -40,12 +52,20 @@ void emit_pty_wait(const PtyWait &wait, bool terminal, std::string_view stage, i
     static_cast<void>(wait); static_cast<void>(terminal); static_cast<void>(stage); static_cast<void>(result);
 #endif
 }
-void cancel_pty_wait(Kernel &kernel, memory::ObjectHandle object,
-                     std::string_view outcome = "cancelled", i64 result = -125)
+// The bound origin of a Linux wait goes with it.
+void pty_retire_origin(memory::ObjectHandle object, const PtyWait &wait)
+{
+    if (!wait.origin) return;
+    if (wait.writing) syscall_origins.retire_terminal(wait.pid, wait.tid, pty_write_origin_binding(object, wait));
+    else syscall_origins.retire_terminal(wait.pid, wait.tid, pty_read_origin_binding(object, wait));
+}
+} // namespace
+void cancel_pty_wait(Kernel &kernel, memory::ObjectHandle object, std::string_view outcome, i64 result)
 {
     auto resolved = pty_wait_objects.resolve(object);
     if (!resolved) { runtime_failure = resolved.status(); return; }
     const auto wait = *resolved.value();
+    pty_retire_origin(object, wait);
     for (auto &entry : pty_waits) if (entry.object == object) entry = {};
     if (wait.ticket.generation)
         static_cast<void>(kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::cancelled));
@@ -55,7 +75,6 @@ void cancel_pty_wait(Kernel &kernel, memory::ObjectHandle object,
     if (auto status = pty_wait_objects.trim_empty_pages(); !status) runtime_failure = status;
     if (wait.ticket.generation) emit_pty_wait(wait, true, outcome, result);
 }
-} // namespace
 void cancel_pty_waits(Kernel &kernel, sched::ProcessId pid, sched::ThreadId tid)
 {
     for (const auto &entry : pty_waits)
@@ -68,7 +87,7 @@ bool pty_owner_current(const sched::ProcessControlBlock &process, const sched::T
 {
     const auto &space = process.resources().native_space;
     return process.pid() == wait.pid && thread.owner == wait.pid && thread.tid == wait.tid &&
-        process.resources().personality == Personality::native && thread.native_active && thread.syscall_pending &&
+        process.resources().personality == wait.personality && thread.native_active && thread.syscall_pending &&
         wait.lease.pool && thread.entry_stack == wait.lease && validate_entry_stack(entry_stacks, thread) &&
         SyscallOrigins::same_frame(thread.native_frame, wait.frame) &&
         space.root == wait.space.root && space.slot == wait.space.slot && space.generation == wait.space.generation;
@@ -116,7 +135,9 @@ Status gather_pty_suffix(const hw::AddressSpace &space, std::span<std::byte> byt
     }
     return copied == bytes.size() ? Status{} : Status::fault("PTY input vector is short");
 }
-Result<usize> attempt_pty_io(Kernel &kernel, sched::ProcessControlBlock &process, const PtyWait &wait)
+// `timer_expired`: a read retried after its VTIME timer ran out.
+Result<usize> attempt_pty_io(Kernel &kernel, sched::ProcessControlBlock &process, const PtyWait &wait,
+                             bool timer_expired = false)
 {
     const auto *description = kernel.scheduler().open_description(wait.description);
     if (!description || !description->references || description->pty_endpoint != wait.endpoint ||
@@ -130,7 +151,7 @@ Result<usize> attempt_pty_io(Kernel &kernel, sched::ProcessControlBlock &process
         {
             if (!pipe_ranges(space, wait.address, wait.count, wait.vectors, true))
                 return Status::fault("PTY output mapping changed");
-            auto prepared = kernel.scheduler().prepare_pty_read(wait.description, wait.count);
+            auto prepared = kernel.scheduler().prepare_pty_read(wait.description, wait.count, timer_expired);
             if (!prepared) return prepared.status();
             auto &preview = prepared.value();
             if (preview.endpoint() != wait.endpoint)
@@ -191,6 +212,38 @@ Result<usize> attempt_pty_write(Kernel &kernel, sched::ProcessControlBlock &proc
         if (!transferred.value() || wait.committed == wait.count) return wait.committed - start;
     }
 }
+using PtyReadWait = decltype(sched::SchedulerState::PtyReadState{}.wait);
+// Arms, keeps or clears the VTIME timer of a read about to wait (Linux
+// n_tty_read): with VMIN 0 one timer runs from the start of the read; below
+// VMIN it restarts whenever the visible input changed since it was armed.
+Status pty_arm_timer(Kernel &kernel, PtyWait &wait)
+{
+    if (wait.writing) return {};
+    auto state = kernel.scheduler().pty_read_state(wait.description, wait.count);
+    if (!state) return state.status();
+    const auto &value = state.value();
+    if (!value.timer_deciseconds) { wait.deadline = 0; wait.timer = 0; wait.interbyte = false; return {}; }
+    const bool interbyte = value.wait == PtyReadWait::interbyte;
+    if (wait.deadline && wait.timer == value.timer_deciseconds && wait.interbyte == interbyte &&
+        (!interbyte || value.buffered == wait.received_mark)) return {};
+    const auto now = arch::monotonic_nanoseconds();
+    if (!now) return now.status();
+    wait.deadline = now.value() + u64{value.timer_deciseconds} * 100'000'000ULL;
+    if (!wait.deadline) wait.deadline = 1;
+    wait.timer = value.timer_deciseconds; wait.interbyte = interbyte; wait.received_mark = value.buffered;
+    return {};
+}
+// A Linux wait carries its bound origin to the new ticket (and write progress).
+void pty_rebind(sched::ProcessControlBlock &process, const sched::ThreadControlBlock &thread,
+                memory::ObjectHandle object, const PtyWait &before, const PtyWait &after)
+{
+    if (!after.origin) return;
+    const auto origin = syscall_origins.identity(process, thread);
+    const bool kept = origin.capture == after.origin && (after.writing
+        ? syscall_origins.rearm(origin, thread.native_frame, pty_write_origin_binding(object, before), pty_write_origin_binding(object, after))
+        : syscall_origins.rearm(origin, thread.native_frame, pty_read_origin_binding(object, before), pty_read_origin_binding(object, after)));
+    if (!kept) syscall_origins.revoke(thread);
+}
 } // namespace
 i64 resume_pty_io(Kernel &kernel, sched::ProcessControlBlock &process,
                   memory::ObjectHandle object, bool &complete)
@@ -202,23 +255,35 @@ i64 resume_pty_io(Kernel &kernel, sched::ProcessControlBlock &process,
     if (!thread || !pty_owner_current(process, *thread, wait) ||
         thread->wait_registration.ticket() != wait.ticket || thread->wait_registration.active())
     { cancel_pty_wait(kernel, object); complete = false; return -125; }
-    if (thread->wait_registration.completion() != sched::WaitCompletion::ready)
+    const auto completion = thread->wait_registration.completion();
+    // A VTIME expiry retries the read with the timer expired (n_tty_read).
+    const bool timer_expired = completion == sched::WaitCompletion::timeout && !wait.writing && wait.deadline;
+    if (completion != sched::WaitCompletion::ready && !timer_expired)
     {
-        const i64 failure = thread->wait_registration.completion() == sched::WaitCompletion::interrupted ? -4 : -125;
+        const i64 failure = completion == sched::WaitCompletion::interrupted ? -4 : -125;
         const auto result = pty_terminal_result(wait, failure);
         cancel_pty_wait(kernel, object, "interrupted", result); return result;
     }
-    auto transferred = wait.writing ? attempt_pty_write(kernel, process, wait) : attempt_pty_io(kernel, process, wait);
+    if (timer_expired) wait.deadline = 0;
+    const auto before = wait;
+    auto transferred = wait.writing ? attempt_pty_write(kernel, process, wait)
+                                    : attempt_pty_io(kernel, process, wait, timer_expired);
     const auto *description = kernel.scheduler().open_description(wait.description);
     const bool blocking = description && !(description->flags & posix::o_NONBLOCK);
     if (blocking && ((transferred && wait.writing && wait.committed < wait.count) ||
         (!transferred && transferred.status().code() == StatusCode::would_block)))
     {
+        if (auto status = pty_arm_timer(kernel, wait); !status)
+        { const auto result = pty_terminal_result(wait, error(status)); cancel_pty_wait(kernel, object, "error", result); return result; }
         auto registration = kernel.scheduler().register_current_wait(pty_wait_reason(wait.writing), pty_wait_key(wait.endpoint));
         if (!registration)
         { const auto result = pty_terminal_result(wait, error(registration.status())); cancel_pty_wait(kernel, object, "error", result); return result; }
-        wait.ticket = registration.value(); emit_pty_wait(wait, false, "rearm"); complete = false; return -11;
+        wait.ticket = registration.value();
+        pty_rebind(process, *thread, object, before, wait);
+        emit_pty_wait(wait, false, "rearm"); complete = false; return -11;
     }
+    // The bound origin still names the binding the wait armed with.
+    pty_retire_origin(object, before);
     const auto result = pty_terminal_result(wait, transferred ? static_cast<i64>(transferred.value()) : error(transferred.status()));
     cancel_pty_wait(kernel, object, transferred ? (result ? "ready" : "eof") : "error", result);
     return result;
@@ -227,7 +292,6 @@ i64 begin_pty_io(Kernel &kernel, sched::ProcessControlBlock &process, sched::Thr
                  i32 fd, u16 description_id, uptr address, usize count, bool writing,
                  bool &complete, const PipeVectors &vectors)
 {
-    if (process.resources().personality != Personality::native) return -95;
     const auto *description = kernel.scheduler().open_description(description_id);
     const auto *thread = kernel.scheduler().find_thread(process.pid(), tid);
     if (!description || !description->references || !description->pty_endpoint || !thread ||
@@ -244,6 +308,7 @@ i64 begin_pty_io(Kernel &kernel, sched::ProcessControlBlock &process, sched::Thr
     initial.lease = thread->entry_stack; initial.frame = thread->native_frame;
     initial.address = address; initial.count = count; initial.fd = fd; initial.description = description_id;
     initial.endpoint = description->pty_endpoint; initial.vectors = vectors; initial.writing = writing;
+    initial.personality = process.resources().personality;
     auto transferred = writing ? attempt_pty_write(kernel, process, initial) : attempt_pty_io(kernel, process, initial);
     const bool blocking = !(description->flags & posix::o_NONBLOCK);
     if ((transferred && (!writing || initial.committed == count || !blocking)) ||
@@ -270,11 +335,26 @@ i64 begin_pty_io(Kernel &kernel, sched::ProcessControlBlock &process, sched::Thr
     if (auto status = kernel.scheduler().retain_description(description_id); !status)
     { cancel_pty_wait(kernel, object); return pty_terminal_result(initial, error(status)); }
     auto &wait = *resolved.value(); wait = initial;
+    if (auto status = pty_arm_timer(kernel, wait); !status)
+    { const auto result = pty_terminal_result(wait, error(status)); cancel_pty_wait(kernel, object); return result; }
     auto registration = kernel.scheduler().register_current_wait(pty_wait_reason(writing), pty_wait_key(wait.endpoint));
     if (!registration)
     { const auto result = pty_terminal_result(wait, error(registration.status())); cancel_pty_wait(kernel, object); return result; }
     wait.ticket = registration.value(); wait.request = wait.ticket.generation;
-    *slot = {wait.pid, wait.tid, object}; emit_pty_wait(wait, false, "arm"); complete = false; return -11;
+    *slot = {wait.pid, wait.tid, object};
+    if (wait.personality == Personality::linux)
+    {
+        // Bound when armed, so a caught signal can interrupt or restart it.
+        const auto origin = syscall_origins.identity(process, *thread);
+        if (syscall_origins.live(origin))
+        {
+            wait.origin = origin.capture;
+            const bool bound = writing ? syscall_origins.bind(origin, thread->native_frame, pty_write_origin_binding(object, wait))
+                                       : syscall_origins.bind(origin, thread->native_frame, pty_read_origin_binding(object, wait));
+            if (!bound) { wait.origin = 0; syscall_origins.revoke(*thread); }
+        }
+    }
+    emit_pty_wait(wait, false, "arm"); complete = false; return -11;
 }
 } // namespace runtime_detail
 } // namespace ok::user::native

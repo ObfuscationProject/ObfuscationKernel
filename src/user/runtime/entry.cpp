@@ -506,7 +506,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
             if (!hw::user_range(space, vectors[i].base, vectors[i].length, !writing)) return -14;
         if (writing && description->console) return tty_console_write(kernel, *process, {vectors.data(), a[2]});
         if (!writing && description->input_console)
-            return tty_console_read(kernel, *process, *caller, *description, {vectors.data(), a[2]}, complete);
+            return tty_console_read(kernel, *process, *caller, *description, {vectors.data(), a[2]}, complete, a, true);
         std::array<std::byte, sched::pipe_capacity> data{};
         const usize limit = data.size();
         if (total > limit) total = limit;
@@ -603,7 +603,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
     if (number == N::read && description && description->input_console)
     {
         const PipeVector vector{a[1], a[2]};
-        return tty_console_read(kernel, *process, *caller, *description, {&vector, 1}, complete);
+        return tty_console_read(kernel, *process, *caller, *description, {&vector, 1}, complete, a, false);
     }
     for (usize i = 0; i < 6; ++i)
         request.args[i] = a[i];
@@ -1062,6 +1062,9 @@ bool step(Kernel &kernel)
                 else
                     waiting_deadline = true;
             }
+    // PTY reads whose VTIME timer ran out retry with the timer expired.
+    waiting_deadline |= expire_tty_timers(kernel, now.value());
+    if (!runtime_failure) { started = false; return false; }
 #ifdef OK_PRIVATE_POLL_MASK
     // A stop never interrupts a wait; settle the ones only parked threads can take.
     private_jobctl_settle(kernel);
@@ -1091,7 +1094,8 @@ bool step(Kernel &kernel)
                             private_pipe_write_signal_ready(kernel, candidate, thread) ||
                             private_futex_signal_ready(kernel, candidate, thread) ||
                             private_poll_signal_ready(kernel, candidate, thread) ||
-                            private_child_signal_ready(kernel, candidate, thread);
+                            private_child_signal_ready(kernel, candidate, thread) ||
+                            private_terminal_signal_ready(kernel, candidate, thread);
 #endif
             if (!thread.native_active ||
                 (thread.state != sched::ProcessState::runnable && thread.state != sched::ProcessState::running && !interruptible))
@@ -1146,6 +1150,10 @@ bool step(Kernel &kernel)
         else if (private_poll_signal_ready(kernel, *owner, *selected))
         {
             if (!private_poll_signal_complete(kernel, *owner, *selected)) return runtime_failure.ok();
+        }
+        else if (private_terminal_signal_ready(kernel, *owner, *selected))
+        {
+            if (!private_terminal_signal_complete(kernel, *owner, *selected)) return runtime_failure.ok();
         }
         else if (selected->state == sched::ProcessState::blocked &&
                  !private_sleep_signal_complete(kernel, *owner, *selected)) return runtime_failure.ok();

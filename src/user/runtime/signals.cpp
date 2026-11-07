@@ -2025,6 +2025,26 @@ i64 private_signal_wait_enqueue(Kernel &kernel, sched::ProcessControlBlock &reci
         [&](sched::ProcessId pid) { return private_signal_table(kernel, pid); },
         [&](sched::ThreadControlBlock &owner) { return private_signal_queue(owner); });
 }
+bool private_signal_interrupting(Kernel &kernel, const sched::ProcessControlBlock &process,
+                                 const sched::ThreadControlBlock &thread, u32 &signal, sched::SignalAction &action)
+{
+    auto queue = private_signal_pending(kernel, process, thread);
+    const auto *actions = private_signal_table(kernel, process.pid());
+    if (!queue || !actions) return false;
+    auto blocked = private_signal_wake_mask(process, thread, *actions);
+    PrivateSignalView::Delivery pending;
+    while (queue.peek(blocked, pending))
+    {
+        const auto *found = actions->find(pending.info.signal);
+        if (!found) return false;
+        if (!PrivateSignalDelivery::Actions::interrupts(pending.info.signal, *found))
+        { blocked.set(pending.info.signal); continue; }
+        if (!PrivateSignalDelivery::supported(*found)) return false;
+        signal = pending.info.signal; action = *found;
+        return true;
+    }
+    return false;
+}
 bool private_signal_admit_blocked(Kernel &kernel, const sched::ProcessControlBlock &recipient,
                                   const sched::ThreadControlBlock &target)
 {
@@ -2042,7 +2062,8 @@ bool private_signal_admit_blocked(Kernel &kernel, const sched::ProcessControlBlo
            private_pipe_write_signal_owned(kernel, recipient, target, pipe_write) ||
            private_child_signal_owned(kernel, recipient, target, child) ||
            private_futex_signal_owned(kernel, recipient, target, futex) ||
-           private_poll_signal_owned(kernel, recipient, target, poll);
+           private_poll_signal_owned(kernel, recipient, target, poll) ||
+           private_terminal_signal_owned(kernel, recipient, target);
 }
 namespace
 {
