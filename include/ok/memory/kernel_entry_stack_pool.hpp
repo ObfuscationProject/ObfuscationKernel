@@ -4,6 +4,7 @@
 
 #include "ok/arch/kernel_entry_stack.hpp"
 #include "ok/core/types.hpp"
+#include "ok/smp/kernel_section.hpp"
 #include "ok/smp/smp.hpp"
 
 #include <array>
@@ -71,6 +72,7 @@ class KernelEntryStackPool final : private NonCopyable
 
     Result<KernelEntryStackHandle> reserve(KernelEntryStackOwner owner)
     {
+        smp::check_exclusive("KernelEntryStackPool::reserve");
         if (!initialized_)
             return Status::not_initialized("entry stack arena is not initialized");
         if (!fault_)
@@ -102,6 +104,7 @@ class KernelEntryStackPool final : private NonCopyable
     Result<arch::execution::KernelEntryStackView> activate_entry(
         KernelEntryStackHandle handle, KernelEntryStackOwner owner, u16 cpu)
     {
+        smp::check_exclusive("KernelEntryStackPool::activate_entry");
         if (auto status = validate(handle, owner); !status)
             return status;
         if (!fault_)
@@ -126,6 +129,7 @@ class KernelEntryStackPool final : private NonCopyable
 
     Status deactivate_entry(KernelEntryStackHandle handle, KernelEntryStackOwner owner, u16 cpu)
     {
+        smp::check_exclusive("KernelEntryStackPool::deactivate_entry");
         if (auto status = validate(handle, owner); !status)
             return status;
         auto &record = records_[handle.slot];
@@ -143,6 +147,7 @@ class KernelEntryStackPool final : private NonCopyable
 
     Status release(KernelEntryStackHandle handle, KernelEntryStackOwner owner)
     {
+        smp::check_exclusive("KernelEntryStackPool::release");
         if (auto status = validate_inactive(handle, owner); !status)
             return status;
         auto &record = records_[handle.slot];

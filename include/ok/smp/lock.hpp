@@ -16,13 +16,18 @@ namespace ok::smp
 enum class LockRank : u8
 {
     big_kernel = 10,
+    ofd_position = 14,  // One open description's offset and flags across one I/O.
+    fs_provider = 16,   // A filesystem's operation gate (a hold recorded by the gate).
     scheduler = 20,
     run_queue = 30,
     wait_queue = 40,
     ipi = 50,
     tlb = 60,
+    arch_spaces = 64,   // A backend's address-space slots, space ids and TLB generations.
     memory = 70,
     irq_router = 80,
+    realtime_clock = 82,
+    monotonic_clock = 84,
     console = 90,
     leaf = 255,
 };
@@ -50,6 +55,85 @@ using LockViolationHandler = void (*)(const LockViolation &) noexcept;
 inline constinit LockViolationHandler lock_violation_handler{};
 
 inline constexpr usize lock_debug_capacity = 8;
+
+// Per-CPU kernel mode bits (ok/smp/kernel_section.hpp). Only the owning CPU
+// writes its word, with a load and a store; other CPUs read it for evidence.
+inline constexpr u32 cpu_mode_bkl_held = 1; // Holds the big kernel lock.
+inline constexpr u32 cpu_mode_section = 2;  // Runs a kernel section without it.
+inline constexpr u32 cpu_mode_spinning = 4; // Waits for a lock, a gate, a drain or a device.
+// Its kernel-lock stretch serves a thread, a device or a section result (not
+// an idle scan); set by bkl_mark_work, cleared at the release.
+inline constexpr u32 cpu_mode_kernel_work = 8;
+
+struct alignas(64) CpuMode
+{
+    std::atomic<u32> bits{};
+    // Times this CPU started a wait (SpinningScope that set the bit).
+    std::atomic<uptr> spins{};
+};
+inline constinit std::array<CpuMode, max_cpus> cpu_modes{};
+
+[[nodiscard]] inline u32 cpu_mode(CpuId cpu) noexcept
+{
+    return cpu < max_cpus ? cpu_modes[cpu].bits.load(std::memory_order_relaxed) : 0;
+}
+
+inline void set_cpu_mode(CpuId cpu, u32 bits) noexcept
+{
+    if (cpu < max_cpus)
+        cpu_modes[cpu].bits.store(cpu_modes[cpu].bits.load(std::memory_order_relaxed) | bits,
+                                  std::memory_order_relaxed);
+}
+
+inline void clear_cpu_mode(CpuId cpu, u32 bits) noexcept
+{
+    if (cpu < max_cpus)
+        cpu_modes[cpu].bits.store(cpu_modes[cpu].bits.load(std::memory_order_relaxed) & ~bits,
+                                  std::memory_order_relaxed);
+}
+
+// A wait that spins with interrupts masked and holds nothing an interrupt's
+// top half takes (a filesystem gate) serves this CPU's pending interrupts
+// meanwhile, so a holder waiting for a device line routed here is not
+// stalled behind the spin. Installed once by the runtime where device lines
+// reach secondary CPUs; unset, it does nothing.
+using SpinService = void (*)();
+inline constinit SpinService spin_service{};
+
+inline void serve_while_spinning() noexcept
+{
+    if (const auto service = spin_service)
+        service();
+}
+
+// Marks this CPU SPINNING while it waits; a nested scope leaves the outer
+// one's bit alone. Lock waits, gate and drain waits and halts that hold the
+// big kernel lock use it, so overlap evidence never counts a waiting CPU.
+class SpinningScope final
+{
+  public:
+    SpinningScope() noexcept : cpu_(current_cpu())
+    {
+        if (cpu_ >= max_cpus || (cpu_mode(cpu_) & cpu_mode_spinning) != 0)
+            return;
+        auto &spins = cpu_modes[cpu_].spins;
+        spins.store(spins.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        set_cpu_mode(cpu_, cpu_mode_spinning);
+        set_ = true;
+    }
+    ~SpinningScope()
+    {
+        if (set_)
+            clear_cpu_mode(cpu_, cpu_mode_spinning);
+    }
+
+    SpinningScope(const SpinningScope &) = delete;
+    SpinningScope &operator=(const SpinningScope &) = delete;
+
+  private:
+    CpuId cpu_;
+    bool set_{false};
+};
 
 struct LockDebugCpu
 {
@@ -100,6 +184,24 @@ namespace detail
     return record.depth < lock_debug_capacity ? record.depth : lock_debug_capacity;
 }
 
+// The wanted rank must be above every rank this CPU holds.
+inline void lock_debug_check_order(const void *lock, LockRank rank, CpuId cpu) noexcept
+{
+    if (cpu >= max_cpus)
+        return;
+    const auto &record = lock_debug_cpus[cpu];
+    LockRank highest{};
+    bool holds = false;
+    for (usize index = 0; index < lock_debug_recorded(record); ++index)
+    {
+        if (!holds || record.ranks[index] > highest)
+            highest = record.ranks[index];
+        holds = true;
+    }
+    if (holds && highest >= rank)
+        lock_rank_violation({LockViolationKind::order, highest, rank, lock, cpu});
+}
+
 // Checked before waiting, so a self-deadlock is reported instead of spinning.
 [[nodiscard]] inline bool lock_debug_may_wait(const void *lock, LockRank rank, CpuId cpu, bool owned) noexcept
 {
@@ -113,17 +215,7 @@ namespace detail
             record.refused[record.refused_depth++] = lock;
         return false;
     }
-    const auto &record = lock_debug_cpus[cpu];
-    LockRank highest{};
-    bool holds = false;
-    for (usize index = 0; index < lock_debug_recorded(record); ++index)
-    {
-        if (!holds || record.ranks[index] > highest)
-            highest = record.ranks[index];
-        holds = true;
-    }
-    if (holds && highest >= rank)
-        lock_rank_violation({LockViolationKind::order, highest, rank, lock, cpu});
+    lock_debug_check_order(lock, rank, cpu);
     return true;
 }
 
@@ -191,12 +283,49 @@ inline void lock_debug_released(const void *lock, LockRank rank, CpuId cpu) noex
 } // namespace detail
 #endif
 
+// Holds recorded on `cpu` (0 without OK_LOCK_DEBUG, where nothing is recorded).
+[[nodiscard]] inline usize lock_debug_depth([[maybe_unused]] CpuId cpu) noexcept
+{
+#if defined(OK_LOCK_DEBUG)
+    return cpu < max_cpus ? lock_debug_cpus[cpu].depth : 0;
+#else
+    return 0;
+#endif
+}
+
+// For a gate that is not a RankedSpinLock (an owner word kept under an
+// unranked lock): the same order checks and records as a lock of `rank`.
+// Call lock_debug_may_wait before waiting for the gate, lock_debug_hold once
+// this CPU owns it and lock_debug_release when it gives it up. Reentry on
+// the owning CPU is the gate's to refuse; it takes no hold. Release builds
+// compile these to nothing.
+inline void lock_debug_may_wait([[maybe_unused]] const void *gate, [[maybe_unused]] LockRank rank) noexcept
+{
+#if defined(OK_LOCK_DEBUG)
+    detail::lock_debug_check_order(gate, rank, current_cpu());
+#endif
+}
+
+inline void lock_debug_hold([[maybe_unused]] const void *gate, [[maybe_unused]] LockRank rank) noexcept
+{
+#if defined(OK_LOCK_DEBUG)
+    detail::lock_debug_acquired(gate, rank, current_cpu());
+#endif
+}
+
+inline void lock_debug_release([[maybe_unused]] const void *gate, [[maybe_unused]] LockRank rank) noexcept
+{
+#if defined(OK_LOCK_DEBUG)
+    detail::lock_debug_released(gate, rank, current_cpu());
+#endif
+}
+
 // Test-and-test-and-set lock that records its owner (CPU + 1, 0 = free). The
 // flag needs only an atomic swap, which every profile has (i386 has no
 // CMPXCHG); only the holder writes the owner word. With OK_LOCK_DEBUG a rank,
 // self-deadlock, owner or LIFO violation is reported to lock_rank_violation;
 // a self-deadlocking lock() returns without the lock rather than spin forever.
-// Release builds compile the checks out.
+// Release builds compile the checks out. A waiting CPU is marked SPINNING.
 template <LockRank Rank> class RankedSpinLock final
 {
   public:
@@ -206,23 +335,31 @@ template <LockRank Rank> class RankedSpinLock final
     RankedSpinLock(const RankedSpinLock &) = delete;
     RankedSpinLock &operator=(const RankedSpinLock &) = delete;
 
-    void lock() noexcept
+    // True when the lock was held elsewhere and this CPU waited for it.
+    bool lock() noexcept
     {
         const auto cpu = current_cpu();
 #if defined(OK_LOCK_DEBUG)
         if (!detail::lock_debug_may_wait(this, Rank, cpu,
                                          owner_.load(std::memory_order_relaxed) == owner_value(cpu)))
-            return;
+            return false;
 #endif
-        while (locked_.test_and_set(std::memory_order_acquire))
+        bool waited = false;
+        if (locked_.test_and_set(std::memory_order_acquire))
         {
-            while (locked_.test(std::memory_order_relaxed))
-                arch::ArchOperations::spin_pause();
+            waited = true;
+            const SpinningScope spinning;
+            do
+            {
+                while (locked_.test(std::memory_order_relaxed))
+                    arch::ArchOperations::spin_pause();
+            } while (locked_.test_and_set(std::memory_order_acquire));
         }
         owner_.store(owner_value(cpu), std::memory_order_relaxed);
 #if defined(OK_LOCK_DEBUG)
         detail::lock_debug_acquired(this, Rank, cpu);
 #endif
+        return waited;
     }
 
     void unlock() noexcept
@@ -242,8 +379,9 @@ template <LockRank Rank> class RankedSpinLock final
         locked_.clear(std::memory_order_release);
     }
 
-    // try_lock cannot deadlock, so it skips the order check; a hold it takes
-    // is still recorded.
+    // try_lock cannot deadlock, but a hold it takes out of rank order breaks
+    // the order other paths rely on, so a successful one is order checked
+    // and recorded. A try on a lock this CPU owns fails without a report.
     [[nodiscard]] bool try_lock() noexcept
     {
         if (locked_.test(std::memory_order_relaxed) || locked_.test_and_set(std::memory_order_acquire))
@@ -251,6 +389,7 @@ template <LockRank Rank> class RankedSpinLock final
         const auto cpu = current_cpu();
         owner_.store(owner_value(cpu), std::memory_order_relaxed);
 #if defined(OK_LOCK_DEBUG)
+        detail::lock_debug_check_order(this, Rank, cpu);
         detail::lock_debug_acquired(this, Rank, cpu);
 #endif
         return true;

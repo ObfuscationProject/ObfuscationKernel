@@ -17,6 +17,8 @@
 #include "ok/sched/console_control.hpp"
 #include "ok/sched/wait_registration.hpp"
 #include "ok/smp/cpu.hpp"
+#include "ok/smp/kernel_section.hpp"
+#include "ok/smp/lock.hpp"
 #include "ok/smp/smp.hpp"
 #include "ok/user/user.hpp"
 
@@ -383,6 +385,59 @@ class RoundRobinPolicy final
 using SchedulerRunQueue = CpuRunQueue<max_processes * max_threads_per_process, smp::SpinLock>;
 static_assert(RunQueue<SchedulerRunQueue>);
 
+// One open description's offset and flags across one offset-dependent I/O,
+// with the provider call that depends on them (ok/smp/lock.hpp rank
+// ofd_position). Taken in both modes: under the kernel lock and in a kernel
+// section (ok/smp/kernel_section.hpp). No path holds two of them.
+using DescriptionPositionLock = smp::RankedSpinLock<smp::LockRank::ofd_position>;
+
+// Holds a description's position lock for a scope; a null lock holds nothing.
+class DescriptionPositionGuard final
+{
+  public:
+    explicit DescriptionPositionGuard(DescriptionPositionLock *lock) noexcept : lock_(lock)
+    {
+        if (!lock_) return;
+        if (!smp::in_section())
+        {
+            lock_->lock();
+            return;
+        }
+        // A kernel section waits serving this CPU's interrupts: the holder
+        // may hold the kernel lock and wait for a device line routed here.
+        if (lock_->try_lock()) return;
+        if (lock_->owned_by_current_cpu())
+        {
+            // Re-entry on this CPU would spin forever, and every drainer of
+            // the process with it: report it and go on under the outer hold.
+            if constexpr (smp::lock_debug_enabled)
+                smp::lock_rank_violation({smp::LockViolationKind::self_deadlock, DescriptionPositionLock::rank,
+                                          DescriptionPositionLock::rank, lock_, smp::current_cpu()});
+            smp::detail::section_assert(&smp::SectionCpu::section_asserts, "section re-entered a position lock");
+            lock_ = nullptr;
+            return;
+        }
+        const smp::SpinningScope spinning;
+        while (!lock_->try_lock())
+        {
+            smp::serve_while_spinning();
+            arch::ArchOperations::spin_pause();
+        }
+    }
+    ~DescriptionPositionGuard() { release(); }
+    DescriptionPositionGuard(const DescriptionPositionGuard &) = delete;
+    DescriptionPositionGuard &operator=(const DescriptionPositionGuard &) = delete;
+    // Gives the lock up before the scope ends.
+    void release() noexcept
+    {
+        if (lock_) lock_->unlock();
+        lock_ = nullptr;
+    }
+
+  private:
+    DescriptionPositionLock *lock_;
+};
+
 // Nonvirtual shared storage/mechanisms keep each policy instantiation small.
 // Construction and dispatch are protected for use by BasicScheduler.
 class SchedulerState
@@ -418,6 +473,8 @@ class SchedulerState
         }
     Result<ThreadId> create_thread_prepared(ProcessId pid, arch::CpuContext initial_context, Prepare &&prepare)
     {
+        smp::check_exclusive("SchedulerState::create_thread_prepared");
+        smp::check_drained(pid, "SchedulerState::create_thread_prepared");
         if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
         auto *process = find(pid);
         if (process == nullptr)
@@ -512,6 +569,10 @@ class SchedulerState
     }
     [[nodiscard]] OpenFileDescription *open_description(u16 id);
     [[nodiscard]] const OpenFileDescription *open_description(u16 id) const;
+    // The position lock of a description in this table; null for any other.
+    [[nodiscard]] DescriptionPositionLock *position_lock(const OpenFileDescription *description);
+    // The process whose resources these are; 0 for the boot resources.
+    [[nodiscard]] ProcessId resources_owner(const ProcessResources &resources) const;
     // Rebinding is allowed only after every UDP description, including an
     // unpublished zero-reference reservation, has been retired.
     Status set_native_udp_service(net::NativeUdpService &service);
@@ -659,10 +720,12 @@ class SchedulerState
     [[nodiscard]] const ProcessControlBlock *find(ProcessId pid) const;
     [[nodiscard]] std::span<ProcessControlBlock> processes()
     {
+        smp::check_exclusive("SchedulerState::processes");
         return {processes_.begin(), processes_.size()};
     }
     [[nodiscard]] std::span<const ProcessControlBlock> processes() const
     {
+        smp::check_exclusive("SchedulerState::processes");
         return {processes_.begin(), processes_.size()};
     }
     [[nodiscard]] CpuSchedulingStats cpu_stats(smp::CpuId cpu) const;
@@ -750,6 +813,7 @@ class SchedulerState
     u64 next_unix_endpoint_generation_{1};
     std::array<PipeBuffer, max_process_pipes> pipes_{};
     std::array<OpenFileDescription, max_open_descriptions> descriptions_{};
+    std::array<DescriptionPositionLock, max_open_descriptions> positions_{};
     u64 next_unix_receive_token_{1}; // ABI58 diagnostic name; shared by UNIX receive, TCP accept and fd installation.
     usize active_unix_receives_{}; // Process compaction cannot move a prepared resource owner.
     usize active_descriptor_reservations_{};

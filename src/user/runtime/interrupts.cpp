@@ -1,8 +1,9 @@
 // The interrupt report: how the kernel loop idled, what the platform lines and
 // device event sources did, how driver waits completed, timer interrupt latency
 // and the interval timer counters (OK_IRQ_PLATFORM, OK_IRQ_EVENTS,
-// OK_IRQ_COMPLETIONS, OK_TIMER_LATENCY, OK_TIMERS), and with secondary CPUs
-// what each CPU did (OK_SMP_CPUS, OK_SMP_IRQS).
+// OK_IRQ_COMPLETIONS, OK_TIMER_LATENCY, OK_TIMERS), with secondary CPUs
+// what each CPU did (OK_SMP_CPUS, OK_SMP_IRQS), socket waits (OK_NET_WAITS)
+// and, where kernel sections are compiled in, the OK_SMP_KERNEL lines.
 #include "private.hpp"
 #include "ok/interrupt/platform.hpp"
 #include "ok/smp/bringup.hpp"
@@ -126,17 +127,150 @@ void report_interrupt_lines()
     }
     emit("\n");
 }
-// How socket waits were woken (OK_NET_WAITS): waiters enlisted in their
-// socket's wait queue, readiness evaluations, and waiters that found their
-// queue full; once any socket wait was queued.
+// The first lock violation each CPU reported since the runtime armed its
+// checks, and each CPU's count at that point: violations before it (the
+// boot test point's deliberate one) are not the runtime's.
+struct alignas(64) FirstViolation
+{
+    std::atomic<bool> recorded{};
+    smp::LockViolation violation{};
+};
+constinit std::array<FirstViolation, smp::max_cpus> first_violations{};
+constinit std::array<u64, smp::max_cpus> violation_baseline{};
+
+// Runs on the violating CPU inside the lock checks: it records, never emits.
+void record_lock_violation(const smp::LockViolation &violation) noexcept
+{
+    if (violation.cpu >= smp::max_cpus) return;
+    auto &first = first_violations[violation.cpu];
+    if (first.recorded.load(std::memory_order_relaxed)) return;
+    first.violation = violation;
+    first.recorded.store(true, std::memory_order_release);
+}
+
+[[maybe_unused]] u64 runtime_lock_violations(smp::CpuId cpu)
+{
+    const auto count = smp::lock_violation_count(cpu);
+    return count > violation_baseline[cpu] ? count - violation_baseline[cpu] : 0;
+}
+
+// Kernel sections (OK_SMP_KERNEL, OK_SMP_KERNEL_FAMILIES,
+// OK_SMP_KERNEL_DECLINES): what ran without the kernel lock, how its results
+// came back, how the kernel lock was contended and what the debug checks
+// counted; per CPU sections:concurrent:witnessed:bkl_acquired:bkl_contended.
+// On every profile that compiles sections in, with one CPU too, once the
+// runtime armed its checks. Any section still pinned is committed first.
+void report_kernel_sections()
+{
+#if defined(OK_SMP_SECTIONS)
+    // Only once the runtime armed its checks: the violation baseline is set.
+    if (!smp::exclusive_armed.load(std::memory_order_acquire)) return;
+    if (smp::kernel_lock.owned_by_current_cpu()) smp::drain_all();
+    auto sum = [](std::atomic<uptr> smp::SectionCpu::*counter) {
+        u64 total = 0;
+        for (const auto &cpu : smp::section_cpus) total += (cpu.*counter).load(std::memory_order_relaxed);
+        return total;
+    };
+    u64 parallel = 0, acquired = 0, contended = 0, violations = 0;
+    for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
+    {
+        const auto max = smp::section_cpus[cpu].max_parallel.load(std::memory_order_relaxed);
+        parallel = max > parallel ? max : parallel;
+        acquired += smp::bkl_cpus[cpu].acquired.load(std::memory_order_relaxed);
+        contended += smp::bkl_cpus[cpu].contended.load(std::memory_order_relaxed);
+        violations += runtime_lock_violations(cpu);
+    }
+    auto field = [](std::string_view name, u64 value) { emit(" "); emit(name); emit("="); emit_number(value); };
+    emit_line("OK_SMP_KERNEL scope=hardware debug="); emit_number(smp::lock_debug_enabled ? 1 : 0);
+    field("online", smp::online_cpus());
+    field("sections", sum(&smp::SectionCpu::sections));
+    field("completed", sum(&smp::SectionCpu::completed));
+    field("declined", sum(&smp::SectionCpu::declined));
+    field("handoffs", sum(&smp::SectionCpu::handoffs));
+    field("concurrent", sum(&smp::SectionCpu::concurrent));
+    field("witnessed", sum(&smp::SectionCpu::witnessed));
+    field("max_parallel", parallel);
+    field("spun", sum(&smp::SectionCpu::spun));
+    field("drains", sum(&smp::SectionCpu::drains));
+    field("drain_waits", sum(&smp::SectionCpu::drain_waits));
+    field("bkl_acquired", acquired);
+    field("bkl_contended", contended);
+    field("lock_violations", violations);
+    field("exclusive_asserts", sum(&smp::SectionCpu::exclusive_asserts));
+    field("drain_asserts", sum(&smp::SectionCpu::drain_asserts));
+    field("depth_asserts", sum(&smp::SectionCpu::depth_asserts));
+    field("section_asserts", sum(&smp::SectionCpu::section_asserts));
+    field("cow_refused", sum(&smp::SectionCpu::cow_refused));
+    field("purity_faults", sum(&smp::SectionCpu::purity_faults));
+    field("shadow", sum(&smp::SectionCpu::shadow_checked));
+    emit("/"); emit_number(sum(&smp::SectionCpu::shadow_mismatched));
+    for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
+    {
+        if ((smp::online_mask() & (u32{1} << cpu)) == 0) continue;
+        const auto &section = smp::section_cpus[cpu];
+        const auto &lock = smp::bkl_cpus[cpu];
+        emit(" cpu"); emit_number(cpu); emit("="); emit_number(section.sections.load(std::memory_order_relaxed));
+        emit(":"); emit_number(section.concurrent.load(std::memory_order_relaxed));
+        emit(":"); emit_number(section.witnessed.load(std::memory_order_relaxed));
+        emit(":"); emit_number(lock.acquired.load(std::memory_order_relaxed));
+        emit(":"); emit_number(lock.contended.load(std::memory_order_relaxed));
+    }
+    emit("\nOK_SMP_KERNEL_FAMILIES scope=hardware");
+    for (usize family = 0; family < smp::section_family_count; ++family)
+    {
+        u64 total = 0;
+        for (const auto &cpu : smp::section_cpus) total += cpu.families[family].load(std::memory_order_relaxed);
+        field(smp::section_family_names[family], total);
+    }
+    emit("\nOK_SMP_KERNEL_DECLINES scope=hardware");
+    for (usize reason = 0; reason < smp::section_decline_count; ++reason)
+    {
+        u64 total = 0;
+        for (const auto &cpu : smp::section_cpus) total += cpu.declines[reason].load(std::memory_order_relaxed);
+        field(smp::section_decline_names[reason], total);
+    }
+    emit("\n");
+    // The first failure per CPU, to locate a non-zero count.
+    for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
+    {
+        if (first_violations[cpu].recorded.load(std::memory_order_acquire))
+        {
+            const auto &violation = first_violations[cpu].violation;
+            emit("OK_SMP_KERNEL_VIOLATION scope=hardware cpu="); emit_number(cpu);
+            emit(" kind="); emit_number(static_cast<u32>(violation.kind));
+            emit(" held="); emit_number(static_cast<u32>(violation.held));
+            emit(" wanted="); emit_number(static_cast<u32>(violation.wanted));
+            emit("\n");
+        }
+        if (const char *site = smp::section_cpus[cpu].first_site.load(std::memory_order_relaxed))
+        {
+            emit("OK_SMP_KERNEL_ASSERT scope=hardware cpu="); emit_number(cpu);
+            emit(" site="); emit(site); emit("\n");
+        }
+    }
+#endif
+}
 } // namespace
 void report_interrupts()
 {
     report_interrupt_lines();
     report_network_waits();
+    report_kernel_sections();
 }
 inline namespace runtime_detail
 {
+void arm_kernel_checks()
+{
+    for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu) violation_baseline[cpu] = smp::lock_violation_count(cpu);
+    smp::lock_violation_handler = record_lock_violation;
+    smp::arm_exclusive();
+}
+} // namespace runtime_detail
+inline namespace runtime_detail
+{
+// How socket waits were woken (OK_NET_WAITS): waiters enlisted in their
+// socket's wait queue, readiness evaluations, and waiters that found their
+// queue full; once any socket wait was queued.
 constinit const net::TcpWaitStats *tcp_wait_stats{};
 void report_network_waits()
 {

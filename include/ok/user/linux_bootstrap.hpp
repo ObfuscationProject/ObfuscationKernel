@@ -27,6 +27,7 @@
 #include "ok/user/linux_clone.hpp"
 #include "ok/user/linux_robust.hpp"
 #include "ok/user/linux_credentials.hpp"
+#include "ok/user/linux_file_io.hpp"
 #include "ok/user/native_signal_mask.hpp"
 #include "ok/user/native_sleep.hpp"
 #include "ok/arch/clock.hpp"
@@ -718,39 +719,10 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
             });
         return result ? static_cast<i64>(result.value()) : -syscall::ErrnoMapper::errno_for(result.status());
     }
+    // The positioned, seek and clock bodies are shared with kernel sections.
+    linux_file_io::ProcessAccess file_access{kernel.posix(), kernel.scheduler(), process->resources()};
     if (is(Operation::pread64) || is(Operation::pwrite64))
-    {
-        constexpr usize first = Codec::profile.aligned_64bit_pairs ? 4 : 3;
-        const auto offset = Codec::decode_argument64(decoded.value(), first);
-        if (!offset || static_cast<i64>(offset.value()) < 0) return -22;
-        const auto fd = static_cast<i32>(static_cast<u32>(a[0]));
-        const auto *entry = process->fd_table().entry(fd);
-        const auto *description = entry && entry->used ? kernel.scheduler().open_description(entry->description) : nullptr;
-        if (!description || !description->used) return -9;
-        if ((!description->node && !description->native_shared_file) || description->pipe != sched::invalid_description ||
-            description->console || description->input_console) return -29;
-        const bool writing = is(Operation::pwrite64);
-        if (writing ? !description->writable : !description->readable) return -9;
-        if (a[2] > (Codec::word_mask >> 1)) return -22;
-        constexpr u64 limit = Codec::word_mask >> 1;
-        if (offset.value() > limit) return -75;
-        const auto size = a[2] < sched::pipe_capacity ? static_cast<usize>(a[2]) : sched::pipe_capacity;
-        // Bound the admitted endpoint even when hosted models have wider usize.
-        if (size > limit - offset.value()) return -75;
-        std::array<std::byte, sched::pipe_capacity> buffer{};
-        if (writing)
-        {
-            if (!hw::copy_from_user(space, buffer.data(), static_cast<uptr>(a[1]), size)) return -14;
-            auto result = kernel.posix().pwrite_with_policy<posix::PositionedWritePolicy::linux_append>(
-                fd, {buffer.data(), size}, static_cast<usize>(offset.value()), limit);
-            return result ? static_cast<i64>(result.value()) : -syscall::ErrnoMapper::errno_for(result.status());
-        }
-        if (!hw::user_range(space, static_cast<uptr>(a[1]), size, true)) return -14;
-        auto result = kernel.posix().pread(fd, {buffer.data(), size}, static_cast<usize>(offset.value()));
-        if (!result) return -syscall::ErrnoMapper::errno_for(result.status());
-        if (!hw::copy_to_user(space, static_cast<uptr>(a[1]), buffer.data(), result.value())) return -14;
-        return static_cast<i64>(result.value());
-    }
+        return linux_file_io::linux_positioned_io<Profile>(file_access, is(Operation::pwrite64), decoded.value());
     if (is(Operation::ftruncate) || is(Operation::ftruncate64) ||
         is(Operation::truncate) || is(Operation::truncate64))
     {
@@ -964,44 +936,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
         return status ? 0 : -syscall::ErrnoMapper::errno_for(status);
     }
     if (is(Operation::lseek) || is(Operation::_llseek))
-    {
-        using Seek = lu::SeekCodec<Profile>;
-        const bool wide = is(Operation::_llseek);
-        const auto fd = static_cast<i32>(static_cast<u32>(a[0]));
-        const auto whence = static_cast<u32>(a[wide ? 4 : 2]);
-        const auto *slot = process->resources().files.entry(fd);
-        const auto *description = slot && slot->used ? kernel.scheduler().open_description(slot->description) : nullptr;
-        if (!description) return -9;
-        // Linux checks fd, then SEEK_MAX, then the endpoint's seek capability.
-        if (whence > 4) return -22;
-        if (description->console || description->input_console ||
-            (!description->node && !description->native_shared_file) ||
-            description->pipe != sched::invalid_description) return -29;
-        // SEEK_DATA/HOLE require filesystem extent semantics outside this slice.
-        if (whence > 2) return -22;
-        if (whence == 2 && description->node)
-        {
-            auto metadata = description->node->query_metadata();
-            if (!metadata) return -syscall::ErrnoMapper::errno_for(metadata.status());
-            // Directory cookies have no byte-size-relative end in this profile.
-            if (metadata.value().type == fs::NodeType::directory) return -22;
-        }
-        const i64 offset = wide ? Seek::wide_offset(a[1], a[2]) : Seek::word_offset(a[1]);
-        auto result = kernel.posix().seek(fd, offset, static_cast<posix::SeekWhence>(whence));
-        if (!result) return -syscall::ErrnoMapper::errno_for(result.status());
-        if (!wide)
-        {
-            // Raw lseek returns native-word off_t. Linux applies this conversion
-            // after vfs_llseek; the common service may impose a smaller capacity.
-            if constexpr (Codec::profile.word_bytes == 4)
-                if (result.value() > 0x7fffffffu) return -75;
-            return static_cast<i64>(result.value());
-        }
-        // Linux commits the shared position before copying the result. EFAULT
-        // must retain that position; do not preflight or undo the successful seek.
-        const auto bytes = Seek::encode(result.value());
-        return hw::copy_to_user(space, static_cast<uptr>(a[3]), bytes.data(), bytes.size()) ? 0 : -14;
-    }
+        return linux_file_io::linux_lseek<Profile>(file_access, is(Operation::_llseek), decoded.value());
     if (is(Operation::pipe) || is(Operation::pipe2))
     {
         using Pipes = lu::PipeCodec<Profile>;
@@ -1358,31 +1293,14 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
             return -22;
         const auto status = user::set_realtime_checked(
             {value.value().seconds, value.value().nanoseconds}, process->credentials(),
-            [] { return arch::monotonic_sample(); },
-            [](time::EpochTime epoch, time::MonotonicPoint point) { return arch::set_realtime(epoch, point); });
+            [](time::EpochTime epoch) { return arch::set_realtime_now(epoch); });
         return status ? 0 : -syscall::ErrnoMapper::errno_for(status);
     }
     if (is(Operation::clock_gettime) || is(Operation::clock_gettime32) || is(Operation::clock_gettime64) ||
         (is(Operation::clock_getres) || is(Operation::clock_getres_time32)) || is(Operation::clock_getres_time64))
-    {
-        const auto identity = static_cast<u32>(a[0]);
-        if (identity > 1)
-            return -22;
-        const bool resolution = (is(Operation::clock_getres) || is(Operation::clock_getres_time32)) || is(Operation::clock_getres_time64);
-        if (resolution && a[1] == 0) return 0;
-        // NULL getres validates identity only; output requires a live provider.
-        auto now = time::public_clock(identity, resolution);
-        if (!now) return -5;
-        const auto format = is(Operation::clock_gettime64) || is(Operation::clock_getres_time64)
-            ? lu::TimeFormat::kernel_timespec : lu::TimeFormat::legacy_timespec;
-        std::array<u8, 16> record{};
-        const usize size = Codec::timespec_size(format);
-        auto status = Codec::encode_timespec(
-            {record.data(), size}, format,
-            {now.value().seconds, now.value().nanoseconds});
-        if (!status) return -75;
-        return hw::copy_to_user(space, static_cast<uptr>(a[1]), record.data(), size) ? 0 : -14;
-    }
+        return linux_file_io::linux_clock_record<Profile>(space, decoded.value(),
+            (is(Operation::clock_getres) || is(Operation::clock_getres_time32)) || is(Operation::clock_getres_time64),
+            is(Operation::clock_gettime64) || is(Operation::clock_getres_time64));
 
     if (is(Operation::set_tid_address))
     {

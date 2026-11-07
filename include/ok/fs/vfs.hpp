@@ -317,6 +317,13 @@ class Node
         if (auto status = found.value()->retain(); !status) return status;
         return found.value();
     }
+    // True when read, write, sync and query_metadata serialize themselves
+    // across CPUs (a filesystem operation gate), so a kernel section may call
+    // them without the big kernel lock. Every other provider stays under it.
+    [[nodiscard]] virtual bool concurrent_io() const
+    {
+        return false;
+    }
 };
 
 struct PathHandle

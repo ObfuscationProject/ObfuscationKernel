@@ -3,7 +3,7 @@
 #include "ok/arch/clock.hpp"
 #include "ok/smp/bringup.hpp"
 #include "ok/smp/cpu.hpp"
-#include "ok/smp/kernel_lock.hpp"
+#include "ok/smp/kernel_section.hpp"
 
 #if defined(OK_KERNEL_FREESTANDING) && defined(__x86_64__)
 #include "../arch/x86_64/ioapic.hpp"
@@ -444,6 +444,10 @@ bool platform_irqs_supported()
 
 Status bind_platform_irq(IrqLine line, IrqTrigger trigger, IrqHandler handler, void *context)
 {
+    // A kernel section never binds: the router and the bottom halves belong
+    // to the kernel lock's holder.
+    if (!smp::require_exclusive("bind_platform_irq") && smp::in_section())
+        return Status::busy("platform interrupt binding inside a kernel section");
     if (!platform_irqs_started())
         return Status::not_initialized("platform interrupts are not started");
     return router.bind(line, trigger, handler, context, spread_target(line, ~u32{0}));
@@ -456,9 +460,16 @@ Status unbind_platform_irq(IrqLine line, IrqHandler handler, void *context)
 
 usize drain_platform_irqs()
 {
+    // Bottom halves run only under the kernel lock; inside a section the
+    // drain is skipped (and counted), the driver keeps polling.
+    if (!smp::require_exclusive("drain_platform_irqs") && smp::in_section())
+        return 0;
     const usize serviced = router.drain();
     if (serviced != 0)
+    {
         bump(local_interrupts().serviced, serviced);
+        smp::bkl_mark_work();
+    }
     return serviced;
 }
 
@@ -568,19 +579,21 @@ void serve_local_interrupts()
 
 void lock_kernel_serving_interrupts()
 {
-    auto &lock = smp::kernel_lock;
     // Only a CPU that may hold a line some kernel-lock holder waits for
     // needs to serve while it spins; lock() reports a self-deadlock.
-    if (!secondary_device_lines() || smp::online_cpus() < 2 || lock.owned_by_current_cpu())
+    if (!secondary_device_lines() || smp::online_cpus() < 2 || smp::kernel_lock.owned_by_current_cpu())
     {
-        lock.lock();
+        smp::bkl_lock();
         return;
     }
-    while (!lock.try_lock())
+    if (smp::bkl_try_lock())
+        return;
+    const smp::SpinningScope spinning;
+    do
     {
         serve_local_interrupts();
         arch::ArchOperations::spin_pause();
-    }
+    } while (!smp::bkl_try_lock(true));
 }
 
 bool platform_irq_pending()
@@ -640,10 +653,13 @@ bool wait_here(bool device)
 bool wait_for_interrupt()
 {
     // Where device lines reach CPU 0 only, a secondary CPU waiting for a
-    // device (a driver inside a syscall, holding the kernel lock) polls.
-    if (!platform_irqs_started() || !platform_irqs_supported() ||
+    // device (a driver inside a syscall, holding the kernel lock) polls. A
+    // kernel section polls too: it may not drain the bottom halves.
+    if (smp::in_section() || !platform_irqs_started() || !platform_irqs_supported() ||
         (smp::current_cpu() != 0 && !secondary_device_lines()))
         return false;
+    // A halt that keeps the kernel lock is a wait, not kernel work.
+    const smp::SpinningScope spinning;
     return wait_here(true);
 }
 
@@ -828,10 +844,16 @@ EventStatistics event_statistics(EventSource source)
 
 namespace
 {
-// Timer latency is recorded by CPU 0's tick paths only; device waits are
-// counted by drivers under the kernel lock.
+// Timer latency is recorded by CPU 0's tick paths only. Device waits are
+// counted per CPU by the waiting driver, under the kernel lock or inside a
+// section, and summed on read.
 constinit std::array<time::LatencyHistogram, 2> timer_latencies{};
-constinit std::array<DeviceWaitStatistics, device_wait_count> device_waits{};
+struct alignas(64) CpuDeviceWaits
+{
+    std::array<std::atomic<usize>, device_wait_count> interrupt{};
+    std::array<std::atomic<usize>, device_wait_count> polled{};
+};
+constinit std::array<CpuDeviceWaits, smp::max_cpus> device_waits{};
 } // namespace
 
 void record_timer_latency(TimerWake wake, u64 late, u64 frequency)
@@ -846,13 +868,30 @@ const time::LatencyHistogram &timer_latency(TimerWake wake)
 
 void count_device_wait(DeviceWait device, bool interrupt)
 {
-    auto &waits = device_waits[static_cast<usize>(device)];
-    ++(interrupt ? waits.interrupt : waits.polled);
+    const auto index = static_cast<usize>(device);
+    const auto cpu = smp::current_cpu();
+    if (index >= device_wait_count || cpu >= smp::max_cpus)
+        return;
+    // Inside a kernel section wait_for_interrupt() refuses, so a driver
+    // waiting on its bound line polled.
+    if (smp::in_section())
+        interrupt = false;
+    auto &waits = device_waits[cpu];
+    bump(interrupt ? waits.interrupt[index] : waits.polled[index]);
 }
 
 DeviceWaitStatistics device_wait_statistics(DeviceWait device)
 {
-    return device_waits[static_cast<usize>(device)];
+    const auto index = static_cast<usize>(device);
+    DeviceWaitStatistics result{};
+    if (index >= device_wait_count)
+        return result;
+    for (const auto &waits : device_waits)
+    {
+        result.interrupt += waits.interrupt[index].load(std::memory_order_relaxed);
+        result.polled += waits.polled[index].load(std::memory_order_relaxed);
+    }
+    return result;
 }
 
 IrqStatistics platform_irq_cpu_statistics(smp::CpuId cpu)

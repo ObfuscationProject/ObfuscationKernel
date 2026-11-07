@@ -40,6 +40,12 @@ option("kernel_gui")
     set_description("Enable the normal-mode kernel GUI desktop")
 option_end()
 
+option("smp_sections")
+    set_default(true)
+    set_showmenu(true)
+    set_description("Run converted syscalls as kernel sections without the big kernel lock (x86_64, aarch64, rv64)")
+option_end()
+
 option("x86_tsc_skew_test")
     set_default(false)
     set_showmenu(true)
@@ -295,6 +301,7 @@ target("okernel")
     add_ok_tsc_skew_test()
     add_ok_debug_test_points()
     add_ok_debug_lock_checks()
+    add_ok_smp_sections()
     if get_config("private_futex_peer_fixture") and is_mode("debug") then
         add_defines("OK_PRIVATE_FUTEX_PEER_FIXTURE")
     end
@@ -372,6 +379,7 @@ target("okernel_image")
     add_ok_tsc_skew_test()
     add_ok_debug_test_points()
     add_ok_debug_lock_checks()
+    add_ok_smp_sections()
     if get_config("private_futex_peer_fixture") and is_mode("debug") then
         add_defines("OK_PRIVATE_FUTEX_PEER_FIXTURE")
     end

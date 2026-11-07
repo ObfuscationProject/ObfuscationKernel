@@ -15,6 +15,7 @@
 #include "ok/core/native_shutdown.hpp"
 #include "ok/smp/bringup.hpp"
 #include "ok/smp/cpu.hpp"
+#include "ok/smp/kernel_section.hpp"
 #include "ok/user/native_sleep.hpp"
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
 #define OK_PRIVATE_POLL_MASK 1
@@ -149,9 +150,102 @@ struct QuarantinedSpace
 // A process holds at most one live space and transactions build one
 // replacement at a time: one slot per process plus one candidate.
 extern std::array<QuarantinedSpace, sched::max_processes + 1> quarantined_spaces;
-extern bool started;
+// The runtime's failure and started state: written only by the kernel lock's
+// holder (a kernel section reads them at admission, under the lock). The
+// wrappers keep the Status and bool interfaces; every write, and every
+// Status reference handed out, is a require_exclusive site.
+class RuntimeFailure final
+{
+  public:
+    constexpr RuntimeFailure() = default;
+    RuntimeFailure(const RuntimeFailure &) = default;
+    RuntimeFailure &operator=(const RuntimeFailure &other)
+    {
+        checked() = other.value_;
+        return *this;
+    }
+    template <typename T>
+        requires std::convertible_to<const T &, Status>
+    RuntimeFailure &operator=(const T &value)
+    {
+        checked() = value;
+        return *this;
+    }
+    operator Status &()
+    {
+        return checked();
+    }
+    operator const Status &() const
+    {
+        return value_;
+    }
+    // `return runtime_failure;` from a Result-returning function.
+    template <typename T> operator Result<T>() const
+    {
+        return Result<T>{value_};
+    }
+    [[nodiscard]] bool ok() const
+    {
+        return value_.ok();
+    }
+    [[nodiscard]] StatusCode code() const
+    {
+        return value_.code();
+    }
+    [[nodiscard]] std::string_view message() const
+    {
+        return value_.message();
+    }
+    [[nodiscard]] explicit operator bool() const
+    {
+        return value_.ok();
+    }
+
+  private:
+    Status &checked()
+    {
+        static_cast<void>(smp::require_exclusive("runtime_failure"));
+        return value_;
+    }
+    Status value_{};
+};
+class RuntimeFlag final
+{
+  public:
+    constexpr RuntimeFlag() = default;
+    RuntimeFlag(const RuntimeFlag &) = default;
+    RuntimeFlag &operator=(const RuntimeFlag &other)
+    {
+        return *this = other.value_;
+    }
+    RuntimeFlag &operator=(bool value)
+    {
+        static_cast<void>(smp::require_exclusive("runtime started"));
+        value_ = value;
+        return *this;
+    }
+    constexpr operator bool() const
+    {
+        return value_;
+    }
+
+  private:
+    bool value_{};
+};
+extern RuntimeFlag started;
+// Kernel sections (src/user/runtime/section.hpp) are compiled in: x86_64,
+// aarch64 and rv64 with option smp_sections.
+#if defined(OK_SMP_SECTIONS)
+inline constexpr bool smp_sections = true;
+#else
+inline constexpr bool smp_sections = false;
+#endif
+// Holding only the kernel lock: commits and waits for `pid`'s kernel
+// sections when any is pinned (src/user/runtime/section.cpp). The check
+// comes first, so a caller holding fine locks with nothing pinned passes.
+void drain_if_pinned(sched::ProcessId pid);
 extern Kernel *runtime_kernel;
-extern Status runtime_failure;
+extern RuntimeFailure runtime_failure;
 extern ShutdownOwner original_shutdown_owner;
 extern bool shutdown_admission_closed, shutdown_retirement_started, shutdown_retirement_completed;
 // Per CPU: inside step(), and whether its last step found nothing to run.
@@ -604,6 +698,9 @@ UdpWaitCounters udp_wait_statistics();
 // The kernel's TCP wait counters, bound when the runtime starts.
 extern const net::TcpWaitStats *tcp_wait_stats;
 void report_network_waits();
+// Installs the lock-violation recorder and arms require_exclusive; once,
+// just before secondary CPUs are admitted (src/user/runtime/interrupts.cpp).
+void arm_kernel_checks();
 RobustWalkReport retire_robust(Kernel &kernel, sched::ProcessControlBlock &process,
                               sched::ThreadLocalState &tls, sched::ThreadId owner);
 void clear_child_tid(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadLocalState &tls, bool peers);

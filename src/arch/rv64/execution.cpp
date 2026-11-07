@@ -2,6 +2,7 @@
 #include "ok/interrupt/platform.hpp"
 #include "ok/arch/clock.hpp"
 #include "ok/smp/bringup.hpp"
+#include "ok/smp/kernel_section.hpp"
 #include "../riscv_common/clint.hpp"
 #include "../riscv_common/plic.hpp"
 #include "../tlb_tags.hpp"
@@ -28,11 +29,12 @@ struct Space
     usize leaves{};
     detail::TlbSpaceTag tlb{};
 };
-constinit SpaceTable<Space> spaces;
-// Entries look a space up without the kernel lock; growing or retiring the
-// slot table under that lock must not move the table under such a lookup. It
-// also serializes space ids and TLB generations.
-constinit smp::SpinLock spaces_lock{};
+constinit SpaceTable<Space, fixed_space_slots> spaces;
+// The slot storage is fixed, so entries look a space up without the kernel
+// lock; slot acquire and release, space ids and TLB generations are
+// serialized by spaces_lock.
+constinit smp::RankedSpinLock<smp::LockRank::arch_spaces> spaces_lock{};
+using SpacesGuard = smp::RankedSpinLock<smp::LockRank::arch_spaces>::Guard;
 constinit detail::TlbSpaceIds space_ids{};
 constexpr unsigned satp_asid_shift = 44;
 bool initialized{false};
@@ -224,8 +226,8 @@ Result<AddressSpace> create_space(MappingView mappings)
     for (const auto &page : mappings)
         if (!admissible(page))
             return Status::invalid_argument("invalid Sv39 user mapping");
-    auto entry = []() -> Result<SpaceTable<Space>::Entry *> {
-        smp::ScopedSpinLock guard(spaces_lock);
+    auto entry = []() -> Result<decltype(spaces)::Entry *> {
+        const SpacesGuard guard(spaces_lock);
         auto acquired = spaces.acquire();
         if (acquired) acquired.value()->space.tlb = space_ids.issue();
         return acquired;
@@ -235,7 +237,7 @@ Result<AddressSpace> create_space(MappingView mappings)
     auto &space = entry.value()->space;
     auto fail = [&](Status status) {
         static_cast<void>(release_tables(space));
-        smp::ScopedSpinLock guard(spaces_lock);
+        const SpacesGuard guard(spaces_lock);
         static_cast<void>(spaces.release(space));
         return status;
     };
@@ -283,10 +285,11 @@ Status remap(const AddressSpace &space, const PageMapping &mapping)
     // Every other hart in this space leaves U-mode first. A hart that cached
     // the old entry fences it at its next entry: untagged harts fence every
     // entry, and a tagged one fences the ASID once the generation moved.
+    static_cast<void>(smp::require_exclusive("address-space quiesce"));
     static_cast<void>(smp::quiesce_root(space.root));
     entry = leaf_entry(mapping);
     asm volatile("fence rw,rw\nfence.i" ::: "memory");
-    smp::ScopedSpinLock guard(spaces_lock);
+    const SpacesGuard guard(spaces_lock);
     stored->tlb.changed();
     return Status::success();
 }
@@ -295,9 +298,10 @@ Status destroy_space(AddressSpace &space)
     auto *stored = lookup(space);
     if (stored == nullptr)
         return Status::invalid_argument("stale native address space");
+    static_cast<void>(smp::require_exclusive("address-space quiesce"));
     static_cast<void>(smp::quiesce_root(space.root));
     const auto released = release_tables(*stored);
-    smp::ScopedSpinLock guard(spaces_lock);
+    const SpacesGuard guard(spaces_lock);
     const auto retired = spaces.release(*stored);
     space = {};
     return !released ? released : retired;
@@ -353,7 +357,7 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
         return Status::busy("nested native entry is unsupported");
     detail::TlbSpaceTag tlb;
     {
-        smp::ScopedSpinLock guard(spaces_lock);
+        const SpacesGuard guard(spaces_lock);
         auto *stored = lookup(space);
         if (stored == nullptr)
             return Status::not_initialized("native address space is unavailable");

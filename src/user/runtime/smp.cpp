@@ -2,9 +2,10 @@
 // except while it runs user code; the entry it is in then is recorded here so
 // that a CPU retiring that thread can take the entry over.
 #include "private.hpp"
+#include "ok/arch/execution_spaces.hpp"
 #include "ok/interrupt/platform.hpp"
 #include "ok/smp/bringup.hpp"
-#include "ok/smp/kernel_lock.hpp"
+#include "ok/smp/kernel_section.hpp"
 
 namespace ok::user::native
 {
@@ -20,6 +21,10 @@ struct CpuEntry
     bool revoked{};
 };
 constinit std::array<CpuEntry, smp::max_cpus> cpu_entries{};
+// A backend with fixed slot storage holds every process's space, every
+// quarantined one and an exec candidate per CPU.
+static_assert(arch::execution::fixed_space_slots ==
+              sched::max_processes + std::tuple_size_v<decltype(quarantined_spaces)> + smp::max_cpus);
 } // namespace
 
 // Set once the runtime serves threads; secondary CPUs only then contend for
@@ -54,11 +59,13 @@ Result<hw::Trap> enter_unlocked(hw::AddressSpace &space, hw::UserFrame &frame, c
     auto &entry = cpu_entries[smp::current_cpu()];
     entry = {pid, tid, lease, false};
     smp::begin_user(space.root);
-    smp::kernel_lock.unlock();
+    smp::bkl_unlock();
     auto trap = hw::enter_owned(space, frame, view);
     smp::end_user();
     // The holder may wait for a device line routed to this CPU.
     interrupt::lock_kernel_serving_interrupts();
+    // This stretch serves the trap.
+    smp::bkl_mark_work();
     const bool revoked = entry.revoked;
     entry = {};
     if (revoked) return Status::no_process("another CPU retired this thread during its user entry");
@@ -113,6 +120,7 @@ Status commit_eviction(Kernel &kernel, const EvictionPlan &plan)
     if (!plan.cpus) return {};
     // Every CPU in this address space leaves user mode. Each then waits for the
     // kernel lock this CPU holds, so its lease is no longer in use.
+    smp::require_exclusive("commit_eviction");
     smp::quiesce_root(plan.root);
     Status failure{};
     for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
@@ -152,17 +160,17 @@ extern "C" bool ok_smp_secondary_step(ok::smp::CpuId cpu)
         // Not serving threads yet: drain a line this CPU took only while the
         // kernel lock is free (the boot CPU idles), since that idle wait does
         // not end for top halves taken here.
-        if (ok::interrupt::platform_irq_pending() && ok::smp::kernel_lock.try_lock())
+        if (ok::interrupt::platform_irq_pending() && ok::smp::bkl_try_lock())
         {
             static_cast<void>(ok::interrupt::drain_platform_irqs());
-            ok::smp::kernel_lock.unlock();
+            ok::smp::bkl_unlock();
         }
         return false;
     }
     ok::interrupt::lock_kernel_serving_interrupts();
     struct Unlock
     {
-        ~Unlock() { ok::smp::kernel_lock.unlock(); }
+        ~Unlock() { ok::smp::bkl_unlock(); }
     } unlock;
     static_cast<void>(ok::interrupt::drain_platform_irqs());
     if (!started || runtime_kernel == nullptr) return false;

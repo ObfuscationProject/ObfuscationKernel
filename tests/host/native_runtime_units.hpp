@@ -15,3 +15,4 @@
 #include "../../src/user/runtime/interrupts.cpp"
 #include "../../src/user/runtime/entry.cpp"
 #include "../../src/user/runtime/smp.cpp"
+#include "../../src/user/runtime/section.cpp"
