@@ -216,6 +216,21 @@ mips64_n64_private::Observation mips64_n64_private::observation(const UserFrame 
 mips64_n64_private::Facts mips64_n64_private::facts() noexcept
 { return private_n64_facts; }
 #endif
+#if (defined(OK_PRIVATE_MIPS_O32_ADMISSION) || defined(OK_PRIVATE_MIPS64_N64_ADMISSION)) !=                          \
+    defined(OK_ARCH_FRAME_BOUND_CAPTURE)
+#error "ok/arch/execution.hpp and this backend disagree on its frame-bound capture"
+#endif
+#ifdef OK_ARCH_FRAME_BOUND_CAPTURE
+void rebind_owned_capture(const UserFrame &from, const UserFrame &to) noexcept
+{
+#ifdef OK_PRIVATE_MIPS64_N64_ADMISSION
+    private_n64_backend.tracker.rebind(from, to);
+#endif
+#ifdef OK_PRIVATE_MIPS_O32_ADMISSION
+    private_signal_capture.rebind(from, to);
+#endif
+}
+#endif
 bool supported() noexcept
 {
     return true;

@@ -170,6 +170,11 @@ class Tracker final
     {
         return observation_.frame_==&frame && observation_.valid_for(frame,space_,view_) ? observation_ : Observation{};
     }
+    // The capture published against `from` follows an equal frame to `to`.
+    void rebind(const UserFrame &from, const UserFrame &to) noexcept
+    {
+        if(observation_.frame_==&from && same_frame(to,captured_)) observation_.frame_=&to;
+    }
 };
 } // namespace detail
 inline bool Capability::admitted() const noexcept

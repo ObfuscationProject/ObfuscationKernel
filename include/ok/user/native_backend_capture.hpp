@@ -84,6 +84,8 @@ class BackendCapture final : private NonCopyable
         thread = process ? scheduler.find_thread(pid, tid) : nullptr;
         if (!process || !thread) return Status::no_process("native thread retired during its user entry");
         thread->native_frame = frame;
+        // The backend ran on the copy; its capture now names the canonical frame.
+        arch::execution::rebind_owned_capture(frame, thread->native_frame);
         const auto after = pool_->active_epoch(lease, {pid, tid}, view);
         if (!after || after.value() != epoch.value() || !canonical(scheduler, *process, *thread) ||
             thread->entry_stack != lease)
