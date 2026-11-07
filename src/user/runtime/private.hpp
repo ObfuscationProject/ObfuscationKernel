@@ -233,6 +233,17 @@ class RuntimeFlag final
     bool value_{};
 };
 extern RuntimeFlag started;
+// Kernel sections (src/user/runtime/section.hpp) are compiled in: x86_64,
+// aarch64 and rv64 with option smp_sections.
+#if defined(OK_SMP_SECTIONS)
+inline constexpr bool smp_sections = true;
+#else
+inline constexpr bool smp_sections = false;
+#endif
+// Holding only the kernel lock: commits and waits for `pid`'s kernel
+// sections when any is pinned (src/user/runtime/section.cpp). The check
+// comes first, so a caller holding fine locks with nothing pinned passes.
+void drain_if_pinned(sched::ProcessId pid);
 extern Kernel *runtime_kernel;
 extern RuntimeFailure runtime_failure;
 extern ShutdownOwner original_shutdown_owner;

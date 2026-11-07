@@ -260,6 +260,7 @@ Status set_result(const sched::ProcessControlBlock &process, hw::UserFrame &fram
 
 void finish(Kernel &kernel, sched::ProcessId pid, i32 code, u8 signal)
 {
+    if constexpr (smp_sections) smp::drain(pid); // Its sections end, results committed, before teardown.
     const auto *initial = kernel.scheduler().find(pid);
     if (!initial) return;
     if (initial->state() == sched::ProcessState::zombie || initial->state() == sched::ProcessState::exited)

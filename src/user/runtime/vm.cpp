@@ -160,6 +160,22 @@ bool same_space(const hw::AddressSpace &a, const hw::AddressSpace &b)
 #ifdef OK_NATIVE_COW_FORK
 bool resolve_native_write(const hw::AddressSpace &space, uptr page) // Installed only after runtime_kernel.
 {
+    // A6: a kernel section never rewrites page records; admission resolved
+    // its output range under the kernel lock.
+    if (smp::in_section())
+    {
+        smp::detail::section_assert(&smp::SectionCpu::cow_refused, "copy-on-write resolution inside a section");
+        return false;
+    }
+    // Any write into a process (its own fault, another process's copy) waits
+    // for that process's sections, which walk the records rewritten here.
+    if constexpr (smp_sections)
+        for (const auto &process : runtime_kernel->scheduler().processes())
+            if (same_space(process.resources().native_space, space))
+            {
+                drain_if_pinned(process.pid());
+                break;
+            }
     auto resolved = resolve_owner_write(runtime_kernel->scheduler().processes(), space, page, page_pool);
     if (!resolved && resolved.status().code() != StatusCode::no_memory) runtime_failure = resolved.status();
     return resolved && resolved.value();

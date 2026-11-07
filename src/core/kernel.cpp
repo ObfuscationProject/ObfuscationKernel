@@ -1829,6 +1829,10 @@ Status Kernel::kill_process(sched::ProcessId pid)
     {
         return Status::invalid_argument("process id must be non-zero");
     }
+#if defined(OK_SMP_SECTIONS)
+    // The process's kernel sections end, their results committed, first.
+    smp::drain(pid);
+#endif
     const auto *process = scheduler_.find(pid);
     bool native_resources = process && (process->resources().native_space.root ||
                                        !process->resources().native_pages.empty());
@@ -1900,6 +1904,10 @@ Status Kernel::kill_process(sched::ProcessId pid)
 Status Kernel::supervise_daemons()
 {
     if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
+#if defined(OK_SMP_SECTIONS)
+    // Restarts replace processes: none may have a section pinned.
+    smp::drain_all();
+#endif
     StaticVector<driver::DriverManager::DriverProcessRestart, driver::max_drivers> driver_restarts;
     if (auto status = drivers_.supervise_kernel_processes(driver_restarts); !status.ok())
     {

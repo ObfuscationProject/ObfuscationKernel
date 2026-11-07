@@ -1,5 +1,6 @@
 // Native start/step loop, user entry and syscall dispatch.
 #include "private.hpp"
+#include "section.hpp"
 
 extern "C" ok::Status ok_boot_filesystem(ok::fs::VirtualFileSystem &) __attribute__((weak));
 extern "C" ok::Status ok_boot_entropy(ok::posix::PosixService &) __attribute__((weak));
@@ -518,6 +519,10 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
                 if (!hw::copy_from_user(space, data.data() + position, vectors[i].base, length)) return -14;
                 position += length;
             }
+        // A shared-file read takes the position, reads at it and advances it
+        // as one step; a write takes the lock inside PosixService::write.
+        sched::DescriptionPositionGuard shared_position(!writing && description->native_shared_file
+                                                     ? kernel.scheduler().position_lock(description) : nullptr);
         Result<usize> result = usize{0};
         if (writing && description->console)
         {
@@ -758,6 +763,23 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
     default:
         return -38;
     }
+    // Node-backed reads and writes and every fsync run the bodies kernel
+    // sections share (ok/user/linux_file_io.hpp); the builtin table handlers
+    // of these numbers call the same PosixService operations.
+    if (((number == N::read || number == N::write) && description && description->node &&
+         !description->native_shared_file && !description->console && !description->input_console &&
+         !description->pty_endpoint && description->pipe == sched::invalid_description) ||
+        number == N::fsync || number == N::fdatasync)
+    {
+        linux_file_io::ProcessAccess access{kernel.posix(), kernel.scheduler(), process->resources()};
+        if (number == N::fsync || number == N::fdatasync)
+            return linux_file_io::file_sync(access, static_cast<posix::Fd>(a[0]));
+        bool would_block{};
+        const auto result = linux_file_io::regular_rw(access, number == N::write, static_cast<posix::Fd>(a[0]),
+                                                      a[1], a[2], would_block);
+        if (would_block && blocked_caller()) complete = false;
+        return result;
+    }
     if (path_arg >= 0)
     {
         if (auto status = string_from_user(space, a[path_arg], path); !status.ok())
@@ -809,6 +831,9 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
     }
     if (description && description->native_shared_file && (number == N::read || number == N::pread64))
     {
+        // read(2) moves the description's position as one step with the read.
+        const sched::DescriptionPositionGuard position(number == N::read
+                                                           ? kernel.scheduler().position_lock(description) : nullptr);
         auto read = kernel.posix().pread(static_cast<i32>(a[0]), {buffer.data(), output_size},
             number == N::read ? description->offset : static_cast<usize>(a[3]));
         if (!read) return error(read.status());
@@ -948,6 +973,7 @@ Status start(Kernel &kernel, fs::BootArchive archive)
     original_shutdown_owner = {&original_shutdown_owner, 1, pid.value(), process->threads()[0].tid};
     emit("OK_NATIVE scope=hardware init=loaded\n");
     arm_kernel_checks();
+    start_sections();
     secondary_admission.store(true, std::memory_order_release);
     return Status::success();
 }
@@ -1230,6 +1256,8 @@ bool step(Kernel &kernel)
         return false;
     }
     bool linux_udp_delay_slot = false;
+    // A syscall trapped by this step's entry, not a continuation resumed.
+    bool trapped_this_step = false;
     if (!running->syscall_pending)
     {
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
@@ -1378,6 +1406,7 @@ bool step(Kernel &kernel)
 #endif
             linux_udp_delay_slot = linux_udp_delay_slot_excluded<lu::configured_native_profile()>(trap.value());
             running->syscall_pending = true;
+            trapped_this_step = true;
         }
         else if (trap.value().kind == hw::TrapKind::interrupt)
         {
@@ -1408,8 +1437,24 @@ bool step(Kernel &kernel)
             finish(kernel, chosen.pid, 0, 11);
         }
     }
-    if (running->native_active && running->syscall_pending)
+    bool sectioned = false;
+    if constexpr (smp_sections)
+        if (trapped_this_step && running->native_active && running->syscall_pending && !linux_udp_delay_slot)
+        {
+            SectionCall<lu::configured_native_profile()> call{};
+            if (admit_section(kernel, *process, *running, cpu, call) == Admission::run)
+            {
+                // Returns holding the kernel lock with the result committed;
+                // the process and thread pointers are not used again.
+                run_section(kernel, call, cpu);
+                sectioned = true;
+            }
+        }
+    if (!sectioned && running->native_active && running->syscall_pending)
     {
+        // The choke point: every other syscall of this process waits for
+        // its sections and commits their results first.
+        if constexpr (smp_sections) smp::drain(chosen.pid);
         bool complete = true;
         i64 result{};
 #ifdef OK_PRIVATE_PPC32_SIGNAL
@@ -1576,6 +1621,8 @@ bool step(Kernel &kernel)
         auto *resumed = kernel.scheduler().find_thread(chosen.pid, chosen.tid);
         if (process && resumed && resumed->native_active && complete)
         {
+            // A8: a shadowed identity call answers what its section computed.
+            if constexpr (smp_sections) shadow_compare(cpu, chosen.pid, chosen.tid, result);
             auto &current = *resumed;
             current.syscall_pending = false;
             current.console_wait_epoch = 0;
