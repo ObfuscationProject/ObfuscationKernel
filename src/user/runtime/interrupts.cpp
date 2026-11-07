@@ -158,11 +158,13 @@ void record_lock_violation(const smp::LockViolation &violation) noexcept
 // OK_SMP_KERNEL_DECLINES): what ran without the kernel lock, how its results
 // came back, how the kernel lock was contended and what the debug checks
 // counted; per CPU sections:concurrent:witnessed:bkl_acquired:bkl_contended.
-// On every profile that compiles sections in, with one CPU too. Any section
-// still pinned is committed first.
+// On every profile that compiles sections in, with one CPU too, once the
+// runtime armed its checks. Any section still pinned is committed first.
 void report_kernel_sections()
 {
 #if defined(OK_SMP_SECTIONS)
+    // Only once the runtime armed its checks: the violation baseline is set.
+    if (!smp::exclusive_armed.load(std::memory_order_acquire)) return;
     if (smp::kernel_lock.owned_by_current_cpu()) smp::drain_all();
     auto sum = [](std::atomic<uptr> smp::SectionCpu::*counter) {
         u64 total = 0;
