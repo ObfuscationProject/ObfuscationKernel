@@ -50,5 +50,12 @@ void stop_local() noexcept;
 // start block may be reused: x86 its parked flag, aarch64 PSCI AFFINITY_INFO
 // OFF, rv64 its cleared start mailbox entry.
 [[nodiscard]] bool parked(ok::smp::CpuId cpu, u64 hardware_id) noexcept;
+// On the requesting CPU, for a CPU that start() launched but bring-up or a
+// restart then gave up on (it never came online, or with another id): send
+// it back to a parked state where the architecture can stop another CPU (x86:
+// INIT, after which parked() is true and start() may run again). aarch64 and
+// rv64 cannot; such a CPU idles outside the online mask and parked() stays
+// false, so it is not restarted.
+void abandon(ok::smp::CpuId cpu, u64 hardware_id) noexcept;
 
 } // namespace ok::arch::smp

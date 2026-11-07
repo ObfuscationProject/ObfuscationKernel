@@ -351,7 +351,12 @@ Status start_secondary_cpus(Kernel &kernel)
         if (came_online && record.reported_id.load(std::memory_order_acquire) == cpu.hardware_id)
             started_mask |= u32{1} << logical;
         else
+        {
             set_state(logical, came_online ? CpuState::halted : CpuState::offline);
+#if defined(OK_ARCH_SMP_START)
+            arch::smp::abandon(logical, cpu.hardware_id);
+#endif
+        }
     }
     detail::started.store(started_mask, std::memory_order_release);
     detail::online.store(started_mask, std::memory_order_release);
@@ -487,6 +492,7 @@ Status restart_secondary_cpu([[maybe_unused]] Kernel &kernel, [[maybe_unused]] C
     {
         // Never online, or not the CPU it was started as: it stays outside.
         set_state(cpu, came_online ? CpuState::halted : CpuState::offline);
+        arch::smp::abandon(cpu, record.hardware_id);
         return Status::io_error("restarted CPU did not come online");
     }
     if (auto status = kernel.scheduler().online_cpu(cpu); !status)
@@ -550,8 +556,8 @@ extern "C" [[noreturn]] void ok_smp_secondary_main(ok::smp::CpuId cpu)
     record.reported_id.store(static_cast<ok::uptr>(ok::arch::smp::current_hardware_id()), std::memory_order_release);
     // A CPU the boot CPU already gave up on stays out: it never serves threads
     // and stays outside the online mask that IPIs and shootdowns cover. (On
-    // x86_64 such a CPU also gets an INIT, and the trampoline halts one that
-    // reads another CPU's start parameters.)
+    // x86_64 the boot CPU also sends it INIT through arch::smp::abandon, and the
+    // trampoline halts a CPU that reads another CPU's start parameters.)
 #if defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1)
     auto starting = static_cast<ok::u8>(CpuState::starting);
     const bool admitted = record.state.compare_exchange_strong(starting, static_cast<ok::u8>(CpuState::online),

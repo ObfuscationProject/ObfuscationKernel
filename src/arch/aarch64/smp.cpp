@@ -230,6 +230,10 @@ void park_self(ok::smp::CpuId) noexcept
         asm volatile("wfe" : : : "memory");
 }
 
+// PSCI cannot stop another CPU: an abandoned one idles outside the online
+// mask, and AFFINITY_INFO keeps it from being restarted.
+void abandon(ok::smp::CpuId, u64) noexcept {}
+
 bool parked(ok::smp::CpuId, u64 hardware_id) noexcept
 {
     if (conduit == boot::CpuStartMethod::none)

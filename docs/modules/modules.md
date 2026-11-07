@@ -126,7 +126,7 @@ ABI79 (`git diff 050aa8e.. -- include/`):
   started masks, IPI reasons, `start_secondary_cpus`, `stop_secondary_cpu`,
   `restart_secondary_cpu`, `HotplugStatistics`, `ok_smp_secondary_main` and
   the weak `ok_smp_secondary_step`/`ok_smp_cpu_leaving` hooks),
-  `ok/arch/smp.hpp` (per-profile discovery, start, IPI, stop, park and
+  `ok/arch/smp.hpp` (per-profile discovery, start, IPI, stop, park, abandon and
   `clock_sync_name`), `ok/boot/cpu_topology.hpp` (`CpuTopologyMap`,
   `CpuStartMethod`), `ok/boot/acpi.hpp` (RSDP and MADT parsing,
   `MadtInterrupts`), `ok/sched/run_queue.hpp` (`ThreadRef`, `CpuRunQueue`;

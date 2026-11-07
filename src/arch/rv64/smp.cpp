@@ -158,6 +158,10 @@ void park_self(ok::smp::CpuId) noexcept
     ok_rv64_hart_park();
 }
 
+// M-mode harts cannot be stopped from outside: an abandoned one idles
+// outside the online mask, and its mailbox entry keeps it from a restart.
+void abandon(ok::smp::CpuId, u64) noexcept {}
+
 bool parked(ok::smp::CpuId, u64 hardware_id) noexcept
 {
     return hardware_id < ok::smp::max_cpus &&

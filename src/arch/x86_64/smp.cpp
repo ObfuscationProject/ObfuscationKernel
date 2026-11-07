@@ -605,11 +605,8 @@ Status start(ok::smp::CpuId cpu, u64 hardware_id, uptr, uptr stack_top)
     if (synchronize_tsc(cpu) == tsc::Verdict::unsynced)
     {
         // Back to wait-for-SIPI before another start rewrites the page, so a
-        // CPU that is merely late does not run on into the kernel. Waiting for
-        // a STARTUP, it is as parked as park() leaves it.
-        send_icr(hardware_id, delivery_init_assert);
-        send_icr(hardware_id, delivery_init_deassert);
-        parked_cpus[cpu].store(true, std::memory_order_release);
+        // CPU that is merely late does not run on into the kernel.
+        abandon(cpu, hardware_id);
         return Status::io_error("x86 secondary TSC was not synchronized");
     }
     return Status::success();
@@ -658,6 +655,16 @@ void park_self(ok::smp::CpuId cpu) noexcept
 bool parked(ok::smp::CpuId cpu, u64) noexcept
 {
     return cpu < ok::smp::max_cpus && parked_cpus[cpu].load(std::memory_order_acquire);
+}
+
+// INIT puts the CPU back into wait-for-SIPI wherever it is; waiting for a
+// STARTUP, it is as parked as park() leaves it.
+void abandon(ok::smp::CpuId cpu, u64 hardware_id) noexcept
+{
+    send_icr(hardware_id, delivery_init_assert);
+    send_icr(hardware_id, delivery_init_deassert);
+    if (cpu < ok::smp::max_cpus)
+        parked_cpus[cpu].store(true, std::memory_order_release);
 }
 
 } // namespace ok::arch::smp

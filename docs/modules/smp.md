@@ -222,6 +222,17 @@ wide, or a residual beyond the tolerance) is never admitted: it finds its
 channel closed and parks with interrupts masked before it reads the clock, and
 bring-up marks it offline.
 
+The APs share one start block in the trampoline page. It names the APIC id it
+was written for (stored as id + 1, so a cleared block matches no CPU), and the
+trampoline compares that with the CPU's own CPUID initial APIC id before it
+loads the stack, halting on a mismatch: a late AP never runs on another CPU's
+stack or per-CPU block. A CPU bring-up or a restart gives up on after
+`start()` launched it (an unverified clock, never online, or online with
+another id) gets INIT through `arch::smp::abandon()` and counts as parked, so
+the page can be rewritten and the CPU restarted later. aarch64 and rv64 cannot
+stop another CPU: there an abandoned CPU idles outside the online mask and is
+not restarted.
+
 Each AP prints one line before `OK_SMP`:
 
 ```
