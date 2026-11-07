@@ -6,11 +6,69 @@
 // The scheduler owns the terminal objects; this unit moves their bytes to the
 // serial port and turns queued terminal signals into kernel-originated signals.
 #include "private.hpp"
+#include "ok/fs/terminal_node.hpp"
+#include "ok/sched/child_exit.hpp"
+#include "ok/sched/console_input_profile.hpp"
+#include "ok/user/native_job_control_profile.hpp"
+#include "ok/user/native_pty_profile.hpp"
+#include "ok/user/native_tty_profile.hpp"
 
 namespace ok::user::native
 {
 inline namespace runtime_detail
 {
+// The exported SDK markers (docs/modules/tty.md section 13) against the code
+// they describe; the OS consumer pins the marker text line for line.
+static_assert(native_sessions_module_abi == kernel_module_abi_version &&
+              native_console_control_module_abi == kernel_module_abi_version &&
+              native_group_signal_module_abi == kernel_module_abi_version &&
+              native_pty_module_abi == kernel_module_abi_version &&
+              native_tty_module_abi == kernel_module_abi_version &&
+              native_job_control_module_abi == kernel_module_abi_version);
+static_assert(native_sessions_version == OK_NATIVE_SESSIONS_VERSION &&
+              native_console_control_version == OK_NATIVE_CONSOLE_CONTROL_VERSION &&
+              native_tty_version == OK_NATIVE_TTY_VERSION &&
+              native_job_control_version == OK_NATIVE_JOB_CONTROL_VERSION);
+static_assert(native_sessions_process_capacity == sched::max_processes &&
+              native_group_signal_process_capacity == sched::max_processes &&
+              native_job_control_process_capacity == sched::max_processes &&
+              native_job_control_owed_kernel_records == sched::max_processes);
+static_assert(native_console_control_pid_bytes == 4 && native_sessions_controlling_tty == 1 &&
+              native_group_signal_controlling_tty == 1 && native_console_control_pty == 1 &&
+              native_console_control_termios == 1 && native_console_control_stop_continue == 1 &&
+              native_console_control_job_control == 1 && native_console_control_background_eio == 0 &&
+              native_console_control_force_steal == 0 && native_console_control_smp == 0);
+static_assert(native_sessions_pty == 1 && native_sessions_job_control == 1);
+static_assert(native_group_signal_profile == "bootcpu-signed32-current-negative-pgid-probe-all-signals-stop-continue-orphan-hupcont-same-session-cont-partial-v3");
+static_assert(native_group_signal_current_group == 1 && native_group_signal_negative_group == 1 &&
+              native_group_signal_probe == 1 && native_group_signal_term == OK_SIGTERM &&
+              native_group_signal_kill == OK_SIGKILL && native_group_signal_deferred_fatal == 1 &&
+              native_group_signal_partial_success == 1 && native_group_signal_broadcast == 0 &&
+              native_group_signal_stop_continue == 1 && native_group_signal_job_control == 1);
+static_assert(sched::native_console_input_profile == "pid1-issued-epoch-fork-exec-leader-revoke-ntty-compat-default-v2");
+static_assert(native_pty_pair_capacity == sched::private_pty::RawPtyTable<>::pair_capacity &&
+              native_pty_queue_capacity == sched::private_pty::RawPtyTable<>::queue_capacity &&
+              native_pty_canonical_capacity == sched::TerminalLdisc::read_capacity &&
+              native_pty_echo_capacity == sched::private_pty::pty_echo_capacity &&
+              native_pty_termios == 1 && native_pty_devpts == 1 && native_pty_smp == 0);
+static_assert(native_tty_terminal_capacity == sched::SchedulerState::terminal_count &&
+              native_tty_pts_capacity == fs::pts_capacity && native_tty_pts_capacity == OK_PTS_CAPACITY &&
+              native_tty_pts_capacity == native_pty_pair_capacity &&
+              native_tty_pts_major == fs::pts_major && native_tty_pts_major == OK_PTS_MAJOR &&
+              native_tty_read_capacity == sched::TerminalLdisc::read_capacity &&
+              native_tty_echo_capacity == sched::TerminalLdisc::echo_capacity &&
+              native_tty_master_queue_capacity == native_pty_queue_capacity &&
+              native_tty_signal_outbox_capacity == sched::terminal_outbox_capacity &&
+              native_tty_native_termios_bytes == tty::NativeTermiosWire<false>::termios_bytes &&
+              native_tty_native_nccs == tty::nccs &&
+              native_tty_winsize_bytes == tty::WindowWire<false>::bytes &&
+              native_tty_pts_mode == fs::pts_default_mode && native_tty_smp == 0);
+static_assert(native_job_control_signal_max == OK_NATIVE_SIGNAL_MAX &&
+              native_job_control_sigaction_bytes == sizeof(ok_sigaction) &&
+              native_job_control_cld_stopped == static_cast<u32>(sched::ChildExitStatus::stopped(1).code()) &&
+              native_job_control_cld_continued == static_cast<u32>(sched::ChildExitStatus::continued(1).code()) &&
+              native_job_control_native_handlers == 0 && native_job_control_native_masks == 0 &&
+              native_job_control_smp == 0);
 namespace
 {
 // Bytes moved per copy: echo and output never need a buffer of the read size.
@@ -19,6 +77,7 @@ constexpr usize tty_chunk = 256;
 // short, as a write to a terminal may be, and the caller writes the rest.
 constexpr usize tty_console_write_limit = 64 * 1024;
 constexpr usize tty_console_read_limit = sched::TerminalLdisc::read_capacity;
+static_assert(native_tty_console_write_limit == tty_console_write_limit);
 
 struct TtyEmitSink
 {

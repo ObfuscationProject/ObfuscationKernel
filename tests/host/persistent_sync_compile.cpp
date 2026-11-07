@@ -2,6 +2,6 @@
 #include <ok/core/module.hpp>
 #include <ok/uapi/syscall.h>
 static_assert(ok::kernel_module_abi_version == 79);
-static_assert(OK_UAPI_VERSION_MINOR == 16 && OK_SYS_SYNC_PERSISTENT == 1031);
+static_assert(OK_UAPI_VERSION_MINOR == 17 && OK_SYS_SYNC_PERSISTENT == 1031);
 // Match the production one-device, nine-buffer owner specialization.
 template class ok::fs::Ext4MountedMetadata<1>;

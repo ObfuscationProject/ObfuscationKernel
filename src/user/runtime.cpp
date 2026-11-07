@@ -6,23 +6,6 @@ namespace ok::user::native
 {
 inline namespace runtime_detail
 {
-static_assert(native_sessions_module_abi == kernel_module_abi_version);
-static_assert(native_sessions_version == OK_NATIVE_SESSIONS_VERSION);
-static_assert(native_sessions_process_capacity == sched::max_processes);
-static_assert(native_console_control_module_abi == kernel_module_abi_version);
-static_assert(native_console_control_version == OK_NATIVE_CONSOLE_CONTROL_VERSION);
-static_assert(native_console_control_pid_bytes == 4 && native_sessions_controlling_tty == 1 &&
-              native_group_signal_controlling_tty == 1 && native_console_control_pty == 0 &&
-              native_console_control_termios == 0 && native_console_control_job_control == 0 &&
-              native_console_control_smp == 0);
-static_assert(native_group_signal_module_abi == kernel_module_abi_version);
-static_assert(native_group_signal_process_capacity == sched::max_processes);
-static_assert(native_group_signal_profile == "bootcpu-signed32-current-negative-pgid-probe-term-kill-deferred-partial-v2");
-static_assert(native_group_signal_current_group == 1 && native_group_signal_negative_group == 1 &&
-              native_group_signal_probe == 1 && native_group_signal_term == OK_SIGTERM &&
-              native_group_signal_kill == OK_SIGKILL && native_group_signal_deferred_fatal == 1 &&
-              native_group_signal_partial_success == 1 && native_group_signal_broadcast == 0 &&
-              native_group_signal_stop_continue == 0 && native_group_signal_job_control == 0);
 void copy_bytes(void *dst, const void *src, usize size)
 {
     auto *out = static_cast<std::byte *>(dst);

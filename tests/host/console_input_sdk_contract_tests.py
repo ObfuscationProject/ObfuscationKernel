@@ -26,7 +26,8 @@ class ConsoleInputContract(unittest.TestCase):
             profile = headers / EXPORT.NATIVE_CONSOLE_INPUT_PROFILE_HEADER
             canonical = profile.read_text()
             for name, text in {
-                "old_profile": canonical.replace("noecho-v1", "noecho-v0"),
+                "old_profile": canonical.replace("ntty-compat-default-v2", "noecho-v1"),
+                "future_profile": canonical.replace("compat-default-v2", "compat-default-v3"),
                 "comment_impersonation": "/*\n" + canonical + "\n*/\n",
                 "conditional": "#if 0\n" + canonical + "#endif\n",
                 "redefinition": canonical + "#define native_console_epoch_limit 1\n",

@@ -49,7 +49,7 @@ struct ShutdownPiix4ModelPorts
         if (port == 0x604 && value == 0x2001) ++writes;
     }
 };
-static_assert(OK_UAPI_VERSION_MAJOR == 0 && OK_UAPI_VERSION_MINOR == 16 && OK_UAPI_VERSION_PATCH == 0);
+static_assert(OK_UAPI_VERSION_MAJOR == 0 && OK_UAPI_VERSION_MINOR == 17 && OK_UAPI_VERSION_PATCH == 0);
 static_assert(OK_NATIVE_POWER_VERSION == user::native_power_version && OK_NATIVE_POWER_VERSION == 1);
 static_assert(OK_POWER_TOKEN_MAX == user::native_power_token_limit && OK_POWER_TOKEN_MAX == 0x3fffffffU);
 static_assert(OK_POWER_HALT == 1 && OK_POWER_REBOOT == 2 && OK_POWER_POWEROFF == 3);

@@ -55,7 +55,7 @@ class NativePtySdkContract(unittest.TestCase):
         PRODUCER.validate_native_pty_profile(self.headers)
         CONSUMER.validate_native_pty_profile(self.headers)
 
-    def refused(self, diagnostic='(?:native PTY|ABI79|UAPI 0.16.0)'):
+    def refused(self, diagnostic='(?:native PTY|ABI79|UAPI 0.17.0)'):
         for validator in (PRODUCER.validate_native_pty_profile,
                           CONSUMER.validate_native_pty_profile):
             with self.assertRaisesRegex(ValueError, diagnostic):
@@ -67,8 +67,8 @@ class NativePtySdkContract(unittest.TestCase):
         self.assertEqual(PRODUCER.NATIVE_PTY_DEFINES, dict(FIXTURES.PTY_DEFINITIONS))
         self.assertEqual(PRODUCER.NATIVE_PTY_DEFINES, CONSUMER.NATIVE_PTY_DEFINES)
         self.assertEqual(PROFILE, FIXTURES.PTY_HEADER)
-        self.assertIn('native_sessions_pty = 0;', FIXTURES.SESSIONS_HEADER)
-        self.assertIn('native_console_control_pty = 0;', FIXTURES.CONSOLE_CONTROL_HEADER)
+        self.assertIn('native_sessions_pty = 1;', FIXTURES.SESSIONS_HEADER)
+        self.assertIn('native_console_control_pty = 1;', FIXTURES.CONSOLE_CONTROL_HEADER)
         syscall = (KERNEL_ROOT / 'include/ok/syscall/syscall.hpp').read_text()
         self.assertIn('    pty_pair = 1035,\n', syscall)
         self.assertIn('    fsync = 74,\n', syscall)
@@ -148,10 +148,10 @@ class NativePtySdkContract(unittest.TestCase):
             with self.subTest(module_abi=version):
                 self.refused('ABI79')
         self.module.write_text('inline constexpr u32 kernel_module_abi_version = 79;\n')
-        for version in (15, 17):
-            self.uapi.write_text(FIXTURES.UAPI_HEADER.replace('MINOR 16', f'MINOR {version}'))
+        for version in (16, 18):
+            self.uapi.write_text(FIXTURES.UAPI_HEADER.replace('MINOR 17', f'MINOR {version}'))
             with self.subTest(uapi_minor=version):
-                self.refused('UAPI 0.16.0')
+                self.refused('UAPI 0.17.0')
         self.uapi.write_text(FIXTURES.UAPI_HEADER)
         self.accepted()
 
@@ -198,9 +198,9 @@ class NativePtySdkContract(unittest.TestCase):
         fixture = self.full_fixture()
         for relative, old, new in (
                 (PRODUCER.NATIVE_PTY_PROFILE_HEADER, 'module_abi = 79', 'module_abi = 73'),
-                (PRODUCER.NATIVE_PTY_PROFILE_HEADER, 'native_pty_termios = 0', 'native_pty_termios = 1'),
+                (PRODUCER.NATIVE_PTY_PROFILE_HEADER, 'native_pty_termios = 1', 'native_pty_termios = 0'),
                 ('ok/uapi/syscall.h', 'OK_SYS_PTY_PAIR 1035ULL', 'OK_SYS_PTY_PAIR 1036ULL'),
-                ('ok/uapi/syscall.h', 'MINOR 16', 'MINOR 15'),
+                ('ok/uapi/syscall.h', 'MINOR 17', 'MINOR 16'),
                 ('ok/core/module.hpp', 'version = 79', 'version = 78'),
                 ('ok/user/native_sessions_profile.hpp', 'module_abi = 79', 'module_abi = 73'),
                 ('ok/user/native_console_control_profile.hpp', 'module_abi = 79', 'module_abi = 73')):

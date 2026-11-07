@@ -4,15 +4,17 @@
 #include <stdint.h>
 
 #define OK_UAPI_VERSION_MAJOR 0
-#define OK_UAPI_VERSION_MINOR 16
+#define OK_UAPI_VERSION_MINOR 17
 #define OK_UAPI_VERSION_PATCH 0
 
 #define OK_UAPI_X86_64_SYSCALL 1
 #define OK_UAPI_SYSCALL_ARG_COUNT 6
 #define OK_NATIVE_CREDENTIALS_VERSION 1
-#define OK_NATIVE_SESSIONS_VERSION 3
+#define OK_NATIVE_SESSIONS_VERSION 4
 #define OK_NATIVE_CONSOLE_LEASE_VERSION 1
-#define OK_NATIVE_CONSOLE_CONTROL_VERSION 1
+#define OK_NATIVE_CONSOLE_CONTROL_VERSION 2
+#define OK_NATIVE_TTY_VERSION 1
+#define OK_NATIVE_JOB_CONTROL_VERSION 1
 #define OK_TIOCSCTTY 0x540eU
 #define OK_TIOCGPGRP 0x540fU
 #define OK_TIOCSPGRP 0x5410U
@@ -202,7 +204,10 @@
 // Native only. Original PID 1 claims a new direct user child, returning a
 // positive bounded epoch. Revoke requires PID 1 and that expected epoch; flush
 // permits PID 1 or the active leader. Unused arguments must be zero. Input is
-// default-closed, never automatically echoed, and lost on revoke/leader death.
+// default-closed and lost on revoke/leader death. The console terminal starts in
+// the raw-compatible N_TTY default (ICRNL only, no echo, no ONLCR, byte at a
+// time) and is reset to it on claim, revoke and retirement; a getty sets
+// cooked mode with TCSETS (docs/modules/tty.md section 6).
 // A claim or flush with nonquiescent serial ingress fails closed with EIO.
 
 // Credential setters consume the low 32 bits of each ID argument. All-ones
@@ -216,8 +221,11 @@
 // PID arguments consume the low signed 32 bits on every architecture. Zero
 // selects the caller for getpgid/getsid/setpgid and the target PID for setpgid's
 // PGID. Fork inherits SID/PGID; successful exec and reparenting preserve them.
-// These operations establish process membership only. They do not acquire a
-// controlling terminal or provide PTYs, job control or group signal delivery.
+// A process's controlling terminal is derived from its session (the console or
+// a PTY slave, acquired by TIOCSCTTY or by opening /dev/pts/N without
+// OK_O_NOCTTY); setsid detaches it. Stop/continue, SIGTTIN/SIGTTOU, hangups and
+// orphaned-group SIGHUP/SIGCONT follow docs/modules/tty.md section 9; the
+// native numbers and wait options are in ok/uapi/job_control.h.
 
 #define OK_MFD_CLOEXEC 1U
 #define OK_MFD_ALLOW_SEALING 2U

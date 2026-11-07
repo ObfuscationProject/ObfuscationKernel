@@ -12,7 +12,9 @@ from pathlib import Path
 # 675 at the split (WT1.4); WT1.2 added emit_line() and its line state (13
 # lines), diagnostics output that is runtime.cpp's own responsibility. New
 # responsibilities go into units: WT1.2's interval timers and interrupt report.
-LIMITS = {"lines": 688, "includes": 1}
+# WT2.2 moved the session, console-control and group-signal marker checks into
+# the tty unit with the other SDK marker checks (17 lines).
+LIMITS = {"lines": 671, "includes": 1}
 UNITS = ("loader", "vm", "wait", "futex", "pipe", "pty", "tty", "net", "signals", "jobctl", "timers", "interrupts", "entry")
 ROOT = Path(__file__).resolve().parents[1]
 
