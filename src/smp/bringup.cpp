@@ -391,6 +391,9 @@ Status stop_secondary_cpu([[maybe_unused]] Kernel &kernel, [[maybe_unused]] CpuI
     const HotplugTurn turn;
     if (!turn)
         return Status::busy("another CPU hotplug request is running");
+    // The requester holds the kernel lock but only waits for another CPU
+    // (its user window, its park): overlap evidence must not count it.
+    const SpinningScope waiting;
     const u32 bit = u32{1} << cpu;
     if (state_of(cpu) != CpuState::online || (online_mask() & bit) == 0)
         return Status::invalid_argument("CPU is not online");
@@ -437,6 +440,10 @@ Status restart_secondary_cpu([[maybe_unused]] Kernel &kernel, [[maybe_unused]] C
     const HotplugTurn turn;
     if (!turn)
         return Status::busy("another CPU hotplug request is running");
+    // The requester holds the kernel lock but only waits for another CPU
+    // (the start and its clock handshake, its first IPI): overlap evidence
+    // must not count it.
+    const SpinningScope waiting;
     const u32 bit = u32{1} << cpu;
     auto &record = cpu_record(cpu);
     if ((online_mask() & bit) != 0 || state_of(cpu) != CpuState::offline || record.stack_top == 0 ||
