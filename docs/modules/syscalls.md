@@ -31,6 +31,10 @@ Implemented baseline syscall groups:
   `exit`, `exit_group`, `umask`.
 - Kernel debug: `ok_debug`.
 
+Terminal ioctls, `/dev/ptmx` and `/dev/pts` opens, `OK_O_NOCTTY`, job-control
+waits and native SIG_DFL/SIG_IGN dispositions (UAPI 0.17, `ok/uapi/termios.h`
+and `ok/uapi/job_control.h`) are described in the [terminal contract](tty.md).
+
 The number table reserves common POSIX/Linux-compatible syscall IDs to make the
 future user ABI predictable. File-oriented syscalls currently route into
 `ok::posix::PosixService`, which is backed by the RAM VFS.

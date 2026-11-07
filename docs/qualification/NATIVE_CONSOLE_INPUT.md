@@ -1,11 +1,12 @@
 # Native console input lease
 
 The SDK capability is
-`native_console_input_profile=pid1-issued-epoch-fork-exec-leader-revoke-noecho-v1`.
-Its fixed declarations are in `ok/sched/console_input_profile.hpp` and
-`ok/uapi/syscall.h`. This additive interface was introduced in UAPI 0.8.0.
-The current candidate UAPI is 0.15.0 and module ABI is 73. The scheduler and private PCB
-layout are built together inside the matching Kernel artifact.
+`native_console_input_profile=pid1-issued-epoch-fork-exec-leader-revoke-ntty-compat-default-v2`
+(`...-noecho-v1` before WT2.2). Its fixed declarations are in
+`ok/sched/console_input_profile.hpp` and `ok/uapi/syscall.h`. This additive
+interface was introduced in UAPI 0.8.0 and qualified at UAPI 0.15.0 and module
+ABI 73; WT2.2 carries it in UAPI 0.17.0. The scheduler and private PCB layout
+are built together inside the matching Kernel artifact.
 
 All ten Kernel profiles use the same native numbers. Unused arguments must be
 zero. These controls are unavailable through the Linux personality.
@@ -39,13 +40,18 @@ and PCB table compaction preserve old membership values without renewing them.
 An epoch cannot wrap: issuance stops at `0x3fffffff`, which fits every native
 word size. A new login needs a new child after revoke or failed issuance.
 
-The 256-byte queue drops input while closed or full. It never echoes bytes.
-Consumed cells and the entire queue at a close/flush are explicitly zeroed.
+Input is dropped while closed. Since WT2.2 the lease's former 256-byte queue
+is the console terminal's 4096-byte N_TTY line discipline under the
+raw-compatible default termios (ICRNL only, no echo, no ONLCR), which claim,
+revoke and retirement reset; under that default a byte arriving at a full
+buffer is dropped and counted, and bytes are echoed only after a caller sets
+ECHO with TCSETS (see the [terminal contract](../modules/tty.md)). Consumed
+cells and the entire buffer at a close/flush are explicitly zeroed.
 Claim, revoke and flush also drain the platform serial input callback, polling
 at most 1,024 times. A source that cannot become empty fails closed with
 `EIO`; a missing freestanding callback fails closed with `EOPNOTSUPP`. This is
-the serialized boot-CPU serial input mechanism. GUI keyboard dispatch, terminal
-line discipline and interrupt/SMP synchronization remain separate work. Explicit
+the serialized boot-CPU serial input mechanism. GUI keyboard dispatch and
+interrupt/SMP synchronization remain separate work. Explicit
 [controlling-console and foreground-group authority](NATIVE_CONSOLE_CONTROL.md)
 is a separate layer under this unchanged lease mechanism.
 

@@ -9,10 +9,14 @@ the boot CPU and uses canonical scheduler process groups.
 For a selector of zero, the sender's current process group is selected.
 A selector below minus one names the corresponding positive process group.
 The implementation widens before negation and rejects INT_MIN with ESRCH.
-Minus one remains unsupported and returns EOPNOTSUPP. Group calls admit only
-signal zero, TERM (15) and KILL (9). Invalid signal numbers return EINVAL;
-other valid group signals return EOPNOTSUPP. Positive-PID behavior remains
-under its existing native or Linux signal contract.
+Minus one remains unsupported and returns EOPNOTSUPP. In this slice group
+calls admitted only signal zero, TERM (15) and KILL (9), and other valid group
+signals returned EOPNOTSUPP. Since WT2.2 (group-signal profile v3) group calls
+accept every signal number, including stop and continue signals, with the
+default actions and same-session SIGCONT rule of the
+[terminal contract](../modules/tty.md). Invalid signal numbers return EINVAL.
+Positive-PID behavior remains under its existing native or Linux signal
+contract.
 
 Selection copies the sender's credentials, PID and PGID, then snapshots at
 most 64 recipient PIDs. It retains no borrowed process or thread pointer
@@ -34,14 +38,20 @@ heap allocation or runtime virtual interface.
 The exact `native_group_signal_profile` manifest field and profile header
 are mandatory in matching architecture/mode SDKs. Producer and consumer
 admission pin the bounded selectors, signal numbers, capacity and refusal
-flags, together with session profile v3. All ten native/Linux profiles and
+flags, together with session profile v3 (v4 since WT2.2). All ten
+native/Linux profiles and
 the four supplied musl profiles remain in scope.
 
-This slice supplies no broadcast, HUP, stop/continue, terminal-generated
+This slice supplied no broadcast, HUP, stop/continue, terminal-generated
 signals, same-session SIGCONT exception, PTY, interactive job control or SMP
 behavior. Bounded [controlling-console authority](NATIVE_CONSOLE_CONTROL.md)
-has its own capability; group-signal profile v2 acknowledges that association
-without broadening the supported delivery signals.
+has its own capability; group-signal profile v2 acknowledged that association
+without broadening the supported delivery signals. Since WT2.2 the profile is
+`native_group_signal_profile=bootcpu-signed32-current-negative-pgid-probe-all-signals-stop-continue-orphan-hupcont-same-session-cont-partial-v3`
+(version 3): stop/continue, terminal-generated signals, orphaned-group SIGHUP
+then SIGCONT, same-session SIGCONT, PTYs and job control are landed (hosted
+runtime evidence; guest lanes in the paired OS worktree `feat/getty-login`).
+Broadcast (`kill(-1)`) and SMP remain unsupported.
 Hosted selection/runtime checks, standalone Debug model points and actual
 native guest execution are separate evidence classes. Development sources
 or passing metadata checks alone do not qualify guest signal execution or

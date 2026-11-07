@@ -14,6 +14,9 @@ bookkeeping. The template directly invokes its concrete policy and then this
 shared mechanism, avoiding both a vtable call in task selection and duplicated
 storage code for each policy. These remain scheduling **models**: selecting a
 PID/TID does not restore CPU registers, change stacks, or switch address spaces.
+`SchedulerState` also owns the console and PTY terminals, the terminal
+namespace and the per-process stop/continue overlay; see the
+[terminal contract](tty.md).
 
 `SchedulingMode` currently records the requested scheduling model; it does not
 enable a hardware scheduling mechanism:

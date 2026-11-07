@@ -15,6 +15,14 @@ read/write, truncate, rename, hard links and sync delegate to the selected files
 Mounted nodes are not cast to `RamNode`. Unmount and user-facing mount syscalls
 are not implemented.
 
+The kernel `DeviceFileSystem`, which ObfuscationOS mounts at `/dev`, provides
+`null`, `zero` and `full` and the terminal nodes `tty`, `console`, `ptmx` and
+the `pts` directory (listed once `attach_terminals(vfs)` links it to the VFS
+terminal namespace). `Node::terminal_node()` identifies terminal nodes, which
+an open converts into terminal descriptions; device nodes report their own
+number through `Attribute::special_device`. See the
+[terminal contract](tty.md).
+
 Retained directory handles carry the mount identity as well as the node. This
 keeps separate mounts of one filesystem distinct when reconstructing cwd/dirfd
 paths, resolving `..` and rejecting cross-mount rename/link operations. Boot

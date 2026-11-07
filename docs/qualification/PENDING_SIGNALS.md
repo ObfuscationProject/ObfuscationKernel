@@ -53,7 +53,10 @@ MIPS signal numbers independently of packed wait status; this is not a claim of
 Linux packed-wait compatibility for signal128. The opt-in private exit path invokes this
 operation as described in [NATIVE_CHILD_EXIT_SIGNALS.md](NATIVE_CHILD_EXIT_SIGNALS.md).
 See [NATIVE_CHILD_SIGINFO.md](NATIVE_CHILD_SIGINFO.md) for wire encoding.
-Other fault, timer, stop/continue and queued-value variants remain unavailable.
+Since WT2.2 the same operation also admits CLD_STOPPED and CLD_CONTINUED, whose
+status is the stopping signal or SIGCONT (see the
+[terminal contract](../modules/tty.md)). Other fault, timer and queued-value
+variants remain unavailable.
 
 Signals 1 through 31 coalesce by signal number and preserve the first pending
 record. Signals 32 through the architecture maximum queue independently up

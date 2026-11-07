@@ -37,7 +37,12 @@ opt-in [maintained policy](../qualification/MAINTAINED_EXT4_TIMESTAMPS.md), qual
 event/fault, native/musl and Linux interoperability gates. RAM and archive-v1 have no
 epoch source and also leave times unavailable. Pipe and console records remain
 explicitly incomplete because they have no qualified identity providers in this
-slice. Existing native block accounting remains unchanged and is not thereby
+slice. Since WT2.2 a terminal description (the boot stdio console included)
+reports the device node it was opened from once the attached device filesystem
+is mounted, and device nodes carry their own number in `FileAttributes::special`
+(`Attribute::special_device`, Linux `st_rdev`); see the
+[terminal contract](tty.md). Existing native block accounting remains
+unchanged and is not thereby
 qualified as Linux `st_blocks`.
 
 The checked active realtime service and administrative software selection are
