@@ -150,7 +150,8 @@ Result<Fd> PosixService::openat_limited(Fd dirfd, std::string_view path, u32 fla
         const sched::TerminalOpenRequest request{
             .node = terminal, .flags = flags & ~(o_CLOEXEC | o_NOCTTY | o_CREAT | o_EXCL | o_TRUNC),
             .readable = is_readable(flags), .writable = is_writable(flags),
-            .no_controlling_terminal = (flags & o_NOCTTY) != 0, .euid = euid(), .egid = egid()};
+            .no_controlling_terminal = (flags & o_NOCTTY) != 0, .large_file = max_regular_size > 0x7fff'ffffu,
+            .euid = euid(), .egid = egid()};
         auto bound = scheduler_->open_terminal(getpid(), description.value(), request);
         if (!bound)
             return bound.status();
@@ -420,7 +421,8 @@ Result<DescriptorReadiness> PosixService::poll_description(u16 id, ReadyEvents r
     if (entry->input_console)
     {
         ready.console_input = true;
-        if (entry->console) ready.events = requested & ReadyEvents::writable; // An O_RDWR /dev/console.
+        // Like n_tty_poll, whatever the access mode: the console always has room.
+        ready.events = requested & ReadyEvents::writable;
         return ready;
     }
     if (entry->console)

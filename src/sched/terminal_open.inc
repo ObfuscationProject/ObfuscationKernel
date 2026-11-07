@@ -79,6 +79,7 @@ Result<TerminalOpenResult> SchedulerState::open_terminal(ProcessId pid, u16 id, 
     open->readable = request.readable;
     open->writable = request.writable;
     open->flags = request.flags;
+    open->large_file = request.large_file;
     open->terminal_origin = kind;
     // Linux tty_open_proc_set_tty: /dev/console, /dev/tty and masters never
     // acquire; a write-only open does not either. A failed precondition is

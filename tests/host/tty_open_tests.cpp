@@ -334,6 +334,12 @@ void acquisition_matrix(Fixture &f, u64 leader, u64 stranger, const Pty &owned, 
 // holds the console lease (TIOCSCTTY below proves it).
 void dev_console(Fixture &f, u64 leader, u64 root, fs::FilesystemDevice device)
 {
+    const auto writable = [&](i32 fd) {
+        constexpr auto out = posix::ReadyEvents::writable;
+        const auto linux = f.posix.poll_description<posix::ReadinessPolicy::linux>(f.id(fd), out);
+        const auto native = f.posix.poll_description<posix::ReadinessPolicy::native>(f.id(fd), out);
+        return linux && linux.value().events == out && native && native.value().events == out;
+    };
     f.use(leader);
     CHECK(f.open("/dev/console", o_RDWR) == -13); // 0600 root.
     f.use(root);
@@ -346,14 +352,19 @@ void dev_console(Fixture &f, u64 leader, u64 root, fs::FilesystemDevice device)
     CHECK(description.console && description.input_console && description.terminal_origin == Kind::console);
     CHECK(!description.pty_endpoint && !description.node && f.scheduler.console_terminal().session == before);
     CHECK(!f.ctty(root) && f.scheduler.console_terminal().console_epoch == epoch);
+    CHECK(writable(console));
     const std::array<std::byte, 2> text{std::byte{'o'}, std::byte{'k'}};
     CHECK(f.posix.write(console, text).value() == 2);
     const auto status = f.posix.fstat(console);
     CHECK(status && status_is(status.value(), {5, 1}, 1281, 0600, 0, 0, device));
     const auto writer = f.open("/dev/console", o_WRONLY);
     CHECK(writer >= 0 && f.description(static_cast<i32>(writer)).console &&
-          !f.description(static_cast<i32>(writer)).input_console);
+          !f.description(static_cast<i32>(writer)).input_console && writable(static_cast<i32>(writer)));
     f.close(static_cast<i32>(writer));
+    // Linux n_tty_poll ignores the access mode: a read-only console polls writable.
+    const auto reader = f.open("/dev/console", o_RDONLY);
+    CHECK(reader >= 0 && !f.description(static_cast<i32>(reader)).console && writable(static_cast<i32>(reader)));
+    f.close(static_cast<i32>(reader));
     // The positive control: the same caller acquires through TIOCSCTTY, and
     // /dev/tty then opens the console.
     i32 force = 0;
@@ -361,7 +372,7 @@ void dev_console(Fixture &f, u64 leader, u64 root, fs::FilesystemDevice device)
     CHECK(f.ctty(root) == sched::console_terminal_ref && f.scheduler.console_terminal().session == root);
     const auto tty = f.open("/dev/tty", o_RDONLY);
     CHECK(tty >= 0 && f.description(static_cast<i32>(tty)).terminal_origin == Kind::controlling);
-    CHECK(f.description(static_cast<i32>(tty)).input_console);
+    CHECK(f.description(static_cast<i32>(tty)).input_console && writable(static_cast<i32>(tty)));
     f.close(static_cast<i32>(tty));
     // The boot stdio reports the console node too.
     const auto stdout_status = f.posix.fstat(1);
@@ -434,6 +445,8 @@ void open_order(Fixture &f, u64 leader, u32 &rows)
         filler[filled++] = fd.value();
     }
     CHECK(f.open("/dev/ptmx", o_RDWR) == -24); ++rows; // EMFILE before ENOSPC.
+    // EMFILE before path errors (Linux get_unused_fd_flags before do_filp_open).
+    CHECK(f.open("/dev/pts/7", o_RDWR) == -24 && f.open("/nonexistent", o_RDONLY) == -24); ++rows;
     for (usize i = 0; i < filled; ++i) f.close(filler[i]);
     f.close(static_cast<i32>(ninth));
     for (usize i = 0; i < opened; ++i) f.close(masters[i]);
@@ -482,7 +495,18 @@ usize linux_profile(Fixture &f, u64 leader, const Pty &pty)
                                            Open::max_regular_size(request.value()));
     CHECK(fd);
     const auto &description = f.description(fd.value());
-    CHECK(!(description.flags & o_NOCTTY) && Open::status_flags(description) == 2);
+    // O_LARGEFILE as on a regular open: forced on 64-bit, sent by musl on 32-bit.
+    const u32 large = lu::Codec<P>::profile.word_bytes == 8 ? Open::largefile : 0u;
+    CHECK(!(description.flags & o_NOCTTY) && Open::status_flags(description) == (2u | large));
+    if constexpr (lu::Codec<P>::profile.word_bytes == 4)
+    {
+        const auto musl = Open::decode(2 | Open::largefile);
+        CHECK(musl);
+        const auto wide = f.posix.openat_limited(posix::at_FDCWD, "/dev/ptmx", musl.value().native_flags, 0,
+                                                 Open::max_regular_size(musl.value()));
+        CHECK(wide && Open::status_flags(f.description(wide.value())) == (2u | Open::largefile));
+        f.close(wide.value());
+    }
     const auto big = lu::Codec<P>::profile.big_endian;
     const auto word = [&](std::span<const u8> bytes, usize at, usize width) {
         u64 value = 0;
@@ -618,7 +642,7 @@ int main()
     working_directory(*f, leader);
     ownership(*f, leader, stranger, root, pty);
     master_close(*f, leader, pty, device.value());
-    CHECK(order == 10 && matrix == 5);
+    CHECK(order == 11 && matrix == 5);
     std::printf("TTY_OPEN_PASS checks=%zu profiles=%zu hosted=1 guest=0\n", checks, profiles);
     std::printf("order_rows=%u acquisition_rows=%u\n", order, matrix);
 }

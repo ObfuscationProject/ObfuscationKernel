@@ -12,6 +12,7 @@ struct TerminalOpenRequest
     fs::TerminalNode node{};
     u32 flags{};
     bool readable{}, writable{}, no_controlling_terminal{};
+    bool large_file{}; // Kept as on regular opens, so Linux F_GETFL reports O_LARGEFILE.
     u32 euid{}, egid{}; // Owner of a new /dev/pts entry.
 };
 
