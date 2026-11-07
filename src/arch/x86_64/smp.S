@@ -52,8 +52,21 @@ trampoline_long:
     xor %eax, %eax
     mov %ax, %fs
     mov %ax, %gs
-    mov ABS(trampoline_stack), %rsp
-    mov ABS(trampoline_cpu), %edi
+    // The block names one CPU at a time, and the boot CPU rewrites it for the
+    // next one after giving up on this one. Read the stack and CPU first and
+    // the APIC id (stored + 1, written before them) last: an id that is this
+    // CPU's own vouches for the two earlier reads, any other halts here.
+    mov ABS(trampoline_stack), %r8
+    mov ABS(trampoline_cpu), %r9
+    mov ABS(trampoline_apic_id), %r10
+    mov $1, %eax
+    cpuid
+    shr $24, %ebx
+    inc %rbx
+    cmp %r10, %rbx
+    jne 1f
+    mov %r8, %rsp
+    mov %r9d, %edi
     mov ABS(trampoline_entry), %rax
     xor %ebp, %ebp
     call *%rax
@@ -85,6 +98,8 @@ trampoline_cr3:
 trampoline_cr4:
     .quad 0
 trampoline_entry:
+    .quad 0
+trampoline_apic_id: // initial APIC id + 1; zero matches no CPU
     .quad 0
 trampoline_stack:
     .quad 0

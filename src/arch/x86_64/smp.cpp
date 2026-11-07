@@ -47,6 +47,7 @@ struct TrampolineParameters
     u64 cr3;
     u64 cr4;
     u64 entry;
+    u64 apic_id; // The started CPU's initial APIC id + 1, checked before stack and cpu are used.
     u64 stack;
     u64 cpu;
 };
@@ -179,9 +180,11 @@ enum SyncOp : u32
 
 // The boot CPU writes the first line, the starting CPU the second, so each
 // round moves one line each way. One channel per CPU: a CPU the boot CPU gave
-// up on can only write its own. The boot CPU posts a command only after the
-// previous one's answer and abandons the CPU on silence, so a command and its
-// argument are never rewritten while the CPU may still read them.
+// up on gets an INIT, and the trampoline halts one that reads another CPU's
+// parameters, so it can only write its own. The boot CPU posts a command only
+// after the previous one's answer and abandons the CPU on silence, so a
+// command and its argument are never rewritten while the CPU may still read
+// them.
 struct TscChannel
 {
     alignas(64) std::atomic<u32> open{}; // the boot CPU still talks to this CPU
@@ -571,6 +574,9 @@ Status start(ok::smp::CpuId cpu, u64 hardware_id, uptr, uptr stack_top)
     // CR4.PCIDE faults outside long mode; load_cpu sets it on the new CPU.
     parameters.cr4 = cr4 & ~(uptr{1} << 17);
     parameters.entry = reinterpret_cast<uptr>(&ok_x86_smp_secondary_entry);
+    // The id before the stack and cpu (the trampoline reads them in the
+    // opposite order); the copy above cleared it first as well.
+    parameters.apic_id = hardware_id + 1;
     parameters.stack = stack_top;
     parameters.cpu = cpu;
     auto &channel = tsc_channels[cpu];
@@ -597,7 +603,15 @@ Status start(ok::smp::CpuId cpu, u64 hardware_id, uptr, uptr stack_top)
     // Fail closed: a CPU whose clock is not verified stays parked, and
     // bring-up marks it offline.
     if (synchronize_tsc(cpu) == tsc::Verdict::unsynced)
+    {
+        // Back to wait-for-SIPI before another start rewrites the page, so a
+        // CPU that is merely late does not run on into the kernel. Waiting for
+        // a STARTUP, it is as parked as park() leaves it.
+        send_icr(hardware_id, delivery_init_assert);
+        send_icr(hardware_id, delivery_init_deassert);
+        parked_cpus[cpu].store(true, std::memory_order_release);
         return Status::io_error("x86 secondary TSC was not synchronized");
+    }
     return Status::success();
 }
 

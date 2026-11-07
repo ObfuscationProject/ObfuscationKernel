@@ -549,7 +549,9 @@ extern "C" [[noreturn]] void ok_smp_secondary_main(ok::smp::CpuId cpu)
     auto &record = cpu_record(cpu);
     record.reported_id.store(static_cast<ok::uptr>(ok::arch::smp::current_hardware_id()), std::memory_order_release);
     // A CPU the boot CPU already gave up on stays out: it never serves threads
-    // and stays outside the online mask that IPIs and shootdowns cover.
+    // and stays outside the online mask that IPIs and shootdowns cover. (On
+    // x86_64 such a CPU also gets an INIT, and the trampoline halts one that
+    // reads another CPU's start parameters.)
 #if defined(__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1)
     auto starting = static_cast<ok::u8>(CpuState::starting);
     const bool admitted = record.state.compare_exchange_strong(starting, static_cast<ok::u8>(CpuState::online),
