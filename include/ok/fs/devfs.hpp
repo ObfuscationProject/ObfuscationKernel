@@ -86,6 +86,7 @@ class DeviceFileSystem final
         Status write(usize, std::span<const std::byte>) override { return Status::is_directory("device directory"); }
         Result<DirectoryListing> list(DirectoryReadIntent = DirectoryReadIntent::access) const override;
         const void *filesystem_identity() const override { return &owner_; }
+        Result<FixedString<96>> directory_path(const Node &root) const override;
         Node *lookup(std::string_view child) override;
         Status create(std::string_view, NodeType) override { return Status::permission("device directory is fixed"); }
         Status chmod(u32) override { return Status::permission("device directory is fixed"); }
@@ -105,6 +106,7 @@ class DeviceFileSystem final
         Status write(usize, std::span<const std::byte>) override { return Status::is_directory("pts directory"); }
         Result<DirectoryListing> list(DirectoryReadIntent = DirectoryReadIntent::access) const override;
         const void *filesystem_identity() const override { return &owner_; }
+        Result<FixedString<96>> directory_path(const Node &root) const override;
         Node *lookup(std::string_view child) override;
         Status create(std::string_view, NodeType) override { return Status::permission("pts directory is fixed"); }
         Status chmod(u32) override { return Status::permission("pts directory is fixed"); }

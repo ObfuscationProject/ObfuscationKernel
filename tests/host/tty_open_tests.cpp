@@ -3,7 +3,7 @@
 // attached at /dev (docs/modules/tty.md sections 2-4): /dev/ptmx, locked and
 // unlocked /dev/pts/N, O_NOCTTY, the automatic acquisition matrix, /dev/tty,
 // /dev/console, the errno order, ENOSPC with raw pairs, fstat and the Linux
-// st_rdev encoding of all ten profiles, pts chmod/chown and rollback.
+// st_rdev encoding of all ten profiles, pts chmod/chown, rollback and getcwd.
 // TIOCGPTN, TIOCSPTLCK and TIOCSCTTY go through the ioctl dispatch the syscall
 // entry uses.
 // Hosted model only; no syscall entry, guest or hardware claim.
@@ -534,6 +534,20 @@ usize linux_profile(Fixture &f, u64 leader, const Pty &pty)
     return 1;
 }
 
+// getcwd inside the device filesystem: /dev and its pts directory.
+void working_directory(Fixture &f, u64 leader)
+{
+    f.use(leader);
+    for (const std::string_view path : {"/dev/pts", "/dev"})
+    {
+        CHECK(f.posix.chdir(path));
+        const auto cwd = f.posix.current_directory();
+        CHECK(cwd && cwd.value() == path);
+    }
+    CHECK(f.posix.chdir("pts") && f.posix.current_directory().value() == "/dev/pts");
+    CHECK(f.posix.chdir("/"));
+}
+
 // chmod and chown of a pts entry by descriptor and by path.
 void ownership(Fixture &f, u64 leader, u64 stranger, u64 root, const Pty &pty)
 {
@@ -601,6 +615,7 @@ int main()
         linux_profile<lu::Profile::rv32>(*f, leader, pty) + linux_profile<lu::Profile::loongarch64>(*f, leader, pty) +
         linux_profile<lu::Profile::mips>(*f, leader, pty) + linux_profile<lu::Profile::mips64>(*f, leader, pty) +
         linux_profile<lu::Profile::ppc>(*f, leader, pty);
+    working_directory(*f, leader);
     ownership(*f, leader, stranger, root, pty);
     master_close(*f, leader, pty, device.value());
     CHECK(order == 10 && matrix == 5);

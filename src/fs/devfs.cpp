@@ -70,10 +70,11 @@ Metadata device_metadata(u64 inode, FilesystemDevice number, u32 mode, u32 uid, 
     result.attributes.mark(Attribute::special_device);
     return result;
 }
-Metadata directory_metadata(u64 inode)
+// Two links plus one for each subdirectory's "..", as on Linux.
+Metadata directory_metadata(u64 inode, u32 subdirectories)
 {
     Metadata result{.type = NodeType::directory, .size = 0, .mode = mode_for(NodeType::directory, 0755u), .uid = 0,
-                    .gid = 0, .link_count = 2, .block_size = metadata_block_size, .blocks = 0};
+                    .gid = 0, .link_count = 2 + subdirectories, .block_size = metadata_block_size, .blocks = 0};
     kernel_attributes(result.attributes, inode);
     return result;
 }
@@ -139,7 +140,7 @@ Status DeviceFileSystem::Device::write(usize, std::span<const std::byte>)
 
 Metadata DeviceFileSystem::Directory::metadata() const
 {
-    return directory_metadata(directory_inode);
+    return directory_metadata(directory_inode, 1); // pts.
 }
 
 Result<DirectoryListing> DeviceFileSystem::Directory::list(DirectoryReadIntent) const
@@ -158,6 +159,12 @@ Result<DirectoryListing> DeviceFileSystem::Directory::list(DirectoryReadIntent) 
     return result;
 }
 
+Result<FixedString<96>> DeviceFileSystem::Directory::directory_path(const Node &root) const
+{
+    if (&root != this) return Status::not_found("directory is outside this root");
+    return FixedString<96>{};
+}
+
 Node *DeviceFileSystem::Directory::lookup(std::string_view child)
 {
     for (auto &device : owner_.devices_)
@@ -168,7 +175,7 @@ Node *DeviceFileSystem::Directory::lookup(std::string_view child)
 
 Metadata DeviceFileSystem::PtsDirectory::metadata() const
 {
-    return directory_metadata(pts_directory_inode);
+    return directory_metadata(pts_directory_inode, 0);
 }
 
 Result<DirectoryListing> DeviceFileSystem::PtsDirectory::list(DirectoryReadIntent) const
@@ -183,6 +190,15 @@ Result<DirectoryListing> DeviceFileSystem::PtsDirectory::list(DirectoryReadInten
         entry.metadata = device.metadata();
     }
     return result;
+}
+
+Result<FixedString<96>> DeviceFileSystem::PtsDirectory::directory_path(const Node &root) const
+{
+    FixedString<96> path;
+    if (&root == this) return path;
+    if (&root != &owner_.root_) return Status::not_found("directory is outside this root");
+    if (auto status = path.assign("/pts"); !status) return status;
+    return path;
 }
 
 Node *DeviceFileSystem::PtsDirectory::lookup(std::string_view child)

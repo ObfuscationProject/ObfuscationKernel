@@ -75,6 +75,13 @@ usize root_nodes(fs::DeviceFileSystem &devfs)
     CHECK(pts.metadata.mode == (fs::mode_directory | 0755) && pts.metadata.attributes.inode == 2);
     CHECK(!pts.metadata.attributes.has(fs::Attribute::special_device));
     CHECK(devfs.root().lookup("pts") && devfs.root().lookup("pts")->lookup("..") == &devfs.root());
+    // Two links plus one per subdirectory (Linux shmem_mkdir), and paths for getcwd.
+    CHECK(devfs.root().metadata().link_count == 3 && pts.metadata.link_count == 2);
+    auto *pts_node = devfs.root().lookup("pts");
+    CHECK(devfs.root().directory_path(devfs.root()) && devfs.root().directory_path(devfs.root()).value().empty());
+    CHECK(pts_node->directory_path(devfs.root()) && pts_node->directory_path(devfs.root()).value().view() == "/pts");
+    CHECK(pts_node->directory_path(*pts_node) && pts_node->directory_path(*pts_node).value().empty());
+    CHECK(devfs.root().directory_path(*pts_node).status().code() == StatusCode::not_found);
     CHECK(!devfs.root().lookup("pty") && !devfs.root().lookup(""));
     return listing.value().count;
 }
@@ -180,6 +187,10 @@ bool mounted()
     CHECK(f->vfs.mount("/dev", f->devfs.root()));
     const auto listing = f->vfs.list("/dev");
     CHECK(listing && listing.value().count == 7);
+    CHECK(f->vfs.stat("/dev").value().link_count == 3 && f->vfs.stat("/dev/pts").value().link_count == 2);
+    const auto dev_path = f->vfs.directory_path(f->devfs.root());
+    const auto pts_path = f->vfs.directory_path(*f->devfs.root().lookup("pts"));
+    CHECK(dev_path && dev_path.value().view() == "/dev" && pts_path && pts_path.value().view() == "/dev/pts");
     const auto identity = f->vfs.filesystem_device(&f->devfs);
     CHECK(identity && f->vfs.filesystem_device(f->scheduler.terminal_namespace().provider()));
     const auto ptmx = f->vfs.stat("/dev/ptmx");
