@@ -362,8 +362,9 @@ template <LockRank Rank> class RankedSpinLock final
         locked_.clear(std::memory_order_release);
     }
 
-    // try_lock cannot deadlock, so it skips the order check; a hold it takes
-    // is still recorded.
+    // try_lock cannot deadlock, but a hold it takes out of rank order breaks
+    // the order other paths rely on, so a successful one is order checked
+    // and recorded. A try on a lock this CPU owns fails without a report.
     [[nodiscard]] bool try_lock() noexcept
     {
         if (locked_.test(std::memory_order_relaxed) || locked_.test_and_set(std::memory_order_acquire))
@@ -371,6 +372,7 @@ template <LockRank Rank> class RankedSpinLock final
         const auto cpu = current_cpu();
         owner_.store(owner_value(cpu), std::memory_order_relaxed);
 #if defined(OK_LOCK_DEBUG)
+        detail::lock_debug_check_order(this, Rank, cpu);
         detail::lock_debug_acquired(this, Rank, cpu);
 #endif
         return true;

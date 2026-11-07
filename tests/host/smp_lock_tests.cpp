@@ -3,6 +3,7 @@
 // Built twice: with OK_LOCK_DEBUG (the full suite) and without (release).
 #include "ok/arch/arch.hpp"
 #include "ok/smp/cpu.hpp"
+#include "ok/smp/kernel_lock.hpp"
 #include "ok/smp/lock.hpp"
 #include "ok/smp/smp.hpp"
 
@@ -186,6 +187,187 @@ void check_hosted_cpu()
     expect(acquired.load(), "waiter never acquired the released lock");
 }
 
+// The big kernel lock helpers keep this CPU's mode bits and accounting: an
+// acquisition, a contended one (the waiter spins with SPINNING set) and a
+// completed stretch per release.
+void check_bkl_accounting()
+{
+    auto &self = smp::bkl_cpus[0];
+    const auto acquired = self.acquired.load(), contended = self.contended.load(), done = self.done.load();
+    smp::bkl_lock();
+    expect(smp::kernel_lock.owned_by_current_cpu() && (smp::cpu_mode(0) & smp::cpu_mode_bkl_held) != 0,
+           "bkl_lock did not hold or mark BKL_HELD");
+    std::atomic<bool> trying{false}, acquired_by_one{false};
+    std::thread waiter([&] {
+        const smp::ScopedHostedCpu scoped(1);
+        expect(!smp::bkl_try_lock(), "bkl_try_lock took a held lock");
+        trying.store(true);
+        smp::bkl_lock();
+        acquired_by_one.store(true);
+        smp::bkl_unlock();
+    });
+    while (!trying.load())
+        std::this_thread::yield();
+    bool spinning_seen = false;
+    for (int spin = 0; spin < 1000000 && !spinning_seen; ++spin)
+    {
+        spinning_seen = (smp::cpu_mode(1) & smp::cpu_mode_spinning) != 0;
+        std::this_thread::yield();
+    }
+    expect(spinning_seen && !acquired_by_one.load(), "a CPU waiting for the kernel lock was not marked SPINNING");
+    expect(self.contended.load() == contended, "the holder counted contention");
+    smp::bkl_unlock();
+    waiter.join();
+    expect(acquired_by_one.load() && smp::cpu_mode(1) == 0 && smp::cpu_mode(0) == 0,
+           "mode bits left behind after release");
+    expect(self.acquired.load() == acquired + 1 && self.done.load() == done + 1, "holder accounting");
+    const auto &other = smp::bkl_cpus[1];
+    expect(other.acquired.load() >= 1 && other.contended.load() >= 1 && other.done.load() >= 1,
+           "waiter accounting");
+    {
+        smp::BklGuard guard;
+        expect(smp::kernel_lock.owned_by_current_cpu(), "BklGuard did not hold");
+    }
+    expect(!smp::kernel_lock.owned_by_current_cpu() && self.acquired.load() == acquired + 2 &&
+               self.done.load() == done + 2 && smp::cpu_mode(0) == 0,
+           "BklGuard accounting");
+    expect(smp::bkl_try_lock() && self.contended.load() == contended, "uncontended bkl_try_lock");
+    smp::bkl_unlock();
+    {
+        const smp::SpinningScope outer;
+        {
+            const smp::SpinningScope inner;
+        }
+        expect((smp::cpu_mode(0) & smp::cpu_mode_spinning) != 0, "a nested SpinningScope cleared the outer bit");
+    }
+    expect(smp::cpu_mode(0) == 0, "SpinningScope left SPINNING set");
+}
+
+// A gate that is not a RankedSpinLock: an owner word (CPU + 1) under an
+// unranked lock, a busy result on reentry from the owning CPU, and a wait
+// outside that lock with the CPU marked SPINNING. It records its hold at the
+// fs_provider rank through the public lock-debug helpers.
+class ModelGate
+{
+  public:
+    // False: this CPU already owns the gate (reentry); nothing is taken.
+    bool enter()
+    {
+        const auto self = static_cast<u32>(smp::current_cpu()) + 1;
+        {
+            // Only this CPU sets or clears its own ownership.
+            smp::ScopedSpinLock guard(lock_);
+            if (owner_ == self)
+                return false;
+        }
+        smp::lock_debug_may_wait(this, smp::LockRank::fs_provider);
+        for (bool counted = false;;)
+        {
+            {
+                smp::ScopedSpinLock guard(lock_);
+                if (owner_ == self)
+                    return false;
+                if (owner_ == 0)
+                {
+                    owner_ = self;
+                    break;
+                }
+            }
+            if (!counted)
+            {
+                counted = true;
+                waits.fetch_add(1);
+            }
+            const smp::SpinningScope spinning;
+            while (busy())
+                arch::ArchOperations::spin_pause();
+        }
+        smp::lock_debug_hold(this, smp::LockRank::fs_provider);
+        return true;
+    }
+    void leave()
+    {
+        smp::lock_debug_release(this, smp::LockRank::fs_provider);
+        smp::ScopedSpinLock guard(lock_);
+        owner_ = 0;
+    }
+    bool busy()
+    {
+        smp::ScopedSpinLock guard(lock_);
+        return owner_ != 0;
+    }
+    std::atomic<int> waits{0};
+
+  private:
+    smp::SpinLock lock_;
+    u32 owner_{0};
+};
+
+// Two hosted CPUs through the gate: one owner at a time, reentry refused on
+// the owning CPU only, every increment kept, and a CPU that waited was seen
+// SPINNING by the other.
+void check_gate_two_cpus()
+{
+    ModelGate gate;
+    long counter = 0;
+    std::atomic<int> inside{0};
+    std::atomic<bool> overlap{false}, reentry{false};
+    constexpr int rounds = 20000;
+    std::vector<std::thread> threads;
+    for (int cpu = 0; cpu < 2; ++cpu)
+        threads.emplace_back([&, cpu] {
+            const smp::ScopedHostedCpu scoped(static_cast<smp::CpuId>(4 + cpu));
+            for (int round = 0; round < rounds; ++round)
+            {
+                if (!gate.enter())
+                    reentry.store(true);
+                if (inside.fetch_add(1) != 0)
+                    overlap.store(true);
+                if (gate.enter())
+                    reentry.store(true); // Reentry must be refused.
+                ++counter;
+                inside.fetch_sub(1);
+                gate.leave();
+            }
+        });
+    for (auto &thread : threads)
+        thread.join();
+    expect(!overlap.load() && counter == 2L * rounds, "the gate let two CPUs in");
+    expect(!reentry.load(), "the gate refused a free entry or admitted reentry");
+    expect(!gate.busy() && smp::cpu_mode(4) == 0 && smp::cpu_mode(5) == 0, "the gate or a mode bit was left held");
+    expect(smp::lock_debug_depth(4) == 0 && smp::lock_debug_depth(5) == 0, "the gate left a recorded hold");
+    // Deterministic wait: CPU 6 owns the gate while CPU 7 asks for it.
+    const auto waits = gate.waits.load();
+    std::atomic<bool> held{false}, release{false}, entered{false};
+    std::thread owner([&] {
+        const smp::ScopedHostedCpu scoped(6);
+        expect(gate.enter(), "owner entry");
+        held.store(true);
+        while (!release.load())
+            std::this_thread::yield();
+        gate.leave();
+    });
+    while (!held.load())
+        std::this_thread::yield();
+    std::thread waiter([&] {
+        const smp::ScopedHostedCpu scoped(7);
+        expect(gate.enter(), "waiter entry");
+        entered.store(true);
+        gate.leave();
+    });
+    bool seen = false;
+    for (int spin = 0; spin < 1000000 && !seen; ++spin)
+    {
+        seen = (smp::cpu_mode(7) & smp::cpu_mode_spinning) != 0;
+        std::this_thread::yield();
+    }
+    expect(seen && !entered.load(), "a CPU waiting for the gate was not marked SPINNING or got in");
+    release.store(true);
+    owner.join();
+    waiter.join();
+    expect(entered.load() && gate.waits.load() == waits + 1 && smp::cpu_mode(7) == 0, "gate waiter accounting");
+}
+
 #if defined(OK_LOCK_DEBUG)
 
 struct Reports
@@ -274,6 +456,10 @@ void check_order_violation()
         scheduler.lock();
         console.lock();
         expect(run_queue.try_lock(), "try_lock under a higher rank failed");
+        expect(reported(smp::LockViolationKind::order, smp::LockRank::console, smp::LockRank::run_queue, &run_queue,
+                        0),
+               "try_lock below a held rank not reported");
+        reset_reports();
         WaitQueueLock wait;
         wait.lock();
         expect(reported(smp::LockViolationKind::order, smp::LockRank::console, smp::LockRank::wait_queue, &wait, 0),
@@ -354,34 +540,93 @@ void check_lifo_violation()
     });
 }
 
-void check_try_lock_exemption()
+void check_try_lock_order()
 {
     on_cpu(0, [] {
         SchedulerLock scheduler;
         RunQueueLock run_queue;
+        expect(scheduler.try_lock() && run_queue.try_lock() && reports.count == 0, "ordered try_lock reported");
+        run_queue.unlock();
+        scheduler.unlock();
         run_queue.lock();
+        // It takes the free lock and records the hold, and reports the order.
         expect(scheduler.try_lock(), "try_lock below a held rank failed");
-        expect(reports.count == 0, "try_lock was order checked");
+        expect(reported(smp::LockViolationKind::order, smp::LockRank::run_queue, smp::LockRank::scheduler,
+                        &scheduler, 0),
+               "try_lock below a held rank not reported");
         expect(record(0).depth == 2 && record(0).locks[1] == &scheduler, "try_lock hold not recorded");
-        expect(!scheduler.try_lock() && reports.count == 0, "try_lock of an own lock was reported or succeeded");
+        expect(!scheduler.try_lock() && reports.count == 1, "try_lock of an own lock was reported or succeeded");
         scheduler.unlock();
         run_queue.unlock();
-        expect(reports.count == 0, "release after try_lock reported");
+        expect(reports.count == 1, "release after try_lock reported");
+        // A failed try takes no hold and reports nothing.
+        reset_reports();
+        run_queue.lock();
+        std::thread holder([&] {
+            const smp::ScopedHostedCpu scoped(1);
+            scheduler.lock();
+        });
+        holder.join();
+        expect(!scheduler.try_lock() && reports.count == 0 && record(0).depth == 1,
+               "a failed try_lock reported or recorded");
+        run_queue.unlock();
+        std::thread releaser([&] {
+            const smp::ScopedHostedCpu scoped(1);
+            scheduler.unlock();
+        });
+        releaser.join();
     });
 }
 
 void check_nesting_overflow()
 {
     on_cpu(1, [] {
-        std::array<smp::RankedSpinLock<smp::LockRank::leaf>, smp::lock_debug_capacity + 1> locks;
-        for (auto &lock : locks)
-            expect(lock.try_lock(), "nesting try_lock failed");
-        expect(reports.count == 1 && reports.last.kind == smp::LockViolationKind::nesting &&
-                   reports.last.lock == &locks.back(),
+        // Nine holds in strictly increasing rank, one past the record.
+        static_assert(smp::lock_debug_capacity + 1 == 9);
+        smp::RankedSpinLock<smp::LockRank::big_kernel> l0;
+        smp::RankedSpinLock<smp::LockRank::ofd_position> l1;
+        smp::RankedSpinLock<smp::LockRank::fs_provider> l2;
+        SchedulerLock l3;
+        RunQueueLock l4;
+        WaitQueueLock l5;
+        smp::RankedSpinLock<smp::LockRank::ipi> l6;
+        smp::RankedSpinLock<smp::LockRank::tlb> l7;
+        smp::RankedSpinLock<smp::LockRank::arch_spaces> l8;
+        l0.lock(); l1.lock(); l2.lock(); l3.lock(); l4.lock(); l5.lock(); l6.lock(); l7.lock();
+        expect(reports.count == 0 && record(1).depth == smp::lock_debug_capacity, "ordered holds reported");
+        l8.lock();
+        expect(reports.count == 1 && reports.last.kind == smp::LockViolationKind::nesting && reports.last.lock == &l8,
                "nesting overflow not reported");
-        for (auto it = locks.rbegin(); it != locks.rend(); ++it)
-            it->unlock();
+        l8.unlock(); l7.unlock(); l6.unlock(); l5.unlock(); l4.unlock(); l3.unlock(); l2.unlock(); l1.unlock();
+        l0.unlock();
         expect(reports.count == 1, "release after overflow reported");
+    });
+}
+
+void check_gate_order()
+{
+    on_cpu(2, [] {
+        ModelGate gate;
+        smp::RankedSpinLock<smp::LockRank::big_kernel> big;
+        smp::RankedSpinLock<smp::LockRank::ofd_position> ofd;
+        smp::RankedSpinLock<smp::LockRank::console> console;
+        big.lock();
+        ofd.lock();
+        expect(gate.enter() && reports.count == 0 && smp::lock_debug_depth(2) == 3, "gate hold not recorded in order");
+        expect(!gate.enter() && reports.count == 0 && smp::lock_debug_depth(2) == 3,
+               "gate reentry was not refused quietly");
+        console.lock();
+        console.unlock();
+        gate.leave();
+        ofd.unlock();
+        expect(reports.count == 0 && smp::lock_debug_depth(2) == 1, "gate release reported or kept the hold");
+        console.lock();
+        expect(gate.enter(), "gate refused a free entry");
+        expect(reported(smp::LockViolationKind::order, smp::LockRank::console, smp::LockRank::fs_provider, &gate, 2),
+               "gate below a held rank not reported");
+        gate.leave();
+        console.unlock();
+        big.unlock();
     });
 }
 
@@ -406,8 +651,9 @@ void run_debug_checks()
     check_self_deadlock();
     check_unlock_not_owner();
     check_lifo_violation();
-    check_try_lock_exemption();
+    check_try_lock_order();
     check_nesting_overflow();
+    check_gate_order();
     check_null_handler_counts();
     smp::lock_violation_handler = nullptr;
 }
@@ -447,6 +693,8 @@ int main()
     check_hosted_cpu();
     check_guards();
     check_contention();
+    check_bkl_accounting();
+    check_gate_two_cpus();
 #if defined(OK_LOCK_DEBUG)
     run_debug_checks();
     std::printf("OK_SMP_LOCKS scope=model mode=debug checks=%d cpus=%d rounds=%d\n", checks, contention_threads,
