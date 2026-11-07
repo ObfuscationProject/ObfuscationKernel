@@ -168,6 +168,13 @@ class PosixService final
     }
     [[nodiscard]] sched::ProcessId getpid() const;
     [[nodiscard]] sched::ThreadId gettid() const;
+    // Kernel sections (ok/smp/kernel_section.hpp): the caller a section on
+    // `cpu` acts for, bound by that CPU under the kernel lock before the
+    // section starts and unbound by it before the section ends. While bound,
+    // getpid, gettid, user_credentials, resources() and thread_local_state()
+    // read it and never the scheduler, so the boot fallback is unreachable.
+    void bind_section_caller(smp::CpuId cpu, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread);
+    void unbind_section_caller(smp::CpuId cpu);
     [[nodiscard]] sched::ProcessId getppid() const;
     Result<sched::ProcessId> getpgid(i32 pid = 0) const;
     Result<sched::ProcessId> getsid(i32 pid = 0) const;
@@ -252,6 +259,12 @@ class PosixService final
     Result<Fd> duplicate(Fd fd, Fd minimum = 0, u32 flags = 0);
     Result<Fd> duplicate_to(Fd fd, Fd target, u32 flags = 0);
     Result<usize> read(Fd fd, std::span<std::byte> out);
+    // A read(2) of a node-backed file staged in several calls holds the
+    // description's position lock (null for any other descriptor) across all
+    // of them and reads with read_held, which neither takes nor drops it, so
+    // it returns one contiguous range of the file.
+    [[nodiscard]] sched::DescriptionPositionLock *node_position_lock(Fd fd);
+    Result<usize> read_held(Fd fd, std::span<std::byte> out);
     Result<usize> write(Fd fd, std::span<const std::byte> in);
     Status fsync(Fd fd);
     Status sync_persistent(Fd fd);
@@ -345,7 +358,10 @@ class PosixService final
     }
     void set_monotonic_time(u64 nanoseconds, u64 resolution)
     {
-        monotonic_ticks_ = nanoseconds;
+        // Steps on different CPUs publish here; an older reading never
+        // moves the clock back.
+        if (nanoseconds > monotonic_ticks_)
+            monotonic_ticks_ = nanoseconds;
         clock_resolution_ = resolution;
     }
     [[nodiscard]] u32 umask(u32 mask);
@@ -362,6 +378,18 @@ class PosixService final
     [[nodiscard]] Result<Fd> allocate_fd(Fd minimum = 0);
     [[nodiscard]] Result<fs::ResolveContext> path_context(Fd dirfd, std::string_view path);
     [[nodiscard]] Status copy_descriptor(Fd source, Fd target, u32 flags);
+    [[nodiscard]] static bool node_backed(const FileDescriptor &entry);
+    // Reads at the description's offset and moves it; the caller holds its position lock.
+    Result<usize> read_node(FileDescriptor &entry, std::span<std::byte> out);
+    struct SectionCaller
+    {
+        sched::ProcessControlBlock *process{};
+        sched::ThreadControlBlock *thread{};
+    };
+    // This CPU's bound section caller, or null.
+    [[nodiscard]] const SectionCaller *section_caller() const;
+    // The boot resources stand in for a missing caller (A10 checks why).
+    void boot_fallback(const char *site) const;
 
     fs::VirtualFileSystem *vfs_{nullptr};
     driver::ConsoleDriver *console_{nullptr};
@@ -373,6 +401,8 @@ class PosixService final
     u64 monotonic_ticks_{0};
     u64 clock_resolution_{1000000};
     driver::EntropySource *entropy_source_{nullptr};
+    // Each entry is written and read only by its own CPU.
+    std::array<SectionCaller, smp::max_cpus> section_callers_{};
 };
 
 template <DirectoryPolicy Policy, typename Consumer>
@@ -405,6 +435,8 @@ Result<usize> PosixService::enumerate_directory(Fd fd, Consumer &&consumer)
             return Status::io_error("directory provider exceeded listing capacity");
         return page;
     };
+    // The stream position is read and committed under the position lock.
+    const sched::DescriptionPositionGuard position(scheduler_->position_lock(description));
     usize page_start = description->offset > dots ? description->offset - dots : 0;
     auto listing = page_at(page_start);
     if (!listing) return listing.status();

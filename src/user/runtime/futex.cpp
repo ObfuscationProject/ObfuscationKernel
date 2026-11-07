@@ -1,5 +1,6 @@
 // Futex wait/wake/requeue/wake-op, shared futex keys and robust-list retirement.
 #include "private.hpp"
+#include "../futex_word.hpp"
 
 namespace ok::user::native
 {
@@ -162,6 +163,20 @@ Status cancel_futex(Kernel &kernel, memory::ObjectHandle object, std::string_vie
 #endif
     return Status::success();
 }
+Status prepare_cancel_futex(sched::ProcessId pid)
+{
+    // cancel_futex stops the runtime on an object it cannot resolve; exec
+    // finds that breach before it evicts sibling threads.
+    for (const auto &entry : futex_waits)
+        if (entry.pid == pid)
+            if (auto resolved = futex_objects.resolve(entry.object); !resolved)
+            {
+                runtime_failure = resolved.status();
+                started = false;
+                return resolved.status();
+            }
+    return Status::success();
+}
 Status cancel_futex(Kernel &kernel, sched::ProcessId pid)
 {
     for (const auto &entry : futex_waits)
@@ -209,10 +224,18 @@ Result<FutexWait::Key> resolve_futex_key(const sched::ProcessControlBlock &proce
 }
 
 i64 wake_futex(Kernel &kernel, sched::ProcessId pid, uptr address, FutexKeyDomain domain, u32 limit);
+// Resolves futex words of one address space to their backing frames.
+struct FutexUserWords
+{
+    const hw::AddressSpace &space;
+    Result<u32 *> operator()(uptr address, bool write) const { return hw::user_word(space, address, write); }
+};
 } // namespace
 struct RobustUserAccess
 {
-    static constexpr bool serialized_native_execution = true;
+    // load32 and compare_exchange32 are single atomic operations on the
+    // backing frame.
+    static constexpr bool indivisible_owner_update = true;
     Kernel &kernel;
     sched::ProcessControlBlock &process;
     static constexpr bool big_endian = lu::Codec<lu::configured_native_profile()>::profile.big_endian;
@@ -222,24 +245,18 @@ struct RobustUserAccess
         return hw::copy_from_user(process.resources().native_space, bytes.data(),
             static_cast<uptr>(address), bytes.size());
     }
+    Result<u32> load32(u64 address)
+    {
+        const auto pointer = static_cast<uptr>(address);
+        if (pointer % sizeof(u32)) return Status::fault("robust owner word is not aligned");
+        return futex_word_load(FutexUserWords{process.resources().native_space}, pointer, big_endian);
+    }
     Result<u32> compare_exchange32(u64 address, u32 expected, u32 desired)
     {
         const auto pointer = static_cast<uptr>(address);
-        auto &space = process.resources().native_space;
-        if (pointer % sizeof(u32) || !hw::user_range(space, pointer, sizeof(u32), true))
-            return Status::fault("robust owner word is not writable and aligned");
-        std::array<std::byte, 4> bytes{};
-        if (auto status = read(address, bytes); !status) return status;
-        u32 actual{};
-        for (usize i = 0; i < bytes.size(); ++i)
-            actual |= static_cast<u32>(bytes[i]) << (8 * (big_endian ? 3 - i : i));
-        if (actual != expected) return actual;
-        for (usize i = 0; i < bytes.size(); ++i)
-            bytes[i] = static_cast<std::byte>(desired >> (8 * (big_endian ? 3 - i : i)));
-        // Every native user is stopped at this CPU0 service boundary. Checked
-        // copy is indivisible relative to those users, not an SMP atomic CAS.
-        if (auto status = hw::copy_to_user(space, pointer, bytes.data(), bytes.size()); !status) return status;
-        return actual;
+        if (pointer % sizeof(u32)) return Status::fault("robust owner word is not writable and aligned");
+        return futex_word_compare_exchange(FutexUserWords{process.resources().native_space}, pointer,
+                                           expected, desired, big_endian);
     }
     void wake_one(u64 address)
     {
@@ -263,7 +280,6 @@ void clear_child_tid(Kernel &kernel, sched::ProcessControlBlock &process, sched:
 {
     if (process.resources().personality != Personality::linux)
         return;
-    const u32 zero = 0;
     const uptr address = tls.clear_tid_address;
     tls.clear_tid_address = 0;
     // Linux mm_release skips the store/wake for the last address-space user.
@@ -271,8 +287,16 @@ void clear_child_tid(Kernel &kernel, sched::ProcessControlBlock &process, sched:
     // requires a writable, aligned word, including when the store failed.
     if (peers && address)
     {
-        static_cast<void>(hw::copy_to_user(process.resources().native_space, address, &zero, sizeof(zero)));
-        if (address % sizeof(u32) == 0 && hw::user_range(process.resources().native_space, address, sizeof(u32), true))
+        auto &space = process.resources().native_space;
+        // An aligned TID word is cleared by one atomic store, like a user store.
+        if (address % sizeof(u32) == 0)
+            static_cast<void>(futex_word_store(FutexUserWords{space}, address, 0, RobustUserAccess::big_endian));
+        else
+        {
+            const u32 zero = 0;
+            static_cast<void>(hw::copy_to_user(space, address, &zero, sizeof(zero)));
+        }
+        if (address % sizeof(u32) == 0 && hw::user_range(space, address, sizeof(u32), true))
             static_cast<void>(wake_futex(kernel, process.pid(), address, FutexKeyDomain::anonymous_shared_operation, 1));
     }
 }
@@ -534,20 +558,13 @@ i64 futex_wake_operation(Kernel &kernel, sched::ProcessId pid, const FutexWakeOp
     // Reject an undefined arithmetic operation without reading or modifying
     // user memory. Linux compares only after the modification has succeeded.
     if (operation.operation > 4) return -38;
-    if (!hw::user_range(space, request.second_address, sizeof(u32), true)) return -14;
-    std::array<u8, sizeof(u32)> bytes{};
-    if (!hw::copy_from_user(space, bytes.data(), request.second_address, bytes.size())) return -14;
-    u32 previous{};
-    for (usize index = 0; index < bytes.size(); ++index)
-        previous |= static_cast<u32>(bytes[index]) << (8 * (request.big_endian ? 3 - index : index));
-    const auto modified = operation.modify(previous);
-    if (!modified) return error(modified.status());
-    for (usize index = 0; index < bytes.size(); ++index)
-        bytes[index] = static_cast<u8>(modified.value() >> (8 * (request.big_endian ? 3 - index : index)));
-    // There is no user/IRQ queue producer in this serialized boot-CPU span.
-    // SMP needs an atomic user-memory operation and futex queue locking.
-    if (!hw::copy_to_user(space, request.second_address, bytes.data(), bytes.size())) return -14;
-    const auto comparison = operation.compare(previous);
+    // One atomic read-modify-write of the backing frame, after copy-on-write
+    // resolved, so user atomics on other CPUs are neither lost nor torn. The
+    // kernel lock orders it and the wakes against every other futex call.
+    const auto previous = futex_word_wake_operation(FutexUserWords{space}, request.second_address,
+                                                    operation, request.big_endian);
+    if (!previous) return -14;
+    const auto comparison = operation.compare(previous.value());
     if (!comparison) return error(comparison.status());
     const auto limit = [](u32 value) { return std::bit_cast<i32>(value) <= 0 ? 1U : value; };
     const auto woke_first = wake_futex(kernel, pid, request.first_address, request.domain, limit(request.first_limit));
@@ -602,13 +619,13 @@ i64 futex_requeue(Kernel &kernel, sched::ProcessId pid, const FutexRequeueReques
     if (!destination) return error(destination.status());
     if (request.compare)
     {
-        std::array<u8, sizeof(u32)> bytes{};
-        if (!hw::copy_from_user(process->resources().native_space, bytes.data(), request.source_address, bytes.size()))
-            return -14;
-        u32 value{};
-        for (usize index = 0; index < bytes.size(); ++index)
-            value |= static_cast<u32>(bytes[index]) << (8 * (request.big_endian ? 3 - index : index));
-        if (value != request.expected) return -11;
+        // One atomic load. The kernel lock keeps the compare and the requeue
+        // indivisible against every other futex call; finer-grained locking
+        // must load with both queue locks held.
+        const auto value = futex_word_load(FutexUserWords{process->resources().native_space},
+                                           request.source_address, request.big_endian);
+        if (!value) return -14;
+        if (value.value() != request.expected) return -11;
     }
     auto selected = snapshot_futex_queue(kernel, source.value());
     if (!selected) return -5;
@@ -725,15 +742,14 @@ i64 futex(Kernel &kernel, sched::ProcessId pid, const FutexRequest &request, boo
         const u32 limit = static_cast<i32>(request.value) <= 0 ? 1 : request.value;
         return wake_futex(kernel, pid, request.address, request.domain, limit);
     }
-    // No user execution or IRQ queue producer can run in this serialized span.
-    // Do not generalize it to SMP without a lock and explicit memory ordering.
-    std::array<u8, 4> bytes{};
-    if (!hw::copy_from_user(process->resources().native_space, bytes.data(), request.address, bytes.size()))
+    // One atomic load. The kernel lock orders the load, compare and enqueue
+    // against every waker; finer-grained locking must hold the queue lock
+    // across all three or a wake between them is lost.
+    const auto value = futex_word_load(FutexUserWords{process->resources().native_space}, request.address,
+                                       request.big_endian);
+    if (!value)
         return -14;
-    u32 value = 0;
-    for (usize i = 0; i < bytes.size(); ++i)
-        value |= static_cast<u32>(bytes[i]) << (8 * (request.big_endian ? 3 - i : i));
-    if (value != request.value)
+    if (value.value() != request.value)
         return -11;
     if (request.timed)
     {

@@ -24,7 +24,7 @@ _start:
     cld
     mov $boot_pml4, %edi
     xor %eax, %eax
-    mov $3072, %ecx
+    mov $4096, %ecx
     rep stosl
 
     mov $boot_pd, %edi
@@ -45,6 +45,15 @@ _start:
     mov $boot_pd, %eax
     or $0x03, %eax
     mov %eax, boot_pdpt
+
+    // The 2 MiB holding the I/O APIC (0xfec00000) and the 2 MiB holding the
+    // xAPIC registers (0xfee00000), uncached (PCD|PWT). User spaces copy these
+    // supervisor entries, so traps on a user CR3 reach both.
+    movl $0xfec0009b, boot_pd_high + 502 * 8
+    movl $0xfee0009b, boot_pd_high + 503 * 8
+    mov $boot_pd_high, %eax
+    or $0x03, %eax
+    mov %eax, boot_pdpt + 3 * 8
 
     mov %cr4, %eax
     or $0x620, %eax
@@ -86,6 +95,19 @@ long_mode_entry:
     xor %eax, %eax
     rep stosb
 
+    // In kernel mode GS_BASE holds the running CPU's block; this is CPU 0's.
+    // Stand-alone probes linked without the execution backend have none.
+    .weak ok_x86_cpu_locals
+    movabs $ok_x86_cpu_locals, %rax
+    test %rax, %rax
+    jz .Lno_cpu_block
+    mov %rax, (%rax)
+    mov %rax, %rdx
+    shr $32, %rdx
+    mov $0xc0000101, %ecx
+    wrmsr
+.Lno_cpu_block:
+
     mov %esi, %edi
     mov %ebx, %esi
     xor %edx, %edx
@@ -113,6 +135,8 @@ boot_pml4:
 boot_pdpt:
     .skip 4096
 boot_pd:
+    .skip 4096
+boot_pd_high:
     .skip 4096
 .align 16
 .global ok_service_stack_lower

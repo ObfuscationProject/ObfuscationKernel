@@ -6,6 +6,7 @@
 #include "ok/fs/vfs.hpp"
 #include "ok/memory/kernel_entry_stack_pool.hpp"
 #include "ok/sched/resources.hpp"
+#include "ok/sched/run_queue.hpp"
 #include "ok/sched/unix_rights.hpp"
 #include "ok/sched/unix_pathname_sdk_profile.hpp"
 #include "ok/sched/descriptor_reservation.hpp"
@@ -15,6 +16,9 @@
 #include "ok/sched/console_input.hpp"
 #include "ok/sched/console_control.hpp"
 #include "ok/sched/wait_registration.hpp"
+#include "ok/smp/cpu.hpp"
+#include "ok/smp/kernel_section.hpp"
+#include "ok/smp/lock.hpp"
 #include "ok/smp/smp.hpp"
 #include "ok/user/user.hpp"
 
@@ -31,8 +35,6 @@ namespace ok::user::native { class SharedMemoryFiles; }
 namespace ok::sched
 {
 
-using ProcessId = u64;
-using ThreadId = u64;
 inline constexpr ProcessId user_init_pid = 1;
 // Common Linux-visible task namespace; zero is reserved for boot/service context.
 // Linux robust futex owner words reserve the upper two bits for state flags.
@@ -44,6 +46,8 @@ inline constexpr u8 scheduler_min_priority = 0;
 inline constexpr u8 scheduler_default_priority = 16;
 inline constexpr u8 scheduler_max_priority = 31;
 inline constexpr u16 cpu_affinity_any = 0xffffu;
+// Marks a thread that is neither on a CPU nor placed on a run queue.
+inline constexpr smp::CpuId no_cpu = 0xffff;
 
 struct PipeReadiness
 {
@@ -112,6 +116,11 @@ struct ThreadControlBlock
     u64 dispatch_count{0};
     u64 cpu_time_ticks{0};
     smp::CpuId last_cpu{0};
+    // The CPU executing this thread, mirrored by that CPU's current slot.
+    smp::CpuId on_cpu{no_cpu};
+    // The run queue holding this thread's single entry. Dispatch and exit drop
+    // the entry; one whose thread blocked meanwhile is discarded when popped.
+    smp::CpuId queued_cpu{no_cpu};
 };
 
 struct CpuSchedulingStats
@@ -371,6 +380,64 @@ class RoundRobinPolicy final
     Result<ProcessId> pick_next(std::span<const ProcessControlBlock> processes, ProcessId current, smp::CpuId cpu);
 };
 
+// A queue can hold every thread a process table admits. Lock types are a
+// build-time choice made here, not a runtime queue interface.
+using SchedulerRunQueue = CpuRunQueue<max_processes * max_threads_per_process, smp::SpinLock>;
+static_assert(RunQueue<SchedulerRunQueue>);
+
+// One open description's offset and flags across one offset-dependent I/O,
+// with the provider call that depends on them (ok/smp/lock.hpp rank
+// ofd_position). Taken in both modes: under the kernel lock and in a kernel
+// section (ok/smp/kernel_section.hpp). No path holds two of them.
+using DescriptionPositionLock = smp::RankedSpinLock<smp::LockRank::ofd_position>;
+
+// Holds a description's position lock for a scope; a null lock holds nothing.
+class DescriptionPositionGuard final
+{
+  public:
+    explicit DescriptionPositionGuard(DescriptionPositionLock *lock) noexcept : lock_(lock)
+    {
+        if (!lock_) return;
+        if (!smp::in_section())
+        {
+            lock_->lock();
+            return;
+        }
+        // A kernel section waits serving this CPU's interrupts: the holder
+        // may hold the kernel lock and wait for a device line routed here.
+        if (lock_->try_lock()) return;
+        if (lock_->owned_by_current_cpu())
+        {
+            // Re-entry on this CPU would spin forever, and every drainer of
+            // the process with it: report it and go on under the outer hold.
+            if constexpr (smp::lock_debug_enabled)
+                smp::lock_rank_violation({smp::LockViolationKind::self_deadlock, DescriptionPositionLock::rank,
+                                          DescriptionPositionLock::rank, lock_, smp::current_cpu()});
+            smp::detail::section_assert(&smp::SectionCpu::section_asserts, "section re-entered a position lock");
+            lock_ = nullptr;
+            return;
+        }
+        const smp::SpinningScope spinning;
+        while (!lock_->try_lock())
+        {
+            smp::serve_while_spinning();
+            arch::ArchOperations::spin_pause();
+        }
+    }
+    ~DescriptionPositionGuard() { release(); }
+    DescriptionPositionGuard(const DescriptionPositionGuard &) = delete;
+    DescriptionPositionGuard &operator=(const DescriptionPositionGuard &) = delete;
+    // Gives the lock up before the scope ends.
+    void release() noexcept
+    {
+        if (lock_) lock_->unlock();
+        lock_ = nullptr;
+    }
+
+  private:
+    DescriptionPositionLock *lock_;
+};
+
 // Nonvirtual shared storage/mechanisms keep each policy instantiation small.
 // Construction and dispatch are protected for use by BasicScheduler.
 class SchedulerState
@@ -406,6 +473,8 @@ class SchedulerState
         }
     Result<ThreadId> create_thread_prepared(ProcessId pid, arch::CpuContext initial_context, Prepare &&prepare)
     {
+        smp::check_exclusive("SchedulerState::create_thread_prepared");
+        smp::check_drained(pid, "SchedulerState::create_thread_prepared");
         if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
         auto *process = find(pid);
         if (process == nullptr)
@@ -443,7 +512,10 @@ class SchedulerState
             return status;
         created.state = ProcessState::runnable;
         if (retired)
+        {
+            forget_queued(pid, *retired);
             *retired = created;
+        }
         else if (auto status = process->threads().push_back(created); !status.ok())
             return status;
         if (process->state() == ProcessState::created || process->state() == ProcessState::blocked)
@@ -455,15 +527,15 @@ class SchedulerState
 
     // Serialized retirement only; caller drains external waits and releases
     // thread-owned resources first. Process/VM/FD ownership remains unchanged.
-    Result<usize> exit_thread(ProcessId pid, ThreadId tid, smp::CpuId cpu = 0);
+    Result<usize> exit_thread(ProcessId pid, ThreadId tid, smp::CpuId cpu = smp::current_cpu());
     Result<ProcessId> spawn(ScheduleRequest request);
     Status set_credentials(ProcessId pid, user::Credentials credentials);
     Status set_priority(ProcessId pid, u8 priority);
     Status set_cpu_affinity(ProcessId pid, u16 cpu_affinity_mask);
     Status set_cpu_accounting(ProcessId pid, ProcessCpuAccounting accounting);
     Status kill_process(ProcessId pid);
-    Status activate(ProcessId pid, smp::CpuId cpu = 0);
-    Status activate_thread(ProcessId pid, ThreadId tid, smp::CpuId cpu = 0);
+    Status activate(ProcessId pid, smp::CpuId cpu = smp::current_cpu());
+    Status activate_thread(ProcessId pid, ThreadId tid, smp::CpuId cpu = smp::current_cpu());
     Result<ProcessId> fork_process(ProcessId parent, bool publish = true);
     // Trusted serialized process mechanisms. Native and Linux syscall boundaries
     // authenticate the caller before entering these operations.
@@ -471,6 +543,9 @@ class SchedulerState
     [[nodiscard]] Result<ProcessId> session_id(ProcessId caller, i32 pid) const;
     Status set_process_group(ProcessId caller, i32 pid, i32 pgid);
     [[nodiscard]] Result<ProcessId> create_session(ProcessId caller);
+    // Every check replace_image makes before it changes anything, except the
+    // entry stack escrow: exec runs it before evicting sibling threads.
+    [[nodiscard]] Status preflight_replace_image(ProcessId pid, const arch::CpuContext &context) const;
     Status replace_image(ProcessId pid, arch::CpuContext context, const MemoryMap &memory);
     Status exit_process(ProcessId pid, i32 code);
     Status terminate_process(ProcessId pid, u8 signal);
@@ -494,6 +569,10 @@ class SchedulerState
     }
     [[nodiscard]] OpenFileDescription *open_description(u16 id);
     [[nodiscard]] const OpenFileDescription *open_description(u16 id) const;
+    // The position lock of a description in this table; null for any other.
+    [[nodiscard]] DescriptionPositionLock *position_lock(const OpenFileDescription *description);
+    // The process whose resources these are; 0 for the boot resources.
+    [[nodiscard]] ProcessId resources_owner(const ProcessResources &resources) const;
     // Rebinding is allowed only after every UDP description, including an
     // unpublished zero-reference reservation, has been retired.
     Status set_native_udp_service(net::NativeUdpService &service);
@@ -587,14 +666,52 @@ class SchedulerState
     void console_input(char value, WakeSource source = WakeSource::thread);
     // Trusted runtime ingress failure closes ownership before returning to userland.
     void abort_console_input();
+    // Clears every CPU slot and moves queue entries off CPUs beyond the count;
+    // the online set keeps only its configured CPUs.
     Status configure_cpus(usize cpu_count);
+    // CPU 0 stays online; every online CPU must be configured. Entries already
+    // queued on a CPU that goes offline stay there and are not stolen.
+    Status set_online_cpus(u32 mask);
+    // Hotplug: a configured secondary CPU leaves the online set and every
+    // entry queued on it moves to an online queue (stale ones are dropped),
+    // so no thread is lost or queued twice and nothing waits on it. Its
+    // current slot stays until that CPU vacates it itself.
+    Status offline_cpu(smp::CpuId cpu);
+    // A configured CPU joins the online set again; it starts with its empty queue.
+    Status online_cpu(smp::CpuId cpu);
+    [[nodiscard]] u32 online_cpus() const { return online_cpus_; }
+    // Per-CPU run queues are a mechanism; nothing enqueues implicitly, so a
+    // thread woken while still on its CPU must be enqueued again by whoever
+    // vacates that CPU (the native runtime enqueues every runnable thread that
+    // is off-CPU on each step). The
+    // caller serializes scheduler state, while each queue lock guards only its
+    // ring, so no path ever holds two queue locks.
+    // Succeeds without change when the thread is on a CPU or already queued.
+    Status enqueue_thread(ProcessId pid, ThreadId tid);
+    // Placement: the last CPU of a thread that has run, while it is online
+    // and allowed; otherwise the allowed online CPU with the shortest queue, lowest id on a
+    // tie; with no allowed CPU online, CPU 0, which is never offline. CPU 0
+    // runs the entry only if the affinity names no configured CPU; otherwise
+    // the entry waits there until a CPU it allows comes online and takes it.
+    [[nodiscard]] smp::CpuId select_cpu(const ProcessControlBlock &process, const ThreadControlBlock &thread) const;
+    // Pops this online CPU's queue, discarding stale entries and moving
+    // entries the affinity no longer allows. An empty queue steals the oldest
+    // eligible entry from the longest other online queue it can try-lock,
+    // trying shorter victims next. The caller marks the result with mark_on_cpu.
+    std::optional<ThreadRef> dequeue_thread(smp::CpuId cpu);
+    // Dispatches exactly this thread on an online, vacant CPU, like
+    // activate_thread, and refuses a thread running on another CPU.
+    Status mark_on_cpu(ProcessId pid, ThreadId tid, smp::CpuId cpu);
+    // Vacates the CPU; the thread returns to runnable unless it blocked or exited.
+    Status clear_on_cpu(ProcessId pid, ThreadId tid, smp::CpuId cpu);
+    [[nodiscard]] const SchedulerRunQueue &run_queue(smp::CpuId cpu) const { return run_queues_.get(cpu); }
     Status set_runnable(ProcessId pid);
     Status block_process(ProcessId pid);
 
+    // No-argument native services act for the thread of the calling CPU.
     [[nodiscard]] ProcessId current_pid() const
     {
-        // No-argument native services operate on the serialized boot CPU.
-        return current_pid_;
+        return current_pid(smp::current_cpu());
     }
     [[nodiscard]] ProcessId current_pid(smp::CpuId cpu) const;
     [[nodiscard]] ThreadId current_tid(smp::CpuId cpu) const;
@@ -611,10 +728,12 @@ class SchedulerState
     [[nodiscard]] const ProcessControlBlock *find(ProcessId pid) const;
     [[nodiscard]] std::span<ProcessControlBlock> processes()
     {
+        smp::check_exclusive("SchedulerState::processes");
         return {processes_.begin(), processes_.size()};
     }
     [[nodiscard]] std::span<const ProcessControlBlock> processes() const
     {
+        smp::check_exclusive("SchedulerState::processes");
         return {processes_.begin(), processes_.size()};
     }
     [[nodiscard]] CpuSchedulingStats cpu_stats(smp::CpuId cpu) const;
@@ -624,7 +743,21 @@ class SchedulerState
     [[nodiscard]] u8 process_usage_percent(ProcessId pid) const;
 
   private:
-    [[nodiscard]] bool thread_running_on_other_cpu(ThreadId tid, smp::CpuId cpu) const;
+    [[nodiscard]] static bool thread_running_on_other_cpu(const ThreadControlBlock &thread, smp::CpuId cpu)
+    {
+        return thread.on_cpu != no_cpu && thread.on_cpu != cpu;
+    }
+    [[nodiscard]] bool cpu_online(smp::CpuId cpu) const
+    {
+        return cpu < cpu_count_ && (online_cpus_ & (1u << cpu)) != 0;
+    }
+    // Drops the thread's queue entry, if any; storage moves never need this.
+    void forget_queued(ProcessId pid, ThreadControlBlock &thread);
+    void vacate_cpu_slot(usize cpu);
+    void occupy_cpu(smp::CpuId cpu, ProcessControlBlock &process, ThreadControlBlock &thread);
+    // The CPU 0 fallback of select_cpu admits a thread whose affinity names no configured CPU.
+    [[nodiscard]] bool affinity_admits(const ProcessControlBlock &process, smp::CpuId cpu) const;
+    [[nodiscard]] bool eligible_on(ThreadRef ref, smp::CpuId queue, smp::CpuId cpu) const;
     Result<ProcessId> create_process_with_pid(ProcessId pid, std::string_view name,
                                                arch::CpuContext initial_context);
     [[nodiscard]] Result<ThreadId> pick_next_thread(ProcessControlBlock &process, ThreadId current, smp::CpuId cpu);
@@ -688,6 +821,7 @@ class SchedulerState
     u64 next_unix_endpoint_generation_{1};
     std::array<PipeBuffer, max_process_pipes> pipes_{};
     std::array<OpenFileDescription, max_open_descriptions> descriptions_{};
+    std::array<DescriptionPositionLock, max_open_descriptions> positions_{};
     u64 next_unix_receive_token_{1}; // ABI58 diagnostic name; shared by UNIX receive, TCP accept and fd installation.
     usize active_unix_receives_{}; // Process compaction cannot move a prepared resource owner.
     usize active_descriptor_reservations_{};
@@ -708,6 +842,8 @@ class SchedulerState
     std::array<ProcessId, smp::max_cpus> current_by_cpu_{};
     std::array<ThreadId, smp::max_cpus> current_thread_by_cpu_{};
     std::array<CpuSchedulingStats, smp::max_cpus> cpu_stats_{};
+    u32 online_cpus_{1};
+    smp::PerCpu<SchedulerRunQueue> run_queues_{};
 };
 
 template <SchedulerPolicy Policy = RoundRobinPolicy> class BasicScheduler final : public SchedulerState

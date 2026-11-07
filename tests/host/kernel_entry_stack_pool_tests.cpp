@@ -86,7 +86,8 @@ void initialization_and_owner_checks()
     status(pool.release(bad, {1, 2}), StatusCode::invalid_argument, "invalid slot rejected");
     bad = handle; ++bad.generation;
     status(pool.release(bad, {1, 2}), StatusCode::not_found, "forged generation rejected");
-    status(pool.activate_entry(handle, {1, 2}, 1).status(), StatusCode::unsupported, "nonboot CPU rejected");
+    status(pool.activate_entry(handle, {1, 2}, ok::smp::max_cpus).status(), StatusCode::invalid_argument,
+           "out-of-range CPU rejected");
     status(pool.activate_entry(handle, {9, 2}, 0).status(), StatusCode::denied, "foreign activation denied");
     auto activated = pool.activate_entry(handle, {1, 2}, 0);
     check(activated.ok(), "activate owned lease");
@@ -100,6 +101,18 @@ void initialization_and_owner_checks()
           !view.contains(view.lower() - 1) && !view.contains(view.lower(), ~usize{0}), "capture range bounds checked");
     status(pool.release(handle, {1, 2}), StatusCode::busy, "active stack cannot be wiped");
     status(pool.activate_entry(handle, {1, 2}, 0).status(), StatusCode::busy, "nested activation denied");
+    status(pool.activate_entry(handle, {1, 2}, 1).status(), StatusCode::busy, "active lease cannot run on a second CPU");
+    {
+        auto second = pool.reserve({5, 6});
+        check(second.ok(), "reserve a second CPU's lease");
+        auto parallel = pool.activate_entry(second.value(), {5, 6}, 1);
+        check(parallel.ok() && pool.accounting().active_slots == 2, "two CPUs hold one active lease each");
+        check(pool.active_epoch(second.value(), {5, 6}, parallel.value()).ok(), "second CPU's view names its lease");
+        status(pool.deactivate_entry(second.value(), {5, 6}, 0), StatusCode::denied, "another CPU cannot deactivate it");
+        check(pool.deactivate_entry(second.value(), {5, 6}, 1).ok() && view.valid(),
+              "deactivating one CPU leaves the other active");
+        check(pool.release(second.value(), {5, 6}).ok(), "release the second CPU's lease");
+    }
     status(pool.deactivate_entry(handle, {1, 2}, 1), StatusCode::denied, "wrong CPU cannot deactivate");
     check(view.valid(), "failed foreign deactivation preserves live view");
     check(pool.deactivate_entry(handle, {1, 2}, 0).ok(), "deactivate legitimate owner");
@@ -118,8 +131,8 @@ void initialization_and_owner_checks()
     zero(std::span(backing).first(Pool::slot_stride), "release wipes full slot including canaries");
     const auto accounting = pool.accounting();
     check(accounting.leased_slots == 0 && accounting.active_slots == 0 && accounting.quarantined_slots == 0 &&
-          accounting.reservations == 2 && accounting.releases == 2 && accounting.activations == 2 &&
-          accounting.peak_slots == 1 && accounting.backing_bytes == Pool::arena_bytes,
+          accounting.reservations == 3 && accounting.releases == 3 && accounting.activations == 3 &&
+          accounting.peak_slots == 2 && accounting.backing_bytes == Pool::arena_bytes,
           "ownership and activation accounting remains exact");
 }
 

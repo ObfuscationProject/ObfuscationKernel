@@ -175,6 +175,17 @@ using Callback = Response (*)(void *context, const Request &request);
 
 inline constexpr usize direct_syscall_limit = 512;
 
+// The caller of the Table::dispatch in progress on each CPU, 0 outside one;
+// each entry is written by its own CPU. A user caller must never be served
+// from the boot resources (PosixService, A10).
+inline constinit std::array<sched::ProcessId, smp::max_cpus> dispatch_callers{};
+
+[[nodiscard]] inline sched::ProcessId dispatch_caller() noexcept
+{
+    const auto cpu = smp::current_cpu();
+    return cpu < dispatch_callers.size() ? dispatch_callers[cpu] : 0;
+}
+
 class Handler
 {
   public:

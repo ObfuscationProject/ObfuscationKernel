@@ -216,6 +216,21 @@ mips64_n64_private::Observation mips64_n64_private::observation(const UserFrame 
 mips64_n64_private::Facts mips64_n64_private::facts() noexcept
 { return private_n64_facts; }
 #endif
+#if (defined(OK_PRIVATE_MIPS_O32_ADMISSION) || defined(OK_PRIVATE_MIPS64_N64_ADMISSION)) !=                          \
+    defined(OK_ARCH_FRAME_BOUND_CAPTURE)
+#error "ok/arch/execution.hpp and this backend disagree on its frame-bound capture"
+#endif
+#ifdef OK_ARCH_FRAME_BOUND_CAPTURE
+void rebind_owned_capture(const UserFrame &from, const UserFrame &to) noexcept
+{
+#ifdef OK_PRIVATE_MIPS64_N64_ADMISSION
+    private_n64_backend.tracker.rebind(from, to);
+#endif
+#ifdef OK_PRIVATE_MIPS_O32_ADMISSION
+    private_signal_capture.rebind(from, to);
+#endif
+}
+#endif
 bool supported() noexcept
 {
     return true;
@@ -460,6 +475,14 @@ Status copy_to_user(const AddressSpace &space, uptr destination, const void *sou
         size -= count;
     }
     return Status::success();
+}
+Result<u32 *> user_word(const AddressSpace &space, uptr address, bool write)
+{
+    if (address % sizeof(u32))
+        return Status::invalid_argument("user word is misaligned");
+    if (!user_range(space, address, sizeof(u32), write))
+        return Status::fault("user word is not mapped with the requested access");
+    return reinterpret_cast<u32 *>(page_at(*lookup(space), address)->physical_address + (address & (page_size - 1)));
 }
 static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack_top)
 {

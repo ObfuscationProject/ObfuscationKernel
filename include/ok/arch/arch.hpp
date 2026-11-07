@@ -18,6 +18,10 @@ concept ArchitectureInstructions = requires {
     { T::enable_interrupts() } noexcept -> std::same_as<void>;
     { T::disable_interrupts() } noexcept -> std::same_as<void>;
     { T::halt() } noexcept -> std::same_as<void>;
+    { T::save_and_disable_interrupts() } noexcept -> std::same_as<uptr>;
+    { T::restore_interrupts(uptr{}) } noexcept -> std::same_as<void>;
+    { T::spin_pause() } noexcept -> std::same_as<void>;
+    { T::cpu_index() } noexcept -> std::same_as<u32>;
 };
 
 template <Architecture A, ArchitectureInstructions Instructions = detail::NativeInstructions<A>>
@@ -107,6 +111,24 @@ class ArchitectureOperations final
     void halt() noexcept
     {
         Instructions::halt();
+    }
+    // Returns the kernel's previous interrupt-enable state; restore re-enables
+    // only when that state had interrupts enabled.
+    [[nodiscard]] static uptr save_and_disable_interrupts() noexcept
+    {
+        return Instructions::save_and_disable_interrupts();
+    }
+    static void restore_interrupts(uptr saved) noexcept
+    {
+        Instructions::restore_interrupts(saved);
+    }
+    static void spin_pause() noexcept
+    {
+        Instructions::spin_pause();
+    }
+    [[nodiscard]] static u32 cpu_index() noexcept
+    {
+        return Instructions::cpu_index();
     }
 };
 

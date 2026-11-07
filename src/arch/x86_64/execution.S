@@ -8,6 +8,15 @@
 .set FRAME_FLAGS, 272
 .set FRAME_FP, 304
 
+// CpuLocal offsets (cpu_local.hpp), checked by execution.cpp. Kernel GS_BASE
+// is the running CPU's block.
+.set CPU_RESUME_RSP, 16
+.set CPU_USER_RSP, 24
+.set CPU_STACK_TOP, 32
+.set CPU_ACTIVE_FRAME, 40
+.set CPU_KERNEL_FS, 48
+.set CPU_KERNEL_FP, 64
+
 .macro PUSH_REGISTERS
     push %rax
     push %rbx
@@ -55,9 +64,9 @@ ok_x86_execution_enter:
     push %r13
     push %r14
     push %r15
-    mov %rsp, ok_x86_execution_resume_rsp(%rip)
-    mov %rdi, ok_x86_execution_active_frame(%rip)
-    fxsave64 ok_x86_execution_kernel_fp(%rip)
+    mov %rsp, %gs:CPU_RESUME_RSP
+    mov %rdi, %gs:CPU_ACTIVE_FRAME
+    fxsave64 %gs:CPU_KERNEL_FP
     fxrstor64 FRAME_FP(%rdi)
 
     mov $0x1b, %ax
@@ -84,6 +93,8 @@ ok_x86_execution_enter:
     mov 96(%rax), %rcx
     mov 104(%rax), %rbx
     mov 112(%rax), %rax
+    // IA32_KERNEL_GS_BASE holds the user GS base; exchange it for this CPU's.
+    swapgs
     iretq
 .size ok_x86_execution_enter, . - ok_x86_execution_enter
 
@@ -92,16 +103,17 @@ ok_x86_execution_enter:
 .global ok_x86_syscall_entry
 .type ok_x86_syscall_entry, @function
 ok_x86_syscall_entry:
-    mov %rsp, ok_x86_execution_user_rsp(%rip)
-    mov ok_x86_execution_stack_top(%rip), %rsp
+    swapgs
+    mov %rsp, %gs:CPU_USER_RSP
+    mov %gs:CPU_STACK_TOP, %rsp
     pushq $0x1b
-    pushq ok_x86_execution_user_rsp(%rip)
+    pushq %gs:CPU_USER_RSP
     push %r11
     pushq $0x23
     push %rcx
     pushq $0
     pushq $256
-    jmp ok_x86_trap_common
+    jmp ok_x86_trap_user
 .size ok_x86_syscall_entry, . - ok_x86_syscall_entry
 
 .macro TRAP_NO_ERROR vector
@@ -166,33 +178,55 @@ TRAP_NO_ERROR 44
 TRAP_NO_ERROR 45
 TRAP_NO_ERROR 46
 TRAP_NO_ERROR 47
+TRAP_NO_ERROR 48
+TRAP_NO_ERROR 49
+TRAP_NO_ERROR 50
+TRAP_NO_ERROR 51
+TRAP_NO_ERROR 52
+TRAP_NO_ERROR 53
+TRAP_NO_ERROR 54
+TRAP_NO_ERROR 55
+TRAP_NO_ERROR 56
+TRAP_NO_ERROR 57
+TRAP_NO_ERROR 58
+TRAP_NO_ERROR 59
+TRAP_NO_ERROR 60
+TRAP_NO_ERROR 61
+TRAP_NO_ERROR 62
+TRAP_NO_ERROR 63
+TRAP_NO_ERROR 239
+TRAP_NO_ERROR 240
 TRAP_NO_ERROR 255
 
+// Every vector without its own stub.
+.global ok_x86_trap_unexpected
+ok_x86_trap_unexpected:
+    pushq $0
+    pushq $512
+    jmp ok_x86_trap_common
+
 ok_x86_trap_common:
+    testb $3, 24(%rsp)
+    jz 1f
+    swapgs
+ok_x86_trap_user:
     cld
     PUSH_REGISTERS
     mov $0x10, %ax
     mov %ax, %ds
     mov %ax, %es
-    testb $3, 144(%rsp)
-    jz 1f
-    mov ok_x86_execution_active_frame(%rip), %rax
+    mov %gs:CPU_ACTIVE_FRAME, %rax
     fxsave64 FRAME_FP(%rax)
-    fxrstor64 ok_x86_execution_kernel_fp(%rip)
+    fxrstor64 %gs:CPU_KERNEL_FP
     mov $0xc0000100, %ecx
-    mov ok_x86_execution_kernel_fs(%rip), %rax
-    mov %rax, %rdx
-    shr $32, %rdx
-    wrmsr
-    mov $0xc0000101, %ecx
-    mov ok_x86_execution_kernel_gs(%rip), %rax
+    mov %gs:CPU_KERNEL_FS, %rax
     mov %rax, %rdx
     shr $32, %rdx
     wrmsr
     mov %rsp, %rdi
     and $-16, %rsp
     call ok_x86_execution_trap
-    mov ok_x86_execution_resume_rsp(%rip), %rsp
+    mov %gs:CPU_RESUME_RSP, %rsp
     pop %r15
     pop %r14
     pop %r13
@@ -204,6 +238,11 @@ ok_x86_trap_common:
 1:
     // Kernel IRQs can occur outside native execution; acknowledge them without
     // turning a kernel fault into a user-process fault or changing its stack.
+    cld
+    PUSH_REGISTERS
+    mov $0x10, %ax
+    mov %ax, %ds
+    mov %ax, %es
     mov %rsp, %rbx
     mov %rsp, %rdi
     and $-16, %rsp
@@ -220,7 +259,8 @@ ok_x86_trap_common:
 .align 8
 .global ok_x86_execution_vectors
 ok_x86_execution_vectors:
-.irp vector,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47
+// Exceptions 0..31 and the platform lines on vectors 32..63.
+.irp vector,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63
     .quad ok_x86_trap_\vector
 .endr
 .section .note.GNU-stack,"",@progbits

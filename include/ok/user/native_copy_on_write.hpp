@@ -128,7 +128,13 @@ Result<bool> resolve_owner_write(Processes &&processes, const arch::execution::A
     {
         const auto &live = process.resources().native_space;
         if (live.root == space.root && live.slot == space.slot && live.generation == space.generation)
+        {
+            // Rewrites the owner's page records and mapping: no kernel
+            // section of that process may still be pinned (A3).
+            if constexpr (requires { process.pid(); })
+                smp::check_drained(process.pid(), "copy-on-write resolution");
             return resolve_copy_on_write(process.resources().native_pages, space, address, pool);
+        }
     }
     return false;
 }

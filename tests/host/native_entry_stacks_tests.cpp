@@ -112,6 +112,58 @@ void corruption_after_exec_commit()
     CHECK(retire_entry_stack(f.pool,p->threads()[0]));
     CHECK(f.pool.accounting().leased_slots==1);
 }
+void prepared_while_sibling_active()
+{
+    // Exec prepares while another CPU still runs a sibling on its lease.
+    Fixture f;const auto pid=f.process();const auto peer=f.peer(pid);f.prepare(pid);auto *p=f.scheduler->find(pid);
+    const auto leader=p->threads()[0].entry_stack,sibling=p->threads()[1].entry_stack;
+    const auto top=p->threads()[1].kernel_stack_top;
+    CHECK(f.pool.activate_entry(sibling,{pid,peer},1));
+    CHECK(f.pool.validate_active(sibling,{pid,peer},1) && !f.pool.validate_active(sibling,{pid,peer},0));
+    CHECK(!f.pool.validate_active(leader,{pid,pid},1));
+    const auto before=f.pool.accounting();
+    {
+        EntryStackPlan plan;CHECK(prepare_entry_stacks(f.pool,*p,plan) && plan.prepared());
+        CHECK(plan.leader().handle==leader && f.pool.accounting().reservations==before.reservations);
+        CHECK(p->threads()[1].entry_stack==sibling && p->threads()[1].kernel_stack_top==top);
+        // Committing before the sibling left its CPU is an invariant breach that changes nothing.
+        bool invoked=false;
+        auto refused=commit_entry_stacks(f.pool,*p,plan,[&]{invoked=true;return Status::success();},[]{return Status{};});
+        CHECK(!refused && !refused.committed && !invoked && p->threads()[1].entry_stack==sibling);
+    }
+    CHECK(f.pool.accounting().active_slots==1 && f.pool.accounting().leased_slots==2);
+    // After eviction the prepared plan commits and releases the sibling's lease.
+    EntryStackPlan plan;CHECK(prepare_entry_stacks(f.pool,*p,plan));
+    CHECK(f.pool.deactivate_entry(sibling,{pid,peer},1));
+    CHECK(commit_entry_stacks(f.pool,*p,plan,[&]{return f.scheduler->replace_image(pid,f.context,{});},[]{return Status{};}));
+    CHECK(p->threads().size()==1 && p->threads()[0].entry_stack==leader && !f.pool.top(sibling,{pid,peer}));
+    f.drain(pid);CHECK(f.pool.accounting().leased_slots==0);
+}
+void prepared_leader_reservation()
+{
+    // A leaderless group's new lease is the plan's until commit consumes it.
+    Fixture f;const auto pid=f.process();const auto peer=f.peer(pid);f.prepare(pid);auto *p=f.scheduler->find(pid);
+    CHECK(retire_entry_stack(f.pool,p->threads()[0]));CHECK(f.scheduler->exit_thread(pid,pid));
+    const auto before=f.pool.accounting();
+    {
+        EntryStackPlan plan;CHECK(prepare_entry_stacks(f.pool,*p,plan));
+        CHECK(plan.leader().handle.pool && !p->threads()[0].entry_stack.pool);
+        CHECK(f.pool.accounting().leased_slots==before.leased_slots+1);
+    }
+    CHECK(f.pool.accounting().leased_slots==before.leased_slots && f.pool.accounting().releases==before.releases+1);
+    // A thread group that changed after preparation is refused before escrow.
+    EntryStackPlan plan;CHECK(prepare_entry_stacks(f.pool,*p,plan));
+    const auto second=f.peer(pid);CHECK(prepare_entry_stack(f.pool,p->threads()[2]));
+    CHECK(!commit_entry_stacks(f.pool,*p,plan,[]{return Status::success();},[]{return Status{};}));
+    CHECK(p->threads()[2].entry_stack.pool && p->threads()[1].entry_stack.pool && !p->threads()[0].entry_stack.pool);
+    CHECK(plan.cancel());
+    CHECK(retire_entry_stack(f.pool,p->threads()[2]));CHECK(f.scheduler->exit_thread(pid,second));
+    CHECK(f.scheduler->activate_thread(pid,peer));
+    CHECK(prepare_entry_stacks(f.pool,*p,plan));
+    CHECK(commit_entry_stacks(f.pool,*p,plan,[&]{return f.scheduler->replace_image(pid,f.context,{});},[]{return Status{};}));
+    CHECK(p->threads().size()==1 && p->threads()[0].entry_stack.pool && validate_entry_stack(f.pool,p->threads()[0]));
+    f.drain(pid);CHECK(f.pool.accounting().leased_slots==0);
+}
 void process_compaction()
 {
     Fixture f;const auto a=f.process(),b=f.process();f.prepare(a);f.prepare(b);
@@ -123,6 +175,7 @@ void process_compaction()
 int main()
 {
     inactive_and_copy_boundaries();exec_failure_and_commit();retired_leader_exec();
-    no_memory_preserves_exec();corruption_after_exec_commit();process_compaction();
+    no_memory_preserves_exec();corruption_after_exec_commit();prepared_while_sibling_active();
+    prepared_leader_reservation();process_compaction();
     std::printf("PASS native entry stacks checks=%zu scope=hosted-model guest=0 smp=0\n",checks);
 }

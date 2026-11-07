@@ -1,4 +1,6 @@
 #include "ok/posix/posix.hpp"
+#include "ok/smp/kernel_section.hpp"
+#include "ok/syscall/syscall.hpp"
 namespace ok::posix
 {
 Status PosixService::initialize(fs::VirtualFileSystem &vfs, driver::ConsoleDriver &console, sched::Scheduler &scheduler)
@@ -15,11 +17,41 @@ Status PosixService::initialize(fs::VirtualFileSystem &vfs, driver::ConsoleDrive
 }
 sched::ProcessId PosixService::getpid() const
 {
+    if (const auto *caller = section_caller()) return caller->process->pid();
     return scheduler_ == nullptr ? 0 : scheduler_->current_pid();
 }
 sched::ThreadId PosixService::gettid() const
 {
-    return scheduler_ == nullptr ? 0 : scheduler_->current_tid(0);
+    if (const auto *caller = section_caller()) return caller->thread->tid;
+    return scheduler_ == nullptr ? 0 : scheduler_->current_tid(smp::current_cpu());
+}
+void PosixService::bind_section_caller(smp::CpuId cpu, sched::ProcessControlBlock &process,
+                                       sched::ThreadControlBlock &thread)
+{
+    // The pointers are taken under the kernel lock, by the section's own CPU.
+    smp::check_exclusive("PosixService::bind_section_caller");
+    if (cpu != smp::current_cpu())
+        smp::count_exclusive_violation("PosixService::bind_section_caller for another CPU");
+    if (cpu < section_callers_.size()) section_callers_[cpu] = {&process, &thread};
+}
+void PosixService::unbind_section_caller(smp::CpuId cpu)
+{
+    // Inside the section, before it ends: only this CPU reads its entry.
+    if (cpu < section_callers_.size()) section_callers_[cpu] = {};
+}
+const PosixService::SectionCaller *PosixService::section_caller() const
+{
+    const auto cpu = smp::current_cpu();
+    return cpu < section_callers_.size() && section_callers_[cpu].process ? &section_callers_[cpu] : nullptr;
+}
+void PosixService::boot_fallback([[maybe_unused]] const char *site) const
+{
+    // A10: a section, or a dispatch for a user caller once the runtime armed
+    // its checks, has a caller of its own that the boot state would replace.
+    if constexpr (smp::lock_debug_enabled)
+        if (smp::in_section() ||
+            (smp::exclusive_armed.load(std::memory_order_relaxed) && syscall::dispatch_caller() != 0))
+            smp::count_exclusive_violation(site);
 }
 sched::ProcessId PosixService::getppid() const
 {
@@ -48,30 +80,41 @@ Status PosixService::setpgid(i32 pid, i32 group)
 }
 sched::ProcessResources &PosixService::resources()
 {
+    if (const auto *caller = section_caller()) return caller->process->resources();
     if (scheduler_ == nullptr)
         return unbound_resources_;
     auto *process = scheduler_->find(getpid());
-    return process == nullptr ? scheduler_->boot_resources() : process->resources();
+    if (process != nullptr) return process->resources();
+    boot_fallback("PosixService::resources boot fallback");
+    return scheduler_->boot_resources();
 }
 const sched::ProcessResources &PosixService::resources() const
 {
+    if (const auto *caller = section_caller()) return caller->process->resources();
     if (scheduler_ == nullptr)
         return unbound_resources_;
     const auto *process = scheduler_->find(getpid());
-    return process == nullptr ? scheduler_->boot_resources() : process->resources();
+    if (process != nullptr) return process->resources();
+    boot_fallback("PosixService::resources boot fallback");
+    return scheduler_->boot_resources();
 }
 sched::ThreadLocalState &PosixService::thread_local_state()
 {
+    if (const auto *caller = section_caller()) return caller->thread->tls;
     auto *process = scheduler_ == nullptr ? nullptr : scheduler_->find(getpid());
     if (process == nullptr || process->threads().empty())
+    {
+        boot_fallback("PosixService::thread_local_state boot fallback");
         return boot_tls_;
+    }
     for (auto &thread : process->threads())
-        if (thread.tid == scheduler_->current_tid(0))
+        if (thread.tid == scheduler_->current_tid(smp::current_cpu()))
             return thread.tls;
     return process->threads()[0].tls;
 }
 user::Credentials PosixService::user_credentials() const
 {
+    if (const auto *caller = section_caller()) return caller->process->credentials();
     const auto *process = scheduler_ == nullptr ? nullptr : scheduler_->find(getpid());
     return process == nullptr ? boot_credentials_ : process->credentials();
 }

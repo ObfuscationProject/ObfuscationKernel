@@ -1,5 +1,6 @@
 // Native start/step loop, user entry and syscall dispatch.
 #include "private.hpp"
+#include "section.hpp"
 
 extern "C" ok::Status ok_boot_filesystem(ok::fs::VirtualFileSystem &) __attribute__((weak));
 extern "C" ok::Status ok_boot_entropy(ok::posix::PosixService &) __attribute__((weak));
@@ -12,16 +13,27 @@ namespace
 SharedNativeCapture<lu::configured_native_profile()> shared_capture{entry_stacks};
 } // namespace
 u64 entry_syscalls{}, entry_timers{}, entry_interrupts{}, entry_faults{}, entry_rejections{};
-bool runtime_idle{false};
 namespace
 {
 sched::ProcessId last_pid{};
 sched::ThreadId last_tid{};
+using Candidate = sched::ThreadRef;
+// Per CPU, the last thread picked because a signal interrupted its wait.
+constinit std::array<Candidate, smp::max_cpus> last_interrupted{};
+// With secondaries online, the threads one step() hands to run queues. Only
+// the kernel-lock holder fills and reads it, within one selection, so a single
+// static buffer serves every CPU and no step zeroes 8 KiB on its stack.
+constinit std::array<Candidate, sched::max_processes * sched::max_threads_per_process> runnable{};
 } // namespace
+void forget_cpu_cursor(smp::CpuId cpu)
+{
+    if (cpu < smp::max_cpus) last_interrupted[cpu] = {};
+}
 struct RuntimeStepGuard
 {
-    RuntimeStepGuard() { runtime_step_active = true; }
-    ~RuntimeStepGuard() { runtime_step_active = false; }
+    smp::CpuId cpu{smp::current_cpu()};
+    RuntimeStepGuard() { runtime_step_active[cpu] = true; }
+    ~RuntimeStepGuard() { runtime_step_active[cpu] = false; }
 };
 namespace
 {
@@ -288,8 +300,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
             return -14;
         return error(user::set_realtime_checked(
             {requested.seconds, requested.nanoseconds}, process->credentials(),
-            [] { return arch::monotonic_sample(); },
-            [](time::EpochTime value, time::MonotonicPoint point) { return arch::set_realtime(value, point); }));
+            [](time::EpochTime value) { return arch::set_realtime_now(value); }));
     }
     if (number == N::clock_gettime || number == N::clock_getres)
     {
@@ -515,6 +526,10 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
                 if (!hw::copy_from_user(space, data.data() + position, vectors[i].base, length)) return -14;
                 position += length;
             }
+        // A shared-file read takes the position, reads at it and advances it
+        // as one step; a write takes the lock inside PosixService::write.
+        sched::DescriptionPositionGuard shared_position(!writing && description->native_shared_file
+                                                     ? kernel.scheduler().position_lock(description) : nullptr);
         Result<usize> result = usize{0};
         if (writing && description->console)
         {
@@ -755,6 +770,23 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
     default:
         return -38;
     }
+    // Node-backed reads and writes and every fsync run the bodies kernel
+    // sections share (ok/user/linux_file_io.hpp); the builtin table handlers
+    // of these numbers call the same PosixService operations.
+    if (((number == N::read || number == N::write) && description && description->node &&
+         !description->native_shared_file && !description->console && !description->input_console &&
+         !description->pty_endpoint && description->pipe == sched::invalid_description) ||
+        number == N::fsync || number == N::fdatasync)
+    {
+        linux_file_io::ProcessAccess access{kernel.posix(), kernel.scheduler(), process->resources()};
+        if (number == N::fsync || number == N::fdatasync)
+            return linux_file_io::file_sync(access, static_cast<posix::Fd>(a[0]));
+        bool would_block{};
+        const auto result = linux_file_io::regular_rw(access, number == N::write, static_cast<posix::Fd>(a[0]),
+                                                      a[1], a[2], would_block);
+        if (would_block && blocked_caller()) complete = false;
+        return result;
+    }
     if (path_arg >= 0)
     {
         if (auto status = string_from_user(space, a[path_arg], path); !status.ok())
@@ -806,6 +838,9 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
     }
     if (description && description->native_shared_file && (number == N::read || number == N::pread64))
     {
+        // read(2) moves the description's position as one step with the read.
+        const sched::DescriptionPositionGuard position(number == N::read
+                                                           ? kernel.scheduler().position_lock(description) : nullptr);
         auto read = kernel.posix().pread(static_cast<i32>(a[0]), {buffer.data(), output_size},
             number == N::read ? description->offset : static_cast<usize>(a[3]));
         if (!read) return error(read.status());
@@ -866,7 +901,7 @@ Status start(Kernel &kernel, fs::BootArchive archive)
 #ifdef OK_KERNEL_FREESTANDING
     // Root selection and native services run on the original boot stack.
     // Bounds are a current-SP check, not faulting guards or a usage budget.
-    if (auto status = arch::require_service_stack(); !status) return status;
+    if (auto status = require_cpu_service_stack(); !status) return status;
 #endif
     if (shutdown_admission_closed || native_shutdown_pending())
         return Status::busy("native shutdown has closed runtime admission");
@@ -910,6 +945,7 @@ Status start(Kernel &kernel, fs::BootArchive archive)
     if (auto status = shared_files.bind(page_pool); !status) return status;
     if (auto status = kernel.scheduler().set_shared_memory_files(shared_files); !status) return status;
     if (auto status = entry_stacks.activate(entry_stack_arena); !status) return status;
+    shared_capture.set_entry(enter_unlocked);
     emit_pool_stats();
     tcp_wait_stats = &kernel.native_tcp_waits().stats();
     emit_entry_stack_stats();
@@ -943,22 +979,25 @@ Status start(Kernel &kernel, fs::BootArchive archive)
     // This static singleton has one boot lifetime and no reconstruction/reset API.
     original_shutdown_owner = {&original_shutdown_owner, 1, pid.value(), process->threads()[0].tid};
     emit("OK_NATIVE scope=hardware init=loaded\n");
+    arm_kernel_checks();
+    start_sections();
+    secondary_admission.store(true, std::memory_order_release);
     return Status::success();
 }
 bool idle()
 {
-    return runtime_idle;
+    return runtime_idle[smp::current_cpu()];
 }
 
 bool step(Kernel &kernel)
 {
-    runtime_idle = false;
+    runtime_idle[smp::current_cpu()] = false;
     if (shutdown_admission_closed || native_shutdown_pending()) return false;
-    if (runtime_step_active)
+    if (runtime_step_active[smp::current_cpu()])
     { runtime_failure = Status::busy("native step is not reentrant"); started = false; return false; }
     RuntimeStepGuard step_guard;
 #ifdef OK_KERNEL_FREESTANDING
-    if (auto status = arch::require_service_stack(); !status)
+    if (auto status = require_cpu_service_stack(); !status)
     { runtime_failure = status; started = false; return false; }
 #endif
     // Retry retained owner/pin cleanup on the serialized boot-CPU service path.
@@ -1088,10 +1127,18 @@ bool step(Kernel &kernel)
                     waiting_deadline = true;
             }
     if (!runtime_failure || !started) { started = false; return false; }
-    struct Candidate { sched::ProcessId pid{}; sched::ThreadId tid{}; };
+    // On one CPU, threads run round robin in (pid, tid) order after the last
+    // pick. With secondaries online, runnable threads go to their CPU's run
+    // queue and each CPU takes the next one from its own queue or steals; a
+    // thread only runnable because a signal interrupts its wait is still
+    // picked in (pid, tid) order, first.
+    const auto cpu = smp::current_cpu();
+    const bool queued = smp::online_cpus() > 1;
+    const Candidate cursor = queued ? last_interrupted[cpu] : Candidate{last_pid, last_tid};
     auto before = [](Candidate left, Candidate right) {
         return left.pid < right.pid || (left.pid == right.pid && left.tid < right.tid);
     };
+    usize runnable_count = 0;
     Candidate chosen{}, first{};
     for (const auto &candidate : kernel.scheduler().processes())
     {
@@ -1113,24 +1160,59 @@ bool step(Kernel &kernel)
                             private_poll_signal_ready(kernel, candidate, thread) ||
                             private_child_signal_ready(kernel, candidate, thread);
 #endif
-            if (!thread.native_active ||
-                (thread.state != sched::ProcessState::runnable && thread.state != sched::ProcessState::running && !interruptible))
+            if (!thread.native_active || thread.on_cpu != sched::no_cpu ||
+                (thread.state != sched::ProcessState::runnable && !interruptible))
                 continue;
             Candidate entry{candidate.pid(), thread.tid};
+            if (queued && thread.state == sched::ProcessState::runnable)
+            {
+                runnable[runnable_count++] = entry;
+                continue;
+            }
             if (!first.pid || before(entry, first)) first = entry;
-            if (before({last_pid, last_tid}, entry) && (!chosen.pid || before(entry, chosen))) chosen = entry;
+            if (before(cursor, entry) && (!chosen.pid || before(entry, chosen))) chosen = entry;
         }
     }
     if (!runtime_failure || !started) { started = false; return false; }
+    for (usize index = 0; index < runnable_count; ++index)
+    {
+        const auto entry = runnable[index];
+        if (!kernel.scheduler().enqueue_thread(entry.pid, entry.tid)) continue;
+        // An idle CPU that was handed work looks at its queue now.
+        const auto *queued = kernel.scheduler().find_thread(entry.pid, entry.tid);
+        if (queued && queued->queued_cpu != cpu && queued->queued_cpu < smp::max_cpus &&
+            runtime_idle[queued->queued_cpu])
+            smp::send_ipi(queued->queued_cpu, smp::ipi_reschedule);
+    }
     if (!chosen.pid)
         chosen = first;
+    if (chosen.pid && queued)
+        last_interrupted[cpu] = chosen;
+    else if (chosen.pid)
+    {
+        last_pid = chosen.pid;
+        last_tid = chosen.tid;
+    }
+    else
+        while (const auto next = kernel.scheduler().dequeue_thread(cpu))
+        {
+            // Entries queued by an earlier scan may have blocked since.
+            bool eligible = false;
+            for (usize index = 0; index < runnable_count && !eligible; ++index)
+                eligible = runnable[index] == *next;
+            if (eligible)
+            {
+                chosen = *next;
+                break;
+            }
+        }
     if (!chosen.pid)
     {
-        runtime_idle = true;
+        runtime_idle[cpu] = true;
         return waiting_deadline;
     }
-    last_pid = chosen.pid;
-    last_tid = chosen.tid;
+    // Serving a thread: this kernel-lock stretch is work (overlap evidence).
+    smp::bkl_mark_work();
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
     if (auto *selected = kernel.scheduler().find_thread(chosen.pid, chosen.tid); selected)
     {
@@ -1171,68 +1253,77 @@ bool step(Kernel &kernel)
                  !private_sleep_signal_complete(kernel, *owner, *selected)) return runtime_failure.ok();
     }
 #endif
-    if (!kernel.scheduler().activate_thread(chosen.pid, chosen.tid))
+    if (!kernel.scheduler().mark_on_cpu(chosen.pid, chosen.tid, cpu))
         return false;
     auto *process = kernel.scheduler().find(chosen.pid);
-    auto &thread = *kernel.scheduler().current_thread();
-    if (linux_udp_receive_object(chosen.pid, chosen.tid).pool && !thread.syscall_pending)
+    auto *running = kernel.scheduler().current_thread();
+    if (linux_udp_receive_object(chosen.pid, chosen.tid).pool && !running->syscall_pending)
     {
         static_cast<void>(linux_udp_receive_invariant(
             Status::fault("Linux UDP receive owner lost its pending syscall before entry")));
         return false;
     }
     bool linux_udp_delay_slot = false;
-    if (!thread.syscall_pending)
+    // A syscall trapped by this step's entry, not a continuation resumed.
+    bool trapped_this_step = false;
+    if (!running->syscall_pending)
     {
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
-        if (!private_signal_deliver(kernel, *process, thread))
+        if (!private_signal_deliver(kernel, *process, *running))
         {
             static_cast<void>(kernel.posix().activate(0));
             return true;
         }
 #endif
-        if (thread.tls.set_tid_address)
+        if (running->tls.set_tid_address)
         {
-            const uptr destination = thread.tls.set_tid_address;
-            thread.tls.set_tid_address = 0;
+            const uptr destination = running->tls.set_tid_address;
+            running->tls.set_tid_address = 0;
             std::array<u8, 4> bytes{};
             constexpr bool big_endian = lu::Codec<lu::configured_native_profile()>::profile.big_endian;
             for (usize i = 0; i < bytes.size(); ++i)
-                bytes[i] = static_cast<u8>(thread.tid >> (8 * (big_endian ? 3 - i : i)));
+                bytes[i] = static_cast<u8>(running->tid >> (8 * (big_endian ? 3 - i : i)));
             static_cast<void>(hw::copy_to_user(process->resources().native_space, destination, bytes.data(), bytes.size()));
         }
-        if (auto status = validate_entry_stack(entry_stacks, thread); !status)
+        if (auto status = validate_entry_stack(entry_stacks, *running); !status)
         { runtime_failure = status; started = false; return false; }
-        auto active = entry_stacks.activate_entry(thread.entry_stack, {chosen.pid, chosen.tid}, 0);
+        auto active = entry_stacks.activate_entry(running->entry_stack, {chosen.pid, chosen.tid}, cpu);
         if (!active) { runtime_failure = active.status(); started = false; return false; }
         const auto view = active.value();
 #ifdef OK_PRIVATE_MIPS64_N64_SIGNAL
-        if (!private_n64_begin(*process, thread, view))
+        if (!private_n64_begin(*process, *running, view))
         {
-            static_cast<void>(entry_stacks.deactivate_entry(thread.entry_stack, {chosen.pid, chosen.tid}, 0));
+            static_cast<void>(entry_stacks.deactivate_entry(running->entry_stack, {chosen.pid, chosen.tid}, cpu));
             runtime_failure = Status::fault("private n64 entry readiness missing");
             started = false;
             return false;
         }
 #endif
 #ifdef OK_PRIVATE_MIPS_O32_SIGNAL
-        if (!private_mips_begin(thread))
+        if (!private_mips_begin(*running))
         {
-            static_cast<void>(entry_stacks.deactivate_entry(thread.entry_stack, {chosen.pid, chosen.tid}, 0));
+            static_cast<void>(entry_stacks.deactivate_entry(running->entry_stack, {chosen.pid, chosen.tid}, cpu));
             runtime_failure = Status::fault("private MIPS entry readiness missing");
             started = false;
             return false;
         }
 #endif
 #ifdef OK_PRIVATE_PPC32_SIGNAL
-        if (process->resources().personality == Personality::linux && !private_ppc_begin(*process, thread, view))
+        if (process->resources().personality == Personality::linux && !private_ppc_begin(*process, *running, view))
         {
-            static_cast<void>(entry_stacks.deactivate_entry(thread.entry_stack, {chosen.pid, chosen.tid}, 0));
+            static_cast<void>(entry_stacks.deactivate_entry(running->entry_stack, {chosen.pid, chosen.tid}, cpu));
             runtime_failure = Status::fault("private PPC entry readiness missing");
             started = false; return false;
         }
 #endif
-        auto trap = shared_capture.enter(syscall_origins, vfs_continuations, *process, thread, view, kernel.scheduler());
+        auto trap = shared_capture.enter(syscall_origins, vfs_continuations, process, running, view, kernel.scheduler());
+        // Another CPU retired this thread while it ran here; it also took over
+        // the lease, so nothing of this entry remains to complete.
+        if (!trap && trap.status().code() == StatusCode::no_process)
+        {
+            ++entry_rejections;
+            return true;
+        }
         const auto capture = trap ? trap.value().kernel_stack_pointer : 0;
         const bool captured = capture != 0 && view.contains(capture);
         const bool needs_capture = trap && (trap.value().kind == hw::TrapKind::syscall ||
@@ -1246,22 +1337,22 @@ bool step(Kernel &kernel)
 #endif
 #ifdef OK_PRIVATE_MIPS64_N64_SIGNAL
         // The observation expires with view deactivation. Consume it first.
-        const bool n64_capture_valid = !needs_capture || (!bad_capture && private_n64_capture(*process, thread, view));
-        const bool n64_fault_captured = resumable_fault && private_n64_capture(*process, thread, view);
-        if ((!needs_capture && !n64_fault_captured) || !n64_capture_valid) private_n64_revoke(thread);
+        const bool n64_capture_valid = !needs_capture || (!bad_capture && private_n64_capture(*process, *running, view));
+        const bool n64_fault_captured = resumable_fault && private_n64_capture(*process, *running, view);
+        if ((!needs_capture && !n64_fault_captured) || !n64_capture_valid) private_n64_revoke(*running);
 #endif
 #ifdef OK_PRIVATE_PPC32_SIGNAL
         const bool ppc_linux = process->resources().personality == Personality::linux;
-        const bool ppc_capture_valid = !ppc_linux || (trap && !bad_capture && private_ppc_capture(*process, thread, view));
-        if (ppc_linux && !ppc_capture_valid) private_ppc_revoke(thread);
+        const bool ppc_capture_valid = !ppc_linux || (trap && !bad_capture && private_ppc_capture(*process, *running, view));
+        if (ppc_linux && !ppc_capture_valid) private_ppc_revoke(*running);
 #endif
         // Backends have restored the service stack and detached hardware/global
         // pointers before returning. Never dispatch or free an active lease.
-        const auto deactivated = entry_stacks.deactivate_entry(thread.entry_stack, {chosen.pid, chosen.tid}, 0);
+        const auto deactivated = entry_stacks.deactivate_entry(running->entry_stack, {chosen.pid, chosen.tid}, cpu);
         if (!deactivated || bad_capture)
         {
-            syscall_origins.revoke(thread);
-            vfs_continuations.revoke(thread);
+            syscall_origins.revoke(*running);
+            vfs_continuations.revoke(*running);
             runtime_failure = !deactivated ? deactivated : Status::fault("missing owned privileged capture");
             started = false;
             emit("OK_TEST_FAIL native-entry-stack=ownership\n");
@@ -1270,8 +1361,8 @@ bool step(Kernel &kernel)
 #ifdef OK_PRIVATE_PPC32_SIGNAL
         if (!ppc_capture_valid)
         {
-            syscall_origins.revoke(thread);
-            vfs_continuations.revoke(thread);
+            syscall_origins.revoke(*running);
+            vfs_continuations.revoke(*running);
             runtime_failure = Status::fault("private PPC capture readiness missing");
             started = false; return false;
         }
@@ -1279,8 +1370,8 @@ bool step(Kernel &kernel)
 #ifdef OK_PRIVATE_MIPS64_N64_SIGNAL
         if (!n64_capture_valid)
         {
-            syscall_origins.revoke(thread);
-            vfs_continuations.revoke(thread);
+            syscall_origins.revoke(*running);
+            vfs_continuations.revoke(*running);
             runtime_failure = Status::fault("private n64 capture readiness missing");
             started = false;
             return false;
@@ -1289,16 +1380,16 @@ bool step(Kernel &kernel)
 #ifdef OK_PRIVATE_MIPS_O32_SIGNAL
         if (needs_capture)
         {
-            if (!private_mips_capture(thread))
+            if (!private_mips_capture(*running))
             {
-                syscall_origins.revoke(thread);
-            vfs_continuations.revoke(thread);
+                syscall_origins.revoke(*running);
+            vfs_continuations.revoke(*running);
                 runtime_failure = Status::fault("private MIPS capture readiness missing");
                 started = false;
                 return false;
             }
         }
-        else if (!resumable_fault || !private_mips_capture(thread)) private_mips_revoke(thread);
+        else if (!resumable_fault || !private_mips_capture(*running)) private_mips_revoke(*running);
 #endif
         if (captured)
         {
@@ -1318,11 +1409,12 @@ bool step(Kernel &kernel)
         else if (trap.value().kind == hw::TrapKind::syscall)
         {
 #if defined(OK_ENABLE_TEST_POINTS) && defined(OK_PRIVATE_FUTEX_PEER_FIXTURE)
-            if (auto status = record_peer_trap(kernel, chosen.pid, chosen.tid, thread.native_frame); !status)
+            if (auto status = record_peer_trap(kernel, chosen.pid, chosen.tid, running->native_frame); !status)
             { runtime_failure = status; started = false; return false; }
 #endif
             linux_udp_delay_slot = linux_udp_delay_slot_excluded<lu::configured_native_profile()>(trap.value());
-            thread.syscall_pending = true;
+            running->syscall_pending = true;
+            trapped_this_step = true;
         }
         else if (trap.value().kind == hw::TrapKind::interrupt)
         {
@@ -1335,7 +1427,7 @@ bool step(Kernel &kernel)
         }
         else if (trap.value().kind == hw::TrapKind::timer)
         {
-            ++thread.cpu_time_ticks;
+            ++running->cpu_time_ticks;
             static bool reported = false;
             if (!reported)
             {
@@ -1353,8 +1445,24 @@ bool step(Kernel &kernel)
             finish(kernel, chosen.pid, 0, 11);
         }
     }
-    if (thread.native_active && thread.syscall_pending)
+    bool sectioned = false;
+    if constexpr (smp_sections)
+        if (trapped_this_step && running->native_active && running->syscall_pending && !linux_udp_delay_slot)
+        {
+            SectionCall<lu::configured_native_profile()> call{};
+            if (admit_section(kernel, *process, *running, cpu, call) == Admission::run)
+            {
+                // Returns holding the kernel lock with the result committed;
+                // the process and thread pointers are not used again.
+                run_section(kernel, call, cpu);
+                sectioned = true;
+            }
+        }
+    if (!sectioned && running->native_active && running->syscall_pending)
     {
+        // The choke point: every other syscall of this process waits for
+        // its sections and commits their results first.
+        if constexpr (smp_sections) smp::drain(chosen.pid);
         bool complete = true;
         i64 result{};
 #ifdef OK_PRIVATE_PPC32_SIGNAL
@@ -1368,12 +1476,12 @@ bool step(Kernel &kernel)
         if (const auto object = linux_udp_receive_object(chosen.pid, chosen.tid); object.pool)
         {
             complete = false;
-            if (auto status = resume_linux_udp_receive(kernel, *process, thread, object); !status)
+            if (auto status = resume_linux_udp_receive(kernel, *process, *running, object); !status)
                 static_cast<void>(linux_udp_receive_invariant(status));
         }
         else
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
-        if (!private_signal_call(kernel, *process, thread, complete, result))
+        if (!private_signal_call(kernel, *process, *running, complete, result))
 #endif
         {
         if (const auto object = native_udp_receive_object(chosen.pid, chosen.tid); object.pool)
@@ -1388,27 +1496,27 @@ bool step(Kernel &kernel)
         else if (const auto object = pipe_write_object(chosen.pid, chosen.tid); object.pool)
             result = resume_pipe_write(kernel, *process, object, complete);
         else if ((process->resources().personality == Personality::native &&
-                      native_unix_path_call(hw::syscall(thread.native_frame), kernel.scheduler(), *process) != lu::UnixPathCall::none) ||
+                      native_unix_path_call(hw::syscall(running->native_frame), kernel.scheduler(), *process) != lu::UnixPathCall::none) ||
                  (process->resources().personality == Personality::linux &&
-                      linux_unix_path_call<lu::configured_native_profile()>(thread.native_frame, kernel.scheduler(), *process) != lu::UnixPathCall::none))
+                      linux_unix_path_call<lu::configured_native_profile()>(running->native_frame, kernel.scheduler(), *process) != lu::UnixPathCall::none))
         {
             if (linux_udp_delay_slot) result = -95;
             else result = process->resources().personality == Personality::linux
-                ? linux_bootstrap::dispatch<lu::configured_native_profile()>(kernel, chosen.pid, thread.native_frame, complete,
+                ? linux_bootstrap::dispatch<lu::configured_native_profile()>(kernel, chosen.pid, running->native_frame, complete,
                     [&](hw::Syscall call, bool &done) { return dispatch(kernel, chosen.pid, call, done); })
-                : dispatch(kernel, chosen.pid, hw::syscall(thread.native_frame), complete);
+                : dispatch(kernel, chosen.pid, hw::syscall(running->native_frame), complete);
         }
-        else if (syscall_origins.has_tcp_immediate(thread) || tcp_immediate_frame(kernel, *process, thread))
+        else if (syscall_origins.has_tcp_immediate(*running) || tcp_immediate_frame(kernel, *process, *running))
         {
             if (linux_udp_delay_slot) result = -95;
             else
             {
                 complete = false; result = 0;
-                if (const auto status = tcp_immediate_runtime.dispatch(kernel, *process, thread); !status)
+                if (const auto status = tcp_immediate_runtime.dispatch(kernel, *process, *running); !status)
                 { runtime_failure = status; started = false; }
             }
         }
-        else if (process->resources().personality == Personality::linux && linux_udp_frame(thread.native_frame))
+        else if (process->resources().personality == Personality::linux && linux_udp_frame(running->native_frame))
         {
             if (linux_udp_delay_slot)
             {
@@ -1422,19 +1530,19 @@ bool step(Kernel &kernel)
                 // after access reset or final original-OFD release.
                 complete = false;
                 result = 0;
-                if (const auto status = dispatch_linux_udp(kernel, *process, thread); !status)
+                if (const auto status = dispatch_linux_udp(kernel, *process, *running); !status)
                     static_cast<void>(linux_udp_receive_invariant(status));
             }
         }
         else
         result = process->resources().personality == Personality::linux
-            ? linux_bootstrap::dispatch<lu::configured_native_profile()>(kernel, chosen.pid, thread.native_frame, complete,
+            ? linux_bootstrap::dispatch<lu::configured_native_profile()>(kernel, chosen.pid, running->native_frame, complete,
                 [&](hw::Syscall call, bool &done) { return dispatch(kernel, chosen.pid, call, done); },
                 [&](sched::ThreadControlBlock &created) {
                     const auto prepared = prepare_native_thread(created);
                     if (!prepared) return prepared;
 #ifdef OK_PRIVATE_PPC32_SIGNAL
-                    if (!private_ppc_inherit(*process, thread, *process, created, true) ||
+                    if (!private_ppc_inherit(*process, *running, *process, created, true) ||
                         !private_ppc_state(*process, created)->stage_relocation(private_ppc_identity(*process, created),
                             created.native_frame, private_ppc_backend::capability()))
                     {
@@ -1452,7 +1560,7 @@ bool step(Kernel &kernel)
                     ppc_prepared_clone = created.tid;
 #endif
 #ifdef OK_PRIVATE_MIPS64_N64_SIGNAL
-                    if (!private_n64_inherit(*process, thread, *process, created) ||
+                    if (!private_n64_inherit(*process, *running, *process, created) ||
                         !private_n64_state(*process, created)->stage_relocation(private_n64_identity(*process, created),
                             created.native_frame, private_n64_backend::capability()))
                     {
@@ -1470,7 +1578,7 @@ bool step(Kernel &kernel)
                     n64_prepared_clone = created.tid;
 #endif
 #ifdef OK_PRIVATE_MIPS_O32_SIGNAL
-                    if (!private_mips_inherit(thread, created))
+                    if (!private_mips_inherit(*running, created))
                     {
                         // The scheduler has not published this child yet.
                         const auto retired = retire_native_thread(created);
@@ -1487,7 +1595,7 @@ bool step(Kernel &kernel)
 #endif
                     return Status::success();
                 })
-            : dispatch(kernel, chosen.pid, hw::syscall(thread.native_frame), complete);
+            : dispatch(kernel, chosen.pid, hw::syscall(running->native_frame), complete);
         }
         process = kernel.scheduler().find(chosen.pid);
 #ifdef OK_PRIVATE_MIPS64_N64_SIGNAL
@@ -1521,6 +1629,8 @@ bool step(Kernel &kernel)
         auto *resumed = kernel.scheduler().find_thread(chosen.pid, chosen.tid);
         if (process && resumed && resumed->native_active && complete)
         {
+            // A8: a shadowed identity call answers what its section computed.
+            if constexpr (smp_sections) shadow_compare(cpu, chosen.pid, chosen.tid, result);
             auto &current = *resumed;
             current.syscall_pending = false;
             current.console_wait_epoch = 0;

@@ -4,6 +4,8 @@
 
 #include "ok/arch/kernel_entry_stack.hpp"
 #include "ok/core/types.hpp"
+#include "ok/smp/kernel_section.hpp"
+#include "ok/smp/smp.hpp"
 
 #include <array>
 #include <span>
@@ -36,8 +38,9 @@ struct KernelEntryStackAccounting
     u64 reservations{}, releases{}, activations{};
 };
 
-// Canonical, serialized boot-CPU ownership. Backing is supplied by trusted
-// platform code and must remain supervisor-accessible for the pool's lifetime.
+// Canonical ownership, serialized by the kernel lock; each CPU has at most one
+// active lease. Backing is supplied by trusted platform code and must remain
+// supervisor-accessible for the pool's lifetime.
 // Canary pages are mapped diagnostic storage, not faulting guard pages.
 class KernelEntryStackPool final : private NonCopyable
 {
@@ -69,6 +72,7 @@ class KernelEntryStackPool final : private NonCopyable
 
     Result<KernelEntryStackHandle> reserve(KernelEntryStackOwner owner)
     {
+        smp::check_exclusive("KernelEntryStackPool::reserve");
         if (!initialized_)
             return Status::not_initialized("entry stack arena is not initialized");
         if (!fault_)
@@ -100,14 +104,17 @@ class KernelEntryStackPool final : private NonCopyable
     Result<arch::execution::KernelEntryStackView> activate_entry(
         KernelEntryStackHandle handle, KernelEntryStackOwner owner, u16 cpu)
     {
+        smp::check_exclusive("KernelEntryStackPool::activate_entry");
         if (auto status = validate(handle, owner); !status)
             return status;
         if (!fault_)
             return fault_;
-        if (cpu != 0)
-            return Status::unsupported("entry stack execution is limited to the boot CPU");
-        if (active_slot_ != capacity)
-            return Status::busy("another entry stack lease is active");
+        if (cpu >= smp::max_cpus)
+            return Status::invalid_argument("entry stack activation CPU is out of range");
+        if (active_slot_[cpu] != capacity)
+            return Status::busy("another entry stack lease is active on this CPU");
+        if (records_[handle.slot].state == State::active)
+            return Status::busy("entry stack lease is active on another CPU");
         if (epoch_ == ~u64{0})
             return Status::overflow("entry stack activation epoch exhausted");
         auto &record = records_[handle.slot];
@@ -116,22 +123,23 @@ class KernelEntryStackPool final : private NonCopyable
         record.state = State::active;
         record.cpu = cpu;
         record.epoch = ++epoch_;
-        active_slot_ = handle.slot;
+        active_slot_[cpu] = handle.slot;
         return arch::execution::KernelEntryStackView{record, record.generation, record.epoch};
     }
 
     Status deactivate_entry(KernelEntryStackHandle handle, KernelEntryStackOwner owner, u16 cpu)
     {
+        smp::check_exclusive("KernelEntryStackPool::deactivate_entry");
         if (auto status = validate(handle, owner); !status)
             return status;
         auto &record = records_[handle.slot];
-        if (record.state != State::active || active_slot_ != handle.slot)
+        if (record.state != State::active || record.cpu >= smp::max_cpus || active_slot_[record.cpu] != handle.slot)
             return Status::not_found("entry stack lease is not active");
         if (cpu != record.cpu)
             return Status::denied("entry stack activation belongs to another CPU");
         // Revoke every copied view even when a damaged canary prevents reuse.
         record.state = State::reserved;
-        active_slot_ = capacity;
+        active_slot_[cpu] = capacity;
         if (auto status = check_canaries(handle.slot); !status)
             return quarantine(record, status);
         return Status::success();
@@ -139,6 +147,7 @@ class KernelEntryStackPool final : private NonCopyable
 
     Status release(KernelEntryStackHandle handle, KernelEntryStackOwner owner)
     {
+        smp::check_exclusive("KernelEntryStackPool::release");
         if (auto status = validate_inactive(handle, owner); !status)
             return status;
         auto &record = records_[handle.slot];
@@ -172,6 +181,31 @@ class KernelEntryStackPool final : private NonCopyable
         return records_[handle.slot].top;
     }
 
+    // The lease's stack top whether it is reserved or active on some CPU: a
+    // health check for a thread another CPU may be running. Release and
+    // reactivation still require the lease to be inactive.
+    Result<uptr> lease_top(KernelEntryStackHandle handle, KernelEntryStackOwner owner)
+    {
+        if (auto status = validate(handle, owner); !status)
+            return status;
+        if (auto status = check_canaries(handle.slot); !status)
+            return quarantine(records_[handle.slot], status);
+        return records_[handle.slot].top;
+    }
+
+    // Whether this exact lease is the one active on `cpu`: what deactivate_entry
+    // requires, checked before an eviction commits to deactivating it.
+    [[nodiscard]] Status validate_active(KernelEntryStackHandle handle, KernelEntryStackOwner owner, u16 cpu) const
+    {
+        if (auto status = validate(handle, owner); !status)
+            return status;
+        const auto &record = records_[handle.slot];
+        if (cpu >= smp::max_cpus || record.state != State::active || record.cpu != cpu ||
+            active_slot_[cpu] != handle.slot)
+            return Status::not_found("entry stack lease is not active on this CPU");
+        return Status::success();
+    }
+
     Result<u64> inactive_epoch(KernelEntryStackHandle handle, KernelEntryStackOwner owner)
     {
         if (auto status = validate_inactive(handle, owner); !status) return status;
@@ -185,16 +219,25 @@ class KernelEntryStackPool final : private NonCopyable
     {
         if (auto status = validate(handle, owner); !status) return status;
         const auto &record = records_[handle.slot];
-        if (active_slot_ != handle.slot || record.cpu != 0 || !view.valid() ||
+        if (record.state != State::active || record.cpu >= smp::max_cpus || active_slot_[record.cpu] != handle.slot ||
+            !view.valid() ||
             view.record_ != &record || view.generation_ != handle.generation ||
             view.epoch_ != record.epoch)
             return Status::denied("entry view does not name the exact active pool lease");
         return record.epoch;
     }
 
+    [[nodiscard]] bool active_on(u16 cpu) const
+    {
+        return cpu < smp::max_cpus && active_slot_[cpu] != capacity;
+    }
+
     [[nodiscard]] KernelEntryStackAccounting accounting() const
     {
-        return {.leased_slots = leased_, .active_slots = active_slot_ != capacity ? 1u : 0u,
+        usize active = 0;
+        for (const auto slot : active_slot_)
+            active += slot != capacity;
+        return {.leased_slots = leased_, .active_slots = active,
                 .quarantined_slots = quarantined_, .peak_slots = peak_,
                 .backing_bytes = initialized_ ? arena_bytes : 0, .leased_usable_bytes = leased_ * usable_bytes,
                 .reservations = generation_, .releases = releases_, .activations = epoch_};
@@ -205,6 +248,13 @@ class KernelEntryStackPool final : private NonCopyable
     using State = View::State;
     using Record = View::Record;
 
+    static constexpr std::array<usize, smp::max_cpus> filled_active_slots()
+    {
+        std::array<usize, smp::max_cpus> slots{};
+        for (auto &slot : slots)
+            slot = capacity;
+        return slots;
+    }
     [[nodiscard]] Status validate(KernelEntryStackHandle handle, KernelEntryStackOwner owner) const
     {
         if (!initialized_)
@@ -259,7 +309,8 @@ class KernelEntryStackPool final : private NonCopyable
     friend struct KernelEntryStackPoolTestAccess;
     std::span<std::byte> backing_{};
     std::array<Record, capacity> records_{};
-    usize leased_{}, peak_{}, quarantined_{}, active_slot_{capacity};
+    usize leased_{}, peak_{}, quarantined_{};
+    std::array<usize, smp::max_cpus> active_slot_{filled_active_slots()};
     u64 generation_{}, releases_{}, epoch_{};
     Status fault_{};
     bool initialized_{};

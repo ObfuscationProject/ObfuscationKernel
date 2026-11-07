@@ -31,6 +31,13 @@ Implemented baseline syscall groups:
   `exit`, `exit_group`, `umask`.
 - Kernel debug: `ok_debug`.
 
+On x86_64, aarch64 and rv64 the native runtime runs the Linux `getpid`,
+`gettid`, `clock_gettime` and `clock_getres`, and `read`, `write`, `pread64`,
+`pwrite64`, `lseek`, `fsync` and `fdatasync` on ext4 regular files, as kernel
+sections without the big kernel lock when admission accepts them; every other
+call, and every declined one, runs under the lock. See
+[SMP](smp.md#kernel-sections).
+
 The number table reserves common POSIX/Linux-compatible syscall IDs to make the
 future user ABI predictable. File-oriented syscalls currently route into
 `ok::posix::PosixService`, which is backed by the RAM VFS.

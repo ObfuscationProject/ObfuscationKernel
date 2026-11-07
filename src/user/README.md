@@ -1,8 +1,11 @@
 # Native user runtime layout
 
-The native runtime is one serialized boot-CPU service compiled as separate
-translation units with one responsibility each. `runtime/private.hpp` is the only
+The native runtime is one service that every online CPU runs under the big
+kernel lock, except for the kernel sections it admits (`docs/modules/smp.md`),
+compiled as separate translation units with one responsibility each. `runtime/private.hpp` is the only
 header the units share; it declares exactly what crosses a unit boundary.
+`runtime/section.hpp` is `section.cpp`'s own header, included only by
+`entry.cpp`, which runs the sections it admits.
 
 | Unit | Responsibility |
 | --- | --- |
@@ -16,13 +19,16 @@ header the units share; it declares exactly what crosses a unit boundary.
 | `runtime/net.cpp` | Native and Linux UDP receive owners, TCP immediate operations, native UDP socket calls |
 | `runtime/signals.cpp` | Private signal delivery, frames and waits, signal interruption of blocking calls, per-architecture signal state |
 | `runtime/timers.cpp` | Linux interval timers: `ITIMER_REAL`, `alarm` and the `timer_create` family, their expiry service and signal records |
-| `runtime/interrupts.cpp` | The interrupt report (`OK_IRQ_PLATFORM`, `OK_IRQ_EVENTS`, `OK_IRQ_COMPLETIONS`, `OK_TIMER_LATENCY`, `OK_TIMERS`) |
-| `runtime/entry.cpp` | `start`/`step`, user entry through entry-stack leases, syscall dispatch |
+| `runtime/interrupts.cpp` | The interrupt report (`OK_IRQ_PLATFORM`, `OK_IRQ_EVENTS`, `OK_IRQ_COMPLETIONS`, `OK_TIMER_LATENCY`, `OK_TIMERS`, `OK_SMP_CPUS`, `OK_SMP_IRQS`, `OK_NET_WAITS`, the `OK_SMP_KERNEL` lines, `OK_SMP_HOTPLUG` with the `smp_hotplug_test` knob), the lock-violation recorder and the arming of the kernel-section checks |
+| `runtime/entry.cpp` | `start`/`step`, user entry through entry-stack leases, syscall dispatch, the kernel-section hook and the choke-point drain |
+| `runtime/smp.cpp` | Secondary CPUs' share of the runtime: the unlocked user entry, per-CPU entries and their eviction (`prepare_eviction`, `commit_eviction`), the secondary step and the hotplug leave hook (`ok_smp_cpu_leaving`) |
+| `runtime/section.cpp` | Kernel sections: the commit handler, decline accounting with its no-effect digest, the shadow comparison of identity calls; `runtime/section.hpp` holds admission, the section bodies and `run_section` (templates `entry.cpp` instantiates for the configured profile) |
 
 Self-contained helpers that hosted tests also include stay as headers beside the
 units: `native_syscall_origin.hpp`, `native_shared_capture.hpp`,
 `native_syscall_restart_publication.hpp`, `native_poll_mask.hpp`,
-`linux_udp_*.hpp`, `tcp_*.hpp` and `signals/*.hpp`.
+`futex_word.hpp` (atomic futex user-word operations through
+`execution::user_word`), `linux_udp_*.hpp`, `tcp_*.hpp` and `signals/*.hpp`.
 
 Architecture signal frames, delivery, sigreturn decoding and the private
 readiness state live in one `include/ok/arch/<arch>/signal.hpp` per

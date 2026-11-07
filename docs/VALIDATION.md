@@ -2,8 +2,8 @@
 
 Validated locally on 2026-09-19 with GCC 14.2 cross compilers and QEMU system
 emulators. `scope=hardware` identifies actual guest CPU execution and device
-transactions under QEMU. It does not certify physical machines, hardware SMP
-or full POSIX conformance. Hosted models are listed separately.
+transactions under QEMU. It does not certify physical machines, SMP on physical
+CPUs or full POSIX conformance. Hosted models are listed separately.
 
 ## Current acceptance
 
@@ -21,7 +21,8 @@ or full POSIX conformance. Hosted models are listed separately.
 | VFS/POSIX host regression | Mount-point protection, directory ancestry/replacement, opened-directory identity, cwd/dirfd across rename/fork, retained unlinked/replaced nodes, RAM capacity reuse, sticky and ancestor search permissions, held-directory access and errno mapping |
 | ext4 host regression | 1/2/4 KiB blocks: mutation, reopen, clean fsck, rename/replacement/hard links, directory topology, unsupported/unclean/read-only rejection, inode reuse and 32-bit ownership |
 | ext4 failure model | 1,776 injected read, partial-write and flush failures; partial rename/link quarantine, logical extent exhaustion, malformed metadata, dirty-marker recovery and retained-unlinked lifetime |
-| Tools | 25 Kernel QEMU runner tests and 39 OS SDK/archive/image/runner tests |
+| Tools | 47 Kernel QEMU runner tests (39 in `test_qemu_runner.py`, 8 in `test_qemu_window_runner.py`); the OS tool suite (1336 tests against the ABI 80 SDK) |
+| SMP (QEMU TCG) | x86_64, aarch64 and rv64 at 2 and 4 vCPUs: secondary start, TSC sync (x86_64), user TLB tags, hotplug test point, device lines on every CPU, kernel sections and atomic futex words under the OS gates below; see [SMP_BRINGUP](qualification/SMP_BRINGUP.md) |
 
 All native profiles are retained: i386, x86_64, aarch64, arm32, rv64, rv32,
 loongarch64, mips, mips64 and ppc. SDK checks cover architecture, mode, compiler,
@@ -41,6 +42,54 @@ contents and a verified scratch disk. Reproduction commands are in
 [NATIVE_EXECUTION.md](NATIVE_EXECUTION.md), [ext4 storage](modules/ext4-storage.md)
 and the OS `docs/STORAGE.md` / `docs/VIRTIO_BLOCK.md`.
 
+## SMP validation
+
+Kernel lanes and runners (this repository):
+
+- `xmake test --qemu_smp=N` (`scripts/qemu_test.py --smp N`, N = 2 and 4 on
+  x86_64, aarch64 and rv64; the other seven profiles must report UP): the
+  hardware `OK_SMP` line, `tsc=` with one verified `OK_TSC_SYNC` line per
+  secondary on x86_64, `OK_SMP_TLB` with an allowed mode, and
+  `OK_SMP_HOTPLUG_BOOT` when printed (`docs/testing/qemu.md`). The debug
+  options `x86_tsc_skew_test` (with `--tsc-skew-test`) and
+  `smp_hotplug_test` add the skewed-TSC and the hotplug-cycle checks.
+- Native probes on two CPUs: `scripts/test_native_x86_64.py --smp 2`
+  (`OK_NATIVE_SMP`, `OK_NATIVE_TLB`, `OK_NATIVE_IOAPIC`),
+  `test_native_aarch64.py` (two CPUs by default; `OK_NATIVE_SMP`,
+  `OK_NATIVE_TLB`, `OK_NATIVE_GIC cpus=2`, at EL1 and EL2) and
+  `test_native_rv64.py` (always two harts; `RV64_NATIVE` start, TLB tags,
+  device routing and `retarget_away`).
+- Hosted model suites (scope=model, host threads or modelled CPUs):
+  `test_smp_locks.py`, `test_run_queues.py`, `test_cpu_topology.py`,
+  `test_kernel_entry_stack_pool.py`, `test_tsc_sync.py`, `test_tlb_tags.py`,
+  `test_futex_word.py`, `test_native_futex_operations.py`,
+  `test_irq_wait_time.py`, `test_clock_counter.py`, `test_realtime_clock.py`,
+  `test_kernel_section_protocol.py`, `test_ext4_gate_concurrency.py`,
+  `test_linux_file_io_equivalence.py` and `test_native_exec_eviction.py`. The
+  hosted suite classifies and runs them.
+
+OS gates (paired worktree `wt/os-smp-bringup`, debug SDK of this tree):
+
+- `scripts/qemu_distro.py --smp N`: native boot and acceptance; on the SMP
+  profiles the `OK_SMP_IRQS` report must show bound device lines on at least
+  two online CPUs.
+- `scripts/test_smp_stress.py --smp N`: the static musl stress probe on
+  scratch ext4 (`SMP_STRESS_PASS files=480 messages=960 forks=480`), user
+  entries on every CPU, and with `--smp-sections on` (the default on
+  x86_64, aarch64 and rv64; the other profiles build no sections) the
+  `OK_SMP_KERNEL` family floors, overlap (`concurrent`, `witnessed`,
+  `max_parallel >= 2`) and zero debug assertion counters; `--smp-sections off`
+  requires that no `OK_SMP_KERNEL` line appears. `--require-hotplug` (a
+  `smp_hotplug_test` kernel) requires a final `OK_SMP_HOTPLUG` with cycles
+  and no failures. The receipt records QEMU's TCG thread mode.
+- `scripts/test_futex_smp_atomic.py --smp N`: FUTEX_WAKE_OP races against
+  user atomics on another CPU and a copy-on-write word after fork
+  (`FUTEX_SMP_ATOMIC_PASS`).
+
+Final WT2.1 tree (kernel bf3c63c, OS 3ed4160): 28 of 28 kernel lanes, 51 of
+51 OS gate runs and the native probes pass; receipts in ObfuscationEvidence
+`receipts/ObfuscationKernel@bf3c63c/feat/smp-bringup/`.
+
 ## Retained desktop validation
 
 The previous GUI round checked production-renderer output, OS integration,
@@ -59,8 +108,12 @@ applications without claiming modeled CPU slots are executing hardware cores.
 - Mount points and their ancestors cannot be renamed. Retained directories that
   are removed/replaced/covered are unreachable by pathname; relative operations
   and getcwd return ENOENT. Reconstructed paths have a 95-byte limit.
-- Native execution and storage currently use the boot CPU; physical-board DMA,
-  IOMMU, noncoherent cache maintenance and hardware SMP are unvalidated.
+- x86_64, aarch64 and rv64 run native threads on two to four QEMU vCPUs;
+  kernel work other than the admitted kernel sections stays under one kernel
+  lock (`docs/qualification/SMP_BRINGUP.md`); the other profiles run on the
+  boot CPU. x86 PCIDs and the `IA32_TSC_ADJUST` path are not exercised under
+  TCG. Physical-board DMA, IOMMU, noncoherent cache maintenance, SMP on
+  physical CPUs and physical CPU hotplug are unvalidated.
 - The retained MIPS CPUs lack hardware NX. LoongArch's strict branch-to-NX probe
   hit a recursive emulator fault on the QEMU 8.2.2 used for that probe; the entry
   guard passes and NX bits remain set. SysToolchain now pins QEMU 10.2.0, and the

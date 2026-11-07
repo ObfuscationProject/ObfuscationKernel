@@ -3,6 +3,8 @@
 #include "ok/core/entry.hpp"
 #include "ok/core/native_shutdown.hpp"
 #include "ok/interrupt/platform.hpp"
+#include "ok/smp/bringup.hpp"
+#include "ok/smp/kernel_lock.hpp"
 #include "ok/arch/terminal_power.hpp"
 #include "ok/user/runtime.hpp"
 
@@ -106,6 +108,11 @@ namespace ok::detail
         static_cast<void>(ok::ok_poll_network());
         static_cast<void>(ok::ok_step_userland());
         shutdown_boundary();
+#if defined(OK_SMP_HOTPLUG_TEST)
+        // Debug knob: cycles the highest secondary CPU while userland runs.
+        if (native_userland_started)
+            ok::smp::hotplug_test_pass();
+#endif
         if (!ok::ok_userland_status().ok())
         {
             platform_write("OK_TEST_FAIL native-runtime=");
@@ -150,12 +157,17 @@ namespace ok::detail
         // a device line instead of spinning; profiles without a controller
         // driver, or whose native runtime did not start the service, keep
         // polling.
+        if (did_work)
+            ok::smp::bkl_mark_work();
         bool waited = false;
         if (!did_work && !ok::interrupt::events_posted())
         {
-            waited = (!native_userland_started || ok::ok_userland_idle()) && ok::interrupt::wait_for_interrupt();
+            // Other CPUs serve their threads while this one waits.
+            ok::smp::bkl_unlock();
+            waited = (!native_userland_started || ok::ok_userland_idle()) && ok::interrupt::idle_until_interrupt();
             if (!waited)
                 desktop_idle();
+            ok::interrupt::lock_kernel_serving_interrupts();
         }
         // Without native userland the rescue GUI's tick is paced by loop passes,
         // and an idle pass now lasts until the next interrupt: tick once per wait.
@@ -180,12 +192,17 @@ extern "C" ok::fs::BootArchive ok_boot_archive() __attribute__((weak));
 
 extern "C" [[noreturn]] void kernel_main()
 {
+    // The boot CPU holds the kernel lock from here on except while it idles or
+    // runs user code; secondary CPUs take it once the runtime admits them.
+    ok::smp::bkl_lock();
+    ok::smp::bkl_mark_work();
     ok_platform_console_init();
     ok_platform_display_clear();
 
     ok::KernelEntryConfig config{};
     config.kernel.architecture = ok::arch::configured_architecture();
     config.kernel.extension = ok_boot_extension != nullptr ? ok_boot_extension() : nullptr;
+    config.start_secondary_cpus = &ok::smp::start_secondary_cpus;
 
 #if defined(OK_ENABLE_TEST_POINTS)
     config.mode = ok::KernelBootMode::debug;

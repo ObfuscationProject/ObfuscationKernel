@@ -496,6 +496,7 @@ Result<usize> PosixService::read(Fd fd, std::span<std::byte> out)
     {
         auto *service = scheduler_->shared_memory_files();
         if (!service) return Status::not_initialized("shared file owner is unavailable");
+        sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
         auto result = service->read(entry->native_shared_file, entry->offset, out);
         if (result) entry->offset += result.value();
         return result;
@@ -515,13 +516,41 @@ Result<usize> PosixService::read(Fd fd, std::span<std::byte> out)
     {
         return Status::invalid_argument("file descriptor has no backing node");
     }
+    // The offset is read and moved once, under the position lock.
+    sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
+    return read_node(*entry, out);
+}
+
+bool PosixService::node_backed(const FileDescriptor &entry)
+{
+    return entry.used && entry.readable && entry.node && !entry.native_shared_file && !entry.pty_endpoint &&
+        entry.pipe == sched::invalid_description && !entry.input_console;
+}
+
+sched::DescriptionPositionLock *PosixService::node_position_lock(Fd fd)
+{
+    auto *entry = descriptor(fd);
+    return entry && node_backed(*entry) ? scheduler_->position_lock(entry) : nullptr;
+}
+
+Result<usize> PosixService::read_held(Fd fd, std::span<std::byte> out)
+{
+    auto *entry = descriptor(fd);
+    auto *lock = entry && node_backed(*entry) ? scheduler_->position_lock(entry) : nullptr;
+    if (!lock || !lock->owned_by_current_cpu())
+        return Status::denied("held read without this description's position lock");
+    return read_node(*entry, out);
+}
+
+Result<usize> PosixService::read_node(FileDescriptor &entry, std::span<std::byte> out)
+{
     // Providers return at most one FileBuffer per call. As on Linux, a read
     // fills the request until a provider returns a short chunk (end of file).
     usize count = 0;
     while (count < out.size())
     {
         const usize wanted = out.size() - count;
-        auto data = entry->node->read(entry->offset + count, wanted);
+        auto data = entry.node->read(entry.offset + count, wanted);
         if (!data)
         {
             if (count) break;
@@ -536,7 +565,7 @@ Result<usize> PosixService::read(Fd fd, std::span<std::byte> out)
         if (chunk < (wanted < fs::max_file_data ? wanted : fs::max_file_data))
             break;
     }
-    entry->offset += count;
+    entry.offset += count;
     return count;
 }
 
@@ -552,6 +581,7 @@ Result<usize> PosixService::write(Fd fd, std::span<const std::byte> in)
         auto *service = scheduler_->shared_memory_files();
         if (!service) return Status::not_initialized("shared file owner is unavailable");
         if (in.empty()) return usize{0};
+        sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
         usize offset = entry->offset;
         if (auto status = service->check_write(entry->native_shared_file, in.size()); !status) return status;
         if (entry->flags & o_APPEND)
@@ -587,6 +617,9 @@ Result<usize> PosixService::write(Fd fd, std::span<const std::byte> in)
     {
         return Status::invalid_argument("file descriptor has no backing node");
     }
+    // The offset, or end of file with O_APPEND, stays this write's until the
+    // offset moves past the written bytes.
+    sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
     usize offset = entry->offset;
     if ((entry->flags & o_APPEND) != 0)
     {
@@ -697,9 +730,15 @@ Result<usize> PosixService::pwrite_with_policy(Fd fd, std::span<const std::byte>
         if (!service) return Status::not_initialized("shared file owner is unavailable");
         if (in.empty()) return usize{0};
         if (auto status = service->check_write(entry->native_shared_file, in.size()); !status) return status;
+        // O_APPEND is read, and an append resolves end of file and writes,
+        // under the position lock.
+        sched::DescriptionPositionGuard position(
+            Policy == PositionedWritePolicy::linux_append ? scheduler_->position_lock(entry) : nullptr);
         if constexpr (Policy == PositionedWritePolicy::linux_append)
         {
-            if (entry->flags & o_APPEND)
+            const bool append = (entry->flags & o_APPEND) != 0;
+            if (!append) position.release();
+            if (append)
             {
                 auto metadata = service->info(entry->native_shared_file);
                 if (!metadata) return metadata.status();
@@ -716,10 +755,15 @@ Result<usize> PosixService::pwrite_with_policy(Fd fd, std::span<const std::byte>
         return Status::bad_descriptor("file descriptor is not writable");
     if (in.empty())
         return usize{0};
+    sched::DescriptionPositionGuard position(
+        Policy == PositionedWritePolicy::linux_append ? scheduler_->position_lock(entry) : nullptr);
     if constexpr (Policy == PositionedWritePolicy::linux_append)
     {
-        // Linux's positional writes honor O_APPEND without changing f_pos.
-        if (entry->flags & o_APPEND)
+        // Linux's positional writes honor O_APPEND without changing f_pos;
+        // an append keeps the position lock until it has written.
+        const bool append = (entry->flags & o_APPEND) != 0;
+        if (!append) position.release();
+        if (append)
         {
             auto metadata = entry->node->query_metadata();
             if (!metadata)
@@ -902,6 +946,8 @@ Result<usize> PosixService::seek(Fd fd, i64 offset, SeekWhence whence)
     }
     if (!entry->node && !entry->native_shared_file)
         return Status::invalid_argument("file descriptor has no backing node");
+    // The base (current offset or end of file) and the new offset, together.
+    sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
     i64 base = 0;
     switch (whence)
     {
@@ -982,14 +1028,29 @@ Result<i64> PosixService::fcntl(Fd fd, u32 command, u64 argument)
     case f_SETFD:
         resources().files.entry(fd)->close_on_exec = (argument & fd_CLOEXEC) != 0;
         return 0;
-    case f_GETFL:
+    case f_GETFL: {
+        const sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
         return static_cast<i64>(entry->flags);
-    case f_SETFL:
+    }
+    case f_SETFL: {
         if (entry->native_udp_handle && (static_cast<u32>(argument) & o_APPEND))
             return Status::unsupported("native UDP does not support append status");
+        bool append_changes{};
+        {
+            const sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
+            append_changes = ((entry->flags ^ static_cast<u32>(argument)) & o_APPEND) != 0;
+        }
+        // The description may be shared with other processes, and a kernel
+        // section admitted without O_APPEND must not write once it is set:
+        // every section ends first. Only F_SETFL writes the flags, under the
+        // kernel lock, so they stay as read.
+        if (append_changes)
+            smp::drain_all();
+        const sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
         entry->flags = (entry->flags & ~(o_APPEND | o_NONBLOCK)) |
                        (static_cast<u32>(argument) & (o_APPEND | o_NONBLOCK));
         return 0;
+    }
     default:
         return Status::unsupported("fcntl command is not implemented");
     }

@@ -23,10 +23,15 @@ struct FutexWakeOperation
             signed_operand((encoded >> 12) & 0xfffU), signed_operand(encoded & 0xfffU),
             (encoded & 0x80000000U) != 0};
     }
+    // The arithmetic operand as an unsigned word: 1 << (operand & 31) when
+    // shifted, otherwise the sign-extended twelve-bit operand.
+    [[nodiscard]] constexpr u32 argument() const
+    {
+        return shifted ? u32{1} << (static_cast<u32>(operand) & 31U) : static_cast<u32>(operand);
+    }
     [[nodiscard]] Result<u32> modify(u32 previous) const
     {
-        const u32 value = shifted ? u32{1} << (static_cast<u32>(operand) & 31U)
-                                  : static_cast<u32>(operand);
+        const u32 value = argument();
         switch (operation)
         {
         case 0: return value;
