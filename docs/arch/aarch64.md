@@ -30,15 +30,17 @@ with GICv2, in addition to the architecture-neutral model tests.
 - Fault classification from ESR_EL1/FAR_EL1, safe user-copy validation across
   every requested page, and stable generation-checked address-space handles.
 
-The current backend supports one executing CPU. Each address space owns a
-level-1 root, a level-2 directory and one level-3 table per populated 2 MiB,
-all allocated from the runtime's table storage and released with the space;
-the slot table grows with the number of spaces. Application backing pages
-belong to the caller; the backend owns page tables only.
+Every CPU executes user code through its own `CpuBlock` (`TPIDR_EL1`) under
+per-CPU ASIDs (`docs/modules/smp.md`). Each address space owns a level-1
+root, a level-2 directory and one level-3 table per populated 2 MiB, all
+allocated from the runtime's table storage and released with the space; the
+slot table is fixed (`fixed_space_slots`) and its storage never moves, so the
+entry path looks a space up under `spaces_lock` without the kernel lock.
+Application backing pages belong to the caller; the backend owns page tables
+only.
 The initial identity layout assumes QEMU virt RAM in `[0x40000000, 0x80000000)`
 and MMIO below `0x10000000`; it does not discover memory from a device tree.
-GICv3, SVE, SMP execution and general physical-page allocation remain future
-work. This is a native mechanism, not a claim of complete POSIX conformance.
+GICv3, SVE and general physical-page allocation remain future work. This is a native mechanism, not a claim of complete POSIX conformance.
 
 ## Hardware acceptance test
 

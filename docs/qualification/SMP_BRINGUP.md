@@ -4,8 +4,12 @@ WT2.1 `feat/smp-bringup`. Slice 1: CPU primitives, ranked locks, per-CPU run
 queues, CPU discovery parsers and the QEMU `-smp` lane. Slice 2: secondary CPU
 start, IPIs, local timers and per-CPU execution state on x86_64, aarch64 and
 rv64. Slice 3: the native runtime serves threads on every online CPU. Slice 4:
-the concurrent filesystem/socket/fork stress gate. This note grows with each
-slice.
+the concurrent filesystem/socket/fork stress gate. The follow-up ("Lifting the
+bring-up limits") reorders exec, makes futex user words atomic, synchronizes
+x86 TSCs, tags user TLB entries, routes device lines to every CPU, runs
+admitted syscalls as kernel sections and adds CPU hotplug. The Design and
+slice sections record the state at slice 4; `docs/modules/smp.md` describes
+the current behaviour.
 
 ## Design
 
@@ -47,7 +51,8 @@ slice.
   entry when it returns.
 - **TLB shootdown.** A CPU's user window is open (odd `user_generation`)
   from before it loads a user translation root until after it switched back
-  to the kernel root, which discards the user TLB on every profile.
+  to the kernel root (at slice 4 this discarded the user TLB on every
+  profile; see "User TLB tags" below).
   `smp::quiesce_root(root)` sends every other CPU whose window uses `root`
   an IPI and waits until that window closed; backends call it before a
   translation changes or its tables are freed. The waiting CPU holds the
@@ -162,7 +167,8 @@ consumes this tree's debug SDK. `scripts/qemu_distro.py` takes `--smp N`.
 
 An adversarial review (one reviewer each for x86_64, aarch64, rv64 with the
 generic layer, and the runtime; one skeptic per finding) confirmed four
-findings, fixed except the exec one listed under Limits:
+findings; three were fixed before the merge and the exec one in the
+follow-up:
 
 - A sibling's `mmap`, `munmap` or `mprotect` replaces the address space while
   another thread of the process runs on another CPU; the capture failed that
@@ -173,26 +179,263 @@ findings, fixed except the exec one listed under Limits:
   itself; a backward 64-bit step now stalls it.
 - Shutdown reservation and native termination refused while any other CPU
   ran user code; they now check the calling CPU's own entry.
-- Exec evicts siblings before its fallible steps (Limits).
+- Exec evicted siblings before its fallible steps; every step that can
+  refuse an exec now precedes the eviction ("Exec ordering" below).
 
 A secondary the boot CPU gave up on (late or with a mismatched id) now stays
 out of the online state; the review rated that hardening.
 
+## Lifting the bring-up limits
+
+Seven follow-up items on the same branch (`git log 023386b..b28815c`), each
+with its own model tests and QEMU evidence. Unless noted, guest evidence is
+QEMU 10.2.0 with debug kernels; the OS gates run in the paired worktree
+`wt/os-smp-bringup`.
+
+### Exec ordering
+
+Exec now makes every step that can refuse it while siblings still run on
+other CPUs: `SchedulerState::preflight_replace_image`, the entry stack plan,
+`prepare_eviction` (which validates each planned CPU's active lease), the
+check that every other leased thread is inactive, and the VFS retirement
+prepare. The futex, UDP, syscall-origin and VFS-continuation preflights that
+follow predict invariant breaches; they, and any failure after
+`commit_eviction`, stop the runtime without resuming the caller. An exec that
+evicted entries prints `OK_NATIVE_EXEC_EVICT pid= tid= evicted=N`.
+
+- `scripts/test_native_exec_eviction.py`: exec with a sibling on a modelled
+  second CPU through the actual runtime, loader, entry stack pool and
+  scheduler, on all ten profiles (scope=model; mock trap, copy and mapping
+  backends).
+- No guest transcript yet shows `OK_NATIVE_EXEC_EVICT`.
+
+### Atomic futex user words
+
+Futex words are updated through the kernel pointer to the word's backing
+frame (`arch::execution::user_word`, `src/user/futex_word.hpp`):
+FUTEX_WAKE_OP's second word is one atomic read-modify-write after
+copy-on-write, FUTEX_WAIT, WAIT_BITSET and CMP_REQUEUE compare with one atomic
+load, robust-list retirement uses an atomic load and compare-exchange, and
+`clear_child_tid` is one atomic store. The futex queues stay under the kernel
+lock. i386 (no CMPXCHG, UP) keeps plain aligned accesses; a profile that
+starts secondaries refuses to build without the hardware operation. The SDK
+profiles become
+`kernel-lock-atomic-word-two-key-private-anonymous-shared-signed-wrap-legacy-count-v2`
+and
+`kernel-lock-atomic-compare-nonpi-read-keys-signed-counts-exact-origin-ticket-sequence-owned-transfer-v2`,
+with `smp_atomic = 1`.
+
+- `scripts/test_futex_word.py` races the primitives against host threads
+  (scope=model); `scripts/test_native_futex_operations.py` runs the wake-op
+  and requeue suites.
+- OS `scripts/test_futex_smp_atomic.py`: the static musl probe races
+  FUTEX_WAKE_OP updates of one word against user atomics on another CPU, then
+  checks a copy-on-write word after fork. Integrated tree, 20000 rounds:
+
+| Profile | vCPUs | Result | `interleaved` |
+| --- | --- | --- | --- |
+| x86_64 | 2 | `FUTEX_SMP_ATOMIC_PASS` | 19975 |
+| x86_64 | 4 | `FUTEX_SMP_ATOMIC_PASS` | 19946 |
+| aarch64 | 2 | `FUTEX_SMP_ATOMIC_PASS` | 19998 |
+| aarch64 | 4 | `FUTEX_SMP_ATOMIC_PASS` | 19949 |
+| rv64 | 2 | <!-- FINAL: rv64 smp=2 futex gate result --> | <!-- FINAL --> |
+| rv64 | 4 | <!-- FINAL: rv64 smp=4 futex gate result --> | <!-- FINAL --> |
+
+<!-- FINAL: replace `interleaved` with the honest overlap evidence the futex probe will report, and add the negative control (the probe losing updates on 023386b at 2 vCPUs) with its receipt path. -->
+
+### x86 TSC synchronization
+
+Each started AP runs a TSC handshake with the boot CPU before it enters the
+kernel (64-round batches, up to 16, until the bound is within 50 us); a
+measured offset is corrected through `IA32_TSC_ADJUST` or a per-CPU software
+offset and verified by measuring again. An AP that cannot be verified parks
+before it reads the clock and stays offline. `OK_SMP` gains
+`tsc=sync|adjusted|offset`, and each AP prints `OK_TSC_SYNC`. The SMP
+profiles' monotonic clock samples without a lock above a shared floor.
+
+- `scripts/test_tsc_sync.py`: the estimator and the correction decision,
+  including the `IA32_TSC_ADJUST` path, against injected skew and noise
+  (scope=model).
+- `xmake test --qemu_smp=2` and `4` on x86_64: `tsc=sync`, every AP within
+  its bound; at 4 vCPUs `offset=133 error=602`, `offset=128 error=660` and
+  `offset=193 error=904` cycles (slack 369).
+- `x86_tsc_skew_test` at 2 vCPUs: CPU 1's rewind went into the software
+  offset (`skew_test=software`), was measured as `offset=-23576246908
+  error=400` and corrected to `result=offset residual=-101
+  residual_error=407 tolerance=769`; `qemu_test.py --tsc-skew-test` accepts
+  it. <!-- FINAL: receipt path of the skew-knob run. -->
+
+### User TLB tags
+
+User entries run under per-CPU tags (aarch64 ASIDs, rv64 satp ASIDs, x86_64
+PCIDs) from one 32-slot cache per CPU, revalidated against each space's TLB
+generation; exit no longer invalidates, and only untagged CPUs flush the user
+TLB on every entry. Bring-up prints `OK_SMP_TLB`.
+
+- `scripts/test_tlb_tags.py`: the generation protocol, rollover and stale
+  tags (scope=model).
+- Lanes at 2 and 4 vCPUs: x86_64 `asid=none pcid=off` (TCG offers no PCID),
+  aarch64 `asid=16`, rv64 `asid=16`.
+- Native probes: aarch64 `OK_NATIVE_TLB asid=16 churn=pass rollover=pass
+  remap=pass`, rv64 `RV64_NATIVE tlb_asid=16 churn=pass rollover=pass
+  remap=pass`, x86_64 `OK_NATIVE_TLB asid=none pcid=off churn=pass
+  rollover=untagged remap=pass`; with two CPUs `remote_remap=pass` on all
+  three (a secondary re-enters a space after a remap shootdown and sees the
+  new frame).
+
+### Device interrupt routing
+
+Device lines are routed to any online CPU on aarch64 (GICv2), rv64 (PLIC) and
+x86_64 (the I/O APIC, which replaces the 8259 there), spread as line mod N,
+and follow a device waiter on another CPU. Secondary CPUs run top halves in
+their user trap path, idle wait and kernel-lock spin; a driver waiting inside
+a syscall on a secondary halts there. `retarget_platform_irqs_away()` moves a
+CPU's lines away for hotplug. The interrupt report adds `OK_SMP_IRQS`
+(`docs/modules/interrupts.md`).
+
+- `scripts/test_irq_wait_time.py`: the router, the wake protocol and the
+  retarget/follow race (scope=model).
+- Native probes: x86_64 `OK_NATIVE_IOAPIC boot_wait=pass pit_gsi=pass
+  uart_gsi=pass`, `cpus=2 user_top_half=pass wake_ipi=pass idle_top_half=pass
+  secondary_device_wait=pass spin_serve=pass` and `retarget_away=pass`;
+  aarch64 `OK_NATIVE_GIC cpus=2 user_top_half=pass wake_ipi=pass
+  idle_top_half=pass kernel_lock_wait=pass spin_serve=pass
+  retarget_away=pass`; rv64 `RV64_NATIVE device_route=hart1
+  user_top_half=pass wake_ipi=pass`, `idle_top_half=pass
+  secondary_device_wait=pass spin_serve=pass` and `retarget_away=pass`.
+- OS `scripts/qemu_distro.py --smp N` requires the bound lines spread over at
+  least two online CPUs on native SMP runs. Stress-gate examples at 4 vCPUs:
+  x86_64 `routes=1@1,4@0,11@3,12@0`, aarch64
+  `routes=33@1,76@2,77@1,78@2,79@3`.
+  <!-- FINAL: qemu_distro acceptance runs (x86_64 at 1/2/4, aarch64 and rv64 at 2/4) on the integrated SDK and their receipt paths. -->
+
+### Kernel sections
+
+The kernel lock is taken only through the BKL helpers, which keep per-CPU
+mode words and accounting; shared clock, console and address-space state moved
+under ranked locks (`ofd_position` 14, `fs_provider` 16, `arch_spaces` 64,
+`realtime_clock` 82, `monotonic_clock` 84, `console` 90), and a successful
+`try_lock` is order checked. Debug kernels check the kernel-lock contracts
+(`exclusive_asserts`, `drain_asserts`). Linux `getpid`, `gettid`,
+`clock_gettime`, `clock_getres` and ext4 regular-file `read`, `write`,
+`pread64`, `pwrite64`, `lseek`, `fsync` and `fdatasync` run as kernel
+sections without the kernel lock, under a description position lock and the
+ext4 operation gate, with their results committed under the lock.
+`docs/modules/smp.md` describes the protocol, admission, drains and the
+evidence lines.
+
+- Model tests: `scripts/test_smp_locks.py`,
+  `scripts/test_kernel_section_protocol.py`,
+  `scripts/test_ext4_gate_concurrency.py` (`--tsan` adds ThreadSanitizer),
+  `scripts/test_linux_file_io_equivalence.py` (ten profiles; each decline
+  checked against its digest), `scripts/test_realtime_clock.py` and
+  `scripts/test_clock_counter.py`.
+- OS `scripts/test_smp_stress.py` (default `--smp-sections on`) requires the
+  families to cover the probe's file traffic (`fsync >= files`; `read`,
+  `write`, `lseek >= 2 * files`); with two or more CPUs, sections on at least
+  two CPUs, `concurrent` and `witnessed` above 0 and `max_parallel >= 2`; on a
+  debug kernel every assertion counter and shadow mismatch at 0. The receipt
+  records QEMU's TCG thread mode from its thread names; every run below was
+  multi-threaded TCG. Integrated tree, one run each, all `SMP_STRESS_PASS
+  files=480 messages=960 forks=480`, `sections=completed=3362` (`read=960
+  write=960 lseek=960 fsync=480 clock_gettime=2`), `shadow=1/0` and every
+  assertion counter 0:
+
+| Profile | vCPUs | Guest s | concurrent | witnessed | max_parallel | handoffs | spun | drain_waits | bkl_acquired | bkl_contended |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| x86_64 | 2 | 51.1 | 942 | 1645 | 2 | 106 | 203 | 43 | 93329 | 57993 |
+| x86_64 | 4 | 55.6 | 1530 | 2007 | 3 | 190 | 436 | 51 | 90218 | 80025 |
+| aarch64 | 2 | 45.2 | 962 | 1280 | 2 | 80 | 173 | 41 | 91569 | 53395 |
+| aarch64 | 4 | 37.7 | 1673 | 1734 | 3 | 276 | 413 | 102 | 86642 | 81350 |
+| rv64 | 2 | <!-- FINAL --> | | | | | | | | |
+| rv64 | 4 | <!-- FINAL --> | | | | | | | | |
+
+Guest seconds come from a host shared with other jobs and are not a speed-up
+measurement.
+
+<!-- FINAL: the smp_sections=n arm (no OK_SMP_KERNEL line), one release run per profile, the 1-vCPU runs, a guest-seconds comparison of both arms on a quiet host, and the receipt paths. -->
+
+### CPU hotplug
+
+`smp::stop_secondary_cpu` and `restart_secondary_cpu` take a started
+secondary offline and back: the scheduler moves its queue, its section is
+drained, it leaves the online mask before its device lines move, and it parks
+(x86 `cli; hlt` until INIT, aarch64 PSCI CPU_OFF confirmed by AFFINITY_INFO,
+rv64 the `boot.S` park loop). Restart reuses its stack and start path and
+requires an IPI answer.
+
+- Every debug SMP boot runs the test point: `OK_SMP_HOTPLUG_BOOT
+  scope=hardware cpu=1 stop=pass parked_ipi=pass restart=pass ipi=pass` in
+  all six integrated lanes (x86_64, aarch64, rv64 at 2 and 4 vCPUs) and in
+  every stress-gate boot above; on the hotplug branch (0bf4c90) 18 of 18
+  lanes, three runs each.
+- OS `scripts/test_smp_stress.py --require-hotplug` against a
+  `smp_hotplug_test=y` kernel: the last `OK_SMP_HOTPLUG` line must show
+  `cycles > 0`, `failures=0` and a secondary CPU, with counters that never go
+  back. On the hotplug branch (0bf4c90), two runs per configuration, all
+  `SMP_STRESS_PASS` with `failures=0`:
+
+| Profile | 2 vCPUs (cpu=1): cycles | 4 vCPUs (cpu=3): cycles |
+| --- | --- | --- |
+| x86_64 | 782, 582 | 865, 502 |
+| aarch64 | 725, 768 | 684, 735 |
+| rv64 | 725, 723 | 697, 675 |
+
+<!-- FINAL: the integrated hotplug gate (x86_64, aarch64, rv64 at 2 and 4 vCPUs) with the OS gate's checks for hotplug cycles during the probe and the release assertion counters, and the receipt paths. -->
+
+### Integrated validation
+
+<!-- FINAL: kernel sha of the integrated run (b28815c or the final merge) and the paired OS sha. -->
+
+- `xmake test` passes on all ten profiles with one CPU, and on x86_64,
+  aarch64 and rv64 with `--qemu_smp=2` and `4`: `OK_QEMU_SMP_TEST ...
+  ipi=pass tsc=sync tlb_asid=none pcid=off hotplug_boot=pass` (x86_64),
+  `tlb_asid=16 pcid=off hotplug_boot=pass` (aarch64, rv64).
+- `scripts/hosted_suite.py --toolchain-root`: 154 passed, 0 failed, 58 not
+  run (fixtures, inputs or quarantine).
+- Native probes pass: x86_64 with one and two CPUs, aarch64 with two, rv64
+  with two harts, arm32, rv32 and i386.
+- `tests/qemu/test_qemu_runner.py`: 39 tests.
+
+<!-- FINAL: OS gate totals, the receipt directory in ObfuscationEvidence and the module ABI number. -->
+
 ## Limits
 
-- Kernel work is serialized by one lock; only user code runs in parallel.
-- The futex wake-op and requeue paths update user words with checked copies
-  under the kernel lock, which is not atomic against user code on other CPUs
-  (`native_futex_*_smp_atomic = 0` in the SDK profile).
-- No CPU hotplug, no ASIDs or PCIDs (every entry flushes the user TLB), and
-  device interrupts are not balanced across CPUs: they stay on CPU 0, and a
-  device wait on a secondary CPU polls.
-- Exec evicts the siblings of the calling thread before steps that can still
-  fail; if exec then fails, an evicted sibling resumes from the frame it had
-  before its last user entry.
-- x86 bring-up does not check that the APs' TSCs are synchronized with the
-  BSP's (invariant TSC, IA32_TSC_ADJUST). A CPU whose TSC runs behind stalls
-  the shared monotonic clock until it catches up instead of moving it
-  backward; under QEMU TCG every vCPU reads the same TSC.
+- Kernel work outside kernel sections is serialized by one lock. Only the
+  Linux identity and clock calls and ext4 regular-file I/O run as sections;
+  thread selection and entry, every blocking call, the VFS namespace, pipes,
+  sockets, PTYs, fork/exec/exit/wait, signals, timers, futex queues, memory
+  mapping and copy-on-write faults, networking, module load, power, device
+  bottom halves and interrupt binding stay under the lock
+  (`docs/modules/smp.md`, "What stays serialized").
+- `O_APPEND` writes and nodes other than ext4 stay under the lock. ext4 runs
+  one operation at a time per filesystem, so file sections never do disk work
+  in parallel; each description serializes its own offset I/O; a process's
+  other syscalls, every reap and every `O_APPEND` change wait for sections.
+- A driver waiting for its device under the kernel lock keeps the lock while
+  it halts; inside a section it polls.
+  <!-- FINAL: state what the pending fix changes for a CPU polling a device inside a kernel section (serving its own interrupt controller). -->
+- The futex queues stay under the kernel lock; file-backed keys,
+  cross-process `CLONE_VM`, PI, realtime priority and lock-free queues remain
+  gaps.
+- x86_64 PCIDs are implemented but not exercised: QEMU TCG offers no PCID and
+  KVM was not available, so x86_64 runs untagged. TCG drops its TLB on ASID
+  and satp changes, so QEMU runs exercise the tagged paths and encodings but
+  cannot detect a missing invalidation; only the hosted model checks the
+  generation protocol.
+- The `IA32_TSC_ADJUST` correction path has model coverage only: under TCG
+  every vCPU reads one counter, and the skew knob's rewind goes through the
+  software offset.
+- Hotplug has no user-facing interface; only the debug test point and the
+  `smp_hotplug_test` knob request it. Device lines are not rebalanced onto a
+  restarted CPU. A stop holds the kernel lock during its bounded wait for the
+  user window, and an x86 restart holds it across INIT and the TSC handshake.
+  No stop timed out in any run, so the timeout path is unexercised.
+- No guest run shows an exec evicting a sibling on another CPU
+  (`OK_NATIVE_EXEC_EVICT`); the exec ordering has model evidence only.
+- The global tick, `ok_interrupt_tick()`, the timer latency histogram and the
+  device event sources stay on CPU 0. An x86_64 boot left on the 8259
+  fallback polls device waits on secondaries. i386, arm32, rv32, loongarch64,
+  mips, mips64 and ppc run UP.
 - Every profile runs on QEMU TCG only; nothing here is evidence for physical
-  CPUs.
+  CPUs or physical hotplug.
