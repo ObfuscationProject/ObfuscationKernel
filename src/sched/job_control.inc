@@ -33,6 +33,13 @@ bool SchedulerState::continue_process(ProcessId pid)
     ++process->job_.continue_generation;
     --stopped_count_;
     wake_job_waiters(*process);
+    // Terminal calls blocked across the stop re-run their job-control check
+    // (Linux restarts them after the stop interrupted the wait).
+    for (auto &thread : process->threads())
+        if (thread.state == ProcessState::blocked &&
+            (thread.wait_reason == ThreadWaitReason::console_read || thread.wait_reason == ThreadWaitReason::pty_read ||
+             thread.wait_reason == ThreadWaitReason::pty_write || thread.wait_reason == ThreadWaitReason::job_control))
+            static_cast<void>(complete_wait(thread.wait_registration.ticket(), WaitCompletion::ready));
     return true;
 }
 void SchedulerState::consume_job_report(ProcessId pid, bool stop)

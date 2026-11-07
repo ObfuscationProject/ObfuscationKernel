@@ -270,7 +270,10 @@ enum class ThreadWaitReason : u8
     udp_receive = 11,
     tcp_stream = 12,
     pty_read = 13,
-    pty_write = 14
+    pty_write = 14,
+    // A terminal call parked by job control, keyed by terminal (0 console,
+    // 1 + PTY slot); it re-dispatches when the wait completes.
+    job_control = 15
 };
 
 struct ThreadLocalState

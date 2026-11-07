@@ -46,7 +46,7 @@ Status SchedulerState::revoke_console(u32 expected_epoch)
     auto status = console_input_.revoke(caller->pid(), expected_epoch);
     if (status)
     {
-        reset_console_terminal();
+        hangup_console(expected_epoch);
         cancel_console_epoch(expected_epoch);
     }
     return status;
@@ -91,16 +91,12 @@ bool SchedulerState::console_readable(ProcessId pid, u32 expected_epoch) const
         console_terminal_.ldisc.poll_readable(console_read_termios());
 }
 
+// Lease membership only: background readers of a controlling console are
+// stopped or refused by the job-control gate before they read (section 9.6).
 Status SchedulerState::console_read_authority(ProcessId pid, u32 expected_epoch) const
 {
     if (!console_authorized(pid, expected_epoch))
         return Status::denied("console read has no current lease authority");
-    const auto *process = find(pid);
-    if (console_terminal_.console_epoch &&
-        (console_terminal_.console_epoch != console_input_.epoch() ||
-         process->session_id() != console_terminal_.session ||
-         process->process_group_id() != console_terminal_.foreground))
-        return Status::io_error("console read requires the controlling foreground group");
     return {};
 }
 
@@ -186,11 +182,47 @@ Status SchedulerState::acquire_terminal(TerminalRef ref, ProcessControlBlock &ca
         if (console_input_.leader() != caller.pid())
             return Status::permission("only the console lease leader may acquire it");
         target->console_epoch = console_input_.epoch();
-        cancel_console_epoch(console_input_.epoch());
     }
     target->session = caller.session_id();
     target->foreground = caller.process_group_id();
+    wake_waiters(ThreadWaitReason::job_control, job_control_key(ref));
     return {};
+}
+
+// The terminal no longer belongs to a session; callers parked by job control
+// re-run their check.
+void SchedulerState::clear_association(TerminalRef ref, Terminal &target)
+{
+    target.session = target.foreground = 0;
+    target.console_epoch = 0;
+    wake_waiters(ThreadWaitReason::job_control, job_control_key(ref));
+}
+
+// Linux disassociate_ctty(1): a session leader's exit sends SIGHUP to its
+// terminal's foreground group (no SIGCONT) and clears the association. The
+// console gets no vhangup (section 14, item 7).
+void SchedulerState::hangup_exiting_leader(const ProcessControlBlock &process)
+{
+    if (process.session_id() != process.pid()) return;
+    const auto ctty = controlling_terminal(process);
+    auto *target = ctty ? terminal(*ctty) : nullptr;
+    if (!target) return;
+    static_cast<void>(target->owe(target->foreground, tty::TerminalSignal::hup, true));
+    clear_association(*ctty, *target);
+}
+
+// Lease revoke or retirement hangs the console up: SIGHUP then SIGCONT to the
+// session leader of its association through the outbox, then a fresh terminal.
+void SchedulerState::hangup_console(u32 epoch)
+{
+    auto &console = console_terminal_;
+    if (console.session && console.console_epoch && console.console_epoch == epoch)
+    {
+        static_cast<void>(console.owe(console.session, tty::TerminalSignal::hup, false));
+        static_cast<void>(console.owe(console.session, tty::TerminalSignal::cont, false));
+    }
+    reset_console_terminal();
+    wake_waiters(ThreadWaitReason::job_control, job_control_key(console_terminal_ref));
 }
 
 // Association checks touch no user memory and precede every copy-in. A
@@ -201,7 +233,7 @@ Status SchedulerState::terminal_check(const TerminalSubject &subject, ConsoleCon
     if (subject.terminal != console_terminal_ref) return pty_terminal_check(subject, operation);
     switch (operation)
     {
-    case Op::detach: case Op::get_pty_number: case Op::set_pty_lock: case Op::count:
+    case Op::get_pty_number: case Op::set_pty_lock: case Op::count:
         return Status::not_terminal("terminal request is not available on the console");
     default:
         break;
@@ -210,7 +242,7 @@ Status SchedulerState::terminal_check(const TerminalSubject &subject, ConsoleCon
     auto *caller = console_caller();
     if (!caller || !console_authorized(caller->pid(), caller->console_epoch_))
         return Status::not_terminal("caller has no current console association");
-    if (operation == Op::get_session || operation == Op::get_foreground)
+    if (operation == Op::get_session || operation == Op::get_foreground || operation == Op::detach)
         if (const auto ctty = controlling_terminal(*caller); !ctty || *ctty != console_terminal_ref)
             return Status::not_terminal("console is not the caller's controlling terminal");
     return {};
@@ -232,9 +264,9 @@ Status SchedulerState::pty_terminal_check(const TerminalSubject &subject, Consol
                                                : Status::io_error("terminal was hung up");
     switch (operation)
     {
-    case Op::count: case Op::detach: // TIOCNOTTY arrives with S8.
+    case Op::count:
         return Status::not_terminal("terminal request is not available");
-    case Op::acquire:
+    case Op::acquire: case Op::detach:
         if (master) return Status::not_terminal("a PTY master is not a controlling terminal");
         break;
     case Op::get_pty_number: case Op::set_pty_lock:
@@ -243,11 +275,12 @@ Status SchedulerState::pty_terminal_check(const TerminalSubject &subject, Consol
     default:
         break;
     }
-    const bool needs_caller = operation == Op::acquire || operation == Op::set_foreground ||
-        (!master && (operation == Op::get_session || operation == Op::get_foreground));
+    const bool owner_check = !master && (operation == Op::get_session || operation == Op::get_foreground ||
+                                         operation == Op::detach);
+    const bool needs_caller = operation == Op::acquire || operation == Op::set_foreground || owner_check;
     auto *caller = console_caller();
     if (needs_caller && !caller) return Status::not_terminal("terminal request has no running caller");
-    if (!master && (operation == Op::get_session || operation == Op::get_foreground))
+    if (owner_check)
         if (const auto ctty = controlling_terminal(*caller); !ctty || *ctty != subject.terminal)
             return Status::not_terminal("terminal is not the caller's controlling terminal");
     if (operation == Op::get_session && !target->session) return Status::not_terminal("terminal has no session");
@@ -333,9 +366,25 @@ Result<TerminalReply> SchedulerState::terminal_control(const TerminalSubject &su
             }
         if (!value || !group) return Status::no_process("foreground group does not exist");
         if (!same_session) return Status::permission("foreground group belongs to another session");
-        // Background callers are not gated before S8 (no SIGTTOU yet).
+        // Background callers were gated before the copy-in (SIGTTOU). Blocked
+        // readers keep their wait (Linux checks at entry); parked ones re-check.
         tty.foreground = static_cast<ProcessId>(value);
-        if (console) cancel_console_epoch(console_input_.epoch());
+        wake_waiters(ThreadWaitReason::job_control, job_control_key(subject.terminal));
+        return reply;
+    }
+    case Op::detach:
+    {
+        // TIOCNOTTY: the session leader hangs up the foreground group (Linux
+        // disassociate_ctty(0)); another member only drops its own terminal.
+        auto *caller = console_caller();
+        if (caller->session_id() == caller->pid())
+        {
+            static_cast<void>(tty.owe(tty.foreground, tty::TerminalSignal::hup, true));
+            static_cast<void>(tty.owe(tty.foreground, tty::TerminalSignal::cont, true));
+            clear_association(subject.terminal, tty);
+        }
+        else
+            caller->ctty_detached_ = true;
         return reply;
     }
     case Op::set_flush:
@@ -457,7 +506,7 @@ void SchedulerState::retire_console_process(ProcessId pid)
     const auto epoch = console_input_.epoch();
     if (console_input_.retire(pid))
     {
-        reset_console_terminal();
+        hangup_console(epoch);
         cancel_console_epoch(epoch);
     }
 }

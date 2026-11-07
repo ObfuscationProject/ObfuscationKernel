@@ -105,6 +105,9 @@ struct ThreadControlBlock
     DeadlineWait native_deadline{};
     WaitRegistration wait_registration{};
     u32 console_wait_epoch{}; // Original input generation survives readiness wakes.
+    // The process's continue generation when a console or PTY data wait was
+    // armed; a continue since then re-runs the job-control check.
+    u32 terminal_gate_mark{};
     ThreadLocalState tls{};
     SignalMask native_signal_mask{};
     memory::KernelEntryStackHandle entry_stack{};
@@ -653,6 +656,8 @@ class SchedulerState
     // Association checks of the running caller; they precede every copy-in.
     Status terminal_check(const TerminalSubject &subject, ConsoleControlOperation operation);
     Result<TerminalReply> terminal_control(const TerminalSubject &subject, const TerminalRequest &request);
+    // Job-control wait key of a terminal: 0 for the console, 1 + slot for a PTY.
+    [[nodiscard]] static constexpr u64 job_control_key(TerminalRef ref) { return ref.index; }
     // Trusted runtime ingress failure closes ownership before returning to userland.
     void abort_console_input();
     Status configure_cpus(usize cpu_count);
@@ -723,6 +728,9 @@ class SchedulerState
     void retire_console_process(ProcessId pid);
     void cancel_console_epoch(u32 epoch);
     void reset_console_terminal();
+    void hangup_console(u32 epoch);
+    void hangup_exiting_leader(const ProcessControlBlock &process);
+    void clear_association(TerminalRef ref, Terminal &target);
     [[nodiscard]] tty::Termios console_read_termios() const;
     void wake_pty(private_pty::Handle endpoint, u8 wakes);
     Status pty_terminal_check(const TerminalSubject &subject, ConsoleControlOperation operation);

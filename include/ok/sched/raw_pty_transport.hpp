@@ -611,8 +611,10 @@ class RawPtyTable final
         return ReadState{planned.wait, planned.timer_deciseconds, terminal.ldisc.buffered()};
     }
     // Releases one open. The last open of a side changes its state: a master
-    // drops its queue and hangs up a ptmx slave (discarding its input); a raw
-    // slave destroys its unread input. A ptmx slave keeps input and session.
+    // drops its queue, queues SIGHUP then SIGCONT for the slave session's
+    // leader and clears the session (Linux tty_signal_session_leader), and
+    // hangs up a ptmx slave (discarding its input); a raw slave destroys its
+    // unread input. A ptmx slave keeps input and session.
     [[nodiscard]] Result<Change> retire(Handle handle)
     {
         auto *pair = resolve(handle);
@@ -622,6 +624,12 @@ class RawPtyTable final
             if (!--pair->master_opens)
             {
                 pair->master_input.clear();
+                if (const auto leader = pair->slave.session)
+                {
+                    static_cast<void>(pair->slave.owe(leader, tty::TerminalSignal::hup, false));
+                    static_cast<void>(pair->slave.owe(leader, tty::TerminalSignal::cont, false));
+                }
+                pair->slave.session = pair->slave.foreground = 0;
                 if (pair->multiplexed)
                 {
                     pair->slave.ldisc.hangup();

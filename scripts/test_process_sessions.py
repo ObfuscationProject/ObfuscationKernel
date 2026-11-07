@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Retain and test actual scheduler session and process-group mechanisms under all ten hosted profiles."""
+"""Retain and test actual scheduler session, process-group and controlling-terminal mechanisms under all ten hosted profiles."""
 from pathlib import Path
 import argparse
 import hashlib
@@ -30,7 +30,7 @@ def main():
     out.mkdir(parents=True, exist_ok=False)
     source = out / 'source'
     architectures = ARCHITECTURES if args.arch == 'all' else (args.arch,)
-    record = dict(status='preparing', scope='Hosted execution of actual scheduler session/process-group mechanisms; no guest, TTY, job-control, CPU context-switch, IRQ, MMU, physical or SMP evidence',
+    record = dict(status='preparing', scope='Hosted execution of actual scheduler session/process-group mechanisms and session-derived controlling terminals (scheduler level); no guest, runtime job-control, CPU context-switch, IRQ, MMU, physical or SMP evidence',
                   sanitizer=args.sanitize, leak_detection=False, architectures=list(architectures), source_sha256={}, commands=[], rows=[])
 
     def save():
@@ -101,7 +101,7 @@ def main():
             run([xmake, 'build', '-P', source, '-j2', '-v', 'session-' + arch], arch + '-build')
             binary = source / 'bin' / ('session-' + arch)
             output = run([binary], arch + '-run')
-            if not output.startswith('PASS process session integration checks=') or not output.rstrip().endswith('guest=0 tty=0 smp=0'):
+            if not output.startswith('PASS process session integration checks=') or not output.rstrip().endswith('guest=0 tty=1 smp=0'):
                 raise ValueError('missing scheduler success marker')
             record['rows'].append(dict(architecture=arch, status='passed', binary_sha256=sha(binary), output=output.strip()))
             save()

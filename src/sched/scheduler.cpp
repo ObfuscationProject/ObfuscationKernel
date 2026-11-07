@@ -913,13 +913,17 @@ Status SchedulerState::release_description(u16 id)
         if (pty_endpoint)
         {
             // One open per final release. The master's last open hangs a ptmx
-            // slave up inside the table (data only); S8 adds the session
-            // leader's SIGHUP and SIGCONT here.
+            // slave up and queues SIGHUP and SIGCONT for the slave session's
+            // leader (Linux tty_signal_session_leader) inside the table.
             const auto retired = pty_transport_.retire(pty_endpoint);
             if (!retired) result = retired.status();
             // Linux devpts_pty_kill: /dev/pts/N goes with the master's last open.
             else if (pty_endpoint.side == private_pty::Side::master && retired.value().master_retired)
+            {
                 terminal_namespace_.remove(pty_endpoint.slot, pty_endpoint.generation);
+                wake_waiters(ThreadWaitReason::job_control,
+                             job_control_key({static_cast<u16>(pty_endpoint.slot + 1), pty_endpoint.generation}));
+            }
             wake_pty(pty_endpoint, private_pty::wake_all);
         }
         if (unix_endpoint)
@@ -1384,6 +1388,9 @@ Status SchedulerState::finish_process(ProcessId pid, i32 code, u8 signal)
             return Status::busy("thread entry stacks must be retired before process exit");
     // Adoption is validated before the completion becomes observable.
     if (auto status = reparent_children_on_exit(pid); !status) return status;
+    // The terminal hangup is queued before the lease retires (its signals are
+    // drained before the orphan pass of the exit commit, as in Linux do_exit).
+    hangup_exiting_leader(*process);
     retire_console_process(pid);
     if (native_tcp_service_) native_tcp_service_->cancel_process(pid);
     process->set_exit_code(code);
