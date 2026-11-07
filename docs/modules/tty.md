@@ -102,6 +102,8 @@ and calls `attach_terminals(vfs)` before mounting; nothing is mounted at
 
 `/dev/pts` lists every allocated index, locked ones included. Lookup accepts
 strict decimal only. An entry disappears when its master's last open closes.
+`/dev` has three links (two plus its `pts` subdirectory) and `/dev/pts` two;
+`getcwd` inside either reports its path.
 
 Landed (S6): `ok/fs/terminal_node.hpp` defines `TerminalNodeKind`,
 `TerminalNode`, `PtsEntryView` and the constant-initializable
@@ -127,12 +129,17 @@ open always converts them (§3).
 - `/dev/tty` opens the caller's controlling terminal, or returns ENXIO.
 - `/dev/console` opens a console description. It never acquires; reads stay
   lease-gated (EACCES without the lease epoch); writes always succeed.
-- Errno order: (1) EINVAL (flags); (2) ENOENT / EACCES (search) / ENOTDIR;
-  (3) EMFILE; (4) ENFILE; (5) ENOENT (stale pts); (6) ENOTDIR (`O_DIRECTORY`) or
-  EEXIST (`O_CREAT|O_EXCL`); (7) EACCES (node mode); (8) ENXIO / ENOENT / EIO /
-  ENOSPC (no free pair) / EOVERFLOW (open count).
+- Errno order: (1) EINVAL (flags); (2) EMFILE; (3) ENFILE; (4) ENOENT /
+  EACCES (search) / ENOTDIR (path walk); (5) ENOENT (stale pts); (6) ENOTDIR
+  (`O_DIRECTORY`) or EEXIST (`O_CREAT|O_EXCL`); (7) EACCES (node mode); (8)
+  ENXIO / ENOENT / EIO / ENOSPC (no free pair) / EOVERFLOW (open count). As on
+  Linux, the descriptor and description are allocated before the path walk
+  (`get_unused_fd_flags` and `alloc_empty_file` before `link_path_walk`). An
+  empty path (ENOENT) and a bad dirfd (EBADF, ENOTDIR) are reported before
+  EMFILE; Linux reports the dirfd errors after it.
 - `O_TRUNC` is ignored. `O_NOCTTY`, `O_CLOEXEC`, `O_CREAT`, `O_EXCL` and
-  `O_TRUNC` are not kept in `F_GETFL`. The fd is the lowest free one, 0
+  `O_TRUNC` are not kept in `F_GETFL`; Linux `O_LARGEFILE` is kept as on a
+  regular open (forced on 64-bit profiles). The fd is the lowest free one, 0
   included.
 - Native `OK_O_NOCTTY` is `0x0100`; Linux `O_NOCTTY` is decoded per profile.
   musl maps ENOSPC from `posix_openpt` to EAGAIN.
@@ -145,7 +152,9 @@ open always converts them (§3).
   all ten profiles; native stat has no rdev (§14 row 11).
 - `fchmod`/`fchown` of a `/dev/pts/N` descriptor and `chmod`/`chown` of the
   path change the entry: chmod by the owner or root, chown by root only.
-  `/dev/ptmx`, `/dev/tty` and `/dev/console` are fixed (EOPNOTSUPP).
+  `/dev/ptmx`, `/dev/tty` and `/dev/console` (and master, `/dev/tty` and
+  console descriptors) are fixed: chmod gives EOPNOTSUPP; chown gives EPERM to
+  non-root and EOPNOTSUPP to root (§14 row 20).
 
 Landed (S6): `PosixService::openat_limited` converts a node whose
 `terminal_node()` is not none after the mode check, by
@@ -556,7 +565,7 @@ Applies to poll and select in both personalities; both share one PTY mapping
 |---|---|---|---|
 | Slave | a line (canonical), or ≥ 1 byte / VMIN (raw); or hung up | room and echo flushed, and not hung up (ptmx hung up: IN\|OUT\|ERR\|HUP) | per §8 |
 | Master | queued output; or slave closed | ldisc room, and the slave open (raw pair) | HUP when the slave is closed; a raw pair's closed slave is a write error |
-| Console | ldisc readable, for lease members | always | no foreground-based POLLERR |
+| Console | ldisc readable, for lease members | always, whatever the access mode (Linux `n_tty_poll`) | no foreground-based POLLERR |
 
 ## 11. errno summary — constants landed (S6)
 
@@ -628,6 +637,7 @@ profile string and version above keeps its current value.
 | 18 | A raw-pair (`OK_SYS_PTY_PAIR`) master whose slave has no session answers TIOCGPGRP with ENOTTY instead of 0, keeping the v1 raw contract. | landed (S5) |
 | 19 | A caught signal during a PTY slave read below VMIN returns EINTR and leaves the buffered bytes for the next read; Linux copies bytes as they arrive and returns their count. | landed (S7) |
 | 19 | A hung-up ptmx slave answers an unknown request with ENOTTY; Linux `hung_up_tty_ioctl` gives EIO for every request except TIOCSPGRP. | landed (S5) |
+| 20 | `/dev/ptmx`, `/dev/tty` and `/dev/console` are fixed: `chmod`/`fchmod` by any caller and root `chown`/`fchown` return EOPNOTSUPP, and so do these calls on a ptmx master, `/dev/tty` or `/dev/console` descriptor or the boot stdio. Linux devtmpfs accepts them (0), or gives EPERM to a non-owner chmod. A non-root chown gets EPERM, as on Linux. | landed (S6) |
 
 ## Tests
 
@@ -773,24 +783,30 @@ S6 adds two runners (hosted model evidence only) and extends one:
   strict_lookup=1 constinit=1 guest=0`: the root's seven entries with their
   numbers, inodes and modes, a `constinit` instance, an empty `/dev/pts`
   without a namespace, locked entries listed, strict decimal lookup, stale
-  references (ENOENT), single attachment, and the filesystem mounted in an
-  actual VFS whose POSIX service attached the scheduler's namespace.
+  references (ENOENT), single attachment, link counts (3 and 2), directory
+  paths, and the filesystem mounted in an actual VFS whose POSIX service
+  attached the scheduler's namespace.
 - `python3 -B scripts/test_tty_open.py --output <dir>` prints `TTY_OPEN_PASS
   checks=<n> profiles=10 hosted=1 guest=0`. Through the actual PosixService,
   scheduler and VFS with the device filesystem mounted: `/dev/ptmx` and its
-  index, the locked slave (EACCES before EIO), unlock and the lowest fd 0,
+  index by TIOCGPTN, the locked slave (EACCES before EIO), unlock and relock
+  by TIOCSPTLCK (the `/dev/pts` entry follows), the lowest fd 0,
   O_NOCTTY, data both ways, the acquisition matrix (leader, write-only,
   non-leader, leader with a ctty, owned slave, O_NOCTTY), `/dev/tty` ENXIO then
   the acquired endpoint, a detached member ENXIO, `/dev/console` without
-  acquisition, the errno order, ENOSPC on the ninth pair and with a raw pair
-  live, EMFILE before ENOSPC, rollback of an uninstalled open, fstat of every
-  kind, pts chmod/chown by descriptor and path, the master's close removing the
-  entry, and on all ten Linux profiles O_NOCTTY decoding, F_GETFL and
+  acquisition by a caller that holds the console lease and then acquires by
+  TIOCSCTTY, console POLLOUT for every access mode, the errno order, ENOSPC on
+  the ninth pair and with a raw pair live, EMFILE before ENOSPC and before path
+  errors, rollback of an uninstalled open, fstat of every kind, `getcwd` in
+  `/dev` and `/dev/pts`, pts chmod/chown by descriptor and path, the master's
+  close removing the entry, and on all ten Linux profiles O_NOCTTY decoding,
+  F_GETFL (O_LARGEFILE as on a regular open) and
   `st_rdev`/`stx_rdev_*` at the offsets of
   `docs/abi/linux-stat-target-layouts.json`.
 - `test_linux_openat.py` checks that F_GETFL omits O_NOCTTY on all ten profiles.
 - Debug test points `devfs/terminal-namespace-model` and
-  `tty-open/ptmx-pts-ctty-model` are models booted in QEMU.
+  `tty-open/ptmx-pts-ctty-model` (unlock through `terminal_control`) are models
+  booted in QEMU.
 
 S7 adds one runner (hosted runtime evidence only) and extends one:
 
