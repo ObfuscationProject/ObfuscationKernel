@@ -517,9 +517,10 @@ class SchedulerState
     Result<PreparedPtyPair> prepare_pty_pair(u64 pid, u32 flags = 0);
     using PreparedPtyRead = private_pty::RawPtyTable<>::PreparedRead;
     // `timer_expired`: a retry after the reader's VTIME timer ran out.
-    Result<PreparedPtyRead> prepare_pty_read(u16 description, usize count, bool timer_expired = false);
+    Result<PreparedPtyRead> prepare_pty_read(u16 description, usize count, bool timer_expired = false,
+                                             private_pty::ReadTimer timer = {});
     using PtyReadState = private_pty::RawPtyTable<>::ReadState;
-    Result<PtyReadState> pty_read_state(u16 description, usize count) const;
+    Result<PtyReadState> pty_read_state(u16 description, usize count, private_pty::ReadTimer timer = {}) const;
     Result<bool> pty_write_progress(u16 description, std::byte next) const;
     Result<usize> commit_pty_read(PreparedPtyRead &preview);
     // Keys may spuriously collide across pair generations. Retained handle and

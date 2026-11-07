@@ -153,7 +153,7 @@ Result<usize> attempt_pty_io(Kernel &kernel, sched::ProcessControlBlock &process
         {
             if (!pipe_ranges(space, wait.address, wait.count, wait.vectors, true))
                 return Status::fault("PTY output mapping changed");
-            auto prepared = kernel.scheduler().prepare_pty_read(wait.description, wait.count, timer_expired);
+            auto prepared = kernel.scheduler().prepare_pty_read(wait.description, wait.count, timer_expired, wait.vtime);
             if (!prepared) return prepared.status();
             auto &preview = prepared.value();
             if (preview.endpoint() != wait.endpoint)
@@ -218,23 +218,25 @@ using PtyReadWait = decltype(sched::SchedulerState::PtyReadState{}.wait);
 sched::TerminalRef pty_terminal_ref(sched::private_pty::Handle endpoint)
 { return {static_cast<u16>(endpoint.slot + 1), endpoint.generation}; }
 // Arms, keeps or clears the VTIME timer of a read about to wait (Linux
-// n_tty_read): with VMIN 0 one timer runs from the start of the read; below
-// VMIN it restarts whenever the visible input changed since it was armed.
+// n_tty_read): VTIME is taken when the read first waits; with VMIN 0 one timer
+// runs from the start of the read; below VMIN it restarts whenever a byte was
+// received since it was armed.
 Status pty_arm_timer(Kernel &kernel, PtyWait &wait)
 {
     if (wait.writing) return {};
-    auto state = kernel.scheduler().pty_read_state(wait.description, wait.count);
+    auto state = kernel.scheduler().pty_read_state(wait.description, wait.count, wait.vtime);
     if (!state) return state.status();
     const auto &value = state.value();
+    if (!wait.vtime.captured) wait.vtime = {value.vtime, true};
     if (!value.timer_deciseconds) { wait.deadline = 0; wait.timer = 0; wait.interbyte = false; return {}; }
     const bool interbyte = value.wait == PtyReadWait::interbyte;
     if (wait.deadline && wait.timer == value.timer_deciseconds && wait.interbyte == interbyte &&
-        (!interbyte || value.buffered == wait.received_mark)) return {};
+        (!interbyte || value.received == wait.received_mark)) return {};
     const auto now = arch::monotonic_nanoseconds();
     if (!now) return now.status();
     wait.deadline = now.value() + u64{value.timer_deciseconds} * 100'000'000ULL;
     if (!wait.deadline) wait.deadline = 1;
-    wait.timer = value.timer_deciseconds; wait.interbyte = interbyte; wait.received_mark = value.buffered;
+    wait.timer = value.timer_deciseconds; wait.interbyte = interbyte; wait.received_mark = value.received;
     return {};
 }
 // A Linux wait carries its bound origin to the new ticket (and write progress).

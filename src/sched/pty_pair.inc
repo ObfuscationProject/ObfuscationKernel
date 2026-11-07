@@ -118,19 +118,21 @@ Result<usize> SchedulerState::write_pty_description(u16 id, std::span<const std:
     return result.value().bytes;
 }
 
-Result<SchedulerState::PreparedPtyRead> SchedulerState::prepare_pty_read(u16 id, usize count, bool timer_expired)
+Result<SchedulerState::PreparedPtyRead> SchedulerState::prepare_pty_read(u16 id, usize count, bool timer_expired,
+                                                                        private_pty::ReadTimer timer)
 {
     auto *open = open_description(id);
     if (!open || !open->references || open->reservation || !open->readable || !open->pty_endpoint)
         return Status::bad_descriptor("description is not a readable retained raw PTY");
-    return pty_transport_.prepare_read(open->pty_endpoint, count, pty_nonblocking(*open), timer_expired);
+    return pty_transport_.prepare_read(open->pty_endpoint, count, pty_nonblocking(*open), timer_expired, timer);
 }
-Result<SchedulerState::PtyReadState> SchedulerState::pty_read_state(u16 id, usize count) const
+Result<SchedulerState::PtyReadState> SchedulerState::pty_read_state(u16 id, usize count,
+                                                                    private_pty::ReadTimer timer) const
 {
     const auto *open = open_description(id);
     if (!open || !open->references || open->reservation || !open->readable || !open->pty_endpoint)
         return Status::bad_descriptor("description is not a readable retained raw PTY");
-    return pty_transport_.read_state(open->pty_endpoint, count);
+    return pty_transport_.read_state(open->pty_endpoint, count, timer);
 }
 Result<bool> SchedulerState::pty_write_progress(u16 id, std::byte next) const
 {

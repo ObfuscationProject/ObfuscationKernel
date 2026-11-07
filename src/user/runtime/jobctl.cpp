@@ -672,7 +672,7 @@ struct PtyWaitAccess
     {
         const auto &wait = selection.wait;
         if (wait.writing) return pty_write_ready(kernel, wait);
-        const auto state = kernel.scheduler().pty_read_state(wait.description, wait.count);
+        const auto state = kernel.scheduler().pty_read_state(wait.description, wait.count, wait.vtime);
         return !state || state.value().wait == decltype(state.value().wait)::none;
     }
     static bool restartable(const Selection &selection) { return !selection.wait.committed; }

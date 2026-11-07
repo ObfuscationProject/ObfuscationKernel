@@ -618,8 +618,9 @@ void slave_vmin_nonblocking_and_drain(std::uint8_t vtime)
 // A blocked write is signal-ready only when its next byte moves now: the
 // whole OPOST expansion must fit (poll writability needs any room), and a
 // master's ISIG character needs outbox room; a write that fails at once is
-// ready.
-void write_progress()
+// ready. read_state counts received bytes across consumes and plans with a
+// read's captured VTIME while reporting the live one.
+void write_progress_and_read_state()
 {
     RawPtyTable<2, 64> table; auto pair = make(table);
     auto *terminal = table.terminal(pair.slave.slot, pair.slave.generation);
@@ -646,6 +647,18 @@ void write_progress()
     CHECK(progress(pair.master, 3));
     std::array<std::byte, 64> input{}; input.fill(std::byte{'g'});
     CHECK(table.write(pair.master, input).value().bytes == 64 && !progress(pair.master, 'a'));
+    // received() goes on across a consume; buffered() returns to the same count.
+    const auto before = table.read_state(pair.slave, 8).value().received;
+    CHECK(drain(table, pair.slave).size() == 64 && table.write(pair.master, text("h")).value().bytes == 1);
+    CHECK(table.read_state(pair.slave, 8).value().received == before + 1 && drain(table, pair.slave) == "h");
+    terminal->termios[tty::Cc::min] = 0; terminal->termios[tty::Cc::time] = 50;
+    auto state = table.read_state(pair.slave, 8).value();
+    using Wait = RawPtyTable<2, 64>::Ldisc::ReadWait;
+    CHECK(state.wait == Wait::timeout && state.timer_deciseconds == 50 && state.vtime == 50);
+    state = table.read_state(pair.slave, 8, ReadTimer{3, true}).value();
+    CHECK(state.timer_deciseconds == 3 && state.vtime == 50);
+    CHECK(table.prepare_read(pair.slave, 8).status().code() == StatusCode::would_block);
+    auto zero = table.prepare_read(pair.slave, 8, false, false, ReadTimer{0, true}); CHECK(zero && !zero.value().size());
     // A write to a gone peer fails at once: ready.
     CHECK(table.retire(pair.master).value().master_retired && progress(pair.slave, '\n'));
     CHECK(table.retire(pair.slave).value().pair_freed);
@@ -808,7 +821,7 @@ int main()
     run("multiplexed-terminal-semantics", multiplexed_terminal_semantics);
     run("slave-vmin-nonblocking-and-drain", [] { slave_vmin_nonblocking_and_drain(0); });
     run("slave-vtime-nonblocking-and-drain", [] { slave_vmin_nonblocking_and_drain(5); });
-    run("write-progress", write_progress);
+    run("write-progress-and-read-state", write_progress_and_read_state);
     run("independent-deque-model-100000-steps", deterministic_model_comparison);
     std::printf("PRIVATE_RAW_PTY_OWNER cases=%zu checks=%zu model_steps=100000 open_counts=1 raw_termios=1 "
                 "status=passed\n", cases, checks);

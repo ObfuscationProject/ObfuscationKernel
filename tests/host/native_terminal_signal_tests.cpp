@@ -42,6 +42,26 @@ std::array<i32, 2> make_pair(Kernel &kernel, u64 pid)
     std::memcpy(fds.data(), user(pair_at), sizeof(fds));
     return fds;
 }
+// A native ioctl by the leader (another thread of the process may wait).
+i64 native_ioctl(Kernel &kernel, u64 pid, i32 fd, u64 request, uptr argument)
+{
+    auto &process = *kernel.scheduler().find(pid);
+    const auto personality = process.resources().personality;
+    process.resources().personality = sched::UserPersonality::native;
+    activate(kernel, pid, pid);
+    bool complete = true;
+    const auto result = native::dispatch(kernel, pid, {OK_SYS_IOCTL, {static_cast<uptr>(fd), static_cast<uptr>(request), argument, 0, 0, 0}}, complete);
+    expect(complete);
+    process.resources().personality = personality;
+    return result;
+}
+i64 set_termios(Kernel &kernel, u64 pid, i32 fd, const tty::Termios &termios)
+{
+    std::array<u8, 36> bytes{};
+    expect(Wire::encode(termios, {}, bytes).ok());
+    std::memcpy(user(argument_at), bytes.data(), bytes.size());
+    return native_ioctl(kernel, pid, fd, OK_TCSETS, argument_at);
+}
 sched::Terminal &slave_terminal(Kernel &kernel, u64 pid, i32 fd)
 {
     const auto *entry = kernel.scheduler().find(pid)->fd_table().entry(fd);
@@ -544,6 +564,43 @@ void vtime(Kernel &kernel)
     mock::now += 40000000ULL;
     resume(kernel, pid, reader);
     expect(!pending(kernel, pid, reader) && result_of(kernel, pid, reader) == 3 && *user(read_at + 2) == std::byte{'c'});
+
+    // The interbyte restart counts received bytes: input flushed and replaced
+    // by as many new bytes still restarts the timer.
+    terminal.termios[tty::Cc::time] = 10;
+    enter(kernel, pid, reader, linux_read, fds[1], read_at, 10);
+    object = native::pty_wait_object(pid, reader);
+    put_master(kernel, pid, fds[0], "ab");
+    resume(kernel, pid, reader);
+    expect(pending(kernel, pid, reader) && native::pty_wait_objects.resolve(object).value()->deadline == mock::now + 1000000000ULL);
+    mock::now += 500000000ULL;
+    expect(native_ioctl(kernel, pid, fds[1], OK_TCFLSH, 0) == 0 && !terminal.ldisc.buffered());
+    mock::now += 400000000ULL;
+    put_master(kernel, pid, fds[0], "cd");
+    resume(kernel, pid, reader);
+    expect(pending(kernel, pid, reader) && native::pty_wait_objects.resolve(object).value()->deadline == mock::now + 1000000000ULL);
+    mock::now += 1000000000ULL;
+    resume(kernel, pid, reader);
+    expect(!pending(kernel, pid, reader) && result_of(kernel, pid, reader) == 2 && *user(read_at) == std::byte{'c'});
+
+    // VTIME is taken when the read first waits: a TCSETS during the wait wakes
+    // the reader but neither restarts nor shortens its timer (n_tty_read).
+    terminal.termios[tty::Cc::min] = 0; terminal.termios[tty::Cc::time] = 50;
+    const auto start = mock::now;
+    enter(kernel, pid, reader, linux_read, fds[1], read_at, 10);
+    object = native::pty_wait_object(pid, reader);
+    expect(pending(kernel, pid, reader) && native::pty_wait_objects.resolve(object).value()->deadline == start + 5000000000ULL);
+    mock::now += 1000000000ULL;
+    auto shorter = terminal.termios; shorter[tty::Cc::time] = 1;
+    expect(set_termios(kernel, pid, fds[0], shorter) == 0 && terminal.termios[tty::Cc::time] == 1);
+    resume(kernel, pid, reader);
+    expect(pending(kernel, pid, reader) && native::pty_wait_objects.resolve(object).value()->deadline == start + 5000000000ULL);
+    mock::now += 200000000ULL;
+    resume(kernel, pid, reader);
+    expect(pending(kernel, pid, reader));
+    mock::now = start + 5000000000ULL;
+    resume(kernel, pid, reader);
+    expect(!pending(kernel, pid, reader) && result_of(kernel, pid, reader) == 0);
 
     // A caught signal interrupts a timed wait.
     terminal.termios[tty::Cc::min] = 0; terminal.termios[tty::Cc::time] = 50;

@@ -403,9 +403,10 @@ struct PtyWait
     Personality personality{Personality::native}; // Captured at admission; the owner must keep it.
     u64 origin{};          // Linux syscall origin capture that bound this wait (0: none).
     u64 deadline{};        // VTIME expiry (monotonic ns), 0 when no timer runs.
-    usize received_mark{}; // Slave bytes visible when the interbyte timer was last armed.
+    u64 received_mark{};   // Slave bytes received when the interbyte timer was last armed.
     u8 timer{};            // Armed VTIME length in deciseconds.
     bool interbyte{};      // The timer restarts on new input (VMIN > 0).
+    sched::private_pty::ReadTimer vtime{}; // VTIME captured when the read first waited.
 };
 // A blocked PTY write would move a byte now or fail at once (signal readiness).
 bool pty_write_ready(Kernel &kernel, const PtyWait &wait);

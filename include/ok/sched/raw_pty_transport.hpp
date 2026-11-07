@@ -63,6 +63,13 @@ struct Readiness
     // no master for a slave), whatever `writable` reports for poll.
     bool readable{}, writable{}, hangup{}, error{}, write_error{};
 };
+// VTIME of a blocking slave read, taken when the read first waits (Linux
+// n_tty_read reads TIME_CHAR once per call); not captured: the live value.
+struct ReadTimer
+{
+    std::uint8_t deciseconds{};
+    bool captured{};
+};
 struct Audit
 {
     std::size_t live_pairs{}, live_endpoints{}, buffered_bytes{};
@@ -233,8 +240,14 @@ class RawPtyTable final
     }
     // What a read of `count` bytes may take now; an empty plan is EOF.
     // `timer_expired`: the reader's VTIME timer ran out (a retry, n_tty_read).
+    [[nodiscard]] static tty::Termios read_termios(const SlaveTerminal &terminal, ReadTimer timer)
+    {
+        auto termios = terminal.termios;
+        if (timer.captured) termios[tty::Cc::time] = timer.deciseconds;
+        return termios;
+    }
     [[nodiscard]] static Result<Plan> plan(const Pair &pair, Side side, std::size_t count, bool nonblocking,
-                                           bool timer_expired = false)
+                                           bool timer_expired = false, ReadTimer timer = {})
     {
         Plan result{};
         if (side == Side::master)
@@ -249,14 +262,15 @@ class RawPtyTable final
             return result;
         }
         const auto &terminal = pair.slave;
-        result = terminal.ldisc.plan_read(terminal.termios, count, nonblocking, timer_expired);
+        const auto termios = read_termios(terminal, timer);
+        result = terminal.ldisc.plan_read(termios, count, nonblocking, timer_expired);
         if (result.wait == Ldisc::ReadWait::none) return result;
         if (!pair.master_opens)
         {
             // After the master's last close a raw slave drains what it holds below
             // VMIN (Linux n_tty_read copies before its other-side-closed check),
             // then reads EOF; a hung-up ptmx slave's input was discarded.
-            const auto drained = terminal.ldisc.plan_read(terminal.termios, count, true, false);
+            const auto drained = terminal.ldisc.plan_read(termios, count, true, false);
             if (drained.wait == Ldisc::ReadWait::none && drained.consume) return drained;
             return Plan{.revision = result.revision};
         }
@@ -345,12 +359,12 @@ class RawPtyTable final
     // commit; a failed/partial copy can cancel without consuming any input.
     // A nonblocking slave read takes what is buffered below VMIN (POSIX, n_tty_read).
     [[nodiscard]] Result<PreparedRead> prepare_read(Handle handle, std::size_t count, bool nonblocking = false,
-                                                    bool timer_expired = false)
+                                                    bool timer_expired = false, ReadTimer timer = {})
     {
         auto *pair = resolve(handle);
         if (!pair) return Status::bad_descriptor("invalid raw PTY endpoint");
         if (!count) return PreparedRead{*this, handle, pair->revision, Plan{}};
-        auto planned = plan(*pair, handle.side, count, nonblocking, timer_expired);
+        auto planned = plan(*pair, handle.side, count, nonblocking, timer_expired, timer);
         if (!planned) return planned.status();
         // Diagnostic saturated revisions cannot authorize a deferred consume.
         if (planned.value().consume && pair->revision == RevisionLimit)
@@ -608,27 +622,29 @@ class RawPtyTable final
         return QueueCapacity - pair->master_input.size >= terminal.ldisc.output_width(terminal.termios, value);
     }
     // Why a blocking read of `count` bytes would wait now (`none`: it completes),
-    // the VTIME length to arm (0: no timer) and the bytes the reader can see,
-    // which a waiting reader compares to restart an interbyte timer.
+    // the VTIME length to arm (0: no timer), the live VTIME (a read captures it
+    // when it first waits) and the slave's received-byte count, which a waiting
+    // reader compares to restart an interbyte timer.
     struct ReadState
     {
         typename Ldisc::ReadWait wait{Ldisc::ReadWait::none};
-        std::uint8_t timer_deciseconds{};
-        std::size_t buffered{};
+        std::uint8_t timer_deciseconds{}, vtime{};
+        std::uint64_t received{};
     };
-    [[nodiscard]] Result<ReadState> read_state(Handle handle, std::size_t count) const
+    [[nodiscard]] Result<ReadState> read_state(Handle handle, std::size_t count, ReadTimer timer = {}) const
     {
         const auto *pair = resolve(handle);
         if (!pair) return Status::bad_descriptor("invalid raw PTY endpoint");
         if (handle.side == Side::master)
         {
             const bool ready = !count || pair->master_input.size || slave_closed(*pair);
-            return ReadState{ready ? Ldisc::ReadWait::none : Ldisc::ReadWait::input, 0, pair->master_input.size};
+            return ReadState{ready ? Ldisc::ReadWait::none : Ldisc::ReadWait::input, 0, 0, 0};
         }
         const auto &terminal = pair->slave;
-        if (!pair->master_opens) return ReadState{Ldisc::ReadWait::none, 0, terminal.ldisc.buffered()};
-        const auto planned = terminal.ldisc.plan_read(terminal.termios, count, false, false);
-        return ReadState{planned.wait, planned.timer_deciseconds, terminal.ldisc.buffered()};
+        const auto vtime = terminal.termios[tty::Cc::time];
+        if (!pair->master_opens) return ReadState{Ldisc::ReadWait::none, 0, vtime, terminal.ldisc.received()};
+        const auto planned = terminal.ldisc.plan_read(read_termios(terminal, timer), count, false, false);
+        return ReadState{planned.wait, planned.timer_deciseconds, vtime, terminal.ldisc.received()};
     }
     // Releases one open. The last open of a side changes its state: a master
     // drops its queue, queues SIGHUP then SIGCONT for the slave session's
