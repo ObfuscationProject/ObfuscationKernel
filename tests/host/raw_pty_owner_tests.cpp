@@ -456,7 +456,8 @@ void deterministic_model_comparison()
                 CHECK(actual.value().buffered == incoming.size() && actual.value().outgoing_available == capacity - outgoing.size());
                 if (master)
                 {
-                    CHECK(actual.value().readable == (!incoming.empty() || closed));
+                    // Only a raw pair's master polls IN after its slave closed (Linux n_tty_poll for ptmx).
+                    CHECK(actual.value().readable == (!incoming.empty() || (closed && !state.multiplexed)));
                     CHECK(actual.value().writable == ((state.multiplexed || state.slave) && outgoing.size() != capacity));
                     CHECK(actual.value().hangup == closed && !actual.value().error);
                     CHECK(actual.value().write_error == (!state.multiplexed && !state.slave));
@@ -762,6 +763,8 @@ void multiplexed_terminal_semantics()
     ready = table.readiness(master).value();
     CHECK(ready.readable && ready.hangup && ready.writable && !ready.write_error);
     CHECK(drain(table, master) == "t" && table.read(master, scratch).status().code() == StatusCode::io_error);
+    ready = table.readiness(master).value();
+    CHECK(!ready.readable && ready.hangup && ready.writable && !ready.write_error);
     // The master still writes into the closed slave's input; its echo drains, then EIO again.
     CHECK(table.write(master, text("x\n")).value().bytes == 2 && drain(table, master) == "x\r\n");
     CHECK(table.read(master, scratch).status().code() == StatusCode::io_error);

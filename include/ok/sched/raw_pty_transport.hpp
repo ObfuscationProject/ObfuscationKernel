@@ -585,7 +585,9 @@ class RawPtyTable final
             const auto room = terminal.ldisc.room(terminal.termios);
             result.buffered = pair->master_input.size;
             result.outgoing_available = room;
-            result.readable = pair->master_input.size || slave_closed(*pair);
+            // A raw pair's master polls IN after its slave closed (the v1 raw
+            // contract); a ptmx master only HUP, as Linux n_tty_poll.
+            result.readable = pair->master_input.size || (!pair->multiplexed && slave_closed(*pair));
             result.writable = (pair->multiplexed || pair->slave_opens) && room;
             result.hangup = slave_closed(*pair);
             result.write_error = !pair->multiplexed && !pair->slave_opens;
