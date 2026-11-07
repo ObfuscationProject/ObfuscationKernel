@@ -49,6 +49,9 @@ struct Change
     Stamp stamp{};
     bool changed{}, master_retired{}, slave_retired{}, pair_freed{};
     std::uint8_t wakes{};
+    // A master's last close that hung a session up: its leader and the
+    // foreground group it had (Linux tty_old_pgrp).
+    ProcessId hangup_leader{}, hangup_foreground{};
 };
 struct Transfer
 {
@@ -650,13 +653,15 @@ class RawPtyTable final
     }
     // Releases one open. The last open of a side changes its state: a master
     // drops its queue, queues SIGHUP then SIGCONT for the slave session's
-    // leader and clears the session (Linux tty_signal_session_leader), and
+    // leader, reports the leader and foreground group and clears the session
+    // (Linux tty_signal_session_leader), and
     // hangs up a ptmx slave (discarding its input); a raw slave destroys its
     // unread input. A ptmx slave keeps input and session.
     [[nodiscard]] Result<Change> retire(Handle handle)
     {
         auto *pair = resolve(handle);
         if (!pair) return Status::bad_descriptor("invalid raw PTY endpoint");
+        ProcessId hangup_leader{}, hangup_foreground{};
         if (handle.side == Side::master)
         {
             if (!--pair->master_opens)
@@ -666,6 +671,8 @@ class RawPtyTable final
                 {
                     static_cast<void>(pair->slave.owe(leader, tty::TerminalSignal::hup, false));
                     static_cast<void>(pair->slave.owe(leader, tty::TerminalSignal::cont, false));
+                    hangup_leader = leader;
+                    hangup_foreground = pair->slave.foreground;
                 }
                 pair->slave.session = pair->slave.foreground = 0;
                 if (pair->multiplexed)
@@ -679,7 +686,10 @@ class RawPtyTable final
             pair->slave.ldisc.hangup();
         advance_revision(*pair);
         if (!pair->master_opens && !pair->slave_opens) release_slot(*pair);
-        return observe(handle.slot, *pair, true, wake_all);
+        auto change = observe(handle.slot, *pair, true, wake_all);
+        change.hangup_leader = hangup_leader;
+        change.hangup_foreground = hangup_foreground;
+        return change;
     }
     // Read-only diagnostics. No byte contents or mutable provider state escape.
     [[nodiscard]] Audit audit() const

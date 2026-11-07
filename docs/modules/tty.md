@@ -547,6 +547,7 @@ in Linux.
 | PTY master's last close | SIGHUP then SIGCONT to the slave session's leader; ctty cleared for the session | landed (S8) |
 | Session leader exit, ctty is a PTY | SIGHUP to the foreground group; association cleared | landed (S8) |
 | Session leader exit, ctty is the console | SIGHUP to the foreground group; association cleared; no console vhangup | landed (S8) |
+| Session leader exit after its terminal was hung up (master close, lease revoke or retire) and not re-acquired | SIGHUP then SIGCONT to the foreground group the terminal had at the hangup (Linux `tty_old_pgrp`) | landed (S8) |
 | TIOCNOTTY by the leader | SIGHUP then SIGCONT to the foreground group | landed (S8) |
 | Console lease revoke or retire | SIGHUP then SIGCONT to the console session leader, then the console terminal is reset | landed (S8) |
 | A process exit orphans a group with stopped members | SIGHUP then SIGCONT to that group, after any terminal hangup signals | landed (S3) |
@@ -560,8 +561,8 @@ SIGQUIT and SIGTSTP to the foreground group, and a TIOCSWINSZ that changes the
 size sends SIGWINCH (S4); PTY master input and PTY TIOCSWINSZ do the same
 (S5). The hangup events are landed (S8): scheduler paths queue them in the
 terminal's outbox (the master's close and the lease revoke or retirement,
-TIOCNOTTY, and `finish_process` for a session leader's exit, before the lease
-retires), and the exit commit drains the outbox before its orphan pass, so a
+TIOCNOTTY, and `finish_process` or the last thread's `exit_thread` for a
+session leader's exit, before the lease retires), and the exit commit drains the outbox before its orphan pass, so a
 leader's exit sends the foreground group SIGHUP before the orphan pass sends
 SIGHUP and SIGCONT (Linux `disassociate_ctty` before `kill_orphaned_pgrp`). A
 TIOCNOTTY from another member only detaches that member.
@@ -694,7 +695,7 @@ profile string and version above keeps its current value.
 | 19 | A hung-up ptmx slave answers an unknown request with ENOTTY; Linux `hung_up_tty_ioctl` gives EIO for every request except TIOCSPGRP. | landed (S5) |
 | 20 | `/dev/ptmx`, `/dev/tty` and `/dev/console` are fixed: `chmod`/`fchmod` by any caller and root `chown`/`fchown` return EOPNOTSUPP, and so do these calls on a ptmx master, `/dev/tty` or `/dev/console` descriptor or the boot stdio. Linux devtmpfs accepts them (0), or gives EPERM to a non-owner chmod. A non-root chown gets EPERM, as on Linux. | landed (S6) |
 | 21 | A caught signal during a blocking non-canonical console or PTY slave read with fewer than VMIN bytes buffered (fewer than min(VMIN, count)) leaves those bytes for the next read. The read returns EINTR, or under SA_RESTART restarts and keeps waiting for VMIN bytes (a consequence of item 8). Linux `n_tty_read` copies the bytes as they arrive and returns their count, with or without SA_RESTART. | landed (S7) |
-| 22 | A session leader's exit hangs its terminal up before its descriptors close, so the foreground group gets SIGHUP alone even when the leader held the master's last descriptor; Linux closes the files first and then sends SIGHUP and SIGCONT to that group through `tty_old_pgrp`. | landed (S8) |
+| 22 | (withdrawn) A session leader that holds the master's last descriptor gives its foreground group SIGHUP alone at exit, as Linux does: `do_exit` runs `disassociate_ctty(1)` before `exit_task_work` runs the deferred master `__fput`, so the later `pty_close` hangup finds no session. | not a deviation (S8) |
 | 23 | A zero-length read or write of a PTY slave returns 0 before the job-control check; Linux `n_tty_read` runs the check for a zero count too. | landed (S8) |
 | 24 | The boot stdio console descriptors are job-controlled like `/dev/tty`. Linux opens init's stdio from `/dev/console`, whose reads and writes skip the check (`redirected_tty_write`); here the console is the only terminal and the boot stdio are the console itself, so a shell on them has job control. Descriptors opened from `/dev/console` skip it as on Linux. | landed (S8) |
 

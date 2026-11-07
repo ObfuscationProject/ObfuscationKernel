@@ -341,6 +341,11 @@ class ProcessControlBlock
     ProcessGroup group_{};
     Session session_{};
     bool ctty_detached_{}; // TIOCNOTTY by a non-leader (S8); fork inherits, setsid clears.
+    // Linux tty_old_pgrp (S8): a session leader whose terminal was hung up
+    // keeps that terminal's foreground group (and the terminal's storage index,
+    // whose outbox carries the signals) for its exit. Not inherited by fork.
+    ProcessId hangup_old_foreground_{};
+    u16 hangup_terminal_{};
     bool has_execed_{}; // Successful image replacement since this process was forked.
     SignalState signals_{};
     ProcessResources resources_{};
@@ -733,7 +738,8 @@ class SchedulerState
     void cancel_console_epoch(u32 epoch);
     void reset_console_terminal();
     void hangup_console(u32 epoch);
-    void hangup_exiting_leader(const ProcessControlBlock &process);
+    void hangup_exiting_leader(ProcessControlBlock &process);
+    void remember_hangup(ProcessId leader, ProcessId foreground, u16 terminal);
     void clear_association(TerminalRef ref, Terminal &target);
     [[nodiscard]] tty::Termios console_read_termios() const;
     void wake_pty(private_pty::Handle endpoint, u8 wakes);

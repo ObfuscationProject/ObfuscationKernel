@@ -276,7 +276,13 @@ Result<usize> SchedulerState::exit_thread(ProcessId pid, ThreadId tid, smp::CpuI
         }
     process->set_state(running ? ProcessState::running : runnable ? ProcessState::runnable : ProcessState::blocked);
     thread->console_wait_epoch = 0;
-    if (!live) retire_console_process(pid);
+    // The last thread's exit is Linux group_dead: disassociate_ctty(1) runs
+    // before the lease retires, as in finish_process.
+    if (!live)
+    {
+        hangup_exiting_leader(*process);
+        retire_console_process(pid);
+    }
     return live;
 }
 
@@ -920,6 +926,8 @@ Status SchedulerState::release_description(u16 id)
             // Linux devpts_pty_kill: /dev/pts/N goes with the master's last open.
             else if (pty_endpoint.side == private_pty::Side::master && retired.value().master_retired)
             {
+                remember_hangup(retired.value().hangup_leader, retired.value().hangup_foreground,
+                                static_cast<u16>(pty_endpoint.slot + 1));
                 terminal_namespace_.remove(pty_endpoint.slot, pty_endpoint.generation);
                 wake_waiters(ThreadWaitReason::job_control,
                              job_control_key({static_cast<u16>(pty_endpoint.slot + 1), pty_endpoint.generation}));

@@ -1100,6 +1100,75 @@ bool hangups(Kernel &kernel, const Session &s, bool &notty)
     expect(take_signal(job) == OK_SIGHUP && take_signal(job) == OK_SIGCONT && !take_signal(job));
     for (const auto pid : {heir, peer, job}) release(kernel, pid);
     CHECK(scheduler.reap_process(leader));
+
+    // Linux tty_old_pgrp: after the master's last close hung the session up,
+    // the leader's exit sends SIGHUP then SIGCONT to the foreground group the
+    // terminal had. A re-acquire in between drops it (Linux __proc_set_tty),
+    // so after a TIOCNOTTY from that terminal the exit sends nothing.
+    for (const bool reacquire : {false, true})
+    {
+        leader = pty_leader(kernel, s, fds, ref);
+        const auto front = member(kernel, leader, true);
+        std::memcpy(user(value_at), &front, 4);
+        expect(fd_ioctl(kernel, leader, fds[1], OK_TIOCSPGRP, value_at) == 0);
+        disposition(kernel, leader, OK_SIGHUP, OK_SIG_IGN);
+        linux_handlers(kernel, front);
+        // The member, which inherited the master, closes its last descriptor.
+        expect(scheduler.close_descriptor(scheduler.find(leader)->resources(), fds[0]).ok());
+        expect(scheduler.close_descriptor(scheduler.find(front)->resources(), fds[0]).ok());
+        expect(native::tty_drain_outbox(kernel) && !take_signal(front) && !scheduler.controlling_terminal(*scheduler.find(leader)));
+        if (reacquire)
+        {
+            const auto other = raw_pair(kernel, leader);
+            expect(fd_ioctl(kernel, leader, other[1], OK_TIOCSCTTY) == 0 && fd_ioctl(kernel, leader, other[1], OK_TIOCNOTTY) == 0);
+            expect(!scheduler.controlling_terminal(*scheduler.find(leader)));
+        }
+        raw_exit(kernel, leader, leader, 0, true);
+        if (!reacquire) expect(take_signal(front) == OK_SIGHUP && take_signal(front) == OK_SIGCONT);
+        expect(!take_signal(front) && !job_of(kernel, front).stopped);
+        release(kernel, front);
+        CHECK(scheduler.reap_process(leader));
+    }
+    return true;
+}
+
+// A Linux SYS_exit of the console session leader's last thread hangs up the
+// foreground group before the lease retires (Linux group_dead runs
+// disassociate_ctty(1)), as exit_group does.
+bool console_leader_thread_exit(Kernel &kernel, const Session &s)
+{
+    auto &scheduler = kernel.scheduler();
+    const auto leader = fork(kernel, s.init);
+    scheduler.find(leader)->threads()[0].native_active = true;
+    expect(native_call(kernel, s.init, N::console_claim, {leader}) > 0);
+    expect(native_call(kernel, leader, N::setsid, {}) == static_cast<i64>(leader));
+    expect(ioctl(kernel, leader, OK_TIOCSCTTY) == 0);
+    const auto front = member(kernel, leader, true);
+    expect(set_group(kernel, leader, front) == 0 && scheduler.console_terminal().foreground == front);
+    linux_handlers(kernel, front);
+    scheduler.find(leader)->resources().personality = sched::UserPersonality::linux;
+    raw_exit(kernel, leader, leader, 0);
+    expect(scheduler.find(leader)->state() == sched::ProcessState::zombie && !scheduler.console_terminal().session);
+    expect(take_signal(front) == OK_SIGHUP && !take_signal(front));
+    release(kernel, front);
+    CHECK(scheduler.reap_process(leader));
+    // A lease revoke hangs the console up; the leader keeps the foreground
+    // group (tty_old_pgrp), which its later exit sends SIGHUP then SIGCONT.
+    const auto revoked = fork(kernel, s.init);
+    scheduler.find(revoked)->threads()[0].native_active = true;
+    const auto epoch = native_call(kernel, s.init, N::console_claim, {revoked});
+    expect(epoch > 0 && native_call(kernel, revoked, N::setsid, {}) == static_cast<i64>(revoked));
+    expect(ioctl(kernel, revoked, OK_TIOCSCTTY) == 0);
+    const auto job = member(kernel, revoked, true);
+    expect(set_group(kernel, revoked, job) == 0);
+    disposition(kernel, revoked, OK_SIGHUP, OK_SIG_IGN);
+    linux_handlers(kernel, job);
+    expect(native_call(kernel, s.init, N::console_revoke, {static_cast<uptr>(epoch)}) == 0);
+    expect(native::tty_drain_outbox(kernel) && !take_signal(job) && !scheduler.console_terminal().session);
+    raw_exit(kernel, revoked, revoked, 0, true);
+    expect(take_signal(job) == OK_SIGHUP && take_signal(job) == OK_SIGCONT && !take_signal(job));
+    release(kernel, job);
+    CHECK(scheduler.reap_process(revoked));
     return true;
 }
 } // namespace
@@ -1133,7 +1202,7 @@ int main()
     expect(native::tty_drain_outbox(kernel) && native::private_signal_find(session.login)->deferred_fatal == OK_SIGHUP);
     bool pty_regated = false;
     const bool init_eio = pty_job_control(kernel, session, pty_regated);
-    const bool hung_up = hangups(kernel, session, notty);
+    const bool hung_up = hangups(kernel, session, notty) && console_leader_thread_exit(kernel, session);
     PtySession pty{};
     std::array<i32, 2> fds{};
     i32 master = -1, slave = -1;

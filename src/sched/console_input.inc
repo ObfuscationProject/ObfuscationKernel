@@ -194,6 +194,9 @@ Status SchedulerState::acquire_terminal(TerminalRef ref, ProcessControlBlock &ca
     }
     target->session = caller.session_id();
     target->foreground = caller.process_group_id();
+    // Linux __proc_set_tty drops tty_old_pgrp.
+    caller.hangup_old_foreground_ = 0;
+    caller.hangup_terminal_ = 0;
     wake_waiters(ThreadWaitReason::job_control, job_control_key(ref));
     return {};
 }
@@ -209,15 +212,35 @@ void SchedulerState::clear_association(TerminalRef ref, Terminal &target)
 
 // Linux disassociate_ctty(1): a session leader's exit sends SIGHUP to its
 // terminal's foreground group (no SIGCONT) and clears the association. The
-// console gets no vhangup (section 14, item 7).
-void SchedulerState::hangup_exiting_leader(const ProcessControlBlock &process)
+// console gets no vhangup (section 14, item 7). A leader whose terminal was
+// hung up before sends SIGHUP then SIGCONT to the foreground group of that
+// hangup (tty_old_pgrp), through the hung-up terminal's outbox.
+void SchedulerState::hangup_exiting_leader(ProcessControlBlock &process)
 {
     if (process.session_id() != process.pid()) return;
+    const auto old = std::exchange(process.hangup_old_foreground_, ProcessId{});
     const auto ctty = controlling_terminal(process);
     auto *target = ctty ? terminal(*ctty) : nullptr;
-    if (!target) return;
+    if (!target)
+    {
+        auto &storage = terminal_storage(process.hangup_terminal_);
+        static_cast<void>(storage.owe(old, tty::TerminalSignal::hup, true));
+        static_cast<void>(storage.owe(old, tty::TerminalSignal::cont, true));
+        return;
+    }
     static_cast<void>(target->owe(target->foreground, tty::TerminalSignal::hup, true));
     clear_association(*ctty, *target);
+}
+
+// Linux tty_signal_session_leader: the leader of a hung-up session keeps its
+// terminal's foreground group (tty_old_pgrp) for its exit.
+void SchedulerState::remember_hangup(ProcessId leader, ProcessId foreground, u16 terminal)
+{
+    auto *process = find(leader);
+    if (!process || !foreground || process->session_id() != leader ||
+        process->state() == ProcessState::zombie || process->state() == ProcessState::exited) return;
+    process->hangup_old_foreground_ = foreground;
+    process->hangup_terminal_ = terminal;
 }
 
 // Lease revoke or retirement hangs the console up: SIGHUP then SIGCONT to the
@@ -229,6 +252,7 @@ void SchedulerState::hangup_console(u32 epoch)
     {
         static_cast<void>(console.owe(console.session, tty::TerminalSignal::hup, false));
         static_cast<void>(console.owe(console.session, tty::TerminalSignal::cont, false));
+        remember_hangup(console.session, console.foreground, 0);
     }
     reset_console_terminal();
     wake_waiters(ThreadWaitReason::job_control, job_control_key(console_terminal_ref));
