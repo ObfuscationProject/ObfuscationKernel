@@ -279,6 +279,9 @@ struct PollWait
     std::array<u32, 3> ready_sets{};
     // Set by poll_ready(): the device source of a ready console or socket.
     sched::WakeSource ready_source{sched::WakeSource::thread};
+    // Every descriptor is a socket whose wait queue holds this wait: it is
+    // evaluated only after a queue signalled (dirty) or its timeout.
+    bool socket_only{}, dirty{};
 };
 using PollObjectsLayout = memory::ObjectPool<PollWait, NativePagePool, 1>;
 constexpr usize poll_object_pages = (sched::max_processes + PollObjectsLayout::slots_per_page - 1) /
@@ -568,6 +571,11 @@ UdpWaitCounters udp_wait_statistics();
 // The kernel's TCP wait counters, bound when the runtime starts.
 extern const net::TcpWaitStats *tcp_wait_stats;
 void report_network_waits();
+// Enlists a thread's armed registration in a UDP socket's wait queue.
+bool watch_udp_socket(sched::ThreadControlBlock &thread, u32 endpoint);
+// Marks the poll wait holding `ticket` for evaluation (a socket queue signalled it).
+void mark_poll_dirty(sched::WaitTicket ticket);
+bool watch_poll_sockets(Kernel &kernel, PollWait &wait);
 RobustWalkReport retire_robust(Kernel &kernel, sched::ProcessControlBlock &process,
                               sched::ThreadLocalState &tls, sched::ThreadId owner);
 void clear_child_tid(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadLocalState &tls, bool peers);
@@ -871,6 +879,63 @@ class TcpImmediateRuntime final
         auto number = mapped_error(access, result.status());
         return number ? Result<lu::Return>{lu::Return{0, number.value()}} : Result<lu::Return>{number.status()};
     }
+    // The record a TCP name call reports: the profile's sockaddr_in or
+    // sockaddr_in6, or the native ok_sockaddr_in or ok_sockaddr_in6.
+    static Result<lu::SocketName> socket_name(const Request &request, const net::tcp::Endpoint &endpoint)
+    {
+        if (request.linux) return lu::encode_socket_name<lu::configured_native_profile()>(endpoint.address, endpoint.port);
+        lu::SocketName name{};
+        const std::array<u8, 2> port{static_cast<u8>(endpoint.port >> 8), static_cast<u8>(endpoint.port)};
+        if (endpoint.address.v4())
+        {
+            ok_sockaddr_in record{};
+            record.family = OK_AF_INET; record.port_be[0] = port[0]; record.port_be[1] = port[1];
+            for (usize i = 0; i < 4; ++i) record.address[i] = endpoint.address[i];
+            const auto bytes = std::bit_cast<std::array<u8, sizeof(record)>>(record);
+            for (usize i = 0; i < bytes.size(); ++i) name.bytes[i] = bytes[i];
+            name.size = bytes.size();
+            return name;
+        }
+        ok_sockaddr_in6 record{};
+        record.family = OK_AF_INET6; record.port_be[0] = port[0]; record.port_be[1] = port[1];
+        for (usize i = 0; i < 16; ++i) record.address[i] = endpoint.address[i];
+        record.scope_id = net::wire::link_local(endpoint.address.ipv6()) ? 1 : 0;
+        const auto bytes = std::bit_cast<std::array<u8, sizeof(record)>>(record);
+        for (usize i = 0; i < bytes.size(); ++i) name.bytes[i] = bytes[i];
+        name.size = bytes.size();
+        return name;
+    }
+    // Linux order (__sys_getsockname, move_addr_to_user): the name is taken
+    // first, then the length is read; a negative length is EINVAL, at most
+    // the length is copied and the full size is reported.
+    static Result<usize> copy_socket_name(Access &access, const Request &request, const lu::SocketName &name, u32 &semantic)
+    {
+        std::array<std::byte, 4> length_bytes{};
+        if (auto status = access.read(request.arguments[2], length_bytes); !status) return status;
+        std::array<u8, 4> raw{};
+        for (usize i = 0; i < raw.size(); ++i) raw[i] = std::to_integer<u8>(length_bytes[i]);
+        i32 length{};
+        if (request.linux)
+        {
+            auto decoded = lu::UdpWire<lu::configured_native_profile()>::decode_socklen(raw); if (!decoded) return decoded.status();
+            length = decoded.value();
+        }
+        else length = std::bit_cast<i32>(std::bit_cast<u32>(raw));
+        if (length < 0) { semantic = error(request, lu::UdpErrno::e_inval, 22); return Status::fault(); }
+        const usize copied = static_cast<usize>(length) < name.size ? static_cast<usize>(length) : name.size;
+        std::array<std::byte, 28> record{};
+        for (usize i = 0; i < copied; ++i) record[i] = std::byte{name.bytes[i]};
+        if (copied) if (auto status = access.write(request.arguments[1], std::span{record}.first(copied)); !status) return status;
+        if (request.linux)
+        {
+            if (auto status = lu::UdpWire<lu::configured_native_profile()>::encode_socklen(raw, static_cast<u32>(name.size)); !status)
+                return status;
+        }
+        else raw = std::bit_cast<std::array<u8, 4>>(static_cast<u32>(name.size));
+        for (usize i = 0; i < raw.size(); ++i) length_bytes[i] = std::byte{raw[i]};
+        if (auto status = access.write(request.arguments[2], length_bytes); !status) return status;
+        return usize{0};
+    }
     // An IPv6 stream is v6-only: an AF_INET record is EAFNOSUPPORT and a
     // mapped address is `mapped` (EINVAL for bind, ENETUNREACH for connect).
     static Result<net::tcp::Endpoint> address(Access &access, const Request &request, net::Family family,
@@ -988,6 +1053,30 @@ class TcpImmediateRuntime final
                 if (status) semantic_error = tcp_error(request, lu::tcp_errno_einprogress, 115);
                 return status ? Result<usize>{0} : Result<usize>{status};
             }
+            if (request.operation == Call::getsockname || request.operation == Call::getpeername)
+            {
+                auto stream = service.snapshot(handle); if (!stream) return stream.status();
+                // Unbound: the unspecified address and port 0 of the socket's family.
+                net::tcp::Endpoint name = stream.value().local;
+                if (!name.port && name.address.unspecified())
+                    name.address = stream.value().family == net::Family::ipv6 ? net::IpAddress{net::wire::Ipv6{}} : net::IpAddress{};
+                const bool connection = stream.value().endpoint && stream.value().endpoint->kind == net::tcp::HandleKind::connection;
+                if (connection)
+                {
+                    auto protocol = service.endpoints().state(*stream.value().endpoint); if (!protocol) return protocol.status();
+                    const auto state = protocol.value().transport.state;
+                    if (request.operation == Call::getsockname) name = protocol.value().local;
+                    // inet_getname: no peer before the handshake or after close.
+                    else if (state == net::tcp::State::closed || state == net::tcp::State::syn_sent ||
+                             state == net::tcp::State::listen)
+                    { semantic_error = tcp_error(request, lu::tcp_errno_enotconn, 107); return Status::fault(); }
+                    else name = protocol.value().peer;
+                }
+                else if (request.operation == Call::getpeername)
+                { semantic_error = tcp_error(request, lu::tcp_errno_enotconn, 107); return Status::fault(); }
+                auto record = socket_name(request, name); if (!record) return record.status();
+                return copy_socket_name(access, request, record.value(), semantic_error);
+            }
             // Defer unsupported operations before touching connection-only state;
             // a listener is a valid stream but not a connection handle.
             if (request.operation != Call::shutdown && request.operation != Call::read && request.operation != Call::write)
@@ -1000,6 +1089,10 @@ class TcpImmediateRuntime final
             if (state.failure != net::tcp::Failure::none)
             {
                 if (state.failure == net::tcp::Failure::refused) semantic_error = tcp_error(request, lu::tcp_errno_econnrefused, 111);
+                else if (state.failure == net::tcp::Failure::host_unreachable) semantic_error = tcp_error(request, lu::tcp_errno_ehostunreach, 113);
+                else if (state.failure == net::tcp::Failure::network_unreachable) semantic_error = tcp_error(request, lu::tcp_errno_enetunreach, 101);
+                else if (state.failure == net::tcp::Failure::prohibited) semantic_error = tcp_error(request, lu::tcp_errno_eacces, 13);
+                else if (state.failure == net::tcp::Failure::protocol) semantic_error = tcp_error(request, lu::tcp_errno_eproto, 71);
                 else if (state.failure == net::tcp::Failure::timed_out) semantic_error = tcp_error(request, lu::tcp_errno_etimedout, 110);
                 else if (state.failure == net::tcp::Failure::reset) semantic_error = tcp_error(request, lu::tcp_errno_econnreset, 104);
                 else semantic_error = tcp_error(request, lu::tcp_errno_econnaborted, 103);

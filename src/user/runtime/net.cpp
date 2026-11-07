@@ -18,12 +18,22 @@ constexpr usize udp_queue_capacity = 16;
 std::array<sched::WaitQueue<udp_queue_capacity>, net::NativeUdpService::socket_capacity> udp_receive_queues{};
 bool udp_receive_rescan{};
 u64 udp_executor_seen{};
+bool udp_executor_failed_seen{};
 UdpWaitCounters udp_wait_counters{};
 sched::WaitQueue<udp_queue_capacity> &udp_receive_queue(u32 endpoint)
 {
     const u32 index = endpoint & 0xffu;
     return udp_receive_queues[index && index <= udp_receive_queues.size() ? index - 1 : 0];
 }
+} // namespace
+bool watch_udp_socket(sched::ThreadControlBlock &thread, u32 endpoint)
+{
+    if (!thread.wait_registration.active()) return false;
+    const auto status = udp_receive_queue(endpoint).enlist(thread.wait_registration);
+    return status || status.code() == StatusCode::already_exists;
+}
+namespace
+{
 void enlist_udp_receive(Kernel &kernel, sched::ProcessId pid, sched::ThreadId tid, u32 endpoint)
 {
     auto *thread = kernel.scheduler().find_thread(pid, tid);
@@ -143,6 +153,8 @@ Result<usize> copy_native_udp_datagram(Kernel &kernel, const hw::AddressSpace &s
     if (operation.flags || (!!operation.source_address != !!operation.source_length) ||
         (operation.source_address ? operation.source_capacity < name_size : operation.source_capacity != 0))
         return Status::invalid_argument("invalid copied native UDP receive request");
+    // A pending ICMP error is reported before any queued datagram.
+    if (auto pending = kernel.native_udp().take_error(endpoint); !pending) return pending;
     const auto received = kernel.native_udp().peek(endpoint);
     if (!received)
     {
@@ -335,6 +347,9 @@ i64 resume_native_udp_receive(Kernel &kernel, sched::ProcessControlBlock &proces
 }
 Status scan_native_udp_receives(Kernel &kernel)
 {
+    // Waiters of sockets whose readiness moved are woken first; the scan then
+    // keeps ownership, capture and descriptor checks.
+    if (auto status = notify_udp_receives(kernel); !status) return status;
     for (const auto &entry : native_udp_receive_waits)
     {
         if (!entry.pid) continue;
@@ -847,6 +862,7 @@ Status linux_udp_receive_post_arm(Kernel &kernel, const LinuxUdpReceiveWait &wai
 }
 [[maybe_unused]] Status scan_linux_udp_receives(Kernel &kernel)
 {
+    if (auto status = notify_udp_receives(kernel); !status) return status;
     for (const auto &entry : linux_udp_receive_waits)
     {
         if (!entry.pid || !entry.object.pool) continue; // Discoverable allocation reservation.
@@ -892,9 +908,10 @@ Status linux_udp_receive_post_arm(Kernel &kernel, const LinuxUdpReceiveWait &wai
 // moved (a link failure ends every wait).
 Status notify_udp_receives(Kernel &kernel)
 {
-    const u64 executor = kernel.native_udp_executor().state().readiness_sequence;
-    const bool all = executor != udp_executor_seen;
-    udp_executor_seen = executor;
+    // A failed executor ends every wait without advancing its sequence.
+    const auto state = kernel.native_udp_executor().state();
+    const bool all = state.readiness_sequence != udp_executor_seen || state.failed != udp_executor_failed_seen;
+    udp_executor_seen = state.readiness_sequence; udp_executor_failed_seen = state.failed;
     Status failure{};
     const auto evaluate = [&](sched::WaitTicket ticket) -> bool {
         if (!failure) return false;
@@ -921,6 +938,8 @@ Status notify_udp_receives(Kernel &kernel)
             const auto *thread = kernel.scheduler().find_thread(wait.pid, wait.tid);
             return !thread || !thread->wait_registration.pending(ticket);
         }
+        // Not a receive wait: a poll or select watching this socket.
+        mark_poll_dirty(ticket);
         return true;
     };
     kernel.native_udp().take_changed([&](u32 handle) { if (!all) udp_receive_queue(handle).notify(evaluate); });

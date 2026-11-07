@@ -276,6 +276,100 @@ void committed_exec_retirement_order(Kernel &kernel)
     }
 }
 // Native AF_INET6 takes exact 28-byte records; the IPv4 socket keeps its own.
+// The connected peer's port is unreachable (an ICMP error the executor
+// routed): a blocked receiver wakes with ECONNREFUSED, poll reports POLLERR,
+// and the error is reported once (Linux __udp4_lib_err). The send side is
+// covered by net_udp_tests: native sendto needs an extension and an address.
+void icmp_refusal_wakes_receiver(Kernel &kernel)
+{
+    const auto g = create(kernel, 51030);
+    // Earlier cases bound the sender; connect to it so its datagrams pass the peer filter.
+    const auto source = peer.binding(sender); CHECK(source && source.value().bound);
+    const u16 remote = source.value().port;
+    CHECK(kernel.native_udp().connect(g.endpoint, udp_link.peer_ip, remote));
+    const net::wire::IcmpErrorClass refused{net::wire::IcmpErrorKind::refused, true, 0};
+    const auto refuse = [&] {
+        auto taken = kernel.native_udp().icmp_error(udp_link.local_ip, g.port, udp_link.peer_ip, remote, refused);
+        expect(taken && taken.value());
+    };
+    arm(kernel, g);
+    refuse();
+    resume(kernel, g, -OK_ECONNREFUSED);
+    select(kernel, g);
+    auto call = [&](uptr number, std::array<uptr, 6> arguments) {
+        bool complete = true;
+        const auto value = native::dispatch(kernel, g.pid, {number, arguments}, complete);
+        expect(complete); return value;
+    };
+    // Reported once: a zero-timeout poll then finds nothing pending.
+    constexpr uptr fds = hw::user_begin + 896;
+    const auto poll = [&](i16 &revents) {
+        ok_pollfd entry{g.fd, OK_POLLIN, 0}; std::memcpy(mock::memory.data() + 896, &entry, sizeof(entry));
+        const auto ready = call(OK_SYS_POLL, {fds, 1, 0, 0, 0, 0});
+        std::memcpy(&entry, mock::memory.data() + 896, sizeof(entry)); revents = entry.revents; return ready;
+    };
+    i16 revents{};
+    expect(poll(revents) == 0 && revents == 0);
+    refuse();
+    expect(poll(revents) == 1 && revents == OK_POLLERR);
+    expect(call(OK_SYS_RECVFROM, {static_cast<uptr>(g.fd), output, 8, 0, 0, 0}) == -OK_ECONNREFUSED);
+    expect(poll(revents) == 0 && revents == 0);
+    // A datagram queued after the error is still read after it.
+    refuse(); packet(kernel, g.port, payload);
+    expect(call(OK_SYS_RECVFROM, {static_cast<uptr>(g.fd), output, 8, 0, 0, 0}) == -OK_ECONNREFUSED);
+    expect(call(OK_SYS_RECVFROM, {static_cast<uptr>(g.fd), output, 8, 0, 0, 0}) == 3);
+    retire(kernel, g);
+}
+// A blocking poll over UDP sockets sleeps on their wait queues: an idle pass
+// does not evaluate it, and a datagram signals the queue so the next pass
+// completes it. Asking for POLLOUT keeps the rescan, since writability
+// follows transmit credit, which signals no queue.
+native::PollWait *poll_wait(sched::ProcessId pid)
+{
+    for (const auto &entry : native::poll_waits)
+        if (entry.pid == pid)
+            if (auto resolved = native::poll_objects.resolve(entry.object)) return resolved.value();
+    return nullptr;
+}
+void poll_sleeps_on_socket_queue(Kernel &kernel)
+{
+    const auto g = create(kernel, 51040);
+    auto &caller = thread(kernel, g);
+    constexpr uptr fds = hw::user_begin + 896;
+    const auto arm_poll = [&](i16 events) {
+        ok_pollfd entry{g.fd, events, 0}; std::memcpy(mock::memory.data() + 896, &entry, sizeof(entry));
+        CHECK(kernel.scheduler().activate_thread(g.pid, g.pid));
+        hw::UserFrame captured{}; captured.pc = hw::user_begin + 256; captured.sp = hw::user_begin + 4096;
+        captured.registers[14] = OK_SYS_POLL; captured.registers[9] = fds; captured.registers[10] = 1;
+        captured.registers[11] = ~uptr{0};
+        caller.native_frame = captured; mock::entry_trap = {hw::TrapKind::syscall, 256};
+        native::last_pid = native::last_tid = 0;
+        expect(native::step(kernel)); expect(caller.syscall_pending);
+        // A completed poll may resume in the same pass; let it take a timer trap.
+        mock::entry_trap = {hw::TrapKind::timer};
+        return poll_wait(g.pid);
+    };
+    auto *wait = arm_poll(OK_POLLIN);
+    expect(wait && wait->socket_only && !wait->dirty);
+    for (usize pass = 0; pass < 3; ++pass)
+    {
+        expect(native::step(kernel)); expect(caller.syscall_pending && poll_wait(g.pid) == wait);
+        expect(wait->socket_only && !wait->dirty);
+    }
+    packet(kernel, g.port, payload);
+    expect(native::step(kernel));
+    expect(!caller.syscall_pending && result(kernel, g) == 1 && !poll_wait(g.pid));
+    ok_pollfd entry{}; std::memcpy(&entry, mock::memory.data() + 896, sizeof(entry));
+    expect(entry.revents == OK_POLLIN);
+    CHECK(kernel.native_udp().consume(g.endpoint));
+    wait = arm_poll(OK_POLLIN | OK_POLLOUT);
+    expect(wait && !wait->socket_only);
+    expect(native::step(kernel)); expect(caller.syscall_pending);
+    packet(kernel, g.port, payload);
+    expect(native::step(kernel));
+    expect(!caller.syscall_pending && result(kernel, g) == 1);
+    retire(kernel, g);
+}
 void ipv6_native_calls(Kernel &kernel)
 {
     const auto g = create(kernel, 51020);
@@ -342,6 +436,8 @@ int main()
     retirement_and_reused_object(kernel);
     committed_exec_retirement_order(kernel);
     ipv6_native_calls(kernel);
+    icmp_refusal_wakes_receiver(kernel);
+    poll_sleeps_on_socket_queue(kernel);
     expect(kernel.native_udp().active_sockets() == 0);
     expect(native::entry_stacks.accounting().leased_slots == 0);
     const auto owners = native::native_udp_receive_objects.accounting();
