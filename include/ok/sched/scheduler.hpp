@@ -406,6 +406,17 @@ class DescriptionPositionGuard final
         // A kernel section waits serving this CPU's interrupts: the holder
         // may hold the kernel lock and wait for a device line routed here.
         if (lock_->try_lock()) return;
+        if (lock_->owned_by_current_cpu())
+        {
+            // Re-entry on this CPU would spin forever, and every drainer of
+            // the process with it: report it and go on under the outer hold.
+            if constexpr (smp::lock_debug_enabled)
+                smp::lock_rank_violation({smp::LockViolationKind::self_deadlock, DescriptionPositionLock::rank,
+                                          DescriptionPositionLock::rank, lock_, smp::current_cpu()});
+            smp::detail::section_assert(&smp::SectionCpu::section_asserts, "section re-entered a position lock");
+            lock_ = nullptr;
+            return;
+        }
         const smp::SpinningScope spinning;
         while (!lock_->try_lock())
         {

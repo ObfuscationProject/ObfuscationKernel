@@ -24,6 +24,9 @@ namespace lu = ok::abi::linux_user;
 namespace mock
 {
 alignas(16) std::array<std::byte, 96 * 1024> memory{};
+// The register the profile under test passes its first argument in, as the
+// native trap decoder reports it (the A5 digest reads the descriptor there).
+ok::usize first_argument_slot{};
 } // namespace mock
 namespace ok::arch
 {
@@ -55,7 +58,12 @@ UserFrame initial_frame(uptr pc, uptr sp)
     f.sp = sp;
     return f;
 }
-Syscall syscall(const UserFrame &) { return {}; }
+Syscall syscall(const UserFrame &f)
+{
+    Syscall call{};
+    call.arguments[0] = f.registers[mock::first_argument_slot];
+    return call;
+}
 void set_return_value(UserFrame &f, i64 v) { f.registers[0] = static_cast<uptr>(v); }
 bool user_range(const AddressSpace &, uptr address, usize size, bool)
 {
@@ -243,6 +251,7 @@ void equivalence(Kernel &kernel, sched::ProcessId pid, usize number_slot, std::a
     using O = lu::Operation;
     using D = smp::SectionDecline;
     Model<P> model{kernel, pid, number_slot, slots};
+    mock::first_argument_slot = slots[0];
     auto &process = *kernel.scheduler().find(pid);
     auto &t = model.thread();
     const auto saved_state = t.state;
@@ -403,6 +412,49 @@ void equivalence(Kernel &kernel, sched::ProcessId pid, usize number_slot, std::a
     smp::close_section_admission();
     model.declines(model.frame(O::getppid, {}), D::shutdown);
     smp::open_section_admission();
+    if constexpr (P == lu::Profile::x86_64)
+    {
+        // A5 with a section working on another CPU: that section may share
+        // the description (fork) and move its offset, which is then not a
+        // decline's effect; with none working, an offset change is caught.
+        auto *shared = description(a.value());
+        t.native_frame = model.frame(O::read, {fa, output, 1});
+        const auto quiet = native::admission_digest(kernel, process, t);
+        CHECK(quiet.offset_stable && native::admission_digest(kernel, process, t).equal(quiet, true));
+        shared->offset += 7;
+        CHECK(!native::admission_digest(kernel, process, t).equal(quiet, true));
+        shared->offset -= 7;
+        smp::section_records[1].store(smp::SectionState::working);
+        const auto busy = native::admission_digest(kernel, process, t);
+        CHECK(!busy.offset_stable);
+        shared->offset += 7;
+        smp::section_records[1].store(smp::SectionState::returning);
+        CHECK(native::admission_digest(kernel, process, t).equal(busy, true));
+        shared->flags ^= posix::o_NONBLOCK;
+        CHECK(!native::admission_digest(kernel, process, t).equal(busy, true));
+        shared->flags ^= posix::o_NONBLOCK;
+        smp::section_records[1].store(smp::SectionState::idle);
+        shared->offset -= 7;
+
+        // A section re-entering a position lock this CPU holds reports a
+        // self-deadlock and a section assertion instead of spinning.
+        auto *lock = kernel.scheduler().position_lock(shared);
+        CHECK(lock != nullptr);
+        const auto asserts = smp::section_cpus[0].section_asserts.load();
+        const auto violations = smp::lock_violation_count(0);
+        smp::set_cpu_mode(0, smp::mode_section);
+        {
+            const sched::DescriptionPositionGuard outer(lock);
+            const sched::DescriptionPositionGuard inner(lock);
+            CHECK(lock->owned_by_current_cpu());
+        }
+        smp::clear_cpu_mode(0, smp::mode_section);
+        CHECK(!lock->owned_by_current_cpu() && lock->try_lock());
+        lock->unlock();
+        CHECK(smp::section_cpus[0].section_asserts.load() == asserts + 1 &&
+              smp::lock_violation_count(0) == violations + 1);
+        smp::section_cpus[0].section_asserts.store(asserts);
+    }
     // Teardown: the RAM nodes return before their descriptions close.
     description(a.value())->node = ra;
     description(b.value())->node = rb;

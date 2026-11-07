@@ -36,12 +36,22 @@ bool AdmissionDigest::equal(const AdmissionDigest &other, bool pages) const
 {
     const bool same = frame == other.frame && syscall_pending == other.syscall_pending && state == other.state &&
         slot_used == other.slot_used && close_on_exec == other.close_on_exec && description == other.description &&
-        offset == other.offset && references == other.references && flags == other.flags &&
+        (!offset_stable || !other.offset_stable || offset == other.offset) &&
+        references == other.references && flags == other.flags &&
         entries == other.entries && origins_live == other.origins_live && origins_bound == other.origins_bound &&
         continuations_pending == other.continuations_pending && futex_live == other.futex_live &&
         processes == other.processes;
     return same && (!pages || (pool_user == other.pool_user && pool_objects == other.pool_objects &&
                                pool_free == other.pool_free));
+}
+
+bool section_working_elsewhere()
+{
+    const auto self = smp::current_cpu();
+    for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
+        if (cpu != self && smp::section_records[cpu].load() == smp::SectionState::working)
+            return true;
+    return false;
 }
 
 AdmissionDigest admission_digest(Kernel &kernel, const sched::ProcessControlBlock &process,
@@ -60,7 +70,10 @@ AdmissionDigest admission_digest(Kernel &kernel, const sched::ProcessControlBloc
         digest.description = slot->description;
         if (const auto *description = slot->used ? kernel.scheduler().open_description(slot->description) : nullptr)
         {
-            digest.offset = description->offset;
+            // Read only when no section can be moving it (no unlocked read).
+            digest.offset_stable = !section_working_elsewhere();
+            if (digest.offset_stable)
+                digest.offset = description->offset;
             digest.references = description->references;
             digest.flags = description->flags;
         }

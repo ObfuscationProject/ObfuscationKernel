@@ -106,7 +106,11 @@ template <lu::Profile Profile> std::optional<SectionSelection> section_family(u6
     return std::nullopt;
 }
 
-// A5: what a decline must leave as it found it.
+// A5: what a decline must leave as it found it. A description's offset is
+// compared only when no other CPU's section was working at the first digest:
+// such a section may share the description (fork) and move it under its
+// position lock, and no section can start while admission holds the kernel
+// lock.
 struct AdmissionDigest
 {
     u64 frame{};
@@ -114,6 +118,7 @@ struct AdmissionDigest
     sched::ProcessState state{};
     bool slot_used{}, close_on_exec{};
     u16 description{};
+    bool offset_stable{};
     usize offset{}, references{};
     u32 flags{};
     u64 entries{};
@@ -124,6 +129,8 @@ struct AdmissionDigest
 };
 AdmissionDigest admission_digest(Kernel &kernel, const sched::ProcessControlBlock &process,
                                  const sched::ThreadControlBlock &thread);
+// Whether a section on a CPU other than this one is working.
+[[nodiscard]] bool section_working_elsewhere();
 
 // Counts one decline (and, with OK_LOCK_DEBUG, any effect it had).
 Admission decline_section(smp::SectionDecline reason, const std::optional<AdmissionDigest> &before, Kernel &kernel,
