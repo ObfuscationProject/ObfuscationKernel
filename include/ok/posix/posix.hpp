@@ -168,6 +168,13 @@ class PosixService final
     }
     [[nodiscard]] sched::ProcessId getpid() const;
     [[nodiscard]] sched::ThreadId gettid() const;
+    // Kernel sections (ok/smp/kernel_section.hpp): the caller a section on
+    // `cpu` acts for, bound by that CPU under the kernel lock before the
+    // section starts and unbound by it before the section ends. While bound,
+    // getpid, gettid, user_credentials, resources() and thread_local_state()
+    // read it and never the scheduler, so the boot fallback is unreachable.
+    void bind_section_caller(smp::CpuId cpu, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread);
+    void unbind_section_caller(smp::CpuId cpu);
     [[nodiscard]] sched::ProcessId getppid() const;
     Result<sched::ProcessId> getpgid(i32 pid = 0) const;
     Result<sched::ProcessId> getsid(i32 pid = 0) const;
@@ -365,6 +372,15 @@ class PosixService final
     [[nodiscard]] Result<Fd> allocate_fd(Fd minimum = 0);
     [[nodiscard]] Result<fs::ResolveContext> path_context(Fd dirfd, std::string_view path);
     [[nodiscard]] Status copy_descriptor(Fd source, Fd target, u32 flags);
+    struct SectionCaller
+    {
+        sched::ProcessControlBlock *process{};
+        sched::ThreadControlBlock *thread{};
+    };
+    // This CPU's bound section caller, or null.
+    [[nodiscard]] const SectionCaller *section_caller() const;
+    // The boot resources stand in for a missing caller (A10 checks why).
+    void boot_fallback(const char *site) const;
 
     fs::VirtualFileSystem *vfs_{nullptr};
     driver::ConsoleDriver *console_{nullptr};
@@ -376,6 +392,8 @@ class PosixService final
     u64 monotonic_ticks_{0};
     u64 clock_resolution_{1000000};
     driver::EntropySource *entropy_source_{nullptr};
+    // Each entry is written and read only by its own CPU.
+    std::array<SectionCaller, smp::max_cpus> section_callers_{};
 };
 
 template <DirectoryPolicy Policy, typename Consumer>
@@ -408,6 +426,8 @@ Result<usize> PosixService::enumerate_directory(Fd fd, Consumer &&consumer)
             return Status::io_error("directory provider exceeded listing capacity");
         return page;
     };
+    // The stream position is read and committed under the position lock.
+    const sched::DescriptionPositionGuard position(scheduler_->position_lock(description));
     usize page_start = description->offset > dots ? description->offset - dots : 0;
     auto listing = page_at(page_start);
     if (!listing) return listing.status();
