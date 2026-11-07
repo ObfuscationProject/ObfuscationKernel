@@ -20,6 +20,10 @@ sched::ThreadId last_tid{};
 using Candidate = sched::ThreadRef;
 // Per CPU, the last thread picked because a signal interrupted its wait.
 constinit std::array<Candidate, smp::max_cpus> last_interrupted{};
+// With secondaries online, the threads one step() hands to run queues. Only
+// the kernel-lock holder fills and reads it, within one selection, so a single
+// static buffer serves every CPU and no step zeroes 8 KiB on its stack.
+constinit std::array<Candidate, sched::max_processes * sched::max_threads_per_process> runnable{};
 } // namespace
 void forget_cpu_cursor(smp::CpuId cpu)
 {
@@ -1134,7 +1138,6 @@ bool step(Kernel &kernel)
     auto before = [](Candidate left, Candidate right) {
         return left.pid < right.pid || (left.pid == right.pid && left.tid < right.tid);
     };
-    std::array<Candidate, sched::max_processes * sched::max_threads_per_process> runnable{};
     usize runnable_count = 0;
     Candidate chosen{}, first{};
     for (const auto &candidate : kernel.scheduler().processes())
