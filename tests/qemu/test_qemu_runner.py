@@ -545,6 +545,14 @@ class QemuRunnerValidationTests(unittest.TestCase):
                 code, stdout, stderr = self.validate_smp(arch, base + boot + "\n" + cycles + "\n", 4)
                 self.assertEqual(code, 0, stderr)
                 self.assertIn("hotplug_boot=pass hotplug_cycles=12", stdout)
+            with self.subTest(arch=arch, case="repeated"):
+                # The real shape: every interrupt report repeats the line, the
+                # first at runtime start before any cycle; the last decides.
+                repeated = "\n".join((cycles.replace("cycles=12", "cycles=0"),
+                                       cycles.replace("cycles=12", "cycles=5"), cycles, cycles))
+                code, stdout, stderr = self.validate_smp(arch, base + boot + "\n" + repeated + "\n", 4)
+                self.assertEqual(code, 0, stderr)
+                self.assertIn("hotplug_boot=pass hotplug_cycles=12", stdout)
             rejected = (
                 boot.replace("restart=pass", "restart=fail"),
                 boot.replace("ipi=pass", "ipi=fail"),
@@ -558,7 +566,11 @@ class QemuRunnerValidationTests(unittest.TestCase):
                 cycles.replace("cpu=3", "cpu=0"),
                 cycles.replace("cpu=3", "cpu=4"),
                 cycles.replace(" failures=0", ""),
-                cycles + "\n" + cycles,
+                # Only the last report counts, and counters never go back.
+                cycles + "\n" + cycles.replace("cycles=12", "cycles=0"),
+                cycles.replace("failures=0", "failures=1") + "\n" + cycles,
+                cycles + "\n" + cycles.replace("cycles=12", "cycles=13").replace("cpu=3", "cpu=2"),
+                cycles + "\n" + cycles.replace("scope=hardware", "scope=model"),
             )
             for extra in rejected:
                 with self.subTest(arch=arch, extra=extra):

@@ -436,7 +436,11 @@ def hotplug_problem(arch: str, lines: list[str], cpus: int) -> tuple[str | None,
     """Check the OK_SMP_HOTPLUG_BOOT and OK_SMP_HOTPLUG lines, when present.
 
     Returns (problem, summary): the summary names what was checked for the
-    OK_QEMU_SMP_TEST line. Only SMP profiles may print them, at most once each.
+    OK_QEMU_SMP_TEST line. Only SMP profiles may print them. The boot line
+    comes at most once. The knob's line comes with every interrupt report (at
+    runtime start, at process retirements, at shutdown), so its counters are
+    cumulative: they never decrease, it always names the same CPU, and the
+    last one is the verdict.
     """
     boot = [parse_fields(line) for line in lines if line.startswith("OK_SMP_HOTPLUG_BOOT ")]
     cycles = [parse_fields(line) for line in lines if line.startswith("OK_SMP_HOTPLUG ")]
@@ -444,8 +448,8 @@ def hotplug_problem(arch: str, lines: list[str], cpus: int) -> tuple[str | None,
         return None, ""
     if arch not in SMP_QEMU_ARCHES:
         return f"{arch} starts no secondary CPU but printed a hotplug line", ""
-    if len(boot) > 1 or len(cycles) > 1:
-        return "a hotplug line was printed more than once", ""
+    if len(boot) > 1:
+        return "OK_SMP_HOTPLUG_BOOT was printed more than once", ""
     summary = ""
     if boot:
         fields = boot[0]
@@ -456,12 +460,19 @@ def hotplug_problem(arch: str, lines: list[str], cpus: int) -> tuple[str | None,
             return "OK_SMP_HOTPLUG_BOOT failed " + ",".join(failed), ""
         summary += " hotplug_boot=pass"
     if cycles:
-        fields = cycles[0]
-        try:
-            count, failures, cpu = int(fields["cycles"]), int(fields["failures"]), int(fields["cpu"])
-        except (KeyError, ValueError):
-            return "OK_SMP_HOTPLUG lacks cycles, failures or cpu", ""
-        if fields.get("scope") != "hardware" or count <= 0 or failures != 0 or not 1 <= cpu < cpus:
+        reports = []
+        for fields in cycles:
+            try:
+                reports.append((int(fields["cycles"]), int(fields["failures"]), int(fields["cpu"])))
+            except (KeyError, ValueError):
+                return "OK_SMP_HOTPLUG lacks cycles, failures or cpu", ""
+            if fields.get("scope") != "hardware":
+                return "OK_SMP_HOTPLUG must name scope=hardware", ""
+        for previous, current in zip(reports, reports[1:]):
+            if current[0] < previous[0] or current[1] < previous[1] or current[2] != previous[2]:
+                return "OK_SMP_HOTPLUG counters went back or its CPU changed between reports", ""
+        count, failures, cpu = reports[-1]
+        if count <= 0 or failures != 0 or not 1 <= cpu < cpus:
             return f"OK_SMP_HOTPLUG cycles={count} failures={failures} cpu={cpu}", ""
         summary += f" hotplug_cycles={count}"
     return None, summary
