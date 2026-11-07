@@ -2,11 +2,12 @@
 
 This is the terminal and job-control contract of WT2.2 `feat/tty-jobctl`
 (`docs/PLAN.md`). The paired ObfuscationOS worktree `feat/getty-login` builds
-against it. Every section carries a status: **planned (Sn)** names the slice
-that lands it, and becomes **landed (Sn)** when that slice merges into this
-branch. Nothing below is implemented yet unless it is marked landed.
+against it. Every section names the slice that landed it (**landed (Sn)**).
+Slices S0-S9a are landed on this branch; only the module ABI bump (S9b, ABI
+80, §13) waits for the merge. The per-slice log and its evidence classes are
+in `docs/qualification/TTY_JOB_CONTROL.md`.
 
-Current behaviour, which the remaining planned sections replace:
+Current behaviour:
 
 - The serial console is a lease (`OK_SYS_CONSOLE_CLAIM/REVOKE/FLUSH`) over a
   terminal object (S4): an N_TTY line discipline under the raw-compatible
@@ -33,6 +34,8 @@ Current behaviour, which the remaining planned sections replace:
   signals (S4), and so do PTY master input and TIOCSWINSZ on a PTY (S5).
   SIGTTIN, SIGTTOU, TOSTOP, TIOCNOTTY and every hangup of §9.7 are landed
   (S8).
+- The SDK publishes all of it through UAPI 0.17.0 and the seven terminal and
+  job-control markers of §13 (S9a); module ABI stays 79 until S9b.
 - `OK_TTY` (`fs::TtyDevice`) is a VFS roadmap model. It is not a terminal and is
   not part of this contract.
 
@@ -47,13 +50,17 @@ UAPI placement:
 | Header | Content | Slice |
 |---|---|---|
 | `ok/uapi/termios.h` (new) | `struct ok_termios`, `struct ok_winsize`, flag and cc macros, `OK_TCIFLUSH/OK_TCOFLUSH/OK_TCIOFLUSH` | landed (S1) |
-| `ok/uapi/syscall.h` (additive defines only) | `OK_TCGETS` … `OK_TIOCNOTTY` (S1), `OK_TIOCGPTN`, `OK_TIOCSPTLCK` (S5), `OK_O_NOCTTY`, `OK_EINTR`, `OK_ENXIO`, `OK_ENOSPC`, `OK_PTS_MAJOR`, `OK_PTS_CAPACITY` (S6) | landed (S1, S5, S6) |
-| `ok/uapi/job_control.h` (new; C, include guard only) | native signal numbers other than KILL and TERM, `OK_SIG_DFL`, `OK_SIG_IGN`, `struct ok_sigaction`, `OK_NATIVE_SIGNAL_ACTION_VERSION`, `OK_WNOHANG`, `OK_WUNTRACED`, `OK_WCONTINUED` | S3 |
-| `ok/uapi/signal.h` | unchanged until S9; S9 decides whether `job_control.h` folds into it with UAPI 0.17 | S9 |
+| `ok/uapi/syscall.h` | `OK_TCGETS` … `OK_TIOCNOTTY` (S1), `OK_TIOCGPTN`, `OK_TIOCSPTLCK` (S5), `OK_O_NOCTTY`, `OK_EINTR`, `OK_ENXIO`, `OK_ENOSPC`, `OK_PTS_MAJOR`, `OK_PTS_CAPACITY` (S6); UAPI 0.17.0, `OK_NATIVE_SESSIONS_VERSION 4`, `OK_NATIVE_CONSOLE_CONTROL_VERSION 2`, `OK_NATIVE_TTY_VERSION 1`, `OK_NATIVE_JOB_CONTROL_VERSION 1` and the rewritten session and console-lease comments (S9a) | landed (S1, S5, S6, S9a) |
+| `ok/uapi/job_control.h` (new; C, include guard only) | native signal numbers other than KILL and TERM, `OK_SIG_DFL`, `OK_SIG_IGN`, `struct ok_sigaction`, `OK_NATIVE_SIGNAL_ACTION_VERSION`, `OK_WNOHANG`, `OK_WUNTRACED`, `OK_WCONTINUED` | landed (S3) |
+| `ok/uapi/signal.h` | unchanged: S9a keeps `job_control.h` as its own header, so `signal.h` and `OK_NATIVE_TERMINATION_VERSION 1` keep the text the OS consumer pins line for line | landed (S9a decision) |
 
-Existing lines of `syscall.h` and `signal.h`, the profile marker headers, module
-ABI 78 and UAPI 0.16.0 stay unchanged until S9, so the unmodified ObfuscationOS
-consumer accepts every intermediate SDK.
+Until S9a, existing lines of `syscall.h` and `signal.h`, the profile markers,
+the module ABI and UAPI 0.16.0 stayed unchanged, so the unmodified
+ObfuscationOS consumer accepted every intermediate SDK. The S9a SDK is UAPI
+0.17.0 with new markers: the unmodified consumer refuses it (first with
+`native console input profile mismatch`, and `check_uapi.py` with
+`OK_UAPI_VERSION_MINOR=17`), so the paired OS worktree `feat/getty-login`
+adopts the matching consumer changes. Module ABI stays 79 until S9b.
 
 ## 1. Terminal objects — landed (S4 console, S5 PTY)
 
@@ -657,21 +664,39 @@ Beyond §3 and §5:
 | winsize | 8 bytes |
 | PID wire | 4 bytes |
 
-## 13. SDK markers and ABI — planned (S9a markers and UAPI 0.17; S9b ABI 79)
+## 13. SDK markers and ABI — markers and UAPI 0.17 landed (S9a); ABI 80 at merge (S9b)
 
-| Header | String | Version | Changes |
+Each marker is a standalone `*_profile.hpp` of typed `inline constexpr`
+declarations; `tools/export_sdk.py` and the OS `tools/kernel_sdk.py` pin every
+line, and `src/user/runtime/tty.cpp` asserts the values against the scheduler,
+N_TTY, devfs and job-control constants.
+
+| Header | String | Version | Fields (S9a) |
 |---|---|---|---|
-| `native_pty_profile.hpp` | `bootcpu-native-pair-devpts-counted-endpoints-ntty-hangup-v2` | 2 | `linux_creation`, `slave_reopen`, `termios`, `controlling_terminal`, `terminal_signals`, `job_control`, `devpts` = 1; `raw` stays 1; added `open_counts`, `dormant_slave_read_block`, `master_slave_closed_eio`, `ptmx_hangup_discard`, `raw_hangup_drain`, `canonical_capacity=4096`, `echo_capacity=512`; `scm_rights=0`, `smp=0` kept |
-| `native_console_control_profile.hpp` | `bootcpu-lease-epoch-explicit-console-pty-session-foreground-sigttin-sigttou-pid32-ioctl-v2` | 2 | `background_eio=0`; `pty`, `termios`, `stop_continue`, `job_control` = 1; `auto_open_acquire=1` (pts only); `force_steal=0` kept; added `background_sigttin=1`, `background_sigttou=1`, `console_auto_open_acquire=0`, `dev_tty=1`, `noctty_open=1` |
-| `native_sessions_profile.hpp` | `bootcpu-serialized-process-group-session-console-pty-jobctl-lifecycle-v4` | 4 | `pty`, `job_control` = 1; added `orphaned_group_hup=1`, `ctty_derived=1` |
-| `native_group_signal_profile.hpp` | `bootcpu-signed32-current-negative-pgid-probe-all-signals-stop-continue-orphan-hupcont-same-session-cont-partial-v3` | 3 | `stop_continue`, `job_control` = 1; added `default_actions`, `same_session_continue`, `orphan_hangup` = 1 |
-| `sched/console_input_profile.hpp` | `pid1-issued-epoch-fork-exec-leader-revoke-ntty-compat-default-v2` | — | — |
-| `native_tty_profile.hpp` (new) | `bootcpu-ntty-template-console-pts8-devfs-ptmx-tty-console-v1` | 1 | §2/§12 numbers; acted/not-acted flags (§6); `console_vtime=0`; `console_vhangup=0`; `console_ixon=0`; `native_termios_bytes=36`; `linux_codec_revision=3`; `pts_mode=0620`, `pts_owner_opener=1`, `grantpt_noop=1`, `locked_listed=1`, `separate_devpts_mount=0`, `stat_rdev_linux=1`, `stat_rdev_native=0`, `tiocgptpeer=0`, `packet_mode=0`, `smp=0` |
-| `native_job_control_profile.hpp` (new) | `bootcpu-overlay-stop-cont-wuntraced-wcontinued-pgrp-wait-nocldstop-owed-kernel-v1` | 1 | `wait_untraced`, `wait_continued`, `group_wait`, `waitid_pgid` (RV32), `nowait` (RV32), `nocldstop`, `native_dfl_ign`, `init_protection` = 1; `native_handlers`, `native_masks`, `broadcast`, `ptrace`, `smp` = 0 |
+| `user/native_pty_profile.hpp` | `bootcpu-native-pair-devpts-counted-endpoints-ntty-hangup-v2` | 2 | `linux_creation`, `slave_reopen`, `termios`, `controlling_terminal`, `terminal_signals`, `job_control`, `devpts` = 1; `raw` stays 1 (raw pairs remain); added `open_counts`, `dormant_slave_read_block`, `master_slave_closed_eio`, `ptmx_hangup_discard`, `raw_hangup_drain` = 1, `canonical_capacity=4096`, `echo_capacity=512`; `scm_rights=0`, `smp=0` kept |
+| `user/native_console_control_profile.hpp` | `bootcpu-lease-epoch-explicit-console-pty-session-foreground-sigttin-sigttou-pid32-ioctl-v2` | 2 | `background_eio=0`; `pty`, `termios`, `stop_continue`, `job_control` = 1; `auto_open_acquire=1` (pts only); `force_steal=0` kept; added `background_sigttin`, `background_sigttou`, `dev_tty`, `noctty_open` = 1, `console_auto_open_acquire=0` |
+| `user/native_sessions_profile.hpp` | `bootcpu-serialized-process-group-session-console-pty-jobctl-lifecycle-v4` | 4 | `pty`, `job_control` = 1; added `ctty_derived`, `orphaned_group_hup` = 1 |
+| `user/native_group_signal_profile.hpp` | `bootcpu-signed32-current-negative-pgid-probe-all-signals-stop-continue-orphan-hupcont-same-session-cont-partial-v3` | 3 | `stop_continue`, `job_control` = 1; added `default_actions`, `same_session_continue`, `orphan_hangup` = 1; `broadcast=0` kept |
+| `sched/console_input_profile.hpp` | `pid1-issued-epoch-fork-exec-leader-revoke-ntty-compat-default-v2` | — | epoch limit unchanged |
+| `user/native_tty_profile.hpp` (new) | `bootcpu-ntty-template-console-pts8-devfs-ptmx-tty-console-v1` | 1 | capacities: 9 terminals, 8 pts (major 136), read buffer 4096, echo 512, master queue 4096, outbox 8, console write limit 65536; `native_termios_bytes=36`, `native_nccs=19`, `winsize_bytes=8`, `linux_codec_revision=3`; acted: `canonical`, `echo`, `isig`, `opost`, `iutf8`, `vmin_vtime`, `pty_vtime`, `pty_ixon`, `console_compat_default` = 1; not acted: `console_vtime`, `console_vhangup`, `console_ixon`, `parity`, `ixany_ixoff`, `imaxbel`, `case_mapping`, `vdiscard`, `baud_reprogramming` = 0; nodes: `dev_tty`, `dev_console`, `dev_ptmx` = 1, `pts_mode=0620`, `pts_owner_opener`, `grantpt_noop`, `locked_listed`, `stat_rdev_linux` = 1, `separate_devpts_mount`, `stat_rdev_native`, `tiocgptpeer`, `packet_mode`, `tiocsti`, `termios2`, `smp` = 0 |
+| `user/native_job_control_profile.hpp` (new) | `bootcpu-overlay-stop-cont-wuntraced-wcontinued-pgrp-wait-nocldstop-owed-kernel-v1` | 1 | 64 processes, `signal_max=64`, 64 owed kernel-signal records, `sigaction_bytes=24`, `cld_stopped=5`, `cld_continued=6`; `stop_overlay`, `wait_untraced`, `wait_continued`, `group_wait`, `waitid_pgid`, `nowait`, `waitid_rv32_only`, `nocldstop`, `orphaned_stop_discard`, `orphan_hangup`, `same_session_continue`, `native_dfl_ign`, `init_protection`, `owed_kernel_signals` = 1; `native_handlers`, `native_masks`, `native_child_sigchld`, `broadcast`, `ptrace`, `core_dump`, `smp` = 0 |
 
-Each marker also carries `module_abi=79`. The SDK moves to UAPI 0.17.0 in S9a
-and module ABI 79 in S9b, each bumped once, at the end. Until then every
-profile string and version above keeps its current value.
+The exporter also pins, for `native_tty_profile`, the syscall.h terminal
+defines (requests, `OK_PTS_*`, `OK_O_NOCTTY`, the new errno values,
+`OK_NATIVE_TTY_VERSION`), the `ok/uapi/termios.h` cc indices, default-termios
+flags and flush selectors, and the `ok_termios`/`ok_winsize` records; for
+`native_job_control_profile`, every `ok/uapi/job_control.h` define, the
+`ok_sigaction` record, `OK_NATIVE_JOB_CONTROL_VERSION` and the unchanged
+termination UAPI. Both list the terminal and job-control headers (`ok/tty/*`,
+`ok/sched/terminal.hpp`, `ok/sched/terminal_open.hpp`, `ok/fs/terminal_node.hpp`,
+`ok/fs/devfs.hpp`, `ok/abi/linux_termios.hpp`, `ok/sched/job_control.hpp`,
+`ok/sched/child_exit.hpp`, `ok/sched/pending_signals.hpp`,
+`ok/user/job_control_signals.hpp`, the UAPI headers) as hashed dependencies,
+and the manifest carries `native_tty_profile` and `native_job_control_profile`.
+
+Every marker carries `module_abi = 79` until S9b. S9b bumps the module ABI to
+80 once, at merge (feat/net-core took 79), together with the `ABI80` entry of
+`docs/modules/modules.md` and the paired OS consumer.
 
 ## 14. Deviations from Linux
 
@@ -718,10 +743,10 @@ with `--runtime_tests=y` from a source snapshot and requires each test
 binary's exact completion line (`PRIVATE_PTY_ACTUAL_OFD`,
 `PRIVATE_RAW_PTY_OWNER … model_steps=100000`, `NATIVE_PTY_PAIR_BOUNDARY_PASS`,
 `PTY_RUNTIME_PASS actual_runtime=1 hosted=1 guest=0`, the boot-check model and
-the UNIX rights regressions). `test_tty_sdk_contract.py` runs the PTY and
-console-input SDK contract suites against the given consumer and prints
-`TTY_SDK_CONTRACT_PASS suites=2 guest=0`; the hosted suite lists it under
-`inputs`.
+the UNIX rights regressions). `test_tty_sdk_contract.py` runs the PTY,
+console-input and TTY/job-control SDK contract suites against the given consumer and prints
+`TTY_SDK_CONTRACT_PASS suites=3 guest=0` (S9a added the TTY and job-control
+suite); the hosted suite lists it under `inputs`.
 
 S1 (value layer; nothing under `src/` uses it yet):
 
@@ -931,5 +956,22 @@ S8 (hosted runtime and model evidence only) extends existing runners:
   derivation, fork, setsid, TIOCNOTTY by a member and the leader, re-acquire,
   leader exit and the master's last close at scheduler level.
 - `test_terminal_control.py` maps `OK_TIOCNOTTY` (`native_requests=16`).
+
+S9a (SDK admission models only; no SDK export, target build or guest
+execution in these suites):
+
+- `tests/host/native_tty_sdk_contract_tests.py` checks the producer
+  (`tools/export_sdk.py`) and the OS consumer (`tools/kernel_sdk.py`) against
+  each other for `native_tty_profile` and `native_job_control_profile`: exact
+  typed declarations, every hashed dependency, the UAPI 0.17 defines and
+  records of `syscall.h`, `termios.h` and `job_control.h`, mixed ABI and UAPI
+  cohorts, the manifest keys and export refusal before the boot archive is
+  built. `test_tty_sdk_contract.py` runs it as the third suite.
+- `native_pty_sdk_contract_tests.py` refuses the rehashed `termios = 1 → 0`
+  mutation; `console_input_sdk_contract_tests.py` refuses the v1 `noecho`
+  string; `test_native_signal_export.py` carries the UAPI 0.17 fixtures and
+  the two new manifest keys.
+- `scripts/check_runtime_split.py` limits `runtime.cpp` to 671 lines after the
+  marker checks moved into the tty unit.
 
 Each slice adds its runners here.

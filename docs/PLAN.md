@@ -297,15 +297,16 @@ group, SIGTTIN/SIGTTOU/SIGHUP, devpts-style PTY allocation on top of the existin
 raw PTY pairs and console lease. Paired OS worktree `feat/getty-login`. Depends
 on WT1.2.
 
-Status: in progress on `feat/tty-jobctl` (paired OS worktree
+Status: complete pending merge on `feat/tty-jobctl` (paired OS worktree
 `feat/getty-login`). The contract the OS builds against is
-[tty](modules/tty.md); each of its sections names the slice that lands it.
-Until S9, existing `syscall.h` and `signal.h` lines, the profile markers,
-module ABI 78 and UAPI 0.16.0 stay unchanged, so the unmodified OS consumes
-every intermediate SDK; new native job-control constants go into
-`ok/uapi/job_control.h`. The console keeps its raw-compatible termios default,
-raw `OK_SYS_PTY_PAIR` pairs keep the v1 hangup contract, and the 8 PTY slots
-are shared with `/dev/ptmx`. Slices:
+[tty](modules/tty.md), where every section is landed; the per-slice log and
+evidence classes are in [TTY_JOB_CONTROL](qualification/TTY_JOB_CONTROL.md).
+Until S9a, existing `syscall.h` and `signal.h` lines, the profile markers,
+the module ABI and UAPI 0.16.0 stayed unchanged, so the unmodified OS consumed
+every intermediate SDK; native job-control constants live in
+`ok/uapi/job_control.h`, which stays its own header. The console keeps its
+raw-compatible termios default, raw `OK_SYS_PTY_PAIR` pairs keep the v1 hangup
+contract, and the 8 PTY slots are shared with `/dev/ptmx`. Slices:
 - S0: native PTY suites and the terminal SDK contract as hosted runners; the
   contract published.
 - S1: termios values, the N_TTY template and generated Linux termios/ioctl
@@ -320,7 +321,20 @@ are shared with `/dev/ptmx`. Slices:
   terminal open path.
 - S7: Linux PTY I/O and poll, EINTR/SA_RESTART on terminal waits, PTY VTIME.
 - S8: SIGTTIN/SIGTTOU background gates, TOSTOP, every hangup, TIOCNOTTY.
-- S9: SDK markers and UAPI 0.17 (S9a), module ABI 79 (S9b).
+- S9a: the seven terminal and job-control SDK markers (two new:
+  `native_tty_profile`, `native_job_control_profile`), UAPI 0.17.0, the
+  exporter validators and manifest keys, final docs. Module ABI stays 79.
+- S9b (at merge, with the user's approval): module ABI 80, since
+  `feat/net-core` merged first and took 79.
+
+Merge obligations: the S9a SDK is refused by the unmodified OS consumer
+(console input profile and UAPI 0.17), so `feat/getty-login` lands the
+matching `tools/kernel_sdk.py`, `tools/check_uapi.py` and SDK suite changes,
+the okcrt/test UAPI 0.17 pins, the okcrt `sigaction()`/`signal()` with SIG_DFL
+and SIG_IGN, the oksh/login SIGTTOU/SIGTTIN/SIGTSTP ignores and the devfs
+`attach_terminals` seam, then consumes SDK 80 after S9b. Receipts
+(`hosted-tty`, `qemu-test-10`, `sdk-export-10`, `guest-tty-10`) are packaged
+in ObfuscationEvidence at merge.
 
 ### WT2.3 `feat/net-core` (XL)
 
@@ -370,8 +384,8 @@ networking is not built into the pinned QEMU. Still open: ICMP errors to
 sockets, poll/select over sockets on queues, TCP getsockname/getpeername.
 Merge: the exported headers bump the module ABI once to 79
 (`docs/modules/modules.md`); the paired OS worktree `feat/net-services`
-consumes SDK 79 and merges right after the kernel. `feat/tty-jobctl` also
-plans 79; whichever merges second takes 80.
+consumes SDK 79 and merges right after the kernel. `feat/tty-jobctl`, which
+merges second, takes 80.
 
 ### WT2.4 `feat/storage-durable` (XL)
 
