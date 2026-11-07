@@ -5,6 +5,7 @@
 #include "ok/abi/linux_stat_call.hpp"
 #include "ok/memory/kernel_entry_stack_pool.hpp"
 #include "ok/sched/scheduler.hpp"
+#include "ok/smp/kernel_section.hpp"
 
 namespace ok::user::native
 {
@@ -36,6 +37,7 @@ class VfsStatContinuation final : private NonCopyable
 
     Status prepare(const sched::ThreadControlBlock &thread)
     {
+        smp::check_exclusive("VfsStatContinuation::prepare");
         if (auto status = pool_->validate_inactive(thread.entry_stack, {thread.owner, thread.tid}); !status)
             return status;
         auto &record = records_[thread.entry_stack.slot];
@@ -77,6 +79,7 @@ class VfsStatContinuation final : private NonCopyable
     Result<CaptureStage> stage_capture(sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread,
                                       const arch::execution::KernelEntryStackView &view, sched::SchedulerState &scheduler)
     {
+        smp::check_exclusive("VfsStatContinuation::stage_capture");
         auto *record = owned(thread);
         if (!record || !record->image || record->pending || thread.syscall_pending || !thread.native_active ||
             thread.state != sched::ProcessState::running || scheduler.find(process.pid()) != &process ||
@@ -91,6 +94,7 @@ class VfsStatContinuation final : private NonCopyable
                    sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread,
                    const arch::execution::KernelEntryStackView &view, sched::SchedulerState &scheduler)
     {
+        smp::check_exclusive("VfsStatContinuation::observe");
         auto *record = owned(thread);
         if (stage.owner_ != this || !stage.image_ || !record || record->image != stage.image_ ||
             stage.lease_ != thread.entry_stack || stage.lease_ != observation.lease() || stage.epoch_ != observation.epoch() ||
@@ -121,6 +125,7 @@ class VfsStatContinuation final : private NonCopyable
     }
     Status retire(const sched::ThreadControlBlock &thread)
     {
+        smp::check_exclusive("VfsStatContinuation::retire");
         if (auto *record = owned(thread))
         {
             if (record->pending) return Status::busy("VFS continuation retirement is still pending");
@@ -129,13 +134,17 @@ class VfsStatContinuation final : private NonCopyable
         return {};
     }
     void revoke(const sched::ThreadControlBlock &thread)
-    { if (auto *record = owned(thread)) record->captured = false; }
+    {
+        smp::check_exclusive("VfsStatContinuation::revoke");
+        if (auto *record = owned(thread)) record->captured = false;
+    }
     // Compatibility path for callers owning only the ordinary VFS observer.
     Result<arch::execution::Trap> enter(sched::SchedulerState &scheduler,
                                        sched::ProcessControlBlock &process,
                                        sched::ThreadControlBlock &thread,
                                        const arch::execution::KernelEntryStackView &view)
     {
+        smp::check_exclusive("VfsStatContinuation::enter");
         auto stage = stage_capture(process, thread, view, scheduler);
         if (!stage) return stage.status();
         auto observed = legacy_capture_.enter(scheduler, process, thread, view);
@@ -215,6 +224,7 @@ class VfsStatContinuation final : private NonCopyable
 
     Status cancel(sched::SchedulerState &scheduler, Handle handle)
     {
+        smp::check_exclusive("VfsStatContinuation::cancel");
         auto *record = resolve(handle);
         if (!record) return Status::not_found("VFS continuation cancellation handle is stale");
         const auto wait = record->pending->ticket;
@@ -233,6 +243,7 @@ class VfsStatContinuation final : private NonCopyable
 
     Status cancel_process(sched::SchedulerState &scheduler, sched::ProcessId pid)
     {
+        smp::check_exclusive("VfsStatContinuation::cancel_process");
         Status result;
         for (usize slot = 0; slot < capacity; ++slot)
             if (auto &r = records_[slot]; r.pid == pid && r.pending)
@@ -247,6 +258,7 @@ class VfsStatContinuation final : private NonCopyable
     // serialized. Readiness grants no VFS operation; resume reacquires it.
     Status drain(sched::SchedulerState &scheduler, fs::VirtualFileSystem &vfs)
     {
+        smp::check_exclusive("VfsStatContinuation::drain");
         for (;;)
         {
             auto ready = vfs.take_ready_certified_operation_wait(this);
@@ -269,6 +281,7 @@ class VfsStatContinuation final : private NonCopyable
 
     Status prune(sched::SchedulerState &scheduler)
     {
+        smp::check_exclusive("VfsStatContinuation::prune");
         for (usize slot = 0; slot < capacity; ++slot)
         {
             auto &record = records_[slot];

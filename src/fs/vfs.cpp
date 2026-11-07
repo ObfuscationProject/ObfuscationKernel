@@ -1,6 +1,7 @@
 #include "ok/fs/vfs.hpp"
 #include "ok/fs/archive_directory_profile.hpp"
 #include "ok/fs/mode_policy.hpp"
+#include "ok/smp/kernel_section.hpp"
 
 #include <utility>
 
@@ -631,6 +632,8 @@ Result<DirectoryListing> RamNode::list(DirectoryReadIntent) const
 
 Result<u64> VirtualFileSystem::enter_operation(OperationContention *contention) const
 {
+    // The namespace stays under the kernel lock; a section never enters it.
+    smp::check_exclusive("VirtualFileSystem::enter_operation");
     smp::ScopedSpinLock guard(lock_);
     if (operation_active_)
     {

@@ -1138,7 +1138,9 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     if (auto status = syscall_origins.preflight_prepare(entry_plan.leader().handle); !status) return stop(status);
     if (auto status = vfs_continuations.preflight_prepare(entry_plan.leader().handle); !status) return stop(status);
     // The point of no return: siblings leave the other CPUs, and replacement
-    // releases their leases.
+    // releases their leases. Exec is the caller's own syscall, so no kernel
+    // section of this process may still be pinned.
+    smp::check_drained(pid, "exec_image before eviction");
     if (auto status = commit_eviction(kernel, eviction); !status) return stop(status);
     // Only an exec that took other CPUs' entries over reports it (never on one CPU).
     if (eviction.cpus)

@@ -558,6 +558,9 @@ Status replace_native_pages(sched::ProcessResources &resources, Pages &candidate
 {
     // Called only after enter() restored the kernel address space, on the boot
     // CPU. Build everything before retiring the old tables or publishing state.
+    if constexpr (smp::lock_debug_enabled)
+        if (runtime_kernel)
+            smp::check_drained(runtime_kernel->scheduler().resources_owner(resources), "replace_native_pages");
     sched::MemoryMap memory;
     if (auto status = page_memory_map(candidate, memory); !status.ok())
         return status;
