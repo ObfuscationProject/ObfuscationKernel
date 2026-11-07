@@ -142,32 +142,18 @@ Status prepare_native_thread(sched::ThreadControlBlock &thread)
 extern "C" void ok_platform_console_write_char(char) __attribute__((weak));
 namespace
 {
-// Any CPU emits; one text reaches the console whole, and console_last
-// stays that of the last text out.
-constinit smp::RankedSpinLock<smp::LockRank::console> console_lock{};
-using ConsoleGuard = smp::RankedSpinLock<smp::LockRank::console>::Guard;
+constinit smp::RankedSpinLock<smp::LockRank::console> console_lock{}; // One text out whole, from any CPU.
 char console_last{'\n'};
-void emit_locked(std::string_view text)
+void emit_text(std::string_view text, bool line)
 {
-    if (ok_platform_console_write_char != nullptr)
-        for (char c : text)
-            ok_platform_console_write_char(c);
-    if (!text.empty())
-        console_last = text.back();
+    const decltype(console_lock)::Guard guard(console_lock);
+    for (const auto part : {std::string_view{line && console_last != '\n' ? "\n" : ""}, text})
+        for (char c : part)
+            if (console_last = c; ok_platform_console_write_char != nullptr) ok_platform_console_write_char(c);
 }
 } // namespace
-void emit(std::string_view text)
-{
-    const ConsoleGuard guard(console_lock);
-    emit_locked(text);
-}
-void emit_line(std::string_view text)
-{
-    const ConsoleGuard guard(console_lock);
-    if (console_last != '\n')
-        emit_locked("\n");
-    emit_locked(text);
-}
+void emit(std::string_view text) { emit_text(text, false); }
+void emit_line(std::string_view text) { emit_text(text, true); }
 void emit_number(u64 value)
 {
     char digits[20];
