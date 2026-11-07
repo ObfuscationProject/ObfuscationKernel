@@ -14,10 +14,15 @@ import re
 import subprocess
 import sys
 
-SUITES = ('tests/host/native_pty_sdk_contract_tests.py', 'tests/host/console_input_sdk_contract_tests.py')
+SUITES = ('tests/host/native_pty_sdk_contract_tests.py', 'tests/host/console_input_sdk_contract_tests.py',
+          'tests/host/native_tty_sdk_contract_tests.py')
 KERNEL_INPUTS = ('tools/export_sdk.py', 'include/ok/user/native_pty_profile.hpp',
-                 'include/ok/sched/console_input_profile.hpp', 'include/ok/uapi/syscall.h',
-                 'include/ok/syscall/syscall.hpp', *SUITES)
+                 'include/ok/sched/console_input_profile.hpp', 'include/ok/user/native_tty_profile.hpp',
+                 'include/ok/user/native_job_control_profile.hpp',
+                 'include/ok/user/native_console_control_profile.hpp',
+                 'include/ok/user/native_sessions_profile.hpp', 'include/ok/user/native_group_signal_profile.hpp',
+                 'include/ok/uapi/syscall.h', 'include/ok/uapi/termios.h', 'include/ok/uapi/job_control.h',
+                 'include/ok/uapi/signal.h', 'include/ok/syscall/syscall.hpp', *SUITES)
 OS_INPUTS = ('tools/kernel_sdk.py', 'tests/tools/test_kernel_sdk.py')
 SCOPE = ('Hosted SDK producer/consumer admission models over header text; no SDK export, target build, '
          'guest or hardware execution.')
