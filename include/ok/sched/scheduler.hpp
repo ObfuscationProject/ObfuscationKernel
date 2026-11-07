@@ -397,7 +397,21 @@ class DescriptionPositionGuard final
   public:
     explicit DescriptionPositionGuard(DescriptionPositionLock *lock) noexcept : lock_(lock)
     {
-        if (lock_) lock_->lock();
+        if (!lock_) return;
+        if (!smp::in_section())
+        {
+            lock_->lock();
+            return;
+        }
+        // A kernel section waits serving this CPU's interrupts: the holder
+        // may hold the kernel lock and wait for a device line routed here.
+        if (lock_->try_lock()) return;
+        const smp::SpinningScope spinning;
+        while (!lock_->try_lock())
+        {
+            smp::serve_while_spinning();
+            arch::ArchOperations::spin_pause();
+        }
     }
     ~DescriptionPositionGuard() { release(); }
     DescriptionPositionGuard(const DescriptionPositionGuard &) = delete;
