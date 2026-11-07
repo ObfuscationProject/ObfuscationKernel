@@ -385,8 +385,7 @@ void check_secondary_cpu()
     print("OK_NATIVE_SMP scope=hardware cpus=2 secondary_user=pass syscall=pass local_timer=pass ipi=pass "
           "shootdown=pass remote_remap=pass boot_pit=pass tsc=");
     print(tsc);
-    print("
-");
+    print("\n");
 }
 
 void check_fault(native::AddressSpace &space, const u8 *entry, native::TrapKind kind, uptr address, uptr error_mask)
