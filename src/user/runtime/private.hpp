@@ -687,6 +687,9 @@ UdpWaitCounters udp_wait_statistics();
 // The kernel's TCP wait counters, bound when the runtime starts.
 extern const net::TcpWaitStats *tcp_wait_stats;
 void report_network_waits();
+// Installs the lock-violation recorder and arms require_exclusive; once,
+// just before secondary CPUs are admitted (src/user/runtime/interrupts.cpp).
+void arm_kernel_checks();
 RobustWalkReport retire_robust(Kernel &kernel, sched::ProcessControlBlock &process,
                               sched::ThreadLocalState &tls, sched::ThreadId owner);
 void clear_child_tid(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadLocalState &tls, bool peers);

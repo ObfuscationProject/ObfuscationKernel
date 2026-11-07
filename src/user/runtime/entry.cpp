@@ -947,6 +947,7 @@ Status start(Kernel &kernel, fs::BootArchive archive)
     // This static singleton has one boot lifetime and no reconstruction/reset API.
     original_shutdown_owner = {&original_shutdown_owner, 1, pid.value(), process->threads()[0].tid};
     emit("OK_NATIVE scope=hardware init=loaded\n");
+    arm_kernel_checks();
     secondary_admission.store(true, std::memory_order_release);
     return Status::success();
 }

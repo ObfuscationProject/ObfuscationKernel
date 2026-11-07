@@ -294,6 +294,17 @@ function add_ok_debug_lock_checks()
     end
 end
 
+-- Kernel sections (ok/smp/kernel_section.hpp) on the profiles that run
+-- kernel code on several CPUs; option smp_sections=n is the A/B arm. The
+-- private futex peer fixture keeps every syscall under the kernel lock.
+function add_ok_smp_sections()
+    local arch = ok_current_arch()
+    if (arch == "x86_64" or arch == "aarch64" or arch == "rv64") and has_config("smp_sections") and
+            not (get_config("private_futex_peer_fixture") and is_mode("debug")) then
+        add_defines("OK_SMP_SECTIONS")
+    end
+end
+
 function add_ok_kernel_gui_option()
     add_options("kernel_gui")
     if has_config("kernel_gui") then
