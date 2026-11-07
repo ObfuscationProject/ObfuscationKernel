@@ -21,6 +21,9 @@ namespace
 using arm::GicV2;
 
 constexpr u32 psci_version = 0x84000000;
+constexpr u32 psci_cpu_off = 0x84000002;
+constexpr u32 psci_affinity_info = 0xc4000004; // SMC64
+constexpr i64 psci_affinity_off = 1;
 constexpr u64 mpidr_affinity = 0xff00ffffff;
 // The kernel's identity-mapped Normal RAM, where the device tree must lie.
 constexpr uptr ram_begin = 0x40000000;
@@ -208,6 +211,30 @@ void wait_local() noexcept
         if (id == GicV2::timer_ppi)
             ok::smp::local_tick();
     }
+}
+
+void stop_local() noexcept
+{
+    asm volatile("msr cntp_ctl_el0, xzr; isb" : : : "memory");
+    GicV2::disable_cpu_lines();
+}
+
+void park_self(ok::smp::CpuId) noexcept
+{
+    // CPU_OFF does not return; the stack is not touched after the call.
+    // Should the firmware refuse, the CPU stays on and the requester's
+    // AFFINITY_INFO wait times out.
+    asm volatile("dsb sy" : : : "memory");
+    static_cast<void>(psci(conduit, psci_cpu_off));
+    for (;;)
+        asm volatile("wfe" : : : "memory");
+}
+
+bool parked(ok::smp::CpuId, u64 hardware_id) noexcept
+{
+    if (conduit == boot::CpuStartMethod::none)
+        return false;
+    return psci(conduit, psci_affinity_info, hardware_id, 0) == psci_affinity_off;
 }
 
 } // namespace ok::arch::smp

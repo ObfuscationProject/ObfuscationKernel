@@ -74,6 +74,13 @@ class GicV2 final
         reg(cpu_interface + 8) = 0;
         enable_cpu_lines();
     }
+    // Hotplug: this CPU's banked lines off and its CPU interface disabled, so
+    // it signals nothing more; reset_cpu_lines() discards what stayed pending.
+    static void disable_cpu_lines()
+    {
+        reg(distributor + 0x180) = 0xffffffffu;
+        reg(cpu_interface) = reg(cpu_interface) & ~1u;
+    }
     // The interface number of the calling CPU: GICD_ITARGETSR0 is banked and
     // reads as that CPU's own target bit. Zero on a uniprocessor GIC.
     static u32 cpu_target_mask()

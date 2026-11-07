@@ -86,7 +86,7 @@ long after its programmed expiry each timer interrupt was observed, for the
 idle wait's tick and the tick that preempts user code
 (`time::LatencyHistogram`, `ok/time/latency_histogram.hpp`). The interrupt
 report prints both as `OK_IRQ_COMPLETIONS` and `OK_TIMER_LATENCY`. With
-secondary CPUs online it ends with `OK_SMP_IRQS scope=hardware
+secondary CPUs started (a CPU parked by hotplug still counts) it ends with `OK_SMP_IRQS scope=hardware
 cpuK=<top halves run>:<lines drained>:<interrupt waits> ... routes=<line>@<cpu>,...`.
 
 ### x86_64: the I/O APIC

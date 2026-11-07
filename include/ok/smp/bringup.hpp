@@ -57,7 +57,12 @@ struct BringupReport
 namespace detail
 {
 inline constinit std::array<CpuRecord, max_cpus> records{};
+// Changed only under the kernel lock: bring-up stores it, a CPU that leaves
+// (hotplug) clears its own bit and a restart sets it again.
 inline constinit std::atomic<u32> online{1};
+// The CPUs bring-up started. Hotplug keeps a parked CPU in it; reports list
+// these CPUs, whose counters stay meaningful while one is parked.
+inline constinit std::atomic<u32> started{1};
 inline constinit std::atomic<usize> discovered{1};
 // Bring-up installs the architecture's IPI sender; until then, and in hosted
 // models, nothing is sent.
@@ -78,12 +83,24 @@ inline constinit void (*ipi_wake)() noexcept {};
 {
     return detail::online.load(std::memory_order_acquire);
 }
-[[nodiscard]] inline usize online_cpus() noexcept
+[[nodiscard]] constexpr usize cpu_count(u32 mask) noexcept
 {
     usize count = 0;
-    for (auto mask = online_mask(); mask != 0; mask &= mask - 1)
+    for (; mask != 0; mask &= mask - 1)
         ++count;
     return count;
+}
+[[nodiscard]] inline usize online_cpus() noexcept
+{
+    return cpu_count(online_mask());
+}
+[[nodiscard]] inline u32 started_mask() noexcept
+{
+    return detail::started.load(std::memory_order_acquire);
+}
+[[nodiscard]] inline usize started_cpus() noexcept
+{
+    return cpu_count(started_mask());
 }
 [[nodiscard]] const BringupReport &bringup_report() noexcept;
 
@@ -92,6 +109,39 @@ inline constinit void (*ipi_wake)() noexcept {};
 // line. A profile or machine that cannot start secondaries reports UP and
 // changes nothing else.
 Status start_secondary_cpus(Kernel &kernel);
+
+// CPU hotplug of a started secondary (CPU 0 never leaves). The caller holds
+// the kernel lock and nothing else, and is not `cpu`; each call releases the
+// lock while it waits for `cpu` and returns holding it again, so the caller
+// re-resolves any kernel record it kept.
+//
+// Stop: `cpu` goes stopping, leaves the scheduler's online set (its queue
+// moves to online CPUs), its kernel sections are drained and it is kicked out
+// of user mode. At its next loop pass outside user code, holding the kernel
+// lock, the CPU itself moves its device lines away and clears its online bit;
+// then, holding nothing, it drains its IPIs, stops its local timer, resets its
+// per-CPU state and parks (x86: cli;hlt until INIT; aarch64: PSCI CPU_OFF;
+// rv64: the boot park loop). Returns once it parked, or fails after a timeout
+// with the CPU stopping. Nothing it could still touch is freed.
+Status stop_secondary_cpu(Kernel &kernel, CpuId cpu);
+// Restart: a parked CPU starts again on its own stack through the
+// architecture's start path (x86 repeats the TSC handshake), comes online with
+// its reported identity, rejoins the online mask and the scheduler, and must
+// answer one IPI.
+Status restart_secondary_cpu(Kernel &kernel, CpuId cpu);
+
+// The smp_hotplug_test debug knob: once userland runs, CPU 0's kernel loop
+// stops and restarts the highest started secondary periodically.
+struct HotplugStatistics
+{
+    usize cycles{};
+    usize failures{};
+    CpuId cpu{};
+};
+[[nodiscard]] HotplugStatistics hotplug_statistics() noexcept;
+// One pass of that test from CPU 0's kernel loop (kernel lock held, no record
+// kept); a no-op unless the knob is built in.
+void hotplug_test_pass() noexcept;
 
 inline void send_ipi(CpuId cpu, u32 reasons) noexcept
 {
@@ -147,7 +197,8 @@ inline void end_user() noexcept
 // user mode and wait until that window closed. The waiting CPU must not hold
 // anything those CPUs need to leave user mode. CPUs outside a window are never
 // waited for; what they cached earlier is the backend's to invalidate at their
-// next entry. Returns the CPUs waited for.
+// next entry. A CPU that leaves the online mask meanwhile (hotplug) closed its
+// window before, so it is not waited for either. Returns the CPUs waited for.
 inline u32 quiesce_root(uptr root) noexcept
 {
     const auto mask = online_mask();
@@ -173,6 +224,7 @@ inline u32 quiesce_root(uptr root) noexcept
         cpu_record(self).shootdowns.fetch_add(1, std::memory_order_relaxed);
     while (waiting != 0)
     {
+        waiting &= online_mask();
         for (CpuId cpu = 0; cpu < max_cpus; ++cpu)
             if ((waiting & (u32{1} << cpu)) != 0 &&
                 cpu_record(cpu).user_generation.load(std::memory_order_acquire) != observed[cpu])
@@ -190,3 +242,7 @@ extern "C" [[noreturn]] void ok_smp_secondary_main(ok::smp::CpuId cpu);
 // The native runtime's work for a secondary CPU, once it serves user threads.
 // Returns false when there was nothing to run.
 extern "C" bool ok_smp_secondary_step(ok::smp::CpuId cpu) __attribute__((weak));
+// The native runtime's part of a secondary CPU leaving (hotplug): on that CPU,
+// under the kernel lock, between steps. Clears its per-CPU runtime state and
+// vacates its scheduler slot; false when a user entry was still recorded.
+extern "C" bool ok_smp_cpu_leaving(ok::smp::CpuId cpu) __attribute__((weak));

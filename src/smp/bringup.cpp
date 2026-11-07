@@ -7,7 +7,9 @@
 #include "ok/interrupt/platform.hpp"
 #include "ok/core/kernel.hpp"
 #include "ok/memory/memory.hpp"
+#include "ok/core/native_shutdown.hpp"
 #include "ok/smp/cpu.hpp"
+#include "ok/smp/kernel_section.hpp"
 #include "../arch/tlb_tags.hpp"
 
 #include <array>
@@ -27,6 +29,8 @@ constexpr u64 ping_timeout_ns = 500'000'000;
 constinit BringupReport report{};
 constinit memory::ChargeAccount stack_charges{};
 bool attempted{};
+// The kernel bring-up served, for the hotplug test's passes.
+[[maybe_unused]] Kernel *bringup_kernel{};
 
 void console(std::string_view text)
 {
@@ -114,6 +118,129 @@ void set_state(CpuId cpu, CpuState state)
     return static_cast<CpuState>(cpu_record(cpu).state.load(std::memory_order_acquire));
 }
 
+#if defined(OK_ARCH_SMP_START)
+constexpr u64 stop_timeout_ns = 2'000'000'000;
+
+// Stops and restarts run one at a time: x86 starts share one trampoline page.
+constinit std::atomic_flag hotplug_busy = ATOMIC_FLAG_INIT;
+class HotplugTurn
+{
+  public:
+    HotplugTurn() noexcept : owned_(!hotplug_busy.test_and_set(std::memory_order_acquire)) {}
+    ~HotplugTurn()
+    {
+        if (owned_)
+            hotplug_busy.clear(std::memory_order_release);
+    }
+    HotplugTurn(const HotplugTurn &) = delete;
+    HotplugTurn &operator=(const HotplugTurn &) = delete;
+    explicit operator bool() const noexcept { return owned_; }
+
+  private:
+    bool owned_;
+};
+
+// Set by a leaving CPU that still found a user entry or a pinned section;
+// read by its requester once it parked.
+constinit std::array<std::atomic<bool>, max_cpus> leave_faults{};
+
+// The caller holds the kernel lock: releases it while `done` does not hold,
+// for at most `timeout_ns`, serving this CPU's interrupts meanwhile (lines
+// routed here, IPIs), and takes it again.
+template <typename Done> bool wait_unlocked(Done done, u64 timeout_ns)
+{
+    bkl_unlock();
+    const bool met = wait_for(
+        [&] {
+            interrupt::serve_local_interrupts();
+            return done();
+        },
+        timeout_ns);
+    interrupt::lock_kernel_serving_interrupts();
+    return met;
+}
+
+[[nodiscard]] Status hotplug_request(CpuId cpu)
+{
+    if (cpu == 0 || cpu >= max_cpus || cpu == current_cpu())
+        return Status::invalid_argument("hotplug acts on a secondary CPU other than the caller");
+    if (!kernel_lock.owned_by_current_cpu())
+        return Status::denied("hotplug runs under the kernel lock");
+    if ((started_mask() & (u32{1} << cpu)) == 0)
+        return Status::invalid_argument("hotplug acts on a CPU bring-up started");
+    return Status::success();
+}
+
+// The CPU leaving, at a loop pass outside user code (stop_secondary_cpu).
+[[noreturn]] void leave(CpuId cpu)
+{
+    auto &record = cpu_record(cpu);
+    interrupt::lock_kernel_serving_interrupts();
+    bool clean = ok_smp_cpu_leaving == nullptr || ok_smp_cpu_leaving(cpu);
+    // Its last section ended with its last step; it returns with an idle record.
+    clean = section_records[cpu].load() == SectionState::idle && clean;
+    section_records[cpu].store(SectionState::idle);
+    // Its lines move while it is still online and this CPU holds the kernel
+    // lock bind_platform_irq needs, so no line is routed here afterwards;
+    // then IPIs and shootdowns stop covering it.
+    static_cast<void>(interrupt::retarget_platform_irqs_away(cpu));
+    detail::online.fetch_and(~(u32{1} << cpu), std::memory_order_acq_rel);
+    bkl_unlock();
+    // What reached it before the others saw it leave, then nothing more.
+    interrupt::serve_local_interrupts();
+    arch::smp::stop_local();
+    record.ipi_pending.store(0, std::memory_order_release);
+    leave_faults[cpu].store(!clean, std::memory_order_relaxed);
+    set_state(cpu, CpuState::offline);
+    arch::smp::park_self(cpu);
+}
+#endif
+
+#if defined(OK_SMP_HOTPLUG_TEST) && defined(OK_ARCH_SMP_START)
+// Online time of the cycled CPU between two cycles.
+constexpr u64 hotplug_period_ns = 100'000'000;
+constinit HotplugStatistics hotplug_stats{};
+u64 hotplug_next{};
+#endif
+
+#if defined(OK_ENABLE_TEST_POINTS) && defined(OK_ARCH_SMP_START)
+// Debug test point before userland: CPU 1 leaves (no IPI is sent to it while
+// it is parked), returns, and answers an IPI again.
+void boot_hotplug_check(Kernel &kernel)
+{
+    constexpr CpuId cpu = 1;
+    constexpr u32 bit = u32{1} << cpu;
+    if ((online_mask() & bit) == 0)
+        return;
+    const bool stopped = stop_secondary_cpu(kernel, cpu).ok() && (online_mask() & bit) == 0 &&
+                         (kernel.scheduler().online_cpus() & bit) == 0 && state_of(cpu) == CpuState::offline;
+    const auto sent = cpu_record(current_cpu()).ipis_sent.load(std::memory_order_relaxed);
+    send_ipi(cpu, ipi_ping);
+    const bool quiet = stopped && cpu_record(current_cpu()).ipis_sent.load(std::memory_order_relaxed) == sent;
+    const bool restarted = stopped && restart_secondary_cpu(kernel, cpu).ok() && (online_mask() & bit) != 0 &&
+                           (kernel.scheduler().online_cpus() & bit) != 0;
+    bool delivered = false;
+    if (restarted)
+    {
+        // Before userland the CPU idles in wait_local, which takes the IPI.
+        const auto before = cpu_record(cpu).ipis_received.load(std::memory_order_acquire);
+        send_ipi(cpu, ipi_ping);
+        delivered = wait_for([&] { return cpu_record(cpu).ipis_received.load(std::memory_order_acquire) != before; },
+                             ping_timeout_ns);
+    }
+    const auto verdict = [](bool pass) { return pass ? std::string_view{"pass"} : std::string_view{"fail"}; };
+    console("OK_SMP_HOTPLUG_BOOT scope=hardware cpu=1 stop=");
+    console(verdict(stopped));
+    console(" parked_ipi=");
+    console(verdict(quiet));
+    console(" restart=");
+    console(verdict(restarted));
+    console(" ipi=");
+    console(verdict(delivered));
+    console("\n");
+}
+#endif
+
 } // namespace
 
 const BringupReport &bringup_report() noexcept
@@ -191,6 +318,7 @@ Status start_secondary_cpus(Kernel &kernel)
         else
             set_state(logical, came_online ? CpuState::halted : CpuState::offline);
     }
+    detail::started.store(started_mask, std::memory_order_release);
     detail::online.store(started_mask, std::memory_order_release);
     report.online = online_cpus();
 
@@ -213,7 +341,155 @@ Status start_secondary_cpus(Kernel &kernel)
         report.reason = "secondary-start-failed";
     emit_report();
     emit_tlb_report(started_mask);
+    bringup_kernel = &kernel;
+#if defined(OK_ENABLE_TEST_POINTS) && defined(OK_ARCH_SMP_START)
+    boot_hotplug_check(kernel);
+#endif
     return Status::success();
+}
+
+Status stop_secondary_cpu([[maybe_unused]] Kernel &kernel, [[maybe_unused]] CpuId cpu)
+{
+#if defined(OK_ARCH_SMP_START)
+    if (auto status = hotplug_request(cpu); !status)
+        return status;
+    const HotplugTurn turn;
+    if (!turn)
+        return Status::busy("another CPU hotplug request is running");
+    const u32 bit = u32{1} << cpu;
+    if (state_of(cpu) != CpuState::online || (online_mask() & bit) == 0)
+        return Status::invalid_argument("CPU is not online");
+    auto &record = cpu_record(cpu);
+    leave_faults[cpu].store(false, std::memory_order_relaxed);
+    set_state(cpu, CpuState::stopping);
+    // No thread is placed on it any more; its queued ones move now.
+    if (auto status = kernel.scheduler().offline_cpu(cpu); !status)
+    {
+        set_state(cpu, CpuState::online);
+        return status;
+    }
+    drain_cpu(cpu);
+    // Out of user mode: it then needs the kernel lock to finish that entry,
+    // so only its window is waited for here, the rest with the lock released.
+    const auto generation = record.user_generation.load(std::memory_order_acquire);
+    send_ipi(cpu, ipi_kick | ipi_reschedule);
+    if ((generation & 1) != 0)
+        static_cast<void>(wait_for(
+            [&] { return record.user_generation.load(std::memory_order_acquire) != generation; }, stop_timeout_ns));
+    if (!wait_unlocked(
+            [&] { return state_of(cpu) == CpuState::offline && arch::smp::parked(cpu, record.hardware_id); },
+            stop_timeout_ns))
+        return Status::io_error("secondary CPU did not park");
+    static_cast<void>(kernel.topology().mark_offline(cpu));
+    if (leave_faults[cpu].load(std::memory_order_relaxed))
+        return Status::fault("leaving CPU still recorded a user entry or a section");
+    return Status::success();
+#else
+    return Status::unsupported("this profile starts no secondary CPUs");
+#endif
+}
+
+Status restart_secondary_cpu([[maybe_unused]] Kernel &kernel, [[maybe_unused]] CpuId cpu)
+{
+#if defined(OK_ARCH_SMP_START)
+    if (auto status = hotplug_request(cpu); !status)
+        return status;
+    const HotplugTurn turn;
+    if (!turn)
+        return Status::busy("another CPU hotplug request is running");
+    const u32 bit = u32{1} << cpu;
+    auto &record = cpu_record(cpu);
+    if ((online_mask() & bit) != 0 || state_of(cpu) != CpuState::offline || record.stack_top == 0 ||
+        !arch::smp::parked(cpu, record.hardware_id))
+        return Status::invalid_argument("CPU is not parked");
+    // Same stack, same start path; the counters stay cumulative.
+    record.ipi_pending.store(0, std::memory_order_relaxed);
+    record.reported_id.store(~uptr{0}, std::memory_order_relaxed);
+    set_state(cpu, CpuState::starting);
+    if (auto status = arch::smp::start(cpu, record.hardware_id, record.stack_lower, record.stack_top); !status)
+    {
+        set_state(cpu, CpuState::offline);
+        return status;
+    }
+    // Online once it ran C++ and reported its identity. It then rejoins the
+    // mask (a running CPU joining needs no lock; only leaving does) and must
+    // answer an IPI, with the kernel lock released: a CPU spinning for the
+    // lock may not take IPIs.
+    bool came_online = false, identified = false, delivered = false;
+    static_cast<void>(wait_unlocked(
+        [&] {
+            if (state_of(cpu) != CpuState::online)
+                return false;
+            came_online = true;
+            identified = record.reported_id.load(std::memory_order_acquire) == record.hardware_id;
+            if (!identified)
+                return true;
+            detail::online.fetch_or(bit, std::memory_order_acq_rel);
+            const auto before = record.ipis_received.load(std::memory_order_acquire);
+            send_ipi(cpu, ipi_ping);
+            delivered = wait_for(
+                [&] {
+                    interrupt::serve_local_interrupts();
+                    return record.ipis_received.load(std::memory_order_acquire) != before;
+                },
+                ping_timeout_ns);
+            return true;
+        },
+        start_timeout_ns));
+    if (!identified)
+    {
+        // Never online, or not the CPU it was started as: it stays outside.
+        set_state(cpu, came_online ? CpuState::halted : CpuState::offline);
+        return Status::io_error("restarted CPU did not come online");
+    }
+    if (auto status = kernel.scheduler().online_cpu(cpu); !status)
+        return status;
+    static_cast<void>(kernel.topology().mark_starting(cpu));
+    static_cast<void>(kernel.topology().mark_online(cpu));
+    if (!delivered)
+        return Status::io_error("restarted CPU did not answer its IPI");
+    return Status::success();
+#else
+    return Status::unsupported("this profile starts no secondary CPUs");
+#endif
+}
+
+HotplugStatistics hotplug_statistics() noexcept
+{
+#if defined(OK_SMP_HOTPLUG_TEST) && defined(OK_ARCH_SMP_START)
+    return hotplug_stats;
+#else
+    return {};
+#endif
+}
+
+void hotplug_test_pass() noexcept
+{
+#if defined(OK_SMP_HOTPLUG_TEST) && defined(OK_ARCH_SMP_START)
+    const u32 secondaries = started_mask() & ~u32{1};
+    if (bringup_kernel == nullptr || secondaries == 0 || current_cpu() != 0 || !kernel_lock.owned_by_current_cpu() ||
+        native_shutdown_pending())
+        return;
+    const auto cpu = static_cast<CpuId>(31 - __builtin_clz(secondaries));
+    hotplug_stats.cpu = cpu;
+    const auto now = arch::monotonic_nanoseconds();
+    if (!now)
+        return;
+    if (hotplug_next == 0 || now.value() < hotplug_next)
+    {
+        if (hotplug_next == 0)
+            hotplug_next = now.value() + hotplug_period_ns;
+        return;
+    }
+    // A stop that timed out leaves the CPU stopping: no restart, a failure.
+    bool cycled = true;
+    if ((online_mask() & (u32{1} << cpu)) != 0)
+        cycled = stop_secondary_cpu(*bringup_kernel, cpu).ok();
+    cycled = state_of(cpu) == CpuState::offline && restart_secondary_cpu(*bringup_kernel, cpu).ok() && cycled;
+    ++(cycled ? hotplug_stats.cycles : hotplug_stats.failures);
+    const auto after = arch::monotonic_nanoseconds();
+    hotplug_next = (after ? after.value() : now.value()) + hotplug_period_ns;
+#endif
 }
 
 } // namespace ok::smp
@@ -238,6 +514,11 @@ extern "C" [[noreturn]] void ok_smp_secondary_main(ok::smp::CpuId cpu)
 #endif
     for (;;)
     {
+#if defined(OK_ARCH_SMP_START)
+        // Hotplug: between steps, so outside user code and holding nothing.
+        if (admitted && record.state.load(std::memory_order_acquire) == static_cast<ok::u8>(CpuState::stopping))
+            leave(cpu);
+#endif
         if (admitted && (online_mask() & (ok::u32{1} << cpu)) != 0 && ok_smp_secondary_step != nullptr &&
             ok_smp_secondary_step(cpu))
             continue;

@@ -381,9 +381,11 @@ tsc::Verdict synchronize_tsc(ok::smp::CpuId cpu) noexcept
             outcome.verdict = tsc::Verdict::unsynced;
     }
     channel.open.store(0, std::memory_order_release);
+    // One line per CPU: a hotplug restart repeats the handshake silently.
+    if ((tsc_measured & (u32{1} << cpu)) == 0)
+        report_tsc(cpu, features, outcome, policy);
     tsc_measured |= u32{1} << cpu;
     tsc_verdicts[cpu] = outcome.verdict;
-    report_tsc(cpu, features, outcome, policy);
     return outcome.verdict;
 }
 
@@ -459,10 +461,14 @@ bool follow_tsc_sync(ok::smp::CpuId cpu) noexcept
     }
 }
 
-// Where a CPU the boot CPU did not admit stays: no clock reads, no record
-// updates; only INIT takes it out.
-[[noreturn]] void park() noexcept
+// Set by a CPU right before it halts for good; start() clears it before INIT.
+constinit std::atomic<bool> parked_cpus[ok::smp::max_cpus]{};
+
+// Where a CPU the boot CPU did not admit, or one hotplug stopped, stays: no
+// clock reads, no stack or record use; only INIT takes it out.
+[[noreturn]] void park(ok::smp::CpuId cpu) noexcept
 {
+    parked_cpus[cpu].store(true, std::memory_order_release);
     for (;;)
         asm volatile("cli; hlt" : : : "memory");
 }
@@ -572,6 +578,7 @@ Status start(ok::smp::CpuId cpu, u64 hardware_id, uptr, uptr stack_top)
     channel.ready.store(0, std::memory_order_relaxed);
     channel.answer.store(0, std::memory_order_relaxed);
     channel.open.store(1, std::memory_order_release);
+    parked_cpus[cpu].store(false, std::memory_order_relaxed);
     asm volatile("mfence" : : : "memory");
 
     // INIT, then STARTUP at the trampoline page; a second STARTUP only if the
@@ -621,6 +628,24 @@ void wait_local() noexcept
     asm volatile("sti; hlt; cli" : : : "memory");
 }
 
+void stop_local() noexcept
+{
+    // INIT and STARTUP still reach a CPU whose local timer is masked and that
+    // halts with interrupts disabled; nothing else does.
+    lapic::reg(lapic::lvt_timer) = lapic::lvt_masked | lapic::timer_vector;
+    lapic::reg(lapic::timer_initial) = 0;
+}
+
+void park_self(ok::smp::CpuId cpu) noexcept
+{
+    park(cpu);
+}
+
+bool parked(ok::smp::CpuId cpu, u64) noexcept
+{
+    return cpu < ok::smp::max_cpus && parked_cpus[cpu].load(std::memory_order_acquire);
+}
+
 } // namespace ok::arch::smp
 
 // The trampoline's 64-bit target, on the CPU's own stack and the boot PML4.
@@ -630,7 +655,7 @@ extern "C" [[noreturn]] void ok_x86_smp_secondary_entry(ok::smp::CpuId cpu)
     asm volatile("fninit; ldmxcsr %0" : : "m"(mxcsr) : "memory");
     ok::arch::execution::x86::load_cpu(cpu);
     if (!ok::arch::smp::follow_tsc_sync(cpu))
-        ok::arch::smp::park();
+        ok::arch::smp::park(cpu);
     ok::arch::smp::prepare_secondary_apic();
     ok_smp_secondary_main(cpu);
 }

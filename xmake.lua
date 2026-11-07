@@ -52,6 +52,12 @@ option("x86_tsc_skew_test")
     set_description("Debug x86_64 only: CPU 1 rewinds its TSC before bring-up's TSC handshake must correct it")
 option_end()
 
+option("smp_hotplug_test")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Debug x86_64/aarch64/rv64 only: once userland runs, CPU 0 stops and restarts the highest secondary CPU periodically")
+option_end()
+
 option("systoolchain_dir")
     set_showmenu(true)
     set_description("Use an existing SysToolchain installation instead of resolving the package")
@@ -122,6 +128,21 @@ local function add_ok_tsc_skew_test()
     if get_config("x86_tsc_skew_test") then
         add_rules("ok-x86-tsc-skew-test")
         add_defines("OK_X86_TSC_SKEW_TEST")
+    end
+end
+
+rule("ok-smp-hotplug-test")
+    on_load(function (target)
+        local arch = target:values("ok.arch")
+        assert((arch == "x86_64" or arch == "aarch64" or arch == "rv64") and is_mode("debug"),
+            "smp_hotplug_test requires an x86_64, aarch64 or rv64 Debug build")
+    end)
+rule_end()
+
+local function add_ok_smp_hotplug_test()
+    if get_config("smp_hotplug_test") then
+        add_rules("ok-smp-hotplug-test")
+        add_defines("OK_SMP_HOTPLUG_TEST")
     end
 end
 
@@ -299,6 +320,7 @@ target("okernel")
     add_ok_terminal_poweroff_policy()
     add_ok_native_fork_policy()
     add_ok_tsc_skew_test()
+    add_ok_smp_hotplug_test()
     add_ok_debug_test_points()
     add_ok_debug_lock_checks()
     add_ok_smp_sections()
@@ -377,6 +399,7 @@ target("okernel_image")
     add_ok_terminal_poweroff_policy()
     add_ok_native_fork_policy()
     add_ok_tsc_skew_test()
+    add_ok_smp_hotplug_test()
     add_ok_debug_test_points()
     add_ok_debug_lock_checks()
     add_ok_smp_sections()

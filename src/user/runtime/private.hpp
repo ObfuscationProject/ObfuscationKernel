@@ -240,6 +240,8 @@ extern bool shutdown_admission_closed, shutdown_retirement_started, shutdown_ret
 // Per CPU: inside step(), and whether its last step found nothing to run.
 extern std::array<bool, smp::max_cpus> runtime_step_active, runtime_idle;
 bool any_step_active();
+// A CPU leaving (hotplug): its round-robin cursor starts fresh on return.
+void forget_cpu_cursor(smp::CpuId cpu);
 // The calling CPU's service stack: the linked boot stack on CPU 0, the stack
 // bring-up allocated on a secondary.
 Status require_cpu_service_stack();

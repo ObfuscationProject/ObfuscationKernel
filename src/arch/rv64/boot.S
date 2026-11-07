@@ -37,6 +37,7 @@ _start:
     la t1, ok_rv64_hart_mailbox
     slli t2, t0, 5
     add t1, t1, t2
+.Lpark_wait:
     li t2, 0x2000000
     slli t3, t0, 2
     add t2, t2, t3
@@ -59,6 +60,26 @@ _start:
 6:
     wfi
     j 6b
+
+# A started hart that hotplug stops returns here from C++ (smp.cpp park_self)
+# with interrupts off, its timer at its maximum and its stack no longer used.
+# Clearing its entry tells the requester it parked; a later start fills it
+# again. Nothing here uses the stack.
+.global ok_rv64_hart_park
+.type ok_rv64_hart_park, @function
+ok_rv64_hart_park:
+    csrr t0, mhartid
+    li t1, 8
+    csrw mie, t1
+    li t1, 16
+    bgeu t0, t1, .Lpark_forever
+    la t1, ok_rv64_hart_mailbox
+    slli t2, t0, 5
+    add t1, t1, t2
+    fence rw, w
+    sd zero, 0(t1)
+    j .Lpark_wait
+.size ok_rv64_hart_park, . - ok_rv64_hart_park
     .option pop
 
 # Not BSS: hart 0 clears BSS while parked harts may already read their entry.

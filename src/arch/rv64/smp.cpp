@@ -31,6 +31,8 @@ extern "C" ok::arch::smp::HartMailbox ok_rv64_hart_mailbox[ok::smp::max_cpus];
 // execution.cpp: the started hart's per-CPU block and its own backend setup.
 extern "C" ok::uptr ok_rv64_cpu_block(ok::u32 cpu, ok::uptr hart) noexcept;
 extern "C" void ok_rv64_secondary_execution() noexcept;
+// boot.S: a stopped hart's way back into its park loop; clears its mailbox entry.
+extern "C" [[noreturn]] void ok_rv64_hart_park() noexcept;
 
 // A released hart arrives here from its park loop with sp, tp and a0 (the
 // logical id) taken from its mailbox entry.
@@ -142,6 +144,24 @@ void wait_local() noexcept
             ok_interrupt_top_half(static_cast<ok::interrupt::IrqLine>(source));
     if (pending & mie_mtie)
         ok::smp::local_tick();
+}
+
+void stop_local() noexcept
+{
+    Clint::set_compare(~u64{0});
+    asm volatile("csrw mie, zero" : : : "memory");
+    Clint::clear_software();
+}
+
+void park_self(ok::smp::CpuId) noexcept
+{
+    ok_rv64_hart_park();
+}
+
+bool parked(ok::smp::CpuId, u64 hardware_id) noexcept
+{
+    return hardware_id < ok::smp::max_cpus &&
+           ok_rv64_hart_mailbox[hardware_id].entry.load(std::memory_order_acquire) == 0;
 }
 
 } // namespace ok::arch::smp
