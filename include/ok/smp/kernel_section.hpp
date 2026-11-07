@@ -199,6 +199,25 @@ inline void section_commit(SectionRecord &record) noexcept
         section_assert(&SectionCpu::section_asserts, "section commit without a handler");
 }
 
+// One other CPU's record: waits for its working section and commits its
+// returning one. True when it waited.
+inline bool drain_record(SectionRecord &record, SectionState state) noexcept
+{
+    bool waited = false;
+    if (state == SectionState::working)
+    {
+        // The pin needs the kernel lock this CPU holds: the section can
+        // only end, in bounded time.
+        waited = true;
+        const SpinningScope spinning;
+        while ((state = record.load()) == SectionState::working)
+            arch::ArchOperations::spin_pause();
+    }
+    if (state == SectionState::returning)
+        section_commit(record);
+    return waited;
+}
+
 template <bool All> inline void drain(u64 pid) noexcept
 {
     const auto self = current_cpu();
@@ -208,20 +227,10 @@ template <bool All> inline void drain(u64 pid) noexcept
         if (cpu == self)
             continue;
         auto &record = section_records[cpu];
-        auto state = record.load();
+        const auto state = record.load();
         if (state == SectionState::idle || state == SectionState::committed || (!All && record.pid != pid))
             continue;
-        if (state == SectionState::working)
-        {
-            // The pin needs the kernel lock this CPU holds: the section can
-            // only end, in bounded time.
-            waited = true;
-            const SpinningScope spinning;
-            while ((state = record.load()) == SectionState::working)
-                arch::ArchOperations::spin_pause();
-        }
-        if (state == SectionState::returning)
-            section_commit(record);
+        waited = drain_record(record, state) || waited;
     }
     section_count(&SectionCpu::drains);
     if (waited)
@@ -321,6 +330,22 @@ inline void drain_all() noexcept
 {
     require_lock_depth(1, "drain_all");
     detail::drain<true>(0);
+}
+
+// Holding the kernel lock: the same for another CPU's section only, before
+// that CPU leaves (hotplug). Its own loop could finish it as well; draining
+// here leaves nothing of that CPU's sections pending once it is told to go.
+inline void drain_cpu(CpuId cpu) noexcept
+{
+    if (cpu >= max_cpus || cpu == current_cpu())
+        return;
+    auto &record = section_records[cpu];
+    const auto state = record.load();
+    if (state != SectionState::working && state != SectionState::returning)
+        return;
+    detail::section_count(&SectionCpu::drains);
+    if (detail::drain_record(record, state))
+        detail::section_count(&SectionCpu::drain_waits);
 }
 
 // Pins a section for (pid, tid) on this CPU and releases the kernel lock,

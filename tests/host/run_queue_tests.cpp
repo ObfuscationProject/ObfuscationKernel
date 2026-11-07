@@ -196,14 +196,17 @@ void test_placement()
     CHECK(f.enqueue(shortest) == 2);
     CHECK(f.length(0) == 1 && f.length(1) == 2 && f.length(2) == 2 && f.length(3) == 1);
 
-    // No allowed CPU online: the lowest allowed configured CPU keeps the entry.
+    // No allowed CPU online: never an offline queue. CPU 0 keeps the entry
+    // but does not run it; a CPU it allows takes it once online.
     CHECK(f.scheduler.set_online_cpus(0x3));
     const auto waiting = f.create(0xc);
-    CHECK(f.enqueue(waiting) == 2);
+    CHECK(f.enqueue(waiting) == 0);
     CHECK(f.dequeue(1) == spread && f.dequeue(1) == tie && f.dequeue(1) == first);
-    CHECK(f.dequeue(1) == 0 && f.length(2) == 3);
+    CHECK(f.dequeue(1) == 0 && f.dequeue(0) == 0 && f.length(2) == 2);
+    CHECK(f.length(0) == 1 && f.thread(waiting).queued_cpu == 0);
     CHECK(f.scheduler.set_online_cpus(0xf));
     CHECK(f.dequeue(2) == warm);
+    CHECK(f.dequeue(3) == pinned && f.dequeue(3) == waiting && f.length(0) == 0);
     f.check_consistent();
 
     // A thread that is not runnable is refused; one on a CPU is left alone.
@@ -411,6 +414,129 @@ void test_two_threads_one_process()
     CHECK(single.thread(second).on_cpu == 0 && single.scheduler.current_pid() == second);
 }
 
+// CPU hotplug: a CPU leaving moves its queue to online CPUs, keeps no entry
+// and is never selected; every runnable thread stays queued exactly once.
+void test_hotplug()
+{
+    Fixture f;
+    CHECK(f.scheduler.offline_cpu(0).code() == StatusCode::invalid_argument);
+    CHECK(f.scheduler.offline_cpu(4).code() == StatusCode::invalid_argument);
+    CHECK(f.scheduler.online_cpu(4).code() == StatusCode::invalid_argument);
+    std::vector<ProcessId> all{};
+    for (const u16 affinity : {cpu_affinity_any, u16{0x8}, u16{0xc}, u16{0x2}, cpu_affinity_any, u16{0x8}})
+        all.push_back(f.create(affinity, true));
+    for (const auto pid : all)
+        CHECK(f.enqueue(pid) < 4);
+    const auto pinned = all[1];
+    CHECK(f.thread(pinned).queued_cpu == 3 && f.length(3) >= 2);
+    // A thread running on the leaving CPU keeps its slot until it vacates it.
+    const auto running = f.create(cpu_affinity_any, true);
+    CHECK(f.scheduler.mark_on_cpu(running, running, 3));
+    // A stale entry (its thread blocked) is dropped, not placed again.
+    const auto stale = f.create(0x8, true);
+    CHECK(f.enqueue(stale) == 3);
+    CHECK(f.scheduler.block_process(stale));
+
+    CHECK(f.scheduler.offline_cpu(3) && f.scheduler.online_cpus() == 0x7);
+    CHECK(f.length(3) == 0 && f.thread(stale).queued_cpu == no_cpu);
+    for (const auto pid : all)
+        CHECK(f.thread(pid).queued_cpu < 3);
+    CHECK(f.thread(pinned).queued_cpu == 0 && f.thread(all[5]).queued_cpu == 0);
+    f.check_consistent();
+    CHECK(f.thread(running).on_cpu == 3 && f.scheduler.current_tid(3) == running);
+    CHECK(!f.scheduler.dequeue_thread(3));
+    CHECK(f.scheduler.mark_on_cpu(all[0], all[0], 3).code() == StatusCode::invalid_argument);
+    // Its last CPU went offline: placement picks an online one.
+    CHECK(f.scheduler.clear_on_cpu(running, running, 3) && f.thread(running).last_cpu == 3);
+    CHECK(f.enqueue(running) < 3);
+
+    // Dequeue everything the online CPUs may run: each thread exactly once,
+    // and the threads pinned to CPU 3 wait on CPU 0.
+    std::vector<ProcessId> taken{};
+    for (bool progress = true; progress;)
+    {
+        progress = false;
+        for (smp::CpuId cpu = 0; cpu < 3; ++cpu)
+            if (const auto pid = f.dequeue(cpu))
+            {
+                CHECK(pid != pinned && pid != all[5]);
+                taken.push_back(pid);
+                progress = true;
+            }
+    }
+    std::sort(taken.begin(), taken.end());
+    CHECK(std::adjacent_find(taken.begin(), taken.end()) == taken.end() && taken.size() == all.size() - 2 + 1);
+    CHECK(f.length(0) == 2 && f.thread(pinned).queued_cpu == 0);
+    f.check_consistent();
+
+    // Back online: CPU 3 takes its pinned threads from CPU 0.
+    CHECK(f.scheduler.online_cpu(3) && f.scheduler.online_cpus() == 0xf);
+    const auto first = f.dequeue(3), second = f.dequeue(3);
+    CHECK(((first == pinned && second == all[5]) || (first == all[5] && second == pinned)) && f.dequeue(3) == 0);
+    f.check_consistent();
+
+    // Repeated cycles of every secondary with traffic in between: no entry on
+    // an offline queue, no placement on an offline CPU, nothing lost or doubled.
+    Fixture g;
+    std::vector<ProcessId> threads{};
+    for (unsigned i = 0; i < 24; ++i)
+        threads.push_back(g.create(i % 5 == 0 ? u16(1u << (i % 4)) : cpu_affinity_any, i % 3 == 0));
+    u32 online = 0xf;
+    unsigned seed = 7;
+    std::vector<ProcessId> running_set{};
+    for (unsigned round = 0; round < 400; ++round)
+    {
+        seed = seed * 1103515245u + 12345u;
+        const auto cpu = static_cast<smp::CpuId>(1 + (seed >> 16) % 3);
+        if ((online & (1u << cpu)) != 0)
+        {
+            CHECK(g.scheduler.offline_cpu(cpu));
+            online &= ~(1u << cpu);
+        }
+        else
+        {
+            CHECK(g.scheduler.online_cpu(cpu));
+            online |= 1u << cpu;
+        }
+        CHECK(g.scheduler.online_cpus() == online);
+        for (const auto pid : threads)
+            if (std::find(running_set.begin(), running_set.end(), pid) == running_set.end())
+            {
+                CHECK(g.scheduler.enqueue_thread(pid, pid));
+                const auto placed = g.thread(pid).queued_cpu;
+                CHECK(placed < 4 && (online & (1u << placed)) != 0);
+                CHECK((online & (1u << g.scheduler.select_cpu(*g.scheduler.find(pid), g.thread(pid)))) != 0);
+            }
+        for (smp::CpuId other = 0; other < 4; ++other)
+            if ((online & (1u << other)) == 0)
+                CHECK(g.length(other) == 0 && !g.scheduler.dequeue_thread(other));
+        g.check_consistent();
+        // Run a few, then return them; each dequeued thread was queued once.
+        for (smp::CpuId other = 0; other < 4; ++other)
+            if (g.scheduler.current_tid(other) != 0)
+                continue;
+            else if (const auto pid = g.dequeue(other))
+            {
+                CHECK((online & (1u << other)) != 0);
+                CHECK(std::find(running_set.begin(), running_set.end(), pid) == running_set.end());
+                CHECK(g.scheduler.mark_on_cpu(pid, pid, other));
+                running_set.push_back(pid);
+            }
+        usize queued = 0;
+        for (const auto pid : threads)
+            queued += g.thread(pid).queued_cpu != no_cpu;
+        CHECK(queued + running_set.size() == threads.size());
+        // Every other round the running threads leave their CPUs, offline or not.
+        if (round % 2 == 1)
+        {
+            for (const auto pid : running_set)
+                CHECK(g.scheduler.clear_on_cpu(pid, pid, g.thread(pid).on_cpu));
+            running_set.clear();
+        }
+    }
+    std::printf("hotplug threads=%zu rounds=400\n", threads.size());
+}
+
 // Host threads stand in for CPUs; each owns one queue and steals from the others.
 void test_contention()
 {
@@ -472,6 +598,7 @@ int main()
     test_exit_and_erase_clean_queues();
     test_mark_on_cpu();
     test_two_threads_one_process();
+    test_hotplug();
     test_contention();
     std::printf("OK_RUN_QUEUES scope=model checks=%zu model_cpus=4 host_threads=4 guest=0 hardware_smp=0\n", checks);
 }

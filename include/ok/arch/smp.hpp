@@ -39,4 +39,16 @@ void send_ipi(ok::smp::CpuId cpu, u64 hardware_id) noexcept;
 // report it through ok::smp::receive_ipi() or ok::smp::local_tick().
 void wait_local() noexcept;
 
+// Hotplug, on profiles that start secondaries (OK_ARCH_SMP_START).
+// On the CPU leaving, holding nothing: stop its local timer and turn off its
+// interrupt controller interface, so no tick or IPI is taken any more.
+void stop_local() noexcept;
+// On that CPU once its state reads offline: leave the kernel for good without
+// touching its stack again. start() starts it again.
+[[noreturn]] void park_self(ok::smp::CpuId cpu) noexcept;
+// On the requesting CPU: `cpu` no longer runs (or never ran) and its stack and
+// start block may be reused: x86 its parked flag, aarch64 PSCI AFFINITY_INFO
+// OFF, rv64 its cleared start mailbox entry.
+[[nodiscard]] bool parked(ok::smp::CpuId cpu, u64 hardware_id) noexcept;
+
 } // namespace ok::arch::smp

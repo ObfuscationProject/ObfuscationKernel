@@ -93,11 +93,18 @@ implicitly, and the native runtime still picks threads by its own scan.
 - `set_online_cpus(mask)` keeps CPU 0 online and refuses unconfigured CPUs; the
   default is CPU 0 only. `configure_cpus` intersects the online set with the new
   count and places entries of removed CPUs again.
+- CPU hotplug uses `offline_cpu(cpu)` and `online_cpu(cpu)`. A secondary CPU
+  that leaves the online set has its queue popped and every live entry placed
+  again on an online queue, and stale entries are dropped, so no thread is lost
+  or queued twice. Its current slot stays until that CPU vacates it.
+  `online_cpu` only sets the bit again, and the CPU starts with an empty queue.
 - `enqueue_thread` places a runnable thread once (`queued_cpu`); a thread already
   queued or on a CPU is left alone. `select_cpu` prefers the last CPU while it is
   online and allowed, then the allowed online CPU with the shortest queue (lowest
-  id on a tie), then the lowest allowed configured CPU, whose queue waits for it,
-  and finally CPU 0 when the affinity names no configured CPU.
+  id on a tie), and otherwise CPU 0. It never picks an offline CPU. CPU 0 runs such
+  an entry only when the affinity names no configured CPU. Otherwise the entry
+  waits on CPU 0's queue until a CPU it allows comes online and dequeues or
+  steals it.
 - `dequeue_thread(cpu)` pops the CPU's own queue, discarding stale entries
   (threads that blocked after they were queued) and moving entries whose
   affinity changed. An empty queue steals the oldest eligible entry from the longest

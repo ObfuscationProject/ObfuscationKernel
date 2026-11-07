@@ -19,6 +19,8 @@ enum class CpuState : u8
     starting,
     online,
     halted,
+    // Hotplug: leaving at its next pass outside user code; then offline.
+    stopping,
 };
 
 enum class TopologyMode : u8
@@ -51,6 +53,8 @@ class CpuTopology final
     Status mark_starting(CpuId cpu);
     Status mark_online(CpuId cpu);
     Status mark_halted(CpuId cpu);
+    // A CPU parked by hotplug, which may start again.
+    Status mark_offline(CpuId cpu);
     Status record_schedule(CpuId cpu);
 
     [[nodiscard]] usize cpu_count() const

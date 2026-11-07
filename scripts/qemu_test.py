@@ -61,6 +61,12 @@ SMP_TLB_MODES = {
 }
 
 
+# CPU hotplug lines, checked when present on an SMP profile: the boot test
+# point (CPU 1 stopped, sent nothing while parked, restarted and pinged) and
+# the smp_hotplug_test knob's cycle count.
+HOTPLUG_BOOT_CHECKS = ("stop", "parked_ipi", "restart", "ipi")
+
+
 class QemuConfigurationError(RuntimeError):
     """Raised before QEMU starts when the requested launch profile is invalid."""
 
@@ -426,6 +432,52 @@ def tsc_sync_problem(lines: list[str], cpus: int, tsc: str, skew_test: bool) -> 
     return None
 
 
+def hotplug_problem(arch: str, lines: list[str], cpus: int) -> tuple[str | None, str]:
+    """Check the OK_SMP_HOTPLUG_BOOT and OK_SMP_HOTPLUG lines, when present.
+
+    Returns (problem, summary): the summary names what was checked for the
+    OK_QEMU_SMP_TEST line. Only SMP profiles may print them. The boot line
+    comes at most once. The knob's line comes with every interrupt report (at
+    runtime start, at process retirements, at shutdown), so its counters are
+    cumulative: they never decrease, it always names the same CPU, and the
+    last one is the verdict.
+    """
+    boot = [parse_fields(line) for line in lines if line.startswith("OK_SMP_HOTPLUG_BOOT ")]
+    cycles = [parse_fields(line) for line in lines if line.startswith("OK_SMP_HOTPLUG ")]
+    if not boot and not cycles:
+        return None, ""
+    if arch not in SMP_QEMU_ARCHES:
+        return f"{arch} starts no secondary CPU but printed a hotplug line", ""
+    if len(boot) > 1:
+        return "OK_SMP_HOTPLUG_BOOT was printed more than once", ""
+    summary = ""
+    if boot:
+        fields = boot[0]
+        if fields.get("scope") != "hardware" or fields.get("cpu") != "1":
+            return "OK_SMP_HOTPLUG_BOOT must name scope=hardware cpu=1", ""
+        failed = [name for name in HOTPLUG_BOOT_CHECKS if fields.get(name) != "pass"]
+        if failed:
+            return "OK_SMP_HOTPLUG_BOOT failed " + ",".join(failed), ""
+        summary += " hotplug_boot=pass"
+    if cycles:
+        reports = []
+        for fields in cycles:
+            try:
+                reports.append((int(fields["cycles"]), int(fields["failures"]), int(fields["cpu"])))
+            except (KeyError, ValueError):
+                return "OK_SMP_HOTPLUG lacks cycles, failures or cpu", ""
+            if fields.get("scope") != "hardware":
+                return "OK_SMP_HOTPLUG must name scope=hardware", ""
+        for previous, current in zip(reports, reports[1:]):
+            if current[0] < previous[0] or current[1] < previous[1] or current[2] != previous[2]:
+                return "OK_SMP_HOTPLUG counters went back or its CPU changed between reports", ""
+        count, failures, cpu = reports[-1]
+        if count <= 0 or failures != 0 or not 1 <= cpu < cpus:
+            return f"OK_SMP_HOTPLUG cycles={count} failures={failures} cpu={cpu}", ""
+        summary += f" hotplug_cycles={count}"
+    return None, summary
+
+
 def validate_smp(arch: str, lines: list[str], cpus: int, tsc_skew_test: bool = False) -> int:
     fields = hardware_smp_fields(lines)
     if fields is None:
@@ -466,7 +518,11 @@ def validate_smp(arch: str, lines: list[str], cpus: int, tsc_skew_test: bool = F
             print(f"debug kernel TLB report invalid for {arch}: asid={mode[0]} pcid={mode[1]}", file=sys.stderr)
             return 14
         tlb = f" tlb_asid={mode[0]} pcid={mode[1]}"
-    print(f"OK_QEMU_SMP_TEST arch={arch} smp={cpus} {reported}{reason}{sync}{tlb}")
+    problem, hotplug = hotplug_problem(arch, lines, cpus)
+    if problem:
+        print(f"debug kernel CPU hotplug for -smp {cpus}: {problem}", file=sys.stderr)
+        return 14
+    print(f"OK_QEMU_SMP_TEST arch={arch} smp={cpus} {reported}{reason}{sync}{tlb}{hotplug}")
     return 0
 
 
@@ -612,6 +668,10 @@ def write_summary(
             handle.write(f"smp.hardware.{key}={smp_hardware[key]}\n")
         for key in sorted(smp_tlb or {}):
             handle.write(f"smp.tlb.{key}={smp_tlb[key]}\n")
+        for marker, prefix in (("OK_SMP_HOTPLUG_BOOT", "smp.hotplug_boot"), ("OK_SMP_HOTPLUG", "smp.hotplug")):
+            fields = next((parse_fields(line) for line in reversed(lines) if line.startswith(marker + " ")), {})
+            for key in sorted(fields):
+                handle.write(f"{prefix}.{key}={fields[key]}\n")
 
 
 def parse_fields(line: str) -> dict[str, str]:

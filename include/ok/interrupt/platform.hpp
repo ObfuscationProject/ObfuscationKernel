@@ -72,7 +72,8 @@ bool idle_until_interrupt();
 // Moves a bound line to `cpu` (an online CPU), on controllers that route, and
 // pins it there: device waits no longer move it.
 Status retarget_platform_irq(IrqLine line, smp::CpuId cpu);
-// Before `cpu` goes offline: spreads its lines over the other online CPUs.
+// As `cpu` goes offline: spreads its lines over the other online CPUs.
+// Hotplug clears its online bit first, so no route() names it afterwards.
 // Called on `cpu` itself with interrupts masked, it then serves what its
 // controller interface already accepted (an x86 vector in the local APIC's
 // IRR, a source pending at its PLIC context, a GIC interrupt signalled to

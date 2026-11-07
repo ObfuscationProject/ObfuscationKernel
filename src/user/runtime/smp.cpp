@@ -148,6 +148,25 @@ Status evict_thread(Kernel &kernel, const sched::ThreadControlBlock &thread)
 } // namespace runtime_detail
 } // namespace ok::user::native
 
+// A secondary CPU leaving (hotplug), on that CPU under the kernel lock between
+// steps: no user entry may remain, and what the runtime keeps per CPU starts
+// fresh when it returns. A thread still in its scheduler slot (a step that
+// returned without vacating it) goes back to runnable for the online CPUs.
+extern "C" bool ok_smp_cpu_leaving(ok::smp::CpuId cpu)
+{
+    using namespace ok::user::native;
+    if (cpu == 0 || cpu >= ok::smp::max_cpus) return false;
+    const bool clean = cpu_entries[cpu].pid == 0 && !cpu_entries[cpu].lease.pool && !runtime_step_active[cpu] &&
+                       !entry_stacks.active_on(cpu);
+    cpu_entries[cpu] = {};
+    runtime_step_active[cpu] = false;
+    runtime_idle[cpu] = false;
+    forget_cpu_cursor(cpu);
+    if (runtime_kernel != nullptr && runtime_kernel->scheduler().current_tid(cpu) != 0)
+        static_cast<void>(runtime_kernel->scheduler().activate(0, cpu));
+    return clean;
+}
+
 // A secondary CPU's share of the native runtime: one step under the kernel
 // lock, after the device bottom halves pending on any CPU. False when it found
 // nothing to run, so the CPU idles until its local timer, an IPI or a device

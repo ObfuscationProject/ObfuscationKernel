@@ -21,6 +21,10 @@ using Candidate = sched::ThreadRef;
 // Per CPU, the last thread picked because a signal interrupted its wait.
 constinit std::array<Candidate, smp::max_cpus> last_interrupted{};
 } // namespace
+void forget_cpu_cursor(smp::CpuId cpu)
+{
+    if (cpu < smp::max_cpus) last_interrupted[cpu] = {};
+}
 struct RuntimeStepGuard
 {
     smp::CpuId cpu{smp::current_cpu()};

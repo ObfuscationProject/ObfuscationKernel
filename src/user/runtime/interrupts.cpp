@@ -2,8 +2,9 @@
 // device event sources did, how driver waits completed, timer interrupt latency
 // and the interval timer counters (OK_IRQ_PLATFORM, OK_IRQ_EVENTS,
 // OK_IRQ_COMPLETIONS, OK_TIMER_LATENCY, OK_TIMERS), with secondary CPUs
-// what each CPU did (OK_SMP_CPUS, OK_SMP_IRQS), socket waits (OK_NET_WAITS)
-// and, where kernel sections are compiled in, the OK_SMP_KERNEL lines.
+// what each CPU did (OK_SMP_CPUS, OK_SMP_IRQS), socket waits (OK_NET_WAITS),
+// where kernel sections are compiled in the OK_SMP_KERNEL lines and, with the
+// smp_hotplug_test knob, the CPU hotplug cycles (OK_SMP_HOTPLUG).
 #include "private.hpp"
 #include "ok/interrupt/platform.hpp"
 #include "ok/smp/bringup.hpp"
@@ -89,13 +90,16 @@ void report_interrupt_lines()
         emit("\n");
     }
 #endif
-    // With secondary CPUs online, what each CPU did: user entries, local timer
-    // ticks, IPIs received and sent, and shootdowns it waited for.
-    if (smp::online_cpus() < 2) return;
-    emit_line("OK_SMP_CPUS scope=hardware online="); emit_number(smp::online_cpus());
+    // With secondary CPUs started, what each CPU did: user entries, local
+    // timer ticks, IPIs received and sent, and shootdowns it waited for. The
+    // CPUs bring-up started, a hotplug-parked one included (online= counts
+    // them), so the per-CPU counters stay comparable across reports.
+    const auto started = smp::started_mask();
+    if (smp::started_cpus() < 2) return;
+    emit_line("OK_SMP_CPUS scope=hardware online="); emit_number(smp::started_cpus());
     for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
     {
-        if ((smp::online_mask() & (u32{1} << cpu)) == 0) continue;
+        if ((started & (u32{1} << cpu)) == 0) continue;
         const auto &record = smp::cpu_record(cpu);
         emit(" cpu"); emit_number(cpu); emit("=");
         emit_number(record.user_entries.load(std::memory_order_relaxed));
@@ -110,7 +114,7 @@ void report_interrupt_lines()
     emit("\nOK_SMP_IRQS scope=hardware");
     for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
     {
-        if ((smp::online_mask() & (u32{1} << cpu)) == 0) continue;
+        if ((started & (u32{1} << cpu)) == 0) continue;
         const auto share = interrupt::platform_irq_cpu_statistics(cpu);
         emit(" cpu"); emit_number(cpu); emit("="); emit_number(share.delivered);
         emit(":"); emit_number(share.serviced); emit(":"); emit_number(share.waits);
@@ -182,7 +186,7 @@ void report_kernel_sections()
     }
     auto field = [](std::string_view name, u64 value) { emit(" "); emit(name); emit("="); emit_number(value); };
     emit_line("OK_SMP_KERNEL scope=hardware debug="); emit_number(smp::lock_debug_enabled ? 1 : 0);
-    field("online", smp::online_cpus());
+    field("online", smp::started_cpus());
     field("sections", sum(&smp::SectionCpu::sections));
     field("completed", sum(&smp::SectionCpu::completed));
     field("declined", sum(&smp::SectionCpu::declined));
@@ -206,7 +210,7 @@ void report_kernel_sections()
     emit("/"); emit_number(sum(&smp::SectionCpu::shadow_mismatched));
     for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
     {
-        if ((smp::online_mask() & (u32{1} << cpu)) == 0) continue;
+        if ((smp::started_mask() & (u32{1} << cpu)) == 0) continue;
         const auto &section = smp::section_cpus[cpu];
         const auto &lock = smp::bkl_cpus[cpu];
         emit(" cpu"); emit_number(cpu); emit("="); emit_number(section.sections.load(std::memory_order_relaxed));
@@ -250,12 +254,26 @@ void report_kernel_sections()
     }
 #endif
 }
+// The smp_hotplug_test knob: stop/restart cycles of the cycled CPU that
+// completed and that failed, with secondary CPUs started.
+void report_hotplug()
+{
+#if defined(OK_SMP_HOTPLUG_TEST)
+    if (smp::started_cpus() < 2) return;
+    const auto hotplug = smp::hotplug_statistics();
+    emit_line("OK_SMP_HOTPLUG scope=hardware cycles="); emit_number(hotplug.cycles);
+    emit(" failures="); emit_number(hotplug.failures);
+    emit(" cpu="); emit_number(hotplug.cpu);
+    emit("\n");
+#endif
+}
 } // namespace
 void report_interrupts()
 {
     report_interrupt_lines();
     report_network_waits();
     report_kernel_sections();
+    report_hotplug();
 }
 inline namespace runtime_detail
 {

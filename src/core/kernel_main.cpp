@@ -108,6 +108,11 @@ namespace ok::detail
         static_cast<void>(ok::ok_poll_network());
         static_cast<void>(ok::ok_step_userland());
         shutdown_boundary();
+#if defined(OK_SMP_HOTPLUG_TEST)
+        // Debug knob: cycles the highest secondary CPU while userland runs.
+        if (native_userland_started)
+            ok::smp::hotplug_test_pass();
+#endif
         if (!ok::ok_userland_status().ok())
         {
             platform_write("OK_TEST_FAIL native-runtime=");
