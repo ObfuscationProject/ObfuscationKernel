@@ -611,7 +611,10 @@ arms). Then, as for pipes:
 - Since S8 a Linux job-control park (§9.6) is a third terminal wait: it is
   never ready, so a caught signal always interrupts it (EINTR, or a restart
   under SA_RESTART); a continue or a foreground change ends it instead and
-  the call re-dispatches.
+  the call re-dispatches. So does the loss of the signal of a park that no
+  stop holds (another thread took it, or a SIGCONT or SIG_IGN discarded it):
+  the settle pass of each step ends the park and the re-dispatched call runs
+  its check again, as Linux restarts it.
 
 ## 10. Readiness — console landed (S4); native PTY landed (S5); Linux PTY landed (S7); console POLLERR removed (S8)
 

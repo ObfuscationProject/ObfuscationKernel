@@ -736,10 +736,12 @@ bool private_child_reap(Kernel &kernel);
 // Job control (jobctl.cpp). Delivery consumed a default stop: an orphaned
 // group (or init) discards TSTP/TTIN/TTOU, otherwise the process stops and its
 // parent is notified. The settle pass applies a pending default stop that only
-// threads parked in waits can take.
+// threads parked in waits can take, then ends each job-control park of a
+// running Linux process whose interrupting signal is gone.
 bool private_jobctl_discard_stop(Kernel &kernel, const sched::ProcessControlBlock &process, u32 signal);
 void private_jobctl_stop(Kernel &kernel, sched::ProcessControlBlock &process, u32 signal);
 void private_jobctl_settle(Kernel &kernel);
+void private_terminal_park_settle(Kernel &kernel);
 i64 private_signal_wait_enqueue(Kernel &kernel, sched::ProcessControlBlock &recipient, sched::ThreadControlBlock &target,
                                 sched::PendingSignalInfo info);
 bool private_signal_admit_blocked(Kernel &kernel, const sched::ProcessControlBlock &recipient,

@@ -276,6 +276,7 @@ void private_jobctl_settle(Kernel &kernel)
             break;
         }
     }
+    private_terminal_park_settle(kernel);
 }
 JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBlock &recipient,
                                          const JobSignalRequest &request)
@@ -838,6 +839,28 @@ bool private_terminal_signal_complete(Kernel &kernel, sched::ProcessControlBlock
     if (JobControlSignalFamily::owned(kernel, process, thread, park))
         return JobControlSignalFamily::complete(kernel, process, thread);
     return ConsoleSignalFamily::complete(kernel, process, thread);
+}
+// A park that no stop holds lives on the signal its check sent. Once that
+// signal is gone (another thread took it, a SIGCONT or SIG_IGN discarded it)
+// the park ends and the call re-runs its check, as Linux restarts the call
+// and runs __tty_check_change again: a new signal, EIO, or the call itself.
+void private_terminal_park_settle(Kernel &kernel)
+{
+    for (auto &process : kernel.scheduler().processes())
+    {
+        if (process.resources().personality != Personality::linux || process.job_control().stopped) continue;
+        for (auto &thread : process.threads())
+        {
+            if (thread.state != sched::ProcessState::blocked || thread.wait_reason != sched::ThreadWaitReason::job_control ||
+                !thread.wait_registration.active()) continue;
+            JobControlSignalFamily::Selected park;
+            u32 signal{};
+            sched::SignalAction action{};
+            if (!JobControlSignalFamily::owned(kernel, process, thread, park) ||
+                private_signal_interrupting(kernel, process, thread, signal, action)) continue;
+            static_cast<void>(kernel.scheduler().complete_wait(thread.wait_registration.ticket(), sched::WaitCompletion::ready));
+        }
+    }
 }
 #endif
 } // namespace runtime_detail

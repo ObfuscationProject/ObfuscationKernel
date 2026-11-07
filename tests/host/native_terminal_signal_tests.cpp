@@ -614,7 +614,8 @@ void vtime(Kernel &kernel)
 
 // A Linux background member of its PTY's session: a caught SIGTTIN interrupts
 // its parked read with EINTR; a caught SIGTTOU under SA_RESTART restarts its
-// parked TCSETS from the captured frame, which then completes in the foreground.
+// parked TCSETS from the captured frame, which then completes in the foreground;
+// a park whose signal another sender discarded re-runs its check.
 void job_control_park(Kernel &kernel)
 {
     auto &scheduler = kernel.scheduler();
@@ -662,6 +663,34 @@ void job_control_park(Kernel &kernel)
     scheduler.terminal(ref)->foreground = member;
     enter(kernel, member, member, linux_ioctl, fds[1], 0x5402, argument_at);
     expect(!pending(kernel, member, member) && result_of(kernel, member, member) == 0);
+    // A park whose signal is gone ends and re-runs its check (Linux restarts
+    // the call): a SIGCONT from elsewhere discards the pending caught SIGTTIN
+    // of the running member, and the re-dispatched read gets a new SIGTTIN
+    // (EINTR from its handler), or EIO once SIGTTIN is ignored.
+    scheduler.terminal(ref)->foreground = leader;
+    for (const bool ignore : {false, true})
+    {
+        thread.native_signal_mask = {}; // The handlers above returned.
+        caught(kernel, member, OK_SIGTTIN, false);
+        enter(kernel, member, member, linux_read, fds[1], read_at, 10);
+        expect(pending(kernel, member, member) && thread.wait_reason == sched::ThreadWaitReason::job_control);
+        native::private_jobctl_settle(kernel);
+        expect(thread.state == sched::ProcessState::blocked && native::private_terminal_signal_ready(kernel, process, thread));
+        static_cast<void>(native::send_kernel_process_signal(kernel, member, OK_SIGCONT));
+        expect(!native::private_terminal_signal_ready(kernel, process, thread) && thread.state == sched::ProcessState::blocked);
+        if (ignore) native::private_signal_table(kernel, member)->find(OK_SIGTTIN)->handler = sched::SignalAction::ignored_handler;
+        native::private_jobctl_settle(kernel);
+        expect(thread.state == sched::ProcessState::runnable && pending(kernel, member, member));
+        resume(kernel, member, member);
+        if (ignore)
+        {
+            expect(!pending(kernel, member, member) && result_of(kernel, member, member) == -5);
+            continue;
+        }
+        expect(pending(kernel, member, member) && thread.wait_reason == sched::ThreadWaitReason::job_control);
+        expect(native::private_terminal_signal_complete(kernel, process, thread) && result_of(kernel, member, member) == -4);
+        expect(native::private_signal_deliver(kernel, process, thread) && thread.native_frame.pc == handler);
+    }
     thread_of(kernel, leader, leader).native_active = true;
     release(kernel, member);
     release(kernel, leader);
