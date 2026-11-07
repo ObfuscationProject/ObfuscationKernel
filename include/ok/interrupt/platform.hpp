@@ -37,7 +37,8 @@ Status start_platform_irqs();
 [[nodiscard]] bool platform_irqs_supported();
 Status bind_platform_irq(IrqLine line, IrqTrigger trigger, IrqHandler handler, void *context);
 Status unbind_platform_irq(IrqLine line, IrqHandler handler, void *context);
-// Runs pending bottom halves; the caller holds the kernel lock.
+// Runs pending bottom halves; the caller holds the kernel lock. Inside a
+// kernel section it runs nothing (and bind_platform_irq refuses).
 usize drain_platform_irqs();
 // From a user-mode TrapKind::interrupt on boards whose trap path does not claim
 // the line itself (Malta): claims the controller's pending line and runs its
@@ -49,7 +50,8 @@ void claim_platform_irq();
 // the wait with an IPI. Returns at once when a line is already pending, and
 // false without waiting when the profile cannot idle on interrupts or this
 // is a secondary CPU of a profile whose device lines reach CPU 0 only
-// (x86_64 on the 8259 pair). A caller holding the kernel lock keeps holding it.
+// (x86_64 on the 8259 pair) or inside a kernel section, whose driver polls.
+// A caller holding the kernel lock keeps holding it.
 bool wait_for_interrupt();
 // The boot CPU's kernel loop idle (kernel lock released): as
 // wait_for_interrupt(), but a top half on another CPU does not end it. That

@@ -156,7 +156,7 @@ namespace ok::detail
         if (!did_work && !ok::interrupt::events_posted())
         {
             // Other CPUs serve their threads while this one waits.
-            ok::smp::kernel_lock.unlock();
+            ok::smp::bkl_unlock();
             waited = (!native_userland_started || ok::ok_userland_idle()) && ok::interrupt::idle_until_interrupt();
             if (!waited)
                 desktop_idle();
@@ -187,7 +187,7 @@ extern "C" [[noreturn]] void kernel_main()
 {
     // The boot CPU holds the kernel lock from here on except while it idles or
     // runs user code; secondary CPUs take it once the runtime admits them.
-    ok::smp::kernel_lock.lock();
+    ok::smp::bkl_lock();
     ok_platform_console_init();
     ok_platform_display_clear();
 

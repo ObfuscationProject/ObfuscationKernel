@@ -4,7 +4,7 @@
 #include "private.hpp"
 #include "ok/interrupt/platform.hpp"
 #include "ok/smp/bringup.hpp"
-#include "ok/smp/kernel_lock.hpp"
+#include "ok/smp/kernel_section.hpp"
 
 namespace ok::user::native
 {
@@ -54,7 +54,7 @@ Result<hw::Trap> enter_unlocked(hw::AddressSpace &space, hw::UserFrame &frame, c
     auto &entry = cpu_entries[smp::current_cpu()];
     entry = {pid, tid, lease, false};
     smp::begin_user(space.root);
-    smp::kernel_lock.unlock();
+    smp::bkl_unlock();
     auto trap = hw::enter_owned(space, frame, view);
     smp::end_user();
     // The holder may wait for a device line routed to this CPU.
@@ -113,6 +113,7 @@ Status commit_eviction(Kernel &kernel, const EvictionPlan &plan)
     if (!plan.cpus) return {};
     // Every CPU in this address space leaves user mode. Each then waits for the
     // kernel lock this CPU holds, so its lease is no longer in use.
+    smp::require_exclusive("commit_eviction");
     smp::quiesce_root(plan.root);
     Status failure{};
     for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
@@ -152,17 +153,17 @@ extern "C" bool ok_smp_secondary_step(ok::smp::CpuId cpu)
         // Not serving threads yet: drain a line this CPU took only while the
         // kernel lock is free (the boot CPU idles), since that idle wait does
         // not end for top halves taken here.
-        if (ok::interrupt::platform_irq_pending() && ok::smp::kernel_lock.try_lock())
+        if (ok::interrupt::platform_irq_pending() && ok::smp::bkl_try_lock())
         {
             static_cast<void>(ok::interrupt::drain_platform_irqs());
-            ok::smp::kernel_lock.unlock();
+            ok::smp::bkl_unlock();
         }
         return false;
     }
     ok::interrupt::lock_kernel_serving_interrupts();
     struct Unlock
     {
-        ~Unlock() { ok::smp::kernel_lock.unlock(); }
+        ~Unlock() { ok::smp::bkl_unlock(); }
     } unlock;
     static_cast<void>(ok::interrupt::drain_platform_irqs());
     if (!started || runtime_kernel == nullptr) return false;

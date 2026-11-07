@@ -47,19 +47,19 @@ inline void bkl_acquired(CpuId cpu, bool waited) noexcept
 }
 } // namespace detail
 
-// The caller passes `waited` when an earlier failed try already showed the
-// lock held elsewhere (a CPU that serves interrupts while it waits).
-inline void bkl_lock(bool waited = false) noexcept
+inline void bkl_lock() noexcept
 {
-    waited = kernel_lock.lock() || waited;
+    const bool waited = kernel_lock.lock();
     detail::bkl_acquired(current_cpu(), waited);
 }
 
-[[nodiscard]] inline bool bkl_try_lock() noexcept
+// `waited`: earlier failed tries of this acquisition (a CPU that serves its
+// interrupts between tries) count it as contended.
+[[nodiscard]] inline bool bkl_try_lock(bool waited = false) noexcept
 {
     if (!kernel_lock.try_lock())
         return false;
-    detail::bkl_acquired(current_cpu(), false);
+    detail::bkl_acquired(current_cpu(), waited);
     return true;
 }
 
