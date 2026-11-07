@@ -513,7 +513,10 @@ class SchedulerState
     Result<DescriptorReservation> prepare_descriptor(u64 pid);
     Result<PreparedPtyPair> prepare_pty_pair(u64 pid, u32 flags = 0);
     using PreparedPtyRead = private_pty::RawPtyTable<>::PreparedRead;
-    Result<PreparedPtyRead> prepare_pty_read(u16 description, usize count);
+    // `timer_expired`: a retry after the reader's VTIME timer ran out.
+    Result<PreparedPtyRead> prepare_pty_read(u16 description, usize count, bool timer_expired = false);
+    using PtyReadState = private_pty::RawPtyTable<>::ReadState;
+    Result<PtyReadState> pty_read_state(u16 description, usize count) const;
     Result<usize> commit_pty_read(PreparedPtyRead &preview);
     // Keys may spuriously collide across pair generations. Retained handle and
     // wait-ticket validation must compare the complete generation separately.

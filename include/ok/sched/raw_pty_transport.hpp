@@ -232,7 +232,9 @@ class RawPtyTable final
         pair.used = pair.locked = false;
     }
     // What a read of `count` bytes may take now; an empty plan is EOF.
-    [[nodiscard]] static Result<Plan> plan(const Pair &pair, Side side, std::size_t count, bool nonblocking)
+    // `timer_expired`: the reader's VTIME timer ran out (a retry, n_tty_read).
+    [[nodiscard]] static Result<Plan> plan(const Pair &pair, Side side, std::size_t count, bool nonblocking,
+                                           bool timer_expired = false)
     {
         Plan result{};
         if (side == Side::master)
@@ -247,7 +249,7 @@ class RawPtyTable final
             return result;
         }
         const auto &terminal = pair.slave;
-        result = terminal.ldisc.plan_read(terminal.termios, count, nonblocking, false);
+        result = terminal.ldisc.plan_read(terminal.termios, count, nonblocking, timer_expired);
         if (result.wait == Ldisc::ReadWait::none) return result;
         if (!pair.master_opens)
         {
@@ -342,12 +344,13 @@ class RawPtyTable final
     // A retained canonical OFD must outlive this preview. Copy-out precedes
     // commit; a failed/partial copy can cancel without consuming any input.
     // A nonblocking slave read takes what is buffered below VMIN (POSIX, n_tty_read).
-    [[nodiscard]] Result<PreparedRead> prepare_read(Handle handle, std::size_t count, bool nonblocking = false)
+    [[nodiscard]] Result<PreparedRead> prepare_read(Handle handle, std::size_t count, bool nonblocking = false,
+                                                    bool timer_expired = false)
     {
         auto *pair = resolve(handle);
         if (!pair) return Status::bad_descriptor("invalid raw PTY endpoint");
         if (!count) return PreparedRead{*this, handle, pair->revision, Plan{}};
-        auto planned = plan(*pair, handle.side, count, nonblocking);
+        auto planned = plan(*pair, handle.side, count, nonblocking, timer_expired);
         if (!planned) return planned.status();
         // Diagnostic saturated revisions cannot authorize a deferred consume.
         if (planned.value().consume && pair->revision == RevisionLimit)
@@ -583,6 +586,29 @@ class RawPtyTable final
                                                !terminal.ldisc.output_stopped());
         result.hangup = result.error = result.write_error = gone;
         return result;
+    }
+    // Why a blocking read of `count` bytes would wait now (`none`: it completes),
+    // the VTIME length to arm (0: no timer) and the bytes the reader can see,
+    // which a waiting reader compares to restart an interbyte timer.
+    struct ReadState
+    {
+        typename Ldisc::ReadWait wait{Ldisc::ReadWait::none};
+        std::uint8_t timer_deciseconds{};
+        std::size_t buffered{};
+    };
+    [[nodiscard]] Result<ReadState> read_state(Handle handle, std::size_t count) const
+    {
+        const auto *pair = resolve(handle);
+        if (!pair) return Status::bad_descriptor("invalid raw PTY endpoint");
+        if (handle.side == Side::master)
+        {
+            const bool ready = !count || pair->master_input.size || slave_closed(*pair);
+            return ReadState{ready ? Ldisc::ReadWait::none : Ldisc::ReadWait::input, 0, pair->master_input.size};
+        }
+        const auto &terminal = pair->slave;
+        if (!pair->master_opens) return ReadState{Ldisc::ReadWait::none, 0, terminal.ldisc.buffered()};
+        const auto planned = terminal.ldisc.plan_read(terminal.termios, count, false, false);
+        return ReadState{planned.wait, planned.timer_deciseconds, terminal.ldisc.buffered()};
     }
     // Releases one open. The last open of a side changes its state: a master
     // drops its queue and hangs up a ptmx slave (discarding its input); a raw
