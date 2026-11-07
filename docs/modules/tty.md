@@ -174,8 +174,11 @@ Landed (S6): `PosixService::openat_limited` converts a node whose
 holding only the opener's pin, re-validates the node (index, generation,
 lock, liveness) and runs every check before its first change; an install
 failure releases the pin, which retires the open and removes a new pair's
-entry. The description records the node in `terminal_origin`; I/O dispatch
-never reads it. `terminal_status(description)` serves fstat,
+entry. The description records the node in `terminal_origin`. fstat and the
+`pts_node`/chmod/chown paths use it. Console reads and writes read it only to
+skip the job-control check for a descriptor opened from `/dev/console` (Linux
+`redirected_tty_write`, §9.6, deviation 24); console ioctls and every other I/O
+path ignore it. `terminal_status(description)` serves fstat,
 `change_pts_mode`/`change_pts_owner` serve chmod and chown, and
 `pts_node(description)` names a slave's entry.
 ## 4. Controlling terminal and foreground group — landed (S4 console, S5 PTY); `/dev/tty` landed (S6); gates and TIOCNOTTY landed (S8)
@@ -677,7 +680,7 @@ N_TTY, devfs and job-control constants.
 | `user/native_console_control_profile.hpp` | `bootcpu-lease-epoch-explicit-console-pty-session-foreground-sigttin-sigttou-pid32-ioctl-v2` | 2 | `background_eio=0`; `pty`, `termios`, `stop_continue`, `job_control` = 1; `auto_open_acquire=1` (pts only); `force_steal=0` kept; added `background_sigttin`, `background_sigttou`, `dev_tty`, `noctty_open` = 1, `console_auto_open_acquire=0` |
 | `user/native_sessions_profile.hpp` | `bootcpu-serialized-process-group-session-console-pty-jobctl-lifecycle-v4` | 4 | `pty`, `job_control` = 1; added `ctty_derived`, `orphaned_group_hup` = 1 |
 | `user/native_group_signal_profile.hpp` | `bootcpu-signed32-current-negative-pgid-probe-all-signals-stop-continue-orphan-hupcont-same-session-cont-partial-v3` | 3 | `stop_continue`, `job_control` = 1; added `default_actions`, `same_session_continue`, `orphan_hangup` = 1; `broadcast=0` kept |
-| `sched/console_input_profile.hpp` | `pid1-issued-epoch-fork-exec-leader-revoke-ntty-compat-default-v2` | — | epoch limit unchanged |
+| `sched/console_input_profile.hpp` | `pid1-issued-epoch-fork-exec-leader-revoke-ntty-compat-default-v2` | — | epoch limit unchanged; no ABI field |
 | `user/native_tty_profile.hpp` (new) | `bootcpu-ntty-template-console-pts8-devfs-ptmx-tty-console-v1` | 1 | capacities: 9 terminals, 8 pts (major 136), read buffer 4096, echo 512, master queue 4096, outbox 8, console write limit 65536; `native_termios_bytes=36`, `native_nccs=19`, `winsize_bytes=8`, `linux_codec_revision=3`; acted: `canonical`, `echo`, `isig`, `opost`, `iutf8`, `vmin_vtime`, `pty_vtime`, `pty_ixon`, `console_compat_default` = 1; not acted: `console_vtime`, `console_vhangup`, `console_ixon`, `parity`, `ixany_ixoff`, `imaxbel`, `case_mapping`, `vdiscard`, `baud_reprogramming` = 0; nodes: `dev_tty`, `dev_console`, `dev_ptmx` = 1, `pts_mode=0620`, `pts_owner_opener`, `grantpt_noop`, `locked_listed`, `stat_rdev_linux` = 1, `separate_devpts_mount`, `stat_rdev_native`, `tiocgptpeer`, `packet_mode`, `tiocsti`, `termios2`, `smp` = 0 |
 | `user/native_job_control_profile.hpp` (new) | `bootcpu-overlay-stop-cont-wuntraced-wcontinued-pgrp-wait-nocldstop-owed-kernel-v1` | 1 | 64 processes, `signal_max=64`, 64 owed kernel-signal records, `sigaction_bytes=24`, `cld_stopped=5`, `cld_continued=6`; `stop_overlay`, `wait_untraced`, `wait_continued`, `group_wait`, `waitid_pgid`, `nowait`, `waitid_rv32_only`, `nocldstop`, `orphaned_stop_discard`, `orphan_hangup`, `same_session_continue`, `native_dfl_ign`, `init_protection`, `owed_kernel_signals` = 1; `native_handlers`, `native_masks`, `native_child_sigchld`, `broadcast`, `ptrace`, `core_dump`, `smp` = 0 |
 
@@ -694,7 +697,8 @@ termination UAPI. Both list the terminal and job-control headers (`ok/tty/*`,
 `ok/user/job_control_signals.hpp`, the UAPI headers) as hashed dependencies,
 and the manifest carries `native_tty_profile` and `native_job_control_profile`.
 
-Every marker carries `module_abi = 79` until S9b. S9b bumps the module ABI to
+Every marker except `sched/console_input_profile.hpp`, which has no ABI
+field, carries `module_abi = 79` until S9b. S9b bumps the module ABI to
 80 once, at merge (feat/net-core took 79), together with the `ABI80` entry of
 `docs/modules/modules.md` and the paired OS consumer.
 
@@ -808,8 +812,9 @@ waits and RV32 `waitid` without WEXITED before that section.
 S4 adds two runners on the actual runtime (x86_64 hosted backends):
 
 - `python3 -B scripts/test_terminal_control.py --output <dir>` prints
-  `TERMINAL_CONTROL_PASS native_requests=15 linux_profiles=10 console=1
-  error_order=1 hosted=1 guest=0`: the shared dispatch's error order (EBADF,
+  `TERMINAL_CONTROL_PASS native_requests=16 linux_profiles=10 console=1
+  error_order=1 hosted=1 guest=0` at HEAD (S4 printed `native_requests=13`;
+  S5 and S8 added three native requests, see below): the shared dispatch's error order (EBADF,
   ENOTTY, association, copy-in EFAULT, control errors, EOVERFLOW, copy-out
   EFAULT) and exact copy sizes for the native wire on both endiannesses and all
   ten Linux encodings, the native request table, and a Linux TCSETS on the
@@ -860,7 +865,7 @@ S5 extends existing runners (hosted model and runtime evidence only):
   non-canonical mode, on a completed line or EOF in canonical mode, and after
   every termios change (Linux `__receive_buf`, `n_tty_set_termios`).
 - `test_terminal_control.py` maps `OK_TIOCGPTN` and `OK_TIOCSPTLCK` natively
-  (`native_requests=15`).
+  (S5 raised `native_requests` from 13 to 15).
 - The `native-pty/scheduler-OFD-ownership-model` debug point also runs a
   ptmx-style pair (counted opens, canonical echo, hangup discard).
 
@@ -955,7 +960,8 @@ S8 (hosted runtime and model evidence only) extends existing runners:
 - `test_process_sessions.py` ends with `guest=0 tty=1 smp=0`: ctty
   derivation, fork, setsid, TIOCNOTTY by a member and the leader, re-acquire,
   leader exit and the master's last close at scheduler level.
-- `test_terminal_control.py` maps `OK_TIOCNOTTY` (`native_requests=16`).
+- `test_terminal_control.py` maps `OK_TIOCNOTTY` (S8 raised
+  `native_requests` from 15 to 16, the value the runner prints at HEAD).
 
 S9a (SDK admission models only; no SDK export, target build or guest
 execution in these suites):
