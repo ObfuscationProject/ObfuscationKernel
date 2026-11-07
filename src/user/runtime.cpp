@@ -34,9 +34,9 @@ alignas(4096) std::array<std::byte, memory::KernelEntryStackPool::arena_bytes> e
 memory::KernelEntryStackPool entry_stacks;
 SyscallOrigins syscall_origins{entry_stacks};
 VfsStatContinuation<lu::configured_native_profile()> vfs_continuations{entry_stacks};
-bool started{};
+constinit RuntimeFlag started{};
 Kernel *runtime_kernel{};
-Status runtime_failure{};
+constinit RuntimeFailure runtime_failure{};
 ShutdownOwner original_shutdown_owner{};
 bool shutdown_admission_closed{}, shutdown_retirement_started{}, shutdown_retirement_completed{};
 namespace
@@ -142,9 +142,12 @@ Status prepare_native_thread(sched::ThreadControlBlock &thread)
 extern "C" void ok_platform_console_write_char(char) __attribute__((weak));
 namespace
 {
+// Any CPU emits; one text reaches the console whole, and console_last
+// stays that of the last text out.
+constinit smp::RankedSpinLock<smp::LockRank::console> console_lock{};
+using ConsoleGuard = smp::RankedSpinLock<smp::LockRank::console>::Guard;
 char console_last{'\n'};
-} // namespace
-void emit(std::string_view text)
+void emit_locked(std::string_view text)
 {
     if (ok_platform_console_write_char != nullptr)
         for (char c : text)
@@ -152,18 +155,25 @@ void emit(std::string_view text)
     if (!text.empty())
         console_last = text.back();
 }
+} // namespace
+void emit(std::string_view text)
+{
+    const ConsoleGuard guard(console_lock);
+    emit_locked(text);
+}
 void emit_line(std::string_view text)
 {
+    const ConsoleGuard guard(console_lock);
     if (console_last != '\n')
-        emit("\n");
-    emit(text);
+        emit_locked("\n");
+    emit_locked(text);
 }
 void emit_number(u64 value)
 {
     char digits[20];
-    usize count = 0;
-    do { digits[count++] = static_cast<char>('0' + value % 10); value /= 10; } while (value);
-    while (count) emit({&digits[--count], 1});
+    usize first = sizeof digits;
+    do { digits[--first] = static_cast<char>('0' + value % 10); value /= 10; } while (value);
+    emit({&digits[first], sizeof digits - first});
 }
 [[maybe_unused]] void emit_hex(u64 value)
 {
