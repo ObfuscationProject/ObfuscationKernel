@@ -130,7 +130,9 @@ open always converts them (§3).
   belongs to no session, and the foreground becomes the caller's group.
 - `/dev/tty` opens the caller's controlling terminal, or returns ENXIO.
 - `/dev/console` opens a console description. It never acquires; reads stay
-  lease-gated (EACCES without the lease epoch); writes always succeed.
+  lease-gated (EACCES without the lease epoch); writes are not lease-gated.
+  Its reads and writes skip the job-control check, its requests do not
+  (§9.6, Linux `redirected_tty_write`).
 - Errno order: (1) EINVAL (flags); (2) EMFILE; (3) ENFILE; (4) ENOENT /
   EACCES (search) / ENOTDIR (path walk); (5) ENOENT (stale pts); (6) ENOTDIR
   (`O_DIRECTORY`) or EEXIST (`O_CREAT|O_EXCL`); (7) EACCES (node mode); (8)
@@ -510,6 +512,11 @@ ctty, has a foreground group, and the caller is not in it.
   `copy_to_iter`; a write copies in first.
 - Callers whose ctty is a different terminal are not job-controlled; this
   includes console lease members in other sessions.
+- Reads and writes through a description opened from `/dev/console` are not
+  checked (Linux `job_control` and `n_tty_write` skip a file whose
+  `write_iter` is `redirected_tty_write`); its requests are. The boot stdio
+  and `/dev/tty` descriptors are the console itself and are checked (§14
+  item 24).
 
 Implementation (S8). `tty_gate` (`src/user/runtime/tty.cpp`) runs at console
 read and readv, console write and writev under TOSTOP, PTY slave read and
@@ -689,6 +696,7 @@ profile string and version above keeps its current value.
 | 21 | A caught signal during a blocking non-canonical console or PTY slave read with fewer than VMIN bytes buffered (fewer than min(VMIN, count)) leaves those bytes for the next read. The read returns EINTR, or under SA_RESTART restarts and keeps waiting for VMIN bytes (a consequence of item 8). Linux `n_tty_read` copies the bytes as they arrive and returns their count, with or without SA_RESTART. | landed (S7) |
 | 22 | A session leader's exit hangs its terminal up before its descriptors close, so the foreground group gets SIGHUP alone even when the leader held the master's last descriptor; Linux closes the files first and then sends SIGHUP and SIGCONT to that group through `tty_old_pgrp`. | landed (S8) |
 | 23 | A zero-length read or write of a PTY slave returns 0 before the job-control check; Linux `n_tty_read` runs the check for a zero count too. | landed (S8) |
+| 24 | The boot stdio console descriptors are job-controlled like `/dev/tty`. Linux opens init's stdio from `/dev/console`, whose reads and writes skip the check (`redirected_tty_write`); here the console is the only terminal and the boot stdio are the console itself, so a shell on them has job control. Descriptors opened from `/dev/console` skip it as on Linux. | landed (S8) |
 
 ## Tests
 

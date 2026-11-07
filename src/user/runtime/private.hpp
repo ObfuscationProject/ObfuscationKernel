@@ -573,8 +573,11 @@ i64 begin_pty_io(Kernel &kernel, sched::ProcessControlBlock &process, sched::Thr
 // outbox, as do the top of step() and the exit commit.
 void tty_console_input(Kernel &kernel, char value, sched::WakeSource source);
 // Writes check TOSTOP first; `fd` and `complete` serve a job-control park.
+// A description opened through /dev/console skips the job-control check of
+// reads and writes (Linux redirected_tty_write).
 i64 tty_console_write(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &caller,
-                      std::span<const PipeVector> vectors, i32 fd, bool &complete);
+                      const sched::OpenFileDescription &description, std::span<const PipeVector> vectors, i32 fd,
+                      bool &complete);
 // `arguments`/`vectored`: the read or readv call a Linux wait binds.
 i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &caller,
                      const sched::OpenFileDescription &description, std::span<const PipeVector> vectors,

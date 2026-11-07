@@ -839,6 +839,22 @@ bool background_console(Kernel &kernel, const Session &s, bool &ttou, bool &tost
     cont(kernel, bg);
     expect(native_call(kernel, bg, N::write, {1, text_at, 1}) == 1 && take_output() == "w");
     expect(set_group(kernel, s.login, s.login) == 0);
+    // A descriptor opened through /dev/console skips the check of reads and
+    // writes (Linux redirected_tty_write); its requests are still checked.
+    const auto redirected = static_cast<uptr>(bind_fd(kernel, bg, [&](u16 id) {
+        return scheduler.open_terminal(bg, id, {.node = {fs::TerminalNodeKind::console}, .flags = 2u, .readable = true,
+                                                .writable = true}).ok();
+    }));
+    expect(native_call(kernel, bg, N::write, {redirected, text_at, 1}) == 1 && take_output() == "w");
+    type("v");
+    expect(native_call(kernel, bg, N::read, {redirected, read_at, 8}) == 1 && *user(read_at) == std::byte{'v'});
+    expect(!job_of(kernel, bg).stopped);
+    expect(call_pending(kernel, bg, N::ioctl, {redirected, OK_TCSBRK, 1}) == -11);
+    expect(job_of(kernel, bg).stop_signal == OK_SIGTTOU && parked(kernel, bg, 0) && reported_stop(kernel, s.login, bg, OK_SIGTTOU));
+    expect(set_group(kernel, s.login, bg) == 0);
+    cont(kernel, bg);
+    expect(native_call(kernel, bg, N::ioctl, {redirected, OK_TCSBRK, 1}) == 0);
+    expect(set_group(kernel, s.login, s.login) == 0 && native_call(kernel, bg, N::close, {redirected}) == 0);
     disposition(kernel, bg, OK_SIGTTOU, OK_SIG_IGN);
     expect(native_call(kernel, bg, N::write, {1, text_at, 1}) == 1 && take_output() == "w");
     // SIG_IGN: a read is EIO, a change goes ahead.

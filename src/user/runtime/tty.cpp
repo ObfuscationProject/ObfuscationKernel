@@ -65,6 +65,14 @@ Result<usize> tty_user_ranges(const hw::AddressSpace &space, std::span<const Pip
     }
     return total;
 }
+
+// Linux job_control and n_tty_write skip a file opened through /dev/console
+// (f_op->write_iter == redirected_tty_write). The boot stdio and /dev/tty
+// descriptors are the console itself and are checked; ioctls always are.
+bool tty_console_redirected(const sched::OpenFileDescription &description)
+{
+    return description.terminal_origin == fs::TerminalNodeKind::console;
+}
 } // namespace
 
 TtyGate tty_check(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread,
@@ -163,18 +171,21 @@ void tty_console_input(Kernel &kernel, char value, sched::WakeSource source)
 }
 
 i64 tty_console_write(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &caller,
-                      std::span<const PipeVector> vectors, i32 fd, bool &complete)
+                      const sched::OpenFileDescription &description, std::span<const PipeVector> vectors, i32 fd,
+                      bool &complete)
 {
     auto &space = process.resources().native_space;
     const auto total = tty_user_ranges(space, vectors, tty_console_write_limit, false);
     if (!total) return -14;
     // n_tty_write under TOSTOP checks the writer at the start of the call.
     bool parked = false;
-    if (auto status = tty_gate(kernel, process, caller, sched::console_terminal_ref, TtyAccess::write, fd, parked); !status)
-    {
-        if (parked) complete = false;
-        return error(status);
-    }
+    if (!tty_console_redirected(description))
+        if (auto status = tty_gate(kernel, process, caller, sched::console_terminal_ref, TtyAccess::write, fd, parked);
+            !status)
+        {
+            if (parked) complete = false;
+            return error(status);
+        }
     auto &terminal = kernel.scheduler().console_terminal();
     // n_tty_write: pending echo goes out before program output.
     tty_emit_echo(terminal);
@@ -216,7 +227,8 @@ i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched:
     auto &scheduler = kernel.scheduler();
     // The job check runs at the first entry and again when a continue ended
     // the wait (Linux restarts the read after the stop interrupted it).
-    if (!caller.console_wait_epoch || caller.terminal_gate_mark != process.job_control().continue_generation)
+    if (!tty_console_redirected(description) &&
+        (!caller.console_wait_epoch || caller.terminal_gate_mark != process.job_control().continue_generation))
     {
         bool parked = false;
         if (auto status = tty_gate(kernel, process, caller, sched::console_terminal_ref, TtyAccess::read,

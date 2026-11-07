@@ -508,7 +508,8 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         for (usize i = 0; i < a[2]; ++i)
             if (!hw::user_range(space, vectors[i].base, vectors[i].length, !writing)) return -14;
         if (writing && description->console)
-            return tty_console_write(kernel, *process, *caller, {vectors.data(), a[2]}, static_cast<i32>(a[0]), complete);
+            return tty_console_write(kernel, *process, *caller, *description, {vectors.data(), a[2]}, static_cast<i32>(a[0]),
+                                     complete);
         std::array<std::byte, sched::pipe_capacity> data{};
         const usize limit = data.size();
         if (total > limit) total = limit;
@@ -600,7 +601,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
     if (number == N::write && description && description->console && description->writable)
     {
         const PipeVector vector{a[1], a[2]};
-        return tty_console_write(kernel, *process, *caller, {&vector, 1}, static_cast<i32>(a[0]), complete);
+        return tty_console_write(kernel, *process, *caller, *description, {&vector, 1}, static_cast<i32>(a[0]), complete);
     }
     if (number == N::read && description && description->input_console)
     {

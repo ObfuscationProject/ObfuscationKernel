@@ -86,7 +86,8 @@ struct OpenFileDescription
     u16 unix_write_pipe{invalid_description};
     private_pty::Handle pty_endpoint{}; // One canonical typed PTY endpoint; never console/pipe/UNIX backing.
     // The device node a path open converted (fstat reports it); none for raw
-    // pairs and the boot stdio. I/O dispatch never reads it.
+    // pairs and the boot stdio. Console I/O reads it only to exempt a
+    // /dev/console open from job control (Linux redirected_tty_write).
     fs::TerminalNodeKind terminal_origin{};
     UnixEndpointHandle unix_endpoint{}; // One pathname endpoint owner per canonical OFD.
     u32 native_udp_handle{0}; // Zero is not a UDP socket; final OFD release retires the handle.
