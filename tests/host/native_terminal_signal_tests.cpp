@@ -124,7 +124,12 @@ void pty_read_signal(Kernel &kernel, u64 sender, bool restart)
     auto &process = *kernel.scheduler().find(pid);
     expect(pending(kernel, pid, reader) && thread.wait_reason == sched::ThreadWaitReason::pty_read);
     const auto object = native::pty_wait_object(pid, reader);
+    const auto armed = *native::pty_wait_objects.resolve(object).value();
+    // A wake that finds no data rearms the continuation and carries its binding.
+    CHECK(kernel.scheduler().complete_wait(armed.ticket, sched::WaitCompletion::ready));
+    resume(kernel, pid, reader);
     const auto wait = *native::pty_wait_objects.resolve(object).value();
+    expect(pending(kernel, pid, reader) && wait.ticket.generation > armed.ticket.generation && wait.request == armed.request);
     const auto origin = native::syscall_origins.identity(process, thread);
     expect(wait.personality == sched::UserPersonality::linux && wait.origin == origin.capture && origin.capture);
     expect(native::syscall_origins.validate_bound(origin, thread.native_frame, native::pty_read_origin_binding(object, wait)));
