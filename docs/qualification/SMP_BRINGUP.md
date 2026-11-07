@@ -98,7 +98,7 @@ ipi=unsupported reason=profile-up`.
   `scripts/test_cpu_topology.py` (synthetic FDT and ACPI cases, a mutation
   corpus, and four DTBs dumped by QEMU 10.2.0 virt with `--qemu-dir`), and
   `scripts/test_kernel_entry_stack_pool.py` (one active lease per CPU).
-- `tests/qemu/test_qemu_runner.py`: 40 tests, including the `-smp` command and
+- `tests/qemu/test_qemu_runner.py`: 32 tests, including the `-smp` command and
   marker validation.
 - `xmake test` passes on all ten profiles with one CPU (the UP line above),
   and `scripts/hosted_suite.py --toolchain-root` runs 145 runners, all passing
@@ -183,11 +183,17 @@ follow-up:
   refuse an exec now precedes the eviction ("Exec ordering" below).
 
 A secondary the boot CPU gave up on (late or with a mismatched id) now stays
-out of the online state; the review rated that hardening.
+out of the online state; the review rated that hardening. On x86_64 every AP
+reads one shared start block, so the pre-merge review added two guards: the
+trampoline compares the block's APIC id with its own CPUID id before it uses
+the stack and CPU number, and halts on a mismatch, and `start()` sends an INIT
+to a CPU whose clock handshake it gives up on before any later start rewrites
+the block.
 
 ## Lifting the bring-up limits
 
-Seven follow-up items on the same branch (`git log 023386b..b28815c`), each
+Seven follow-up items on the same branch (`git log 023386b..bf3c63c`: the
+merges at b28815c, then the fixes 7e59ab5, 67c9bf7 and 49b53e8), each
 with its own model tests and QEMU evidence. Unless noted, guest evidence is
 QEMU 10.2.0 with debug kernels; the OS gates run in the paired worktree
 `wt/os-smp-bringup`.
@@ -338,7 +344,8 @@ evidence lines.
   `scripts/test_linux_file_io_equivalence.py` (ten profiles; each decline
   checked against its digest), `scripts/test_realtime_clock.py` and
   `scripts/test_clock_counter.py`.
-- OS `scripts/test_smp_stress.py` (default `--smp-sections on`) requires the
+- OS `scripts/test_smp_stress.py` (default `--smp-sections on` on x86_64,
+  aarch64 and rv64, `off` on the profiles without sections) requires the
   families to cover the probe's file traffic (`fsync >= files`; `read`,
   `write`, `lseek >= 2 * files`); with two or more CPUs, sections on at least
   two CPUs, `concurrent` and `witnessed` above 0 and `max_parallel >= 2`; on a

@@ -21,7 +21,7 @@ CPUs or full POSIX conformance. Hosted models are listed separately.
 | VFS/POSIX host regression | Mount-point protection, directory ancestry/replacement, opened-directory identity, cwd/dirfd across rename/fork, retained unlinked/replaced nodes, RAM capacity reuse, sticky and ancestor search permissions, held-directory access and errno mapping |
 | ext4 host regression | 1/2/4 KiB blocks: mutation, reopen, clean fsck, rename/replacement/hard links, directory topology, unsupported/unclean/read-only rejection, inode reuse and 32-bit ownership |
 | ext4 failure model | 1,776 injected read, partial-write and flush failures; partial rename/link quarantine, logical extent exhaustion, malformed metadata, dirty-marker recovery and retained-unlinked lifetime |
-| Tools | 25 Kernel QEMU runner tests and 39 OS SDK/archive/image/runner tests |
+| Tools | 39 Kernel QEMU runner tests and 39 OS SDK/archive/image/runner tests |
 | SMP (QEMU TCG) | x86_64, aarch64 and rv64 at 2 and 4 vCPUs: secondary start, TSC sync (x86_64), user TLB tags, hotplug test point, device lines on every CPU, kernel sections and atomic futex words under the OS gates below; see [SMP_BRINGUP](qualification/SMP_BRINGUP.md) |
 
 All native profiles are retained: i386, x86_64, aarch64, arm32, rv64, rv32,
@@ -75,7 +75,8 @@ OS gates (paired worktree `wt/os-smp-bringup`, debug SDK of this tree):
   two online CPUs.
 - `scripts/test_smp_stress.py --smp N`: the static musl stress probe on
   scratch ext4 (`SMP_STRESS_PASS files=480 messages=960 forks=480`), user
-  entries on every CPU, and with `--smp-sections on` (default) the
+  entries on every CPU, and with `--smp-sections on` (the default on
+  x86_64, aarch64 and rv64; the other profiles build no sections) the
   `OK_SMP_KERNEL` family floors, overlap (`concurrent`, `witnessed`,
   `max_parallel >= 2`) and zero debug assertion counters; `--smp-sections off`
   requires that no `OK_SMP_KERNEL` line appears. `--require-hotplug` (a
