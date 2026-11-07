@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an isolated RV64 U-mode/Sv39/CLINT hardware probe without changing xmake."""
+"""Build an isolated RV64 U-mode/Sv39/CLINT two-hart hardware probe without changing xmake."""
 from __future__ import annotations
 import argparse
 from pathlib import Path
@@ -18,16 +18,16 @@ def main() -> int:
     output.mkdir(parents=True, exist_ok=True)
     common = ["-mcmodel=medany", "-msmall-data-limit=0"]
     cxx = ["-std=c++23", "-O2", "-ffreestanding", "-fno-builtin", "-fno-exceptions", "-fno-stack-protector", "-Wall", "-Wextra", "-Wpedantic", "-Werror", "-I", str(root / "include"),
-           "-DOK_ARCH_TARGET_RV64"]
+           "-DOK_ARCH_TARGET_RV64", "-DOK_KERNEL_FREESTANDING"]
     objects = []
-    sources = [("boot", "src/arch/rv64/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/rv64/execution.cpp"), ("irq", "src/interrupt/platform_irq.cpp"), ("clock", "src/arch/clock.cpp"), ("bridge", "src/arch/rv64/execution.S"), ("user", "tests/native/rv64_execution_user.S"), ("test", "tests/native/rv64_execution_test.cpp")]
+    sources = [("boot", "src/arch/rv64/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/rv64/execution.cpp"), ("ops", "src/arch/rv64/ops.cpp"), ("smp", "src/arch/rv64/smp.cpp"), ("fdt", "src/boot/fdt.cpp"), ("irq", "src/interrupt/platform_irq.cpp"), ("clock", "src/arch/clock.cpp"), ("bridge", "src/arch/rv64/execution.S"), ("user", "tests/native/rv64_execution_user.S"), ("test", "tests/native/rv64_execution_test.cpp")]
     for name, source in sources:
         target = output / f"{name}.o"
         subprocess.run([str(compiler), *common, *(cxx if source.endswith(".cpp") else []), "-c", str(root / source), "-o", str(target)], check=True)
         objects.append(str(target))
     elf = output / "probe.elf"
     subprocess.run([str(compiler), *common, "-nostdlib", "-static", "-Wl,--build-id=none", "-Wl,-T," + str(root / "src/arch/rv64/linker.ld"), *objects, "-lgcc", "-o", str(elf)], check=True)
-    command = [args.qemu, "-machine", "virt", "-m", "128M", "-bios", "none", "-kernel", str(elf), "-display", "none", "-serial", "stdio", "-monitor", "none", "-no-reboot"]
+    command = [args.qemu, "-machine", "virt", "-m", "128M", "-smp", "2", "-bios", "none", "-kernel", str(elf), "-display", "none", "-serial", "stdio", "-monitor", "none", "-no-reboot"]
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=20)
     except subprocess.TimeoutExpired as error:
@@ -35,7 +35,9 @@ def main() -> int:
     serial = result.stdout + result.stderr
     (output / "serial.log").write_text(serial)
     print(serial, end="")
-    if result.returncode != 0 or "RV64_NATIVE_PASS scope=hardware" not in serial:
+    if result.returncode != 0 or "RV64_NATIVE_PASS scope=hardware" not in serial or \
+            "RV64_NATIVE tlb_asid=" not in serial or \
+            "RV64_NATIVE section_wait_serve=pass section_poll_serve=pass" not in serial:
         raise RuntimeError(f"RV64 native hardware probe failed: QEMU exit {result.returncode}")
     return 0
 

@@ -1,12 +1,21 @@
+#include "cpu_local.hpp"
+#include "ioapic.hpp"
+#include "lapic.hpp"
 #include "ok/arch/execution_spaces.hpp"
 #include "ok/interrupt/platform.hpp"
+#include "ok/smp/bringup.hpp"
+#include "ok/smp/kernel_section.hpp"
 
 #include <cstddef>
 
 namespace ok::arch::execution
 {
+using x86::CpuLocal;
+using x86::this_cpu;
 namespace
 {
+namespace lapic = arch::x86::lapic;
+namespace ioapic = arch::x86::ioapic;
 constexpr u64 present = 1;
 constexpr u64 writable = 2;
 constexpr u64 user = 4;
@@ -32,27 +41,26 @@ struct Space
     Table *pdpt{};
     Table *directory{};
     usize tables{};
+    detail::TlbSpaceTag tlb{};
 };
-constinit SpaceTable<Space> spaces;
+constinit SpaceTable<Space, fixed_space_slots> spaces;
+// The slot storage is fixed, so entries validate their space without the
+// kernel lock; slot acquire and release, space ids and TLB generations are
+// serialized by spaces_lock.
+constinit smp::RankedSpinLock<smp::LockRank::arch_spaces> spaces_lock{};
+using SpacesGuard = smp::RankedSpinLock<smp::LockRank::arch_spaces>::Guard;
+constinit detail::TlbSpaceIds space_ids{};
+// CR4.PCIDE: CR3[11:0] names the PCID, and bit 63 of a CR3 load keeps the
+// loaded PCID's cached translations. The kernel's translation is PCID 0.
+constexpr uptr cr4_pcide = uptr{1} << 17;
+constexpr uptr cr3_keep = uptr{1} << 63;
 u64 kernel_pdpt[512]{};
 bool initialized = false;
-bool executing = false;
-Trap last_trap{};
 
 struct [[gnu::packed]] DescriptorPointer
 {
     u16 limit;
     uptr base;
-};
-struct [[gnu::packed]] TaskState
-{
-    u32 reserved0{};
-    u64 rsp[3]{};
-    u64 reserved1{};
-    u64 ist[7]{};
-    u64 reserved2{};
-    u16 reserved3{};
-    u16 io_bitmap_offset{sizeof(TaskState)};
 };
 struct [[gnu::packed]] InterruptGate
 {
@@ -75,25 +83,37 @@ struct SavedTrap
     uptr sp;
     uptr ss;
 };
-static_assert(sizeof(TaskState) == 104);
 static_assert(sizeof(InterruptGate) == 16);
 static_assert(offsetof(SavedTrap, cs) == 144);
 static_assert(offsetof(UserFrame, pc) == 256);
 static_assert(offsetof(UserFrame, sp) == 264);
 static_assert(offsetof(UserFrame, flags) == 272);
+static_assert(offsetof(UserFrame, fs_base) == 280);
+static_assert(offsetof(UserFrame, gs_base) == 288);
 static_assert(offsetof(UserFrame, fp_state) == 304);
 static_assert(alignof(UserFrame) >= 16);
+static_assert(offsetof(CpuLocal, self) == 0);
+static_assert(offsetof(CpuLocal, logical) == x86::cpu_logical_offset);
+static_assert(offsetof(CpuLocal, resume_rsp) == 16);
+static_assert(offsetof(CpuLocal, user_rsp) == 24);
+static_assert(offsetof(CpuLocal, stack_top) == 32);
+static_assert(offsetof(CpuLocal, active_frame) == 40);
+static_assert(offsetof(CpuLocal, kernel_fs) == 48);
+static_assert(offsetof(CpuLocal, kernel_fp) == 64);
 
-alignas(16) u64 gdt[7]{};
-TaskState tss{};
+// One IDT for every CPU; each CPU has its own GDT, TSS and stacks.
 alignas(16) InterruptGate idt[256]{};
 alignas(16) u8 interrupt_stack[64 * 1024]{};
-alignas(16) u8 emergency_stack[8 * 1024]{};
+alignas(16) u8 secondary_interrupt_stacks[smp::max_cpus - 1][16 * 1024]{};
+alignas(16) u8 emergency_stacks[smp::max_cpus][8 * 1024]{};
 
 extern "C" void ok_x86_execution_enter(UserFrame *);
 extern "C" void ok_x86_syscall_entry();
+extern "C" void ok_x86_trap_239();
+extern "C" void ok_x86_trap_240();
 extern "C" void ok_x86_trap_255();
-extern "C" const uptr ok_x86_execution_vectors[48];
+extern "C" void ok_x86_trap_unexpected();
+extern "C" const uptr ok_x86_execution_vectors[ioapic::vector_base + ioapic::max_lines];
 extern "C" void ok_platform_console_write_char(char);
 
 void outb(u16 port, u8 value)
@@ -130,6 +150,12 @@ void write_cr3(uptr value)
 {
     asm volatile("mov %0, %%cr3" : : "r"(value) : "memory");
 }
+bool pcid_supported()
+{
+    u32 a = 1, b, c, d;
+    asm volatile("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
+    return (c & (1u << 17)) != 0;
+}
 void console(std::string_view text)
 {
     for (char value : text)
@@ -160,22 +186,68 @@ u64 pit_tick_late()
     const u16 count = static_cast<u16>(low | (u16{inb(0x40)} << 8));
     return count != 0 && count <= pit_divisor ? pit_divisor - count : 0;
 }
-// Vector 32 is the PIT tick; 33..47 are platform lines whose top half the
-// interrupt service runs once it has started. Before that, only acknowledge.
-// The kernel takes interrupts only in the idle wait.
+[[nodiscard]] bool platform_vector(uptr vector)
+{
+    return vector >= ioapic::vector_base && vector < ioapic::vector_base + ioapic::max_lines;
+}
+// Vectors 32..63 are platform lines (ioapic.hpp): the PIT tick, which reaches
+// the boot CPU only, and lines whose top half the interrupt service runs once
+// it has started; before that they are only acknowledged. The 8259 pair
+// completes at its own ports, the I/O APIC at this CPU's local APIC. The
+// kernel takes interrupts only in its explicit waits (halt_until_interrupt,
+// wait_local, serve_local_interrupts).
 void complete_irq(uptr vector, interrupt::TimerWake wake)
 {
-    if (vector < 32 || vector >= 48)
+    if (!platform_vector(vector))
         return;
-    if (vector == 32)
+    const bool apic = ioapic::active();
+    if (vector == ioapic::tick_vector())
     {
         interrupt::record_timer_latency(wake, pit_tick_late(), pit_frequency);
         ok_interrupt_tick();
     }
-    if (vector == 32 || !interrupt::platform_irqs_started())
-        acknowledge_irq(vector);
+    else if (interrupt::platform_irqs_started())
+    {
+        ok_interrupt_top_half(static_cast<interrupt::IrqLine>(vector - ioapic::vector_base));
+        return;
+    }
+    if (apic)
+        lapic::end_of_interrupt();
     else
-        ok_interrupt_top_half(static_cast<interrupt::IrqLine>(vector - 32));
+        acknowledge_irq(vector);
+}
+// The local APIC timer and IPIs, on whatever translation trapped. False for
+// any other vector.
+bool complete_local(uptr vector)
+{
+    if (vector == lapic::timer_vector)
+    {
+        lapic::end_of_interrupt();
+        smp::local_tick();
+    }
+    else if (vector == lapic::ipi_vector)
+    {
+        lapic::end_of_interrupt();
+        static_cast<void>(smp::receive_ipi());
+    }
+    else if (vector != lapic::spurious_vector)
+        return false;
+    return true;
+}
+void fill_descriptors(CpuLocal &cpu, uptr rsp0, uptr ist)
+{
+    cpu.gdt[0] = 0;
+    cpu.gdt[1] = 0x00af9a000000ffffULL;
+    cpu.gdt[2] = 0x00cf92000000ffffULL;
+    cpu.gdt[3] = 0x00cff2000000ffffULL;
+    cpu.gdt[4] = 0x00affa000000ffffULL;
+    const auto tss_address = reinterpret_cast<uptr>(&cpu.tss);
+    cpu.gdt[5] = (sizeof(cpu.tss) - 1) | ((tss_address & 0xffffff) << 16) | (u64{0x89} << 40) |
+                 (((tss_address >> 24) & 0xff) << 56);
+    cpu.gdt[6] = tss_address >> 32;
+    cpu.tss.rsp[0] = rsp0;
+    cpu.tss.ist[0] = ist;
+    cpu.stack_top = rsp0;
 }
 void install_gate(usize vector, uptr entry, u8 ist = 0)
 {
@@ -261,26 +333,66 @@ Status release_tables(Space &value)
 
 } // namespace
 
-extern "C"
+namespace x86
 {
-    uptr ok_x86_execution_resume_rsp = 0;
-    uptr ok_x86_execution_user_rsp = 0;
-    uptr ok_x86_execution_stack_top = 0;
-    UserFrame *ok_x86_execution_active_frame = nullptr;
-    alignas(16) u8 ok_x86_execution_kernel_fp[512]{};
-    u64 ok_x86_execution_kernel_fs = 0;
-    u64 ok_x86_execution_kernel_gs = 0;
+constinit CpuLocal ok_x86_cpu_locals[smp::max_cpus]{};
+
+void prepare_cpu(smp::CpuId id, u32 apic_id)
+{
+    auto &cpu = ok_x86_cpu_locals[id];
+    cpu = {};
+    cpu.self = &cpu;
+    cpu.logical = id;
+    cpu.apic_id = apic_id;
+    fill_descriptors(cpu, reinterpret_cast<uptr>(secondary_interrupt_stacks[id - 1] + sizeof(secondary_interrupt_stacks[0])),
+                     reinterpret_cast<uptr>(emergency_stacks[id] + sizeof(emergency_stacks[0])));
 }
+
+void load_cpu(smp::CpuId id)
+{
+    auto &cpu = ok_x86_cpu_locals[id];
+    write_msr(0xc0000101, reinterpret_cast<uptr>(&cpu)); // GS_BASE
+    write_msr(0xc0000102, 0);                            // KERNEL_GS_BASE
+    const DescriptorPointer gdtr{sizeof(cpu.gdt) - 1, reinterpret_cast<uptr>(cpu.gdt)};
+    asm volatile("lgdt %0; mov $0x28, %%ax; ltr %%ax" : : "m"(gdtr) : "rax", "memory");
+    const DescriptorPointer idtr{sizeof(idt) - 1, reinterpret_cast<uptr>(idt)};
+    asm volatile("lidt %0" : : "m"(idtr) : "memory");
+    write_msr(0xc0000080, read_msr(0xc0000080) | 0x801); // EFER.SCE and NXE.
+    write_msr(0xc0000081, (u64{0x10} << 48) | (u64{0x08} << 32));
+    write_msr(0xc0000082, reinterpret_cast<uptr>(ok_x86_syscall_entry));
+    write_msr(0xc0000084, 0x44700); // IF, TF, DF, NT and AC clear on SYSCALL.
+    uptr cr0;
+    asm volatile("mov %%cr0, %0" : "=r"(cr0));
+    cr0 |= uptr{1} << 16; // Supervisor writes also respect read-only PTEs.
+    asm volatile("mov %0, %%cr0; clts" : : "r"(cr0) : "memory");
+    // PCIDs where the CPU has them. Setting PCIDE needs long mode and CR3[11:0]
+    // clear, which the boot PML4 load guarantees on every CPU.
+    uptr cr4;
+    asm volatile("mov %%cr4, %0" : "=r"(cr4));
+    const bool pcid = pcid_supported();
+    if (pcid && (cr4 & cr4_pcide) == 0)
+        asm volatile("mov %0, %%cr4" : : "r"(cr4 | cr4_pcide) : "memory");
+    cpu.tlb_tags.configure(pcid ? 12 : 0);
+}
+} // namespace x86
 
 bool supported() noexcept
 {
     return true;
 }
 
+TlbTagReport tlb_tag_report(u32 online_mask) noexcept
+{
+    return summarize_tlb_tags(online_mask, smp::max_cpus, true,
+                              [](u32 cpu) -> const auto & { return x86::ok_x86_cpu_locals[cpu].tlb_tags; });
+}
+
 OwnershipReport ownership_report() noexcept
 {
     OwnershipReport report{};
-    report.executing = executing || ok_x86_execution_active_frame != nullptr || ok_x86_execution_resume_rsp != 0 || ok_x86_execution_user_rsp != 0;
+    for (const auto &cpu : x86::ok_x86_cpu_locals)
+        report.executing = report.executing || cpu.executing || cpu.active_frame != nullptr || cpu.resume_rsp != 0 ||
+                           cpu.user_rsp != 0;
     spaces.each([&](const Space &value, uptr root) {
         ++report.address_spaces;
         report.table_pages += 3 + value.tables;
@@ -309,36 +421,19 @@ Status initialize()
     for (usize i = 0; i < 512; ++i)
         kernel_pdpt[i] = boot_pdpt->entries[i];
 
-    gdt[0] = 0;
-    gdt[1] = 0x00af9a000000ffffULL;
-    gdt[2] = 0x00cf92000000ffffULL;
-    gdt[3] = 0x00cff2000000ffffULL;
-    gdt[4] = 0x00affa000000ffffULL;
-    const auto tss_address = reinterpret_cast<uptr>(&tss);
-    gdt[5] =
-        (sizeof(tss) - 1) | ((tss_address & 0xffffff) << 16) | (u64{0x89} << 40) | (((tss_address >> 24) & 0xff) << 56);
-    gdt[6] = tss_address >> 32;
-    tss.rsp[0] = reinterpret_cast<uptr>(interrupt_stack + sizeof(interrupt_stack));
-    tss.ist[0] = reinterpret_cast<uptr>(emergency_stack + sizeof(emergency_stack));
-    ok_x86_execution_stack_top = tss.rsp[0];
-    const DescriptorPointer gdtr{sizeof(gdt) - 1, reinterpret_cast<uptr>(gdt)};
-    asm volatile("lgdt %0; mov $0x28, %%ax; ltr %%ax" : : "m"(gdtr) : "rax", "memory");
-
     for (usize i = 0; i < 256; ++i)
-        install_gate(i, reinterpret_cast<uptr>(ok_x86_trap_255));
-    for (usize i = 0; i < 48; ++i)
+        install_gate(i, reinterpret_cast<uptr>(ok_x86_trap_unexpected));
+    for (usize i = 0; i < ioapic::vector_base + ioapic::max_lines; ++i)
         install_gate(i, ok_x86_execution_vectors[i], i == 8 ? 1 : 0);
-    const DescriptorPointer idtr{sizeof(idt) - 1, reinterpret_cast<uptr>(idt)};
-    asm volatile("lidt %0" : : "m"(idtr) : "memory");
+    install_gate(lapic::timer_vector, reinterpret_cast<uptr>(ok_x86_trap_239));
+    install_gate(lapic::ipi_vector, reinterpret_cast<uptr>(ok_x86_trap_240));
+    install_gate(lapic::spurious_vector, reinterpret_cast<uptr>(ok_x86_trap_255));
 
-    write_msr(0xc0000080, read_msr(0xc0000080) | 0x801); // EFER.SCE and NXE.
-    write_msr(0xc0000081, (u64{0x10} << 48) | (u64{0x08} << 32));
-    write_msr(0xc0000082, reinterpret_cast<uptr>(ok_x86_syscall_entry));
-    write_msr(0xc0000084, 0x44700); // IF, TF, DF, NT and AC clear on SYSCALL.
-    uptr cr0;
-    asm volatile("mov %%cr0, %0" : "=r"(cr0));
-    cr0 |= uptr{1} << 16; // Supervisor writes also respect read-only PTEs.
-    asm volatile("mov %0, %%cr0; clts" : : "r"(cr0) : "memory");
+    auto &boot = x86::ok_x86_cpu_locals[0];
+    boot.self = &boot;
+    fill_descriptors(boot, reinterpret_cast<uptr>(interrupt_stack + sizeof(interrupt_stack)),
+                     reinterpret_cast<uptr>(emergency_stacks[0] + sizeof(emergency_stacks[0])));
+    x86::load_cpu(0);
 
     const auto master_mask = inb(0x21);
     const auto slave_mask = inb(0xa1);
@@ -377,12 +472,18 @@ Result<AddressSpace> create_space(MappingView mappings)
     for (const auto &mapping : mappings)
         if (!admissible(mapping))
             return Status::invalid_argument("invalid native user-page mapping or writable executable page");
-    auto entry = spaces.acquire();
+    auto entry = [&]() -> Result<decltype(spaces)::Entry *> {
+        const SpacesGuard guard(spaces_lock);
+        auto acquired = spaces.acquire();
+        if (acquired) acquired.value()->space.tlb = space_ids.issue();
+        return acquired;
+    }();
     if (!entry)
         return entry.status();
     auto &value = entry.value()->space;
     auto fail = [&](Status status) {
         static_cast<void>(release_tables(value));
+        const SpacesGuard guard(spaces_lock);
         static_cast<void>(spaces.release(value));
         return status;
     };
@@ -421,7 +522,7 @@ Status remap(const AddressSpace &space, const PageMapping &mapping)
     auto *value = storage(space);
     if (value == nullptr)
         return Status::not_found("native address-space handle is stale");
-    if (executing)
+    if (this_cpu().executing)
         return Status::busy("cannot remap an address space during native execution");
     if (!admissible(mapping) || mapping.flags == 0)
         return Status::invalid_argument("invalid native user-page remap");
@@ -431,8 +532,14 @@ Status remap(const AddressSpace &space, const PageMapping &mapping)
     auto &entry = reinterpret_cast<Table *>(directory_entry & address_mask)->entries[(mapping.virtual_address >> 12) & 511];
     if ((entry & present) == 0)
         return Status::not_found("native user page has no translation");
-    // The next entry reloads CR3, which drops these non-global translations.
+    // Every CPU running this space leaves it first. A CPU that cached the old
+    // translation drops it at its next entry: an untagged CR3 load flushes
+    // it, and a PCID whose generation moved is loaded without the keep bit.
+    static_cast<void>(smp::require_exclusive("address-space quiesce"));
+    smp::quiesce_root(space.root);
     entry = leaf_entry(mapping);
+    const SpacesGuard guard(spaces_lock);
+    value->tlb.changed();
     return Status::success();
 }
 
@@ -441,10 +548,16 @@ Status destroy_space(AddressSpace &space)
     auto *value = storage(space);
     if (value == nullptr)
         return Status::not_found("native address-space handle is stale");
-    if (executing)
+    if (this_cpu().executing)
         return Status::busy("cannot destroy an address space during native execution");
+    static_cast<void>(smp::require_exclusive("address-space quiesce"));
+    smp::quiesce_root(space.root);
     const auto released = release_tables(*value);
-    const auto retired = spaces.release(*value);
+    Status retired;
+    {
+        const SpacesGuard guard(spaces_lock);
+        retired = spaces.release(*value);
+    }
     space = {};
     return !released ? released : retired;
 }
@@ -526,14 +639,32 @@ Status copy_to_user(const AddressSpace &space, uptr destination, const void *sou
     }
     return Status::success();
 }
+Result<u32 *> user_word(const AddressSpace &space, uptr address, bool write)
+{
+    if (address % sizeof(u32))
+        return Status::invalid_argument("user word is misaligned");
+    if (!user_range(space, address, sizeof(u32), write))
+        return Status::fault("user word is not mapped with the requested access");
+    return reinterpret_cast<u32 *>((lookup(space, address) & address_mask) + (address & (page_size - 1)));
+}
 
 static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack_top)
 {
-    if (!initialized || storage(space) == nullptr)
+    if (!initialized)
         return Status::not_initialized("native address space is unavailable");
-    if (executing)
-        return Status::busy("native backend currently supports one executing CPU");
-    const auto code = lookup(space, frame.pc);
+    auto &cpu = this_cpu();
+    if (cpu.executing)
+        return Status::busy("this CPU is already executing native code");
+    u64 code;
+    detail::TlbSpaceTag tlb;
+    {
+        const SpacesGuard guard(spaces_lock);
+        const auto *value = storage(space);
+        if (value == nullptr)
+            return Status::not_initialized("native address space is unavailable");
+        code = lookup(space, frame.pc);
+        tlb = value->tlb;
+    }
     // Like Linux, the stack need not be mapped; only an access to it faults (a
     // detached musl thread unmaps its own stack before its exit syscall).
     if (!permits(code, false) || (code & no_execute) != 0 || frame.sp <= user_begin || frame.sp > user_end)
@@ -544,39 +675,51 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     frame.flags = (frame.flags & 0x250fd5u) | 0x202u;
     uptr saved_mask;
     asm volatile("pushfq; pop %0; cli" : "=r"(saved_mask) : : "memory");
-    const auto old_stack_top = tss.rsp[0];
-    if (stack_top) tss.rsp[0] = stack_top;
-    ok_x86_execution_stack_top = tss.rsp[0];
+    const auto old_stack_top = cpu.tss.rsp[0];
+    if (stack_top) cpu.tss.rsp[0] = stack_top;
+    cpu.stack_top = cpu.tss.rsp[0];
     const auto old_root = read_cr3();
-    const auto old_master = inb(0x21);
-    const auto old_slave = inb(0xa1);
-    ok_x86_execution_kernel_fs = read_msr(0xc0000100);
-    ok_x86_execution_kernel_gs = read_msr(0xc0000101);
-    executing = true;
-    const bool routed = interrupt::platform_irqs_started();
+    // Before the interrupt service starts, the 8259 delivers the tick alone, to
+    // the boot CPU; secondaries take only local interrupts then.
+    const bool boot = cpu.logical == 0;
+    const auto old_master = boot ? inb(0x21) : u8{};
+    const auto old_slave = boot ? inb(0xa1) : u8{};
+    cpu.kernel_fs = read_msr(0xc0000100);
+    cpu.executing = true;
+    const bool routed = !boot || interrupt::platform_irqs_started();
     if (!routed)
     {
         outb(0x21, 0xfe);
         outb(0xa1, 0xff);
     }
     write_msr(0xc0000100, frame.fs_base);
-    write_msr(0xc0000101, frame.gs_base);
-    write_cr3(space.root);
+    write_msr(0xc0000102, frame.gs_base); // GS_BASE after the swapgs to user mode.
+    // Untagged, each CR3 load flushes every non-global translation. With
+    // PCIDs, the space's PCID keeps its entries unless this CPU must drop
+    // them, and the kernel's PCID 0 keeps its own across the entry.
+    const bool tagged = cpu.tlb_tags.tagged();
+    if (tagged)
+    {
+        const auto selection = cpu.tlb_tags.select(tlb);
+        write_cr3(space.root | selection.tag | (selection.invalidate ? 0 : cr3_keep));
+    }
+    else
+        write_cr3(space.root);
     ok_x86_execution_enter(&frame);
-    write_cr3(old_root);
+    write_cr3(tagged ? old_root | cr3_keep : old_root);
     if (!routed)
     {
         outb(0x21, old_master);
         outb(0xa1, old_slave);
     }
-    executing = false;
-    ok_x86_execution_active_frame = nullptr;
-    tss.rsp[0] = old_stack_top;
-    ok_x86_execution_resume_rsp = 0;
-    ok_x86_execution_user_rsp = 0;
-    ok_x86_execution_stack_top = old_stack_top;
+    cpu.executing = false;
+    cpu.active_frame = nullptr;
+    cpu.tss.rsp[0] = old_stack_top;
+    cpu.resume_rsp = 0;
+    cpu.user_rsp = 0;
+    cpu.stack_top = old_stack_top;
     asm volatile("push %0; popfq" : : "r"(saved_mask) : "memory", "cc");
-    return last_trap;
+    return cpu.last_trap;
 }
 
 Result<Trap> enter(AddressSpace &space, UserFrame &frame)
@@ -597,7 +740,8 @@ Result<Trap> enter_owned(AddressSpace &space, UserFrame &frame, const KernelEntr
 
 extern "C" void ok_x86_execution_trap(const SavedTrap *saved)
 {
-    auto &frame = *ok_x86_execution_active_frame;
+    auto &cpu = this_cpu();
+    auto &frame = *cpu.active_frame;
     for (usize i = 0; i < 15; ++i)
         frame.registers[i] = saved->registers[i];
     frame.pc = saved->pc;
@@ -606,20 +750,33 @@ extern "C" void ok_x86_execution_trap(const SavedTrap *saved)
     uptr fault_address = 0;
     if (saved->vector == 14)
         asm volatile("mov %%cr2, %0" : "=r"(fault_address));
-    last_trap = {saved->vector == 256  ? TrapKind::syscall
-                 : saved->vector == 32 ? TrapKind::timer
-                 : saved->vector == 14 ? TrapKind::page_fault
-                 : saved->vector > 32 && saved->vector < 48 ? TrapKind::interrupt
-                                       : TrapKind::exception,
-                 static_cast<u32>(saved->vector), saved->error, fault_address, reinterpret_cast<uptr>(saved)};
-    complete_irq(saved->vector, interrupt::TimerWake::user);
+    const auto vector = saved->vector;
+    cpu.last_trap = {vector == 256                                                   ? TrapKind::syscall
+                     : vector == ioapic::tick_vector() || vector == lapic::timer_vector ? TrapKind::timer
+                     : vector == 14                                                    ? TrapKind::page_fault
+                     : platform_vector(vector) || vector == lapic::ipi_vector || vector == lapic::spurious_vector
+                         ? TrapKind::interrupt
+                         : TrapKind::exception,
+                     static_cast<u32>(vector), saved->error, fault_address, reinterpret_cast<uptr>(saved)};
+    // A device line routed to this CPU runs its top half here, on any CPU.
+    if (!complete_local(vector))
+        complete_irq(vector, interrupt::TimerWake::user);
 }
 
+// Interrupts the kernel takes in its explicit waits, on any CPU: the tick,
+// device lines routed here, the local timer and IPIs. A secondary CPU's local
+// timer ends its interrupt wait, as an IPI does (receive_ipi()).
 extern "C" void ok_x86_execution_kernel_trap(const SavedTrap *saved)
 {
-    if (saved->vector >= 32 && saved->vector < 48)
+    if (platform_vector(saved->vector))
     {
         complete_irq(saved->vector, interrupt::TimerWake::idle);
+        return;
+    }
+    if (complete_local(saved->vector))
+    {
+        if (saved->vector == lapic::timer_vector)
+            ok_interrupt_wake();
         return;
     }
     console("OK_NATIVE_KERNEL_FAULT vector=");

@@ -3,8 +3,10 @@
 #include "ok/core/concepts.hpp"
 #include "ok/core/types.hpp"
 #include "ok/interrupt/interrupt.hpp"
+#include "ok/smp/lock.hpp"
 
 #include <array>
+#include <atomic>
 #include <concepts>
 
 namespace ok::interrupt
@@ -20,8 +22,9 @@ enum class IrqTrigger : u8
 };
 
 // Static-dispatch contract for an interrupt controller backend. Each profile
-// supplies one implementation (the 8259A pair, GICv2, the PLIC, EIOINTC with
-// PCH-PIC, Malta's 8259 pair, the MPIC), selected as PlatformIrqChip in
+// supplies one implementation (the 8259A pair, x86_64's I/O APIC with the 8259
+// pair as fallback, GICv2, the PLIC, EIOINTC with PCH-PIC, Malta's 8259 pair,
+// the MPIC), selected as PlatformIrqChip in
 // src/interrupt/platform_irq.cpp; generic code is instantiated over it. No
 // virtual call sits on the interrupt path.
 template <typename Chip>
@@ -36,8 +39,17 @@ concept IrqChip = requires(Chip chip, const Chip cchip, IrqLine line, IrqTrigger
     { cchip.name() } -> std::convertible_to<std::string_view>;
 };
 
+// A controller that can deliver a line to one chosen CPU (GICv2 ITARGETSR,
+// the PLIC's per-hart contexts, I/O APIC destinations). The router calls
+// route() with its lock held.
+template <typename Chip>
+concept RoutableIrqChip = IrqChip<Chip> && requires(Chip chip, IrqLine line, smp::CpuId cpu) {
+    { chip.route(line, cpu) } -> std::same_as<Status>;
+};
+
 // Hosted model chip: records state so the router can be tested without
-// hardware. It is explicitly not an interrupt controller.
+// hardware. It is explicitly not an interrupt controller. Model threads may
+// stand in for CPUs, so its records are atomic.
 class ModelIrqChip final
 {
   public:
@@ -67,14 +79,21 @@ class ModelIrqChip final
     {
         if (!initialized_ || line >= line_count())
             return Status{StatusCode::invalid_argument, "irq line out of range"};
-        ++acknowledged_[line];
+        acknowledged_[line].fetch_add(1, std::memory_order_relaxed);
         return Status::success();
     }
     Status end_of_interrupt(IrqLine line)
     {
         if (!initialized_ || line >= line_count())
             return Status{StatusCode::invalid_argument, "irq line out of range"};
-        ++completed_[line];
+        completed_[line].fetch_add(1, std::memory_order_relaxed);
+        return Status::success();
+    }
+    Status route(IrqLine line, smp::CpuId cpu)
+    {
+        if (!initialized_ || line >= line_count() || cpu >= smp::max_cpus)
+            return Status{StatusCode::invalid_argument, "irq line or CPU out of range"};
+        routes_[line].store(cpu, std::memory_order_relaxed);
         return Status::success();
     }
     [[nodiscard]] usize line_count() const
@@ -87,15 +106,19 @@ class ModelIrqChip final
     }
     [[nodiscard]] bool masked(IrqLine line) const
     {
-        return line < line_count() && masked_[line];
+        return line < line_count() && masked_[line].load(std::memory_order_relaxed);
     }
     [[nodiscard]] usize acknowledged(IrqLine line) const
     {
-        return line < line_count() ? acknowledged_[line] : 0;
+        return line < line_count() ? acknowledged_[line].load(std::memory_order_relaxed) : 0;
     }
     [[nodiscard]] usize completed(IrqLine line) const
     {
-        return line < line_count() ? completed_[line] : 0;
+        return line < line_count() ? completed_[line].load(std::memory_order_relaxed) : 0;
+    }
+    [[nodiscard]] smp::CpuId routed(IrqLine line) const
+    {
+        return line < line_count() ? routes_[line].load(std::memory_order_relaxed) : smp::CpuId{0};
     }
 
   private:
@@ -105,27 +128,43 @@ class ModelIrqChip final
             return Status{StatusCode::not_initialized, "irq chip not initialised"};
         if (line >= line_count())
             return Status{StatusCode::invalid_argument, "irq line out of range"};
-        masked_[line] = value;
+        masked_[line].store(value, std::memory_order_relaxed);
         return Status::success();
     }
     bool initialized_{false};
-    std::array<bool, 32> masked_{};
+    std::array<std::atomic<bool>, 32> masked_{};
     std::array<IrqTrigger, 32> triggers_{};
-    std::array<usize, 32> acknowledged_{};
-    std::array<usize, 32> completed_{};
+    std::array<std::atomic<usize>, 32> acknowledged_{};
+    std::array<std::atomic<usize>, 32> completed_{};
+    std::array<std::atomic<smp::CpuId>, 32> routes_{};
 };
-static_assert(IrqChip<ModelIrqChip>);
+static_assert(RoutableIrqChip<ModelIrqChip>);
 
 // Bottom-half handler for one line: services the device (reads its interrupt
 // status, consumes completions) with interrupts disabled, outside trap context.
 using IrqHandler = void (*)(void *context, IrqLine line);
 
 // Splits an interrupt into a bounded top half and a deferred bottom half. The
-// top half runs in the trap path: it acknowledges the line, masks it so a
-// level-triggered device cannot re-enter before it is serviced, records it
-// pending and completes it at the controller. drain() runs from the kernel
-// loop and calls each pending line's handler once, then unmasks the line. No
-// device code and no allocation runs in trap context.
+// top half runs in the trap path of the CPU that took the line: it
+// acknowledges the line, masks it so a level-triggered device cannot re-enter
+// before it is serviced, records it pending and completes it at that CPU's
+// controller interface. drain() runs on any CPU and calls each pending line's
+// handlers once, then unmasks the line. No device code and no allocation runs
+// in trap context.
+//
+// SMP: line records, handler lists, statistics and every chip
+// read-modify-write sequence sit under one irq_router lock, taken with
+// interrupts masked and never held while a handler runs. A drain claims a
+// line's pending flag by atomic exchange, so one CPU at a time runs that
+// line's handlers, and the line stays masked from its top half until they
+// returned. Handlers of different lines, and unbind() against a running
+// handler, are serialized by the caller (the kernel lock).
+//
+// A chip that drops edges arriving while a line is masked (the x86 I/O APIC;
+// loses_masked_edges()) keeps its edge-triggered lines unmasked instead: an
+// edge during the bottom half runs another top half, which marks the line
+// pending again, and its handlers run once more. Two drains of such a line on
+// different CPUs are then serialized by the caller (the kernel lock) as well.
 template <IrqChip Chip> class IrqRouter final : private NonCopyable
 {
   public:
@@ -136,10 +175,13 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
     {
     }
 
-    Status bind(IrqLine line, IrqTrigger trigger, IrqHandler handler, void *context)
+    // The first handler configures the line, routes it to `target` on a
+    // routable chip (to CPU 0 when `target` cannot take it) and unmasks it.
+    Status bind(IrqLine line, IrqTrigger trigger, IrqHandler handler, void *context, smp::CpuId target = 0)
     {
         if (line >= chip_.line_count() || line >= max_irq_lines || handler == nullptr)
             return Status{StatusCode::invalid_argument, "irq line out of range or without handler"};
+        Guard guard(lock_);
         auto &entry = lines_[line];
         for (usize i = 0; i < entry.count; ++i)
             if (entry.handlers[i].handler == handler && entry.handlers[i].context == context)
@@ -153,12 +195,21 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
             if (auto configured = chip_.configure(line, trigger); !configured.ok())
                 return configured;
             entry.trigger = trigger;
+            entry.target.store(0, std::memory_order_relaxed);
+            entry.pinned = false;
+            if constexpr (RoutableIrqChip<Chip>)
+            {
+                if (target != 0 && chip_.route(line, target).ok())
+                    entry.target.store(target, std::memory_order_relaxed);
+                else if (auto routed = chip_.route(line, 0); !routed.ok())
+                    return routed;
+            }
         }
         entry.handlers[entry.count++] = {handler, context};
         if (entry.count == 1)
             if (auto unmasked = chip_.unmask(line); !unmasked.ok())
             {
-                entry = {};
+                reset(entry);
                 return unmasked;
             }
         return Status::success();
@@ -168,6 +219,7 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
     {
         if (line >= max_irq_lines)
             return Status{StatusCode::not_found, "irq line not bound"};
+        Guard guard(lock_);
         auto &entry = lines_[line];
         for (usize i = 0; i < entry.count; ++i)
         {
@@ -178,84 +230,184 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
             entry.handlers[--entry.count] = {};
             if (entry.count != 0)
                 return Status::success();
-            if (entry.pending)
-                --pending_count_;
-            entry = {};
+            reset(entry);
             return chip_.mask(line);
         }
         return Status{StatusCode::not_found, "irq handler not bound to this line"};
+    }
+    // Delivers a bound line to `target` from now on and pins it there: follow()
+    // no longer moves it. An interrupt the old CPU already claimed still runs
+    // its top half there; pending state is kept.
+    Status retarget(IrqLine line, smp::CpuId target)
+    {
+        if (line >= max_irq_lines)
+            return Status{StatusCode::not_found, "irq line not bound"};
+        Guard guard(lock_);
+        auto &entry = lines_[line];
+        if (entry.count == 0)
+            return Status{StatusCode::not_found, "irq line not bound"};
+        if (entry.target.load(std::memory_order_relaxed) == target)
+        {
+            entry.pinned = true;
+            return Status::success();
+        }
+        if constexpr (RoutableIrqChip<Chip>)
+        {
+            if (auto routed = chip_.route(line, target); !routed.ok())
+                return routed;
+            entry.target.store(target, std::memory_order_relaxed);
+            entry.pinned = true;
+            return Status::success();
+        }
+        else
+            return Status{StatusCode::unsupported, "irq controller delivers to CPU 0 only"};
+    }
+    // Moves a line bind() placed (not pinned by retarget()) to `target`, the
+    // CPU waiting to drain it, as retarget() would. True when it moved.
+    bool follow(IrqLine line, smp::CpuId target)
+    {
+        if constexpr (RoutableIrqChip<Chip>)
+        {
+            if (line >= max_irq_lines)
+                return false;
+            Guard guard(lock_);
+            auto &entry = lines_[line];
+            if (entry.count == 0 || entry.pinned || entry.target.load(std::memory_order_relaxed) == target ||
+                !chip_.route(line, target).ok())
+                return false;
+            entry.target.store(target, std::memory_order_relaxed);
+            return true;
+        }
+        else
+        {
+            static_cast<void>(line);
+            static_cast<void>(target);
+            return false;
+        }
+    }
+    // Moves every bound line delivered to `cpu` to pick(line), deciding and
+    // routing under the lock so that a concurrent unbind and rebind is never
+    // moved by mistake. A line pick() leaves on `cpu`, or the chip refuses,
+    // stays. Returns the lines moved.
+    template <typename Pick> usize retarget_away(smp::CpuId cpu, Pick pick)
+    {
+        usize moved = 0;
+        if constexpr (RoutableIrqChip<Chip>)
+        {
+            Guard guard(lock_);
+            for (usize line = 0; line < max_irq_lines; ++line)
+            {
+                auto &entry = lines_[line];
+                if (entry.count == 0 || entry.target.load(std::memory_order_relaxed) != cpu)
+                    continue;
+                const smp::CpuId next = pick(static_cast<IrqLine>(line));
+                if (next != cpu && chip_.route(static_cast<IrqLine>(line), next).ok())
+                {
+                    entry.target.store(next, std::memory_order_relaxed);
+                    ++moved;
+                }
+            }
+        }
+        return moved;
     }
     [[nodiscard]] bool bound(IrqLine line) const
     {
         return line < max_irq_lines && lines_[line].count != 0;
     }
-    // Top half: called with interrupts disabled for the line the trap names.
-    void top_half(IrqLine line)
+    // The CPU a bound line is delivered to.
+    [[nodiscard]] smp::CpuId target(IrqLine line) const
     {
-        if (line >= max_irq_lines || lines_[line].count == 0)
+        return line < max_irq_lines ? lines_[line].target.load(std::memory_order_relaxed) : smp::CpuId{0};
+    }
+    // Top half: called with interrupts disabled, on the CPU that took `line`.
+    // True when the line was bound and is now pending.
+    bool top_half(IrqLine line)
+    {
+        bool claimed = false;
         {
-            // Unclaimed: keep it from re-asserting and complete it.
-            ++spurious_;
-            if (line < chip_.line_count())
+            Guard guard(lock_);
+            if (line >= max_irq_lines || lines_[line].count == 0)
             {
+                // Unclaimed: keep it from re-asserting and complete it.
+                bump(spurious_);
+                if (line >= chip_.line_count())
+                    return false;
                 static_cast<void>(chip_.mask(line));
-                static_cast<void>(chip_.end_of_interrupt(line));
             }
-            return;
+            else
+            {
+                if (!chip_.acknowledge(line).ok() || (masks_in_top_half(lines_[line]) && !chip_.mask(line).ok()))
+                    bump(controller_errors_);
+                bump(delivered_[line]);
+                lines_[line].pending.store(true, std::memory_order_release);
+                any_pending_.store(true, std::memory_order_seq_cst);
+                claimed = true;
+            }
         }
-        if (!chip_.acknowledge(line).ok() || !chip_.mask(line).ok())
-            ++controller_errors_;
-        if (!lines_[line].pending)
+        // The completion goes to this CPU's own controller interface.
+        if (!chip_.end_of_interrupt(line).ok() && claimed)
         {
-            lines_[line].pending = true;
-            ++pending_count_;
+            Guard guard(lock_);
+            bump(controller_errors_);
         }
-        ++delivered_[line];
-        if (!chip_.end_of_interrupt(line).ok())
-            ++controller_errors_;
+        return claimed;
     }
     // Bottom half: runs every pending line's handlers once and re-enables it.
     usize drain()
     {
+        if (!any_pending_.exchange(false, std::memory_order_acq_rel))
+            return 0;
         usize serviced = 0;
-        for (IrqLine line = 0; pending_count_ != 0 && line < max_irq_lines; ++line)
+        for (IrqLine line = 0; line < max_irq_lines; ++line)
         {
             auto &entry = lines_[line];
-            if (!entry.pending)
+            if (!entry.pending.load(std::memory_order_relaxed) ||
+                !entry.pending.exchange(false, std::memory_order_acq_rel))
                 continue;
-            entry.pending = false;
-            --pending_count_;
-            for (usize i = 0; i < entry.count; ++i)
-                entry.handlers[i].handler(entry.handlers[i].context, line);
-            ++serviced_[line];
+            // This CPU owns the masked line until it unmasks it. The handlers
+            // run from a snapshot, without the lock.
+            std::array<Handler, max_line_handlers> handlers{};
+            usize count = 0;
+            {
+                Guard guard(lock_);
+                handlers = entry.handlers;
+                count = entry.count;
+            }
+            for (usize i = 0; i < count; ++i)
+                handlers[i].handler(handlers[i].context, line);
+            Guard guard(lock_);
+            bump(serviced_[line]);
             ++serviced;
             if (entry.count != 0 && !chip_.unmask(line).ok())
-                ++controller_errors_;
+                bump(controller_errors_);
         }
         return serviced;
     }
+    // Some line may be pending (sequentially consistent with the top half's
+    // store, so a waiter that published itself first cannot miss it).
     [[nodiscard]] bool pending() const
     {
-        return pending_count_ != 0;
+        return any_pending_.load(std::memory_order_seq_cst);
     }
     [[nodiscard]] usize delivered(IrqLine line) const
     {
-        return line < max_irq_lines ? delivered_[line] : 0;
+        return line < max_irq_lines ? delivered_[line].load(std::memory_order_relaxed) : 0;
     }
     [[nodiscard]] usize serviced(IrqLine line) const
     {
-        return line < max_irq_lines ? serviced_[line] : 0;
+        return line < max_irq_lines ? serviced_[line].load(std::memory_order_relaxed) : 0;
     }
     [[nodiscard]] usize spurious() const
     {
-        return spurious_;
+        return spurious_.load(std::memory_order_relaxed);
     }
     [[nodiscard]] usize controller_errors() const
     {
-        return controller_errors_;
+        return controller_errors_.load(std::memory_order_relaxed);
     }
 
   private:
+    using Guard = smp::RankedSpinGuard<smp::LockRank::irq_router>;
     struct Handler
     {
         IrqHandler handler{nullptr};
@@ -266,15 +418,43 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
         std::array<Handler, max_line_handlers> handlers{};
         usize count{0};
         IrqTrigger trigger{IrqTrigger::edge};
-        bool pending{false};
+        // Written under the lock; target() reads it without.
+        std::atomic<smp::CpuId> target{0};
+        // Placed by retarget(), which follow() leaves alone.
+        bool pinned{false};
+        std::atomic<bool> pending{false};
     };
+    // Counters change only under the lock and are read without it. A load
+    // and a store avoid read-modify-write atomics, which not every profile
+    // has.
+    static void bump(std::atomic<usize> &counter)
+    {
+        counter.store(counter.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    }
+    [[nodiscard]] bool masks_in_top_half(const Line &entry) const
+    {
+        if constexpr (requires { { chip_.loses_masked_edges() } -> std::convertible_to<bool>; })
+            return entry.trigger == IrqTrigger::level || !chip_.loses_masked_edges();
+        else
+            return true;
+    }
+    static void reset(Line &entry)
+    {
+        entry.handlers = {};
+        entry.count = 0;
+        entry.trigger = IrqTrigger::edge;
+        entry.target.store(0, std::memory_order_relaxed);
+        entry.pinned = false;
+        entry.pending.store(false, std::memory_order_relaxed);
+    }
     Chip &chip_;
+    smp::RankedSpinLock<smp::LockRank::irq_router> lock_{};
     std::array<Line, max_irq_lines> lines_{};
-    std::array<usize, max_irq_lines> delivered_{};
-    std::array<usize, max_irq_lines> serviced_{};
-    usize pending_count_{0};
-    usize spurious_{0};
-    usize controller_errors_{0};
+    std::array<std::atomic<usize>, max_irq_lines> delivered_{};
+    std::array<std::atomic<usize>, max_irq_lines> serviced_{};
+    std::atomic<bool> any_pending_{false};
+    std::atomic<usize> spurious_{0};
+    std::atomic<usize> controller_errors_{0};
 };
 
 } // namespace ok::interrupt

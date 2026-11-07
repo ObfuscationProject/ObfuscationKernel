@@ -151,7 +151,7 @@ def main():
         def freeze(path,name):
             dest=snap/name;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(path.read_bytes());hashes[name]=digest(dest);return dest
         freeze(Path(__file__),'run_native.py');freeze(stage/'scripts/test_native_firmware_handoff.py','test_native_firmware_handoff.py');freeze(stage/'scripts/native_firmware_profiles.json','build-profiles.json')
-        for name in ['include/ok/arch/types.hpp','include/ok/core/types.hpp','include/ok/core/fixed.hpp','include/ok/boot/e820.hpp','include/ok/boot/fdt.hpp','include/ok/boot/raw_handoff.hpp','src/boot/raw_handoff.cpp','src/boot/fdt.cpp',f'src/arch/{arch}/boot.S',f'src/arch/{arch}/linker.ld']:
+        for name in ['include/ok/arch/types.hpp','include/ok/core/types.hpp','include/ok/core/fixed.hpp','include/ok/boot/e820.hpp','include/ok/boot/fdt.hpp','include/ok/boot/cpu_topology.hpp','include/ok/smp/smp.hpp','include/ok/boot/raw_handoff.hpp','src/boot/raw_handoff.cpp','src/boot/fdt.cpp',f'src/arch/{arch}/boot.S',f'src/arch/{arch}/linker.ld']:
             freeze(root/name,name)
         freeze(stage/'include/ok/boot/firmware_handoff.hpp','include/ok/boot/firmware_handoff.hpp');freeze(stage/'tests/native/runtime_frame_probe.cpp','probe.cpp');freeze(stage/'include/ok/boot/qualified_memory.hpp','include/ok/boot/qualified_memory.hpp');freeze(stage/'include/ok/boot/qemu_entry_memory.hpp','include/ok/boot/qemu_entry_memory.hpp')
         for header in (root/'include').rglob('*.hpp'):
@@ -162,7 +162,9 @@ def main():
                 if dependency.is_file():freeze(dependency,str(dependency.relative_to(root)))
         freeze(stage/'include/ok/boot/qemu_runtime_frames.hpp','include/ok/boot/qemu_runtime_frames.hpp')
         freeze(stage/'tests/native/runtime_frame_user.S','user.S')
-        for relative in ['src/memory/memory.cpp',f'src/arch/{arch}/execution.cpp',f'src/arch/{arch}/execution.S','src/interrupt/platform_irq.cpp','src/interrupt/pic8259.hpp','src/arch/arm_common/gicv2.hpp','src/arch/riscv_common/plic.hpp','src/arch/loongarch64/eiointc.hpp','src/arch/ppc/mpic.hpp']:
+        # Backends whose entry path reads the per-CPU block through cpu_index().
+        per_cpu_ops=[('ops',f'src/arch/{arch}/ops.cpp')] if arch in ('rv64',) else []
+        for relative in ['src/memory/memory.cpp',f'src/arch/{arch}/execution.cpp',f'src/arch/{arch}/execution.S','src/interrupt/platform_irq.cpp','src/interrupt/pic8259.hpp','src/arch/arm_common/gicv2.hpp','src/arch/riscv_common/plic.hpp','src/arch/riscv_common/clint.hpp','src/arch/loongarch64/eiointc.hpp','src/arch/ppc/mpic.hpp',*(['src/arch/ops_private.hpp'] if per_cpu_ops else []),*(path for _,path in per_cpu_ops)]:
             freeze(root/relative,relative)
         prefix=root/'toolchains'/cfg['triple']/'bin'/cfg['triple'];tools={n:Path(str(prefix)+'-'+n) for n in ['gcc','g++','ld','objcopy']}
         if subprocess.check_output([str(tools['gcc']),'-dumpmachine'],text=True).strip()!=cfg['triple'] or subprocess.check_output([str(tools['gcc']),'-dumpfullversion'],text=True).strip()!=cfg['compiler']['version']:raise ValueError('compiler identity mismatch')
@@ -174,7 +176,7 @@ def main():
         with (out/'build.log').open('w') as log:
             run([tools['gcc'],*cfg['asflags'],'-c',snap/f'src/arch/{arch}/boot.S','-o',out/'boot.o'],log)
             objects=[out/'boot.o']
-            for name,path in [('probe','probe.cpp'),('capture','src/boot/raw_handoff.cpp'),('fdt','src/boot/fdt.cpp'),('memory','src/memory/memory.cpp'),('execution',f'src/arch/{arch}/execution.cpp'),('irq','src/interrupt/platform_irq.cpp')]:
+            for name,path in [('probe','probe.cpp'),('capture','src/boot/raw_handoff.cpp'),('fdt','src/boot/fdt.cpp'),('memory','src/memory/memory.cpp'),('execution',f'src/arch/{arch}/execution.cpp'),('irq','src/interrupt/platform_irq.cpp'),*per_cpu_ops]:
                 obj=out/(name+'.o');run([tools['g++'],'-std=c++23',*cfg['cxxflags'],'-fno-builtin','-Werror','-fstack-usage','-ffunction-sections','-fdata-sections','-I'+str(snap/'include'),*['-D'+d for d in defines],'-c',snap/path,'-o',obj],log);objects.append(obj)
             for name,path in [('native-entry',f'src/arch/{arch}/execution.S'),('user','user.S')]:
                 obj=out/(name+'.o');run([tools['gcc'],*cfg['asflags'],*['-D'+d for d in defines],'-c',snap/path,'-o',obj],log);objects.append(obj)

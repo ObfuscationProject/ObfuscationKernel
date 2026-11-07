@@ -196,5 +196,12 @@ void set_return_value(UserFrame &frame, i64 value);
 [[nodiscard]] bool user_range(const AddressSpace &space, uptr address, usize size, bool write = false);
 Status copy_from_user(const AddressSpace &space, void *destination, uptr source, usize size);
 Status copy_to_user(const AddressSpace &space, uptr destination, const void *source, usize size);
+// The kernel pointer to the aligned 32-bit user word at `address` in its
+// backing frame, for single atomic accesses (futex words). Validates like
+// copy_from_user, or for `write` like copy_to_user, which first resolves
+// copy-on-write: invalid_argument if misaligned, fault if not accessible. The
+// pointer is valid only while the mapping cannot change; today the caller
+// holds the kernel lock, which every remap, unmap and space teardown takes.
+[[nodiscard]] Result<u32 *> user_word(const AddressSpace &space, uptr address, bool write);
 
 } // namespace ok::arch::execution

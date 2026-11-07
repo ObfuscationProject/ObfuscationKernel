@@ -11,6 +11,7 @@
 #include "ok/fs/vfs.hpp"
 #include "ok/time/realtime_clock.hpp"
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <span>
 #include <bit>
@@ -177,6 +178,8 @@ class Ext4Node final : public Node
     Status write(usize offset, std::span<const std::byte> data) override;
     Status truncate(usize size) override;
     Status sync() override;
+    // Every provider call takes the filesystem's operation gate.
+    [[nodiscard]] bool concurrent_io() const override { return true; }
     Status retain() override;
     Status release() override;
     Status expose_borrowed_identity() override;
@@ -236,6 +239,12 @@ class Ext4Node final : public Node
 // are rejected before any write. Ordinary file mutations require inline extents
 // (at most four runs); symlinks use inline bytes or one block. Filesystem blocks
 // are 1/2/4 KiB with 32-bit block numbers.
+//
+// Operation gate: one operation at a time per filesystem, across CPUs. It is
+// held across all device I/O and drains detached nodes before it opens. The
+// owning CPU re-entering it (a provider callback) gets busy; another CPU
+// waits, marked SPINNING, outside the identity lock. The hold is recorded at
+// lock rank fs_provider, so it nests inside ofd_position and the kernel lock.
 class Ext4FileSystem final
 {
   public:
@@ -248,6 +257,8 @@ class Ext4FileSystem final
   private:
     friend class Ext4Node;
     Status begin_operation(const Ext4Node *node, bool mounting = false);
+    // Identity lock held and the gate free: this CPU owns it.
+    void claim_operation_locked();
     Status finish_operation();
     Status drain_detached();
     void detach(Ext4Node &node);
@@ -371,6 +382,9 @@ class Ext4FileSystem final
     std::array<Ext4Node, 128> nodes_{};
     mutable smp::SpinLock identity_lock_{};
     bool operation_active_{false};
+    // The gate's owner, CPU + 1 (0 = free): written under identity_lock_,
+    // read without it by a CPU waiting for the gate.
+    std::atomic<u32> operation_owner_{0};
 };
 
 // Pure candidate qualification for the existing plain, nonjournalled subset.

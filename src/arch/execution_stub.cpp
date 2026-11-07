@@ -60,4 +60,8 @@ Status copy_to_user(const AddressSpace &, uptr, const void *, usize)
 {
     return initialize();
 }
+Result<u32 *> user_word(const AddressSpace &, uptr, bool)
+{
+    return initialize();
+}
 } // namespace ok::arch::execution

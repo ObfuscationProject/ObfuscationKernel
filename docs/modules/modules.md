@@ -12,7 +12,7 @@ Each module exposes a `ModuleManifest` with:
 - dependency, exported-service, and required-service lists;
 - `ModuleExecution`, either `inline_core` or `kernel_process`;
 - `ModuleThreading`, either `single_threaded` or `per_cpu`;
-- `abi_version`, currently `kernel_module_abi_version == 79`;
+- `abi_version`, currently `kernel_module_abi_version == 80`;
 - a capability mask declaring service export/use, kernel-process ownership,
   per-CPU workers, user ABI, driver ABI, or GUI behavior;
 - `ModuleRestartPolicy`;
@@ -107,6 +107,38 @@ Roadmap tests cover:
 - the built-in module graph used by the kernel debug suite.
 
 ## ABI history
+
+ABI80 (`feat/smp-bringup`, WT2.1 follow-up) changes exported declarations:
+`smp::LockRank` gains `ofd_position`, `fs_provider`, `arch_spaces`,
+`realtime_clock` and `monotonic_clock`. `ok/smp/lock.hpp` gains the per-CPU
+mode words, `SpinningScope`, `spin_service`, the gate hold helpers
+(`lock_debug_may_wait`, `lock_debug_hold`, `lock_debug_release`) and
+`lock_debug_depth`; the ranked spin lock's `lock` reports whether it waited and
+`try_lock` is order-checked. `ok/smp/kernel_lock.hpp` gains `bkl_lock`,
+`bkl_try_lock`, `bkl_unlock`, `BklGuard`, `bkl_mark_work` and per-CPU
+accounting, and the new `ok/smp/kernel_section.hpp` exports section records,
+statistics, drains, `require_exclusive`/`require_drained` and
+`serve_while_polling`. `ok/smp/bringup.hpp` gains `started_mask`/
+`started_cpus`, `stop_secondary_cpu`, `restart_secondary_cpu`,
+`HotplugStatistics` and the weak `ok_smp_cpu_leaving` hook; `CpuState` gains
+`stopping` and `CpuTopology` gains `mark_offline`; `ok/arch/smp.hpp` gains
+`clock_sync_name`, `stop_local`, `park_self` and `parked`. `SchedulerState`
+gains `offline_cpu`/`online_cpu` and the description position locks.
+`ok/interrupt/irq_chip.hpp` and `platform.hpp` route lines to any online CPU
+(`RoutableIrqChip`, `follow`, `retarget_platform_irq`,
+`retarget_platform_irqs_away`, `lock_kernel_serving_interrupts`,
+`serve_local_interrupts`, per-CPU statistics), and `ok/boot/acpi.hpp` gains
+`MadtInterrupts`. `arch::execution` gains `user_word` and `SpaceTable` takes
+fixed slots; `set_realtime_now` and `commit_realtime_setting` are new.
+`fs::Node` gains `concurrent_io`, `PosixService` gains
+`bind_section_caller`/`unbind_section_caller`, `ok/syscall/syscall.hpp` gains
+`dispatch_callers`, and the new `ok/user/linux_file_io.hpp` holds the Linux
+regular-file I/O and clock helpers that `linux_bootstrap.hpp` and the kernel
+sections share. `ok/user/robust_futex.hpp` replaces `SerializedRobustAccess`
+with `RobustAccess` (indivisible `load32` and `compare_exchange32`), and the
+futex wake-operation and requeue SDK profiles move to their v2 strings with
+`smp_atomic = 1`. The public UAPI is unchanged. Every exported module marker, the SDK manifest and the OS consumer
+declare 80 and refuse 79 and 81.
 
 ABI79 (`feat/net-core`, WT2.3) changes exported declarations: the new
 `ok/net/ip.hpp`, `icmp.hpp`, `neighbour.hpp`, `route.hpp`, `interface.hpp`,

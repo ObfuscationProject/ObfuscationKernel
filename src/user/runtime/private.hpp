@@ -13,6 +13,9 @@
 #include "ok/user/native_group_signal_profile.hpp"
 #include "ok/user/native_console_control_profile.hpp"
 #include "ok/core/native_shutdown.hpp"
+#include "ok/smp/bringup.hpp"
+#include "ok/smp/cpu.hpp"
+#include "ok/smp/kernel_section.hpp"
 #include "ok/user/native_sleep.hpp"
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
 #define OK_PRIVATE_POLL_MASK 1
@@ -147,11 +150,136 @@ struct QuarantinedSpace
 // A process holds at most one live space and transactions build one
 // replacement at a time: one slot per process plus one candidate.
 extern std::array<QuarantinedSpace, sched::max_processes + 1> quarantined_spaces;
-extern bool started;
+// The runtime's failure and started state: written only by the kernel lock's
+// holder (a kernel section reads them at admission, under the lock). The
+// wrappers keep the Status and bool interfaces; every write, and every
+// Status reference handed out, is a require_exclusive site.
+class RuntimeFailure final
+{
+  public:
+    constexpr RuntimeFailure() = default;
+    RuntimeFailure(const RuntimeFailure &) = default;
+    RuntimeFailure &operator=(const RuntimeFailure &other)
+    {
+        checked() = other.value_;
+        return *this;
+    }
+    template <typename T>
+        requires std::convertible_to<const T &, Status>
+    RuntimeFailure &operator=(const T &value)
+    {
+        checked() = value;
+        return *this;
+    }
+    operator Status &()
+    {
+        return checked();
+    }
+    operator const Status &() const
+    {
+        return value_;
+    }
+    // `return runtime_failure;` from a Result-returning function.
+    template <typename T> operator Result<T>() const
+    {
+        return Result<T>{value_};
+    }
+    [[nodiscard]] bool ok() const
+    {
+        return value_.ok();
+    }
+    [[nodiscard]] StatusCode code() const
+    {
+        return value_.code();
+    }
+    [[nodiscard]] std::string_view message() const
+    {
+        return value_.message();
+    }
+    [[nodiscard]] explicit operator bool() const
+    {
+        return value_.ok();
+    }
+
+  private:
+    Status &checked()
+    {
+        static_cast<void>(smp::require_exclusive("runtime_failure"));
+        return value_;
+    }
+    Status value_{};
+};
+class RuntimeFlag final
+{
+  public:
+    constexpr RuntimeFlag() = default;
+    RuntimeFlag(const RuntimeFlag &) = default;
+    RuntimeFlag &operator=(const RuntimeFlag &other)
+    {
+        return *this = other.value_;
+    }
+    RuntimeFlag &operator=(bool value)
+    {
+        static_cast<void>(smp::require_exclusive("runtime started"));
+        value_ = value;
+        return *this;
+    }
+    constexpr operator bool() const
+    {
+        return value_;
+    }
+
+  private:
+    bool value_{};
+};
+extern RuntimeFlag started;
+// Kernel sections (src/user/runtime/section.hpp) are compiled in: x86_64,
+// aarch64 and rv64 with option smp_sections.
+#if defined(OK_SMP_SECTIONS)
+inline constexpr bool smp_sections = true;
+#else
+inline constexpr bool smp_sections = false;
+#endif
+// Holding only the kernel lock: commits and waits for `pid`'s kernel
+// sections when any is pinned (src/user/runtime/section.cpp). The check
+// comes first, so a caller holding fine locks with nothing pinned passes.
+void drain_if_pinned(sched::ProcessId pid);
 extern Kernel *runtime_kernel;
-extern Status runtime_failure;
+extern RuntimeFailure runtime_failure;
 extern ShutdownOwner original_shutdown_owner;
-extern bool runtime_step_active, shutdown_admission_closed, shutdown_retirement_started, shutdown_retirement_completed;
+extern bool shutdown_admission_closed, shutdown_retirement_started, shutdown_retirement_completed;
+// Per CPU: inside step(), and whether its last step found nothing to run.
+extern std::array<bool, smp::max_cpus> runtime_step_active, runtime_idle;
+bool any_step_active();
+// A CPU leaving (hotplug): its round-robin cursor starts fresh on return.
+void forget_cpu_cursor(smp::CpuId cpu);
+// The calling CPU's service stack: the linked boot stack on CPU 0, the stack
+// bring-up allocated on a secondary.
+Status require_cpu_service_stack();
+extern std::atomic<bool> secondary_admission;
+// The backend entry for the shared capture: leaves the kernel lock while this
+// CPU runs user code (src/user/runtime/smp.cpp).
+Result<hw::Trap> enter_unlocked(hw::AddressSpace &space, hw::UserFrame &frame, const hw::KernelEntryStackView &view,
+                                memory::KernelEntryStackHandle lease, u64 pid, u64 tid);
+// Takes over the entry of every other CPU that is running a thread, so its
+// lease and address space can be retired. Planning can refuse and changes
+// nothing; a plan's commit fails only on an invariant breach (a damaged
+// lease), and it still revokes every planned entry.
+struct EvictionPlan
+{
+    sched::ProcessId pid{};
+    uptr root{};
+    u32 cpus{};
+};
+// Plans every thread of `threads` (all of process `pid`) that another CPU runs.
+Status prepare_eviction(sched::ProcessId pid, uptr root, std::span<const sched::ThreadControlBlock> threads,
+                        EvictionPlan &plan);
+// Whether every leased thread of `threads` is inactive once `plan` commits:
+// planned ones run on the lease their TCB names, the others are inactive.
+Status validate_evicted_leases(std::span<const sched::ThreadControlBlock> threads, const EvictionPlan &plan);
+Status commit_eviction(Kernel &kernel, const EvictionPlan &plan);
+// Plans and commits the eviction of one thread.
+Status evict_thread(Kernel &kernel, const sched::ThreadControlBlock &thread);
 #ifdef OK_PRIVATE_MIPS_O32_SIGNAL
 // The backend owns capability/capture tokens; this table owns per-lease state.
 using PrivateMipsReadiness = MipsO32SignalReadiness;
@@ -456,6 +584,8 @@ Status retire_linux_udp_receives(Kernel &kernel, sched::ProcessId pid,
 [[maybe_unused]] memory::ObjectHandle futex_object(sched::ProcessId pid, sched::ThreadId tid);
 Status cancel_futex(Kernel &kernel, memory::ObjectHandle object, std::string_view reason = "cancelled", i64 result = -4);
 Status cancel_futex(Kernel &kernel, sched::ProcessId pid);
+// Exec's check, before it evicts siblings, that cancel_futex(pid) will succeed.
+Status prepare_cancel_futex(sched::ProcessId pid);
 
 [[maybe_unused]] memory::ObjectHandle poll_object(sched::ProcessId pid, sched::ThreadId tid);
 u64 poll_syscall_number(const hw::UserFrame &frame, bool select_sets);
@@ -557,6 +687,8 @@ memory::ObjectHandle native_udp_receive_object(sched::ProcessId pid, sched::Thre
 void retire_native_udp_receives(Kernel &kernel, sched::ProcessId pid,
                                std::optional<sched::ThreadId> tid = {});
 Status retire_native_udp_receives_for_exec(Kernel &kernel, sched::ProcessId pid);
+// Exec's check, before it evicts siblings, that the retirement above will succeed.
+Status prepare_native_udp_receives_for_exec(sched::ProcessId pid);
 i64 resume_native_udp_receive(Kernel &kernel, sched::ProcessControlBlock &process,
                              memory::ObjectHandle object, bool &complete);
 Status scan_native_udp_receives(Kernel &kernel);
@@ -568,6 +700,9 @@ UdpWaitCounters udp_wait_statistics();
 // The kernel's TCP wait counters, bound when the runtime starts.
 extern const net::TcpWaitStats *tcp_wait_stats;
 void report_network_waits();
+// Installs the lock-violation recorder and arms require_exclusive; once,
+// just before secondary CPUs are admitted (src/user/runtime/interrupts.cpp).
+void arm_kernel_checks();
 RobustWalkReport retire_robust(Kernel &kernel, sched::ProcessControlBlock &process,
                               sched::ThreadLocalState &tls, sched::ThreadId owner);
 void clear_child_tid(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadLocalState &tls, bool peers);
@@ -1065,6 +1200,7 @@ SyscallOrigins::LinuxUdpReceiveBinding linux_udp_receive_binding(memory::ObjectH
 [[maybe_unused]] Status retire_linux_udp_receives(Kernel &kernel, sched::ProcessId pid,
     std::optional<sched::ThreadId> tid, LinuxUdpReceiveRetirement cause);
 [[maybe_unused]] Status retire_linux_udp_receives_for_exec(Kernel &kernel, sched::ProcessId pid);
+[[maybe_unused]] Status prepare_linux_udp_receives_for_exec(sched::ProcessId pid);
 
 Status linux_udp_receive_start_status();
 

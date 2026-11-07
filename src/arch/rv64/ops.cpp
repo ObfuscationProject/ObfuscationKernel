@@ -46,4 +46,38 @@ void NativeInstructions<Architecture::rv64>::halt() noexcept
 #endif
 }
 
+// The kernel runs in machine mode (QEMU -bios none): the mask is mstatus.MIE.
+uptr NativeInstructions<Architecture::rv64>::save_and_disable_interrupts() noexcept
+{
+#if defined(OK_KERNEL_FREESTANDING) && defined(__riscv)
+    uptr status = 0;
+    asm volatile("csrrci %0, mstatus, 8" : "=r"(status) : : "memory");
+    return status & 8;
+#else
+    return 0;
+#endif
+}
+
+void NativeInstructions<Architecture::rv64>::restore_interrupts(uptr saved) noexcept
+{
+#if defined(OK_KERNEL_FREESTANDING) && defined(__riscv)
+    asm volatile("csrs mstatus, %0" : : "r"(saved & 8) : "memory");
+#else
+    static_cast<void>(saved);
+#endif
+}
+
+// The logical id heads the per-CPU block tp points at (src/arch/rv64/
+// execution.cpp); boot.S leaves tp 0 in images without the native backend.
+u32 NativeInstructions<Architecture::rv64>::cpu_index() noexcept
+{
+#if defined(OK_KERNEL_FREESTANDING) && defined(__riscv)
+    const uptr *block;
+    asm("mv %0, tp" : "=r"(block));
+    return block != nullptr ? static_cast<u32>(*block) : 0;
+#else
+    return 0;
+#endif
+}
+
 } // namespace ok::arch::detail

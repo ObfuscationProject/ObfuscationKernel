@@ -1,5 +1,6 @@
 #include "ok/arch/realtime.hpp"
 #include "ok/arch/clock.hpp"
+#include "ok/smp/lock.hpp"
 #include "ok/time/rtc.hpp"
 
 namespace ok::arch
@@ -7,7 +8,12 @@ namespace ok::arch
 namespace
 {
 
+// The anchors change from any CPU (clock_settime, a continuity failure), so
+// every access holds realtime_lock. A reading takes its monotonic sample
+// inside the lock, so samples reach the anchors in increasing order.
 time::RealtimeClock clock{};
+constinit smp::RankedSpinLock<smp::LockRank::realtime_clock> realtime_lock{};
+using RealtimeGuard = smp::RankedSpinLock<smp::LockRank::realtime_clock>::Guard;
 
 #if defined(OK_ARCH_TARGET_AARCH64) || defined(OK_ARCH_TARGET_ARM32) || \
     defined(OK_ARCH_TARGET_RV32) || defined(OK_ARCH_TARGET_RV64) || defined(OK_ARCH_TARGET_LOONGARCH64)
@@ -61,6 +67,7 @@ Result<time::EpochReading> read_epoch_source()
 
 Status initialize_realtime()
 {
+    const RealtimeGuard guard(realtime_lock);
     if (clock.boot_info().state != time::AnchorState::uninitialized)
         return clock.boot_status();
     auto before = monotonic_sample();
@@ -77,6 +84,7 @@ Status initialize_realtime()
 
 Result<time::RealtimeSample> realtime_sample()
 {
+    const RealtimeGuard guard(realtime_lock);
     if (clock.info().state != time::AnchorState::ready)
         return clock.status();
     auto current = monotonic_sample();
@@ -95,6 +103,7 @@ Result<time::EpochTime> realtime()
 
 time::AnchorInfo realtime_info()
 {
+    const RealtimeGuard guard(realtime_lock);
     if (clock.boot_info().state == time::AnchorState::ready)
         if (auto status = clock_status(); !status)
         {
@@ -106,17 +115,37 @@ time::AnchorInfo realtime_info()
 
 time::RealtimeInfo realtime_clock_info()
 {
+    const RealtimeGuard guard(realtime_lock);
     if (clock.info().state == time::AnchorState::ready)
         if (auto status = clock_status(); !status)
             static_cast<void>(clock.invalidate(status));
     return clock.info();
 }
 
-Status set_realtime(time::EpochTime value, time::MonotonicPoint point)
+namespace
+{
+// Holding realtime_lock.
+Status commit_locked(time::EpochTime value, time::MonotonicPoint point)
 {
     if (!clock_status())
         return Status::io_error("realtime setting requires a continuous platform clock");
     return clock.set(value, point, clock_resolution_ns());
+}
+} // namespace
+
+Status set_realtime(time::EpochTime value, time::MonotonicPoint point)
+{
+    const RealtimeGuard guard(realtime_lock);
+    return commit_locked(value, point);
+}
+
+Status set_realtime_now(time::EpochTime value)
+{
+    // The sample is taken inside the lock: a reading on another CPU (a kernel
+    // section's clock_gettime, an ext4 timestamp) cannot advance the anchor
+    // past it before the commit.
+    const RealtimeGuard guard(realtime_lock);
+    return time::commit_realtime_setting(value, [] { return monotonic_sample(); }, commit_locked);
 }
 
 } // namespace ok::arch

@@ -40,6 +40,24 @@ option("kernel_gui")
     set_description("Enable the normal-mode kernel GUI desktop")
 option_end()
 
+option("smp_sections")
+    set_default(true)
+    set_showmenu(true)
+    set_description("Run converted syscalls as kernel sections without the big kernel lock (x86_64, aarch64, rv64)")
+option_end()
+
+option("x86_tsc_skew_test")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Debug x86_64 only: CPU 1 rewinds its TSC before bring-up's TSC handshake must correct it")
+option_end()
+
+option("smp_hotplug_test")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Debug x86_64/aarch64/rv64 only: once userland runs, CPU 0 stops and restarts the highest secondary CPU periodically")
+option_end()
+
 option("systoolchain_dir")
     set_showmenu(true)
     set_description("Use an existing SysToolchain installation instead of resolving the package")
@@ -48,6 +66,12 @@ option_end()
 option("qemu_binary")
     set_showmenu(true)
     set_description("Explicit QEMU system executable for the configured architecture")
+option_end()
+
+option("qemu_smp")
+    set_default("1")
+    set_showmenu(true)
+    set_description("QEMU vCPU count for the debug boot test; above 1 requires the hardware OK_SMP marker")
 option_end()
 
 if not get_config("systoolchain_dir") then
@@ -93,9 +117,39 @@ local function add_ok_native_fork_policy()
     end
 end
 
+rule("ok-x86-tsc-skew-test")
+    on_load(function (target)
+        assert(target:values("ok.arch") == "x86_64" and is_mode("debug"),
+            "x86_tsc_skew_test requires an x86_64 Debug build")
+    end)
+rule_end()
+
+local function add_ok_tsc_skew_test()
+    if get_config("x86_tsc_skew_test") then
+        add_rules("ok-x86-tsc-skew-test")
+        add_defines("OK_X86_TSC_SKEW_TEST")
+    end
+end
+
+rule("ok-smp-hotplug-test")
+    on_load(function (target)
+        local arch = target:values("ok.arch")
+        assert((arch == "x86_64" or arch == "aarch64" or arch == "rv64") and is_mode("debug"),
+            "smp_hotplug_test requires an x86_64, aarch64 or rv64 Debug build")
+    end)
+rule_end()
+
+local function add_ok_smp_hotplug_test()
+    if get_config("smp_hotplug_test") then
+        add_rules("ok-smp-hotplug-test")
+        add_defines("OK_SMP_HOTPLUG_TEST")
+    end
+end
+
 local configured_arch_spec = ok_arch_spec(ok_current_arch())
 local configured_toolchain_dir = get_config("systoolchain_dir")
 local configured_qemu_binary = get_config("qemu_binary")
+local configured_qemu_smp = get_config("qemu_smp")
 local configured_mode = get_config("mode") or "release"
 
 local function systoolchain_qemu(target, arch)
@@ -124,8 +178,30 @@ local function systoolchain_qemu(target, arch)
     return qemu
 end
 
+local function qemu_test_argv(target)
+    local argv = {
+        path.join(os.projectdir(), "scripts", "qemu_test.py"),
+        "--arch", target:values("ok.arch"),
+        "--kernel", path.join(target:targetdir(), "kernel.bin"),
+        "--qemu", systoolchain_qemu(target, target:values("ok.arch"))
+    }
+    local cpus = tonumber(configured_qemu_smp or "1")
+    if cpus == nil or cpus ~= math.floor(cpus) or cpus < 1 or cpus > 8 then
+        raise("qemu_smp must be a CPU count from 1 to 8, got %s", tostring(configured_qemu_smp))
+    end
+    if cpus > 1 then
+        table.insert(argv, "--smp")
+        table.insert(argv, tostring(math.floor(cpus)))
+    end
+    -- The skewed CPU must then be found and corrected, not reported in sync.
+    if get_config("x86_tsc_skew_test") then
+        table.insert(argv, "--tsc-skew-test")
+    end
+    return argv
+end
+
 function add_ok_kernel_sources(include_kernel_main)
-    add_files("src/boot/raw_handoff.cpp", "src/boot/fdt.cpp", "src/boot/boot_memory.cpp")
+    add_files("src/boot/raw_handoff.cpp", "src/boot/fdt.cpp", "src/boot/boot_memory.cpp", "src/boot/acpi_madt.cpp")
     add_files("src/core/*.cpp")
     -- Rescue applications are diagnostics: built with kernel_gui or debug test
     -- points; other builds link stand-ins that behave as never opened.
@@ -243,7 +319,11 @@ target("okernel")
     add_ok_terminal_reboot_policy()
     add_ok_terminal_poweroff_policy()
     add_ok_native_fork_policy()
+    add_ok_tsc_skew_test()
+    add_ok_smp_hotplug_test()
     add_ok_debug_test_points()
+    add_ok_debug_lock_checks()
+    add_ok_smp_sections()
     if get_config("private_futex_peer_fixture") and is_mode("debug") then
         add_defines("OK_PRIVATE_FUTEX_PEER_FIXTURE")
     end
@@ -318,7 +398,11 @@ target("okernel_image")
     add_ok_terminal_reboot_policy()
     add_ok_terminal_poweroff_policy()
     add_ok_native_fork_policy()
+    add_ok_tsc_skew_test()
+    add_ok_smp_hotplug_test()
     add_ok_debug_test_points()
+    add_ok_debug_lock_checks()
+    add_ok_smp_sections()
     if get_config("private_futex_peer_fixture") and is_mode("debug") then
         add_defines("OK_PRIVATE_FUTEX_PEER_FIXTURE")
     end
@@ -338,20 +422,10 @@ target("okernel_image")
     end
     after_build(build_kernel_image)
     on_run(function (target)
-        os.execv("python3", {
-            path.join(os.projectdir(), "scripts", "qemu_test.py"),
-            "--arch", target:values("ok.arch"),
-            "--kernel", path.join(target:targetdir(), "kernel.bin"),
-            "--qemu", systoolchain_qemu(target, target:values("ok.arch"))
-        })
+        os.execv("python3", qemu_test_argv(target))
     end)
     on_test(function (target)
-        local code = os.execv("python3", {
-            path.join(os.projectdir(), "scripts", "qemu_test.py"),
-            "--arch", target:values("ok.arch"),
-            "--kernel", path.join(target:targetdir(), "kernel.bin"),
-            "--qemu", systoolchain_qemu(target, target:values("ok.arch"))
-        }, {try = true})
+        local code = os.execv("python3", qemu_test_argv(target), {try = true})
         return code == 0
     end)
 target_end()

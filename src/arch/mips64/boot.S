@@ -5,6 +5,12 @@
 .global _start
 .type _start, @function
 _start:
+    # QEMU Malta sends every CPU from its bootloader to this entry. Only CPU 0
+    # (EBase.CPUNum) boots; the others wait here with interrupts masked.
+    mfc0 $8, $15, 1
+    andi $8, $8, 0x3ff
+    bnez $8, .Lsecondary_park
+    nop
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && defined(__mips64)
     # Integer-only admission precedes CU1 installation and compiled C++.
     mfc0 $8,$16,0
@@ -126,6 +132,11 @@ _start:
     nop
 3:
     b 3b
+    nop
+
+.Lsecondary_park:
+    wait
+    b .Lsecondary_park
     nop
 
 .section .bootstrap_bss, "aw", @nobits

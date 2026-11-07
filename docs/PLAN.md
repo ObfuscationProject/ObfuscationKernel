@@ -290,6 +290,48 @@ run queues in `BasicScheduler`; IPIs; TLB shootdown; lock ranks with debug
 checking; per-CPU storage. Other profiles report UP honestly. Exit: 2–4 vCPU
 concurrent filesystem/socket/fork stress on three profiles. Depends on WT1.1, WT1.2.
 
+Status on `feat/smp-bringup` (paired OS worktree `feat/smp-bringup`; results
+and limits in [SMP_BRINGUP](qualification/SMP_BRINGUP.md)):
+- x86_64 starts APs with INIT-SIPI-SIPI (ACPI MADT), aarch64 with PSCI CPU_ON
+  through the DT conduit (hvc or smc), rv64 by releasing parked harts through
+  the CLINT MSIP. The rv64 kernel runs in machine mode with `-bios none`, so no
+  SBI firmware exists: the plan's SBI HSM is an HSM-shaped start inside the
+  kernel (`ap_start=clint-msip`). A CPU counts online only after it ran kernel
+  code and reported its own hardware id; `OK_SMP scope=hardware` reports the
+  result. The seven other profiles report UP; rv32, mips and mips64 park the
+  extra CPUs their QEMU machines start.
+- IPIs (xAPIC, GICv2 SGI, CLINT MSIP), per-CPU local timers and per-CPU
+  execution state (GS_BASE with swapgs, TPIDR_EL1, tp); TLB shootdown waits for
+  every CPU whose user window uses the changed translation root.
+- Ranked spin locks with debug order checks (try_lock included); one big
+  kernel lock serializes kernel work while user code runs on every online
+  CPU; per-CPU run queues in `BasicScheduler` with placement and stealing;
+  per-CPU entry stack leases; a CPU retiring a thread running elsewhere takes
+  over its entry, and exec makes every refusable step before it evicts
+  siblings.
+- Exit gate met under QEMU 10.2.0 TCG: `scripts/test_smp_stress.py` (OS) passes
+  three runs each with 2 and 4 vCPUs on x86_64, aarch64 and rv64, with user code
+  on every CPU.
+- Follow-up limits lifted: Linux identity/clock calls and ext4 regular-file
+  I/O run as kernel sections without the big lock (description position
+  locks, a cross-CPU ext4 operation gate, debug contract checks and
+  `OK_SMP_KERNEL` overlap evidence in the OS gate); device lines route to any
+  online CPU (GICv2, PLIC, x86_64 I/O APIC); futex user words are updated
+  atomically (SDK `smp_atomic = 1`); x86 APs are admitted only after a
+  verified TSC handshake; user TLB entries carry per-CPU ASIDs/PCIDs; secondary
+  CPUs can be stopped and restarted (boot test point and the
+  `smp_hotplug_test` knob). Module ABI 80. The final tree (kernel bf3c63c,
+  OS 3ed4160) passes 28 of 28 kernel lanes and 51 of 51 OS gate runs (stress
+  with sections at 1/2/4 vCPUs, hotplug, futex, sections-off and release
+  arms); receipts in ObfuscationEvidence
+  `receipts/ObfuscationKernel@bf3c63c/feat/smp-bringup/`.
+Carried forward: other kernel work (blocking calls, VFS namespace, pipes and
+sockets, fork/exec/exit, signals, memory mapping, futex queues, networking,
+bottom halves) stays under the big lock; ext4 runs one operation at a time per
+filesystem; a device wait under the big lock holds it; x86 PCIDs and the
+`IA32_TSC_ADJUST` path are unexercised under TCG; hotplug has no user-facing
+interface; QEMU TCG evidence only.
+
 ### WT2.2 `feat/tty-jobctl` (L)
 
 termios, N_TTY line discipline, controlling terminal and foreground process

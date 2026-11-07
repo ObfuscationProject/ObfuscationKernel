@@ -53,6 +53,16 @@ Status CpuTopology::mark_halted(CpuId cpu)
     return Status::success();
 }
 
+Status CpuTopology::mark_offline(CpuId cpu)
+{
+    if (!valid(cpu) || cpu == 0)
+    {
+        return Status::invalid_argument("cpu id out of range or the boot cpu");
+    }
+    cpus_[cpu].state = CpuState::offline;
+    return Status::success();
+}
+
 Status CpuTopology::record_schedule(CpuId cpu)
 {
     if (!valid(cpu))

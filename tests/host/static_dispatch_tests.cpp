@@ -78,6 +78,24 @@ struct RecordingInstructions
     {
         calls |= 16;
     }
+    static uptr save_and_disable_interrupts() noexcept
+    {
+        calls |= 32;
+        return 0x200;
+    }
+    static void restore_interrupts(uptr saved) noexcept
+    {
+        calls |= saved == 0x200 ? 64 : 0;
+    }
+    static void spin_pause() noexcept
+    {
+        calls |= 128;
+    }
+    static u32 cpu_index() noexcept
+    {
+        calls |= 256;
+        return 3;
+    }
 };
 
 static_assert(arch::ArchitectureInstructions<RecordingInstructions>);
@@ -118,7 +136,10 @@ void test_architecture_dispatch()
     arm.enable_interrupts();
     arm.disable_interrupts();
     arm.halt();
-    check(RecordingInstructions::calls == 31);
+    arm.restore_interrupts(x86.save_and_disable_interrupts());
+    x86.spin_pause();
+    check(arm.cpu_index() == 3);
+    check(RecordingInstructions::calls == 511);
 
     auto &native = arch::configured_arch_operations();
     check(native.architecture() == arch::configured_architecture());

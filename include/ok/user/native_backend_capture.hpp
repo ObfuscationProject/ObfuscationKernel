@@ -33,6 +33,8 @@ class BackendCapture final : private NonCopyable
         [[nodiscard]] Space space() const { return space_; }
         [[nodiscard]] const Frame &frame() const { return frame_; }
         [[nodiscard]] const Trap &trap() const { return trap_; }
+        [[nodiscard]] u64 pid() const { return pid_; }
+        [[nodiscard]] u64 tid() const { return tid_; }
       private:
         friend class BackendCapture;
         Observation(BackendCapture &owner, Lease lease, u64 sequence, u64 epoch, u64 pid, u64 tid,
@@ -47,28 +49,49 @@ class BackendCapture final : private NonCopyable
         Trap trap_{};
     };
 
-    explicit constexpr BackendCapture(Pool &pool) : pool_(&pool) {}
-    Result<Observation> enter(sched::SchedulerState &scheduler, sched::ProcessControlBlock &process,
-                              sched::ThreadControlBlock &thread, const View &view)
+    // The backend entry. The native runtime installs one that leaves the
+    // kernel lock while user code runs on this CPU; the thread is named by its
+    // identity because its records may move while the lock is not held.
+    // Without one, the backend is entered directly.
+    using Entry = Result<Trap> (*)(Space &space, Frame &frame, const View &view, Lease lease, u64 pid, u64 tid);
+    explicit constexpr BackendCapture(Pool &pool, Entry entry = nullptr) : pool_(&pool), entry_(entry) {}
+    void set_entry(Entry entry) { entry_ = entry; }
+    // On success `process`/`thread` name the canonical records again, which
+    // may have moved. A no_process status means another CPU retired the
+    // thread while it ran: its lease and frame are no longer this caller's.
+    Result<Observation> enter(sched::SchedulerState &scheduler, sched::ProcessControlBlock *&process,
+                              sched::ThreadControlBlock *&thread, const View &view)
     {
-        if (!canonical(scheduler, process, thread) || thread.syscall_pending || !thread.native_active ||
-            thread.state != sched::ProcessState::running || thread.entry_stack.pool != pool_)
+        if (!process || !thread || !canonical(scheduler, *process, *thread) || thread->syscall_pending ||
+            !thread->native_active || thread->state != sched::ProcessState::running || thread->entry_stack.pool != pool_)
             return Status::denied("shared backend capture has no current canonical native owner");
-        const auto epoch = pool_->active_epoch(thread.entry_stack, {thread.owner, thread.tid}, view);
+        const u64 pid = thread->owner, tid = thread->tid;
+        const auto epoch = pool_->active_epoch(thread->entry_stack, {pid, tid}, view);
         if (!epoch) return epoch.status();
-        const Lease lease = thread.entry_stack;
+        const Lease lease = thread->entry_stack;
         auto &entry = entries_[lease.slot];
         if (entry.lease == lease && entry.epoch == epoch.value())
             return Status::already_exists("backend already invoked for this active lease epoch");
         if (sequence_ == ~u64{0}) return Status::overflow("shared backend capture sequence exhausted");
-        const Space space = process.resources().native_space;
+        Space space = process->resources().native_space;
         // Consume the epoch even on backend failure; replay requires a new entry.
         entry = {lease, epoch.value(), ++sequence_, 0};
-        auto trap = arch::execution::enter_owned(process.resources().native_space, thread.native_frame, view);
-        const auto after = pool_->active_epoch(lease, {thread.owner, thread.tid}, view);
-        if (!after || after.value() != epoch.value() || !canonical(scheduler, process, thread) ||
-            thread.entry_stack != lease || !same_space(space, process.resources().native_space))
+        Frame frame = thread->native_frame;
+        auto trap = entry_ ? entry_(space, frame, view, lease, pid, tid)
+                           : arch::execution::enter_owned(space, frame, view);
+        if (!trap && trap.status().code() == StatusCode::no_process) return trap.status();
+        process = scheduler.find(pid);
+        thread = process ? scheduler.find_thread(pid, tid) : nullptr;
+        if (!process || !thread) return Status::no_process("native thread retired during its user entry");
+        thread->native_frame = frame;
+        const auto after = pool_->active_epoch(lease, {pid, tid}, view);
+        if (!after || after.value() != epoch.value() || !canonical(scheduler, *process, *thread) ||
+            thread->entry_stack != lease)
             return Status::denied("shared backend capture changed canonical owner or lease");
+        // A sibling on another CPU may have replaced the address space while
+        // this thread ran (mmap, munmap, mprotect): the old tables were
+        // quiesced before they were freed, and the trap belongs to the live one.
+        space = process->resources().native_space;
         if (!trap) return trap.status();
         const auto stack = trap.value().kernel_stack_pointer;
         const bool required = trap.value().kind == arch::execution::TrapKind::syscall ||
@@ -76,8 +99,15 @@ class BackendCapture final : private NonCopyable
                               trap.value().kind == arch::execution::TrapKind::interrupt;
         if ((stack && !view.contains(stack)) || (required && !stack))
             return Status::denied("shared backend capture lacks its privileged stack");
-        return Observation(*this, lease, entry.sequence, entry.epoch, thread.owner, thread.tid,
-                           space, thread.native_frame, trap.value());
+        return Observation(*this, lease, entry.sequence, entry.epoch, pid, tid,
+                           space, thread->native_frame, trap.value());
+    }
+    Result<Observation> enter(sched::SchedulerState &scheduler, sched::ProcessControlBlock &process,
+                              sched::ThreadControlBlock &thread, const View &view)
+    {
+        auto *owner = &process;
+        auto *current = &thread;
+        return enter(scheduler, owner, current, view);
     }
 
     [[nodiscard]] static bool claim(const Observation &observation, Observer observer,
@@ -115,9 +145,10 @@ class BackendCapture final : private NonCopyable
             scheduler.find_thread(thread.owner, thread.tid) == &thread && scheduler.current_thread() == &thread &&
             scheduler.current_pid() == process.pid();
     }
-    struct Entry { Lease lease{}; u64 epoch{}, sequence{}; u8 claimed{}; };
+    struct Record { Lease lease{}; u64 epoch{}, sequence{}; u8 claimed{}; };
     Pool *pool_{};
-    std::array<Entry, Pool::capacity> entries_{};
+    Entry entry_{};
+    std::array<Record, Pool::capacity> entries_{};
     u64 sequence_{};
 };
 } // namespace ok::user::native

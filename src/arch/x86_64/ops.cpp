@@ -1,4 +1,5 @@
 #include "../ops_private.hpp"
+#include "cpu_local.hpp"
 
 namespace ok::arch::detail
 {
@@ -44,6 +45,40 @@ void NativeInstructions<Architecture::x86_64>::halt() noexcept
     asm volatile("hlt" ::: "memory");
 #elif defined(__x86_64__)
     asm volatile("pause" ::: "memory");
+#endif
+}
+
+uptr NativeInstructions<Architecture::x86_64>::save_and_disable_interrupts() noexcept
+{
+#if defined(OK_KERNEL_FREESTANDING) && defined(__x86_64__)
+    uptr flags = 0;
+    asm volatile("pushfq\n\tpopq %0\n\tcli" : "=r"(flags) : : "memory");
+    return flags;
+#else
+    return 0;
+#endif
+}
+
+void NativeInstructions<Architecture::x86_64>::restore_interrupts(uptr saved) noexcept
+{
+#if defined(OK_KERNEL_FREESTANDING) && defined(__x86_64__)
+    if ((saved & 0x200) != 0) // RFLAGS.IF
+        asm volatile("sti" ::: "memory");
+#else
+    static_cast<void>(saved);
+#endif
+}
+
+// In kernel mode GS_BASE holds the running CPU's block (cpu_local.hpp); boot.S
+// installs the boot CPU's before any C++ runs.
+u32 NativeInstructions<Architecture::x86_64>::cpu_index() noexcept
+{
+#if defined(OK_KERNEL_FREESTANDING) && defined(__x86_64__)
+    u32 index;
+    asm volatile("movl %%gs:%c1, %0" : "=r"(index) : "i"(execution::x86::cpu_logical_offset));
+    return index;
+#else
+    return 0;
 #endif
 }
 

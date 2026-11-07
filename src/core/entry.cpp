@@ -247,7 +247,9 @@ Status ok_kernel_entry(const KernelEntryConfig &config, KernelEntryResult *resul
     if (config.mode == KernelBootMode::normal)
     {
         Kernel &kernel = kernel_instance();
-        const auto status = kernel.boot(config.kernel);
+        auto status = kernel.boot(config.kernel);
+        if (status.ok() && config.start_secondary_cpus != nullptr)
+            status = config.start_secondary_cpus(kernel);
         if (result != nullptr)
         {
             result->status = status;
@@ -320,6 +322,14 @@ Status ok_kernel_entry(const KernelEntryConfig &config, KernelEntryResult *resul
         }
         emit(sink, "OK_EXTENSION_TEST scope=model result=pass\n");
     }
+    if (config.start_secondary_cpus != nullptr)
+        if (auto status = config.start_secondary_cpus(kernel); !status.ok())
+        {
+            emit_failure(sink, status);
+            if (result != nullptr)
+                result->status = status;
+            return status;
+        }
     emit_roadmap_markers(sink, kernel);
     emit(sink, "OK_DEBUG fs=pass user=pass display=pass\n");
     emit_pass(sink, kernel);
