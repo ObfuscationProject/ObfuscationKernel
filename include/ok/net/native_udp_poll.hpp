@@ -22,7 +22,7 @@ namespace ok::net
     if (readable && snapshot.receive.readable())
         ready.events |= requested & posix::ReadyEvents::readable;
     const bool terminal = snapshot.receive.terminal || snapshot.executor.failed;
-    if (terminal) ready.events |= posix::ReadyEvents::error;
+    if (terminal || snapshot.receive.error) ready.events |= posix::ReadyEvents::error;
     if (writable && !terminal && snapshot.executor.active && snapshot.executor.transmit_credit)
         ready.events |= requested & posix::ReadyEvents::writable;
     return ready;

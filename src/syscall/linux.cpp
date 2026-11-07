@@ -28,6 +28,8 @@ i64 ErrnoMapper::errno_for(Status status)
         return 36;
     case StatusCode::message_size:
         return 90;
+    case StatusCode::connection_refused:
+        return 111;
     case StatusCode::process_file_limit:
         return 24;
     case StatusCode::system_file_limit:

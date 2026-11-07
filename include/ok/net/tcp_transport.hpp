@@ -3,6 +3,7 @@
 #include <ok/net/tcp_wire.hpp>
 #include <ok/net/tcp_congestion.hpp>
 #include <ok/net/address.hpp>
+#include <ok/net/icmp.hpp>
 #include <limits>
 
 namespace ok::net::tcp
@@ -21,7 +22,8 @@ inline constexpr bool between(u32 value, u32 first, u32 last)
 struct Endpoint { IpAddress address{}; u16 port{}; bool operator==(const Endpoint &) const = default; };
 enum class State : u8 { closed, listen, syn_sent, syn_received, established, fin_wait_1,
     fin_wait_2, close_wait, closing, last_ack, time_wait };
-enum class Failure : u8 { none, reset, refused, timed_out, aborted };
+// The last four come from ICMP reports (RFC 1122 section 4.2.3.9).
+enum class Failure : u8 { none, reset, refused, timed_out, aborted, host_unreachable, network_unreachable, prohibited, protocol };
 enum class Ingress : u8 { ignored, accepted, challenged, reset };
 struct PreparedPacket { usize length{}; u64 token{}; };
 struct Snapshot
@@ -285,6 +287,36 @@ class Connection final
     }
 
   public:
+    // An ICMP error about a segment this connection sent. It counts only when
+    // the quoted sequence is still unacknowledged (Linux tcp_v4_err): a hard
+    // error ends a handshake, a soft one is remembered and reported if the
+    // connection times out, and an MTU report lowers the segment size.
+    Result<bool> icmp_error(wire::IcmpErrorClass error, u32 quoted_sequence, u64 now)
+    {
+        if (plan_.active) return Status::busy("complete prepared TCP packet before ICMP work");
+        if (now < last_now_) return Status::invalid_argument("TCP clock moved backward");
+        if (error.kind == wire::IcmpErrorKind::none || state_ == State::closed || state_ == State::listen ||
+            snd_max_ == snd_una_ || !between(quoted_sequence, snd_una_, snd_max_ - 1))
+            return false;
+        last_now_ = now;
+        if (error.kind == wire::IcmpErrorKind::mtu)
+        {
+            const u32 header = local_.address.v6() ? 60 : 40, floor = local_.address.v6() ? 1280 : 576;
+            const u32 mtu = error.mtu < floor ? floor : error.mtu;
+            if (mtu - header < peer_mss_) { peer_mss_ = static_cast<u16>(mtu - header); retransmit_head_ = sending(); }
+            return true;
+        }
+        const Failure failure = icmp_failure(error.kind);
+        if (error.hard && (state_ == State::syn_sent || state_ == State::syn_received))
+        {
+            if (state_ == State::syn_received && passive_) return_to_listen();
+            else terminate(failure);
+            return true;
+        }
+        soft_error_ = failure;
+        return true;
+    }
+
     Status tick(u64 now)
     {
         if (plan_.active) return Status::busy("complete prepared TCP packet before timer work");
@@ -295,7 +327,7 @@ class Connection final
         if (rtx_.active && now >= rtx_.deadline && rtx_.retries >= max_retransmissions)
         {
             if (state_ == State::syn_received && passive_) return_to_listen();
-            else terminate(Failure::timed_out);
+            else terminate(soft_error_ != Failure::none ? soft_error_ : Failure::timed_out);
         }
         if (state_ == State::fin_wait_2 && now >= fin_wait_deadline_) terminate(Failure::timed_out);
         return Status::success();
@@ -397,6 +429,17 @@ class Connection final
     static constexpr u64 deadline(u64 now, u64 delay)
     { return now > std::numeric_limits<u64>::max() - delay ? std::numeric_limits<u64>::max() : now + delay; }
     static bool valid_endpoint(Endpoint ep) { return ep.port && ep.address.unicast(); }
+    static constexpr Failure icmp_failure(wire::IcmpErrorKind kind)
+    {
+        switch (kind)
+        {
+        case wire::IcmpErrorKind::refused: return Failure::refused;
+        case wire::IcmpErrorKind::network_unreachable: return Failure::network_unreachable;
+        case wire::IcmpErrorKind::prohibited: return Failure::prohibited;
+        case wire::IcmpErrorKind::protocol: return Failure::protocol;
+        default: return Failure::host_unreachable;
+        }
+    }
     bool aliases_self(Bytes input) const
     {
         if (input.empty()) return false;
@@ -518,6 +561,8 @@ class Connection final
         tx_head_ = (tx_head_ + released) % SendCapacity; tx_size_ -= released;
         if (rtt_timing_ && !before(ack, rtt_sequence_)) { sample_rtt(now - rtt_sent_at_); rtt_timing_ = false; }
         snd_una_ = ack; if (before(snd_nxt_, snd_una_)) snd_nxt_ = snd_una_;
+        // Progress means the path works: forget a remembered soft error (Linux tcp_ack).
+        soft_error_ = Failure::none;
         if (fin) fin_acknowledged_ = true;
         dupacks_ = 0;
         if (recovery_)
@@ -626,10 +671,11 @@ class Connection final
         passive_ = pending_syn_ = pending_ack_ = reset_pending_ = eof_ = write_shutdown_ = rtt_known_ = syn_retried_ = false;
         challenge_seen_ = listener_armed_ = rtt_timing_ = recovery_ = retransmit_head_ = fin_acknowledged_ = false;
         challenge_deadline_ = persist_deadline_ = rtt_sent_at_ = 0; rtt_sequence_ = 0; dupacks_ = 0; ooo_count_ = 0;
+        soft_error_ = Failure::none;
         cc_ = {}; cc_.start(segment());
         // Packet token generation and monotonic time survive control-block reuse.
     }
-    State state_{State::closed}; Failure failure_{Failure::none}; Endpoint local_{}, peer_{}, reset_peer_{};
+    State state_{State::closed}; Failure failure_{Failure::none}, soft_error_{Failure::none}; Endpoint local_{}, peer_{}, reset_peer_{};
     std::array<std::byte, SendCapacity> tx_{}; std::array<std::byte, ReceiveCapacity> rx_{};
     usize tx_head_{}, tx_size_{}, rx_head_{}, rx_size_{};
     u32 snd_una_{}, snd_nxt_{}, snd_max_{}, rcv_nxt_{}, iss_{}, irs_{}, wl1_{}, wl2_{}, reset_seq_{}, recover_{}, rtt_sequence_{};

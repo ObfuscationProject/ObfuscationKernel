@@ -335,6 +335,18 @@ class EndpointTable final
         if (result && changed(before, slot->core.snapshot())) bump(*slot);
         return result;
     }
+    // An ICMP error quoting a segment of the connection local -> peer.
+    // Returns whether a connection took it.
+    Result<bool> icmp_error(Endpoint local, Endpoint peer, wire::IcmpErrorClass error, u32 quoted_sequence, u64 now)
+    {
+        if (auto s = command_time(now); !s) return s;
+        auto *slot = tuple(local, peer); if (!slot) return false;
+        const usize i = static_cast<usize>(slot - connections_.data());
+        const auto before = slot->core.snapshot(); now_ = now;
+        auto taken = slot->core.icmp_error(error, quoted_sequence, now); if (!taken) return taken.status();
+        if (changed(before, slot->core.snapshot())) bump(*slot);
+        settle(i, now); return taken.value();
+    }
     template <IssSource Source> Result<IngressResult> ingest(Bytes packet, u64 now, Source &source)
     {
         if (auto s = command_time(now); !s) return s;

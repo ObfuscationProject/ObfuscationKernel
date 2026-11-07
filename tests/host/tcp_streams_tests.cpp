@@ -510,6 +510,49 @@ void ethernet_failure_controls()
     for (usize i = 0; i < 4; ++i)
     { auto eth = wire::ethernet(device.outgoing[i].view()); CHECK(eth && wire::arp(eth.value().payload).value().operation == 2); }
 }
+// The gateway reports a frame we sent as unreachable; the error quotes its IP packet.
+Packet icmp_unreachable(const Packet &sent, u8 code)
+{
+    Packet ip; auto built = wire::build_icmp_error<wire::Ipv4Family>(ip.bytes, peer.address.ipv4(), local.address.ipv4(), 9,
+        wire::icmpv4::unreachable, code, 0, sent.view().subspan(14));
+    CHECK(built); ip.length = built.value(); return ethernet(ip);
+}
+// ICMP errors reach the TCP connection or UDP socket their quote names and
+// wake its waiters; a quote of a segment never sent is dropped.
+void ethernet_icmp_errors()
+{
+    auto owner = fixture(); auto &f = *owner; Device device;
+    auto fd = f.operations.open(f.pid); CHECK(fd); CHECK(f.operations.bind(f.pid, fd.value(), local));
+    CHECK(f.operations.connect(f.pid, fd.value(), peer, 100, 0));
+    CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 0)); CHECK(device.sent == 1);
+    auto ticket = f.wait(fd.value(), tcp::Readiness::connect_interest);
+    device.push(icmp_unreachable(ethernet(packet(local, peer, 5000, 0, tcp_syn)), wire::icmpv4::port_unreachable));
+    CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 1));
+    CHECK(f.executor.state().icmp_errors == 0 && f.executor.state().dropped == 1);
+    CHECK(f.waits.observe(ticket).value().completion == sched::WaitCompletion::none);
+    device.push(icmp_unreachable(device.outgoing[0], wire::icmpv4::port_unreachable));
+    CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 2));
+    CHECK(f.executor.state().icmp_errors == 1 && f.executor.state().dropped == 1);
+    CHECK(f.waits.observe(ticket).value().completion == sched::WaitCompletion::ready); CHECK(f.waits.finish(ticket));
+    auto ready = f.service.readiness(f.stream(fd.value())); CHECK(ready && ready.value().error);
+    auto state = f.service.endpoints().state(ready.value().handle);
+    CHECK(state && state.value().transport.failure == tcp::Failure::refused);
+    CHECK(f.scheduler.close_descriptor(f.process().resources(), fd.value()));
+    // A connected UDP socket learns that its peer refused a datagram.
+    auto socket = f.udp.open(); CHECK(socket); CHECK(f.udp.connect(socket.value(), peer.address, 43000));
+    const std::array payload{std::byte{'q'}}; Packet sent;
+    auto built = f.udp.build_datagram(socket.value(), peer.address, 43000, payload, sent.bytes);
+    CHECK(built && built.value()); sent.length = built.value();
+    device.push(icmp_unreachable(sent, wire::icmpv4::port_unreachable));
+    CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 3));
+    CHECK(f.executor.state().icmp_errors == 2 && f.udp.readiness(socket.value()).value().error);
+    // Host unreachable is soft for UDP: nothing is kept.
+    CHECK(f.udp.take_error(socket.value()).code() == StatusCode::connection_refused);
+    device.push(icmp_unreachable(sent, wire::icmpv4::host_unreachable));
+    CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 4));
+    CHECK(f.executor.state().icmp_errors == 2 && !f.udp.readiness(socket.value()).value().error);
+    CHECK(f.udp.close(socket.value()));
+}
 }
 int main()
 {
@@ -525,6 +568,6 @@ int main()
     linux_ipv6_profile<abi::linux_user::Profile::loongarch64>(); linux_ipv6_profile<abi::linux_user::Profile::mips>();
     linux_ipv6_profile<abi::linux_user::Profile::mips64>(); linux_ipv6_profile<abi::linux_user::Profile::ppc>();
     ipv6_accept();
-    ethernet_integration(); ethernet_link_passes(); ethernet_failure_controls();
+    ethernet_integration(); ethernet_link_passes(); ethernet_failure_controls(); ethernet_icmp_errors();
     std::printf("TCP_STREAMS_HOSTED_PASS checks=%zu real_scheduler=1 guest_execution=0 socket_execution=0 nic_execution=0\n", checks);
 }

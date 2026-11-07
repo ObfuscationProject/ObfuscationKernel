@@ -312,6 +312,137 @@ void lossy_transfer(u32 seed, u32 drop_percent, Endpoint left, Endpoint right)
 }
 }
 
+// ICMP errors about the connection's own segments, built as a router would
+// send them and parsed back through the classifier and the quote parser.
+template <class Family> struct IcmpReport { Packet packet; IcmpErrorClass error; IcmpQuote<Family> quote; };
+template <class Family = Ipv4Family>
+IcmpReport<Family> icmp_about(const Packet &offending, u8 type, u8 code, u32 rest = 0)
+{
+    IcmpReport<Family> r;
+    typename Family::Address router{}, local{};
+    if constexpr (Family::version == 4) { router = Ipv4{10, 0, 0, 1}; local = left.address.ipv4(); }
+    else { router = right6.address.ipv6(); router[15] = 1; local = left6.address.ipv6(); }
+    auto n = build_icmp_error<Family>(r.packet.bytes, router, local, 7, type, code, rest, offending.view());
+    CHECK(n); r.packet.length = n.value();
+    Result<Icmp> message = Status::invalid_argument("unparsed");
+    if constexpr (Family::version == 4) { auto ip = ipv4(r.packet.view()); CHECK(ip); message = icmp<Family>(ip.value()); }
+    else { auto ip = ipv6(r.packet.view()); CHECK(ip); message = icmp<Family>(ip.value()); }
+    CHECK(message);
+    r.error = classify_icmp_error<Family>(message.value());
+    auto quote = icmp_quote<Family>(message.value()); CHECK(quote); r.quote = quote.value();
+    return r;
+}
+// Every retransmission until the connection gives up.
+template <class C> void exhaust(C &c)
+{
+    for (usize i = 0; i < 64 && c.snapshot().state != State::closed; ++i)
+    {
+        const u64 now = c.snapshot().retransmit_deadline;
+        CHECK(c.tick(now)); while (next(c, now)) {}
+    }
+    CHECK(c.snapshot().state == State::closed);
+}
+
+void icmp_errors()
+{
+    using K = IcmpErrorKind;
+    // A hard error during the handshake ends it with that failure.
+    {
+        Big c; CHECK(c.active_open(left, right, iss, 0)); const auto syn = take(c, 0);
+        const auto r = icmp_about(syn, icmpv4::unreachable, icmpv4::port_unreachable);
+        CHECK(r.error.kind == K::refused && r.error.hard && r.quote.protocol == 6 && r.quote.sequence == iss);
+        CHECK(r.quote.source == left.address.ipv4() && r.quote.destination == right.address.ipv4());
+        CHECK(r.quote.source_port == left.port && r.quote.destination_port == right.port);
+        // A quoted sequence outside [SND.UNA, SND.MAX) is not this connection's.
+        auto stale = c.icmp_error(r.error, iss + 1, 5); CHECK(stale && !stale.value());
+        CHECK(c.snapshot().state == State::syn_sent);
+        auto taken = c.icmp_error(r.error, r.quote.sequence, 5); CHECK(taken && taken.value());
+        CHECK(c.snapshot().state == State::closed && c.snapshot().failure == Failure::refused);
+        auto closed = c.icmp_error(r.error, iss, 6); CHECK(closed && !closed.value());
+    }
+    // A soft error is remembered and named when the handshake times out.
+    {
+        Big c; CHECK(c.active_open(left, right, iss, 0)); const auto syn = take(c, 0);
+        const auto r = icmp_about(syn, icmpv4::unreachable, icmpv4::host_unreachable);
+        CHECK(r.error.kind == K::host_unreachable && !r.error.hard);
+        auto taken = c.icmp_error(r.error, r.quote.sequence, 5); CHECK(taken && taken.value());
+        CHECK(c.snapshot().state == State::syn_sent);
+        exhaust(c); CHECK(c.snapshot().failure == Failure::host_unreachable);
+    }
+    // Established, a hard error is only remembered and acknowledged progress forgets it.
+    {
+        Big c; establish(c);
+        const auto data = pattern(1000, 5); CHECK(c.write(data));
+        std::deque<Packet> store; CHECK(burst(c, 101, store).size() == 2);
+        const auto r = icmp_about(store.front(), icmpv4::unreachable, icmpv4::port_unreachable);
+        CHECK(r.quote.sequence == iss + 1);
+        auto taken = c.icmp_error(r.error, r.quote.sequence, 110); CHECK(taken && taken.value());
+        CHECK(c.snapshot().state == State::established && c.snapshot().failure == Failure::none);
+        input(c, ack(iss + 1 + 536), 120);
+        exhaust(c); CHECK(c.snapshot().failure == Failure::timed_out);
+    }
+    {
+        Big c; establish(c);
+        const auto data = pattern(1000, 5); CHECK(c.write(data));
+        std::deque<Packet> store; CHECK(burst(c, 101, store).size() == 2);
+        const auto r = icmp_about(store.back(), icmpv4::time_exceeded, 0);
+        CHECK(r.error.kind == K::host_unreachable && !r.error.hard && r.quote.sequence == iss + 1 + 536);
+        auto taken = c.icmp_error(r.error, r.quote.sequence, 110); CHECK(taken && taken.value());
+        exhaust(c); CHECK(c.snapshot().failure == Failure::host_unreachable);
+    }
+    // Fragmentation needed lowers the segment size and resends the head at it.
+    {
+        Connection<16384, 4096, 1460> c; CHECK(c.active_open(left, right, iss, 0)); take(c, 0);
+        const std::array<std::byte, 4> mss{std::byte{2}, std::byte{4}, std::byte{0x05}, std::byte{0xb4}};
+        Packet synack; TcpFields fields{0, 0, irs, iss + 1, tcp_syn | tcp_ack, 60000};
+        fields.source_port = right.port; fields.destination_port = left.port;
+        auto n = build_tcp(synack.bytes, right.address.ipv4(), left.address.ipv4(), 10, 64, fields, Bytes{mss.data(), mss.size()}, {});
+        CHECK(n); synack.length = n.value();
+        input(c, synack, 100); take(c, 100);
+        CHECK(c.snapshot().state == State::established && c.snapshot().peer_mss == 1460);
+        const auto data = pattern(3000, 6); CHECK(c.write(data));
+        std::deque<Packet> store; auto flight = burst(c, 101, store);
+        CHECK(flight.size() >= 2 && flight[0].payload.size() == 1460);
+        const auto r = icmp_about(store.front(), icmpv4::unreachable, 4, 1000);
+        CHECK(r.error.kind == K::mtu && r.error.mtu == 1000);
+        auto taken = c.icmp_error(r.error, r.quote.sequence, 110); CHECK(taken && taken.value());
+        CHECK(c.snapshot().peer_mss == 960 && c.snapshot().state == State::established);
+        const auto resent = seen(take(c, 111));
+        CHECK(resent.fields.sequence == iss + 1 && resent.payload.size() == 960);
+        // A report below the IPv4 minimum is clamped to 576.
+        taken = c.icmp_error({K::mtu, false, 68}, iss + 1, 112); CHECK(taken && taken.value());
+        CHECK(c.snapshot().peer_mss == 536);
+    }
+    // IPv6: port unreachable refuses the handshake; parameter problem is hard too.
+    {
+        Connection<> c; CHECK(c.active_open(left6, right6, iss, 0)); const auto syn = take(c, 0);
+        const auto r = icmp_about<Ipv6Family>(syn, icmpv6::unreachable, icmpv6::port_unreachable);
+        CHECK(r.error.kind == K::refused && r.error.hard && r.quote.protocol == 6 && r.quote.sequence == iss);
+        CHECK(r.quote.source == left6.address.ipv6() && r.quote.destination_port == right6.port);
+        auto taken = c.icmp_error(r.error, r.quote.sequence, 5); CHECK(taken && taken.value());
+        CHECK(c.snapshot().state == State::closed && c.snapshot().failure == Failure::refused);
+        const auto p = icmp_about<Ipv6Family>(syn, icmpv6::parameter_problem, 0);
+        CHECK(p.error.kind == K::protocol && p.error.hard);
+        const auto big = icmp_about<Ipv6Family>(syn, icmpv6::packet_too_big, 0, 1400);
+        CHECK(big.error.kind == K::mtu && big.error.mtu == 1400);
+        const auto odd = icmp_about<Ipv6Family>(syn, icmpv6::unreachable, 9);
+        CHECK(odd.error.kind == K::protocol && !odd.error.hard);
+    }
+    // The classifier's IPv4 table (Linux icmp_err_convert).
+    const std::array<std::pair<K, bool>, 16> table{{
+        {K::network_unreachable, false}, {K::host_unreachable, false}, {K::refused, true}, {K::refused, true},
+        {K::mtu, false}, {K::host_unreachable, false}, {K::network_unreachable, true}, {K::host_unreachable, true},
+        {K::host_unreachable, true}, {K::network_unreachable, true}, {K::host_unreachable, true},
+        {K::network_unreachable, false}, {K::host_unreachable, false}, {K::host_unreachable, true},
+        {K::host_unreachable, true}, {K::host_unreachable, true}}};
+    for (u8 code = 0; code < table.size(); ++code)
+    {
+        const auto e = classify_icmp_error<Ipv4Family>(Icmp{icmpv4::unreachable, code, 0, {}, {}});
+        CHECK(e.kind == table[code].first && e.hard == table[code].second);
+    }
+    CHECK(classify_icmp_error<Ipv4Family>(Icmp{icmpv4::echo_reply, 0, 0, {}, {}}).kind == K::none);
+}
+
 int main()
 {
     slow_start_and_peer_window();
@@ -324,5 +455,6 @@ int main()
     lossy_transfer(99, 25, left, right);
     for (u32 seed = 20; seed < 24; ++seed) lossy_transfer(seed, 10, left6, right6);
     ipv6_endpoints();
+    icmp_errors();
     std::printf("PASS tcp window scope=model checks=%zu\n", checks);
 }

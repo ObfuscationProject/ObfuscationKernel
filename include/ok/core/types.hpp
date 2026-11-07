@@ -55,6 +55,8 @@ enum class StatusCode : u32
     not_terminal,
     exec_format,
     argument_list_too_long,
+    // A peer refused the datagram (ICMP port or protocol unreachable).
+    connection_refused,
 };
 
 class Status final
@@ -116,6 +118,10 @@ class Status final
     [[nodiscard]] static constexpr Status message_size(std::string_view message = {})
     {
         return {StatusCode::message_size, message};
+    }
+    [[nodiscard]] static constexpr Status connection_refused(std::string_view message = {})
+    {
+        return {StatusCode::connection_refused, message};
     }
     [[nodiscard]] static constexpr Status process_file_limit(std::string_view message = {})
     {

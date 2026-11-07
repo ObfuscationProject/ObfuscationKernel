@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ok/abi/linux_tcp_data.hpp>
 #include "linux_udp_immediate_access.hpp"
 #include "linux_udp_original_ofd.hpp"
 #include "linux_udp_captured_decode.hpp"
@@ -69,6 +70,8 @@ template <abi::linux_user::Profile Selected>
     case StatusCode::message_size: return linux_udp_receive_errno<Selected>(E::e_msgsize);
     case StatusCode::overflow: return linux_udp_receive_errno<Selected>(E::e_overflow);
     case StatusCode::bad_descriptor: return linux_udp_receive_errno<Selected>(E::e_badf);
+    case StatusCode::connection_refused:
+        return -static_cast<i64>(abi::linux_user::tcp_errno_econnrefused[static_cast<usize>(Selected)]);
     default: return linux_udp_receive_errno<Selected>(E::e_io);
     }
 }
