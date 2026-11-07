@@ -249,6 +249,15 @@ void pty_rebind(sched::ProcessControlBlock &process, const sched::ThreadControlB
     if (!kept) syscall_origins.revoke(thread);
 }
 } // namespace
+// The next unwritten byte decides (an OPOST expansion or an ISIG character
+// may not fit); an unreadable buffer is ready, its re-dispatch faults.
+bool pty_write_ready(Kernel &kernel, const PtyWait &wait)
+{
+    std::byte next{};
+    if (wait.committed >= wait.count || !gather_pty_suffix(wait.space, {&next, 1}, wait)) return true;
+    const auto progress = kernel.scheduler().pty_write_progress(wait.description, next);
+    return !progress || progress.value();
+}
 i64 resume_pty_io(Kernel &kernel, sched::ProcessControlBlock &process,
                   memory::ObjectHandle object, bool &complete)
 {

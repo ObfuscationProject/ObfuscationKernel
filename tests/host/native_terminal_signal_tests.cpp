@@ -3,10 +3,10 @@
 // signals interrupting blocked PTY and console reads and PTY writes (EINTR,
 // SA_RESTART through the captured syscall origin, the committed count of a
 // partial write), the kill admission of such a wait, terminating defaults,
-// readiness winning over a pending signal, PTY VTIME timers through the
-// actual step(), and the job-control park of a background member (EINTR, and
-// an SA_RESTART restart of TCSETS). Hosted trap, copy and mapping backends;
-// no guest execution.
+// readiness (the call moves a byte now) winning over a pending signal, PTY
+// VTIME timers through the actual step(), and the job-control park of a
+// background member (EINTR, and an SA_RESTART restart of TCSETS). Hosted trap,
+// copy and mapping backends; no guest execution.
 #define OK_NATIVE_MODEL_MEMORY_BYTES 32768
 #define OK_NATIVE_SIGNAL_RUNTIME 1
 #define OK_SYSCALL_ORIGIN_MODEL 1
@@ -246,6 +246,105 @@ void pty_write_signal(Kernel &kernel)
     expect(native::private_terminal_signal_complete(kernel, *kernel.scheduler().find(pid), blocked));
     expect(blocked.native_frame.pc == site && blocked.native_frame.registers[14] == linux_write);
     release(kernel, pid);
+}
+
+// Readiness of a blocked write is "it moves a byte now", not poll POLLOUT: a
+// slave write whose CR LF does not fit the master queue (room 1) gets EINTR or
+// a restart from a caught signal and is ended by a default SIGTERM (kill
+// admission, then step()); poll still reports the room.
+void pty_write_expansion(Kernel &kernel, u64 sender)
+{
+    for (const int mode : {0, 1, 2}) // EINTR, SA_RESTART, SIG_DFL SIGTERM
+    {
+        u64 writer{}; const auto pid = linux_process(kernel, writer);
+        const auto fds = make_pair(kernel, pid);
+        auto &terminal = slave_terminal(kernel, pid, fds[1]);
+        terminal.termios.oflag |= tty::oflag::opost | tty::oflag::onlcr;
+        std::array<std::byte, sched::pipe_capacity - 1> fill{}; fill.fill(std::byte{'f'});
+        activate(kernel, pid, pid);
+        expect(kernel.posix().write(fds[1], fill).value() == fill.size());
+        *user(input_at) = std::byte{'\n'};
+        enter(kernel, pid, writer, linux_write, fds[1], input_at, 1);
+        auto &thread = thread_of(kernel, pid, writer);
+        auto &process = *kernel.scheduler().find(pid);
+        expect(pending(kernel, pid, writer) && thread.wait_reason == sched::ThreadWaitReason::pty_write);
+        const auto *entry = process.fd_table().entry(fds[1]);
+        expect(kernel.scheduler().pty_description_readiness(entry->description).value().writable);
+        if (mode == 2)
+        {
+            expect(linux_kill(kernel, sender, pid, 15) == 0);
+            resume(kernel, pid, writer);
+            const auto state = kernel.scheduler().find(pid)->state();
+            expect(state == sched::ProcessState::zombie || state == sched::ProcessState::exited);
+            expect(!native::pty_wait_object(pid, writer).pool);
+            release(kernel, pid);
+            continue;
+        }
+        caught(kernel, pid, 10, mode == 1);
+        enqueue(kernel, pid, writer, 10);
+        expect(native::private_terminal_signal_ready(kernel, process, thread));
+        expect(native::private_terminal_signal_complete(kernel, process, thread));
+        expect(!thread.syscall_pending && !native::pty_wait_object(pid, writer).pool);
+        expect(thread.native_frame.pc == (mode == 1 ? site : site + 2));
+        expect(thread.native_frame.registers[14] == (mode == 1 ? linux_write : static_cast<u64>(-4)));
+        expect(native::private_signal_deliver(kernel, process, thread) && thread.native_frame.pc == handler);
+        release(kernel, pid);
+    }
+}
+
+// A master write of ^C with input room but a full signal outbox moves nothing,
+// so a caught signal interrupts it; with outbox room readiness wins.
+void pty_master_signal_character(Kernel &kernel)
+{
+    u64 writer{}; const auto pid = linux_process(kernel, writer);
+    const auto fds = make_pair(kernel, pid);
+    auto &terminal = slave_terminal(kernel, pid, fds[1]);
+    terminal.termios.lflag |= tty::lflag::isig; terminal.termios[tty::Cc::intr] = 3;
+    std::array<std::byte, sched::pipe_capacity> full{}; full.fill(std::byte{'f'});
+    activate(kernel, pid, pid);
+    expect(kernel.posix().write(fds[0], full).value() == full.size());
+    caught(kernel, pid, 10, false);
+    *user(input_at) = std::byte{3};
+    enter(kernel, pid, writer, linux_write, fds[0], input_at, 1);
+    expect(pending(kernel, pid, writer));
+    expect(take(kernel, pid, fds[1], 16) == 16);
+    auto &thread = thread_of(kernel, pid, writer);
+    auto &process = *kernel.scheduler().find(pid);
+    enqueue(kernel, pid, writer, 10);
+    expect(!native::private_terminal_signal_ready(kernel, process, thread));
+    for (usize index = 0; index < sched::terminal_outbox_capacity; ++index)
+        expect(terminal.owe(1000 + index, tty::TerminalSignal::interrupt, true));
+    expect(native::private_terminal_signal_ready(kernel, process, thread));
+    expect(native::private_terminal_signal_complete(kernel, process, thread));
+    expect(!thread.syscall_pending && thread.native_frame.registers[14] == static_cast<u64>(-4));
+    while (terminal.outbox_count) static_cast<void>(terminal.take_outbox());
+    release(kernel, pid);
+}
+
+// Room, or a write that fails at once, wins over a pending signal.
+void pty_write_readiness_wins(Kernel &kernel)
+{
+    for (const bool closed : {false, true})
+    {
+        u64 writer{}; const auto pid = linux_process(kernel, writer);
+        const auto fds = make_pair(kernel, pid);
+        caught(kernel, pid, 10, true);
+        std::array<std::byte, sched::pipe_capacity> full{};
+        activate(kernel, pid, pid);
+        expect(kernel.posix().write(fds[0], full).value() == sched::pipe_capacity);
+        std::memcpy(user(input_at), "abc", 3);
+        enter(kernel, pid, writer, linux_write, fds[0], input_at, 3);
+        expect(pending(kernel, pid, writer));
+        if (closed) { activate(kernel, pid, pid); CHECK(kernel.posix().close(fds[1])); }
+        else expect(take(kernel, pid, fds[1], 16) == 16);
+        enqueue(kernel, pid, writer, 10);
+        expect(!native::private_terminal_signal_ready(kernel, *kernel.scheduler().find(pid), thread_of(kernel, pid, writer)));
+        resume(kernel, pid, writer);
+        expect(!pending(kernel, pid, writer) && result_of(kernel, pid, writer) == (closed ? -5 : 3));
+        resume(kernel, pid, writer);
+        expect(thread_of(kernel, pid, writer).native_frame.pc == handler);
+        release(kernel, pid);
+    }
 }
 
 // A Linux console read in the foreground group: EINTR and SA_RESTART.
@@ -529,6 +628,9 @@ int main()
     pty_read_step(kernel);
     pty_ready_and_default(kernel);
     pty_write_signal(kernel);
+    pty_write_expansion(kernel, sender);
+    pty_master_signal_character(kernel);
+    pty_write_readiness_wins(kernel);
     const auto init = create_init(kernel);
     console_read_signal(kernel, init, false);
     console_read_signal(kernel, init, true);

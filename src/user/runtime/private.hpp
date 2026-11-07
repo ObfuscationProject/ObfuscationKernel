@@ -407,6 +407,8 @@ struct PtyWait
     u8 timer{};            // Armed VTIME length in deciseconds.
     bool interbyte{};      // The timer restarts on new input (VMIN > 0).
 };
+// A blocked PTY write would move a byte now or fail at once (signal readiness).
+bool pty_write_ready(Kernel &kernel, const PtyWait &wait);
 SyscallOrigins::PtyReadBinding pty_read_origin_binding(memory::ObjectHandle object, const PtyWait &wait);
 SyscallOrigins::PtyWriteBinding pty_write_origin_binding(memory::ObjectHandle object, const PtyWait &wait);
 constexpr usize pty_wait_capacity = memory::KernelEntryStackPool::capacity;

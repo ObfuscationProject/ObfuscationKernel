@@ -671,11 +671,7 @@ struct PtyWaitAccess
     static bool ready_now(Kernel &kernel, const sched::ProcessControlBlock &, const Selection &selection)
     {
         const auto &wait = selection.wait;
-        if (wait.writing)
-        {
-            const auto readiness = kernel.scheduler().pty_description_readiness(wait.description);
-            return !readiness || readiness.value().writable || readiness.value().write_error;
-        }
+        if (wait.writing) return pty_write_ready(kernel, wait);
         const auto state = kernel.scheduler().pty_read_state(wait.description, wait.count);
         return !state || state.value().wait == decltype(state.value().wait)::none;
     }

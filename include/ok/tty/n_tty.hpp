@@ -328,6 +328,28 @@ class NTty final
         return used + 1 < ReadCapacity ? ReadCapacity - 1 - used : 0;
     }
 
+    // Output room the OPOST expansion of `value` needs now: process_output
+    // consumes a byte only when its whole expansion (CR LF, an XTABS tab) fits.
+    [[nodiscard]] constexpr usize output_width(const Termios &termios, u8 value) const
+    {
+        if (!(termios.oflag & oflag::opost))
+            return 1;
+        if (value == '\n' && (termios.oflag & oflag::onlcr))
+            return 2;
+        if (value == '\t' && (termios.oflag & oflag::tabdly) == oflag::xtabs)
+            return 8 - (column_ & 7);
+        return 1;
+    }
+
+    // Whether receive() would report `value` as an ISIG signal character now.
+    [[nodiscard]] constexpr bool signal_character(const Termios &termios, u8 value) const
+    {
+        if (termios.iflag & iflag::istrip)
+            value &= 0x7f;
+        return !lnext_ && (termios.lflag & lflag::isig) &&
+               (is(termios, Cc::intr, value) || is(termios, Cc::quit, value) || is(termios, Cc::susp, value));
+    }
+
     [[nodiscard]] constexpr usize buffered() const { return read_head_ - read_tail_; }
     [[nodiscard]] constexpr bool output_stopped() const { return output_stopped_; }
     [[nodiscard]] constexpr u32 column() const { return column_; }

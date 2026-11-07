@@ -615,6 +615,45 @@ void slave_vmin_nonblocking_and_drain(std::uint8_t vtime)
     CHECK(table.retire(pair.slave).value().pair_freed); empty(table);
 }
 
+// A blocked write is signal-ready only when its next byte moves now: the
+// whole OPOST expansion must fit (poll writability needs any room), and a
+// master's ISIG character needs outbox room; a write that fails at once is
+// ready.
+void write_progress()
+{
+    RawPtyTable<2, 64> table; auto pair = make(table);
+    auto *terminal = table.terminal(pair.slave.slot, pair.slave.generation);
+    const auto progress = [&](Handle handle, char value) { return table.write_progress(handle, std::byte(value)).value(); };
+    terminal->termios.oflag |= tty::oflag::opost | tty::oflag::onlcr;
+    std::array<std::byte, 63> fill{}; fill.fill(std::byte{'f'});
+    CHECK(table.write(pair.slave, fill).value().bytes == 63);
+    CHECK(table.readiness(pair.slave).value().writable && progress(pair.slave, 'a') && !progress(pair.slave, '\n'));
+    CHECK(table.write(pair.slave, text("\n")).status().code() == StatusCode::would_block);
+    CHECK(drain(table, pair.master).size() == 63);
+    terminal->termios.oflag |= tty::oflag::xtabs;
+    std::array<std::byte, 62> line{}; line.fill(std::byte{'f'});
+    CHECK(table.write(pair.slave, text("\r")).value().bytes == 1 && table.write(pair.slave, line).value().bytes == 62);
+    CHECK(progress(pair.slave, 'a') && !progress(pair.slave, '\t')); // Column 62: the tab needs 2.
+    CHECK(table.write(pair.slave, text("\t")).status().code() == StatusCode::would_block);
+    CHECK(drain(table, pair.master).size() == 63);
+    // Master: ^C with a full outbox moves nothing; other bytes need input room.
+    terminal->termios.lflag |= tty::lflag::isig; terminal->termios[tty::Cc::intr] = 3;
+    for (std::size_t index = 0; index < ok::sched::terminal_outbox_capacity; ++index)
+        CHECK(terminal->owe(100 + index, tty::TerminalSignal::interrupt, true));
+    CHECK(table.readiness(pair.master).value().writable && progress(pair.master, 'a') && !progress(pair.master, 3));
+    CHECK(table.write(pair.master, text("\x03")).status().code() == StatusCode::would_block);
+    while (terminal->outbox_count) static_cast<void>(terminal->take_outbox());
+    CHECK(progress(pair.master, 3));
+    std::array<std::byte, 64> input{}; input.fill(std::byte{'g'});
+    CHECK(table.write(pair.master, input).value().bytes == 64 && !progress(pair.master, 'a'));
+    // A write to a gone peer fails at once: ready.
+    CHECK(table.retire(pair.master).value().master_retired && progress(pair.slave, '\n'));
+    CHECK(table.retire(pair.slave).value().pair_freed);
+    pair = make(table);
+    CHECK(table.retire(pair.slave) && progress(pair.master, 'a'));
+    CHECK(table.retire(pair.master).value().pair_freed); empty(table);
+}
+
 // ptmx-style pairs: dormant, locked, counted opens, N_TTY between the ends,
 // slave reopen keeping input and session, and the master's hangup.
 void multiplexed_terminal_semantics()
@@ -769,6 +808,7 @@ int main()
     run("multiplexed-terminal-semantics", multiplexed_terminal_semantics);
     run("slave-vmin-nonblocking-and-drain", [] { slave_vmin_nonblocking_and_drain(0); });
     run("slave-vtime-nonblocking-and-drain", [] { slave_vmin_nonblocking_and_drain(5); });
+    run("write-progress", write_progress);
     run("independent-deque-model-100000-steps", deterministic_model_comparison);
     std::printf("PRIVATE_RAW_PTY_OWNER cases=%zu checks=%zu model_steps=100000 open_counts=1 raw_termios=1 "
                 "status=passed\n", cases, checks);

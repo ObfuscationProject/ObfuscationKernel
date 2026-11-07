@@ -587,6 +587,26 @@ class RawPtyTable final
         result.hangup = result.error = result.write_error = gone;
         return result;
     }
+    // Whether a blocked write whose next byte is `next` would move a byte now
+    // or fail at once; otherwise a signal may interrupt it. Unlike poll
+    // writability (room, as Linux n_tty_poll) it needs room for the byte's
+    // whole OPOST expansion, or outbox room for a master's ISIG character.
+    [[nodiscard]] Result<bool> write_progress(Handle handle, std::byte next) const
+    {
+        const auto *pair = resolve(handle);
+        if (!pair) return Status::bad_descriptor("invalid raw PTY endpoint");
+        const auto &terminal = pair->slave;
+        const auto value = std::to_integer<std::uint8_t>(next);
+        if (handle.side == Side::master)
+        {
+            if (!pair->multiplexed && !pair->slave_opens) return true;
+            return terminal.ldisc.room(terminal.termios) &&
+                (terminal.outbox_room() || !terminal.ldisc.signal_character(terminal.termios, value));
+        }
+        if (!pair->master_opens) return true;
+        if (terminal.ldisc.echo_pending() || terminal.ldisc.output_stopped()) return false;
+        return QueueCapacity - pair->master_input.size >= terminal.ldisc.output_width(terminal.termios, value);
+    }
     // Why a blocking read of `count` bytes would wait now (`none`: it completes),
     // the VTIME length to arm (0: no timer) and the bytes the reader can see,
     // which a waiting reader compares to restart an interbyte timer.

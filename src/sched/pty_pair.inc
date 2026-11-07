@@ -132,6 +132,13 @@ Result<SchedulerState::PtyReadState> SchedulerState::pty_read_state(u16 id, usiz
         return Status::bad_descriptor("description is not a readable retained raw PTY");
     return pty_transport_.read_state(open->pty_endpoint, count);
 }
+Result<bool> SchedulerState::pty_write_progress(u16 id, std::byte next) const
+{
+    const auto *open = open_description(id);
+    if (!open || !open->references || open->reservation || !open->writable || !open->pty_endpoint)
+        return Status::bad_descriptor("description is not a writable retained raw PTY");
+    return pty_transport_.write_progress(open->pty_endpoint, next);
+}
 Result<usize> SchedulerState::commit_pty_read(PreparedPtyRead &preview)
 {
     if (!preview.owned_by(pty_transport_))
