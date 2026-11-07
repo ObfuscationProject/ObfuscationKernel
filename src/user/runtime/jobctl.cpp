@@ -700,13 +700,11 @@ struct ConsoleReadAccess
         out.binding = *bound;
         return true;
     }
-    // Lease authority and an ldisc read that would complete; the re-dispatch
-    // then reads. No foreground check: background reads are gated at entry.
+    // Lease authority and an ldisc read of the call's bytes that would
+    // complete; the re-dispatch then reads. No foreground check: background
+    // reads are gated at entry.
     static bool ready_now(Kernel &kernel, const sched::ProcessControlBlock &process, const Selection &selection)
-    {
-        return kernel.scheduler().console_read_authority(process.pid(), selection.binding.epoch).ok() &&
-            kernel.scheduler().console_readable(process.pid(), selection.binding.epoch);
-    }
+    { return kernel.scheduler().console_read_ready(process.pid(), selection.binding.epoch, selection.binding.bytes); }
     static bool restartable(const Selection &) { return true; }
     static i64 interrupted_result(const Selection &) { return -4; }
     template <typename Visit> static bool with_binding(const Selection &selection, Visit &&visit)

@@ -628,6 +628,8 @@ class SchedulerState
     [[nodiscard]] bool console_authorized(ProcessId pid, u32 expected_epoch = 0) const;
     [[nodiscard]] Status console_read_authority(ProcessId pid, u32 expected_epoch = 0) const;
     [[nodiscard]] bool console_readable(ProcessId pid, u32 expected_epoch) const;
+    // Lease authority and a blocking read of `count` bytes that would complete now.
+    [[nodiscard]] bool console_read_ready(ProcessId pid, u32 expected_epoch, usize count) const;
     [[nodiscard]] Status shutdown_console_status() const;
     // Console reads are planned, copied by the caller, then committed, so a
     // failed copy-out consumes nothing. A plan that must wait gives would_block.

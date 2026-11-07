@@ -91,6 +91,15 @@ bool SchedulerState::console_readable(ProcessId pid, u32 expected_epoch) const
         console_terminal_.ldisc.poll_readable(console_read_termios());
 }
 
+// The read plan, not poll readability: a read below VMIN completes with
+// min(VMIN, count) bytes (n_tty_read).
+bool SchedulerState::console_read_ready(ProcessId pid, u32 expected_epoch, usize count) const
+{
+    return console_read_authority(pid, expected_epoch).ok() &&
+        console_terminal_.ldisc.plan_read(console_read_termios(), count, false, false).wait ==
+            TerminalLdisc::ReadWait::none;
+}
+
 // Lease membership only: background readers of a controlling console are
 // stopped or refused by the job-control gate before they read (section 9.6).
 Status SchedulerState::console_read_authority(ProcessId pid, u32 expected_epoch) const

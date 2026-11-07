@@ -244,7 +244,7 @@ i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched:
             if (const auto origin = syscall_origins.identity(process, caller); origin.capture)
             {
                 const SyscallOrigins::ConsoleReadBinding binding{ticket.value(), static_cast<i32>(arguments[0]),
-                    arguments[1], arguments[2], epoch, vectored};
+                    arguments[1], arguments[2], epoch, vectored, total.value()};
                 if (!syscall_origins.bind_console_read(origin, caller.native_frame, binding)) syscall_origins.revoke(caller);
             }
         complete = false;

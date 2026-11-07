@@ -308,6 +308,7 @@ class SyscallOriginTable final : private NonCopyable
         usize count{}; // The raw count (read) or vector count (readv) argument.
         u32 epoch{};
         bool vectored{};
+        usize bytes{}; // The bytes the call reads (the readv total), for its readiness.
         [[nodiscard]] constexpr bool operator==(const ConsoleReadBinding &) const = default;
     };
     // A terminal call parked by job control (a read, a write under TOSTOP or a
@@ -1612,7 +1613,8 @@ class SyscallOriginTable final : private NonCopyable
     [[nodiscard]] static bool valid_binding(const Identity &identity, const ConsoleReadBinding &binding)
     {
         return binding.ticket.generation && binding.ticket.owner == identity.pid && binding.ticket.thread == identity.tid &&
-            binding.epoch && binding.count && (!binding.vectored || binding.count <= PipeVectors::capacity);
+            binding.epoch && binding.count && binding.bytes &&
+            (!binding.vectored || binding.count <= PipeVectors::capacity);
     }
     template <typename Binding> static uptr input_of(const Binding &binding)
     { if constexpr (requires { binding.input; }) return binding.input; else return 0; }

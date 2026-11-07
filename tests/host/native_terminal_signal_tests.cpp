@@ -347,28 +347,51 @@ void pty_write_readiness_wins(Kernel &kernel)
     }
 }
 
+// A Linux job in the console's foreground group (native init and login).
+struct ConsoleJob { u64 login{}, job{}; i64 epoch{}; tty::Termios saved{}; };
+i64 console_call(Kernel &kernel, u64 pid, N number, std::array<uptr, 6> arguments)
+{
+    activate(kernel, pid, pid);
+    bool complete = true;
+    const auto result = native::dispatch(kernel, pid, {static_cast<uptr>(number), arguments}, complete);
+    expect(complete);
+    return result;
+}
+ConsoleJob console_job(Kernel &kernel, u64 init)
+{
+    auto &scheduler = kernel.scheduler();
+    scheduler.find(init)->resources().personality = sched::UserPersonality::native;
+    ConsoleJob c{};
+    c.login = fork(kernel, init);
+    c.epoch = console_call(kernel, init, N::console_claim, {c.login});
+    expect(c.epoch > 0 && console_call(kernel, c.login, N::setsid, {}) == static_cast<i64>(c.login));
+    expect(console_call(kernel, c.login, N::ioctl, {0, OK_TIOCSCTTY}) == 0);
+    c.job = fork(kernel, c.login);
+    expect(console_call(kernel, c.login, N::setpgid, {c.job, c.job}) == 0);
+    std::memcpy(user(argument_at), &c.job, 4);
+    expect(console_call(kernel, c.login, N::ioctl, {0, OK_TIOCSPGRP, argument_at}) == 0);
+    scheduler.find(c.job)->resources().personality = sched::UserPersonality::linux;
+    for (const auto pid : {init, c.login}) for (auto &thread : scheduler.find(pid)->threads()) thread.native_active = false;
+    c.saved = scheduler.console_terminal().termios;
+    return c;
+}
+void console_done(Kernel &kernel, u64 init, const ConsoleJob &c)
+{
+    auto &scheduler = kernel.scheduler();
+    scheduler.console_terminal().ldisc.flush_input();
+    scheduler.console_terminal().termios = c.saved;
+    for (const auto pid : {init, c.login}) for (auto &each : scheduler.find(pid)->threads()) each.native_active = true;
+    release(kernel, c.job);
+    expect(console_call(kernel, init, N::console_revoke, {static_cast<uptr>(c.epoch)}) == 0);
+    release(kernel, c.login);
+}
+
 // A Linux console read in the foreground group: EINTR and SA_RESTART.
 void console_read_signal(Kernel &kernel, u64 init, bool restart)
 {
     auto &scheduler = kernel.scheduler();
-    scheduler.find(init)->resources().personality = sched::UserPersonality::native;
-    const auto login = fork(kernel, init);
-    auto call = [&](u64 pid, N number, std::array<uptr, 6> arguments) {
-        activate(kernel, pid, pid);
-        bool complete = true;
-        const auto result = native::dispatch(kernel, pid, {static_cast<uptr>(number), arguments}, complete);
-        expect(complete);
-        return result;
-    };
-    const auto epoch = call(init, N::console_claim, {login});
-    expect(epoch > 0 && call(login, N::setsid, {}) == static_cast<i64>(login));
-    expect(call(login, N::ioctl, {0, OK_TIOCSCTTY}) == 0);
-    const auto job = fork(kernel, login);
-    expect(call(login, N::setpgid, {job, job}) == 0);
-    std::memcpy(user(argument_at), &job, 4);
-    expect(call(login, N::ioctl, {0, OK_TIOCSPGRP, argument_at}) == 0);
-    scheduler.find(job)->resources().personality = sched::UserPersonality::linux;
-    for (const auto pid : {init, login}) for (auto &thread : scheduler.find(pid)->threads()) thread.native_active = false;
+    const auto c = console_job(kernel, init);
+    const auto job = c.job;
     caught(kernel, job, 10, restart);
     enter(kernel, job, job, linux_read, 0, read_at, 16);
     auto &thread = thread_of(kernel, job, job);
@@ -376,11 +399,10 @@ void console_read_signal(Kernel &kernel, u64 init, bool restart)
     expect(thread.syscall_pending && thread.wait_reason == sched::ThreadWaitReason::console_read && thread.console_wait_epoch);
     const auto origin = native::syscall_origins.identity(process, thread);
     const auto bound = native::syscall_origins.bound_console_read(origin, thread.native_frame);
-    expect(bound && bound->epoch == thread.console_wait_epoch && bound->count == 16 && !bound->vectored);
+    expect(bound && bound->epoch == thread.console_wait_epoch && bound->count == 16 && bound->bytes == 16 && !bound->vectored);
     expect(native::private_signal_admit_blocked(kernel, process, thread));
     // Input that does not complete the read is no readiness (canonical mode).
     auto &console = scheduler.console_terminal();
-    const auto saved = console.termios;
     console.termios = tty::linux_std_termios();
     native::input('x');
     // A wake that finds no complete line re-dispatches the read, which waits again.
@@ -405,12 +427,55 @@ void console_read_signal(Kernel &kernel, u64 init, bool restart)
         resume(kernel, job, job);
         expect(!thread.syscall_pending && result_of(kernel, job, job) == 2 && *user(read_at) == std::byte{'x'});
     }
-    console.ldisc.flush_input();
-    console.termios = saved;
-    for (const auto pid : {init, login}) for (auto &each : scheduler.find(pid)->threads()) each.native_active = true;
-    release(kernel, job);
-    expect(call(init, N::console_revoke, {static_cast<uptr>(epoch)}) == 0);
-    release(kernel, login);
+    console_done(kernel, init, c);
+}
+
+// Console readiness is the read plan of the call's bytes: a complete line, or
+// min(VMIN, count) bytes, wins over a pending signal; a read below that gets
+// EINTR and keeps its bytes (docs/modules/tty.md section 14, row 21). Each
+// phase uses its own caught signal (a handler blocks its signal).
+void console_read_ready(Kernel &kernel, u64 init)
+{
+    auto &scheduler = kernel.scheduler();
+    const auto c = console_job(kernel, init);
+    auto &console = scheduler.console_terminal();
+    auto &thread = thread_of(kernel, c.job, c.job);
+    auto &process = *scheduler.find(c.job);
+    const auto wake = [&] {
+        if (thread.wait_registration.active())
+            CHECK(scheduler.complete_wait(thread.wait_registration.ticket(), sched::WaitCompletion::ready));
+    };
+    const auto read = [&](usize count, std::string_view input, u32 signal) {
+        enter(kernel, c.job, c.job, linux_read, 0, read_at, count);
+        expect(thread.syscall_pending && thread.wait_reason == sched::ThreadWaitReason::console_read);
+        for (const char value : input) native::input(value);
+        wake();
+        caught(kernel, c.job, signal, false);
+        enqueue(kernel, c.job, c.job, signal);
+        expect(native::private_terminal_signal_owned(kernel, process, thread));
+    };
+    const auto completes = [&](i64 count, char first) {
+        expect(!native::private_terminal_signal_ready(kernel, process, thread));
+        resume(kernel, c.job, c.job);
+        expect(!thread.syscall_pending && result_of(kernel, c.job, c.job) == count && *user(read_at) == std::byte(first));
+        resume(kernel, c.job, c.job);
+        expect(thread.native_frame.pc == handler);
+    };
+    console.termios = tty::linux_std_termios();
+    read(16, "x\r", 10);
+    completes(2, 'x');
+    auto raw = tty::linux_std_termios();
+    raw.lflag &= ~(tty::lflag::icanon | tty::lflag::echo);
+    raw[tty::Cc::min] = 4;
+    console.termios = raw;
+    read(1, "y", 12);
+    completes(1, 'y');
+    read(4, "z", 14);
+    expect(native::private_terminal_signal_ready(kernel, process, thread));
+    expect(native::private_terminal_signal_complete(kernel, process, thread));
+    expect(result_of(kernel, c.job, c.job) == -4 && console.ldisc.buffered() == 1);
+    expect(native::private_signal_deliver(kernel, process, thread) && thread.native_frame.pc == handler);
+    console_done(kernel, init, c);
 }
 
 // VTIME: a VMIN 0 read returns 0 when its timer runs out; below VMIN the
@@ -634,6 +699,7 @@ int main()
     const auto init = create_init(kernel);
     console_read_signal(kernel, init, false);
     console_read_signal(kernel, init, true);
+    console_read_ready(kernel, init);
     vtime(kernel);
     vectors(kernel);
     job_control_park(kernel);
