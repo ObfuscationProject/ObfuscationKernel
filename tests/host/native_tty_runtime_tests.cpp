@@ -925,6 +925,10 @@ bool pty_job_control(Kernel &kernel, const Session &s)
     expect(fd_ioctl(kernel, a, fds[0], OK_TCSETS, argument_at) == 0);
     scheduler.find_thread(b, b)->syscall_pending = false; // The model drops the parked read.
     cont(kernel, b);
+    // TCFLSH and TCSBRK on the master are not checked (Linux checks the master
+    // itself, never a controlling terminal).
+    expect(fd_ioctl(kernel, b, fds[0], OK_TCFLSH, 0) == 0 && fd_ioctl(kernel, b, fds[0], OK_TCSBRK, 1) == 0);
+    expect(!job_of(kernel, b).stopped);
     std::memcpy(user(text_at), "t", 1);
     expect(slave_call(b, N::write, {static_cast<uptr>(fds[1]), text_at, 1}, complete) == -11 && !complete);
     expect(job_of(kernel, b).stop_signal == OK_SIGTTOU && parked(kernel, b, key));
