@@ -128,12 +128,13 @@ template <class Codec> void error_order()
 // Native requests are uniform on all ten profiles (ok/uapi/syscall.h).
 void native_table()
 {
-    const std::array<std::pair<u64, Op>, 15> mapped{{
+    const std::array<std::pair<u64, Op>, 16> mapped{{
         {OK_TIOCSCTTY, Op::acquire}, {OK_TIOCGSID, Op::get_session}, {OK_TIOCGPGRP, Op::get_foreground},
         {OK_TIOCSPGRP, Op::set_foreground}, {OK_TCGETS, Op::get_attributes}, {OK_TCSETS, Op::set_now},
         {OK_TCSETSW, Op::set_drain}, {OK_TCSETSF, Op::set_flush}, {OK_TCSBRK, Op::drain_break},
         {OK_TCFLSH, Op::flush}, {OK_TIOCGWINSZ, Op::get_window}, {OK_TIOCSWINSZ, Op::set_window},
-        {OK_FIONREAD, Op::input_pending}, {OK_TIOCGPTN, Op::get_pty_number}, {OK_TIOCSPTLCK, Op::set_pty_lock}}};
+        {OK_FIONREAD, Op::input_pending}, {OK_TIOCGPTN, Op::get_pty_number}, {OK_TIOCSPTLCK, Op::set_pty_lock},
+        {OK_TIOCNOTTY, Op::detach}}};
     for (const auto &[request, operation] : mapped)
     {
         CHECK(cc::native_operation(request) == operation);
@@ -142,8 +143,8 @@ void native_table()
               static_cast<lu::TerminalIoctl>(operation));
         ++native_requests;
     }
-    // TIOCNOTTY waits for S8; the rest never exist.
-    for (const u64 refused : {u64{OK_TIOCNOTTY}, u64{0x540a}, u64{0x5411},
+    // These never exist natively.
+    for (const u64 refused : {u64{0x540a}, u64{0x5411},
                               u64{0x5412}, u64{0x802c542a}, u64{0x5420}, u64{0x80045440}, u64{0}})
         CHECK(!cc::native_operation(refused));
     CHECK(!cc::native_operation((u64{1} << 32) | OK_TCGETS)); // The native request word is not truncated.

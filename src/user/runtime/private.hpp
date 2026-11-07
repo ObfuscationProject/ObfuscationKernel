@@ -569,13 +569,32 @@ i64 begin_pty_io(Kernel &kernel, sched::ProcessControlBlock &process, sched::Thr
 // call); reads copy out before they consume. Every path drains the terminal
 // outbox, as do the top of step() and the exit commit.
 void tty_console_input(Kernel &kernel, char value, sched::WakeSource source);
-i64 tty_console_write(Kernel &kernel, sched::ProcessControlBlock &process, std::span<const PipeVector> vectors);
+// Writes check TOSTOP first; `fd` and `complete` serve a job-control park.
+i64 tty_console_write(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &caller,
+                      std::span<const PipeVector> vectors, i32 fd, bool &complete);
 // `arguments`/`vectored`: the read or readv call a Linux wait binds.
 i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &caller,
                      const sched::OpenFileDescription &description, std::span<const PipeVector> vectors,
                      bool &complete, const std::array<uptr, 6> &arguments, bool vectored);
 // Native terminal ioctls (struct ok_termios); Linux uses TtyIoctlCodec in linux_bootstrap.hpp.
-i64 tty_terminal_control(Kernel &kernel, sched::ProcessControlBlock &process, const std::array<uptr, 6> &arguments);
+i64 tty_terminal_control(Kernel &kernel, sched::ProcessControlBlock &process, const std::array<uptr, 6> &arguments,
+                         bool &complete);
+// The job-control gate (docs/modules/tty.md section 9.6, Linux
+// __tty_check_change). It acts only when `ref` is the caller's controlling
+// terminal, has a foreground group and the caller is not in it. A write is
+// checked only under TOSTOP. `park`: the caller's group got SIGTTIN/SIGTTOU
+// and the call waits in ThreadWaitReason::job_control until a continue, a
+// foreground change or a signal ends the park; it then re-dispatches.
+enum class TtyAccess : u8 { read, write, change };
+enum class TtyGate : u8 { go, io_error, park };
+TtyGate tty_check(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread,
+                  sched::TerminalRef ref, TtyAccess access);
+// Parks the running `thread` (would_block with `parked` set).
+Status tty_park(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread,
+                sched::TerminalRef ref, i32 fd, bool &parked);
+// tty_check then tty_park: {} to go on, io_error, or the park.
+Status tty_gate(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread,
+                sched::TerminalRef ref, TtyAccess access, i32 fd, bool &parked);
 // Sends queued terminal signals; true when any outbox held entries.
 bool tty_drain_outbox(Kernel &kernel);
 
@@ -782,6 +801,17 @@ void private_jobctl_discard_owed(sched::ProcessId pid, u32 signal);
 bool private_signal_ignored_or_blocked(Kernel &kernel, const sched::ProcessControlBlock &process,
                                        const sched::ThreadControlBlock &thread, u32 signal);
 bool private_group_orphaned(Kernel &kernel, sched::ProcessId group);
+// Linux __tty_check_change for a background member of the terminal's session
+// (`signal` is native SIGTTIN or SIGTTOU). `restart` means the caller's group
+// got the signal and the caller stopped or has a signal that interrupts a
+// park; otherwise the result is io_error (init drops its stop).
+enum class BackgroundAccess : u8 { allowed, io_error, restart };
+BackgroundAccess private_terminal_background(Kernel &kernel, sched::ProcessControlBlock &caller,
+                                             sched::ThreadControlBlock &thread, u32 signal);
+// Parks the running `thread` in ThreadWaitReason::job_control under `key` and,
+// for Linux, binds the park to its syscall origin; -11 with `complete` false.
+i64 private_job_control_park(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread,
+                             u64 key, i32 fd, bool &complete);
 // Native rt_sigaction: SIG_DFL and SIG_IGN only (ok/uapi/job_control.h).
 i64 native_signal_action(Kernel &kernel, sched::ProcessControlBlock &process, const std::array<uptr, 6> &arguments);
 // Exec: SIG_IGN kept under the new numbering (MIPS), except SIGCHLD in a

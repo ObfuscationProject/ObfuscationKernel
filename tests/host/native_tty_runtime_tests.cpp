@@ -2,8 +2,11 @@
 // output observed through the platform console callback, ISIG and SIGWINCH as
 // kernel signals, flushes, large writev and prepared reads. PTYs: slave
 // acquisition, ISIG and SIGWINCH from either end, canonical echo into the
-// master, raw-pair drain, TIOCGPTN/TIOCSPTLCK and the ptmx hangup. Hosted trap
-// and mapping backends; no guest execution.
+// master, raw-pair drain, TIOCGPTN/TIOCSPTLCK and the ptmx hangup. Job
+// control: SIGTTIN, SIGTTOU and TOSTOP on the console and a PTY slave, the
+// job-control park and its re-check after a continue, init's EIO, and every
+// hangup (master close, TIOCNOTTY, session-leader exit, lease revoke). Hosted
+// trap and mapping backends; no guest execution.
 #define OK_NATIVE_MODEL_MEMORY_BYTES 32768
 #define OK_NATIVE_SIGNAL_RUNTIME 1
 #define OK_SYSCALL_ORIGIN_MODEL 1
@@ -22,7 +25,8 @@ namespace
 using N = syscall::Number;
 using Wire = tty::NativeTermiosWire<false>;
 constexpr uptr argument_at = hw::user_begin + 0x2400, vectors_at = hw::user_begin + 0x2800,
-               read_at = hw::user_begin + 0x2c00, text_at = hw::user_begin + 0x3000;
+               read_at = hw::user_begin + 0x2c00, text_at = hw::user_begin + 0x3000,
+               act_at = hw::user_begin + 0x5800, status_at = hw::user_begin + 0x5900, value_at = hw::user_begin + 0x5a00;
 
 std::byte *user(uptr address) { return mock::memory.data() + (address - hw::user_begin); }
 
@@ -103,6 +107,14 @@ struct Session
     u32 epoch{};
 };
 
+// Native rt_sigaction with SIG_DFL or SIG_IGN, as okcrt signal() does.
+void disposition(Kernel &kernel, u64 pid, u32 signal, u64 handler)
+{
+    const ok_sigaction action{handler, 0, 0};
+    std::memcpy(user(act_at), &action, sizeof(action));
+    expect(native_call(kernel, pid, N::rt_sigaction, {signal, act_at, 0, 8}) == 0);
+}
+
 Session open_console(Kernel &kernel)
 {
     Session session{};
@@ -122,6 +134,10 @@ Session open_console(Kernel &kernel)
     expect(native_call(kernel, session.login, N::setpgid, {session.job, session.job}) == 0);
     scheduler.find(session.job)->resources().personality = sched::UserPersonality::linux;
     for (const u32 signal : {u32{OK_SIGINT}, u32{OK_SIGQUIT}, u32{OK_SIGWINCH}}) handle(kernel, session.job, signal);
+    // Like an interactive shell, the login shell ignores the job-control stops
+    // so it may change the terminal from the background.
+    for (const u32 signal : {u32{OK_SIGTTIN}, u32{OK_SIGTTOU}, u32{OK_SIGTSTP}})
+        disposition(kernel, session.login, signal, OK_SIG_IGN);
     return session;
 }
 
@@ -401,6 +417,9 @@ PtySession pty_session(Kernel &kernel, const Session &s, std::array<i32, 2> &fds
     for (const u32 signal : {u32{OK_SIGINT}, u32{OK_SIGWINCH}}) handle(kernel, p.job, signal);
     std::memcpy(user(argument_at), &p.job, 4);
     expect(fd_ioctl(kernel, p.shell, fds[1], OK_TIOCSPGRP, argument_at) == 0);
+    // The shell changes its terminal from the background (through the master
+    // too: Linux checks the slave a master names), so it ignores SIGTTOU.
+    disposition(kernel, p.shell, OK_SIGTTOU, OK_SIG_IGN);
     return p;
 }
 
@@ -464,24 +483,25 @@ bool pty_terminal(Kernel &kernel, const Session &s, PtySession &p, std::array<i3
 bool pty_wakes(Kernel &kernel, const PtySession &p, const std::array<i32, 2> &fds)
 {
     auto &scheduler = kernel.scheduler();
-    const auto *reader = scheduler.find_thread(p.shell, p.shell);
+    // The foreground job reads the slave; a background read would be checked.
+    const auto *reader = scheduler.find_thread(p.job, p.job);
     const auto master = scheduler.find(p.shell)->resources().files.entry(fds[0])->description;
     const auto blocked = [&] {
         return reader->state == sched::ProcessState::blocked && reader->wait_reason == sched::ThreadWaitReason::pty_read;
     };
     const auto block = [&] {
-        activate(kernel, p.shell, p.shell);
-        scheduler.find_thread(p.shell, p.shell)->syscall_pending = true;
+        activate(kernel, p.job, p.job);
+        scheduler.find_thread(p.job, p.job)->syscall_pending = true;
         bool complete = true;
-        expect(native::dispatch(kernel, p.shell, {static_cast<uptr>(N::read), {static_cast<uptr>(fds[1]), read_at, 10}},
+        expect(native::dispatch(kernel, p.job, {static_cast<uptr>(N::read), {static_cast<uptr>(fds[1]), read_at, 10}},
                                 complete) == -11 && !complete && blocked());
     };
     // A woken reader re-plans: -11 when still unmet, else the bytes.
     const auto resume = [&] {
-        activate(kernel, p.shell, p.shell);
+        activate(kernel, p.job, p.job);
         bool complete = true;
-        const auto result = native::dispatch(kernel, p.shell, {static_cast<uptr>(N::read), {~uptr{0}, 0, 0}}, complete);
-        if (complete) scheduler.find_thread(p.shell, p.shell)->syscall_pending = false;
+        const auto result = native::dispatch(kernel, p.job, {static_cast<uptr>(N::read), {~uptr{0}, 0, 0}}, complete);
+        if (complete) scheduler.find_thread(p.job, p.job)->syscall_pending = false;
         return result;
     };
     const auto master_input = [&](std::string_view text) {
@@ -492,7 +512,7 @@ bool pty_wakes(Kernel &kernel, const PtySession &p, const std::array<i32, 2> &fd
         std::array<u8, 36> bytes{};
         expect(Wire::encode(termios, {}, bytes).ok());
         std::memcpy(user(argument_at), bytes.data(), bytes.size());
-        expect(fd_ioctl(kernel, p.job, fds[0], OK_TCSETS, argument_at) == 0); // Through the master, by another process.
+        expect(fd_ioctl(kernel, p.shell, fds[0], OK_TCSETS, argument_at) == 0); // Through the master, by another process.
     };
     auto raw = tty::linux_pty_termios();
     raw.lflag &= ~(tty::lflag::icanon | tty::lflag::echo);
@@ -527,7 +547,7 @@ bool canonical_echo(Kernel &kernel, const PtySession &p, const std::array<i32, 2
 {
     expect(pty_write(kernel, p.shell, fds[0], "hel\x7flo\r") == 7);
     expect(pty_read(kernel, p.shell, fds[0]) == "hel\b \blo\r\n");
-    expect(pty_read(kernel, p.shell, fds[1]) == "helo\n");
+    expect(pty_read(kernel, p.job, fds[1]) == "helo\n"); // The foreground job reads the slave.
     // A partial line does not satisfy the slave; OPOST expands slave output.
     expect(pty_write(kernel, p.shell, fds[0], "wait") == 4 && pty_read(kernel, p.shell, fds[0]) == "wait");
     expect(pty_poll(kernel, p.shell, fds[1], OK_POLLIN) == 0);
@@ -686,9 +706,320 @@ bool vmin_wake(Kernel &kernel, const Session &s)
     type("pqr");
     block(10);
     termios[tty::Cc::min] = 2;
+    // The Linux job is in the background; ignoring SIGTTOU lets it change the terminal.
+    auto &ttou = *native::private_signal_table(kernel, s.job)->find(OK_SIGTTOU);
+    ttou.handler = sched::SignalAction::ignored_handler;
     set_termios(kernel, s.job, termios);
+    ttou = {};
     expect(!blocked() && read_text(kernel, s.login, 10) == "pqr");
     take_output();
+    return true;
+}
+
+// Job control (docs/modules/tty.md section 9.6). A native member forked from
+// `parent` with SIG_DFL job-control stops, in its own group or the parent's.
+u64 member(Kernel &kernel, u64 parent, bool own_group)
+{
+    const auto child = fork(kernel, parent);
+    kernel.scheduler().find(child)->threads()[0].native_active = true;
+    for (const u32 signal : {u32{OK_SIGTTIN}, u32{OK_SIGTTOU}, u32{OK_SIGTSTP}}) disposition(kernel, child, signal, OK_SIG_DFL);
+    if (own_group) expect(native_call(kernel, parent, N::setpgid, {child, child}) == 0);
+    return child;
+}
+const sched::JobControlState &job_of(Kernel &kernel, u64 pid) { return kernel.scheduler().find(pid)->job_control(); }
+bool parked(Kernel &kernel, u64 pid, u64 key)
+{
+    const auto *thread = kernel.scheduler().find_thread(pid, pid);
+    return thread->state == sched::ProcessState::blocked && thread->wait_reason == sched::ThreadWaitReason::job_control &&
+        thread->wait_key == key;
+}
+// A stop as wait4(WNOHANG | WUNTRACED) reports it to the native parent.
+bool reported_stop(Kernel &kernel, u64 parent, u64 child, u32 signal)
+{
+    const auto result = native_call(kernel, parent, N::wait4, {child, status_at, OK_WNOHANG | OK_WUNTRACED, 0});
+    u32 status{};
+    std::memcpy(&status, user(status_at), 4);
+    return result == static_cast<i64>(child) && status == ((signal << 8) | 0x7f);
+}
+void cont(Kernel &kernel, u64 pid) { static_cast<void>(native::send_kernel_process_signal(kernel, pid, OK_SIGCONT)); }
+i64 set_group(Kernel &kernel, u64 setter, u64 group, bool *pending = nullptr)
+{
+    const auto value = static_cast<i32>(group);
+    std::memcpy(user(value_at), &value, 4);
+    return native_call(kernel, setter, N::ioctl, {0, OK_TIOCSPGRP, value_at}, pending);
+}
+i64 call_pending(Kernel &kernel, u64 pid, N number, std::array<uptr, 6> arguments)
+{
+    bool pending = false;
+    const auto result = native_call(kernel, pid, number, arguments, &pending);
+    expect(pending == (result == -11));
+    return result;
+}
+
+// Background members of the console's session: SIGTTIN on read, SIGTTOU on
+// the checked requests and under TOSTOP on write, the job-control park and
+// its re-check, SIG_IGN, an orphaned group and a lease member in another session.
+bool background_console(Kernel &kernel, const Session &s, bool &ttou, bool &tostop)
+{
+    auto &scheduler = kernel.scheduler();
+    auto &console = scheduler.console_terminal();
+    set_termios(kernel, s.login, tty::console_compat_termios());
+    expect(console.foreground == s.login);
+    take_output();
+    const auto bg = member(kernel, s.login, true);
+    // Readiness has no job check (n_tty_poll); the read has.
+    type("z");
+    ok_pollfd request{0, OK_POLLIN, 0};
+    std::memcpy(user(argument_at), &request, sizeof(request));
+    expect(native_call(kernel, bg, N::poll, {argument_at, 1, 0}) == 1);
+    std::memcpy(&request, user(argument_at), sizeof(request));
+    expect(request.revents == OK_POLLIN);
+    // A SIG_DFL reader stops with its group and parks under the console key.
+    expect(call_pending(kernel, bg, N::read, {0, read_at, 8}) == -11);
+    expect(job_of(kernel, bg).stopped && job_of(kernel, bg).stop_signal == OK_SIGTTIN && parked(kernel, bg, 0));
+    expect(reported_stop(kernel, s.login, bg, OK_SIGTTIN));
+    // A continue alone re-runs the check: still in the background, it stops again.
+    cont(kernel, bg);
+    expect(!job_of(kernel, bg).stopped && !parked(kernel, bg, 0));
+    expect(call_pending(kernel, bg, N::read, {0, read_at, 8}) == -11 && job_of(kernel, bg).stopped);
+    // A foreground change ends the park; once continued, the read takes the byte.
+    expect(set_group(kernel, s.login, bg) == 0);
+    expect(!parked(kernel, bg, 0) && job_of(kernel, bg).stopped);
+    cont(kernel, bg);
+    expect(native_call(kernel, bg, N::read, {0, read_at, 8}) == 1 && *user(read_at) == std::byte{'z'});
+    // The login shell ignores SIGTTOU: its background TIOCSPGRP goes ahead.
+    expect(set_group(kernel, s.login, s.login) == 0 && console.foreground == s.login);
+    // SIGTTOU for TCSETS, TCSBRK, TCFLSH and TIOCSPGRP, then the same request completes in the foreground.
+    std::array<u8, 36> bytes{};
+    expect(Wire::encode(tty::console_compat_termios(), {}, bytes).ok());
+    const auto own = static_cast<i32>(bg);
+    for (const auto &[request_number, argument] : std::array<std::pair<u64, uptr>, 4>{
+             {{OK_TCSETS, text_at}, {OK_TCSBRK, 1}, {OK_TCFLSH, 0}, {OK_TIOCSPGRP, act_at + 0x40}}})
+    {
+        std::memcpy(user(text_at), bytes.data(), bytes.size());
+        std::memcpy(user(act_at + 0x40), &own, 4);
+        expect(call_pending(kernel, bg, N::ioctl, {0, request_number, argument}) == -11);
+        expect(job_of(kernel, bg).stop_signal == OK_SIGTTOU && parked(kernel, bg, 0));
+        expect(reported_stop(kernel, s.login, bg, OK_SIGTTOU));
+        expect(set_group(kernel, s.login, bg) == 0);
+        cont(kernel, bg);
+        expect(native_call(kernel, bg, N::ioctl, {0, request_number, argument}) == 0);
+        expect(set_group(kernel, s.login, s.login) == 0);
+    }
+    // TCGETS, TIOCGWINSZ and TIOCSWINSZ are never checked.
+    expect(native_call(kernel, bg, N::ioctl, {0, OK_TCGETS, argument_at}) == 0);
+    expect(native_call(kernel, bg, N::ioctl, {0, OK_TIOCGWINSZ, argument_at}) == 0);
+    expect(native_call(kernel, bg, N::ioctl, {0, OK_TIOCSWINSZ, argument_at}) == 0 && !job_of(kernel, bg).stopped);
+    ttou = true;
+    // TOSTOP: a background write stops; without TOSTOP or under SIG_IGN it goes out.
+    std::memcpy(user(text_at), "w", 1);
+    expect(native_call(kernel, bg, N::write, {1, text_at, 1}) == 1 && take_output() == "w");
+    auto stopping = tty::console_compat_termios();
+    stopping.lflag |= tty::lflag::tostop;
+    set_termios(kernel, s.login, stopping);
+    expect(call_pending(kernel, bg, N::write, {1, text_at, 1}) == -11 && console_output.empty());
+    expect(job_of(kernel, bg).stop_signal == OK_SIGTTOU && parked(kernel, bg, 0) && reported_stop(kernel, s.login, bg, OK_SIGTTOU));
+    expect(set_group(kernel, s.login, bg) == 0);
+    cont(kernel, bg);
+    expect(native_call(kernel, bg, N::write, {1, text_at, 1}) == 1 && take_output() == "w");
+    expect(set_group(kernel, s.login, s.login) == 0);
+    disposition(kernel, bg, OK_SIGTTOU, OK_SIG_IGN);
+    expect(native_call(kernel, bg, N::write, {1, text_at, 1}) == 1 && take_output() == "w");
+    // SIG_IGN: a read is EIO, a change goes ahead.
+    disposition(kernel, bg, OK_SIGTTIN, OK_SIG_IGN);
+    type("y");
+    expect(native_call(kernel, bg, N::read, {0, read_at, 8}) == -5 && console.ldisc.buffered() == 1);
+    std::memcpy(user(text_at), bytes.data(), bytes.size());
+    expect(native_call(kernel, bg, N::ioctl, {0, OK_TCSETS, text_at}) == 0 && console.termios == tty::console_compat_termios());
+    tostop = true;
+    // The login shell's own group is orphaned (its parent, init, is in another
+    // session): EIO without a signal, ENOTTY for TIOCSPGRP.
+    const auto lone = member(kernel, s.login, false);
+    expect(scheduler.process_group_orphaned(s.login));
+    expect(set_group(kernel, s.login, bg) == 0);
+    expect(native_call(kernel, lone, N::read, {0, read_at, 8}) == -5);
+    std::memcpy(user(text_at), bytes.data(), bytes.size());
+    expect(native_call(kernel, lone, N::ioctl, {0, OK_TCSETS, text_at}) == -5);
+    expect(set_group(kernel, lone, lone) == -25 && console.foreground == bg);
+    expect(!job_of(kernel, lone).stopped && !job_of(kernel, bg).stopped);
+    expect(set_group(kernel, s.login, s.login) == 0);
+    // A lease member whose session does not own the console is not job-controlled.
+    const auto other = member(kernel, s.login, false);
+    expect(native_call(kernel, other, N::setsid, {}) == static_cast<i64>(other));
+    expect(native_call(kernel, other, N::read, {0, read_at, 8}) == 1 && *user(read_at) == std::byte{'y'});
+    for (const auto pid : {bg, lone, other}) release(kernel, pid);
+    return true;
+}
+
+// cat blocked on the terminal, ^Z, bg: the continued read takes SIGTTIN
+// instead of the input; fg lets it read.
+bool regate(Kernel &kernel, const Session &s)
+{
+    auto &console = kernel.scheduler().console_terminal();
+    set_termios(kernel, s.login, tty::linux_std_termios());
+    expect(set_group(kernel, s.login, s.job) == 0);
+    take_output();
+    expect(call_pending(kernel, s.job, N::read, {0, read_at, 64}) == -11);
+    const auto *reader = kernel.scheduler().find_thread(s.job, s.job);
+    expect(reader->wait_reason == sched::ThreadWaitReason::console_read);
+    // ^Z stops the job; its read stays armed while it is stopped.
+    type("\x1a");
+    expect(job_of(kernel, s.job).stopped && reader->state == sched::ProcessState::blocked &&
+           reader->wait_reason == sched::ThreadWaitReason::console_read);
+    // The shell takes the terminal back and continues the job in the background.
+    expect(set_group(kernel, s.login, s.login) == 0);
+    cont(kernel, s.job);
+    expect(!job_of(kernel, s.job).stopped && reader->state == sched::ProcessState::runnable);
+    type("cat\r");
+    expect(call_pending(kernel, s.job, N::read, {0, read_at, 64}) == -11);
+    expect(job_of(kernel, s.job).stopped && job_of(kernel, s.job).stop_signal == OK_SIGTTIN && parked(kernel, s.job, 0));
+    expect(console.ldisc.inq(console.termios) == 4);
+    expect(set_group(kernel, s.login, s.job) == 0);
+    cont(kernel, s.job);
+    expect(read_text(kernel, s.job) == "cat\n");
+    expect(set_group(kernel, s.job, s.login) == 0);
+    while (take_signal(s.job)) {}
+    take_output();
+    return true;
+}
+
+// A PTY slave: SIGTTIN and TOSTOP stop a native background member, which
+// parks under the slave's key; init, whose stop is dropped, gets EIO.
+bool pty_job_control(Kernel &kernel, const Session &s)
+{
+    auto &scheduler = kernel.scheduler();
+    const auto fds = raw_pair(kernel, s.init);
+    expect(fd_ioctl(kernel, s.init, fds[1], OK_TIOCSCTTY) == 0);
+    const auto slot = scheduler.open_description(scheduler.find(s.init)->resources().files.entry(fds[1])->description)
+                          ->pty_endpoint.slot;
+    const u64 key = slot + 1u;
+    const auto a = member(kernel, s.init, true);
+    const auto b = member(kernel, a, false);
+    // b joins init's group, which a (in another group of the session) now holds.
+    expect(native_call(kernel, b, N::setpgid, {0, s.init}) == 0 && !scheduler.process_group_orphaned(s.init));
+    const auto group_a = static_cast<i32>(a), group_init = static_cast<i32>(s.init);
+    std::memcpy(user(value_at), &group_a, 4);
+    expect(fd_ioctl(kernel, s.init, fds[1], OK_TIOCSPGRP, value_at) == 0);
+    // Init's group gets SIGTTIN: b stops, init drops the stop and reads EIO
+    // instead of parking (tty.md section 14, item 13).
+    expect(pty_call(kernel, s.init, N::read, {static_cast<uptr>(fds[1]), read_at, 8}) == -5);
+    expect(job_of(kernel, b).stopped && !job_of(kernel, s.init).stopped);
+    cont(kernel, b);
+    const auto slave_call = [&](u64 pid, N number, std::array<uptr, 6> arguments, bool &complete) {
+        activate(kernel, pid, pid);
+        scheduler.find_thread(pid, pid)->syscall_pending = true;
+        complete = true;
+        const auto result = native::dispatch(kernel, pid, {static_cast<uptr>(number), arguments}, complete);
+        if (complete) scheduler.find_thread(pid, pid)->syscall_pending = false;
+        return result;
+    };
+    bool complete = true;
+    expect(slave_call(b, N::read, {static_cast<uptr>(fds[1]), read_at, 8}, complete) == -11 && !complete);
+    expect(job_of(kernel, b).stopped && job_of(kernel, b).stop_signal == OK_SIGTTIN && parked(kernel, b, key));
+    // TOSTOP, set by the foreground: the continued member's background write stops.
+    auto termios = tty::raw_pair_termios();
+    termios.lflag |= tty::lflag::tostop;
+    std::array<u8, 36> bytes{};
+    expect(Wire::encode(termios, {}, bytes).ok());
+    std::memcpy(user(argument_at), bytes.data(), bytes.size());
+    expect(fd_ioctl(kernel, a, fds[0], OK_TCSETS, argument_at) == 0);
+    scheduler.find_thread(b, b)->syscall_pending = false; // The model drops the parked read.
+    cont(kernel, b);
+    std::memcpy(user(text_at), "t", 1);
+    expect(slave_call(b, N::write, {static_cast<uptr>(fds[1]), text_at, 1}, complete) == -11 && !complete);
+    expect(job_of(kernel, b).stop_signal == OK_SIGTTOU && parked(kernel, b, key));
+    // The foreground hands the slave to init's group; the continued write goes out.
+    std::memcpy(user(value_at), &group_init, 4);
+    expect(fd_ioctl(kernel, a, fds[1], OK_TIOCSPGRP, value_at) == 0 && !parked(kernel, b, key));
+    cont(kernel, b);
+    expect(slave_call(b, N::write, {static_cast<uptr>(fds[1]), text_at, 1}, complete) == 1 && complete);
+    expect(pty_read(kernel, s.init, fds[0]) == "t");
+    for (const auto pid : {b, a}) release(kernel, pid);
+    for (const auto fd : fds) expect(pty_call(kernel, s.init, N::close, {static_cast<uptr>(fd)}) == 0);
+    native::tty_drain_outbox(kernel);
+    expect(native::private_signal_find(s.init)->deferred_fatal == 0); // Init drops the master-close SIGHUP.
+    return true;
+}
+
+// Hangups (section 9.7): the master's last close, TIOCNOTTY from a member and
+// from the leader, and a session leader's exit followed by the orphan pass.
+u64 pty_leader(Kernel &kernel, const Session &s, std::array<i32, 2> &fds, sched::TerminalRef &ref)
+{
+    const auto leader = fork(kernel, s.init);
+    kernel.scheduler().find(leader)->threads()[0].native_active = true;
+    expect(native_call(kernel, leader, N::setsid, {}) == static_cast<i64>(leader));
+    fds = raw_pair(kernel, leader);
+    expect(fd_ioctl(kernel, leader, fds[1], OK_TIOCSCTTY) == 0);
+    activate(kernel, leader, leader);
+    const auto subject = kernel.posix().terminal_descriptor(fds[1]); CHECK(subject);
+    ref = subject.value().terminal;
+    return leader;
+}
+void linux_handlers(Kernel &kernel, u64 pid)
+{
+    kernel.scheduler().find(pid)->resources().personality = sched::UserPersonality::linux;
+    for (const u32 signal : {u32{OK_SIGHUP}, u32{OK_SIGCONT}}) handle(kernel, pid, signal);
+}
+bool hangups(Kernel &kernel, const Session &s, bool &notty)
+{
+    auto &scheduler = kernel.scheduler();
+    std::array<i32, 2> fds{};
+    sched::TerminalRef ref{};
+    // Master's last close: SIGHUP then SIGCONT to the leader, queued in that
+    // order in the slave's outbox; the session loses the terminal.
+    auto leader = pty_leader(kernel, s, fds, ref);
+    auto *terminal = scheduler.terminal(ref);
+    linux_handlers(kernel, leader);
+    expect(scheduler.close_descriptor(scheduler.find(leader)->resources(), fds[0]).ok());
+    expect(terminal->outbox_count == 2 && !terminal->session && !terminal->foreground);
+    expect(terminal->outbox[0] == (sched::TerminalOutboxEntry{leader, tty::TerminalSignal::hup, false}));
+    expect(terminal->outbox[1] == (sched::TerminalOutboxEntry{leader, tty::TerminalSignal::cont, false}));
+    expect(!scheduler.controlling_terminal(*scheduler.find(leader)));
+    expect(native::tty_drain_outbox(kernel) && !terminal->outbox_count);
+    i32 code{};
+    expect(take_signal(leader, &code) == OK_SIGHUP && code == 128 && take_signal(leader) == OK_SIGCONT);
+    scheduler.find(leader)->resources().personality = sched::UserPersonality::native;
+    expect(pty_call(kernel, leader, N::close, {static_cast<uptr>(fds[1])}) == 0);
+    release(kernel, leader);
+
+    // TIOCNOTTY by a member drops only its own terminal (a fork keeps that);
+    // by the leader it sends SIGHUP then SIGCONT to the foreground group.
+    leader = pty_leader(kernel, s, fds, ref);
+    terminal = scheduler.terminal(ref);
+    const auto job = member(kernel, leader, true);
+    const auto peer = member(kernel, leader, false);
+    std::memcpy(user(value_at), &job, 4);
+    expect(fd_ioctl(kernel, leader, fds[1], OK_TIOCSPGRP, value_at) == 0);
+    expect(fd_ioctl(kernel, leader, fds[0], OK_TIOCNOTTY) == -25); // Never on a master.
+    expect(fd_ioctl(kernel, peer, fds[1], OK_TIOCNOTTY) == 0 && scheduler.find(peer)->ctty_detached());
+    expect(!scheduler.controlling_terminal(*scheduler.find(peer)) && !terminal->outbox_count);
+    expect(fd_ioctl(kernel, peer, fds[1], OK_TIOCNOTTY) == -25 && fd_ioctl(kernel, peer, fds[1], OK_TIOCGPGRP, value_at) == -25);
+    const auto heir = member(kernel, peer, false);
+    expect(!scheduler.controlling_terminal(*scheduler.find(heir)));
+    expect(fd_ioctl(kernel, leader, fds[1], OK_TIOCGSID, value_at) == 0 && int_at(value_at) == static_cast<i32>(leader));
+    linux_handlers(kernel, job);
+    expect(fd_ioctl(kernel, leader, fds[1], OK_TIOCNOTTY) == 0 && !terminal->session && !terminal->foreground);
+    expect(take_signal(job) == OK_SIGHUP && take_signal(job) == OK_SIGCONT && !take_signal(job));
+    expect(fd_ioctl(kernel, leader, fds[1], OK_TIOCGSID, value_at) == -25);
+    // Deviation 12: a re-acquire by the leader gives members forked earlier the
+    // terminal again; a member that detached itself stays detached.
+    expect(fd_ioctl(kernel, leader, fds[1], OK_TIOCSCTTY) == 0);
+    expect(scheduler.controlling_terminal(*scheduler.find(job)) == ref && !scheduler.controlling_terminal(*scheduler.find(peer)));
+    notty = true;
+
+    // The leader's exit: SIGHUP to the foreground group, then the orphan pass
+    // (the group lost its parent in the session and has a stopped member)
+    // sends SIGHUP and SIGCONT. The terminal signal comes first.
+    std::memcpy(user(value_at), &job, 4);
+    expect(fd_ioctl(kernel, leader, fds[1], OK_TIOCSPGRP, value_at) == 0);
+    expect(native::send_kernel_process_signal(kernel, job, OK_SIGSTOP) == native::KernelSignalSend::sent);
+    expect(job_of(kernel, job).stopped && !scheduler.process_group_orphaned(job));
+    raw_exit(kernel, leader, leader, 0, true);
+    expect(!terminal->session && !terminal->outbox_count && scheduler.find(job)->parent_pid() == sched::user_init_pid);
+    expect(!job_of(kernel, job).stopped && job_of(kernel, job).continue_report);
+    expect(take_signal(job) == OK_SIGHUP && take_signal(job) == OK_SIGCONT && !take_signal(job));
+    for (const auto pid : {heir, peer, job}) release(kernel, pid);
+    CHECK(scheduler.reap_process(leader));
     return true;
 }
 } // namespace
@@ -696,7 +1027,6 @@ bool vmin_wake(Kernel &kernel, const Session &s)
 int main()
 {
     static_cast<void>(&create); // Fixture helpers this suite does not need.
-    static_cast<void>(&release);
     static Kernel kernel; CHECK(kernel.boot({}));
     CHECK(native::entry_stacks.activate(native::entry_stack_arena));
     const auto session = open_console(kernel);
@@ -708,12 +1038,21 @@ int main()
     const bool large = writev_8k(kernel, session);
     const bool kept = efault_keeps_input(kernel, session);
     const bool vmin = vmin_wake(kernel, session);
-    // Revocation resets the whole terminal, ldisc and window included.
+    bool ttou = false, tostop = false, notty = false;
+    const bool ttin = background_console(kernel, session, ttou, tostop);
+    const bool regated = regate(kernel, session);
+    // Revocation hangs the console up (SIGHUP then SIGCONT to its session
+    // leader) and resets the whole terminal, ldisc and window included.
     auto &console = kernel.scheduler().console_terminal();
     set_termios(kernel, session.login, tty::linux_std_termios());
     type("left");
     expect(native_call(kernel, session.init, N::console_revoke, {session.epoch}) == 0);
     expect(console.termios == tty::console_compat_termios() && !console.ldisc.buffered() && !console.session);
+    expect(console.outbox_count == 2 && console.outbox[0] == (sched::TerminalOutboxEntry{session.login, tty::TerminalSignal::hup, false}) &&
+           console.outbox[1] == (sched::TerminalOutboxEntry{session.login, tty::TerminalSignal::cont, false}));
+    expect(native::tty_drain_outbox(kernel) && native::private_signal_find(session.login)->deferred_fatal == OK_SIGHUP);
+    const bool init_eio = pty_job_control(kernel, session);
+    const bool hung_up = hangups(kernel, session, notty);
     PtySession pty{};
     std::array<i32, 2> fds{};
     i32 master = -1, slave = -1;
@@ -727,7 +1066,8 @@ int main()
     expect(native::runtime_status().ok());
     std::printf("NATIVE_TTY_RUNTIME_PASS console=1 compat_default=%d icanon=%d echo=%d isig=%d winch=%d flush=%d "
                 "writev_8k=%d efault_keeps_input=%d vmin_wake=%d pty=%d canonical_echo=%d ptmx_hangup_discard=%d "
-                "raw_drain=%d ptn_lock=%d hosted=1 guest=0\n",
+                "raw_drain=%d ptn_lock=%d linux=%d sigttin=%d sigttou=%d tostop=%d regate=%d hangup=%d tiocnotty=%d "
+                "hosted=1 guest=0\n",
                 compat, canonical, canonical, signals, window, flushed, large, kept, vmin && woken, terminal, echoed, discarded,
-                drained, locked);
+                drained, locked, regated, ttin && init_eio, ttou, tostop, regated, hung_up, notty);
 }

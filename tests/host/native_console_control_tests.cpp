@@ -1,11 +1,14 @@
 // Canonical scheduler and native/Linux dispatch with hosted checked-copy maps.
+// The signal runtime is on, as in the kernel: background access is job-controlled.
+#define OK_NATIVE_SIGNAL_RUNTIME 1
 #include "native_clock_model.hpp"
 
 namespace
 {
 using N = syscall::Number;
 using Pid = sched::ProcessId;
-constexpr uptr output = hw::user_begin + 128, vectors = hw::user_begin + 512;
+constexpr uptr output = hw::user_begin + 128, vectors = hw::user_begin + 512, act_at = hw::user_begin + 1024,
+               status_at = hw::user_begin + 1088;
 usize checks{}, profile_calls{};
 
 void activate(Kernel &kernel, Pid pid)
@@ -53,6 +56,35 @@ Pid fork(Kernel &kernel, Pid parent)
     activate(kernel, parent);
     const auto child = kernel.scheduler().fork_process(parent); CHECK(child);
     return child.value();
+}
+
+// Native rt_sigaction with SIG_DFL or SIG_IGN (ok/uapi/job_control.h).
+void disposition(Kernel &kernel, Pid pid, u32 signal, u64 handler)
+{
+    const ok_sigaction action{handler, 0, 0};
+    std::memcpy(mock::memory.data() + (act_at - hw::user_begin), &action, sizeof(action));
+    CHECK(call(kernel, pid, N::rt_sigaction, {signal, act_at, 0, 8}) == 0);
+}
+
+// The process is stopped by `signal` and its thread parks in job control
+// under the console's key; its native parent sees the stop with WUNTRACED.
+void stopped_by(Kernel &kernel, Pid parent, Pid pid, u32 signal)
+{
+    const auto *process = kernel.scheduler().find(pid);
+    const auto &thread = process->threads()[0];
+    CHECK(process->job_control().stopped && process->job_control().stop_signal == signal);
+    CHECK(thread.state == sched::ProcessState::blocked && thread.wait_reason == sched::ThreadWaitReason::job_control &&
+          thread.wait_key == 0);
+    CHECK(call(kernel, parent, N::wait4, {pid, status_at, OK_WNOHANG | OK_WUNTRACED, 0}) == static_cast<i64>(pid));
+    u32 status{};
+    std::memcpy(&status, mock::memory.data() + (status_at - hw::user_begin), 4);
+    CHECK(status == ((signal << 8) | 0x7f));
+}
+
+void cont(Kernel &kernel, Pid pid)
+{
+    CHECK(native::send_kernel_process_signal(kernel, pid, OK_SIGCONT) == native::KernelSignalSend::ignored);
+    CHECK(!kernel.scheduler().find(pid)->job_control().stopped);
 }
 
 template <lu::Profile Profile>
@@ -197,7 +229,9 @@ void linux_profile(Kernel &kernel, Pid login, Pid peer)
     CHECK(console.ldisc.buffered() == (wide ? 1u : 0u));
     CHECK(dispatch(0, *Tty::number(T::flush), 2) == 0 && !console.ldisc.buffered());
     CHECK(dispatch(0, *Tty::number(T::flush), 3) == -22);
-    for (const auto refused : {T::detach, T::get_pty_number, T::set_pty_lock})
+    // TIOCNOTTY now acts (the login shell would hang its own console up);
+    // the PTY-only requests stay refused on the console.
+    for (const auto refused : {T::get_pty_number, T::set_pty_lock})
         CHECK(dispatch(0, *Tty::number(refused), output) == -25);
     CHECK(Ioctl::encode_pid(expected, static_cast<i32>(login)));
     std::memcpy(mock::memory.data() + 128, expected.data(), expected.size());
@@ -224,7 +258,7 @@ void terminal_rows(Kernel &kernel, Pid login, Pid peer)
                               OK_TIOCSPGRP, OK_TIOCGPGRP, OK_TIOCSCTTY})
         CHECK(ioctl(kernel, 1, request, hw::user_end) == -25);
     CHECK(ioctl(kernel, login, OK_TCSETS, hw::user_end) == -14);
-    CHECK(ioctl(kernel, login, OK_TIOCNOTTY) == -25 && ioctl(kernel, login, 0x80045430U, output) == -25);
+    CHECK(ioctl(kernel, 1, OK_TIOCNOTTY) == -25 && ioctl(kernel, login, 0x80045430U, output) == -25);
     // Cooked mode: ICANON holds input until a line ends; FIONREAD counts complete lines.
     auto cooked = tty::console_compat_termios();
     cooked.lflag |= tty::lflag::icanon;
@@ -357,7 +391,8 @@ void readiness_handoff(Kernel &kernel, Pid login, Pid peer)
         {
             ok_pollfd observed{};
             std::memcpy(&observed, mock::memory.data() + 160, sizeof(observed));
-            CHECK(observed.fd == 0 && observed.events == OK_POLLIN && observed.revents == OK_POLLERR);
+            // A background member sees readiness (no POLLERR); its read is checked.
+            CHECK(observed.fd == 0 && observed.events == OK_POLLIN && observed.revents == OK_POLLIN);
         }
         CHECK(native::retire_native_thread(*waiter));
         waiter->native_frame = original_frame;
@@ -371,7 +406,12 @@ void readiness_handoff(Kernel &kernel, Pid login, Pid peer)
         CHECK(call(kernel, peer, N::read, {0, output, 1}) == 1 && mock::memory[128] == static_cast<std::byte>(nonce));
         CHECK(invoke(kernel, peer, N::read, {0, output, 1}) == std::pair(i64{-11}, false));
         store_pid(static_cast<i32>(login)); CHECK(ioctl(kernel, login, OK_TIOCSPGRP, output) == 0);
-        CHECK(invoke(kernel, peer, N::read, {0, output, 1}) == std::pair(i64{-5}, true));
+        // A reader already blocked keeps its wait across a foreground change
+        // (Linux checks at entry) and takes the next input.
+        const auto &blocked = scheduler.find(peer)->threads()[0];
+        CHECK(blocked.state == sched::ProcessState::blocked && blocked.wait_reason == sched::ThreadWaitReason::console_read);
+        native::input('k');
+        CHECK(invoke(kernel, peer, N::read, {0, output, 1}) == std::pair(i64{1}, true) && mock::memory[128] == std::byte{'k'});
     }
 }
 
@@ -438,8 +478,20 @@ void lifecycle(Kernel &kernel)
     const auto pipe = kernel.posix().pipe(); CHECK(pipe);
     CHECK(ioctl(kernel, login, OK_TIOCGSID, output, pipe.value()[0]) == -25);
     const auto peer = fork(kernel, login);
+    // Like an interactive shell, the login shell ignores the job-control
+    // stops; the peer keeps SIG_DFL (forked before).
+    for (const u32 signal : {u32{OK_SIGTTIN}, u32{OK_SIGTTOU}, u32{OK_SIGTSTP}}) disposition(kernel, login, signal, OK_SIG_IGN);
     CHECK(call(kernel, login, N::setpgid, {peer, peer}) == 0);
     native::input('a');
+    // A background read (tty.md section 9.6): the SIG_DFL peer stops with its
+    // group and parks; a continue re-runs the check; under SIG_IGN it is EIO.
+    CHECK(invoke(kernel, peer, N::read, {0, output, 1}) == std::pair(i64{-11}, false));
+    stopped_by(kernel, login, peer, OK_SIGTTIN);
+    cont(kernel, peer);
+    CHECK(invoke(kernel, peer, N::read, {0, output, 1}) == std::pair(i64{-11}, false));
+    stopped_by(kernel, login, peer, OK_SIGTTIN);
+    cont(kernel, peer);
+    disposition(kernel, peer, OK_SIGTTIN, OK_SIG_IGN);
     CHECK(call(kernel, peer, N::read, {0, output, 1}) == -5);
     CHECK(call(kernel, login, N::read, {0, output, 1}) == 1 && mock::memory[128] == std::byte{'a'});
     for (const auto &[target, error] : std::array<std::pair<i32, i64>, 4>{{{-1, -22}, {0, -3}, {999999, -3}, {1, -1}}})
@@ -452,30 +504,67 @@ void lifecycle(Kernel &kernel)
     CHECK(ioctl(kernel, login, OK_TIOCSPGRP, output) == -14);
     mock::forbidden = 0;
     CHECK(ioctl(kernel, login, OK_TIOCGPGRP, output) == 0 && loaded_pid() == static_cast<i32>(login));
+    // A background TIOCSPGRP gets SIGTTOU (the SIG_DFL peer stops); under
+    // SIG_IGN it goes ahead.
+    store_pid(static_cast<i32>(peer));
+    CHECK(invoke(kernel, peer, N::ioctl, {0, OK_TIOCSPGRP, output}) == std::pair(i64{-11}, false));
+    stopped_by(kernel, login, peer, OK_SIGTTOU);
+    cont(kernel, peer);
+    disposition(kernel, peer, OK_SIGTTOU, OK_SIG_IGN);
     CHECK(invoke(kernel, login, N::read, {0, output, 1}) == std::pair(i64{-11}, false));
     store_pid(static_cast<i32>(peer));
     CHECK(ioctl(kernel, peer, OK_TIOCSPGRP, output) == 0);
     CHECK(scheduler.console_authorized(login) && scheduler.console_authorized(peer));
-    CHECK(invoke(kernel, login, N::read, {0, output, 1}) == std::pair(i64{-5}, true));
+    // The login shell's blocked read keeps its wait (Linux checks at entry and
+    // never re-checks a sleeping reader) and takes the next input.
+    const auto &reader = scheduler.find(login)->threads()[0];
+    CHECK(reader.state == sched::ProcessState::blocked && reader.wait_reason == sched::ThreadWaitReason::console_read);
     native::input('b');
     CHECK(scheduler.console_authorized(peer)); // Ingress never revokes a background shell.
-    CHECK(call(kernel, peer, N::read, {0, output, 1}) == 1 && mock::memory[128] == std::byte{'b'});
+    CHECK(invoke(kernel, login, N::read, {0, output, 1}) == std::pair(i64{1}, true) && mock::memory[128] == std::byte{'b'});
+    native::input('c');
+    CHECK(call(kernel, peer, N::read, {0, output, 1}) == 1 && mock::memory[128] == std::byte{'c'});
+    // Readiness has no foreground-based POLLERR; the background read is
+    // checked (EIO: the login shell ignores SIGTTIN).
+    native::input('d');
     activate(kernel, login);
     bool done = true;
     const std::array<ok_pollfd, 1> fds{{{0, OK_POLLIN, 0}}};
     CHECK(native::begin_poll(kernel, login, {output + 32, fds, 0, false, false}, done) == 1 && done);
     ok_pollfd observed{}; std::memcpy(&observed, mock::memory.data() + 160, sizeof(observed));
-    CHECK(observed.revents == OK_POLLERR);
+    CHECK(observed.revents == OK_POLLIN);
+    CHECK(call(kernel, login, N::read, {0, output, 1}) == -5);
+    CHECK(call(kernel, peer, N::read, {0, output, 1}) == 1 && mock::memory[128] == std::byte{'d'});
     const std::array<native::PipeVector, 2> iov{{{output, 1}, {output + 8, 1}}};
     std::memcpy(mock::memory.data() + 512, iov.data(), sizeof(iov));
     CHECK(invoke(kernel, peer, N::readv, {0, vectors, 2}) == std::pair(i64{-11}, false));
     store_pid(static_cast<i32>(login));
     CHECK(ioctl(kernel, login, OK_TIOCSPGRP, output) == 0);
+    CHECK(scheduler.find(peer)->threads()[0].wait_reason == sched::ThreadWaitReason::console_read);
+    native::input('e');
+    CHECK(invoke(kernel, peer, N::readv, {0, vectors, 2}) == std::pair(i64{1}, true) && mock::memory[128] == std::byte{'e'});
+    // A new background readv is checked (EIO under SIG_IGN).
     CHECK(invoke(kernel, peer, N::readv, {0, vectors, 2}) == std::pair(i64{-5}, true));
+    // A member of the login shell's own group: init, the group's only outside
+    // parent, is in another session, so the group is orphaned. EIO without a
+    // signal, and ENOTTY for TIOCSPGRP.
+    const auto orphan = fork(kernel, login);
+    for (const u32 signal : {u32{OK_SIGTTIN}, u32{OK_SIGTTOU}}) disposition(kernel, orphan, signal, OK_SIG_DFL);
+    CHECK(scheduler.process_group_orphaned(login));
+    store_pid(static_cast<i32>(peer)); CHECK(ioctl(kernel, login, OK_TIOCSPGRP, output) == 0);
+    native::input('o');
+    CHECK(call(kernel, orphan, N::read, {0, output, 1}) == -5);
+    store_pid(static_cast<i32>(orphan)); CHECK(ioctl(kernel, orphan, OK_TIOCSPGRP, output) == -25);
+    CHECK(!scheduler.find(orphan)->job_control().stopped);
+    CHECK(call(kernel, peer, N::read, {0, output, 1}) == 1 && mock::memory[128] == std::byte{'o'});
+    store_pid(static_cast<i32>(login)); CHECK(ioctl(kernel, login, OK_TIOCSPGRP, output) == 0);
+    CHECK(scheduler.exit_process(orphan, 0) && scheduler.reap_process(orphan));
+    // A lease member in another session is not job-controlled: it reads.
     const auto detached = fork(kernel, login);
     CHECK(call(kernel, detached, N::setsid) == static_cast<i64>(detached));
     CHECK(scheduler.console_authorized(detached));
-    CHECK(call(kernel, detached, N::read, {0, output, 1}) == -5);
+    native::input('f');
+    CHECK(call(kernel, detached, N::read, {0, output, 1}) == 1 && mock::memory[128] == std::byte{'f'});
     CHECK(ioctl(kernel, detached, OK_TIOCGSID, output) == -25);
     CHECK(ioctl(kernel, detached, OK_TIOCSCTTY) == -1);
     CHECK(ioctl(kernel, detached, OK_TIOCSCTTY, 1) == -1); // Forced on an owned console: no capabilities.
@@ -498,8 +587,13 @@ void lifecycle(Kernel &kernel)
     readiness_handoff(kernel, login, peer);
     foreground_group_lifetime(kernel, login);
     CHECK(call(kernel, 1, N::console_revoke, {static_cast<uptr>(epoch)}) == 0);
+    // The revoke hangs the console up: SIGHUP then SIGCONT to its session leader.
+    const auto &console = scheduler.console_terminal();
+    CHECK(console.outbox_count == 2 && console.outbox[0].target == login && console.outbox[0].signal == tty::TerminalSignal::hup &&
+          console.outbox[1].signal == tty::TerminalSignal::cont && !console.outbox[1].group);
     CHECK(call(kernel, login, N::read, {0, output, 1}) == -13);
     CHECK(ioctl(kernel, login, OK_TIOCGSID, output) == -25);
+    CHECK(!console.outbox_count && native::private_signal_find(login)->deferred_fatal == OK_SIGHUP);
     const auto next = fork(kernel, 1);
     CHECK(call(kernel, 1, N::console_claim, {next}) > epoch);
     CHECK(call(kernel, next, N::setsid) == static_cast<i64>(next));

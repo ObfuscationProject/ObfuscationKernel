@@ -95,6 +95,7 @@ static_assert(TerminalCodec<NativeTerminalCodec<false>> && TerminalCodec<NativeT
     case OK_TIOCGWINSZ: return Operation::get_window;
     case OK_TIOCSWINSZ: return Operation::set_window;
     case OK_FIONREAD: return Operation::input_pending;
+    case OK_TIOCNOTTY: return Operation::detach;
     case OK_TIOCGPTN: return Operation::get_pty_number;
     case OK_TIOCSPTLCK: return Operation::set_pty_lock;
     default: return {};
@@ -188,3 +189,17 @@ i64 dispatch(i32 fd, std::optional<Operation> operation, u64 address, Describe &
     }
 }
 } // namespace ok::user::console_control
+
+namespace ok { class Kernel; }
+namespace ok::user::native
+{
+// The runtime's job-control gate of a terminal request by the running caller
+// (Linux tty_check_change; docs/modules/tty.md section 9.6), run after the
+// association check: {} to go on, EIO (ENOTTY for TIOCSPGRP), or would_block
+// with `parked` set when the call waits for a continue, a foreground change
+// or a signal and then re-dispatches.
+Status terminal_request_gate(Kernel &kernel, sched::ProcessId pid, const sched::TerminalSubject &subject,
+                             sched::ConsoleControlOperation operation, i32 fd, bool &parked);
+// Sends the terminal signals a request queued (TIOCNOTTY, TIOCSWINSZ).
+void terminal_request_done(Kernel &kernel);
+} // namespace ok::user::native

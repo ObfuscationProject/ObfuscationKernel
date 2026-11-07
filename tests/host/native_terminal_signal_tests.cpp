@@ -3,8 +3,10 @@
 // signals interrupting blocked PTY and console reads and PTY writes (EINTR,
 // SA_RESTART through the captured syscall origin, the committed count of a
 // partial write), the kill admission of such a wait, terminating defaults,
-// readiness winning over a pending signal, and PTY VTIME timers through the
-// actual step(). Hosted trap, copy and mapping backends; no guest execution.
+// readiness winning over a pending signal, PTY VTIME timers through the
+// actual step(), and the job-control park of a background member (EINTR, and
+// an SA_RESTART restart of TCSETS). Hosted trap, copy and mapping backends;
+// no guest execution.
 #define OK_NATIVE_MODEL_MEMORY_BYTES 32768
 #define OK_NATIVE_SIGNAL_RUNTIME 1
 #define OK_SYSCALL_ORIGIN_MODEL 1
@@ -20,7 +22,7 @@ constexpr uptr pair_at = hw::user_begin + 0x2400, poll_at = hw::user_begin + 0x2
                argument_at = hw::user_begin + 0x2500, vectors_at = hw::user_begin + 0x2600,
                read_at = hw::user_begin + 0x2800, input_at = hw::user_begin + 0x4000;
 constexpr u64 sa_restart = 0x10000000;
-constexpr u64 linux_read = 0, linux_write = 1, linux_readv = 19;
+constexpr u64 linux_read = 0, linux_write = 1, linux_ioctl = 16, linux_readv = 19;
 usize linux_calls{};
 
 std::byte *user(uptr address) { return mock::memory.data() + (address - hw::user_begin); }
@@ -366,6 +368,61 @@ void vtime(Kernel &kernel)
     release(kernel, pid);
 }
 
+// A Linux background member of its PTY's session: a caught SIGTTIN interrupts
+// its parked read with EINTR; a caught SIGTTOU under SA_RESTART restarts its
+// parked TCSETS from the captured frame, which then completes in the foreground.
+void job_control_park(Kernel &kernel)
+{
+    auto &scheduler = kernel.scheduler();
+    const auto leader = create(kernel);
+    const auto fds = make_pair(kernel, leader);
+    const auto *slave = scheduler.open_description(scheduler.find(leader)->fd_table().entry(fds[1])->description);
+    const sched::TerminalRef ref{static_cast<u16>(slave->pty_endpoint.slot + 1), slave->pty_endpoint.generation};
+    expect(scheduler.acquire_terminal(ref, *scheduler.find(leader), true, sched::AcquireMode::ioctl).ok());
+    const auto member = fork(kernel, leader);
+    CHECK(scheduler.set_process_group(leader, static_cast<i32>(member), static_cast<i32>(member)));
+    auto &thread = thread_of(kernel, member, member);
+    thread.native_active = true;
+    thread_of(kernel, leader, leader).native_active = false;
+    auto &process = *scheduler.find(member);
+    expect(!scheduler.process_group_orphaned(member) && scheduler.terminal(ref)->foreground == leader);
+    // The read parks in job control under the slave's key, bound to its origin.
+    caught(kernel, member, OK_SIGTTIN, false);
+    enter(kernel, member, member, linux_read, fds[1], read_at, 10);
+    expect(pending(kernel, member, member) && thread.wait_reason == sched::ThreadWaitReason::job_control &&
+           thread.wait_key == ref.index && !native::pty_wait_object(member, member).pool);
+    auto origin = native::syscall_origins.identity(process, thread);
+    const auto bound = native::syscall_origins.bound_terminal_control(origin, thread.native_frame);
+    expect(bound && bound->ticket == thread.wait_registration.ticket() && bound->fd == fds[1] && bound->key == ref.index);
+    expect(native::private_signal_admit_blocked(kernel, process, thread));
+    expect(native::private_terminal_signal_ready(kernel, process, thread));
+    expect(native::private_terminal_signal_complete(kernel, process, thread));
+    expect(!thread.syscall_pending && thread.native_frame.pc == site + 2 && thread.native_frame.registers[14] == static_cast<u64>(-4));
+    expect(!native::syscall_origins.live(origin) && thread.state != sched::ProcessState::blocked);
+    expect(native::private_signal_deliver(kernel, process, thread) && thread.native_frame.pc == handler);
+    // TCGETS is not checked; TCSETS belongs to the restartable terminal_control family.
+    caught(kernel, member, OK_SIGTTOU, true);
+    enter(kernel, member, member, linux_ioctl, fds[1], 0x5401, argument_at);
+    expect(!pending(kernel, member, member) && result_of(kernel, member, member) == 0);
+    enter(kernel, member, member, linux_ioctl, fds[1], 0x5402, argument_at);
+    expect(pending(kernel, member, member) && thread.wait_reason == sched::ThreadWaitReason::job_control);
+    expect(native::SyscallOrigins::Adapter::family(thread.native_frame) == native::SyscallOrigins::Adapter::Family::terminal_control);
+    origin = native::syscall_origins.identity(process, thread);
+    expect(native::syscall_origins.bound_terminal_control(origin, thread.native_frame).has_value());
+    const auto frame = thread.native_frame;
+    expect(native::private_terminal_signal_complete(kernel, process, thread));
+    expect(!thread.syscall_pending && thread.native_frame.pc == site && thread.native_frame.registers[14] == linux_ioctl);
+    for (usize index : {9, 10, 11}) expect(thread.native_frame.registers[index] == frame.registers[index]);
+    expect(native::private_signal_deliver(kernel, process, thread) && thread.native_frame.pc == handler);
+    // In the foreground the restarted request completes.
+    scheduler.terminal(ref)->foreground = member;
+    enter(kernel, member, member, linux_ioctl, fds[1], 0x5402, argument_at);
+    expect(!pending(kernel, member, member) && result_of(kernel, member, member) == 0);
+    thread_of(kernel, leader, leader).native_active = true;
+    release(kernel, member);
+    release(kernel, leader);
+}
+
 // A vectored Linux read and a nonblocking one through the same owners.
 void vectors(Kernel &kernel)
 {
@@ -477,10 +534,11 @@ int main()
     console_read_signal(kernel, init, true);
     vtime(kernel);
     vectors(kernel);
+    job_control_park(kernel);
     release(kernel, sender);
     const auto stats = native::pty_wait_objects.accounting();
     expect(stats.allocations == stats.destructions && !stats.live_objects);
     expect(native::runtime_status().ok());
     std::printf("NATIVE_TERMINAL_SIGNAL_RUNTIME_PASS linux_calls=%zu profiles=%zu eintr=1 restart=1 partial_write=1 "
-                "console_read=1 poll=1 vtime=1 hosted=1 guest=0\n", linux_calls, profiles);
+                "console_read=1 poll=1 vtime=1 job_control_park=1 hosted=1 guest=0\n", linux_calls, profiles);
 }

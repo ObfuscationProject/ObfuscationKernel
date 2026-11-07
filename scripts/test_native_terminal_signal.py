@@ -53,8 +53,8 @@ def main():
   for arch in arches:
    run([xmake,'build','-P',source,'-j2','-v','native-terminal-signal-'+arch],arch+'-build')
    binary=source/'bin'/('native-terminal-signal-'+arch);output=run([binary],arch+'-run')
-   if not re.search(r'^NATIVE_TERMINAL_SIGNAL_RUNTIME_PASS linux_calls=[0-9]+ profiles=10 eintr=1 restart=1 partial_write=1 console_read=1 poll=1 vtime=1 hosted=1 guest=0$',output,re.M):raise ValueError('missing exact success marker')
-   record['rows'].append(dict(architecture=arch,status='passed',binary_sha256=sha(binary),output=output.strip()));save();print('PASS',arch,'hosted Linux terminal waits (PTY I/O and ppoll on ten profiles, EINTR, SA_RESTART, partial writes, console reads, VTIME)',flush=True)
+   if not re.search(r'^NATIVE_TERMINAL_SIGNAL_RUNTIME_PASS linux_calls=[0-9]+ profiles=10 eintr=1 restart=1 partial_write=1 console_read=1 poll=1 vtime=1 job_control_park=1 hosted=1 guest=0$',output,re.M):raise ValueError('missing exact success marker')
+   record['rows'].append(dict(architecture=arch,status='passed',binary_sha256=sha(binary),output=output.strip()));save();print('PASS',arch,'hosted Linux terminal waits (PTY I/O and ppoll on ten profiles, EINTR, SA_RESTART, partial writes, console reads, VTIME, job-control park)',flush=True)
   for name,digest in record['source_sha256'].items():
    if sha(source/name)!=digest:raise ValueError('retained source changed: '+name)
   record['status']='passed'

@@ -108,7 +108,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
     if (number == N::rt_sigaction && process->resources().personality == Personality::native)
         return native_signal_action(kernel, *process, a);
 #endif
-    if (number == N::ioctl) return tty_terminal_control(kernel, *process, a);
+    if (number == N::ioctl) return tty_terminal_control(kernel, *process, a, complete);
     if (caller->console_wait_epoch && !kernel.scheduler().console_authorized(pid, caller->console_wait_epoch))
     {
         caller->console_wait_epoch = 0;
@@ -504,7 +504,8 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         }
         for (usize i = 0; i < a[2]; ++i)
             if (!hw::user_range(space, vectors[i].base, vectors[i].length, !writing)) return -14;
-        if (writing && description->console) return tty_console_write(kernel, *process, {vectors.data(), a[2]});
+        if (writing && description->console)
+            return tty_console_write(kernel, *process, *caller, {vectors.data(), a[2]}, static_cast<i32>(a[0]), complete);
         if (!writing && description->input_console)
             return tty_console_read(kernel, *process, *caller, *description, {vectors.data(), a[2]}, complete, a, true);
         std::array<std::byte, sched::pipe_capacity> data{};
@@ -598,7 +599,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
     if (number == N::write && description && description->console && description->writable)
     {
         const PipeVector vector{a[1], a[2]};
-        return tty_console_write(kernel, *process, {&vector, 1});
+        return tty_console_write(kernel, *process, *caller, {&vector, 1}, static_cast<i32>(a[0]), complete);
     }
     if (number == N::read && description && description->input_console)
     {

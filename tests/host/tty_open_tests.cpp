@@ -27,15 +27,6 @@ static usize checks{};
 #define CHECK(expression) do { ++checks; if (!static_cast<bool>(expression)) { \
     std::fprintf(stderr, "FAIL %d %s\n", __LINE__, #expression); std::abort(); } } while (false)
 
-namespace ok::sched
-{
-struct ProcessTestAccess
-{
-    // Stands in for a non-leader's TIOCNOTTY (S8).
-    static void detach(ProcessControlBlock &process) { process.ctty_detached_ = true; }
-};
-} // namespace ok::sched
-
 namespace
 {
 constinit fs::DeviceFileSystem devfs;
@@ -266,7 +257,10 @@ void dev_tty(Fixture &f, u64 leader, const Pty &pty)
     const auto shared = f.open("/dev/tty", o_RDONLY);
     CHECK(shared >= 0 && f.description(static_cast<i32>(shared)).pty_endpoint == description.pty_endpoint);
     CHECK(f.posix.close(static_cast<i32>(shared)));
-    sched::ProcessTestAccess::detach(*f.scheduler.find(member));
+    // A non-leader's TIOCNOTTY detaches only the caller.
+    f.scheduler.find(member)->threads()[0].native_active = true;
+    i32 none = 0;
+    CHECK(f.ioctl(tty, OK_TIOCNOTTY, none) == 0 && f.scheduler.find(member)->ctty_detached());
     CHECK(f.open("/dev/tty", o_RDWR) == -6);
     CHECK(f.scheduler.kill_process(member));
     f.use(leader);

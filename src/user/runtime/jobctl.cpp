@@ -484,6 +484,46 @@ bool private_group_orphaned(Kernel &kernel, sched::ProcessId group)
     return kernel.scheduler().process_group_orphaned(group);
 }
 
+// Linux __tty_check_change for a background member of its terminal's
+// foreground session: ignored or blocked SIGTTIN is EIO and SIGTTOU allowed,
+// an orphaned group gets EIO, else the signal goes to the caller's group and
+// the call restarts. A caller that neither stopped nor has a signal that
+// interrupts the park (init drops its stop) gets EIO rather than a park that
+// nothing ends (section 14, item 13).
+BackgroundAccess private_terminal_background(Kernel &kernel, sched::ProcessControlBlock &caller,
+                                             sched::ThreadControlBlock &thread, u32 signal)
+{
+    if (private_signal_ignored_or_blocked(kernel, caller, thread, signal))
+        return signal == job::native.ttin ? BackgroundAccess::io_error : BackgroundAccess::allowed;
+    const auto group = caller.process_group_id();
+    if (private_group_orphaned(kernel, group)) return BackgroundAccess::io_error;
+    static_cast<void>(send_kernel_group_signal(kernel, group, signal));
+    const auto *process = kernel.scheduler().find(caller.pid());
+    if (!process || jobctl_completed(*process)) return BackgroundAccess::io_error;
+    u32 pending{};
+    sched::SignalAction action{};
+    return process->job_control().stopped || private_signal_interrupting(kernel, *process, thread, pending, action)
+        ? BackgroundAccess::restart : BackgroundAccess::io_error;
+}
+
+i64 private_job_control_park(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread,
+                             u64 key, i32 fd, bool &complete)
+{
+    auto ticket = kernel.scheduler().register_current_wait(sched::ThreadWaitReason::job_control, key);
+    if (!ticket) return error(ticket.status());
+    thread.console_wait_epoch = 0;
+    if (process.resources().personality == Personality::linux)
+        if (const auto origin = syscall_origins.identity(process, thread); origin.capture)
+        {
+            // The park replaces any data-wait binding of this frame.
+            syscall_origins.release_terminal(origin, thread.native_frame, false);
+            if (!syscall_origins.bind(origin, thread.native_frame, SyscallOrigins::TerminalControlBinding{ticket.value(), fd, key}))
+                syscall_origins.revoke(thread);
+        }
+    complete = false;
+    return -11;
+}
+
 i64 native_signal_action(Kernel &kernel, sched::ProcessControlBlock &process, const std::array<uptr, 6> &a)
 {
     // Order: sigsetsize, act copy, number, KILL/STOP, handler, flags/mask,
@@ -678,6 +718,29 @@ struct ConsoleReadAccess
     }
 };
 
+// A job-control park is never ready: a continue or foreground change ends it
+// and the call re-dispatches; only a signal interrupts it here.
+struct JobControlAccess
+{
+    static constexpr std::string_view kind = "job_control";
+    struct Selection { SyscallOrigins::TerminalControlBinding binding{}; };
+    static bool find(Kernel &, const sched::ProcessControlBlock &, const sched::ThreadControlBlock &thread,
+                     const SyscallOrigins::Identity &origin, Selection &out)
+    {
+        const auto bound = syscall_origins.bound_terminal_control(origin, thread.native_frame);
+        if (!bound || bound->ticket != thread.wait_registration.ticket()) return false;
+        out.binding = *bound;
+        return true;
+    }
+    static bool ready_now(Kernel &, const sched::ProcessControlBlock &, const Selection &) { return false; }
+    static bool restartable(const Selection &) { return true; }
+    static i64 interrupted_result(const Selection &) { return -4; }
+    template <typename Visit> static bool with_binding(const Selection &selection, Visit &&visit)
+    { return visit(selection.binding); }
+    static void retire(Kernel &, sched::ThreadControlBlock &thread, const Selection &selection, i64)
+    { syscall_origins.retire_terminal(thread.owner, thread.tid, selection.binding); }
+};
+
 template <typename Access>
     requires TerminalWaitAccess<Access>
 struct TerminalSignalFamily
@@ -747,6 +810,7 @@ struct TerminalSignalFamily
 };
 using PtySignalFamily = TerminalSignalFamily<PtyWaitAccess>;
 using ConsoleSignalFamily = TerminalSignalFamily<ConsoleReadAccess>;
+using JobControlSignalFamily = TerminalSignalFamily<JobControlAccess>;
 } // namespace
 
 bool private_terminal_signal_owned(Kernel &kernel, const sched::ProcessControlBlock &process,
@@ -754,20 +818,27 @@ bool private_terminal_signal_owned(Kernel &kernel, const sched::ProcessControlBl
 {
     PtySignalFamily::Selected pty;
     ConsoleSignalFamily::Selected console;
-    return PtySignalFamily::owned(kernel, process, thread, pty) || ConsoleSignalFamily::owned(kernel, process, thread, console);
+    JobControlSignalFamily::Selected park;
+    return PtySignalFamily::owned(kernel, process, thread, pty) || ConsoleSignalFamily::owned(kernel, process, thread, console) ||
+        JobControlSignalFamily::owned(kernel, process, thread, park);
 }
 bool private_terminal_signal_ready(Kernel &kernel, const sched::ProcessControlBlock &process,
                                    const sched::ThreadControlBlock &thread)
 {
     PtySignalFamily::Selected pty;
     ConsoleSignalFamily::Selected console;
-    return PtySignalFamily::select(kernel, process, thread, pty) || ConsoleSignalFamily::select(kernel, process, thread, console);
+    JobControlSignalFamily::Selected park;
+    return PtySignalFamily::select(kernel, process, thread, pty) || ConsoleSignalFamily::select(kernel, process, thread, console) ||
+        JobControlSignalFamily::select(kernel, process, thread, park);
 }
 bool private_terminal_signal_complete(Kernel &kernel, sched::ProcessControlBlock &process,
                                       sched::ThreadControlBlock &thread)
 {
     PtySignalFamily::Selected pty;
     if (PtySignalFamily::owned(kernel, process, thread, pty)) return PtySignalFamily::complete(kernel, process, thread);
+    JobControlSignalFamily::Selected park;
+    if (JobControlSignalFamily::owned(kernel, process, thread, park))
+        return JobControlSignalFamily::complete(kernel, process, thread);
     return ConsoleSignalFamily::complete(kernel, process, thread);
 }
 #endif

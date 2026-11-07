@@ -471,11 +471,14 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
         using TerminalOperation = sched::ConsoleControlOperation;
         std::optional<TerminalOperation> selected;
         if (const auto operation = Ioctl::operation(a[1])) selected = static_cast<TerminalOperation>(*operation);
-        return console_control::dispatch<Ioctl>(
-            Ioctl::scalar_argument(a[0]), selected, a[2] & Codec::word_mask,
-            [&](i32 fd) { return kernel.posix().terminal_descriptor(fd); },
+        const auto fd = Ioctl::scalar_argument(a[0]);
+        bool parked = false;
+        const auto result = console_control::dispatch<Ioctl>(
+            fd, selected, a[2] & Codec::word_mask,
+            [&](i32 descriptor) { return kernel.posix().terminal_descriptor(descriptor); },
             [&](const sched::TerminalSubject &subject, TerminalOperation operation) {
-                return kernel.posix().terminal_check(subject, operation);
+                if (auto status = kernel.posix().terminal_check(subject, operation); !status) return status;
+                return native::terminal_request_gate(kernel, pid, subject, operation, fd, parked);
             },
             [&](u64 address, std::span<u8> bytes) {
                 return hw::copy_from_user(space, bytes.data(), static_cast<uptr>(address), bytes.size());
@@ -487,6 +490,10 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
             [&](u64 address, std::span<const u8> bytes) {
                 return hw::copy_to_user(space, static_cast<uptr>(address), bytes.data(), bytes.size());
             });
+        native::terminal_request_done(kernel);
+        // A job-control park re-dispatches this call; nothing is published.
+        if (parked) complete = false;
+        return result;
     }
     if (direct_message || (legacy_socketcall && (a[0] == 16 || a[0] == 17)))
     {

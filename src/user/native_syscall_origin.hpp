@@ -310,9 +310,19 @@ class SyscallOriginTable final : private NonCopyable
         bool vectored{};
         [[nodiscard]] constexpr bool operator==(const ConsoleReadBinding &) const = default;
     };
+    // A terminal call parked by job control (a read, a write under TOSTOP or a
+    // tty_check_change request); its frame is re-dispatched when the park ends.
+    struct TerminalControlBinding
+    {
+        sched::WaitTicket ticket{};
+        i32 fd{};
+        u64 key{}; // Job-control key of the terminal (0 console, 1 + PTY slot).
+        [[nodiscard]] constexpr bool operator==(const TerminalControlBinding &) const = default;
+    };
     template <typename Binding>
     static constexpr bool terminal_binding = std::same_as<Binding, PtyReadBinding> ||
-        std::same_as<Binding, PtyWriteBinding> || std::same_as<Binding, ConsoleReadBinding>;
+        std::same_as<Binding, PtyWriteBinding> || std::same_as<Binding, ConsoleReadBinding> ||
+        std::same_as<Binding, TerminalControlBinding>;
     template <typename Binding>
     static constexpr bool supported_binding = std::same_as<Binding, PipeBinding> || std::same_as<Binding, PipeWriteBinding> || std::same_as<Binding, FutexBinding> || std::same_as<Binding, ChildBinding> || std::same_as<Binding, LinuxUdpReceiveBinding> || terminal_binding<Binding>;
     template <typename Binding> requires supported_binding<Binding>
@@ -614,7 +624,7 @@ class SyscallOriginTable final : private NonCopyable
     bool bind(const Identity &identity, const Frame &frame, const Binding &binding)
     {
         auto *record = resolve(identity);
-        if (!record || record->kind != Kind::linux_restart || record->bound || record->family != binding_family<Binding>() ||
+        if (!record || record->kind != Kind::linux_restart || record->bound || !family_admits<Binding>(record->family) ||
             !same_frame(record->frame, frame) || !valid_binding(identity, binding) ||
             !current_wait(*record, binding)) return false;
         if constexpr (std::same_as<Binding, PtyReadBinding> || std::same_as<Binding, PtyWriteBinding>)
@@ -630,6 +640,11 @@ class SyscallOriginTable final : private NonCopyable
         {
             if (!terminal_call(record->frame, false, binding.fd, binding.vectored, binding.output, binding.count))
                 return false;
+        }
+        else if constexpr (std::same_as<Binding, TerminalControlBinding>)
+        {
+            const auto call = Adapter::Bridge::decode_call(record->frame, 1);
+            if (!call || static_cast<i32>(call.value().arguments[0]) != binding.fd) return false;
         }
         else if constexpr (std::same_as<Binding, PipeBinding>)
         {
@@ -711,7 +726,7 @@ class SyscallOriginTable final : private NonCopyable
                  current_linux_udp_wait(*record, binding, sched::WaitCompletion::ready));
         }
         const auto *record = resolve(identity);
-        return record && record->kind == Kind::linux_restart && record->bound && record->family == binding_family<Binding>() &&
+        return record && record->kind == Kind::linux_restart && record->bound && family_admits<Binding>(record->family) &&
             record->terminal == terminal_tag<Binding>() &&
             bound_record<Binding>(*record) == binding && same_frame(record->frame, frame);
     }
@@ -723,7 +738,7 @@ class SyscallOriginTable final : private NonCopyable
         // Scheduler has just armed the new ticket; resolve the immutable owner
         // without requiring its already-replaced old wait to remain current.
         auto *record = resolve(identity, false);
-        if (!record || record->kind != Kind::linux_restart || !record->bound || record->family != binding_family<Binding>() ||
+        if (!record || record->kind != Kind::linux_restart || !record->bound || !family_admits<Binding>(record->family) ||
             record->terminal != terminal_tag<Binding>() ||
             bound_record<Binding>(*record) != before || !same_frame(record->frame, frame) ||
             !valid_binding(identity, after) || after.ticket.generation <= before.ticket.generation)
@@ -790,6 +805,26 @@ class SyscallOriginTable final : private NonCopyable
         if (!record->bound) return bind(identity, frame, binding);
         return rearm(identity, frame, record->console_binding, binding);
     }
+    // The job-control park the record currently owns.
+    [[nodiscard]] std::optional<TerminalControlBinding> bound_terminal_control(const Identity &identity, const Frame &frame) const
+    {
+        const auto *record = resolve(identity);
+        if (!record || record->kind != Kind::linux_restart || !record->bound || record->terminal != Terminal::job_control ||
+            !same_frame(record->frame, frame)) return std::nullopt;
+        return record->control_binding;
+    }
+    // Unbinds the terminal wait the record holds for this frame and keeps the
+    // capture live, so the re-dispatched call can bind its next wait: a
+    // job-control park replaces a data wait, and a data wait follows a park.
+    // `parks_only` leaves data-wait bindings alone.
+    void release_terminal(const Identity &identity, const Frame &frame, bool parks_only)
+    {
+        auto *record = const_cast<Record *>(resolve(identity, false));
+        if (!record || record->kind != Kind::linux_restart || !record->bound || record->terminal == Terminal::none ||
+            !same_frame(record->frame, frame) || (parks_only && record->terminal != Terminal::job_control)) return;
+        record->bound = false;
+        record->terminal = Terminal::none;
+    }
     template <typename Binding> requires supported_binding<Binding>
     [[nodiscard]] Result<BoundRestartPermit<Binding>> prepare_restart(const Identity &identity, const Frame &frame,
                                                                      const Binding &binding) const
@@ -801,7 +836,7 @@ class SyscallOriginTable final : private NonCopyable
         if constexpr (std::same_as<Binding, FutexBinding>)
             if (binding.timeout_address) return Status::unsupported("timed FUTEX_WAIT cannot restart after a handler");
         const auto *record = restart_record<Binding>(identity);
-        if (record->family != binding_family<Binding>() || !record->site.bytes)
+        if (!family_admits<Binding>(record->family) || !record->site.bytes)
             return Status::unsupported("syscall restart has no captured opcode qualification");
         auto plan = Adapter::prepare(record->frame, record->trap,
             std::span<const u8>{record->opcode}.first(record->site.bytes),
@@ -1084,7 +1119,7 @@ class SyscallOriginTable final : private NonCopyable
     { return a.root == b.root && a.slot == b.slot && a.generation == b.generation; }
 
   private:
-    enum class Terminal : u8 { none, pty_read, pty_write, console_read };
+    enum class Terminal : u8 { none, pty_read, pty_write, console_read, job_control };
     struct Record
     {
         Identity identity{};
@@ -1101,6 +1136,7 @@ class SyscallOriginTable final : private NonCopyable
         PtyReadBinding pty_read_binding{};
         PtyWriteBinding pty_write_binding{};
         ConsoleReadBinding console_binding{};
+        TerminalControlBinding control_binding{};
         Terminal terminal{Terminal::none};
         u16 linux_udp_borrows{};
         bool linux_udp_revoke_pending{}, linux_udp_retire_pending{};
@@ -1129,7 +1165,17 @@ class SyscallOriginTable final : private NonCopyable
         if constexpr (std::same_as<Binding, PtyReadBinding>) return Terminal::pty_read;
         else if constexpr (std::same_as<Binding, PtyWriteBinding>) return Terminal::pty_write;
         else if constexpr (std::same_as<Binding, ConsoleReadBinding>) return Terminal::console_read;
+        else if constexpr (std::same_as<Binding, TerminalControlBinding>) return Terminal::job_control;
         else return Terminal::none;
+    }
+    // A job-control park belongs to a terminal read, write or checked request.
+    template <typename Binding> requires supported_binding<Binding>
+    [[nodiscard]] static constexpr bool family_admits(typename Adapter::Family family)
+    {
+        if constexpr (std::same_as<Binding, TerminalControlBinding>)
+            return family == Adapter::Family::pipe_read || family == Adapter::Family::pipe_write ||
+                family == Adapter::Family::terminal_control;
+        else return family == binding_family<Binding>();
     }
     template <typename Binding> requires supported_binding<Binding>
     [[nodiscard]] static constexpr typename Adapter::Family binding_family()
@@ -1149,6 +1195,7 @@ class SyscallOriginTable final : private NonCopyable
         else if constexpr (std::same_as<Binding, PtyReadBinding>) return record.pty_read_binding;
         else if constexpr (std::same_as<Binding, PtyWriteBinding>) return record.pty_write_binding;
         else if constexpr (std::same_as<Binding, ConsoleReadBinding>) return record.console_binding;
+        else if constexpr (std::same_as<Binding, TerminalControlBinding>) return record.control_binding;
         else if constexpr (std::same_as<Binding, PipeWriteBinding>) return record.write_binding;
         else if constexpr (std::same_as<Binding, FutexBinding>) return record.futex_binding;
         else if constexpr (std::same_as<Binding, LinuxUdpReceiveBinding>) return record.linux_udp_receive_binding;
@@ -1166,7 +1213,7 @@ class SyscallOriginTable final : private NonCopyable
     {
         for (auto &record : records_)
             if (record.kind == Kind::linux_restart && record.live && record.bound && record.identity.pid == pid && record.identity.tid == tid &&
-                record.family == binding_family<Binding>() && record.terminal == terminal_tag<Binding>() &&
+                family_admits<Binding>(record.family) && record.terminal == terminal_tag<Binding>() &&
                 bound_record<Binding>(record) == binding)
             { record.live = false; record.bound = false; }
     }
@@ -1181,6 +1228,7 @@ class SyscallOriginTable final : private NonCopyable
             return current_linux_udp_wait(record, record.linux_udp_receive_binding, sched::WaitCompletion::none) ||
                 current_linux_udp_wait(record, record.linux_udp_receive_binding, sched::WaitCompletion::ready);
         if (record.kind != Kind::linux_restart) return false;
+        if (record.terminal == Terminal::job_control) return current_wait(record, record.control_binding);
         switch (record.family)
         {
         case Adapter::Family::pipe_read:
@@ -1546,6 +1594,20 @@ class SyscallOriginTable final : private NonCopyable
             ? thread->state == sched::ProcessState::blocked && thread->wait_reason == sched::ThreadWaitReason::console_read &&
                 thread->wait_key == binding.epoch
             : thread->wait_registration.completion() == sched::WaitCompletion::ready;
+    }
+    [[nodiscard]] static bool current_wait(const Record &record, const TerminalControlBinding &binding)
+    {
+        const auto *thread = record.scheduler ? record.scheduler->find_thread(record.identity.pid, record.identity.tid) : nullptr;
+        if (!thread || !thread->syscall_pending || thread->wait_registration.ticket() != binding.ticket) return false;
+        return thread->wait_registration.active()
+            ? thread->state == sched::ProcessState::blocked && thread->wait_reason == sched::ThreadWaitReason::job_control &&
+                thread->wait_key == binding.key
+            : thread->wait_registration.completion() == sched::WaitCompletion::ready;
+    }
+    [[nodiscard]] static bool valid_binding(const Identity &identity, const TerminalControlBinding &binding)
+    {
+        return binding.ticket.generation && binding.ticket.owner == identity.pid && binding.ticket.thread == identity.tid &&
+            binding.fd >= 0 && binding.key < sched::SchedulerState::terminal_count;
     }
     [[nodiscard]] static bool valid_binding(const Identity &identity, const ConsoleReadBinding &binding)
     {

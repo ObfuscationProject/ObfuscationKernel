@@ -2,6 +2,8 @@
 // for both personalities. A Linux wait binds its syscall origin when armed; the
 // terminal signal family (jobctl.cpp) interrupts or restarts it. A read that
 // waits below VMIN or with VMIN 0 runs its VTIME timer (expire_tty_timers).
+// Slave reads, and slave writes under TOSTOP, pass the job-control gate at
+// entry and again when a continue ended their wait.
 #include "private.hpp"
 
 namespace ok::user::native
@@ -213,6 +215,8 @@ Result<usize> attempt_pty_write(Kernel &kernel, sched::ProcessControlBlock &proc
     }
 }
 using PtyReadWait = decltype(sched::SchedulerState::PtyReadState{}.wait);
+sched::TerminalRef pty_terminal_ref(sched::private_pty::Handle endpoint)
+{ return {static_cast<u16>(endpoint.slot + 1), endpoint.generation}; }
 // Arms, keeps or clears the VTIME timer of a read about to wait (Linux
 // n_tty_read): with VMIN 0 one timer runs from the start of the read; below
 // VMIN it restarts whenever the visible input changed since it was armed.
@@ -251,7 +255,7 @@ i64 resume_pty_io(Kernel &kernel, sched::ProcessControlBlock &process,
     auto resolved = pty_wait_objects.resolve(object);
     if (!resolved) { runtime_failure = resolved.status(); complete = false; return error(resolved.status()); }
     auto &wait = *resolved.value();
-    const auto *thread = kernel.scheduler().find_thread(wait.pid, wait.tid);
+    auto *thread = kernel.scheduler().find_thread(wait.pid, wait.tid);
     if (!thread || !pty_owner_current(process, *thread, wait) ||
         thread->wait_registration.ticket() != wait.ticket || thread->wait_registration.active())
     { cancel_pty_wait(kernel, object); complete = false; return -125; }
@@ -265,6 +269,29 @@ i64 resume_pty_io(Kernel &kernel, sched::ProcessControlBlock &process,
         cancel_pty_wait(kernel, object, "interrupted", result); return result;
     }
     if (timer_expired) wait.deadline = 0;
+    // A continue ended the wait: the slave call runs its job check again. A
+    // write that already moved bytes returns them instead of stopping again.
+    if (wait.endpoint.side == sched::private_pty::Side::slave &&
+        thread->terminal_gate_mark != process.job_control().continue_generation)
+        if (const auto gate = tty_check(kernel, process, *thread, pty_terminal_ref(wait.endpoint),
+                                        wait.writing ? TtyAccess::write : TtyAccess::read); gate != TtyGate::go)
+        {
+            if (gate == TtyGate::io_error || wait.committed)
+            {
+                const auto result = pty_terminal_result(wait, -5);
+                cancel_pty_wait(kernel, object, "job-control", result);
+                return result;
+            }
+            // The park takes over the frame and its origin capture.
+            const auto fd = wait.fd;
+            const auto ref = pty_terminal_ref(wait.endpoint);
+            wait.origin = 0;
+            cancel_pty_wait(kernel, object, "job-control", -11);
+            bool parked = false;
+            const auto status = tty_park(kernel, process, *thread, ref, fd, parked);
+            complete = !parked;
+            return error(status);
+        }
     const auto before = wait;
     auto transferred = wait.writing ? attempt_pty_write(kernel, process, wait)
                                     : attempt_pty_io(kernel, process, wait, timer_expired);
@@ -279,6 +306,7 @@ i64 resume_pty_io(Kernel &kernel, sched::ProcessControlBlock &process,
         if (!registration)
         { const auto result = pty_terminal_result(wait, error(registration.status())); cancel_pty_wait(kernel, object, "error", result); return result; }
         wait.ticket = registration.value();
+        thread->terminal_gate_mark = process.job_control().continue_generation;
         pty_rebind(process, *thread, object, before, wait);
         emit_pty_wait(wait, false, "rearm"); complete = false; return -11;
     }
@@ -293,7 +321,7 @@ i64 begin_pty_io(Kernel &kernel, sched::ProcessControlBlock &process, sched::Thr
                  bool &complete, const PipeVectors &vectors)
 {
     const auto *description = kernel.scheduler().open_description(description_id);
-    const auto *thread = kernel.scheduler().find_thread(process.pid(), tid);
+    auto *thread = kernel.scheduler().find_thread(process.pid(), tid);
     if (!description || !description->references || !description->pty_endpoint || !thread ||
         !(writing ? description->writable : description->readable)) return -9;
     if (!thread->native_active || !thread->syscall_pending || !thread->entry_stack.pool ||
@@ -303,6 +331,16 @@ i64 begin_pty_io(Kernel &kernel, sched::ProcessControlBlock &process, sched::Thr
     if (!vectors.count && address > ~uptr{0} - count) return -14;
     for (usize index = 0; index < vectors.count; ++index)
         if (vectors.entries[index].base > ~uptr{0} - vectors.entries[index].length) return -14;
+    if (description->pty_endpoint.side == sched::private_pty::Side::slave)
+    {
+        bool parked = false;
+        if (auto status = tty_gate(kernel, process, *thread, pty_terminal_ref(description->pty_endpoint),
+                                   writing ? TtyAccess::write : TtyAccess::read, fd, parked); !status)
+        {
+            if (parked) complete = false;
+            return error(status);
+        }
+    }
     PtyWait initial{};
     initial.pid = process.pid(); initial.tid = tid; initial.space = process.resources().native_space;
     initial.lease = thread->entry_stack; initial.frame = thread->native_frame;
@@ -341,6 +379,7 @@ i64 begin_pty_io(Kernel &kernel, sched::ProcessControlBlock &process, sched::Thr
     if (!registration)
     { const auto result = pty_terminal_result(wait, error(registration.status())); cancel_pty_wait(kernel, object); return result; }
     wait.ticket = registration.value(); wait.request = wait.ticket.generation;
+    thread->terminal_gate_mark = process.job_control().continue_generation;
     *slot = {wait.pid, wait.tid, object};
     if (wait.personality == Personality::linux)
     {

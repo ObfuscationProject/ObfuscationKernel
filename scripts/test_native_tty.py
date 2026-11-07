@@ -52,8 +52,8 @@ def main():
   for arch in arches:
    run([xmake,'build','-P',source,'-j2','-v','native-tty-'+arch],arch+'-build')
    binary=source/'bin'/('native-tty-'+arch);output=run([binary],arch+'-run')
-   if not re.search(r'^NATIVE_TTY_RUNTIME_PASS console=1 compat_default=1 icanon=1 echo=1 isig=1 winch=1 flush=1 writev_8k=1 efault_keeps_input=1 vmin_wake=1 pty=1 canonical_echo=1 ptmx_hangup_discard=1 raw_drain=1 ptn_lock=1 hosted=1 guest=0$',output,re.M):raise ValueError('missing exact success marker')
-   record['rows'].append(dict(architecture=arch,status='passed',binary_sha256=sha(binary),output=output.strip()));save();print('PASS',arch,'hosted runtime console and PTY terminals (N_TTY, echo, ISIG, WINCH, writev, prepared reads, VMIN wakes, ptmx hangup, TIOCGPTN)',flush=True)
+   if not re.search(r'^NATIVE_TTY_RUNTIME_PASS console=1 compat_default=1 icanon=1 echo=1 isig=1 winch=1 flush=1 writev_8k=1 efault_keeps_input=1 vmin_wake=1 pty=1 canonical_echo=1 ptmx_hangup_discard=1 raw_drain=1 ptn_lock=1 linux=1 sigttin=1 sigttou=1 tostop=1 regate=1 hangup=1 tiocnotty=1 hosted=1 guest=0$',output,re.M):raise ValueError('missing exact success marker')
+   record['rows'].append(dict(architecture=arch,status='passed',binary_sha256=sha(binary),output=output.strip()));save();print('PASS',arch,'hosted runtime console and PTY terminals (N_TTY, echo, ISIG, WINCH, writev, prepared reads, VMIN wakes, ptmx hangup, TIOCGPTN, SIGTTIN/SIGTTOU/TOSTOP, re-check after continue, hangups, TIOCNOTTY)',flush=True)
   for name,digest in record['source_sha256'].items():
    if sha(source/name)!=digest:raise ValueError('retained source changed: '+name)
   record['status']='passed'

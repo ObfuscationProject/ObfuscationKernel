@@ -143,10 +143,10 @@ Result<usize> poll_ready(Kernel &kernel, PollWait &wait)
             u16 events = static_cast<u16>(ready.value().events);
             if (ready.value().console_input)
             {
+                // Linux n_tty_poll has no job-control check: a background
+                // member sees readiness and is gated when it reads.
                 if (!wait.console_epoch || !kernel.scheduler().console_authorized(wait.pid, wait.console_epoch))
                     events |= OK_POLLERR | OK_POLLHUP;
-                else if (!kernel.scheduler().console_read_authority(wait.pid, wait.console_epoch))
-                    events |= OK_POLLERR;
                 else if ((canonical & OK_POLLIN) && kernel.scheduler().console_readable(wait.pid, wait.console_epoch))
                 {
                     events |= OK_POLLIN;

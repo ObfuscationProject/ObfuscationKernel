@@ -1,9 +1,10 @@
 // Terminals in the runtime: console ingress with echo, console output through
 // OPOST, prepared console reads (a Linux one binds its wait for signals), PTY
-// VTIME expiry, terminal ioctls for the native personality,
-// and the signal outboxes of the console and every PTY slave (docs/modules/tty.md). The scheduler owns the
-// terminal objects; this unit moves their bytes to the serial port and turns
-// queued terminal signals into kernel-originated signals.
+// VTIME expiry, terminal ioctls for the native personality, the job-control
+// gate of every terminal call (SIGTTIN, SIGTTOU, TOSTOP; docs/modules/tty.md
+// section 9.6), and the signal outboxes of the console and every PTY slave.
+// The scheduler owns the terminal objects; this unit moves their bytes to the
+// serial port and turns queued terminal signals into kernel-originated signals.
 #include "private.hpp"
 
 namespace ok::user::native
@@ -66,6 +67,65 @@ Result<usize> tty_user_ranges(const hw::AddressSpace &space, std::span<const Pip
 }
 } // namespace
 
+TtyGate tty_check(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread,
+                  sched::TerminalRef ref, TtyAccess access)
+{
+    auto &scheduler = kernel.scheduler();
+    // A park that ended (continue, foreground change) leaves its binding; it
+    // goes before the call binds its next wait.
+    if (process.resources().personality == Personality::linux)
+        if (const auto origin = syscall_origins.identity(process, thread); origin.capture)
+            syscall_origins.release_terminal(origin, thread.native_frame, true);
+    const auto *terminal = scheduler.terminal(ref);
+    if (!terminal || (access == TtyAccess::write && !(terminal->termios.lflag & tty::lflag::tostop))) return TtyGate::go;
+    const auto facts = scheduler.terminal_job_facts(process.pid(), ref);
+    if (!facts.is_ctty || !facts.has_foreground || facts.in_foreground) return TtyGate::go;
+#ifdef OK_PRIVATE_POLL_MASK
+    switch (private_terminal_background(kernel, process, thread, access == TtyAccess::read ? job::native.ttin : job::native.ttou))
+    {
+    case BackgroundAccess::allowed: return TtyGate::go;
+    case BackgroundAccess::io_error: return TtyGate::io_error;
+    case BackgroundAccess::restart: break;
+    }
+    return TtyGate::park;
+#else
+    return TtyGate::io_error;
+#endif
+}
+
+Status tty_park(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread,
+                sched::TerminalRef ref, i32 fd, bool &parked)
+{
+#ifdef OK_PRIVATE_POLL_MASK
+    bool complete = true;
+    const auto result = private_job_control_park(kernel, process, thread, sched::SchedulerState::job_control_key(ref), fd,
+                                                 complete);
+    tty_drain_outbox(kernel);
+    if (!complete)
+    {
+        parked = true;
+        return Status::would_block("terminal call parked by job control");
+    }
+    return result == -12 ? Status::no_memory("job-control park") : Status::invalid_argument("job-control park");
+#else
+    static_cast<void>(kernel); static_cast<void>(process); static_cast<void>(thread); static_cast<void>(ref);
+    static_cast<void>(fd); static_cast<void>(parked);
+    return Status::io_error("terminal call in the background");
+#endif
+}
+
+Status tty_gate(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread,
+                sched::TerminalRef ref, TtyAccess access, i32 fd, bool &parked)
+{
+    switch (tty_check(kernel, process, thread, ref, access))
+    {
+    case TtyGate::go: return {};
+    case TtyGate::io_error: tty_drain_outbox(kernel); return Status::io_error("terminal call in the background");
+    case TtyGate::park: break;
+    }
+    return tty_park(kernel, process, thread, ref, fd, parked);
+}
+
 bool tty_drain_outbox(Kernel &kernel)
 {
     auto &scheduler = kernel.scheduler();
@@ -102,11 +162,19 @@ void tty_console_input(Kernel &kernel, char value, sched::WakeSource source)
     tty_drain_outbox(kernel);
 }
 
-i64 tty_console_write(Kernel &kernel, sched::ProcessControlBlock &process, std::span<const PipeVector> vectors)
+i64 tty_console_write(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &caller,
+                      std::span<const PipeVector> vectors, i32 fd, bool &complete)
 {
     auto &space = process.resources().native_space;
     const auto total = tty_user_ranges(space, vectors, tty_console_write_limit, false);
     if (!total) return -14;
+    // n_tty_write under TOSTOP checks the writer at the start of the call.
+    bool parked = false;
+    if (auto status = tty_gate(kernel, process, caller, sched::console_terminal_ref, TtyAccess::write, fd, parked); !status)
+    {
+        if (parked) complete = false;
+        return error(status);
+    }
     auto &terminal = kernel.scheduler().console_terminal();
     // n_tty_write: pending echo goes out before program output.
     tty_emit_echo(terminal);
@@ -144,6 +212,18 @@ i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched:
     const auto total = tty_user_ranges(space, vectors, tty_console_read_limit, true);
     if (!total) return -14;
     auto &scheduler = kernel.scheduler();
+    // The job check runs at the first entry and again when a continue ended
+    // the wait (Linux restarts the read after the stop interrupted it).
+    if (!caller.console_wait_epoch || caller.terminal_gate_mark != process.job_control().continue_generation)
+    {
+        bool parked = false;
+        if (auto status = tty_gate(kernel, process, caller, sched::console_terminal_ref, TtyAccess::read,
+                                   static_cast<i32>(arguments[0]), parked); !status)
+        {
+            if (parked) complete = false;
+            return error(status);
+        }
+    }
     const auto epoch = caller.console_wait_epoch ? caller.console_wait_epoch : process.console_epoch();
     const bool nonblocking = description.flags & posix::o_NONBLOCK;
     const auto plan = scheduler.prepare_console_read(process.pid(), epoch, total.value(), nonblocking);
@@ -151,6 +231,7 @@ i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched:
     {
         if (plan.status().code() != StatusCode::would_block || nonblocking) return error(plan.status());
         caller.console_wait_epoch = epoch;
+        caller.terminal_gate_mark = process.job_control().continue_generation;
         auto ticket = scheduler.register_current_wait(sched::ThreadWaitReason::console_read, epoch);
         if (!ticket)
         {
@@ -208,15 +289,19 @@ bool expire_tty_timers(Kernel &kernel, u64 now)
     return pending;
 }
 
-i64 tty_terminal_control(Kernel &kernel, sched::ProcessControlBlock &process, const std::array<uptr, 6> &a)
+i64 tty_terminal_control(Kernel &kernel, sched::ProcessControlBlock &process, const std::array<uptr, 6> &a,
+                         bool &complete)
 {
     auto &space = process.resources().native_space;
     using Codec = console_control::NativeTerminalCodec<std::endian::native == std::endian::big>;
+    const auto fd = static_cast<i32>(a[0]);
+    bool parked = false;
     const auto result = console_control::dispatch<Codec>(
-        static_cast<i32>(a[0]), console_control::native_operation(a[1]), a[2],
-        [&](i32 fd) { return kernel.posix().terminal_descriptor(fd); },
+        fd, console_control::native_operation(a[1]), a[2],
+        [&](i32 descriptor) { return kernel.posix().terminal_descriptor(descriptor); },
         [&](const sched::TerminalSubject &subject, sched::ConsoleControlOperation operation) {
-            return kernel.posix().terminal_check(subject, operation);
+            if (auto status = kernel.posix().terminal_check(subject, operation); !status) return status;
+            return terminal_request_gate(kernel, process.pid(), subject, operation, fd, parked);
         },
         [&](u64 address, std::span<u8> bytes) {
             return hw::copy_from_user(space, bytes.data(), static_cast<uptr>(address), bytes.size());
@@ -229,7 +314,33 @@ i64 tty_terminal_control(Kernel &kernel, sched::ProcessControlBlock &process, co
             return hw::copy_to_user(space, static_cast<uptr>(address), bytes.data(), bytes.size());
         });
     tty_drain_outbox(kernel);
+    if (parked) complete = false;
     return result;
 }
 } // namespace runtime_detail
+
+// Linux tty_check_change callers: set_termios (TCSETS, TCSETSW, TCSETSF) and
+// tiocspgrp check the slave a master names (real_tty); TCSBRK and TCFLSH check
+// the descriptor's own terminal, so a master's are never checked.
+Status terminal_request_gate(Kernel &kernel, sched::ProcessId pid, const sched::TerminalSubject &subject,
+                             sched::ConsoleControlOperation operation, i32 fd, bool &parked)
+{
+    using Op = sched::ConsoleControlOperation;
+    const bool checked = operation == Op::set_now || operation == Op::set_drain || operation == Op::set_flush ||
+        operation == Op::set_foreground ||
+        (subject.side != sched::TerminalSide::pty_master && (operation == Op::drain_break || operation == Op::flush));
+    auto *process = kernel.scheduler().find(pid);
+    auto *thread = kernel.scheduler().current_thread();
+    if (!checked || !process || !thread || thread->owner != pid) return {};
+    auto status = tty_gate(kernel, *process, *thread, subject.terminal, TtyAccess::change, fd, parked);
+    // Linux tiocspgrp turns the gate's EIO into ENOTTY.
+    if (!status && !parked && status.code() == StatusCode::io_error && operation == Op::set_foreground)
+        return Status::not_terminal("background group cannot take the terminal");
+    return status;
+}
+
+void terminal_request_done(Kernel &kernel)
+{
+    tty_drain_outbox(kernel);
+}
 } // namespace ok::user::native

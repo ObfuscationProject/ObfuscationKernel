@@ -108,12 +108,13 @@ void drain(u64 pid)
     native::PrivateProcessQueue::Delivery ticket;
     while (shared(pid).peek({}, ticket)) CHECK(shared(pid).consume(ticket));
 }
-// Park in a console read without a bound syscall origin: no signal interrupts
-// it (a Linux read entered through a syscall binds one and is interruptible).
+// Park in a wait that no signal interrupts and no continue completes (a VFS
+// operation; a continue completes terminal waits so they re-run their job
+// check, and a Linux terminal read entered through a syscall is interruptible).
 sched::WaitTicket park(Kernel &kernel, u64 pid)
 {
     activate(kernel, pid, pid);
-    auto ticket = kernel.scheduler().register_current_wait(sched::ThreadWaitReason::console_read, 0); CHECK(ticket);
+    auto ticket = kernel.scheduler().register_current_wait(sched::ThreadWaitReason::vfs_operation, 0); CHECK(ticket);
     kernel.scheduler().find_thread(pid, pid)->syscall_pending = true;
     return ticket.value();
 }
