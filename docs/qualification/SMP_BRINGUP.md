@@ -437,6 +437,44 @@ QEMU 10.2.0 TCG; receipts in ObfuscationEvidence `receipts/ObfuscationKernel@bf3
   (skipped=34)`) and an x86_64 native distro boot (`OK_USERLAND
   scope=hardware acceptance=pass`) against the exported SDK.
 
+### Pre-merge review fixes
+
+The final review of the paired PRs found that native userland no longer
+started on mips and mips64: `BackendCapture` enters the backend on a copy of
+the thread's frame (a sibling may move the records during the user window),
+while the MIPS o32, MIPS64 n64 and PPC32 private-signal captures name their
+frame by address. After the copy-back the capture now follows the frame to
+`thread->native_frame` (`arch::execution::rebind_owned_capture`). The same
+review moved a staged `read(2)` above 4 KiB under one position-lock hold
+(`PosixService::read_held`, with a hosted test that interleaves a reader on
+another CPU between two chunks), added the x86_64 trampoline identity check and
+INIT described above, kept `step()`'s run-queue candidates out of its stack
+and made the OS stress runner default to `--smp-sections off` on profiles
+without sections.
+
+Kernel f69c5c5 (fixes 2f36c93 to e11bb54) with the paired OS changes, QEMU
+10.2.0 TCG, debug:
+
+- Before the fix (3c5ef19, OS e86adee) mips and mips64 stop at
+  `OK_TEST_FAIL native-runtime=private MIPS capture readiness missing` and
+  `private n64 capture readiness missing`, and a Linux-personality musl
+  program on ppc stops at `private PPC capture readiness missing`.
+- With it, `xmake qemu-distro --fs=simplefs --require-native` against the
+  exported debug SDK prints `OK_USERLAND scope=hardware acceptance=pass` on
+  all ten profiles: i386, x86_64, aarch64, arm32, rv64, rv32, loongarch64,
+  mips, mips64 and ppc.
+- The static-musl stress probe (a Linux ELF) passes with one CPU on ppc
+  (native profile), mips and mips64 (`SMP_STRESS_PASS`, runner defaults).
+- SMP gates on x86_64, aarch64 and rv64: stress with sections at 2 and 4
+  vCPUs, the futex atomicity probe at 2 and the hotplug knob at 2
+  (x86_64 501, aarch64 961, rv64 884 cycles, `failures=0`), every run with
+  `lock_violations=0` and all assertion counters 0.
+- `xmake test` on all ten profiles and with `--qemu_smp=2` on the three SMP
+  profiles; native probes x86_64 and aarch64 with two CPUs, rv64 and x86_64
+  with one; `scripts/hosted_suite.py --toolchain-root`: 154 passed, 0 failed,
+  58 not run; the OS tool suite against the x86_64 debug SDK: `Ran 1336
+  tests, OK (skipped=34)`.
+
 ## Limits
 
 - Kernel work outside kernel sections is serialized by one lock. Only the
