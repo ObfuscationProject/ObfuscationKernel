@@ -79,7 +79,23 @@ AdmissionDigest admission_digest(Kernel &kernel, const sched::ProcessControlBloc
         }
     }
     digest.entries = entry_syscalls + entry_timers + entry_interrupts + entry_faults + entry_rejections;
-    const auto origins = syscall_origins.ownership();
+    // A drain during admission (the copy-on-write resolver's, for an output
+    // range) commits the process's pinned sections, and each commit revokes
+    // its thread's origin record. A pinned section's thread record changes
+    // only at that commit (sections never touch origins), so it is left out
+    // here and in the digest compared with this one.
+    auto origins = syscall_origins.ownership();
+    for (const auto &record : smp::section_records)
+    {
+        const auto pinned = record.load();
+        if (pinned != smp::SectionState::working && pinned != smp::SectionState::returning) continue;
+        if (const auto *owner = kernel.scheduler().find_thread(record.pid, record.tid))
+        {
+            const auto share = syscall_origins.thread_ownership(*owner);
+            origins.live -= share.live;
+            origins.bound -= share.bound;
+        }
+    }
     digest.origins_live = origins.live;
     digest.origins_bound = origins.bound;
     digest.continuations_pending = vfs_continuations.ownership().pending;

@@ -1,3 +1,4 @@
+#define OK_SYSCALL_ORIGIN_MODEL 1
 #include "unavailable_realtime.hpp"
 // Model coverage only: the Linux file-I/O and clock bodies kernel sections
 // share with the kernel-lock path (ok/user/linux_file_io.hpp), and section
@@ -21,6 +22,28 @@ namespace lu = ok::abi::linux_user;
             std::abort();                                                                                              \
         }                                                                                                              \
     } while (false)
+namespace ok::user::native
+{
+// Gives a thread a live origin record, as its trapped Linux read leaves one.
+struct SyscallOriginTestAccess
+{
+    static void live(SyscallOrigins &table, const sched::ThreadControlBlock &thread)
+    {
+        table.pool_ = const_cast<SyscallOrigins::Pool *>(thread.entry_stack.pool);
+        auto &record = table.records_[thread.entry_stack.slot];
+        record.identity.lease = thread.entry_stack;
+        record.identity.pid = thread.owner;
+        record.identity.tid = thread.tid;
+        record.live = true;
+    }
+    static void clear(SyscallOrigins &table, const sched::ThreadControlBlock &thread, SyscallOrigins::Pool *pool)
+    {
+        table.records_[thread.entry_stack.slot] = {};
+        table.pool_ = pool;
+    }
+    static SyscallOrigins::Pool *pool(SyscallOrigins &table) { return table.pool_; }
+};
+} // namespace ok::user::native
 namespace mock
 {
 alignas(16) std::array<std::byte, 96 * 1024> memory{};
@@ -435,6 +458,34 @@ void equivalence(Kernel &kernel, sched::ProcessId pid, usize number_slot, std::a
         shared->flags ^= posix::o_NONBLOCK;
         smp::section_records[1].store(smp::SectionState::idle);
         shared->offset -= 7;
+
+        // A5 with a section of the process pinned: a drain during admission
+        // (the copy-on-write resolver's) commits it, and the commit revokes
+        // its thread's origin record. That is not a decline's effect; the
+        // same change to an unpinned thread's record is. The model's one
+        // thread stands in for the pinned sibling.
+        {
+            using Access = native::SyscallOriginTestAccess;
+            auto *pool = Access::pool(native::syscall_origins);
+            Access::live(native::syscall_origins, t);
+            CHECK(native::syscall_origins.thread_ownership(t).live == 1);
+            auto &sibling = smp::section_records[1];
+            sibling.pid = t.owner;
+            sibling.tid = t.tid;
+            sibling.store(smp::SectionState::returning);
+            const auto pinned = native::admission_digest(kernel, process, t);
+            native::syscall_origins.revoke(t);
+            sibling.store(smp::SectionState::committed);
+            CHECK(native::admission_digest(kernel, process, t).equal(pinned, false));
+            sibling.store(smp::SectionState::idle);
+            Access::live(native::syscall_origins, t);
+            const auto unpinned = native::admission_digest(kernel, process, t);
+            native::syscall_origins.revoke(t);
+            CHECK(!native::admission_digest(kernel, process, t).equal(unpinned, false));
+            sibling.pid = 0;
+            sibling.tid = 0;
+            Access::clear(native::syscall_origins, t, pool);
+        }
 
         // A section re-entering a position lock this CPU holds reports a
         // self-deadlock and a section assertion instead of spinning.

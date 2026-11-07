@@ -355,6 +355,17 @@ class SyscallOriginTable final : private NonCopyable
         }
         return result;
     }
+    // One thread's share of ownership(): its own record's live and bound bits.
+    [[nodiscard]] Ownership thread_ownership(const sched::ThreadControlBlock &thread) const
+    {
+        Ownership result{};
+        if (const auto *record = owned(thread))
+        {
+            result.live = record->live;
+            result.bound = record->bound;
+        }
+        return result;
+    }
     Status retire_checked(const sched::ThreadControlBlock &thread)
     {
         if (auto *record = owned(thread))
