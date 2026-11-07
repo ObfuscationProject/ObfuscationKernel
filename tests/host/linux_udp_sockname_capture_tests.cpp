@@ -91,7 +91,7 @@ template <lu::Profile P> void success(Fixture<P> &f,u32 capacity,
   auto out=query(f,f.fd,capacity?name_at:~uptr{0}); CHECK(out.status);
   expect(out.published==1 && out.value==0 && length<P>()==16);
   expect(mock::copies==copies+1+(f.socketcall?1:0) && mock::outputs==outputs+(capacity?2:1));
-  std::array<u8,16> bytes{}; CHECK(lu::UdpWire<P>::encode_address(bytes,{2,wanted.port,wanted.address}));
+  std::array<u8,16> bytes{}; CHECK(lu::UdpWire<P>::encode_address(bytes,{2,wanted.port,wanted.address.ipv4()}));
   for(usize i=0;i<32;++i)
     expect(mock::memory[name_at-hw::user_begin+i]==(i<std::min<usize>(capacity,16)?std::byte{bytes[i]}:std::byte{0xa7}));
   const auto after=f.kernel.native_udp().readiness(f.endpoint); CHECK(after);
@@ -246,7 +246,8 @@ template <lu::Profile P> void decode_rejections(Kernel &kernel) {
   for(usize mode=0;mode<6;++mode) {
     Fixture<P> f(kernel,true);auto frame=query_frame(f,f.fd,name_at,length_at);
     if(mode==1) reg<P>(frame,lu::Codec<P>::profile.argument_registers[1],lu::Codec<P>::word_mask-1);
-    if(mode==2) reg<P>(frame,lu::Codec<P>::profile.argument_registers[0],8);
+    // Subcalls reserved before UDP capture (5, 8, 16-18) never reach this decoder.
+    if(mode==2) reg<P>(frame,lu::Codec<P>::profile.argument_registers[0],20);
     if(mode==3) reg<P>(frame,lu::Codec<P>::profile.argument_registers[0],0);
     f.observe(frame);auto exact=Fixture<P>::Access::acquire(f.origins,f.process(),f.thread());CHECK(exact);
     if(mode==0) mock::forbidden=words+lu::Codec<P>::profile.word_bytes;
