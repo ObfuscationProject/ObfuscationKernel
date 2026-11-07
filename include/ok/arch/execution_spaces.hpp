@@ -8,16 +8,29 @@
 
 namespace ok::arch::execution
 {
-// Address-space slots of one backend, kept in table storage. The slot table
-// doubles when full and is released once its last space retires, so no slot
-// count is fixed. Generations come from one sequence that outlives the table:
-// a stale handle never matches a later space, even one whose root reuses the
-// same frame. Mutation is serialized by the caller (the kernel lock); a
-// backend whose entries look spaces up without that lock also holds its own
-// space lock around grow/release and those lookups.
-template <typename Space> class SpaceTable
+// Slots of a fixed table: one live space per process, one per quarantine
+// slot (a process's space plus one replacement candidate) and one per CPU.
+// The native runtime checks this sum against its own limits.
+inline constexpr usize fixed_space_slots = 64 + (64 + 1) + 16;
+
+// Address-space slots of one backend, kept in table storage. Generations come
+// from one sequence that outlives the storage: a stale handle never matches a
+// later space, even one whose root reuses the same frame.
+//
+// FixedSlots == 0: the slot table doubles when full and is released once its
+// last space retires, so no slot count is fixed. Mutation is serialized by
+// the caller (the kernel lock).
+//
+// FixedSlots > 0 (the profiles that run kernel code on several CPUs): the
+// storage for FixedSlots entries is allocated by the first acquire() and
+// never moves or goes back, so an entry's address stays valid for lookups
+// that hold no lock; a full table refuses with would_block. Acquire and
+// release are serialized by the backend's space lock.
+template <typename Space, usize FixedSlots = 0> class SpaceTable
 {
   public:
+    static constexpr bool fixed = FixedSlots != 0;
+
     struct Entry
     {
         Space space{};
@@ -28,11 +41,19 @@ template <typename Space> class SpaceTable
     static_assert(std::is_trivially_copyable_v<Entry>);
 
     // A free entry, marked used with a fresh generation. Valid until the next
-    // acquire(); publish its root before handing out the handle.
+    // acquire() (a growable table) or its release() (a fixed one); publish
+    // its root before handing out the handle.
     [[nodiscard]] Result<Entry *> acquire()
     {
         if (live_ == capacity_)
+        {
+            if constexpr (fixed)
+            {
+                if (entries_ != nullptr)
+                    return Status::would_block("native address-space slots are exhausted");
+            }
             if (auto status = grow(); !status) return status;
+        }
         for (usize index = 0; index < capacity_; ++index)
             if (!entries_[index].used)
             {
@@ -57,14 +78,14 @@ template <typename Space> class SpaceTable
         return entry.used && entry.root && entry.root == space.root && entry.generation == space.generation
                    ? &entry.space : nullptr;
     }
-    // Retires an entry; the table itself goes back once no space is live.
+    // Retires an entry; a growable table itself goes back once no space is live.
     Status release(Space &space)
     {
         auto *entry = reinterpret_cast<Entry *>(&space);
         if (entry < entries_ || entry >= entries_ + capacity_ || !entry->used)
             return Status::invalid_argument("native address-space slot is foreign or free");
         *entry = {};
-        if (--live_) return Status::success();
+        if (--live_ || fixed) return Status::success();
         const auto pages = pages_;
         const auto address = reinterpret_cast<uptr>(entries_);
         entries_ = nullptr;
@@ -85,12 +106,18 @@ template <typename Space> class SpaceTable
 
     Status grow()
     {
-        const usize pages = pages_ ? pages_ * 2 : 1;
-        if (pages_ && pages / 2 != pages_) return Status::overflow("native address-space slot table overflow");
+        usize pages;
+        if constexpr (fixed)
+            pages = (FixedSlots * sizeof(Entry) + page_size - 1) / page_size;
+        else
+        {
+            pages = pages_ ? pages_ * 2 : 1;
+            if (pages_ && pages / 2 != pages_) return Status::overflow("native address-space slot table overflow");
+        }
         auto storage = allocate_table_pages(pages);
         if (!storage) return storage.status();
         auto *entries = reinterpret_cast<Entry *>(storage.value());
-        const usize capacity = pages * page_size / sizeof(Entry);
+        const usize capacity = fixed ? FixedSlots : pages * page_size / sizeof(Entry);
         for (usize index = 0; index < capacity; ++index)
             new (&entries[index]) Entry{index < capacity_ ? entries_[index] : Entry{}};
         const auto previous = reinterpret_cast<uptr>(entries_);

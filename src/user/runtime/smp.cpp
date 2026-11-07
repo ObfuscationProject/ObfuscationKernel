@@ -2,6 +2,7 @@
 // except while it runs user code; the entry it is in then is recorded here so
 // that a CPU retiring that thread can take the entry over.
 #include "private.hpp"
+#include "ok/arch/execution_spaces.hpp"
 #include "ok/interrupt/platform.hpp"
 #include "ok/smp/bringup.hpp"
 #include "ok/smp/kernel_section.hpp"
@@ -20,6 +21,10 @@ struct CpuEntry
     bool revoked{};
 };
 constinit std::array<CpuEntry, smp::max_cpus> cpu_entries{};
+// A backend with fixed slot storage holds every process's space, every
+// quarantined one and an exec candidate per CPU.
+static_assert(arch::execution::fixed_space_slots ==
+              sched::max_processes + std::tuple_size_v<decltype(quarantined_spaces)> + smp::max_cpus);
 } // namespace
 
 // Set once the runtime serves threads; secondary CPUs only then contend for

@@ -4,6 +4,7 @@
 #include "ok/arch/execution_spaces.hpp"
 #include "ok/interrupt/platform.hpp"
 #include "ok/smp/bringup.hpp"
+#include "ok/smp/kernel_section.hpp"
 
 #include <cstddef>
 
@@ -42,11 +43,12 @@ struct Space
     usize tables{};
     detail::TlbSpaceTag tlb{};
 };
-constinit SpaceTable<Space> spaces;
-// Entries validate their space without the kernel lock while the CPU holding
-// it may grow or shrink the slot table. It also serializes space ids and TLB
-// generations.
-constinit smp::SpinLock spaces_lock{};
+constinit SpaceTable<Space, fixed_space_slots> spaces;
+// The slot storage is fixed, so entries validate their space without the
+// kernel lock; slot acquire and release, space ids and TLB generations are
+// serialized by spaces_lock.
+constinit smp::RankedSpinLock<smp::LockRank::arch_spaces> spaces_lock{};
+using SpacesGuard = smp::RankedSpinLock<smp::LockRank::arch_spaces>::Guard;
 constinit detail::TlbSpaceIds space_ids{};
 // CR4.PCIDE: CR3[11:0] names the PCID, and bit 63 of a CR3 load keeps the
 // loaded PCID's cached translations. The kernel's translation is PCID 0.
@@ -470,8 +472,8 @@ Result<AddressSpace> create_space(MappingView mappings)
     for (const auto &mapping : mappings)
         if (!admissible(mapping))
             return Status::invalid_argument("invalid native user-page mapping or writable executable page");
-    auto entry = [&]() -> Result<SpaceTable<Space>::Entry *> {
-        smp::ScopedSpinLock guard(spaces_lock);
+    auto entry = [&]() -> Result<decltype(spaces)::Entry *> {
+        const SpacesGuard guard(spaces_lock);
         auto acquired = spaces.acquire();
         if (acquired) acquired.value()->space.tlb = space_ids.issue();
         return acquired;
@@ -481,7 +483,7 @@ Result<AddressSpace> create_space(MappingView mappings)
     auto &value = entry.value()->space;
     auto fail = [&](Status status) {
         static_cast<void>(release_tables(value));
-        smp::ScopedSpinLock guard(spaces_lock);
+        const SpacesGuard guard(spaces_lock);
         static_cast<void>(spaces.release(value));
         return status;
     };
@@ -533,9 +535,10 @@ Status remap(const AddressSpace &space, const PageMapping &mapping)
     // Every CPU running this space leaves it first. A CPU that cached the old
     // translation drops it at its next entry: an untagged CR3 load flushes
     // it, and a PCID whose generation moved is loaded without the keep bit.
+    static_cast<void>(smp::require_exclusive("address-space quiesce"));
     smp::quiesce_root(space.root);
     entry = leaf_entry(mapping);
-    smp::ScopedSpinLock guard(spaces_lock);
+    const SpacesGuard guard(spaces_lock);
     value->tlb.changed();
     return Status::success();
 }
@@ -547,11 +550,12 @@ Status destroy_space(AddressSpace &space)
         return Status::not_found("native address-space handle is stale");
     if (this_cpu().executing)
         return Status::busy("cannot destroy an address space during native execution");
+    static_cast<void>(smp::require_exclusive("address-space quiesce"));
     smp::quiesce_root(space.root);
     const auto released = release_tables(*value);
     Status retired;
     {
-        smp::ScopedSpinLock guard(spaces_lock);
+        const SpacesGuard guard(spaces_lock);
         retired = spaces.release(*value);
     }
     space = {};
@@ -654,7 +658,7 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     u64 code;
     detail::TlbSpaceTag tlb;
     {
-        smp::ScopedSpinLock guard(spaces_lock);
+        const SpacesGuard guard(spaces_lock);
         const auto *value = storage(space);
         if (value == nullptr)
             return Status::not_initialized("native address space is unavailable");
