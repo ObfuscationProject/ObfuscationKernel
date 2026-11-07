@@ -389,8 +389,8 @@ Result<TerminalReply> SchedulerState::terminal_control(const TerminalSubject &su
         reply.value = index.value();
         return reply;
     }
-    case Op::set_pty_lock:
-        if (auto status = pty_transport_.set_locked(endpoint, request.scalar != 0); !status) return status;
+    case Op::set_pty_lock: // One path with the scheduler API: the PTY table and /dev/pts stay in step.
+        if (auto status = set_pty_lock(subject.description, request.scalar != 0); !status) return status;
         return reply;
     default:
         return Status::not_terminal("terminal request is not available");

@@ -44,8 +44,9 @@ inline Status check_devfs_terminal_namespace_model()
 }
 
 // Scheduler terminal opens only (docs/modules/tty.md sections 3 and 4): one
-// ptmx pair, its locked and unlocked slave, the automatic acquisition and
-// /dev/tty, on a temporary session leader. No path walk, trap or guest claim.
+// ptmx pair, its locked slave, TIOCSPTLCK through terminal_control, the
+// unlocked slave, the automatic acquisition and /dev/tty, on a temporary
+// session leader. No path walk, trap or guest claim.
 inline Status check_tty_open_model(sched::SchedulerState &scheduler)
 {
     using Kind = fs::TerminalNodeKind;
@@ -87,7 +88,15 @@ inline Status check_tty_open_model(sched::SchedulerState &scheduler)
         const fs::TerminalNode slave{Kind::pts_slave, index, entry.generation};
         auto locked = open(1, slave, false);
         if (locked || locked.status().code() != StatusCode::io_error) return Status::fault("locked slave open is not EIO");
-        if (auto status = scheduler.set_pty_lock(description(0), false); !status) return status;
+        // TIOCSPTLCK 0 through the terminal control path the ioctl takes.
+        const auto subject = scheduler.terminal_subject(description(0));
+        if (!subject) return subject.status();
+        const auto revision = scheduler.terminal_namespace().revision();
+        const auto unlocked = scheduler.terminal_control(
+            subject.value(), {.operation = sched::ConsoleControlOperation::set_pty_lock, .scalar = 0});
+        if (!unlocked) return unlocked.status();
+        if (scheduler.terminal_namespace().entry(index).locked || scheduler.terminal_namespace().revision() == revision)
+            return Status::fault("TIOCSPTLCK did not unlock the /dev/pts entry");
         auto quiet = open(1, slave, true);
         if (!quiet || quiet.value().acquired) return Status::fault("O_NOCTTY slave open acquired");
         auto taken = open(2, slave, false);
