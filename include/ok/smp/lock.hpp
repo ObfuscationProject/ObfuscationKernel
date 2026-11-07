@@ -89,6 +89,20 @@ inline void clear_cpu_mode(CpuId cpu, u32 bits) noexcept
                                   std::memory_order_relaxed);
 }
 
+// A wait that spins with interrupts masked and holds nothing an interrupt's
+// top half takes (a filesystem gate) serves this CPU's pending interrupts
+// meanwhile, so a holder waiting for a device line routed here is not
+// stalled behind the spin. Installed once by the runtime where device lines
+// reach secondary CPUs; unset, it does nothing.
+using SpinService = void (*)();
+inline constinit SpinService spin_service{};
+
+inline void serve_while_spinning() noexcept
+{
+    if (const auto service = spin_service)
+        service();
+}
+
 // Marks this CPU SPINNING while it waits; a nested scope leaves the outer
 // one's bit alone. Lock waits, gate and drain waits and halts that hold the
 // big kernel lock use it, so overlap evidence never counts a waiting CPU.

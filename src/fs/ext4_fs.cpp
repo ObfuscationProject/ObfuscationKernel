@@ -96,9 +96,13 @@ Status Ext4FileSystem::begin_operation(const Ext4Node *node, bool mounting)
         }
         // Another CPU owns the gate and finishes in bounded time; its identity
         // checks are made again once this CPU gets it.
+        // The owner may wait for a device line routed to this CPU.
         const smp::SpinningScope spinning;
         while (operation_owner_.load(std::memory_order_relaxed) != 0)
+        {
+            smp::serve_while_spinning();
             arch::ArchOperations::spin_pause();
+        }
     }
     smp::lock_debug_hold(this, smp::LockRank::fs_provider);
     return {};
