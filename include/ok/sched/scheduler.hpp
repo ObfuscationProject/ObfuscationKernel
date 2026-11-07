@@ -611,6 +611,13 @@ class SchedulerState
     // CPU 0 stays online; every online CPU must be configured. Entries already
     // queued on a CPU that goes offline stay there and are not stolen.
     Status set_online_cpus(u32 mask);
+    // Hotplug: a configured secondary CPU leaves the online set and every
+    // entry queued on it moves to an online queue (stale ones are dropped),
+    // so no thread is lost or queued twice and nothing waits on it. Its
+    // current slot stays until that CPU vacates it itself.
+    Status offline_cpu(smp::CpuId cpu);
+    // A configured CPU joins the online set again; it starts with its empty queue.
+    Status online_cpu(smp::CpuId cpu);
     [[nodiscard]] u32 online_cpus() const { return online_cpus_; }
     // Per-CPU run queues are a mechanism; nothing enqueues implicitly, so a
     // thread woken while still on its CPU must be enqueued again by whoever
@@ -622,8 +629,9 @@ class SchedulerState
     Status enqueue_thread(ProcessId pid, ThreadId tid);
     // Placement: the last CPU of a thread that has run, while it is online
     // and allowed; otherwise the allowed online CPU with the shortest queue, lowest id on a
-    // tie; with no allowed CPU online, the lowest allowed configured CPU, whose
-    // queue waits for it; with no allowed configured CPU, CPU 0.
+    // tie; with no allowed CPU online, CPU 0, which is never offline. CPU 0
+    // runs the entry only if the affinity names no configured CPU; otherwise
+    // the entry waits there until a CPU it allows comes online and takes it.
     [[nodiscard]] smp::CpuId select_cpu(const ProcessControlBlock &process, const ThreadControlBlock &thread) const;
     // Pops this online CPU's queue, discarding stale entries and moving
     // entries the affinity no longer allows. An empty queue steals the oldest

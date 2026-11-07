@@ -456,6 +456,33 @@ Status SchedulerState::set_online_cpus(u32 mask)
     return Status::success();
 }
 
+Status SchedulerState::offline_cpu(smp::CpuId cpu)
+{
+    if (cpu == 0)
+        return Status::invalid_argument("the boot CPU must stay online");
+    if (cpu >= cpu_count_)
+        return Status::invalid_argument("offline CPU is not configured");
+    online_cpus_ &= ~(1u << cpu);
+    // Each entry is popped once and placed again on an online queue; one
+    // whose thread no longer names this queue is stale and dropped.
+    auto &queue = run_queues_.get(cpu);
+    while (const auto ref = queue.pop())
+        if (auto *thread = find_thread(ref->pid, ref->tid); thread && thread->queued_cpu == cpu)
+        {
+            thread->queued_cpu = no_cpu;
+            static_cast<void>(enqueue_thread(ref->pid, ref->tid));
+        }
+    return Status::success();
+}
+
+Status SchedulerState::online_cpu(smp::CpuId cpu)
+{
+    if (cpu >= cpu_count_)
+        return Status::invalid_argument("online CPU is not configured");
+    online_cpus_ |= 1u << cpu;
+    return Status::success();
+}
+
 Status SchedulerState::enqueue_thread(ProcessId pid, ThreadId tid)
 {
     if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
@@ -493,13 +520,8 @@ smp::CpuId SchedulerState::select_cpu(const ProcessControlBlock &process, const 
                 best = cpu;
                 shortest = length;
             }
-    if (best != no_cpu)
-        return best;
-    const u32 configured = affinity & configured_cpu_mask();
-    for (smp::CpuId cpu = 0; cpu < cpu_count_; ++cpu)
-        if ((configured & (1u << cpu)) != 0)
-            return cpu;
-    return 0;
+    // Never an offline CPU: CPU 0 is always online.
+    return best != no_cpu ? best : 0;
 }
 
 bool SchedulerState::affinity_admits(const ProcessControlBlock &process, smp::CpuId cpu) const
