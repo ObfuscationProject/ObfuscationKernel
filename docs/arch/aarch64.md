@@ -62,7 +62,10 @@ under its own ASID through a remap shootdown and its next entry
 GICD_ISPENDR) in EL0 and in its idle wait, holds the kernel lock across a
 device wait that the boot CPU's top half ends while it spins in
 `lock_kernel_serving_interrupts()`, and retargets its line away
-(`OK_NATIVE_GIC cpus=2`). With `--smp 1` the boot CPU's interrupt wait takes
+(`OK_NATIVE_GIC cpus=2`). Last, it polls inside a kernel section while the
+boot CPU holds the kernel lock across a device wait for the SPI routed to it;
+the section's poll runs the top half whose IPI ends that wait
+(`section_wait_serve=pass section_poll_serve=pass`). With `--smp 1` the boot CPU's interrupt wait takes
 the SPI instead (`OK_NATIVE_GIC cpus=1`). Successful runs emit
 `OK_NATIVE_TEST_PASS scope=hardware architecture=aarch64`; serial logs are
 written under `build/native-tests/aarch64`.

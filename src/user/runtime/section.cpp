@@ -154,8 +154,8 @@ void start_sections()
     smp::section_commit_handler = [](smp::SectionRecord &record) noexcept { commit_section(record); };
     if constexpr (smp_sections)
     {
-        // A section that waits for the ext4 gate serves its CPU's lines: the
-        // gate's owner may hold the kernel lock and wait for one routed here.
+        // A section that waits for the ext4 gate or polls a device serves its
+        // CPU's lines: a kernel-lock holder may wait for one routed here.
         smp::spin_service = interrupt::serve_local_interrupts;
         smp::open_section_admission();
     }

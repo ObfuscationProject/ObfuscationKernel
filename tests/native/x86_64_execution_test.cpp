@@ -3,6 +3,7 @@
 #include "ok/arch/smp.hpp"
 #include "ok/interrupt/platform.hpp"
 #include "ok/smp/bringup.hpp"
+#include "ok/smp/kernel_section.hpp"
 #include "execution_table_pages.hpp"
 #include "../../src/arch/tlb_tags.hpp"
 #include "../../src/arch/x86_64/ioapic.hpp"
@@ -415,7 +416,7 @@ void uart_service(void *, interrupt::IrqLine)
 // CPU 1's share: user entries during which it raises the line routed to it
 // from its kernel side, then idle waits, then a device wait as a driver
 // inside a syscall would make one, then a retirement as a hotplug path
-// would make one.
+// would make one, then a kernel section polling a device.
 enum DevicePhase : u32
 {
     device_none,
@@ -426,9 +427,12 @@ enum DevicePhase : u32
     device_woken,
     device_retire,
     device_retired,
+    device_section,
+    device_section_stop,
+    device_section_done,
 };
 constinit std::atomic<u32> device_phase{};
-constinit std::atomic<bool> device_raise{}, device_stop{}, device_accepted{};
+constinit std::atomic<bool> device_raise{}, device_stop{}, device_accepted{}, section_wait{};
 constinit std::atomic<u32> device_traps{}, device_other{};
 constinit std::atomic<usize> device_moved{};
 constinit interrupt::IrqLine uart_line{};
@@ -488,6 +492,32 @@ void secondary_devices()
                 50'000'000));
             device_moved.store(interrupt::retarget_platform_irqs_away(1));
             device_phase.store(device_retired, std::memory_order_release);
+        }
+        else if (phase == device_section)
+        {
+            // A kernel section whose driver polls, as an ext4 fsync section
+            // polls virtio-blk: no kernel lock and no bottom halves, but every
+            // pass serves this CPU's local APIC, through the interrupt wait
+            // (which refuses inside a section) or the poll loop's
+            // serve_while_polling. The line is raised from here once the boot
+            // CPU halted in its wait.
+            ok::smp::bkl_lock();
+            ok::smp::enter_section(1, 1);
+            while (device_phase.load(std::memory_order_acquire) == device_section)
+            {
+                if (device_raise.exchange(false, std::memory_order_acq_rel))
+                {
+                    static_cast<void>(wait_for([] { return false; }, 2'000'000));
+                    raise_uart_line();
+                }
+                if (!section_wait.load(std::memory_order_relaxed))
+                    ok::smp::serve_while_polling();
+                else if (interrupt::wait_for_interrupt())
+                    device_other.fetch_add(1, std::memory_order_relaxed);
+            }
+            ok::smp::leave_section(0);
+            ok::smp::bkl_unlock();
+            device_phase.store(device_section_done, std::memory_order_release);
         }
         else
             ok::arch::smp::wait_local();
@@ -684,6 +714,51 @@ void check_device_interrupts()
                 delivered_on(1) == secondary_delivered + 2,
             "the line reaches the boot CPU after the retarget");
     print("OK_NATIVE_IOAPIC scope=hardware retarget_away=pass\n");
+
+    // The boot CPU holds the kernel lock across a device wait for the line
+    // routed to CPU 1, while CPU 1 polls a device inside a kernel section
+    // with interrupts masked. The section's poll runs the top half (first
+    // through its refused interrupt wait, then through serve_while_polling),
+    // whose IPI ends the boot CPU's wait; the boot CPU drains under the lock.
+    ok::smp::section_commit_handler = [](ok::smp::SectionRecord &) noexcept {};
+    ok::smp::spin_service = interrupt::serve_local_interrupts;
+    require(interrupt::retarget_platform_irq(uart_line, 1).ok() && interrupt::platform_irq_target(uart_line) == 1,
+            "route the COM1 line to CPU 1 for its section");
+    for (u32 mode = 0; mode < 2; ++mode)
+        for (usize attempt = 1;; ++attempt)
+        {
+            const auto before_boot = delivered_on(0), before_secondary = delivered_on(1);
+            const auto boot_ipis = boot.ipis_received.load();
+            const auto sent = record.ipis_sent.load();
+            section_wait.store(mode == 0, std::memory_order_relaxed);
+            device_phase.store(device_section, std::memory_order_release);
+            require(wait_for([] { return ok::smp::in_section(1); }, 2'000'000'000),
+                    "CPU 1 polls inside a kernel section");
+            ok::smp::bkl_lock();
+            device_raise.store(true, std::memory_order_release);
+            require(wait_for(
+                        [] {
+                            if (!interrupt::platform_irq_pending())
+                                static_cast<void>(interrupt::wait_for_interrupt());
+                            return interrupt::platform_irq_pending();
+                        },
+                        2'000'000'000),
+                    "a polling section serves the line a kernel-lock holder waits for");
+            require(delivered_on(1) == before_secondary + 1 && delivered_on(0) == before_boot &&
+                        interrupt::drain_platform_irqs() == 1 && uart_serviced.load() == ++serviced,
+                    "CPU 1's section runs the top half; the lock holder drains");
+            const auto woken = wake_ipi(boot, boot_ipis, record, sent, [] { interrupt::serve_local_interrupts(); });
+            ok::smp::bkl_unlock();
+            device_phase.store(device_section_stop, std::memory_order_release);
+            require(wait_for([] { return device_phase.load(std::memory_order_acquire) == device_section_done; },
+                             2'000'000'000) &&
+                        !ok::smp::in_section(1) && device_other.load() == 0,
+                    "CPU 1 leaves its section");
+            if (woken == WakeIpi::received)
+                break;
+            require(attempt < wake_attempts, "the section's top half wakes the lock holder with an IPI");
+        }
+    print("OK_NATIVE_IOAPIC scope=hardware cpus=2 section_wait_serve=pass section_poll_serve=pass\n");
 }
 
 void check_fault(native::AddressSpace &space, const u8 *entry, native::TrapKind kind, uptr address, uptr error_mask)

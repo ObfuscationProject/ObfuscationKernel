@@ -53,6 +53,8 @@ void claim_platform_irq();
 // false without waiting when the profile cannot idle on interrupts or this
 // is a secondary CPU of a profile whose device lines reach CPU 0 only
 // (x86_64 on the 8259 pair) or inside a kernel section, whose driver polls.
+// Inside a section it first serves this CPU's pending interrupts
+// (serve_local_interrupts; the poll loop then calls smp::serve_while_polling).
 // A caller holding the kernel lock keeps holding it.
 bool wait_for_interrupt();
 // The boot CPU's kernel loop idle (kernel lock released): as

@@ -5,8 +5,10 @@ The independent build does not change any xmake configuration. Both supported
 Linux Image boot entry levels, EL1 and EL2, execute the same EL0 test program.
 With two or more CPUs the probe also starts a secondary through PSCI CPU_ON and
 runs EL0 code on it, including a remap shootdown and its next entry, and then
-routes a GIC SPI to it (OK_NATIVE_GIC cpus=2); with one CPU the boot CPU's
-interrupt wait takes that SPI (OK_NATIVE_GIC cpus=1).
+routes a GIC SPI to it (OK_NATIVE_GIC cpus=2), including a kernel section on
+it that polls with interrupts masked and still serves the SPI a kernel-lock
+holder waits for; with one CPU the boot CPU's interrupt wait takes that SPI
+(OK_NATIVE_GIC cpus=1).
 """
 from __future__ import annotations
 
@@ -75,6 +77,9 @@ def main() -> int:
             raise RuntimeError(f"native {entry_level} hardware test did not take a GIC SPI")
         if args.smp > 1 and "OK_NATIVE_GIC scope=hardware cpus=2 " not in output:
             raise RuntimeError(f"native {entry_level} hardware test did not route an SPI to a secondary CPU")
+        if args.smp > 1 and "OK_NATIVE_GIC scope=hardware cpus=2 section_wait_serve=pass section_poll_serve=pass" \
+                not in output:
+            raise RuntimeError(f"native {entry_level} hardware test: a polling kernel section did not serve its SPI")
     return 0
 
 

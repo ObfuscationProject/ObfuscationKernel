@@ -95,6 +95,9 @@ def main() -> int:
         raise RuntimeError("native hardware test did not deliver a device line to a secondary CPU")
     if args.smp > 1 and "OK_NATIVE_IOAPIC scope=hardware retarget_away=pass" not in output:
         raise RuntimeError("native hardware test did not retarget a secondary CPU's lines away")
+    if args.smp > 1 and \
+            "OK_NATIVE_IOAPIC scope=hardware cpus=2 section_wait_serve=pass section_poll_serve=pass" not in output:
+        raise RuntimeError("native hardware test: a polling kernel section did not serve its line")
     return 0
 
 

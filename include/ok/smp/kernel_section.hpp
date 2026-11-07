@@ -54,6 +54,18 @@ inline constexpr u32 mode_kernel_work = cpu_mode_kernel_work;
     return in_section(current_cpu());
 }
 
+// A device poll with interrupts masked calls this on every pass (a driver
+// whose interrupt wait refused). Inside a kernel section it serves this CPU's
+// pending interrupts through spin_service: top halves and IPIs only, the
+// bottom halves stay with the kernel lock. A kernel-lock holder waiting for
+// a line routed here is then not stalled behind the poll. Elsewhere it does
+// nothing.
+inline void serve_while_polling() noexcept
+{
+    if (in_section())
+        serve_while_spinning();
+}
+
 enum class SectionState : u32
 {
     idle,

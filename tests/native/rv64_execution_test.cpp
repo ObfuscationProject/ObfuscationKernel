@@ -2,6 +2,7 @@
 #include "ok/arch/smp.hpp"
 #include "ok/interrupt/platform.hpp"
 #include "ok/smp/bringup.hpp"
+#include "ok/smp/kernel_section.hpp"
 #include "execution_table_pages.hpp"
 #include "../../src/arch/riscv_common/clint.hpp"
 #include "../../src/arch/tlb_tags.hpp"
@@ -175,15 +176,16 @@ constexpr usize wake_attempts = 8;
 // idles; in phase 4 it waits for a device interrupt as a driver inside a
 // syscall would; in phase 6 it raises the line routed to it and, with the
 // source pending at its PLIC context, retargets its lines away as before
-// going offline.
+// going offline; in phase 8 it polls a device inside a kernel section.
 alignas(16) std::array<std::byte, 16384> hart_one_stack{};
 alignas(4096) std::array<u64, 512> hart_one_target{};
 hw::AddressSpace hart_one_space{};
-// 1 run, 2 stop, 3 stopped, 4 device wait, 5 woken, 6 retire, 7 retired
+// 1 run, 2 stop, 3 stopped, 4 device wait, 5 woken, 6 retire, 7 retired,
+// 8 section poll, 9 section stop, 10 section left
 std::atomic<u32> hart_one_phase{};
 std::atomic<u32> hart_one_timers{}, hart_one_ipis{}, hart_one_devices{}, hart_one_other{};
 std::atomic<uptr> hart_one_count{}, hart_one_before{}, hart_one_after{}, hart_one_moved{};
-std::atomic<bool> hart_one_identity{}, hart_one_raise{}, hart_one_accepted{};
+std::atomic<bool> hart_one_identity{}, hart_one_raise{}, hart_one_accepted{}, hart_one_section_wait{};
 // One memory pass on hart 1, inside its user window: the sum it reports, or 0
 // when an entry ended otherwise.
 u64 hart_one_memory_pass()
@@ -258,6 +260,34 @@ extern "C" [[noreturn]] void ok_smp_secondary_main(smp::CpuId cpu)
             }));
             hart_one_moved.store(interrupt::retarget_platform_irqs_away(1));
             hart_one_phase.store(7, std::memory_order_release);
+        }
+        else if (phase == 8)
+        {
+            // A kernel section whose driver polls, as an ext4 fsync section
+            // polls virtio-blk: no kernel lock and no bottom halves, but every
+            // pass serves this hart's PLIC context, through the interrupt
+            // wait (which refuses inside a section) or the poll loop's
+            // serve_while_polling. The line is raised from here once hart 0
+            // halted in its wait.
+            smp::bkl_lock();
+            smp::enter_section(1, 1);
+            while (hart_one_phase.load(std::memory_order_acquire) == 8)
+            {
+                if (hart_one_raise.exchange(false, std::memory_order_acq_rel))
+                {
+                    const u64 start = arch::riscv::Clint::time();
+                    while (arch::riscv::Clint::time() - start < 20'000)
+                        arch::ArchOperations::spin_pause();
+                    raise_uart_line();
+                }
+                if (!hart_one_section_wait.load(std::memory_order_relaxed))
+                    smp::serve_while_polling();
+                else if (interrupt::wait_for_interrupt())
+                    hart_one_other.fetch_add(1, std::memory_order_relaxed);
+            }
+            smp::leave_section(0);
+            smp::bkl_unlock();
+            hart_one_phase.store(10, std::memory_order_release);
         }
         else
             arch::smp::wait_local();
@@ -531,6 +561,49 @@ extern "C" [[noreturn]] void kernel_main()
               interrupt::platform_irq_cpu_statistics(1).delivered == secondary_delivered,
           "the line reaches hart 0 after the retarget");
     emit("RV64_NATIVE retarget_away=pass\n");
+    // Hart 0 holds the kernel lock across a device wait for the line routed
+    // to hart 1, while hart 1 polls a device inside a kernel section with
+    // interrupts masked. The section's poll runs the top half (first through
+    // its refused interrupt wait, then through serve_while_polling), whose
+    // IPI ends hart 0's wait; hart 0 drains under the lock.
+    smp::section_commit_handler = [](smp::SectionRecord &) noexcept {};
+    smp::spin_service = interrupt::serve_local_interrupts;
+    check(interrupt::retarget_platform_irq(uart_line, 1).ok() && interrupt::platform_irq_target(uart_line) == 1,
+          "route the UART line to hart 1 for its section");
+    for (u32 mode = 0; mode < 2; ++mode)
+        for (u32 attempt = 1;; ++attempt)
+        {
+            const auto before_boot = interrupt::platform_irq_cpu_statistics(0).delivered;
+            const auto before_hart_one = interrupt::platform_irq_cpu_statistics(1).delivered;
+            const auto boot_ipis = smp::cpu_record(0).ipis_received.load();
+            const auto sent = hart_one.ipis_sent.load();
+            hart_one_section_wait.store(mode == 0, std::memory_order_relaxed);
+            hart_one_phase.store(8, std::memory_order_release);
+            check(wait_for([] { return smp::in_section(1); }), "hart 1 polls inside a kernel section");
+            smp::bkl_lock();
+            hart_one_raise.store(true, std::memory_order_release);
+            check(wait_for([] {
+                      if (!interrupt::platform_irq_pending())
+                          static_cast<void>(interrupt::wait_for_interrupt());
+                      return interrupt::platform_irq_pending();
+                  }),
+                  "a polling section serves the line a kernel-lock holder waits for");
+            check(interrupt::platform_irq_cpu_statistics(1).delivered == before_hart_one + 1 &&
+                      interrupt::platform_irq_cpu_statistics(0).delivered == before_boot &&
+                      interrupt::drain_platform_irqs() == 1 && uart_serviced.load() == ++serviced,
+                  "hart 1's section runs the top half; the lock holder drains");
+            const auto woken =
+                wake_ipi(smp::cpu_record(0), boot_ipis, hart_one, sent, [] { interrupt::serve_local_interrupts(); });
+            smp::bkl_unlock();
+            hart_one_phase.store(9, std::memory_order_release);
+            check(wait_for([] { return hart_one_phase.load(std::memory_order_acquire) == 10; }) &&
+                      !smp::in_section(1) && hart_one_other.load() == 0,
+                  "hart 1 leaves its section");
+            if (woken == WakeIpi::received)
+                break;
+            check(attempt < wake_attempts, "the section's top half wakes the lock holder with an IPI");
+        }
+    emit("RV64_NATIVE section_wait_serve=pass section_poll_serve=pass\n");
     check(!hw::copy_to_user(space, hw::user_begin, &value, sizeof(value)), "reject read-only copy");
     check(!hw::user_range(space, hw::user_begin + 0x1fff, 2, true), "reject unmapped boundary");
     check(hw::copy_from_user(space, nullptr, 0, 0).ok(), "empty null copy");

@@ -652,10 +652,18 @@ bool wait_here(bool device)
 
 bool wait_for_interrupt()
 {
+    // A kernel section polls: it may not drain the bottom halves. It still
+    // runs the top halves pending here, as its poll loop does on every pass
+    // (smp::serve_while_polling), so a kernel-lock holder waiting for a line
+    // routed to this CPU is not stalled behind the section.
+    if (smp::in_section())
+    {
+        serve_local_interrupts();
+        return false;
+    }
     // Where device lines reach CPU 0 only, a secondary CPU waiting for a
-    // device (a driver inside a syscall, holding the kernel lock) polls. A
-    // kernel section polls too: it may not drain the bottom halves.
-    if (smp::in_section() || !platform_irqs_started() || !platform_irqs_supported() ||
+    // device (a driver inside a syscall, holding the kernel lock) polls.
+    if (!platform_irqs_started() || !platform_irqs_supported() ||
         (smp::current_cpu() != 0 && !secondary_device_lines()))
         return false;
     // A halt that keeps the kernel lock is a wait, not kernel work.

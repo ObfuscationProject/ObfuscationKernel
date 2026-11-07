@@ -72,7 +72,13 @@ one is refused. The native probes exercise it as well.
 Secondary CPUs run top halves from their user trap path, their idle wait and
 while they spin for the kernel lock (`lock_kernel_serving_interrupts()`,
 `serve_local_interrupts()`): a lock holder may be waiting for a line routed to
-the spinning CPU.
+the spinning CPU. A kernel section never drains, and its
+`wait_for_interrupt()` refuses so that its driver polls; that refusal serves
+the CPU's pending interrupts first, and the driver's poll loop calls
+`smp::serve_while_polling()` on every pass, which does the same inside a
+section (top halves and IPIs only). A lock holder waiting for a line routed
+to a CPU whose section polls a device is therefore not stalled until the
+section ends; the native probes check this on aarch64, rv64 and x86_64.
 
 `wait_for_interrupt()` halts the calling CPU with interrupts masked until it
 takes a device line, a tick (a secondary CPU's local timer) or an IPI. Each
