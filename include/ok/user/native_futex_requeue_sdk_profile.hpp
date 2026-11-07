@@ -20,7 +20,7 @@ namespace ok::user::native
 {
 inline constexpr std::string_view native_futex_requeue_profile = "kernel-lock-atomic-compare-nonpi-read-keys-signed-counts-exact-origin-ticket-sequence-owned-transfer-v2";
 inline constexpr std::string_view linux_futex_requeue_profile = "kernel-lock-atomic-compare-nonpi-read-keys-signed-counts-exact-origin-ticket-sequence-owned-transfer-v2";
-inline constexpr u32 native_futex_requeue_module_abi = 79;
+inline constexpr u32 native_futex_requeue_module_abi = 80;
 inline constexpr usize native_futex_requeue_word_bits = 32;
 inline constexpr usize native_futex_requeue_operation_count = 2;
 inline constexpr usize native_futex_requeue_linux_operation = 3;
