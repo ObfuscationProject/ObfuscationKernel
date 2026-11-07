@@ -148,7 +148,7 @@ void record_lock_violation(const smp::LockViolation &violation) noexcept
     first.recorded.store(true, std::memory_order_release);
 }
 
-u64 runtime_lock_violations(smp::CpuId cpu)
+[[maybe_unused]] u64 runtime_lock_violations(smp::CpuId cpu)
 {
     const auto count = smp::lock_violation_count(cpu);
     return count > violation_baseline[cpu] ? count - violation_baseline[cpu] : 0;
