@@ -195,11 +195,12 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
             if (auto configured = chip_.configure(line, trigger); !configured.ok())
                 return configured;
             entry.trigger = trigger;
-            entry.target = 0;
+            entry.target.store(0, std::memory_order_relaxed);
+            entry.pinned = false;
             if constexpr (RoutableIrqChip<Chip>)
             {
                 if (target != 0 && chip_.route(line, target).ok())
-                    entry.target = target;
+                    entry.target.store(target, std::memory_order_relaxed);
                 else if (auto routed = chip_.route(line, 0); !routed.ok())
                     return routed;
             }
@@ -234,8 +235,9 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
         }
         return Status{StatusCode::not_found, "irq handler not bound to this line"};
     }
-    // Delivers a bound line to `target` from now on. An interrupt the old CPU
-    // already claimed still runs its top half there; pending state is kept.
+    // Delivers a bound line to `target` from now on and pins it there: follow()
+    // no longer moves it. An interrupt the old CPU already claimed still runs
+    // its top half there; pending state is kept.
     Status retarget(IrqLine line, smp::CpuId target)
     {
         if (line >= max_irq_lines)
@@ -244,17 +246,44 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
         auto &entry = lines_[line];
         if (entry.count == 0)
             return Status{StatusCode::not_found, "irq line not bound"};
-        if (entry.target == target)
+        if (entry.target.load(std::memory_order_relaxed) == target)
+        {
+            entry.pinned = true;
             return Status::success();
+        }
         if constexpr (RoutableIrqChip<Chip>)
         {
             if (auto routed = chip_.route(line, target); !routed.ok())
                 return routed;
-            entry.target = target;
+            entry.target.store(target, std::memory_order_relaxed);
+            entry.pinned = true;
             return Status::success();
         }
         else
             return Status{StatusCode::unsupported, "irq controller delivers to CPU 0 only"};
+    }
+    // Moves a line bind() placed (not pinned by retarget()) to `target`, the
+    // CPU waiting to drain it, as retarget() would. True when it moved.
+    bool follow(IrqLine line, smp::CpuId target)
+    {
+        if constexpr (RoutableIrqChip<Chip>)
+        {
+            if (line >= max_irq_lines)
+                return false;
+            Guard guard(lock_);
+            auto &entry = lines_[line];
+            if (entry.count == 0 || entry.pinned || entry.target.load(std::memory_order_relaxed) == target ||
+                !chip_.route(line, target).ok())
+                return false;
+            entry.target.store(target, std::memory_order_relaxed);
+            return true;
+        }
+        else
+        {
+            static_cast<void>(line);
+            static_cast<void>(target);
+            return false;
+        }
     }
     // Moves every bound line delivered to `cpu` to pick(line), deciding and
     // routing under the lock so that a concurrent unbind and rebind is never
@@ -269,12 +298,12 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
             for (usize line = 0; line < max_irq_lines; ++line)
             {
                 auto &entry = lines_[line];
-                if (entry.count == 0 || entry.target != cpu)
+                if (entry.count == 0 || entry.target.load(std::memory_order_relaxed) != cpu)
                     continue;
                 const smp::CpuId next = pick(static_cast<IrqLine>(line));
                 if (next != cpu && chip_.route(static_cast<IrqLine>(line), next).ok())
                 {
-                    entry.target = next;
+                    entry.target.store(next, std::memory_order_relaxed);
                     ++moved;
                 }
             }
@@ -288,7 +317,7 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
     // The CPU a bound line is delivered to.
     [[nodiscard]] smp::CpuId target(IrqLine line) const
     {
-        return line < max_irq_lines ? lines_[line].target : smp::CpuId{0};
+        return line < max_irq_lines ? lines_[line].target.load(std::memory_order_relaxed) : smp::CpuId{0};
     }
     // Top half: called with interrupts disabled, on the CPU that took `line`.
     // True when the line was bound and is now pending.
@@ -389,7 +418,10 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
         std::array<Handler, max_line_handlers> handlers{};
         usize count{0};
         IrqTrigger trigger{IrqTrigger::edge};
-        smp::CpuId target{0};
+        // Written under the lock; target() reads it without.
+        std::atomic<smp::CpuId> target{0};
+        // Placed by retarget(), which follow() leaves alone.
+        bool pinned{false};
         std::atomic<bool> pending{false};
     };
     // Counters change only under the lock and are read without it. A load
@@ -411,7 +443,8 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
         entry.handlers = {};
         entry.count = 0;
         entry.trigger = IrqTrigger::edge;
-        entry.target = 0;
+        entry.target.store(0, std::memory_order_relaxed);
+        entry.pinned = false;
         entry.pending.store(false, std::memory_order_relaxed);
     }
     Chip &chip_;
