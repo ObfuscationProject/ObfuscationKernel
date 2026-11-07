@@ -4,8 +4,9 @@ WT2.3 `feat/net-core`. Slice 1: the family-generic wire layer. Slice 2: the
 neighbour cache and routing tables. Slice 3: the Ethernet interface and the
 executor running through it. Slice 4: general TCP. Slice 5: IPv6 transport
 endpoints and `AF_INET6` sockets. Slice 6: readiness through wait queues.
-Slice 7: the link probe and its QEMU evidence. This note grows with each
-slice.
+Slice 7: the link probe and its QEMU evidence. Follow-up
+`net-socket-gaps`: ICMP errors to sockets, socket poll and select on wait
+queues, TCP socket names. This note grows with each slice.
 
 ## Design
 
@@ -120,15 +121,59 @@ slice.
   record to an IPv4 socket (Linux UDP EAFNOSUPPORT, Linux TCP EOPNOTSUPP,
   native EINVAL).
 
+## Socket errors, names and poll
+
+- ICMP errors reach the transport whose packet they quote.
+  `classify_icmp_error` gives each error a kind and a hard/soft class
+  (Linux `icmp_err_convert` and `icmpv6_err_convert`; IPv4 protocol
+  unreachable and codes 7 and 8 map to the nearest kind). `icmp_quote` reads
+  the quoted header and the first eight transport bytes. The executor routes
+  each error by quoted protocol and endpoints.
+  - TCP follows Linux `tcp_v4_err`. The quoted sequence must lie in
+    [SND.UNA, SND.MAX). A hard error ends a handshake with that failure. A
+    soft error, or a hard error on an established connection, is remembered
+    and named if the connection later times out, and acknowledged progress
+    forgets it. Fragmentation needed and packet too big lower the peer MSS
+    (floored at 576 and 1280) and resend from SND.UNA. Failures map to
+    ECONNREFUSED, EHOSTUNREACH, ENETUNREACH, EACCES and EPROTO, with per-profile
+    numbers in `linux_tcp_data.hpp`.
+  - UDP follows Linux `__udp4_lib_err`. Only a hard port-unreachable on a
+    connected socket is kept. It wakes the socket's waiters, makes poll report
+    POLLERR, and is reported once as ECONNREFUSED by the next receive (before
+    any queued datagram) or send.
+- Poll and select over TCP streams have a readiness provider
+  (`tcp_stream_poll.hpp`, Linux `tcp_poll`):
+  - an unconnected stream reports POLLOUT|POLLHUP;
+  - a listener is readable while a connection waits;
+  - a handshake in progress reports nothing;
+  - a closed or failed connection reports POLLIN|POLLOUT|POLLHUP, plus
+    POLLERR if it failed.
+
+  Before this, such a poll failed with ENOSYS.
+- A poll or select whose descriptors are all sockets sleeps on their wait
+  queues. These are the TCP endpoint queues and the UDP receive queues;
+  a UDP descriptor asking for output is excluded because transmit credit
+  signals no queue. Such a poll is evaluated only after a queue signals it,
+  or at its timeout. Any other descriptor keeps the per-pass rescan. UDP
+  receive waits wake from their socket queue only, and a failed executor
+  wakes all of them.
+- TCP getsockname reports the bound name (an unbound stream reports the
+  family's unspecified address). getpeername reports the peer of a connected
+  stream and ENOTCONN in SYN_SENT, CLOSE and LISTEN (Linux `inet_getname`).
+  Records come from `encode_socket_name`; the length rules match the UDP
+  calls (truncate to the capacity, report the full size, a negative length
+  is EINVAL).
+
 ## Not yet
 
-- TCP: no window scaling, timestamps, SACK or delayed ACKs; the peer MSS
-  bounds segments but there is no path MTU discovery.
+- TCP: no window scaling, timestamps, SACK or delayed ACKs. Path MTU
+  discovery only lowers the MSS on an ICMP report (segments carry DF); the
+  MSS is never raised again and there is no black-hole detection.
 
-- ICMP errors are not delivered to sockets; UDP receive waits and poll/select
-  over sockets still rescan rather than wait on per-socket queues. TCP
-  getsockname/getpeername are still deferred (EOPNOTSUPP) for both families;
-  their records would come from `encode_socket_name`.
+- An ICMP error is not checked against the packet's original destination
+  beyond the quoted endpoints, and socket errors stay reported until close
+  (no `SO_ERROR` read-and-clear; getsockopt stays EOPNOTSUPP). There is no
+  `IP_RECVERR` error queue.
 - The OS's default image keeps the static link (gateway as a permanent
   neighbour); only its `net_probe` image uses the routed interface. DHCP and
   a configurable address belong to OS services.
@@ -173,6 +218,22 @@ slice.
   `notify` and multi-queue enlistment; `tcp_streams_tests` checks that a
   pass without a readiness change evaluates no waiter and that a segment's
   edge evaluates it once.
+- Socket errors and poll (hosted, scope=model):
+  - `tcp_window_tests` covers ICMP errors built against the connection's own
+    segments, both families: hard and soft errors, out-of-window quotes,
+    progress forgetting a soft error, the MTU floor, and the IPv4
+    classification table.
+  - `net_udp_tests` covers the connected-only, report-once UDP error.
+  - `tcp_streams_tests` routes errors through the executor and wakes a
+    connect waiter.
+  - `tcp_immediate_runtime_tests` covers ECONNREFUSED, EHOSTUNREACH and
+    ENETUNREACH from an ICMP-refused connect, TCP names, the TCP poll states,
+    and a blocking poll that stays unevaluated over idle passes until data
+    arrives.
+  - `native_udp_receive_tests` covers a blocked receiver woken with
+    ECONNREFUSED, POLLERR and the same gating for UDP.
+  - `scripts/test_net_runtime.py` builds and runs these runtime suites with
+    ASan/UBSan, one binary per test.
 - Probe: `net_probe_tests` runs `LinkProbe` against a scripted slirp-like
   gateway (exact marker text), also with ten percent TCP loss each way.
 - QEMU device execution (paired OS `feat/net-services`):
