@@ -789,6 +789,22 @@ bool background_console(Kernel &kernel, const Session &s, bool &ttou, bool &tost
     expect(native_call(kernel, bg, N::read, {0, read_at, 8}) == 1 && *user(read_at) == std::byte{'z'});
     // The login shell ignores SIGTTOU: its background TIOCSPGRP goes ahead.
     expect(set_group(kernel, s.login, s.login) == 0 && console.foreground == s.login);
+    // The check precedes the buffer's mapping (Linux n_tty_read runs it before
+    // copy_to_iter): an unmapped buffer still stops a background read or
+    // readv; in the foreground the call faults.
+    constexpr uptr unmapped = hw::user_begin + OK_NATIVE_MODEL_MEMORY_BYTES;
+    const std::array<native::PipeVector, 1> far{{{unmapped, 8}}};
+    std::memcpy(user(vectors_at), far.data(), sizeof(far));
+    for (const auto &[number, arguments] : std::array<std::pair<N, std::array<uptr, 6>>, 2>{
+             {{N::read, {0, unmapped, 8}}, {N::readv, {0, vectors_at, 1}}}})
+    {
+        expect(call_pending(kernel, bg, number, arguments) == -11);
+        expect(job_of(kernel, bg).stop_signal == OK_SIGTTIN && parked(kernel, bg, 0) && reported_stop(kernel, s.login, bg, OK_SIGTTIN));
+        expect(set_group(kernel, s.login, bg) == 0);
+        cont(kernel, bg);
+        expect(native_call(kernel, bg, number, arguments) == -14);
+        expect(set_group(kernel, s.login, s.login) == 0);
+    }
     // SIGTTOU for TCSETS, TCSBRK, TCFLSH and TIOCSPGRP, then the same request completes in the foreground.
     std::array<u8, 36> bytes{};
     expect(Wire::encode(tty::console_compat_termios(), {}, bytes).ok());
@@ -829,6 +845,7 @@ bool background_console(Kernel &kernel, const Session &s, bool &ttou, bool &tost
     disposition(kernel, bg, OK_SIGTTIN, OK_SIG_IGN);
     type("y");
     expect(native_call(kernel, bg, N::read, {0, read_at, 8}) == -5 && console.ldisc.buffered() == 1);
+    expect(native_call(kernel, bg, N::read, {0, unmapped, 8}) == -5 && native_call(kernel, bg, N::readv, {0, vectors_at, 1}) == -5);
     std::memcpy(user(text_at), bytes.data(), bytes.size());
     expect(native_call(kernel, bg, N::ioctl, {0, OK_TCSETS, text_at}) == 0 && console.termios == tty::console_compat_termios());
     tostop = true;

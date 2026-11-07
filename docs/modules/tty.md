@@ -505,7 +505,9 @@ ctty, has a foreground group, and the caller is not in it.
 - If the caller would neither stop nor have the call interrupted (pid 1), the
   result is EIO.
 - The check runs at call entry, on restart, and after the caller is continued
-  from a stop taken while blocked on the terminal.
+  from a stop taken while blocked on the terminal. A read checks its buffer's
+  mapping after it (only a wrapping range faults first), as Linux faults in
+  `copy_to_iter`; a write copies in first.
 - Callers whose ctty is a different terminal are not job-controlled; this
   includes console lease members in other sessions.
 

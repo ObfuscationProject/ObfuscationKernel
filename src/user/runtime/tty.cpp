@@ -209,8 +209,10 @@ i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched:
 {
     if (!description.readable) return -9;
     auto &space = process.resources().native_space;
-    const auto total = tty_user_ranges(space, vectors, tty_console_read_limit, true);
-    if (!total) return -14;
+    // Linux n_tty_read runs its job check before copy_to_iter: only a range
+    // that wraps faults first, the mappings are checked after the gate.
+    for (const auto &vector : vectors)
+        if (vector.base > ~uptr{0} - vector.length) return -14;
     auto &scheduler = kernel.scheduler();
     // The job check runs at the first entry and again when a continue ended
     // the wait (Linux restarts the read after the stop interrupted it).
@@ -224,6 +226,8 @@ i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched:
             return error(status);
         }
     }
+    const auto total = tty_user_ranges(space, vectors, tty_console_read_limit, true);
+    if (!total) return -14;
     const auto epoch = caller.console_wait_epoch ? caller.console_wait_epoch : process.console_epoch();
     const bool nonblocking = description.flags & posix::o_NONBLOCK;
     const auto plan = scheduler.prepare_console_read(process.pid(), epoch, total.value(), nonblocking);

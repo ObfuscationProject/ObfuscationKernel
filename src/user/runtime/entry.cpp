@@ -502,12 +502,13 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
                 : begin_pipe_read(kernel, *process, calling_tid, static_cast<i32>(a[0]),
                 slot->description, a[1], staged, complete, request);
         }
+        // A console read checks its mappings after the job check.
+        if (!writing && description->input_console)
+            return tty_console_read(kernel, *process, *caller, *description, {vectors.data(), a[2]}, complete, a, true);
         for (usize i = 0; i < a[2]; ++i)
             if (!hw::user_range(space, vectors[i].base, vectors[i].length, !writing)) return -14;
         if (writing && description->console)
             return tty_console_write(kernel, *process, *caller, {vectors.data(), a[2]}, static_cast<i32>(a[0]), complete);
-        if (!writing && description->input_console)
-            return tty_console_read(kernel, *process, *caller, *description, {vectors.data(), a[2]}, complete, a, true);
         std::array<std::byte, sched::pipe_capacity> data{};
         const usize limit = data.size();
         if (total > limit) total = limit;
