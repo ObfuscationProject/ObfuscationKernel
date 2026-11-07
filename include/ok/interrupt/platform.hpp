@@ -138,8 +138,9 @@ void record_timer_latency(TimerWake wake, u64 late, u64 frequency);
 // Driver waits for a device (a block or entropy request, a blocking transmit)
 // by how they waited: on the device's bound line, reading the device once and
 // then only after its own interrupt (a completion the first read already saw
-// counts here too), or by polling, before the service started, without a line
-// or with polling selected.
+// counts here too), or by polling, before the service started, without a line,
+// with polling selected or inside a kernel section (where wait_for_interrupt()
+// refuses, so a wait on a bound line is counted as polled).
 enum class DeviceWait : u8
 {
     block,

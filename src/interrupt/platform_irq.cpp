@@ -858,6 +858,10 @@ void count_device_wait(DeviceWait device, bool interrupt)
     const auto cpu = smp::current_cpu();
     if (index >= device_wait_count || cpu >= smp::max_cpus)
         return;
+    // Inside a kernel section wait_for_interrupt() refuses, so a driver
+    // waiting on its bound line polled.
+    if (smp::in_section())
+        interrupt = false;
     auto &waits = device_waits[cpu];
     bump(interrupt ? waits.interrupt[index] : waits.polled[index]);
 }

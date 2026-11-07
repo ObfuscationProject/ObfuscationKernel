@@ -644,6 +644,14 @@ static void check_latency_histogram()
           interrupt::device_wait_statistics(interrupt::DeviceWait::block).polled == 1);
     CHECK(interrupt::device_wait_statistics(interrupt::DeviceWait::entropy).interrupt == 0 &&
           interrupt::device_wait_statistics(interrupt::DeviceWait::transmit).interrupt == 1);
+    // Inside a kernel section wait_for_interrupt() refuses: a wait on a bound
+    // line polled and is counted so.
+    smp::set_cpu_mode(smp::current_cpu(), smp::cpu_mode_section);
+    CHECK(!interrupt::wait_for_interrupt());
+    interrupt::count_device_wait(interrupt::DeviceWait::block, true);
+    smp::clear_cpu_mode(smp::current_cpu(), smp::cpu_mode_section);
+    CHECK(interrupt::device_wait_statistics(interrupt::DeviceWait::block).interrupt == 2 &&
+          interrupt::device_wait_statistics(interrupt::DeviceWait::block).polled == 2);
 }
 
 int main()
