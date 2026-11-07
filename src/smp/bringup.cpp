@@ -200,6 +200,19 @@ template <typename Done> bool wait_unlocked(Done done, u64 timeout_ns)
 #endif
 
 #if defined(OK_SMP_HOTPLUG_TEST) && defined(OK_ARCH_SMP_START)
+// The highest started secondary, the one the test cycles; 0 for none. A plain
+// loop: __builtin_clz pulls libgcc's __clzdi2, whose medlow table reference
+// does not reach the rv64 kernel's higher-half link address.
+CpuId cycled_cpu() noexcept
+{
+    const u32 secondaries = started_mask() & ~u32{1};
+    CpuId cpu = 0;
+    for (CpuId bit = 1; bit < max_cpus; ++bit)
+        if ((secondaries & (u32{1} << bit)) != 0)
+            cpu = bit;
+    return cpu;
+}
+
 // Online time of the cycled CPU between two cycles.
 constexpr u64 hotplug_period_ns = 100'000'000;
 constinit HotplugStatistics hotplug_stats{};
@@ -486,8 +499,8 @@ HotplugStatistics hotplug_statistics() noexcept
 #if defined(OK_SMP_HOTPLUG_TEST) && defined(OK_ARCH_SMP_START)
     // The CPU the test cycles, also in reports before its first pass.
     auto statistics = hotplug_stats;
-    if (const u32 secondaries = started_mask() & ~u32{1}; secondaries != 0)
-        statistics.cpu = static_cast<CpuId>(31 - __builtin_clz(secondaries));
+    if (const CpuId cpu = cycled_cpu(); cpu != 0)
+        statistics.cpu = cpu;
     return statistics;
 #else
     return {};
@@ -497,11 +510,10 @@ HotplugStatistics hotplug_statistics() noexcept
 void hotplug_test_pass() noexcept
 {
 #if defined(OK_SMP_HOTPLUG_TEST) && defined(OK_ARCH_SMP_START)
-    const u32 secondaries = started_mask() & ~u32{1};
-    if (bringup_kernel == nullptr || secondaries == 0 || current_cpu() != 0 || !kernel_lock.owned_by_current_cpu() ||
+    const CpuId cpu = cycled_cpu();
+    if (bringup_kernel == nullptr || cpu == 0 || current_cpu() != 0 || !kernel_lock.owned_by_current_cpu() ||
         native_shutdown_pending())
         return;
-    const auto cpu = static_cast<CpuId>(31 - __builtin_clz(secondaries));
     const auto now = arch::monotonic_nanoseconds();
     if (!now)
         return;
