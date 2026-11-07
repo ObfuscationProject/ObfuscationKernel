@@ -14,8 +14,9 @@ Current behaviour, which the remaining planned sections replace:
   byte at a time). The console serves TCGETS, TCSETS/TCSETSW/TCSETSF, TCSBRK,
   TCFLSH, TIOCGWINSZ, TIOCSWINSZ and FIONREAD besides `OK_TIOCSCTTY`,
   `OK_TIOCGPGRP`, `OK_TIOCSPGRP` and `OK_TIOCGSID`, for both personalities, so
-  musl `isatty()` on a console descriptor is 1. Background console reads keep
-  returning EIO until S8.
+  musl `isatty()` on a console descriptor is 1. Background members of the
+  console's session are job-controlled (§9.6, S8); console lease members in
+  other sessions read without a check.
 - `OK_SYS_PTY_PAIR` creates raw native PTY pairs (8 slots) with the v1 hangup
   rules of §8. Every PTY slave is a terminal with N_TTY under raw termios, so
   raw pairs move bytes exactly as the former 4096-byte queues (S5). PTY
@@ -29,8 +30,9 @@ Current behaviour, which the remaining planned sections replace:
   signal number reaches native and Linux recipients, stops and continues are
   reported through WUNTRACED/WCONTINUED and SIGCHLD, and native programs have
   SIG_DFL/SIG_IGN. On the console, ISIG characters and TIOCSWINSZ generate
-  signals (S4), and so do PTY master input and TIOCSWINSZ on a PTY (S5);
-  gates and hangup signals follow in S8.
+  signals (S4), and so do PTY master input and TIOCSWINSZ on a PTY (S5).
+  SIGTTIN, SIGTTOU, TOSTOP, TIOCNOTTY and every hangup of §9.7 are landed
+  (S8).
 - `OK_TTY` (`fs::TtyDevice`) is a VFS roadmap model. It is not a terminal and is
   not part of this contract.
 
@@ -167,7 +169,7 @@ entry. The description records the node in `terminal_origin`; I/O dispatch
 never reads it. `terminal_status(description)` serves fstat,
 `change_pts_mode`/`change_pts_owner` serve chmod and chown, and
 `pts_node(description)` names a slave's entry.
-## 4. Controlling terminal and foreground group — landed (S4 console, S5 PTY); `/dev/tty` landed (S6); planned (gates and TIOCNOTTY S8)
+## 4. Controlling terminal and foreground group — landed (S4 console, S5 PTY); `/dev/tty` landed (S6); gates and TIOCNOTTY landed (S8)
 
 - **Derivation.** A process's ctty is the terminal whose session equals its
   session ID, unless the process detached itself with TIOCNOTTY as a
@@ -192,7 +194,7 @@ never reads it. `terminal_status(description)` serves fstat,
   group, and the association is cleared. From another member: only that
   process detaches. Not the caller's ctty, or a master: ENOTTY.
 
-## 5. ioctl requests — codecs landed (S1); console landed (S4); PTY landed (S5); planned (S8 gate, TIOCNOTTY)
+## 5. ioctl requests — codecs landed (S1); console landed (S4); PTY landed (S5); gate and TIOCNOTTY landed (S8)
 
 Error order: (1) EBADF; (2) ENOTTY for a non-terminal fd, an unknown request,
 or a request invalid on this side; (3) association checks; (4) job-control
@@ -223,7 +225,11 @@ for everything except TCGETS and TIOCGWINSZ.
 Linux columns are generated from Linux 6.13.4 and musl 1.2.5; the generated
 `linux_profile_data.hpp` is authoritative. The rows landed on the console in
 S4 and on PTY descriptors in S5, with TIOCGPTN and TIOCSPTLCK
-(`OK_TIOCGPTN`, `OK_TIOCSPTLCK`); TIOCNOTTY lands in S8. On a PTY master,
+(`OK_TIOCGPTN`, `OK_TIOCSPTLCK`); TIOCNOTTY and the gate landed in S8
+(`OK_TIOCNOTTY` maps natively). The gate checks TCSETS, TCSETSW, TCSETSF and
+TIOCSPGRP on a master against the slave it names (Linux `real_tty`); TCSBRK
+and TCFLSH on a master are not checked (Linux checks the master itself, never
+a controlling terminal). On a PTY master,
 termios, window, foreground and session requests act on the slave's terminal;
 TCFLSH and FIONREAD act on the master's own direction (its queue to read, its
 input not yet read by the slave). TIOCGPTN and TIOCSPTLCK on a raw-pair master
@@ -328,7 +334,7 @@ password.
   faulting buffer loses no input (§14 row 17).
 - `OK_SYS_CONSOLE_FLUSH` also flushes the console line discipline's input.
 
-## 8. PTY pair states — data and open counts landed (S5); `/dev/pts` landed (S6); planned (S8 signals)
+## 8. PTY pair states — data and open counts landed (S5); `/dev/pts` landed (S6); hangup signals landed (S8)
 
 | Event | ptmx pair (Linux semantics) | `OK_SYS_PTY_PAIR` raw pair (v1, unchanged) |
 |---|---|---|
@@ -357,8 +363,9 @@ raw slave was closed or the slave is locked, EOVERFLOW at 65535 opens. A
 description to bind must be fresh: provider-free with exactly one reference.
 `pty_index` and `set_pty_lock` serve TIOCGPTN/TIOCSPTLCK, and
 `terminal_audit()` checks that every endpoint's open count equals its bound
-descriptions. The hung-up data rules are landed; the hangup signals and the
-cleared session wait for S8 (a hung-up slave keeps its session until then).
+descriptions. The hung-up data rules are landed (S5); since S8 the master's
+last close of either kind queues SIGHUP then SIGCONT for the slave session's
+leader in the slave's outbox and clears the session and foreground.
 
 ## 9. Job control
 
@@ -481,7 +488,7 @@ stopped; it must ignore the signal instead. Native recipients accept every
 signal: terminating defaults terminate, stop defaults stop. `tgkill` of a
 native thread returns EOPNOTSUPP.
 
-### 9.6 Background access — planned (S8)
+### 9.6 Background access — landed (S8)
 
 Linux `__tty_check_change`. Applies only when the terminal is the caller's
 ctty, has a foreground group, and the caller is not in it.
@@ -499,15 +506,36 @@ ctty, has a foreground group, and the caller is not in it.
 - Callers whose ctty is a different terminal are not job-controlled; this
   includes console lease members in other sessions.
 
+Implementation (S8). `tty_gate` (`src/user/runtime/tty.cpp`) runs at console
+read and readv, console write and writev under TOSTOP, PTY slave read and
+write (TOSTOP) and step 4 of the ioctl dispatch, for both personalities.
+`private_terminal_background` (`jobctl.cpp`) decides. A restart parks the
+call in `ThreadWaitReason::job_control` keyed by terminal (0 the console,
+1 + slot a PTY); no data wait is armed and the syscall re-dispatches from its
+frame when the park completes, so the check runs again. A continue
+(`continue_process` bumps `continue_generation`) completes the process's
+console read, PTY read and write and job-control waits with `ready`; a data
+wait records the generation in `terminal_gate_mark` when armed, and a call
+whose wait outlived a continue is checked again (a PTY write that already
+moved bytes returns them). A foreground change, a hangup or a new
+association wakes the terminal's parks. A Linux park binds its syscall origin
+(`TerminalControlBinding`), so a caught signal interrupts it with EINTR or
+restarts the call under SA_RESTART (`RestartAdapter` family `terminal_control`
+for the checked requests, the read/write families otherwise). Native SIG_DFL
+SIGTTIN/SIGTTOU stop the process; SIG_IGN gives EIO (read) or lets the call
+go on. Console readiness and `console_read_authority` keep only the lease
+check; a reader already blocked keeps its wait across a foreground change, as
+in Linux.
+
 ### 9.7 Hangup and related signals
 
 | Event | Signals | Status |
 |---|---|---|
-| PTY master's last close | SIGHUP then SIGCONT to the slave session's leader; ctty cleared for the session | planned (S8) |
-| Session leader exit, ctty is a PTY | SIGHUP to the foreground group; association cleared | planned (S8) |
-| Session leader exit, ctty is the console | SIGHUP to the foreground group; association cleared; no console vhangup | planned (S8) |
-| TIOCNOTTY by the leader | SIGHUP then SIGCONT to the foreground group | planned (S8) |
-| Console lease revoke or retire | SIGHUP then SIGCONT to the console session leader, then the console terminal is reset | planned (S8) |
+| PTY master's last close | SIGHUP then SIGCONT to the slave session's leader; ctty cleared for the session | landed (S8) |
+| Session leader exit, ctty is a PTY | SIGHUP to the foreground group; association cleared | landed (S8) |
+| Session leader exit, ctty is the console | SIGHUP to the foreground group; association cleared; no console vhangup | landed (S8) |
+| TIOCNOTTY by the leader | SIGHUP then SIGCONT to the foreground group | landed (S8) |
+| Console lease revoke or retire | SIGHUP then SIGCONT to the console session leader, then the console terminal is reset | landed (S8) |
 | A process exit orphans a group with stopped members | SIGHUP then SIGCONT to that group, after any terminal hangup signals | landed (S3) |
 | Window size change | SIGWINCH to the foreground group | landed (S4 console, S5 PTY) |
 
@@ -517,7 +545,13 @@ API (`send_kernel_process_signal`, `send_kernel_group_signal`, native numbers)
 is landed (S3). On the console, VINTR, VQUIT and VSUSP under ISIG send SIGINT,
 SIGQUIT and SIGTSTP to the foreground group, and a TIOCSWINSZ that changes the
 size sends SIGWINCH (S4); PTY master input and PTY TIOCSWINSZ do the same
-(S5); the hangup events arrive in S8.
+(S5). The hangup events are landed (S8): scheduler paths queue them in the
+terminal's outbox (the master's close and the lease revoke or retirement,
+TIOCNOTTY, and `finish_process` for a session leader's exit, before the lease
+retires), and the exit commit drains the outbox before its orphan pass, so a
+leader's exit sends the foreground group SIGHUP before the orphan pass sends
+SIGHUP and SIGCONT (Linux `disassociate_ctty` before `kill_orphaned_pgrp`). A
+TIOCNOTTY from another member only detaches that member.
 
 ### 9.8 Kill-path errors — landed (S3); terminal waits interruptible (S7)
 
@@ -555,8 +589,12 @@ arms). Then, as for pipes:
   at generation as before. A Linux wait whose origin could not be bound stays
   non-interruptible (§9.8).
 - `kill(-1)` returns EOPNOTSUPP.
+- Since S8 a Linux job-control park (§9.6) is a third terminal wait: it is
+  never ready, so a caught signal always interrupts it (EINTR, or a restart
+  under SA_RESTART); a continue or a foreground change ends it instead and
+  the call re-dispatches.
 
-## 10. Readiness — console landed (S4); native PTY landed (S5); Linux PTY landed (S7); planned (S8 console POLLERR)
+## 10. Readiness — console landed (S4); native PTY landed (S5); Linux PTY landed (S7); console POLLERR removed (S8)
 
 Applies to poll and select in both personalities; both share one PTY mapping
 (readable → POLLIN, writable → POLLOUT, hangup → POLLHUP, error → POLLERR).
@@ -623,13 +661,13 @@ profile string and version above keeps its current value.
 | 4 | No ptrace stops, no `kill(-1)`, no core bit. `waitid` is RV32-only. | landed (S3) |
 | 5 | No devpts filesystem: no mount options, no `newinstance`, no `/dev/pts/ptmx`. `st_dev(/dev/pts/N) == st_dev(/dev)`. The gid policy is the opener's egid. | landed (S6) |
 | 6 | 8 PTYs, shared with raw pairs. | landed (S5, S6) |
-| 7 | No console vhangup. VTIME on the console is treated as 0 (PTY slaves run it, S7). IXON output stop works on PTY slaves only. | VTIME landed (S4, S7); IXON landed (S5); planned (S8) |
+| 7 | No console vhangup. VTIME on the console is treated as 0 (PTY slaves run it, S7). IXON output stop works on PTY slaves only. | VTIME landed (S4, S7); IXON landed (S5); hangup landed (S8) |
 | 8 | VMIN reads are admitted atomically. | landed (S1) |
 | 9 | Echo overflow and console overrun drop bytes and are counted. Echo kept after a drop keeps the OPOST expansion (XTABS, tab-erase width) computed when it was generated. | landed (S1, S4) |
 | 10 | A PTY master cannot be a controlling terminal. | landed (S5) |
 | 11 | Native `stat` has no rdev, and there is no `ttyname` (no `/proc`). Linux `stat` reports `st_rdev`; the OS names a slave by the path it opened or by TIOCGPTN. | landed (S6) |
-| 12 | After a hangup and a later re-acquire by the leader, members forked earlier see the new ctty. | planned (S8) |
-| 13 | pid 1 gets EIO instead of a restart loop on background terminal access. | planned (S8) |
+| 12 | After a hangup and a later re-acquire by the leader, members forked earlier see the new ctty (a member that detached itself with TIOCNOTTY does not). | landed (S8) |
+| 13 | pid 1 gets EIO instead of a restart loop on background terminal access: a caller that neither stopped nor has a signal that would interrupt the park gets EIO. | landed (S8) |
 | 14 | Non-canonical input fills all 4096 bytes of the read buffer (Linux stops at 4095), so raw pairs keep their 4096-byte queue. | landed (S1) |
 | 15 | Init never takes the `complete_signal` fatal shortcut. Linux 6.13 does when the named thread blocks a SIG_DFL fatal signal that another init thread does not; here it stays queued and is dropped when dequeued. | landed (S3) |
 | 16 | One console `write` or `writev` moves at most 64 KiB; a longer one returns a short count. | landed (S4) |
@@ -638,6 +676,8 @@ profile string and version above keeps its current value.
 | 19 | A hung-up ptmx slave answers an unknown request with ENOTTY; Linux `hung_up_tty_ioctl` gives EIO for every request except TIOCSPGRP. | landed (S5) |
 | 20 | `/dev/ptmx`, `/dev/tty` and `/dev/console` are fixed: `chmod`/`fchmod` by any caller and root `chown`/`fchown` return EOPNOTSUPP, and so do these calls on a ptmx master, `/dev/tty` or `/dev/console` descriptor or the boot stdio. Linux devtmpfs accepts them (0), or gives EPERM to a non-owner chmod. A non-root chown gets EPERM, as on Linux. | landed (S6) |
 | 21 | A caught signal during a PTY slave read below VMIN returns EINTR and leaves the buffered bytes for the next read; Linux copies bytes as they arrive and returns their count. | landed (S7) |
+| 22 | A session leader's exit hangs its terminal up before its descriptors close, so the foreground group gets SIGHUP alone even when the leader held the master's last descriptor; Linux closes the files first and then sends SIGHUP and SIGCONT to that group through `tty_old_pgrp`. | landed (S8) |
+| 23 | A zero-length read or write of a PTY slave returns 0 before the job-control check; Linux `n_tty_read` runs the check for a zero count too. | landed (S8) |
 
 ## Tests
 
@@ -830,5 +870,32 @@ S7 adds one runner (hosted runtime evidence only) and extends one:
   writev move bytes (`OK_SYS_PTY_PAIR` stays ENOSYS for Linux), a Linux wait
   is cancelled when its owner changes personality, and select reports PTY
   readiness instead of ENOSYS.
+
+S8 (hosted runtime and model evidence only) extends existing runners:
+
+- `test_native_tty.py` appends `linux=1 sigttin=1 sigttou=1 tostop=1
+  regate=1 hangup=1 tiocnotty=1` before `hosted=1 guest=0`: a native SIG_DFL
+  background reader stops and parks (WUNTRACED reports it), a continue alone
+  stops it again, a foreground change ends the park; SIGTTOU for TCSETS,
+  TCSBRK, TCFLSH and TIOCSPGRP and none for TCGETS/TIOCGWINSZ/TIOCSWINSZ;
+  TOSTOP; SIG_IGN; an orphaned group (EIO, ENOTTY for TIOCSPGRP); a lease
+  member in another session reading; a Linux `cat` blocked on the console,
+  ^Z, bg, the continued read taking SIGTTIN, fg; a PTY slave's SIGTTIN and
+  TOSTOP under the slave's key; pid 1's EIO; the master's last close
+  (outbox SIGHUP then SIGCONT for the leader); TIOCNOTTY from a member and
+  from the leader; a leader's exit followed by the orphan pass; the console
+  revoke's SIGHUP and SIGCONT.
+- `test_native_terminal_signal.py` appends `job_control_park=1`: a Linux
+  background read parked under the slave's key and interrupted with EINTR, and
+  a parked TCSETS restarted under SA_RESTART from its captured frame
+  (`terminal_control` family) that completes in the foreground.
+- `test_native_console_control.py` runs with the signal runtime: background
+  reads stop SIG_DFL callers, give EIO under SIG_IGN and in an orphaned group,
+  a background TIOCSPGRP gets SIGTTOU or ENOTTY when orphaned, console poll
+  reports readiness without POLLERR, and blocked readers keep their wait.
+- `test_process_sessions.py` ends with `guest=0 tty=1 smp=0`: ctty
+  derivation, fork, setsid, TIOCNOTTY by a member and the leader, re-acquire,
+  leader exit and the master's last close at scheduler level.
+- `test_terminal_control.py` maps `OK_TIOCNOTTY` (`native_requests=16`).
 
 Each slice adds its runners here.
