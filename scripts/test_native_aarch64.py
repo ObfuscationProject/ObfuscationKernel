@@ -4,7 +4,9 @@
 The independent build does not change any xmake configuration. Both supported
 Linux Image boot entry levels, EL1 and EL2, execute the same EL0 test program.
 With two or more CPUs the probe also starts a secondary through PSCI CPU_ON and
-runs EL0 code on it, including a remap shootdown and its next entry.
+runs EL0 code on it, including a remap shootdown and its next entry, and then
+routes a GIC SPI to it (OK_NATIVE_GIC cpus=2); with one CPU the boot CPU's
+interrupt wait takes that SPI (OK_NATIVE_GIC cpus=1).
 """
 from __future__ import annotations
 
@@ -33,13 +35,14 @@ def main() -> int:
     objects = []
     for name, source in (("boot", "src/arch/aarch64/boot.S"), ("handoff", "src/boot/raw_handoff.cpp"), ("execution", "src/arch/aarch64/execution.cpp"), ("irq", "src/interrupt/platform_irq.cpp"),
                          ("clock", "src/arch/clock.cpp"), ("entry", "src/arch/aarch64/execution.S"),
-                         ("smp", "src/arch/aarch64/smp.cpp"), ("fdt", "src/boot/fdt.cpp"),
-                         ("user", "tests/native/aarch64_execution_user.S"),
+                         ("ops", "src/arch/aarch64/ops.cpp"), ("smp", "src/arch/aarch64/smp.cpp"),
+                         ("fdt", "src/boot/fdt.cpp"), ("user", "tests/native/aarch64_execution_user.S"),
                          ("test", "tests/native/aarch64_execution_test.cpp")):
         target = out / (name + ".o")
         command = [gxx, *flags] if source.endswith(".cpp") else [gcc]
-        if name in ("execution", "smp", "test"):
-            # Kernel code: smp::current_cpu() reads the per-CPU block.
+        if name in ("execution", "irq", "smp", "test"):
+            # Kernel code: smp::current_cpu() reads the per-CPU block, and the
+            # interrupt service drives the GIC.
             command.append("-DOK_KERNEL_FREESTANDING")
         subprocess.run([*command, "-c", str(project/source), "-o", str(target)], check=True)
         objects.append(str(target))
@@ -68,6 +71,10 @@ def main() -> int:
             raise RuntimeError(f"native {entry_level} hardware test failed: QEMU exit {result.returncode}")
         if args.smp > 1 and "OK_NATIVE_SMP scope=hardware cpus=2 " not in output:
             raise RuntimeError(f"native {entry_level} hardware test did not run EL0 code on a secondary CPU")
+        if "OK_NATIVE_GIC scope=hardware " not in output:
+            raise RuntimeError(f"native {entry_level} hardware test did not take a GIC SPI")
+        if args.smp > 1 and "OK_NATIVE_GIC scope=hardware cpus=2 " not in output:
+            raise RuntimeError(f"native {entry_level} hardware test did not route an SPI to a secondary CPU")
     return 0
 
 

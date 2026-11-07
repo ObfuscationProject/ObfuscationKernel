@@ -285,7 +285,8 @@ static boot::MadtInterrupts poisoned_interrupts()
 
 static bool same(const boot::MadtInterrupts &a, const boot::MadtInterrupts &b)
 {
-    if (a.io_apic_count != b.io_apic_count || a.pcat_compat != b.pcat_compat || a.truncated != b.truncated)
+    if (a.io_apic_count != b.io_apic_count || a.pcat_compat != b.pcat_compat || a.truncated != b.truncated ||
+        a.rejected != b.rejected)
         return false;
     for (usize i = 0; i < a.io_apics.size(); ++i)
         if (a.io_apics[i].id != b.io_apics[i].id || a.io_apics[i].address != b.io_apics[i].address ||
@@ -747,6 +748,21 @@ static CpuTopologyMap acpi_parsed(Memory &memory)
     return map;
 }
 
+// A malformed I/O APIC or override entry: the CPU map still parses (two
+// CPUs, SIPI) and the interrupt description is rejected and empty.
+static void acpi_interrupts_rejected(Memory &memory, u64 rsdp_address)
+{
+    ++acpi_cases;
+    auto map = poisoned();
+    auto interrupts = poisoned_interrupts();
+    assert(boot::parse_acpi_madt(memory.reader(), rsdp_address, map, &interrupts));
+    assert(map.count == 2 && map.enabled_count() == 2 && map.method == CpuStartMethod::x86_sipi);
+    boot::MadtInterrupts expected{};
+    expected.pcat_compat = true;
+    expected.rejected = true;
+    assert(same(interrupts, expected));
+}
+
 static void acpi_fails(Memory &memory, u64 rsdp_address, StatusCode expected)
 {
     ++acpi_cases;
@@ -1060,43 +1076,43 @@ static void acpi_checks()
         t[t.size() - 11] = std::byte{11};
         t.pop_back();
     });
-    acpi_fails(memory, at, StatusCode::invalid_argument); // Short I/O APIC entry.
+    acpi_interrupts_rejected(memory, at); // Short I/O APIC entry.
     memory = interrupt_variant([](Bytes &t) { io_apic(t, 0, 0, 0); });
-    acpi_fails(memory, at, StatusCode::invalid_argument); // I/O APIC without an address.
+    acpi_interrupts_rejected(memory, at); // I/O APIC without an address.
     memory = interrupt_variant([](Bytes &t) {
         io_apic(t, 0, 0xfec00000, 0);
         io_apic(t, 0, 0xfec01000, 24);
     });
-    acpi_fails(memory, at, StatusCode::invalid_argument); // Duplicate I/O APIC id.
+    acpi_interrupts_rejected(memory, at); // Duplicate I/O APIC id.
     memory = interrupt_variant([](Bytes &t) {
         io_apic(t, 0, 0xfec00000, 0);
         io_apic(t, 1, 0xfec00000, 24);
     });
-    acpi_fails(memory, at, StatusCode::invalid_argument); // Duplicate I/O APIC address.
+    acpi_interrupts_rejected(memory, at); // Duplicate I/O APIC address.
     memory = interrupt_variant([](Bytes &t) {
         source_override(t, 0, 2, 0);
         t[t.size() - 9] = std::byte{9};
         t.pop_back();
     });
-    acpi_fails(memory, at, StatusCode::invalid_argument); // Short override.
+    acpi_interrupts_rejected(memory, at); // Short override.
     memory = interrupt_variant([](Bytes &t) { source_override(t, 0, 2, 0, 1); });
-    acpi_fails(memory, at, StatusCode::invalid_argument); // Not the ISA bus.
+    acpi_interrupts_rejected(memory, at); // Not the ISA bus.
     memory = interrupt_variant([](Bytes &t) { source_override(t, 16, 16, 0); });
-    acpi_fails(memory, at, StatusCode::invalid_argument); // No ISA IRQ.
+    acpi_interrupts_rejected(memory, at); // No ISA IRQ.
     memory = interrupt_variant([](Bytes &t) { source_override(t, 9, 9, 0x2); });
-    acpi_fails(memory, at, StatusCode::invalid_argument); // Reserved polarity.
+    acpi_interrupts_rejected(memory, at); // Reserved polarity.
     memory = interrupt_variant([](Bytes &t) { source_override(t, 9, 9, 0x8); });
-    acpi_fails(memory, at, StatusCode::invalid_argument); // Reserved trigger mode.
+    acpi_interrupts_rejected(memory, at); // Reserved trigger mode.
     memory = interrupt_variant([](Bytes &t) {
         source_override(t, 9, 9, 0xd);
         source_override(t, 9, 19, 0xd);
     });
-    acpi_fails(memory, at, StatusCode::invalid_argument); // One IRQ overridden twice.
+    acpi_interrupts_rejected(memory, at); // One IRQ overridden twice.
     memory = interrupt_variant([](Bytes &t) {
         source_override(t, 0, 2, 0);
         source_override(t, 3, 2, 0);
     });
-    acpi_fails(memory, at, StatusCode::invalid_argument); // Two IRQs onto one GSI.
+    acpi_interrupts_rejected(memory, at); // Two IRQs onto one GSI.
 
     // No reader at all.
     CpuTopologyMap map_none{};
@@ -1129,6 +1145,7 @@ static void acpi_checks()
         }
         assert(result.count && result.count <= result.cpus.size() && result.local_apic_address);
         assert(interrupts.io_apic_count <= interrupts.io_apics.size());
+        assert(!interrupts.rejected || (interrupts.io_apic_count == 0 && !interrupts.truncated));
         for (usize j = 0; j < interrupts.io_apic_count; ++j)
             assert(interrupts.io_apics[j].address != 0);
         assert(result.up_reason.empty() == (result.method != CpuStartMethod::none));

@@ -463,19 +463,41 @@ Status retarget_platform_irq(IrqLine line, smp::CpuId cpu)
     return router.retarget(line, cpu);
 }
 
+namespace
+{
+// A device interrupt this CPU's controller interface accepted and has not
+// handed to a top half yet. Only reads state; serve_local_interrupts() takes
+// it.
+[[nodiscard]] bool local_device_interrupt_accepted()
+{
+    if (!platform_irqs_started() || !secondary_device_lines())
+        return false;
+#if defined(OK_PLATFORM_IRQ_WAIT) && defined(__aarch64__)
+    u64 status;
+    asm volatile("mrs %0, isr_el1" : "=r"(status));
+    return (status & 0x80) != 0;
+#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__x86_64__)
+    return arch::x86::lapic::reg(arch::x86::lapic::request_32_63) != 0;
+#elif defined(OK_PLATFORM_IRQ_WAIT) && defined(__riscv) && __riscv_xlen == 64
+    uptr pending;
+    asm volatile("csrr %0, mip" : "=r"(pending));
+    return (pending & mie_meie) != 0;
+#else
+    return false;
+#endif
+}
+} // namespace
+
 usize retarget_platform_irqs_away(smp::CpuId cpu)
 {
-    usize moved = 0;
     const u32 others = cpu < smp::max_cpus ? ~(u32{1} << cpu) : ~u32{0};
-    for (usize line = 0; line < max_irq_lines; ++line)
-    {
-        const auto id = static_cast<IrqLine>(line);
-        if (!router.bound(id) || router.target(id) != cpu)
-            continue;
-        const auto target = spread_target(id, others);
-        if (target != cpu && router.retarget(id, target).ok())
-            ++moved;
-    }
+    const usize moved = router.retarget_away(cpu, [others](IrqLine line) { return spread_target(line, others); });
+    // The lines no longer reach this CPU; what it accepted before the move
+    // runs its top half here. Bounded: a line still routed here (no other
+    // CPU online) may keep asserting.
+    if (cpu == smp::current_cpu())
+        for (usize round = 0; round < 64 && local_device_interrupt_accepted(); ++round)
+            serve_local_interrupts();
     return moved;
 }
 

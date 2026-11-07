@@ -256,6 +256,31 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
         else
             return Status{StatusCode::unsupported, "irq controller delivers to CPU 0 only"};
     }
+    // Moves every bound line delivered to `cpu` to pick(line), deciding and
+    // routing under the lock so that a concurrent unbind and rebind is never
+    // moved by mistake. A line pick() leaves on `cpu`, or the chip refuses,
+    // stays. Returns the lines moved.
+    template <typename Pick> usize retarget_away(smp::CpuId cpu, Pick pick)
+    {
+        usize moved = 0;
+        if constexpr (RoutableIrqChip<Chip>)
+        {
+            Guard guard(lock_);
+            for (usize line = 0; line < max_irq_lines; ++line)
+            {
+                auto &entry = lines_[line];
+                if (entry.count == 0 || entry.target != cpu)
+                    continue;
+                const smp::CpuId next = pick(static_cast<IrqLine>(line));
+                if (next != cpu && chip_.route(static_cast<IrqLine>(line), next).ok())
+                {
+                    entry.target = next;
+                    ++moved;
+                }
+            }
+        }
+        return moved;
+    }
     [[nodiscard]] bool bound(IrqLine line) const
     {
         return line < max_irq_lines && lines_[line].count != 0;

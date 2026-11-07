@@ -68,8 +68,11 @@ bool idle_until_interrupt();
 // Moves a bound line to `cpu` (an online CPU), on controllers that route.
 Status retarget_platform_irq(IrqLine line, smp::CpuId cpu);
 // Before `cpu` goes offline: spreads its lines over the other online CPUs.
-// An interrupt `cpu` already claimed still runs its top half there. Returns
-// the lines moved.
+// Called on `cpu` itself with interrupts masked, it then serves what its
+// controller interface already accepted (an x86 vector in the local APIC's
+// IRR, a source pending at its PLIC context, a GIC interrupt signalled to
+// it), so the top half runs and completes there and no line is left blocked
+// behind an x86 Remote IRR or an unfinished claim. Returns the lines moved.
 usize retarget_platform_irqs_away(smp::CpuId cpu);
 // Runs the top halves of interrupts pending at this CPU's controller
 // interface, and takes its IPIs, without waiting. For a CPU spinning with

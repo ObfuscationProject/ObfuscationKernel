@@ -20,6 +20,7 @@ enum Register : u32
     id = 0x20,
     task_priority = 0x80,
     eoi = 0xb0,
+    request_32_63 = 0x210, // IRR bits for vectors 32..63.
     spurious = 0xf0,
     icr_low = 0x300,
     icr_high = 0x310,

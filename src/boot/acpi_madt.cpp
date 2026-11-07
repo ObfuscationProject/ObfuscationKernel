@@ -167,20 +167,16 @@ class MadtParser final
             }
             else if (type == 1) // I/O APIC
             {
-                if (length < 12)
-                    return invalid("ACPI MADT I/O APIC entry is truncated");
-                if (auto status = add_io_apic({std::to_integer<u8>(entry[2]), le32(entry + 4), le32(entry + 8)});
-                    !status.ok())
-                    return status;
+                // A malformed interrupt entry spoils only the interrupt
+                // description; the CPU map still parses.
+                if (length < 12 || !add_io_apic({std::to_integer<u8>(entry[2]), le32(entry + 4), le32(entry + 8)}))
+                    interrupts_.rejected = true;
             }
             else if (type == 2) // Interrupt Source Override
             {
-                if (length < 10)
-                    return invalid("ACPI MADT interrupt source override is truncated");
-                if (auto status = add_override(std::to_integer<u8>(entry[2]), std::to_integer<u8>(entry[3]),
-                                               le32(entry + 4), le16(entry + 8));
-                    !status.ok())
-                    return status;
+                if (length < 10 || !add_override(std::to_integer<u8>(entry[2]), std::to_integer<u8>(entry[3]),
+                                                 le32(entry + 4), le16(entry + 8)))
+                    interrupts_.rejected = true;
             }
             else if (type == 5) // Local APIC Address Override
             {
@@ -206,6 +202,8 @@ class MadtParser final
             return invalid("ACPI MADT names no local APIC address");
         if (!map_.count)
             return Status::not_found("ACPI MADT describes no usable processors");
+        if (interrupts_.rejected)
+            interrupts_ = {.pcat_compat = interrupts_.pcat_compat, .rejected = true};
         if (map_.enabled_count() > 1)
             map_.method = CpuStartMethod::x86_sipi;
         else
@@ -251,42 +249,38 @@ class MadtParser final
         return Status::success();
     }
 
-    Status add_io_apic(IoApicDescription io_apic)
+    // False for an I/O APIC without an address or described twice.
+    bool add_io_apic(IoApicDescription io_apic)
     {
         if (io_apic.address == 0)
-            return invalid("ACPI MADT I/O APIC has no address");
+            return false;
         for (usize i = 0; i < interrupts_.io_apic_count; ++i)
             if (interrupts_.io_apics[i].id == io_apic.id || interrupts_.io_apics[i].address == io_apic.address)
-                return invalid("ACPI MADT describes an I/O APIC twice");
+                return false;
         if (interrupts_.io_apic_count == interrupts_.io_apics.size())
-        {
             interrupts_.truncated = true;
-            return Status::success();
-        }
-        interrupts_.io_apics[interrupts_.io_apic_count++] = io_apic;
-        return Status::success();
+        else
+            interrupts_.io_apics[interrupts_.io_apic_count++] = io_apic;
+        return true;
     }
 
     // MPS INTI flags: polarity in bits 1:0 and trigger mode in bits 3:2, each
     // 0 (conforms to the bus), 1 (active high, edge) or 3 (active low,
     // level); 2 is reserved. The ISA bus is edge-triggered and active high.
-    Status add_override(u8 bus, u8 source, u32 gsi, u16 flags)
+    // False for a bus other than ISA, no ISA IRQ, reserved flags, an IRQ
+    // overridden twice or two IRQs onto one GSI.
+    bool add_override(u8 bus, u8 source, u32 gsi, u16 flags)
     {
-        if (bus != 0)
-            return invalid("ACPI MADT interrupt source override names a bus other than ISA");
-        if (source >= MadtInterrupts::isa_irqs)
-            return invalid("ACPI MADT interrupt source override names no ISA IRQ");
         const unsigned polarity = flags & 3, trigger = (flags >> 2) & 3;
-        if (polarity == 2 || trigger == 2)
-            return invalid("ACPI MADT interrupt source override has reserved flags");
-        if (interrupts_.overridden[source])
-            return invalid("ACPI MADT overrides an ISA IRQ twice");
+        if (bus != 0 || source >= MadtInterrupts::isa_irqs || polarity == 2 || trigger == 2 ||
+            interrupts_.overridden[source])
+            return false;
         for (u8 irq = 0; irq < MadtInterrupts::isa_irqs; ++irq)
             if (interrupts_.overridden[irq] && interrupts_.isa[irq].gsi == gsi)
-                return invalid("ACPI MADT overrides two ISA IRQs onto one GSI");
+                return false;
         interrupts_.overridden[source] = true;
         interrupts_.isa[source] = {gsi, trigger == 3, polarity == 3};
-        return Status::success();
+        return true;
     }
 
     CpuTopologyMap map_{};

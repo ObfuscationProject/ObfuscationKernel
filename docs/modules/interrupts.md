@@ -51,8 +51,16 @@ GICD_ITARGETSR, one target per line; the PLIC through hart h's M-mode context
 2h; the I/O APIC through each redirection entry's physical destination) a
 line bound while N CPUs are online goes to the (line mod N)-th online CPU in
 logical order. aarch64, rv64 and x86_64 route this way; arm32 and rv32 run
-one CPU, and i386 keeps the 8259 on CPU 0. `retarget_platform_irq()` and
-`retarget_platform_irqs_away(cpu)` move bound lines (for CPU hotplug).
+one CPU, and i386 keeps the 8259 on CPU 0. `retarget_platform_irq()` moves
+one bound line. `retarget_platform_irqs_away(cpu)` prepares CPU hotplug: it
+decides and moves every line delivered to `cpu` under the router lock
+(`IrqRouter::retarget_away()`), spreading them over the other online CPUs.
+Called on `cpu` itself with interrupts masked, it then serves what that CPU's
+controller interface already accepted (a vector in the local APIC's IRR,
+ISR_EL1.I, mip.MEIP) so its top half runs and completes there; an x86 level
+line would otherwise stay blocked behind its Remote IRR. A pending,
+unclaimed GIC or PLIC interrupt instead follows its new target. No offline
+path calls it yet; the native probes exercise it.
 Secondary CPUs run top halves from their user trap path, their idle wait and
 while they spin for the kernel lock (`lock_kernel_serving_interrupts()`,
 `serve_local_interrupts()`): a lock holder may be waiting for a line routed to
@@ -86,7 +94,11 @@ cpuK=<top halves run>:<lines drained>:<interrupt waits> ... routes=<line>@<cpu>,
 `arch::x86::PcIrqChip` (`src/arch/x86_64/ioapic.hpp`) is x86_64's chip. When
 `smp::discover()` finds the xAPIC page `boot.S` maps, it keeps the MADT's I/O
 APIC entries and ISA interrupt source overrides (`boot::MadtInterrupts`,
-`ok/boot/acpi.hpp`), on uniprocessor boots too. `initialize()` then picks the
+`ok/boot/acpi.hpp`), on uniprocessor boots too. A malformed one (a short
+entry, no address, a duplicate I/O APIC, an override of a bus other than
+ISA, with reserved flags, of one IRQ twice or of two IRQs onto one GSI)
+marks the description `rejected` and empty: the CPU map still parses, and the
+chip keeps the 8259 pair. `initialize()` then picks the
 I/O APIC whose GSIs start at 0, inside the uncached 2 MiB at 0xfec00000 that
 `boot.S` maps, and masks every redirection entry. It masks both 8259s and the
 boot CPU's LINT0 (no ExtINT any more), enables the boot CPU's local APIC and

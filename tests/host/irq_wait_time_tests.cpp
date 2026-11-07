@@ -123,6 +123,41 @@ static void check_irq_routing()
     CHECK(!router.bound(4) && router.target(4) == 0);
 }
 
+// Hotplug: retarget_away moves exactly the bound lines delivered to the
+// departing CPU, under the router lock, and keeps their pending state: a
+// line whose top half ran on that CPU is still drained once and unmasked.
+static void check_irq_retarget_away()
+{
+    interrupt::ModelIrqChip chip;
+    interrupt::IrqRouter<interrupt::ModelIrqChip> router(chip);
+    CHECK(chip.initialize().ok());
+    Serviced a{.chip = &chip}, b{.chip = &chip}, c{.chip = &chip}, d{.chip = &chip};
+    CHECK(router.bind(3, interrupt::IrqTrigger::level, service, &a, 2).ok());
+    CHECK(router.bind(4, interrupt::IrqTrigger::edge, service, &b, 2).ok());
+    CHECK(router.bind(5, interrupt::IrqTrigger::level, service, &c, 1).ok());
+    // Bound to CPU 2 once, then unbound: no longer a line to move.
+    CHECK(router.bind(7, interrupt::IrqTrigger::level, service, &d, 2).ok());
+    CHECK(router.unbind(7, service, &d).ok() && router.target(7) == 0);
+    // Line 3 is in flight on CPU 2: its top half ran, the drain did not.
+    CHECK(router.top_half(3) && chip.masked(3));
+    usize asked = 0;
+    const usize moved = router.retarget_away(2, [&](interrupt::IrqLine line) {
+        ++asked;
+        // Line 4 has nowhere else to go.
+        return line == 4 ? smp::CpuId{2} : smp::CpuId{1};
+    });
+    CHECK(moved == 1 && asked == 2);
+    CHECK(router.target(3) == 1 && chip.routed(3) == 1 && router.target(4) == 2 && chip.routed(4) == 2);
+    CHECK(router.target(5) == 1 && chip.routed(5) == 1 && !router.bound(7) && chip.routed(7) == 2);
+    CHECK(router.pending() && router.drain() == 1 && a.calls == 1 && !chip.masked(3));
+    CHECK(chip.completed(3) == 1 && router.controller_errors() == 0);
+    // No line left on CPU 3; nothing is asked or moved.
+    CHECK(router.retarget_away(3, [&](interrupt::IrqLine) {
+        ++asked;
+        return smp::CpuId{0};
+    }) == 0 && asked == 2);
+}
+
 // Model threads stand in for CPUs: one takes top halves of three lines while
 // three others drain. A line's handlers never run on two threads at once, the
 // line stays masked while they run, and every top half is serviced.
@@ -615,6 +650,7 @@ int main()
 {
     check_irq_router();
     check_irq_routing();
+    check_irq_retarget_away();
     check_irq_router_concurrency();
     check_wait_queue();
     check_wait_queue_enlist();

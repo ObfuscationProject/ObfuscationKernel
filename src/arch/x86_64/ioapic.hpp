@@ -66,6 +66,8 @@ class IoApic final
     // inside the mapped window.
     Status initialize()
     {
+        if (ioapic::firmware.rejected)
+            return Status::invalid_argument("the MADT's interrupt entries are malformed");
         const boot::IoApicDescription *chosen = nullptr;
         for (usize i = 0; i < ioapic::firmware.io_apic_count; ++i)
             if (ioapic::firmware.io_apics[i].gsi_base == 0)

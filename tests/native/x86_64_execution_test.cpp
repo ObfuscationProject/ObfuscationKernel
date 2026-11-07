@@ -414,7 +414,8 @@ void uart_service(void *, interrupt::IrqLine)
 
 // CPU 1's share: user entries during which it raises the line routed to it
 // from its kernel side, then idle waits, then a device wait as a driver
-// inside a syscall would make one.
+// inside a syscall would make one, then a retirement as a hotplug path
+// would make one.
 enum DevicePhase : u32
 {
     device_none,
@@ -423,10 +424,13 @@ enum DevicePhase : u32
     device_idle,
     device_wait,
     device_woken,
+    device_retire,
+    device_retired,
 };
 constinit std::atomic<u32> device_phase{};
-constinit std::atomic<bool> device_raise{}, device_stop{};
+constinit std::atomic<bool> device_raise{}, device_stop{}, device_accepted{};
 constinit std::atomic<u32> device_traps{}, device_other{};
+constinit std::atomic<usize> device_moved{};
 constinit interrupt::IrqLine uart_line{};
 native::AddressSpace device_space{};
 
@@ -458,18 +462,35 @@ void secondary_devices()
         }
     }
     device_phase.store(device_user_done, std::memory_order_release);
-    // One device wait each time the boot CPU asks for one.
+    // One device wait each time the boot CPU asks for one, then the
+    // retirement: with interrupts masked, CPU 1 raises the line routed to it
+    // and its local APIC accepts the vector into the IRR before the line is
+    // moved away; retarget_platform_irqs_away() must take it here.
     for (;;)
     {
-        while (device_phase.load(std::memory_order_acquire) != device_wait)
+        const auto phase = device_phase.load(std::memory_order_acquire);
+        if (phase == device_wait)
+        {
+            while (!interrupt::platform_irq_pending())
+                if (!interrupt::wait_for_interrupt())
+                {
+                    device_other.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                }
+            device_phase.store(device_woken, std::memory_order_release);
+        }
+        else if (phase == device_retire)
+        {
+            const u32 bit = u32{1} << (uart_line % 32);
+            raise_uart_line();
+            device_accepted.store(wait_for(
+                [bit] { return (ok::arch::x86::lapic::reg(ok::arch::x86::lapic::request_32_63) & bit) != 0; },
+                50'000'000));
+            device_moved.store(interrupt::retarget_platform_irqs_away(1));
+            device_phase.store(device_retired, std::memory_order_release);
+        }
+        else
             ok::arch::smp::wait_local();
-        while (!interrupt::platform_irq_pending())
-            if (!interrupt::wait_for_interrupt())
-            {
-                device_other.fetch_add(1, std::memory_order_relaxed);
-                break;
-            }
-        device_phase.store(device_woken, std::memory_order_release);
     }
 }
 
@@ -636,6 +657,33 @@ void check_device_interrupts()
     }
     print("OK_NATIVE_IOAPIC scope=hardware cpus=2 user_top_half=pass wake_ipi=pass idle_top_half=pass "
           "secondary_device_wait=pass spin_serve=pass\n");
+
+    // CPU 1 leaves as a hotplug path would. The vector its local APIC
+    // accepted before the move runs its top half on CPU 1 (an edge line here;
+    // a level line's Remote IRR would otherwise block the GSI for good), and
+    // the line then reaches the boot CPU only.
+    require(interrupt::retarget_platform_irq(uart_line, 1).ok() && interrupt::platform_irq_target(uart_line) == 1,
+            "route the COM1 line to CPU 1 again");
+    const auto boot_delivered = delivered_on(0);
+    device_phase.store(device_retire, std::memory_order_release);
+    require(wait_for([] { return device_phase.load(std::memory_order_acquire) == device_retired; },
+                     2'000'000'000) &&
+                device_accepted.load() && device_moved.load() == 1 && interrupt::platform_irq_target(uart_line) == 0,
+            "CPU 1 retargets its line away");
+    require(delivered_on(1) == secondary_delivered + 2 && delivered_on(0) == boot_delivered &&
+                interrupt::drain_platform_irqs() == 1 && uart_serviced.load() == ++serviced,
+            "CPU 1 runs the top half of the vector it accepted");
+    raise_uart_line();
+    require(wait_for(
+                [&] {
+                    interrupt::serve_local_interrupts();
+                    return delivered_on(0) == boot_delivered + 1;
+                },
+                2'000'000'000) &&
+                interrupt::drain_platform_irqs() == 1 && uart_serviced.load() == ++serviced &&
+                delivered_on(1) == secondary_delivered + 2,
+            "the line reaches the boot CPU after the retarget");
+    print("OK_NATIVE_IOAPIC scope=hardware retarget_away=pass\n");
 }
 
 void check_fault(native::AddressSpace &space, const u8 *entry, native::TrapKind kind, uptr address, uptr error_mask)

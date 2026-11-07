@@ -58,6 +58,9 @@ struct MadtInterrupts
     std::array<bool, isa_irqs> overridden{};
     bool pcat_compat{}; // The board also has the dual 8259 pair.
     bool truncated{};   // More I/O APICs than max_io_apics.
+    // A malformed I/O APIC or override entry: nothing else is recorded and
+    // the I/O APIC must not be used. The CPU map is unaffected.
+    bool rejected{};
 
     [[nodiscard]] constexpr GsiWiring isa_irq(u8 irq) const
     {
@@ -94,9 +97,9 @@ Status find_acpi_rsdp(PhysicalReader reader, u64 &rsdp);
 // present CPUs; online-capable but not enabled entries are recorded disabled;
 // entries with neither flag are skipped. The boot CPU is unknown until the
 // caller marks its own APIC id with mark_boot_cpu. With `interrupts`, also
-// record the I/O APIC and ISA interrupt source override entries. Failure
-// leaves both outputs unchanged; no table length is trusted beyond the
-// reader's window.
+// record the I/O APIC and ISA interrupt source override entries; a malformed
+// one marks them rejected instead of failing the parse. Failure leaves both
+// outputs unchanged; no table length is trusted beyond the reader's window.
 Status parse_acpi_madt(PhysicalReader reader, u64 rsdp, CpuTopologyMap &output, MadtInterrupts *interrupts = nullptr);
 
 } // namespace ok::boot
