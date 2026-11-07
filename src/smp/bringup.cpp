@@ -180,11 +180,14 @@ template <typename Done> bool wait_unlocked(Done done, u64 timeout_ns)
     // Its last section ended with its last step; it returns with an idle record.
     clean = section_records[cpu].load() == SectionState::idle && clean;
     section_records[cpu].store(SectionState::idle);
-    // Its lines move while it is still online and this CPU holds the kernel
-    // lock bind_platform_irq needs, so no line is routed here afterwards;
-    // then IPIs and shootdowns stop covering it.
+    // Out of the online mask first: IPIs and shootdowns stop covering it, and
+    // every routable chip refuses it as a target (route() checks the mask
+    // under the router lock), so neither bind_platform_irq nor a top half's
+    // follow() can place a line here once the lines move away below. A
+    // follow() that routed one here before still ran under that lock, ahead
+    // of the move.
+    detail::online.fetch_and(~(u32{1} << cpu), std::memory_order_seq_cst);
     static_cast<void>(interrupt::retarget_platform_irqs_away(cpu));
-    detail::online.fetch_and(~(u32{1} << cpu), std::memory_order_acq_rel);
     bkl_unlock();
     // What reached it before the others saw it leave, then nothing more.
     interrupt::serve_local_interrupts();
@@ -204,8 +207,11 @@ u64 hotplug_next{};
 #endif
 
 #if defined(OK_ENABLE_TEST_POINTS) && defined(OK_ARCH_SMP_START)
-// Debug test point before userland: CPU 1 leaves (no IPI is sent to it while
-// it is parked), returns, and answers an IPI again.
+// How long a parked CPU must stay quiet after an IPI raised at it.
+constexpr u64 parked_quiet_ns = 20'000'000;
+
+// Debug test point before userland: CPU 1 leaves, takes no IPI while parked,
+// returns, and answers an IPI again.
 void boot_hotplug_check(Kernel &kernel)
 {
     constexpr CpuId cpu = 1;
@@ -214,9 +220,25 @@ void boot_hotplug_check(Kernel &kernel)
         return;
     const bool stopped = stop_secondary_cpu(kernel, cpu).ok() && (online_mask() & bit) == 0 &&
                          (kernel.scheduler().online_cpus() & bit) == 0 && state_of(cpu) == CpuState::offline;
-    const auto sent = cpu_record(current_cpu()).ipis_sent.load(std::memory_order_relaxed);
-    send_ipi(cpu, ipi_ping);
-    const bool quiet = stopped && cpu_record(current_cpu()).ipis_sent.load(std::memory_order_relaxed) == sent;
+    // Parked: send_ipi() skips it, and an IPI raised at its hardware anyway
+    // is not taken (x86 halts with interrupts off, aarch64 is off, the rv64
+    // park loop only rereads its mailbox). The restart discards what stayed
+    // pending (INIT, GicV2::reset_cpu_lines, the park loop's MSIP clear).
+    bool quiet = false;
+    if (stopped)
+    {
+        auto &target = cpu_record(cpu);
+        const auto sent = cpu_record(current_cpu()).ipis_sent.load(std::memory_order_relaxed);
+        const auto received = target.ipis_received.load(std::memory_order_acquire);
+        send_ipi(cpu, ipi_ping);
+        const bool skipped = cpu_record(current_cpu()).ipis_sent.load(std::memory_order_relaxed) == sent &&
+                             target.ipi_pending.load(std::memory_order_acquire) == 0;
+        if (detail::ipi_sender != nullptr)
+            detail::ipi_sender(cpu, target.hardware_id);
+        static_cast<void>(wait_for([] { return false; }, parked_quiet_ns));
+        quiet = skipped && target.ipis_received.load(std::memory_order_acquire) == received &&
+                state_of(cpu) == CpuState::offline && arch::smp::parked(cpu, target.hardware_id);
+    }
     const bool restarted = stopped && restart_secondary_cpu(kernel, cpu).ok() && (online_mask() & bit) != 0 &&
                            (kernel.scheduler().online_cpus() & bit) != 0;
     bool delivered = false;
@@ -379,7 +401,12 @@ Status stop_secondary_cpu([[maybe_unused]] Kernel &kernel, [[maybe_unused]] CpuI
     if (!wait_unlocked(
             [&] { return state_of(cpu) == CpuState::offline && arch::smp::parked(cpu, record.hardware_id); },
             stop_timeout_ns))
+    {
+        // It may still leave later; until a restart, it takes no work:
+        // Kernel::tick schedules only CPUs its topology lists as online.
+        static_cast<void>(kernel.topology().mark_halted(cpu));
         return Status::io_error("secondary CPU did not park");
+    }
     static_cast<void>(kernel.topology().mark_offline(cpu));
     if (leave_faults[cpu].load(std::memory_order_relaxed))
         return Status::fault("leaving CPU still recorded a user entry or a section");
@@ -457,7 +484,11 @@ Status restart_secondary_cpu([[maybe_unused]] Kernel &kernel, [[maybe_unused]] C
 HotplugStatistics hotplug_statistics() noexcept
 {
 #if defined(OK_SMP_HOTPLUG_TEST) && defined(OK_ARCH_SMP_START)
-    return hotplug_stats;
+    // The CPU the test cycles, also in reports before its first pass.
+    auto statistics = hotplug_stats;
+    if (const u32 secondaries = started_mask() & ~u32{1}; secondaries != 0)
+        statistics.cpu = static_cast<CpuId>(31 - __builtin_clz(secondaries));
+    return statistics;
 #else
     return {};
 #endif
@@ -471,7 +502,6 @@ void hotplug_test_pass() noexcept
         native_shutdown_pending())
         return;
     const auto cpu = static_cast<CpuId>(31 - __builtin_clz(secondaries));
-    hotplug_stats.cpu = cpu;
     const auto now = arch::monotonic_nanoseconds();
     if (!now)
         return;

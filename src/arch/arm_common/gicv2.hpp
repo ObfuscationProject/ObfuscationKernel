@@ -2,6 +2,7 @@
 
 #include "ok/core/types.hpp"
 #include "ok/interrupt/irq_chip.hpp"
+#include "ok/smp/bringup.hpp"
 
 #include <array>
 #include <string_view>
@@ -106,11 +107,15 @@ class GicV2 final
         return Status::success();
     }
     // One target CPU per line (one byte store): every other CPU's IAR never
-    // sees it, so no CPU wakes to read a spurious 1023.
+    // sees it, so no CPU wakes to read a spurious 1023. Like the I/O APIC and
+    // the PLIC, it refuses a CPU outside the online mask: a CPU that hotplug
+    // stops keeps its interface number while it is off.
     Status route(interrupt::IrqLine line, ok::smp::CpuId cpu)
     {
         if (auto status = admit(line); !status.ok())
             return status;
+        if (cpu >= ok::smp::max_cpus || (cpu != 0 && (ok::smp::online_mask() & (u32{1} << cpu)) == 0))
+            return Status::invalid_argument("GIC route names an offline CPU");
         const u8 interface_number = cpu_interface_number(cpu);
         if (interface_number >= 8)
             return Status::invalid_argument("GIC has no CPU interface for this CPU");

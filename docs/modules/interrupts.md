@@ -63,8 +63,12 @@ Called on `cpu` itself with interrupts masked, it then serves what that CPU's
 controller interface already accepted (a vector in the local APIC's IRR,
 ISR_EL1.I, mip.MEIP) so its top half runs and completes there; an x86 level
 line would otherwise stay blocked behind its Remote IRR. A pending,
-unclaimed GIC or PLIC interrupt instead follows its new target. No offline
-path calls it yet; the native probes exercise it.
+unclaimed GIC or PLIC interrupt instead follows its new target. CPU hotplug
+(`smp::stop_secondary_cpu()`) calls it on the leaving CPU after that CPU
+cleared its online bit: every routable chip (GICv2, PLIC, I/O APIC) refuses a
+CPU outside the online mask, and the router asks it under its lock, so a
+follow() that moved a line there earlier is undone by the move and a later
+one is refused. The native probes exercise it as well.
 Secondary CPUs run top halves from their user trap path, their idle wait and
 while they spin for the kernel lock (`lock_kernel_serving_interrupts()`,
 `serve_local_interrupts()`): a lock holder may be waiting for a line routed to

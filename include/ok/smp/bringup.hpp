@@ -57,8 +57,8 @@ struct BringupReport
 namespace detail
 {
 inline constinit std::array<CpuRecord, max_cpus> records{};
-// Changed only under the kernel lock: bring-up stores it, a CPU that leaves
-// (hotplug) clears its own bit and a restart sets it again.
+// Bring-up stores it under the kernel lock; a CPU that leaves (hotplug)
+// clears its own bit under that lock, and a restart sets it again.
 inline constinit std::atomic<u32> online{1};
 // The CPUs bring-up started. Hotplug keeps a parked CPU in it; reports list
 // these CPUs, whose counters stay meaningful while one is parked.

@@ -167,6 +167,79 @@ static void check_irq_retarget_away()
     }) == 0 && asked == 2);
 }
 
+// A routable model chip that, like the I/O APIC, GICv2 and the PLIC, refuses
+// a CPU outside the online mask (CPU 0 is always routable).
+class OnlineModelIrqChip final
+{
+  public:
+    Status initialize() { return chip_.initialize(); }
+    Status configure(interrupt::IrqLine line, interrupt::IrqTrigger trigger) { return chip_.configure(line, trigger); }
+    Status mask(interrupt::IrqLine line) { return chip_.mask(line); }
+    Status unmask(interrupt::IrqLine line) { return chip_.unmask(line); }
+    Status acknowledge(interrupt::IrqLine line) { return chip_.acknowledge(line); }
+    Status end_of_interrupt(interrupt::IrqLine line) { return chip_.end_of_interrupt(line); }
+    [[nodiscard]] usize line_count() const { return chip_.line_count(); }
+    [[nodiscard]] std::string_view name() const { return chip_.name(); }
+    Status route(interrupt::IrqLine line, smp::CpuId cpu)
+    {
+        if (cpu != 0 && (cpu >= smp::max_cpus || (smp::online_mask() & (u32{1} << cpu)) == 0))
+            return Status{StatusCode::invalid_argument, "route names an offline CPU"};
+        return chip_.route(line, cpu);
+    }
+    [[nodiscard]] smp::CpuId routed(interrupt::IrqLine line) const { return chip_.routed(line); }
+
+  private:
+    interrupt::ModelIrqChip chip_;
+};
+static_assert(interrupt::RoutableIrqChip<OnlineModelIrqChip>);
+
+// Hotplug's leaving order (bringup.cpp leave()): the CPU clears its online
+// bit, then retarget_away() moves its lines. A top half's follow() that
+// routed a line to it before the move is undone by the move; one delayed past
+// it is refused by the chip. Model threads race follow() against the leave.
+static void check_irq_follow_against_leave()
+{
+    OnlineModelIrqChip chip;
+    interrupt::IrqRouter<OnlineModelIrqChip> router(chip);
+    CHECK(chip.initialize().ok());
+    Serviced seen{};
+    smp::detail::online.store(0b111);
+    CHECK(router.bind(3, interrupt::IrqTrigger::level, service, &seen, 1).ok());
+    CHECK(router.bind(4, interrupt::IrqTrigger::level, service, &seen, 0).ok());
+    // A follow before the leave lands on CPU 2; the move takes it off.
+    CHECK(router.follow(4, 2) && router.target(4) == 2 && chip.routed(4) == 2);
+    smp::detail::online.fetch_and(~u32{0b100});
+    CHECK(router.retarget_away(2, [](interrupt::IrqLine) { return smp::CpuId{0}; }) == 1);
+    CHECK(router.target(4) == 0 && chip.routed(4) == 0);
+    // Delayed past the move: refused, nothing reaches the parked CPU.
+    CHECK(!router.follow(3, 2) && !router.follow(4, 2));
+    CHECK(router.target(3) == 1 && chip.routed(3) == 1 && router.target(4) == 0);
+    // Restarted, it is a target again.
+    smp::detail::online.fetch_or(0b100);
+    CHECK(router.follow(3, 2) && router.target(3) == 2 && chip.routed(3) == 2);
+    CHECK(router.follow(3, 1) && router.target(3) == 1);
+
+    constexpr int rounds = 2000;
+    for (int round = 0; round < rounds; ++round)
+    {
+        smp::detail::online.store(0b111);
+        std::atomic<bool> go{false};
+        std::thread top_half([&] {
+            while (!go.load(std::memory_order_acquire))
+                ;
+            for (int attempt = 0; attempt < 8; ++attempt)
+                static_cast<void>(router.follow(static_cast<interrupt::IrqLine>(3 + (attempt & 1)), 2));
+        });
+        go.store(true, std::memory_order_release);
+        smp::detail::online.fetch_and(~u32{0b100}, std::memory_order_seq_cst);
+        static_cast<void>(router.retarget_away(2, [](interrupt::IrqLine) { return smp::CpuId{0}; }));
+        top_half.join();
+        CHECK(router.target(3) != 2 && chip.routed(3) != 2 && router.target(4) != 2 && chip.routed(4) != 2);
+    }
+    CHECK(router.unbind(3, service, &seen).ok() && router.unbind(4, service, &seen).ok());
+    smp::detail::online.store(1);
+}
+
 // Model threads stand in for CPUs: one takes top halves of three lines while
 // three others drain. A line's handlers never run on two threads at once, the
 // line stays masked while they run, and every top half is serviced.
@@ -660,6 +733,7 @@ int main()
     check_irq_router();
     check_irq_routing();
     check_irq_retarget_away();
+    check_irq_follow_against_leave();
     check_irq_router_concurrency();
     check_wait_queue();
     check_wait_queue_enlist();
