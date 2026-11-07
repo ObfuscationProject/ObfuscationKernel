@@ -520,7 +520,8 @@ frame when the park completes, so the check runs again. A continue
 console read, PTY read and write and job-control waits with `ready`; a data
 wait records the generation in `terminal_gate_mark` when armed, and a call
 whose wait outlived a continue is checked again (a PTY write that already
-moved bytes returns them). A foreground change, a hangup or a new
+moved bytes returns them unchecked, as Linux `n_tty_write` returned its
+partial count when the stop interrupted it). A foreground change, a hangup or a new
 association wakes the terminal's parks. A Linux park binds its syscall origin
 (`TerminalControlBinding`), so a caught signal interrupts it with EINTR or
 restarts the call under SA_RESTART (`RestartAdapter` family `terminal_control`

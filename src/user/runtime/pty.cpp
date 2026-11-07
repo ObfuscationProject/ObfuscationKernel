@@ -281,17 +281,25 @@ i64 resume_pty_io(Kernel &kernel, sched::ProcessControlBlock &process,
     }
     if (timer_expired) wait.deadline = 0;
     // A continue ended the wait: the slave call runs its job check again. A
-    // write that already moved bytes returns them instead of stopping again.
+    // write that already moved bytes returns them unchecked, foreground or
+    // not (Linux n_tty_write returned b - buf when the stop interrupted it,
+    // and a partial write is never restarted).
     if (wait.endpoint.side == sched::private_pty::Side::slave &&
         thread->terminal_gate_mark != process.job_control().continue_generation)
+    {
+        if (wait.writing && wait.committed)
+        {
+            const auto result = pty_terminal_result(wait, -5);
+            cancel_pty_wait(kernel, object, "job-control", result);
+            return result;
+        }
         if (const auto gate = tty_check(kernel, process, *thread, pty_terminal_ref(wait.endpoint),
                                         wait.writing ? TtyAccess::write : TtyAccess::read); gate != TtyGate::go)
         {
-            if (gate == TtyGate::io_error || wait.committed)
+            if (gate == TtyGate::io_error)
             {
-                const auto result = pty_terminal_result(wait, -5);
-                cancel_pty_wait(kernel, object, "job-control", result);
-                return result;
+                cancel_pty_wait(kernel, object, "job-control", -5);
+                return -5;
             }
             // The park takes over the frame and its origin capture.
             const auto fd = wait.fd;
@@ -303,6 +311,7 @@ i64 resume_pty_io(Kernel &kernel, sched::ProcessControlBlock &process,
             complete = !parked;
             return error(status);
         }
+    }
     const auto before = wait;
     auto transferred = wait.writing ? attempt_pty_write(kernel, process, wait)
                                     : attempt_pty_io(kernel, process, wait, timer_expired);
