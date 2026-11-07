@@ -487,9 +487,10 @@ bool private_group_orphaned(Kernel &kernel, sched::ProcessId group)
 // Linux __tty_check_change for a background member of its terminal's
 // foreground session: ignored or blocked SIGTTIN is EIO and SIGTTOU allowed,
 // an orphaned group gets EIO, else the signal goes to the caller's group and
-// the call restarts. A caller that neither stopped nor has a signal that
-// interrupts the park (init drops its stop) gets EIO rather than a park that
-// nothing ends (section 14, item 13).
+// the call restarts. A caller that neither stopped nor has a signal that can
+// interrupt the park (init drops its stop; a Linux call without a captured
+// syscall origin cannot bind one) gets EIO rather than a park that nothing
+// ends (section 14, item 13).
 BackgroundAccess private_terminal_background(Kernel &kernel, sched::ProcessControlBlock &caller,
                                              sched::ThreadControlBlock &thread, u32 signal)
 {
@@ -500,9 +501,12 @@ BackgroundAccess private_terminal_background(Kernel &kernel, sched::ProcessContr
     static_cast<void>(send_kernel_group_signal(kernel, group, signal));
     const auto *process = kernel.scheduler().find(caller.pid());
     if (!process || jobctl_completed(*process)) return BackgroundAccess::io_error;
+    if (process->job_control().stopped) return BackgroundAccess::restart;
     u32 pending{};
     sched::SignalAction action{};
-    return process->job_control().stopped || private_signal_interrupting(kernel, *process, thread, pending, action)
+    const bool bindable = process->resources().personality != Personality::linux ||
+        syscall_origins.identity(*process, thread).capture;
+    return bindable && private_signal_interrupting(kernel, *process, thread, pending, action)
         ? BackgroundAccess::restart : BackgroundAccess::io_error;
 }
 

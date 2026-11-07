@@ -667,7 +667,7 @@ profile string and version above keeps its current value.
 | 10 | A PTY master cannot be a controlling terminal. | landed (S5) |
 | 11 | Native `stat` has no rdev, and there is no `ttyname` (no `/proc`). Linux `stat` reports `st_rdev`; the OS names a slave by the path it opened or by TIOCGPTN. | landed (S6) |
 | 12 | After a hangup and a later re-acquire by the leader, members forked earlier see the new ctty (a member that detached itself with TIOCNOTTY does not). | landed (S8) |
-| 13 | pid 1 gets EIO instead of a restart loop on background terminal access: a caller that neither stopped nor has a signal that would interrupt the park gets EIO. | landed (S8) |
+| 13 | pid 1 gets EIO instead of a restart loop on background terminal access: a caller that neither stopped nor has a signal that would interrupt the park gets EIO. That includes a Linux caller with a caught SIGTTIN/SIGTTOU whose call has no captured syscall origin (so no binding could deliver EINTR or SA_RESTART); Linux returns ERESTARTSYS and runs the handler. | landed (S8) |
 | 14 | Non-canonical input fills all 4096 bytes of the read buffer (Linux stops at 4095), so raw pairs keep their 4096-byte queue. | landed (S1) |
 | 15 | Init never takes the `complete_signal` fatal shortcut. Linux 6.13 does when the named thread blocks a SIG_DFL fatal signal that another init thread does not; here it stays queued and is dropped when dequeued. | landed (S3) |
 | 16 | One console `write` or `writev` moves at most 64 KiB; a longer one returns a short count. | landed (S4) |
