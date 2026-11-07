@@ -6,9 +6,13 @@
 // hosted mapping/copy backend. No CPU leaves the kernel lock, no section is
 // pinned and no guest executes; the hardware lane is the OS SMP stress gate.
 #include "native_runtime_units.hpp"
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
+#include <thread>
+#include <utility>
 using namespace ok;
 namespace native = ok::user::native;
 namespace hw = ok::arch::execution;
@@ -50,6 +54,8 @@ alignas(16) std::array<std::byte, 96 * 1024> memory{};
 // The register the profile under test passes its first argument in, as the
 // native trap decoder reports it (the A5 digest reads the descriptor there).
 ok::usize first_argument_slot{};
+// Runs once after the next copy to user memory: between two chunks of a read.
+std::function<void()> after_copy_out;
 } // namespace mock
 namespace ok::arch
 {
@@ -103,6 +109,7 @@ Status copy_to_user(const AddressSpace &s, uptr address, const void *in, usize s
 {
     if (!user_range(s, address, size, true)) return Status::fault();
     if (size) std::memcpy(mock::memory.data() + address - user_begin, in, size);
+    if (auto hook = std::exchange(mock::after_copy_out, nullptr)) hook();
     return Status::success();
 }
 Result<u32 *> user_word(const AddressSpace &s, uptr address, bool write)
@@ -505,6 +512,63 @@ void equivalence(Kernel &kernel, sched::ProcessId pid, usize number_slot, std::a
         CHECK(smp::section_cpus[0].section_asserts.load() == asserts + 1 &&
               smp::lock_violation_count(0) == violations + 1);
         smp::section_cpus[0].section_asserts.store(asserts);
+
+        // A read staged in several chunks holds the description's position
+        // across all of them and the copy-outs between them, on both paths
+        // and without re-entering the lock: a reader on another CPU that
+        // arrives between two chunks reads after the whole read.
+        for (const bool sectioned : {false, true})
+        {
+            constexpr usize chunk = sched::pipe_capacity;
+            na.size = 3 * chunk;
+            for (usize i = 0; i < na.size; ++i)
+                na.bytes[i] = static_cast<std::byte>(i / chunk * 64 + i % 61);
+            shared->offset = 0;
+            std::fill(mock::memory.begin() + (output - hw::user_begin),
+                      mock::memory.begin() + (output - hw::user_begin) + 2 * chunk, std::byte{0});
+            std::atomic<bool> entered{false}, done{false};
+            Result<usize> second = usize{0};
+            std::array<std::byte, chunk> second_out{};
+            std::thread reader;
+            mock::after_copy_out = [&] {
+                // A section of the same process on CPU 1 reads the description.
+                reader = std::thread([&] {
+                    const smp::ScopedHostedCpu cpu(1);
+                    smp::set_cpu_mode(1, smp::mode_section);
+                    kernel.posix().bind_section_caller(1, process, t);
+                    entered.store(true);
+                    second = kernel.posix().read(a.value(), second_out);
+                    kernel.posix().unbind_section_caller(1);
+                    smp::clear_cpu_mode(1, smp::mode_section);
+                    done.store(true);
+                });
+                while (!entered.load()) std::this_thread::yield();
+                // Room for the second reader to take the position if it were free.
+                for (int spin = 0; spin < 200000 && !done.load(); ++spin) std::this_thread::yield();
+            };
+            const auto staged_asserts = smp::section_cpus[0].section_asserts.load();
+            const auto staged_violations = smp::lock_violation_count(0) + smp::lock_violation_count(1);
+            const auto call = model.frame(O::read, {fa, output, 2 * chunk});
+            i64 first{};
+            if (sectioned)
+            {
+                native::SectionCall<lu::Profile::x86_64> admitted{};
+                CHECK(model.admit(call, admitted) == native::Admission::run);
+                smp::set_cpu_mode(0, smp::mode_section);
+                first = model.body(admitted);
+                smp::clear_cpu_mode(0, smp::mode_section);
+            }
+            else
+                first = model.locked(call);
+            CHECK(!mock::after_copy_out && reader.joinable());
+            reader.join();
+            CHECK(first == static_cast<i64>(2 * chunk) && second && second.value() == chunk);
+            CHECK(!std::memcmp(mock::memory.data() + (output - hw::user_begin), na.bytes.data(), 2 * chunk));
+            CHECK(!std::memcmp(second_out.data(), na.bytes.data() + 2 * chunk, chunk));
+            CHECK(shared->offset == 3 * chunk && !lock->owned_by_current_cpu());
+            CHECK(smp::section_cpus[0].section_asserts.load() == staged_asserts &&
+                  smp::lock_violation_count(0) + smp::lock_violation_count(1) == staged_violations);
+        }
     }
     // Teardown: the RAM nodes return before their descriptions close.
     description(a.value())->node = ra;

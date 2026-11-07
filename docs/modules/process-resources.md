@@ -18,7 +18,8 @@ Descriptor slots hold handles into the scheduler's open-file-description pool.
 keeping descriptor flags and tables independent. Each description has a
 position lock (rank `ofd_position`) held across every offset-dependent read,
 write, seek and directory read together with its provider call, and around
-`F_GETFL`/`F_SETFL`; no path holds two. An `F_SETFL` that changes `O_APPEND`
+`F_GETFL`/`F_SETFL`; a node-backed `read(2)` staged in 4 KiB chunks holds it
+across all of them. No path holds two. An `F_SETFL` that changes `O_APPEND`
 first drains every kernel section. Last close releases the open
 description. `exec` closes only CLOEXEC descriptors and preserves cwd/identity.
 Legacy descriptor-table metadata helpers reject copying or closing live

@@ -516,15 +516,41 @@ Result<usize> PosixService::read(Fd fd, std::span<std::byte> out)
     {
         return Status::invalid_argument("file descriptor has no backing node");
     }
-    // Providers return at most one FileBuffer per call. As on Linux, a read
-    // fills the request until a provider returns a short chunk (end of file).
     // The offset is read and moved once, under the position lock.
     sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
+    return read_node(*entry, out);
+}
+
+bool PosixService::node_backed(const FileDescriptor &entry)
+{
+    return entry.used && entry.readable && entry.node && !entry.native_shared_file && !entry.pty_endpoint &&
+        entry.pipe == sched::invalid_description && !entry.input_console;
+}
+
+sched::DescriptionPositionLock *PosixService::node_position_lock(Fd fd)
+{
+    auto *entry = descriptor(fd);
+    return entry && node_backed(*entry) ? scheduler_->position_lock(entry) : nullptr;
+}
+
+Result<usize> PosixService::read_held(Fd fd, std::span<std::byte> out)
+{
+    auto *entry = descriptor(fd);
+    auto *lock = entry && node_backed(*entry) ? scheduler_->position_lock(entry) : nullptr;
+    if (!lock || !lock->owned_by_current_cpu())
+        return Status::denied("held read without this description's position lock");
+    return read_node(*entry, out);
+}
+
+Result<usize> PosixService::read_node(FileDescriptor &entry, std::span<std::byte> out)
+{
+    // Providers return at most one FileBuffer per call. As on Linux, a read
+    // fills the request until a provider returns a short chunk (end of file).
     usize count = 0;
     while (count < out.size())
     {
         const usize wanted = out.size() - count;
-        auto data = entry->node->read(entry->offset + count, wanted);
+        auto data = entry.node->read(entry.offset + count, wanted);
         if (!data)
         {
             if (count) break;
@@ -539,7 +565,7 @@ Result<usize> PosixService::read(Fd fd, std::span<std::byte> out)
         if (chunk < (wanted < fs::max_file_data ? wanted : fs::max_file_data))
             break;
     }
-    entry->offset += count;
+    entry.offset += count;
     return count;
 }
 

@@ -394,7 +394,10 @@ process's footprint, read-only, and state behind fine locks:
 - **Description position lock.** Each open description has an `ofd_position`
   lock, held in both modes across every offset-dependent read, write, seek and
   directory read together with its provider call, and around
-  `F_GETFL`/`F_SETFL`. No path holds two. A section waiting for one serves its
+  `F_GETFL`/`F_SETFL`. A node-backed `read(2)` staged in 4 KiB chunks holds
+  it across every chunk and the copy-outs between them
+  (`PosixService::read_held`), so it reads one contiguous range while other
+  CPUs read the description. No path holds two. A section waiting for one serves its
   CPU's interrupts; one that would re-enter a lock its CPU holds reports a
   self-deadlock and a section assertion instead of spinning.
 - **ext4 operation gate.** One operation at a time per filesystem, across

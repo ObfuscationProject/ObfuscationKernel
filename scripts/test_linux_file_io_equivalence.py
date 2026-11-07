@@ -28,7 +28,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='ok-linux-file-io-') as directory:
         executable = Path(directory)/'file-io-equivalence-tests'
         subprocess.run([*shlex.split(args.cxx), '-std=c++23', '-O1', '-g', '-Wall', '-Wextra',
-                        '-Wpedantic', '-Werror', '-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections',
+                        '-Wpedantic', '-Werror', '-pthread', '-ffunction-sections', '-fdata-sections', '-Wl,--gc-sections',
                         *(['-fsanitize=address,undefined', '-fno-omit-frame-pointer'] if args.sanitize else []),
                         '-DOK_ARCH_TARGET_X86_64', '-DOK_LOCK_DEBUG', '-I', str(root/'include'),
                         *(str(path) for path in sources), '-o', str(executable)], check=True)

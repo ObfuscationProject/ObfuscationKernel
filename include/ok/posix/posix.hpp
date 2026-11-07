@@ -259,6 +259,12 @@ class PosixService final
     Result<Fd> duplicate(Fd fd, Fd minimum = 0, u32 flags = 0);
     Result<Fd> duplicate_to(Fd fd, Fd target, u32 flags = 0);
     Result<usize> read(Fd fd, std::span<std::byte> out);
+    // A read(2) of a node-backed file staged in several calls holds the
+    // description's position lock (null for any other descriptor) across all
+    // of them and reads with read_held, which neither takes nor drops it, so
+    // it returns one contiguous range of the file.
+    [[nodiscard]] sched::DescriptionPositionLock *node_position_lock(Fd fd);
+    Result<usize> read_held(Fd fd, std::span<std::byte> out);
     Result<usize> write(Fd fd, std::span<const std::byte> in);
     Status fsync(Fd fd);
     Status sync_persistent(Fd fd);
@@ -372,6 +378,9 @@ class PosixService final
     [[nodiscard]] Result<Fd> allocate_fd(Fd minimum = 0);
     [[nodiscard]] Result<fs::ResolveContext> path_context(Fd dirfd, std::string_view path);
     [[nodiscard]] Status copy_descriptor(Fd source, Fd target, u32 flags);
+    [[nodiscard]] static bool node_backed(const FileDescriptor &entry);
+    // Reads at the description's offset and moves it; the caller holds its position lock.
+    Result<usize> read_node(FileDescriptor &entry, std::span<std::byte> out);
     struct SectionCaller
     {
         sched::ProcessControlBlock *process{};

@@ -60,7 +60,14 @@ class ProcessAccess final
 // read(2) and write(2) of a node-backed description, as the native generic
 // marshalling does them: one staging buffer of pipe_capacity bytes, the
 // syscall table handlers' null-buffer check, and for a read further chunks
-// until one comes back short. A write takes at most pipe_capacity bytes.
+// until one comes back short. A write takes at most pipe_capacity bytes in
+// one transfer, under PosixService::write's position hold. A read holds the
+// description's position lock across every chunk and the copy-outs between
+// them, so it returns one contiguous range of the file while other CPUs read
+// the same description (Linux holds f_pos_lock the same way). The copy-outs
+// resolve no copy-on-write page that waits for a section: a section's output
+// range was resolved at admission, and the kernel-lock caller's process was
+// drained before the call.
 // `would_block` reports a provider that asked to wait (the caller decides
 // whether its thread blocked).
 template <Access A>
@@ -70,10 +77,12 @@ i64 regular_rw(A &access, bool writing, i32 fd, uptr address, usize requested, b
     const auto &space = access.space();
     alignas(16) std::array<std::byte, sched::pipe_capacity + 1> buffer{};
     usize size = requested < sched::pipe_capacity ? requested : sched::pipe_capacity;
+    auto *const position_lock = writing ? nullptr : access.posix().node_position_lock(fd);
     auto transfer = [&](usize count) -> Result<usize> {
         if (buffer.data() == nullptr && count != 0)
             return Status::fault(writing ? "write buffer is null" : "read buffer is null");
         if (writing) return access.posix().write(fd, std::span<const std::byte>{buffer.data(), count});
+        if (position_lock) return access.posix().read_held(fd, std::span<std::byte>{buffer.data(), count});
         return access.posix().read(fd, std::span<std::byte>{buffer.data(), count});
     };
     if (writing)
@@ -83,6 +92,7 @@ i64 regular_rw(A &access, bool writing, i32 fd, uptr address, usize requested, b
     }
     else if (!hw::user_range(space, address, size, true))
         return -14;
+    const sched::DescriptionPositionGuard position(position_lock);
     auto result = transfer(size);
     if (!result)
     {
