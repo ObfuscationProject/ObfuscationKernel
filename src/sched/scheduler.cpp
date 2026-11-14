@@ -511,6 +511,9 @@ Status SchedulerState::enqueue_thread(ProcessId pid, ThreadId tid)
     if (thread->state != ProcessState::runnable || process->state() == ProcessState::zombie ||
         process->state() == ProcessState::exited)
         return Status::invalid_argument("only a runnable thread can be queued");
+    // A stopped process is never queued; the runtime's scan queues it after SIGCONT.
+    if (process->job_.stopped)
+        return Status::invalid_argument("a stopped process is not queued");
     if (thread->queued_cpu != no_cpu)
         return Status::success();
     const auto cpu = select_cpu(*process, *thread);
@@ -549,7 +552,7 @@ bool SchedulerState::eligible_on(ThreadRef ref, smp::CpuId queue, smp::CpuId cpu
 {
     const auto *process = find(ref.pid);
     if (!process || process->state() == ProcessState::zombie || process->state() == ProcessState::exited ||
-        !affinity_admits(*process, cpu))
+        process->job_.stopped || !affinity_admits(*process, cpu))
         return false;
     for (const auto &thread : process->threads())
         if (thread.tid == ref.tid)
@@ -575,7 +578,8 @@ std::optional<ThreadRef> SchedulerState::dequeue_thread(smp::CpuId cpu)
             continue;
         thread->queued_cpu = no_cpu;
         if (thread->state != ProcessState::runnable || thread->on_cpu != no_cpu ||
-            process->state() == ProcessState::zombie || process->state() == ProcessState::exited)
+            process->state() == ProcessState::zombie || process->state() == ProcessState::exited ||
+            process->job_.stopped)
             continue;
         if (!affinity_admits(*process, cpu))
         {
@@ -627,7 +631,7 @@ Status SchedulerState::mark_on_cpu(ProcessId pid, ThreadId tid, smp::CpuId cpu)
     if (current_thread_by_cpu_[cpu] != 0)
         return Status::busy("CPU already runs another thread");
     if (thread->state != ProcessState::runnable || process->state() == ProcessState::zombie ||
-        process->state() == ProcessState::exited || !affinity_admits(*process, cpu))
+        process->state() == ProcessState::exited || process->job_.stopped || !affinity_admits(*process, cpu))
         return Status::invalid_argument("thread cannot run on this CPU");
     occupy_cpu(cpu, *process, *thread);
     return Status::success();

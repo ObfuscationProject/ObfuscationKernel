@@ -414,6 +414,52 @@ void test_two_threads_one_process()
     CHECK(single.thread(second).on_cpu == 0 && single.scheduler.current_pid() == second);
 }
 
+// Job control: a stopped process is never queued, stolen, marked or
+// activated; an entry queued before the stop is discarded when its own CPU
+// pops it and dropped when hotplug places it again. SIGCONT makes it eligible.
+void test_stopped_processes()
+{
+    Fixture f;
+    const auto stopped = f.create();
+    const auto other = f.create();
+    CHECK(f.enqueue(stopped) == 0 && f.enqueue(other) == 0);
+    CHECK(f.scheduler.stop_process(stopped, 19));
+    // Another CPU steals past it; with nothing else eligible it steals nothing.
+    CHECK(f.dequeue(1) == other);
+    CHECK(f.dequeue(2) == 0 && f.thread(stopped).queued_cpu == 0 && f.length(0) == 1);
+    // Its own CPU discards the entry and clears the record.
+    CHECK(f.dequeue(0) == 0 && f.thread(stopped).queued_cpu == no_cpu && f.length(0) == 0);
+    CHECK(f.scheduler.enqueue_thread(stopped, stopped).code() == StatusCode::invalid_argument);
+    CHECK(f.thread(stopped).queued_cpu == no_cpu && f.length(0) == 0);
+    CHECK(f.scheduler.mark_on_cpu(stopped, stopped, 3).code() == StatusCode::invalid_argument);
+    CHECK(!f.scheduler.activate_thread(stopped, stopped, 3));
+    CHECK(f.thread(stopped).on_cpu == no_cpu && f.scheduler.current_pid(3) == 0);
+
+    // A thread stopped while it ran is not queued again once it leaves its CPU.
+    CHECK(f.scheduler.continue_process(stopped));
+    CHECK(f.scheduler.mark_on_cpu(stopped, stopped, 2));
+    CHECK(f.scheduler.stop_process(stopped, 20));
+    CHECK(f.scheduler.clear_on_cpu(stopped, stopped, 2));
+    CHECK(f.scheduler.enqueue_thread(stopped, stopped).code() == StatusCode::invalid_argument);
+
+    // Hotplug drops the entry of a process stopped while queued on the leaving CPU.
+    const auto far = f.create(0x8);
+    CHECK(f.enqueue(far) == 3);
+    CHECK(f.scheduler.stop_process(far, 19));
+    CHECK(f.scheduler.offline_cpu(3) && f.thread(far).queued_cpu == no_cpu);
+    for (smp::CpuId cpu = 0; cpu < 4; ++cpu)
+        CHECK(f.length(cpu) == 0);
+    CHECK(f.scheduler.online_cpu(3));
+    f.check_consistent();
+
+    // Continued, both are queued and dispatched again.
+    CHECK(f.scheduler.continue_process(stopped) && f.scheduler.continue_process(far));
+    CHECK(f.enqueue(stopped) == 2 && f.enqueue(far) == 3);
+    CHECK(f.dequeue(1) == stopped && f.dequeue(3) == far);
+    CHECK(f.scheduler.mark_on_cpu(stopped, stopped, 1) && f.scheduler.mark_on_cpu(far, far, 3));
+    f.check_consistent();
+}
+
 // CPU hotplug: a CPU leaving moves its queue to online CPUs, keeps no entry
 // and is never selected; every runnable thread stays queued exactly once.
 void test_hotplug()
@@ -598,6 +644,7 @@ int main()
     test_exit_and_erase_clean_queues();
     test_mark_on_cpu();
     test_two_threads_one_process();
+    test_stopped_processes();
     test_hotplug();
     test_contention();
     std::printf("OK_RUN_QUEUES scope=model checks=%zu model_cpus=4 host_threads=4 guest=0 hardware_smp=0\n", checks);

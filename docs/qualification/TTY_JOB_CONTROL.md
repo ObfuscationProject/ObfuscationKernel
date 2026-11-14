@@ -65,6 +65,18 @@ are listed in the Tests section of [tty](../modules/tty.md).
   `OK_UAPI_VERSION_MINOR=17 expected=16`). The paired worktree must adopt the
   mirrored consumer changes before it consumes an S9a or later SDK.
 
+## Merge with feat/smp-bringup
+
+Main gained per-CPU run queues, the kernel lock and kernel sections (ABI 80)
+while this branch was open. Terminal and job-control work stays under the
+kernel lock in `step()` on every CPU. The stop overlay now also gates the run
+queues: `enqueue_thread`, stealing (`eligible_on`) and `mark_on_cpu` refuse a
+stopped process, `dequeue_thread` discards an entry queued before the stop
+(hotplug re-placement drops it), and a stop kicks a thread of the process that
+runs on another CPU out of user mode. `test_run_queues.py`
+(`test_stopped_processes`, model) covers the gates; removing any one of the
+four fails it.
+
 ## Paired ObfuscationOS obligations (`feat/getty-login`)
 
 1. Consumer: `tools/kernel_sdk.py` (marker strings and lines, the two new

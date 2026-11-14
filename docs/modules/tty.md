@@ -39,8 +39,9 @@ Current behaviour:
 - `OK_TTY` (`fs::TtyDevice`) is a VFS roadmap model. It is not a terminal and is
   not part of this contract.
 
-Scope. All mechanisms run on the boot CPU, serialized at the runtime `step()`
-boundary. Hosted model and runtime runners are model/hosted evidence; debug
+Scope. All mechanisms run under the kernel lock, serialized at the runtime
+`step()` boundary of whichever CPU runs it ([SMP](smp.md#what-stays-serialized)):
+terminal reads, writes and ioctls never run in a kernel section. Hosted model and runtime runners are model/hosted evidence; debug
 test points are models booted in QEMU; only the ObfuscationOS guest probes
 (`TTY_DEVPTS_*`, the login and oksh lanes) are guest execution. The contract
 makes no SMP, physical-hardware or process-isolation claim.
@@ -426,7 +427,12 @@ handler runs under it after the continue.
 
 - A stop is a per-process overlay: the process is never entered while stopped.
   Kernel waits it started still complete, and their results are published when
-  it resumes.
+  it resumes. With secondary CPUs online the per-CPU run queues apply the same
+  gate (`enqueue_thread`, stealing and `mark_on_cpu` refuse a stopped process;
+  `dequeue_thread` discards an entry queued before the stop), and the stop
+  kicks a thread of it running on another CPU out of user mode; that thread
+  finishes a syscall it already trapped, as a Linux thread does before it
+  parks. The scan after SIGCONT queues it again.
 - Generating SIGCONT continues the process even if SIGCONT is ignored or
   blocked, and discards pending STOP/TSTP/TTIN/TTOU. Generating any stop signal
   discards a pending SIGCONT.

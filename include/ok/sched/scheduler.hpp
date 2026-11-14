@@ -791,6 +791,8 @@ class SchedulerState
     Status block_process(ProcessId pid);
     // Job-control overlay (job_control.inc). A stopped process keeps its
     // threads and waits; the runtime never enters it until it is continued.
+    // Meanwhile enqueue_thread, stealing, mark_on_cpu and activate_thread
+    // refuse it, and dequeue_thread discards an entry queued before the stop.
     // `signal` is in the process's own numbering. Stopping an already stopped
     // process succeeds without change; a zombie gives already_exists.
     Status stop_process(ProcessId pid, u8 signal);

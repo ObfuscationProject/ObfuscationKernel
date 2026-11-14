@@ -486,7 +486,10 @@ With one CPU online `step()` keeps the `(pid, tid)` round robin. With
 secondaries online it places every runnable thread that is off-CPU on the run
 queue of its CPU (`enqueue_thread`), takes the next entry from this CPU's queue
 or steals one (`dequeue_thread`), dispatches it with `mark_on_cpu` and sends an
-idle CPU it handed work a reschedule IPI. The entry stack pool keeps one active
+idle CPU it handed work a reschedule IPI. A process stopped by job control is
+never queued, stolen or marked, and an entry queued before the stop is
+discarded when popped ([terminal contract](tty.md#93-stop-and-continue--landed-s2-overlay-s3-generation)).
+The entry stack pool keeps one active
 lease per CPU; the scheduler's no-argument current thread and activation act
 for the calling CPU. With more than one CPU started the interrupt report ends
 with `OK_SMP_CPUS scope=hardware online=N cpuK=<user entries>:<local

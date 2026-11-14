@@ -255,6 +255,11 @@ void private_jobctl_stop(Kernel &kernel, sched::ProcessControlBlock &process, u3
         started = false;
         return;
     }
+    // A thread running on another CPU leaves user mode now (Linux
+    // kick_process), not at its next tick; no step enters it again.
+    for (const auto &thread : process.threads())
+        if (thread.on_cpu != sched::no_cpu && thread.on_cpu != smp::current_cpu())
+            smp::send_ipi(thread.on_cpu, smp::ipi_kick);
     jobctl_notify_parent(kernel, process, sched::ChildExitStatus::stopped(signal));
 }
 
