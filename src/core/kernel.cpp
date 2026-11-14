@@ -1,4 +1,5 @@
 #include "ok/core/kernel.hpp"
+#include "ok/smp/bringup.hpp"
 #include "ok/arch/terminal_power.hpp"
 #include "ok/core/entry.hpp"
 #include "ok/net/native_udp_sdk_profile.hpp"
@@ -215,26 +216,15 @@ Status Kernel::boot(KernelConfig config)
     keyboard_driver_.set_mode(config_.modes.drivers);
     mouse_driver_.set_mode(config_.modes.drivers);
 
-    const auto hardware_threads = arch_->hardware_thread_count();
-    if (auto status = topology_.initialize(hardware_threads == 0 ? 1 : hardware_threads); !status.ok())
+    // Only the boot CPU runs until secondary bring-up started others for real;
+    // the profile's hardware thread count is metadata, not discovery.
+    if (auto status = topology_.initialize(1); !status.ok())
     {
         return status;
     }
     if (auto status = topology_.mark_online(0); !status.ok())
     {
         return status;
-    }
-    for (usize cpu = 1; cpu < topology_.cpu_count(); ++cpu)
-    {
-        const auto cpu_id = static_cast<smp::CpuId>(cpu);
-        if (auto status = topology_.mark_starting(cpu_id); !status.ok())
-        {
-            return status;
-        }
-        if (auto status = topology_.mark_online(cpu_id); !status.ok())
-        {
-            return status;
-        }
     }
     if (auto status = scheduler_.configure_cpus(topology_.cpu_count()); !status.ok())
     {
@@ -863,6 +853,29 @@ Result<u32> Kernel::native_tcp_iss(net::tcp::Endpoint local, net::tcp::Endpoint 
     return value;
 }
 
+Status Kernel::publish_cpu_topology(usize discovered, u32 online_mask)
+{
+    if (discovered == 0 || discovered > smp::max_cpus || (online_mask & 1) == 0 ||
+        (discovered < 32 && (online_mask >> discovered) != 0))
+        return Status::invalid_argument("CPU topology does not hold the online CPUs");
+    if (auto status = topology_.initialize(discovered); !status.ok())
+        return status;
+    for (usize cpu = 0; cpu < discovered; ++cpu)
+    {
+        if ((online_mask & (u32{1} << cpu)) == 0)
+            continue;
+        const auto id = static_cast<smp::CpuId>(cpu);
+        if (cpu != 0)
+            if (auto status = topology_.mark_starting(id); !status.ok())
+                return status;
+        if (auto status = topology_.mark_online(id); !status.ok())
+            return status;
+    }
+    if (auto status = scheduler_.configure_cpus(discovered); !status.ok())
+        return status;
+    return scheduler_.set_online_cpus(online_mask);
+}
+
 Status Kernel::tick()
 {
     if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
@@ -872,11 +885,14 @@ Status Kernel::tick()
     }
     ++kernel_tick_count_;
 
+    // Each CPU schedules its own slot: a started secondary may be running a
+    // native thread there right now.
     for (usize i = 0; i < topology_.cpu_count(); ++i)
     {
         const auto cpu = static_cast<smp::CpuId>(i);
         const auto *info = topology_.cpu(cpu);
-        if (info == nullptr || !cpu_accepts_work(info->state))
+        if (info == nullptr || !cpu_accepts_work(info->state) ||
+            (smp::online_cpus() > 1 && cpu != smp::current_cpu()))
         {
             continue;
         }
@@ -1813,6 +1829,10 @@ Status Kernel::kill_process(sched::ProcessId pid)
     {
         return Status::invalid_argument("process id must be non-zero");
     }
+#if defined(OK_SMP_SECTIONS)
+    // The process's kernel sections end, their results committed, first.
+    smp::drain(pid);
+#endif
     const auto *process = scheduler_.find(pid);
     bool native_resources = process && (process->resources().native_space.root ||
                                        !process->resources().native_pages.empty());
@@ -1884,6 +1904,10 @@ Status Kernel::kill_process(sched::ProcessId pid)
 Status Kernel::supervise_daemons()
 {
     if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
+#if defined(OK_SMP_SECTIONS)
+    // Restarts replace processes: none may have a section pinned.
+    smp::drain_all();
+#endif
     StaticVector<driver::DriverManager::DriverProcessRestart, driver::max_drivers> driver_restarts;
     if (auto status = drivers_.supervise_kernel_processes(driver_restarts); !status.ok())
     {

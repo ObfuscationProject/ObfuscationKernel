@@ -19,7 +19,7 @@ def main():
         flags = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"] if args.sanitize else []
         subprocess.run([
             *shlex.split(args.cxx), "-std=c++23", "-O2", "-Wall", "-Wextra",
-            "-Wpedantic", "-Werror", "-fno-exceptions", *flags,
+            "-Wpedantic", "-Werror", "-fno-exceptions", "-pthread", *flags,
             f"-I{root / 'include'}", str(root / "tests/host/clock_counter_tests.cpp"),
             "-o", str(output),
         ], check=True)

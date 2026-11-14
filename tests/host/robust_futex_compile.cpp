@@ -6,8 +6,9 @@ static_assert(sizeof(uptr)==RobustListCodec<selected>::word_bytes);
 static_assert((std::endian::native==std::endian::big)==RobustListCodec<selected>::big_endian);
 struct Access
 {
-    static constexpr bool serialized_native_execution=true;
+    static constexpr bool indivisible_owner_update=true;
     Status read(u64,std::span<std::byte>);
+    Result<u32> load32(u64);
     Result<u32> compare_exchange32(u64,u32,u32);
     void wake_one(u64);
 };

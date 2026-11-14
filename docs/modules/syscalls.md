@@ -35,6 +35,13 @@ Terminal ioctls, `/dev/ptmx` and `/dev/pts` opens, `OK_O_NOCTTY`, job-control
 waits and native SIG_DFL/SIG_IGN dispositions (UAPI 0.17, `ok/uapi/termios.h`
 and `ok/uapi/job_control.h`) are described in the [terminal contract](tty.md).
 
+On x86_64, aarch64 and rv64 the native runtime runs the Linux `getpid`,
+`gettid`, `clock_gettime` and `clock_getres`, and `read`, `write`, `pread64`,
+`pwrite64`, `lseek`, `fsync` and `fdatasync` on ext4 regular files, as kernel
+sections without the big kernel lock when admission accepts them; every other
+call, and every declined one, runs under the lock. See
+[SMP](smp.md#kernel-sections).
+
 The number table reserves common POSIX/Linux-compatible syscall IDs to make the
 future user ABI predictable. File-oriented syscalls currently route into
 `ok::posix::PosixService`, which is backed by the RAM VFS.

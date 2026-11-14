@@ -15,7 +15,12 @@ before reaping. Reaping a process that still owns native pages returns `busy`.
 
 Descriptor slots hold handles into the scheduler's open-file-description pool.
 `fork` and `dup` retain those descriptions, sharing offsets and status flags while
-keeping descriptor flags and tables independent. Last close releases the open
+keeping descriptor flags and tables independent. Each description has a
+position lock (rank `ofd_position`) held across every offset-dependent read,
+write, seek and directory read together with its provider call, and around
+`F_GETFL`/`F_SETFL`; a node-backed `read(2)` staged in 4 KiB chunks holds it
+across all of them. No path holds two. An `F_SETFL` that changes `O_APPEND`
+first drains every kernel section. Last close releases the open
 description. `exec` closes only CLOEXEC descriptors and preserves cwd/identity.
 Legacy descriptor-table metadata helpers reject copying or closing live
 descriptions; those operations must go through the scheduler to maintain counts.

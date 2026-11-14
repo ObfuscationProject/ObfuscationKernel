@@ -1,4 +1,4 @@
-"""Producer/consumer SDK79 wake-operation contract models; no target execution."""
+"""Producer/consumer SDK80 wake-operation contract models; no target execution."""
 from pathlib import Path
 import importlib.util
 import tempfile
@@ -79,7 +79,7 @@ class FutexWakeOperationSdkContract(unittest.TestCase):
         for mutated in SDK_FIXTURES.nondeclaration_marker_sources(DECLARATIONS):
             self.profile.write_text(mutated)
             with self.subTest(mutation=mutated):
-                self.refused("(?:futex wake-operation|SDK79 contract markers must be unconditional and free of local macros|SDK79 contract markers cannot use physical line continuations)")
+                self.refused("(?:futex wake-operation|SDK80 contract markers must be unconditional and free of local macros|SDK80 contract markers cannot use physical line continuations)")
         # A documentary raw literal cannot substitute for a declaration, and
         # does not hide the real canonical declaration placed after it.
         self.profile.write_text('constexpr auto example = R"example(\n' +
@@ -87,8 +87,8 @@ class FutexWakeOperationSdkContract(unittest.TestCase):
         self.accepted()
 
     def test_predecessor_future_and_broadened_contracts_are_refused(self):
-        for before, after in (('module_abi = 79', 'module_abi = 65'),
-                              ('module_abi = 79', 'module_abi = 80'),
+        for before, after in (('module_abi = 80', 'module_abi = 65'),
+                              ('module_abi = 80', 'module_abi = 81'),
                               ('word_bits = 32', 'word_bits = 64'),
                               ('operand_bits = 12', 'operand_bits = 16'),
                               ('shift_bits = 5', 'shift_bits = 6'),
@@ -97,10 +97,11 @@ class FutexWakeOperationSdkContract(unittest.TestCase):
                               ('wake_passes = 2', 'wake_passes = 1'),
                               ('key_domains = 2', 'key_domains = 3'),
                               ('nonpositive_wake_minimum = 1', 'nonpositive_wake_minimum = 0'),
-                              ('smp_atomic = 0', 'smp_atomic = 1'),
+                              ('smp_atomic = 1', 'smp_atomic = 0'),
                               ('file_backed = 0', 'file_backed = 1'),
                               ('cross_process_clone_vm = 0', 'cross_process_clone_vm = 1'),
-                              (PRODUCER.FUTEX_WAKE_OPERATION_PROFILE, 'smp-file-backed-full-posix-v1')):
+                              (PRODUCER.FUTEX_WAKE_OPERATION_PROFILE, 'smp-file-backed-full-posix-v1'),
+                              (PRODUCER.FUTEX_WAKE_OPERATION_PROFILE, 'bootcpu-serialized-two-key-private-anonymous-shared-signed-wrap-legacy-count-v1')):
             self.profile.write_text(PROFILE.replace(before, after))
             with self.subTest(before=before, after=after):
                 self.refused()
@@ -119,7 +120,7 @@ class FutexWakeOperationSdkContract(unittest.TestCase):
         args = types.SimpleNamespace(headers=fixture.sdk / 'include', mode='debug', arch='x86_64',
                                      define=['OK_NATIVE_SIGNAL_RUNTIME'], asflag=[], cxxflag=[])
         marker = args.headers / PRODUCER.FUTEX_WAKE_OPERATION_PROFILE_HEADER
-        for source in (None, '', DECLARATIONS.replace('module_abi = 79', 'module_abi = 65')):
+        for source in (None, '', DECLARATIONS.replace('module_abi = 80', 'module_abi = 65')):
             if source is None:
                 marker.unlink()
             else:

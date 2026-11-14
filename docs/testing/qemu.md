@@ -158,3 +158,62 @@ The OS owns system-desktop integration tests. Run its `distro_image` with the
 matching exported SDK to exercise extension attachment, package dispatch and
 GUI lifecycle; a standalone kernel does not include the OS desktop or Linux
 driver compatibility model.
+
+## SMP lane
+
+`scripts/qemu_test.py --smp N` (1 to 8) appends `-smp N` to every profile's
+QEMU command line; the default of 1 leaves the command line unchanged. The
+xmake option `qemu_smp` (default 1) forwards it from `xmake run`, `xmake test`,
+`xmake qemu-test` and `xmake qemu-matrix`:
+
+```sh
+xmake f -c -y -m debug -a x86_64 --qemu_smp=2
+xmake test
+```
+
+With N above 1 the runner requires the hardware marker
+`OK_SMP scope=hardware cpus=<discovered> online=<online> ap_start=<method>
+ipi=<pass|fail|unsupported>`, with a trailing `reason=<token>` when the kernel
+stays uniprocessor. `x86_64`, `aarch64` and `rv64` must report `cpus=N`,
+`online=N` and `ipi=pass`; every other profile must report `online=1` and
+`ap_start=unsupported`. A missing or mismatched marker fails with exit code 14.
+The kernel prints the hardware line before `OK_TEST_PASS`: every profile except
+i386 and x86_64 stops capturing output at that marker. Under `-bios none` QEMU
+starts every RISC-V hart at the kernel entry, so rv64 and rv32 park the harts
+other than hart 0 before they touch the stack or BSS.
+The `scope=model` `OK_SMP` line is not evidence of secondary-CPU startup and
+never satisfies this check.
+
+On the SMP profiles the runner also checks, with exit code 14 on failure:
+
+- `tsc=` (x86_64 once a secondary is online): one of `sync`, `adjusted` or
+  `offset`, equal to the worst of the `OK_TSC_SYNC` lines, of which there must
+  be exactly one per secondary. Each must pass the kernel's own acceptance
+  recomputed from its fields (error within `max_error`, a `sync` offset within
+  error plus slack, a corrected residual within its error plus tolerance).
+  Under QEMU every vCPU reads one counter, so each must be `sync`, except with
+  `--tsc-skew-test` (forwarded by xmake when the debug option
+  `x86_tsc_skew_test` is set), where CPU 1 must report `skew_test=tsc` or
+  `software` and be detected and corrected.
+- `OK_SMP_TLB scope=hardware asid=<bits|none> pcid=<on|off>`, required on
+  x86_64, aarch64 and rv64 with an allowed mode: x86_64 `none`/`off` or
+  `12`/`on`, aarch64 `8` or `16` with `off`, rv64 `none` or 1 to 16 bits with
+  `off`.
+- The CPU hotplug lines, when present (only the SMP profiles may print
+  them): `OK_SMP_HOTPLUG_BOOT` at most once, naming `cpu=1` with `stop`,
+  `parked_ipi`, `restart` and `ipi` all `pass` (every debug SMP boot prints
+  it); and the `smp_hotplug_test` knob's repeated `OK_SMP_HOTPLUG` lines,
+  whose counters never go back and whose CPU never changes, the last showing
+  `cycles` above 0, `failures=0` and a secondary CPU.
+
+`OK_QEMU_SMP_TEST` then appends `tsc=`, `tlb_asid=`, `pcid=`,
+`hotplug_boot=pass` and `hotplug_cycles=` as they were checked. The summary
+records `smp.cpus`, the distinct scopes of each marker under
+`scopes.<marker>`, `marker.OK_SMP_HARDWARE`, the hardware marker's fields as
+`smp.hardware.<field>`, the TLB line's as `smp.tlb.<field>` and the hotplug
+lines' as `smp.hotplug_boot.<field>` and `smp.hotplug.<field>`.
+
+`OK_SMP_CPUS`, `OK_SMP_IRQS` and the `OK_SMP_KERNEL` lines come from the
+native runtime's interrupt report, which standalone lane transcripts do not
+contain; the OS distro runner and the OS SMP gates check them
+(`docs/VALIDATION.md`).

@@ -23,7 +23,7 @@ namespace mock
 #ifndef OK_NATIVE_MODEL_MEMORY_BYTES
 #define OK_NATIVE_MODEL_MEMORY_BYTES 8192
 #endif
-std::array<std::byte, OK_NATIVE_MODEL_MEMORY_BYTES> memory{};
+alignas(16) std::array<std::byte, OK_NATIVE_MODEL_MEMORY_BYTES> memory{};
 uptr forbidden{};
 uptr write_forbidden{};
 usize copies{};
@@ -80,6 +80,12 @@ Status set_realtime(time::EpochTime epoch, time::MonotonicPoint point)
     mock::last_setting = epoch;
     mock::setting_point = point;
     return Status::success();
+}
+
+// The kernel samples inside the realtime lock; a hosted model is serialized.
+Status set_realtime_now(time::EpochTime epoch)
+{
+    return time::commit_realtime_setting(epoch, [] { return monotonic_sample(); }, set_realtime);
 }
 
 time::AnchorInfo realtime_info() { return {}; }
@@ -206,5 +212,24 @@ Status copy_to_user(const AddressSpace &s, uptr address, const void *in, usize s
         std::memcpy(mock::memory.data() + address - user_begin, in, size);
     if (mock::after_usercopy) mock::after_usercopy();
     return Status::success();
+}
+Result<u32 *> user_word(const AddressSpace &s, uptr address, bool write)
+{
+    // A word access stands in for the copy it replaced: a read counts and
+    // advances the clock like copy_from_user, a write counts as an output.
+    if (write)
+        ++mock::outputs;
+    else
+    {
+        ++mock::copies;
+        mock::now += mock::copy_clock_step;
+        mock::last_input = address;
+        mock::last_input_size = sizeof(u32);
+    }
+    if (address % sizeof(u32))
+        return Status::invalid_argument();
+    if (!user_range(s, address, sizeof(u32), write))
+        return Status::fault();
+    return reinterpret_cast<u32 *>(mock::memory.data() + (address - user_begin));
 }
 } // namespace ok::arch::execution

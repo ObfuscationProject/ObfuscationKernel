@@ -30,6 +30,7 @@
 #include "mount_retention_checks.hpp"
 #include "mount_snapshot_checks.hpp"
 #include "n_tty_checks.hpp"
+#include "smp_lock_checks.hpp"
 #include <array>
 #include <span>
 #endif
@@ -318,6 +319,11 @@ Status test_smp(TestPointRunner &runner)
         return status;
     }
     lock.unlock();
+    if (auto status = runner.check_status("smp", "ranked-lock-order", tests::check_ranked_lock_order());
+        !status.ok())
+    {
+        return status;
+    }
     return Status::success();
 }
 

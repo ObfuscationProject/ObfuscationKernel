@@ -49,4 +49,31 @@ void NativeInstructions<Architecture::i386>::halt() noexcept
 #endif
 }
 
+uptr NativeInstructions<Architecture::i386>::save_and_disable_interrupts() noexcept
+{
+#if defined(OK_KERNEL_FREESTANDING) && defined(__i386__)
+    uptr flags = 0;
+    asm volatile("pushfl\n\tpopl %0\n\tcli" : "=r"(flags) : : "memory");
+    return flags;
+#else
+    return 0;
+#endif
+}
+
+void NativeInstructions<Architecture::i386>::restore_interrupts(uptr saved) noexcept
+{
+#if defined(OK_KERNEL_FREESTANDING) && defined(__i386__)
+    if ((saved & 0x200) != 0) // EFLAGS.IF
+        asm volatile("sti" ::: "memory");
+#else
+    static_cast<void>(saved);
+#endif
+}
+
+// Every profile reports the boot CPU until per-CPU registers are installed.
+u32 NativeInstructions<Architecture::i386>::cpu_index() noexcept
+{
+    return 0;
+}
+
 } // namespace ok::arch::detail

@@ -1,4 +1,4 @@
-"""Producer/consumer SDK79 requeue contract models; no target execution."""
+"""Producer/consumer SDK80 requeue contract models; no target execution."""
 from pathlib import Path
 import importlib.util
 import hashlib
@@ -80,7 +80,7 @@ class FutexRequeueSdkContract(unittest.TestCase):
         for mutated in SDK_FIXTURES.nondeclaration_marker_sources(DECLARATIONS):
             self.profile.write_text(mutated)
             with self.subTest(mutation=mutated):
-                self.refused("(?:futex requeue|SDK79 contract markers must be unconditional and free of local macros|SDK79 contract markers cannot use physical line continuations)")
+                self.refused("(?:futex requeue|SDK80 contract markers must be unconditional and free of local macros|SDK80 contract markers cannot use physical line continuations)")
         # A documentary raw literal cannot substitute for a declaration, and
         # does not hide the real canonical declaration placed after it.
         self.profile.write_text('constexpr auto example = R"example(\n' +
@@ -89,8 +89,8 @@ class FutexRequeueSdkContract(unittest.TestCase):
 
     def test_predecessor_future_and_broadened_contracts_are_refused(self):
         for before, after in (
-                ('module_abi = 79', 'module_abi = 66'),
-                ('module_abi = 79', 'module_abi = 80'),
+                ('module_abi = 80', 'module_abi = 66'),
+                ('module_abi = 80', 'module_abi = 81'),
                 ('native_futex_requeue_word_bits = 32', 'native_futex_requeue_word_bits = 33'),
                 ('native_futex_requeue_operation_count = 2', 'native_futex_requeue_operation_count = 3'),
                 ('native_futex_requeue_linux_operation = 3', 'native_futex_requeue_linux_operation = 4'),
@@ -104,12 +104,13 @@ class FutexRequeueSdkContract(unittest.TestCase):
                 ('native_futex_requeue_zero_wake_minimum = 0', 'native_futex_requeue_zero_wake_minimum = 1'),
                 ('native_futex_requeue_signed_negative_counts_rejected = 1', 'native_futex_requeue_signed_negative_counts_rejected = 2'),
                 ('native_futex_requeue_transfer_pin_owners_retained = 1', 'native_futex_requeue_transfer_pin_owners_retained = 2'),
-                ('native_futex_requeue_smp_atomic = 0', 'native_futex_requeue_smp_atomic = 1'),
+                ('native_futex_requeue_smp_atomic = 1', 'native_futex_requeue_smp_atomic = 0'),
                 ('native_futex_requeue_priority_inheritance = 0', 'native_futex_requeue_priority_inheritance = 1'),
                 ('native_futex_requeue_realtime_priority = 0', 'native_futex_requeue_realtime_priority = 1'),
                 ('native_futex_requeue_file_backed = 0', 'native_futex_requeue_file_backed = 1'),
                 ('native_futex_requeue_cross_process_clone_vm = 0', 'native_futex_requeue_cross_process_clone_vm = 1'),
-                (PRODUCER.FUTEX_REQUEUE_PROFILE, "smp-file-backed-full-posix-v1")):
+                (PRODUCER.FUTEX_REQUEUE_PROFILE, "smp-file-backed-full-posix-v1"),
+                (PRODUCER.FUTEX_REQUEUE_PROFILE, "bootcpu-nonpi-read-keys-signed-counts-exact-origin-ticket-sequence-owned-transfer-v1")):
             self.profile.write_text(PROFILE.replace(before, after))
             with self.subTest(before=before, after=after):
                 self.refused()
@@ -158,9 +159,9 @@ class FutexRequeueSdkContract(unittest.TestCase):
         fixture = self.full_fixture()
         name = 'include/' + PRODUCER.FUTEX_REQUEUE_PROFILE_HEADER
         path = fixture.sdk / name
-        for source in (DECLARATIONS.replace('module_abi = 79', 'module_abi = 66'),
-                       DECLARATIONS.replace('module_abi = 79', 'module_abi = 80'),
-                       DECLARATIONS.replace('native_futex_requeue_smp_atomic = 0', 'native_futex_requeue_smp_atomic = 1'),
+        for source in (DECLARATIONS.replace('module_abi = 80', 'module_abi = 66'),
+                       DECLARATIONS.replace('module_abi = 80', 'module_abi = 81'),
+                       DECLARATIONS.replace('native_futex_requeue_smp_atomic = 1', 'native_futex_requeue_smp_atomic = 0'),
                        DECLARATIONS.replace('native_futex_requeue_transfer_pin_owners_retained = 1', 'native_futex_requeue_transfer_pin_owners_retained = 0'),
                        DECLARATIONS + DECLARATIONS):
             path.write_text(source)
@@ -176,7 +177,7 @@ class FutexRequeueSdkContract(unittest.TestCase):
         args = types.SimpleNamespace(headers=fixture.sdk / 'include', mode='debug', arch='x86_64',
                                      define=['OK_NATIVE_SIGNAL_RUNTIME'], asflag=[], cxxflag=[])
         marker = args.headers / PRODUCER.FUTEX_REQUEUE_PROFILE_HEADER
-        for source in (None, '', DECLARATIONS.replace('module_abi = 79', 'module_abi = 66')):
+        for source in (None, '', DECLARATIONS.replace('module_abi = 80', 'module_abi = 66')):
             if source is None:
                 marker.unlink()
             else:

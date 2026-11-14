@@ -3,6 +3,12 @@
 .global _start
 .type _start, @function
 _start:
+    # QEMU Malta sends every CPU from its bootloader to this entry. Only CPU 0
+    # (EBase.CPUNum) boots; the others wait here with interrupts masked.
+    mfc0 $t0, $15, 1
+    andi $t0, $t0, 0x3ff
+    bnez $t0, .Lsecondary_park
+    nop
     # The freestanding O32 ABI permits paired floating-point registers.
     mfc0 $t0, $12
     li $t1, 0x20000000
@@ -28,6 +34,11 @@ _start:
     nop
 3:
     b 3b
+    nop
+
+.Lsecondary_park:
+    wait
+    b .Lsecondary_park
     nop
 
 .section .bootstrap_bss, "aw", @nobits

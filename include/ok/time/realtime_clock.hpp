@@ -32,6 +32,23 @@ struct RealtimeInfo
     return current + 1;
 }
 
+// Commits a software setting at one monotonic sample: an unavailable clock is
+// an I/O error and a value before the elapsed monotonic time is refused. The
+// kernel runs it under the lock every realtime reader holds, so no reading can
+// advance the active anchor between the sample and the commit.
+template <typename Sample, typename Commit>
+Status commit_realtime_setting(EpochTime value, Sample &&sample, Commit &&commit)
+{
+    auto point = sample();
+    if (!point)
+        return Status::io_error("realtime setting requires a continuous monotonic clock");
+    const auto seconds = static_cast<i64>(point.value().nanoseconds / nanoseconds_per_second);
+    const auto fraction = point.value().nanoseconds % nanoseconds_per_second;
+    if (value.seconds < seconds || (value.seconds == seconds && value.nanoseconds < fraction))
+        return Status::invalid_argument("realtime setting precedes monotonic elapsed time");
+    return commit(value, point.value());
+}
+
 // One serialized boot-CPU owner. Neither an IRQ handler nor another CPU may
 // enter during publication. Software selection never retries the physical RTC.
 class RealtimeClock final

@@ -19,7 +19,8 @@ jobs:
       - name: Check the native runtime split ratchet
         run: python3 scripts/check_runtime_split.py
   # Hosted model suites (scope=model) for the P1 memory, allocator, page cache,
-  # VM and IRQ/wait/time mechanisms, under ASan and UBSan with the host g++.
+  # VM, IRQ/wait/time and SMP lock mechanisms and the P2 CPU discovery parsers,
+  # under ASan and UBSan with the host g++.
   hosted-models:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -40,6 +41,9 @@ jobs:
           - native_vm
           - process_resources
           - irq_wait_time
+          - run_queues
+          - cpu_topology
+          - smp_locks
     steps:
       - uses: actions/checkout@v4
       # Some runners build their hosted binaries through a generated xmake project.

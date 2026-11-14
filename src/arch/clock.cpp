@@ -1,15 +1,51 @@
 #include "ok/arch/clock.hpp"
 #include "clock_counter.hpp"
+#include "ok/smp/lock.hpp"
+
+#include <atomic>
+
+#if defined(OK_ARCH_TARGET_X86_64)
+#include "x86_64/cpu_local.hpp"
+#endif
 
 namespace ok::arch
 {
 namespace
 {
 
-detail::CounterClock clock_state{};
+// The profiles that start secondary CPUs read the clock on every CPU without
+// a lock: the conversion keeps no state above the shared floor. The others
+// keep the accumulating conversion their narrow counters need, under
+// clock_lock. Initialization takes clock_lock everywhere.
+#if defined(OK_ARCH_TARGET_X86_64) || defined(OK_ARCH_TARGET_AARCH64) || defined(OK_ARCH_TARGET_RV64)
+constexpr bool lock_free_samples = true;
+constinit detail::SharedCounterClock clock_state{};
+#else
+constexpr bool lock_free_samples = false;
+constinit detail::CounterClock clock_state{};
+#endif
+// Serializes initialization (clock_attempted, clock_failure, clock_state's
+// set-up) and, on the accumulating profiles, every sample.
+constinit smp::RankedSpinLock<smp::LockRank::monotonic_clock> clock_lock{};
 bool clock_attempted{};
-bool clock_invalidated{};
+// Readers on any CPU see the failure once `clock_invalidated` is set; the
+// first CPU to fail writes it.
+std::atomic<bool> clock_invalidated{};
+std::atomic_flag clock_invalidating{};
 Status clock_failure{Status::not_initialized("platform clock is not initialized")};
+
+[[nodiscard]] bool invalidated() noexcept
+{
+    return clock_invalidated.load(std::memory_order_acquire);
+}
+
+void fail_clock(Status reason) noexcept
+{
+    if (clock_invalidating.test_and_set(std::memory_order_acq_rel))
+        return;
+    clock_failure = reason;
+    clock_invalidated.store(true, std::memory_order_release);
+}
 
 #if defined(OK_ARCH_TARGET_X86_64) || defined(OK_ARCH_TARGET_I386)
 struct PlatformClock
@@ -27,6 +63,10 @@ struct PlatformClock
     }
     static u64 read()
     {
+#if defined(OK_ARCH_TARGET_X86_64)
+        // This CPU's TSC, corrected to the boot CPU's at bring-up.
+        return execution::x86::clock_counter();
+#else
         // CPUID works on both retained PC CPU profiles; i386 does not require
         // SSE2/LFENCE. Serialize older instructions before sampling the TSC.
         u32 a = 0, b, c, d;
@@ -34,6 +74,7 @@ struct PlatformClock
         u32 low, high;
         asm volatile("rdtsc" : "=a"(low), "=d"(high) : : "memory");
         return (u64{high} << 32) | low;
+#endif
     }
     // One latched read of PIT channel 2 between two TSC samples: the count
     // was latched at some point inside the bracket.
@@ -273,7 +314,8 @@ struct PlatformClock
 
 Status initialize_clock()
 {
-    if (clock_invalidated)
+    const smp::RankedSpinLock<smp::LockRank::monotonic_clock>::Guard guard(clock_lock);
+    if (invalidated())
         return clock_failure;
     if (clock_state.initialized())
         return Status::success();
@@ -288,17 +330,20 @@ Status initialize_clock()
 
 Result<u64> monotonic_nanoseconds()
 {
-    if (clock_invalidated)
+    if (invalidated())
         return clock_failure;
     if (!clock_state.initialized())
         return clock_failure;
-    auto result = clock_state.sample(PlatformClock::read());
-    if (!result)
-    {
-        clock_failure = result.status();
-        clock_invalidated = true;
-    }
-    return result;
+    auto sample = [] {
+        auto result = clock_state.sample(PlatformClock::read());
+        if (!result)
+            fail_clock(result.status());
+        return result;
+    };
+    if constexpr (lock_free_samples)
+        return sample();
+    const smp::RankedSpinLock<smp::LockRank::monotonic_clock>::Guard guard(clock_lock);
+    return sample();
 }
 
 Result<time::MonotonicPoint> monotonic_sample()
@@ -312,26 +357,22 @@ Result<time::MonotonicPoint> monotonic_sample()
 
 void invalidate_clock()
 {
-    if (!clock_invalidated)
-    {
-        clock_failure = Status::io_error("platform clock continuity invalidated");
-        clock_invalidated = true;
-    }
+    fail_clock(Status::io_error("platform clock continuity invalidated"));
 }
 
 Status clock_status()
 {
-    return clock_invalidated || !clock_state.initialized() ? clock_failure : Status::success();
+    return invalidated() || !clock_state.initialized() ? clock_failure : Status::success();
 }
 
 u64 clock_resolution_ns()
 {
-    return clock_invalidated ? 0 : clock_state.resolution();
+    return invalidated() ? 0 : clock_state.resolution();
 }
 
 u64 clock_frequency()
 {
-    return clock_invalidated ? 0 : clock_state.frequency();
+    return invalidated() ? 0 : clock_state.frequency();
 }
 
 } // namespace ok::arch

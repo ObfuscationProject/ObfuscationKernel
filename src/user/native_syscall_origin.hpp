@@ -6,6 +6,7 @@
 #include "ok/user/native_pipe_vectors.hpp"
 #include "ok/memory/kernel_entry_stack_pool.hpp"
 #include "ok/memory/object_pool.hpp"
+#include "ok/smp/kernel_section.hpp"
 #include "ok/sched/scheduler.hpp"
 #include "ok/syscall/syscall.hpp"
 #include "ok/uapi/syscall.h"
@@ -368,6 +369,7 @@ class SyscallOriginTable final : private NonCopyable
 
     Status prepare(const sched::ThreadControlBlock &thread)
     {
+        smp::check_exclusive("SyscallOriginTable::prepare");
         if (auto status = pool_->validate_inactive(thread.entry_stack, {thread.owner, thread.tid}); !status)
             return status;
         auto &record = records_[thread.entry_stack.slot];
@@ -378,6 +380,16 @@ class SyscallOriginTable final : private NonCopyable
         record.identity.pid = thread.owner;
         record.identity.tid = thread.tid;
         record.identity.image = ++image_sequence_;
+        return Status::success();
+    }
+    // The checks prepare makes of a lease's record, for exec to make before it
+    // evicts sibling threads; prepare itself runs once the old image retired.
+    [[nodiscard]] Status preflight_prepare(Handle lease) const
+    {
+        if (lease.pool != pool_ || lease.slot >= capacity)
+            return Status::invalid_argument("syscall origin prepare names a foreign lease");
+        if (records_[lease.slot].linux_udp_borrows) return Status::busy("syscall origin prepare has a live Linux UDP borrow");
+        if (image_sequence_ == ~u64{0}) return Status::overflow("syscall origin image sequence exhausted");
         return Status::success();
     }
     struct Ownership
@@ -394,6 +406,17 @@ class SyscallOriginTable final : private NonCopyable
             result.bound += record.bound;
             result.borrows += record.linux_udp_borrows;
             result.pending += record.linux_udp_retire_pending || record.linux_udp_revoke_pending;
+        }
+        return result;
+    }
+    // One thread's share of ownership(): its own record's live and bound bits.
+    [[nodiscard]] Ownership thread_ownership(const sched::ThreadControlBlock &thread) const
+    {
+        Ownership result{};
+        if (const auto *record = owned(thread))
+        {
+            result.live = record->live;
+            result.bound = record->bound;
         }
         return result;
     }
@@ -960,6 +983,7 @@ class SyscallOriginTable final : private NonCopyable
     [[nodiscard]] Status retire_linux_udp_receive(const LinuxUdpReceiveCapture &capture,
         const LinuxUdpReceiveBinding &binding)
     {
+        smp::check_exclusive("SyscallOriginTable::retire_linux_udp_receive");
         const auto &identity = capture.identity_;
         if (capture.owner_ != this || identity.lease.pool != pool_ || identity.lease.slot >= capacity)
             return Status::denied("foreign Linux UDP receive capture");
@@ -1068,6 +1092,7 @@ class SyscallOriginTable final : private NonCopyable
     }
     void retire_native_udp(const NativeUdpCapture &capture, const NativeUdpReceiveBinding &binding)
     {
+        smp::check_exclusive("SyscallOriginTable::retire_native_udp");
         if (capture.owner_ != this || capture.identity_.lease.pool != pool_ ||
             capture.identity_.lease.slot >= capacity) return;
         auto &record = records_[capture.identity_.lease.slot];
@@ -1096,6 +1121,7 @@ class SyscallOriginTable final : private NonCopyable
     bool commit_space(const SpaceUpdate &update, sched::SchedulerState *scheduler,
                        const sched::ProcessResources &resources)
     {
+        smp::check_exclusive("SyscallOriginTable::commit_space");
         if (update.owner_ != this || !same_space(resources.native_space, update.next_)) return false;
         // Validate every participant before changing any record.
         for (usize slot = 0; slot < records_.size(); ++slot)
@@ -1157,6 +1183,7 @@ class SyscallOriginTable final : private NonCopyable
     };
     static void revoke_record(Record &record)
     {
+        smp::check_exclusive("SyscallOriginTable::revoke_record");
         if (record.linux_udp_borrows) record.linux_udp_revoke_pending = true;
         else { record.live = false; record.bound = false; }
     }
@@ -1212,6 +1239,7 @@ class SyscallOriginTable final : private NonCopyable
     template <typename Binding> requires supported_binding<Binding>
     void retire_binding(sched::ProcessId pid, sched::ThreadId tid, const Binding &binding)
     {
+        smp::check_exclusive("SyscallOriginTable::retire_binding");
         for (auto &record : records_)
             if (record.kind == Kind::linux_restart && record.live && record.bound && record.identity.pid == pid && record.identity.tid == tid &&
                 family_admits<Binding>(record.family) && record.terminal == terminal_tag<Binding>() &&
@@ -1246,6 +1274,7 @@ class SyscallOriginTable final : private NonCopyable
     }
     [[nodiscard]] const Record *owned(const sched::ThreadControlBlock &thread) const
     {
+        smp::check_exclusive("SyscallOriginTable::owned");
         if (thread.entry_stack.pool != pool_ || thread.entry_stack.slot >= capacity) return nullptr;
         const auto &record = records_[thread.entry_stack.slot];
         return record.identity.lease == thread.entry_stack && record.identity.pid == thread.owner &&
@@ -1255,6 +1284,7 @@ class SyscallOriginTable final : private NonCopyable
     { return const_cast<Record *>(static_cast<const SyscallOriginTable *>(this)->owned(thread)); }
     [[nodiscard]] const Record *resolve(const Identity &identity, bool check_wait = true) const
     {
+        smp::check_exclusive("SyscallOriginTable::resolve");
         if (identity.lease.pool != pool_ || identity.lease.slot >= capacity || !identity.capture ||
             !identity.epoch || !identity.image || !identity.pid || !identity.tid) return nullptr;
         const auto &record = records_[identity.lease.slot];
@@ -1280,6 +1310,7 @@ class SyscallOriginTable final : private NonCopyable
     }
     [[nodiscard]] const Record *resolve_linux_udp_immediate(const LinuxUdpImmediateCapture &capture) const
     {
+        smp::check_exclusive("SyscallOriginTable::resolve_linux_udp_immediate");
         const auto &identity = capture.identity_;
         if (capture.owner_ != this || identity.lease.pool != pool_ || identity.lease.slot >= capacity ||
             !identity.pid || !identity.tid || !identity.image || !identity.capture || !identity.epoch)
@@ -1305,6 +1336,7 @@ class SyscallOriginTable final : private NonCopyable
     }
     [[nodiscard]] const Record *resolve_tcp_immediate(const TcpImmediateCapture &capture) const
     {
+        smp::check_exclusive("SyscallOriginTable::resolve_tcp_immediate");
         const auto &identity = capture.identity_;
         if (capture.owner_ != this || identity.lease.pool != pool_ || identity.lease.slot >= capacity ||
             !identity.pid || !identity.tid || !identity.image || !identity.capture || !identity.epoch)
@@ -1330,6 +1362,7 @@ class SyscallOriginTable final : private NonCopyable
     }
     void retire_tcp_immediate(const TcpImmediateCapture &capture)
     {
+        smp::check_exclusive("SyscallOriginTable::retire_tcp_immediate");
         const auto &identity = capture.identity_;
         if (capture.owner_ != this || identity.lease.pool != pool_ || identity.lease.slot >= capacity) return;
         auto &record = records_[identity.lease.slot];
@@ -1340,6 +1373,7 @@ class SyscallOriginTable final : private NonCopyable
     }
     void retire_linux_udp_immediate(const LinuxUdpImmediateCapture &capture)
     {
+        smp::check_exclusive("SyscallOriginTable::retire_linux_udp_immediate");
         const auto &identity = capture.identity_;
         if (capture.owner_ != this || identity.lease.pool != pool_ || identity.lease.slot >= capacity) return;
         auto &record = records_[identity.lease.slot];
@@ -1358,6 +1392,7 @@ class SyscallOriginTable final : private NonCopyable
     }
     [[nodiscard]] const Record *resolve_linux_udp_receive_identity(const Identity &identity) const
     {
+        smp::check_exclusive("SyscallOriginTable::resolve_linux_udp_receive_identity");
         if (identity.lease.pool != pool_ || identity.lease.slot >= capacity || !identity.pid || !identity.tid ||
             !identity.image || !identity.capture || !identity.epoch) return nullptr;
         const auto &record = records_[identity.lease.slot];
@@ -1423,6 +1458,7 @@ class SyscallOriginTable final : private NonCopyable
     }
     void drop_linux_udp_borrow(const Identity &identity)
     {
+        smp::check_exclusive("SyscallOriginTable::drop_linux_udp_borrow");
         // Exact revocation/retirement refuses a nonzero count. This cannot access
         // a revoked record or an object/description on a normal or failed exit.
         auto &record = records_[identity.lease.slot];
@@ -1438,6 +1474,7 @@ class SyscallOriginTable final : private NonCopyable
     }
     [[nodiscard]] const Record *resolve_native_udp(const NativeUdpCapture &capture) const
     {
+        smp::check_exclusive("SyscallOriginTable::resolve_native_udp");
         const auto &identity = capture.identity_;
         if (capture.owner_ != this || identity.lease.pool != pool_ || identity.lease.slot >= capacity ||
             !identity.pid || !identity.tid || !identity.image || !identity.capture || !identity.epoch)

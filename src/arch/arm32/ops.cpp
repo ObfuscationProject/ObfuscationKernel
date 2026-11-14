@@ -46,4 +46,31 @@ void NativeInstructions<Architecture::arm32>::halt() noexcept
 #endif
 }
 
+uptr NativeInstructions<Architecture::arm32>::save_and_disable_interrupts() noexcept
+{
+#if defined(OK_KERNEL_FREESTANDING) && defined(__arm__)
+    u32 cpsr = 0;
+    asm volatile("mrs %0, cpsr\n\tcpsid i" : "=r"(cpsr) : : "memory");
+    return cpsr;
+#else
+    return 0;
+#endif
+}
+
+void NativeInstructions<Architecture::arm32>::restore_interrupts(uptr saved) noexcept
+{
+#if defined(OK_KERNEL_FREESTANDING) && defined(__arm__)
+    if ((saved & 0x80) == 0) // CPSR.I clear: IRQs were unmasked.
+        asm volatile("cpsie i" ::: "memory");
+#else
+    static_cast<void>(saved);
+#endif
+}
+
+// Every profile reports the boot CPU until per-CPU registers are installed.
+u32 NativeInstructions<Architecture::arm32>::cpu_index() noexcept
+{
+    return 0;
+}
+
 } // namespace ok::arch::detail

@@ -4,6 +4,7 @@
 #include "ok/arch/terminal_power.hpp"
 #include "ok/user/runtime.hpp"
 #include "ok/user/native_power_profile.hpp"
+#include "ok/smp/kernel_section.hpp"
 #include "ok/uapi/syscall.h"
 
 extern "C" ok::Status ok_shutdown_storage_preflight(ok::fs::VirtualFileSystem &,
@@ -94,7 +95,16 @@ Result<ShutdownTicket> prepare_native_shutdown(Kernel &kernel, SystemPowerAction
     }
     if (services.kernel != &kernel) return Status::denied("shutdown kernel instance differs");
     auto prepared = coordinator.prepare(caller.value(), action);
-    if (prepared) services.ticket = prepared.value();
+    if (prepared)
+    {
+        services.ticket = prepared.value();
+        // No kernel section starts once power-off is prepared, and every
+        // pinned one ends with its result committed before retirement.
+        smp::close_section_admission();
+#if defined(OK_SMP_SECTIONS)
+        smp::drain_all();
+#endif
+    }
     return prepared;
 }
 Status commit_native_shutdown(Kernel &kernel, ShutdownTicket ticket)

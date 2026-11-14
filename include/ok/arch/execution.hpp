@@ -189,6 +189,18 @@ inline void set_write_resolver(WriteResolver resolver) noexcept
 // The unowned entry is retained only for standalone diagnostic fixtures.
 Result<Trap> enter(AddressSpace &space, UserFrame &frame);
 Result<Trap> enter_owned(AddressSpace &space, UserFrame &frame, const KernelEntryStackView &stack);
+// A caller that entered on `from`, a copy of the thread's frame, and has
+// written the copy back to `to` moves the backend's private-signal capture
+// there. The MIPS o32, MIPS64 n64 and PPC32 captures name their frame by
+// address; every other backend publishes none.
+#if defined(OK_NATIVE_SIGNAL_RUNTIME) &&                                                                               \
+    (defined(__mips__) || ((defined(__powerpc__) || defined(__PPC__)) && __SIZEOF_POINTER__ == 4 &&                    \
+                           __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__))
+#define OK_ARCH_FRAME_BOUND_CAPTURE 1
+void rebind_owned_capture(const UserFrame &from, const UserFrame &to) noexcept;
+#else
+inline void rebind_owned_capture(const UserFrame &, const UserFrame &) noexcept {}
+#endif
 [[nodiscard]] UserFrame initial_frame(uptr entry, uptr stack);
 [[nodiscard]] Syscall syscall(const UserFrame &frame);
 void set_return_value(UserFrame &frame, i64 value);
@@ -196,5 +208,12 @@ void set_return_value(UserFrame &frame, i64 value);
 [[nodiscard]] bool user_range(const AddressSpace &space, uptr address, usize size, bool write = false);
 Status copy_from_user(const AddressSpace &space, void *destination, uptr source, usize size);
 Status copy_to_user(const AddressSpace &space, uptr destination, const void *source, usize size);
+// The kernel pointer to the aligned 32-bit user word at `address` in its
+// backing frame, for single atomic accesses (futex words). Validates like
+// copy_from_user, or for `write` like copy_to_user, which first resolves
+// copy-on-write: invalid_argument if misaligned, fault if not accessible. The
+// pointer is valid only while the mapping cannot change; today the caller
+// holds the kernel lock, which every remap, unmap and space teardown takes.
+[[nodiscard]] Result<u32 *> user_word(const AddressSpace &space, uptr address, bool write);
 
 } // namespace ok::arch::execution

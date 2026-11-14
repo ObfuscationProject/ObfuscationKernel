@@ -112,6 +112,9 @@ class Kernel final
     Status handle_gui_scroll(i32 rows);
     Status handle_gui_key(int key);
     Status tick();
+    // Secondary bring-up records the CPUs it discovered and those that came
+    // online; the scheduler then places work on the online ones only.
+    Status publish_cpu_topology(usize discovered, u32 online_mask);
     Status poll_network();
     Status activate_native_tcp();
     // Configures the link once: the distribution's interface configuration

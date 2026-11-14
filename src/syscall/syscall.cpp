@@ -52,8 +52,36 @@ Status Table::register_callback(Number number, std::string_view name, void *cont
     return Status::success();
 }
 
+namespace
+{
+// Marks this CPU's dispatch caller for its duration; nested dispatches restore.
+class DispatchCaller final
+{
+  public:
+    explicit DispatchCaller(sched::ProcessId caller) noexcept : cpu_(smp::current_cpu())
+    {
+        if (cpu_ >= dispatch_callers.size()) return;
+        previous_ = dispatch_callers[cpu_];
+        dispatch_callers[cpu_] = caller;
+    }
+    ~DispatchCaller()
+    {
+        if (cpu_ < dispatch_callers.size()) dispatch_callers[cpu_] = previous_;
+    }
+    DispatchCaller(const DispatchCaller &) = delete;
+    DispatchCaller &operator=(const DispatchCaller &) = delete;
+
+  private:
+    smp::CpuId cpu_;
+    sched::ProcessId previous_{};
+};
+} // namespace
+
 Response Table::dispatch(const Request &request)
 {
+    // Handlers may register at runtime (load_module): never in a section.
+    smp::check_exclusive("syscall::Table::dispatch");
+    const DispatchCaller caller(request.caller);
     const auto key = static_cast<u64>(request.number);
     if (key < direct_handlers_.size())
     {

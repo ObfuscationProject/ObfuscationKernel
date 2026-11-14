@@ -170,7 +170,7 @@ def main():
         def freeze(path,name):
             dest=snap/name;dest.parent.mkdir(parents=True,exist_ok=True);dest.write_bytes(path.read_bytes());hashes[name]=digest(dest);return dest
         freeze(Path(__file__),'run_native.py');freeze(stage/'scripts/native_firmware_profiles.json','build-profiles.json')
-        for name in ['include/ok/arch/types.hpp','include/ok/core/types.hpp','include/ok/boot/e820.hpp','include/ok/boot/fdt.hpp','include/ok/boot/loader_tables.hpp','include/ok/boot/raw_handoff.hpp','include/ok/user/native_signal_config.hpp','src/boot/raw_handoff.cpp','src/boot/fdt.cpp',f'src/arch/{arch}/boot.S',f'src/arch/{arch}/linker.ld']:
+        for name in ['include/ok/arch/types.hpp','include/ok/core/types.hpp','include/ok/boot/e820.hpp','include/ok/boot/fdt.hpp','include/ok/boot/cpu_topology.hpp','include/ok/smp/smp.hpp','include/ok/boot/loader_tables.hpp','include/ok/boot/raw_handoff.hpp','include/ok/user/native_signal_config.hpp','src/boot/raw_handoff.cpp','src/boot/fdt.cpp',f'src/arch/{arch}/boot.S',f'src/arch/{arch}/linker.ld']:
             freeze(root/name,name)
         freeze(stage/'include/ok/boot/firmware_handoff.hpp','include/ok/boot/firmware_handoff.hpp');freeze(stage/'tests/native/firmware_handoff_probe.cpp','probe.cpp')
         prefix=(a.toolchain_dir.resolve() if a.toolchain_dir else root/'toolchains')/cfg['triple']/'bin'/cfg['triple'];tools={n:Path(str(prefix)+'-'+n) for n in ['gcc','g++','ld','objcopy']}

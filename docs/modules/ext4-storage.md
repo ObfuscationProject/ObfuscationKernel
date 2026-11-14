@@ -67,6 +67,16 @@ released. Rename handles files, directories, replacement, same-inode no-ops and
 cross-parent `..` updates. VFS rejects cross-mount moves and mount-point changes;
 directory moves reject cycles and non-empty replacement targets.
 
+Every node operation passes one per-filesystem operation gate, held across its
+device I/O and the drain of detached inodes. The gate records its owning CPU:
+reentry from that CPU (a provider callback) returns `busy`, while another CPU
+waits for the gate, marked SPINNING, and then makes its identity checks. The
+hold is recorded at lock rank `fs_provider`, below the description position
+lock. A last release of an unlinked inode runs the drain inline only when the
+gate is free; otherwise the current owner drains it when it finishes.
+`Ext4Node::concurrent_io()` reports this self-serialization; journalled mounted
+metadata, RAM, devfs, simplefs and FAT nodes do not claim it.
+
 Namespace mutation is serialized by the VFS lock. If a multi-write rename/link
 fails after changing metadata, the mount is quarantined and cannot be marked
 clean by a later sync. This preserves failure detection, not rollback or power-loss
@@ -103,6 +113,13 @@ sizes, including symlink creation, link, unlink, rename, replacement and capacit
 rollback. Logical extent-capacity
 failures also verify quarantine after a partial namespace change. It also checks malformed metadata, pinned/unlinked node lifetime and
 32-bit owner IDs. These are failure models, not physical power-loss tests.
+
+`python3 scripts/test_ext4_gate_concurrency.py` is a model test of the operation
+gate with host threads standing in for CPUs: concurrent read, write and fsync
+from two CPUs, a waiter marked SPINNING, busy only on same-CPU reentry, a
+release deferred to another CPU's operation, and the `fs_provider` rank. It also
+runs the VFS/ext4 callback lock control and release integration tests. Each is
+built with and without `OK_LOCK_DEBUG`; `--tsan` runs them under ThreadSanitizer.
 
 The separate OS `scripts/test_persistent_ext4.py` boots a real Virtio disk,
 loads `/init` and applications from ext4, writes a note, renames files/directories and creates hard links through native

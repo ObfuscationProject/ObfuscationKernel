@@ -5,7 +5,7 @@ namespace ok::user
 {
 inline constexpr std::string_view native_pty_profile = "bootcpu-native-pair-devpts-counted-endpoints-ntty-hangup-v2";
 inline constexpr u32 native_pty_version = 2;
-inline constexpr u32 native_pty_module_abi = 79;
+inline constexpr u32 native_pty_module_abi = 80;
 inline constexpr u32 native_pty_pair_capacity = 8;
 inline constexpr u32 native_pty_queue_capacity = 4096;
 inline constexpr u32 native_pty_canonical_capacity = 4096;

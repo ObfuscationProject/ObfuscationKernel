@@ -134,6 +134,7 @@ struct BackendAccess final
     static void invalidate() noexcept {tracker.invalidate();raw={};}
     static void capture(const UserFrame &frame,AddressSpace space,const KernelEntryStackView &view) noexcept
     {tracker.publish_owned(frame,space,view,raw);}
+    static void rebind(const UserFrame &from,const UserFrame &to) noexcept {tracker.rebind(from,to);}
 };
 Tracker BackendAccess::tracker{};
 Facts BackendAccess::measured{};
@@ -145,6 +146,15 @@ Capability capability() noexcept {return detail::BackendAccess::tracker.capabili
 Observation observation(const UserFrame &frame) noexcept {return detail::BackendAccess::tracker.query(frame);}
 Facts facts() noexcept {return detail::BackendAccess::measured;}
 bool address_space_live(AddressSpace space) noexcept {return storage(space)!=nullptr;}
+}
+#endif
+#if defined(OK_PPC32_PRIVATE_BACKEND) != defined(OK_ARCH_FRAME_BOUND_CAPTURE)
+#error "ok/arch/execution.hpp and this backend disagree on its frame-bound capture"
+#endif
+#ifdef OK_ARCH_FRAME_BOUND_CAPTURE
+void rebind_owned_capture(const UserFrame &from, const UserFrame &to) noexcept
+{
+    ppc32_private::detail::BackendAccess::rebind(from, to);
 }
 #endif
 
@@ -334,6 +344,14 @@ Status copy_to_user(const AddressSpace &space, uptr destination, const void *sou
         size -= count;
     }
     return Status::success();
+}
+Result<u32 *> user_word(const AddressSpace &space, uptr address, bool write)
+{
+    if (address % sizeof(u32))
+        return Status::invalid_argument("user word is misaligned");
+    if (!user_range(space, address, sizeof(u32), write))
+        return Status::fault("user word is not mapped with the requested access");
+    return reinterpret_cast<u32 *>(mapping(*storage(space), address)->physical_address + (address & (page_size - 1)));
 }
 static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack_top)
 {

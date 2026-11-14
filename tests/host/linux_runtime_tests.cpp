@@ -185,6 +185,14 @@ Status copy_to_user(const AddressSpace &space, uptr address, const void *in, usi
     }
     return Status::success();
 }
+Result<u32 *> user_word(const AddressSpace &s, uptr address, bool write)
+{
+    if (address % sizeof(u32))
+        return Status::invalid_argument();
+    if (!user_range(s, address, sizeof(u32), write))
+        return Status::fault();
+    return reinterpret_cast<u32 *>(mock::page(s, address)->physical_address + address % hw::page_size);
+}
 Status destroy_space(AddressSpace &space)
 {
     CHECK(space.root && mock::spaces[space.slot].live);

@@ -1,12 +1,14 @@
 #pragma once
 #include "ok/arch/execution.hpp"
 #include "ok/memory/memory.hpp"
+#include "ok/smp/kernel_section.hpp"
 #include <optional>
 #include <utility>
 
 namespace ok::user::native
 {
-// Canonical ownership for the serialized boot-CPU runtime. PageMapping remains
+// Canonical ownership for the serialized runtime (the kernel lock holder,
+// never a kernel section). PageMapping remains
 // an architecture interface, not an allocation handle. Only this registry may
 // return retained owner/generation tokens to the allocator. Activation requires
 // already established supervisor access to every supplied frame address.
@@ -17,6 +19,8 @@ class NativePagePool final : private NonCopyable
 {
   public:
     static constexpr usize page_size = arch::execution::page_size;
+    // The caller contract of this registry and of object pools it backs (A2).
+    static void check_caller(const char *site) noexcept { smp::check_exclusive(site); }
     enum class Source : u8 { inactive, linker_reserved, qualified_firmware };
     class Lease final
     {
@@ -233,6 +237,7 @@ class NativePagePool final : private NonCopyable
     }
     Status mark_shared(const memory::PhysicalFrame &frame)
     {
+        smp::check_exclusive("NativePagePool::mark_shared");
         auto *descriptor = state(frame, memory::PageKind::native_user);
         if (!descriptor || descriptor->references != 1 || (descriptor->flags & pending_flag))
             return Status::invalid_argument("shared frame classification requires one live owner");
@@ -241,6 +246,7 @@ class NativePagePool final : private NonCopyable
     }
     Status retain_shared(const memory::PhysicalFrame &frame)
     {
+        smp::check_exclusive("NativePagePool::retain_shared");
         auto *descriptor = state(frame, memory::PageKind::native_user);
         if (!descriptor || !(descriptor->flags & shared_flag) || !descriptor->references ||
             (descriptor->flags & pending_flag))
@@ -254,6 +260,7 @@ class NativePagePool final : private NonCopyable
     // reference. The shared classification stays clear, so writes copy.
     Status retain_copy(const memory::PhysicalFrame &frame)
     {
+        smp::check_exclusive("NativePagePool::retain_copy");
         auto *descriptor = state(frame, memory::PageKind::native_user);
         if (!descriptor || (descriptor->flags & (shared_flag | pending_flag)) || !descriptor->references)
             return Status::invalid_argument("copy-on-write frame is foreign, shared, stale or pending release");
@@ -264,6 +271,7 @@ class NativePagePool final : private NonCopyable
     }
     Status release_reference(const memory::PhysicalFrame &frame)
     {
+        smp::check_exclusive("NativePagePool::release_reference");
         auto *descriptor = state(frame, memory::PageKind::native_user);
         if (!descriptor || !descriptor->references)
             return Status::invalid_argument("native user frame reference is foreign or stale");
@@ -308,6 +316,7 @@ class NativePagePool final : private NonCopyable
     // record or an address that may later name a MAP_FIXED replacement.
     Status pin(const memory::PhysicalFrame &frame)
     {
+        smp::check_exclusive("NativePagePool::pin");
         auto *descriptor = state(frame, memory::PageKind::native_user);
         if (!descriptor || descriptor->pins == max_count || !descriptor->references ||
             (descriptor->flags & pending_flag))
@@ -323,6 +332,7 @@ class NativePagePool final : private NonCopyable
     }
     Status unpin(const memory::PhysicalFrame &frame)
     {
+        smp::check_exclusive("NativePagePool::unpin");
         auto *descriptor = state(frame, memory::PageKind::native_user);
         if (!descriptor || !descriptor->pins)
             return Status::fault("invalid native frame quarantine release");
@@ -392,6 +402,7 @@ class NativePagePool final : private NonCopyable
     }
     Result<memory::PhysicalFrame> acquire(memory::PageKind kind)
     {
+        smp::check_exclusive("NativePagePool::acquire");
         if (!frames_)
             return Status::not_initialized("native page pool inactive");
         const bool user = kind == memory::PageKind::native_user;
@@ -432,6 +443,7 @@ class NativePagePool final : private NonCopyable
     }
     Status release_frame(const memory::PhysicalFrame &frame)
     {
+        smp::check_exclusive("NativePagePool::release_frame");
         const auto descriptor = *frames_->descriptor(frame);
         if (auto status = frames_->release(frame); !status)
             return status;

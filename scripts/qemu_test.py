@@ -41,6 +41,30 @@ CAPABILITIES_BY_ARCH = {
     arch: SERIAL_WINDOW_QEMU_CAPABILITIES if arch in SERIAL_WINDOW_QEMU_ARCHES else BOOTABLE_QEMU_CAPABILITIES
     for arch in BOOTABLE_QEMU_ARCHES
 }
+# Profiles whose kernel must start every QEMU vCPU; the rest report UP.
+# The hardware OK_SMP line must precede OK_TEST_PASS: run_until_marker stops
+# reading there on every profile without a debug exit device.
+SMP_QEMU_ARCHES = ("x86_64", "aarch64", "rv64")
+# Profiles whose OK_SMP line names the TSC synchronization result (tsc=),
+# with one OK_TSC_SYNC line per started secondary before it.
+TSC_SYNC_QEMU_ARCHES = ("x86_64",)
+TSC_SYNC_RESULTS = ("sync", "adjusted", "offset", "unsynced")
+# The kernel admits only a verified CPU, so an online one is never unsynced.
+TSC_SYNC_VERIFIED = ("sync", "adjusted", "offset")
+MAX_QEMU_CPUS = 8
+# What OK_SMP_TLB may report on each SMP profile: ASID widths (none: every
+# entry flushes the user TLB) and whether x86 PCIDs carry the tags.
+SMP_TLB_MODES = {
+    "x86_64": {("none", "off"), ("12", "on")},
+    "aarch64": {("8", "off"), ("16", "off")},
+    "rv64": {("none", "off"), *((str(bits), "off") for bits in range(1, 17))},
+}
+
+
+# CPU hotplug lines, checked when present on an SMP profile: the boot test
+# point (CPU 1 stopped, sent nothing while parked, restarted and pinged) and
+# the smp_hotplug_test knob's cycle count.
+HOTPLUG_BOOT_CHECKS = ("stop", "parked_ipi", "restart", "ipi")
 
 
 class QemuConfigurationError(RuntimeError):
@@ -122,11 +146,22 @@ def serial_args(arch: str, display: str) -> list[str]:
     return ["-serial", "stdio"]
 
 
-def qemu_command(arch: str, qemu: Path, kernel: Path, display: str, debug_exit: bool, disk: Path) -> list[str]:
+def qemu_command(
+    arch: str, qemu: Path, kernel: Path, display: str, debug_exit: bool, disk: Path, cpus: int = 1
+) -> list[str]:
     if arch not in BOOTABLE_QEMU_ARCHES:
         raise QemuConfigurationError(f"qemu-system boot is not implemented for {arch} yet")
-    qemu_path = str(qemu)
+    if not 1 <= cpus <= MAX_QEMU_CPUS:
+        raise QemuConfigurationError(f"qemu -smp must be between 1 and {MAX_QEMU_CPUS}, got {cpus}")
+    command = profile_command(arch, str(qemu), kernel, display, debug_exit, disk)
+    if cpus > 1:
+        command += ["-smp", str(cpus)]
+    return command
 
+
+def profile_command(
+    arch: str, qemu_path: str, kernel: Path, display: str, debug_exit: bool, disk: Path
+) -> list[str]:
     if arch in ("aarch64", "arm32"):
         command = [
             qemu_path,
@@ -264,13 +299,14 @@ def run_kernel(
     display: str,
     debug_exit: bool,
     timeout: float | None,
+    cpus: int = 1,
 ) -> subprocess.CompletedProcess[str]:
     with tempfile.TemporaryDirectory(prefix="okernel-qemu-") as tmp:
         runnable_kernel = Path(tmp) / "kernel.bin"
         scratch_disk = Path(tmp) / "fs.img"
         shutil.copyfile(kernel, runnable_kernel)
         create_virtual_disk(scratch_disk)
-        command = qemu_command(arch, qemu, runnable_kernel, display, debug_exit, scratch_disk)
+        command = qemu_command(arch, qemu, runnable_kernel, display, debug_exit, scratch_disk, cpus)
         if not debug_exit:
             return run_until_marker(command, timeout)
         return subprocess.run(command, text=True, capture_output=True, check=False, timeout=timeout)
@@ -326,7 +362,172 @@ def run_until_marker(command: list[str], timeout: float | None) -> subprocess.Co
                                        stderr.decode(errors="replace"))
 
 
-def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: bool) -> int:
+def hardware_smp_fields(lines: list[str]) -> dict[str, str] | None:
+    for line in reversed(lines):
+        if line.startswith("OK_SMP "):
+            fields = parse_fields(line)
+            if fields.get("scope") == "hardware":
+                return fields
+    return None
+
+
+def hardware_tlb_fields(lines: list[str]) -> dict[str, str] | None:
+    for line in reversed(lines):
+        if line.startswith("OK_SMP_TLB "):
+            fields = parse_fields(line)
+            if fields.get("scope") == "hardware":
+                return fields
+    return None
+
+
+def tsc_sync_problem(lines: list[str], cpus: int, tsc: str, skew_test: bool) -> str | None:
+    """Check the per-CPU OK_TSC_SYNC lines behind OK_SMP's tsc= field.
+
+    Under QEMU TCG every vCPU reads one host counter, so each secondary must
+    measure in sync. With the x86_tsc_skew_test knob CPU 1 starts skewed and
+    must be detected and corrected (offset or adjusted) to a residual within
+    the bound the kernel verified, plus its own measurement error.
+    """
+    reports: dict[int, dict[str, str]] = {}
+    for line in lines:
+        if line.startswith("OK_TSC_SYNC "):
+            fields = parse_fields(line)
+            if fields.get("scope") == "hardware" and fields.get("cpu", "").isdigit():
+                if int(fields["cpu"]) in reports:
+                    return f"cpu {fields['cpu']} reported twice"
+                reports[int(fields["cpu"])] = fields
+    if sorted(reports) != list(range(1, cpus)):
+        return f"expected one OK_TSC_SYNC line for each of cpus 1..{cpus - 1}, got {sorted(reports)}"
+    worst = "sync"
+    for cpu, fields in sorted(reports.items()):
+        result = fields.get("result")
+        if result not in TSC_SYNC_VERIFIED:
+            return f"cpu {cpu} result={result}"
+        if TSC_SYNC_VERIFIED.index(result) > TSC_SYNC_VERIFIED.index(worst):
+            worst = result
+        try:
+            slack, max_error = int(fields["slack"]), int(fields["max_error"])
+            offset, error = int(fields["offset"]), int(fields["error"])
+            residual, residual_error = int(fields["residual"]), int(fields["residual_error"])
+            tolerance = int(fields["tolerance"])
+        except (KeyError, ValueError):
+            return f"cpu {cpu} lacks its measurement fields"
+        skewed = skew_test and cpu == 1
+        if skewed:
+            if fields.get("skew_test") not in ("tsc", "software"):
+                return f"cpu 1 skew_test={fields.get('skew_test')}, expected the knob to have skewed it"
+            if result == "sync" or abs(offset) <= error + slack:
+                return f"cpu 1 skew went undetected: result={result} offset={offset} error={error}"
+        elif result != "sync":
+            return f"cpu {cpu} result={result}; every QEMU vCPU reads one counter"
+        # The kernel's own acceptance test, recomputed from what it printed.
+        if max(error, residual_error) > max_error:
+            return f"cpu {cpu} measured with error={error} residual_error={residual_error} above {max_error}"
+        if result == "sync" and abs(offset) > error + slack:
+            return f"cpu {cpu} sync with offset={offset} beyond error={error} + slack={slack}"
+        if result != "sync" and abs(residual) > residual_error + tolerance:
+            return f"cpu {cpu} residual={residual} beyond residual_error={residual_error} + tolerance={tolerance}"
+    if worst != tsc:
+        return f"OK_SMP tsc={tsc} but the worst OK_TSC_SYNC result is {worst}"
+    return None
+
+
+def hotplug_problem(arch: str, lines: list[str], cpus: int) -> tuple[str | None, str]:
+    """Check the OK_SMP_HOTPLUG_BOOT and OK_SMP_HOTPLUG lines, when present.
+
+    Returns (problem, summary): the summary names what was checked for the
+    OK_QEMU_SMP_TEST line. Only SMP profiles may print them. The boot line
+    comes at most once. The knob's line comes with every interrupt report (at
+    runtime start, at process retirements, at shutdown), so its counters are
+    cumulative: they never decrease, it always names the same CPU, and the
+    last one is the verdict.
+    """
+    boot = [parse_fields(line) for line in lines if line.startswith("OK_SMP_HOTPLUG_BOOT ")]
+    cycles = [parse_fields(line) for line in lines if line.startswith("OK_SMP_HOTPLUG ")]
+    if not boot and not cycles:
+        return None, ""
+    if arch not in SMP_QEMU_ARCHES:
+        return f"{arch} starts no secondary CPU but printed a hotplug line", ""
+    if len(boot) > 1:
+        return "OK_SMP_HOTPLUG_BOOT was printed more than once", ""
+    summary = ""
+    if boot:
+        fields = boot[0]
+        if fields.get("scope") != "hardware" or fields.get("cpu") != "1":
+            return "OK_SMP_HOTPLUG_BOOT must name scope=hardware cpu=1", ""
+        failed = [name for name in HOTPLUG_BOOT_CHECKS if fields.get(name) != "pass"]
+        if failed:
+            return "OK_SMP_HOTPLUG_BOOT failed " + ",".join(failed), ""
+        summary += " hotplug_boot=pass"
+    if cycles:
+        reports = []
+        for fields in cycles:
+            try:
+                reports.append((int(fields["cycles"]), int(fields["failures"]), int(fields["cpu"])))
+            except (KeyError, ValueError):
+                return "OK_SMP_HOTPLUG lacks cycles, failures or cpu", ""
+            if fields.get("scope") != "hardware":
+                return "OK_SMP_HOTPLUG must name scope=hardware", ""
+        for previous, current in zip(reports, reports[1:]):
+            if current[0] < previous[0] or current[1] < previous[1] or current[2] != previous[2]:
+                return "OK_SMP_HOTPLUG counters went back or its CPU changed between reports", ""
+        count, failures, cpu = reports[-1]
+        if count <= 0 or failures != 0 or not 1 <= cpu < cpus:
+            return f"OK_SMP_HOTPLUG cycles={count} failures={failures} cpu={cpu}", ""
+        summary += f" hotplug_cycles={count}"
+    return None, summary
+
+
+def validate_smp(arch: str, lines: list[str], cpus: int, tsc_skew_test: bool = False) -> int:
+    fields = hardware_smp_fields(lines)
+    if fields is None:
+        print(f"debug kernel did not report OK_SMP scope=hardware for -smp {cpus}", file=sys.stderr)
+        return 14
+    reported = " ".join(f"{key}={fields.get(key, 'missing')}" for key in ("cpus", "online", "ap_start", "ipi"))
+    if arch in SMP_QEMU_ARCHES:
+        expected = {"cpus": str(cpus), "online": str(cpus), "ipi": "pass"}
+    else:
+        expected = {"online": "1", "ap_start": "unsupported"}
+    if any(fields.get(key) != value for key, value in expected.items()):
+        wanted = " ".join(f"{key}={value}" for key, value in expected.items())
+        print(f"debug kernel SMP report mismatch for -smp {cpus}: expected {wanted}, got {reported}", file=sys.stderr)
+        return 14
+    # How the started CPUs' TSCs agree with the boot CPU's; x86_64 reports it
+    # once a secondary started, other profiles read one shared counter.
+    tsc = fields.get("tsc")
+    if (tsc is None and arch in TSC_SYNC_QEMU_ARCHES and int(fields.get("online", "1")) > 1) or (
+            tsc is not None and tsc not in TSC_SYNC_VERIFIED):
+        print(f"debug kernel SMP report for -smp {cpus} has tsc={tsc or 'missing'}, expected one of "
+              f"{','.join(TSC_SYNC_VERIFIED)}", file=sys.stderr)
+        return 14
+    if arch in TSC_SYNC_QEMU_ARCHES and tsc is not None:
+        problem = tsc_sync_problem(lines, cpus, tsc, tsc_skew_test)
+        if problem:
+            print(f"debug kernel TSC synchronization for -smp {cpus}: {problem}", file=sys.stderr)
+            return 14
+    reason = f" reason={fields['reason']}" if "reason" in fields else ""
+    sync = f" tsc={tsc}" if tsc is not None else ""
+    tlb = ""
+    if arch in SMP_QEMU_ARCHES:
+        tlb_fields = hardware_tlb_fields(lines)
+        if tlb_fields is None:
+            print(f"debug kernel did not report OK_SMP_TLB scope=hardware for -smp {cpus}", file=sys.stderr)
+            return 14
+        mode = (tlb_fields.get("asid", "missing"), tlb_fields.get("pcid", "missing"))
+        if mode not in SMP_TLB_MODES[arch]:
+            print(f"debug kernel TLB report invalid for {arch}: asid={mode[0]} pcid={mode[1]}", file=sys.stderr)
+            return 14
+        tlb = f" tlb_asid={mode[0]} pcid={mode[1]}"
+    problem, hotplug = hotplug_problem(arch, lines, cpus)
+    if problem:
+        print(f"debug kernel CPU hotplug for -smp {cpus}: {problem}", file=sys.stderr)
+        return 14
+    print(f"OK_QEMU_SMP_TEST arch={arch} smp={cpus} {reported}{reason}{sync}{tlb}{hotplug}")
+    return 0
+
+
+def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: bool, cpus: int = 1,
+                    tsc_skew_test: bool = False) -> int:
     lines = output.splitlines()
     fail_lines = [line for line in lines if line.startswith("OK_TEST_FAIL ")]
     if fail_lines:
@@ -387,10 +588,14 @@ def validate_output(arch: str, output: str, returncode: int, accept_debug_exit: 
         print("display driver did not report boot text", file=sys.stderr)
         return 10
     print(f"OK_QEMU_NET_TEST arch={arch} udp=pass tcp=pass")
+    if cpus > 1:
+        return validate_smp(arch, lines, cpus, tsc_skew_test)
     return 0
 
 
-def write_summary(kernel: Path, arch: str, output: str, qemu_returncode: int, validation_code: int) -> None:
+def write_summary(
+    kernel: Path, arch: str, output: str, qemu_returncode: int, validation_code: int, cpus: int = 1
+) -> None:
     summary = kernel.parent / "qemu-test-summary.txt"
     lines = output.splitlines()
     pass_lines = [line for line in lines if line.startswith("OK_TEST_PASS ")]
@@ -415,6 +620,7 @@ def write_summary(kernel: Path, arch: str, output: str, qemu_returncode: int, va
         "OK_BLOCK",
         "OK_EXT4_READONLY",
         "OK_SMP",
+        "OK_SMP_TLB",
         "OK_IRQ",
         "OK_PREEMPT",
         "OK_TEST_FAIL",
@@ -428,6 +634,13 @@ def write_summary(kernel: Path, arch: str, output: str, qemu_returncode: int, va
                       for line in reversed(lines) if line.startswith(marker + " ")), "absent")
         for marker in roadmap_markers
     }
+    marker_scope_lists = {
+        marker: ",".join(dict.fromkeys(parse_fields(line).get("scope", "unspecified")
+                                       for line in lines if line.startswith(marker + " "))) or "absent"
+        for marker in roadmap_markers
+    }
+    smp_hardware = hardware_smp_fields(lines)
+    smp_tlb = hardware_tlb_fields(lines)
     coverage = coverage_statuses(arch, fields)
     with summary.open("w", encoding="utf-8") as handle:
         handle.write(f"arch={arch}\n")
@@ -435,6 +648,7 @@ def write_summary(kernel: Path, arch: str, output: str, qemu_returncode: int, va
         handle.write(f"qemu_returncode={qemu_returncode}\n")
         handle.write(f"validation_code={validation_code}\n")
         handle.write(f"capabilities={','.join(CAPABILITIES_BY_ARCH.get(arch, ()))}\n")
+        handle.write(f"smp.cpus={cpus}\n")
         handle.write(f"ok_mode={'OK_MODE debug' in lines}\n")
         handle.write(f"boot_complete={any(line.startswith('OK_DEBUG boot=complete') for line in lines)}\n")
         handle.write(f"ok_test_pass={bool(pass_lines)}\n")
@@ -448,6 +662,16 @@ def write_summary(kernel: Path, arch: str, output: str, qemu_returncode: int, va
         for marker, present in marker_status.items():
             handle.write(f"marker.{marker}={'present' if present else 'missing'}\n")
             handle.write(f"scope.{marker}={marker_scopes[marker]}\n")
+            handle.write(f"scopes.{marker}={marker_scope_lists[marker]}\n")
+        handle.write(f"marker.OK_SMP_HARDWARE={'present' if smp_hardware is not None else 'missing'}\n")
+        for key in sorted(smp_hardware or {}):
+            handle.write(f"smp.hardware.{key}={smp_hardware[key]}\n")
+        for key in sorted(smp_tlb or {}):
+            handle.write(f"smp.tlb.{key}={smp_tlb[key]}\n")
+        for marker, prefix in (("OK_SMP_HOTPLUG_BOOT", "smp.hotplug_boot"), ("OK_SMP_HOTPLUG", "smp.hotplug")):
+            fields = next((parse_fields(line) for line in reversed(lines) if line.startswith(marker + " ")), {})
+            for key in sorted(fields):
+                handle.write(f"{prefix}.{key}={fields[key]}\n")
 
 
 def parse_fields(line: str) -> dict[str, str]:
@@ -459,6 +683,16 @@ def parse_fields(line: str) -> dict[str, str]:
     return fields
 
 
+def smp_cpu_count(value: str) -> int:
+    try:
+        cpus = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid CPU count: {value}") from None
+    if not 1 <= cpus <= MAX_QEMU_CPUS:
+        raise argparse.ArgumentTypeError(f"CPU count must be between 1 and {MAX_QEMU_CPUS}")
+    return cpus
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--arch", required=True)
@@ -467,6 +701,11 @@ def main() -> int:
     parser.add_argument("--display", default="none")
     parser.add_argument("--no-debug-exit", action="store_true")
     parser.add_argument("--timeout", type=float, default=DEFAULT_QEMU_TIMEOUT_SECONDS)
+    parser.add_argument("--smp", type=smp_cpu_count, default=1,
+                        help=f"QEMU vCPU count (1..{MAX_QEMU_CPUS}); above 1 requires the hardware OK_SMP marker")
+    parser.add_argument("--tsc-skew-test", action="store_true",
+                        help="the x86_64 kernel was built with x86_tsc_skew_test: CPU 1 must be found skewed "
+                             "and corrected")
     args = parser.parse_args()
 
     arch = normalize_arch(args.arch)
@@ -486,10 +725,10 @@ def main() -> int:
             file=sys.stderr,
         )
     try:
-        result = run_kernel(arch, qemu, kernel, args.display, use_debug_exit, args.timeout)
+        result = run_kernel(arch, qemu, kernel, args.display, use_debug_exit, args.timeout, args.smp)
     except QemuConfigurationError as error:
         print(str(error), file=sys.stderr)
-        write_summary(kernel, arch, "", 127, 11)
+        write_summary(kernel, arch, "", 127, 11, args.smp)
         return 11
     except subprocess.TimeoutExpired as error:
         stdout = error.stdout or ""
@@ -503,14 +742,15 @@ def main() -> int:
         if stderr:
             print(stderr, end="", file=sys.stderr)
         print("qemu timed out before OK_TEST_PASS", file=sys.stderr)
-        write_summary(kernel, arch, stdout, 124, 12)
+        write_summary(kernel, arch, stdout, 124, 12, args.smp)
         return 12
     if result.stdout:
         print(result.stdout, end="")
     if result.stderr:
         print(result.stderr, end="", file=sys.stderr)
-    validation_code = validate_output(arch, result.stdout, result.returncode, use_debug_exit)
-    write_summary(kernel, arch, result.stdout, result.returncode, validation_code)
+    validation_code = validate_output(arch, result.stdout, result.returncode, use_debug_exit, args.smp,
+                                      args.tsc_skew_test)
+    write_summary(kernel, arch, result.stdout, result.returncode, validation_code, args.smp)
     return validation_code
 
 
