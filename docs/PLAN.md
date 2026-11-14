@@ -365,16 +365,17 @@ contract, and the 8 PTY slots are shared with `/dev/ptmx`. Slices:
 - S8: SIGTTIN/SIGTTOU background gates, TOSTOP, every hangup, TIOCNOTTY.
 - S9a: the seven terminal and job-control SDK markers (two new:
   `native_tty_profile`, `native_job_control_profile`), UAPI 0.17.0, the
-  exporter validators and manifest keys, final docs. Module ABI stays 79.
-- S9b (at merge, with the user's approval): module ABI 80, since
-  `feat/net-core` merged first and took 79.
+  exporter validators and manifest keys, final docs.
+- S9b: module ABI 81, since `feat/net-core` took 79 and `feat/smp-bringup`
+  took 80 before this branch merged. Main (smp-bringup) is merged in, and
+  the stop overlay also gates the per-CPU run queues.
 
 Merge obligations: the S9a SDK is refused by the unmodified OS consumer
 (console input profile and UAPI 0.17), so `feat/getty-login` lands the
 matching `tools/kernel_sdk.py`, `tools/check_uapi.py` and SDK suite changes,
 the okcrt/test UAPI 0.17 pins, the okcrt `sigaction()`/`signal()` with SIG_DFL
 and SIG_IGN, the oksh/login SIGTTOU/SIGTTIN/SIGTSTP ignores and the devfs
-`attach_terminals` seam, then consumes SDK 80 after S9b. Receipts
+`attach_terminals` seam, and consumes SDK 81. Receipts
 (`hosted-tty`, `qemu-test-10`, `sdk-export-10`, `guest-tty-10`) are packaged
 in ObfuscationEvidence at merge.
 
@@ -426,8 +427,8 @@ networking is not built into the pinned QEMU. Still open: ICMP errors to
 sockets, poll/select over sockets on queues, TCP getsockname/getpeername.
 Merge: the exported headers bump the module ABI once to 79
 (`docs/modules/modules.md`); the paired OS worktree `feat/net-services`
-consumes SDK 79 and merges right after the kernel. `feat/tty-jobctl`, which
-merges second, takes 80.
+consumes SDK 79 and merges right after the kernel. `feat/smp-bringup` then
+took 80, so `feat/tty-jobctl` takes 81.
 
 ### WT2.4 `feat/storage-durable` (XL)
 

@@ -3,8 +3,8 @@
 This is the terminal and job-control contract of WT2.2 `feat/tty-jobctl`
 (`docs/PLAN.md`). The paired ObfuscationOS worktree `feat/getty-login` builds
 against it. Every section names the slice that landed it (**landed (Sn)**).
-Slices S0-S9a are landed on this branch; only the module ABI bump (S9b, ABI
-80, §13) waits for the merge. The per-slice log and its evidence classes are
+Slices S0-S9b are landed on this branch; S9b is the module ABI bump to 81
+(§13). The per-slice log and its evidence classes are
 in `docs/qualification/TTY_JOB_CONTROL.md`.
 
 Current behaviour:
@@ -35,7 +35,7 @@ Current behaviour:
   SIGTTIN, SIGTTOU, TOSTOP, TIOCNOTTY and every hangup of §9.7 are landed
   (S8).
 - The SDK publishes all of it through UAPI 0.17.0 and the seven terminal and
-  job-control markers of §13 (S9a); module ABI stays 79 until S9b.
+  job-control markers of §13 (S9a) with module ABI 81 (S9b).
 - `OK_TTY` (`fs::TtyDevice`) is a VFS roadmap model. It is not a terminal and is
   not part of this contract.
 
@@ -61,7 +61,7 @@ ObfuscationOS consumer accepted every intermediate SDK. The S9a SDK is UAPI
 0.17.0 with new markers: the unmodified consumer refuses it (first with
 `native console input profile mismatch`, and `check_uapi.py` with
 `OK_UAPI_VERSION_MINOR=17`), so the paired OS worktree `feat/getty-login`
-adopts the matching consumer changes. Module ABI stays 79 until S9b.
+adopts the matching consumer changes. S9b moves every marker to module ABI 81.
 
 ## 1. Terminal objects — landed (S4 console, S5 PTY)
 
@@ -673,7 +673,7 @@ Beyond §3 and §5:
 | winsize | 8 bytes |
 | PID wire | 4 bytes |
 
-## 13. SDK markers and ABI — markers and UAPI 0.17 landed (S9a); ABI 80 at merge (S9b)
+## 13. SDK markers and ABI — markers and UAPI 0.17 landed (S9a); ABI 81 landed (S9b)
 
 Each marker is a standalone `*_profile.hpp` of typed `inline constexpr`
 declarations; `tools/export_sdk.py` and the OS `tools/kernel_sdk.py` pin every
@@ -704,9 +704,10 @@ termination UAPI. Both list the terminal and job-control headers (`ok/tty/*`,
 and the manifest carries `native_tty_profile` and `native_job_control_profile`.
 
 Every marker except `sched/console_input_profile.hpp`, which has no ABI
-field, carries `module_abi = 79` until S9b. S9b bumps the module ABI to
-80 once, at merge (feat/net-core took 79), together with the `ABI80` entry of
-`docs/modules/modules.md` and the paired OS consumer.
+field, carries `module_abi = 81`. S9b bumped the module ABI once, to 81,
+because `feat/net-core` took 79 and `feat/smp-bringup` took 80 before this
+branch merged; the `ABI81` entry of `docs/modules/modules.md` lists the delta
+from 80, and the paired OS consumer declares 81 and refuses 80 and 82.
 
 ## 14. Deviations from Linux
 

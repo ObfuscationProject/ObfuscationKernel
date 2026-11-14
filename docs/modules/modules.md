@@ -12,14 +12,14 @@ Each module exposes a `ModuleManifest` with:
 - dependency, exported-service, and required-service lists;
 - `ModuleExecution`, either `inline_core` or `kernel_process`;
 - `ModuleThreading`, either `single_threaded` or `per_cpu`;
-- `abi_version`, currently `kernel_module_abi_version == 80`;
+- `abi_version`, currently `kernel_module_abi_version == 81`;
 - a capability mask declaring service export/use, kernel-process ownership,
   per-CPU workers, user ABI, driver ABI, or GUI behavior;
 - `ModuleRestartPolicy`;
 - `ModuleResourceBudget` for maximum threads, services, memory pages, and
   handles.
 
-The current contract is module ABI 75 with public UAPI 0.16.0 and SDK manifest
+The current contract is module ABI 81 with public UAPI 0.17.0 and SDK manifest
 schema 1. The exporter writes the same generation into every SDK manifest, and
 the OS consumer rejects a mismatched generation before linking. Rebuild native
 extensions against the exact architecture/mode/compiler SDK; older generations
@@ -107,6 +107,55 @@ Roadmap tests cover:
 - the built-in module graph used by the kernel debug suite.
 
 ## ABI history
+
+ABI81 (`feat/tty-jobctl`, WT2.2) changes exported declarations against
+ABI80 (`git diff 931f252.. -- include/`):
+
+- Status and filesystem. `StatusCode` gains `no_device` (ENXIO) and
+  `Status::no_device`. `fs::Attribute` gains `special_device` and
+  `FileAttributes` gains `special` (a device node's own number, `st_rdev`).
+  `fs::Node` gains the virtual `terminal_node()` (the one new virtual: the
+  terminal provider boundary of device nodes), and the new
+  `ok/fs/terminal_node.hpp` exports `TerminalNodeKind`, `TerminalNode` and
+  `TerminalNamespace`. `ok/fs/devfs.hpp` changes the device filesystem layout
+  (`/dev/tty`, `/dev/console`, `/dev/ptmx`, `/dev/pts/N` and
+  `attach_terminals`), and `VirtualFileSystem` gains the terminal namespace
+  attachment and `filesystem_device`.
+- Descriptions and PTYs. `OpenFileDescription` gains `terminal_origin`.
+  `RawPtyTable` changes its `Pair` and `Audit` layouts (per-endpoint open
+  counts, dormant slaves, locks, the slave terminal with its N_TTY state).
+  `ok/sched/terminal.hpp` (the `Terminal` object, `TerminalRef`,
+  subjects, requests and replies) and `ok/sched/terminal_open.hpp` are new.
+- Scheduler and processes. `SchedulerState` gains the terminal storage and
+  namespace, the console terminal, controlling-terminal and job-control
+  members (`stop_process`, `continue_process`, orphaned-group queries, hangup
+  bookkeeping, PTY read/write state and terminal control). The new
+  `ok/sched/job_control.hpp` exports `JobControlState`;
+  `ProcessControlBlock` gains `job_` and `ctty_detached_`, and
+  `ThreadControlBlock` gains `terminal_gate_mark`. `ThreadWaitReason` gains
+  `job_control`, `ChildExitStatus` gains `stopped`/`continued` (CLD codes 5
+  and 6), and `ChildWaitRequest` gains `group`, `exited`, `stopped`,
+  `continued`, `nowait`, `idtype` and `raw_options`. `PosixService` replaces
+  its console control entry points with `terminal_descriptor`,
+  `terminal_check`, `terminal_control` and `terminal_file_status`.
+- New terminal headers. `ok/tty/termios.hpp` and `ok/tty/n_tty.hpp` (the
+  N_TTY template), `ok/user/job_control_signals.hpp`, and the generated Linux
+  tables at codec revision 3 (`native_tty_linux_codec_revision`;
+  `ok/abi/linux_profile_data.hpp`: ENXIO and ENOSPC, the termios layouts and
+  the TTY ioctls; `ok/abi/linux_termios.hpp`), plus `O_NOCTTY` in the Linux
+  open codec and `st_rdev` in the stat codec.
+- Markers. `native_pty_profile` v2, `native_console_control_profile` v2,
+  `native_sessions_profile` v4, `native_group_signal_profile` v3 and
+  `native_console_input_profile` `...-ntty-compat-default-v2` change; the new
+  `native_tty_profile` v1 and `native_job_control_profile` v1 are exported
+  and listed in the manifest (`docs/modules/tty.md` section 13).
+- UAPI 0.17.0: the new `ok/uapi/termios.h` and `ok/uapi/job_control.h`, the
+  terminal ioctl requests, `OK_PTS_*`, `OK_O_NOCTTY`, `OK_EINTR`, `OK_ENXIO`,
+  `OK_ENOSPC` and the session, console control, TTY and job-control
+  versions in `syscall.h`; `signal.h` is unchanged.
+
+Every exported module marker, the SDK manifest and the OS consumer declare 81
+and refuse 80 and 82.
 
 ABI80 (`feat/smp-bringup`, WT2.1) changes exported declarations against
 ABI79 (`git diff 050aa8e.. -- include/`):

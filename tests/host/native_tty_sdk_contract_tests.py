@@ -1,4 +1,4 @@
-"""SDK80 producer/consumer terminal and job-control admission models (UAPI 0.17); no target execution."""
+"""SDK81 producer/consumer terminal and job-control admission models (UAPI 0.17); no target execution."""
 from pathlib import Path
 import hashlib
 import importlib.util
@@ -74,13 +74,13 @@ class NativeTtySdkContract(unittest.TestCase):
             for module in (PRODUCER, CONSUMER):
                 getattr(module, validator)(self.headers)
                 getattr(module, validator)(KERNEL_ROOT / 'include')
-        # Every other terminal marker moved with UAPI 0.17 while the module ABI stays 80.
+        # Every other terminal marker moved with UAPI 0.17 and module ABI 81.
         for header in ('ok/user/native_pty_profile.hpp', 'ok/user/native_console_control_profile.hpp',
                        'ok/user/native_sessions_profile.hpp', 'ok/user/native_group_signal_profile.hpp',
                        'ok/sched/console_input_profile.hpp'):
             self.assertEqual((KERNEL_ROOT / 'include' / header).read_text(), (self.headers / header).read_text(), header)
         manifest = CONSUMER.validate_sdk(self.sdk, 'x86_64', 'debug')
-        self.assertEqual(manifest['abi_version'], 80)
+        self.assertEqual(manifest['abi_version'], 81)
         self.assertEqual(manifest['native_tty_profile'], PRODUCER.NATIVE_TTY_PROFILE)
         self.assertEqual(manifest['native_job_control_profile'], PRODUCER.NATIVE_JOB_CONTROL_PROFILE)
 
@@ -188,10 +188,10 @@ class NativeTtySdkContract(unittest.TestCase):
         uapi = self.headers / 'ok/uapi/syscall.h'
         good_module, good_uapi = module.read_text(), uapi.read_text()
         for _, _, _, _, validator, _ in CONTRACTS:
-            for version in (79, 81):
-                module.write_text(good_module.replace('= 80;', f'= {version};'))
+            for version in (80, 82):
+                module.write_text(good_module.replace('= 81;', f'= {version};'))
                 with self.subTest(validator=validator, module_abi=version):
-                    self.refused(validator, 'ABI80')
+                    self.refused(validator, 'ABI81')
             module.write_text(good_module)
             for version in (16, 18):
                 uapi.write_text(good_uapi.replace('MINOR 17', f'MINOR {version}'))
@@ -208,7 +208,7 @@ class NativeTtySdkContract(unittest.TestCase):
                                                          'validate_native_job_control_profile'))):
             path = self.headers / header
             good = path.read_text()
-            path.write_text(good.replace('module_abi = 80', 'module_abi = 79'))
+            path.write_text(good.replace('module_abi = 81', 'module_abi = 80'))
             for validator in validators:
                 with self.subTest(dependency=header, validator=validator):
                     self.refused(validator)
@@ -246,7 +246,7 @@ class NativeTtySdkContract(unittest.TestCase):
                     CONSUMER.validate_sdk(self.sdk, 'x86_64', 'debug')
                 path.write_bytes(content)
         for relative, old, new in (
-                (PRODUCER.NATIVE_TTY_PROFILE_HEADER, 'module_abi = 80', 'module_abi = 79'),
+                (PRODUCER.NATIVE_TTY_PROFILE_HEADER, 'module_abi = 81', 'module_abi = 80'),
                 (PRODUCER.NATIVE_TTY_PROFILE_HEADER, 'native_tty_smp = 0', 'native_tty_smp = 1'),
                 (PRODUCER.NATIVE_JOB_CONTROL_PROFILE_HEADER, 'native_job_control_native_handlers = 0',
                  'native_job_control_native_handlers = 1'),
@@ -284,7 +284,7 @@ class NativeTtySdkContract(unittest.TestCase):
                 path.write_bytes(original)
             profile = self.headers / getattr(PRODUCER, header)
             good = profile.read_text()
-            for source in ('', good.replace('module_abi = 80', 'module_abi = 79')):
+            for source in ('', good.replace('module_abi = 81', 'module_abi = 80')):
                 profile.write_text(source)
                 with patch.object(PRODUCER, 'construct_boot_archive') as construct, \
                         self.subTest(header=header, source=source[:40]), self.assertRaisesRegex(ValueError, label):

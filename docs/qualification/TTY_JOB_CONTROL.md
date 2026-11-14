@@ -3,8 +3,8 @@
 WT2.2 `feat/tty-jobctl`, paired with the ObfuscationOS worktree
 `feat/getty-login`. The contract is [tty](../modules/tty.md); this note is the
 per-slice log: what each slice landed, which evidence backs it, and the
-deviations it recorded. Slices S0-S9a are landed; S9b (module ABI 80) is made
-at merge.
+deviations it recorded. Slices S0-S9b are landed; S9b is the module ABI bump
+to 81 (`feat/net-core` took 79 and `feat/smp-bringup` 80).
 
 ## Evidence classes
 
@@ -39,7 +39,7 @@ No slice claims SMP, physical hardware or process isolation.
 | S7 | Linux PTY I/O and poll, EINTR/SA_RESTART on terminal waits, PTY VTIME | `test_native_terminal_signal.py` (`profiles=10 eintr=1 restart=1 vtime=1`), `test_native_pty.py` | fast lanes | `TTY_LINUX_PROBE stage=PASS checks=43 interrupts=2`, x86_64 and aarch64 (static musl) |
 | S8 | SIGTTIN/SIGTTOU gates and TOSTOP, every hangup of section 9.7, TIOCNOTTY | `test_native_tty.py` (`sigttin=1 sigttou=1 tostop=1 hangup=1 tiocnotty=1`), `test_native_terminal_signal.py` (`job_control_park=1`), `test_process_sessions.py` (`tty=1`), `test_native_console_control.py` | x86_64, arm32, ppc, mips | paired OS `qemu-distro` and interactive `--posix-check`, x86_64, mips, ppc; unmodified OS main still passes on x86_64 |
 | S9a | seven SDK markers (two new), UAPI 0.17.0, exporter validators and manifest keys, final docs | `test_tty_sdk_contract.py` (suites=3), `test_native_signal_export.py`, every `*_sdk_contract_tests.py`, `check_runtime_split.py` (671 lines), full hosted suite | x86_64, arm32, ppc, mips (86 points) | paired OS consumer: `kernel-sdk-check`, `qemu-distro`, x86_64; the OS tools unittests |
-| S9b | module ABI 80 | — | — | — (at merge) |
+| S9b | main (feat/smp-bringup, ABI 80) merged, the stop gate on the per-CPU run queues, module ABI 81 | full hosted suite, `test_run_queues.py`, `test_tty_sdk_contract.py` (suites=3), `test_native_signal_export.py`, every `*_sdk_contract_tests.py` | ten profiles (87 points); x86_64, aarch64, rv64 with 2 and 4 vCPUs | paired OS (main c3e1c55 + consumer changes, ABI 81): `kernel-sdk-check`, `qemu-distro`, interactive driver, devpts and musl probes, x86_64 |
 
 Each slice's runners, their exact completion lines and the cases they cover
 are listed in the Tests section of [tty](../modules/tty.md).
@@ -50,7 +50,8 @@ are listed in the Tests section of [tty](../modules/tty.md).
   `native_console_control_profile` v2, `native_sessions_profile` v4,
   `native_group_signal_profile` v3, `native_console_input_profile`
   `...-ntty-compat-default-v2`, and the new `native_tty_profile` v1 and
-  `native_job_control_profile` v1. All keep `module_abi = 79`.
+  `native_job_control_profile` v1. All kept `module_abi = 79` until S9b,
+  which moved them, with every other marker, to 81.
 - UAPI 0.17.0: `OK_NATIVE_SESSIONS_VERSION 4`,
   `OK_NATIVE_CONSOLE_CONTROL_VERSION 2`, `OK_NATIVE_TTY_VERSION 1`,
   `OK_NATIVE_JOB_CONTROL_VERSION 1`. `ok/uapi/job_control.h` is not folded into
@@ -94,7 +95,7 @@ four fails it.
    qualifier that expects EIO for a background console read, POLLERR from
    console poll or ENOTTY for TIOCNOTTY; run the login lane with the paired
    login and oksh.
-4. Consume SDK 80 after S9b and merge right after the kernel.
+4. Consume SDK 81 (S9b) and merge right after the kernel.
 
 ## Receipts
 
