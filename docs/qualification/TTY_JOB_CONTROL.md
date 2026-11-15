@@ -74,7 +74,10 @@ kernel lock in `step()` on every CPU. The stop overlay now also gates the run
 queues: `enqueue_thread`, stealing (`eligible_on`) and `mark_on_cpu` refuse a
 stopped process, `dequeue_thread` discards an entry queued before the stop
 (hotplug re-placement drops it), and a stop kicks a thread of the process that
-runs on another CPU out of user mode. `test_run_queues.py`
+runs on another CPU out of user mode. That thread finishes a syscall it
+already trapped after the parent may have seen the stop: the report is made at
+generation, not when the last thread parks as in Linux (deviation 25 in
+section 14 of [tty](../modules/tty.md)). `test_run_queues.py`
 (`test_stopped_processes`, model) covers the gates; removing any one of the
 four fails it.
 
@@ -108,7 +111,7 @@ receipts.
 
 ## Deviations
 
-The 23 deviations from Linux, each with the slice that landed it, are the
+The 24 deviations from Linux, each with the slice that landed it, are the
 table in section 14 of [tty](../modules/tty.md). The main ones: a stop
 applies at generation; owed kernel signals are invisible to `sigpending`;
 native programs have SIG_DFL/SIG_IGN only and no masks; no ptrace stops,
@@ -116,4 +119,6 @@ native programs have SIG_DFL/SIG_IGN only and no masks; no ptrace stops,
 PTYs shared with raw pairs; no console vhangup, VTIME or IXON on the console;
 VMIN reads are atomic (and a caught signal below VMIN leaves the bytes
 buffered); a PTY master cannot be a controlling terminal; pid 1 gets EIO
-instead of a restart loop on background access.
+instead of a restart loop on background access; with secondary CPUs online a
+stop is reported before a thread on another CPU has finished its trapped
+syscall.

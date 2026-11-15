@@ -431,8 +431,10 @@ handler runs under it after the continue.
   gate (`enqueue_thread`, stealing and `mark_on_cpu` refuse a stopped process;
   `dequeue_thread` discards an entry queued before the stop), and the stop
   kicks a thread of it running on another CPU out of user mode; that thread
-  finishes a syscall it already trapped, as a Linux thread does before it
-  parks. The scan after SIGCONT queues it again.
+  finishes a syscall it already trapped. The stop is reported to the parent
+  when it is generated, before that thread has left user mode or finished
+  its syscall (deviation 25 in section 14). The scan after SIGCONT queues it
+  again.
 - Generating SIGCONT continues the process even if SIGCONT is ignored or
   blocked, and discards pending STOP/TSTP/TTIN/TTOU. Generating any stop signal
   discards a pending SIGCONT.
@@ -737,6 +739,7 @@ from 80, and the paired OS consumer declares 81 and refuses 80 and 82.
 | 22 | (withdrawn) A session leader that holds the master's last descriptor gives its foreground group SIGHUP alone at exit, as Linux does: `do_exit` runs `disassociate_ctty(1)` before `exit_task_work` runs the deferred master `__fput`, so the later `pty_close` hangup finds no session. | not a deviation (S8) |
 | 23 | A zero-length read or write of a PTY slave returns 0 before the job-control check; Linux `n_tty_read` runs the check for a zero count too. | landed (S8) |
 | 24 | The boot stdio console descriptors are job-controlled like `/dev/tty`. Linux opens init's stdio from `/dev/console`, whose reads and writes skip the check (`redirected_tty_write`); here the console is the only terminal and the boot stdio are the console itself, so a shell on them has job control. Descriptors opened from `/dev/console` skip it as on Linux. | landed (S8) |
+| 25 | With secondary CPUs online, a stop is reported to the parent (WUNTRACED, SIGCHLD) when it is generated, while a thread of the process on another CPU may still run user code until the kick IPI lands and finish a syscall it already trapped (an admitted ext4 section included). The window is bounded by one syscall: a blocking call parks in an armed wait. Linux `do_signal_stop` notifies the parent only when the last thread joins the group stop, so a WUNTRACED report there means no thread still runs. | landed (merge with feat/smp-bringup) |
 
 ## Tests
 
