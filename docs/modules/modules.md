@@ -123,27 +123,70 @@ ABI80 (`git diff 931f252.. -- include/`):
   attachment and `filesystem_device`.
 - Descriptions and PTYs. `OpenFileDescription` gains `terminal_origin`.
   `RawPtyTable` changes its `Pair` and `Audit` layouts (per-endpoint open
-  counts, dormant slaves, locks, the slave terminal with its N_TTY state).
-  `ok/sched/terminal.hpp` (the `Terminal` object, `TerminalRef`,
-  subjects, requests and replies) and `ok/sched/terminal_open.hpp` are new.
+  counts, dormant slaves, locks, the slave terminal with its N_TTY state),
+  `read`/`prepare_read` gain a `nonblocking` argument, and it gains
+  `create_multiplexed`, `admit_open`, `set_locked`, `index`, `flush`,
+  `input_pending`, `write_progress`, `read_state` and `ReadTimer`.
+  `ok/sched/terminal.hpp` (`BasicTerminal`/`Terminal`, `TerminalLdisc`,
+  `TerminalRef`, `TerminalSubject`, `TerminalJobFacts` and the signal
+  outbox) and `ok/sched/terminal_open.hpp` (`TerminalOpenRequest`,
+  `TerminalOpenResult`, `TerminalStatus`) are new.
+  `ok/sched/console_control.hpp` extends `ConsoleControlOperation` after its
+  first four values with twelve operations (termios get/set/drain/flush,
+  `TCSBRK`, `TCFLSH`, window get/set, `detach`, `FIONREAD`, PTY number and
+  lock) and `count`, and exports `TerminalRequest`/`TerminalReply`.
+  `ConsoleInputLease` loses its 256-byte buffer and `input`, `read`,
+  `readable` and `buffered` (console input lives in the console terminal's
+  N_TTY) and gains `admit`, which changes its layout.
 - Scheduler and processes. `SchedulerState` gains the terminal storage and
   namespace, the console terminal, controlling-terminal and job-control
   members (`stop_process`, `continue_process`, orphaned-group queries, hangup
-  bookkeeping, PTY read/write state and terminal control). The new
-  `ok/sched/job_control.hpp` exports `JobControlState`;
-  `ProcessControlBlock` gains `job_` and `ctty_detached_`, and
+  bookkeeping, PTY read/write state and terminal control) and the static
+  `child_group_wait_key`. It drops `console_control(op, value)`,
+  `read_console` and the old `ConsoleTerminal` record (replaced by a
+  `Terminal`); `console_input` now returns `TerminalLdisc::Input`, and
+  `prepare_pty_read` gains timer arguments. The new
+  `ok/sched/job_control.hpp` exports `JobControlState`, `JobMember` and
+  `job_group_orphaned`; `ProcessControlBlock` gains `job_`,
+  `ctty_detached_`, `hangup_old_foreground_` and `hangup_terminal_`, and
   `ThreadControlBlock` gains `terminal_gate_mark`. `ThreadWaitReason` gains
   `job_control`, `ChildExitStatus` gains `stopped`/`continued` (CLD codes 5
   and 6), and `ChildWaitRequest` gains `group`, `exited`, `stopped`,
   `continued`, `nowait`, `idtype` and `raw_options`. `PosixService` replaces
-  its console control entry points with `terminal_descriptor`,
-  `terminal_check`, `terminal_control` and `terminal_file_status`.
+  `console_control_descriptor` and `console_control` with
+  `terminal_descriptor`, `terminal_check`, `terminal_control` and
+  `terminal_file_status`, and `posix::o_NOCTTY` is new.
+- Signals, waits and dispatch. `SignalDelivery::Result` inserts `stop`
+  before `unsupported`/`corrupt`, which renumbers both; a default stop is
+  consumed as `stop` instead of refused. The `deliver_directed_signal`
+  blocked-admit callable (`RejectDirectedBlockedWait`) takes a third
+  `i32 signal` argument, so a two-argument ABI80 callback no longer
+  compiles; the new `continue_signal_permitted` adds the SIGCONT session
+  exception, and STOP/TSTP/TTIN/TTOU/CONT are no longer refused with -95.
+  `ProcessSignalSender` gains `session`, and `send_process_group_signal`
+  admits every signal number instead of only 0, 9 and 15.
+  `SignalActionCodec` takes its numbers from `job::linux_numbering` and gains
+  the hup/tstp/ttin/ttou numbers, `default_stop`, `stop_or_continue` and
+  `interrupts`; `LinuxSleepInterruption` skips default stops through
+  `interrupts`. `SignalInfoCodec` encodes CLD codes 5/6 and accepts SI_KERNEL
+  terminal signals (`kernel_terminal_signal`), and `PendingSignalInfo`
+  accepts CLD codes 5/6. `RestartAdapter::Family` gains `terminal_control`
+  (the requests Linux runs `tty_check_change` for). `child_wait_key` and
+  `ChildWaitReport` are new in `ok/user/native_child_wait.hpp`.
+  `console_control::dispatch` takes a `TerminalCodec` (new concept;
+  `NativeTerminalCodec<BigEndian>`) instead of `bool BigEndian`, gains a
+  `Check` callable and reorders its parameters to describe, check, copy-in,
+  control, writable, copy-out; `terminal_request_gate` and
+  `terminal_request_done` are new.
 - New terminal headers. `ok/tty/termios.hpp` and `ok/tty/n_tty.hpp` (the
   N_TTY template), `ok/user/job_control_signals.hpp`, and the generated Linux
   tables at codec revision 3 (`native_tty_linux_codec_revision`;
-  `ok/abi/linux_profile_data.hpp`: ENXIO and ENOSPC, the termios layouts and
-  the TTY ioctls; `ok/abi/linux_termios.hpp`), plus `O_NOCTTY` in the Linux
-  open codec and `st_rdev` in the stat codec.
+  `ok/abi/linux_profile_data.hpp`: `Error` gains `e_nxio` and `e_nospc`
+  before `count`, `ProfileData` gains `tty_ioctls`, `termios` and
+  `termios_slots`, plus the termios name tables;
+  `ok/abi/linux_termios.hpp`: `TerminalIoctl`, `TerminalArgument`,
+  `TermiosCodec` and `TtyIoctlCodec`), plus `O_NOCTTY` in the Linux open
+  codec and `st_rdev` in the stat codec.
 - Markers. `native_pty_profile` v2, `native_console_control_profile` v2,
   `native_sessions_profile` v4, `native_group_signal_profile` v3 and
   `native_console_input_profile` `...-ntty-compat-default-v2` change; the new
