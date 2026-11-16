@@ -122,6 +122,9 @@ inline constexpr u32 cpu_mode_kernel_work = 8;
 inline constexpr u32 cpu_mode_kernel_free = 16;
 // Runs an interrupt top half (TopHalfScope).
 inline constexpr u32 cpu_mode_top_half = 32;
+// Walks user translations inside a kernel window (ok/smp/bringup.hpp), where
+// it may take no lock outside a top half (W1).
+inline constexpr u32 cpu_mode_window = 64;
 
 struct alignas(64) CpuMode
 {
@@ -507,6 +510,8 @@ inline void lock_debug_acquired(const void *lock, LockRank rank, CpuId cpu) noex
         owner_add(lock_stat_cpus[cpu].acquired[static_cast<usize>(stat)]);
     if (rank < top_half_floor && (cpu_mode(cpu) & cpu_mode_top_half) != 0)
         count_check(KernelCheck::top_half, "lock below irq_router in a top half");
+    if ((cpu_mode(cpu) & (cpu_mode_window | cpu_mode_top_half)) == cpu_mode_window)
+        count_check(KernelCheck::window_lock, "lock taken inside a kernel window");
 }
 
 inline void lock_debug_released(const void *lock, LockRank rank, CpuId cpu) noexcept
@@ -570,6 +575,21 @@ inline void lock_debug_released(const void *lock, LockRank rank, CpuId cpu) noex
 #else
     return 0;
 #endif
+}
+
+// True when `cpu` records a hold above `rank` (W2: quiesce_root runs holding
+// nothing above mm). Always false without OK_LOCK_DEBUG.
+[[nodiscard]] inline bool lock_debug_holds_above([[maybe_unused]] CpuId cpu, [[maybe_unused]] LockRank rank) noexcept
+{
+#if defined(OK_LOCK_DEBUG)
+    if (cpu >= max_cpus)
+        return false;
+    const auto &record = lock_debug_cpus[cpu];
+    for (usize index = 0; index < detail::lock_debug_recorded(record); ++index)
+        if (record.ranks[index] > rank)
+            return true;
+#endif
+    return false;
 }
 
 // I1 and I2: no class B acquisition, device wait, user copy, quiesce or wait

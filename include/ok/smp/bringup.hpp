@@ -3,6 +3,7 @@
 #include "ok/arch/arch.hpp"
 #include "ok/core/types.hpp"
 #include "ok/smp/cpu.hpp"
+#include "ok/smp/kernel_section.hpp"
 #include "ok/smp/lock.hpp"
 #include "ok/smp/smp.hpp"
 
@@ -38,6 +39,11 @@ struct alignas(64) CpuRecord
     // changes a translation waits for every such window to close.
     std::atomic<u32> user_generation{};
     std::atomic<uptr> user_root{};
+    // Odd while this CPU's kernel code walks user translations under
+    // `kernel_root` (0: any root): a kernel window around a user copy, a range
+    // check or one user word. Waited for like a user window, never kicked.
+    std::atomic<u32> kernel_generation{};
+    std::atomic<uptr> kernel_root{};
     std::atomic<u32> ipi_pending{};
     std::atomic<uptr> ipis_sent{};
     std::atomic<uptr> ipis_received{};
@@ -65,6 +71,8 @@ inline constinit std::atomic<u32> online{1};
 // these CPUs, whose counters stay meaningful while one is parked.
 inline constinit std::atomic<u32> started{1};
 inline constinit std::atomic<usize> discovered{1};
+// Kernel windows this CPU has open (only its own CPU touches its entry).
+inline constinit std::array<u32, max_cpus> kernel_window_depth{};
 // Bring-up installs the architecture's IPI sender; until then, and in hosted
 // models, nothing is sent.
 inline constinit void (*ipi_sender)(CpuId cpu, u64 hardware_id) noexcept {};
@@ -173,17 +181,31 @@ inline void local_tick() noexcept
     cpu_record(current_cpu()).local_ticks.fetch_add(1, std::memory_order_relaxed);
 }
 
+// The window protocol (x86_64, aarch64 and rv64 run kernel code on several
+// CPUs; elsewhere one CPU runs and quiesce_root returns at once).
+//
+// A writer, holding the owning process's mm: publishes the translation (or
+// marks the address-space slot retiring), bumps the space's TLB generation,
+// issues a full fence, calls quiesce_root and only then frees what the old
+// translation reached. A reader (user entry, a user copy, a range check,
+// with_user_word): reads the handle, opens its window (full fence included),
+// validates the handle against the slot, walks, copies or enters, and closes
+// the window. Either the writer sees the reader's open window and waits for
+// it, or the reader sees the retiring slot or the new translation. A window
+// body takes no lock (top halves excepted).
+
 // The current CPU opens and closes a window in which it may run user code
-// under `root`. Open it while holding what a translation change also holds,
-// before the entry; close it after the switch back to the kernel translation.
-// User translations may stay cached past the window (ASIDs, PCIDs): the
-// backend revalidates them at the CPU's next entry into that space.
+// under `root`, around the entry; close it after the switch back to the
+// kernel translation. User translations may stay cached past the window
+// (ASIDs, PCIDs): the backend revalidates them at the CPU's next entry into
+// that space.
 inline void begin_user(uptr root) noexcept
 {
     auto &record = cpu_record(current_cpu());
     record.user_root.store(root, std::memory_order_relaxed);
     record.user_generation.fetch_add(1, std::memory_order_acq_rel);
     record.user_entries.fetch_add(1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 
 inline void end_user() noexcept
@@ -193,44 +215,132 @@ inline void end_user() noexcept
     record.user_generation.fetch_add(1, std::memory_order_release);
 }
 
-// Before a translation under `root` changes or its tables are freed: send
-// every other CPU whose window uses `root` (all windows for root 0) out of
-// user mode and wait until that window closed. The waiting CPU must not hold
-// anything those CPUs need to leave user mode. CPUs outside a window are never
-// waited for; what they cached earlier is the backend's to invalidate at their
-// next entry. A CPU that leaves the online mask meanwhile (hotplug) closed its
-// window before, so it is not waited for either. Returns the CPUs waited for.
+// A kernel window around a walk of `root`'s user translations. Windows nest
+// on one CPU; the outermost opens and closes the shared record, and a nested
+// window on another root widens it to every root. Only this CPU writes its
+// record, with loads and stores.
+inline void begin_kernel_window(uptr root) noexcept
+{
+    const auto cpu = current_cpu();
+    if (cpu >= max_cpus)
+        return;
+    auto &record = cpu_record(cpu);
+    auto &depth = detail::kernel_window_depth[cpu];
+    if (depth++ != 0)
+    {
+        if (record.kernel_root.load(std::memory_order_relaxed) != root)
+            record.kernel_root.store(0, std::memory_order_relaxed);
+        return;
+    }
+    record.kernel_root.store(root, std::memory_order_relaxed);
+    record.kernel_generation.store(record.kernel_generation.load(std::memory_order_relaxed) + 1,
+                                   std::memory_order_relaxed);
+    set_cpu_mode(cpu, cpu_mode_window);
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    detail::owner_add(evidence_cpus[cpu].kernel_windows);
+}
+
+inline void end_kernel_window() noexcept
+{
+    const auto cpu = current_cpu();
+    if (cpu >= max_cpus || detail::kernel_window_depth[cpu] == 0)
+        return;
+    if (--detail::kernel_window_depth[cpu] != 0)
+        return;
+    clear_cpu_mode(cpu, cpu_mode_window);
+    auto &record = cpu_record(cpu);
+    record.kernel_generation.store(record.kernel_generation.load(std::memory_order_relaxed) + 1,
+                                   std::memory_order_release);
+}
+
+[[nodiscard]] inline bool in_kernel_window() noexcept
+{
+    const auto cpu = current_cpu();
+    return cpu < max_cpus && detail::kernel_window_depth[cpu] != 0;
+}
+
+class KernelWindow final
+{
+  public:
+    explicit KernelWindow(uptr root) noexcept
+    {
+        begin_kernel_window(root);
+    }
+    ~KernelWindow()
+    {
+        end_kernel_window();
+    }
+    KernelWindow(const KernelWindow &) = delete;
+    KernelWindow &operator=(const KernelWindow &) = delete;
+};
+
+// Before a translation under `root` changes or its tables are freed, after
+// the change was published and the TLB generation bumped: send every other
+// CPU whose user window uses `root` (all windows for root 0) out of user mode
+// and wait until that window closed; wait, without a kick, for every kernel
+// window on `root` too. The waiting CPU holds nothing above mm (W2) and serves
+// its own interrupts meanwhile. CPUs outside a window are never waited for;
+// what they cached earlier is the backend's to invalidate at their next
+// entry. A CPU that leaves the online mask meanwhile (hotplug) closed its
+// windows before, so it is not waited for either. Returns the CPUs waited for.
 inline u32 quiesce_root(uptr root) noexcept
 {
     static_cast<void>(check_class_wait("quiesce_root under a spin lock"));
+    if (lock_debug_holds_above(current_cpu(), LockRank::mm))
+        detail::section_assert(&SectionCpu::depth_asserts, "quiesce_root above mm");
+    std::atomic_thread_fence(std::memory_order_seq_cst);
     const auto mask = online_mask();
     if ((mask & (mask - 1)) == 0)
         return 0;
     const auto self = current_cpu();
-    std::array<u32, max_cpus> observed{};
-    u32 waiting = 0;
+    std::array<u32, max_cpus> user_observed{};
+    std::array<u32, max_cpus> kernel_observed{};
+    u32 user_waiting = 0;
+    u32 kernel_waiting = 0;
     for (CpuId cpu = 0; cpu < max_cpus; ++cpu)
     {
         if (cpu == self || (mask & (u32{1} << cpu)) == 0)
             continue;
         auto &record = cpu_record(cpu);
+        const auto kernel = record.kernel_generation.load(std::memory_order_acquire);
+        const auto kernel_root = record.kernel_root.load(std::memory_order_relaxed);
+        if ((kernel & 1) != 0 && (root == 0 || kernel_root == 0 || kernel_root == root))
+        {
+            kernel_observed[cpu] = kernel;
+            kernel_waiting |= u32{1} << cpu;
+        }
         const auto generation = record.user_generation.load(std::memory_order_acquire);
         if ((generation & 1) == 0 || (root != 0 && record.user_root.load(std::memory_order_relaxed) != root))
             continue;
-        observed[cpu] = generation;
-        waiting |= u32{1} << cpu;
+        user_observed[cpu] = generation;
+        user_waiting |= u32{1} << cpu;
         send_ipi(cpu, ipi_kick);
     }
-    const auto waited = waiting;
-    if (waiting != 0)
-        cpu_record(self).shootdowns.fetch_add(1, std::memory_order_relaxed);
-    while (waiting != 0)
+    const auto waited = user_waiting | kernel_waiting;
+    if (waited != 0)
     {
-        waiting &= online_mask();
+        cpu_record(self).shootdowns.fetch_add(1, std::memory_order_relaxed);
+        detail::owner_add(evidence_cpus[self < max_cpus ? self : 0].quiesce_rounds);
+    }
+    if (waited == 0)
+        return 0;
+    const SpinningScope spinning;
+    while ((user_waiting | kernel_waiting) != 0)
+    {
+        const auto online = online_mask();
+        user_waiting &= online;
+        kernel_waiting &= online;
         for (CpuId cpu = 0; cpu < max_cpus; ++cpu)
-            if ((waiting & (u32{1} << cpu)) != 0 &&
-                cpu_record(cpu).user_generation.load(std::memory_order_acquire) != observed[cpu])
-                waiting &= ~(u32{1} << cpu);
+        {
+            const auto bit = u32{1} << cpu;
+            if ((user_waiting & bit) != 0 &&
+                cpu_record(cpu).user_generation.load(std::memory_order_acquire) != user_observed[cpu])
+                user_waiting &= ~bit;
+            if ((kernel_waiting & bit) != 0 &&
+                cpu_record(cpu).kernel_generation.load(std::memory_order_acquire) != kernel_observed[cpu])
+                kernel_waiting &= ~bit;
+        }
+        serve_while_spinning();
         arch::ArchOperations{}.spin_pause();
     }
     return waited;

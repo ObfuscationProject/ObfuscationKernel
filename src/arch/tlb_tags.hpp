@@ -3,6 +3,7 @@
 #include "ok/core/types.hpp"
 
 #include <array>
+#include <atomic>
 
 // Tagged user TLB entries (aarch64 ASIDs, rv64 satp ASIDs, x86_64 PCIDs).
 // Each CPU picks its own tags: a space's tag differs between CPUs, so no tag
@@ -23,17 +24,30 @@ namespace ok::arch::detail
 // What an entry needs to know about its space. `id` comes from one sequence
 // and never repeats, so a cached tag never matches a later space, even one
 // whose root reuses the same frame. `generation` moves after each change of
-// an existing translation.
+// an existing translation. Entries read it without a lock, so it is an atomic
+// word (the backends that use tags are 64-bit; only the backend's space lock
+// holder bumps it, with a load and a store).
 struct TlbSpaceTag
 {
     u64 id{};
     u64 generation{};
 
-    // Called after a translation was rewritten and every CPU that may run the
-    // space left its user window (quiesce_root). Bumping before the rewrite
-    // would let a CPU still in its window cache the old translation under the
-    // new generation.
-    constexpr void changed() noexcept { ++generation; }
+    // Writer order: after the translation was rewritten, before quiesce_root.
+    // A CPU still in its window when the generation moves may have cached the
+    // old translation under the old generation; quiesce_root sends it out and
+    // its next entry sees the new generation and drops what it cached. A CPU
+    // that enters after the bump reads the new generation and drops stale
+    // entries of earlier runs.
+    void changed() noexcept
+    {
+        const std::atomic_ref<u64> word{generation};
+        word.store(word.load(std::memory_order_relaxed) + 1, std::memory_order_release);
+    }
+    // A consistent copy for an entry: the id never changes after issue().
+    [[nodiscard]] TlbSpaceTag current() const noexcept
+    {
+        return {id, std::atomic_ref<u64>{const_cast<u64 &>(generation)}.load(std::memory_order_acquire)};
+    }
 };
 
 // Issues space ids. Serialized by the backend's space lock.
