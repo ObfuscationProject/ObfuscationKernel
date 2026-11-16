@@ -4,6 +4,7 @@
 #include "ok/core/native_shutdown.hpp"
 #include "ok/interrupt/platform.hpp"
 #include "ok/smp/bringup.hpp"
+#include "ok/smp/hotplug.hpp"
 #include "ok/smp/kernel_lock.hpp"
 #include "ok/arch/terminal_power.hpp"
 #include "ok/user/runtime.hpp"
@@ -108,6 +109,9 @@ namespace ok::detail
         static_cast<void>(ok::ok_poll_network());
         static_cast<void>(ok::ok_step_userland());
         shutdown_boundary();
+        // User CPU hotplug: one request from /sys/devices/system/cpu per pass.
+        if (native_userland_started)
+            static_cast<void>(ok::smp::hotplug_service_pass());
 #if defined(OK_SMP_HOTPLUG_TEST)
         // Debug knob: cycles the highest secondary CPU while userland runs.
         if (native_userland_started)
@@ -161,7 +165,7 @@ namespace ok::detail
         if (did_work)
             ok::smp::bkl_mark_work();
         bool waited = false;
-        if (!did_work && !ok::interrupt::events_posted())
+        if (!did_work && !ok::interrupt::events_posted() && ok::smp::hotplug::pending() == 0)
         {
             // Other CPUs serve their threads while this one waits.
             ok::smp::bkl_unlock();

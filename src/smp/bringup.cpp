@@ -9,6 +9,7 @@
 #include "ok/memory/memory.hpp"
 #include "ok/core/native_shutdown.hpp"
 #include "ok/smp/cpu.hpp"
+#include "ok/smp/hotplug.hpp"
 #include "ok/smp/kernel_section.hpp"
 #include "../arch/tlb_tags.hpp"
 
@@ -385,6 +386,7 @@ Status start_secondary_cpus(Kernel &kernel)
     emit_report();
     emit_tlb_report(started_mask);
     bringup_kernel = &kernel;
+    hotplug_attach(kernel);
 #if defined(OK_ENABLE_TEST_POINTS) && defined(OK_ARCH_SMP_START)
     boot_hotplug_check(kernel);
 #endif
