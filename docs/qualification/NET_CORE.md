@@ -265,3 +265,13 @@ queues, TCP socket names. This note grows with each slice.
   evaluated once (`OK_NET_WAITS`). Receipts: ObfuscationEvidence
   `receipts/ObfuscationKernel@956c7be/feat/net-core/` (`device-probe-matrix`,
   `hosted`).
+- net-socket-gaps at ABI 82 (kernel 0a09bbb, OS `feat/net-socket-gaps`
+  ba64a78), on all ten profiles:
+  - kernel `xmake test` and SDK export pass;
+  - the `net_probe` link probe passes clean and with ten percent TCP loss;
+  - `qemu-distro --fs=simplefs --require-native` reports
+    `OK_USERLAND scope=hardware acceptance=pass shell_pipeline=pass`.
+
+  The kernel SDK contract tests pass against that OS tree, and so do the
+  OS `tests/tools` suite (1341 tests) and the 18 hosted socket runtime
+  suites. Receipts are not packaged yet.
