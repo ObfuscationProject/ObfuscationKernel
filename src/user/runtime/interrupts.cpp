@@ -6,7 +6,8 @@
 // where kernel sections are compiled in the OK_SMP_KERNEL lines and, with the
 // smp_hotplug_test knob, the CPU hotplug cycles (OK_SMP_HOTPLUG), then the
 // lock checks and fine-lock evidence (OK_SMP_KERNEL_CHECKS, OK_SMP_LOCKS,
-// OK_SMP_WAKE, OK_SMP_MM, OK_SMP_AUDIT).
+// OK_SMP_WAKE, OK_SMP_MM, OK_SMP_AUDIT), then the user CPU hotplug requests
+// (OK_SMP_HOTPLUG_USER, hotplug.cpp).
 #include "private.hpp"
 #include "ok/interrupt/platform.hpp"
 #include "ok/smp/bringup.hpp"
@@ -366,6 +367,7 @@ void report_interrupts()
     report_kernel_sections();
     report_hotplug();
     report_kernel_checks();
+    report_cpu_hotplug();
 }
 inline namespace runtime_detail
 {
