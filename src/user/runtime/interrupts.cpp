@@ -143,6 +143,9 @@ struct alignas(64) FirstViolation
 };
 constinit std::array<FirstViolation, smp::max_cpus> first_violations{};
 constinit std::array<u64, smp::max_cpus> violation_baseline{};
+// Lock class counts at that point (the boot test points take locks too),
+// as acquired and contended.
+constinit std::array<std::array<u64, 2>, smp::lock_stat_count> lock_stat_baseline{};
 
 // Runs on the violating CPU inside the lock checks: it records, never emits.
 void record_lock_violation(const smp::LockViolation &violation) noexcept
@@ -158,6 +161,14 @@ void record_lock_violation(const smp::LockViolation &violation) noexcept
 {
     const auto count = smp::lock_violation_count(cpu);
     return count > violation_baseline[cpu] ? count - violation_baseline[cpu] : 0;
+}
+
+u64 runtime_lock_stat(smp::LockStat stat, bool contended)
+{
+    if (stat == smp::LockStat::none) return 0;
+    const auto count = smp::lock_stat_total(stat, contended);
+    const auto base = lock_stat_baseline[static_cast<usize>(stat)][contended ? 1 : 0];
+    return count > base ? count - base : 0;
 }
 
 // Kernel sections (OK_SMP_KERNEL, OK_SMP_KERNEL_FAMILIES,
@@ -272,8 +283,8 @@ void report_hotplug()
 // The lock order's assertion counters and the fine-lock evidence, after the
 // lines above, on every profile once the runtime armed its checks:
 //   OK_SMP_KERNEL_CHECKS every check counter and the deepest lock nesting;
-//   OK_SMP_LOCKS         per lock class acquired:contended (acquisitions are
-//                        counted in debug kernels only);
+//   OK_SMP_LOCKS         per lock class acquired:contended since the checks
+//                        were armed (acquisitions in debug kernels only);
 //   OK_SMP_WAKE, OK_SMP_MM, OK_SMP_AUDIT the wakeup, memory and audit
 //                        counters (zero until their paths are converted);
 //   OK_SMP_CHECK_SITE    the first failed check per CPU.
@@ -311,7 +322,7 @@ void report_kernel_checks()
     {
         const auto which = static_cast<smp::LockStat>(stat);
         emit(" "); emit(smp::lock_stat_names[stat]); emit("=");
-        emit_number(smp::lock_stat_total(which, false)); emit(":"); emit_number(smp::lock_stat_total(which, true));
+        emit_number(runtime_lock_stat(which, false)); emit(":"); emit_number(runtime_lock_stat(which, true));
     }
     emit("\nOK_SMP_WAKE scope=hardware");
     field("remote", smp::evidence_total(&smp::EvidenceCpu::remote_wakes));
@@ -321,8 +332,8 @@ void report_kernel_checks()
     field("deadline_late_max_us", smp::evidence_max(&smp::EvidenceCpu::deadline_late_max_us));
     field("unqueued", smp::evidence_total(&smp::EvidenceCpu::unqueued));
     emit("\nOK_SMP_MM scope=hardware");
-    field("mm_acquired", smp::lock_stat_total(smp::LockStat::mm, false));
-    field("mm_contended", smp::lock_stat_total(smp::LockStat::mm, true));
+    field("mm_acquired", runtime_lock_stat(smp::LockStat::mm, false));
+    field("mm_contended", runtime_lock_stat(smp::LockStat::mm, true));
     field("quiesce_rounds", smp::evidence_total(&smp::EvidenceCpu::quiesce_rounds));
     field("kernel_windows", smp::evidence_total(&smp::EvidenceCpu::kernel_windows));
     field("cow_copied", smp::evidence_total(&smp::EvidenceCpu::cow_copied));
@@ -357,6 +368,9 @@ inline namespace runtime_detail
 void arm_kernel_checks()
 {
     for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu) violation_baseline[cpu] = smp::lock_violation_count(cpu);
+    for (usize stat = 0; stat < smp::lock_stat_count; ++stat)
+        for (usize contended = 0; contended < 2; ++contended)
+            lock_stat_baseline[stat][contended] = smp::lock_stat_total(static_cast<smp::LockStat>(stat), contended != 0);
     smp::lock_violation_handler = record_lock_violation;
     smp::arm_exclusive();
 }
