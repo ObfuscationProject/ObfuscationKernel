@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ok/user/native_syscall_restart.hpp"
+#include "ok/user/uaccess.hpp"
 #include "ok/user/native_backend_capture.hpp"
 #include "ok/user/native_child_wait.hpp"
 #include "ok/user/native_pipe_vectors.hpp"
@@ -577,7 +578,7 @@ class SyscallOriginTable final : private NonCopyable
                     [&](uptr address, std::span<u8> bytes) {
                         if (!executable(process.resources(), address, bytes.size()))
                             return Status::fault("Linux UDP restart opcode is not completely executable");
-                        return hw::copy_from_user(observation.space(), bytes.data(), address, bytes.size());
+                        return uaccess::copy_from_user(observation.space(), bytes.data(), address, bytes.size());
                     });
                 if (plan)
                 {
@@ -599,7 +600,7 @@ class SyscallOriginTable final : private NonCopyable
             [&](uptr address, std::span<u8> bytes) {
                 if (!executable(process.resources(), address, bytes.size()))
                     return Status::fault("syscall origin opcode is not completely executable");
-                return hw::copy_from_user(observation.space(), bytes.data(), address, bytes.size());
+                return uaccess::copy_from_user(observation.space(), bytes.data(), address, bytes.size());
             });
         if (!plan) return Status{};
         record->identity.capture = sequence;
@@ -1741,7 +1742,7 @@ class SyscallOriginTable final : private NonCopyable
                 if (mapping.virtual_address == page && (mapping.flags & hw::page_execute)) { found = true; break; }
             if (!found) return false;
         }
-        return hw::user_range(resources.native_space, address, bytes);
+        return uaccess::user_range(resources.native_space, address, bytes);
     }
 #ifdef OK_SYSCALL_ORIGIN_MODEL
     friend struct SyscallOriginTestAccess;

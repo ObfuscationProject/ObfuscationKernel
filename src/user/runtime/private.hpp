@@ -18,6 +18,7 @@
 #include "ok/smp/bringup.hpp"
 #include "ok/smp/cpu.hpp"
 #include "ok/smp/kernel_section.hpp"
+#include "ok/user/uaccess.hpp"
 #include "ok/user/native_sleep.hpp"
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
 #define OK_PRIVATE_POLL_MASK 1
@@ -681,9 +682,13 @@ Status activate_pool(Kernel *kernel);
 Status check_runtime_objects();
 #endif
 bool same_space(const hw::AddressSpace &a, const hw::AddressSpace &b);
-#ifdef OK_NATIVE_COW_FORK
-bool resolve_native_write(const hw::AddressSpace &space, uptr page);
-#endif
+// A user page fault of the process that owns `resources`, under its mm: a
+// write to a withheld page, or a fault on a translation replaced meanwhile.
+// True when the thread may resume.
+bool resolve_user_fault(sched::ProcessResources &resources, const hw::Trap &trap);
+// Process teardown under its mm: retires the space and every frame, then
+// marks the address space dead.
+void release_address_space(sched::ProcessResources &resources);
 const memory::PhysicalFrame *owned_frame(const Pages &pages, const hw::PageMapping &page);
 Status discharge_quarantine(QuarantinedSpace &saved, bool all = false, uptr begin = 0, usize size = 0);
 Status finish_quarantine(QuarantinedSpace &saved, bool retry_owners = true);

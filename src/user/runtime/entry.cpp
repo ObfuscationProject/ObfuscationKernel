@@ -123,10 +123,10 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
     {
         if (process->resources().personality != Personality::native) return -38;
         auto result = native_pty::create<std::endian::native == std::endian::big>(a,
-            [&](uptr output, usize size) { return hw::user_range(space, output, size, true); },
+            [&](uptr output, usize size) { return uaccess::user_range(space, output, size, true); },
             [&](u32 flags) { return kernel.scheduler().prepare_pty_pair(pid, flags); },
             [&](uptr output, std::span<const u8> bytes) {
-                return hw::copy_to_user(space, output, bytes.data(), bytes.size());
+                return uaccess::copy_to_user(space, output, bytes.data(), bytes.size());
             },
             [](sched::PreparedPtyPair &operation) noexcept { operation.publish_checked(); },
             [&](Status failure) { if (runtime_failure) runtime_failure = failure; });
@@ -146,7 +146,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         return native_metadata::dispatch(process->resources().personality == Personality::native, *operation, a,
             [&](uptr address, FixedString<256> &path) {
                 return native_metadata::copy_path(address, path, [&](uptr byte, char &value) {
-                    return hw::copy_from_user(space, &value, byte, 1);
+                    return uaccess::copy_from_user(space, &value, byte, 1);
                 });
             },
             [&](native_metadata::Request request, std::string_view path) -> fs::ModeChangeResult {
@@ -159,9 +159,9 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
     if (number == N::mount_info)
         return native_mount_info::dispatch(process->resources().personality == Personality::native, a,
             [&](u32 slot, fs::MountSnapshot &snapshot) { return kernel.vfs().mount_snapshot(slot, snapshot); },
-            [&](uptr address, usize bytes) { return hw::user_range(space, address, bytes, true); },
+            [&](uptr address, usize bytes) { return uaccess::user_range(space, address, bytes, true); },
             [&](uptr address, std::span<const u8> bytes) {
-                return hw::copy_to_user(space, address, bytes.data(), bytes.size());
+                return uaccess::copy_to_user(space, address, bytes.data(), bytes.size());
             });
     // Per-process memory quotas; other resources keep the static service table.
     if ((number == N::getrlimit || number == N::prlimit64) && process->resources().personality == Personality::native)
@@ -172,8 +172,8 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
             sched::MemoryLimit requested{}, saved = *limit;
             if (prlimit && a[0] && a[0] != static_cast<uptr>(pid)) return -3; // Only the caller's own limits.
             if (!prlimit && !previous) return -14;
-            if (set && !hw::copy_from_user(space, &requested, a[2], sizeof(requested))) return -14;
-            if (previous && !hw::copy_to_user(space, previous, &saved, sizeof(saved))) return -14;
+            if (set && !uaccess::copy_from_user(space, &requested, a[2], sizeof(requested))) return -14;
+            if (previous && !uaccess::copy_to_user(space, previous, &saved, sizeof(saved))) return -14;
             return set ? sched::MemoryLimits::update(*limit, requested, process->credentials().euid == 0) : 0;
         }
     if (number == N::power_prepare || number == N::power_commit)
@@ -233,7 +233,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         if (process->resources().personality != Personality::native) return -38;
         return native_credentials::dispatch(*process, *credential_call, a,
             [&](uptr address, std::span<const u8> bytes) {
-                return hw::copy_to_user(space, address, bytes.data(), bytes.size());
+                return uaccess::copy_to_user(space, address, bytes.data(), bytes.size());
             });
     }
     const auto unix_operation = native_unix_path_call(call, kernel.scheduler(), *process);
@@ -241,9 +241,9 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         return unix_pathname<lu::configured_native_profile(), true>(kernel.posix(), kernel.scheduler(), *process,
             unix_operation, {a[0], a[1], a[2], a[3], a[4], a[5]},
             [](std::array<u64, 6> arguments) -> Result<std::array<u64, 6>> { return arguments; },
-            [&](u64 address, std::span<u8> bytes) { return hw::copy_from_user(space, bytes.data(), address, bytes.size()); },
-            [&](u64 address, std::span<const u8> bytes) { return hw::copy_to_user(space, address, bytes.data(), bytes.size()); },
-            [&](u64 address, usize length) { return hw::user_range(space, address, length, true); });
+            [&](u64 address, std::span<u8> bytes) { return uaccess::copy_from_user(space, bytes.data(), address, bytes.size()); },
+            [&](u64 address, std::span<const u8> bytes) { return uaccess::copy_to_user(space, address, bytes.data(), bytes.size()); },
+            [&](u64 address, usize length) { return uaccess::user_range(space, address, length, true); });
     if (number == N::sendmsg || number == N::recvmsg)
     {
         if (process->resources().personality != Personality::native) return -38;
@@ -257,9 +257,9 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
             (offsetof(ok_msghdr, vectors) == C::vectors_offset && offsetof(ok_msghdr, flags) == C::flags_offset));
         return unix_message<lu::configured_native_profile(), true>(kernel.posix(), number == N::recvmsg,
             a[0], a[1], a[2],
-            [&](u64 address, std::span<u8> bytes) { return hw::copy_from_user(space, bytes.data(), address, bytes.size()); },
-            [&](u64 address, std::span<const u8> bytes) { return hw::copy_to_user(space, address, bytes.data(), bytes.size()); },
-            [&](u64 address, usize length) { return hw::user_range(space, address, length, true); });
+            [&](u64 address, std::span<u8> bytes) { return uaccess::copy_from_user(space, bytes.data(), address, bytes.size()); },
+            [&](u64 address, std::span<const u8> bytes) { return uaccess::copy_to_user(space, address, bytes.data(), bytes.size()); },
+            [&](u64 address, usize length) { return uaccess::user_range(space, address, length, true); });
     }
     if (number == N::socketpair)
     {
@@ -270,7 +270,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         auto fds = kernel.posix().unix_socketpair(static_cast<u32>(a[1]) &
                                                   (posix::o_NONBLOCK | posix::o_CLOEXEC));
         if (!fds) return error(fds.status());
-        if (!hw::copy_to_user(space, a[3], fds.value().data(), sizeof(i32) * 2))
+        if (!uaccess::copy_to_user(space, a[3], fds.value().data(), sizeof(i32) * 2))
         {
             static_cast<void>(kernel.posix().close(fds.value()[0]));
             static_cast<void>(kernel.posix().close(fds.value()[1]));
@@ -284,10 +284,10 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
     {
         if (a[1] > sched::max_process_fds)
             return -22;
-        if (!hw::user_range(space, a[0], a[1] * sizeof(ok_pollfd), true))
+        if (!uaccess::user_range(space, a[0], a[1] * sizeof(ok_pollfd), true))
             return -14;
         std::array<ok_pollfd, sched::max_process_fds> descriptors{};
-        if (!hw::copy_from_user(space, descriptors.data(), a[0], a[1] * sizeof(ok_pollfd)))
+        if (!uaccess::copy_from_user(space, descriptors.data(), a[0], a[1] * sizeof(ok_pollfd)))
             return -14;
         const i32 milliseconds = static_cast<i32>(a[2]);
         PollRequest request{};
@@ -303,7 +303,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         if (a[0] != 0)
             return -22;
         ok_timespec requested{};
-        if (!hw::copy_from_user(space, &requested, a[1], sizeof(requested)))
+        if (!uaccess::copy_from_user(space, &requested, a[1], sizeof(requested)))
             return -14;
         return error(user::set_realtime_checked(
             {requested.seconds, requested.nanoseconds}, process->credentials(),
@@ -319,7 +319,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         if (!now)
             return error(now.status());
         const posix::ClockTime result{now.value().seconds, now.value().nanoseconds};
-        return hw::copy_to_user(space, a[1], &result, sizeof(result)) ? 0 : -14;
+        return uaccess::copy_to_user(space, a[1], &result, sizeof(result)) ? 0 : -14;
     }
     if (number == N::time || number == N::gettimeofday)
     {
@@ -334,12 +334,12 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
             if (!seconds)
                 return error(seconds.status());
             const i64 value = seconds.value();
-            if (a[0] && !hw::copy_to_user(space, a[0], &value, sizeof(value)))
+            if (a[0] && !uaccess::copy_to_user(space, a[0], &value, sizeof(value)))
                 return -14;
             return value;
         }
         const ok_timeval result{now.value().seconds, now.value().nanoseconds / 1000};
-        return hw::copy_to_user(space, a[0], &result, sizeof(result)) ? 0 : -14;
+        return uaccess::copy_to_user(space, a[0], &result, sizeof(result)) ? 0 : -14;
     }
     if (number == N::nanosleep || number == N::clock_nanosleep)
     {
@@ -347,7 +347,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         if (clock_sleep && (a[0] != 1 || (a[1] & ~uptr{1}) != 0))
             return -22;
         posix::ClockTime request{};
-        if (!hw::copy_from_user(space, &request, a[clock_sleep ? 2 : 0], sizeof(request)))
+        if (!uaccess::copy_from_user(space, &request, a[clock_sleep ? 2 : 0], sizeof(request)))
             return -14;
         const bool absolute = clock_sleep && a[1] == 1;
         auto now = arch::monotonic_nanoseconds();
@@ -478,12 +478,12 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
 
     if (number == N::pipe || number == N::pipe2)
     {
-        if (!hw::user_range(space, a[0], sizeof(i32) * 2, true))
+        if (!uaccess::user_range(space, a[0], sizeof(i32) * 2, true))
             return -14;
         auto fds = kernel.posix().pipe(number == N::pipe2 ? static_cast<u32>(a[1]) : 0);
         if (!fds)
             return error(fds.status());
-        if (!hw::copy_to_user(space, a[0], fds.value().data(), sizeof(i32) * 2))
+        if (!uaccess::copy_to_user(space, a[0], fds.value().data(), sizeof(i32) * 2))
         {
             static_cast<void>(kernel.posix().close(fds.value()[0]));
             static_cast<void>(kernel.posix().close(fds.value()[1]));
@@ -496,7 +496,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         using Vector = PipeVector;
         std::array<Vector, PipeVectors::capacity> vectors{};
         if (a[2] > vectors.size()) return -22;
-        if (!hw::copy_from_user(space, vectors.data(), a[1], a[2] * sizeof(Vector))) return -14;
+        if (!uaccess::copy_from_user(space, vectors.data(), a[1], a[2] * sizeof(Vector))) return -14;
         const auto *slot = process->fd_table().entry(static_cast<i32>(a[0]));
         auto *description = slot && slot->used ? kernel.scheduler().open_description(slot->description) : nullptr;
         const bool writing = number == N::writev;
@@ -533,7 +533,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         if (!writing && description->input_console)
             return tty_console_read(kernel, *process, *caller, *description, {vectors.data(), a[2]}, complete, a, true);
         for (usize i = 0; i < a[2]; ++i)
-            if (!hw::user_range(space, vectors[i].base, vectors[i].length, !writing)) return -14;
+            if (!uaccess::user_range(space, vectors[i].base, vectors[i].length, !writing)) return -14;
         if (writing && description->console)
             return tty_console_write(kernel, *process, *caller, *description, {vectors.data(), a[2]}, static_cast<i32>(a[0]),
                                      complete);
@@ -545,7 +545,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
             for (usize i = 0; i < a[2] && position < total; ++i)
             {
                 auto length = vectors[i].length < total - position ? vectors[i].length : total - position;
-                if (!hw::copy_from_user(space, data.data() + position, vectors[i].base, length)) return -14;
+                if (!uaccess::copy_from_user(space, data.data() + position, vectors[i].base, length)) return -14;
                 position += length;
             }
         // A shared-file read takes the position, reads at it and advances it
@@ -570,7 +570,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
             for (usize i = 0; i < a[2] && position < result.value(); ++i)
             {
                 auto length = vectors[i].length < result.value() - position ? vectors[i].length : result.value() - position;
-                if (!hw::copy_to_user(space, vectors[i].base, data.data() + position, length)) return -14;
+                if (!uaccess::copy_to_user(space, vectors[i].base, data.data() + position, length)) return -14;
                 position += length;
             }
             if (description->native_shared_file) description->offset += result.value();
@@ -810,7 +810,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
     }
     if (input_arg >= 0)
     {
-        if (!hw::copy_from_user(space, buffer.data(), a[input_arg], input_size))
+        if (!uaccess::copy_from_user(space, buffer.data(), a[input_arg], input_size))
             return -14;
         request.args[input_arg] = reinterpret_cast<uptr>(buffer.data());
     }
@@ -819,7 +819,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         // readlink has no side effects: validate only the bytes it returns,
         // so unused capacity may extend beyond the caller's mapped buffer.
         if (number != N::readlink && number != N::readlinkat &&
-            !hw::user_range(space, a[output_arg], output_size, true))
+            !uaccess::user_range(space, a[output_arg], output_size, true))
             return -14;
         request.args[output_arg] = reinterpret_cast<uptr>(buffer.data());
     }
@@ -831,7 +831,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         auto read = kernel.posix().pread(static_cast<i32>(a[0]), {buffer.data(), output_size},
             number == N::read ? description->offset : static_cast<usize>(a[3]));
         if (!read) return error(read.status());
-        if (!hw::copy_to_user(space, a[1], buffer.data(), read.value())) return -14;
+        if (!uaccess::copy_to_user(space, a[1], buffer.data(), read.value())) return -14;
         if (number == N::read)
         {
             auto *open = kernel.scheduler().open_description(fd->description);
@@ -853,7 +853,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
     {
         if (variable_output)
             output_size = static_cast<usize>(result.value);
-        if (output_size > buffer.size() || !hw::copy_to_user(space, a[output_arg], buffer.data(), output_size))
+        if (output_size > buffer.size() || !uaccess::copy_to_user(space, a[output_arg], buffer.data(), output_size))
             return -14;
     }
     // A file or device read fills the request one buffer at a time, as on
@@ -870,7 +870,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
             const auto more = kernel.syscalls().dispatch(request);
             if (!more.status.ok() || more.value <= 0) break;
             const auto chunk = static_cast<usize>(more.value);
-            if (chunk > wanted || !hw::copy_to_user(space, a[1] + total, buffer.data(), chunk)) break;
+            if (chunk > wanted || !uaccess::copy_to_user(space, a[1] + total, buffer.data(), chunk)) break;
             total += chunk;
             if (chunk < wanted) break;
         }
@@ -960,9 +960,6 @@ Status start(Kernel &kernel, fs::BootArchive archive)
 #endif
     started = true;
     runtime_kernel = &kernel;
-#ifdef OK_NATIVE_COW_FORK
-    hw::set_write_resolver(resolve_native_write);
-#endif
     // This static singleton has one boot lifetime and no reconstruction/reset API.
     original_shutdown_owner = {&original_shutdown_owner, 1, pid.value(), process->threads()[0].tid};
     emit("OK_NATIVE scope=hardware init=loaded\n");
@@ -1289,7 +1286,7 @@ bool step(Kernel &kernel)
             constexpr bool big_endian = lu::Codec<lu::configured_native_profile()>::profile.big_endian;
             for (usize i = 0; i < bytes.size(); ++i)
                 bytes[i] = static_cast<u8>(running->tid >> (8 * (big_endian ? 3 - i : i)));
-            static_cast<void>(hw::copy_to_user(process->resources().native_space, destination, bytes.data(), bytes.size()));
+            static_cast<void>(uaccess::copy_to_user(process->resources().native_space, destination, bytes.data(), bytes.size()));
         }
         if (auto status = validate_entry_stack(entry_stacks, *running); !status)
         { runtime_failure = status; started = false; return false; }
@@ -1441,10 +1438,8 @@ bool step(Kernel &kernel)
                 reported = true;
             }
         }
-#ifdef OK_NATIVE_COW_FORK
         else if (trap.value().kind == hw::TrapKind::page_fault &&
-                 resolve_native_write(process->resources().native_space, trap.value().fault_address)) {}
-#endif
+                 resolve_user_fault(process->resources(), trap.value())) {}
         else
         {
             emit("OK_NATIVE scope=hardware fault=contained\n");

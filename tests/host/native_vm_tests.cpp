@@ -1490,6 +1490,7 @@ void check_shared_file_write_request_uses_existing_rw_ptes()
 namespace mock
 {
 usize remaps{};
+usize protects{};
 bool fail_remap{};
 } // namespace mock
 
@@ -1504,6 +1505,18 @@ Status remap(const AddressSpace &space, const PageMapping &mapping)
           mock::spaces[space.slot].generation == space.generation);
     CHECK(mock::page(space, mapping.virtual_address) == &mapping);
     ++mock::remaps;
+    return Status::success();
+}
+// One call for a run of records (fork); each accessible record is checked
+// like remap() but counted once for the whole run.
+Status protect(const AddressSpace &space, MappingView mappings)
+{
+    if (mock::fail_remap)
+        return Status::busy("injected protect failure");
+    for (const auto &mapping : mappings)
+        if (mapping.flags)
+            CHECK(mock::page(space, mapping.virtual_address) == &mapping);
+    ++mock::protects;
     return Status::success();
 }
 } // namespace ok::arch::execution
@@ -1549,12 +1562,14 @@ void check_copy_on_write_fork()
     for (usize i = 0; i < hw::page_size; ++i) bytes[i] = static_cast<unsigned char>(i * 7 + 3);
     const usize frames = mock::used_frames();
     const usize remaps = mock::remaps;
+    const usize protects = mock::protects;
 
     sched::ProcessResources child;
     fork_resources(parent, child);
     CHECK(mock::used_frames() == frames);
-    // Private writable pages: the stack page and the anonymous mapping.
-    CHECK(mock::remaps == remaps + 2);
+    // Private writable pages, the stack page and the anonymous mapping, are
+    // withheld through one protect over the parent's records (one quiesce).
+    CHECK(mock::remaps == remaps && mock::protects == protects + 1);
     const auto *parent_record = mock::page(parent.native_space, private_page.value());
     const auto *child_record = mock::page(child.native_space, private_page.value());
     CHECK(parent_record->physical_address == child_record->physical_address);

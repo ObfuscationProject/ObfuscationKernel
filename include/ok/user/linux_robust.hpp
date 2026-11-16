@@ -2,6 +2,7 @@
 
 #include "ok/core/kernel.hpp"
 #include "ok/user/robust_futex.hpp"
+#include "ok/user/uaccess.hpp"
 
 namespace ok::user::linux_bootstrap
 {
@@ -43,7 +44,7 @@ i64 robust_registration(Kernel &kernel, sched::ProcessId pid, bool set, const st
         std::array<u8, Codec::word_bytes> bytes{};
         for (usize i = 0; i < bytes.size(); ++i)
             bytes[i] = static_cast<u8>(value >> (8 * (Codec::big_endian ? bytes.size() - 1 - i : i)));
-        return arch::execution::copy_to_user(process->resources().native_space,
+        return uaccess::copy_to_user(process->resources().native_space,
             static_cast<uptr>(address), bytes.data(), bytes.size());
     };
     // The first successful store remains visible if the second faults or aliases.

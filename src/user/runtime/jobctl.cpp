@@ -541,7 +541,7 @@ i64 native_signal_action(Kernel &kernel, sched::ProcessControlBlock &process, co
     if (a[3] != 8) return -22;
     auto &space = process.resources().native_space;
     ok_sigaction requested{};
-    if (a[1] && !hw::copy_from_user(space, &requested, a[1], sizeof(requested))) return -14;
+    if (a[1] && !uaccess::copy_from_user(space, &requested, a[1], sizeof(requested))) return -14;
     const auto signal = static_cast<i32>(a[0]);
     if (signal < 1 || signal > OK_NATIVE_SIGNAL_MAX) return -22;
     if (a[1])
@@ -562,7 +562,7 @@ i64 native_signal_action(Kernel &kernel, sched::ProcessControlBlock &process, co
         current.handler = requested.handler;
         if (requested.handler == OK_SIG_IGN) private_jobctl_discard_owed(process.pid(), static_cast<u32>(signal));
     }
-    if (a[2] && !hw::copy_to_user(space, a[2], &old, sizeof(old))) return -14;
+    if (a[2] && !uaccess::copy_to_user(space, a[2], &old, sizeof(old))) return -14;
     return 0;
 }
 

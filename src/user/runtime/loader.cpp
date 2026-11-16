@@ -5,37 +5,31 @@ namespace ok::user::native
 {
 inline namespace runtime_detail
 {
-#ifdef OK_PRIVATE_PPC32_SIGNAL
 namespace
 {
-// Pinned PPC musl debug files retain section tables after their debug data.
-// This bounded private prefix is metadata storage, not executable image memory.
-std::array<std::byte, 512 * 1024> elf_buffer{};
-} // namespace
-#else
-namespace
-{
-std::array<std::byte, 128 * 1024> elf_buffer{};
-} // namespace
-#endif
-namespace
-{
-// ELF admission reads metadata from a file prefix. When an architecture check
-// needs more than the static buffer (a section table after debug data, an ABI
-// record after the text), the prefix it asks for is read into a kernel object
-// run, released when the load ends.
+// ELF admission reads metadata from a file prefix into a kernel-object run of
+// its own, per load (no buffer is shared between loads on different CPUs) and
+// released when the load ends. The first read covers what admission usually
+// needs; an architecture check that needs more (a section table after debug
+// data, an ABI record after the text) grows it to the prefix it asks for.
 class ElfPrefix final : private NonCopyable
 {
   public:
+#ifdef OK_PRIVATE_PPC32_SIGNAL
+    // Pinned PPC musl debug files retain section tables after their debug data.
+    static constexpr usize initial_bytes = 512 * 1024;
+#else
+    static constexpr usize initial_bytes = 128 * 1024;
+#endif
     static constexpr usize max_bytes = 16 * 1024 * 1024;
     ElfPrefix() = default;
     ~ElfPrefix() { if (run_) static_cast<void>(page_pool.release_object_run(run_, pages_)); }
-    [[nodiscard]] std::byte *data() const { return run_ ? reinterpret_cast<std::byte *>(run_) : elf_buffer.data(); }
+    [[nodiscard]] std::byte *data() const { return reinterpret_cast<std::byte *>(run_); }
     [[nodiscard]] usize size() const { return size_; }
     [[nodiscard]] std::span<const std::byte> bytes() const { return {data(), size_}; }
     [[nodiscard]] Status read(fs::Node &node, usize size)
     {
-        if (size > elf_buffer.size())
+        if (size > pages_ * hw::page_size)
         {
             if (size > max_bytes) return Status::no_memory("ELF metadata prefix exceeds the admission bound");
             if (auto status = activate_pool(); !status) return status;
@@ -346,7 +340,8 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
         !status.ok())
         return status;
     ElfPrefix prefix;
-    if (auto status = prefix.read(*node, metadata.size < elf_buffer.size() ? metadata.size : elf_buffer.size());
+    if (auto status = prefix.read(*node, metadata.size < ElfPrefix::initial_bytes ? metadata.size
+                                                                                  : ElfPrefix::initial_bytes);
         !status.ok())
         return status;
     // Each grown prefix can expose one further record (section names, then
@@ -531,19 +526,11 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
             return fail(status);
         const usize interpreter_prefix = interpreter_metadata.size < lu::X86DynamicExec::max_prefix_bytes ?
             interpreter_metadata.size : lu::X86DynamicExec::max_prefix_bytes;
-        usize interpreter_offset = 0;
-        while (interpreter_offset < interpreter_prefix)
-        {
-            auto bytes = interpreter_node->read(interpreter_offset, interpreter_prefix - interpreter_offset);
-            if (!bytes)
-                return fail(bytes.status());
-            if (bytes.value().size == 0 || bytes.value().size > interpreter_prefix - interpreter_offset)
-                return fail(Status::invalid_argument("truncated musl interpreter prefix"));
-            copy_bytes(elf_buffer.data() + interpreter_offset, bytes.value().data.data(), bytes.value().size);
-            interpreter_offset += bytes.value().size;
-        }
-        auto inspected = lu::X86DynamicExec::inspect(
-            {elf_buffer.data(), interpreter_prefix}, interpreter_metadata.size, true);
+        ElfPrefix interpreter_bytes;
+        if (auto status = interpreter_bytes.read(*interpreter_node, interpreter_prefix); !status.ok())
+            return fail(status.code() == StatusCode::invalid_argument
+                            ? Status::invalid_argument("truncated musl interpreter prefix") : status);
+        auto inspected = lu::X86DynamicExec::inspect(interpreter_bytes.bytes(), interpreter_metadata.size, true);
         if (!inspected)
             return fail(inspected.status());
         constexpr uptr interpreter_bias = 0x60000000;
@@ -684,7 +671,7 @@ Status argument_from_user(const hw::AddressSpace &space, uptr address, Arguments
         const uptr at = address + length;
         const usize to_page = hw::page_size - (at & (hw::page_size - 1));
         const usize count = to_page < chunk.size() ? to_page : chunk.size();
-        if (!hw::copy_from_user(space, chunk.data(), at, count)) return Status::fault("invalid user string");
+        if (!uaccess::copy_from_user(space, chunk.data(), at, count)) return Status::fault("invalid user string");
         usize used = 0;
         while (used < count && chunk[used]) ++used;
         length += used;
@@ -695,7 +682,7 @@ Status argument_from_user(const hw::AddressSpace &space, uptr address, Arguments
     // Copy into the arena now that the length is known and bounded.
     auto bytes = out.reserve(length, environment, environment ? out.envc() : out.argc());
     if (!bytes) return bytes.status();
-    if (!hw::copy_from_user(space, bytes.value(), address, length)) return Status::fault("invalid user string");
+    if (!uaccess::copy_from_user(space, bytes.value(), address, length)) return Status::fault("invalid user string");
     return Status::success();
 }
 Status arguments_from_user(const hw::AddressSpace &space, uptr pointer, Arguments &out, bool environment)
@@ -706,7 +693,7 @@ Status arguments_from_user(const hw::AddressSpace &space, uptr pointer, Argument
     {
         uptr value{};
         const uptr address = pointer + i * sizeof(uptr);
-        if (address < pointer || !hw::copy_from_user(space, &value, address, sizeof(value)))
+        if (address < pointer || !uaccess::copy_from_user(space, &value, address, sizeof(value)))
             return Status::fault("invalid argument vector");
         if (value == 0)
             return Status::success();
@@ -716,8 +703,10 @@ Status arguments_from_user(const hw::AddressSpace &space, uptr pointer, Argument
 }
 namespace
 {
+// Holding the process's mm (taken here unless the caller holds it).
 Status install(sched::ProcessControlBlock &process, Image &image, sched::SignalMask mask = {})
 {
+    const sched::AddressSpaceGate::Hold hold(process.resources().mm);
     // Native bridges currently execute only on the boot CPU.
     const bool previous_quarantined = space_quarantined(process.resources().native_space);
     if (!process.resources().native_pages.empty() ||
@@ -740,7 +729,7 @@ Status install(sched::ProcessControlBlock &process, Image &image, sched::SignalM
         vfs_continuations.revoke(thread);
         thread = previous_thread;
         resources.memory = previous_memory;
-        resources.native_space = previous_space;
+        sched::publish_native_space(resources, previous_space);
         resources.personality = previous_personality;
         resources.program_break_base = previous_break_base;
         resources.program_break = previous_break;
@@ -767,7 +756,7 @@ Status install(sched::ProcessControlBlock &process, Image &image, sched::SignalM
         emit(" physical_last="); emit_hex(last); emit(" owner=retained\n");
     }
     resources.personality = image.personality;
-    resources.native_space = image.space;
+    sched::publish_native_space(resources, image.space);
     resources.program_break_base = image.program_break;
     resources.program_break = image.program_break;
     resources.program_break_limit = hw::user_end - 0x100000 - 17 * hw::page_size;
@@ -803,11 +792,16 @@ Status install(sched::ProcessControlBlock &process, Image &image, sched::SignalM
     return Status::success();
 }
 } // namespace
+// The exec commit, under the process's mm: the old image retires (its tables
+// are destroyed, a translation write) and the new one is published.
 template <typename Install>
 Status retire_then_install(sched::ProcessResources &resources, Image &image,
                            ImageRetirementReservation &previous, Install &&install_image)
 {
-    const auto retired = previous.retire(resources.native_space, resources.native_pages);
+    const sched::AddressSpaceGate::Hold hold(resources.mm);
+    auto previous_space = resources.native_space;
+    const auto retired = previous.retire(previous_space, resources.native_pages);
+    sched::publish_native_space(resources, previous_space);
     if (!retired)
     {
         static_cast<void>(image.retire());

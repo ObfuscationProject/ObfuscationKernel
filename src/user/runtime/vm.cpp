@@ -225,30 +225,94 @@ bool same_space(const hw::AddressSpace &a, const hw::AddressSpace &b)
 {
     return a.root == b.root && a.slot == b.slot && a.generation == b.generation;
 }
-#ifdef OK_NATIVE_COW_FORK
-bool resolve_native_write(const hw::AddressSpace &space, uptr page) // Installed only after runtime_kernel.
+namespace
 {
-    // A6: a kernel section never rewrites page records; admission resolved
-    // its output range under the kernel lock.
-    if (smp::in_section())
+// The process whose live space `space` is. The kernel lock holder finds it
+// among the processes; the per-CPU caller binding replaces the scan once user
+// accesses run without that lock.
+sched::ProcessControlBlock *space_owner(const hw::AddressSpace &space)
+{
+    if (!runtime_kernel || !space.root) return nullptr;
+    for (auto &process : runtime_kernel->scheduler().processes())
+        if (same_space(sched::read_native_space(process.resources()), space)) return &process;
+    return nullptr;
+}
+// Holding the owner's mm: makes every withheld page of the range writable.
+// Returns how many it resolved.
+Result<usize> resolve_withheld([[maybe_unused]] sched::ProcessResources &resources,
+                               [[maybe_unused]] const hw::AddressSpace &space, [[maybe_unused]] uptr address,
+                               [[maybe_unused]] usize size)
+{
+    usize resolved{};
+#ifdef OK_NATIVE_COW_FORK
+    smp::check_held(resources.mm, "copy-on-write resolution");
+    if (resources.mm.dead || !size || address > ~uptr{0} - (size - 1)) return resolved;
+    const uptr last = address + size - 1;
+    for (uptr page = address & ~(hw::page_size - 1);; page += hw::page_size)
     {
-        smp::detail::section_assert(&smp::SectionCpu::cow_refused, "copy-on-write resolution inside a section");
+        auto changed = resolve_copy_on_write(resources.native_pages, space, page, page_pool);
+        if (!changed) return changed.status();
+        resolved += changed.value();
+        if (last - page < hw::page_size) break;
+    }
+#endif
+    return resolved;
+}
+} // namespace
+Status resolve_user_access(const hw::AddressSpace &space, uptr address, usize size, bool write,
+                           const uaccess::Attempt *attempt)
+{
+    auto *owner = space_owner(space);
+    if (!owner) return attempt ? (*attempt)() : Status::not_found("user space has no live owner");
+    auto &resources = owner->resources();
+    // A write into a process waits for that process's sections, which walk
+    // the records rewritten here; the drain runs before mm is taken.
+    if constexpr (smp_sections)
+        if (write) drain_if_pinned(owner->pid());
+    const sched::AddressSpaceGate::Hold hold(resources.mm);
+    if (!same_space(resources.native_space, space))
+        return attempt ? (*attempt)() : Status::not_found("user space was replaced");
+    usize resolved{};
+    if (write)
+    {
+        auto changed = resolve_withheld(resources, space, address, size);
+        if (!changed)
+        {
+            if (changed.status().code() != StatusCode::no_memory) runtime_failure = changed.status();
+            return attempt ? Status::fault("copy-on-write resolution failed") : changed.status();
+        }
+        resolved = changed.value();
+    }
+    if (attempt) return (*attempt)();
+    return resolved ? Status{} : Status::not_found("no withheld page in the user range");
+}
+bool resolve_user_fault(sched::ProcessResources &resources, const hw::Trap &trap)
+{
+    const hw::AddressSpace space = resources.native_space;
+    if constexpr (smp_sections)
+        if (runtime_kernel) drain_if_pinned(runtime_kernel->scheduler().resources_owner(resources));
+    const sched::AddressSpaceGate::Hold hold(resources.mm);
+    if (resources.mm.dead) return false;
+    // A write to a withheld page: copy it or regain write access.
+    auto resolved = resolve_withheld(resources, space, trap.fault_address, 1);
+    if (!resolved)
+    {
+        if (resolved.status().code() != StatusCode::no_memory) runtime_failure = resolved.status();
         return false;
     }
-    // Any write into a process (its own fault, another process's copy) waits
-    // for that process's sections, which walk the records rewritten here.
-    if constexpr (smp_sections)
-        for (const auto &process : runtime_kernel->scheduler().processes())
-            if (same_space(process.resources().native_space, space))
-            {
-                drain_if_pinned(process.pid());
-                break;
-            }
-    auto resolved = resolve_owner_write(runtime_kernel->scheduler().processes(), space, page, page_pool);
-    if (!resolved && resolved.status().code() != StatusCode::no_memory) runtime_failure = resolved.status();
-    return resolved && resolved.value();
+    if (resolved.value()) return true;
+    // A fault on a translation another CPU replaced meanwhile (break before
+    // make): the page is mapped for any data access now, so it repeats.
+    return trap.translation_changed && hw::user_range(space, trap.fault_address, 1, true);
 }
-#endif
+void release_address_space(sched::ProcessResources &resources)
+{
+    const sched::AddressSpaceGate::Hold hold(resources.mm);
+    auto space = resources.native_space;
+    release(space, resources.native_pages);
+    sched::publish_native_space(resources, space);
+    resources.mm.dead = true;
+}
 namespace
 {
 Status release_page_reference(const memory::PhysicalFrame &frame, bool &consumed)
@@ -642,14 +706,91 @@ Status page_memory_map(const Pages &pages, sched::MemoryMap &map)
     return Status::success();
 }
 
+// One mmap's frames, staged before mm (stage then build): fresh zeroed frames
+// (marked shared for MAP_SHARED) or aliases of a sealed shared file's pages,
+// with a private file's bytes read in. Records are keyed by their offset in
+// the range; transfer() moves them into the candidate at their final address.
+// Whatever was not moved goes back when this goes, after mm was released.
+class StagedRange final : private NonCopyable
+{
+  public:
+    StagedRange() = default;
+    ~StagedRange()
+    {
+        for (usize index = 0; index < pages_.size(); ++index)
+            if (!pages_.retirement(index))
+                if (const auto *frame = pages_.frame(index))
+                    if (auto status = release_page_reference(*frame); !status) runtime_failure = status;
+        if (auto status = pages_.clear(); !status) runtime_failure = status;
+    }
+    Status stage(usize size, u8 flags, bool shared, SharedFileHandle shared_file, usize offset, fs::Node *source,
+                 usize file_size)
+    {
+#ifndef OK_KERNEL_FREESTANDING
+        if (auto status = activate_pool(); !status) return status;
+#endif
+        if (auto status = pages_.reserve(page_pool, size / hw::page_size, true); !status) return status;
+        for (usize mapping_offset = 0; mapping_offset < size; mapping_offset += hw::page_size)
+        {
+            Status status{};
+            if (shared_file)
+            {
+                auto frame = shared_files.page(shared_file, (offset + mapping_offset) / hw::page_size);
+                if (!frame) status = frame.status();
+                else if (auto retained = shared_files.retain_alias(frame.value()); !retained) status = retained;
+                else
+                {
+                    status = pages_.push_back({mapping_offset, frame.value().address, flags}, frame.value());
+                    if (!status) static_cast<void>(shared_files.release_alias(frame.value()));
+                }
+            }
+            else status = allocate(pages_, mapping_offset, flags, shared);
+            if (!status) return status;
+        }
+        if (!source) return {};
+        const usize remaining = file_size - offset;
+        // The requested length reserves complete pages. Bytes between length
+        // and the end of its final page still reflect the file up to EOF.
+        const usize file_bytes = size < remaining ? size : remaining;
+        usize copied = 0;
+        while (copied < file_bytes)
+        {
+            const usize chunk = file_bytes - copied < fs::max_file_data ? file_bytes - copied : fs::max_file_data;
+            auto read = source->read(offset + copied, chunk);
+            if (!read) return read.status();
+            if (!read.value().size || read.value().size > chunk)
+                return Status::io_error("private file mapping changed during staging");
+            if (auto status = store(pages_, copied, read.value().data.data(), read.value().size); !status)
+                return status;
+            copied += read.value().size;
+        }
+        return {};
+    }
+    // Moves every staged record into `candidate` at `address` plus its offset.
+    Status transfer(Pages &candidate, uptr address)
+    {
+        for (usize index = 0; index < pages_.size(); ++index)
+        {
+            auto page = pages_[index];
+            const auto *frame = pages_.frame(index);
+            if (!frame) return Status::fault("staged mapping lost its exact frame token");
+            page.virtual_address += address;
+            if (auto status = candidate.push_back(page, *frame); !status) return status;
+            pages_.retirement(index) = 1;
+        }
+        return {};
+    }
+
+  private:
+    Pages pages_;
+};
+
 Status replace_native_pages(sched::ProcessResources &resources, Pages &candidate,
                             bool &can_release_staged, uptr staged_begin = 0, usize staged_size = 0)
 {
-    // Called only after enter() restored the kernel address space, on the boot
-    // CPU. Build everything before retiring the old tables or publishing state.
-    if constexpr (smp::lock_debug_enabled)
-        if (runtime_kernel)
-            smp::check_drained(runtime_kernel->scheduler().resources_owner(resources), "replace_native_pages");
+    // Holding the process's mm, with the kernel address space restored. Build
+    // everything before retiring the old tables or publishing state.
+    smp::check_held(resources.mm, "replace_native_pages");
     sched::MemoryMap memory;
     if (auto status = page_memory_map(candidate, memory); !status.ok())
         return status;
@@ -707,7 +848,7 @@ Status replace_native_pages(sched::ProcessResources &resources, Pages &candidate
         can_release_staged = false;
         return status;
     }
-    resources.native_space = replacement.value();
+    sched::publish_native_space(resources, replacement.value());
     resources.native_pages = std::move(candidate);
     resources.memory = memory;
     if (!syscall_origins.commit_space(origin_update.value(), runtime_kernel ? &runtime_kernel->scheduler() : nullptr,
@@ -783,54 +924,87 @@ Result<uptr> native_mmap(sched::ProcessResources &resources, uptr hint, usize le
     if (shared_file && (protection & posix::prot_WRITE))
         if (auto status = shared_files.check_write(shared_file, 1); !status) return status;
     const usize size = rounded.value();
-    auto available = [&](uptr address) {
-        if (!valid_native_range(address, size))
-            return false;
-        for (const auto &page : resources.native_pages)
-            if (page.virtual_address >= address && page.virtual_address - address < size)
-                return false;
-        return true;
-    };
-    uptr address = hint & ~(hw::page_size - 1);
-    if (fixed && (address != hint || !valid_native_range(address, size)))
+    if (fixed && ((hint & (hw::page_size - 1)) || !valid_native_range(hint, size)))
         return Status::invalid_argument("native fixed mapping range is invalid");
-    if (fixed && private_signal_reserved_range(resources, address, size))
-        return Status::denied("private signal return page is reserved");
-    if (!fixed && (hint == 0 || !available(address)))
-    {
-        // Keep ordinary allocations away from the conventional ELF base. A
-        // hint remains optional: occupied/invalid hints use the same first fit.
-        address = hw::user_begin + 16 * 1024 * 1024;
-        while (valid_native_range(address, size))
-        {
-            uptr next = address;
-            for (const auto &page : resources.native_pages)
-                if (page.virtual_address >= address && page.virtual_address - address < size &&
-                    page.virtual_address + hw::page_size > next)
-                    next = page.virtual_address + hw::page_size;
-            if (next == address)
-                break;
-            address = next;
-        }
-        if (!available(address))
-            return Status::no_memory("native virtual address window exhausted");
-    }
-    Pages candidate;
-    usize removed_count = 0;
-    for (const auto &page : resources.native_pages)
-        if (fixed && page.virtual_address >= address && page.virtual_address - address < size)
-        {
-            if (!owns_pool_page(resources.native_pages, page))
-                return Status::fault("native fixed mapping has no pool owner");
-            ++removed_count;
-        }
-    if (size / hw::page_size > Pages::capacity - (resources.native_pages.size() - removed_count))
+    if (size / hw::page_size > Pages::capacity)
         return Status::no_memory("native process page capacity exceeded");
-    if (auto status = resources.memory_limits.admit(resources.native_pages.size() - removed_count +
-                                                    size / hw::page_size, hw::page_size); !status) return status;
+    // Where the range goes and what it replaces, from the records as they are
+    // now (the caller holds mm). Run read-only before staging, so a refusal
+    // allocates nothing, and again under mm before the build.
+    struct Plan
+    {
+        uptr address{};
+        usize removed{};
+    };
+    auto plan = [&]() -> Result<Plan> {
+        if (resources.mm.dead)
+            return Status::no_process("native address space was torn down");
+        auto available = [&](uptr candidate_address) {
+            if (!valid_native_range(candidate_address, size))
+                return false;
+            for (const auto &page : resources.native_pages)
+                if (page.virtual_address >= candidate_address && page.virtual_address - candidate_address < size)
+                    return false;
+            return true;
+        };
+        uptr address = hint & ~(hw::page_size - 1);
+        if (fixed && private_signal_reserved_range(resources, address, size))
+            return Status::denied("private signal return page is reserved");
+        if (!fixed && (hint == 0 || !available(address)))
+        {
+            // Keep ordinary allocations away from the conventional ELF base. A
+            // hint remains optional: occupied/invalid hints use the same first fit.
+            address = hw::user_begin + 16 * 1024 * 1024;
+            while (valid_native_range(address, size))
+            {
+                uptr next = address;
+                for (const auto &page : resources.native_pages)
+                    if (page.virtual_address >= address && page.virtual_address - address < size &&
+                        page.virtual_address + hw::page_size > next)
+                        next = page.virtual_address + hw::page_size;
+                if (next == address)
+                    break;
+                address = next;
+            }
+            if (!available(address))
+                return Status::no_memory("native virtual address window exhausted");
+        }
+        usize removed = 0;
+        for (const auto &page : resources.native_pages)
+            if (fixed && page.virtual_address >= address && page.virtual_address - address < size)
+            {
+                if (!owns_pool_page(resources.native_pages, page))
+                    return Status::fault("native fixed mapping has no pool owner");
+                ++removed;
+            }
+        if (size / hw::page_size > Pages::capacity - (resources.native_pages.size() - removed))
+            return Status::no_memory("native process page capacity exceeded");
+        if (auto status = resources.memory_limits.admit(resources.native_pages.size() - removed +
+                                                        size / hw::page_size, hw::page_size); !status)
+            return status;
+        return Plan{address, removed};
+    };
+    {
+        const sched::AddressSpaceGate::Hold hold(resources.mm);
+        if (auto planned = plan(); !planned) return planned.status();
+    }
     auto retirement_result = PageRetirementReservation::reserve();
     if (!retirement_result) return retirement_result.status();
     auto retirement = std::move(retirement_result.value());
+    // Stage before mm: the frames, the shared-file aliases and the file's
+    // bytes (a provider read ranks below mm). Nothing here depends on where
+    // the range lands.
+    StagedRange staged;
+    if (auto status = staged.stage(size, page_flags.value(), shared, shared_file, offset, source, file_size); !status)
+        return status;
+    // Build from the records as they are now: a sibling's munmap, mmap or
+    // copy-on-write resolution meanwhile is part of this candidate.
+    const sched::AddressSpaceGate::Hold hold(resources.mm);
+    auto planned = plan();
+    if (!planned) return planned.status();
+    const uptr address = planned.value().address;
+    const usize removed_count = planned.value().removed;
+    Pages candidate;
     if (auto status = candidate.reserve(page_pool,
             resources.native_pages.size() - removed_count + size / hw::page_size, true); !status) return status;
     for (const auto &page : resources.native_pages)
@@ -846,56 +1020,12 @@ Result<uptr> native_mmap(sched::ProcessResources &resources, uptr hint, usize le
         if (auto status = retirement.release_range(candidate, address, size); !status)
             runtime_failure = status;
     };
-    for (usize mapping_offset = 0; mapping_offset < size; mapping_offset += hw::page_size)
+    // The staged frames move into the candidate; from here the candidate
+    // owns them and the rollback releases its [address, address + size).
+    if (auto status = staged.transfer(candidate, address); !status)
     {
-        Status status{};
-        if (shared_file)
-        {
-            auto frame = shared_files.page(shared_file, (offset + mapping_offset) / hw::page_size);
-            if (!frame) status = frame.status();
-            else if (auto retained = shared_files.retain_alias(frame.value()); !retained) status = retained;
-            else
-            {
-                status = candidate.push_back({address + mapping_offset, frame.value().address, page_flags.value()}, frame.value());
-                if (!status) static_cast<void>(shared_files.release_alias(frame.value()));
-            }
-        }
-        else status = allocate(candidate, address + mapping_offset, page_flags.value(), shared);
-        if (!status)
-        {
-            rollback_pages();
-            return status;
-        }
-    }
-    if (source)
-    {
-        const usize remaining = file_size - offset;
-        // The requested length reserves complete pages. Bytes between length
-        // and the end of its final page still reflect the file up to EOF.
-        const usize file_bytes = size < remaining ? size : remaining;
-        usize copied = 0;
-        while (copied < file_bytes)
-        {
-            const usize chunk = file_bytes - copied < fs::max_file_data ? file_bytes - copied : fs::max_file_data;
-            auto read = source->read(offset + copied, chunk);
-            if (!read)
-            {
-                rollback_pages();
-                return read.status();
-            }
-            if (!read.value().size || read.value().size > chunk)
-            {
-                rollback_pages();
-                return Status::io_error("private file mapping changed during staging");
-            }
-            if (auto status = store(candidate, address + copied,
-                                    read.value().data.data(), read.value().size); !status)
-            {
-                rollback_pages();
-                return status;
-            }
-            copied += read.value().size;
-        }
+        rollback_pages();
+        return status;
     }
     bool can_release_staged = true;
     if (auto status = replace_native_pages(resources, candidate, can_release_staged, address, size); !status.ok())
@@ -920,6 +1050,9 @@ Result<uptr> native_mmap(sched::ProcessResources &resources, uptr hint, usize le
 
 Status native_mprotect(sched::ProcessResources &resources, uptr address, usize length, uptr protection)
 {
+    const sched::AddressSpaceGate::Hold hold(resources.mm);
+    if (resources.mm.dead)
+        return Status::no_process("native address space was torn down");
     auto rounded = native_page_length(length);
     if (!rounded)
         return rounded.status();
@@ -967,6 +1100,9 @@ Status native_mprotect(sched::ProcessResources &resources, uptr address, usize l
 
 Status native_munmap(sched::ProcessResources &resources, uptr address, usize length)
 {
+    const sched::AddressSpaceGate::Hold hold(resources.mm);
+    if (resources.mm.dead)
+        return Status::no_process("native address space was torn down");
     auto rounded = native_page_length(length);
     if (!rounded)
         return rounded.status();
@@ -1012,8 +1148,11 @@ Status native_munmap(sched::ProcessResources &resources, uptr address, usize len
     return Status::success();
 }
 
+// The whole call holds mm (the break and the records it checks); its mmap
+// stages anonymous frames under it, which ranks allow.
 Result<uptr> native_brk(sched::ProcessResources &resources, uptr address)
 {
+    const sched::AddressSpaceGate::Hold hold(resources.mm);
     if (!address)
         return resources.program_break;
     if (resources.program_break_base < hw::user_begin ||
@@ -1083,72 +1222,61 @@ i64 fork_process(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBloc
         static_cast<void>(kernel.posix().wait(pid, child_pid));
         return error(status);
     }
-    auto &pages = child->resources().native_pages;
-    if (auto status = pages.reserve(page_pool, process->resources().native_pages.size(), true); !status)
-    {
-        finish(kernel, child_pid, 127);
-        static_cast<void>(kernel.posix().wait(pid, child_pid));
-        return error(status);
-    }
-    for (const auto &page : process->resources().native_pages)
-    {
-        const auto *source_frame = owned_frame(process->resources().native_pages, page);
-        if (!source_frame)
+    // The copy runs under the parent's mm (its records and translations); a
+    // failure leaves it before the child is finished, which takes the child's.
+    bool fatal = false;
+    const auto copied = [&]() -> Status {
+        auto &parent = process->resources();
+        const sched::AddressSpaceGate::Hold hold(parent.mm);
+        auto &pages = child->resources().native_pages;
+        if (auto status = pages.reserve(page_pool, parent.native_pages.size(), true); !status) return status;
+        for (const auto &page : parent.native_pages)
         {
-            finish(kernel, child_pid, 127);
-            static_cast<void>(kernel.posix().wait(pid, child_pid));
-            return error(Status::fault("fork page lost exact frame authority"));
-        }
-        if (shared_pool_page(process->resources().native_pages, page))
-        {
-            const auto owner = *source_frame;
-            if (auto status = retain_page_reference(owner); !status)
+            const auto *source_frame = owned_frame(parent.native_pages, page);
+            if (!source_frame) return Status::fault("fork page lost exact frame authority");
+            if (shared_pool_page(parent.native_pages, page))
             {
-                finish(kernel, child_pid, 127);
-                static_cast<void>(kernel.posix().wait(pid, child_pid));
-                return error(status);
+                const auto owner = *source_frame;
+                if (auto status = retain_page_reference(owner); !status) return status;
+                if (auto status = pages.push_back(page, owner); !status)
+                {
+                    static_cast<void>(release_page_reference(owner));
+                    return status;
+                }
+                continue;
             }
-            if (auto status = pages.push_back(page, owner); !status)
-            {
-                static_cast<void>(release_page_reference(owner));
-                finish(kernel, child_pid, 127);
-                static_cast<void>(kernel.posix().wait(pid, child_pid));
-                return error(status);
-            }
-            continue;
+            if (auto status = copy_on_write_fork ? share_private_page(pages, page, *source_frame, page_pool)
+                                                 : allocate(pages, page.virtual_address, page.flags); !status.ok())
+                return status;
+            if (!copy_on_write_fork)
+                copy_bytes(reinterpret_cast<void *>(pages[pages.size() - 1].physical_address),
+                           reinterpret_cast<const void *>(source_frame->address), hw::page_size);
         }
-        if (auto status = copy_on_write_fork ? share_private_page(pages, page, *source_frame, page_pool)
-                                             : allocate(pages, page.virtual_address, page.flags); !status.ok())
-        {
-            finish(kernel, child_pid, 127);
-            static_cast<void>(kernel.posix().wait(pid, child_pid));
-            return error(status);
-        }
-        if (!copy_on_write_fork)
-            copy_bytes(reinterpret_cast<void *>(pages[pages.size() - 1].physical_address),
-                       reinterpret_cast<const void *>(source_frame->address), hw::page_size);
-    }
-    sched::MemoryMap child_memory;
-    if (auto status = page_memory_map(pages, child_memory); !status)
-    {
-        finish(kernel, child_pid, 127);
-        static_cast<void>(kernel.posix().wait(pid, child_pid));
-        return error(status);
-    }
-    auto child_space = create_page_space(pages);
-    if (!child_space)
-    {
-        finish(kernel, child_pid, 127);
-        static_cast<void>(kernel.posix().wait(pid, child_pid));
-        return error(child_space.status());
-    }
-    child->resources().native_space = child_space.value();
-    child->resources().memory = child_memory;
+        sched::MemoryMap child_memory;
+        if (auto status = page_memory_map(pages, child_memory); !status) return status;
+        auto child_space = create_page_space(pages);
+        if (!child_space) return child_space.status();
+        // The child is not runnable yet and no other CPU can name it: its
+        // handle is stored without its own mm (one mm per CPU).
+        child->resources().native_space = child_space.value();
+        child->resources().memory = child_memory;
 #ifdef OK_NATIVE_COW_FORK
-    if (auto status = withhold_shared_writes(process->resources().native_pages, process->resources().native_space,
-                                             page_pool); !status)
-    { runtime_failure = status; started = false; return error(status); }
+        // One protect over the parent's records: one quiesce.
+        if (auto status = withhold_shared_writes(parent.native_pages, parent.native_space, page_pool); !status)
+        {
+            fatal = true;
+            return status;
+        }
 #endif
+        return {};
+    }();
+    if (fatal) { runtime_failure = copied; started = false; return error(copied); }
+    if (!copied)
+    {
+        finish(kernel, child_pid, 127);
+        static_cast<void>(kernel.posix().wait(pid, child_pid));
+        return error(copied);
+    }
     if (auto status = encode_result(*child, child->threads()[0].native_frame, 0); !status.ok())
     {
         finish(kernel, child_pid, 127);

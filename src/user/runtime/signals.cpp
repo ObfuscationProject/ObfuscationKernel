@@ -736,7 +736,7 @@ bool private_signal_can_enter(const sched::ProcessControlBlock &process, const h
 #endif
     if (frame.pc < hw::user_begin || frame.pc >= hw::user_end ||
         stack_address <= hw::user_begin || stack_address > hw::user_end ||
-        !hw::user_range(process.resources().native_space, stack_address - 1, 1, true)) return false;
+        !uaccess::user_range(process.resources().native_space, stack_address - 1, 1, true)) return false;
 #if defined(__arm__)
     if (!Arm32RtSignalFrame::program(frame.pc, frame.flags, hw::user_begin, hw::user_end) ||
         !hw::Arm32FpState::admitted(frame)) return false;
@@ -963,7 +963,7 @@ bool private_signal_deliver(Kernel &kernel, sched::ProcessControlBlock &process,
         const auto result = PrivateSignalDelivery::deliver(queue, *actions, thread.native_signal_mask,
             thread.native_frame, *private_signal_altstack(thread), hw::user_begin, hw::user_end, cpu_context,
             [&](u64 address, std::span<const std::byte> bytes) {
-                return hw::copy_to_user(process.resources().native_space, address, bytes.data(), bytes.size()).ok();
+                return uaccess::copy_to_user(process.resources().native_space, address, bytes.data(), bytes.size()).ok();
             }, signal, restorer, [&](const hw::UserFrame &staged) {
                 #if defined(__arm__)
                 const u64 restorer_pc = staged.registers[14] & ~u64{1};
@@ -1054,7 +1054,7 @@ bool private_sleep_signal_complete(Kernel &kernel, sched::ProcessControlBlock &p
     const auto ticket = thread.wait_registration.ticket();
     const auto completion = PrivateSleepInterruption::complete(kernel.scheduler(), process, thread, ticket, now.value(),
         [&](uptr destination, std::span<const u8> bytes) {
-            return hw::copy_to_user(process.resources().native_space, destination, bytes.data(), bytes.size()).ok();
+            return uaccess::copy_to_user(process.resources().native_space, destination, bytes.data(), bytes.size()).ok();
         }, [&](i64 result) { return set_result(process, thread.native_frame, result).ok(); });
     using Outcome = PrivateSleepInterruption::Outcome;
     if (completion.outcome == Outcome::lost) return false;
@@ -1833,7 +1833,7 @@ i64 private_signal_wait_copy(sched::ProcessControlBlock &process, PrivateSignalV
     }
     // Linux synchronous receive is destructive before its optional copyout.
     // Do not validate the output while empty or undo this consume on EFAULT.
-    return output && !hw::copy_to_user(process.resources().native_space, output, info.data(), info.size())
+    return output && !uaccess::copy_to_user(process.resources().native_space, output, info.data(), info.size())
         ? -14 : static_cast<i64>(ticket.info.signal);
 }
 } // namespace
@@ -1929,7 +1929,7 @@ bool private_signal_wait_call(Kernel &kernel, sched::ProcessControlBlock &proces
     PrivateSignalWaitCodec::Request request;
     result = PrivateSignalWaitCodec::decode(decoded.value(),
         [&](u64 address, std::span<std::byte> bytes) {
-            return hw::copy_from_user(process.resources().native_space, bytes.data(), address, bytes.size()).ok();
+            return uaccess::copy_from_user(process.resources().native_space, bytes.data(), address, bytes.size()).ok();
         }, request);
     if (result) return true;
     if (signal_waits.find(thread) || poll_signal_masks.find(thread)) { result = -22; return true; }
@@ -2248,7 +2248,7 @@ bool private_signal_call(Kernel &kernel, sched::ProcessControlBlock &process,
         result = user::query_directed_signal_pending<private_signal_profile>(pending.pending_mask(),
             thread.native_signal_mask, arguments[0], arguments[1],
             [&](u64 address, std::span<const std::byte> bytes) {
-                return hw::copy_to_user(process.resources().native_space, address,
+                return uaccess::copy_to_user(process.resources().native_space, address,
                                         bytes.data(), bytes.size()).ok();
             });
         return true;
@@ -2270,10 +2270,10 @@ bool private_signal_call(Kernel &kernel, sched::ProcessControlBlock &process,
     }
     auto &space = process.resources().native_space;
     auto read = [&](u64 address, std::span<std::byte> bytes) {
-        return hw::copy_from_user(space, bytes.data(), address, bytes.size()).ok();
+        return uaccess::copy_from_user(space, bytes.data(), address, bytes.size()).ok();
     };
     auto write = [&](u64 address, std::span<const std::byte> bytes) {
-        return hw::copy_to_user(space, address, bytes.data(), bytes.size()).ok();
+        return uaccess::copy_to_user(space, address, bytes.data(), bytes.size()).ok();
     };
     auto *actions = private_signal_table(kernel, process.pid());
     auto *queue = private_signal_queue(thread);

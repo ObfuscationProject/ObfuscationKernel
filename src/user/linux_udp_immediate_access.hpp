@@ -47,7 +47,7 @@ class LinuxUdpImmediateAccess final
         if (output.empty()) return {};
         auto space = capture_.address_space();
         if (!space) return lost();
-        const auto status = arch::execution::copy_from_user(space.value(), output.data(), address, output.size());
+        const auto status = uaccess::copy_from_user(space.value(), output.data(), address, output.size());
         if (!live()) return lost();
         return status;
     }
@@ -57,7 +57,7 @@ class LinuxUdpImmediateAccess final
         if (input.empty()) return {};
         auto space = capture_.address_space();
         if (!space) return lost();
-        const auto status = arch::execution::copy_to_user(space.value(), address, input.data(), input.size());
+        const auto status = uaccess::copy_to_user(space.value(), address, input.data(), input.size());
         if (!live()) return lost();
         return status;
     }

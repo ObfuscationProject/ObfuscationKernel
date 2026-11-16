@@ -2,6 +2,7 @@
 
 #include "ok/user/native_child_wait.hpp"
 #include "ok/user/native_owned_stat_request.hpp"
+#include "ok/user/uaccess.hpp"
 
 #include "ok/abi/linux_native.hpp"
 #include "ok/abi/linux_open.hpp"
@@ -50,7 +51,7 @@ inline Status copy_pathname(const hw::AddressSpace &space, uptr address, FixedSt
     for (usize offset = 0; offset < 256; ++offset)
     {
         char value{};
-        if (address > ~uptr{0} - offset || !hw::copy_from_user(space, &value, address + offset, 1))
+        if (address > ~uptr{0} - offset || !uaccess::copy_from_user(space, &value, address + offset, 1))
             return Status::fault("Linux pathname is not readable");
         if (!value)
             return Status::success();
@@ -81,7 +82,7 @@ template <lu::Profile Profile> i64 linux_uname(Kernel &kernel, const hw::Address
     put(3, "#1 ObfuscationKernel");
     put(4, machine);
     put(5, "(none)");
-    return hw::copy_to_user(space, output, bytes.data(), bytes.size()) ? 0 : -14;
+    return uaccess::copy_to_user(space, output, bytes.data(), bytes.size()) ? 0 : -14;
 }
 
 // Linux struct sysinfo with this profile's word: memory from the discovered
@@ -107,7 +108,7 @@ template <lu::Profile Profile> i64 linux_sysinfo(Kernel &kernel, const hw::Addre
     put(5 * word, free, word);
     put(10 * word, info.process_count, 2);
     put(word == 8 ? 104 : 52, unit, 4);
-    return hw::copy_to_user(space, output, bytes.data(), bytes.size()) ? 0 : -14;
+    return uaccess::copy_to_user(space, output, bytes.data(), bytes.size()) ? 0 : -14;
 }
 
 // chown, lchown, fchown, their 32-bit-ID variants and fchownat. An ID of -1
@@ -177,7 +178,7 @@ i64 linux_utimensat(Kernel &kernel, const hw::AddressSpace &space, const std::ar
         // time64 records are two 64-bit words; time32 records two native words.
         const usize field = time64 ? 8 : word, record = 2 * field;
         std::array<u8, 32> bytes{};
-        if (!hw::copy_from_user(space, bytes.data(), static_cast<uptr>(a[2]), 2 * record)) return -14;
+        if (!uaccess::copy_from_user(space, bytes.data(), static_cast<uptr>(a[2]), 2 * record)) return -14;
         const auto get = [&](usize at) {
             u64 value{};
             for (usize i = 0; i < field; ++i)
@@ -244,7 +245,7 @@ i64 linux_statfs(Kernel &kernel, const hw::AddressSpace &space, bool by_fd, bool
     put(layout.files, value.files); put(layout.ffree, value.free_files); put(layout.namelen, value.name_max);
     put(layout.frsize, value.block_size); put(layout.flags, st_valid | (value.read_only ? st_rdonly : 0));
     if (!fits) return -75;
-    return hw::copy_to_user(space, output, bytes.data(), layout.size) ? 0 : -14;
+    return uaccess::copy_to_user(space, output, bytes.data(), layout.size) ? 0 : -14;
 }
 
 // vfork and clone(CLONE_VFORK) run as a copy-on-write fork: the child has its
@@ -287,13 +288,13 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
             unix_operation, first.value().arguments,
             [&](std::array<u64, 6>) -> Result<std::array<u64, 6>> {
                 auto copied = Bridge::decode_call_copying_stack(frame, count,
-                    [&](uptr address, std::span<u8> bytes) { return hw::copy_from_user(space, bytes.data(), address, bytes.size()); });
+                    [&](uptr address, std::span<u8> bytes) { return uaccess::copy_from_user(space, bytes.data(), address, bytes.size()); });
                 if (!copied) return copied.status();
                 return copied.value().arguments;
             },
-            [&](u64 address, std::span<u8> bytes) { return hw::copy_from_user(space, bytes.data(), static_cast<uptr>(address), bytes.size()); },
-            [&](u64 address, std::span<const u8> bytes) { return hw::copy_to_user(space, static_cast<uptr>(address), bytes.data(), bytes.size()); },
-            [&](u64 address, usize length) { return hw::user_range(space, static_cast<uptr>(address), length, true); });
+            [&](u64 address, std::span<u8> bytes) { return uaccess::copy_from_user(space, bytes.data(), static_cast<uptr>(address), bytes.size()); },
+            [&](u64 address, std::span<const u8> bytes) { return uaccess::copy_to_user(space, static_cast<uptr>(address), bytes.data(), bytes.size()); },
+            [&](u64 address, usize length) { return uaccess::user_range(space, static_cast<uptr>(address), length, true); });
     }
     const auto snapshot = Bridge::snapshot(frame);
     const u64 number = snapshot.integer[Codec::profile.number_register];
@@ -327,7 +328,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
         // another dispatcher branch can decode or reread user memory.
         auto captured = native::OwnedStatRequest<Profile>::capture(frame,
             [&](uptr address, std::span<u8> destination) -> Status {
-                return hw::copy_from_user(space, destination.data(), address, destination.size());
+                return uaccess::copy_from_user(space, destination.data(), address, destination.size());
             },
             [&](u64 address, FixedString<256> &path) -> Status {
                 return copy_pathname(space, static_cast<uptr>(address), path);
@@ -349,10 +350,10 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
                 return kernel.posix().statat(request.fd, path, request.flags);
             },
             [&](u64 address, usize length) -> bool {
-                return hw::user_range(space, static_cast<uptr>(address), length, true);
+                return uaccess::user_range(space, static_cast<uptr>(address), length, true);
             },
             [&](u64 address, std::span<const u8> bytes) -> Status {
-                return hw::copy_to_user(space, static_cast<uptr>(address), bytes.data(), bytes.size());
+                return uaccess::copy_to_user(space, static_cast<uptr>(address), bytes.data(), bytes.size());
             });
     }
     std::optional<lu::ChmodCall> chmod_call;
@@ -461,7 +462,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
     else
         return -38;
     auto decoded = Bridge::decode_call_copying_stack(frame, count, [&](uptr address, std::span<u8> destination) {
-        return hw::copy_from_user(space, destination.data(), address, destination.size());
+        return uaccess::copy_from_user(space, destination.data(), address, destination.size());
     });
     if (!decoded)
         return -14;
@@ -482,14 +483,14 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
                 return native::terminal_request_gate(kernel, pid, subject, operation, fd, parked);
             },
             [&](u64 address, std::span<u8> bytes) {
-                return hw::copy_from_user(space, bytes.data(), static_cast<uptr>(address), bytes.size());
+                return uaccess::copy_from_user(space, bytes.data(), static_cast<uptr>(address), bytes.size());
             },
             [&](const sched::TerminalSubject &subject, const sched::TerminalRequest &request) {
                 return kernel.posix().terminal_control(subject, request);
             },
-            [&](u64 address, usize bytes) { return hw::user_range(space, static_cast<uptr>(address), bytes, true); },
+            [&](u64 address, usize bytes) { return uaccess::user_range(space, static_cast<uptr>(address), bytes, true); },
             [&](u64 address, std::span<const u8> bytes) {
-                return hw::copy_to_user(space, static_cast<uptr>(address), bytes.data(), bytes.size());
+                return uaccess::copy_to_user(space, static_cast<uptr>(address), bytes.data(), bytes.size());
             });
         native::terminal_request_done(kernel);
         // A job-control park re-dispatches this call; nothing is published.
@@ -506,19 +507,19 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
         {
             if (!Messages::range(a[1], 12)) return -14;
             std::array<u8, 12> bytes{};
-            if (!hw::copy_from_user(space, bytes.data(), static_cast<uptr>(a[1]), bytes.size())) return -14;
+            if (!uaccess::copy_from_user(space, bytes.data(), static_cast<uptr>(a[1]), bytes.size())) return -14;
             for (usize index = 0; index < arguments.size(); ++index)
                 arguments[index] = Messages::load(std::span<const u8>{bytes}.subspan(index * 4, 4));
         }
         else for (usize index = 0; index < arguments.size(); ++index) arguments[index] = a[index];
         return native::unix_message<Profile>(kernel.posix(), receive, arguments[0], arguments[1], arguments[2],
             [&](u64 address, std::span<u8> bytes) {
-                return hw::copy_from_user(space, bytes.data(), static_cast<uptr>(address), bytes.size());
+                return uaccess::copy_from_user(space, bytes.data(), static_cast<uptr>(address), bytes.size());
             },
             [&](u64 address, std::span<const u8> bytes) {
-                return hw::copy_to_user(space, static_cast<uptr>(address), bytes.data(), bytes.size());
+                return uaccess::copy_to_user(space, static_cast<uptr>(address), bytes.data(), bytes.size());
             },
-            [&](u64 address, usize length) { return hw::user_range(space, static_cast<uptr>(address), length, true); });
+            [&](u64 address, usize length) { return uaccess::user_range(space, static_cast<uptr>(address), length, true); });
     }
     if (memfd_create)
     {
@@ -539,7 +540,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
             // remain unsupported and do not acquire socket resources.
             if (a[0] != 8) return -38;
             std::array<u8, 16> bytes{};
-            if (!hw::copy_from_user(space, bytes.data(), static_cast<uptr>(a[1]), bytes.size()))
+            if (!uaccess::copy_from_user(space, bytes.data(), static_cast<uptr>(a[1]), bytes.size()))
                 return -14;
             for (usize item = 0; item < arguments.size(); ++item)
                 for (usize byte = 0; byte < 4; ++byte)
@@ -557,7 +558,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
         auto fds = kernel.posix().unix_socketpair(flags.value());
         if (!fds) return -syscall::ErrnoMapper::errno_for(fds.status());
         const auto encoded = lu::PipeCodec<Profile>::encode(fds.value());
-        if (!hw::copy_to_user(space, static_cast<uptr>(arguments[3]), encoded.data(), encoded.size()))
+        if (!uaccess::copy_to_user(space, static_cast<uptr>(arguments[3]), encoded.data(), encoded.size()))
         {
             static_cast<void>(kernel.posix().close(fds.value()[0]));
             static_cast<void>(kernel.posix().close(fds.value()[1]));
@@ -568,7 +569,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
     if (credential_call)
         return linux_credentials::dispatch<Profile>(*process, *credential_call, a,
             [&](u64 address, std::span<const u8> bytes) {
-                return hw::copy_to_user(space, static_cast<uptr>(address), bytes.data(), bytes.size());
+                return uaccess::copy_to_user(space, static_cast<uptr>(address), bytes.data(), bytes.size());
             });
     if (is(Operation::rt_sigprocmask))
     {
@@ -576,10 +577,10 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
         if (!thread || thread->owner != pid || thread->state != sched::ProcessState::running) return -22;
         return native::update_signal_mask<Profile>(thread->native_signal_mask, static_cast<i32>(a[0]), a[1], a[2], a[3],
             [&](u64 address, std::span<std::byte> bytes) {
-                return hw::copy_from_user(space, bytes.data(), static_cast<uptr>(address), bytes.size());
+                return uaccess::copy_from_user(space, bytes.data(), static_cast<uptr>(address), bytes.size());
             },
             [&](u64 address, std::span<const std::byte> bytes) {
-                return hw::copy_to_user(space, static_cast<uptr>(address), bytes.data(), bytes.size());
+                return uaccess::copy_to_user(space, static_cast<uptr>(address), bytes.data(), bytes.size());
             });
     }
     if (is(Operation::set_robust_list) || is(Operation::get_robust_list))
@@ -600,7 +601,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
             // CMP_REQUEUE needs input six; WAIT/WAKE keep four-input decoding.
             const auto tail = Bridge::decode_call_copying_stack(frame, compare ? 6 : 5,
                 [&](uptr address, std::span<u8> destination) {
-                    return hw::copy_from_user(space, destination.data(), address, destination.size());
+                    return uaccess::copy_from_user(space, destination.data(), address, destination.size());
                 });
             if (!tail) return -14;
             const auto &arguments = tail.value().arguments;
@@ -617,7 +618,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
             // existing four-input WAIT/WAKE never inspect that unused stack.
             const auto tail = Bridge::decode_call_copying_stack(frame, 6,
                 [&](uptr address, std::span<u8> destination) {
-                    return hw::copy_from_user(space, destination.data(), address, destination.size());
+                    return uaccess::copy_from_user(space, destination.data(), address, destination.size());
                 });
             if (!tail) return -14;
             const auto &arguments = tail.value().arguments;
@@ -644,7 +645,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
                                     : lu::TimeFormat::legacy_timespec;
             std::array<u8, 16> bytes{};
             const auto size = Codec::timespec_size(format);
-            if (!hw::copy_from_user(space, bytes.data(), static_cast<uptr>(a[3]), size))
+            if (!uaccess::copy_from_user(space, bytes.data(), static_cast<uptr>(a[3]), size))
                 return -14;
             auto timeout = Codec::decode_timespec({bytes.data(), size}, format);
             if (!timeout || timeout.value().seconds < 0 || timeout.value().nanoseconds < 0 ||
@@ -708,12 +709,12 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
                 if (requested > 0x7fffffffU || size > capacity - written)
                     return Status::invalid_argument("Linux directory output count too small");
                 const uptr address = static_cast<uptr>(a[1]);
-                if (written > ~uptr{0} - address || !hw::user_range(space, address + written, size, true))
+                if (written > ~uptr{0} - address || !uaccess::user_range(space, address + written, size, true))
                     return Status::fault("Linux directory output range");
                 std::array<u8, Directory::capacity> bytes{};
                 auto encoded = Directory::encode(entry, cookie, bytes);
                 if (!encoded) return encoded.status();
-                if (!hw::copy_to_user(space, address + written, bytes.data(), size))
+                if (!uaccess::copy_to_user(space, address + written, bytes.data(), size))
                     return Status::fault("Linux directory output copy");
                 written += size;
                 return size;
@@ -764,14 +765,14 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
             if (is(Operation::select))
             {
                 std::array<u8, Select::old_argument_bytes> bytes{};
-                if (!hw::copy_from_user(space, bytes.data(), static_cast<uptr>(a[0]), bytes.size())) return -14;
+                if (!uaccess::copy_from_user(space, bytes.data(), static_cast<uptr>(a[0]), bytes.size())) return -14;
                 arguments = Select::old_arguments(bytes);
             }
         u64 mask_pointer{}, mask_size{};
         if (precise && a[5])
         {
             std::array<u8, Select::signal_argument_bytes> bytes{};
-            if (!hw::copy_from_user(space, bytes.data(), static_cast<uptr>(a[5]), bytes.size())) return -14;
+            if (!uaccess::copy_from_user(space, bytes.data(), static_cast<uptr>(a[5]), bytes.size())) return -14;
             mask_pointer = Poll::word(std::span{bytes}.first(Select::word_bytes));
             mask_size = Poll::word(std::span{bytes}.subspan(Select::word_bytes));
         }
@@ -786,7 +787,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
         if (arguments[4])
         {
             std::array<u8, 16> bytes{};
-            if (!hw::copy_from_user(space, bytes.data(), static_cast<uptr>(arguments[4]), time_bytes)) return -14;
+            if (!uaccess::copy_from_user(space, bytes.data(), static_cast<uptr>(arguments[4]), time_bytes)) return -14;
             auto time = precise ? Codec::decode_timespec({bytes.data(), time_bytes}, format)
                                 : Select::timeval({bytes.data(), time_bytes});
             if (!time || time.value().seconds < 0) return -22;
@@ -811,7 +812,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
             using Mask = native::SignalMaskCodec<Profile>;
             if (mask_size != Mask::bytes) return -22;
             std::array<std::byte, Mask::bytes> mask{};
-            if (!hw::copy_from_user(space, mask.data(), static_cast<uptr>(mask_pointer), mask.size())) return -14;
+            if (!uaccess::copy_from_user(space, mask.data(), static_cast<uptr>(mask_pointer), mask.size())) return -14;
             if (const auto result = mask_scope.begin(Mask::sanitize(Mask::decode(mask))); result) return result;
         }
         auto failed_select = [&](i64 error) {
@@ -830,7 +831,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
             request.sets.output[set] = static_cast<uptr>(arguments[set + 1]);
             if (!bytes_count || !request.sets.output[set]) continue;
             std::array<u8, Select::word_bytes> bytes{};
-            if (!hw::copy_from_user(space, bytes.data(), request.sets.output[set], bytes_count)) return failed_select(-14);
+            if (!uaccess::copy_from_user(space, bytes.data(), request.sets.output[set], bytes_count)) return failed_select(-14);
             request.sets.interests[set] = static_cast<u32>(Poll::word(bytes)) & Select::valid_bits(request.sets.count);
         }
         return native::begin_select(kernel, pid, request, complete);
@@ -855,7 +856,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
             {
                 std::array<u8, 16> bytes{};
                 const auto size = Codec::timespec_size(format);
-                if (!hw::copy_from_user(space, bytes.data(), static_cast<uptr>(a[2]), size)) return -14;
+                if (!uaccess::copy_from_user(space, bytes.data(), static_cast<uptr>(a[2]), size)) return -14;
                 auto time = Codec::decode_timespec({bytes.data(), size}, format);
                 if (!time || time.value().seconds < 0) return -22;
                 interval = time.value(); finite = true;
@@ -891,7 +892,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
             using Mask = native::SignalMaskCodec<Profile>;
             if (a[4] != Mask::bytes) return -22;
             std::array<std::byte, Mask::bytes> mask{};
-            if (!hw::copy_from_user(space, mask.data(), static_cast<uptr>(a[3]), mask.size())) return -14;
+            if (!uaccess::copy_from_user(space, mask.data(), static_cast<uptr>(a[3]), mask.size())) return -14;
             if (const auto result = mask_scope.begin(Mask::sanitize(Mask::decode(mask))); result) return result;
         }
         auto failed_poll = [&](i64 error) {
@@ -904,7 +905,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
         const auto nfds = static_cast<u32>(a[1]);
         if (nfds > sched::max_process_fds) return failed_poll(-22);
         std::array<u8, Poll::record_size * sched::max_process_fds> bytes{};
-        if (!hw::copy_from_user(space, bytes.data(), request.output, nfds * Poll::record_size))
+        if (!uaccess::copy_from_user(space, bytes.data(), request.output, nfds * Poll::record_size))
             return failed_poll(-14);
         std::array<ok_pollfd, sched::max_process_fds> descriptors{};
         for (usize i = 0; i < nfds; ++i)
@@ -924,7 +925,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
             ? lu::TimeFormat::kernel_timespec : lu::TimeFormat::legacy_timespec;
         std::array<u8, 16> bytes{};
         const auto size = Codec::timespec_size(format);
-        if (!hw::copy_from_user(space, bytes.data(), static_cast<uptr>(a[clock_sleep ? 2 : 0]), size))
+        if (!uaccess::copy_from_user(space, bytes.data(), static_cast<uptr>(a[clock_sleep ? 2 : 0]), size))
             return -14;
         auto request = Codec::decode_timespec({bytes.data(), size}, format);
         if (!request || request.value().seconds < 0) return -22;
@@ -957,7 +958,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
             return fds.value()[0];
         }
         const auto bytes = Pipes::encode(fds.value());
-        if (!hw::copy_to_user(space, output, bytes.data(), bytes.size()))
+        if (!uaccess::copy_to_user(space, output, bytes.data(), bytes.size()))
         {
             static_cast<void>(kernel.posix().close(fds.value()[0]));
             static_cast<void>(kernel.posix().close(fds.value()[1]));
@@ -1033,7 +1034,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
             return -34; // Linux ERANGE, including a zero syscall buffer size.
         // Validate/copy only the returned NUL-terminated path, not unused tail
         // capacity. Linux's raw syscall returns its size including the NUL.
-        if (!hw::copy_to_user(space, static_cast<uptr>(a[0]), path.data(), bytes))
+        if (!uaccess::copy_to_user(space, static_cast<uptr>(a[0]), path.data(), bytes))
             return -14;
         return static_cast<i64>(bytes);
     }
@@ -1158,7 +1159,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
                 if (!result) return result;
                 std::array<u8, 4> word{};
                 const u32 source = static_cast<u32>(frame.sp) + u32{16};
-                if (hw::copy_from_user(space, word.data(), source, word.size()))
+                if (uaccess::copy_from_user(space, word.data(), source, word.size()))
                     for (usize i = 0; i < 4; ++i)
                         result.value().arguments[4] |= static_cast<u64>(word[i]) << (8 * (Codec::profile.big_endian ? 3 - i : i));
                 result.value().argument_count = 5;
@@ -1306,7 +1307,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
                                 ? lu::TimeFormat::kernel_timespec : lu::TimeFormat::legacy_timespec;
         std::array<u8, 16> record{};
         const usize size = Codec::timespec_size(format);
-        if (!hw::copy_from_user(space, record.data(), static_cast<uptr>(a[1]), size))
+        if (!uaccess::copy_from_user(space, record.data(), static_cast<uptr>(a[1]), size))
             return -14;
         auto value = Codec::decode_timespec({record.data(), size}, format);
         if (!value)
@@ -1347,8 +1348,8 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
         if (!is(Operation::set_thread_area))
             return -38;
         std::array<u32, 4> descriptor{};
-        if (!hw::copy_from_user(space, descriptor.data(), pointer, sizeof(descriptor)) ||
-            !hw::user_range(space, pointer, sizeof(descriptor), true))
+        if (!uaccess::copy_from_user(space, descriptor.data(), pointer, sizeof(descriptor)) ||
+            !uaccess::user_range(space, pointer, sizeof(descriptor), true))
             return -14;
         if ((descriptor[0] != ~u32{0} && descriptor[0] != Bridge::i386_tls_entry) || descriptor[2] != 0xfffff ||
             descriptor[3] != 0x51)
@@ -1357,7 +1358,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
         if (base != 0 && (base < hw::user_begin || base >= hw::user_end))
             return -22;
         descriptor[0] = Bridge::i386_tls_entry;
-        if (!hw::copy_to_user(space, pointer, descriptor.data(), sizeof(descriptor)))
+        if (!uaccess::copy_to_user(space, pointer, descriptor.data(), sizeof(descriptor)))
             return -14;
         pointer = base;
     }

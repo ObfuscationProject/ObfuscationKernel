@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ok/smp/kernel_section.hpp"
 #include "ok/user/native_mapping_pages.hpp"
 
 namespace ok::user::native
@@ -57,19 +58,29 @@ inline Status share_private_page(MappingPages &child, const arch::execution::Pag
 }
 
 // After the child space exists, withhold write access from every parent record
-// whose private frame is now shared. A failed remap leaves a writable
-// translation of a shared frame, so the caller must stop the runtime.
+// whose private frame is now shared, then re-synchronize the records from the
+// first to the last one changed with one protect (one quiesce, the parent's
+// mm held). A failed protect leaves a writable translation of a shared frame,
+// so the caller must stop the runtime.
 inline Status withhold_shared_writes(MappingPages &pages, const arch::execution::AddressSpace &space,
                                      const NativePagePool &pool)
 {
+    usize first = pages.size(), last = 0, withheld = 0;
     for (usize index = 0; index < pages.size(); ++index)
     {
         auto &page = pages[index];
         if (!(page.flags & arch::execution::page_write) || exclusive_frame(pool, page.physical_address)) continue;
         settle_access(page, page.flags, false);
-        if (auto status = arch::execution::remap(space, page); !status) return status;
+        if (first == pages.size()) first = index;
+        last = index;
+        ++withheld;
     }
-    return Status::success();
+    if (first == pages.size()) return Status::success();
+    auto status = arch::execution::protect(space, arch::execution::MappingView{&pages[first], last - first + 1});
+    if (status)
+        if (const auto cpu = smp::current_cpu(); cpu < smp::max_cpus)
+            smp::detail::owner_add(smp::evidence_cpus[cpu].protect_pages, withheld);
+    return status;
 }
 
 // Resolves a write to a withheld page of the live `space` that `pages`
@@ -114,6 +125,8 @@ inline Result<bool> resolve_copy_on_write(MappingPages &pages, const arch::execu
             if (auto status = pool.release_reference(previous); !status) return status;
         if (!mapped) return mapped;
         ++(exclusive ? copy_on_write_stats.reused : copy_on_write_stats.copied);
+        if (const auto cpu = smp::current_cpu(); cpu < smp::max_cpus)
+            smp::detail::owner_add(exclusive ? smp::evidence_cpus[cpu].cow_reused : smp::evidence_cpus[cpu].cow_copied);
         return true;
     }
     return false;

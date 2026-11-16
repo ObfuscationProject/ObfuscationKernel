@@ -215,7 +215,7 @@ Admission admit_section(Kernel &kernel, sched::ProcessControlBlock &process, sch
     const auto &space = process.resources().native_space;
     auto decoded = Bridge::decode_call_copying_stack(thread.native_frame, selected->arguments,
         [&](uptr address, std::span<u8> destination) {
-            return hw::copy_from_user(space, destination.data(), address, destination.size());
+            return uaccess::copy_from_user(space, destination.data(), address, destination.size());
         });
     if (!decoded) return decline(D::fault);
     const auto &a = decoded.value().arguments;
@@ -260,7 +260,7 @@ Admission admit_section(Kernel &kernel, sched::ProcessControlBlock &process, sch
             ? Codec::timespec_size(selected->time64 ? lu::TimeFormat::kernel_timespec : lu::TimeFormat::legacy_timespec)
             : static_cast<usize>(a[2]);
         if (family != F::read && length > sched::pipe_capacity) length = sched::pipe_capacity;
-        if (!hw::user_range(space, static_cast<uptr>(a[1]), length, output)) return decline(D::fault);
+        if (!uaccess::user_range(space, static_cast<uptr>(a[1]), length, output)) return decline(D::fault);
     }
     if (family == F::getpid || family == F::gettid)
         if (shadow_turn(cpu))

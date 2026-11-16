@@ -30,9 +30,10 @@ struct Space
     detail::TlbSpaceTag tlb{};
 };
 constinit SpaceTable<Space, fixed_space_slots> spaces;
-// The slot storage is fixed, so entries look a space up without the kernel
-// lock; slot acquire and release, space ids and TLB generations are
-// serialized by spaces_lock.
+// The slot storage is fixed, so entries and user copies validate their space
+// lock-free inside their window (ok/smp/bringup.hpp); slot acquire, publish,
+// retire and release, space ids and TLB generation bumps are serialized by
+// spaces_lock.
 constinit smp::RankedSpinLock<smp::LockRank::arch_spaces> spaces_lock{};
 using SpacesGuard = smp::RankedSpinLock<smp::LockRank::arch_spaces>::Guard;
 constinit detail::TlbSpaceIds space_ids{};
@@ -43,10 +44,26 @@ Space *lookup(const AddressSpace &space)
 {
     return spaces.find(space);
 }
-const PageMapping *mapping(const Space &space, uptr address)
+// The leaf entry of a user address, read as the hardware walks it; 0 when
+// unmapped (PROT_NONE has no entry). User accesses go through the tables, not
+// the runtime's records, which it edits in place before a remap.
+u64 leaf(const Space &space, uptr address)
 {
-    const auto *page = space.mappings.find(address);
-    return page && page->flags ? page : nullptr;
+    if (address < user_begin || address >= user_end)
+        return 0;
+    const auto middle = std::atomic_ref<u64>{space.middle->entries[(address >> 21) & 511u]}.load(std::memory_order_acquire);
+    if ((middle & pte_valid) == 0)
+        return 0;
+    auto &entry = reinterpret_cast<Table *>((middle >> 10) << 12)->entries[(address >> 12) & 511u];
+    return std::atomic_ref<u64>{entry}.load(std::memory_order_acquire);
+}
+[[nodiscard]] bool permits(u64 entry, u64 access)
+{
+    return (entry & (pte_valid | pte_user | access)) == (pte_valid | pte_user | access);
+}
+[[nodiscard]] uptr frame_of(u64 entry)
+{
+    return static_cast<uptr>((entry >> 10) << 12);
 }
 u64 table_entry(const Table &table)
 {
@@ -266,7 +283,10 @@ Result<AddressSpace> create_space(MappingView mappings)
     }
     space.mappings = mappings;
     asm volatile("fence rw,rw\nfence.i" ::: "memory");
-    entry.value()->root = reinterpret_cast<uptr>(space.root);
+    {
+        const SpacesGuard guard(spaces_lock);
+        spaces.publish(*entry.value(), reinterpret_cast<uptr>(space.root));
+    }
     return spaces.handle(*entry.value());
 }
 Status remap(const AddressSpace &space, const PageMapping &mapping)
@@ -282,23 +302,71 @@ Status remap(const AddressSpace &space, const PageMapping &mapping)
     auto &entry = reinterpret_cast<Table *>((middle >> 10) << 12)->entries[(mapping.virtual_address >> 12) & 511u];
     if ((entry & pte_valid) == 0)
         return Status::not_found("native user page has no translation");
-    // Every other hart in this space leaves U-mode first. A hart that cached
-    // the old entry fences it at its next entry: untagged harts fence every
-    // entry, and a tagged one fences the ASID once the generation moved.
-    static_cast<void>(smp::require_exclusive("address-space quiesce"));
-    static_cast<void>(smp::quiesce_root(space.root));
-    entry = leaf_entry(mapping);
+    // Writer order (the owning process's mm held): publish, bump, quiesce;
+    // the caller frees what the old entry reached only after this returns.
+    // Sv39 allows an in-place rewrite. A hart that cached the old entry fences
+    // it at its next entry: untagged harts fence every entry, and a tagged one
+    // fences the ASID once the generation moved.
+    std::atomic_ref<u64>{entry}.store(leaf_entry(mapping), std::memory_order_release);
     asm volatile("fence rw,rw\nfence.i" ::: "memory");
-    const SpacesGuard guard(spaces_lock);
-    stored->tlb.changed();
+    {
+        const SpacesGuard guard(spaces_lock);
+        stored->tlb.changed();
+    }
+    static_cast<void>(smp::quiesce_root(space.root));
     return Status::success();
+}
+// remap() for a run of records, with one generation bump and one quiesce.
+Status protect(const AddressSpace &space, MappingView mappings)
+{
+    auto *stored = lookup(space);
+    if (stored == nullptr)
+        return Status::invalid_argument("stale native address space");
+    Status result{};
+    usize changed = 0;
+    for (const auto &mapping : mappings)
+    {
+        if (mapping.flags == 0)
+            continue;
+        if (!admissible(mapping))
+        {
+            result = Status::invalid_argument("invalid Sv39 user protection");
+            break;
+        }
+        const auto middle = stored->middle->entries[(mapping.virtual_address >> 21) & 511u];
+        auto *entry = (middle & pte_valid) == 0
+                          ? nullptr
+                          : &reinterpret_cast<Table *>((middle >> 10) << 12)->entries[(mapping.virtual_address >> 12) & 511u];
+        if (entry == nullptr || (*entry & pte_valid) == 0)
+        {
+            result = Status::not_found("native user page has no translation");
+            break;
+        }
+        std::atomic_ref<u64>{*entry}.store(leaf_entry(mapping), std::memory_order_release);
+        ++changed;
+    }
+    if (changed == 0)
+        return result;
+    asm volatile("fence rw,rw\nfence.i" ::: "memory");
+    {
+        const SpacesGuard guard(spaces_lock);
+        stored->tlb.changed();
+    }
+    static_cast<void>(smp::quiesce_root(space.root));
+    return result;
 }
 Status destroy_space(AddressSpace &space)
 {
     auto *stored = lookup(space);
     if (stored == nullptr)
         return Status::invalid_argument("stale native address space");
-    static_cast<void>(smp::require_exclusive("address-space quiesce"));
+    // Retiring: no new window finds the space; quiesce_root waits for the
+    // windows that found it before the tables go back.
+    {
+        const SpacesGuard guard(spaces_lock);
+        static_cast<void>(spaces.retire(*stored));
+        stored->tlb.changed();
+    }
     static_cast<void>(smp::quiesce_root(space.root));
     const auto released = release_tables(*stored);
     const SpacesGuard guard(spaces_lock);
@@ -355,20 +423,17 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     auto &cpu = this_cpu();
     if (cpu.executing.load(std::memory_order_relaxed))
         return Status::busy("nested native entry is unsupported");
-    detail::TlbSpaceTag tlb;
-    {
-        const SpacesGuard guard(spaces_lock);
-        auto *stored = lookup(space);
-        if (stored == nullptr)
-            return Status::not_initialized("native address space is unavailable");
-        tlb = stored->tlb;
-        const auto *entry = mapping(*stored, frame.pc);
-        // Like Linux, the stack need not be mapped; only an access to it faults (a
-        // detached musl thread unmaps its own stack before its exit syscall).
-        if (entry == nullptr || !(entry->flags & page_execute) || (frame.pc & 1) != 0 || frame.sp <= user_begin ||
-            frame.sp > user_end)
-            return Status::invalid_argument("invalid user entry frame");
-    }
+    // The caller opened this hart's user window (begin_user), so the space
+    // validated here cannot retire before the window closes.
+    const auto *stored = lookup(space);
+    if (stored == nullptr)
+        return Status::not_initialized("native address space is unavailable");
+    const auto tlb = stored->tlb.current();
+    // Like Linux, the stack need not be mapped; only an access to it faults (a
+    // detached musl thread unmaps its own stack before its exit syscall).
+    if (!permits(leaf(*stored, frame.pc), pte_execute) || (frame.pc & 1) != 0 || frame.sp <= user_begin ||
+        frame.sp > user_end)
+        return Status::invalid_argument("invalid user entry frame");
     uptr saved_status;
     asm volatile("csrrc %0, mstatus, %1" : "=r"(saved_status) : "r"(uptr{8}) : "memory");
     cpu.executing.store(true, std::memory_order_release);
@@ -388,6 +453,7 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     complete_irq(trap, cpu);
     // The assembly restored the masked status; re-enable only on the service stack.
     asm volatile("csrs mstatus, %0" : : "r"(saved_status & uptr{8}) : "memory");
+    trap.translation_changed = stored->tlb.current().generation != tlb.generation;
     return trap;
 }
 
@@ -418,8 +484,12 @@ void set_return_value(UserFrame &frame, i64 value)
 {
     frame.registers[10] = static_cast<uptr>(value);
 }
+// User accesses walk the tables inside a kernel window. A page whose write
+// access is withheld (copy-on-write) fails a write; the runtime's uaccess
+// layer resolves it outside the window and retries.
 bool user_range(const AddressSpace &space, uptr address, usize size, bool write)
 {
+    const smp::KernelWindow window(space.root);
     const auto *stored = lookup(space);
     if (stored == nullptr)
         return false;
@@ -429,10 +499,7 @@ bool user_range(const AddressSpace &space, uptr address, usize size, bool write)
         return false;
     for (uptr cursor = address; cursor < address + size;)
     {
-        const auto *page = mapping(*stored, cursor);
-        if (page == nullptr || (!(page->flags & (write ? page_write : page_read)) &&
-                                !(write && resolve_write(space, cursor & ~(page_size - 1)) &&
-                                  (page->flags & page_write))))
+        if (!permits(leaf(*stored, cursor), write ? pte_write : pte_read))
             return false;
         const auto next = (cursor & ~(page_size - 1)) + page_size;
         cursor = next < address + size ? next : address + size;
@@ -441,16 +508,17 @@ bool user_range(const AddressSpace &space, uptr address, usize size, bool write)
 }
 Status copy_from_user(const AddressSpace &space, void *destination, uptr source, usize size)
 {
+    const smp::KernelWindow window(space.root);
     if ((destination == nullptr && size != 0) || !user_range(space, source, size))
         return Status::fault("invalid user read range");
     const auto *stored = lookup(space);
     auto *output = static_cast<std::byte *>(destination);
     for (usize i = 0; i < size;)
     {
-        const auto *page = mapping(*stored, source + i);
+        const auto frame = frame_of(leaf(*stored, source + i));
         const auto offset = (source + i) & (page_size - 1);
         const usize chunk = size - i < page_size - offset ? size - i : page_size - offset;
-        const auto *input = reinterpret_cast<const std::byte *>(page->physical_address + offset);
+        const auto *input = reinterpret_cast<const std::byte *>(frame + offset);
         for (usize j = 0; j < chunk; ++j)
             output[i + j] = input[j];
         i += chunk;
@@ -459,29 +527,33 @@ Status copy_from_user(const AddressSpace &space, void *destination, uptr source,
 }
 Status copy_to_user(const AddressSpace &space, uptr destination, const void *source, usize size)
 {
+    const smp::KernelWindow window(space.root);
     if ((source == nullptr && size != 0) || !user_range(space, destination, size, true))
         return Status::fault("invalid user write range");
     const auto *stored = lookup(space);
     const auto *input = static_cast<const std::byte *>(source);
     for (usize i = 0; i < size;)
     {
-        const auto *page = mapping(*stored, destination + i);
+        const auto frame = frame_of(leaf(*stored, destination + i));
         const auto offset = (destination + i) & (page_size - 1);
         const usize chunk = size - i < page_size - offset ? size - i : page_size - offset;
-        auto *output = reinterpret_cast<std::byte *>(page->physical_address + offset);
+        auto *output = reinterpret_cast<std::byte *>(frame + offset);
         for (usize j = 0; j < chunk; ++j)
             output[j] = input[i + j];
         i += chunk;
     }
     return Status::success();
 }
+// The pointer outlives this call's window: the caller holds the owning mm
+// or its own window (with_user_word) while it uses the word.
 Result<u32 *> user_word(const AddressSpace &space, uptr address, bool write)
 {
+    const smp::KernelWindow window(space.root);
     if (address % sizeof(u32))
         return Status::invalid_argument("user word is misaligned");
     if (!user_range(space, address, sizeof(u32), write))
         return Status::fault("user word is not mapped with the requested access");
-    return reinterpret_cast<u32 *>(mapping(*lookup(space), address)->physical_address + (address & (page_size - 1)));
+    return reinterpret_cast<u32 *>(frame_of(leaf(*lookup(space), address)) + (address & (page_size - 1)));
 }
 } // namespace ok::arch::execution
 

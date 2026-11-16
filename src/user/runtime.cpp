@@ -212,7 +212,7 @@ Status string_from_user(const hw::AddressSpace &space, uptr address, FixedString
     for (usize i = 0; i < 256; ++i)
     {
         char c;
-        if (address + i < address || !hw::copy_from_user(space, &c, address + i, 1))
+        if (address + i < address || !uaccess::copy_from_user(space, &c, address + i, 1))
             return Status::fault("invalid user string");
         if (c == 0)
             return Status::success();
@@ -285,7 +285,7 @@ void finish(Kernel &kernel, sched::ProcessId pid, i32 code, u8 signal)
 #endif
         clear_group_tids(kernel, *process);
         if (!runtime_failure) return runtime_failure;
-        release(process->resources().native_space, process->resources().native_pages);
+        release_address_space(process->resources());
         if (!runtime_failure) return runtime_failure;
         emit_pool_stats();
         emit_entry_stack_stats();
@@ -663,7 +663,7 @@ void release_process(Kernel &kernel, u64 pid)
         private_signal_retire(pid);
 #endif
         clear_group_tids(kernel, *process);
-        release(process->resources().native_space, process->resources().native_pages);
+        release_address_space(process->resources());
         emit_entry_stack_stats();
         for (auto &thread : process->threads())
         {

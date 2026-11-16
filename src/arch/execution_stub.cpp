@@ -26,6 +26,10 @@ Status remap(const AddressSpace &, const PageMapping &)
 {
     return initialize();
 }
+Status protect(const AddressSpace &, MappingView)
+{
+    return initialize();
+}
 Result<Trap> enter(AddressSpace &, UserFrame &)
 {
     return initialize();
