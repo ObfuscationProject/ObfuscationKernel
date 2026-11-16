@@ -335,6 +335,18 @@ class EndpointTable final
         if (result && changed(before, slot->core.snapshot())) bump(*slot);
         return result;
     }
+    // Takes the connection's pending failure once (Connection::take_error);
+    // a listener has none.
+    Result<Failure> take_error(Handle handle, bool soft = false)
+    {
+        if (handle.kind == HandleKind::listener) { if (!listener(handle)) return stale(); return Failure::none; }
+        auto *slot = connection(handle); if (!slot) return stale();
+        if (slot->core.snapshot().prepared) return Status::busy("complete prepared TCP packet before taking its error");
+        const auto before = slot->core.snapshot();
+        const Failure taken = slot->core.take_error(soft);
+        if (changed(before, slot->core.snapshot())) bump(*slot);
+        return taken;
+    }
     // An ICMP error quoting a segment of the connection local -> peer.
     // Returns whether a connection took it.
     Result<bool> icmp_error(Endpoint local, Endpoint peer, wire::IcmpErrorClass error, u32 quoted_sequence, u64 now)
@@ -569,7 +581,7 @@ class EndpointTable final
     }
     static bool changed(const Snapshot &a, const Snapshot &b)
     {
-        return a.state != b.state || a.failure != b.failure || a.send_buffered != b.send_buffered ||
+        return a.state != b.state || a.failure != b.failure || a.error_pending != b.error_pending || a.send_buffered != b.send_buffered ||
             a.receive_buffered != b.receive_buffered || a.eof != b.eof || a.write_shutdown != b.write_shutdown ||
             a.prepared != b.prepared || a.peer_window != b.peer_window || a.receive_window != b.receive_window ||
             a.send_unacknowledged != b.send_unacknowledged || a.receive_next != b.receive_next;

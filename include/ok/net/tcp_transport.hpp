@@ -36,6 +36,8 @@ struct Snapshot
     u8 retransmissions{}; bool flight{}, eof{}, write_shutdown{}, prepared{}, listener_armed{};
     u32 congestion_window{}, slow_start_threshold{}, in_flight{};
     usize out_of_order{}; u8 duplicate_acks{}; bool recovering{};
+    // The failure has not been reported yet (Linux sk_err is set).
+    bool error_pending{};
 };
 
 // One executor owns this noncopyable control block. Input and write bytes are
@@ -70,7 +72,18 @@ class Connection final
         return {state_, failure_, snd_una_, snd_nxt_, rcv_nxt_, tx_size_, rx_size_, peer_window_,
             window(), peer_mss_, rtx_.active ? rtx_.deadline : 0, time_wait_deadline_, rto_,
             rtx_.retries, rtx_.active, eof_, write_shutdown_, plan_.active, listener_armed_,
-            cc_.window(), cc_.threshold(), outstanding(), out_of_order(), dupacks_, recovery_};
+            cc_.window(), cc_.threshold(), outstanding(), out_of_order(), dupacks_, recovery_,
+            failure_ != Failure::none && !error_reported_};
+    }
+    // Reports the connection's failure once, as Linux sock_error clears
+    // sk_err; later calls see the closed connection without it. With `soft`
+    // (SO_ERROR), a remembered soft ICMP error is taken when no failure is
+    // pending, as sock_getsockopt falls back to sk_err_soft.
+    Failure take_error(bool soft = false)
+    {
+        if (failure_ != Failure::none && !error_reported_) { error_reported_ = true; return failure_; }
+        if (!soft) return Failure::none;
+        const Failure remembered = soft_error_; soft_error_ = Failure::none; return remembered;
     }
     [[nodiscard]] Endpoint local() const { return local_; }
     [[nodiscard]] Endpoint peer() const { return peer_; }
@@ -655,7 +668,7 @@ class Connection final
     { state_ = State::time_wait; time_wait_deadline_ = deadline(now, 2 * msl_ms); rtx_ = {}; }
     void terminate(Failure reason)
     {
-        state_ = State::closed; failure_ = reason; tx_size_ = rx_size_ = 0; ooo_count_ = 0;
+        state_ = State::closed; failure_ = reason; error_reported_ = false; tx_size_ = rx_size_ = 0; ooo_count_ = 0;
         rtx_ = {}; pending_syn_ = pending_ack_ = reset_pending_ = retransmit_head_ = false; write_shutdown_ = true;
     }
     void return_to_listen()
@@ -671,11 +684,12 @@ class Connection final
         passive_ = pending_syn_ = pending_ack_ = reset_pending_ = eof_ = write_shutdown_ = rtt_known_ = syn_retried_ = false;
         challenge_seen_ = listener_armed_ = rtt_timing_ = recovery_ = retransmit_head_ = fin_acknowledged_ = false;
         challenge_deadline_ = persist_deadline_ = rtt_sent_at_ = 0; rtt_sequence_ = 0; dupacks_ = 0; ooo_count_ = 0;
-        soft_error_ = Failure::none;
+        soft_error_ = Failure::none; error_reported_ = false;
         cc_ = {}; cc_.start(segment());
         // Packet token generation and monotonic time survive control-block reuse.
     }
     State state_{State::closed}; Failure failure_{Failure::none}, soft_error_{Failure::none}; Endpoint local_{}, peer_{}, reset_peer_{};
+    bool error_reported_{};
     std::array<std::byte, SendCapacity> tx_{}; std::array<std::byte, ReceiveCapacity> rx_{};
     usize tx_head_{}, tx_size_{}, rx_head_{}, rx_size_{};
     u32 snd_una_{}, snd_nxt_{}, snd_max_{}, rcv_nxt_{}, iss_{}, irs_{}, wl1_{}, wl2_{}, reset_seq_{}, recover_{}, rtt_sequence_{};

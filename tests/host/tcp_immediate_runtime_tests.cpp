@@ -49,6 +49,9 @@ class Link final : public KernelExtension
         const usize slot = (head + count) % outgoing.size();
         std::copy(frame.begin(), frame.end(), outgoing[slot].begin()); lengths[slot] = frame.size(); ++count; return {};
     }
+    // Immediate sends (native UDP sendto) take the same TX queue.
+    Status network_transmit(Kernel &kernel, std::span<const std::byte> frame) override
+    { return network_try_transmit(kernel, frame); }
     void receive_peer(Peer &peer)
     {
         if (!count) std::fprintf(stderr, "TCP_IMMEDIATE_PEER_EMPTY submissions=%zu receives=%zu peer_state=%u\n",
@@ -143,6 +146,17 @@ i64 poll_now(Kernel &kernel, Group group, i32 fd, i16 events)
     const auto ready = invoke(kernel, group, 7, {hw::user_begin + 896, 1, 0});
     std::memcpy(&entry, mock::memory.data() + 896, sizeof(entry));
     return ready < 0 ? ready : static_cast<u16>(entry.revents);
+}
+// getsockopt(fd, level, option) into a four-byte value with `capacity`.
+struct Option { i64 result{}; u32 length{}; u32 value{}; };
+Option option_call(Kernel &kernel, Group group, i32 fd, u32 level, u32 option, i32 capacity = 4)
+{
+    std::memset(mock::memory.data() + 768, 0xa5, 4);
+    std::memcpy(mock::memory.data() + 1000, &capacity, sizeof(capacity));
+    Option out; out.result = invoke(kernel, group, 55, {static_cast<uptr>(fd), level, option, address_pointer, name_length_pointer});
+    std::memcpy(&out.length, mock::memory.data() + 1000, sizeof(out.length));
+    std::memcpy(&out.value, mock::memory.data() + 768, sizeof(out.value));
+    return out;
 }
 void address(net::wire::Ipv4 ip, u16 port)
 {
@@ -372,7 +386,9 @@ void listener_errors(Kernel &kernel, bool linux, u16 port)
 }
 // The gateway answers the SYN with an ICMP unreachable: the handshake fails
 // with the errno Linux tcp_v4_err reports for it.
-void icmp_refusal(Kernel &kernel, bool linux, u16 port, u8 code, i64 expected)
+// `report` picks what reports the failure: a read, SO_ERROR or a second connect.
+enum class Report { read, option, connect };
+void icmp_refusal(Kernel &kernel, bool linux, u16 port, u8 code, i64 expected, Report report)
 {
     const auto group = create(kernel, linux);
     const auto fd = invoke(kernel, group, 41, {2, OK_SOCK_STREAM | OK_SOCK_NONBLOCK, 6}); expect(fd >= 3);
@@ -407,9 +423,73 @@ void icmp_refusal(Kernel &kernel, bool linux, u16 port, u8 code, i64 expected)
     expect(kernel.native_ethernet_executor().state().icmp_errors == errors + 1);
     // A refused connect is shut down both ways and failed.
     expect(poll_now(kernel, group, static_cast<i32>(fd), both) == (OK_POLLIN | OK_POLLOUT | OK_POLLERR | OK_POLLHUP));
-    expect(invoke(kernel, group, 0, {static_cast<uptr>(fd), payload_pointer, 8}) == expected);
-    expect(invoke(kernel, group, 1, {static_cast<uptr>(fd), payload_pointer, 8}) == expected);
-    expect(name_call(kernel, group, 52, static_cast<i32>(fd), 16).result == -107);
+    const auto f = static_cast<i32>(fd);
+    // The failure is reported once (Linux sock_error).
+    if (report == Report::read) expect(invoke(kernel, group, 0, {static_cast<uptr>(fd), payload_pointer, 8}) == expected);
+    if (report == Report::connect)
+    {
+        address(link.peer_ip, 7100);
+        expect(invoke(kernel, group, 42, {static_cast<uptr>(fd), address_pointer, 16}) == expected);
+    }
+    if (report == Report::option)
+    {
+        const auto taken = option_call(kernel, group, f, OK_SOL_SOCKET, OK_SO_ERROR);
+        expect(taken.result == 0 && taken.length == 4 && taken.value == static_cast<u32>(-expected));
+    }
+    auto none = option_call(kernel, group, f, OK_SOL_SOCKET, OK_SO_ERROR);
+    expect(none.result == 0 && none.length == 4 && none.value == 0);
+    // Then the closed connection reads EOF, writes EPIPE and has no POLLERR.
+    expect(poll_now(kernel, group, f, both) == (OK_POLLIN | OK_POLLOUT | OK_POLLHUP));
+    expect(invoke(kernel, group, 0, {static_cast<uptr>(fd), payload_pointer, 8}) == 0);
+    expect(invoke(kernel, group, 1, {static_cast<uptr>(fd), payload_pointer, 8}) == -32);
+    expect(name_call(kernel, group, 52, f, 16).result == -107);
+    // SO_TYPE; a short capacity copies a prefix and reports it; negative is EINVAL.
+    auto type = option_call(kernel, group, f, OK_SOL_SOCKET, OK_SO_TYPE);
+    expect(type.result == 0 && type.length == 4 && type.value == OK_SOCK_STREAM);
+    type = option_call(kernel, group, f, OK_SOL_SOCKET, OK_SO_TYPE, 1);
+    expect(type.result == 0 && type.length == 1 && (type.value & 0xff) == OK_SOCK_STREAM && (type.value >> 8) == 0xa5a5a5);
+    expect(option_call(kernel, group, f, OK_SOL_SOCKET, OK_SO_TYPE, -1).result == -22);
+    expect(option_call(kernel, group, f, 6, 1).result == -95);
+    expect(invoke(kernel, group, 3, {static_cast<uptr>(fd)}) == 0);
+    retire(kernel, group);
+}
+// A connected UDP socket whose peer refused a datagram: the next sendto
+// reports ECONNREFUSED once (both personalities), and SO_ERROR takes it too.
+void udp_refusal(Kernel &kernel, bool linux)
+{
+    const auto group = create(kernel, linux);
+    // Nonblocking: a blocking Linux UDP send needs its captured continuation.
+    const auto fd = invoke(kernel, group, 41, {2, OK_SOCK_DGRAM | OK_SOCK_NONBLOCK, 0}); expect(fd >= 3);
+    const auto *process = kernel.scheduler().find(group.pid); CHECK(process);
+    const auto *description = kernel.scheduler().open_description(process->fd_table().entry(static_cast<i32>(fd))->description);
+    CHECK(description && description->native_udp_handle);
+    const u32 udp = description->native_udp_handle;
+    CHECK(kernel.native_udp().connect(udp, link.peer_ip, 7200));
+    const auto binding = kernel.native_udp().binding(udp); CHECK(binding);
+    const net::wire::IcmpErrorClass refused{net::wire::IcmpErrorKind::refused, true, 0};
+    const auto refuse = [&] {
+        auto taken = kernel.native_udp().icmp_error(binding.value().address, binding.value().port, link.peer_ip, 7200, refused);
+        expect(taken && taken.value());
+    };
+    const std::array<std::byte, 3> bytes{std::byte{'u'}, std::byte{'d'}, std::byte{'p'}};
+    std::copy(bytes.begin(), bytes.end(), mock::memory.begin() + 128);
+    const auto send = [&] {
+        address(link.peer_ip, 7200);
+        return invoke(kernel, group, 44, {static_cast<uptr>(fd), payload_pointer, bytes.size(), 0, address_pointer, 16});
+    };
+    refuse();
+    expect(send() == -111);
+    expect(send() == 3);
+    extension.head = extension.count = 0;
+    const auto f = static_cast<i32>(fd);
+    refuse();
+    auto taken = option_call(kernel, group, f, OK_SOL_SOCKET, OK_SO_ERROR);
+    expect(taken.result == 0 && taken.length == 4 && taken.value == 111);
+    taken = option_call(kernel, group, f, OK_SOL_SOCKET, OK_SO_ERROR);
+    expect(taken.result == 0 && taken.value == 0);
+    const auto type = option_call(kernel, group, f, OK_SOL_SOCKET, OK_SO_TYPE);
+    expect(type.result == 0 && type.length == 4 && type.value == OK_SOCK_DGRAM);
+    expect(option_call(kernel, group, f, 0, 1).result == -95);
     expect(invoke(kernel, group, 3, {static_cast<uptr>(fd)}) == 0);
     retire(kernel, group);
 }
@@ -451,10 +531,12 @@ int main()
     ipv6_exercise(kernel, false, 56001); ipv6_exercise(kernel, true, 56011);
     listener_errors(kernel, false, 55001); listener_errors(kernel, true, 55002);
     exercise(kernel, false, 54001); exercise(kernel, true, 54002);
-    icmp_refusal(kernel, false, 53001, net::wire::icmpv4::port_unreachable, -111);
-    icmp_refusal(kernel, true, 53002, net::wire::icmpv4::port_unreachable, -111);
-    icmp_refusal(kernel, true, 53003, 10, -113);
-    icmp_refusal(kernel, true, 53004, 6, -101);
+    icmp_refusal(kernel, false, 53001, net::wire::icmpv4::port_unreachable, -111, Report::read);
+    icmp_refusal(kernel, true, 53002, net::wire::icmpv4::port_unreachable, -111, Report::option);
+    icmp_refusal(kernel, false, 53005, net::wire::icmpv4::port_unreachable, -111, Report::option);
+    icmp_refusal(kernel, true, 53003, 10, -113, Report::connect);
+    icmp_refusal(kernel, true, 53004, 6, -101, Report::read);
+    udp_refusal(kernel, false); udp_refusal(kernel, true);
     const auto before = kernel.native_udp_executor().state(); expect(before.active && !before.failed);
     extension.failed = true; expect(!kernel.poll_network());
     const auto after = kernel.native_udp_executor().state(); expect(after.failed && after.readiness_sequence > before.readiness_sequence);

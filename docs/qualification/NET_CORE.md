@@ -157,6 +157,16 @@ queues, TCP socket names. This note grows with each slice.
   or at its timeout. Any other descriptor keeps the per-pass rescan. UDP
   receive waits wake from their socket queue only, and a failed executor
   wakes all of them.
+- A failure is reported once, as Linux `sock_error` clears `sk_err`.
+  - TCP: the next read, write, connect or `getsockopt(SO_ERROR)` takes it.
+    Afterwards the closed connection reads EOF, writes EPIPE and polls
+    without POLLERR. `SO_ERROR` also takes a remembered soft ICMP error
+    (`sk_err_soft`).
+  - UDP: `SO_ERROR` takes a pending refusal like a receive or send would.
+    getsockopt on a UDP socket used to be ENOTSOCK.
+  - `SO_TYPE` reports SOCK_STREAM or SOCK_DGRAM. Option lengths follow
+    `sock_getsockopt`: a negative length is EINVAL, at most four bytes are
+    copied, and the copied size is written back.
 - TCP getsockname reports the bound name (an unbound stream reports the
   family's unspecified address). getpeername reports the peer of a connected
   stream and ENOTCONN in SYN_SENT, CLOSE and LISTEN (Linux `inet_getname`).
@@ -171,9 +181,11 @@ queues, TCP socket names. This note grows with each slice.
   MSS is never raised again and there is no black-hole detection.
 
 - An ICMP error is not checked against the packet's original destination
-  beyond the quoted endpoints, and socket errors stay reported until close
-  (no `SO_ERROR` read-and-clear; getsockopt stays EOPNOTSUPP). There is no
-  `IP_RECVERR` error queue.
+  beyond the quoted endpoints. There is no `IP_RECVERR` error queue, and
+  getsockopt knows only `SO_ERROR` and `SO_TYPE` (other options are
+  EOPNOTSUPP rather than ENOPROTOOPT; setsockopt stays unsupported). A
+  second connect after a failed one whose error was reported is EISCONN
+  rather than a new attempt.
 - The OS's default image keeps the static link (gateway as a permanent
   neighbour); only its `net_probe` image uses the routed interface. DHCP and
   a configurable address belong to OS services.
@@ -227,9 +239,12 @@ queues, TCP socket names. This note grows with each slice.
   - `tcp_streams_tests` routes errors through the executor and wakes a
     connect waiter.
   - `tcp_immediate_runtime_tests` covers ECONNREFUSED, EHOSTUNREACH and
-    ENETUNREACH from an ICMP-refused connect, TCP names, the TCP poll states,
-    and a blocking poll that stays unevaluated over idle passes until data
-    arrives.
+    ENETUNREACH from an ICMP-refused connect. Each is reported once, by a
+    read, `SO_ERROR` or a second connect, and is then followed by EOF, EPIPE
+    and no POLLERR. It also covers TCP names, `SO_TYPE` and option lengths,
+    UDP sendto and `SO_ERROR` after a refusal (both personalities), the TCP
+    poll states, and a blocking poll that stays unevaluated over idle passes
+    until data arrives.
   - `native_udp_receive_tests` covers a blocked receiver woken with
     ECONNREFUSED, POLLERR and the same gating for UDP.
   - `scripts/test_net_runtime.py` builds and runs these runtime suites with

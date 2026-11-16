@@ -13,8 +13,8 @@ namespace ok::net
 // - during the handshake the stream is neither readable nor writable;
 // - a received FIN makes it readable; a closed connection (finished, reset,
 //   refused or timed out) has both directions shut down and so reports
-//   POLLIN, POLLOUT and POLLHUP, plus POLLERR when it failed.
-// Errors stay reported: the connection keeps its failure until it is closed.
+//   POLLIN, POLLOUT and POLLHUP, plus POLLERR while its failure is not yet
+//   reported (Linux sk_err).
 [[nodiscard]] inline Result<posix::DescriptorReadiness> native_tcp_descriptor_readiness(
     const NativeTcpStreamService &service, TcpStreamHandle handle, posix::ReadyEvents requested)
 {
@@ -46,7 +46,7 @@ namespace ok::net
         if (t.receive_buffered) ready.events |= requested & E::readable;
         if (send_shutdown || r.writable_bytes) ready.events |= requested & E::writable;
     }
-    if (state.value().terminal || t.failure != tcp::Failure::none) ready.events |= E::error;
+    if (state.value().terminal || t.error_pending) ready.events |= E::error;
     return ready;
 }
 

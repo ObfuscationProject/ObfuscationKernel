@@ -359,6 +359,9 @@ void icmp_errors()
         auto taken = c.icmp_error(r.error, r.quote.sequence, 5); CHECK(taken && taken.value());
         CHECK(c.snapshot().state == State::closed && c.snapshot().failure == Failure::refused);
         auto closed = c.icmp_error(r.error, iss, 6); CHECK(closed && !closed.value());
+        // Reported once (sock_error); the failure itself stays.
+        CHECK(c.snapshot().error_pending && c.take_error() == Failure::refused);
+        CHECK(!c.snapshot().error_pending && c.take_error(true) == Failure::none && c.snapshot().failure == Failure::refused);
     }
     // A soft error is remembered and named when the handshake times out.
     {
@@ -388,7 +391,11 @@ void icmp_errors()
         const auto r = icmp_about(store.back(), icmpv4::time_exceeded, 0);
         CHECK(r.error.kind == K::host_unreachable && !r.error.hard && r.quote.sequence == iss + 1 + 536);
         auto taken = c.icmp_error(r.error, r.quote.sequence, 110); CHECK(taken && taken.value());
-        exhaust(c); CHECK(c.snapshot().failure == Failure::host_unreachable);
+        // SO_ERROR takes a soft error (sk_err_soft); a read does not.
+        CHECK(!c.snapshot().error_pending && c.take_error() == Failure::none);
+        CHECK(c.take_error(true) == Failure::host_unreachable && c.take_error(true) == Failure::none);
+        taken = c.icmp_error(r.error, r.quote.sequence, 111); CHECK(taken && taken.value());
+        exhaust(c); CHECK(c.snapshot().failure == Failure::host_unreachable && c.snapshot().error_pending);
     }
     // Fragmentation needed lowers the segment size and resends the head at it.
     {
