@@ -19,6 +19,10 @@ ARCHITECTURES = (
     "i386", "x86_64", "aarch64", "arm32", "rv64", "rv32", "loongarch64",
     "mips", "mips64", "ppc",
 )
+# Profiles that start secondary CPUs, so their fine locks are spin locks. Kept
+# by hand: the define itself follows src/arch/<arch>/smp.cpp, as in
+# xmake/arch.lua, and the test checks the two agree.
+SMP_START = ("x86_64", "aarch64", "rv64")
 
 
 def main() -> None:
@@ -37,6 +41,8 @@ def main() -> None:
                 "-Wpedantic", "-Werror", f"-I{root / 'include'}",
                 "-ffunction-sections", "-fdata-sections", "-Wl,--gc-sections",
                 f"-DOK_ARCH_TARGET_{architecture.upper()}",
+                *(["-DOK_ARCH_SMP_START"] if (root / "src/arch" / architecture / "smp.cpp").is_file() else []),
+                f"-DOK_EXPECT_CONCURRENT_LOCKS={int(architecture in SMP_START)}",
                 str(root / "tests/host/static_dispatch_tests.cpp"),
                 str(root / "src/sched/scheduler.cpp"),
                 str(root / "src/sched/process.cpp"),
@@ -52,7 +58,8 @@ def main() -> None:
                 command += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie"]
             subprocess.run(command, check=True)
             subprocess.run([str(executable)], check=True)
-            print(f"PASS {architecture}: static architecture dispatch, two scheduler policies and the dispatch lock tables",
+            print(f"PASS {architecture}: static architecture dispatch, two scheduler policies, the dispatch lock tables "
+                  f"and fine-lock selection (concurrent={architecture in SMP_START})",
                   flush=True)
 
 

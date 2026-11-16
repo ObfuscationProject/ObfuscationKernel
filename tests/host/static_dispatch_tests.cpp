@@ -232,8 +232,43 @@ void test_alternate_policy_and_ownership()
 } // namespace
 
 // Every syscall of every profile still dispatches under the big kernel lock,
-// and fine locks are selected at build time (an UpLock without
-// OK_ARCH_SMP_START or OK_HOSTED_LOCK_MODEL).
+// and fine locks are selected at build time: the spin lock on the profiles
+// that start secondaries (scripts/test_static_dispatch.py passes
+// OK_ARCH_SMP_START as xmake/arch.lua does, and OK_EXPECT_CONCURRENT_LOCKS
+// from its own fixed list), an UpLock elsewhere.
+#if !defined(OK_EXPECT_CONCURRENT_LOCKS)
+#error "scripts/test_static_dispatch.py defines OK_EXPECT_CONCURRENT_LOCKS"
+#endif
+static_assert(smp::concurrent_locks == (OK_EXPECT_CONCURRENT_LOCKS != 0),
+              "OK_ARCH_SMP_START does not match the profile's SMP start");
+static_assert(std::is_same_v<smp::FineLock<smp::LockRank::task>, smp::RankedSpinLock<smp::LockRank::task>> ==
+              (OK_EXPECT_CONCURRENT_LOCKS != 0));
+
+// A flipped row dispatches unlocked unless the build forces the lock, on
+// every profile; indices past a table stay under the lock.
+void test_dispatch_policy_rows()
+{
+    namespace policy = user::native::dispatch_policy;
+    constexpr auto flipped = [] {
+        auto table = policy::all_bkl<policy::LinuxLockTable>();
+        table[3] = policy::LockMode::unlocked;
+        return table;
+    }();
+    static_assert(!policy::row_requires_bkl(flipped, 3, false));
+    static_assert(policy::row_requires_bkl(flipped, 3, true));
+    static_assert(policy::row_requires_bkl(flipped, 2, false));
+    static_assert(policy::row_requires_bkl(flipped, flipped.size(), false));
+    constexpr auto native = [] {
+        auto table = policy::all_bkl<policy::NativeLockTable>();
+        table[0] = policy::LockMode::unlocked;
+        return table;
+    }();
+    static_assert(!policy::row_requires_bkl(native, 0, false) && policy::row_requires_bkl(native, 0, true));
+    // This runner builds without OK_BKL_DISPATCH_FORCED: the tables decide.
+    static_assert(!policy::bkl_dispatch_forced);
+    check(!policy::row_requires_bkl(flipped, 3, policy::bkl_dispatch_forced));
+}
+
 template <usize... Profiles> void test_dispatch_policy_tables(std::index_sequence<Profiles...>)
 {
     namespace policy = user::native::dispatch_policy;
@@ -251,13 +286,13 @@ template <usize... Profiles> void test_dispatch_policy_tables(std::index_sequenc
                    static_cast<abi::linux_user::Operation>(operation)) && ...));
     for (u64 number = 0; number < policy::native_syscall_limit + 8; ++number)
         check(policy::native_bkl_required(number));
-    static_assert(std::is_same_v<smp::FineLock<smp::LockRank::task>, smp::UpLock<smp::LockRank::task>> ==
-                  !smp::concurrent_locks);
+    check(policy::native_bkl_required(u64{1} << 40));
 }
 
 int main()
 {
     test_dispatch_policy_tables(std::make_index_sequence<user::native::dispatch_policy::profile_count>{});
+    test_dispatch_policy_rows();
     test_architecture_dispatch();
     test_reject_foreign_process_target();
     test_default_policy();
