@@ -33,11 +33,6 @@ inline constinit std::array<BklCpu, max_cpus> bkl_cpus{};
 
 namespace detail
 {
-inline void owner_add(std::atomic<uptr> &counter, uptr amount = 1) noexcept
-{
-    counter.store(counter.load(std::memory_order_relaxed) + amount, std::memory_order_relaxed);
-}
-
 inline void bkl_acquired(CpuId cpu, bool waited) noexcept
 {
     if (cpu >= max_cpus)
@@ -90,6 +85,26 @@ inline void bkl_unlock() noexcept
         bkl_count_done(cpu);
     kernel_lock.unlock();
 }
+
+// The frozen check (a group transition quiesces its threads): an
+// acquisition of the kernel lock made on behalf of a thread of `pid` asks it
+// after acquiring, and a frozen thread skips trap handling and dispatch.
+// Nothing installs it until group transitions freeze; until then no thread
+// is frozen and the check answers false.
+using BklFrozenCheck = bool (*)(u64 pid) noexcept;
+inline constinit BklFrozenCheck bkl_frozen_check{};
+
+[[nodiscard]] inline bool bkl_thread_frozen(u64 pid) noexcept
+{
+    const auto check = bkl_frozen_check;
+    return check != nullptr && check(pid);
+}
+
+// Try-only tokens, never waited for (TryToken): one CPU at a time stops or
+// restarts a secondary CPU, and one CPU at a time runs the runtime's
+// housekeeping sweeps.
+inline constinit TryToken hotplug_turn{};
+inline constinit TryToken housekeeping{};
 
 class BklGuard final
 {

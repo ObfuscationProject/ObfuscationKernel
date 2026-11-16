@@ -3,6 +3,7 @@
 #include "ok/arch/arch.hpp"
 #include "ok/core/types.hpp"
 #include "ok/smp/cpu.hpp"
+#include "ok/smp/lock.hpp"
 #include "ok/smp/smp.hpp"
 
 #include <array>
@@ -201,6 +202,7 @@ inline void end_user() noexcept
 // window before, so it is not waited for either. Returns the CPUs waited for.
 inline u32 quiesce_root(uptr root) noexcept
 {
+    static_cast<void>(check_class_wait("quiesce_root under a spin lock"));
     const auto mask = online_mask();
     if ((mask & (mask - 1)) == 0)
         return 0;

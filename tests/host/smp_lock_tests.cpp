@@ -1,6 +1,8 @@
-// Hosted model test for ranked spin locks (feat/smp-bringup). Threads stand in
-// for CPUs through ScopedHostedCpu; no CPU, interrupt mask or IPI executes.
-// Built twice: with OK_LOCK_DEBUG (the full suite) and without (release).
+// Hosted model test for ranked spin locks (feat/smp-bringup, smp-scaling WP0a).
+// Threads stand in for CPUs through ScopedHostedCpu; no CPU, interrupt mask or
+// IPI executes. Built with OK_LOCK_DEBUG (the full suite) and without
+// (release), each with OK_HOSTED_LOCK_MODEL (FineLock is the spin lock) and
+// without (FineLock is an UpLock).
 #include "ok/arch/arch.hpp"
 #include "ok/smp/cpu.hpp"
 #include "ok/smp/kernel_lock.hpp"
@@ -11,7 +13,9 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <string_view>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 using namespace ok;
@@ -31,14 +35,14 @@ void expect(bool condition, const char *what)
     }
 }
 
-using SchedulerLock = smp::RankedSpinLock<smp::LockRank::scheduler>;
+using TaskTableLock = smp::RankedSpinLock<smp::LockRank::task_table>;
+using TaskLock = smp::RankedSpinLock<smp::LockRank::task>;
 using RunQueueLock = smp::RankedSpinLock<smp::LockRank::run_queue>;
-using WaitQueueLock = smp::RankedSpinLock<smp::LockRank::wait_queue>;
 using ConsoleLock = smp::RankedSpinLock<smp::LockRank::console>;
 
 // Constant initialization is the kernel's only option for globals.
-constinit SchedulerLock global_scheduler_lock;
-constinit RunQueueLock global_run_queue_lock;
+constinit TaskTableLock global_task_table_lock;
+constinit TaskLock global_task_lock;
 
 constexpr int contention_threads = 4;
 constexpr int contention_rounds = 20000;
@@ -58,7 +62,7 @@ void check_contention()
             {
                 if (round % 2 == 0)
                 {
-                    SchedulerLock::Guard guard(global_scheduler_lock);
+                    TaskTableLock::Guard guard(global_task_table_lock);
                     if (inside.fetch_add(1, std::memory_order_relaxed) != 0)
                         overlap.store(true);
                     ++counter;
@@ -66,8 +70,8 @@ void check_contention()
                 }
                 else
                 {
-                    smp::RankedSpinGuard guard{global_scheduler_lock};
-                    smp::RankedSpinGuard nested{global_run_queue_lock};
+                    smp::RankedSpinGuard guard{global_task_table_lock};
+                    smp::RankedSpinGuard nested{global_task_lock};
                     if (inside.fetch_add(1, std::memory_order_relaxed) != 0)
                         overlap.store(true);
                     ++counter;
@@ -80,9 +84,9 @@ void check_contention()
         thread.join();
     expect(counter == long{contention_threads} * contention_rounds, "contended counter lost increments");
     expect(!overlap.load(), "two CPUs were inside the critical section");
-    expect(!global_scheduler_lock.owned_by_current_cpu() && global_scheduler_lock.try_lock(),
+    expect(!global_task_table_lock.owned_by_current_cpu() && global_task_table_lock.try_lock(),
            "contended lock was left held");
-    global_scheduler_lock.unlock();
+    global_task_table_lock.unlock();
 }
 
 // Fake interrupt mask: enabled until saved, restored only if it was enabled.
@@ -110,13 +114,13 @@ static_assert(smp::InterruptMask<FakeInterrupts>);
 
 void check_guards()
 {
-    SchedulerLock outer;
-    RunQueueLock inner;
+    TaskTableLock outer;
+    TaskLock inner;
     {
-        smp::RankedSpinGuard<smp::LockRank::scheduler, FakeInterrupts> guard{outer};
+        smp::RankedSpinGuard<smp::LockRank::task_table, FakeInterrupts> guard{outer};
         expect(!FakeInterrupts::enabled && outer.owned_by_current_cpu(), "guard did not mask before holding");
         {
-            smp::RankedSpinGuard<smp::LockRank::run_queue, FakeInterrupts> nested{inner};
+            smp::RankedSpinGuard<smp::LockRank::task, FakeInterrupts> nested{inner};
             expect(!FakeInterrupts::enabled && inner.owned_by_current_cpu(), "nested guard did not hold masked");
         }
         expect(!FakeInterrupts::enabled, "nested guard re-enabled interrupts the outer guard masked");
@@ -125,12 +129,12 @@ void check_guards()
     expect(FakeInterrupts::enabled && !outer.owned_by_current_cpu(), "guard did not restore enabled interrupts");
     FakeInterrupts::enabled = false;
     {
-        smp::RankedSpinGuard<smp::LockRank::scheduler, FakeInterrupts> guard{outer};
+        smp::RankedSpinGuard<smp::LockRank::task_table, FakeInterrupts> guard{outer};
     }
     expect(!FakeInterrupts::enabled, "guard enabled interrupts that were masked on entry");
     expect(FakeInterrupts::saves == 3 && FakeInterrupts::restores == 3, "guard save/restore count mismatch");
     {
-        RunQueueLock::Guard guard(inner);
+        TaskLock::Guard guard(inner);
         expect(inner.owned_by_current_cpu(), "plain guard did not hold");
     }
     expect(FakeInterrupts::saves == 3 && !inner.owned_by_current_cpu(), "plain guard touched interrupts or held");
@@ -157,7 +161,7 @@ void check_hosted_cpu()
     }
     expect(smp::current_cpu() == 0, "hosted CPU not restored");
     // A lock is owned per CPU, not per thread.
-    SchedulerLock lock;
+    TaskTableLock lock;
     {
         const smp::ScopedHostedCpu scoped(2);
         lock.lock();
@@ -170,7 +174,7 @@ void check_hosted_cpu()
         expect(!lock.owned_by_current_cpu(), "unlock left the owner");
     }
     // spin_pause in a waiter: CPU 1 waits while CPU 0 holds.
-    SchedulerLock contended;
+    TaskTableLock contended;
     contended.lock();
     std::atomic<bool> acquired{false};
     std::thread waiter([&] {
@@ -380,6 +384,210 @@ void check_gate_two_cpus()
     expect(entered.load() && gate.waits.load() == waits + 1 && smp::cpu_mode(7) == 0, "gate waiter accounting");
 }
 
+using FutexBucketLock = smp::RankedSpinLock<smp::LockRank::futex_bucket>;
+
+// Bucket pairs as futex WAKE_OP takes them: the lower index at its own rank,
+// the higher through lock_as. Four CPUs over three buckets keep every pair's
+// increments and never deadlock; contention is counted under the futex class.
+void check_lock_as_contention()
+{
+    std::array<FutexBucketLock, 3> buckets;
+    std::array<long, 3> counters{};
+    constexpr int rounds = 20000;
+    const auto contended = smp::lock_stat_total(smp::LockStat::futex, true);
+    std::vector<std::thread> threads;
+    for (int cpu = 0; cpu < 4; ++cpu)
+        threads.emplace_back([&, cpu] {
+            const smp::ScopedHostedCpu scoped(static_cast<smp::CpuId>(8 + cpu));
+            for (int round = 0; round < rounds; ++round)
+            {
+                const usize first = static_cast<usize>(round + cpu) % 3, second = static_cast<usize>(round + cpu + 1) % 3;
+                const usize low = first < second ? first : second, high = first < second ? second : first;
+                buckets[low].lock();
+                buckets[high].lock_as<smp::LockRank::futex_bucket_second>();
+                ++counters[low];
+                ++counters[high];
+                buckets[high].unlock();
+                buckets[low].unlock();
+            }
+        });
+    for (auto &thread : threads)
+        thread.join();
+    expect(counters[0] + counters[1] + counters[2] == 2L * 4 * rounds, "a bucket pair lost an increment");
+    for (auto &bucket : buckets)
+    {
+        expect(bucket.try_lock(), "a bucket was left held");
+        bucket.unlock();
+    }
+    for (smp::CpuId cpu = 8; cpu < 12; ++cpu)
+        expect(smp::lock_debug_depth(cpu) == 0 && smp::cpu_mode(cpu) == 0, "a bucket CPU kept a hold or a mode bit");
+    // Deterministic contention: CPU 12 waits through lock_as for a bucket CPU 13 holds.
+    std::atomic<bool> held{false}, release{false}, acquired{false};
+    std::thread holder([&] {
+        const smp::ScopedHostedCpu scoped(13);
+        buckets[1].lock();
+        held.store(true);
+        while (!release.load())
+            std::this_thread::yield();
+        buckets[1].unlock();
+    });
+    while (!held.load())
+        std::this_thread::yield();
+    std::thread waiter([&] {
+        const smp::ScopedHostedCpu scoped(12);
+        buckets[0].lock();
+        buckets[1].lock_as<smp::LockRank::futex_bucket_second>();
+        acquired.store(true);
+        buckets[1].unlock();
+        buckets[0].unlock();
+    });
+    bool spinning = false;
+    for (int spin = 0; spin < 1000000 && !spinning; ++spin)
+    {
+        spinning = (smp::cpu_mode(12) & smp::cpu_mode_spinning) != 0;
+        std::this_thread::yield();
+    }
+    expect(spinning && !acquired.load(), "a CPU waiting through lock_as was not marked SPINNING or got in");
+    release.store(true);
+    holder.join();
+    waiter.join();
+    expect(acquired.load() && smp::lock_stat_total(smp::LockStat::futex, true) > contended,
+           "bucket contention was not counted");
+}
+
+// FineLock is the spin lock where CPUs run concurrently (this suite builds
+// with OK_HOSTED_LOCK_MODEL and without it) and an UpLock elsewhere; both
+// fit the run queue's lock shape and the ranked-lock interface.
+void check_fine_lock_selection()
+{
+    using Fine = smp::FineLock<smp::LockRank::run_queue>;
+    static_assert(std::is_same_v<Fine, smp::RankedSpinLock<smp::LockRank::run_queue>> == smp::concurrent_locks);
+    static_assert(smp::RankedLock<Fine> && Fine::rank == smp::LockRank::run_queue);
+#if defined(OK_HOSTED_LOCK_MODEL)
+    static_assert(smp::concurrent_locks);
+#else
+    static_assert(!smp::concurrent_locks);
+#endif
+    smp::UpLock<smp::LockRank::task> up;
+    expect(!up.lock() && up.owned_by_current_cpu(), "UpLock lock() waited or was not held");
+    up.unlock();
+    {
+        smp::UpLock<smp::LockRank::task>::Guard guard(up);
+        expect(up.owned_by_current_cpu(), "UpLock guard did not hold");
+    }
+    expect(up.try_lock(), "UpLock try_lock of a free lock failed");
+    up.unlock();
+#if !defined(OK_LOCK_DEBUG)
+    static_assert(sizeof(smp::UpLock<smp::LockRank::task>) == 1); // Empty.
+#endif
+    Fine fine;
+    expect(!fine.lock() && fine.owned_by_current_cpu(), "an uncontended FineLock waited or was not held");
+    fine.unlock();
+}
+
+// Try-only tokens: one holder, never waited for, never recorded; their holder
+// may give the kernel lock up and take it again meanwhile.
+void check_try_tokens()
+{
+    smp::TryToken token;
+    expect(!token.held() && token.try_lock() && token.owned_by_current_cpu() && token.held(), "token try_lock");
+    expect(!token.try_lock(), "a held token was taken again");
+    expect(smp::lock_debug_depth(0) == 0, "a token hold was recorded");
+    smp::bkl_lock();
+    smp::bkl_unlock();
+    smp::bkl_lock();
+    smp::bkl_unlock();
+    std::thread other([&] {
+        const smp::ScopedHostedCpu scoped(1);
+        expect(!token.try_lock() && !token.owned_by_current_cpu(), "another CPU took or owned a held token");
+    });
+    other.join();
+    token.unlock();
+    expect(!token.held() && !token.owned_by_current_cpu(), "token unlock");
+    expect(smp::check_held(smp::hotplug_turn, "model hotplug turn") == !smp::lock_debug_enabled,
+           "check_held passed a free token in a debug build");
+    expect(smp::hotplug_turn.try_lock(), "hotplug turn");
+    expect(smp::check_held(smp::hotplug_turn, "model hotplug turn"), "check_held of the held turn");
+    smp::hotplug_turn.unlock();
+    expect(smp::housekeeping.try_lock() && !smp::housekeeping.try_lock(), "housekeeping token");
+    smp::housekeeping.unlock();
+    // Mutual exclusion under contention through try_lock only.
+    long counter = 0;
+    std::atomic<int> inside{0};
+    std::atomic<bool> overlap{false};
+    std::vector<std::thread> threads;
+    for (int cpu = 0; cpu < 4; ++cpu)
+        threads.emplace_back([&, cpu] {
+            const smp::ScopedHostedCpu scoped(static_cast<smp::CpuId>(cpu));
+            for (int round = 0; round < 20000;)
+            {
+                if (!token.try_lock())
+                    continue;
+                if (inside.fetch_add(1) != 0)
+                    overlap.store(true);
+                ++counter;
+                inside.fetch_sub(1);
+                token.unlock();
+                ++round;
+            }
+        });
+    for (auto &thread : threads)
+        thread.join();
+    expect(!overlap.load() && counter == 4L * 20000 && !token.held(), "token mutual exclusion");
+}
+
+// The frozen check answers false until a runtime installs it.
+void check_frozen_hook()
+{
+    expect(!smp::bkl_thread_frozen(7), "a thread was frozen without a check");
+    smp::bkl_frozen_check = [](u64 pid) noexcept { return pid == 7; };
+    expect(smp::bkl_thread_frozen(7) && !smp::bkl_thread_frozen(8), "the installed frozen check was not asked");
+    smp::bkl_frozen_check = nullptr;
+}
+
+// The top-half mode bit nests like SPINNING.
+void check_top_half_scope()
+{
+    {
+        const smp::TopHalfScope outer;
+        {
+            const smp::TopHalfScope inner;
+        }
+        expect((smp::cpu_mode(0) & smp::cpu_mode_top_half) != 0, "a nested TopHalfScope cleared the outer bit");
+    }
+    expect(smp::cpu_mode(0) == 0, "TopHalfScope left TOP_HALF set");
+}
+
+// The rank table: every class B rank below every class A rank, top halves
+// from irq_router up, bottom halves from device up.
+void check_rank_table()
+{
+    static_assert(smp::lock_class(smp::LockRank::big_kernel) == smp::LockClass::serving);
+    static_assert(smp::lock_class(smp::LockRank::mm) == smp::LockClass::serving);
+    static_assert(smp::lock_class(smp::LockRank::files) == smp::LockClass::spin);
+    static_assert(smp::LockRank::vfs_namespace < smp::LockRank::ofd_position &&
+                  smp::LockRank::ofd_position < smp::LockRank::fs_provider &&
+                  smp::LockRank::fs_provider < smp::LockRank::block_request &&
+                  smp::LockRank::block_request < smp::LockRank::mm && smp::LockRank::mm < smp::LockRank::files);
+    static_assert(smp::LockRank::futex_bucket < smp::LockRank::futex_bucket_second &&
+                  smp::LockRank::futex_bucket_second < smp::LockRank::task_table &&
+                  smp::LockRank::task_table < smp::LockRank::device &&
+                  smp::LockRank::device < smp::LockRank::wait_hash && smp::LockRank::wait_hash < smp::LockRank::task &&
+                  smp::LockRank::task < smp::LockRank::deadline && smp::LockRank::deadline < smp::LockRank::run_queue);
+    static_assert(smp::LockRank::page_pool < smp::LockRank::slab && smp::LockRank::slab < smp::LockRank::frame &&
+                  smp::LockRank::frame < smp::top_half_floor &&
+                  smp::top_half_floor < smp::LockRank::hotplug_request &&
+                  smp::LockRank::hotplug_request < smp::LockRank::console &&
+                  smp::LockRank::console < smp::LockRank::runtime_status &&
+                  smp::LockRank::runtime_status < smp::LockRank::driver_abi);
+    static_assert(smp::bottom_half_floor == smp::LockRank::device && smp::top_half_floor == smp::LockRank::irq_router);
+    static_assert(smp::lock_stat(smp::LockRank::futex_bucket_second) == smp::LockStat::futex &&
+                  smp::lock_stat(smp::LockRank::console) == smp::LockStat::none);
+    expect(smp::lock_stat_names[static_cast<usize>(smp::LockStat::frame)] == "frame" &&
+               smp::kernel_check_names[static_cast<usize>(smp::KernelCheck::poll_audit_ready)] == "poll_audit_ready",
+           "report name tables out of order");
+}
+
 #if defined(OK_LOCK_DEBUG)
 
 struct Reports
@@ -427,59 +635,59 @@ template <typename Body> void on_cpu(smp::CpuId cpu, Body body)
 void check_order_violation()
 {
     on_cpu(0, [] {
-        SchedulerLock scheduler;
-        RunQueueLock run_queue;
-        WaitQueueLock wait_queue;
-        scheduler.lock();
-        run_queue.lock();
-        wait_queue.lock();
+        TaskTableLock table;
+        TaskLock task;
+        RunQueueLock queue;
+        table.lock();
+        task.lock();
+        queue.lock();
         expect(reports.count == 0 && record(0).depth == 3, "ordered acquisition reported");
-        wait_queue.unlock();
-        run_queue.unlock();
-        scheduler.unlock();
+        queue.unlock();
+        task.unlock();
+        table.unlock();
         expect(reports.count == 0 && record(0).depth == 0, "ordered release reported");
 
         const auto before = smp::lock_violation_count(0);
-        run_queue.lock();
-        scheduler.lock(); // Free, so it proceeds after the report.
-        expect(reported(smp::LockViolationKind::order, smp::LockRank::run_queue, smp::LockRank::scheduler,
-                        &scheduler, 0),
+        task.lock();
+        table.lock(); // Free, so it proceeds after the report.
+        expect(reported(smp::LockViolationKind::order, smp::LockRank::task, smp::LockRank::task_table,
+                        &table, 0),
                "reverse order not reported");
-        expect(scheduler.owned_by_current_cpu(), "reverse-order lock() did not take a free lock");
+        expect(table.owned_by_current_cpu(), "reverse-order lock() did not take a free lock");
         expect(smp::lock_violation_count(0) == before + 1, "violation not counted on its CPU");
-        scheduler.unlock();
-        run_queue.unlock();
+        table.unlock();
+        task.unlock();
         expect(reports.count == 1, "LIFO release after a reported order reported again");
 
-        // Equal rank is not strictly above: two run queues need a defined order.
+        // Equal rank is not strictly above: two task locks need a defined order.
         reset_reports();
-        RunQueueLock other;
-        run_queue.lock();
+        TaskLock other;
+        task.lock();
         other.lock();
-        expect(reported(smp::LockViolationKind::order, smp::LockRank::run_queue, smp::LockRank::run_queue, &other,
+        expect(reported(smp::LockViolationKind::order, smp::LockRank::task, smp::LockRank::task, &other,
                         0),
                "equal rank not reported");
         other.unlock();
-        run_queue.unlock();
+        task.unlock();
 
         // The order check compares against every hold, not just the top.
         reset_reports();
         ConsoleLock console;
-        scheduler.lock();
+        table.lock();
         console.lock();
-        expect(run_queue.try_lock(), "try_lock under a higher rank failed");
-        expect(reported(smp::LockViolationKind::order, smp::LockRank::console, smp::LockRank::run_queue, &run_queue,
+        expect(task.try_lock(), "try_lock under a higher rank failed");
+        expect(reported(smp::LockViolationKind::order, smp::LockRank::console, smp::LockRank::task, &task,
                         0),
                "try_lock below a held rank not reported");
         reset_reports();
-        WaitQueueLock wait;
+        RunQueueLock wait;
         wait.lock();
-        expect(reported(smp::LockViolationKind::order, smp::LockRank::console, smp::LockRank::wait_queue, &wait, 0),
+        expect(reported(smp::LockViolationKind::order, smp::LockRank::console, smp::LockRank::run_queue, &wait, 0),
                "rank below a non-top hold not reported");
         wait.unlock();
-        run_queue.unlock();
+        task.unlock();
         console.unlock();
-        scheduler.unlock();
+        table.unlock();
         expect(reports.count == 1, "LIFO release reported");
     });
 }
@@ -487,11 +695,11 @@ void check_order_violation()
 void check_self_deadlock()
 {
     on_cpu(1, [] {
-        SchedulerLock lock;
+        TaskTableLock lock;
         lock.lock();
         // Reported before spinning: the second lock() returns instead of hanging.
         lock.lock();
-        expect(reported(smp::LockViolationKind::self_deadlock, smp::LockRank::scheduler, smp::LockRank::scheduler,
+        expect(reported(smp::LockViolationKind::self_deadlock, smp::LockRank::task_table, smp::LockRank::task_table,
                         &lock, 1),
                "self-deadlock not reported");
         expect(lock.owned_by_current_cpu() && record(1).depth == 1, "self-deadlock changed the hold");
@@ -507,9 +715,9 @@ void check_self_deadlock()
 void check_unlock_not_owner()
 {
     on_cpu(2, [] {
-        SchedulerLock lock;
+        TaskTableLock lock;
         lock.unlock(); // Free.
-        expect(reported(smp::LockViolationKind::not_owner, smp::LockRank::scheduler, smp::LockRank::scheduler, &lock,
+        expect(reported(smp::LockViolationKind::not_owner, smp::LockRank::task_table, smp::LockRank::task_table, &lock,
                         2),
                "unlock of a free lock not reported");
         reset_reports();
@@ -517,7 +725,7 @@ void check_unlock_not_owner()
         std::thread foreign([&] {
             const smp::ScopedHostedCpu scoped(3);
             lock.unlock(); // Held by CPU 2.
-            expect(reported(smp::LockViolationKind::not_owner, smp::LockRank::scheduler, smp::LockRank::scheduler,
+            expect(reported(smp::LockViolationKind::not_owner, smp::LockRank::task_table, smp::LockRank::task_table,
                             &lock, 3),
                    "unlock of another CPU's lock not reported");
             expect(!lock.try_lock(), "foreign unlock released the owner's lock");
@@ -532,22 +740,22 @@ void check_unlock_not_owner()
 void check_lifo_violation()
 {
     on_cpu(3, [] {
-        SchedulerLock scheduler;
-        RunQueueLock run_queue;
-        WaitQueueLock wait_queue;
-        scheduler.lock();
-        run_queue.lock();
-        wait_queue.lock();
-        run_queue.unlock();
-        expect(reported(smp::LockViolationKind::unlock_order, smp::LockRank::wait_queue, smp::LockRank::run_queue,
-                        &run_queue, 3),
+        TaskTableLock table;
+        TaskLock task;
+        RunQueueLock queue;
+        table.lock();
+        task.lock();
+        queue.lock();
+        task.unlock();
+        expect(reported(smp::LockViolationKind::unlock_order, smp::LockRank::run_queue, smp::LockRank::task,
+                        &task, 3),
                "out-of-order unlock not reported");
-        expect(!run_queue.owned_by_current_cpu(), "out-of-order unlock did not release");
+        expect(!task.owned_by_current_cpu(), "out-of-order unlock did not release");
         const auto &cpu = record(3);
-        expect(cpu.depth == 2 && cpu.locks[0] == &scheduler && cpu.locks[1] == &wait_queue,
+        expect(cpu.depth == 2 && cpu.locks[0] == &table && cpu.locks[1] == &queue,
                "out-of-order unlock left the record inconsistent");
-        wait_queue.unlock();
-        scheduler.unlock();
+        queue.unlock();
+        table.unlock();
         expect(reports.count == 1, "release after repair reported");
     });
 }
@@ -555,36 +763,36 @@ void check_lifo_violation()
 void check_try_lock_order()
 {
     on_cpu(0, [] {
-        SchedulerLock scheduler;
-        RunQueueLock run_queue;
-        expect(scheduler.try_lock() && run_queue.try_lock() && reports.count == 0, "ordered try_lock reported");
-        run_queue.unlock();
-        scheduler.unlock();
-        run_queue.lock();
+        TaskTableLock table;
+        TaskLock task;
+        expect(table.try_lock() && task.try_lock() && reports.count == 0, "ordered try_lock reported");
+        task.unlock();
+        table.unlock();
+        task.lock();
         // It takes the free lock and records the hold, and reports the order.
-        expect(scheduler.try_lock(), "try_lock below a held rank failed");
-        expect(reported(smp::LockViolationKind::order, smp::LockRank::run_queue, smp::LockRank::scheduler,
-                        &scheduler, 0),
+        expect(table.try_lock(), "try_lock below a held rank failed");
+        expect(reported(smp::LockViolationKind::order, smp::LockRank::task, smp::LockRank::task_table,
+                        &table, 0),
                "try_lock below a held rank not reported");
-        expect(record(0).depth == 2 && record(0).locks[1] == &scheduler, "try_lock hold not recorded");
-        expect(!scheduler.try_lock() && reports.count == 1, "try_lock of an own lock was reported or succeeded");
-        scheduler.unlock();
-        run_queue.unlock();
+        expect(record(0).depth == 2 && record(0).locks[1] == &table, "try_lock hold not recorded");
+        expect(!table.try_lock() && reports.count == 1, "try_lock of an own lock was reported or succeeded");
+        table.unlock();
+        task.unlock();
         expect(reports.count == 1, "release after try_lock reported");
         // A failed try takes no hold and reports nothing.
         reset_reports();
-        run_queue.lock();
+        task.lock();
         std::thread holder([&] {
             const smp::ScopedHostedCpu scoped(1);
-            scheduler.lock();
+            table.lock();
         });
         holder.join();
-        expect(!scheduler.try_lock() && reports.count == 0 && record(0).depth == 1,
+        expect(!table.try_lock() && reports.count == 0 && record(0).depth == 1,
                "a failed try_lock reported or recorded");
-        run_queue.unlock();
+        task.unlock();
         std::thread releaser([&] {
             const smp::ScopedHostedCpu scoped(1);
-            scheduler.unlock();
+            table.unlock();
         });
         releaser.join();
     });
@@ -593,24 +801,33 @@ void check_try_lock_order()
 void check_nesting_overflow()
 {
     on_cpu(1, [] {
-        // Nine holds in strictly increasing rank, one past the record.
-        static_assert(smp::lock_debug_capacity + 1 == 9);
+        // The deepest chain the lock order plans (a file read whose device
+        // wait drains a bottom half, during the migration under the kernel
+        // lock) fits the record; one more hold overflows it.
+        static_assert(smp::lock_debug_capacity == 12);
         smp::RankedSpinLock<smp::LockRank::big_kernel> l0;
         smp::RankedSpinLock<smp::LockRank::ofd_position> l1;
         smp::RankedSpinLock<smp::LockRank::fs_provider> l2;
-        SchedulerLock l3;
-        RunQueueLock l4;
-        WaitQueueLock l5;
-        smp::RankedSpinLock<smp::LockRank::ipi> l6;
-        smp::RankedSpinLock<smp::LockRank::tlb> l7;
-        smp::RankedSpinLock<smp::LockRank::arch_spaces> l8;
-        l0.lock(); l1.lock(); l2.lock(); l3.lock(); l4.lock(); l5.lock(); l6.lock(); l7.lock();
+        smp::RankedSpinLock<smp::LockRank::block_request> l3;
+        smp::RankedSpinLock<smp::LockRank::mm> l4;
+        smp::RankedSpinLock<smp::LockRank::files> l5;
+        smp::RankedSpinLock<smp::LockRank::device> l6;
+        smp::RankedSpinLock<smp::LockRank::wait_hash> l7;
+        TaskLock l8;
+        RunQueueLock l9;
+        smp::RankedSpinLock<smp::LockRank::frame> l10;
+        ConsoleLock l11;
+        smp::RankedSpinLock<smp::LockRank::runtime_status> l12;
+        l0.lock(); l1.lock(); l2.lock(); l3.lock(); l4.lock(); l5.lock(); l6.lock(); l7.lock(); l8.lock();
+        l9.lock(); l10.lock(); l11.lock();
         expect(reports.count == 0 && record(1).depth == smp::lock_debug_capacity, "ordered holds reported");
-        l8.lock();
-        expect(reports.count == 1 && reports.last.kind == smp::LockViolationKind::nesting && reports.last.lock == &l8,
+        expect(smp::lock_debug_max_depth(1) == smp::lock_debug_capacity, "deepest nesting not recorded");
+        l12.lock();
+        expect(reports.count == 1 && reports.last.kind == smp::LockViolationKind::nesting &&
+                   reports.last.lock == &l12,
                "nesting overflow not reported");
-        l8.unlock(); l7.unlock(); l6.unlock(); l5.unlock(); l4.unlock(); l3.unlock(); l2.unlock(); l1.unlock();
-        l0.unlock();
+        l12.unlock(); l11.unlock(); l10.unlock(); l9.unlock(); l8.unlock(); l7.unlock(); l6.unlock();
+        l5.unlock(); l4.unlock(); l3.unlock(); l2.unlock(); l1.unlock(); l0.unlock();
         expect(reports.count == 1, "release after overflow reported");
     });
 }
@@ -648,10 +865,158 @@ void check_null_handler_counts()
         const auto previous = smp::lock_violation_handler;
         smp::lock_violation_handler = nullptr;
         const auto before = smp::lock_violation_count(2);
-        SchedulerLock lock;
+        TaskTableLock lock;
         lock.unlock();
         smp::lock_violation_handler = previous;
         expect(smp::lock_violation_count(2) == before + 1 && reports.count == 0, "null handler did not only count");
+    });
+}
+
+// lock_as records the one acquisition at the wanted rank: a same-rank pair is
+// in order, the record names the nested rank, an out-of-order release names
+// it too, and a plain second lock() of the same rank is still reported.
+void check_lock_as()
+{
+    on_cpu(4, [] {
+        FutexBucketLock lower, higher;
+        lower.lock();
+        higher.lock_as<smp::LockRank::futex_bucket_second>();
+        expect(reports.count == 0 && record(4).depth == 2 &&
+                   record(4).ranks[1] == smp::LockRank::futex_bucket_second && record(4).locks[1] == &higher,
+               "lock_as was reported or not recorded at its rank");
+        lower.unlock();
+        expect(reported(smp::LockViolationKind::unlock_order, smp::LockRank::futex_bucket_second,
+                        smp::LockRank::futex_bucket, &lower, 4),
+               "out-of-order release under lock_as not reported");
+        higher.unlock();
+        expect(record(4).depth == 0 && !lower.owned_by_current_cpu() && !higher.owned_by_current_cpu(),
+               "lock_as release");
+        reset_reports();
+        lower.lock();
+        higher.lock();
+        expect(reported(smp::LockViolationKind::order, smp::LockRank::futex_bucket, smp::LockRank::futex_bucket,
+                        &higher, 4),
+               "a same-rank pair without lock_as not reported");
+        higher.unlock();
+        lower.unlock();
+        reset_reports();
+        // Self-deadlock through lock_as is refused like lock().
+        lower.lock_as<smp::LockRank::futex_bucket_second>();
+        lower.lock_as<smp::LockRank::futex_bucket_second>();
+        expect(reported(smp::LockViolationKind::self_deadlock, smp::LockRank::futex_bucket_second,
+                        smp::LockRank::futex_bucket_second, &lower, 4),
+               "lock_as self-deadlock not reported");
+        lower.unlock();
+        lower.unlock();
+        expect(record(4).depth == 0 && !lower.owned_by_current_cpu(), "lock_as self-deadlock release");
+    });
+}
+
+// An UpLock keeps the order checks of a RankedSpinLock in debug builds.
+void check_up_lock()
+{
+    on_cpu(5, [] {
+        smp::UpLock<smp::LockRank::task> task;
+        smp::UpLock<smp::LockRank::run_queue> queue;
+        task.lock();
+        queue.lock();
+        expect(reports.count == 0 && record(5).depth == 2, "ordered UpLocks reported");
+        expect(!task.try_lock(), "try_lock of a held UpLock succeeded");
+        queue.unlock();
+        task.unlock();
+        queue.lock();
+        task.lock();
+        expect(reported(smp::LockViolationKind::order, smp::LockRank::run_queue, smp::LockRank::task, &task, 5),
+               "UpLock reverse order not reported");
+        task.unlock();
+        queue.unlock();
+        reset_reports();
+        task.lock();
+        task.lock();
+        expect(reported(smp::LockViolationKind::self_deadlock, smp::LockRank::task, smp::LockRank::task, &task, 5),
+               "UpLock self-deadlock not reported");
+        task.unlock();
+        task.unlock();
+        expect(!task.owned_by_current_cpu() && record(5).depth == 0, "UpLock release");
+        reset_reports();
+        task.unlock();
+        expect(reported(smp::LockViolationKind::not_owner, smp::LockRank::task, smp::LockRank::task, &task, 5),
+               "UpLock unlock of a free lock not reported");
+    });
+}
+
+// check_held counts a lock the caller does not hold; class rules count a wait
+// under a class A lock; a top half counts a rank below irq_router.
+void check_assertion_counters()
+{
+    on_cpu(6, [] {
+        auto count = [](smp::KernelCheck check) {
+            return smp::check_cpus[6].counts[static_cast<usize>(check)].load();
+        };
+        TaskLock task;
+        expect(!smp::check_held(task, "model unheld") && count(smp::KernelCheck::held) == 1,
+               "check_held of a free lock not counted");
+        expect(std::string_view{smp::check_cpus[6].first_site.load()} == "model unheld", "first check site");
+        task.lock();
+        expect(smp::check_held(task, "model held") && count(smp::KernelCheck::held) == 1, "check_held of a hold");
+        std::thread other([&] {
+            const smp::ScopedHostedCpu scoped(7);
+            expect(!smp::check_held(task, "model other"), "check_held passed another CPU's hold");
+        });
+        other.join();
+
+        // I1/I2: under the task lock a wait is counted; under class B locks only it is not.
+        expect(!smp::check_class_wait("model wait under task") && count(smp::KernelCheck::class_rule) == 1,
+               "a wait under a spin lock not counted");
+        task.unlock();
+        smp::RankedSpinLock<smp::LockRank::big_kernel> big;
+        smp::RankedSpinLock<smp::LockRank::mm> mm;
+        big.lock();
+        mm.lock();
+        expect(smp::check_class_wait("model wait under mm") && count(smp::KernelCheck::class_rule) == 1,
+               "a wait under class B locks counted");
+        mm.unlock();
+        big.unlock();
+
+        // Top halves: irq_router and up are allowed, lower ranks counted.
+        {
+            const smp::TopHalfScope top_half;
+            smp::RankedSpinLock<smp::LockRank::irq_router> router;
+            ConsoleLock console;
+            router.lock();
+            router.unlock();
+            console.lock();
+            console.unlock();
+            expect(count(smp::KernelCheck::top_half) == 0, "a top half's own ranks counted");
+            task.lock();
+            task.unlock();
+            expect(count(smp::KernelCheck::top_half) == 1, "a task lock in a top half not counted");
+        }
+        task.lock();
+        task.unlock();
+        expect(count(smp::KernelCheck::top_half) == 1 && reports.count == 0, "a task lock outside a top half");
+    });
+    expect(smp::check_total(smp::KernelCheck::held) >= 2 && smp::check_total(smp::KernelCheck::class_rule) >= 1,
+           "check totals");
+}
+
+// Debug builds count every acquisition of a reported class, gates included.
+void check_lock_stats()
+{
+    on_cpu(7, [] {
+        const auto tasks = smp::lock_stat_cpus[7].acquired[static_cast<usize>(smp::LockStat::task)].load();
+        const auto gates = smp::lock_stat_cpus[7].acquired[static_cast<usize>(smp::LockStat::fs_provider)].load();
+        TaskLock task;
+        task.lock();
+        task.unlock();
+        expect(task.try_lock(), "free task lock try");
+        task.unlock();
+        ModelGate gate;
+        expect(gate.enter(), "model gate entry");
+        gate.leave();
+        expect(smp::lock_stat_cpus[7].acquired[static_cast<usize>(smp::LockStat::task)].load() == tasks + 2 &&
+                   smp::lock_stat_cpus[7].acquired[static_cast<usize>(smp::LockStat::fs_provider)].load() == gates + 1,
+               "acquisitions not counted per class");
     });
 }
 
@@ -659,6 +1024,10 @@ void run_debug_checks()
 {
     static_assert(smp::lock_debug_enabled);
     smp::lock_violation_handler = record_report;
+    check_lock_as();
+    check_up_lock();
+    check_assertion_counters();
+    check_lock_stats();
     check_order_violation();
     check_self_deadlock();
     check_unlock_not_owner();
@@ -683,15 +1052,15 @@ void count_release_report(const smp::LockViolation &) noexcept
 void run_release_checks()
 {
     static_assert(!smp::lock_debug_enabled);
-    static_assert(sizeof(SchedulerLock) == 2 * sizeof(u32)); // Flag and owner word only.
+    static_assert(sizeof(TaskTableLock) == 2 * sizeof(u32)); // Flag and owner word only.
     smp::lock_violation_handler = count_release_report;
-    SchedulerLock scheduler;
-    RunQueueLock run_queue;
-    run_queue.lock();
-    scheduler.lock();
-    scheduler.unlock();
-    run_queue.unlock();
-    run_queue.unlock(); // Not owned: silently stores free.
+    TaskTableLock table;
+    TaskLock task;
+    task.lock();
+    table.lock();
+    table.unlock();
+    task.unlock();
+    task.unlock(); // Not owned: silently stores free.
     expect(release_reports == 0 && smp::lock_violation_count(0) == 0, "release build reported a violation");
     smp::lock_violation_handler = nullptr;
 }
@@ -707,13 +1076,20 @@ int main()
     check_contention();
     check_bkl_accounting();
     check_gate_two_cpus();
+    check_lock_as_contention();
+    check_fine_lock_selection();
+    check_try_tokens();
+    check_frozen_hook();
+    check_top_half_scope();
+    check_rank_table();
 #if defined(OK_LOCK_DEBUG)
     run_debug_checks();
-    std::printf("OK_SMP_LOCKS scope=model mode=debug checks=%d cpus=%d rounds=%d\n", checks, contention_threads,
-                contention_rounds);
+    std::printf("OK_SMP_LOCKS scope=model mode=debug locks=%s checks=%d cpus=%d rounds=%d\n",
+                smp::concurrent_locks ? "concurrent" : "up", checks, contention_threads, contention_rounds);
 #else
     run_release_checks();
-    std::printf("OK_SMP_LOCKS scope=model mode=release checks=%d\n", checks);
+    std::printf("OK_SMP_LOCKS scope=model mode=release locks=%s checks=%d\n",
+                smp::concurrent_locks ? "concurrent" : "up", checks);
 #endif
     return 0;
 }

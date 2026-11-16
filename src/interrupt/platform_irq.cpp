@@ -652,6 +652,8 @@ bool wait_here(bool device)
 
 bool wait_for_interrupt()
 {
+    // A device wait never holds a spin lock (I2).
+    static_cast<void>(smp::check_class_wait("device wait under a spin lock"));
     // A kernel section polls: it may not drain the bottom halves. It still
     // runs the top halves pending here, as its poll loop does on every pass
     // (smp::serve_while_polling), so a kernel-lock holder waiting for a line
@@ -938,6 +940,8 @@ IrqStatistics platform_irq_statistics()
 extern "C" void ok_interrupt_top_half(ok::interrupt::IrqLine line)
 {
     using namespace ok::interrupt;
+    // Top halves take only ranks from irq_router up (top_half_asserts).
+    const ok::smp::TopHalfScope top_half;
     const bool pending = router.top_half(line);
     auto &self = local_interrupts();
     bump(self.delivered);

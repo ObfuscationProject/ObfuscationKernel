@@ -16,10 +16,11 @@ inline void record_ranked_lock_report(const smp::LockViolation &violation) noexc
 } // namespace detail
 
 // Boot CPU only: a reverse-order lock() is reported before it would wait, and
-// the lock it wants is free, so the check cannot deadlock.
+// the lock it wants is free, so the check cannot deadlock. A same-rank pair
+// taken with lock_as for the second is in order.
 inline Status check_ranked_lock_order()
 {
-    smp::RankedSpinLock<smp::LockRank::scheduler> outer;
+    smp::RankedSpinLock<smp::LockRank::task> outer;
     smp::RankedSpinLock<smp::LockRank::run_queue> inner;
     const auto previous = smp::lock_violation_handler;
     smp::lock_violation_handler = detail::record_ranked_lock_report;
@@ -30,8 +31,15 @@ inline Status check_ranked_lock_order()
         smp::RankedSpinGuard inner_guard{inner};
         ordered = outer.owned_by_current_cpu() && inner.owned_by_current_cpu();
     }
+    smp::RankedSpinLock<smp::LockRank::futex_bucket> lower;
+    smp::RankedSpinLock<smp::LockRank::futex_bucket> higher;
+    lower.lock();
+    higher.lock_as<smp::LockRank::futex_bucket_second>();
+    ordered = ordered && lower.owned_by_current_cpu() && higher.owned_by_current_cpu();
+    higher.unlock();
+    lower.unlock();
     ordered = ordered && detail::ranked_lock_reports == 0 && !outer.owned_by_current_cpu() &&
-              !inner.owned_by_current_cpu();
+              !inner.owned_by_current_cpu() && !lower.owned_by_current_cpu() && !higher.owned_by_current_cpu();
     inner.lock();
     outer.lock();
     const auto reports = detail::ranked_lock_reports;
@@ -46,7 +54,7 @@ inline Status check_ranked_lock_order()
     if constexpr (smp::lock_debug_enabled)
     {
         if (reports != 1 || report.kind != smp::LockViolationKind::order ||
-            report.held != smp::LockRank::run_queue || report.wanted != smp::LockRank::scheduler ||
+            report.held != smp::LockRank::run_queue || report.wanted != smp::LockRank::task ||
             report.lock != &outer)
             return Status::fault("reverse lock order was not reported");
     }

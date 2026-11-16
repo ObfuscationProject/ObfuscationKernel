@@ -25,23 +25,27 @@ namespace ok::smp
 // footprint, waits for the working ones and commits the returning ones
 // through section_commit_handler before it mutates anything.
 //
-// Mode bits (cpu_modes, ok/smp/lock.hpp): BKL_HELD, SECTION, SPINNING and
-// KERNEL_WORK.
+// Mode bits (cpu_modes, ok/smp/lock.hpp): BKL_HELD, SECTION, SPINNING,
+// KERNEL_WORK, KERNEL_FREE and TOP_HALF.
 inline constexpr u32 mode_bkl_held = cpu_mode_bkl_held;
 inline constexpr u32 mode_section = cpu_mode_section;
 inline constexpr u32 mode_spinning = cpu_mode_spinning;
 inline constexpr u32 mode_kernel_work = cpu_mode_kernel_work;
+inline constexpr u32 mode_kernel_free = cpu_mode_kernel_free;
+inline constexpr u32 mode_top_half = cpu_mode_top_half;
 
-// Doing kernel work right now, not waiting: in a section, or holding the lock
-// in a stretch marked as work (bkl_mark_work), so an idle CPU scanning an
-// empty run queue under the lock does not count. A section's device polling
-// is the section's own I/O and counts.
+// Doing kernel work right now, not waiting: in a section, serving work
+// without the kernel lock (KERNEL_FREE), or holding the lock in a stretch
+// marked as work (bkl_mark_work), so an idle CPU scanning an empty run queue
+// under the lock does not count. A section's device polling is the section's
+// own I/O and counts.
 [[nodiscard]] inline bool productive(CpuId cpu) noexcept
 {
     const auto bits = cpu_mode(cpu);
     if ((bits & mode_spinning) != 0)
         return false;
-    return (bits & mode_section) != 0 || (bits & (mode_bkl_held | mode_kernel_work)) == (mode_bkl_held | mode_kernel_work);
+    return (bits & (mode_section | mode_kernel_free)) != 0 ||
+           (bits & (mode_bkl_held | mode_kernel_work)) == (mode_bkl_held | mode_kernel_work);
 }
 
 [[nodiscard]] inline bool in_section(CpuId cpu) noexcept
@@ -279,6 +283,19 @@ inline bool require_exclusive(const char *site) noexcept
     if (!exclusive)
         detail::section_assert(&SectionCpu::exclusive_asserts, site);
     return exclusive;
+}
+
+// A path that stays under the big kernel lock (boot, modules, mounts, power,
+// CPU 0 rescue, hotplug execution and every syscall still marked
+// bkl_required): once armed, refused without the lock. Counted as
+// exclusive_asserts, which the OK_SMP_KERNEL_CHECKS line reports as
+// bkl_asserts. False on a violation.
+inline bool require_bkl(const char *site) noexcept
+{
+    const bool held = !exclusive_armed.load(std::memory_order_relaxed) || kernel_lock.owned_by_current_cpu();
+    if (!held)
+        detail::section_assert(&SectionCpu::exclusive_asserts, site);
+    return held;
 }
 
 // A mutator of `pid`'s footprint: no section of it may be working or returning.
