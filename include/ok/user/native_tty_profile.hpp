@@ -5,7 +5,7 @@ namespace ok::user
 {
 inline constexpr std::string_view native_tty_profile = "bootcpu-ntty-template-console-pts8-devfs-ptmx-tty-console-v1";
 inline constexpr u32 native_tty_version = 1;
-inline constexpr u32 native_tty_module_abi = 81;
+inline constexpr u32 native_tty_module_abi = 82;
 inline constexpr u32 native_tty_serialized_boot_cpu = 1;
 inline constexpr u32 native_tty_terminal_capacity = 9;
 inline constexpr u32 native_tty_pts_capacity = 8;
