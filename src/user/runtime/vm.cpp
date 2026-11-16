@@ -34,6 +34,74 @@ bool memory_preparation_attempted{};
 } // namespace
 #endif
 std::array<QuarantinedSpace, sched::max_processes + 1> quarantined_spaces{};
+constinit smp::FineLock<smp::LockRank::mm_retire> mm_retire_lock{};
+constinit std::atomic<u32> quarantine_live{};
+namespace
+{
+using RetireGuard = decltype(mm_retire_lock)::Guard;
+void count_live(bool add)
+{
+    const auto live = quarantine_live.load(std::memory_order_relaxed);
+    quarantine_live.store(add ? live + 1 : live - 1, std::memory_order_relaxed);
+}
+} // namespace
+QuarantinedSpace *reserve_quarantine()
+{
+    const RetireGuard guard(mm_retire_lock);
+    for (auto &saved : quarantined_spaces)
+        if (!saved.used && !saved.reserved && !saved.busy)
+        {
+            saved.reserved = true;
+            return &saved;
+        }
+    return nullptr;
+}
+void cancel_quarantine(QuarantinedSpace &saved)
+{
+    const RetireGuard guard(mm_retire_lock);
+    saved.reserved = false;
+}
+void publish_quarantine(QuarantinedSpace &saved, const hw::AddressSpace &space, bool table_retired, bool pin_complete)
+{
+    const RetireGuard guard(mm_retire_lock);
+    if (!saved.used) count_live(true);
+    saved.space = space;
+    saved.used = true;
+    saved.reserved = false;
+    saved.busy = true;
+    saved.table_retired = table_retired;
+    saved.pin_complete = pin_complete;
+}
+QuarantinedSpace *claim_quarantine(const hw::AddressSpace &space, bool retired_only)
+{
+    const RetireGuard guard(mm_retire_lock);
+    for (auto &saved : quarantined_spaces)
+        if (saved.used && !saved.busy && (!retired_only || saved.table_retired) &&
+            (space.root == 0 || same_space(saved.space, space)))
+        {
+            saved.busy = true;
+            return &saved;
+        }
+    return nullptr;
+}
+void unclaim_quarantine(QuarantinedSpace &saved)
+{
+    const RetireGuard guard(mm_retire_lock);
+    saved.busy = false;
+}
+void set_quarantine_state(QuarantinedSpace &saved, bool table_retired, bool pin_complete)
+{
+    const RetireGuard guard(mm_retire_lock);
+    saved.table_retired = table_retired;
+    saved.pin_complete = pin_complete;
+}
+bool space_quarantined(const hw::AddressSpace &space)
+{
+    const RetireGuard guard(mm_retire_lock);
+    for (const auto &saved : quarantined_spaces)
+        if (saved.used && saved.space.root && same_space(saved.space, space)) return true;
+    return false;
+}
 namespace
 {
 constexpr usize kernel_object_pages = poll_object_pages + futex_object_pages + pipe_read_object_pages + pipe_write_object_pages + pty_wait_object_pages + child_wait_object_pages + native_udp_receive_pages + linux_udp_receive_pages;
@@ -269,6 +337,9 @@ Status finish_quarantine(QuarantinedSpace &saved, bool retry_owners)
         if (saved.ownership(index) == QuarantinedSpace::Ownership::pending || saved.pin_held(index))
             return result ? Status::busy("quarantine still owns failed frame retirement") : result;
     if (auto status = saved.pages.clear(); !status) return status;
+    // The emptied slot goes back free once its claimant unclaims it.
+    const RetireGuard guard(mm_retire_lock);
+    if (saved.used) count_live(false);
     saved.space = {};
     saved.used = false;
     saved.reserved = false;
@@ -279,9 +350,18 @@ Status finish_quarantine(QuarantinedSpace &saved, bool retry_owners)
 Status retry_quarantined_retirement()
 {
     Status result{};
-    for (auto &saved : quarantined_spaces)
-        if (saved.used && saved.table_retired)
-            if (auto status = finish_quarantine(saved); !status && result) result = status;
+    if (quarantine_live.load(std::memory_order_relaxed) == 0) return result;
+    // Pop one retired slot at a time under the lock; finish it outside.
+    std::array<QuarantinedSpace *, std::tuple_size_v<decltype(quarantined_spaces)>> claimed{};
+    usize count{};
+    while (count < claimed.size())
+    {
+        auto *saved = claim_quarantine({}, true);
+        if (!saved) break;
+        claimed[count++] = saved;
+        if (auto status = finish_quarantine(*saved); !status && result) result = status;
+    }
+    for (usize index = 0; index < count; ++index) unclaim_quarantine(*claimed[index]);
     if (!result) runtime_failure = result;
     return result;
 }
@@ -295,15 +375,10 @@ class PageRetirementReservation final : private NonCopyable
     PageRetirementReservation &operator=(PageRetirementReservation &&) = delete;
     PageRetirementReservation(PageRetirementReservation &&other) noexcept
         : saved_(std::exchange(other.saved_, nullptr)) {}
-    ~PageRetirementReservation() { if (saved_) saved_->reserved = false; }
+    ~PageRetirementReservation() { if (saved_) cancel_quarantine(*saved_); }
     [[nodiscard]] static Result<PageRetirementReservation> reserve()
     {
-        for (auto &saved : quarantined_spaces)
-            if (!saved.used && !saved.reserved)
-            {
-                saved.reserved = true;
-                return PageRetirementReservation{saved};
-            }
+        if (auto *saved = reserve_quarantine()) return PageRetirementReservation{*saved};
         return Status::no_memory("native range retirement bookkeeping is full");
     }
     Status release_range(Pages &pages, uptr begin, usize size)
@@ -312,16 +387,13 @@ class PageRetirementReservation final : private NonCopyable
             return Status::fault("native range retirement reservation lost its owner");
         auto &saved = *saved_;
         saved.pages = std::move(pages);
-        saved.space = {};
-        saved.used = true;
-        saved.reserved = false;
-        saved.table_retired = true;
-        saved.pin_complete = true;
         saved.pinned_count = 0;
         saved.reset(QuarantinedSpace::Ownership::borrowed);
+        publish_quarantine(saved, {}, true, true);
         saved_ = nullptr;
         const auto discharged = discharge_quarantine(saved, false, begin, size);
         const auto retired = finish_quarantine(saved, false);
+        unclaim_quarantine(saved);
         if (!discharged) return discharged;
         return retired;
     }
@@ -333,40 +405,38 @@ namespace
 {
 Status quarantine(const hw::AddressSpace &space, Pages &pages)
 {
-    for (const auto &saved : quarantined_spaces)
-        if (saved.used && same_space(saved.space,space))
+    if (space_quarantined(space))
+    {
+        if (pages.empty()) return Status::success();
+        runtime_failure = Status::already_exists("native space is already quarantined");
+        __builtin_trap();
+    }
+    if (auto *reserved = reserve_quarantine())
+    {
+        auto &saved = *reserved;
+        saved.pages = std::move(pages);
+        saved.reset(QuarantinedSpace::Ownership::borrowed);
+        saved.pinned_count = 0;
+        publish_quarantine(saved, space, false, false);
+        Status status{};
+        for (usize index = 0; index < saved.pages.size() && status; ++index)
         {
-            if (pages.empty()) return Status::success();
-            runtime_failure = Status::already_exists("native space is already quarantined");
-            __builtin_trap();
-        }
-    for (auto &saved : quarantined_spaces)
-        if (!saved.used && !saved.reserved)
-        {
-            saved.pages = std::move(pages);
-            saved.space = space;
-            saved.used = true;
-            saved.table_retired = false;
-            saved.reset(QuarantinedSpace::Ownership::borrowed);
-            saved.pinned_count = 0;
-            saved.pin_complete = false;
-            for (usize index = 0; index < saved.pages.size(); ++index)
+            const auto *frame = owned_frame(saved.pages, saved.pages[index]);
+            if (!frame) status = runtime_failure = Status::fault("quarantine lost its exact mapping frame");
+            else if (status = page_pool.pin(*frame); !status)
+                // Retain the metadata and every ownership edge. No alias may
+                // be discharged while this borrow is incompletely pinned.
+                runtime_failure = status;
+            else
             {
-                const auto *frame = owned_frame(saved.pages, saved.pages[index]);
-                if (!frame) return runtime_failure = Status::fault("quarantine lost its exact mapping frame");
-                if (auto status = page_pool.pin(*frame); !status)
-                {
-                    runtime_failure = status;
-                    // Retain the metadata and every ownership edge. No alias
-                    // may be discharged while this borrow is incompletely pinned.
-                    return status;
-                }
                 saved.pin_held(index) = true;
                 ++saved.pinned_count;
             }
-            saved.pin_complete = true;
-            return Status::success();
         }
+        if (status) set_quarantine_state(saved, false, true);
+        unclaim_quarantine(saved);
+        return status;
+    }
     // Returning here would destroy the caller's metadata while an unretired
     // backend may still borrow its view. This is a backend slot-contract breach.
     runtime_failure = Status::overflow("native retirement quarantine exhausted");
@@ -374,22 +444,32 @@ Status quarantine(const hw::AddressSpace &space, Pages &pages)
 }
 Status forget_quarantine(const hw::AddressSpace &space)
 {
-    for (auto &saved : quarantined_spaces)
-        if (saved.used && same_space(saved.space,space))
-        {
-            saved.table_retired = true;
-            const auto status = finish_quarantine(saved);
-            if (!status) runtime_failure = status;
-            return status;
-        }
-    return {};
+    if (!space.root) return {};
+    auto *saved = claim_quarantine(space, false);
+    if (!saved) return {};
+    set_quarantine_state(*saved, true, saved->pin_complete);
+    const auto status = finish_quarantine(*saved);
+    unclaim_quarantine(*saved);
+    if (!status) runtime_failure = status;
+    return status;
+}
+// Discharges the staged frames of a quarantined space that `pinned` admits.
+void discharge_staged(const hw::AddressSpace &space, bool pinned, uptr begin, usize size, bool record)
+{
+    auto *saved = space.root ? claim_quarantine(space, false) : nullptr;
+    if (!saved) return;
+    if (!pinned || saved->pin_complete)
+        if (auto released = discharge_quarantine(*saved, false, begin, size); !released && record)
+            runtime_failure = released;
+    unclaim_quarantine(*saved);
 }
 Status retire_space(hw::AddressSpace &space, Pages &pages, uptr staged_begin = 0, usize staged_size = 0)
 {
     const auto previous = space;
-    for (auto &saved : quarantined_spaces)
-        if (saved.used && saved.table_retired && same_space(saved.space, previous))
+    if (previous.root)
+        if (auto *saved = claim_quarantine(previous, true))
         {
+            unclaim_quarantine(*saved);
             space = {};
             return forget_quarantine(previous);
         }
@@ -397,21 +477,14 @@ Status retire_space(hw::AddressSpace &space, Pages &pages, uptr staged_begin = 0
     {
         if (auto retained = quarantine(previous, pages); !retained)
         {
-            if (staged_size)
-                for (auto &saved : quarantined_spaces)
-                    if (saved.used && same_space(saved.space, previous))
-                        static_cast<void>(discharge_quarantine(saved, false, staged_begin, staged_size));
+            if (staged_size) discharge_staged(previous, false, staged_begin, staged_size, false);
             runtime_failure = retained;
             return retained;
         }
         // mmap owns freshly allocated backing only in the replacement. Once
         // the failed table is pinned, mark those frames pending so successful
         // later retirement returns them to the allocator.
-        if (staged_size)
-            for (auto &saved : quarantined_spaces)
-                if (saved.used && saved.pin_complete && same_space(saved.space, previous))
-                    if (auto released = discharge_quarantine(saved, false, staged_begin, staged_size); !released)
-                        runtime_failure = released;
+        if (staged_size) discharge_staged(previous, true, staged_begin, staged_size, true);
         runtime_failure = status;
         return status;
     }
@@ -428,9 +501,11 @@ void release(hw::AddressSpace &space, Pages &pages)
         // A failed final retirement transferred the owner into quarantine.
         // Every user frame becomes pending while its borrowed view is pinned.
         if (pages.empty())
-            for (auto &saved : quarantined_spaces)
-                if (saved.used && same_space(saved.space, space))
-                    if (auto status = discharge_quarantine(saved, true); !status) runtime_failure = status;
+            if (auto *saved = claim_quarantine(space, false))
+            {
+                if (auto status = discharge_quarantine(*saved, true); !status) runtime_failure = status;
+                unclaim_quarantine(*saved);
+            }
         return;
     }
     if (pages.empty())
@@ -440,22 +515,20 @@ void release(hw::AddressSpace &space, Pages &pages)
     }
     // Reserve bounded retry bookkeeping before consuming any ownership edge,
     // including when no hardware table was ever created for these staged pages.
-    for (auto &saved : quarantined_spaces)
-        if (!saved.used && !saved.reserved)
-        {
-            saved.pages = std::move(pages);
-            saved.space = space;
-            saved.used = true;
-            saved.table_retired = true;
-            saved.pin_complete = true;
-            saved.pinned_count = 0;
-            saved.reset(QuarantinedSpace::Ownership::borrowed);
-            const auto discharged = discharge_quarantine(saved, true);
-            const auto retired = finish_quarantine(saved, false);
-            if (!discharged) runtime_failure = discharged;
-            else if (!retired) runtime_failure = retired;
-            return;
-        }
+    if (auto *reserved = reserve_quarantine())
+    {
+        auto &saved = *reserved;
+        saved.pages = std::move(pages);
+        saved.pinned_count = 0;
+        saved.reset(QuarantinedSpace::Ownership::borrowed);
+        publish_quarantine(saved, space, true, true);
+        const auto discharged = discharge_quarantine(saved, true);
+        const auto retired = finish_quarantine(saved, false);
+        unclaim_quarantine(saved);
+        if (!discharged) runtime_failure = discharged;
+        else if (!retired) runtime_failure = retired;
+        return;
+    }
     runtime_failure = Status::no_memory("native frame retirement bookkeeping is full");
 }
 Status allocate(Pages &pages, uptr address, u8 flags, bool shared)

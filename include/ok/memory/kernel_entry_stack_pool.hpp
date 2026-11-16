@@ -4,7 +4,7 @@
 
 #include "ok/arch/kernel_entry_stack.hpp"
 #include "ok/core/types.hpp"
-#include "ok/smp/kernel_section.hpp"
+#include "ok/smp/lock.hpp"
 #include "ok/smp/smp.hpp"
 
 #include <array>
@@ -38,10 +38,17 @@ struct KernelEntryStackAccounting
     u64 reservations{}, releases{}, activations{};
 };
 
-// Canonical ownership, serialized by the kernel lock; each CPU has at most one
-// active lease. Backing is supplied by trusted platform code and must remain
-// supervisor-accessible for the pool's lifetime.
-// Canary pages are mapped diagnostic storage, not faulting guard pages.
+// Canonical ownership; each CPU has at most one active lease. Backing is
+// supplied by trusted platform code and must remain supervisor-accessible for
+// the pool's lifetime. Canary pages are mapped diagnostic storage, not faulting
+// guard pages.
+//
+// Locking: the records, the per-CPU active slots and the counters change only
+// under one lock (rank entry_stack). A slot is reserved under it and its
+// canaries written after it, before the handle exists; a released slot keeps
+// its record (no owner) while its backing is cleared outside the lock, and is
+// freed under it afterwards. An active view is read lock-free by the CPU it is
+// active on: nobody else may change that record until it is deactivated.
 class KernelEntryStackPool final : private NonCopyable
 {
   public:
@@ -72,39 +79,44 @@ class KernelEntryStackPool final : private NonCopyable
 
     Result<KernelEntryStackHandle> reserve(KernelEntryStackOwner owner)
     {
-        smp::check_exclusive("KernelEntryStackPool::reserve");
-        if (!initialized_)
-            return Status::not_initialized("entry stack arena is not initialized");
-        if (!fault_)
-            return fault_;
-        if (owner.pid == 0 || owner.tid == 0)
-            return Status::invalid_argument("entry stack owner must name a process and thread");
-        for (const auto &record : records_)
-            if (record.state != State::free && record.pid == owner.pid && record.tid == owner.tid)
-                return Status::already_exists("thread already owns an entry stack lease");
-        if (generation_ == ~u64{0})
-            return Status::overflow("entry stack lease generation exhausted");
-        for (usize slot = 0; slot < capacity; ++slot)
-        {
-            auto &record = records_[slot];
-            if (record.state != State::free)
-                continue;
-            const uptr lower = reinterpret_cast<uptr>(backing_.data() + slot * slot_stride + canary_bytes);
-            record = {.lower = lower, .top = lower + usable_bytes, .pid = owner.pid, .tid = owner.tid,
-                      .generation = ++generation_, .state = State::reserved};
-            set_canaries(slot, record.generation);
-            ++leased_;
-            if (leased_ > peak_)
-                peak_ = leased_;
-            return KernelEntryStackHandle{this, static_cast<u32>(slot), record.generation};
-        }
-        return Status::no_memory("entry stack lease capacity exhausted");
+        auto reserved = [&]() -> Result<KernelEntryStackHandle> {
+            const Guard guard(lock_);
+            if (!initialized_)
+                return Status::not_initialized("entry stack arena is not initialized");
+            if (!fault_)
+                return fault_;
+            if (owner.pid == 0 || owner.tid == 0)
+                return Status::invalid_argument("entry stack owner must name a process and thread");
+            for (const auto &record : records_)
+                if (record.state != State::free && record.pid == owner.pid && record.tid == owner.tid)
+                    return Status::already_exists("thread already owns an entry stack lease");
+            if (generation_ == ~u64{0})
+                return Status::overflow("entry stack lease generation exhausted");
+            for (usize slot = 0; slot < capacity; ++slot)
+            {
+                auto &record = records_[slot];
+                if (record.state != State::free)
+                    continue;
+                const uptr lower = reinterpret_cast<uptr>(backing_.data() + slot * slot_stride + canary_bytes);
+                record = {.lower = lower, .top = lower + usable_bytes, .pid = owner.pid, .tid = owner.tid,
+                          .generation = ++generation_, .state = State::reserved};
+                ++leased_;
+                if (leased_ > peak_)
+                    peak_ = leased_;
+                return KernelEntryStackHandle{this, static_cast<u32>(slot), record.generation};
+            }
+            return Status::no_memory("entry stack lease capacity exhausted");
+        }();
+        // Only this caller can name the slot until the handle is returned.
+        if (reserved)
+            set_canaries(reserved.value().slot, reserved.value().generation);
+        return reserved;
     }
 
     Result<arch::execution::KernelEntryStackView> activate_entry(
         KernelEntryStackHandle handle, KernelEntryStackOwner owner, u16 cpu)
     {
-        smp::check_exclusive("KernelEntryStackPool::activate_entry");
+        const Guard guard(lock_);
         if (auto status = validate(handle, owner); !status)
             return status;
         if (!fault_)
@@ -129,7 +141,7 @@ class KernelEntryStackPool final : private NonCopyable
 
     Status deactivate_entry(KernelEntryStackHandle handle, KernelEntryStackOwner owner, u16 cpu)
     {
-        smp::check_exclusive("KernelEntryStackPool::deactivate_entry");
+        const Guard guard(lock_);
         if (auto status = validate(handle, owner); !status)
             return status;
         auto &record = records_[handle.slot];
@@ -147,14 +159,19 @@ class KernelEntryStackPool final : private NonCopyable
 
     Status release(KernelEntryStackHandle handle, KernelEntryStackOwner owner)
     {
-        smp::check_exclusive("KernelEntryStackPool::release");
-        if (auto status = validate_inactive(handle, owner); !status)
-            return status;
-        auto &record = records_[handle.slot];
+        {
+            const Guard guard(lock_);
+            if (auto status = validate_inactive_locked(handle, owner); !status)
+                return status;
+            // The record stays taken, with no owner, while its backing clears.
+            auto &record = records_[handle.slot];
+            record.pid = record.tid = 0;
+        }
         auto bytes = backing_.subspan(handle.slot * slot_stride, slot_stride);
         for (auto &byte : bytes)
             byte = std::byte{};
-        record = {};
+        const Guard guard(lock_);
+        records_[handle.slot] = {};
         --leased_;
         ++releases_;
         return Status::success();
@@ -164,19 +181,14 @@ class KernelEntryStackPool final : private NonCopyable
     // this never changes healthy backing, lease generation or accounting.
     Status validate_inactive(KernelEntryStackHandle handle, KernelEntryStackOwner owner)
     {
-        if (auto status = validate(handle, owner); !status)
-            return status;
-        auto &record = records_[handle.slot];
-        if (record.state == State::active)
-            return Status::busy("entry stack lease is still active");
-        if (auto status = check_canaries(handle.slot); !status)
-            return quarantine(record, status);
-        return Status::success();
+        const Guard guard(lock_);
+        return validate_inactive_locked(handle, owner);
     }
 
     Result<uptr> top(KernelEntryStackHandle handle, KernelEntryStackOwner owner)
     {
-        if (auto status = validate_inactive(handle, owner); !status)
+        const Guard guard(lock_);
+        if (auto status = validate_inactive_locked(handle, owner); !status)
             return status;
         return records_[handle.slot].top;
     }
@@ -186,6 +198,7 @@ class KernelEntryStackPool final : private NonCopyable
     // reactivation still require the lease to be inactive.
     Result<uptr> lease_top(KernelEntryStackHandle handle, KernelEntryStackOwner owner)
     {
+        const Guard guard(lock_);
         if (auto status = validate(handle, owner); !status)
             return status;
         if (auto status = check_canaries(handle.slot); !status)
@@ -197,6 +210,7 @@ class KernelEntryStackPool final : private NonCopyable
     // requires, checked before an eviction commits to deactivating it.
     [[nodiscard]] Status validate_active(KernelEntryStackHandle handle, KernelEntryStackOwner owner, u16 cpu) const
     {
+        const Guard guard(lock_);
         if (auto status = validate(handle, owner); !status)
             return status;
         const auto &record = records_[handle.slot];
@@ -208,7 +222,8 @@ class KernelEntryStackPool final : private NonCopyable
 
     Result<u64> inactive_epoch(KernelEntryStackHandle handle, KernelEntryStackOwner owner)
     {
-        if (auto status = validate_inactive(handle, owner); !status) return status;
+        const Guard guard(lock_);
+        if (auto status = validate_inactive_locked(handle, owner); !status) return status;
         return records_[handle.slot].epoch;
     }
 
@@ -217,6 +232,7 @@ class KernelEntryStackPool final : private NonCopyable
     Result<u64> active_epoch(KernelEntryStackHandle handle, KernelEntryStackOwner owner,
                              const arch::execution::KernelEntryStackView &view) const
     {
+        const Guard guard(lock_);
         if (auto status = validate(handle, owner); !status) return status;
         const auto &record = records_[handle.slot];
         if (record.state != State::active || record.cpu >= smp::max_cpus || active_slot_[record.cpu] != handle.slot ||
@@ -229,11 +245,13 @@ class KernelEntryStackPool final : private NonCopyable
 
     [[nodiscard]] bool active_on(u16 cpu) const
     {
+        const Guard guard(lock_);
         return cpu < smp::max_cpus && active_slot_[cpu] != capacity;
     }
 
     [[nodiscard]] KernelEntryStackAccounting accounting() const
     {
+        const Guard guard(lock_);
         usize active = 0;
         for (const auto slot : active_slot_)
             active += slot != capacity;
@@ -244,6 +262,8 @@ class KernelEntryStackPool final : private NonCopyable
     }
 
   private:
+    using Lock = smp::FineLock<smp::LockRank::entry_stack>;
+    using Guard = Lock::Guard;
     using View = arch::execution::KernelEntryStackView;
     using State = View::State;
     using Record = View::Record;
@@ -254,6 +274,18 @@ class KernelEntryStackPool final : private NonCopyable
         for (auto &slot : slots)
             slot = capacity;
         return slots;
+    }
+    // The caller holds lock_.
+    Status validate_inactive_locked(KernelEntryStackHandle handle, KernelEntryStackOwner owner)
+    {
+        if (auto status = validate(handle, owner); !status)
+            return status;
+        auto &record = records_[handle.slot];
+        if (record.state == State::active)
+            return Status::busy("entry stack lease is still active");
+        if (auto status = check_canaries(handle.slot); !status)
+            return quarantine(record, status);
+        return Status::success();
     }
     [[nodiscard]] Status validate(KernelEntryStackHandle handle, KernelEntryStackOwner owner) const
     {
@@ -307,6 +339,7 @@ class KernelEntryStackPool final : private NonCopyable
     friend struct arch::execution::Ppc32PrivateViewAccess;
 #endif
     friend struct KernelEntryStackPoolTestAccess;
+    mutable Lock lock_{};
     std::span<std::byte> backing_{};
     std::array<Record, capacity> records_{};
     usize leased_{}, peak_{}, quarantined_{};

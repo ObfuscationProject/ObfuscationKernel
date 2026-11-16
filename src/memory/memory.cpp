@@ -140,7 +140,8 @@ Result<usize> FrameAllocator::metadata_bytes(std::span<const MemoryRegion> regio
 
 Status FrameAllocator::initialize(std::span<const MemoryRegion> regions, usize page_size, std::span<std::byte> metadata)
 {
-    if (used_count_ != 0)
+    const Guard guard(lock_);
+    if (used_count_.load(std::memory_order_relaxed) != 0)
         return Status::busy("physical frames are still owned");
     auto totals = count_usable(regions, page_size);
     if (!totals)
@@ -241,15 +242,23 @@ bool FrameAllocator::exact(const PhysicalFrame &frame) const
 
 PageDescriptor *FrameAllocator::descriptor(const PhysicalFrame &frame)
 {
+    const Guard guard(lock_);
     return exact(frame) ? &descriptors_[frame.index] : nullptr;
 }
 
 const PageDescriptor *FrameAllocator::descriptor(const PhysicalFrame &frame) const
 {
+    const Guard guard(lock_);
     return exact(frame) ? &descriptors_[frame.index] : nullptr;
 }
 
 Result<PhysicalFrame> FrameAllocator::handle_at(usize index) const
+{
+    const Guard guard(lock_);
+    return handle_at_locked(index);
+}
+
+Result<PhysicalFrame> FrameAllocator::handle_at_locked(usize index) const
 {
     if (index >= frame_count_ || descriptors_[index].generation == 0)
         return Status::not_found("physical frame is not allocated");
@@ -257,10 +266,16 @@ Result<PhysicalFrame> FrameAllocator::handle_at(usize index) const
         .address = address_for(index), .index = index, .owner = this, .generation = descriptors_[index].generation};
 }
 
+void FrameAllocator::add_used(usize count, bool take)
+{
+    const auto used = used_count_.load(std::memory_order_relaxed);
+    used_count_.store(take ? used + count : used - count, std::memory_order_relaxed);
+}
+
 PhysicalFrame FrameAllocator::take(usize index)
 {
     mark(index, true);
-    ++used_count_;
+    add_used(1, true);
     descriptors_[index] = PageDescriptor{.generation = next_generation_++};
     return PhysicalFrame{
         .address = address_for(index), .index = index, .owner = this, .generation = descriptors_[index].generation};
@@ -268,9 +283,15 @@ PhysicalFrame FrameAllocator::take(usize index)
 
 Result<PhysicalFrame> FrameAllocator::allocate()
 {
+    const Guard guard(lock_);
+    return allocate_locked();
+}
+
+Result<PhysicalFrame> FrameAllocator::allocate_locked()
+{
     if (frame_count_ == 0)
         return Status::not_initialized("physical frame allocator is not initialized");
-    if (used_count_ >= frame_count_)
+    if (used_count_.load(std::memory_order_relaxed) >= frame_count_)
         return Status::no_memory("physical frame allocator exhausted");
     if (next_generation_ == 0)
         return Status::overflow("physical frame ownership sequence exhausted");
@@ -291,11 +312,12 @@ Result<PhysicalFrame> FrameAllocator::allocate()
 
 Result<PhysicalFrame> FrameAllocator::allocate(ChargeAccount &account)
 {
+    const Guard guard(lock_);
     if (frame_count_ == 0)
         return Status::not_initialized("physical frame allocator is not initialized");
     if (auto status = account.charge(1); !status.ok())
         return status;
-    auto frame = allocate();
+    auto frame = allocate_locked();
     if (!frame)
         static_cast<void>(account.uncharge(1));
     return frame;
@@ -303,13 +325,14 @@ Result<PhysicalFrame> FrameAllocator::allocate(ChargeAccount &account)
 
 Result<PhysicalFrame> FrameAllocator::allocate_contiguous(usize count, ChargeAccount &account, usize alignment)
 {
+    const Guard guard(lock_);
     if (frame_count_ == 0)
         return Status::not_initialized("physical frame allocator is not initialized");
     if (count == 0)
         return Status::invalid_argument("contiguous frame request is empty");
     if (alignment & (alignment - 1))
         return Status::invalid_argument("contiguous frame alignment is not a power of two");
-    if (count > frame_count_ - used_count_)
+    if (count > frame_count_ - used_count_.load(std::memory_order_relaxed))
         return Status::no_memory("physical frame allocator exhausted");
     if (count > ~u64{0} - next_generation_)
         return Status::overflow("physical frame ownership sequence exhausted");
@@ -326,7 +349,7 @@ Result<PhysicalFrame> FrameAllocator::allocate_contiguous(usize count, ChargeAcc
                 return status;
             for (usize i = 0; i < count; ++i)
                 static_cast<void>(take(first + i));
-            return handle_at(first);
+            return handle_at_locked(first);
         }
     }
     return Status::no_memory("no physically contiguous frame run");
@@ -334,6 +357,7 @@ Result<PhysicalFrame> FrameAllocator::allocate_contiguous(usize count, ChargeAcc
 
 Status FrameAllocator::release_contiguous(PhysicalFrame first, usize count, ChargeAccount &account)
 {
+    const Guard guard(lock_);
     if (count == 0 || !exact(first) || count > frame_count_ - first.index)
         return Status::invalid_argument("contiguous frame run handle is invalid or stale");
     for (usize i = 1; i < count; ++i)
@@ -346,7 +370,7 @@ Status FrameAllocator::release_contiguous(PhysicalFrame first, usize count, Char
         mark(first.index + i, false);
         descriptors_[first.index + i] = {};
     }
-    used_count_ -= count;
+    add_used(count, false);
     if (first.index < next_free_hint_)
         next_free_hint_ = first.index;
     static_cast<void>(account.uncharge(count));
@@ -355,11 +379,17 @@ Status FrameAllocator::release_contiguous(PhysicalFrame first, usize count, Char
 
 Status FrameAllocator::release(PhysicalFrame frame)
 {
+    const Guard guard(lock_);
+    return release_locked(frame);
+}
+
+Status FrameAllocator::release_locked(PhysicalFrame frame)
+{
     if (!exact(frame) || !used(frame.index))
         return Status::invalid_argument("physical frame ownership handle is invalid or stale");
     mark(frame.index, false);
     descriptors_[frame.index] = {};
-    --used_count_;
+    add_used(1, false);
     if (frame.index < next_free_hint_)
         next_free_hint_ = frame.index;
     return Status::success();
@@ -367,11 +397,12 @@ Status FrameAllocator::release(PhysicalFrame frame)
 
 Status FrameAllocator::release(PhysicalFrame frame, ChargeAccount &account)
 {
+    const Guard guard(lock_);
     if (!exact(frame) || !used(frame.index))
         return Status::invalid_argument("physical frame ownership handle is invalid or stale");
     if (account.used() == 0)
         return Status::invalid_argument("physical frame release has no matching charge");
-    if (auto status = release(frame); !status.ok())
+    if (auto status = release_locked(frame); !status.ok())
         return status;
     static_cast<void>(account.uncharge(1));
     return Status::success();

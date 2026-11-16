@@ -216,18 +216,13 @@ class ImageRetirementReservation final : private NonCopyable
     ~ImageRetirementReservation() { cancel(); }
     [[nodiscard]] static Result<ImageRetirementReservation> reserve()
     {
-        for (auto &saved : quarantined_spaces)
-            if (!saved.used && !saved.reserved)
-            {
-                saved.reserved = true;
-                return ImageRetirementReservation{saved};
-            }
+        if (auto *saved = reserve_quarantine()) return ImageRetirementReservation{*saved};
         return Status::no_memory("native image retirement bookkeeping is full");
     }
     [[nodiscard]] bool active() const { return saved_ != nullptr; }
     void cancel()
     {
-        if (saved_) saved_->reserved = false;
+        if (saved_) cancel_quarantine(*saved_);
         saved_ = nullptr;
     }
     Status retire(hw::AddressSpace &space, Pages &pages) { return transfer(space, pages, true); }
@@ -246,24 +241,31 @@ class ImageRetirementReservation final : private NonCopyable
         }
         auto &saved = *std::exchange(saved_, nullptr);
         saved.pages = std::move(pages);
-        saved.space = std::exchange(space, {});
-        saved.used = true;
-        saved.reserved = false;
-        saved.table_retired = saved.space.root == 0;
-        saved.pin_complete = saved.table_retired;
+        const auto table = std::exchange(space, {});
         saved.pinned_count = 0;
         saved.reset(QuarantinedSpace::Ownership::pending);
+        // The slot stays claimed by this CPU until the transfer ends.
+        publish_quarantine(saved, table, table.root == 0, table.root == 0);
+        const auto result = transfer_claimed(saved, table, destroy_table);
+        unclaim_quarantine(saved);
+        return result;
+    }
+    // The caller claimed `saved`, which names `table`.
+    static Status transfer_claimed(QuarantinedSpace &saved, hw::AddressSpace table, bool destroy_table)
+    {
         for (const auto &page : saved.pages)
             if (!owned_frame(saved.pages, page))
                 return Status::fault("native image retirement lost an exact owner token");
         Status result{};
-        if (!saved.table_retired && destroy_table)
+        bool retired = table.root == 0;
+        if (!retired && destroy_table)
         {
-            result = hw::destroy_space(saved.space);
-            saved.table_retired = result.ok();
-            saved.pin_complete = saved.table_retired;
+            // Destroyed outside mm_retire_lock: quiesce_root may wait here.
+            result = hw::destroy_space(table);
+            retired = result.ok();
+            if (retired) set_quarantine_state(saved, true, true);
         }
-        if (!saved.table_retired)
+        if (!retired)
         {
             for (usize index = 0; index < saved.pages.size(); ++index)
             {
@@ -273,14 +275,14 @@ class ImageRetirementReservation final : private NonCopyable
                 saved.pin_held(index) = true;
                 ++saved.pinned_count;
             }
-            saved.pin_complete = true;
+            set_quarantine_state(saved, false, true);
             if (!destroy_table) return Status::success();
         }
         const auto discharged = discharge_quarantine(saved);
-        if (!saved.table_retired) return !result ? result : discharged;
-        const auto retired = finish_quarantine(saved, false);
+        if (!retired) return !result ? result : discharged;
+        const auto finished = finish_quarantine(saved, false);
         if (!discharged) return discharged;
-        return retired;
+        return finished;
     }
     QuarantinedSpace *saved_{};
 };
@@ -717,9 +719,7 @@ namespace
 Status install(sched::ProcessControlBlock &process, Image &image, sched::SignalMask mask = {})
 {
     // Native bridges currently execute only on the boot CPU.
-    bool previous_quarantined = false;
-    for (const auto &saved : quarantined_spaces)
-        previous_quarantined |= saved.space.root && same_space(saved.space, process.resources().native_space);
+    const bool previous_quarantined = space_quarantined(process.resources().native_space);
     if (!process.resources().native_pages.empty() ||
         (process.resources().native_space.root && !previous_quarantined))
         return Status::busy("previous native image must retire before installation");

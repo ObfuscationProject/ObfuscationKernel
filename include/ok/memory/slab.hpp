@@ -43,11 +43,15 @@ struct SlabAccounting
 //
 // Owner: the MemoryManager that initializes it. Accounting: every frame it holds
 // is charged to its own page account (with a limit); every object charges its
-// caller's account in bytes of its class or pages. Allocation context: a single
-// serialized boot-CPU caller; `atomic` may use the frame reserve that `boot` and
-// `kernel` must leave free. Reclamation: a slab page whose last object is
-// released returns to the frame allocator unless it is its class's only
-// partially used page; large objects return their frames on release.
+// caller's account in bytes of its class or pages. Allocation context: any CPU
+// with interrupts masked, outside interrupt top halves; `atomic` may use the
+// frame reserve that `boot` and `kernel` must leave free. Locking: one lock
+// (rank slab) covers the class lists, the slab page headers, the page account
+// and the counters; it nests the frame lock inside. The caller's owner account
+// is charged under it, so the caller serializes its own account.
+// Reclamation: a slab page whose last object is released returns to the frame
+// allocator unless it is its class's only partially used page; large objects
+// return their frames on release.
 // Objects are aligned to their class size (large ones to a page). Releasing
 // checks the page kind, class, slot alignment and slot occupancy, so foreign,
 // misaligned and double releases fail without changing any state.
@@ -85,7 +89,12 @@ class SlabAllocator final : private NonCopyable
         usize live{};
     };
 
+    using Lock = smp::FineLock<smp::LockRank::slab>;
+    using Guard = Lock::Guard;
+
     [[nodiscard]] static usize class_index(usize size);
+    Result<void *> allocate_locked(usize size, ChargeAccount &owner, AllocationContext context);
+    Status release_locked(void *object, usize size, ChargeAccount &owner);
     Result<uptr> new_page(usize index, AllocationContext context);
     Status reserve_frames_for(usize count, AllocationContext context) const;
     Result<PhysicalFrame> owned_page(uptr address, PageKind kind) const;
@@ -94,6 +103,7 @@ class SlabAllocator final : private NonCopyable
     Result<void *> allocate_large(usize size, ChargeAccount &owner, AllocationContext context);
     Status release_large(void *object, usize size, ChargeAccount &owner);
 
+    mutable Lock lock_{};
     FrameAllocator *frames_{};
     usize reserve_{};
     ChargeAccount pages_{};

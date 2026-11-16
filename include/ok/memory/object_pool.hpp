@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ok/core/types.hpp"
+#include "ok/smp/lock.hpp"
 
 #include <array>
 #include <concepts>
@@ -44,18 +45,12 @@ concept ObjectPageProvider = requires(P &provider, typename P::Lease lease) {
     std::is_nothrow_move_constructible_v<typename P::Lease> &&
     std::is_nothrow_move_assignable_v<typename P::Lease>;
 
-// A provider may name the caller contract its pools check on every access
-// (P::check_caller(site); NativePagePool: the kernel lock holder, never a
-// kernel section). A provider without one checks nothing.
-template <class P> void check_provider_caller([[maybe_unused]] const char *site) noexcept
-{
-    if constexpr (requires { P::check_caller(site); })
-        P::check_caller(site);
-}
-
-// The provider owns mapping authority and exact page leases. One serialized
-// caller owns this pool (see check_provider_caller); IRQ/SMP access requires a
-// separate contract.
+// The provider owns mapping authority and exact page leases. Any CPU may use
+// the pool with interrupts masked, outside interrupt top halves: one lock
+// (rank object_pool, at most one pool's held per CPU) covers the pages, the
+// slot generations and the counters, and nests the provider's lock inside.
+// resolve() checks a handle under the lock; the object it returns stays valid
+// while its owner, the only one that destroys it, holds the handle.
 // Pool and provider must outlive all objects/handles/leases. Shutdown drains
 // object users, destroys each object, then explicitly trims empty pages.
 template <class T, ObjectPageProvider P, usize MaximumPages>
@@ -77,7 +72,7 @@ class ObjectPool final : private NonCopyable
         requires std::is_nothrow_constructible_v<T, Args...>
     Result<ObjectHandle> create(Args &&...arguments)
     {
-        check_provider_caller<P>("ObjectPool::create");
+        const Guard guard(lock_);
         if (mutating_)
             return Status::busy("object pool mutation is not reentrant");
         Mutation mutation{mutating_};
@@ -166,7 +161,7 @@ class ObjectPool final : private NonCopyable
 
     Result<T *> resolve(ObjectHandle handle)
     {
-        check_provider_caller<P>("ObjectPool::resolve");
+        const Guard guard(lock_);
         if (auto status = validate(handle); !status)
             return status;
         return object(pages_[handle.page_slot], handle.object_slot);
@@ -174,7 +169,7 @@ class ObjectPool final : private NonCopyable
 
     Result<const T *> resolve(ObjectHandle handle) const
     {
-        check_provider_caller<P>("ObjectPool::resolve");
+        const Guard guard(lock_);
         if (auto status = validate(handle); !status)
             return status;
         return object(pages_[handle.page_slot], handle.object_slot);
@@ -182,7 +177,7 @@ class ObjectPool final : private NonCopyable
 
     Status destroy(ObjectHandle handle)
     {
-        check_provider_caller<P>("ObjectPool::destroy");
+        const Guard guard(lock_);
         if (auto status = validate(handle); !status)
             return status;
         Mutation mutation{mutating_};
@@ -201,6 +196,7 @@ class ObjectPool final : private NonCopyable
 
     Status trim_empty_pages()
     {
+        const Guard guard(lock_);
         if (mutating_)
             return Status::busy("object pool mutation is not reentrant");
         Mutation mutation{mutating_};
@@ -221,11 +217,13 @@ class ObjectPool final : private NonCopyable
 
     [[nodiscard]] Status ownership_status() const
     {
+        const Guard guard(lock_);
         return mutating_ ? Status::busy("object pool mutation is active") : fault_;
     }
 
     [[nodiscard]] ObjectAccounting accounting() const
     {
+        const Guard guard(lock_);
         ObjectAccounting result{.live_objects = live_, .peak_objects = peak_,
                                 .allocations = generation_, .destructions = destructions_};
         for (const auto &page : pages_)
@@ -238,6 +236,8 @@ class ObjectPool final : private NonCopyable
     }
 
   private:
+    using Lock = smp::FineLock<smp::LockRank::object_pool>;
+    using Guard = typename Lock::Guard;
     struct Mutation
     {
         explicit Mutation(bool &active) : active_(active) { active_ = true; }
@@ -275,6 +275,7 @@ class ObjectPool final : private NonCopyable
     }
 
     friend struct ObjectPoolTestAccess;
+    mutable Lock lock_{};
     P &provider_;
     usize limit_{};
     std::array<Page, MaximumPages> pages_{};

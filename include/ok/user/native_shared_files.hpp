@@ -1,6 +1,7 @@
 #pragma once
 #include "ok/core/fixed.hpp"
 #include "ok/fs/attributes.hpp"
+#include "ok/smp/lock.hpp"
 #include "ok/user/native_page_pool.hpp"
 #include "ok/user/native_shared_file_handle.hpp"
 #include <new>
@@ -8,14 +9,22 @@
 
 namespace ok::user::native
 {
-// Serialized boot-CPU provider. File pages and each alias have distinct pool
-// references; allocator generations remain authoritative throughout retirement.
-// The file table, each file's page index and the retirement ledger are
-// kernel-object runs of the page pool: they grow on demand and are released
-// once empty. The 16-bit handle slot bounds the file count; the pool's
-// quotas bound file sizes.
+// File pages and each alias have distinct pool references; allocator
+// generations remain authoritative throughout retirement. The file table, each
+// file's page index and the retirement ledger are kernel-object runs of the
+// page pool: they grow on demand and are released once empty. The 16-bit
+// handle slot bounds the file count; the pool's quotas bound file sizes.
+//
+// Locking: one lock (rank shared_files) covers the file table, every file
+// record and page index, and the ledger; the page pool's lock nests inside.
+// Sizing a file reserves its index and ledger cells under the lock, allocates
+// and zeroes the frames outside it (the file is marked sizing meanwhile) and
+// publishes them under it again.
 class SharedMemoryFiles final : private NonCopyable
 {
+    using Lock = smp::FineLock<smp::LockRank::shared_files>;
+    using Guard = Lock::Guard;
+
   public:
     static constexpr usize max_files = usize{1} << 16;
     static constexpr usize page_size = NativePagePool::page_size;
@@ -35,6 +44,7 @@ class SharedMemoryFiles final : private NonCopyable
         [[nodiscard]] Result<SharedFileHandle> publish()
         {
             if (!owner_) return Status::bad_descriptor("shared file reservation completed");
+            const Guard guard(owner_->lock_);
             auto *file = owner_->reserved(handle_);
             if (!file) return Status::bad_descriptor("shared file reservation is stale");
             file->state = State::live;
@@ -45,6 +55,7 @@ class SharedMemoryFiles final : private NonCopyable
         void cancel()
         {
             if (!owner_) return;
+            const Guard guard(owner_->lock_);
             if (auto *file = owner_->reserved(handle_))
             {
                 *file = {};
@@ -75,6 +86,7 @@ class SharedMemoryFiles final : private NonCopyable
 
     Status bind(NativePagePool &pool)
     {
+        const Guard guard(lock_);
         if (pool_ && pool_ != &pool) return Status::busy("shared file page owner cannot change");
         if (pool.source() == NativePagePool::Source::inactive)
             return Status::not_initialized("shared file page owner is inactive");
@@ -84,6 +96,7 @@ class SharedMemoryFiles final : private NonCopyable
     [[nodiscard]] bool ready() const { return pool_ && pool_->source() != NativePagePool::Source::inactive; }
     [[nodiscard]] Result<Reservation> reserve(std::string_view name, u32 uid = 0, u32 gid = 0)
     {
+        const Guard guard(lock_);
         if (!pool_) return Status::not_initialized("shared file page owner is unavailable");
         if (name.size() > 249) return Status::name_too_long("shared file name exceeds bound");
         usize index = 0;
@@ -116,9 +129,14 @@ class SharedMemoryFiles final : private NonCopyable
             static_cast<u16>(index)};
         return Reservation{*this, handle};
     }
-    [[nodiscard]] bool valid(SharedFileHandle handle) const { return live(handle) != nullptr; }
+    [[nodiscard]] bool valid(SharedFileHandle handle) const
+    {
+        const Guard guard(lock_);
+        return live(handle) != nullptr;
+    }
     [[nodiscard]] Result<FileInfo> info(SharedFileHandle handle) const
     {
+        const Guard guard(lock_);
         const auto *file = live(handle);
         if (!file) return Status::bad_descriptor("shared file handle is foreign or stale");
         return FileInfo{file->size, file->pages, file->aliases, file->seals, file->description,
@@ -126,6 +144,7 @@ class SharedMemoryFiles final : private NonCopyable
     }
     Status add_seals(SharedFileHandle handle, u32 seals)
     {
+        const Guard guard(lock_);
         auto *file = live(handle);
         if (!file) return Status::bad_descriptor("shared file handle is foreign or stale");
         if (seals & ~supported_seals) return Status::unsupported("shared file seal is not admitted");
@@ -153,16 +172,12 @@ class SharedMemoryFiles final : private NonCopyable
     }
     [[nodiscard]] Status check_write(SharedFileHandle handle, usize count) const
     {
-        const auto *file = live(handle);
-        if (!file) return Status::bad_descriptor("shared file handle is foreign or stale");
-        // Linux zero-length writes are no-ops even with WRITE sealing; preserve
-        // the canonical open-description offset as well as every file byte.
-        if (count && (file->seals & seal_write))
-            return Status::permission("shared file contents are write sealed");
-        return {};
+        const Guard guard(lock_);
+        return check_write_locked(handle, count);
     }
     [[nodiscard]] Status check_mapping_write(const memory::PhysicalFrame &frame) const
     {
+        const Guard guard(lock_);
         const auto location = locate(frame);
         if (location.file == no_file)
             return Status::bad_descriptor("shared mapping lost its canonical file owner");
@@ -172,22 +187,31 @@ class SharedMemoryFiles final : private NonCopyable
     }
     Status initialize_size(SharedFileHandle handle, usize size)
     {
-        auto *file = live(handle);
-        if (!file) return Status::bad_descriptor("shared file handle is foreign or stale");
-        if (size == file->size) return {};
-        if ((size < file->size && (file->seals & seal_shrink)) ||
-            (size > file->size && (file->seals & seal_grow)))
-            return Status::permission("shared file size is sealed");
-        if (file->size) return Status::unsupported("shared file resize is not admitted");
-        if (!size || size % page_size)
-            return Status::unsupported("shared file size must be complete pages");
-        const usize count = size / page_size;
-        // A file can never hold more pages than the pool lets users own.
-        if (count > pool_->user_capacity_count())
-            return Status::no_memory("shared file size exceeds the user page quota");
-        auto reserved = reserve_size(count);
-        if (!reserved) return reserved.status();
+        usize count{};
+        auto reserved = [&]() -> Result<SizeReservation> {
+            const Guard guard(lock_);
+            auto *file = live(handle);
+            if (!file) return Status::bad_descriptor("shared file handle is foreign or stale");
+            if (size == file->size) return Status::already_exists();
+            if ((size < file->size && (file->seals & seal_shrink)) ||
+                (size > file->size && (file->seals & seal_grow)))
+                return Status::permission("shared file size is sealed");
+            if (file->size) return Status::unsupported("shared file resize is not admitted");
+            if (!size || size % page_size)
+                return Status::unsupported("shared file size must be complete pages");
+            if (file->sizing) return Status::busy("shared file size is being initialized");
+            count = size / page_size;
+            // A file can never hold more pages than the pool lets users own.
+            if (count > pool_->user_capacity_count())
+                return Status::no_memory("shared file size exceeds the user page quota");
+            auto reservation = reserve_size(count);
+            if (reservation) file->sizing = true;
+            return reservation;
+        }();
+        if (!reserved)
+            return reserved.status().code() == StatusCode::already_exists ? Status{} : reserved.status();
         auto reservation = std::move(reserved.value());
+        // Only this caller reaches the staged index until it is published.
         usize acquired{};
         Status failure{};
         for (; acquired < count; ++acquired)
@@ -212,12 +236,21 @@ class SharedMemoryFiles final : private NonCopyable
             auto *bytes = reinterpret_cast<std::byte *>(frame.address);
             for (usize offset = 0; offset < page_size; ++offset) bytes[offset] = std::byte{};
         }
-        if (!failure) return failure;
+        const Guard guard(lock_);
+        auto *file = live(handle);
+        if (file) file->sizing = false;
+        if (failure && !file) failure = Status::bad_descriptor("shared file retired while sized");
+        if (!failure)
+        {
+            reservation.discard();
+            return failure;
+        }
         reservation.publish(*file, size);
         return {};
     }
     [[nodiscard]] Result<memory::PhysicalFrame> page(SharedFileHandle handle, usize index) const
     {
+        const Guard guard(lock_);
         const auto *file = live(handle);
         if (!file) return Status::bad_descriptor("shared file handle is foreign or stale");
         if ((file->seals & (seal_shrink | seal_grow)) != (seal_shrink | seal_grow))
@@ -228,10 +261,12 @@ class SharedMemoryFiles final : private NonCopyable
     }
     [[nodiscard]] bool owns(const memory::PhysicalFrame &frame) const
     {
+        const Guard guard(lock_);
         return locate(frame).file != no_file;
     }
     Status retain_alias(const memory::PhysicalFrame &frame)
     {
+        const Guard guard(lock_);
         const auto location = locate(frame);
         if (location.file == no_file) return Status::bad_descriptor("shared alias has no canonical file owner");
         auto &file = files_[location.file];
@@ -253,6 +288,7 @@ class SharedMemoryFiles final : private NonCopyable
     // Callers retaining a retry ledger must distinguish these two outcomes.
     Status release_alias(const memory::PhysicalFrame &frame, bool &consumed)
     {
+        const Guard guard(lock_);
         consumed = false;
         const auto location = locate(frame);
         if (location.file == no_file) return Status::bad_descriptor("shared alias has no canonical file owner");
@@ -270,6 +306,7 @@ class SharedMemoryFiles final : private NonCopyable
     }
     Status release_description(SharedFileHandle handle)
     {
+        const Guard guard(lock_);
         auto *file = live(handle);
         if (!file || !file->description) return Status::bad_descriptor("shared file provider hold is stale");
         file->description = false;
@@ -280,6 +317,7 @@ class SharedMemoryFiles final : private NonCopyable
     }
     [[nodiscard]] Result<usize> read(SharedFileHandle handle, usize offset, std::span<std::byte> output) const
     {
+        const Guard guard(lock_);
         const auto *file = live(handle);
         if (!file) return Status::bad_descriptor("shared file handle is foreign or stale");
         const usize count = offset < file->size ?
@@ -296,10 +334,11 @@ class SharedMemoryFiles final : private NonCopyable
     }
     [[nodiscard]] Result<usize> write(SharedFileHandle handle, usize offset, std::span<const std::byte> input)
     {
+        const Guard guard(lock_);
         auto *file = live(handle);
         if (!file) return Status::bad_descriptor("shared file handle is foreign or stale");
         if (input.empty()) return usize{0};
-        if (auto status = check_write(handle, input.size()); !status) return status;
+        if (auto status = check_write_locked(handle, input.size()); !status) return status;
         if (offset >= file->size)
             return file->seals & seal_grow ? Status::permission("shared file write cannot grow sealed size")
                                          : Status::unsupported("shared file write cannot initialize or resize size");
@@ -313,6 +352,7 @@ class SharedMemoryFiles final : private NonCopyable
     }
     Status retry_retirement()
     {
+        const Guard guard(lock_);
         Status result{};
         for (usize index = 0; index < cell_capacity_; ++index)
             if (auto &cell = cells_[index]; cell.state == LedgerState::retained)
@@ -330,6 +370,7 @@ class SharedMemoryFiles final : private NonCopyable
     }
     [[nodiscard]] LedgerInfo ledger() const
     {
+        const Guard guard(lock_);
         LedgerInfo result{};
         result.first_cleanup_failure = first_cleanup_failure_;
         for (usize index = 0; index < file_capacity_; ++index)
@@ -346,13 +387,29 @@ class SharedMemoryFiles final : private NonCopyable
         }
         return result;
     }
-    [[nodiscard]] usize ledger_capacity() const { return cell_capacity_; }
+    [[nodiscard]] usize ledger_capacity() const
+    {
+        const Guard guard(lock_);
+        return cell_capacity_;
+    }
+    // A diagnostic view of ledger cell `index`, valid until the ledger changes.
     [[nodiscard]] const memory::PhysicalFrame *retained_frame(usize index) const
     {
+        const Guard guard(lock_);
         return index < cell_capacity_ && cells_[index].state == LedgerState::retained ? &cells_[index].frame : nullptr;
     }
 
   private:
+    [[nodiscard]] Status check_write_locked(SharedFileHandle handle, usize count) const
+    {
+        const auto *file = live(handle);
+        if (!file) return Status::bad_descriptor("shared file handle is foreign or stale");
+        // Linux zero-length writes are no-ops even with WRITE sealing; preserve
+        // the canonical open-description offset as well as every file byte.
+        if (count && (file->seals & seal_write))
+            return Status::permission("shared file contents are write sealed");
+        return {};
+    }
 #if defined(OK_ENABLE_TEST_POINTS)
     friend struct SharedMemoryFilesFaultProbe;
 #endif
@@ -363,6 +420,7 @@ class SharedMemoryFiles final : private NonCopyable
     {
         State state{};
         bool description{};
+        bool sizing{}; // initialize_size stages its frames outside the lock.
         usize size{}, pages{}, aliases{};
         u32 seals{};
         u32 uid{}, gid{};
@@ -394,6 +452,13 @@ class SharedMemoryFiles final : private NonCopyable
         ~SizeReservation()
         {
             if (!owner_) return;
+            const Guard guard(owner_->lock_);
+            discard();
+        }
+        // The caller holds the owner's lock.
+        void discard()
+        {
+            if (!owner_) return;
             for (usize index = 0; index < staged_; ++index)
                 if (frames_[index].owner)
                     if (auto released = owner_->release_staged(frames_[index]); !released)
@@ -401,12 +466,14 @@ class SharedMemoryFiles final : private NonCopyable
             owner_->finish_size_reservation(identity_);
             static_cast<void>(owner_->retire_run(reinterpret_cast<uptr>(frames_), pages_));
             owner_->trim_cells();
+            owner_ = nullptr;
         }
         void stage(usize index, memory::PhysicalFrame frame)
         {
             frames_[index] = frame;
             staged_ = index + 1;
         }
+        // The caller holds the owner's lock.
         void publish(File &file, usize size)
         {
             file.frames = frames_;
@@ -590,6 +657,7 @@ class SharedMemoryFiles final : private NonCopyable
 #endif
         return pool_->release_reference(frame);
     }
+    mutable Lock lock_{};
     NativePagePool *pool_{};
     File *files_{};
     usize file_capacity_{}, file_pages_{};

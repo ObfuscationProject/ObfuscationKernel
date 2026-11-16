@@ -161,12 +161,35 @@ struct QuarantinedSpace
     usize pinned_count{};
     bool used{};
     bool reserved{};
+    // Claimed by one CPU that works on it with mm_retire_lock released.
+    bool busy{};
     bool table_retired{};
     bool pin_complete{};
 };
 // A process holds at most one live space and transactions build one
 // replacement at a time: one slot per process plus one candidate.
+//
+// mm_retire_lock (rank mm_retire) covers each slot's state words (used,
+// reserved, busy, space, table_retired, pin_complete) and quarantine_live.
+// A slot's pages, ownership bits and pin count belong to the CPU that
+// reserved it or claimed it busy; that CPU destroys tables and releases
+// frames after unlocking (entries are popped under the lock, destroyed
+// outside it).
 extern std::array<QuarantinedSpace, sched::max_processes + 1> quarantined_spaces;
+extern smp::FineLock<smp::LockRank::mm_retire> mm_retire_lock;
+// Slots in use, read without the lock to skip an empty retry pass.
+extern std::atomic<u32> quarantine_live;
+// A free slot reserved for the caller, or null when every slot is taken.
+[[nodiscard]] QuarantinedSpace *reserve_quarantine();
+void cancel_quarantine(QuarantinedSpace &saved);
+// The caller's reserved or free-claimed slot becomes used and stays busy.
+void publish_quarantine(QuarantinedSpace &saved, const hw::AddressSpace &space, bool table_retired,
+                        bool pin_complete);
+// Marks a used slot whose space matches (any, for root 0) busy for the caller.
+[[nodiscard]] QuarantinedSpace *claim_quarantine(const hw::AddressSpace &space, bool retired_only);
+void unclaim_quarantine(QuarantinedSpace &saved);
+void set_quarantine_state(QuarantinedSpace &saved, bool table_retired, bool pin_complete);
+[[nodiscard]] bool space_quarantined(const hw::AddressSpace &space);
 // The runtime's failure and started state: written only by the kernel lock's
 // holder (a kernel section reads them at admission, under the lock). The
 // wrappers keep the Status and bool interfaces; every write is a

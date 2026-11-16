@@ -485,10 +485,14 @@ NativeShutdownReport shutdown_report(Kernel &kernel)
     result.leased_entries = entries.leased_slots;
     result.quarantined_entries = entries.quarantined_slots;
     for (const auto &entry : stranded_entry_stacks) result.stranded_entries += entry.handle.pool != nullptr;
-    for (const auto &space : quarantined_spaces)
     {
-        result.quarantined_spaces += space.used || space.reserved || space.space.root || !space.pages.empty();
-        result.quarantined_pins += space.pinned_count;
+        const decltype(mm_retire_lock)::Guard guard(mm_retire_lock);
+        for (const auto &space : quarantined_spaces)
+        {
+            result.quarantined_spaces += space.used || space.reserved || space.busy || space.space.root ||
+                                         (!space.busy && !space.pages.empty());
+            if (!space.busy) result.quarantined_pins += space.pinned_count;
+        }
     }
     auto members = [&](const auto &waits) {
         for (const auto &entry : waits) result.wait_members += entry.pid || entry.tid || entry.object.pool;
