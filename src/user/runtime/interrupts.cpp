@@ -282,20 +282,25 @@ void report_hotplug()
 }
 // The lock order's assertion counters and the fine-lock evidence, after the
 // lines above, on every profile once the runtime armed its checks:
-//   OK_SMP_KERNEL_CHECKS every check counter and the deepest lock nesting;
+//   OK_SMP_KERNEL_CHECKS every check counter and the deepest lock nesting
+//                        (OK_SMP_CHECKS, see below);
 //   OK_SMP_LOCKS         per lock class acquired:contended since the checks
 //                        were armed (acquisitions in debug kernels only);
 //   OK_SMP_WAKE, OK_SMP_MM, OK_SMP_AUDIT the wakeup, memory and audit
 //                        counters (zero until their paths are converted);
 //   OK_SMP_CHECK_SITE    the first failed check per CPU.
 // A kernel built with smp_sections=n on a profile that starts secondaries
-// prints no OK_SMP_KERNEL* line at all (the OS stress gate rejects one), so
-// its counters show only in the other lines.
+// may print no OK_SMP_KERNEL text at all (the OS stress gate rejects it), so
+// it prints the check line as OK_SMP_CHECKS, with the same fields.
+#if defined(OK_SMP_SECTIONS) || !defined(OK_ARCH_SMP_START)
+constexpr std::string_view check_line = "OK_SMP_KERNEL_CHECKS scope=hardware debug=";
+#else
+constexpr std::string_view check_line = "OK_SMP_CHECKS scope=hardware debug=";
+#endif
 void report_kernel_checks()
 {
     if (!smp::exclusive_armed.load(std::memory_order_acquire)) return;
     auto field = [](std::string_view name, u64 value) { emit(" "); emit(name); emit("="); emit_number(value); };
-#if defined(OK_SMP_SECTIONS) || !defined(OK_ARCH_SMP_START)
     auto section_sum = [](std::atomic<uptr> smp::SectionCpu::*counter) {
         u64 total = 0;
         for (const auto &cpu : smp::section_cpus) total += (cpu.*counter).load(std::memory_order_relaxed);
@@ -308,7 +313,7 @@ void report_kernel_checks()
         const u64 deepest = smp::lock_debug_max_depth(cpu);
         depth = deepest > depth ? deepest : depth;
     }
-    emit_line("OK_SMP_KERNEL_CHECKS scope=hardware debug="); emit_number(smp::lock_debug_enabled ? 1 : 0);
+    emit_line(check_line); emit_number(smp::lock_debug_enabled ? 1 : 0);
     field("lock_violations", violations);
     field("bkl_asserts", section_sum(&smp::SectionCpu::exclusive_asserts));
     field("wait_depth_asserts", section_sum(&smp::SectionCpu::depth_asserts));
@@ -316,7 +321,6 @@ void report_kernel_checks()
         field(smp::kernel_check_names[check], smp::check_total(static_cast<smp::KernelCheck>(check)));
     field("max_lock_depth", depth);
     emit("\n");
-#endif
     emit_line("OK_SMP_LOCKS scope=hardware debug="); emit_number(smp::lock_debug_enabled ? 1 : 0);
     for (usize stat = 0; stat < smp::lock_stat_count; ++stat)
     {
