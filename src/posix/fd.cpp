@@ -140,6 +140,11 @@ Result<Fd> PosixService::openat_limited(Fd dirfd, std::string_view path, u32 fla
             return status;
         }
     }
+    // kernfs: a read-only kernel attribute opened for writing is EACCES, even
+    // for root (Linux kernfs_fop_open). A writable control node opens as usual.
+    const auto control = node->control_node();
+    if (control.kind == fs::ControlNodeKind::attribute && is_writable(flags))
+        return Status::denied("kernel attribute is read-only");
     // A terminal node becomes a terminal description through the scheduler,
     // which re-validates it; the description never holds the node. O_TRUNC is
     // ignored and the open-only flags are not kept (Linux do_dentry_open).
@@ -198,6 +203,7 @@ Result<Fd> PosixService::openat_limited(Fd dirfd, std::string_view path, u32 fla
     entry.offset = 0;
     entry.node = node;
     entry.mount_id = mount_id;
+    entry.control = control; // A cpu_online write goes to the hotplug service.
     // Diagnostic only: identity is carried by the retained node and mount.
     static_cast<void>(entry.path.assign(path));
     *reserved = entry;
