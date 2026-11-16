@@ -12,7 +12,22 @@ namespace
 {
 SharedNativeCapture<lu::configured_native_profile()> shared_capture{entry_stacks};
 } // namespace
-u64 entry_syscalls{}, entry_timers{}, entry_interrupts{}, entry_faults{}, entry_rejections{};
+constinit std::array<EntryCpu, smp::max_cpus> entry_cpus{};
+void count_entry(std::atomic<uptr> EntryCpu::*counter)
+{
+    if (const auto cpu = smp::current_cpu(); cpu < smp::max_cpus) smp::detail::owner_add(entry_cpus[cpu].*counter);
+}
+u64 entry_total(std::atomic<uptr> EntryCpu::*counter)
+{
+    u64 total = 0;
+    for (const auto &cpu : entry_cpus) total += (cpu.*counter).load(std::memory_order_relaxed);
+    return total;
+}
+u64 entry_total()
+{
+    return entry_total(&EntryCpu::syscalls) + entry_total(&EntryCpu::timers) + entry_total(&EntryCpu::interrupts) +
+           entry_total(&EntryCpu::faults) + entry_total(&EntryCpu::rejections);
+}
 namespace
 {
 sched::ProcessId last_pid{};
@@ -957,19 +972,19 @@ Status start(Kernel &kernel, fs::BootArchive archive)
 }
 bool idle()
 {
-    return runtime_idle[smp::current_cpu()];
+    return runtime_idle[smp::current_cpu()].load(std::memory_order_relaxed);
 }
 
 bool step(Kernel &kernel)
 {
-    runtime_idle[smp::current_cpu()] = false;
+    runtime_idle[smp::current_cpu()].store(false, std::memory_order_relaxed);
     if (shutdown_admission_closed || native_shutdown_pending()) return false;
     if (runtime_step_active[smp::current_cpu()])
-    { runtime_failure = Status::busy("native step is not reentrant"); started = false; return false; }
+    { fail_runtime(Status::busy("native step is not reentrant")); return false; }
     RuntimeStepGuard step_guard;
 #ifdef OK_KERNEL_FREESTANDING
     if (auto status = require_cpu_service_stack(); !status)
-    { runtime_failure = status; started = false; return false; }
+    { fail_runtime(status); return false; }
 #endif
     // Retry retained owner/pin cleanup on the serialized boot-CPU service path.
     // A failed retry remains discoverable and cannot consume a discharged edge.
@@ -987,20 +1002,19 @@ bool step(Kernel &kernel)
 #endif
 #if defined(OK_ENABLE_TEST_POINTS) && defined(OK_PRIVATE_FUTEX_PEER_FIXTURE)
     if (auto status = checkpoint_peer_fixture(kernel); !status)
-    { runtime_failure = status; started = false; return false; }
+    { fail_runtime(status); return false; }
     if (!started) return false;
 #endif
     auto now = arch::monotonic_nanoseconds();
     if (!now)
     {
-        runtime_failure = now.status();
-        started = false;
+        fail_runtime(now.status());
         emit("OK_TEST_FAIL native-clock=unavailable\n");
         return false;
     }
     kernel.posix().set_monotonic_time(now.value(), arch::clock_resolution_ns());
     if (auto status = prune_departed_linux_udp_receives(kernel); !status)
-    { runtime_failure = status; started = false; return false; }
+    { fail_runtime(status); return false; }
 #ifdef OK_PRIVATE_POLL_MASK
     if (!private_child_reap(kernel)) return false;
 #else
@@ -1008,11 +1022,11 @@ bool step(Kernel &kernel)
 #endif
     if (!runtime_failure) { started = false; return false; }
     if (auto status = notify_udp_receives(kernel); !status)
-    { runtime_failure = status; started = false; return false; }
+    { fail_runtime(status); return false; }
     if (auto status = scan_native_udp_receives(kernel); !status)
-    { runtime_failure = status; started = false; return false; }
+    { fail_runtime(status); return false; }
     if (auto status = scan_linux_udp_receives(kernel); !status)
-    { runtime_failure = status; started = false; return false; }
+    { fail_runtime(status); return false; }
     prune_pipe_reads(kernel);
     prune_pipe_writes(kernel);
     prune_pty_waits(kernel);
@@ -1168,7 +1182,7 @@ bool step(Kernel &kernel)
         // An idle CPU that was handed work looks at its queue now.
         const auto *queued = kernel.scheduler().find_thread(entry.pid, entry.tid);
         if (queued && queued->queued_cpu != cpu && queued->queued_cpu < smp::max_cpus &&
-            runtime_idle[queued->queued_cpu])
+            runtime_idle[queued->queued_cpu].load(std::memory_order_relaxed))
             smp::send_ipi(queued->queued_cpu, smp::ipi_reschedule);
     }
     if (!chosen.pid)
@@ -1195,7 +1209,7 @@ bool step(Kernel &kernel)
         }
     if (!chosen.pid)
     {
-        runtime_idle[cpu] = true;
+        runtime_idle[cpu].store(true, std::memory_order_relaxed);
         return waiting_deadline;
     }
     // Serving a thread: this kernel-lock stretch is work (overlap evidence).
@@ -1312,7 +1326,7 @@ bool step(Kernel &kernel)
         // the lease, so nothing of this entry remains to complete.
         if (!trap && trap.status().code() == StatusCode::no_process)
         {
-            ++entry_rejections;
+            count_entry(&EntryCpu::rejections);
             return true;
         }
         const auto capture = trap ? trap.value().kernel_stack_pointer : 0;
@@ -1384,12 +1398,12 @@ bool step(Kernel &kernel)
 #endif
         if (captured)
         {
-            if (trap.value().kind == hw::TrapKind::syscall) ++entry_syscalls;
-            else if (trap.value().kind == hw::TrapKind::timer) ++entry_timers;
-            else if (trap.value().kind == hw::TrapKind::interrupt) ++entry_interrupts;
-            else ++entry_faults;
+            if (trap.value().kind == hw::TrapKind::syscall) count_entry(&EntryCpu::syscalls);
+            else if (trap.value().kind == hw::TrapKind::timer) count_entry(&EntryCpu::timers);
+            else if (trap.value().kind == hw::TrapKind::interrupt) count_entry(&EntryCpu::interrupts);
+            else count_entry(&EntryCpu::faults);
         }
-        else ++entry_rejections;
+        else count_entry(&EntryCpu::rejections);
         if (!trap)
         {
             finish(kernel, chosen.pid, 127);

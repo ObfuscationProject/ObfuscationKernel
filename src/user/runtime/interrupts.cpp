@@ -24,7 +24,7 @@ void report_interrupt_lines()
     emit(" ticks="); emit_number(irqs.ticks);
     emit(" delivered="); emit_number(irqs.delivered);
     emit(" serviced="); emit_number(irqs.serviced);
-    emit(" user_interrupts="); emit_number(entry_interrupts);
+    emit(" user_interrupts="); emit_number(entry_total(&EntryCpu::interrupts));
     emit(" spurious="); emit_number(irqs.spurious);
     emit(" controller_errors="); emit_number(irqs.controller_errors);
     // Bound lines as line:delivered.

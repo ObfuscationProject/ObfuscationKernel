@@ -78,7 +78,7 @@ AdmissionDigest admission_digest(Kernel &kernel, const sched::ProcessControlBloc
             digest.flags = description->flags;
         }
     }
-    digest.entries = entry_syscalls + entry_timers + entry_interrupts + entry_faults + entry_rejections;
+    digest.entries = entry_total();
     // A drain during admission (the copy-on-write resolver's, for an output
     // range) commits the process's pinned sections, and each commit revokes
     // its thread's origin record. A pinned section's thread record changes

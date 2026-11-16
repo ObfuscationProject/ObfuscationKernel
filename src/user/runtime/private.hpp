@@ -138,7 +138,17 @@ extern memory::KernelEntryStackPool entry_stacks;
 using SyscallOrigins = SyscallOriginTable<lu::configured_native_profile()>;
 extern SyscallOrigins syscall_origins;
 extern VfsStatContinuation<lu::configured_native_profile()> vfs_continuations;
-extern u64 entry_syscalls, entry_timers, entry_interrupts, entry_faults, entry_rejections;
+// User entries by outcome, per CPU: written only by that CPU (a load and a
+// store), summed by entry_total for reports and admission digests.
+struct alignas(64) EntryCpu
+{
+    std::atomic<uptr> syscalls{}, timers{}, interrupts{}, faults{}, rejections{};
+};
+extern std::array<EntryCpu, smp::max_cpus> entry_cpus;
+void count_entry(std::atomic<uptr> EntryCpu::*counter);
+[[nodiscard]] u64 entry_total(std::atomic<uptr> EntryCpu::*counter);
+// Every outcome on every CPU.
+[[nodiscard]] u64 entry_total();
 struct QuarantinedSpace
 {
     enum class Ownership : u8 { borrowed, pending, discharged };
@@ -160,7 +170,10 @@ extern std::array<QuarantinedSpace, sched::max_processes + 1> quarantined_spaces
 // The runtime's failure and started state: written only by the kernel lock's
 // holder (a kernel section reads them at admission, under the lock). The
 // wrappers keep the Status and bool interfaces; every write, and every
-// Status reference handed out, is a require_exclusive site.
+// Status reference handed out, is a require_exclusive site. A failure is
+// stored under runtime_status_lock (rank runtime_status, a leaf); `started`
+// is an atomic flag.
+extern smp::RankedSpinLock<smp::LockRank::runtime_status> runtime_status_lock;
 class RuntimeFailure final
 {
   public:
@@ -168,15 +181,25 @@ class RuntimeFailure final
     RuntimeFailure(const RuntimeFailure &) = default;
     RuntimeFailure &operator=(const RuntimeFailure &other)
     {
-        checked() = other.value_;
+        store(other.value_);
         return *this;
     }
     template <typename T>
         requires std::convertible_to<const T &, Status>
     RuntimeFailure &operator=(const T &value)
     {
-        checked() = value;
+        store(value);
         return *this;
+    }
+    void store(const Status &value)
+    {
+        const decltype(runtime_status_lock)::Guard guard(runtime_status_lock);
+        store_locked(value);
+    }
+    // The caller holds runtime_status_lock.
+    void store_locked(const Status &value)
+    {
+        checked() = value;
     }
     operator Status &()
     {
@@ -220,26 +243,28 @@ class RuntimeFlag final
 {
   public:
     constexpr RuntimeFlag() = default;
-    RuntimeFlag(const RuntimeFlag &) = default;
+    RuntimeFlag(const RuntimeFlag &other) noexcept : value_(static_cast<bool>(other)) {}
     RuntimeFlag &operator=(const RuntimeFlag &other)
     {
-        return *this = other.value_;
+        return *this = static_cast<bool>(other);
     }
     RuntimeFlag &operator=(bool value)
     {
         static_cast<void>(smp::require_exclusive("runtime started"));
-        value_ = value;
+        value_.store(value, std::memory_order_release);
         return *this;
     }
-    constexpr operator bool() const
+    operator bool() const
     {
-        return value_;
+        return value_.load(std::memory_order_acquire);
     }
 
   private:
-    bool value_{};
+    std::atomic<bool> value_{};
 };
 extern RuntimeFlag started;
+// Records the runtime's failure and stops it, both under runtime_status_lock.
+void fail_runtime(const Status &status);
 // Kernel sections (src/user/runtime/section.hpp) are compiled in: x86_64,
 // aarch64 and rv64 with option smp_sections.
 #if defined(OK_SMP_SECTIONS)
@@ -256,7 +281,9 @@ extern RuntimeFailure runtime_failure;
 extern ShutdownOwner original_shutdown_owner;
 extern bool shutdown_admission_closed, shutdown_retirement_started, shutdown_retirement_completed;
 // Per CPU: inside step(), and whether its last step found nothing to run.
-extern std::array<bool, smp::max_cpus> runtime_step_active, runtime_idle;
+extern std::array<bool, smp::max_cpus> runtime_step_active;
+// Written by its own CPU; another CPU reads it to decide whether to wake it.
+extern std::array<std::atomic<bool>, smp::max_cpus> runtime_idle;
 bool any_step_active();
 // A CPU leaving (hotplug): its round-robin cursor starts fresh on return.
 void forget_cpu_cursor(smp::CpuId cpu);
