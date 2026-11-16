@@ -477,9 +477,17 @@ Status SchedulerState::offline_cpu(smp::CpuId cpu)
         return Status::invalid_argument("the boot CPU must stay online");
     if (cpu >= cpu_count_)
         return Status::invalid_argument("offline CPU is not configured");
-    online_cpus_ &= ~(1u << cpu);
+    // A process mask is kernel placement policy: it must keep an online CPU.
+    // Thread masks do not refuse; such a thread's affinity breaks instead.
+    const u32 remaining = online_cpus_ & ~(1u << cpu);
+    for (const auto &process : processes_)
+        if (process.state() != ProcessState::zombie && process.state() != ProcessState::exited &&
+            (process.cpu_affinity_mask() & remaining) == 0)
+            return Status::busy("a process allows no other online CPU");
+    online_cpus_ = remaining;
     // Each entry is popped once and placed again on an online queue; one
-    // whose thread no longer names this queue is stale and dropped.
+    // whose thread no longer names this queue is stale and dropped. A thread
+    // none of whose CPUs stays online gets its affinity broken there.
     auto &queue = run_queues_.get(cpu);
     while (const auto ref = queue.pop())
         if (auto *thread = find_thread(ref->pid, ref->tid); thread && thread->queued_cpu == cpu)
@@ -523,10 +531,11 @@ Status SchedulerState::enqueue_thread(ProcessId pid, ThreadId tid)
     return Status::success();
 }
 
-smp::CpuId SchedulerState::select_cpu(const ProcessControlBlock &process, const ThreadControlBlock &thread) const
+smp::CpuId SchedulerState::select_cpu(ProcessControlBlock &process, ThreadControlBlock &thread)
 {
-    const u32 affinity = process.cpu_affinity_mask();
-    const u32 allowed = affinity & online_cpus_;
+    // Last allowed CPU gone offline: the thread mask resets (broken affinity).
+    static_cast<void>(repair_affinity(process, thread));
+    const u32 allowed = effective_affinity(process, thread) & online_cpus_;
     // A thread that never ran has no cache to return to.
     if (thread.dispatch_count != 0 && thread.last_cpu < smp::max_cpus && (allowed & (1u << thread.last_cpu)) != 0)
         return thread.last_cpu;
@@ -539,7 +548,8 @@ smp::CpuId SchedulerState::select_cpu(const ProcessControlBlock &process, const 
                 best = cpu;
                 shortest = length;
             }
-    // Never an offline CPU: CPU 0 is always online.
+    // Never an offline CPU: CPU 0 is always online. Only a process mask that
+    // names no configured CPU gets here (thread masks were repaired above).
     return best != no_cpu ? best : 0;
 }
 
@@ -548,15 +558,90 @@ bool SchedulerState::affinity_admits(const ProcessControlBlock &process, smp::Cp
     return process.can_run_on(cpu) || (cpu == 0 && (process.cpu_affinity_mask() & configured_cpu_mask()) == 0);
 }
 
+bool SchedulerState::thread_admits(const ProcessControlBlock &process, const ThreadControlBlock &thread,
+                                   smp::CpuId cpu) const
+{
+    if (cpu >= smp::max_cpus) return false;
+    const u16 allowed = effective_affinity(process, thread);
+    return (allowed & (1u << cpu)) != 0 || (cpu == 0 && (allowed & configured_cpu_mask()) == 0);
+}
+
+bool SchedulerState::repair_affinity(ProcessControlBlock &process, ThreadControlBlock &thread)
+{
+    const u16 allowed = effective_affinity(process, thread);
+    // Only the thread mask breaks; a process mask keeps an online CPU (offline_cpu).
+    if ((allowed & online_cpus_) != 0 || thread.cpu_affinity_mask == cpu_affinity_any ||
+        (process.cpu_affinity_mask() & online_cpus_) == 0)
+        return false;
+    smp::CpuId first = 0;
+    while (first + 1u < smp::max_cpus && (allowed & (1u << first)) == 0) ++first;
+    thread.cpu_affinity_mask = cpu_affinity_any;
+    affinity_broken_[affinity_broken_total_ % affinity_broken_.size()] = {process.pid(), thread.tid, first};
+    ++affinity_broken_total_;
+    return true;
+}
+
+Status SchedulerState::set_thread_affinity(ProcessControlBlock &process, ThreadControlBlock &thread, u16 mask)
+{
+    if ((process.cpu_affinity_mask() & mask & online_cpus_) == 0)
+        return Status::invalid_argument("affinity names no online CPU the process allows");
+    thread.cpu_affinity_mask = mask;
+    return {};
+}
+
+ThreadControlBlock *SchedulerState::find_thread_by_tid(ThreadId tid)
+{
+    smp::check_exclusive("SchedulerState::find_thread_by_tid");
+    for (auto &process : processes_)
+    {
+        if (process.state() == ProcessState::zombie || process.state() == ProcessState::exited) continue;
+        for (auto &thread : process.threads())
+            if (thread.tid == tid && thread.state != ProcessState::exited) return &thread;
+    }
+    return nullptr;
+}
+
+std::optional<AffinityBroken> SchedulerState::take_affinity_broken()
+{
+    if (affinity_broken_taken_ == affinity_broken_total_) return std::nullopt;
+    // Older records than the ring holds are counted, not reported.
+    if (affinity_broken_total_ - affinity_broken_taken_ > affinity_broken_.size())
+        affinity_broken_taken_ = affinity_broken_total_ - affinity_broken_.size();
+    return affinity_broken_[affinity_broken_taken_++ % affinity_broken_.size()];
+}
+
+Result<ProcessId> SchedulerState::schedule_kernel_thread_on_cpu(smp::CpuId cpu)
+{
+    if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
+    if (cpu >= cpu_count_) return Status::invalid_argument("scheduler cpu id out of range");
+    const auto current = current_pid(cpu);
+    const usize count = processes_.size();
+    usize start = 0;
+    for (usize i = 0; i < count; ++i)
+        if (processes_[i].pid() == current) start = (i + 1) % count;
+    // Highest priority first, then round robin after the current record.
+    const ProcessControlBlock *best = nullptr;
+    for (usize offset = 0; offset < count; ++offset)
+    {
+        const auto &process = processes_[(start + offset) % count];
+        if (process.execution() != ProcessExecution::kernel_thread || !process_allowed_on(process, cpu, current))
+            continue;
+        if (!best || process.priority() > best->priority()) best = &process;
+    }
+    if (!best) return Status::would_block("no runnable kernel thread");
+    return dispatch_selected(cpu, best->pid());
+}
+
 bool SchedulerState::eligible_on(ThreadRef ref, smp::CpuId queue, smp::CpuId cpu) const
 {
     const auto *process = find(ref.pid);
     if (!process || process->state() == ProcessState::zombie || process->state() == ProcessState::exited ||
-        process->job_.stopped || !affinity_admits(*process, cpu))
+        process->job_.stopped)
         return false;
     for (const auto &thread : process->threads())
         if (thread.tid == ref.tid)
-            return thread.queued_cpu == queue && thread.state == ProcessState::runnable && thread.on_cpu == no_cpu;
+            return thread.queued_cpu == queue && thread.state == ProcessState::runnable && thread.on_cpu == no_cpu &&
+                   thread_admits(*process, thread, cpu);
     return false;
 }
 
@@ -581,7 +666,7 @@ std::optional<ThreadRef> SchedulerState::dequeue_thread(smp::CpuId cpu)
             process->state() == ProcessState::zombie || process->state() == ProcessState::exited ||
             process->job_.stopped)
             continue;
-        if (!affinity_admits(*process, cpu))
+        if (!thread_admits(*process, *thread, cpu))
         {
             static_cast<void>(enqueue_thread(ref->pid, ref->tid));
             continue;
@@ -631,7 +716,7 @@ Status SchedulerState::mark_on_cpu(ProcessId pid, ThreadId tid, smp::CpuId cpu)
     if (current_thread_by_cpu_[cpu] != 0)
         return Status::busy("CPU already runs another thread");
     if (thread->state != ProcessState::runnable || process->state() == ProcessState::zombie ||
-        process->state() == ProcessState::exited || process->job_.stopped || !affinity_admits(*process, cpu))
+        process->state() == ProcessState::exited || process->job_.stopped || !thread_admits(*process, *thread, cpu))
         return Status::invalid_argument("thread cannot run on this CPU");
     occupy_cpu(cpu, *process, *thread);
     return Status::success();
@@ -786,6 +871,8 @@ Result<ThreadId> SchedulerState::pick_next_thread(ProcessControlBlock &process, 
     for (usize offset = 0; offset < threads.size(); ++offset)
     {
         auto &thread = threads[(start + offset) % threads.size()];
+        if (!thread_admits(process, thread, cpu))
+            continue;
         if (thread.state == ProcessState::runnable || (thread.state == ProcessState::running && thread.tid == current &&
                                                        !thread_running_on_other_cpu(thread, cpu)))
         {
@@ -812,7 +899,8 @@ Result<ProcessId> SchedulerState::dispatch_selected(smp::CpuId cpu, Result<Proce
     if (requested)
     {
         const auto *thread = find_thread(next.value(), requested);
-        if (!thread || thread_running_on_other_cpu(*thread, cpu) ||
+        const auto *owner = find(next.value());
+        if (!thread || !owner || !thread_admits(*owner, *thread, cpu) || thread_running_on_other_cpu(*thread, cpu) ||
             (thread->state != ProcessState::runnable &&
              !(thread->state == ProcessState::running && requested == previous_tid && next.value() == previous_pid)))
             return Status::invalid_argument("requested thread cannot be activated");
@@ -1405,6 +1493,8 @@ Status SchedulerState::activate_thread(ProcessId pid, ThreadId tid, smp::CpuId c
         (process->state() != ProcessState::runnable && process->state() != ProcessState::running) ||
         !process->can_run_on(cpu) || process->job_.stopped)
         return Status::invalid_argument("thread owner cannot be activated");
+    if (const auto *thread = find_thread(pid, tid); thread && !thread_admits(*process, *thread, cpu))
+        return Status::invalid_argument("thread affinity excludes this CPU");
     auto selected = dispatch_selected(cpu, pid, tid);
     return selected ? Status::success() : selected.status();
 }
@@ -1490,6 +1580,7 @@ Result<ProcessId> SchedulerState::fork_process(ProcessId parent, bool publish)
     child->threads()[0].priority = calling_thread->priority;
     child->threads()[0].tls = calling_thread->tls;
     child->threads()[0].native_signal_mask = calling_thread->native_signal_mask;
+    child->threads()[0].cpu_affinity_mask = calling_thread->cpu_affinity_mask;
     child->threads()[0].native_frame = calling_thread->native_frame;
     child->threads()[0].native_active = false;
     child->threads()[0].syscall_pending = false;

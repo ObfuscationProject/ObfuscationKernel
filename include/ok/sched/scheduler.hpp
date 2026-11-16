@@ -127,6 +127,18 @@ struct ThreadControlBlock
     // The run queue holding this thread's single entry. Dispatch and exit drop
     // the entry; one whose thread blocked meanwhile is discarded when popped.
     smp::CpuId queued_cpu{no_cpu};
+    // sched_setaffinity's mask; the thread runs on CPUs both it and the
+    // process mask allow. Fork and clone copy it, exec keeps it.
+    u16 cpu_affinity_mask{cpu_affinity_any};
+};
+
+// A thread whose allowed CPUs all went offline (docs/modules/sysfs.md): its
+// mask was reset to every CPU, as Linux does when it breaks affinity.
+struct AffinityBroken
+{
+    ProcessId pid{};
+    ThreadId tid{};
+    smp::CpuId cpu{}; // The lowest CPU it was confined to.
 };
 
 struct CpuSchedulingStats
@@ -761,6 +773,36 @@ class SchedulerState
     Status offline_cpu(smp::CpuId cpu);
     // A configured CPU joins the online set again; it starts with its empty queue.
     Status online_cpu(smp::CpuId cpu);
+    // The CPUs a thread may run on: its process mask and its own.
+    [[nodiscard]] static u16 effective_affinity(const ProcessControlBlock &process, const ThreadControlBlock &thread)
+    {
+        return static_cast<u16>(process.cpu_affinity_mask() & thread.cpu_affinity_mask);
+    }
+    // Whether the thread may run on `cpu`; CPU 0 also admits a thread whose
+    // effective mask names no configured CPU (the select_cpu fallback).
+    [[nodiscard]] bool thread_admits(const ProcessControlBlock &process, const ThreadControlBlock &thread,
+                                     smp::CpuId cpu) const;
+    // A thread none of whose allowed CPUs is online gets every CPU back (its
+    // thread mask resets) and is recorded once as broken affinity. Returns
+    // whether it was reset. Every placement of a thread calls it first.
+    bool repair_affinity(ProcessControlBlock &process, ThreadControlBlock &thread);
+    // sched_setaffinity on a thread: invalid_argument when the process mask
+    // and `mask` share no online CPU, else the thread mask becomes `mask`.
+    Status set_thread_affinity(ProcessControlBlock &process, ThreadControlBlock &thread, u16 mask);
+    // A thread by its id alone (sched_*affinity name threads by tid).
+    [[nodiscard]] ThreadControlBlock *find_thread_by_tid(ThreadId tid);
+    // Broken-affinity records not yet reported, oldest first; the ring keeps
+    // the last 16, the count every one.
+    [[nodiscard]] std::optional<AffinityBroken> take_affinity_broken();
+    [[nodiscard]] u64 affinity_broken() const { return affinity_broken_total_; }
+    // Once native userland started, the kernel tick and the preemption tick
+    // place only kernel_thread records: native threads belong to the
+    // runtime's step, which honors their thread masks.
+    void set_native_userland(bool started) { native_userland_ = started; }
+    [[nodiscard]] bool native_userland() const { return native_userland_; }
+    // Round robin over the kernel_thread records allowed on `cpu`, after the
+    // one it runs; dispatches the choice there.
+    Result<ProcessId> schedule_kernel_thread_on_cpu(smp::CpuId cpu);
     [[nodiscard]] u32 online_cpus() const { return online_cpus_; }
     // Per-CPU run queues are a mechanism; nothing enqueues implicitly, so a
     // thread woken while still on its CPU must be enqueued again by whoever
@@ -775,7 +817,7 @@ class SchedulerState
     // tie; with no allowed CPU online, CPU 0, which is never offline. CPU 0
     // runs the entry only if the affinity names no configured CPU; otherwise
     // the entry waits there until a CPU it allows comes online and takes it.
-    [[nodiscard]] smp::CpuId select_cpu(const ProcessControlBlock &process, const ThreadControlBlock &thread) const;
+    [[nodiscard]] smp::CpuId select_cpu(ProcessControlBlock &process, ThreadControlBlock &thread);
     // Pops this online CPU's queue, discarding stale entries and moving
     // entries the affinity no longer allows. An empty queue steals the oldest
     // eligible entry from the longest other online queue it can try-lock,
@@ -854,6 +896,11 @@ class SchedulerState
     void occupy_cpu(smp::CpuId cpu, ProcessControlBlock &process, ThreadControlBlock &thread);
     // The CPU 0 fallback of select_cpu admits a thread whose affinity names no configured CPU.
     [[nodiscard]] bool affinity_admits(const ProcessControlBlock &process, smp::CpuId cpu) const;
+    [[nodiscard]] bool affinity_admits(const ProcessControlBlock &process, const ThreadControlBlock &thread,
+                                       smp::CpuId cpu) const
+    {
+        return thread_admits(process, thread, cpu);
+    }
     [[nodiscard]] bool eligible_on(ThreadRef ref, smp::CpuId queue, smp::CpuId cpu) const;
     Result<ProcessId> create_process_with_pid(ProcessId pid, std::string_view name,
                                                arch::CpuContext initial_context);
@@ -950,6 +997,9 @@ class SchedulerState
     std::array<CpuSchedulingStats, smp::max_cpus> cpu_stats_{};
     u32 online_cpus_{1};
     smp::PerCpu<SchedulerRunQueue> run_queues_{};
+    std::array<AffinityBroken, 16> affinity_broken_{};
+    u64 affinity_broken_total_{}, affinity_broken_taken_{};
+    bool native_userland_{};
 };
 
 template <SchedulerPolicy Policy = RoundRobinPolicy> class BasicScheduler final : public SchedulerState
@@ -980,6 +1030,7 @@ template <SchedulerPolicy Policy = RoundRobinPolicy> class BasicScheduler final 
         {
             return Status::invalid_argument("scheduler cpu id out of range");
         }
+        if (native_userland()) return schedule_kernel_thread_on_cpu(cpu);
         return dispatch_selected(cpu, policy_.pick_next(processes(), current_pid(cpu), cpu));
     }
 
