@@ -12,26 +12,38 @@ class SharedNativeCapture final : private NonCopyable
     using Origins = SyscallOriginTable<Selected>;
     using Vfs = VfsStatContinuation<Selected>;
     explicit constexpr SharedNativeCapture(memory::KernelEntryStackPool &pool) : backend_(pool) {}
+    void set_entry(BackendCapture::Entry entry) { backend_.set_entry(entry); }
+    // `process`/`thread` are updated to the canonical records after the entry;
+    // see BackendCapture::enter.
+    Result<arch::execution::Trap> enter(Origins &origins, Vfs &vfs, sched::ProcessControlBlock *&process,
+                                       sched::ThreadControlBlock *&thread,
+                                       const arch::execution::KernelEntryStackView &view,
+                                       sched::SchedulerState &scheduler)
+    {
+        auto restart_stage = origins.stage_capture(*process, *thread, view, scheduler);
+        if (!restart_stage) return restart_stage.status();
+        auto vfs_stage = vfs.stage_capture(*process, *thread, view, scheduler);
+        if (!vfs_stage) return vfs_stage.status();
+        auto observation = backend_.enter(scheduler, process, thread, view);
+        if (!observation) return observation.status();
+        auto status = origins.observe(restart_stage.value(), observation.value(), *process, *thread, view, scheduler);
+        if (status) status = vfs.observe(vfs_stage.value(), observation.value(), *process, *thread, view, scheduler);
+        if (!status)
+        {
+            origins.revoke(*thread);
+            vfs.revoke(*thread);
+            return status;
+        }
+        return observation.value().trap();
+    }
     Result<arch::execution::Trap> enter(Origins &origins, Vfs &vfs, sched::ProcessControlBlock &process,
                                        sched::ThreadControlBlock &thread,
                                        const arch::execution::KernelEntryStackView &view,
                                        sched::SchedulerState &scheduler)
     {
-        auto restart_stage = origins.stage_capture(process, thread, view, scheduler);
-        if (!restart_stage) return restart_stage.status();
-        auto vfs_stage = vfs.stage_capture(process, thread, view, scheduler);
-        if (!vfs_stage) return vfs_stage.status();
-        auto observation = backend_.enter(scheduler, process, thread, view);
-        if (!observation) return observation.status();
-        auto status = origins.observe(restart_stage.value(), observation.value(), process, thread, view, scheduler);
-        if (status) status = vfs.observe(vfs_stage.value(), observation.value(), process, thread, view, scheduler);
-        if (!status)
-        {
-            origins.revoke(thread);
-            vfs.revoke(thread);
-            return status;
-        }
-        return observation.value().trap();
+        auto *owner = &process;
+        auto *current = &thread;
+        return enter(origins, vfs, owner, current, view, scheduler);
     }
   private:
     BackendCapture backend_;

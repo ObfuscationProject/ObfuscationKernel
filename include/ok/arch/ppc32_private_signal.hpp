@@ -204,6 +204,9 @@ class Tracker final
     {Capability c;c.issuer_=this;c.epoch_=epoch_;c.sequence_=sequence_;return c;}
     [[nodiscard]] Observation query(const UserFrame &frame) const noexcept
     {return observation_.valid_for(frame,space_,view_)?observation_:Observation{};}
+    // The capture published against `from` follows an equal frame to `to`.
+    void rebind(const UserFrame &from,const UserFrame &to) noexcept
+    {if(observation_.frame_==&from && same_frame(to,frame_)) observation_.frame_=&to;}
 };
 }
 inline bool Capability::admitted() const noexcept

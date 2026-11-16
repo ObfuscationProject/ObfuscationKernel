@@ -96,7 +96,7 @@ void policy()
 }
 
 template <lu::Profile P>
-void admission(Kernel &kernel,sched::ProcessId source,sched::ProcessId destination)
+void admission(Kernel &kernel,sched::ProcessId source,sched::ProcessId destination,sched::ProcessId peer)
 {
     using Codec=user::native::SignalActionCodec<P>;
     auto &scheduler=kernel.scheduler();
@@ -130,9 +130,36 @@ void admission(Kernel &kernel,sched::ProcessId source,sched::ProcessId destinati
     thread->native_active=true;thread->state=sched::ProcessState::blocked;
     CHECK(call(true,0,destination,0)==0 && call(true,0,destination,10)==-95);
     thread->state=sched::ProcessState::runnable;
-    for(u32 stop:{Codec::stop_signal,Codec::mips?24U:20U,Codec::mips?26U:21U,
-                 Codec::mips?27U:22U,Codec::mips?25U:18U})CHECK(call(true,0,destination,stop)==-95);
     CHECK(deliveries==initial);
+    // Stop and continue signals reach the delivery callback, which owns their
+    // job-control effects.
+    for(u32 stop:{Codec::stop_signal,Codec::mips?24U:20U,Codec::mips?26U:21U,
+                 Codec::mips?27U:22U,Codec::mips?25U:18U})CHECK(call(true,0,destination,stop)==0 && sent.signal==stop);
+    CHECK(deliveries==initial+5);
+    // A blocked target is admitted only by the callback, which sees the signal.
+    thread->state=sched::ProcessState::blocked;
+    auto admit_continue=[&](const auto &,const auto &,i32 signal){return signal==static_cast<i32>(Codec::continue_signal);};
+    std::array<u64,6> blocked{destination,Codec::continue_signal};
+    CHECK(user::send_directed_signal<P>(scheduler,*sender,true,blocked,deliver,admit_continue)==0);
+    blocked[1]=10;CHECK(user::send_directed_signal<P>(scheduler,*sender,true,blocked,deliver,admit_continue)==-95);
+    thread->state=sched::ProcessState::runnable;
+    // SIGCONT crosses credentials inside the sender's session only: refused
+    // for the separately created destination, delivered to the forked peer.
+    recipient->set_credentials(denied);
+    CHECK(sender->session_id()!=recipient->session_id());
+    CHECK(call(true,0,destination,10)==-1 && call(true,0,destination,Codec::continue_signal)==-1);
+    recipient->set_credentials(to);
+    auto *same=scheduler.find(peer);auto *peer_thread=scheduler.find_thread(peer,peer);CHECK(same && peer_thread);
+    CHECK(same->session_id()==sender->session_id());
+    same->set_credentials(denied);same->resources().personality=sched::UserPersonality::linux;
+    peer_thread->native_active=true;peer_thread->state=sched::ProcessState::runnable;
+    auto deliver_peer=[&](auto &process,auto &task,sched::PendingSignalInfo info)->i64 {
+        CHECK(process.pid()==peer && task.tid==peer);++deliveries;sent=info;return 0;
+    };
+    std::array<u64,6> to_peer{peer,Codec::continue_signal};
+    CHECK(user::send_directed_signal<P>(scheduler,*sender,true,to_peer,deliver_peer)==0 && sent.signal==Codec::continue_signal);
+    to_peer[1]=10;CHECK(user::send_directed_signal<P>(scheduler,*sender,true,to_peer,deliver_peer)==-1);
+    const unsigned extra=2;
     const u64 high=u64{0x12345678}<<32;
     CHECK(call(false,high|destination,high|destination,high)==0);
     CHECK(call(true,0,high|destination,high|10)==0);
@@ -140,7 +167,10 @@ void admission(Kernel &kernel,sched::ProcessId source,sched::ProcessId destinati
     const auto snapshot=sent;sender->set_credentials(user::root_credentials());
     CHECK(sent==snapshot);sender->set_credentials(from);
     CHECK(call(false,destination,destination,Codec::max_signal)==0);
-    CHECK(sent.signal==Codec::max_signal && deliveries==initial+2 && thread->native_signal_mask==mask);
+    CHECK(sent.signal==Codec::max_signal && deliveries==initial+7+extra && thread->native_signal_mask==mask);
+    CHECK(user::continue_signal_permitted(Codec::continue_signal,Codec::continue_signal,7,7) &&
+          !user::continue_signal_permitted(Codec::continue_signal,Codec::continue_signal,7,8) &&
+          !user::continue_signal_permitted(10,Codec::continue_signal,7,7));
     queues<P>(kernel,destination);
     ++profiles;
 }
@@ -187,17 +217,19 @@ int main()
     auto source=kernel.scheduler().create_user_process("directed-source",context);CHECK(source);
     auto destination=kernel.scheduler().create_user_process("directed-target",context);CHECK(destination);
     CHECK(kernel.posix().activate(source.value()));
-    admission<lu::Profile::x86_64>(kernel,source.value(),destination.value());
-    admission<lu::Profile::i386>(kernel,source.value(),destination.value());
-    admission<lu::Profile::aarch64>(kernel,source.value(),destination.value());
-    admission<lu::Profile::arm32>(kernel,source.value(),destination.value());
-    admission<lu::Profile::rv64>(kernel,source.value(),destination.value());
-    admission<lu::Profile::rv32>(kernel,source.value(),destination.value());
-    admission<lu::Profile::loongarch64>(kernel,source.value(),destination.value());
-    admission<lu::Profile::mips>(kernel,source.value(),destination.value());
-    admission<lu::Profile::mips64>(kernel,source.value(),destination.value());
-    admission<lu::Profile::ppc>(kernel,source.value(),destination.value());
+    // Shares the source's session through fork.
+    auto peer=kernel.posix().fork(source.value());CHECK(peer);
+    admission<lu::Profile::x86_64>(kernel,source.value(),destination.value(),peer.value());
+    admission<lu::Profile::i386>(kernel,source.value(),destination.value(),peer.value());
+    admission<lu::Profile::aarch64>(kernel,source.value(),destination.value(),peer.value());
+    admission<lu::Profile::arm32>(kernel,source.value(),destination.value(),peer.value());
+    admission<lu::Profile::rv64>(kernel,source.value(),destination.value(),peer.value());
+    admission<lu::Profile::rv32>(kernel,source.value(),destination.value(),peer.value());
+    admission<lu::Profile::loongarch64>(kernel,source.value(),destination.value(),peer.value());
+    admission<lu::Profile::mips>(kernel,source.value(),destination.value(),peer.value());
+    admission<lu::Profile::mips64>(kernel,source.value(),destination.value(),peer.value());
+    admission<lu::Profile::ppc>(kernel,source.value(),destination.value(),peer.value());
     lifecycle(kernel,source.value(),destination.value(),context);
-    CHECK(profiles==10 && permissions==13 && deliveries==20);
-    std::puts("DIRECTED_SIGNAL_MODEL_PASS profiles=10 permission_vectors=13 callback_deliveries=20 lifecycle=1 guest=0");
+    CHECK(profiles==10 && permissions==13 && deliveries==90);
+    std::printf("DIRECTED_SIGNAL_MODEL_PASS profiles=10 permission_vectors=13 callback_deliveries=%u lifecycle=1 guest=0\n",deliveries);
 }

@@ -19,7 +19,7 @@ namespace lu = ok::abi::linux_user;
     } while (false)
 namespace mock
 {
-std::array<std::byte, 8192> memory{};
+alignas(16) std::array<std::byte, 8192> memory{};
 uptr forbidden{};
 usize copies{};
 } // namespace mock
@@ -106,6 +106,14 @@ Status copy_to_user(const AddressSpace &s, uptr address, const void *in, usize s
     if (size)
         std::memcpy(mock::memory.data() + address - user_begin, in, size);
     return Status::success();
+}
+Result<u32 *> user_word(const AddressSpace &s, uptr address, bool write)
+{
+    if (address % sizeof(u32))
+        return Status::invalid_argument();
+    if (!user_range(s, address, sizeof(u32), write))
+        return Status::fault();
+    return reinterpret_cast<u32 *>(mock::memory.data() + (address - user_begin));
 }
 } // namespace ok::arch::execution
 // Sparse metadata fixture proves the size check precedes destructive truncate;
@@ -233,6 +241,10 @@ void test_profile(Kernel &kernel, sched::ProcessId pid, LargeNode &large, usize 
     CHECK(slot && slot->close_on_exec);
     const auto *desc = kernel.scheduler().open_description(slot->description);
     CHECK(desc && desc->flags == (posix::o_RDWR | posix::o_CREAT | posix::o_EXCL | posix::o_NONBLOCK));
+    // O_NOCTTY is decoded (it gates a terminal open's acquisition) but is never
+    // kept in the description, so F_GETFL omits it.
+    CHECK(Open::decode(Open::no_ctty).value().native_flags == posix::o_NOCTTY);
+    CHECK(!(desc->flags & posix::o_NOCTTY) && !(Open::status_flags(*desc) & Open::no_ctty));
     const char data[] = "payload";
     const std::span<const std::byte> bytes{reinterpret_cast<const std::byte *>(data), sizeof(data) - 1};
     CHECK(kernel.posix().write(4, bytes).value() == sizeof(data) - 1);

@@ -64,17 +64,22 @@ boot-CPU runtime; these arrays do not supply an SMP locking protocol.
   immediate process termination in `step`; they are not routed to user fault
   handlers with fault-specific `siginfo`. The queue supports authenticated sender
   records and a trusted zero-payload kernel signal, not a complete tagged fault,
-  timer or child payload. Directed sends reject stop-family signals and SIGCONT
-  with `EOPNOTSUPP`. Default stop-family delivery returns `unsupported`, which the
-  private service treats as failure; default SIGCONT is classified as ignored.
-  Implement stopped/runnable group transitions, pending stop/continue interaction,
-  parent notifications and wait reporting before advertising job control.
+  timer or child payload. When this runtime was extracted, directed sends
+  rejected stop-family signals and SIGCONT with `EOPNOTSUPP` and default
+  stop-family delivery returned `unsupported`. Since WT2.2 job control is
+  landed: stops and continues are a per-process overlay, every signal number
+  reaches native and Linux recipients, pending stop/continue signals discard
+  each other, and parents get CLD_STOPPED/CLD_CONTINUED SIGCHLD and
+  WUNTRACED/WCONTINUED wait reports (see the
+  [terminal contract](../modules/tty.md)).
 - **Process routing.** The private positive-target `kill` path now uses a stable
   shared process queue; `tkill`/`tgkill` remain directed. Pending queries, ignoring
   dispositions, fork/exec/exit and all qualified wait selectors include shared
   work. Production still requires broader blocked-state qualification, process
-  groups/broadcasts, capability/user namespace/LSM permissions and the SIGCONT
-  same-session exception. See `NATIVE_PROCESS_SIGNALS.md` for exact boundaries.
+  groups/broadcasts and capability/user namespace/LSM permissions; the SIGCONT
+  same-session exception landed in WT2.2 (see the
+  [terminal contract](../modules/tty.md)). See `NATIVE_PROCESS_SIGNALS.md` for
+  exact boundaries.
 - **Action behavior.** Runtime admission accepts the implemented subset
   `SA_SIGINFO`, architecture-supported `SA_RESTORER`, `SA_NODEFER`, `SA_RESETHAND`,
   `SA_ONSTACK` and `SA_RESTART`; it rejects unsupported sanitized flags with
@@ -82,8 +87,9 @@ boot-CPU runtime; these arrays do not supply an SMP locking protocol.
   Restart is qualified separately for pipe read/write, child wait and futex
   continuations; partial writes retain committed progress. Sleep and poll use
   their own interruption rules and temporary-mask restoration. Exit-only SIGCHLD/SA_NOCLDWAIT policy is implemented as described in
-  `NATIVE_CHILD_EXIT_SIGNALS.md`; stop/continue events and additional signal
-  sources still require their own behavioral implementation.
+  `NATIVE_CHILD_EXIT_SIGNALS.md`; stop/continue events are landed since WT2.2
+  (SA_NOCLDSTOP included), and additional signal sources still require their
+  own behavioral implementation.
 - **Architecture capability.** Frame codecs require executable handler PCs,
   writable stacks and profile-specific register/mode/alignment checks. Reserved
   trampolines require owned RX mappings with exact code bytes. The current state

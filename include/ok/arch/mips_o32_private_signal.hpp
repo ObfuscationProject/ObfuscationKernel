@@ -114,6 +114,11 @@ class CaptureTracker final
     {
         return admitted_ && frame_mode(frame) && observation_.matches(frame) ? observation_ : Observation{};
     }
+    // The capture published against `from` follows the frame to `to`.
+    constexpr void rebind(const UserFrame &from, const UserFrame &to) noexcept
+    {
+        if (observation_.frame_ == &from) observation_.frame_ = &to;
+    }
 };
 
 // Defined only by the opted-in native o32 backend. Query immediately after

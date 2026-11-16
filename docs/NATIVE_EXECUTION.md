@@ -8,7 +8,7 @@ native user execution backends and OS crt/syscall implementations:
 | Profile | User privilege / translation | Preemption source |
 | --- | --- | --- |
 | i386 | CPL3 / PAE with NX, QEMU `-cpu max` | PIC/PIT |
-| x86_64 | CPL3 / four-level paging | PIC/PIT |
+| x86_64 | CPL3 / four-level paging | PIT through the I/O APIC (PIC before the interrupt service starts or without one) |
 | aarch64 | EL0 / TTBR0, 4 KiB pages | GICv2 physical timer |
 | arm32 | USR / ARMv7 short descriptors | GICv2 physical timer |
 | rv64 | U-mode / Sv39, M-mode kernel | CLINT machine timer |

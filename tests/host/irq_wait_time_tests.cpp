@@ -7,9 +7,14 @@
 #include "ok/abi/linux_timer.hpp"
 #include "ok/user/native_signal_info.hpp"
 #include "interrupt/console_ring.hpp"
+#include "ok/smp/bringup.hpp"
+#include "ok/smp/cpu.hpp"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
+#include <vector>
 
 using namespace ok;
 
@@ -90,6 +95,223 @@ static void check_irq_router()
                       &many[interrupt::IrqRouter<interrupt::ModelIrqChip>::max_line_handlers]).code() ==
           StatusCode::overflow);
     CHECK(router.controller_errors() == 0);
+}
+
+// Routing on a chip that can target CPUs: the first bind places the line, a
+// shared handler keeps it there, retarget moves it, unbind forgets it.
+static void check_irq_routing()
+{
+    interrupt::ModelIrqChip chip;
+    interrupt::IrqRouter<interrupt::ModelIrqChip> router(chip);
+    CHECK(chip.initialize().ok());
+    Serviced first{.chip = &chip}, second{.chip = &chip};
+    CHECK(router.bind(4, interrupt::IrqTrigger::level, service, &first, 3).ok());
+    CHECK(router.target(4) == 3 && chip.routed(4) == 3 && !chip.masked(4));
+    CHECK(router.bind(4, interrupt::IrqTrigger::level, service, &second, 1).ok());
+    CHECK(router.target(4) == 3 && chip.routed(4) == 3);
+    // A CPU the chip cannot reach falls back to CPU 0.
+    CHECK(router.bind(6, interrupt::IrqTrigger::edge, service, &first, smp::max_cpus).ok());
+    CHECK(router.target(6) == 0 && chip.routed(6) == 0);
+    CHECK(router.retarget(4, 1).ok() && router.target(4) == 1 && chip.routed(4) == 1 && !chip.masked(4));
+    CHECK(router.retarget(4, smp::max_cpus).code() == StatusCode::invalid_argument && router.target(4) == 1);
+    CHECK(router.retarget(9, 1).code() == StatusCode::not_found);
+    // Pending state survives a move; the drain still services it once.
+    router.top_half(4);
+    CHECK(router.retarget(4, 2).ok() && router.pending() && chip.masked(4));
+    CHECK(router.drain() == 1 && first.calls == 1 && second.calls == 1 && !chip.masked(4));
+    CHECK(router.unbind(4, service, &first).ok() && router.unbind(4, service, &second).ok());
+    CHECK(!router.bound(4) && router.target(4) == 0);
+    // follow() moves a line bind() placed to its waiter, never a line
+    // retarget() pinned; a new bind places it afresh.
+    CHECK(router.bind(8, interrupt::IrqTrigger::level, service, &first, 2).ok() && router.target(8) == 2);
+    CHECK(router.follow(8, 1) && router.target(8) == 1 && chip.routed(8) == 1 && !router.follow(8, 1));
+    CHECK(router.retarget(8, 1).ok() && !router.follow(8, 3) && router.target(8) == 1 && chip.routed(8) == 1);
+    CHECK(!router.follow(9, 1) && !router.bound(9));
+    CHECK(router.unbind(8, service, &first).ok() && router.bind(8, interrupt::IrqTrigger::level, service, &first, 2).ok());
+    CHECK(router.follow(8, 3) && router.target(8) == 3 && chip.routed(8) == 3);
+    CHECK(router.unbind(8, service, &first).ok());
+}
+
+// Hotplug: retarget_away moves exactly the bound lines delivered to the
+// departing CPU, under the router lock, and keeps their pending state: a
+// line whose top half ran on that CPU is still drained once and unmasked.
+static void check_irq_retarget_away()
+{
+    interrupt::ModelIrqChip chip;
+    interrupt::IrqRouter<interrupt::ModelIrqChip> router(chip);
+    CHECK(chip.initialize().ok());
+    Serviced a{.chip = &chip}, b{.chip = &chip}, c{.chip = &chip}, d{.chip = &chip};
+    CHECK(router.bind(3, interrupt::IrqTrigger::level, service, &a, 2).ok());
+    CHECK(router.bind(4, interrupt::IrqTrigger::edge, service, &b, 2).ok());
+    CHECK(router.bind(5, interrupt::IrqTrigger::level, service, &c, 1).ok());
+    // Bound to CPU 2 once, then unbound: no longer a line to move.
+    CHECK(router.bind(7, interrupt::IrqTrigger::level, service, &d, 2).ok());
+    CHECK(router.unbind(7, service, &d).ok() && router.target(7) == 0);
+    // Line 3 is in flight on CPU 2: its top half ran, the drain did not.
+    CHECK(router.top_half(3) && chip.masked(3));
+    usize asked = 0;
+    const usize moved = router.retarget_away(2, [&](interrupt::IrqLine line) {
+        ++asked;
+        // Line 4 has nowhere else to go.
+        return line == 4 ? smp::CpuId{2} : smp::CpuId{1};
+    });
+    CHECK(moved == 1 && asked == 2);
+    CHECK(router.target(3) == 1 && chip.routed(3) == 1 && router.target(4) == 2 && chip.routed(4) == 2);
+    CHECK(router.target(5) == 1 && chip.routed(5) == 1 && !router.bound(7) && chip.routed(7) == 2);
+    CHECK(router.pending() && router.drain() == 1 && a.calls == 1 && !chip.masked(3));
+    CHECK(chip.completed(3) == 1 && router.controller_errors() == 0);
+    // No line left on CPU 3; nothing is asked or moved.
+    CHECK(router.retarget_away(3, [&](interrupt::IrqLine) {
+        ++asked;
+        return smp::CpuId{0};
+    }) == 0 && asked == 2);
+}
+
+// A routable model chip that, like the I/O APIC, GICv2 and the PLIC, refuses
+// a CPU outside the online mask (CPU 0 is always routable).
+class OnlineModelIrqChip final
+{
+  public:
+    Status initialize() { return chip_.initialize(); }
+    Status configure(interrupt::IrqLine line, interrupt::IrqTrigger trigger) { return chip_.configure(line, trigger); }
+    Status mask(interrupt::IrqLine line) { return chip_.mask(line); }
+    Status unmask(interrupt::IrqLine line) { return chip_.unmask(line); }
+    Status acknowledge(interrupt::IrqLine line) { return chip_.acknowledge(line); }
+    Status end_of_interrupt(interrupt::IrqLine line) { return chip_.end_of_interrupt(line); }
+    [[nodiscard]] usize line_count() const { return chip_.line_count(); }
+    [[nodiscard]] std::string_view name() const { return chip_.name(); }
+    Status route(interrupt::IrqLine line, smp::CpuId cpu)
+    {
+        if (cpu != 0 && (cpu >= smp::max_cpus || (smp::online_mask() & (u32{1} << cpu)) == 0))
+            return Status{StatusCode::invalid_argument, "route names an offline CPU"};
+        return chip_.route(line, cpu);
+    }
+    [[nodiscard]] smp::CpuId routed(interrupt::IrqLine line) const { return chip_.routed(line); }
+
+  private:
+    interrupt::ModelIrqChip chip_;
+};
+static_assert(interrupt::RoutableIrqChip<OnlineModelIrqChip>);
+
+// Hotplug's leaving order (bringup.cpp leave()): the CPU clears its online
+// bit, then retarget_away() moves its lines. A top half's follow() that
+// routed a line to it before the move is undone by the move; one delayed past
+// it is refused by the chip. Model threads race follow() against the leave.
+static void check_irq_follow_against_leave()
+{
+    OnlineModelIrqChip chip;
+    interrupt::IrqRouter<OnlineModelIrqChip> router(chip);
+    CHECK(chip.initialize().ok());
+    Serviced seen{};
+    smp::detail::online.store(0b111);
+    CHECK(router.bind(3, interrupt::IrqTrigger::level, service, &seen, 1).ok());
+    CHECK(router.bind(4, interrupt::IrqTrigger::level, service, &seen, 0).ok());
+    // A follow before the leave lands on CPU 2; the move takes it off.
+    CHECK(router.follow(4, 2) && router.target(4) == 2 && chip.routed(4) == 2);
+    smp::detail::online.fetch_and(~u32{0b100});
+    CHECK(router.retarget_away(2, [](interrupt::IrqLine) { return smp::CpuId{0}; }) == 1);
+    CHECK(router.target(4) == 0 && chip.routed(4) == 0);
+    // Delayed past the move: refused, nothing reaches the parked CPU.
+    CHECK(!router.follow(3, 2) && !router.follow(4, 2));
+    CHECK(router.target(3) == 1 && chip.routed(3) == 1 && router.target(4) == 0);
+    // Restarted, it is a target again.
+    smp::detail::online.fetch_or(0b100);
+    CHECK(router.follow(3, 2) && router.target(3) == 2 && chip.routed(3) == 2);
+    CHECK(router.follow(3, 1) && router.target(3) == 1);
+
+    constexpr int rounds = 2000;
+    for (int round = 0; round < rounds; ++round)
+    {
+        smp::detail::online.store(0b111);
+        std::atomic<bool> go{false};
+        std::thread top_half([&] {
+            while (!go.load(std::memory_order_acquire))
+                ;
+            for (int attempt = 0; attempt < 8; ++attempt)
+                static_cast<void>(router.follow(static_cast<interrupt::IrqLine>(3 + (attempt & 1)), 2));
+        });
+        go.store(true, std::memory_order_release);
+        smp::detail::online.fetch_and(~u32{0b100}, std::memory_order_seq_cst);
+        static_cast<void>(router.retarget_away(2, [](interrupt::IrqLine) { return smp::CpuId{0}; }));
+        top_half.join();
+        CHECK(router.target(3) != 2 && chip.routed(3) != 2 && router.target(4) != 2 && chip.routed(4) != 2);
+    }
+    CHECK(router.unbind(3, service, &seen).ok() && router.unbind(4, service, &seen).ok());
+    smp::detail::online.store(1);
+}
+
+// Model threads stand in for CPUs: one takes top halves of three lines while
+// three others drain. A line's handlers never run on two threads at once, the
+// line stays masked while they run, and every top half is serviced.
+struct ConcurrentLine
+{
+    interrupt::ModelIrqChip *chip{nullptr};
+    std::atomic<int> running{0};
+    std::atomic<usize> calls{0};
+    std::atomic<bool> overlapped{false}, unmasked{false};
+};
+static void concurrent_service(void *context, interrupt::IrqLine line)
+{
+    auto &state = *static_cast<ConcurrentLine *>(context);
+    if (state.running.fetch_add(1) != 0)
+        state.overlapped = true;
+    if (!state.chip->masked(line))
+        state.unmasked = true;
+    // Long enough for another drainer to try the same line.
+    std::this_thread::yield();
+    state.calls.fetch_add(1);
+    state.running.fetch_sub(1);
+}
+
+static void check_irq_router_concurrency()
+{
+    interrupt::ModelIrqChip chip;
+    interrupt::IrqRouter<interrupt::ModelIrqChip> router(chip);
+    CHECK(chip.initialize().ok());
+    std::array<ConcurrentLine, 3> lines{};
+    for (usize index = 0; index < lines.size(); ++index)
+    {
+        lines[index].chip = &chip;
+        CHECK(router.bind(static_cast<interrupt::IrqLine>(10 + index), interrupt::IrqTrigger::level,
+                          concurrent_service, &lines[index], static_cast<smp::CpuId>(index))
+                  .ok());
+    }
+    constexpr usize rounds = 20000;
+    std::atomic<bool> producing{true};
+    std::atomic<usize> drained{0};
+    std::vector<std::thread> drainers;
+    for (smp::CpuId cpu = 1; cpu <= 3; ++cpu)
+        drainers.emplace_back([&, cpu] {
+            smp::ScopedHostedCpu hosted(cpu);
+            while (producing.load() || router.pending())
+                drained.fetch_add(router.drain());
+        });
+    {
+        smp::ScopedHostedCpu hosted(0);
+        // The device raises a line only while it is unmasked, as a controller
+        // delivers it only then.
+        for (usize round = 0; round < rounds; ++round)
+        {
+            const auto line = static_cast<interrupt::IrqLine>(10 + round % lines.size());
+            if (!chip.masked(line))
+                CHECK(router.top_half(line));
+        }
+        producing = false;
+    }
+    for (auto &thread : drainers)
+        thread.join();
+    drained.fetch_add(router.drain());
+    usize delivered = 0, serviced = 0;
+    for (usize index = 0; index < lines.size(); ++index)
+    {
+        const auto line = static_cast<interrupt::IrqLine>(10 + index);
+        CHECK(!lines[index].overlapped && !lines[index].unmasked && !chip.masked(line));
+        CHECK(router.serviced(line) == lines[index].calls && router.delivered(line) == lines[index].calls);
+        delivered += router.delivered(line);
+        serviced += lines[index].calls;
+    }
+    CHECK(delivered == serviced && drained == serviced && serviced != 0 && !router.pending());
+    CHECK(router.controller_errors() == 0 && router.spurious() == 0);
 }
 
 static void check_wait_queue()
@@ -190,6 +412,37 @@ static void check_event_sources()
     CHECK(stats.driven && stats.posted == 3 && stats.served == 1 && stats.polled == 2);
     // Sources are independent.
     CHECK(!interrupt::event_driven(EventSource::input) && interrupt::take_event(EventSource::input));
+}
+
+// A post from a CPU other than the consumer sends the consumer one IPI per
+// idle-to-posted change; the consumer's own posts send none.
+static std::array<usize, smp::max_cpus> model_ipis{};
+static void check_event_consumer_ipi()
+{
+    using interrupt::EventSource;
+    smp::detail::online.store(0b11);
+    smp::detail::ipi_sender = [](smp::CpuId cpu, u64) noexcept { ++model_ipis[cpu]; };
+    interrupt::drive_events(EventSource::console);
+    {
+        smp::ScopedHostedCpu secondary(1);
+        interrupt::post_event(EventSource::console);
+        interrupt::post_event(EventSource::console);
+        CHECK(model_ipis[0] == 1 && model_ipis[1] == 0);
+        CHECK((smp::cpu_record(0).ipi_pending.exchange(0) & smp::ipi_device) != 0);
+    }
+    CHECK(interrupt::take_event(EventSource::console) && !interrupt::take_event(EventSource::console));
+    interrupt::post_event(EventSource::console);
+    CHECK(model_ipis[0] == 1);
+    CHECK(interrupt::take_event(EventSource::console));
+    {
+        smp::ScopedHostedCpu secondary(1);
+        interrupt::post_event(EventSource::console);
+        CHECK(model_ipis[0] == 2);
+    }
+    CHECK(interrupt::take_event(EventSource::console));
+    smp::detail::ipi_sender = nullptr;
+    smp::detail::online.store(1);
+    smp::cpu_record(0).ipi_pending.store(0);
 }
 
 struct ModelUart
@@ -473,16 +726,30 @@ static void check_latency_histogram()
           interrupt::device_wait_statistics(interrupt::DeviceWait::block).polled == 1);
     CHECK(interrupt::device_wait_statistics(interrupt::DeviceWait::entropy).interrupt == 0 &&
           interrupt::device_wait_statistics(interrupt::DeviceWait::transmit).interrupt == 1);
+    // Inside a kernel section wait_for_interrupt() refuses: a wait on a bound
+    // line polled and is counted so.
+    smp::set_cpu_mode(smp::current_cpu(), smp::cpu_mode_section);
+    CHECK(!interrupt::wait_for_interrupt());
+    interrupt::count_device_wait(interrupt::DeviceWait::block, true);
+    smp::clear_cpu_mode(smp::current_cpu(), smp::cpu_mode_section);
+    CHECK(interrupt::device_wait_statistics(interrupt::DeviceWait::block).interrupt == 2 &&
+          interrupt::device_wait_statistics(interrupt::DeviceWait::block).polled == 2);
 }
 
 int main()
 {
     check_irq_router();
+    check_irq_routing();
+    check_irq_retarget_away();
+    check_irq_follow_against_leave();
+    check_irq_router_concurrency();
     check_wait_queue();
     check_wait_queue_enlist();
     check_wake_source();
     check_event_sources();
     check_console_ring();
+    // Drives the console source, which check_console_ring() expects undriven.
+    check_event_consumer_ipi();
     check_calibrated_clock();
     check_interval_timer();
     check_timer_codec();

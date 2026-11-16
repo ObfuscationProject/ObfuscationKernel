@@ -131,10 +131,10 @@ void native_kill_contract(Kernel &kernel)
     recipient.set_credentials({.uid = 1003, .gid = 1003, .euid = 1004, .egid = 1003, .suid = 1005});
     expect(native_kill(kernel, sender, target, 0) == -1);
     expect(native_kill(kernel, sender, target, OK_SIGKILL) == -1);
-    expect(native::private_signal_find(target)->native_termination == 0);
+    expect(native::private_signal_find(target)->deferred_fatal == 0);
     auto credentials = recipient.credentials(); credentials.suid = 1002; recipient.set_credentials(credentials);
     expect(native_kill(kernel, sender, target, 0) == 0);
-    expect(native::private_signal_find(target)->native_termination == 0);
+    expect(native::private_signal_find(target)->deferred_fatal == 0);
     source.set_credentials(user::root_credentials());
     const auto task = kernel.scheduler().create_process("kill-control", kernel.arch().make_kernel_context(1, 2)); CHECK(task);
     expect(native_kill(kernel, sender, task.value(), 0) == -95);
@@ -157,7 +157,7 @@ void native_kill_lifecycle(Kernel &kernel)
         expect(native::pipe_read_object(child, sibling).pool != nullptr);
         expect(native_kill(kernel, parent, child, signal) == 0);
         expect(kernel.scheduler().find(child)->state() != sched::ProcessState::zombie);
-        expect(native::private_signal_find(child)->native_termination == signal);
+        expect(native::private_signal_find(child)->deferred_fatal == signal);
         native::private_process_signal_fatal(kernel);
         const auto *completed = kernel.scheduler().find(child); CHECK(completed);
         expect(completed->state() == sched::ProcessState::zombie && completed->wait_status() == signal);
@@ -177,7 +177,7 @@ void native_kill_lifecycle(Kernel &kernel)
     expect(native_kill(kernel, self, self, OK_SIGTERM) == 0);
     auto *process = kernel.scheduler().find(self); CHECK(process);
     expect(process->state() == sched::ProcessState::running && process->threads()[0].native_active);
-    expect(native::private_signal_find(self)->native_termination == OK_SIGKILL);
+    expect(native::private_signal_find(self)->deferred_fatal == OK_SIGKILL);
     native::private_process_signal_fatal(kernel);
     expect(kernel.scheduler().find(self)->wait_status() == OK_SIGKILL);
     release(kernel, self);

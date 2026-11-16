@@ -30,15 +30,17 @@ with GICv2, in addition to the architecture-neutral model tests.
 - Fault classification from ESR_EL1/FAR_EL1, safe user-copy validation across
   every requested page, and stable generation-checked address-space handles.
 
-The current backend supports one executing CPU. Each address space owns a
-level-1 root, a level-2 directory and one level-3 table per populated 2 MiB,
-all allocated from the runtime's table storage and released with the space;
-the slot table grows with the number of spaces. Application backing pages
-belong to the caller; the backend owns page tables only.
+Every CPU executes user code through its own `CpuBlock` (`TPIDR_EL1`) under
+per-CPU ASIDs (`docs/modules/smp.md`). Each address space owns a level-1
+root, a level-2 directory and one level-3 table per populated 2 MiB, all
+allocated from the runtime's table storage and released with the space; the
+slot table is fixed (`fixed_space_slots`) and its storage never moves, so the
+entry path looks a space up under `spaces_lock` without the kernel lock.
+Application backing pages belong to the caller; the backend owns page tables
+only.
 The initial identity layout assumes QEMU virt RAM in `[0x40000000, 0x80000000)`
 and MMIO below `0x10000000`; it does not discover memory from a device tree.
-GICv3, SVE, SMP execution and general physical-page allocation remain future
-work. This is a native mechanism, not a claim of complete POSIX conformance.
+GICv3, SVE and general physical-page allocation remain future work. This is a native mechanism, not a claim of complete POSIX conformance.
 
 ## Hardware acceptance test
 
@@ -53,7 +55,18 @@ QEMU twice, entering at EL1 and EL2. It executes actual EL0 machine code and
 checks SVC registers, TLS, SIMD/FPCR preservation, distinct physical backing
 at the same virtual address, timer preemption of a non-cooperative loop,
 supervisor isolation, read-only/NX/unmapped faults, invalid instructions,
-user-copy bounds and kernel TTBR0 restoration. Successful runs emit
+user-copy bounds and kernel TTBR0 restoration. Both runs use two CPUs by
+default (`--smp`). One secondary, started through PSCI, first runs EL0 code
+under its own ASID through a remap shootdown and its next entry
+(`OK_NATIVE_SMP`), then takes a GIC SPI routed to it (made pending through
+GICD_ISPENDR) in EL0 and in its idle wait, holds the kernel lock across a
+device wait that the boot CPU's top half ends while it spins in
+`lock_kernel_serving_interrupts()`, and retargets its line away
+(`OK_NATIVE_GIC cpus=2`). Last, it polls inside a kernel section while the
+boot CPU holds the kernel lock across a device wait for the SPI routed to it;
+the section's poll runs the top half whose IPI ends that wait
+(`section_wait_serve=pass section_poll_serve=pass`). With `--smp 1` the boot CPU's interrupt wait takes
+the SPI instead (`OK_NATIVE_GIC cpus=1`). Successful runs emit
 `OK_NATIVE_TEST_PASS scope=hardware architecture=aarch64`; serial logs are
 written under `build/native-tests/aarch64`.
 

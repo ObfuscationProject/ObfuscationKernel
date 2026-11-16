@@ -1,12 +1,31 @@
 // The same real ext4 callback must reject the former VFS lock-across-I/O design.
+// The ext4 operation gate refuses reentry only from its owning CPU: inside the
+// callback a nested VFS or direct ext4 call returns busy, while another hosted
+// CPU's direct ext4 call waits (marked SPINNING) and is served afterwards.
 #include "ext4_realtime_model.hpp"
-#include "ok/fs/ext4/layout.hpp"
+#include "ok/smp/lock.hpp"
 
+#include <array>
+#include <atomic>
+#include <bit>
+#include <concepts>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <optional>
+#include <span>
+#include <string_view>
+#include <thread>
+#include <type_traits>
+#include <utility>
 #include <vector>
+
+// The VFS and gate state are private; this hosted control inspects them.
+#define private public
+#include "ok/fs/ext4/layout.hpp"
+#undef private
 
 using namespace ok;
 using namespace ok::fs;
@@ -35,18 +54,41 @@ class Disk final : public driver::BlockDevice
     }
     Status flush() override { probe(); return {}; }
     VirtualFileSystem *vfs{};
-    bool active{};
+    Node *root{};
+    std::atomic<bool> active{false};
     usize reentrant_busy{};
+    usize direct_busy{};
+    // Another CPU's direct ext4 call, started from the first callback.
+    std::optional<std::thread> other_cpu{};
+    std::atomic<bool> other_served{false};
+    bool other_was_waiting{};
     Bytes bytes;
   private:
     void probe() const
     {
         if (!active) return;
+        auto &self = const_cast<Disk &>(*this);
+        // Only the callback's own CPU (0) probes; the other CPU runs after it.
+        if (smp::current_cpu() != 0) return;
         CHECK(vfs && vfs->lock_.try_lock());
         vfs->lock_.unlock();
         const auto nested = vfs->stat("/victim");
         CHECK(!nested && nested.status().code() == StatusCode::busy);
-        ++const_cast<Disk *>(this)->reentrant_busy;
+        ++self.reentrant_busy;
+        const auto direct = root->query_metadata();
+        CHECK(!direct && direct.status().code() == StatusCode::busy);
+        ++self.direct_busy;
+        if (self.other_cpu) return;
+        self.other_cpu.emplace([this] {
+            const smp::ScopedHostedCpu cpu(1);
+            auto &owner = const_cast<Disk &>(*this);
+            const auto metadata = owner.root->query_metadata();
+            CHECK(metadata && metadata.value().type == NodeType::directory);
+            owner.other_served = true;
+        });
+        while ((smp::cpu_mode(1) & smp::cpu_mode_spinning) == 0 && !self.other_served.load())
+            std::this_thread::yield();
+        self.other_was_waiting = !self.other_served.load();
     }
 };
 }
@@ -64,9 +106,15 @@ int main(int argc, char **argv)
     CHECK(storage->mount(disk)); auto *root = storage->root(); CHECK(root);
     auto vfs = std::make_unique<VirtualFileSystem>(); CHECK(vfs->mount("/", *root));
     CHECK(root->create("victim", NodeType::regular));
-    disk.vfs = vfs.get(); disk.active = true;
+    disk.vfs = vfs.get(); disk.root = root; disk.active = true;
     CHECK(vfs->stat("/victim"));
-    CHECK(disk.reentrant_busy >= 1);
+    disk.active = false;
+    CHECK(disk.reentrant_busy >= 1 && disk.direct_busy == disk.reentrant_busy);
+    CHECK(disk.other_cpu); disk.other_cpu->join();
+    CHECK(disk.other_was_waiting && disk.other_served.load());
+    CHECK(!storage->operation_active_ && storage->operation_owner_.load() == 0);
+    CHECK(smp::cpu_mode(1) == 0);
     CHECK(testing::ext4_clock::calls() == 0);
-    std::puts("PASS actual ext4 callback lock control: provider I/O unlocked and reentrant VFS returns busy");
+    std::puts("PASS actual ext4 callback lock control: provider I/O unlocked, reentrant VFS and ext4 calls "
+              "busy on the owning CPU, another CPU waits and is served");
 }

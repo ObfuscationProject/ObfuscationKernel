@@ -748,7 +748,8 @@ Status install(sched::ProcessControlBlock &process, Image &image, sched::SignalM
         process.set_cpu_affinity_mask(previous_affinity);
         return status;
     };
-    process.set_cpu_affinity_mask(1);
+    // Native threads run on every online CPU; the scheduler places them.
+    process.set_cpu_affinity_mask(sched::cpu_affinity_any);
     if (image.personality == Personality::linux)
     {
         uptr first = ~uptr{0}, last = 0;
@@ -1087,6 +1088,7 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     const auto inherited_mask = kernel.scheduler().find_thread(pid, calling_tid)->native_signal_mask;
 #endif
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
+    const auto personality_before_exec = process->resources().personality;
     auto *pending_before_exec = private_signal_queue(*kernel.scheduler().find_thread(pid, calling_tid));
     const auto altstack_before_exec = *private_signal_altstack(*kernel.scheduler().find_thread(pid, calling_tid));
     std::array<RetainedEntryStack, sched::max_threads_per_process> old_signal_owners{};
@@ -1107,8 +1109,52 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     for (const auto &old_thread : process->threads())
         if (old_thread.entry_stack.pool) previous_signal_slots[previous_signal_count++] = old_thread.entry_stack.slot;
 #endif
+    // Everything that can refuse the exec runs while sibling threads still run
+    // on other CPUs. Evicting one discards its entry, so it would lose its user
+    // progress if the exec then failed: after eviction only commits remain,
+    // and those fail only on an invariant breach, which stops the runtime
+    // without resuming the caller's frame, so it receives no error.
+    const auto stop = [&](Status status) -> i64 {
+        static_cast<void>(image.value().retain_for_diagnosis());
+        runtime_failure = status;
+        started = false;
+        complete = false;
+        return 0;
+    };
+    if (auto status = kernel.scheduler().preflight_replace_image(pid, context); !status)
+        return error(status);
+    EntryStackPlan entry_plan;
+    if (auto status = prepare_entry_stacks(entry_stacks, *process, entry_plan); !status)
+        return error(status);
+    const std::span<const sched::ThreadControlBlock> old_threads{process->threads().begin(), process->threads().size()};
+    EvictionPlan eviction;
+    if (auto status = prepare_eviction(pid, process->resources().native_space.root, old_threads, eviction); !status)
+        return error(status);
+    if (auto status = validate_evicted_leases(old_threads, eviction); !status) return error(status);
+    // These predict retirement and install steps whose failure is an invariant
+    // breach that stops the runtime; finding it first stops it the same way.
+    if (auto status = prepare_cancel_futex(pid); !status) return stop(status);
+    if (auto status = prepare_native_udp_receives_for_exec(pid); !status) return stop(status);
+    if (auto status = prepare_linux_udp_receives_for_exec(pid); !status) return stop(status);
+    if (auto status = syscall_origins.preflight_prepare(entry_plan.leader().handle); !status) return stop(status);
+    if (auto status = vfs_continuations.preflight_prepare(entry_plan.leader().handle); !status) return stop(status);
+    // The point of no return: siblings leave the other CPUs, and replacement
+    // releases their leases. Exec is the caller's own syscall, so no kernel
+    // section of this process may still be pinned.
+    smp::check_drained(pid, "exec_image before eviction");
+    if (auto status = commit_eviction(kernel, eviction); !status) return stop(status);
+    // Only an exec that took other CPUs' entries over reports it (never on one CPU).
+    if (eviction.cpus)
+    {
+        // Counted per CPU: std::popcount calls a libgcc helper that the
+        // mips64 kernel cannot link.
+        u64 evicted{};
+        for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu) evicted += (eviction.cpus >> cpu) & 1;
+        emit("OK_NATIVE_EXEC_EVICT pid="); emit_number(pid); emit(" tid="); emit_number(calling_tid);
+        emit(" evicted="); emit_number(evicted); emit("\n");
+    }
     bool vfs_retired{};
-    const auto replaced = replace_entry_stacks(entry_stacks, *process,
+    const auto replaced = commit_entry_stacks(entry_stacks, *process, entry_plan,
         [&] {
             return kernel.posix().exec(pid, context, image.value().memory);
         }, [&] {
@@ -1143,7 +1189,10 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     {
         if (!replaced.committed)
         {
-            return error(replaced.status);
+            // The leases are back in their TCBs. Without an evicted sibling the
+            // old image simply continues; an evicted one lost its entry.
+            if (!eviction.cpus) return error(replaced.status);
+            return stop(replaced.status);
         }
         // Exec cannot return to the old image after scheduler commit. Keep
         // both VM generations and every unreleased lease for diagnosis.
@@ -1176,6 +1225,7 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     }
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
     private_signal_exec(kernel, *process, pending_before_exec, altstack_before_exec);
+    private_jobctl_exec(kernel, *process, personality_before_exec);
     for (usize index = 0; index < old_signal_owner_count; ++index)
         if (old_signal_owners[index].handle != process->threads()[0].entry_stack)
             private_signal_thread_retire(pid, old_signal_owners[index].owner.tid, old_signal_owners[index].handle);

@@ -2,8 +2,8 @@
 #include "ok/uapi/syscall.h"
 #include <limits.h>
 
-_Static_assert(OK_UAPI_VERSION_MAJOR == 0 && OK_UAPI_VERSION_MINOR == 16 && OK_UAPI_VERSION_PATCH == 0,
-               "native power requires the explicit UAPI0.15.0 SDK");
+_Static_assert(OK_UAPI_VERSION_MAJOR == 0 && OK_UAPI_VERSION_MINOR == 17 && OK_UAPI_VERSION_PATCH == 0,
+               "native power requires the explicit UAPI0.17.0 SDK");
 _Static_assert(OK_NATIVE_POWER_VERSION == 1, "native power version");
 _Static_assert(OK_POWER_TOKEN_MAX == 0x3fffffffU && OK_POWER_TOKEN_MAX <= INT32_MAX,
                "power token must remain positive in every native signed return word");

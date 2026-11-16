@@ -20,4 +20,10 @@ Status set_realtime(time::EpochTime, time::MonotonicPoint)
     return Status::unsupported("this hosted regression does not exercise clock setting");
 }
 
+// The kernel samples inside the realtime lock; a hosted model is serialized.
+Status set_realtime_now(time::EpochTime epoch)
+{
+    return time::commit_realtime_setting(epoch, [] { return monotonic_sample(); }, set_realtime);
+}
+
 } // namespace ok::arch

@@ -27,7 +27,8 @@ The mechanism currently runs at the existing serialized boot-CPU syscall
 boundary. It adds no process table allocation, runtime virtual dispatch,
 blocking operation or new architecture-specific scheduler path. The module
 ABI originally changed with the exported PCB layout and exec-lifecycle state.
-The current cohort requires session profile v3 and a separate bounded
+The cohort qualified here required session profile v3 (v4 since WT2.2) and a
+separate bounded
 [process-group signal contract](NATIVE_PROCESS_GROUP_SIGNALS.md). Session
 profile v2 removes the former broad `group_signals` boolean; the separate
 profile enumerates the supported selectors and signals. Session profile v3
@@ -43,10 +44,15 @@ applies credentials, then rechecks the session and console before directly
 executing the shell. Existing console generation
 leases retain their independent input-authority contract.
 
-Session creation alone does not acquire a controlling console. The separate
-explicit acquisition and foreground contract creates no PTY, broadcast signals,
-stop/continue jobs or same-session SIGCONT exception. Session membership
-alone does not establish those properties or prove process isolation.
+Session creation alone does not acquire a controlling terminal. The original
+explicit acquisition and foreground contract created no PTY, stop/continue
+jobs or same-session SIGCONT exception. Since WT2.2 session profile v4
+(`bootcpu-serialized-process-group-session-console-pty-jobctl-lifecycle-v4`)
+derives the controlling terminal (the console or a PTY slave) from the
+session, and job control, same-session SIGCONT and orphaned-group SIGHUP then
+SIGCONT are landed, as the [terminal contract](../modules/tty.md) describes.
+Broadcast signals (`kill(-1)`) remain unavailable. Session membership alone
+does not prove process isolation.
 
 Validation separates hosted scheduler lifecycle checks, hosted actual
 native/Linux syscall dispatch, Debug boot model checks and actual native

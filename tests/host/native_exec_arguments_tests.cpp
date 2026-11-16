@@ -31,6 +31,7 @@ void set_return_value(UserFrame &frame, i64 value) { frame.registers[0] = static
 bool user_range(const AddressSpace &, uptr, usize, bool) { return false; }
 Status copy_from_user(const AddressSpace &, void *, uptr, usize) { return Status::fault(); }
 Status copy_to_user(const AddressSpace &, uptr, const void *, usize) { return Status::fault(); }
+Result<u32 *> user_word(const AddressSpace &, uptr, bool) { return Status::fault(); }
 }
 
 namespace {

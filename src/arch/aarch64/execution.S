@@ -1,5 +1,12 @@
 .section .text
 
+// This CPU's execution block, named by TPIDR_EL1; execution.cpp checks the
+// offsets.
+.equ CPU_RESUME_SP, 8
+.equ CPU_STACK_TOP, 16
+.equ CPU_ACTIVE_FRAME, 24
+.equ CPU_KERNEL_FP, 128
+
 .macro SAVE_SIMD base
     stp q0, q1, [\base, #0]
     stp q2, q3, [\base, #32]
@@ -53,12 +60,11 @@ ok_arm_execution_enter:
     mrs x1, fpcr
     mrs x2, fpsr
     stp x1, x2, [sp, #112]
-    ldr x1, =ok_arm_execution_resume_sp
+    mrs x1, tpidr_el1
     mov x2, sp
-    str x2, [x1]
-    ldr x1, =ok_arm_execution_active_frame
-    str x0, [x1]
-    ldr x1, =ok_arm_execution_kernel_fp
+    str x2, [x1, #CPU_RESUME_SP]
+    str x0, [x1, #CPU_ACTIVE_FRAME]
+    add x1, x1, #CPU_KERNEL_FP
     SAVE_SIMD x1
 
     mov x9, x0
@@ -76,8 +82,8 @@ ok_arm_execution_enter:
     ldp x1, x2, [x9, #280]
     msr tpidr_el0, x1
     msr tpidrro_el0, x2
-    ldr x1, =ok_arm_execution_stack_top
-    ldr x1, [x1]
+    mrs x1, tpidr_el1
+    ldr x1, [x1, #CPU_STACK_TOP]
     mov sp, x1
     ldp x0, x1, [x9, #0]
     ldp x2, x3, [x9, #16]
@@ -136,8 +142,8 @@ ok_arm_execution_vectors:
 ok_arm_user_trap:
     // All register and SIMD state is captured before entering compiled code.
     // SP_EL1 is kernel-owned; an invalid user SP never becomes a kernel stack.
-    ldr x1, =ok_arm_execution_active_frame
-    ldr x1, [x1]
+    mrs x1, tpidr_el1
+    ldr x1, [x1, #CPU_ACTIVE_FRAME]
     stp x2, x3, [x1, #16]
     stp x4, x5, [x1, #32]
     stp x6, x7, [x1, #48]
@@ -170,10 +176,11 @@ ok_arm_user_trap:
     stp x2, x3, [x1, #280]
     add x2, x1, #304
     SAVE_SIMD x2
-    ldr x2, =ok_arm_execution_kernel_fp
+    mrs x2, tpidr_el1
+    add x2, x2, #CPU_KERNEL_FP
     RESTORE_SIMD x2
-    ldr x1, =ok_arm_execution_resume_sp
-    ldr x1, [x1]
+    mrs x1, tpidr_el1
+    ldr x1, [x1, #CPU_RESUME_SP]
     ldp x2, x3, [x1, #96]
     msr tpidr_el0, x2
     msr tpidrro_el0, x3
@@ -183,8 +190,8 @@ ok_arm_user_trap:
     mov x0, x10
     mov x1, sp
     bl ok_arm_execution_trap
-    ldr x0, =ok_arm_execution_resume_sp
-    ldr x0, [x0]
+    mrs x0, tpidr_el1
+    ldr x0, [x0, #CPU_RESUME_SP]
     mov sp, x0
     ldp x19, x20, [sp, #0]
     ldp x21, x22, [sp, #16]

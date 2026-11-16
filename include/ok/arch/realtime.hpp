@@ -19,6 +19,12 @@ Status initialize_realtime();
 [[nodiscard]] Result<time::RealtimeSample> realtime_sample();
 [[nodiscard]] time::RealtimeInfo realtime_clock_info();
 // Trusted serialized commit after user validation/authority and one real sample.
+// A reading on another CPU between that sample and this commit makes it fail
+// continuity; callers that can race readers use set_realtime_now.
 Status set_realtime(time::EpochTime value, time::MonotonicPoint point);
+// Trusted commit after user validation/authority: samples the monotonic clock
+// and commits under the lock every realtime reader holds
+// (time::commit_realtime_setting).
+Status set_realtime_now(time::EpochTime value);
 
 } // namespace ok::arch

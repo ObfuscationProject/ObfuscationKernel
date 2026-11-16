@@ -64,6 +64,17 @@ All present syscall numbers are crosschecked against Linux 6.13.4's selected
 architecture tables or generic UAPI; ARM private `set_tls` uses the selected EABI
 base. MIPS architecture number bases and errno differences remain explicit.
 
+Codec revision 3 adds the terminal tables used by `ok/abi/linux_termios.hpp`
+(`TermiosCodec<Profile>`, `TtyIoctlCodec<Profile>`): twelve terminal requests
+encoded from Linux `ioctls.h` with argument sizes taken only from a checked
+type table, the kernel `struct termios` layout of each termbits family (36, 40
+or 44 bytes), control-character slots and one map row per named flag value.
+Every value must equal musl 1.2.5's; a disagreement, a musl struct that is not
+a prefix-compatible superset of the kernel struct, or a change in musl's
+`tcgetattr`/`tcsetattr` pass-through to `TCGETS`/`TCSETS+act` fails generation.
+`BOTHER` and `ADDRB` are Linux-only names. musl and Linux disagree on PPC
+`CBAUDEX` (musl 020, Linux 0); the map does not use `CBAUDEX`.
+
 ```sh
 python3 scripts/generate_linux_abi.py \
   --musl-archive=/path/to/musl-1.2.5.tar.gz \

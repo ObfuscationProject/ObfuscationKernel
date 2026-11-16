@@ -6,6 +6,7 @@
 #include "ok/fs/vfs.hpp"
 #include "ok/memory/kernel_entry_stack_pool.hpp"
 #include "ok/sched/resources.hpp"
+#include "ok/sched/run_queue.hpp"
 #include "ok/sched/unix_rights.hpp"
 #include "ok/sched/unix_pathname_sdk_profile.hpp"
 #include "ok/sched/descriptor_reservation.hpp"
@@ -14,7 +15,13 @@
 #include "ok/sched/deadline.hpp"
 #include "ok/sched/console_input.hpp"
 #include "ok/sched/console_control.hpp"
+#include "ok/sched/terminal.hpp"
+#include "ok/sched/terminal_open.hpp"
+#include "ok/sched/job_control.hpp"
 #include "ok/sched/wait_registration.hpp"
+#include "ok/smp/cpu.hpp"
+#include "ok/smp/kernel_section.hpp"
+#include "ok/smp/lock.hpp"
 #include "ok/smp/smp.hpp"
 #include "ok/user/user.hpp"
 
@@ -31,8 +38,6 @@ namespace ok::user::native { class SharedMemoryFiles; }
 namespace ok::sched
 {
 
-using ProcessId = u64;
-using ThreadId = u64;
 inline constexpr ProcessId user_init_pid = 1;
 // Common Linux-visible task namespace; zero is reserved for boot/service context.
 // Linux robust futex owner words reserve the upper two bits for state flags.
@@ -44,6 +49,8 @@ inline constexpr u8 scheduler_min_priority = 0;
 inline constexpr u8 scheduler_default_priority = 16;
 inline constexpr u8 scheduler_max_priority = 31;
 inline constexpr u16 cpu_affinity_any = 0xffffu;
+// Marks a thread that is neither on a CPU nor placed on a run queue.
+inline constexpr smp::CpuId no_cpu = 0xffff;
 
 struct PipeReadiness
 {
@@ -102,6 +109,9 @@ struct ThreadControlBlock
     DeadlineWait native_deadline{};
     WaitRegistration wait_registration{};
     u32 console_wait_epoch{}; // Original input generation survives readiness wakes.
+    // The process's continue generation when a console or PTY data wait was
+    // armed; a continue since then re-runs the job-control check.
+    u32 terminal_gate_mark{};
     ThreadLocalState tls{};
     SignalMask native_signal_mask{};
     memory::KernelEntryStackHandle entry_stack{};
@@ -112,6 +122,11 @@ struct ThreadControlBlock
     u64 dispatch_count{0};
     u64 cpu_time_ticks{0};
     smp::CpuId last_cpu{0};
+    // The CPU executing this thread, mirrored by that CPU's current slot.
+    smp::CpuId on_cpu{no_cpu};
+    // The run queue holding this thread's single entry. Dispatch and exit drop
+    // the entry; one whose thread blocked meanwhile is discarded when popped.
+    smp::CpuId queued_cpu{no_cpu};
 };
 
 struct CpuSchedulingStats
@@ -166,6 +181,7 @@ class ProcessControlBlock
     {
         termination_signal_ = signal;
     }
+    [[nodiscard]] const JobControlState &job_control() const { return job_; }
     [[nodiscard]] i32 wait_status() const
     {
         return termination_signal_ != 0 ? static_cast<i32>(termination_signal_)
@@ -213,6 +229,7 @@ class ProcessControlBlock
         return pid_;
     }
     [[nodiscard]] u32 console_epoch() const { return console_epoch_; }
+    [[nodiscard]] bool ctty_detached() const { return ctty_detached_; }
     [[nodiscard]] std::string_view name() const
     {
         return name_.view();
@@ -326,17 +343,25 @@ class ProcessControlBlock
 
   private:
     friend class SchedulerState;
+    friend struct ProcessTestAccess; // Hosted tests only.
     ProcessId pid_{0};
     u32 console_epoch_{}; // Only the scheduler may issue or inherit membership.
     ProcessId parent_pid_{0};
     ProcessGroup group_{};
     Session session_{};
+    bool ctty_detached_{}; // TIOCNOTTY by a non-leader (S8); fork inherits, setsid clears.
+    // Linux tty_old_pgrp (S8): a session leader whose terminal was hung up
+    // keeps that terminal's foreground group (and the terminal's storage index,
+    // whose outbox carries the signals) for its exit. Not inherited by fork.
+    ProcessId hangup_old_foreground_{};
+    u16 hangup_terminal_{};
     bool has_execed_{}; // Successful image replacement since this process was forked.
     SignalState signals_{};
     ProcessResources resources_{};
     StaticVector<ProcessId, max_process_children> children_{};
     i32 exit_code_{0};
     u8 termination_signal_{0};
+    JobControlState job_{}; // Only the scheduler stops or continues a process.
     FixedString<max_process_name> name_{};
     ProcessState state_{ProcessState::created};
     bool background_{false};
@@ -369,6 +394,64 @@ class RoundRobinPolicy final
         return "round-robin";
     }
     Result<ProcessId> pick_next(std::span<const ProcessControlBlock> processes, ProcessId current, smp::CpuId cpu);
+};
+
+// A queue can hold every thread a process table admits. Lock types are a
+// build-time choice made here, not a runtime queue interface.
+using SchedulerRunQueue = CpuRunQueue<max_processes * max_threads_per_process, smp::SpinLock>;
+static_assert(RunQueue<SchedulerRunQueue>);
+
+// One open description's offset and flags across one offset-dependent I/O,
+// with the provider call that depends on them (ok/smp/lock.hpp rank
+// ofd_position). Taken in both modes: under the kernel lock and in a kernel
+// section (ok/smp/kernel_section.hpp). No path holds two of them.
+using DescriptionPositionLock = smp::RankedSpinLock<smp::LockRank::ofd_position>;
+
+// Holds a description's position lock for a scope; a null lock holds nothing.
+class DescriptionPositionGuard final
+{
+  public:
+    explicit DescriptionPositionGuard(DescriptionPositionLock *lock) noexcept : lock_(lock)
+    {
+        if (!lock_) return;
+        if (!smp::in_section())
+        {
+            lock_->lock();
+            return;
+        }
+        // A kernel section waits serving this CPU's interrupts: the holder
+        // may hold the kernel lock and wait for a device line routed here.
+        if (lock_->try_lock()) return;
+        if (lock_->owned_by_current_cpu())
+        {
+            // Re-entry on this CPU would spin forever, and every drainer of
+            // the process with it: report it and go on under the outer hold.
+            if constexpr (smp::lock_debug_enabled)
+                smp::lock_rank_violation({smp::LockViolationKind::self_deadlock, DescriptionPositionLock::rank,
+                                          DescriptionPositionLock::rank, lock_, smp::current_cpu()});
+            smp::detail::section_assert(&smp::SectionCpu::section_asserts, "section re-entered a position lock");
+            lock_ = nullptr;
+            return;
+        }
+        const smp::SpinningScope spinning;
+        while (!lock_->try_lock())
+        {
+            smp::serve_while_spinning();
+            arch::ArchOperations::spin_pause();
+        }
+    }
+    ~DescriptionPositionGuard() { release(); }
+    DescriptionPositionGuard(const DescriptionPositionGuard &) = delete;
+    DescriptionPositionGuard &operator=(const DescriptionPositionGuard &) = delete;
+    // Gives the lock up before the scope ends.
+    void release() noexcept
+    {
+        if (lock_) lock_->unlock();
+        lock_ = nullptr;
+    }
+
+  private:
+    DescriptionPositionLock *lock_;
 };
 
 // Nonvirtual shared storage/mechanisms keep each policy instantiation small.
@@ -406,6 +489,8 @@ class SchedulerState
         }
     Result<ThreadId> create_thread_prepared(ProcessId pid, arch::CpuContext initial_context, Prepare &&prepare)
     {
+        smp::check_exclusive("SchedulerState::create_thread_prepared");
+        smp::check_drained(pid, "SchedulerState::create_thread_prepared");
         if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
         auto *process = find(pid);
         if (process == nullptr)
@@ -443,7 +528,10 @@ class SchedulerState
             return status;
         created.state = ProcessState::runnable;
         if (retired)
+        {
+            forget_queued(pid, *retired);
             *retired = created;
+        }
         else if (auto status = process->threads().push_back(created); !status.ok())
             return status;
         if (process->state() == ProcessState::created || process->state() == ProcessState::blocked)
@@ -455,15 +543,15 @@ class SchedulerState
 
     // Serialized retirement only; caller drains external waits and releases
     // thread-owned resources first. Process/VM/FD ownership remains unchanged.
-    Result<usize> exit_thread(ProcessId pid, ThreadId tid, smp::CpuId cpu = 0);
+    Result<usize> exit_thread(ProcessId pid, ThreadId tid, smp::CpuId cpu = smp::current_cpu());
     Result<ProcessId> spawn(ScheduleRequest request);
     Status set_credentials(ProcessId pid, user::Credentials credentials);
     Status set_priority(ProcessId pid, u8 priority);
     Status set_cpu_affinity(ProcessId pid, u16 cpu_affinity_mask);
     Status set_cpu_accounting(ProcessId pid, ProcessCpuAccounting accounting);
     Status kill_process(ProcessId pid);
-    Status activate(ProcessId pid, smp::CpuId cpu = 0);
-    Status activate_thread(ProcessId pid, ThreadId tid, smp::CpuId cpu = 0);
+    Status activate(ProcessId pid, smp::CpuId cpu = smp::current_cpu());
+    Status activate_thread(ProcessId pid, ThreadId tid, smp::CpuId cpu = smp::current_cpu());
     Result<ProcessId> fork_process(ProcessId parent, bool publish = true);
     // Trusted serialized process mechanisms. Native and Linux syscall boundaries
     // authenticate the caller before entering these operations.
@@ -471,6 +559,9 @@ class SchedulerState
     [[nodiscard]] Result<ProcessId> session_id(ProcessId caller, i32 pid) const;
     Status set_process_group(ProcessId caller, i32 pid, i32 pgid);
     [[nodiscard]] Result<ProcessId> create_session(ProcessId caller);
+    // Every check replace_image makes before it changes anything, except the
+    // entry stack escrow: exec runs it before evicting sibling threads.
+    [[nodiscard]] Status preflight_replace_image(ProcessId pid, const arch::CpuContext &context) const;
     Status replace_image(ProcessId pid, arch::CpuContext context, const MemoryMap &memory);
     Status exit_process(ProcessId pid, i32 code);
     Status terminate_process(ProcessId pid, u8 signal);
@@ -494,6 +585,10 @@ class SchedulerState
     }
     [[nodiscard]] OpenFileDescription *open_description(u16 id);
     [[nodiscard]] const OpenFileDescription *open_description(u16 id) const;
+    // The position lock of a description in this table; null for any other.
+    [[nodiscard]] DescriptionPositionLock *position_lock(const OpenFileDescription *description);
+    // The process whose resources these are; 0 for the boot resources.
+    [[nodiscard]] ProcessId resources_owner(const ProcessResources &resources) const;
     // Rebinding is allowed only after every UDP description, including an
     // unpublished zero-reference reservation, has been retired.
     Status set_native_udp_service(net::NativeUdpService &service);
@@ -505,7 +600,12 @@ class SchedulerState
     Result<DescriptorReservation> prepare_descriptor(u64 pid);
     Result<PreparedPtyPair> prepare_pty_pair(u64 pid, u32 flags = 0);
     using PreparedPtyRead = private_pty::RawPtyTable<>::PreparedRead;
-    Result<PreparedPtyRead> prepare_pty_read(u16 description, usize count);
+    // `timer_expired`: a retry after the reader's VTIME timer ran out.
+    Result<PreparedPtyRead> prepare_pty_read(u16 description, usize count, bool timer_expired = false,
+                                             private_pty::ReadTimer timer = {});
+    using PtyReadState = private_pty::RawPtyTable<>::ReadState;
+    Result<PtyReadState> pty_read_state(u16 description, usize count, private_pty::ReadTimer timer = {}) const;
+    Result<bool> pty_write_progress(u16 description, std::byte next) const;
     Result<usize> commit_pty_read(PreparedPtyRead &preview);
     // Keys may spuriously collide across pair generations. Retained handle and
     // wait-ticket validation must compare the complete generation separately.
@@ -515,6 +615,39 @@ class SchedulerState
     Result<usize> write_pty_description(u16 description, std::span<const std::byte> input);
     Result<private_pty::Readiness> pty_description_readiness(u16 description) const;
     [[nodiscard]] private_pty::Audit pty_audit() const { return pty_transport_.audit(); }
+    // ptmx-style pairs (docs/modules/tty.md section 8). The devfs open path
+    // (S6) binds a fresh provider-free description that holds exactly one
+    // reference; each bound description owns one endpoint open, shared by dup,
+    // fork and SCM_RIGHTS, and its final release retires that open.
+    // bind_pty_multiplexer creates the pair (slave locked and dormant) and
+    // returns the master endpoint; bind_pty_slave admits one more slave open.
+    Result<private_pty::Handle> bind_pty_multiplexer(u16 description);
+    Status bind_pty_slave(u16 description, private_pty::Handle slave);
+    [[nodiscard]] Result<u32> pty_index(u16 description) const;
+    Status set_pty_lock(u16 description, bool locked);
+    // Each endpoint's open count equals the descriptions bound to it, outside
+    // an unpublished prepared raw pair (whose opens precede publication).
+    [[nodiscard]] Status terminal_audit() const;
+    // Terminal device nodes (docs/modules/tty.md sections 2 and 3). open()
+    // binds a fresh provider-free description holding exactly one reference;
+    // every check precedes the first change, and the node is re-validated
+    // here (index, generation, lock and liveness), never trusted. /dev/tty is
+    // the caller's derived controlling terminal or no_device (ENXIO);
+    // /dev/console never acquires; /dev/ptmx gives no_space (ENOSPC) when every
+    // pair slot, raw pairs included, is in use; a /dev/pts/N open without
+    // O_NOCTTY by a session leader without a terminal acquires an unowned,
+    // readable slave (Linux tty_open_proc_set_tty).
+    Result<TerminalOpenResult> open_terminal(ProcessId pid, u16 description, const TerminalOpenRequest &request);
+    // The node a terminal description reports to fstat; not_terminal for raw
+    // pairs and every other description.
+    [[nodiscard]] Result<TerminalStatus> terminal_status(u16 description) const;
+    // chmod and chown of a /dev/pts entry (owner or root; chown root only).
+    Status change_pts_mode(fs::TerminalNode node, u32 mode, user::Credentials caller);
+    Status change_pts_owner(fs::TerminalNode node, u32 uid, u32 gid, user::Credentials caller);
+    // The entry a description bound to a ptmx slave names; not_terminal otherwise.
+    [[nodiscard]] Result<fs::TerminalNode> pts_node(u16 description) const;
+    [[nodiscard]] fs::TerminalNamespace &terminal_namespace() { return terminal_namespace_; }
+    [[nodiscard]] const fs::TerminalNamespace &terminal_namespace() const { return terminal_namespace_; }
     // Each successful retain owns one reference, released exactly once. A pin
     // keeps the ID, backing node and pipe endpoint alive across fd close/reuse.
     Status retain_description(u16 id);
@@ -579,22 +712,103 @@ class SchedulerState
     Status flush_console(u32 expected_epoch);
     [[nodiscard]] bool console_authorized(ProcessId pid, u32 expected_epoch = 0) const;
     [[nodiscard]] Status console_read_authority(ProcessId pid, u32 expected_epoch = 0) const;
-    Result<i64> console_control(ConsoleControlOperation operation, i32 value = 0);
     [[nodiscard]] bool console_readable(ProcessId pid, u32 expected_epoch) const;
+    // Lease authority and a blocking read of `count` bytes that would complete now.
+    [[nodiscard]] bool console_read_ready(ProcessId pid, u32 expected_epoch, usize count) const;
     [[nodiscard]] Status shutdown_console_status() const;
-    Result<usize> read_console(ProcessId pid, u32 expected_epoch, std::span<std::byte> output);
+    // Console reads are planned, copied by the caller, then committed, so a
+    // failed copy-out consumes nothing. A plan that must wait gives would_block.
+    Result<TerminalLdisc::ReadPlan> prepare_console_read(ProcessId pid, u32 expected_epoch, usize count,
+                                                         bool nonblocking);
+    usize preview_console_read(const TerminalLdisc::ReadPlan &plan, std::span<std::byte> output,
+                               usize offset) const;
+    Status commit_console_read(const TerminalLdisc::ReadPlan &plan);
+    // One ingress byte through the console line discipline. ISIG signals go to
+    // the console outbox; echo stays in the ldisc for the runtime to emit.
     // `source` is the console's: interrupt once its UART line is bound.
-    void console_input(char value, WakeSource source = WakeSource::thread);
+    TerminalLdisc::Input console_input(char value, WakeSource source = WakeSource::thread);
+    // Terminals (docs/modules/tty.md sections 1, 4 and 5). The console is
+    // terminal 0; the runtime moves echo and output and drains the outbox.
+    [[nodiscard]] Terminal *terminal(TerminalRef ref);
+    [[nodiscard]] const Terminal *terminal(TerminalRef ref) const;
+    // Every terminal's storage by index (0 console, 1 + slot), live or not,
+    // for the outbox drain.
+    static constexpr usize terminal_count = 1 + private_pty::RawPtyTable<>::pair_capacity;
+    [[nodiscard]] Terminal &terminal_storage(usize index);
+    [[nodiscard]] Terminal &console_terminal() { return console_terminal_; }
+    [[nodiscard]] const Terminal &console_terminal() const { return console_terminal_; }
+    [[nodiscard]] Result<TerminalSubject> terminal_subject(u16 description) const;
+    [[nodiscard]] std::optional<TerminalRef> controlling_terminal(const ProcessControlBlock &process) const;
+    [[nodiscard]] TerminalJobFacts terminal_job_facts(ProcessId pid, TerminalRef ref) const;
+    Status acquire_terminal(TerminalRef ref, ProcessControlBlock &caller, bool readable, AcquireMode mode);
+    // Association checks of the running caller; they precede every copy-in.
+    Status terminal_check(const TerminalSubject &subject, ConsoleControlOperation operation);
+    Result<TerminalReply> terminal_control(const TerminalSubject &subject, const TerminalRequest &request);
+    // Job-control wait key of a terminal: 0 for the console, 1 + slot for a PTY.
+    [[nodiscard]] static constexpr u64 job_control_key(TerminalRef ref) { return ref.index; }
     // Trusted runtime ingress failure closes ownership before returning to userland.
     void abort_console_input();
+    // Clears every CPU slot and moves queue entries off CPUs beyond the count;
+    // the online set keeps only its configured CPUs.
     Status configure_cpus(usize cpu_count);
+    // CPU 0 stays online; every online CPU must be configured. Entries already
+    // queued on a CPU that goes offline stay there and are not stolen.
+    Status set_online_cpus(u32 mask);
+    // Hotplug: a configured secondary CPU leaves the online set and every
+    // entry queued on it moves to an online queue (stale ones are dropped),
+    // so no thread is lost or queued twice and nothing waits on it. Its
+    // current slot stays until that CPU vacates it itself.
+    Status offline_cpu(smp::CpuId cpu);
+    // A configured CPU joins the online set again; it starts with its empty queue.
+    Status online_cpu(smp::CpuId cpu);
+    [[nodiscard]] u32 online_cpus() const { return online_cpus_; }
+    // Per-CPU run queues are a mechanism; nothing enqueues implicitly, so a
+    // thread woken while still on its CPU must be enqueued again by whoever
+    // vacates that CPU (the native runtime enqueues every runnable thread that
+    // is off-CPU on each step). The
+    // caller serializes scheduler state, while each queue lock guards only its
+    // ring, so no path ever holds two queue locks.
+    // Succeeds without change when the thread is on a CPU or already queued.
+    Status enqueue_thread(ProcessId pid, ThreadId tid);
+    // Placement: the last CPU of a thread that has run, while it is online
+    // and allowed; otherwise the allowed online CPU with the shortest queue, lowest id on a
+    // tie; with no allowed CPU online, CPU 0, which is never offline. CPU 0
+    // runs the entry only if the affinity names no configured CPU; otherwise
+    // the entry waits there until a CPU it allows comes online and takes it.
+    [[nodiscard]] smp::CpuId select_cpu(const ProcessControlBlock &process, const ThreadControlBlock &thread) const;
+    // Pops this online CPU's queue, discarding stale entries and moving
+    // entries the affinity no longer allows. An empty queue steals the oldest
+    // eligible entry from the longest other online queue it can try-lock,
+    // trying shorter victims next. The caller marks the result with mark_on_cpu.
+    std::optional<ThreadRef> dequeue_thread(smp::CpuId cpu);
+    // Dispatches exactly this thread on an online, vacant CPU, like
+    // activate_thread, and refuses a thread running on another CPU.
+    Status mark_on_cpu(ProcessId pid, ThreadId tid, smp::CpuId cpu);
+    // Vacates the CPU; the thread returns to runnable unless it blocked or exited.
+    Status clear_on_cpu(ProcessId pid, ThreadId tid, smp::CpuId cpu);
+    [[nodiscard]] const SchedulerRunQueue &run_queue(smp::CpuId cpu) const { return run_queues_.get(cpu); }
     Status set_runnable(ProcessId pid);
     Status block_process(ProcessId pid);
+    // Job-control overlay (job_control.inc). A stopped process keeps its
+    // threads and waits; the runtime never enters it until it is continued.
+    // Meanwhile enqueue_thread, stealing, mark_on_cpu and activate_thread
+    // refuse it, and dequeue_thread discards an entry queued before the stop.
+    // `signal` is in the process's own numbering. Stopping an already stopped
+    // process succeeds without change; a zombie gives already_exists.
+    Status stop_process(ProcessId pid, u8 signal);
+    // Returns true when the process was stopped.
+    bool continue_process(ProcessId pid);
+    void consume_job_report(ProcessId pid, bool stop);
+    [[nodiscard]] u16 stopped_processes() const { return stopped_count_; }
+    [[nodiscard]] bool process_group_orphaned(ProcessId group, ProcessId ignored = 0) const;
+    [[nodiscard]] bool process_group_has_stopped(ProcessId group) const;
+    // Child-wait key of a process-group selector; pid keys stay below 2^32.
+    [[nodiscard]] static constexpr u64 child_group_wait_key(ProcessId group) { return (u64{1} << 32) | group; }
 
+    // No-argument native services act for the thread of the calling CPU.
     [[nodiscard]] ProcessId current_pid() const
     {
-        // No-argument native services operate on the serialized boot CPU.
-        return current_pid_;
+        return current_pid(smp::current_cpu());
     }
     [[nodiscard]] ProcessId current_pid(smp::CpuId cpu) const;
     [[nodiscard]] ThreadId current_tid(smp::CpuId cpu) const;
@@ -611,10 +825,12 @@ class SchedulerState
     [[nodiscard]] const ProcessControlBlock *find(ProcessId pid) const;
     [[nodiscard]] std::span<ProcessControlBlock> processes()
     {
+        smp::check_exclusive("SchedulerState::processes");
         return {processes_.begin(), processes_.size()};
     }
     [[nodiscard]] std::span<const ProcessControlBlock> processes() const
     {
+        smp::check_exclusive("SchedulerState::processes");
         return {processes_.begin(), processes_.size()};
     }
     [[nodiscard]] CpuSchedulingStats cpu_stats(smp::CpuId cpu) const;
@@ -624,7 +840,21 @@ class SchedulerState
     [[nodiscard]] u8 process_usage_percent(ProcessId pid) const;
 
   private:
-    [[nodiscard]] bool thread_running_on_other_cpu(ThreadId tid, smp::CpuId cpu) const;
+    [[nodiscard]] static bool thread_running_on_other_cpu(const ThreadControlBlock &thread, smp::CpuId cpu)
+    {
+        return thread.on_cpu != no_cpu && thread.on_cpu != cpu;
+    }
+    [[nodiscard]] bool cpu_online(smp::CpuId cpu) const
+    {
+        return cpu < cpu_count_ && (online_cpus_ & (1u << cpu)) != 0;
+    }
+    // Drops the thread's queue entry, if any; storage moves never need this.
+    void forget_queued(ProcessId pid, ThreadControlBlock &thread);
+    void vacate_cpu_slot(usize cpu);
+    void occupy_cpu(smp::CpuId cpu, ProcessControlBlock &process, ThreadControlBlock &thread);
+    // The CPU 0 fallback of select_cpu admits a thread whose affinity names no configured CPU.
+    [[nodiscard]] bool affinity_admits(const ProcessControlBlock &process, smp::CpuId cpu) const;
+    [[nodiscard]] bool eligible_on(ThreadRef ref, smp::CpuId queue, smp::CpuId cpu) const;
     Result<ProcessId> create_process_with_pid(ProcessId pid, std::string_view name,
                                                arch::CpuContext initial_context);
     [[nodiscard]] Result<ThreadId> pick_next_thread(ProcessControlBlock &process, ThreadId current, smp::CpuId cpu);
@@ -637,17 +867,26 @@ class SchedulerState
     void clear_current(ProcessId pid);
     Status reparent_children_on_exit(ProcessId pid);
     Status finish_process(ProcessId pid, i32 code, u8 signal);
+    void wake_job_waiters(const ProcessControlBlock &process);
     [[nodiscard]] ProcessControlBlock *console_caller();
     void retire_console_process(ProcessId pid);
     void cancel_console_epoch(u32 epoch);
+    void reset_console_terminal();
+    void hangup_console(u32 epoch);
+    void hangup_exiting_leader(ProcessControlBlock &process);
+    void remember_hangup(ProcessId leader, ProcessId foreground, u16 terminal);
+    void clear_association(TerminalRef ref, Terminal &target);
+    [[nodiscard]] tty::Termios console_read_termios() const;
+    void wake_pty(private_pty::Handle endpoint, u8 wakes);
+    Status pty_terminal_check(const TerminalSubject &subject, ConsoleControlOperation operation);
+    void terminal_changed(TerminalRef ref);
+    Result<private_pty::Handle> bind_pty_multiplexer(u16 description, u32 uid, u32 gid);
     private_pty::RawPtyTable<> pty_transport_{}; // One stable table; handles never cross scheduler domains.
     ConsoleInputLease console_input_{};
     std::array<u64, wake_source_count> wakes_{};
-    struct ConsoleTerminal
-    {
-        u32 epoch{};
-        ProcessId session{}, foreground{};
-    } console_terminal_{};
+    u16 stopped_count_{};
+    Terminal console_terminal_{};
+    fs::TerminalNamespace terminal_namespace_{};
     [[nodiscard]] bool pipe_has_endpoint(u16 pipe, bool writable) const;
     friend class UnixReceive;
     friend class UnixAccept;
@@ -688,6 +927,7 @@ class SchedulerState
     u64 next_unix_endpoint_generation_{1};
     std::array<PipeBuffer, max_process_pipes> pipes_{};
     std::array<OpenFileDescription, max_open_descriptions> descriptions_{};
+    std::array<DescriptionPositionLock, max_open_descriptions> positions_{};
     u64 next_unix_receive_token_{1}; // ABI58 diagnostic name; shared by UNIX receive, TCP accept and fd installation.
     usize active_unix_receives_{}; // Process compaction cannot move a prepared resource owner.
     usize active_descriptor_reservations_{};
@@ -708,6 +948,8 @@ class SchedulerState
     std::array<ProcessId, smp::max_cpus> current_by_cpu_{};
     std::array<ThreadId, smp::max_cpus> current_thread_by_cpu_{};
     std::array<CpuSchedulingStats, smp::max_cpus> cpu_stats_{};
+    u32 online_cpus_{1};
+    smp::PerCpu<SchedulerRunQueue> run_queues_{};
 };
 
 template <SchedulerPolicy Policy = RoundRobinPolicy> class BasicScheduler final : public SchedulerState
@@ -750,5 +992,9 @@ static_assert(max_unix_endpoints == unix_pathname_endpoint_capacity);
 static_assert(max_unix_backlog == unix_pathname_backlog_capacity);
 static_assert(SchedulerPolicy<RoundRobinPolicy>);
 static_assert(!std::is_polymorphic_v<Scheduler>);
+static_assert(fs::pts_capacity == private_pty::RawPtyTable<>::pair_capacity,
+              "every PTY pair slot has one /dev/pts entry");
+static_assert(std::is_same_v<private_pty::RawPtyTable<>::SlaveTerminal, Terminal>,
+              "every kernel PTY slave is a Terminal with the kernel line discipline");
 
 } // namespace ok::sched

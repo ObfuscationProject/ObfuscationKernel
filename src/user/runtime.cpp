@@ -6,23 +6,6 @@ namespace ok::user::native
 {
 inline namespace runtime_detail
 {
-static_assert(native_sessions_module_abi == kernel_module_abi_version);
-static_assert(native_sessions_version == OK_NATIVE_SESSIONS_VERSION);
-static_assert(native_sessions_process_capacity == sched::max_processes);
-static_assert(native_console_control_module_abi == kernel_module_abi_version);
-static_assert(native_console_control_version == OK_NATIVE_CONSOLE_CONTROL_VERSION);
-static_assert(native_console_control_pid_bytes == 4 && native_sessions_controlling_tty == 1 &&
-              native_group_signal_controlling_tty == 1 && native_console_control_pty == 0 &&
-              native_console_control_termios == 0 && native_console_control_job_control == 0 &&
-              native_console_control_smp == 0);
-static_assert(native_group_signal_module_abi == kernel_module_abi_version);
-static_assert(native_group_signal_process_capacity == sched::max_processes);
-static_assert(native_group_signal_profile == "bootcpu-signed32-current-negative-pgid-probe-term-kill-deferred-partial-v2");
-static_assert(native_group_signal_current_group == 1 && native_group_signal_negative_group == 1 &&
-              native_group_signal_probe == 1 && native_group_signal_term == OK_SIGTERM &&
-              native_group_signal_kill == OK_SIGKILL && native_group_signal_deferred_fatal == 1 &&
-              native_group_signal_partial_success == 1 && native_group_signal_broadcast == 0 &&
-              native_group_signal_stop_continue == 0 && native_group_signal_job_control == 0);
 void copy_bytes(void *dst, const void *src, usize size)
 {
     auto *out = static_cast<std::byte *>(dst);
@@ -34,11 +17,11 @@ alignas(4096) std::array<std::byte, memory::KernelEntryStackPool::arena_bytes> e
 memory::KernelEntryStackPool entry_stacks;
 SyscallOrigins syscall_origins{entry_stacks};
 VfsStatContinuation<lu::configured_native_profile()> vfs_continuations{entry_stacks};
-bool started{};
+constinit RuntimeFlag started{};
 Kernel *runtime_kernel{};
-Status runtime_failure{};
+constinit RuntimeFailure runtime_failure{};
 ShutdownOwner original_shutdown_owner{};
-bool runtime_step_active{}, shutdown_admission_closed{}, shutdown_retirement_started{}, shutdown_retirement_completed{};
+bool shutdown_admission_closed{}, shutdown_retirement_started{}, shutdown_retirement_completed{};
 namespace
 {
 Status shutdown_failure{};
@@ -62,6 +45,8 @@ Status retire_native_thread(sched::ThreadControlBlock &thread
 {
     if (linux_udp_receive_object(thread.owner, thread.tid).pool)
         return Status::busy("native thread retirement must first retire its Linux UDP receive owner");
+    if (runtime_kernel)
+        if (auto status = evict_thread(*runtime_kernel, thread); !status) return status;
     if (auto status = cancel_native_vfs_thread(thread); !status) return status;
 #ifdef OK_PRIVATE_POLL_MASK
     const auto signal_lease = thread.entry_stack;
@@ -140,28 +125,24 @@ Status prepare_native_thread(sched::ThreadControlBlock &thread)
 extern "C" void ok_platform_console_write_char(char) __attribute__((weak));
 namespace
 {
+constinit smp::RankedSpinLock<smp::LockRank::console> console_lock{}; // One text out whole, from any CPU.
 char console_last{'\n'};
+void emit_text(std::string_view text, bool line)
+{
+    const decltype(console_lock)::Guard guard(console_lock);
+    for (const auto part : {std::string_view{line && console_last != '\n' ? "\n" : ""}, text})
+        for (char c : part)
+            if (console_last = c; ok_platform_console_write_char != nullptr) ok_platform_console_write_char(c);
+}
 } // namespace
-void emit(std::string_view text)
-{
-    if (ok_platform_console_write_char != nullptr)
-        for (char c : text)
-            ok_platform_console_write_char(c);
-    if (!text.empty())
-        console_last = text.back();
-}
-void emit_line(std::string_view text)
-{
-    if (console_last != '\n')
-        emit("\n");
-    emit(text);
-}
+void emit(std::string_view text) { emit_text(text, false); }
+void emit_line(std::string_view text) { emit_text(text, true); }
 void emit_number(u64 value)
 {
     char digits[20];
-    usize count = 0;
-    do { digits[count++] = static_cast<char>('0' + value % 10); value /= 10; } while (value);
-    while (count) emit({&digits[--count], 1});
+    usize first = sizeof digits;
+    do { digits[--first] = static_cast<char>('0' + value % 10); value /= 10; } while (value);
+    emit({&digits[first], sizeof digits - first});
 }
 [[maybe_unused]] void emit_hex(u64 value)
 {
@@ -262,6 +243,7 @@ Status set_result(const sched::ProcessControlBlock &process, hw::UserFrame &fram
 
 void finish(Kernel &kernel, sched::ProcessId pid, i32 code, u8 signal)
 {
+    if constexpr (smp_sections) smp::drain(pid); // Its sections end, results committed, before teardown.
     const auto *initial = kernel.scheduler().find(pid);
     if (!initial) return;
     if (initial->state() == sched::ProcessState::zombie || initial->state() == sched::ProcessState::exited)
@@ -314,7 +296,7 @@ void finish(Kernel &kernel, sched::ProcessId pid, i32 code, u8 signal)
     const auto status = child_exit_transaction(cleanup, transition,
         [&] {
             if (auto status = private_child_exit_commit(kernel, completion); !status) return status;
-            return PrivateChildExit::commit_adoption(kernel.scheduler(), adoption, private_signal_find);
+            return private_exit_commit(kernel, pid, completion, adoption);
         });
 #else
     auto status = cleanup();
@@ -424,7 +406,7 @@ Status shutdown_preflight(Kernel &kernel, ShutdownOwner owner)
     if (!started || shutdown_admission_closed)
         return Status::busy("native shutdown runtime is not accepting a reservation");
     if (auto status = original_init_state(kernel); !status) return status;
-    if (entry_stacks.accounting().active_slots)
+    if (entry_stacks.active_on(smp::current_cpu()))
         return Status::busy("native shutdown reservation has an active entry");
     // Service children remain admissible until the OS has quiesced them.
     const auto report = shutdown_report(kernel);
@@ -451,9 +433,9 @@ Status shutdown_outer_boundary(Kernel &kernel)
 {
     if (auto status = shutdown_runtime_owner(kernel); !status) return status;
 #ifdef OK_KERNEL_FREESTANDING
-    if (auto status = arch::require_service_stack(); !status) return status;
+    if (auto status = require_cpu_service_stack(); !status) return status;
 #endif
-    if (runtime_step_active || entry_stacks.accounting().active_slots)
+    if (any_step_active() || entry_stacks.accounting().active_slots)
         return Status::busy("native shutdown requires return from the complete runtime step");
     const auto backend = hw::ownership_report();
     if (!backend.failure) return backend.failure;
@@ -472,7 +454,7 @@ NativeShutdownReport shutdown_report(Kernel &kernel)
     auto retain_failure = [&](Status status) { if (result.failure && !status) result.failure = status; };
     retain_failure(shutdown_runtime_owner(kernel));
     result.admission_closed = shutdown_admission_closed;
-    result.step_active = runtime_step_active;
+    result.step_active = any_step_active();
     result.retirement_started = shutdown_retirement_started;
     result.retirement_completed = shutdown_retirement_completed;
     for (const auto &process : kernel.scheduler().processes())
@@ -531,7 +513,7 @@ NativeShutdownReport shutdown_report(Kernel &kernel)
 #ifdef OK_PRIVATE_POLL_MASK
     for (const auto &entry : private_signal_actions)
     {
-        result.signal_owners += entry.pid || entry.shared.identity().process || entry.group_kill || entry.native_termination;
+        result.signal_owners += entry.pid || entry.shared.identity().process || entry.group_kill || entry.deferred_fatal;
         for (auto word : entry.shared.pending_mask().words) result.signal_owners += word != 0;
     }
     for (usize i = 0; i < private_signal_queues.size(); ++i)
@@ -633,7 +615,7 @@ Status terminate_native_process(Kernel &kernel, u64 pid, u8 signal)
         return Status::not_initialized("native termination requires its service owner");
     if (!runtime_failure) return runtime_failure;
     if (!started) return Status::not_initialized("native termination requires a running service");
-    if (entry_stacks.accounting().active_slots)
+    if (entry_stacks.active_on(smp::current_cpu()))
         return Status::busy("native termination requires an inactive entry boundary");
     if (!process->resources().native_space.root || process->resources().native_pages.empty())
         return Status::invalid_argument("native termination requires a retained address space");
@@ -683,6 +665,6 @@ void release_process(Kernel &kernel, u64 pid)
 void input(char value, sched::WakeSource source)
 {
     if (!shutdown_admission_closed && !native_shutdown_pending() && runtime_kernel != nullptr)
-        runtime_kernel->scheduler().console_input(value, source);
+        tty_console_input(*runtime_kernel, value, source);
 }
 } // namespace ok::user::native

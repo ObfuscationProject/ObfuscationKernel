@@ -25,19 +25,24 @@ void profile()
         };
         put(0, info.signal); put(code_at, static_cast<u32>(info.code));
         put(payload, info.sender_pid); put(payload + 4, info.sender_uid);
-        if (info.code == 1 || info.code == 2) put(payload + 8, static_cast<u32>(info.child_status));
+        if (info.code == 1 || info.code == 2 || info.code == 5 || info.code == 6)
+            put(payload + 8, static_cast<u32>(info.child_status));
         return value;
     };
     for (sched::PendingSignalInfo info : {sched::PendingSignalInfo{child, 1, 0x12345678, 0xfedcba98, 0},
         {child, 1, 0x12345678, 0xfedcba98, 165}, {child, 1, 0x12345678, 0xfedcba98, 255},
         {child, 2, 0x12345678, 0xfedcba98, 1}, {child, 2, 0x12345678, 0xfedcba98, static_cast<i32>(maximum)},
-        {child, 0, 0x12345678, 0xfedcba98}, {8, -6, 0x12345678, 0xfedcba98}, {8, 128, 0, 0}, {maximum, 128, 0, 0}})
+        {child, 0, 0x12345678, 0xfedcba98}, {8, -6, 0x12345678, 0xfedcba98}, {8, 128, 0, 0}, {maximum, 128, 0, 0},
+        {child, 5, 0x12345678, 0xfedcba98, static_cast<i32>(user::job::linux_numbering<P>.tstp)},
+        {child, 5, 0x12345678, 0xfedcba98, static_cast<i32>(maximum)},
+        {child, 6, 0x12345678, 0xfedcba98, static_cast<i32>(user::job::linux_numbering<P>.cont)}})
     {
         std::array<std::byte, 128> out{}, waited{}; out.fill(std::byte{0x5a});
         CHECK(Codec::encode(info, out)); CHECK(out == expected(info));
         CHECK(SignalWaitCodec<P>::encode_info(info, waited)); CHECK(waited == out);
-        CHECK(Codec::template frame_valid<>(info) == (info.code != 128));
-        CHECK(Codec::template frame_valid<true>(info) == (info.code != 128 || info.signal == 8));
+        CHECK(Codec::template frame_valid<>(info) == (info.code != 128 || Codec::kernel_terminal_signal(info.signal)));
+        CHECK(Codec::template frame_valid<true>(info) ==
+              (info.code != 128 || info.signal == 8 || Codec::kernel_terminal_signal(info.signal)));
         std::array<std::byte, 131> surrounded{}; surrounded.fill(std::byte{0xa5});
         CHECK(Codec::encode_into(info, surrounded, 1));
         CHECK(surrounded[0] == std::byte{0xa5} && surrounded[129] == std::byte{0xa5} && surrounded[130] == std::byte{0xa5});
@@ -46,12 +51,27 @@ void profile()
         CHECK(!Codec::encode_into(info, surrounded, 4)); CHECK(surrounded == before);
         CHECK(!Codec::encode_into(info, surrounded, ~usize{0})); CHECK(surrounded == before);
     }
+    {
+        // SI_KERNEL frames: ITIMER_REAL SIGALRM plus the terminal and orphan
+        // signals in this profile's numbering; FPE only where admitted.
+        constexpr const auto &n = user::job::linux_numbering<P>;
+        for (u32 signal = 1; signal <= maximum; ++signal)
+        {
+            const bool terminal = signal == n.hup || signal == n.interrupt || signal == n.quit ||
+                signal == n.tstp || signal == n.ttin || signal == n.ttou || signal == n.cont || signal == n.window;
+            const sched::PendingSignalInfo info{signal, 128, 0, 0};
+            CHECK(Codec::template frame_valid<>(info) == (signal == 14 || terminal));
+            CHECK(Codec::template frame_valid<true>(info) == (signal == 8 || signal == 14 || terminal));
+        }
+    }
     for (sched::PendingSignalInfo info : {sched::PendingSignalInfo{0, 1, 1, 0, 0},
         {maximum + 1, 1, 1, 0, 0}, {child + 1, 1, 1, 0, 0}, {child, 3, 1, 0, 0},
         {child, 1, 0, 0, 0}, {child, 1, 0x80000000, 0, 0}, {child, 1, 1, 0, -1},
         {child, 1, 1, 0, 256}, {child, 2, 1, 0, 0}, {child, 2, 1, 0, static_cast<i32>(maximum + 1)},
         {child, 0, 1, 0, 1}, {child, -6, 1, 0, 1}, {8, 128, 1, 0, 0}, {8, 128, 0, 1, 0},
-        {8, 128, 0, 0, 1}, {child, -1, 1, 0, 0}})
+        {8, 128, 0, 0, 1}, {child, -1, 1, 0, 0}, {child, 5, 1, 0, 0}, {child, 6, 1, 0, 0},
+        {child, 5, 1, 0, static_cast<i32>(maximum + 1)}, {child, 6, 0, 0, 18}, {child + 1, 5, 1, 0, 19},
+        {child, 4, 1, 0, 1}, {child, 7, 1, 0, 1}})
     {
         std::array<std::byte, 128> out{}; out.fill(std::byte{0x5a}); const auto before = out;
         CHECK(!Codec::valid(info)); CHECK(!Codec::encode(info, out)); CHECK(out == before);
@@ -83,6 +103,17 @@ void profile()
     CHECK(queue.enqueue_child_exit(sched::ChildExitStatus::normal(3), 3, 7) == Q::Enqueue::queued);
     CHECK(!queue.consume(ticket)); queue.discard(child);
     CHECK(queue.enqueue_child_exit(sched::ChildExitStatus::normal(3), 3, 7) == Q::Enqueue::full);
+    {
+        // CLD_STOPPED and CLD_CONTINUED carry a signal and leave the child alive.
+        Q stops; CHECK(stops.reset({1, 1, 9}));
+        constexpr const auto &n = user::job::linux_numbering<P>;
+        CHECK(stops.enqueue_child_exit(sched::ChildExitStatus::stopped(0), 2, 0) == Q::Enqueue::invalid);
+        CHECK(stops.enqueue_child_exit(sched::ChildExitStatus::stopped(n.ttin), 4, 5) == Q::Enqueue::queued);
+        CHECK(stops.peek({}, ticket)); CHECK((ticket.info == sched::PendingSignalInfo{child, 5, 4, 5, static_cast<i32>(n.ttin)}));
+        CHECK(stops.consume(ticket));
+        CHECK(stops.enqueue_child_exit(sched::ChildExitStatus::continued(n.cont), 4, 5) == Q::Enqueue::queued);
+        CHECK(stops.peek({}, ticket)); CHECK((ticket.info == sched::PendingSignalInfo{child, 6, 4, 5, static_cast<i32>(n.cont)}));
+    }
 
     using Shared = ProcessPendingSignals<maximum, 1, 2>;
     Shared shared; typename Shared::Delivery selected;

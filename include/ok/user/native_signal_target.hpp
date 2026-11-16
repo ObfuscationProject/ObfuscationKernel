@@ -28,13 +28,22 @@ template <abi::linux_user::Profile Profile, typename Write>
 
 // Linux 6.13.4 kernel/signal.c: kill_ok_by_cred/check_kill_permission.
 // Effective root is this kernel's reduced CAP_KILL policy. This does not model
-// capabilities, user namespaces, LSM or the SIGCONT session exception.
+// capabilities, user namespaces or LSM; callers add the SIGCONT session
+// exception through continue_signal_permitted.
 [[nodiscard]] constexpr bool directed_signal_permitted(Credentials sender, Credentials target,
                                                        bool same_thread_group)
 {
     return same_thread_group || sender.euid == root_uid ||
            sender.euid == target.uid || sender.euid == target.suid ||
            sender.uid == target.uid || sender.uid == target.suid;
+}
+
+// Linux check_kill_permission: SIGCONT reaches any process of the sender's
+// session whatever the credentials.
+[[nodiscard]] constexpr bool continue_signal_permitted(u32 signal, u32 continue_signal,
+                                                       sched::ProcessId sender_session, sched::ProcessId target_session)
+{
+    return signal == continue_signal && sender_session == target_session;
 }
 
 struct DirectedSignalTarget
@@ -74,9 +83,11 @@ struct DirectedSignalTarget
 // The callback owns actual target action/queue acquisition. In particular it is
 // never called by a zero probe, a refused request or a retained retired leader.
 // This is shared by the native boundary and scheduler-backed model tests.
+// A blocked target is admitted only by the callback, which also sees the
+// signal: job-control signals act on a blocked thread without interrupting it.
 struct RejectDirectedBlockedWait
 {
-    bool operator()(const sched::ProcessControlBlock &, const sched::ThreadControlBlock &) const { return false; }
+    bool operator()(const sched::ProcessControlBlock &, const sched::ThreadControlBlock &, i32) const { return false; }
 };
 
 template <abi::linux_user::Profile Profile, typename Deliver, typename AdmitBlocked = RejectDirectedBlockedWait>
@@ -96,17 +107,16 @@ template <abi::linux_user::Profile Profile, typename Deliver, typename AdmitBloc
     if (signal < 0 || signal > static_cast<i32>(Codec::max_signal)) return -22;
     const auto credentials = sender.credentials();
     if (!directed_signal_permitted(credentials, target.process->credentials(),
-                                   sender.pid() == target.process->pid())) return -1;
+                                   sender.pid() == target.process->pid()) &&
+        !continue_signal_permitted(static_cast<u32>(signal), Codec::continue_signal, sender.session_id(),
+                                   target.process->session_id())) return -1;
     if (!signal || target.retired_leader) return 0;
     if (!target.thread->native_active || target.process->resources().personality != sched::UserPersonality::linux)
         return -95;
     // Only a caller with a qualified wait continuation may admit blocked tasks.
     // The default remains refusal; signal masks and blocked waits are distinct.
-    if ((target.thread->state == sched::ProcessState::blocked &&
-         !std::forward<AdmitBlocked>(admit_blocked)(*target.process, *target.thread)) ||
-        signal == static_cast<i32>(Codec::stop_signal) ||
-        signal == (Codec::mips ? 24 : 20) || signal == (Codec::mips ? 26 : 21) ||
-        signal == (Codec::mips ? 27 : 22) || signal == (Codec::mips ? 25 : 18)) return -95;
+    if (target.thread->state == sched::ProcessState::blocked &&
+        !std::forward<AdmitBlocked>(admit_blocked)(*target.process, *target.thread, signal)) return -95;
     return std::forward<Deliver>(deliver)(*target.process, *target.thread,
         sched::PendingSignalInfo{static_cast<u32>(signal), -6,
                                  static_cast<u32>(sender.pid()), credentials.uid});

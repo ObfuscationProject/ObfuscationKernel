@@ -183,10 +183,10 @@ Result<usize> poll_ready(Kernel &kernel, PollWait &wait)
             u16 events = static_cast<u16>(ready.value().events);
             if (ready.value().console_input)
             {
+                // Linux n_tty_poll has no job-control check: a background
+                // member sees readiness and is gated when it reads.
                 if (!wait.console_epoch || !kernel.scheduler().console_authorized(wait.pid, wait.console_epoch))
                     events |= OK_POLLERR | OK_POLLHUP;
-                else if (!kernel.scheduler().console_read_authority(wait.pid, wait.console_epoch))
-                    events |= OK_POLLERR;
                 else if ((canonical & OK_POLLIN) && kernel.scheduler().console_readable(wait.pid, wait.console_epoch))
                 {
                     events |= OK_POLLIN;
@@ -259,15 +259,13 @@ memory::ObjectHandle child_wait_object(sched::ProcessId pid, sched::ThreadId tid
 }
 namespace
 {
-u64 child_wait_key(const ChildWaitRequest &request)
-{ return request.selector == -1 ? 0 : static_cast<u32>(request.selector); }
 bool child_wait_output_valid(const sched::ProcessControlBlock &process, const ChildWaitRequest &request)
 {
     return !request.siginfo && !request.output ? true :
         hw::user_range(process.resources().native_space, request.output, request.siginfo ? 128 : 4, true);
 }
 } // namespace
-i64 child_wait_probe(Kernel &kernel, sched::ProcessId pid, const ChildWaitRequest &request)
+i64 child_wait_probe(Kernel &kernel, sched::ProcessId pid, const ChildWaitRequest &request, ChildWaitReport *report)
 {
     const auto *parent = kernel.scheduler().find(pid);
     if (!parent) return -3;
@@ -275,12 +273,24 @@ i64 child_wait_probe(Kernel &kernel, sched::ProcessId pid, const ChildWaitReques
     bool eligible = false;
     for (auto id : parent->children())
     {
-        if (request.selector != -1 && id != static_cast<u32>(request.selector)) continue;
+        if (!request.group && request.selector != -1 && id != static_cast<u32>(request.selector)) continue;
         const auto *child = kernel.scheduler().find(id);
         if (!child || child->parent_pid() != pid) continue;
+        // A group selector compares the child's group now, not at call time.
+        if (request.group && child->process_group_id() != request.group) continue;
+        const bool dead = child->state() == sched::ProcessState::zombie || child->state() == sched::ProcessState::exited;
+        // Linux wait_task_zombie: without WEXITED a zombie is skipped and
+        // leaves ECHILD in place; it can never become reportable.
+        if (dead && !request.exited) continue;
         eligible = true;
-        if (child->state() == sched::ProcessState::zombie || child->state() == sched::ProcessState::exited)
-            return static_cast<i64>(id);
+        const auto &job = child->job_control();
+        ChildWaitReport kind{};
+        if (dead) kind = ChildWaitReport::exited;
+        else if (request.stopped && job.stopped && job.stop_report) kind = ChildWaitReport::stopped;
+        else if (request.continued && job.continue_report) kind = ChildWaitReport::continued;
+        else continue;
+        if (report) *report = kind;
+        return static_cast<i64>(id);
     }
     return !eligible ? -10 : request.nohang ? 0 : -11;
 }
@@ -345,7 +355,16 @@ void prune_child_waits(Kernel &kernel)
 }
 namespace
 {
-i64 complete_child_wait(Kernel &kernel, sched::ProcessId pid, const ChildWaitRequest &request, i64 ready)
+// A stop, continue or termination signal in the waiting parent's numbering.
+u32 child_wait_signal(const sched::ProcessControlBlock &child, const sched::ProcessControlBlock *parent, u32 signal)
+{
+    if (!parent) return signal;
+    const auto translated = job::translate(private_job_numbering(child.resources().personality),
+                                           private_job_numbering(parent->resources().personality), signal);
+    return translated ? translated : signal;
+}
+i64 complete_child_wait(Kernel &kernel, sched::ProcessId pid, const ChildWaitRequest &request, i64 ready,
+                        ChildWaitReport report)
 {
     if (ready < 0) return ready;
     std::array<u8, 128> bytes{};
@@ -357,19 +376,45 @@ i64 complete_child_wait(Kernel &kernel, sched::ProcessId pid, const ChildWaitReq
     {
         const auto *child = kernel.scheduler().find(static_cast<sched::ProcessId>(ready));
         if (!child || child->parent_pid() != pid) return -10;
-        const u32 status = child->wait_status(), uid = child->credentials().uid;
+        const auto *waiter = kernel.scheduler().find(pid);
+        const u32 uid = child->credentials().uid;
+        // CLD_EXITED 1, CLD_KILLED 2, CLD_DUMPED 3, CLD_STOPPED 5, CLD_CONTINUED 6.
+        u32 status{}, code{}, value{};
+        if (report == ChildWaitReport::exited)
+        {
+            status = child->wait_status();
+            const u32 signal = child_wait_signal(*child, waiter, status & 0x7fU);
+            if (status & 0x7fU) status = (status & ~0x7fU) | signal;
+            code = (status & 0x7fU) ? ((status & 0x80U) ? 3U : 2U) : 1U;
+            value = (status & 0x7fU) ? signal : ((status >> 8) & 0xffU);
+        }
+        else if (report == ChildWaitReport::stopped)
+        {
+            value = child_wait_signal(*child, waiter, child->job_control().stop_signal);
+            status = (value << 8) | 0x7fU; code = 5;
+        }
+        else
+        {
+            value = waiter ? private_job_numbering(waiter->resources().personality).cont : 18U;
+            status = 0xffffU; code = 6;
+        }
         if (request.siginfo)
         {
-            const u32 signal = status & 0x7fU;
-            field(0, 17); field(8, signal ? ((status & 0x80U) ? 3U : 2U) : 1U);
+            field(0, 17); field(8, code);
             field(12, static_cast<u32>(ready)); field(16, uid);
-            field(20, signal ? signal : ((status >> 8) & 0xffU));
+            field(20, value);
         }
         else field(0, status);
-        // Reaping compacts canonical process storage. Re-find the parent for
-        // output; a checked copy failure is reported even after consumption.
-        auto reaped = kernel.scheduler().wait_process(pid, static_cast<sched::ProcessId>(ready));
-        if (!reaped) return error(reaped.status());
+        // WNOWAIT leaves the report in place.
+        if (!request.nowait && report != ChildWaitReport::exited)
+            kernel.scheduler().consume_job_report(static_cast<sched::ProcessId>(ready), report == ChildWaitReport::stopped);
+        else if (!request.nowait)
+        {
+            // Reaping compacts canonical process storage. Re-find the parent for
+            // output; a checked copy failure is reported even after consumption.
+            auto reaped = kernel.scheduler().wait_process(pid, static_cast<sched::ProcessId>(ready));
+            if (!reaped) return error(reaped.status());
+        }
     }
     const auto *parent = kernel.scheduler().find(pid);
     if (!parent) return -3;
@@ -388,7 +433,8 @@ i64 resume_child_wait(Kernel &kernel, sched::ProcessControlBlock &process, memor
     if (!thread || thread->wait_registration.ticket() != wait.ticket || thread->wait_registration.active() ||
         thread->wait_registration.completion() != sched::WaitCompletion::ready)
     { cancel_child_wait(kernel, object); return -125; }
-    const auto ready = child_wait_probe(kernel, wait.pid, wait.operation);
+    ChildWaitReport report{};
+    const auto ready = child_wait_probe(kernel, wait.pid, wait.operation, &report);
     if (ready == -11)
     {
         // A different waiter may have reaped the wake's child while another
@@ -405,7 +451,7 @@ i64 resume_child_wait(Kernel &kernel, sched::ProcessControlBlock &process, memor
     const auto pid = wait.pid;
     const auto request = wait.operation;
     cancel_child_wait(kernel, object, "complete", ready);
-    return complete_child_wait(kernel, pid, request, ready);
+    return complete_child_wait(kernel, pid, request, ready, report);
 }
 namespace
 {
@@ -416,8 +462,9 @@ i64 start_child_wait(Kernel &kernel, sched::ProcessId pid, const ChildWaitReques
     if (!process || !thread || thread->owner != pid || thread->state != sched::ProcessState::running) return -22;
     if (const auto previous = child_wait_object(pid, thread->tid); previous.pool)
         return resume_child_wait(kernel, *process, previous, complete);
-    const auto ready = child_wait_probe(kernel, pid, request);
-    if (ready != -11) return complete_child_wait(kernel, pid, request, ready);
+    ChildWaitReport report{};
+    const auto ready = child_wait_probe(kernel, pid, request, &report);
+    if (ready != -11) return complete_child_wait(kernel, pid, request, ready, report);
     PollWaitIndex *slot = nullptr;
     for (auto &entry : child_waits) if (!entry.pid) { slot = &entry; break; }
     if (!slot) return -12;

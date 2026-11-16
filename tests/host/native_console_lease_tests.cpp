@@ -98,20 +98,40 @@ void bounded_algorithm()
     CHECK(tests::check_console_input_lease_model());
     sched::ConsoleInputLease input;
     CHECK(input.bind_manager(1));
-    const auto epoch = input.claim(1, 2); CHECK(epoch);
-    for (usize index = 0; index < 256; ++index) CHECK(input.input(static_cast<char>(index)));
-    CHECK(!input.input('x'));
-    std::array<std::byte, 63> bytes{};
-    for (usize start = 0; start < 256;)
+    const auto epoch = input.claim(1, 2); CHECK(epoch && input.admit());
+    // The console terminal's 4096-byte line discipline replaces the lease's
+    // former 256-byte ring; under the compat default it is a byte FIFO with CR->LF.
+    static sched::Terminal console{};
+    console.reset(tty::console_compat_termios(), tty::console_window());
+    const auto feed = [](u8 value) {
+        const std::array<std::byte, 1> byte{std::byte{value}};
+        return console.ldisc.receive(console.termios, byte, console.outbox_room(), true);
+    };
+    for (usize index = 0; index < sched::TerminalLdisc::read_capacity; ++index)
     {
-        auto read = input.read(2, epoch.value(), epoch.value(), bytes); CHECK(read);
-        for (usize index = 0; index < read.value(); ++index)
-            CHECK(bytes[index] == static_cast<std::byte>(static_cast<unsigned char>(start + index)));
-        start += read.value();
+        const auto received = feed(static_cast<u8>(index));
+        CHECK(received.consumed == 1 && !received.dropped && !received.echoed && !received.signal_count);
     }
-    CHECK(input.input('z') && input.flush(2, epoch.value(), epoch.value()) && !input.buffered());
-    CHECK(input.read(2, epoch.value(), epoch.value(), bytes).status().code() == StatusCode::would_block);
-    CHECK(input.revoke(1, epoch.value()));
+    CHECK(feed('x').dropped && console.ldisc.overruns() == 1 && !console.ldisc.echo_pending());
+    std::array<std::byte, 63> bytes{};
+    for (usize start = 0; start < sched::TerminalLdisc::read_capacity;)
+    {
+        const auto plan = console.ldisc.plan_read(console.termios, bytes.size(), false, false);
+        CHECK(plan.wait == sched::TerminalLdisc::ReadWait::none && plan.copy == plan.consume && plan.copy);
+        CHECK(console.ldisc.preview(plan, bytes) == plan.copy && console.ldisc.consume(plan));
+        for (usize index = 0; index < plan.copy; ++index)
+        {
+            const auto value = static_cast<u8>(start + index);
+            CHECK(bytes[index] == std::byte{value == '\r' ? static_cast<u8>('\n') : value});
+        }
+        start += plan.copy;
+    }
+    CHECK(console.ldisc.cleared_outside_live_bytes());
+    CHECK(feed('z').became_readable && input.flush(2, epoch.value(), epoch.value()));
+    console.ldisc.flush_input(); // flush_console runs this after the lease authorizes the flush.
+    CHECK(!console.ldisc.buffered() && console.ldisc.cleared_outside_live_bytes());
+    CHECK(console.ldisc.plan_read(console.termios, 1, true, false).wait == sched::TerminalLdisc::ReadWait::would_block);
+    CHECK(input.revoke(1, epoch.value()) && !input.admit());
     sched::ConsoleInputLeaseTestAccess::exhaust(input);
     CHECK(input.claim(1, 3).status().code() == StatusCode::overflow && !input.active());
 }
@@ -159,6 +179,18 @@ void runtime_ownership(Kernel &kernel)
     CHECK(linux_call(kernel, service.value(), 0, {0, out, 4}) == -13);
     CHECK(call(kernel, login, N::read, {0, out, 4}) == 4);
     CHECK(std::memcmp(mock::memory.data() + 128, "s3cr", 4) == 0);
+    // The compat default: the raw CR becomes LF, nothing is echoed, bytes are read as they come.
+    native::input('\r');
+    CHECK(console_output == echo_before);
+    CHECK(call(kernel, login, N::read, {0, out, 4}) == 1 && mock::memory[128] == std::byte{'\n'});
+    // 4096 bytes of line discipline; a byte beyond them is dropped as an overrun.
+    const auto overruns = scheduler.console_terminal().ldisc.overruns();
+    for (usize index = 0; index <= sched::TerminalLdisc::read_capacity; ++index)
+        native::input(static_cast<char>('A' + index % 26));
+    CHECK(scheduler.console_terminal().ldisc.buffered() == sched::TerminalLdisc::read_capacity &&
+          scheduler.console_terminal().ldisc.overruns() == overruns + 1 && console_output == echo_before);
+    CHECK(call(kernel, login, N::read, {0, out, 8000}) == 4096);
+    CHECK(mock::memory[128] == std::byte{'A'} && mock::memory[128 + 4095] == std::byte{'A' + 4095 % 26});
 
     const std::array<native::PipeVector, 2> vectors{{{out, 1}, {out + 8, 1}}};
     std::memcpy(mock::memory.data() + 512, vectors.data(), sizeof(vectors));
@@ -275,5 +307,5 @@ int main()
     static Kernel kernel; CHECK(kernel.boot({}));
     runtime_ownership(kernel);
     CHECK(native::poll_objects.accounting().live_objects == 0);
-    std::puts("NATIVE_CONSOLE_LEASE_MODEL_PASS default_closed=1 pid1_authority=1 read_readv_poll=1 linux=1 fork_exec=1 revoke_epoch=1 adoption=1 noecho=1 ingress_bound=1024 guest=0");
+    std::puts("NATIVE_CONSOLE_LEASE_MODEL_PASS default_closed=1 pid1_authority=1 read_readv_poll=1 linux=1 fork_exec=1 revoke_epoch=1 adoption=1 ntty_compat_default=1 ingress_bound=1024 guest=0");
 }

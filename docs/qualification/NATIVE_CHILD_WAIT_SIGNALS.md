@@ -61,7 +61,11 @@ execution, physical isolation, SMP safety or independent verification.
 The retained bootstrap subset supports child exits with a positive PID or any
 child (-1), WNOHANG, no rusage, and RV32 P_ALL/P_PID with WEXITED. It does not add
 process-group waits, stops/continues, ptrace, WNOWAIT or raw legacy waitpid syscall
-numbers. Automatic SIGCHLD, SA_NOCLDWAIT and deferred child autoreaping are supplied
+numbers. Since WT2.2 wait4 also takes WUNTRACED, WCONTINUED and the selectors 0
+and -pgid, and RV32 waitid takes WSTOPPED, WCONTINUED, WNOWAIT and P_PGID, as
+the [terminal contract](../modules/tty.md) describes; ptrace, rusage and raw
+legacy waitpid numbers remain absent. Automatic SIGCHLD, SA_NOCLDWAIT and
+deferred child autoreaping are supplied
 by the later opt-in [child-exit integration](NATIVE_CHILD_EXIT_SIGNALS.md);
 child-ready/ECHILD precedence over signal interruption remains unchanged. Musl's waitpid paths are
 covered through its selected wait4/waitid ABI.

@@ -15,7 +15,7 @@ struct SignalDelivery
 {
     using Frame = typename FramePolicy::Frame;
     using Actions = SignalActionCodec<Profile>;
-    enum class Result : u8 { none, ignored, handler, terminate, unsupported, corrupt };
+    enum class Result : u8 { none, ignored, handler, terminate, stop, unsupported, corrupt };
     static constexpr u64 siginfo = Actions::mips ? 8 : 4;
     static constexpr u64 restorer = Actions::has_restorer ? 0x04000000 : 0;
     static constexpr u64 nodefer = 0x40000000, resethand = 0x80000000;
@@ -51,11 +51,8 @@ struct SignalDelivery
             return pending.consume(ticket) ? Result::ignored : Result::corrupt;
         if (action.handler == sched::SignalAction::default_handler)
         {
-            // Job control remains an explicit runtime integration gate.
-            constexpr u32 first_job_stop = Actions::mips ? 23 : 19;
-            if (signal == first_job_stop || signal == (Actions::mips ? 24 : 20) ||
-                signal == (Actions::mips ? 26 : 21) || signal == (Actions::mips ? 27 : 22))
-                return Result::unsupported;
+            // A default stop is consumed here; the runtime applies the stop.
+            if (Actions::default_stop(signal)) return pending.consume(ticket) ? Result::stop : Result::corrupt;
             return pending.consume(ticket) ? Result::terminate : Result::corrupt;
         }
         if (!supported(action)) return Result::unsupported;

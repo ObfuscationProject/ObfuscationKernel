@@ -19,10 +19,21 @@ class ChildExitStatus
     {
         return signal && signal <= 128 ? ChildExitStatus{2, signal} : ChildExitStatus{};
     }
+    // CLD_STOPPED and CLD_CONTINUED carry the stopping signal or SIGCONT in
+    // the parent's numbering; neither ends the child.
+    [[nodiscard]] static constexpr ChildExitStatus stopped(u32 signal) noexcept
+    {
+        return signal && signal <= 128 ? ChildExitStatus{5, signal} : ChildExitStatus{};
+    }
+    [[nodiscard]] static constexpr ChildExitStatus continued(u32 signal) noexcept
+    {
+        return signal && signal <= 128 ? ChildExitStatus{6, signal} : ChildExitStatus{};
+    }
     [[nodiscard]] constexpr bool valid(u32 maximum_signal) const noexcept
     {
         return (maximum_signal == 64 || maximum_signal == 128) &&
-            ((code_ == 1 && status_ <= 255) || (code_ == 2 && status_ && status_ <= maximum_signal));
+            ((code_ == 1 && status_ <= 255) ||
+             ((code_ == 2 || code_ == 5 || code_ == 6) && status_ && status_ <= maximum_signal));
     }
     [[nodiscard]] constexpr i32 code() const noexcept { return code_; }
     [[nodiscard]] constexpr i32 status() const noexcept { return static_cast<i32>(status_); }

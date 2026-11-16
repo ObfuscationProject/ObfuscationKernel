@@ -201,9 +201,22 @@ void pair_controls(Kernel &kernel)
     }
     auto *process=kernel.scheduler().find(g.pid);process->resources().personality=sched::UserPersonality::linux;
     expect(invoke(kernel,g,{OK_SYS_PTY_PAIR,{output,0,0,0,0,0}},complete)==-38&&complete);
+    // Linux reads and writes move bytes through the same owners as native ones.
     for(const auto number:{OK_SYS_READ,OK_SYS_WRITE,OK_SYS_READV,OK_SYS_WRITEV})
-        expect(invoke(kernel,g,call(number,g.fds[0],output,0),complete)==-95&&complete);
-    process->resources().personality=sched::UserPersonality::native;retire(kernel,g);
+        expect(invoke(kernel,g,call(number,g.fds[0],output,0),complete)==0&&complete);
+    expect(invoke(kernel,g,call(OK_SYS_WRITE,g.fds[0],input,3),complete)==3&&complete);
+    expect(invoke(kernel,g,call(OK_SYS_READ,g.fds[1],output,7000),complete)==3&&complete);
+    for(usize index=0;index<3;++index)expect(mock::memory[output-hw::user_begin+index]==mock::memory[input-hw::user_begin+index]);
+    set_vectors(5,true);expect(invoke(kernel,g,call(OK_SYS_WRITEV,g.fds[0],vectors_address,3),complete)==5&&complete);
+    set_vectors(5,false);expect(invoke(kernel,g,call(OK_SYS_READV,g.fds[1],vectors_address,3),complete)==5&&complete);
+    expect(mock::memory[output-hw::user_begin+4]==mock::memory[input-hw::user_begin+4]);
+    // A blocking Linux read keeps a continuation owned by the Linux personality.
+    arm(kernel,g);expect(snapshot(g).personality==sched::UserPersonality::linux&&!snapshot(g).origin);
+    write(kernel,g,g.fds[0],"lnx");expect(resume(kernel,g)==3&&mock::memory[output-hw::user_begin]==std::byte{'l'});
+    // The owner must keep the personality it was admitted with.
+    arm(kernel,g);process->resources().personality=sched::UserPersonality::native;native::prune_pty_waits(kernel);
+    expect(!native::pty_wait_object(g.pid,g.peer).pool);
+    retire(kernel,g);
 }
 i16 poll_immediate(Kernel &kernel,Group g,i32 fd,i16 events)
 {
@@ -249,14 +262,21 @@ void poll_retained(Kernel &kernel,unsigned mode)
     if(mode!=2)expect(request.revents==static_cast<i16>(mode==1?0:OK_POLLIN));
     retire(kernel,g);
 }
-void select_refusal(Kernel &kernel)
+// Select uses the Linux readiness policy, which shares the PTY mapping.
+void select_readiness(Kernel &kernel)
 {
     auto g=create(kernel);activate(kernel,g);native::SelectRequest request{};
+    const u32 bit=u32{1}<<g.fds[1];
     request.sets.count=static_cast<usize>(g.fds[1]+1);request.sets.word_bytes=8;
-    request.sets.interests[0]=u32{1}<<g.fds[1];request.sets.output[0]=output;request.readiness.immediate=true;
-    bool complete=true;expect(native::begin_select(kernel,g.pid,request,complete)==-38&&complete);
+    request.sets.interests[0]=request.sets.interests[1]=bit;request.sets.output[0]=output;request.sets.output[1]=output+8;
+    request.readiness.immediate=true;
+    auto words=[&]{std::array<u64,2> value{};std::memcpy(value.data(),mock::memory.data()+output-hw::user_begin,sizeof(value));return value;};
+    bool complete=true;expect(native::begin_select(kernel,g.pid,request,complete)==1&&complete);
+    expect(words()[0]==0&&words()[1]==bit);
+    write(kernel,g,g.fds[0],"s");activate(kernel,g);
+    expect(native::begin_select(kernel,g.pid,request,complete)==2&&complete&&words()[0]==bit&&words()[1]==bit);
     expect(kernel.scheduler().open_description(description(kernel,g,g.fds[1]))->references==1);
-    expect(!native::poll_object(g.pid,g.pid).pool);retire(kernel,g);
+    expect(!native::poll_object(g.pid,g.pid).pool);drain(kernel,g,1,0,false);retire(kernel,g);
 }
 void allocation_and_registration(Kernel &kernel,bool writing,bool progress)
 {
@@ -347,7 +367,7 @@ int main()
     for(unsigned mode=0;mode<4;++mode)lifecycle(kernel,mode);
     pair_controls(kernel);actual_step(kernel);direct_frame_refusal(kernel);poll_readiness(kernel);
     for(unsigned mode=0;mode<3;++mode)poll_retained(kernel,mode);
-    select_refusal(kernel);allocation_and_registration(kernel,false,false);
+    select_readiness(kernel);allocation_and_registration(kernel,false,false);
     allocation_and_registration(kernel,true,false);allocation_and_registration(kernel,true,true);
     endpoint_generation(kernel);registration_conflict(kernel);lease_mismatch(kernel);failed_exec(kernel);nonblocking_write(kernel);
     const auto stats=native::pty_wait_objects.accounting();expect(stats.allocations==stats.destructions&&!stats.live_objects&&!stats.backing_pages);

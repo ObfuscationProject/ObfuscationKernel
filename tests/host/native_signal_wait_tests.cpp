@@ -667,6 +667,47 @@ void fatal_outside_wait(Kernel &kernel, bool process, bool suspend)
     expect(native::runtime_status().ok()); retire(kernel, g);
 }
 
+// Stop admission is still closed, so the queues are filled directly. A
+// sigsuspend unblocks everything; the settle pass may take the stop only when
+// Linux next_signal would dequeue it (directed queue, then shared, lowest
+// number first, ignored entries passed over). 0: TERM before STOP is fatal and
+// never stops. 1: a directed STOP precedes a shared TERM. 2: a pending
+// default-ignored CHLD does not hide the STOP. 3: a caught USR1 gets its
+// handler frame before the STOP stops the process.
+void stop_order(Kernel &kernel, unsigned variant)
+{
+    const auto g = create(kernel); auto &t = thread(kernel, g.pid, g.peer);
+    t.native_signal_mask = mask({10, 15, 17}); action(kernel, g, 15, 0); action(kernel, g, 17, 0);
+    if (variant == 3) action(kernel, g, 10);
+    input({}); only_waiter(kernel, g); expect(!begin(kernel, g, g.peer, true).complete);
+    if (variant == 1) expect(shared(kernel, g).enqueue({15, 0, 7, 0}) == native::PrivateProcessQueue::Enqueue::queued);
+    else direct(kernel, g, g.peer, variant == 0 ? 15 : variant == 2 ? 17 : 10);
+    direct(kernel, g, g.peer, 19);
+    const auto old_thread = t; const auto entries = mock::entries;
+    mock::entry_trap = {hw::TrapKind::timer}; static_cast<void>(native::step(kernel));
+    auto *p = kernel.scheduler().find(g.pid); CHECK(p);
+    const auto pending = native::private_signal_queue(t) ? native::private_signal_queue(t)->pending_mask() : sched::SignalMask{};
+    if (variant == 0)
+    {
+        expect(p->state() == sched::ProcessState::zombie && p->wait_status() == 15);
+        expect(!p->job_control().stopped && !p->job_control().stop_report && !native::signal_waits.find(old_thread));
+    }
+    else if (variant == 3)
+    {
+        expect(!p->job_control().stopped && mock::entries == entries + 1 && t.native_frame.pc == handler);
+        expect(!t.syscall_pending && !native::signal_waits.find(t) && pending.contains(19) && !pending.contains(10));
+        expect(!native::private_signal_deliver(kernel, *p, t));
+        expect(p->job_control().stopped && p->job_control().stop_signal == 19 && t.native_frame.pc == handler);
+    }
+    else
+    {
+        expect(p->job_control().stopped && p->job_control().stop_signal == 19 && mock::entries == entries);
+        expect(t.syscall_pending && t.wait_registration.active() && native::signal_waits.find(t) && !pending.contains(19));
+        expect(variant == 1 ? shared(kernel, g).pending_mask().contains(15) : pending.contains(17));
+    }
+    expect(native::runtime_status().ok()); retire(kernel, g);
+}
+
 void delayed_suspend_disposition(Kernel &kernel)
 {
     const auto g = create(kernel); auto &t = thread(kernel, g.pid, g.peer);
@@ -909,6 +950,7 @@ int main()
     write_exec_image(kernel); fork_and_exec(kernel, false); fork_and_exec(kernel, true);
     fatal_cleanup(kernel, false); fatal_cleanup(kernel, true);
     for (const bool process : {false, true}) for (const bool suspend : {false, true}) fatal_outside_wait(kernel, process, suspend);
+    for (unsigned variant = 0; variant < 4; ++variant) stop_order(kernel, variant);
     expect(native::entry_stacks.accounting().leased_slots == 0);
     for (const auto &record : native::signal_waits.records()) expect(record.phase == decltype(native::signal_waits)::Phase::none);
     std::printf("SIGNAL_WAIT_PASS checks=%zu hosted=1 native=0\n", checks);

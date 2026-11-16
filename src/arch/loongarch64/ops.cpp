@@ -46,4 +46,33 @@ void NativeInstructions<Architecture::loongarch64>::halt() noexcept
 #endif
 }
 
+// CSRXCHG returns the old CRMD and writes only the bits its mask (never $r0/$r1) selects.
+uptr NativeInstructions<Architecture::loongarch64>::save_and_disable_interrupts() noexcept
+{
+#if defined(OK_KERNEL_FREESTANDING) && defined(__loongarch__)
+    uptr crmd = 0;
+    asm volatile("csrxchg %0, %1, 0x0" : "+r"(crmd) : "q"(uptr{4}) : "memory");
+    return crmd & 4;
+#else
+    return 0;
+#endif
+}
+
+void NativeInstructions<Architecture::loongarch64>::restore_interrupts(uptr saved) noexcept
+{
+#if defined(OK_KERNEL_FREESTANDING) && defined(__loongarch__)
+    uptr crmd = saved & 4; // CRMD.IE
+    if (crmd != 0)
+        asm volatile("csrxchg %0, %1, 0x0" : "+r"(crmd) : "q"(uptr{4}) : "memory");
+#else
+    static_cast<void>(saved);
+#endif
+}
+
+// Every profile reports the boot CPU until per-CPU registers are installed.
+u32 NativeInstructions<Architecture::loongarch64>::cpu_index() noexcept
+{
+    return 0;
+}
+
 } // namespace ok::arch::detail

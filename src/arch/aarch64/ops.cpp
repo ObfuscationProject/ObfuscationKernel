@@ -46,4 +46,25 @@ void NativeInstructions<Architecture::aarch64>::halt() noexcept
 #endif
 }
 
+uptr NativeInstructions<Architecture::aarch64>::save_and_disable_interrupts() noexcept
+{
+#if defined(OK_KERNEL_FREESTANDING) && defined(__aarch64__)
+    uptr daif = 0;
+    asm volatile("mrs %0, daif\n\tmsr daifset, #2" : "=r"(daif) : : "memory");
+    return daif;
+#else
+    return 0;
+#endif
+}
+
+void NativeInstructions<Architecture::aarch64>::restore_interrupts(uptr saved) noexcept
+{
+#if defined(OK_KERNEL_FREESTANDING) && defined(__aarch64__)
+    if ((saved & 0x80) == 0) // DAIF.I clear: IRQs were unmasked.
+        asm volatile("msr daifclr, #2" ::: "memory");
+#else
+    static_cast<void>(saved);
+#endif
+}
+
 } // namespace ok::arch::detail

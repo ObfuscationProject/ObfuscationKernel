@@ -218,6 +218,17 @@ function add_ok_arch_files()
     else
         add_files(path.join(os.projectdir(), "src/arch", "execution_stub.cpp"))
     end
+    -- Profiles that start secondary CPUs link their own smp.cpp (and smp.S).
+    -- OK_ARCH_SMP_START lets code that relies on a UP profile refuse to build.
+    if os.isfile(path.join(os.projectdir(), "src/arch", spec.source, "smp.cpp")) then
+        add_defines("OK_ARCH_SMP_START")
+        add_files(path.join(os.projectdir(), "src/arch", spec.source, "smp.cpp"))
+        if os.isfile(path.join(os.projectdir(), "src/arch", spec.source, "smp.S")) then
+            add_files(path.join(os.projectdir(), "src/arch", spec.source, "smp.S"))
+        end
+    else
+        add_files(path.join(os.projectdir(), "src/arch", "smp_stub.cpp"))
+    end
 end
 
 function add_ok_boot_files()
@@ -273,6 +284,24 @@ end
 function add_ok_debug_test_points()
     if is_mode("debug") then
         add_defines("OK_ENABLE_TEST_POINTS")
+    end
+end
+
+-- Ranked spin lock order, owner and LIFO checks (ok/smp/lock.hpp).
+function add_ok_debug_lock_checks()
+    if is_mode("debug") then
+        add_defines("OK_LOCK_DEBUG")
+    end
+end
+
+-- Kernel sections (ok/smp/kernel_section.hpp) on the profiles that run
+-- kernel code on several CPUs; option smp_sections=n is the A/B arm. The
+-- private futex peer fixture keeps every syscall under the kernel lock.
+function add_ok_smp_sections()
+    local arch = ok_current_arch()
+    if (arch == "x86_64" or arch == "aarch64" or arch == "rv64") and has_config("smp_sections") and
+            not (get_config("private_futex_peer_fixture") and is_mode("debug")) then
+        add_defines("OK_SMP_SECTIONS")
     end
 end
 

@@ -641,10 +641,7 @@ Status Kernel::register_builtin_syscalls(posix::PosixService &posix)
                               return status_response(user::set_realtime_checked(
                                   {value.seconds, value.nanoseconds},
                                   static_cast<posix::PosixService *>(context)->user_credentials(),
-                                  [] { return arch::monotonic_sample(); },
-                                  [](time::EpochTime epoch, time::MonotonicPoint point) {
-                                      return arch::set_realtime(epoch, point);
-                                  }));
+                                  [](time::EpochTime epoch) { return arch::set_realtime_now(epoch); }));
                           });
         !status.ok())
     {

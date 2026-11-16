@@ -66,6 +66,9 @@ local function task_configure_args(mode, arch, extra)
     if config.get("qemu_binary") then
         table.insert(argv, "--qemu_binary=" .. path.absolute(config.get("qemu_binary")))
     end
+    if config.get("qemu_smp") and tostring(config.get("qemu_smp")) ~= "1" then
+        table.insert(argv, "--qemu_smp=" .. tostring(config.get("qemu_smp")))
+    end
     for _, arg in ipairs(extra or {}) do
         table.insert(argv, arg)
     end

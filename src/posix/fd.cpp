@@ -63,7 +63,7 @@ Result<Fd> PosixService::openat_limited(Fd dirfd, std::string_view path, u32 fla
         return Status::not_initialized("POSIX service not initialized");
     }
     constexpr u32 allowed = o_WRONLY | o_RDWR | o_APPEND | o_NONBLOCK | o_CREAT | o_EXCL |
-                            o_NOFOLLOW | o_TRUNC | o_CLOEXEC | o_DIRECTORY;
+                            o_NOFOLLOW | o_TRUNC | o_CLOEXEC | o_DIRECTORY | o_NOCTTY;
     if ((flags & ~allowed) != 0 || (flags & 3u) == 3u ||
         (flags & (o_CREAT | o_DIRECTORY)) == (o_CREAT | o_DIRECTORY))
         return Status::invalid_argument("unsupported open flags or access mode");
@@ -140,6 +140,28 @@ Result<Fd> PosixService::openat_limited(Fd dirfd, std::string_view path, u32 fla
             return status;
         }
     }
+    // A terminal node becomes a terminal description through the scheduler,
+    // which re-validates it; the description never holds the node. O_TRUNC is
+    // ignored and the open-only flags are not kept (Linux do_dentry_open).
+    if (const auto terminal = node->terminal_node(); terminal.kind != fs::TerminalNodeKind::none)
+    {
+        if (auto status = resolved.value().release(); !status.ok())
+            return status;
+        const sched::TerminalOpenRequest request{
+            .node = terminal, .flags = flags & ~(o_CLOEXEC | o_NOCTTY | o_CREAT | o_EXCL | o_TRUNC),
+            .readable = is_readable(flags), .writable = is_writable(flags),
+            .no_controlling_terminal = (flags & o_NOCTTY) != 0, .large_file = max_regular_size > 0x7fff'ffffu,
+            .euid = euid(), .egid = egid()};
+        auto bound = scheduler_->open_terminal(getpid(), description.value(), request);
+        if (!bound)
+            return bound.status();
+        static_cast<void>(reserved->path.assign(path));
+        if (auto status = scheduler_->install_descriptor(resources(), fd.value(), description.value(),
+                                                         (flags & o_CLOEXEC) != 0);
+            !status.ok())
+            return status;
+        return fd.value();
+    }
     if (metadata.type == fs::NodeType::regular && metadata.size > max_regular_size)
         return Status::overflow("regular file exceeds selected open size policy");
     // Acquire the only node reference owned by this pending description before
@@ -170,7 +192,7 @@ Result<Fd> PosixService::openat_limited(Fd dirfd, std::string_view path, u32 fla
     entry.readable = is_readable(flags);
     entry.writable = is_writable(flags);
     entry.large_file = max_regular_size > 0x7fff'ffffu;
-    entry.flags = flags & ~o_CLOEXEC;
+    entry.flags = flags & ~(o_CLOEXEC | o_NOCTTY);
     // Append changes each write's destination, never the initial read position.
     // write() obtains the current EOF immediately before every append write.
     entry.offset = 0;
@@ -343,8 +365,7 @@ Result<DescriptorReadiness> PosixService::poll_description(u16 id, ReadyEvents r
     DescriptorReadiness ready{};
     if (entry->pty_endpoint)
     {
-        if constexpr (Policy == ReadinessPolicy::linux)
-            return Status::unsupported("raw PTY Linux readiness is outside the native candidate");
+        // Both personalities share the terminal mapping (docs/modules/tty.md section 10).
         auto state = scheduler_->pty_description_readiness(id);
         if (!state) return state.status();
         if (state.value().readable) ready.events |= requested & ReadyEvents::readable;
@@ -400,6 +421,8 @@ Result<DescriptorReadiness> PosixService::poll_description(u16 id, ReadyEvents r
     if (entry->input_console)
     {
         ready.console_input = true;
+        // Like n_tty_poll, whatever the access mode: the console always has room.
+        ready.events = requested & ReadyEvents::writable;
         return ready;
     }
     if (entry->console)
@@ -496,6 +519,7 @@ Result<usize> PosixService::read(Fd fd, std::span<std::byte> out)
     {
         auto *service = scheduler_->shared_memory_files();
         if (!service) return Status::not_initialized("shared file owner is unavailable");
+        sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
         auto result = service->read(entry->native_shared_file, entry->offset, out);
         if (result) entry->offset += result.value();
         return result;
@@ -515,13 +539,41 @@ Result<usize> PosixService::read(Fd fd, std::span<std::byte> out)
     {
         return Status::invalid_argument("file descriptor has no backing node");
     }
+    // The offset is read and moved once, under the position lock.
+    sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
+    return read_node(*entry, out);
+}
+
+bool PosixService::node_backed(const FileDescriptor &entry)
+{
+    return entry.used && entry.readable && entry.node && !entry.native_shared_file && !entry.pty_endpoint &&
+        entry.pipe == sched::invalid_description && !entry.input_console;
+}
+
+sched::DescriptionPositionLock *PosixService::node_position_lock(Fd fd)
+{
+    auto *entry = descriptor(fd);
+    return entry && node_backed(*entry) ? scheduler_->position_lock(entry) : nullptr;
+}
+
+Result<usize> PosixService::read_held(Fd fd, std::span<std::byte> out)
+{
+    auto *entry = descriptor(fd);
+    auto *lock = entry && node_backed(*entry) ? scheduler_->position_lock(entry) : nullptr;
+    if (!lock || !lock->owned_by_current_cpu())
+        return Status::denied("held read without this description's position lock");
+    return read_node(*entry, out);
+}
+
+Result<usize> PosixService::read_node(FileDescriptor &entry, std::span<std::byte> out)
+{
     // Providers return at most one FileBuffer per call. As on Linux, a read
     // fills the request until a provider returns a short chunk (end of file).
     usize count = 0;
     while (count < out.size())
     {
         const usize wanted = out.size() - count;
-        auto data = entry->node->read(entry->offset + count, wanted);
+        auto data = entry.node->read(entry.offset + count, wanted);
         if (!data)
         {
             if (count) break;
@@ -536,7 +588,7 @@ Result<usize> PosixService::read(Fd fd, std::span<std::byte> out)
         if (chunk < (wanted < fs::max_file_data ? wanted : fs::max_file_data))
             break;
     }
-    entry->offset += count;
+    entry.offset += count;
     return count;
 }
 
@@ -552,6 +604,7 @@ Result<usize> PosixService::write(Fd fd, std::span<const std::byte> in)
         auto *service = scheduler_->shared_memory_files();
         if (!service) return Status::not_initialized("shared file owner is unavailable");
         if (in.empty()) return usize{0};
+        sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
         usize offset = entry->offset;
         if (auto status = service->check_write(entry->native_shared_file, in.size()); !status) return status;
         if (entry->flags & o_APPEND)
@@ -587,6 +640,9 @@ Result<usize> PosixService::write(Fd fd, std::span<const std::byte> in)
     {
         return Status::invalid_argument("file descriptor has no backing node");
     }
+    // The offset, or end of file with O_APPEND, stays this write's until the
+    // offset moves past the written bytes.
+    sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
     usize offset = entry->offset;
     if ((entry->flags & o_APPEND) != 0)
     {
@@ -697,9 +753,15 @@ Result<usize> PosixService::pwrite_with_policy(Fd fd, std::span<const std::byte>
         if (!service) return Status::not_initialized("shared file owner is unavailable");
         if (in.empty()) return usize{0};
         if (auto status = service->check_write(entry->native_shared_file, in.size()); !status) return status;
+        // O_APPEND is read, and an append resolves end of file and writes,
+        // under the position lock.
+        sched::DescriptionPositionGuard position(
+            Policy == PositionedWritePolicy::linux_append ? scheduler_->position_lock(entry) : nullptr);
         if constexpr (Policy == PositionedWritePolicy::linux_append)
         {
-            if (entry->flags & o_APPEND)
+            const bool append = (entry->flags & o_APPEND) != 0;
+            if (!append) position.release();
+            if (append)
             {
                 auto metadata = service->info(entry->native_shared_file);
                 if (!metadata) return metadata.status();
@@ -716,10 +778,15 @@ Result<usize> PosixService::pwrite_with_policy(Fd fd, std::span<const std::byte>
         return Status::bad_descriptor("file descriptor is not writable");
     if (in.empty())
         return usize{0};
+    sched::DescriptionPositionGuard position(
+        Policy == PositionedWritePolicy::linux_append ? scheduler_->position_lock(entry) : nullptr);
     if constexpr (Policy == PositionedWritePolicy::linux_append)
     {
-        // Linux's positional writes honor O_APPEND without changing f_pos.
-        if (entry->flags & o_APPEND)
+        // Linux's positional writes honor O_APPEND without changing f_pos;
+        // an append keeps the position lock until it has written.
+        const bool append = (entry->flags & o_APPEND) != 0;
+        if (!append) position.release();
+        if (append)
         {
             auto metadata = entry->node->query_metadata();
             if (!metadata)
@@ -902,6 +969,8 @@ Result<usize> PosixService::seek(Fd fd, i64 offset, SeekWhence whence)
     }
     if (!entry->node && !entry->native_shared_file)
         return Status::invalid_argument("file descriptor has no backing node");
+    // The base (current offset or end of file) and the new offset, together.
+    sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
     i64 base = 0;
     switch (whence)
     {
@@ -982,14 +1051,29 @@ Result<i64> PosixService::fcntl(Fd fd, u32 command, u64 argument)
     case f_SETFD:
         resources().files.entry(fd)->close_on_exec = (argument & fd_CLOEXEC) != 0;
         return 0;
-    case f_GETFL:
+    case f_GETFL: {
+        const sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
         return static_cast<i64>(entry->flags);
-    case f_SETFL:
+    }
+    case f_SETFL: {
         if (entry->native_udp_handle && (static_cast<u32>(argument) & o_APPEND))
             return Status::unsupported("native UDP does not support append status");
+        bool append_changes{};
+        {
+            const sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
+            append_changes = ((entry->flags ^ static_cast<u32>(argument)) & o_APPEND) != 0;
+        }
+        // The description may be shared with other processes, and a kernel
+        // section admitted without O_APPEND must not write once it is set:
+        // every section ends first. Only F_SETFL writes the flags, under the
+        // kernel lock, so they stay as read.
+        if (append_changes)
+            smp::drain_all();
+        const sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
         entry->flags = (entry->flags & ~(o_APPEND | o_NONBLOCK)) |
                        (static_cast<u32>(argument) & (o_APPEND | o_NONBLOCK));
         return 0;
+    }
     default:
         return Status::unsupported("fcntl command is not implemented");
     }
@@ -1005,19 +1089,47 @@ Result<i64> PosixService::ioctl(Fd fd, u64, u64)
     return Status::not_terminal("ioctl request is not implemented for this descriptor");
 }
 
-Status PosixService::console_control_descriptor(Fd fd) const
+Result<sched::TerminalSubject> PosixService::terminal_descriptor(Fd fd) const
 {
-    const auto *entry = descriptor(fd);
-    if (!entry || !entry->used) return Status::bad_descriptor("bad console descriptor");
-    if (!entry->console && !entry->input_console)
-        return Status::not_terminal("descriptor is not a native console description");
-    return {};
+    const auto *slot = resources().files.entry(fd);
+    if (!scheduler_ || !slot || !slot->used) return Status::bad_descriptor("bad terminal descriptor");
+    return scheduler_->terminal_subject(slot->description);
 }
 
-Result<i64> PosixService::console_control(Fd fd, sched::ConsoleControlOperation operation, i32 value)
+Status PosixService::terminal_check(const sched::TerminalSubject &subject, sched::ConsoleControlOperation operation)
 {
-    if (auto status = console_control_descriptor(fd); !status) return status;
-    return scheduler_->console_control(operation, value);
+    return scheduler_->terminal_check(subject, operation);
+}
+
+Result<sched::TerminalReply> PosixService::terminal_control(const sched::TerminalSubject &subject,
+                                                            const sched::TerminalRequest &request)
+{
+    return scheduler_->terminal_control(subject, request);
+}
+
+// The device node a terminal description was opened from (the console for
+// the boot stdio). The inode, device and timestamps need the attached device
+// filesystem to be mounted; without it the attribute-free status remains.
+FileStatus PosixService::terminal_file_status(const sched::TerminalStatus &terminal) const
+{
+    FileStatus status{.type = fs::NodeType::device, .size = 0, .mode = fs::mode_for(fs::NodeType::device, terminal.mode),
+                      .uid = terminal.uid, .gid = terminal.gid, .link_count = 1,
+                      .block_size = fs::metadata_block_size, .blocks = 0};
+    const auto *terminals = vfs_->terminal_namespace();
+    auto device = terminals ? vfs_->filesystem_device(terminals->provider())
+                            : Result<fs::FilesystemDevice>{Status::not_found("no terminal namespace")};
+    if (!device) return status;
+    auto &attributes = status.attributes;
+    attributes.inode = terminal.inode;
+    attributes.device = device.value();
+    attributes.special = terminal.rdev;
+    for (auto *time : {&attributes.access, &attributes.modification, &attributes.change})
+        *time = {.seconds = 0, .nanoseconds = 0, .source = fs::TimestampSource::kernel_fixed};
+    for (const auto field : {fs::Attribute::inode, fs::Attribute::device, fs::Attribute::special_device,
+                             fs::Attribute::blocks512, fs::Attribute::access_time, fs::Attribute::modification_time,
+                             fs::Attribute::change_time})
+        attributes.mark(field);
+    return status;
 }
 
 Result<FileStatus> PosixService::fstat(Fd fd) const
@@ -1027,6 +1139,9 @@ Result<FileStatus> PosixService::fstat(Fd fd) const
     {
         return Status::invalid_argument("bad file descriptor");
     }
+    const auto *slot = resources().files.entry(fd);
+    if (auto terminal = scheduler_->terminal_status(slot->description); terminal)
+        return terminal_file_status(terminal.value());
     if (entry->pty_endpoint)
         return FileStatus{.type = fs::NodeType::device,
             .mode = fs::mode_character_device | 0600u,
@@ -1047,7 +1162,6 @@ Result<FileStatus> PosixService::fstat(Fd fd) const
             .blocks = metadata.value().size / 512, .attributes = attributes,
             .provider = FileStatusProvider::volatile_shared_file};
     }
-    const auto *slot = resources().files.entry(fd);
     if (slot && slot->used && scheduler_->is_unix_socket(slot->description))
         return FileStatus{.type = fs::NodeType::socket, .mode = fs::mode_socket | 0600u,
                           .link_count = 1, .block_size = fs::metadata_block_size};
@@ -1061,19 +1175,6 @@ Result<FileStatus> PosixService::fstat(Fd fd) const
     if (entry->native_udp_handle)
         return FileStatus{.type = fs::NodeType::device, .mode = fs::mode_socket | 0600u,
                           .link_count = 1, .block_size = fs::metadata_block_size};
-    if (entry->console || entry->input_console)
-    {
-        return FileStatus{
-            .type = fs::NodeType::device,
-            .size = 0,
-            .mode = fs::mode_for(fs::NodeType::device, 0600u),
-            .uid = fs::default_uid,
-            .gid = fs::default_gid,
-            .link_count = 1,
-            .block_size = fs::metadata_block_size,
-            .blocks = 0,
-        };
-    }
     if (entry->node == nullptr)
     {
         return Status::invalid_argument("file descriptor has no backing node");

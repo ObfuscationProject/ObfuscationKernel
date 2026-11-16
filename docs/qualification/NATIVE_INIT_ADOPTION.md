@@ -23,8 +23,11 @@ designated init, existing orphan/reaper behavior remains in effect.
 
 This mechanism is serialized on the boot CPU. It does not synthesize Linux
 SIGCHLD or apply an adopting Linux parent's SIG_IGN/SA_NOCLDWAIT policy to an
-already-zombie orphan. Full Linux orphan notification, subreapers, process-group
-job control, native signal handlers, synchronized shutdown and SMP remain open.
+already-zombie orphan. Full Linux orphan notification, subreapers, native
+signal handlers, synchronized shutdown and SMP remain open. Process-group job
+control, open when this slice landed, has been implemented since WT2.2,
+including SIGHUP/SIGCONT to a newly orphaned stopped group (see §9 of the
+[terminal contract](../modules/tty.md) and `TTY_JOB_CONTROL.md`).
 
 Hosted ordinary production tests execute the actual runtime and dispatcher with
 mock trap/copy/mapping backends. The fixed Debug and Release suites each pass

@@ -1,6 +1,7 @@
 #include "ok/fs/vfs.hpp"
 #include "ok/fs/archive_directory_profile.hpp"
 #include "ok/fs/mode_policy.hpp"
+#include "ok/smp/kernel_section.hpp"
 
 #include <utility>
 
@@ -631,6 +632,8 @@ Result<DirectoryListing> RamNode::list(DirectoryReadIntent) const
 
 Result<u64> VirtualFileSystem::enter_operation(OperationContention *contention) const
 {
+    // The namespace stays under the kernel lock; a section never enters it.
+    smp::check_exclusive("VirtualFileSystem::enter_operation");
     smp::ScopedSpinLock guard(lock_);
     if (operation_active_)
     {
@@ -1816,6 +1819,26 @@ void VirtualFileSystem::complete_metadata(const Node &node, Metadata &metadata) 
         metadata.attributes.device = device.value();
         metadata.attributes.mark(Attribute::device);
     }
+}
+
+Status VirtualFileSystem::attach_terminal_namespace(TerminalNamespace &terminals)
+{
+    smp::ScopedSpinLock guard(lock_);
+    if (terminals_ && terminals_ != &terminals) return Status::busy("VFS already has a terminal namespace");
+    terminals_ = &terminals;
+    return Status::success();
+}
+
+TerminalNamespace *VirtualFileSystem::terminal_namespace() const
+{
+    smp::ScopedSpinLock guard(lock_);
+    return terminals_;
+}
+
+Result<FilesystemDevice> VirtualFileSystem::filesystem_device(const void *identity) const
+{
+    smp::ScopedSpinLock guard(lock_);
+    return identities_.find(identity);
 }
 
 Result<Metadata> VirtualFileSystem::query_metadata(Node &node) const

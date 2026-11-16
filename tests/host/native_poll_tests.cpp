@@ -11,7 +11,7 @@ namespace native = ok::user::native;
 namespace hw = ok::arch::execution;
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "%d: %s\n", __LINE__, #x); std::abort(); } } while (false)
 namespace mock {
-std::array<std::byte, 4096> memory{};
+alignas(16) std::array<std::byte, 4096> memory{};
 bool writable = true;
 }
 namespace ok::arch {
@@ -49,6 +49,14 @@ Status copy_to_user(const AddressSpace &space, uptr address, const void *in, usi
     if (!user_range(space,address,size,true)) return Status::fault();
     if(size) std::memcpy(mock::memory.data()+address-user_begin,in,size);
     return Status::success();
+}
+Result<u32 *> user_word(const AddressSpace &s, uptr address, bool write)
+{
+    if (address % sizeof(u32))
+        return Status::invalid_argument();
+    if (!user_range(s, address, sizeof(u32), write))
+        return Status::fault();
+    return reinterpret_cast<u32 *>(mock::memory.data() + (address - user_begin));
 }
 }
 

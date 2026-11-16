@@ -1,5 +1,7 @@
-// Actual scheduler session and process-group mechanisms; no guest or TTY evidence.
+// Actual scheduler session and process-group mechanisms, and controlling
+// terminals derived from sessions (hosted; no guest evidence).
 #include "ok/sched/process.hpp"
+#include "ok/sched/scheduler.hpp"
 
 #include <array>
 #include <cstdio>
@@ -246,6 +248,97 @@ void departed_leaders_reparent_and_compaction()
     CHECK(f.scheduler.set_process_group(member, descendant, 0));
     f.ids(descendant, descendant, leader);
 }
+
+// Controlling terminals by derivation (docs/modules/tty.md sections 4 and
+// 9.7) on a ptmx-style pair: a session leader acquires the slave, fork keeps
+// it and setsid drops it; a member's TIOCNOTTY detaches only that member (a
+// fork inherits the detachment, setsid clears it); the leader's TIOCNOTTY
+// queues SIGHUP then SIGCONT for the foreground group, its exit SIGHUP alone,
+// and the master's last close SIGHUP then SIGCONT for the session leader.
+void controlling_terminal_derivation()
+{
+    Fixture f;
+    auto &s = f.scheduler;
+    const auto leader = f.fork();
+    CHECK(s.create_session(leader));
+    const auto open = [&](auto bind) {
+        const auto made = s.allocate_description({.readable = true, .writable = true, .flags = 2u});
+        CHECK(made);
+        CHECK(s.retain_description(made.value()));
+        CHECK(bind(made.value()));
+        return made.value();
+    };
+    private_pty::Handle master{};
+    const auto master_id = open([&](u16 id) {
+        const auto bound = s.bind_pty_multiplexer(id);
+        if (bound) master = bound.value();
+        return bound.ok();
+    });
+    CHECK(s.set_pty_lock(master_id, false));
+    const private_pty::Handle pts{master.slot, master.generation, private_pty::Side::slave};
+    const auto slave_id = open([&](u16 id) { return s.bind_pty_slave(id, pts).ok(); });
+    const TerminalRef ref{static_cast<u16>(master.slot + 1), master.generation};
+    CHECK(!s.controlling_terminal(f.process(leader)));
+    CHECK(s.acquire_terminal(ref, f.process(leader), true, AcquireMode::open));
+    CHECK(s.controlling_terminal(f.process(leader)) == ref);
+    const auto member = f.fork(leader);
+    CHECK(s.controlling_terminal(f.process(member)) == ref);
+    const auto front = s.terminal_job_facts(member, ref);
+    CHECK(front.is_ctty && front.has_foreground && front.in_foreground && front.pgrp == leader);
+    const auto job = f.fork(leader);
+    CHECK(s.set_process_group(leader, static_cast<i32>(job), static_cast<i32>(job)));
+    const auto back = s.terminal_job_facts(job, ref);
+    CHECK(back.is_ctty && back.has_foreground && !back.in_foreground && back.pgrp == job);
+    const auto other = f.fork(leader);
+    CHECK(s.create_session(other));
+    CHECK(!s.controlling_terminal(f.process(other)) && !s.terminal_job_facts(other, ref).is_ctty);
+    // Requests of the running caller, as the ioctl dispatch makes them.
+    const auto request = [&](ProcessId pid, ConsoleControlOperation operation, i32 scalar = 0) -> Status {
+        f.process(pid).threads()[0].native_active = true;
+        CHECK(s.activate(pid));
+        const auto subject = s.terminal_subject(slave_id);
+        CHECK(subject);
+        if (auto status = s.terminal_check(subject.value(), operation); !status) return status;
+        TerminalRequest value{};
+        value.operation = operation;
+        value.scalar = scalar;
+        const auto reply = s.terminal_control(subject.value(), value);
+        return reply ? Status{} : reply.status();
+    };
+    using Op = ConsoleControlOperation;
+    CHECK(request(member, Op::detach));
+    CHECK(f.process(member).ctty_detached() && !s.controlling_terminal(f.process(member)));
+    CHECK(request(member, Op::detach).code() == StatusCode::not_terminal);
+    const auto heir = f.fork(member);
+    CHECK(f.process(heir).ctty_detached() && !s.controlling_terminal(f.process(heir)));
+    CHECK(s.create_session(heir) && !f.process(heir).ctty_detached());
+    CHECK(s.controlling_terminal(f.process(leader)) == ref && s.controlling_terminal(f.process(job)) == ref);
+    auto *terminal = s.terminal(ref);
+    CHECK(terminal && !terminal->outbox_count);
+    CHECK(request(leader, Op::set_foreground, static_cast<i32>(job)) && terminal->foreground == job);
+    CHECK(request(leader, Op::detach));
+    CHECK(terminal->outbox_count == 2 && terminal->outbox[0] == (TerminalOutboxEntry{job, tty::TerminalSignal::hup, true}) &&
+          terminal->outbox[1] == (TerminalOutboxEntry{job, tty::TerminalSignal::cont, true}));
+    CHECK(!terminal->session && !terminal->foreground);
+    CHECK(!s.controlling_terminal(f.process(leader)) && !s.controlling_terminal(f.process(job)));
+    while (terminal->outbox_count) static_cast<void>(terminal->take_outbox());
+    // A re-acquire gives members forked earlier the terminal again (tty.md
+    // section 14, item 12); a member that detached itself stays detached.
+    CHECK(s.acquire_terminal(ref, f.process(leader), true, AcquireMode::ioctl));
+    CHECK(s.controlling_terminal(f.process(job)) == ref && !s.controlling_terminal(f.process(member)));
+    CHECK(request(leader, Op::set_foreground, static_cast<i32>(job)));
+    CHECK(s.exit_process(leader, 0));
+    CHECK(terminal->outbox_count == 1 && terminal->outbox[0] == (TerminalOutboxEntry{job, tty::TerminalSignal::hup, true}));
+    CHECK(!terminal->session && !s.controlling_terminal(f.process(job)));
+    static_cast<void>(terminal->take_outbox());
+    CHECK(s.acquire_terminal(ref, f.process(heir), true, AcquireMode::open));
+    CHECK(s.release_description(master_id));
+    CHECK(terminal->outbox_count == 2 && terminal->outbox[0] == (TerminalOutboxEntry{heir, tty::TerminalSignal::hup, false}) &&
+          terminal->outbox[1] == (TerminalOutboxEntry{heir, tty::TerminalSignal::cont, false}));
+    CHECK(!terminal->session && !s.controlling_terminal(f.process(heir)));
+    while (terminal->outbox_count) static_cast<void>(terminal->take_outbox());
+    CHECK(s.release_description(slave_id));
+}
 } // namespace
 
 int main()
@@ -256,5 +349,6 @@ int main()
     thread_and_retained_leader_identities();
     group_membership_reserves_identity_until_last_reap();
     departed_leaders_reparent_and_compaction();
-    std::printf("PASS process session integration checks=%zu guest=0 tty=0 smp=0\n", checks);
+    controlling_terminal_derivation();
+    std::printf("PASS process session integration checks=%zu guest=0 tty=1 smp=0\n", checks);
 }

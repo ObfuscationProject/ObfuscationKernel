@@ -20,7 +20,7 @@ static unsigned checks;
     } while (false)
 namespace mock
 {
-std::array<std::byte, 8192> memory{};
+alignas(16) std::array<std::byte, 8192> memory{};
 uptr forbidden{};
 usize copies{};
 usize outputs{};
@@ -139,6 +139,14 @@ Status copy_to_user(const AddressSpace &s, uptr address, const void *in, usize s
     if (size)
         std::memcpy(mock::memory.data() + address - user_begin, in, size);
     return Status::success();
+}
+Result<u32 *> user_word(const AddressSpace &s, uptr address, bool write)
+{
+    if (address % sizeof(u32))
+        return Status::invalid_argument();
+    if (!user_range(s, address, sizeof(u32), write))
+        return Status::fault();
+    return reinterpret_cast<u32 *>(mock::memory.data() + (address - user_begin));
 }
 } // namespace ok::arch::execution
 

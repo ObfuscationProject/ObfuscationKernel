@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ok/sched/signal_action.hpp"
+#include "ok/user/job_control_signals.hpp"
 #include "ok/user/native_signal_mask.hpp"
 #include <concepts>
 
@@ -26,14 +27,20 @@ struct SignalActionCodec
     static constexpr usize restorer_offset = has_restorer ? 2 * word_bytes : absent_offset;
     static constexpr usize mask_offset = (has_restorer ? 3 : 2) * word_bytes;
     static constexpr usize bytes = mask_offset + Mask::bytes;
-    static constexpr u32 max_signal = mips ? 128 : 64;
-    static constexpr u32 stop_signal = Mask::stop;
-    static constexpr u32 child_signal = mips ? 18 : 17;
+    static constexpr const job::Numbering &numbering = job::linux_numbering<Profile>;
+    static constexpr u32 max_signal = numbering.max;
+    static constexpr u32 hangup_signal = numbering.hup;
+    static constexpr u32 stop_signal = numbering.stop;
+    static constexpr u32 tstp_signal = numbering.tstp;
+    static constexpr u32 ttin_signal = numbering.ttin;
+    static constexpr u32 ttou_signal = numbering.ttou;
+    static constexpr u32 child_signal = numbering.child;
     static constexpr u64 no_child_stop = 1;
     static constexpr u64 no_child_wait = mips ? 0x10000 : 2;
-    static constexpr u32 continue_signal = mips ? 25 : 18;
-    static constexpr u32 window_signal = mips ? 20 : 28;
-    static constexpr u32 urgent_signal = mips ? 21 : 23;
+    static constexpr u32 continue_signal = numbering.cont;
+    static constexpr u32 window_signal = numbering.window;
+    static constexpr u32 urgent_signal = numbering.urgent;
+    static_assert(max_signal == (mips ? 128U : 64U) && stop_signal == Mask::stop);
     // Linux UAPI_SA_FLAGS, not a delivery-support advertisement. ARM32's
     // SA_THIRTYTWO is UAPI; the same bit is internal SA_IA32_ABI on x86.
     static constexpr u64 uapi_flags = 0xd8000800ULL | (mips ? 0x00010009ULL : 0x00000007ULL) |
@@ -49,6 +56,21 @@ struct SignalActionCodec
     {
         return action.handler == Action::ignored_handler ||
             (action.handler == Action::default_handler && default_ignored(signal));
+    }
+    // STOP, TSTP, TTIN and TTOU: their default action stops the process.
+    [[nodiscard]] static constexpr bool default_stop(u32 signal)
+    {
+        return signal == stop_signal || signal == tstp_signal || signal == ttin_signal || signal == ttou_signal;
+    }
+    [[nodiscard]] static constexpr bool stop_or_continue(u32 signal)
+    {
+        return default_stop(signal) || signal == continue_signal;
+    }
+    // A pending signal with this action interrupts a wait: it is neither
+    // ignored nor a default stop, which leaves the wait armed while stopped.
+    [[nodiscard]] static constexpr bool interrupts(u32 signal, const Action &action)
+    {
+        return !ignored(signal, action) && !(action.handler == Action::default_handler && default_stop(signal));
     }
     [[nodiscard]] static constexpr Action sanitize(Action action)
     {

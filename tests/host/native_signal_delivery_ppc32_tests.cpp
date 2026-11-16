@@ -164,10 +164,15 @@ static void queues()
     {Fixture f;f.setup();f.blocked.set(10);CHECK(f.deliver()==Delivery::Result::none&&f.queue.pending_mask().contains(10));}
     for(u32 signal:{17u,18u,23u,28u}){Fixture f;CHECK(f.queue.enqueue({signal,0,1,2})==Queue::Enqueue::queued);CHECK(f.deliver()==Delivery::Result::ignored&&f.memory.writes==0);}
     {Fixture f;f.setup();f.actions.find(10)->handler=1;CHECK(f.deliver()==Delivery::Result::ignored&&!f.queue.pending_mask().contains(10));}
-    for(u32 signal:{19u,20u,21u,22u}){Fixture f;CHECK(f.queue.enqueue({signal,0,1,2})==Queue::Enqueue::queued);CHECK(f.deliver()==Delivery::Result::unsupported&&f.queue.pending_mask().contains(signal));}
+    // A default STOP/TSTP/TTIN/TTOU is consumed as a stop without a frame write.
+    for(u32 signal:{19u,20u,21u,22u}){Fixture f;CHECK(f.queue.enqueue({signal,0,1,2})==Queue::Enqueue::queued);const auto frame=f.frame;CHECK(f.deliver()==Delivery::Result::stop&&f.selected==signal&&!f.queue.pending_mask().contains(signal)&&equal(frame,f.frame)&&f.memory.writes==0);}
+    for(u32 signal:{20u,21u,22u}){Fixture f;CHECK(f.queue.enqueue({signal,0,1,2})==Queue::Enqueue::queued);f.actions.find(signal)->handler=1;CHECK(f.deliver()==Delivery::Result::ignored&&!f.queue.pending_mask().contains(signal)&&f.memory.writes==0);}
+    {Fixture f;f.setup(4,20);CHECK(f.deliver()==Delivery::Result::handler&&f.frame.registers[3]==20);}
     {Fixture f;CHECK(f.queue.enqueue({64,0,1,2})==Queue::Enqueue::queued);f.blocked.set(64,false);CHECK(f.deliver()==Delivery::Result::terminate&&f.selected==64);CHECK(f.queue.enqueue({65,0,1,2})==Queue::Enqueue::invalid);}
     {Fixture f;f.setup(4,64);f.blocked.set(64,false);CHECK(f.deliver()==Delivery::Result::handler&&f.frame.registers[3]==64&&f.blocked.contains(64));}
-    {Fixture f;f.setup(1);CHECK(f.deliver()==Delivery::Result::unsupported&&f.memory.writes==0&&f.queue.pending_mask().contains(10));}
+    // SA_NOCLDSTOP and SA_NOCLDWAIT are accepted no-ops; every other bit outside supported_flags is refused.
+    static_assert((Delivery::supported_flags&3)==3);
+    for(unsigned bit=0;bit<64;++bit)if(!(Delivery::supported_flags&(u64{1}<<bit))){Fixture f;f.setup(u64{1}<<bit);CHECK(f.deliver()==Delivery::Result::unsupported&&f.memory.writes==0&&f.queue.pending_mask().contains(10));}
     {Fixture f;f.setup(4);CHECK(f.queue.enqueue({10,0,99,100})==Queue::Enqueue::coalesced);CHECK(f.deliver()==Delivery::Result::handler);CHECK(f.memory.get(f.frame.sp+80+12)==0x1234&&f.memory.get(f.frame.sp+80+16)==0x5678);}
     {Fixture f;*f.actions.find(8)={handler,4,0,{}};CHECK(f.queue.enqueue_kernel(8)==Queue::Enqueue::queued);CHECK(f.deliver()==Delivery::Result::terminate&&f.selected==11&&f.queue.pending_mask().contains(8)&&f.memory.writes==0);}
     {
