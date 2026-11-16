@@ -173,6 +173,49 @@ struct alignas(64) SectionCpu
 };
 inline constinit std::array<SectionCpu, max_cpus> section_cpus{};
 
+// Per-CPU evidence of the fine-locked paths (OK_SMP_WAKE, OK_SMP_MM,
+// OK_SMP_AUDIT), owner-written with detail::owner_add. The packages that
+// convert wakeups, memory and the audit feed them; until then they stay zero.
+struct alignas(64) EvidenceCpu
+{
+    // OK_SMP_WAKE
+    std::atomic<uptr> remote_wakes{};
+    std::atomic<uptr> wake_ipis{};
+    std::atomic<uptr> probes{};
+    std::atomic<uptr> steals{};
+    std::atomic<uptr> deadline_late_max_us{}; // A maximum, not a sum.
+    std::atomic<uptr> unqueued{};
+    // OK_SMP_MM
+    std::atomic<uptr> quiesce_rounds{};
+    std::atomic<uptr> kernel_windows{};
+    std::atomic<uptr> cow_copied{};
+    std::atomic<uptr> cow_reused{};
+    std::atomic<uptr> retiring_rejects{};
+    std::atomic<uptr> protect_pages{};
+    std::atomic<uptr> uaccess_retries{};
+    std::atomic<uptr> uaccess_held{};
+    // OK_SMP_AUDIT (repairs and poll readiness count as KernelCheck)
+    std::atomic<uptr> audit_passes{};
+};
+inline constinit std::array<EvidenceCpu, max_cpus> evidence_cpus{};
+
+[[nodiscard]] inline u64 evidence_total(std::atomic<uptr> EvidenceCpu::*counter) noexcept
+{
+    u64 total = 0;
+    for (const auto &cpu : evidence_cpus)
+        total += (cpu.*counter).load(std::memory_order_relaxed);
+    return total;
+}
+
+[[nodiscard]] inline u64 evidence_max(std::atomic<uptr> EvidenceCpu::*counter) noexcept
+{
+    u64 highest = 0;
+    for (const auto &cpu : evidence_cpus)
+        if (const u64 value = (cpu.*counter).load(std::memory_order_relaxed); value > highest)
+            highest = value;
+    return highest;
+}
+
 // The runtime closes admission before power-off; WP3's admission reads it.
 inline constinit std::atomic<bool> section_admission{};
 // require_exclusive checks the kernel lock once secondary CPUs are admitted.

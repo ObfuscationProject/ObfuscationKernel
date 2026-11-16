@@ -4,7 +4,9 @@
 // OK_IRQ_COMPLETIONS, OK_TIMER_LATENCY, OK_TIMERS), with secondary CPUs
 // what each CPU did (OK_SMP_CPUS, OK_SMP_IRQS), socket waits (OK_NET_WAITS),
 // where kernel sections are compiled in the OK_SMP_KERNEL lines and, with the
-// smp_hotplug_test knob, the CPU hotplug cycles (OK_SMP_HOTPLUG).
+// smp_hotplug_test knob, the CPU hotplug cycles (OK_SMP_HOTPLUG), then the
+// lock checks and fine-lock evidence (OK_SMP_KERNEL_CHECKS, OK_SMP_LOCKS,
+// OK_SMP_WAKE, OK_SMP_MM, OK_SMP_AUDIT).
 #include "private.hpp"
 #include "ok/interrupt/platform.hpp"
 #include "ok/smp/bringup.hpp"
@@ -267,6 +269,80 @@ void report_hotplug()
     emit("\n");
 #endif
 }
+// The lock order's assertion counters and the fine-lock evidence, after the
+// lines above, on every profile once the runtime armed its checks:
+//   OK_SMP_KERNEL_CHECKS every check counter and the deepest lock nesting;
+//   OK_SMP_LOCKS         per lock class acquired:contended (acquisitions are
+//                        counted in debug kernels only);
+//   OK_SMP_WAKE, OK_SMP_MM, OK_SMP_AUDIT the wakeup, memory and audit
+//                        counters (zero until their paths are converted);
+//   OK_SMP_CHECK_SITE    the first failed check per CPU.
+// A kernel built with smp_sections=n on a profile that starts secondaries
+// prints no OK_SMP_KERNEL* line at all (the OS stress gate rejects one), so
+// its counters show only in the other lines.
+void report_kernel_checks()
+{
+    if (!smp::exclusive_armed.load(std::memory_order_acquire)) return;
+    auto field = [](std::string_view name, u64 value) { emit(" "); emit(name); emit("="); emit_number(value); };
+#if defined(OK_SMP_SECTIONS) || !defined(OK_ARCH_SMP_START)
+    auto section_sum = [](std::atomic<uptr> smp::SectionCpu::*counter) {
+        u64 total = 0;
+        for (const auto &cpu : smp::section_cpus) total += (cpu.*counter).load(std::memory_order_relaxed);
+        return total;
+    };
+    u64 violations = 0, depth = 0;
+    for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
+    {
+        violations += runtime_lock_violations(cpu);
+        const u64 deepest = smp::lock_debug_max_depth(cpu);
+        depth = deepest > depth ? deepest : depth;
+    }
+    emit_line("OK_SMP_KERNEL_CHECKS scope=hardware debug="); emit_number(smp::lock_debug_enabled ? 1 : 0);
+    field("lock_violations", violations);
+    field("bkl_asserts", section_sum(&smp::SectionCpu::exclusive_asserts));
+    field("wait_depth_asserts", section_sum(&smp::SectionCpu::depth_asserts));
+    for (usize check = 0; check < smp::kernel_check_count; ++check)
+        field(smp::kernel_check_names[check], smp::check_total(static_cast<smp::KernelCheck>(check)));
+    field("max_lock_depth", depth);
+    emit("\n");
+#endif
+    emit_line("OK_SMP_LOCKS scope=hardware debug="); emit_number(smp::lock_debug_enabled ? 1 : 0);
+    for (usize stat = 0; stat < smp::lock_stat_count; ++stat)
+    {
+        const auto which = static_cast<smp::LockStat>(stat);
+        emit(" "); emit(smp::lock_stat_names[stat]); emit("=");
+        emit_number(smp::lock_stat_total(which, false)); emit(":"); emit_number(smp::lock_stat_total(which, true));
+    }
+    emit("\nOK_SMP_WAKE scope=hardware");
+    field("remote", smp::evidence_total(&smp::EvidenceCpu::remote_wakes));
+    field("ipis", smp::evidence_total(&smp::EvidenceCpu::wake_ipis));
+    field("probes", smp::evidence_total(&smp::EvidenceCpu::probes));
+    field("steals", smp::evidence_total(&smp::EvidenceCpu::steals));
+    field("deadline_late_max_us", smp::evidence_max(&smp::EvidenceCpu::deadline_late_max_us));
+    field("unqueued", smp::evidence_total(&smp::EvidenceCpu::unqueued));
+    emit("\nOK_SMP_MM scope=hardware");
+    field("mm_acquired", smp::lock_stat_total(smp::LockStat::mm, false));
+    field("mm_contended", smp::lock_stat_total(smp::LockStat::mm, true));
+    field("quiesce_rounds", smp::evidence_total(&smp::EvidenceCpu::quiesce_rounds));
+    field("kernel_windows", smp::evidence_total(&smp::EvidenceCpu::kernel_windows));
+    field("cow_copied", smp::evidence_total(&smp::EvidenceCpu::cow_copied));
+    field("cow_reused", smp::evidence_total(&smp::EvidenceCpu::cow_reused));
+    field("retiring_rejects", smp::evidence_total(&smp::EvidenceCpu::retiring_rejects));
+    field("protect_pages", smp::evidence_total(&smp::EvidenceCpu::protect_pages));
+    field("uaccess_retries", smp::evidence_total(&smp::EvidenceCpu::uaccess_retries));
+    field("uaccess_held", smp::evidence_total(&smp::EvidenceCpu::uaccess_held));
+    emit("\nOK_SMP_AUDIT scope=hardware");
+    field("passes", smp::evidence_total(&smp::EvidenceCpu::audit_passes));
+    field("repairs", smp::check_total(smp::KernelCheck::audit_repairs));
+    field("poll_ready", smp::check_total(smp::KernelCheck::poll_audit_ready));
+    emit("\n");
+    for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
+        if (const char *site = smp::check_cpus[cpu].first_site.load(std::memory_order_relaxed))
+        {
+            emit("OK_SMP_CHECK_SITE scope=hardware cpu="); emit_number(cpu);
+            emit(" site="); emit(site); emit("\n");
+        }
+}
 } // namespace
 void report_interrupts()
 {
@@ -274,6 +350,7 @@ void report_interrupts()
     report_network_waits();
     report_kernel_sections();
     report_hotplug();
+    report_kernel_checks();
 }
 inline namespace runtime_detail
 {
