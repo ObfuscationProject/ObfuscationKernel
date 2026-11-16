@@ -52,7 +52,8 @@ def main() -> None:
                 command += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie"]
             subprocess.run(command, check=True)
             subprocess.run([str(executable)], check=True)
-            print(f"PASS {architecture}: static architecture dispatch and two scheduler policies", flush=True)
+            print(f"PASS {architecture}: static architecture dispatch, two scheduler policies and the dispatch lock tables",
+                  flush=True)
 
 
 if __name__ == "__main__":

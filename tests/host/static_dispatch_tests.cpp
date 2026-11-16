@@ -1,9 +1,12 @@
 #include "ok/arch/arch.hpp"
 #include "ok/sched/process.hpp"
 #include "ok/sched/scheduler.hpp"
+#include "ok/smp/lock.hpp"
+#include "../../src/user/runtime/dispatch_policy.hpp"
 
 #include <type_traits>
 #include <memory>
+#include <utility>
 
 namespace
 {
@@ -228,8 +231,33 @@ void test_alternate_policy_and_ownership()
 
 } // namespace
 
+// Every syscall of every profile still dispatches under the big kernel lock,
+// and fine locks are selected at build time (an UpLock without
+// OK_ARCH_SMP_START or OK_HOSTED_LOCK_MODEL).
+template <usize... Profiles> void test_dispatch_policy_tables(std::index_sequence<Profiles...>)
+{
+    namespace policy = user::native::dispatch_policy;
+    constexpr auto all_bkl = [](const auto &table) {
+        for (const auto mode : table)
+            if (mode != policy::LockMode::bkl)
+                return false;
+        return true;
+    };
+    static_assert((all_bkl(policy::linux_lock_modes<static_cast<abi::linux_user::Profile>(Profiles)>) && ...));
+    static_assert(all_bkl(policy::native_lock_modes));
+    static_assert(sizeof...(Profiles) == policy::profile_count);
+    for (usize operation = 0; operation < policy::linux_operation_count; ++operation)
+        check((policy::bkl_required<static_cast<abi::linux_user::Profile>(Profiles)>(
+                   static_cast<abi::linux_user::Operation>(operation)) && ...));
+    for (u64 number = 0; number < policy::native_syscall_limit + 8; ++number)
+        check(policy::native_bkl_required(number));
+    static_assert(std::is_same_v<smp::FineLock<smp::LockRank::task>, smp::UpLock<smp::LockRank::task>> ==
+                  !smp::concurrent_locks);
+}
+
 int main()
 {
+    test_dispatch_policy_tables(std::make_index_sequence<user::native::dispatch_policy::profile_count>{});
     test_architecture_dispatch();
     test_reject_foreign_process_target();
     test_default_policy();

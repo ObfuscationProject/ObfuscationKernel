@@ -1,6 +1,7 @@
 // Native start/step loop, user entry and syscall dispatch.
 #include "private.hpp"
 #include "section.hpp"
+#include "dispatch_policy.hpp"
 
 extern "C" ok::Status ok_boot_filesystem(ok::fs::VirtualFileSystem &) __attribute__((weak));
 extern "C" ok::Status ok_boot_entropy(ok::posix::PosixService &) __attribute__((weak));
