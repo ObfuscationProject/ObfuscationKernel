@@ -17,10 +17,13 @@ unused by production code or nested inside the big kernel lock (BKL), and the
   class and interrupt rules. The unused `scheduler`, `wait_queue`, `memory`
   and `leaf` enumerators are gone; `page_pool` replaces `memory`.
 - **Locks.** `RankedSpinLock::lock_as<R>()` records one acquisition at a
-  higher rank (the futex bucket pair). `UpLock<R>` keeps the owner word and
-  order checks in debug builds and is empty otherwise; `FineLock<R>` picks the
-  spin lock where `concurrent_locks` holds (`OK_ARCH_SMP_START` or
-  `OK_HOSTED_LOCK_MODEL`) and the `UpLock` elsewhere. `TryToken` is the
+  higher rank (the futex bucket pair). `UpLock<R>` never spins; it keeps the
+  owner word and order checks in debug builds and one plain held byte in
+  release builds, so `try_lock` fails and `owned_by_current_cpu` reads true
+  while it is held in both modes, as on a `RankedSpinLock`. `FineLock<R>`
+  picks the spin lock where `concurrent_locks` holds (`OK_ARCH_SMP_START` or
+  `OK_HOSTED_LOCK_MODEL`) and the `UpLock` elsewhere; the `smp`
+  `fine-lock-selection` test point checks the booted kernel's choice. `TryToken` is the
   unranked try-only token behind `hotplug_turn` (now used by the hotplug turn)
   and `housekeeping`; it stays out of the lock-debug record.
 - **Gates** (`include/ok/smp/gate.hpp`). `ServingGate<R>` and
@@ -43,10 +46,17 @@ unused by production code or nested inside the big kernel lock (BKL), and the
 - **Runtime.** `started` is atomic; `runtime_failure` is stored under
   `runtime_status_lock` (rank `runtime_status`) and `fail_runtime` records a
   failure and stops the runtime in one hold, keeping today's overwrite
-  semantics; `runtime_idle` is an array of atomics; user-entry outcome
-  counters are per CPU. `src/user/runtime/dispatch_policy.hpp` holds the
-  `bkl_required` tables (one per Linux profile, one native), all `bkl` and
-  consulted nowhere.
+  semantics. The one exception is `RuntimeFailure::bkl_sink()`, a named
+  `Status &` that the UDP and TCP operation bodies record release failures
+  into; those writes skip the lock and are safe only while both families
+  dispatch under the BKL (it replaces an implicit `Status &` conversion, so no
+  other write can bypass the lock unnoticed). `runtime_idle` is an array of
+  atomics; user-entry outcome counters are per CPU.
+  `src/user/runtime/dispatch_policy.hpp` holds the `bkl_required` tables (one
+  per Linux profile, one native), all `bkl` and consulted nowhere. Builds
+  that define `OK_BKL_DISPATCH_FORCED` (`smp_sections=n`, and the debug
+  private futex peer fixture, on any profile) force every row; every other
+  build, UP profiles included, follows the tables.
 - **Driver ABI.** `OkMutex` is an `atomic_flag` with the same try contract;
   `OkWaitQueue` and `OkSlabAllocator` run under one `driver_abi` leaf lock.
 - **Evidence lines**, after the existing report lines once the runtime armed
@@ -69,6 +79,18 @@ unused by production code or nested inside the big kernel lock (BKL), and the
   `owner_asserts`, `queue_asserts`, `pin_asserts`, `admit_shadow_mismatch`,
   `quiesce_timeouts`, `audit_repairs` and `poll_audit_ready` are reported but
   nothing feeds them until their packages land.
+- The UDP and TCP bodies' `bkl_sink()` writes bypass `runtime_status_lock`
+  (above). Routing them through the lock needs a sink type threaded through
+  the original-description guards and their hosted tests; the package that
+  takes UDP or TCP off the BKL must do it.
+- No `abi_dev = "smp-scaling.WP0a"` SDK manifest tag. Section 7 asks for one
+  per package; the lead waived it for this series (one module ABI bump at
+  the merge, and every gate relinks the OS against the fresh SDK). WP0a does
+  change exported layouts at ABI 81: `LockRank` values, `LockDebugCpu`
+  (capacity 12 plus `max_depth`), `OkMutex` (an `atomic_flag`, no longer
+  copyable) and new inline globals in `ok/smp/lock.hpp`. An OS object built
+  against the 5815814 SDK is therefore not compatible with this SDK and
+  nothing rejects it; rebuild every OS object against this SDK.
 - The gate and ext4 position-lock counts in `OK_SMP_LOCKS` record
   acquisitions (debug) only: the ext4 gate and the section path of the
   position guard keep their own waiting code, which does not count
@@ -82,14 +104,17 @@ pinned SysToolchain QEMU 10.2; model tests print `scope=model`.
 - Hosted: `scripts/test_smp_locks.py` (lock suite four ways: debug/release by
   `OK_HOSTED_LOCK_MODEL` on/off; gate suite debug/release with real host
   threads), `test_kernel_section_protocol.py`, `test_ext4_gate_concurrency.py`,
-  `test_static_dispatch.py` (ten profiles, dispatch tables), the full
-  `scripts/hosted_suite.py`.
+  `test_static_dispatch.py` (ten profiles: dispatch tables, flipped and
+  forced rows, and `concurrent_locks` against a fixed list of SMP profiles
+  with `OK_ARCH_SMP_START` passed as xmake passes it), the full
+  `scripts/hosted_suite.py` including the ext4-fixture runners.
 - Kernel: debug `okernel_image` and `xmake test` at `-smp 1` on all ten
   profiles; `-smp 2` and `-smp 4` on x86_64, aarch64 and rv64.
 - OS (private copy of `wt/os-smp-scaling` 46b763d, unchanged): native distro
   boot to `OK_USERLAND scope=hardware acceptance=pass` on all ten profiles;
-  `test_smp_stress.py` debug at 2 and 4 vCPUs and release at 2 vCPUs on the
-  three SMP profiles; the futex probe, `--smp_hotplug_test=y
+  `test_smp_stress.py` debug and release at 2 and 4 vCPUs on the three SMP
+  profiles (release runs used a private release musl built from the pinned
+  archive, because the shared release trees are empty); the futex probe, `--smp_hotplug_test=y
   --require-hotplug` and `smp_sections=n` at 2 vCPUs on each. Every run
   passed with every check counter and `lock_violations` at zero;
   `max_lock_depth` was 4 on the debug stress runs and 3 on the distro boots
