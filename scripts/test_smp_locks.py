@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Hosted model test for ranked spin locks and their debug checks (feat/smp-bringup, smp-scaling WP0a).
+"""Hosted model test for ranked spin locks, gates and their debug checks (feat/smp-bringup, smp-scaling WP0a).
 
 Model coverage only: host threads stand in for CPUs; no AP, interrupt mask or IPI executes.
 The lock suite is built with OK_LOCK_DEBUG and without it (release builds compile the checks
 out), each with OK_HOSTED_LOCK_MODEL (FineLock is the real spin lock) and without it (FineLock
-is an UpLock).
+is an UpLock). The gate suite races ServingGate and SharedGate on host threads, so it is built
+with OK_HOSTED_LOCK_MODEL only, with and without OK_LOCK_DEBUG.
 """
 import argparse
 import os
@@ -43,6 +44,9 @@ def main():
         build_and_run(args, root, directory, "smp-locks-debug", locks, [model, "-DOK_LOCK_DEBUG"])
         build_and_run(args, root, directory, "smp-locks-up-release", locks, [])
         build_and_run(args, root, directory, "smp-locks-up-debug", locks, ["-DOK_LOCK_DEBUG"])
+        gates = "tests/host/smp_gate_tests.cpp"
+        build_and_run(args, root, directory, "smp-gates-release", gates, [model])
+        build_and_run(args, root, directory, "smp-gates-debug", gates, [model, "-DOK_LOCK_DEBUG"])
 
 
 if __name__ == "__main__":
