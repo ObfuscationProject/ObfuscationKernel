@@ -33,6 +33,7 @@ struct PosixTimer
     sched::ThreadId thread{}; // SIGEV_THREAD_ID target; zero is process-directed.
     u64 value{};
     bool owed{};    // Expired, its signal not queued yet.
+    bool replay{};  // The owed expiry's CONT/stop side effects already ran.
     bool parked{};  // Signalled while its signal is ignored: queued again once unignored.
     bool stalled{}; // Its target thread is gone; nothing will dequeue the signal.
     time::IntervalTimer timer{};
@@ -177,10 +178,12 @@ void service_posix(Kernel &kernel, sched::ProcessControlBlock &process, PosixTim
         if (private_signal_ignored(kernel, process.pid(), timer.signal)) return;
         timer.parked = false;
         timer.owed = true;
+        timer.replay = false;
     }
     if (timer.timer.expire(now))
     {
         timer.owed = true;
+        timer.replay = false;
         ++timer_counters.expired;
     }
     if (!timer.owed)
@@ -196,7 +199,7 @@ void service_posix(Kernel &kernel, sched::ProcessControlBlock &process, PosixTim
         return;
     }
     const sched::PendingSignalInfo info{timer.signal, timer_code, 0, 0, 0, timer.id, timer.timer.preview(now), timer.value};
-    switch (private_timer_signal(kernel, process, timer.thread, info))
+    switch (private_timer_signal(kernel, process, timer.thread, info, timer.replay))
     {
     case PrivateTimerSend::sent:
         timer.owed = false;
@@ -204,8 +207,8 @@ void service_posix(Kernel &kernel, sched::ProcessControlBlock &process, PosixTim
         break;
     case PrivateTimerSend::ignored:
         // Linux parks an ignored interval timer until its signal is unignored
-        // (posixtimer_sig_ignore) and drops a one-shot expiry; a job-control
-        // signal is dropped, as job control is not implemented.
+        // (posixtimer_sig_ignore) and drops a one-shot expiry, including one
+        // that init drops as SIGNAL_UNKILLABLE.
         timer.owed = false;
         if (timer.timer.state() == TimerState::signalled && private_signal_ignored(kernel, process.pid(), timer.signal))
             timer.parked = true;
@@ -215,6 +218,8 @@ void service_posix(Kernel &kernel, sched::ProcessControlBlock &process, PosixTim
         timer.stalled = true;
         break;
     case PrivateTimerSend::retry:
+        // Generation already applied a CONT/stop; later attempts only queue.
+        timer.replay = true;
         ++timer_counters.retried;
         break;
     }
@@ -506,6 +511,15 @@ void private_timer_discard(Kernel &kernel, sched::ProcessId pid, u32 signal)
         else if (timer.timer.state() == TimerState::signalled && record_queued(kernel, pid, timer))
             timer.parked = true;
     }
+}
+
+// Like a queued record flushed by the opposite CONT/stop: an interval timer
+// rearms at the next settle, as for a record that left its queue.
+void private_timer_discard_owed(sched::ProcessId pid, u32 signal)
+{
+    if (auto *timers = find_timers(pid))
+        for (auto &timer : timers->posix)
+            if (timer.used && timer.owed && timer.signal == signal) timer.owed = timer.replay = false;
 }
 
 // A SIGEV_THREAD_ID target is exiting and its queue can still be read: a record

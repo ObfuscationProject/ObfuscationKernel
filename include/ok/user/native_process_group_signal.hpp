@@ -10,15 +10,17 @@ struct ProcessSignalSender
     sched::ProcessId pid{};
     Credentials credentials{};
     sched::ProcessId group{};
+    sched::ProcessId session{}; // SIGCONT may cross credentials within the sender's session.
 };
 
 [[nodiscard]] inline ProcessSignalSender process_signal_sender(const sched::ProcessControlBlock &sender)
 {
-    return {sender.pid(), sender.credentials(), sender.process_group_id()};
+    return {sender.pid(), sender.credentials(), sender.process_group_id(), sender.session_id()};
 }
 
 // The boot CPU serializes selection and callbacks. Snapshot only PIDs, never
-// borrowed PCB/TCB references. Callbacks re-resolve recipients and own delivery.
+// borrowed PCB/TCB references. Callbacks re-resolve recipients and own delivery,
+// including the signal's job-control effects; every signal number is admitted.
 template <u32 MaximumSignal, typename Deliver>
 [[nodiscard]] i64 send_process_group_signal(sched::SchedulerState &scheduler,
                                             ProcessSignalSender sender,
@@ -32,7 +34,6 @@ template <u32 MaximumSignal, typename Deliver>
     if (selector == -1) return -95;
     // Linux kill_something_info refuses INT_MIN before negating pid_t.
     if (selector == (-2147483647 - 1)) return -3;
-    if (signal != 0 && signal != 9 && signal != 15) return -95;
     const auto group = selector == 0 ? sender.group
                                     : static_cast<sched::ProcessId>(-static_cast<i64>(selector));
     if (!group) return -3;

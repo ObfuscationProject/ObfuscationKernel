@@ -84,7 +84,7 @@ class OpenCodec final
             u32 native_flag;
         } pairs[] = {{create, posix::o_CREAT},      {exclusive, posix::o_EXCL},    {truncate, posix::o_TRUNC},
                      {append, posix::o_APPEND},     {nonblock, posix::o_NONBLOCK}, {directory, posix::o_DIRECTORY},
-                     {nofollow, posix::o_NOFOLLOW}, {cloexec, posix::o_CLOEXEC}};
+                     {nofollow, posix::o_NOFOLLOW}, {cloexec, posix::o_CLOEXEC}, {no_ctty, posix::o_NOCTTY}};
         for (const auto pair : pairs)
             if (flags & pair.linux_flag)
                 native |= pair.native_flag;

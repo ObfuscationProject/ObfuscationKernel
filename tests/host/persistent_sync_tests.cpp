@@ -226,7 +226,7 @@ void adversarial(Kernel &kernel, const Bytes &bytes)
 int main(int argc, char **argv)
 {
     if (argc != 3) return 2;
-    static_assert(OK_NATIVE_PERSISTENT_SYNC_VERSION == 1 && OK_UAPI_VERSION_MINOR == 16);
+    static_assert(OK_NATIVE_PERSISTENT_SYNC_VERSION == 1 && OK_UAPI_VERSION_MINOR == 17);
     static_assert(OK_SYS_SYNC_PERSISTENT == static_cast<u64>(N::sync_persistent));
     std::ifstream input(argv[1], std::ios::binary); CHECK(input);
     const Bytes bytes((std::istreambuf_iterator<char>(input)), {});

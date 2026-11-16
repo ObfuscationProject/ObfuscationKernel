@@ -156,7 +156,7 @@ void injected_controls()
 }
 int main()
 {
-    static_assert(OK_UAPI_VERSION_MINOR == 16 && sizeof(ok_mount_info) == 288);
+    static_assert(OK_UAPI_VERSION_MINOR == 17 && sizeof(ok_mount_info) == 288);
     static_assert(OK_SYS_MOUNT_INFO == static_cast<u64>(N::mount_info));
     static Kernel kernel; CHECK(kernel.boot({}));
     const auto context = kernel.arch().make_user_context({hw::user_begin, hw::user_end - 4096});

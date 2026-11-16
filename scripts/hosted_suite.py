@@ -100,6 +100,7 @@ INPUTS = {
     'native_firmware_handoff': 'toolchain root and one QEMU directory holding all ten qemu-system binaries',
     'native_qualified_memory': 'toolchain root at KERNEL_ROOT/toolchains with the pinned compiler identity',
     'native_runtime_frames': 'toolchain root at KERNEL_ROOT/toolchains with the pinned compiler identity',
+    'tty_sdk_contract': 'ObfuscationOS checkout (--os-root) whose tools/kernel_sdk.py consumes this SDK',
     'jbd2': 'generated JBD2 fixture tests/fixtures/jbd2_v3.bin (scripts/generate_jbd2_fixture.py)',
     'jbd2_replay': 'generated JBD2 fixture tests/fixtures/jbd2_v3.bin (scripts/generate_jbd2_fixture.py)',
 }

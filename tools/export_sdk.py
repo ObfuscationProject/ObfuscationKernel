@@ -16,14 +16,14 @@ from pathlib import Path
 
 COMMON_PROFILE = "serialized-common-eight-family-directory-create-ordered-free-init-zero-refill-optional-revoke-legacy-v4"
 NATIVE_TERMINATION_PROFILE = "bootcpu-positive-pid-probe-term-kill-deferred-v1"
-NATIVE_CONSOLE_INPUT_PROFILE = "pid1-issued-epoch-fork-exec-leader-revoke-noecho-v1"
+NATIVE_CONSOLE_INPUT_PROFILE = "pid1-issued-epoch-fork-exec-leader-revoke-ntty-compat-default-v2"
 NATIVE_CONSOLE_INPUT_PROFILE_HEADER = "ok/sched/console_input_profile.hpp"
 NATIVE_CONSOLE_INPUT_HEADERS = (
     NATIVE_CONSOLE_INPUT_PROFILE_HEADER, "ok/sched/console_input.hpp",
     "ok/sched/scheduler.hpp", "ok/uapi/syscall.h", "ok/core/types.hpp",
 )
 NATIVE_CONSOLE_INPUT_DEFINES = {
-    "OK_UAPI_VERSION_MAJOR": "0", "OK_UAPI_VERSION_MINOR": "16", "OK_UAPI_VERSION_PATCH": "0",
+    "OK_UAPI_VERSION_MAJOR": "0", "OK_UAPI_VERSION_MINOR": "17", "OK_UAPI_VERSION_PATCH": "0",
     "OK_NATIVE_CONSOLE_LEASE_VERSION": "1", "OK_CONSOLE_EPOCH_MAX": "0x3fffffffU",
     "OK_SYS_CONSOLE_CLAIM": "1028ULL", "OK_SYS_CONSOLE_REVOKE": "1029ULL",
     "OK_SYS_CONSOLE_FLUSH": "1030ULL",
@@ -92,7 +92,7 @@ def validate_native_mount_info_profile(headers: Path) -> None:
         raise ValueError("kernel SDK mount inventory wire layout mismatch")
 
 
-NATIVE_SESSIONS_PROFILE = "bootcpu-serialized-process-group-session-console-lifecycle-v3"
+NATIVE_SESSIONS_PROFILE = "bootcpu-serialized-process-group-session-console-pty-jobctl-lifecycle-v4"
 NATIVE_SESSIONS_PROFILE_HEADER = "ok/user/native_sessions_profile.hpp"
 NATIVE_SESSIONS_HEADERS = (
     NATIVE_SESSIONS_PROFILE_HEADER, "ok/sched/resources.hpp", "ok/sched/scheduler.hpp",
@@ -101,14 +101,14 @@ NATIVE_SESSIONS_HEADERS = (
     "ok/abi/linux_profile_data.hpp",
 )
 NATIVE_SESSIONS_DEFINES = {
-    "OK_NATIVE_SESSIONS_VERSION": "3", "OK_SYS_SETPGID": "109ULL",
+    "OK_NATIVE_SESSIONS_VERSION": "4", "OK_SYS_SETPGID": "109ULL",
     "OK_SYS_GETPGRP": "111ULL", "OK_SYS_SETSID": "112ULL",
     "OK_SYS_GETPGID": "121ULL", "OK_SYS_GETSID": "124ULL", "OK_ESRCH": "3",
 }
 
 
 def validate_native_sessions_profile(headers: Path) -> None:
-    """Admit bounded process membership with explicit single-console ownership."""
+    """Admit bounded process membership with a derived console or PTY controlling terminal."""
     for name in NATIVE_SESSIONS_HEADERS:
         if not (headers / name).is_file():
             raise ValueError("kernel SDK native sessions header missing: " + name)
@@ -123,17 +123,19 @@ def validate_native_sessions_profile(headers: Path) -> None:
         '#include <string_view>',
         'namespace ok::user',
         '{',
-        'inline constexpr std::string_view native_sessions_profile = "bootcpu-serialized-process-group-session-console-lifecycle-v3";',
-        'inline constexpr u32 native_sessions_version = 3;',
-        'inline constexpr u32 native_sessions_module_abi = 80;',
+        'inline constexpr std::string_view native_sessions_profile = "bootcpu-serialized-process-group-session-console-pty-jobctl-lifecycle-v4";',
+        'inline constexpr u32 native_sessions_version = 4;',
+        'inline constexpr u32 native_sessions_module_abi = 81;',
         'inline constexpr u32 native_sessions_pid_bits = 32;',
         'inline constexpr u32 native_sessions_process_capacity = 64;',
         'inline constexpr u32 native_sessions_fork_inherits = 1;',
         'inline constexpr u32 native_sessions_exec_preserves = 1;',
         'inline constexpr u32 native_sessions_reparent_preserves = 1;',
         'inline constexpr u32 native_sessions_controlling_tty = 1;',
-        'inline constexpr u32 native_sessions_pty = 0;',
-        'inline constexpr u32 native_sessions_job_control = 0;',
+        'inline constexpr u32 native_sessions_ctty_derived = 1;',
+        'inline constexpr u32 native_sessions_orphaned_group_hup = 1;',
+        'inline constexpr u32 native_sessions_pty = 1;',
+        'inline constexpr u32 native_sessions_job_control = 1;',
         '} // namespace ok::user',
     ]
     if lines != expected:
@@ -151,7 +153,7 @@ def validate_native_sessions_profile(headers: Path) -> None:
             raise ValueError("kernel SDK native sessions UAPI mismatch: " + name)
 
 
-NATIVE_GROUP_SIGNAL_PROFILE = 'bootcpu-signed32-current-negative-pgid-probe-term-kill-deferred-partial-v2'
+NATIVE_GROUP_SIGNAL_PROFILE = 'bootcpu-signed32-current-negative-pgid-probe-all-signals-stop-continue-orphan-hupcont-same-session-cont-partial-v3'
 NATIVE_GROUP_SIGNAL_PROFILE_HEADER = "ok/user/native_group_signal_profile.hpp"
 NATIVE_GROUP_SIGNAL_HEADERS = (
     NATIVE_GROUP_SIGNAL_PROFILE_HEADER, "ok/user/native_signal_target.hpp",
@@ -162,7 +164,7 @@ NATIVE_GROUP_SIGNAL_HEADERS = (
 
 
 def validate_native_group_signal_profile(headers: Path) -> None:
-    """Admit only serialized group probes and deferred TERM/KILL selection."""
+    """Admit serialized group signals with stop/continue and orphaned-group hangups."""
     for name in NATIVE_GROUP_SIGNAL_HEADERS:
         if not (headers / name).is_file():
             raise ValueError("kernel SDK native group signal header missing: " + name)
@@ -177,9 +179,9 @@ def validate_native_group_signal_profile(headers: Path) -> None:
         '#include <string_view>',
         'namespace ok::user',
         '{',
-        'inline constexpr std::string_view native_group_signal_profile = "bootcpu-signed32-current-negative-pgid-probe-term-kill-deferred-partial-v2";',
-        'inline constexpr u32 native_group_signal_version = 2;',
-        'inline constexpr u32 native_group_signal_module_abi = 80;',
+        'inline constexpr std::string_view native_group_signal_profile = "bootcpu-signed32-current-negative-pgid-probe-all-signals-stop-continue-orphan-hupcont-same-session-cont-partial-v3";',
+        'inline constexpr u32 native_group_signal_version = 3;',
+        'inline constexpr u32 native_group_signal_module_abi = 81;',
         'inline constexpr u32 native_group_signal_pid_bits = 32;',
         'inline constexpr u32 native_group_signal_process_capacity = 64;',
         'inline constexpr u32 native_group_signal_current_group = 1;',
@@ -189,10 +191,13 @@ def validate_native_group_signal_profile(headers: Path) -> None:
         'inline constexpr u32 native_group_signal_kill = 9;',
         'inline constexpr u32 native_group_signal_deferred_fatal = 1;',
         'inline constexpr u32 native_group_signal_partial_success = 1;',
+        'inline constexpr u32 native_group_signal_default_actions = 1;',
+        'inline constexpr u32 native_group_signal_same_session_continue = 1;',
+        'inline constexpr u32 native_group_signal_orphan_hangup = 1;',
         'inline constexpr u32 native_group_signal_broadcast = 0;',
-        'inline constexpr u32 native_group_signal_stop_continue = 0;',
+        'inline constexpr u32 native_group_signal_stop_continue = 1;',
         'inline constexpr u32 native_group_signal_controlling_tty = 1;',
-        'inline constexpr u32 native_group_signal_job_control = 0;',
+        'inline constexpr u32 native_group_signal_job_control = 1;',
         'inline constexpr u32 native_group_signal_smp = 0;',
         '} // namespace ok::user',
     ]
@@ -202,7 +207,7 @@ def validate_native_group_signal_profile(headers: Path) -> None:
     validate_native_termination_profile(headers)
 
 
-NATIVE_CONSOLE_CONTROL_PROFILE = "bootcpu-lease-epoch-explicit-session-foreground-eio-pid32-ioctl-v1"
+NATIVE_CONSOLE_CONTROL_PROFILE = "bootcpu-lease-epoch-explicit-console-pty-session-foreground-sigttin-sigttou-pid32-ioctl-v2"
 NATIVE_CONSOLE_CONTROL_PROFILE_HEADER = "ok/user/native_console_control_profile.hpp"
 # Each implementation boundary used by this capability is explicitly hashed.
 # The OS still links the exported library and never compiles kernel sources.
@@ -214,10 +219,11 @@ NATIVE_CONSOLE_CONTROL_HEADERS = (
     "ok/user/linux_bootstrap.hpp", "ok/abi/linux_console_ioctl.hpp",
     "ok/abi/linux_user.hpp", "ok/abi/linux_profile_data.hpp",
     "ok/user/native_sessions_profile.hpp", "ok/user/native_group_signal_profile.hpp",
+    "ok/sched/terminal.hpp", "ok/abi/linux_termios.hpp",
     "ok/uapi/syscall.h", "ok/core/module.hpp", "ok/core/types.hpp",
 )
 NATIVE_CONSOLE_CONTROL_DEFINES = {
-    "OK_NATIVE_CONSOLE_CONTROL_VERSION": "1", "OK_SYS_IOCTL": "16ULL",
+    "OK_NATIVE_CONSOLE_CONTROL_VERSION": "2", "OK_SYS_IOCTL": "16ULL",
     "OK_TIOCSCTTY": "0x540eU", "OK_TIOCGSID": "0x5429U",
     "OK_TIOCGPGRP": "0x540fU", "OK_TIOCSPGRP": "0x5410U",
     "OK_EBADF": "9", "OK_EACCES": "13", "OK_EFAULT": "14", "OK_EIO": "5",
@@ -226,7 +232,7 @@ NATIVE_CONSOLE_CONTROL_DEFINES = {
 
 
 def validate_native_console_control_profile(headers: Path) -> None:
-    """Admit explicit one-console foreground control, without full job control."""
+    """Admit console and PTY foreground control with SIGTTIN/SIGTTOU job control."""
     for name in NATIVE_CONSOLE_CONTROL_HEADERS:
         if not (headers / name).is_file():
             raise ValueError("kernel SDK native console control header missing: " + name)
@@ -241,27 +247,32 @@ def validate_native_console_control_profile(headers: Path) -> None:
         '#include <string_view>',
         'namespace ok::user',
         '{',
-        'inline constexpr std::string_view native_console_control_profile = "bootcpu-lease-epoch-explicit-session-foreground-eio-pid32-ioctl-v1";',
-        'inline constexpr u32 native_console_control_version = 1;',
-        'inline constexpr u32 native_console_control_module_abi = 80;',
+        'inline constexpr std::string_view native_console_control_profile = "bootcpu-lease-epoch-explicit-console-pty-session-foreground-sigttin-sigttou-pid32-ioctl-v2";',
+        'inline constexpr u32 native_console_control_version = 2;',
+        'inline constexpr u32 native_console_control_module_abi = 81;',
         'inline constexpr u32 native_console_control_serialized_boot_cpu = 1;',
         'inline constexpr u32 native_console_control_lease_epoch = 1;',
         'inline constexpr u32 native_console_control_explicit_acquire = 1;',
         'inline constexpr u32 native_console_control_original_lease_session_leader = 1;',
         'inline constexpr u32 native_console_control_foreground_read = 1;',
-        'inline constexpr u32 native_console_control_background_eio = 1;',
+        'inline constexpr u32 native_console_control_background_eio = 0;',
+        'inline constexpr u32 native_console_control_background_sigttin = 1;',
+        'inline constexpr u32 native_console_control_background_sigttou = 1;',
         'inline constexpr u32 native_console_control_same_session_background_control = 1;',
         'inline constexpr u32 native_console_control_zombie_group_until_reap = 1;',
         'inline constexpr u32 native_console_control_pid_bytes = 4;',
         'inline constexpr u32 native_console_control_native_uniform_requests = 1;',
         'inline constexpr u32 native_console_control_linux_generated_requests = 1;',
-        'inline constexpr u32 native_console_control_auto_open_acquire = 0;',
+        'inline constexpr u32 native_console_control_auto_open_acquire = 1;',
+        'inline constexpr u32 native_console_control_console_auto_open_acquire = 0;',
+        'inline constexpr u32 native_console_control_dev_tty = 1;',
+        'inline constexpr u32 native_console_control_noctty_open = 1;',
         'inline constexpr u32 native_console_control_force_steal = 0;',
         'inline constexpr u32 native_console_control_empty_foreground_replaced = 0;',
-        'inline constexpr u32 native_console_control_pty = 0;',
-        'inline constexpr u32 native_console_control_termios = 0;',
-        'inline constexpr u32 native_console_control_stop_continue = 0;',
-        'inline constexpr u32 native_console_control_job_control = 0;',
+        'inline constexpr u32 native_console_control_pty = 1;',
+        'inline constexpr u32 native_console_control_termios = 1;',
+        'inline constexpr u32 native_console_control_stop_continue = 1;',
+        'inline constexpr u32 native_console_control_job_control = 1;',
         'inline constexpr u32 native_console_control_smp = 0;',
         '} // namespace ok::user',
     ]
@@ -280,7 +291,7 @@ def validate_native_console_control_profile(headers: Path) -> None:
             raise ValueError("kernel SDK native console control UAPI mismatch: " + name)
 
 
-NATIVE_PTY_PROFILE = "bootcpu-native-raw-pair-ofd-waits-drain-eof-eio-v1"
+NATIVE_PTY_PROFILE = "bootcpu-native-pair-devpts-counted-endpoints-ntty-hangup-v2"
 NATIVE_PTY_PROFILE_HEADER = "ok/user/native_pty_profile.hpp"
 # Hash each owner, reservation and publication boundary; these are admission
 # dependencies, not evidence that a target executed the transport.
@@ -288,6 +299,7 @@ NATIVE_PTY_HEADERS = (
     NATIVE_PTY_PROFILE_HEADER, "ok/sched/raw_pty_transport.hpp",
     "ok/sched/pty_pair.hpp", "ok/sched/resources.hpp", "ok/sched/scheduler.hpp",
     "ok/sched/descriptor_reservation.hpp", "ok/user/native_pty_pair_dispatch.hpp",
+    "ok/sched/terminal.hpp", "ok/tty/termios.hpp", "ok/tty/n_tty.hpp", "ok/fs/terminal_node.hpp",
     "ok/syscall/syscall.hpp", "ok/uapi/syscall.h", "ok/core/module.hpp", "ok/core/types.hpp",
 )
 NATIVE_PTY_DEFINES = {
@@ -297,7 +309,7 @@ NATIVE_PTY_DEFINES = {
 
 
 def validate_native_pty_profile(headers: Path) -> None:
-    """Admit only the bounded native raw pair, without terminal policy claims."""
+    """Admit the eight shared PTY pairs: raw native pairs and /dev/ptmx terminals."""
     for name in NATIVE_PTY_HEADERS:
         if not (headers / name).is_file():
             raise ValueError("kernel SDK native PTY header missing: " + name)
@@ -312,11 +324,13 @@ def validate_native_pty_profile(headers: Path) -> None:
         '#include <string_view>',
         'namespace ok::user',
         '{',
-        'inline constexpr std::string_view native_pty_profile = "bootcpu-native-raw-pair-ofd-waits-drain-eof-eio-v1";',
-        'inline constexpr u32 native_pty_version = 1;',
-        'inline constexpr u32 native_pty_module_abi = 80;',
+        'inline constexpr std::string_view native_pty_profile = "bootcpu-native-pair-devpts-counted-endpoints-ntty-hangup-v2";',
+        'inline constexpr u32 native_pty_version = 2;',
+        'inline constexpr u32 native_pty_module_abi = 81;',
         'inline constexpr u32 native_pty_pair_capacity = 8;',
         'inline constexpr u32 native_pty_queue_capacity = 4096;',
+        'inline constexpr u32 native_pty_canonical_capacity = 4096;',
+        'inline constexpr u32 native_pty_echo_capacity = 512;',
         'inline constexpr u32 native_pty_generation_bits = 64;',
         'inline constexpr u32 native_pty_descriptor_bytes = 4;',
         'inline constexpr u32 native_pty_pair_output_bytes = 8;',
@@ -326,14 +340,19 @@ def validate_native_pty_profile(headers: Path) -> None:
         'inline constexpr u32 native_pty_unconditional_hangup = 1;',
         'inline constexpr u32 native_pty_slave_master_closed_poll_error = 1;',
         'inline constexpr u32 native_pty_master_slave_closed_poll_error = 0;',
+        'inline constexpr u32 native_pty_open_counts = 1;',
+        'inline constexpr u32 native_pty_dormant_slave_read_block = 1;',
+        'inline constexpr u32 native_pty_master_slave_closed_eio = 1;',
+        'inline constexpr u32 native_pty_ptmx_hangup_discard = 1;',
+        'inline constexpr u32 native_pty_raw_hangup_drain = 1;',
         'inline constexpr u32 native_pty_scm_rights = 0;',
-        'inline constexpr u32 native_pty_linux_creation = 0;',
-        'inline constexpr u32 native_pty_slave_reopen = 0;',
-        'inline constexpr u32 native_pty_termios = 0;',
-        'inline constexpr u32 native_pty_controlling_terminal = 0;',
-        'inline constexpr u32 native_pty_terminal_signals = 0;',
-        'inline constexpr u32 native_pty_job_control = 0;',
-        'inline constexpr u32 native_pty_devpts = 0;',
+        'inline constexpr u32 native_pty_linux_creation = 1;',
+        'inline constexpr u32 native_pty_slave_reopen = 1;',
+        'inline constexpr u32 native_pty_termios = 1;',
+        'inline constexpr u32 native_pty_controlling_terminal = 1;',
+        'inline constexpr u32 native_pty_terminal_signals = 1;',
+        'inline constexpr u32 native_pty_job_control = 1;',
+        'inline constexpr u32 native_pty_devpts = 1;',
         'inline constexpr u32 native_pty_smp = 0;',
         '} // namespace ok::user',
     ]
@@ -357,6 +376,262 @@ def validate_native_pty_profile(headers: Path) -> None:
         if definitions != ["#define " + name + " " + value] or any(
                 re.match(r"#\s*undef\s+" + re.escape(name) + r"(?:\s|$)", line) for line in directives):
             raise ValueError("kernel SDK native PTY UAPI mismatch: " + name)
+
+
+NATIVE_TTY_PROFILE = "bootcpu-ntty-template-console-pts8-devfs-ptmx-tty-console-v1"
+NATIVE_TTY_PROFILE_HEADER = "ok/user/native_tty_profile.hpp"
+# Terminal objects, the N_TTY template, the device nodes and the open path;
+# hashed admission dependencies, not evidence that a target ran a terminal.
+NATIVE_TTY_HEADERS = (
+    NATIVE_TTY_PROFILE_HEADER, "ok/tty/termios.hpp", "ok/tty/n_tty.hpp",
+    "ok/sched/terminal.hpp", "ok/sched/terminal_open.hpp", "ok/sched/raw_pty_transport.hpp",
+    "ok/sched/scheduler.hpp", "ok/fs/terminal_node.hpp", "ok/fs/devfs.hpp",
+    "ok/abi/linux_termios.hpp", "ok/abi/linux_profile_data.hpp",
+    "ok/user/console_control_dispatch.hpp", "ok/uapi/termios.h", "ok/uapi/syscall.h",
+    "ok/core/module.hpp", "ok/core/types.hpp",
+)
+NATIVE_TTY_DEFINES = {
+    "OK_NATIVE_TTY_VERSION": "1", "OK_TCGETS": "0x5401U", "OK_TCSETS": "0x5402U",
+    "OK_TCSETSW": "0x5403U", "OK_TCSETSF": "0x5404U", "OK_TCSBRK": "0x5409U",
+    "OK_TCFLSH": "0x540bU", "OK_TIOCGWINSZ": "0x5413U", "OK_TIOCSWINSZ": "0x5414U",
+    "OK_FIONREAD": "0x541bU", "OK_TIOCNOTTY": "0x5422U", "OK_TIOCGPTN": "0x80045430U",
+    "OK_TIOCSPTLCK": "0x40045431U", "OK_PTS_MAJOR": "136U", "OK_PTS_CAPACITY": "8U",
+    "OK_O_NOCTTY": "0x0100U", "OK_EINTR": "4", "OK_ENXIO": "6", "OK_ENOSPC": "28",
+}
+NATIVE_TERMIOS_DEFINES = {
+    "OK_NCCS": "19", "OK_VINTR": "0", "OK_VQUIT": "1", "OK_VERASE": "2", "OK_VKILL": "3",
+    "OK_VEOF": "4", "OK_VTIME": "5", "OK_VMIN": "6", "OK_VSWTC": "7", "OK_VSTART": "8",
+    "OK_VSTOP": "9", "OK_VSUSP": "10", "OK_VEOL": "11", "OK_VREPRINT": "12",
+    "OK_VDISCARD": "13", "OK_VWERASE": "14", "OK_VLNEXT": "15", "OK_VEOL2": "16",
+    "OK_ICRNL": "0x00000100U", "OK_IXON": "0x00000400U", "OK_IUTF8": "0x00004000U",
+    "OK_OPOST": "0x00000001U", "OK_ONLCR": "0x00000004U", "OK_CS8": "0x00000030U",
+    "OK_CREAD": "0x00000080U", "OK_HUPCL": "0x00000400U", "OK_CLOCAL": "0x00000800U",
+    "OK_B38400": "0x0000000fU", "OK_B115200": "0x00001002U", "OK_ISIG": "0x00000001U",
+    "OK_ICANON": "0x00000002U", "OK_ECHO": "0x00000008U", "OK_ECHOE": "0x00000010U",
+    "OK_ECHOK": "0x00000020U", "OK_ECHONL": "0x00000040U", "OK_NOFLSH": "0x00000080U",
+    "OK_TOSTOP": "0x00000100U", "OK_ECHOCTL": "0x00000200U", "OK_ECHOKE": "0x00000800U",
+    "OK_IEXTEN": "0x00008000U", "OK_TCIFLUSH": "0", "OK_TCOFLUSH": "1", "OK_TCIOFLUSH": "2",
+}
+NATIVE_TERMIOS_RECORDS = {
+    "ok_termios": "{ uint32_t c_iflag; uint32_t c_oflag; uint32_t c_cflag; uint32_t c_lflag; "
+                  "uint8_t c_line; uint8_t c_cc[OK_NCCS]; }",
+    "ok_winsize": "{ uint16_t ws_row; uint16_t ws_col; uint16_t ws_xpixel; uint16_t ws_ypixel; }",
+}
+
+
+def uapi_contract_directives(path: Path, guard: str, conditions: list[str], label: str) -> tuple[str, list[str]]:
+    """Return comment-free code and directives of a C UAPI with a fixed conditional shape."""
+    source = path.read_text()
+    if (not source.isascii() or any(ord(c) < 32 and c not in "\t\n" for c in source) or
+            any(token in source for token in (chr(92), "??", "%:"))):
+        raise ValueError(f"kernel SDK {label} UAPI requires canonical ASCII lines")
+    code = re.sub(r"/\*.*?\*/|//[^\n]*", lambda match: re.sub(r"[^\n]", " ", match[0]),
+                  source, flags=re.DOTALL)
+    if "/*" in code or "*/" in code:
+        raise ValueError(f"kernel SDK {label} UAPI has unsupported syntax")
+    directives = [" ".join(line.split()) for line in code.split("\n") if line.lstrip().startswith("#")]
+    found = [line for line in directives if re.match(r"#\s*(?:if|ifdef|ifndef|elif|else|endif)\b", line)]
+    if (found != conditions or directives[:2] != ["#ifndef " + guard, "#define " + guard] or
+            directives[-1:] != ["#endif"] or any(re.match(r"#\s*undef\b", line) for line in directives)):
+        raise ValueError(f"kernel SDK {label} UAPI must be unconditional within its include guard")
+    if "#ifdef __cplusplus" in conditions:
+        # The language branches may hold only matching assertions; every pinned
+        # definition and record must sit outside them, where C consumers see it.
+        lines = [" ".join(line.split()) for line in code.split("\n")]
+        start = lines.index("#ifdef __cplusplus")
+        middle = lines.index("#else", start)
+        end = lines.index("#endif", middle)
+        cxx = [line for line in lines[start + 1:middle] if line]
+        c = [line for line in lines[middle + 1:end] if line]
+        if (not cxx or any(not re.fullmatch(r"static_assert\([^;{}]*\);", line) for line in cxx) or
+                c != ["_S" + line[1:] for line in cxx]):
+            raise ValueError(f"kernel SDK {label} UAPI language branches may hold only matching assertions")
+        code = "\n".join("" if start <= index <= end else line
+                         for index, line in enumerate(code.split("\n")))
+        directives = [" ".join(line.split()) for line in code.split("\n") if line.lstrip().startswith("#")]
+    return code, directives
+
+
+def require_uapi_defines(directives: list[str], defines: dict[str, str], label: str) -> None:
+    for name, value in defines.items():
+        definitions = [line for line in directives if re.match(r"#\s*define\s+" + re.escape(name) + r"(?:\s|\(|$)", line)]
+        if definitions != ["#define " + name + " " + value]:
+            raise ValueError(f"kernel SDK {label} UAPI mismatch: " + name)
+
+
+def require_uapi_records(code: str, records: dict[str, str], label: str) -> None:
+    flat = " ".join(code.split())
+    for name, body in records.items():
+        found = re.findall(r"\bstruct " + name + r"\s*(\{[^}]*\})\s*;", flat)
+        if [" ".join(item.replace("{", "{ ").replace("}", " }").replace(";", "; ").split()) for item in found] != [body] or \
+                len(re.findall(r"\bstruct " + name + r"\s*\{", flat)) != 1:
+            raise ValueError(f"kernel SDK {label} UAPI record mismatch: " + name)
+
+
+def validate_native_tty_profile(headers: Path) -> None:
+    """Admit the bounded N_TTY terminal set: the console and eight PTY slaves."""
+    for name in NATIVE_TTY_HEADERS:
+        if not (headers / name).is_file():
+            raise ValueError("kernel SDK native TTY header missing: " + name)
+    source = (headers / NATIVE_TTY_PROFILE_HEADER).read_text()
+    if (not source.isascii() or any(ord(c) < 32 and c not in "\t\n" for c in source) or
+            any(token in source for token in (chr(92), "??", "%:"))):
+        raise ValueError("kernel SDK native TTY profile requires canonical ASCII lines")
+    lines = [" ".join(line.split()) for line in source.split("\n") if line.strip()]
+    expected = [
+        '#pragma once',
+        '#include "ok/core/types.hpp"',
+        '#include <string_view>',
+        'namespace ok::user',
+        '{',
+        'inline constexpr std::string_view native_tty_profile = "bootcpu-ntty-template-console-pts8-devfs-ptmx-tty-console-v1";',
+        'inline constexpr u32 native_tty_version = 1;',
+        'inline constexpr u32 native_tty_module_abi = 81;',
+        'inline constexpr u32 native_tty_serialized_boot_cpu = 1;',
+        'inline constexpr u32 native_tty_terminal_capacity = 9;',
+        'inline constexpr u32 native_tty_pts_capacity = 8;',
+        'inline constexpr u32 native_tty_pts_major = 136;',
+        'inline constexpr u32 native_tty_read_capacity = 4096;',
+        'inline constexpr u32 native_tty_echo_capacity = 512;',
+        'inline constexpr u32 native_tty_master_queue_capacity = 4096;',
+        'inline constexpr u32 native_tty_signal_outbox_capacity = 8;',
+        'inline constexpr u32 native_tty_console_write_limit = 65536;',
+        'inline constexpr u32 native_tty_native_termios_bytes = 36;',
+        'inline constexpr u32 native_tty_native_nccs = 19;',
+        'inline constexpr u32 native_tty_winsize_bytes = 8;',
+        'inline constexpr u32 native_tty_linux_codec_revision = 3;',
+        'inline constexpr u32 native_tty_canonical = 1;',
+        'inline constexpr u32 native_tty_echo = 1;',
+        'inline constexpr u32 native_tty_isig = 1;',
+        'inline constexpr u32 native_tty_opost = 1;',
+        'inline constexpr u32 native_tty_iutf8 = 1;',
+        'inline constexpr u32 native_tty_vmin_vtime = 1;',
+        'inline constexpr u32 native_tty_pty_vtime = 1;',
+        'inline constexpr u32 native_tty_pty_ixon = 1;',
+        'inline constexpr u32 native_tty_console_compat_default = 1;',
+        'inline constexpr u32 native_tty_console_vtime = 0;',
+        'inline constexpr u32 native_tty_console_vhangup = 0;',
+        'inline constexpr u32 native_tty_console_ixon = 0;',
+        'inline constexpr u32 native_tty_parity = 0;',
+        'inline constexpr u32 native_tty_ixany_ixoff = 0;',
+        'inline constexpr u32 native_tty_imaxbel = 0;',
+        'inline constexpr u32 native_tty_case_mapping = 0;',
+        'inline constexpr u32 native_tty_vdiscard = 0;',
+        'inline constexpr u32 native_tty_baud_reprogramming = 0;',
+        'inline constexpr u32 native_tty_dev_tty = 1;',
+        'inline constexpr u32 native_tty_dev_console = 1;',
+        'inline constexpr u32 native_tty_dev_ptmx = 1;',
+        'inline constexpr u32 native_tty_pts_mode = 0620;',
+        'inline constexpr u32 native_tty_pts_owner_opener = 1;',
+        'inline constexpr u32 native_tty_grantpt_noop = 1;',
+        'inline constexpr u32 native_tty_locked_listed = 1;',
+        'inline constexpr u32 native_tty_separate_devpts_mount = 0;',
+        'inline constexpr u32 native_tty_stat_rdev_linux = 1;',
+        'inline constexpr u32 native_tty_stat_rdev_native = 0;',
+        'inline constexpr u32 native_tty_tiocgptpeer = 0;',
+        'inline constexpr u32 native_tty_packet_mode = 0;',
+        'inline constexpr u32 native_tty_tiocsti = 0;',
+        'inline constexpr u32 native_tty_termios2 = 0;',
+        'inline constexpr u32 native_tty_smp = 0;',
+        '} // namespace ok::user',
+    ]
+    if lines != expected:
+        raise ValueError("kernel SDK native TTY profile mismatch")
+    validate_module_abi(headers / "ok/core/module.hpp")
+    validate_uapi_version(headers / "ok/uapi/syscall.h")
+    _, directives = uapi_contract_directives(headers / "ok/uapi/syscall.h", "OK_UAPI_SYSCALL_H",
+                                             ["#ifndef OK_UAPI_SYSCALL_H", "#endif"], "native TTY")
+    require_uapi_defines(directives, NATIVE_TTY_DEFINES, "native TTY")
+    code, directives = uapi_contract_directives(
+        headers / "ok/uapi/termios.h", "OK_UAPI_TERMIOS_H",
+        ["#ifndef OK_UAPI_TERMIOS_H", "#ifdef __cplusplus", "#else", "#endif", "#endif"], "native termios")
+    require_uapi_defines(directives, NATIVE_TERMIOS_DEFINES, "native termios")
+    require_uapi_records(code, NATIVE_TERMIOS_RECORDS, "native termios")
+    validate_native_pty_profile(headers)
+    validate_native_console_control_profile(headers)
+
+
+NATIVE_JOB_CONTROL_PROFILE = "bootcpu-overlay-stop-cont-wuntraced-wcontinued-pgrp-wait-nocldstop-owed-kernel-v1"
+NATIVE_JOB_CONTROL_PROFILE_HEADER = "ok/user/native_job_control_profile.hpp"
+NATIVE_JOB_CONTROL_HEADERS = (
+    NATIVE_JOB_CONTROL_PROFILE_HEADER, "ok/sched/job_control.hpp", "ok/sched/child_exit.hpp",
+    "ok/sched/pending_signals.hpp", "ok/sched/process.hpp", "ok/sched/scheduler.hpp",
+    "ok/user/job_control_signals.hpp", "ok/user/native_signal_action.hpp",
+    "ok/uapi/job_control.h", "ok/uapi/signal.h", "ok/uapi/syscall.h",
+    "ok/core/module.hpp", "ok/core/types.hpp",
+)
+NATIVE_JOB_CONTROL_DEFINES = {
+    "OK_SIGHUP": "1", "OK_SIGINT": "2", "OK_SIGQUIT": "3", "OK_SIGCHLD": "17",
+    "OK_SIGCONT": "18", "OK_SIGSTOP": "19", "OK_SIGTSTP": "20", "OK_SIGTTIN": "21",
+    "OK_SIGTTOU": "22", "OK_SIGWINCH": "28", "OK_SIG_DFL": "0", "OK_SIG_IGN": "1",
+    "OK_NATIVE_SIGNAL_ACTION_VERSION": "1", "OK_WNOHANG": "1", "OK_WUNTRACED": "2",
+    "OK_WCONTINUED": "8",
+}
+NATIVE_JOB_CONTROL_RECORDS = {"ok_sigaction": "{ uint64_t handler; uint64_t flags; uint64_t mask; }"}
+
+
+def validate_native_job_control_profile(headers: Path) -> None:
+    """Admit serialized stop/continue, stop and continue waits and SIG_DFL/SIG_IGN native dispositions."""
+    for name in NATIVE_JOB_CONTROL_HEADERS:
+        if not (headers / name).is_file():
+            raise ValueError("kernel SDK native job control header missing: " + name)
+    source = (headers / NATIVE_JOB_CONTROL_PROFILE_HEADER).read_text()
+    if (not source.isascii() or any(ord(c) < 32 and c not in "\t\n" for c in source) or
+            any(token in source for token in (chr(92), "??", "%:"))):
+        raise ValueError("kernel SDK native job control profile requires canonical ASCII lines")
+    lines = [" ".join(line.split()) for line in source.split("\n") if line.strip()]
+    expected = [
+        '#pragma once',
+        '#include "ok/core/types.hpp"',
+        '#include <string_view>',
+        'namespace ok::user',
+        '{',
+        'inline constexpr std::string_view native_job_control_profile = "bootcpu-overlay-stop-cont-wuntraced-wcontinued-pgrp-wait-nocldstop-owed-kernel-v1";',
+        'inline constexpr u32 native_job_control_version = 1;',
+        'inline constexpr u32 native_job_control_module_abi = 81;',
+        'inline constexpr u32 native_job_control_serialized_boot_cpu = 1;',
+        'inline constexpr u32 native_job_control_process_capacity = 64;',
+        'inline constexpr u32 native_job_control_signal_max = 64;',
+        'inline constexpr u32 native_job_control_owed_kernel_records = 64;',
+        'inline constexpr u32 native_job_control_sigaction_bytes = 24;',
+        'inline constexpr u32 native_job_control_cld_stopped = 5;',
+        'inline constexpr u32 native_job_control_cld_continued = 6;',
+        'inline constexpr u32 native_job_control_stop_overlay = 1;',
+        'inline constexpr u32 native_job_control_wait_untraced = 1;',
+        'inline constexpr u32 native_job_control_wait_continued = 1;',
+        'inline constexpr u32 native_job_control_group_wait = 1;',
+        'inline constexpr u32 native_job_control_waitid_pgid = 1;',
+        'inline constexpr u32 native_job_control_nowait = 1;',
+        'inline constexpr u32 native_job_control_waitid_rv32_only = 1;',
+        'inline constexpr u32 native_job_control_nocldstop = 1;',
+        'inline constexpr u32 native_job_control_orphaned_stop_discard = 1;',
+        'inline constexpr u32 native_job_control_orphan_hangup = 1;',
+        'inline constexpr u32 native_job_control_same_session_continue = 1;',
+        'inline constexpr u32 native_job_control_native_dfl_ign = 1;',
+        'inline constexpr u32 native_job_control_init_protection = 1;',
+        'inline constexpr u32 native_job_control_owed_kernel_signals = 1;',
+        'inline constexpr u32 native_job_control_native_handlers = 0;',
+        'inline constexpr u32 native_job_control_native_masks = 0;',
+        'inline constexpr u32 native_job_control_native_child_sigchld = 0;',
+        'inline constexpr u32 native_job_control_broadcast = 0;',
+        'inline constexpr u32 native_job_control_ptrace = 0;',
+        'inline constexpr u32 native_job_control_core_dump = 0;',
+        'inline constexpr u32 native_job_control_smp = 0;',
+        '} // namespace ok::user',
+    ]
+    if lines != expected:
+        raise ValueError("kernel SDK native job control profile mismatch")
+    validate_module_abi(headers / "ok/core/module.hpp")
+    validate_uapi_version(headers / "ok/uapi/syscall.h")
+    _, directives = uapi_contract_directives(headers / "ok/uapi/syscall.h", "OK_UAPI_SYSCALL_H",
+                                             ["#ifndef OK_UAPI_SYSCALL_H", "#endif"], "native job control")
+    require_uapi_defines(directives, {"OK_NATIVE_JOB_CONTROL_VERSION": "1"}, "native job control")
+    code, directives = uapi_contract_directives(headers / "ok/uapi/job_control.h", "OK_UAPI_JOB_CONTROL_H",
+                                                ["#ifndef OK_UAPI_JOB_CONTROL_H", "#endif"], "native job control")
+    require_uapi_defines(directives, NATIVE_JOB_CONTROL_DEFINES, "native job control")
+    require_uapi_records(code, NATIVE_JOB_CONTROL_RECORDS, "native job control")
+    validate_native_termination_profile(headers)
+    validate_native_group_signal_profile(headers)
 
 
 NATIVE_METADATA_PROFILE = "checked-mode-root-owner-u32-v1"
@@ -386,7 +661,7 @@ def validate_native_metadata_profile(headers: Path) -> None:
                 "namespace ok::user", "{",
                 'inline constexpr std::string_view native_metadata_profile = "checked-mode-root-owner-u32-v1";',
                 "inline constexpr u32 native_metadata_version = 1;",
-                "inline constexpr u32 native_metadata_module_abi = 80;", "} // namespace ok::user"]
+                "inline constexpr u32 native_metadata_module_abi = 81;", "} // namespace ok::user"]
     if lines != expected:
         raise ValueError("kernel SDK native metadata profile mismatch")
     validate_module_abi(headers / "ok/core/module.hpp")
@@ -519,7 +794,7 @@ def validate_native_console_input_profile(headers: Path) -> None:
     lines = [" ".join(line.split()) for line in source.split("\n") if line.strip()]
     expected = ["#pragma once", '#include "ok/core/types.hpp"', "#include <string_view>",
                 "namespace ok::sched", "{",
-                'inline constexpr std::string_view native_console_input_profile = "pid1-issued-epoch-fork-exec-leader-revoke-noecho-v1";',
+                'inline constexpr std::string_view native_console_input_profile = "pid1-issued-epoch-fork-exec-leader-revoke-ntty-compat-default-v2";',
                 "inline constexpr u32 native_console_epoch_limit = 0x3fffffff;", "} // namespace ok::sched"]
     if lines != expected:
         raise ValueError("kernel SDK console input profile mismatch")
@@ -647,18 +922,18 @@ def validate_directory_create_profile(headers: Path) -> None:
     """Require the explicit bounded directory producer/consumer contract."""
     for name in DIRECTORY_CREATE_PROFILE_HEADERS:
         if not (headers / name).is_file():
-            raise ValueError("SDK80 directory-create contract header is missing: " + name)
+            raise ValueError("SDK81 directory-create contract header is missing: " + name)
     source = shared_file_contract_code((headers / DIRECTORY_CREATE_PROFILE_HEADER).read_text())
     name = "ext4_directory_create_profile"
     pattern = rf'^[ \t]*inline[ \t]+constexpr[ \t]+std::string_view[ \t]+{name}[ \t]*=[ \t]*"([^"\n]+)"[ \t]*;[ \t]*$'
     if contract_declaration_values(source, name, pattern) != [DIRECTORY_CREATE_PROFILE]:
-        raise ValueError("SDK80 directory-create profile mismatch")
-    for name, kind, expected in (("ext4_directory_create_module_abi", "u32", "80"),
+        raise ValueError("SDK81 directory-create profile mismatch")
+    for name, kind, expected in (("ext4_directory_create_module_abi", "u32", "81"),
                                  ("ext4_directory_create_home_capacity", "usize", "8"),
                                  ("ext4_directory_create_owner_buffers", "usize", "9")):
         pattern = rf"^[ \t]*inline[ \t]+constexpr[ \t]+{kind}[ \t]+{name}[ \t]*=[ \t]*([0-9]+)[ \t]*;[ \t]*$"
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK80 directory-create contract mismatch: " + name)
+            raise ValueError("SDK81 directory-create contract mismatch: " + name)
 
 
 UNIX_PATHNAME_PROFILE_HEADER = "ok/sched/unix_pathname_sdk_profile.hpp"
@@ -673,13 +948,13 @@ UNIX_PATHNAME_PROFILE_HEADERS = (
 def validate_unix_pathname_profile(headers: Path) -> None:
     for name in UNIX_PATHNAME_PROFILE_HEADERS:
         if not (headers / name).is_file():
-            raise ValueError("SDK80 UNIX pathname contract header is missing: " + name)
+            raise ValueError("SDK81 UNIX pathname contract header is missing: " + name)
     source = shared_file_contract_code((headers / UNIX_PATHNAME_PROFILE_HEADER).read_text())
     for name in ("native_unix_pathname_profile", "linux_unix_pathname_profile"):
         pattern = rf'^[ \t]*inline[ \t]+constexpr[ \t]+std::string_view[ \t]+{name}[ \t]*=[ \t]*"([^"\n]+)"[ \t]*;[ \t]*$'
         if contract_declaration_values(source, name, pattern) != [UNIX_PATHNAME_PROFILE]:
-            raise ValueError("SDK80 UNIX pathname profile mismatch: " + name)
-    for name, kind, expected in (("unix_pathname_module_abi", "u32", "80"),
+            raise ValueError("SDK81 UNIX pathname profile mismatch: " + name)
+    for name, kind, expected in (("unix_pathname_module_abi", "u32", "81"),
             ("unix_pathname_endpoint_capacity", "usize", "32"),
             ("unix_pathname_backlog_capacity", "usize", "4"),
             ("unix_pathname_address_capacity", "usize", "110"),
@@ -687,7 +962,7 @@ def validate_unix_pathname_profile(headers: Path) -> None:
             ("unix_pathname_peer_credentials_bytes", "usize", "12")):
         pattern = rf"^[ \t]*inline[ \t]+constexpr[ \t]+{kind}[ \t]+{name}[ \t]*=[ \t]*([0-9]+)[ \t]*;[ \t]*$"
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK80 UNIX pathname contract mismatch: " + name)
+            raise ValueError("SDK81 UNIX pathname contract mismatch: " + name)
 
 
 UDP_PROFILE_HEADER = "ok/net/native_udp_sdk_profile.hpp"
@@ -725,14 +1000,14 @@ def validate_futex_wake_operation_profile(headers: Path) -> None:
     """Require the explicit atomic-word two-key contract, without claiming execution."""
     for name in FUTEX_WAKE_OPERATION_PROFILE_HEADERS:
         if not (headers / name).is_file():
-            raise ValueError("SDK80 futex wake-operation contract header is missing: " + name)
+            raise ValueError("SDK81 futex wake-operation contract header is missing: " + name)
     source = shared_file_contract_code((headers / FUTEX_WAKE_OPERATION_PROFILE_HEADER).read_text())
     for name in ("native_futex_wake_operation_profile", "linux_futex_wake_operation_profile"):
         pattern = rf'^[ \t]*inline[ \t]+constexpr[ \t]+std::string_view[ \t]+{name}[ \t]*=[ \t]*"([^"\n]+)"[ \t]*;[ \t]*$'
         if contract_declaration_values(source, name, pattern) != [FUTEX_WAKE_OPERATION_PROFILE]:
-            raise ValueError("SDK80 futex wake-operation profile mismatch: " + name)
+            raise ValueError("SDK81 futex wake-operation profile mismatch: " + name)
     for name, kind, expected in (
-            ("native_futex_wake_operation_module_abi", "u32", "80"),
+            ("native_futex_wake_operation_module_abi", "u32", "81"),
             ("native_futex_wake_operation_word_bits", "usize", "32"),
             ("native_futex_wake_operation_operand_bits", "usize", "12"),
             ("native_futex_wake_operation_shift_bits", "usize", "5"),
@@ -746,7 +1021,7 @@ def validate_futex_wake_operation_profile(headers: Path) -> None:
             ("native_futex_wake_operation_cross_process_clone_vm", "u32", "0")):
         pattern = rf"^[ \t]*inline[ \t]+constexpr[ \t]+{kind}[ \t]+{name}[ \t]*=[ \t]*([0-9]+)[ \t]*;[ \t]*$"
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK80 futex wake-operation contract mismatch: " + name)
+            raise ValueError("SDK81 futex wake-operation contract mismatch: " + name)
 
 
 FUTEX_REQUEUE_PROFILE_HEADER = "ok/user/native_futex_requeue_sdk_profile.hpp"
@@ -762,14 +1037,14 @@ def validate_futex_requeue_profile(headers: Path) -> None:
     """Require the exact implemented source slice; metadata is not execution."""
     for name in FUTEX_REQUEUE_PROFILE_HEADERS:
         if not (headers / name).is_file():
-            raise ValueError("SDK80 futex requeue contract header is missing: " + name)
+            raise ValueError("SDK81 futex requeue contract header is missing: " + name)
     source = shared_file_contract_code((headers / FUTEX_REQUEUE_PROFILE_HEADER).read_text())
     for name in ("native_futex_requeue_profile", "linux_futex_requeue_profile"):
         pattern = rf'^[ \t]*inline[ \t]+constexpr[ \t]+std::string_view[ \t]+{name}[ \t]*=[ \t]*"([^"\n]+)"[ \t]*;[ \t]*$'
         if contract_declaration_values(source, name, pattern) != [FUTEX_REQUEUE_PROFILE]:
-            raise ValueError("SDK80 futex requeue profile mismatch: " + name)
+            raise ValueError("SDK81 futex requeue profile mismatch: " + name)
     for name, kind, expected in (
-            ("native_futex_requeue_module_abi", "u32", "80"),
+            ("native_futex_requeue_module_abi", "u32", "81"),
             ("native_futex_requeue_word_bits", "usize", "32"),
             ("native_futex_requeue_operation_count", "usize", "2"),
             ("native_futex_requeue_linux_operation", "usize", "3"),
@@ -791,7 +1066,7 @@ def validate_futex_requeue_profile(headers: Path) -> None:
     ):
         pattern = rf"^[ \t]*inline[ \t]+constexpr[ \t]+{kind}[ \t]+{name}[ \t]*=[ \t]*([0-9]+)[ \t]*;[ \t]*$"
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK80 futex requeue contract mismatch: " + name)
+            raise ValueError("SDK81 futex requeue contract mismatch: " + name)
 
 
 def shared_file_contract_code(source: str, preserve_strings: bool = True) -> str:
@@ -803,7 +1078,7 @@ def shared_file_contract_code(source: str, preserve_strings: bool = True) -> str
     approximating C++ raw-string restoration of preprocessing transformations.
     """
     if re.search(r"\\[ \t]*\r?\n", source):
-        raise ValueError("SDK80 contract markers cannot use physical line continuations")
+        raise ValueError("SDK81 contract markers cannot use physical line continuations")
     output: list[str] = []
     index = 0
     raw_start = re.compile(r'(?:u8|[uUL])?R"([^ ()\\\t\v\f\r\n]{0,16})\(')
@@ -821,7 +1096,7 @@ def shared_file_contract_code(source: str, preserve_strings: bool = True) -> str
         if source.startswith("/*", index):
             end = source.find("*/", index + 2)
             if end < 0:
-                raise ValueError("SDK80 contract has an unterminated comment")
+                raise ValueError("SDK81 contract has an unterminated comment")
             end += 2
             output.append(mask(source[index:end]))
             index = end
@@ -832,7 +1107,7 @@ def shared_file_contract_code(source: str, preserve_strings: bool = True) -> str
             end_token = ")" + raw[1] + '"'
             end = source.find(end_token, raw.end())
             if end < 0:
-                raise ValueError("SDK80 contract has an unterminated raw string")
+                raise ValueError("SDK81 contract has an unterminated raw string")
             end += len(end_token)
             output.append(mask(source[index:end]))
             index = end
@@ -842,10 +1117,10 @@ def shared_file_contract_code(source: str, preserve_strings: bool = True) -> str
             end = index + 1
             while end < len(source) and source[end] != quote:
                 if source[end] == "\n":
-                    raise ValueError("SDK80 contract has an invalid multiline quoted literal")
+                    raise ValueError("SDK81 contract has an invalid multiline quoted literal")
                 end += 2 if source[end] == "\\" else 1
             if end >= len(source):
-                raise ValueError("SDK80 contract has an unterminated quoted literal")
+                raise ValueError("SDK81 contract has an unterminated quoted literal")
             end += 1
             value = source[index:end]
             output.append(value if preserve_strings and quote == '"' else mask(value))
@@ -855,7 +1130,7 @@ def shared_file_contract_code(source: str, preserve_strings: bool = True) -> str
         index += 1
     code = "".join(output)
     if re.search(r"^[ \t\v\f]*(?:#|%:)[ \t\v\f]*(?:if|ifdef|ifndef|elif|else|endif|define|undef)\b", code, re.MULTILINE):
-        raise ValueError("SDK80 contract markers must be unconditional and free of local macros")
+        raise ValueError("SDK81 contract markers must be unconditional and free of local macros")
     return code
 
 
@@ -899,20 +1174,20 @@ def validate_shared_file_profile(headers: Path) -> None:
     """Require exact typed declarations in the named bounded contract header."""
     for name in SHARED_FILE_PROFILE_HEADERS:
         if not (headers / name).is_file():
-            raise ValueError("SDK80 shared-file contract header is missing: " + name)
+            raise ValueError("SDK81 shared-file contract header is missing: " + name)
     source = shared_file_contract_code((headers / SHARED_FILE_PROFILE_HEADER).read_text())
     for name, expected in (("native_shared_file_profile", NATIVE_SHARED_FILE_PROFILE),
                            ("linux_shared_file_profile", LINUX_SHARED_FILE_PROFILE)):
         pattern = rf'^[ \t]*inline[ \t]+constexpr[ \t]+std::string_view[ \t]+{name}[ \t]*=[ \t]*"([^"\n]+)"[ \t]*;[ \t]*$'
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK80 shared-file profile mismatch: " + name)
+            raise ValueError("SDK81 shared-file profile mismatch: " + name)
     # Profile v3 has no fixed file or page-count bound; the pool's quotas apply.
-    for name, kind, expected in (("native_shared_file_module_abi", "u32", "80"),
+    for name, kind, expected in (("native_shared_file_module_abi", "u32", "81"),
                                  ("native_shared_file_page_size", "usize", "4096"),
                                  ("native_shared_file_supported_seals", "u32", "15")):
         pattern = rf"^[ \t]*inline[ \t]+constexpr[ \t]+{kind}[ \t]+{name}[ \t]*=[ \t]*([0-9]+)[ \t]*;[ \t]*$"
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK80 shared-file contract marker mismatch: " + name)
+            raise ValueError("SDK81 shared-file contract marker mismatch: " + name)
 
 
 BOOT_ARCHIVE_RECEIPT_PREFIX = "[kernel-sdk] boot-archive-construction-v1 "
@@ -991,7 +1266,7 @@ def validate_tcp_profile(headers: Path) -> None:
     """Require real typed declarations for bounded client and prepared accept profiles."""
     for name in TCP_PROFILE_HEADERS:
         if not (headers / name).is_file():
-            raise ValueError("SDK80 TCP contract header is missing: " + name)
+            raise ValueError("SDK81 TCP contract header is missing: " + name)
     source = shared_file_contract_code((headers / TCP_PROFILE_HEADER).read_text())
     for name, expected in (("native_tcp_profile", NATIVE_TCP_PROFILE),
                            ("linux_tcp_profile", LINUX_TCP_PROFILE),
@@ -999,8 +1274,8 @@ def validate_tcp_profile(headers: Path) -> None:
                            ("linux_tcp_accept_profile", LINUX_TCP_ACCEPT_PROFILE)):
         pattern = rf'^[ \t]*inline[ \t]+constexpr[ \t]+std::string_view[ \t]+{name}[ \t]*=[ \t]*"([^"\n]+)"[ \t]*;[ \t]*$'
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK80 TCP profile mismatch: " + name)
-    for name, expected in (("native_tcp_module_abi", "80"), ("native_tcp_stream_capacity", "16"),
+            raise ValueError("SDK81 TCP profile mismatch: " + name)
+    for name, expected in (("native_tcp_module_abi", "81"), ("native_tcp_stream_capacity", "16"),
                            ("native_tcp_connection_capacity", "8"), ("native_tcp_listener_capacity", "4"),
                            ("native_tcp_backlog_capacity", "4"), ("native_tcp_send_capacity", "1024"),
                            ("native_tcp_receive_capacity", "1024"), ("native_tcp_segment_capacity", "536"),
@@ -1008,43 +1283,43 @@ def validate_tcp_profile(headers: Path) -> None:
         kind = "u32" if name == "native_tcp_module_abi" else "usize"
         pattern = rf"^[ \t]*inline[ \t]+constexpr[ \t]+{kind}[ \t]+{name}[ \t]*=[ \t]*([0-9]+)[ \t]*;[ \t]*$"
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK80 TCP contract marker mismatch: " + name)
+            raise ValueError("SDK81 TCP contract marker mismatch: " + name)
 
 
 def validate_udp_profile(headers: Path) -> None:
     """Require the existing bounded UDP values as actual typed declarations."""
     for name in UDP_PROFILE_HEADERS:
         if not (headers / name).is_file():
-            raise ValueError("SDK80 UDP contract header is missing: " + name)
+            raise ValueError("SDK81 UDP contract header is missing: " + name)
     source = shared_file_contract_code((headers / UDP_PROFILE_HEADER).read_text())
     for name, expected in (("native_udp_profile", NATIVE_UDP_PROFILE),
                            ("linux_udp_profile", LINUX_UDP_PROFILE),
                            ("native_udp_connected_profile", CONNECTED_UDP_PROFILE)):
         pattern = rf'^[ \t]*inline[ \t]+constexpr[ \t]+std::string_view[ \t]+{name}[ \t]*=[ \t]*"([^"\n]+)"[ \t]*;[ \t]*$'
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK80 UDP profile mismatch: " + name)
-    for name, expected in (("native_udp_module_abi", "80"), ("native_udp_socket_capacity", "16"),
+            raise ValueError("SDK81 UDP profile mismatch: " + name)
+    for name, expected in (("native_udp_module_abi", "81"), ("native_udp_socket_capacity", "16"),
                            ("native_udp_queue_capacity", "2"), ("native_udp_datagram_capacity", "1472"),
                            ("native_udp_frame_capacity", "1514")):
         kind = "u32" if name == "native_udp_module_abi" else "usize"
         pattern = rf"^[ \t]*inline[ \t]+constexpr[ \t]+{kind}[ \t]+{name}[ \t]*=[ \t]*([0-9]+)[ \t]*;[ \t]*$"
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK80 UDP contract marker mismatch: " + name)
+            raise ValueError("SDK81 UDP contract marker mismatch: " + name)
 
 
 def validate_common_profile(headers: Path) -> None:
     """Require actual typed declarations for the preserved ext4 common profile."""
     for name in COMMON_HEADERS:
         if not (headers / name).is_file():
-            raise ValueError("SDK80 common-opening header is missing: " + name)
+            raise ValueError("SDK81 common-opening header is missing: " + name)
     source = shared_file_contract_code((headers / COMMON_HEADERS[0]).read_text())
     pattern = r'^[ \t]*inline[ \t]+constexpr[ \t]+std::string_view[ \t]+ext4_common_opening_profile[ \t]*=[ \t]*"([^"\n]+)"[ \t]*;[ \t]*$'
     if contract_declaration_values(source, "ext4_common_opening_profile", pattern) != [COMMON_PROFILE]:
-        raise ValueError("SDK80 common-opening profile declaration mismatch")
-    for name, expected in (("ext4_common_module_abi", "80"), ("ext4_common_session_counter_bits", "64")):
+        raise ValueError("SDK81 common-opening profile declaration mismatch")
+    for name, expected in (("ext4_common_module_abi", "81"), ("ext4_common_session_counter_bits", "64")):
         pattern = rf"^[ \t]*inline[ \t]+constexpr[ \t]+u32[ \t]+{name}[ \t]*=[ \t]*([0-9]+)[ \t]*;[ \t]*$"
         if contract_declaration_values(source, name, pattern) != [expected]:
-            raise ValueError("SDK80 common-opening contract mismatch: " + name)
+            raise ValueError("SDK81 common-opening contract mismatch: " + name)
 
 
 def validate_image(arch: str, image_format: str, payload: bytes) -> None:
@@ -1136,8 +1411,8 @@ def validate_module_abi(header: Path) -> None:
     """Check one actual typed native ABI declaration in the hashed SDK header."""
     source = shared_file_contract_code(header.read_text())
     pattern = r"^[ \t]*inline[ \t]+constexpr[ \t]+u32[ \t]+kernel_module_abi_version[ \t]*=[ \t]*([0-9]+)[ \t]*;[ \t]*$"
-    if contract_declaration_values(source, "kernel_module_abi_version", pattern) != ["80"]:
-        raise ValueError("SDK80 requires the compiled native module ABI80 header")
+    if contract_declaration_values(source, "kernel_module_abi_version", pattern) != ["81"]:
+        raise ValueError("SDK81 requires the compiled native module ABI81 header")
 
 
 def validate_uapi_version(header: Path) -> None:
@@ -1150,11 +1425,11 @@ def validate_uapi_version(header: Path) -> None:
     if any(token in source for token in ('/*', '*/', '"', "'")):
         raise ValueError("kernel SDK UAPI version has unsupported syntax")
     directives = [" ".join(line.split()) for line in source.split("\n") if line.lstrip().startswith("#")]
-    for component, expected in (("MAJOR", "0"), ("MINOR", "16"), ("PATCH", "0")):
+    for component, expected in (("MAJOR", "0"), ("MINOR", "17"), ("PATCH", "0")):
         name = "OK_UAPI_VERSION_" + component
         definitions = [line for line in directives if re.match(r"#define " + name + r"(?:\s|\(|$)", line)]
         if definitions != ["#define " + name + " " + expected]:
-            raise ValueError(f"kernel SDK UAPI version requires UAPI 0.16.0: invalid {component.lower()} version")
+            raise ValueError(f"kernel SDK UAPI version requires UAPI 0.17.0: invalid {component.lower()} version")
 
 
 def validate_bios_extent(boot: bytes, image_size: int) -> int:
@@ -1177,7 +1452,7 @@ def export(args: argparse.Namespace) -> None:
     scheduler_contract = (args.headers / "ok/sched/scheduler.hpp").read_text()
     for declaration in ("user_init_pid = 1", "create_init_process(", "user_adoption_target("):
         if declaration not in scheduler_contract:
-            raise ValueError("SDK80 lacks designated init/adoption scheduler contract: " + declaration)
+            raise ValueError("SDK81 lacks designated init/adoption scheduler contract: " + declaration)
     validate_uapi_version(args.headers / "ok/uapi/syscall.h")
     validate_common_profile(args.headers)
     validate_udp_profile(args.headers)
@@ -1197,6 +1472,8 @@ def export(args: argparse.Namespace) -> None:
     validate_native_group_signal_profile(args.headers)
     validate_native_console_control_profile(args.headers)
     validate_native_pty_profile(args.headers)
+    validate_native_tty_profile(args.headers)
+    validate_native_job_control_profile(args.headers)
     validate_boot_archive_directory_profile(args.headers)
     validate_native_termination_profile(args.headers)
     output = args.output.resolve()
@@ -1221,7 +1498,7 @@ def export(args: argparse.Namespace) -> None:
             raise ValueError(f"compiler target {compiler_target} != {args.triple}")
         compiler_version = subprocess.check_output([str(args.compiler), "-dumpfullversion"], text=True).strip()
         manifest = {
-            "schema": 1, "kernel_version": args.version, "abi_version": 80,
+            "schema": 1, "kernel_version": args.version, "abi_version": 81,
             "arch": args.arch, "mode": args.mode, "triple": args.triple,
             "native_signal_profile": profile,
             "native_init_profile": "designated-pid1-native-linux-adoption-v2",
@@ -1236,6 +1513,8 @@ def export(args: argparse.Namespace) -> None:
             "native_group_signal_profile": NATIVE_GROUP_SIGNAL_PROFILE,
             "native_console_control_profile": NATIVE_CONSOLE_CONTROL_PROFILE,
             "native_pty_profile": NATIVE_PTY_PROFILE,
+            "native_tty_profile": NATIVE_TTY_PROFILE,
+            "native_job_control_profile": NATIVE_JOB_CONTROL_PROFILE,
             "terminal_reboot_backend": reboot_backend,
             "terminal_poweroff_backend": poweroff_backend,
             "boot_archive_directory_profile": BOOT_ARCHIVE_DIRECTORY_PROFILE,

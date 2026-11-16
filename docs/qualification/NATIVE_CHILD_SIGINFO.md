@@ -21,7 +21,11 @@ frame and user-copy transactions retain their existing ownership rules.
 
 The payload supplies CLD_EXITED or CLD_KILLED, group PID, real UID and typed status.
 User/system CPU fields remain explicitly unimplemented zeros. No CLD_DUMPED,
-stop/continue, ptrace, timer or queued-value payload is advertised. MIPS uses
+stop/continue, ptrace, timer or queued-value payload was advertised by this
+slice. Since WT2.2 `ChildExitStatus::stopped` and `continued` add CLD_STOPPED
+(5) and CLD_CONTINUED (6), whose status is the stopping signal or SIGCONT in
+the parent's numbering (see the [terminal contract](../modules/tty.md));
+CLD_DUMPED, ptrace, timer and queued-value payloads remain absent. MIPS uses
 SIGCHLD 18 and swapped code/errno offsets; the other profiles use SIGCHLD 17.
 The typed MIPS signal-128 representation is not a packed-wait compatibility claim.
 

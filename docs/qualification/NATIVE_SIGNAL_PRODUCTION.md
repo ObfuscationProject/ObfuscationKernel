@@ -16,9 +16,15 @@ user copies and mappings; they are not QEMU or physical execution.
 
 Process/thread queues, blocked masks, dispositions, altstack, architecture frame
 and sigreturn checks, synchronous waits, supported wait interruption/restart,
-SIGPIPE and child exit policy retain their existing implementation. No signal
-numbers or supported action flags change. Existing unsupported process-group,
-stop/continue and unqualified blocked-state sends retain EOPNOTSUPP. Hardware
+SIGPIPE and child exit policy retain their existing implementation. This slice
+changes no signal numbers or supported action flags. When this slice landed,
+unsupported process-group, stop/continue and unqualified blocked-state sends
+returned EOPNOTSUPP. Since WT2.2, kill, tkill, tgkill and group sends accept
+every signal number, including stop and continue signals (group-signal profile
+v3, `native_group_signal_stop_continue = 1`). EOPNOTSUPP remains only for
+`kill(-1)` and for a caught non-stop signal sent by a user to a Linux process
+whose unblocked threads are all in waits that cannot be interrupted; see §9.8
+of the [terminal contract](../modules/tty.md) and `TTY_JOB_CONTROL.md`. Hardware
 fault handling remains fatal SIGSEGV without catchable fault-specific siginfo.
 CPU-time fields are still zero. No general SMP, dynamic extension-state or POSIX
 conformance claim is added by making the bounded implementation available.

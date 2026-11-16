@@ -167,9 +167,51 @@ void retirement()
     Q::Delivery next;
     CHECK(queue.peek({}, next) && next.sequence > old.sequence && !queue.consume(old));
 }
+// CLD_STOPPED (5) and CLD_CONTINUED (6) carry a signal like CLD_KILLED (2);
+// only the trusted lifecycle path queues them and only as SIGCHLD.
+template<u32 Maximum> void job_reports()
+{
+    using Q=PendingSignals<Maximum,2>;using E=typename Q::Enqueue;constexpr u32 child=Maximum==128?18U:17U;
+    for(u32 signal:{0U,1U,Maximum,Maximum+1})
+    {
+        const bool in_range=signal&&signal<=Maximum;
+        CHECK(ChildExitStatus::stopped(signal).valid(Maximum)==in_range);
+        CHECK(ChildExitStatus::continued(signal).valid(Maximum)==in_range);
+        if(in_range)CHECK(ChildExitStatus::stopped(signal).code()==5&&ChildExitStatus::continued(signal).code()==6&&
+                          ChildExitStatus::stopped(signal).status()==static_cast<i32>(signal));
+    }
+    CHECK(ChildExitStatus::stopped(129)==ChildExitStatus{}&&ChildExitStatus::continued(0)==ChildExitStatus{});
+    CHECK(!ChildExitStatus::stopped(1).valid(32)&&!ChildExitStatus::continued(1).valid(0));
+    for(i32 code=-7;code<=8;++code)
+        for(i32 status:{-1,0,1,static_cast<i32>(Maximum),static_cast<i32>(Maximum+1)})
+        {
+            const PendingSignalInfo info{child,code,9,0,status};
+            const bool signal_code=(code==2||code==5||code==6)&&status>0&&static_cast<u32>(status)<=Maximum;
+            const bool exit_code=code==1&&status>=0&&status<=255;
+            const bool plain=(code==0||code==-6)&&status==0;
+            if(code!=PendingSignalInfo::timer_code(Maximum)&&code!=128)
+                CHECK(info.valid(Maximum)==(signal_code||exit_code||plain));
+            if(code==5||code==6)
+            {
+                const PendingSignalInfo other_signal{child+1,code,9,0,1},no_sender{child,code,0,0,1};
+                CHECK(!other_signal.valid(Maximum)&&!no_sender.valid(Maximum));
+            }
+        }
+    Q queue;CHECK(queue.reset({3,4,5}));typename Q::Delivery ticket{};
+    const PendingSignalInfo stopped{child,5,9,0,1},continued{child,6,9,0,1};
+    CHECK(queue.enqueue(stopped)==E::invalid&&queue.enqueue(continued)==E::invalid);
+    CHECK(queue.enqueue_child_exit(ChildExitStatus::stopped(Maximum+1),9,0)==E::invalid);
+    CHECK(queue.enqueue_child_exit(ChildExitStatus::stopped(Maximum),9,7)==E::queued);
+    CHECK(queue.enqueue_child_exit(ChildExitStatus::continued(1),9,7)==E::coalesced);
+    CHECK(queue.peek({},ticket)&&ticket.info==(PendingSignalInfo{child,5,9,7,static_cast<i32>(Maximum)}));
+    CHECK(queue.consume(ticket));CHECK(queue.enqueue_child_exit(ChildExitStatus::continued(1),9,7)==E::queued);
+    CHECK(queue.peek({},ticket)&&ticket.info==(PendingSignalInfo{child,6,9,7,1})&&queue.consume(ticket));
+    std::printf("PASS pending job reports maximum=%u\n",Maximum);
+}
 int main()
 {
     retirement();
+    job_reports<64>();job_reports<128>();
     boundaries<64>();boundaries<128>();exhaustion();
     random_model<64,1>();random_model<64,4>();random_model<64,32>();
     random_model<128,1>();random_model<128,4>();random_model<128,32>();

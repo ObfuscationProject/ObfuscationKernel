@@ -1088,6 +1088,7 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     const auto inherited_mask = kernel.scheduler().find_thread(pid, calling_tid)->native_signal_mask;
 #endif
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
+    const auto personality_before_exec = process->resources().personality;
     auto *pending_before_exec = private_signal_queue(*kernel.scheduler().find_thread(pid, calling_tid));
     const auto altstack_before_exec = *private_signal_altstack(*kernel.scheduler().find_thread(pid, calling_tid));
     std::array<RetainedEntryStack, sched::max_threads_per_process> old_signal_owners{};
@@ -1224,6 +1225,7 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     }
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
     private_signal_exec(kernel, *process, pending_before_exec, altstack_before_exec);
+    private_jobctl_exec(kernel, *process, personality_before_exec);
     for (usize index = 0; index < old_signal_owner_count; ++index)
         if (old_signal_owners[index].handle != process->threads()[0].entry_stack)
             private_signal_thread_retire(pid, old_signal_owners[index].owner.tid, old_signal_owners[index].handle);

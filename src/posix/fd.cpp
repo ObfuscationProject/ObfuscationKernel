@@ -63,7 +63,7 @@ Result<Fd> PosixService::openat_limited(Fd dirfd, std::string_view path, u32 fla
         return Status::not_initialized("POSIX service not initialized");
     }
     constexpr u32 allowed = o_WRONLY | o_RDWR | o_APPEND | o_NONBLOCK | o_CREAT | o_EXCL |
-                            o_NOFOLLOW | o_TRUNC | o_CLOEXEC | o_DIRECTORY;
+                            o_NOFOLLOW | o_TRUNC | o_CLOEXEC | o_DIRECTORY | o_NOCTTY;
     if ((flags & ~allowed) != 0 || (flags & 3u) == 3u ||
         (flags & (o_CREAT | o_DIRECTORY)) == (o_CREAT | o_DIRECTORY))
         return Status::invalid_argument("unsupported open flags or access mode");
@@ -140,6 +140,28 @@ Result<Fd> PosixService::openat_limited(Fd dirfd, std::string_view path, u32 fla
             return status;
         }
     }
+    // A terminal node becomes a terminal description through the scheduler,
+    // which re-validates it; the description never holds the node. O_TRUNC is
+    // ignored and the open-only flags are not kept (Linux do_dentry_open).
+    if (const auto terminal = node->terminal_node(); terminal.kind != fs::TerminalNodeKind::none)
+    {
+        if (auto status = resolved.value().release(); !status.ok())
+            return status;
+        const sched::TerminalOpenRequest request{
+            .node = terminal, .flags = flags & ~(o_CLOEXEC | o_NOCTTY | o_CREAT | o_EXCL | o_TRUNC),
+            .readable = is_readable(flags), .writable = is_writable(flags),
+            .no_controlling_terminal = (flags & o_NOCTTY) != 0, .large_file = max_regular_size > 0x7fff'ffffu,
+            .euid = euid(), .egid = egid()};
+        auto bound = scheduler_->open_terminal(getpid(), description.value(), request);
+        if (!bound)
+            return bound.status();
+        static_cast<void>(reserved->path.assign(path));
+        if (auto status = scheduler_->install_descriptor(resources(), fd.value(), description.value(),
+                                                         (flags & o_CLOEXEC) != 0);
+            !status.ok())
+            return status;
+        return fd.value();
+    }
     if (metadata.type == fs::NodeType::regular && metadata.size > max_regular_size)
         return Status::overflow("regular file exceeds selected open size policy");
     // Acquire the only node reference owned by this pending description before
@@ -170,7 +192,7 @@ Result<Fd> PosixService::openat_limited(Fd dirfd, std::string_view path, u32 fla
     entry.readable = is_readable(flags);
     entry.writable = is_writable(flags);
     entry.large_file = max_regular_size > 0x7fff'ffffu;
-    entry.flags = flags & ~o_CLOEXEC;
+    entry.flags = flags & ~(o_CLOEXEC | o_NOCTTY);
     // Append changes each write's destination, never the initial read position.
     // write() obtains the current EOF immediately before every append write.
     entry.offset = 0;
@@ -343,8 +365,7 @@ Result<DescriptorReadiness> PosixService::poll_description(u16 id, ReadyEvents r
     DescriptorReadiness ready{};
     if (entry->pty_endpoint)
     {
-        if constexpr (Policy == ReadinessPolicy::linux)
-            return Status::unsupported("raw PTY Linux readiness is outside the native candidate");
+        // Both personalities share the terminal mapping (docs/modules/tty.md section 10).
         auto state = scheduler_->pty_description_readiness(id);
         if (!state) return state.status();
         if (state.value().readable) ready.events |= requested & ReadyEvents::readable;
@@ -400,6 +421,8 @@ Result<DescriptorReadiness> PosixService::poll_description(u16 id, ReadyEvents r
     if (entry->input_console)
     {
         ready.console_input = true;
+        // Like n_tty_poll, whatever the access mode: the console always has room.
+        ready.events = requested & ReadyEvents::writable;
         return ready;
     }
     if (entry->console)
@@ -1066,19 +1089,47 @@ Result<i64> PosixService::ioctl(Fd fd, u64, u64)
     return Status::not_terminal("ioctl request is not implemented for this descriptor");
 }
 
-Status PosixService::console_control_descriptor(Fd fd) const
+Result<sched::TerminalSubject> PosixService::terminal_descriptor(Fd fd) const
 {
-    const auto *entry = descriptor(fd);
-    if (!entry || !entry->used) return Status::bad_descriptor("bad console descriptor");
-    if (!entry->console && !entry->input_console)
-        return Status::not_terminal("descriptor is not a native console description");
-    return {};
+    const auto *slot = resources().files.entry(fd);
+    if (!scheduler_ || !slot || !slot->used) return Status::bad_descriptor("bad terminal descriptor");
+    return scheduler_->terminal_subject(slot->description);
 }
 
-Result<i64> PosixService::console_control(Fd fd, sched::ConsoleControlOperation operation, i32 value)
+Status PosixService::terminal_check(const sched::TerminalSubject &subject, sched::ConsoleControlOperation operation)
 {
-    if (auto status = console_control_descriptor(fd); !status) return status;
-    return scheduler_->console_control(operation, value);
+    return scheduler_->terminal_check(subject, operation);
+}
+
+Result<sched::TerminalReply> PosixService::terminal_control(const sched::TerminalSubject &subject,
+                                                            const sched::TerminalRequest &request)
+{
+    return scheduler_->terminal_control(subject, request);
+}
+
+// The device node a terminal description was opened from (the console for
+// the boot stdio). The inode, device and timestamps need the attached device
+// filesystem to be mounted; without it the attribute-free status remains.
+FileStatus PosixService::terminal_file_status(const sched::TerminalStatus &terminal) const
+{
+    FileStatus status{.type = fs::NodeType::device, .size = 0, .mode = fs::mode_for(fs::NodeType::device, terminal.mode),
+                      .uid = terminal.uid, .gid = terminal.gid, .link_count = 1,
+                      .block_size = fs::metadata_block_size, .blocks = 0};
+    const auto *terminals = vfs_->terminal_namespace();
+    auto device = terminals ? vfs_->filesystem_device(terminals->provider())
+                            : Result<fs::FilesystemDevice>{Status::not_found("no terminal namespace")};
+    if (!device) return status;
+    auto &attributes = status.attributes;
+    attributes.inode = terminal.inode;
+    attributes.device = device.value();
+    attributes.special = terminal.rdev;
+    for (auto *time : {&attributes.access, &attributes.modification, &attributes.change})
+        *time = {.seconds = 0, .nanoseconds = 0, .source = fs::TimestampSource::kernel_fixed};
+    for (const auto field : {fs::Attribute::inode, fs::Attribute::device, fs::Attribute::special_device,
+                             fs::Attribute::blocks512, fs::Attribute::access_time, fs::Attribute::modification_time,
+                             fs::Attribute::change_time})
+        attributes.mark(field);
+    return status;
 }
 
 Result<FileStatus> PosixService::fstat(Fd fd) const
@@ -1088,6 +1139,9 @@ Result<FileStatus> PosixService::fstat(Fd fd) const
     {
         return Status::invalid_argument("bad file descriptor");
     }
+    const auto *slot = resources().files.entry(fd);
+    if (auto terminal = scheduler_->terminal_status(slot->description); terminal)
+        return terminal_file_status(terminal.value());
     if (entry->pty_endpoint)
         return FileStatus{.type = fs::NodeType::device,
             .mode = fs::mode_character_device | 0600u,
@@ -1108,7 +1162,6 @@ Result<FileStatus> PosixService::fstat(Fd fd) const
             .blocks = metadata.value().size / 512, .attributes = attributes,
             .provider = FileStatusProvider::volatile_shared_file};
     }
-    const auto *slot = resources().files.entry(fd);
     if (slot && slot->used && scheduler_->is_unix_socket(slot->description))
         return FileStatus{.type = fs::NodeType::socket, .mode = fs::mode_socket | 0600u,
                           .link_count = 1, .block_size = fs::metadata_block_size};
@@ -1122,19 +1175,6 @@ Result<FileStatus> PosixService::fstat(Fd fd) const
     if (entry->native_udp_handle)
         return FileStatus{.type = fs::NodeType::device, .mode = fs::mode_socket | 0600u,
                           .link_count = 1, .block_size = fs::metadata_block_size};
-    if (entry->console || entry->input_console)
-    {
-        return FileStatus{
-            .type = fs::NodeType::device,
-            .size = 0,
-            .mode = fs::mode_for(fs::NodeType::device, 0600u),
-            .uid = fs::default_uid,
-            .gid = fs::default_gid,
-            .link_count = 1,
-            .block_size = fs::metadata_block_size,
-            .blocks = 0,
-        };
-    }
     if (entry->node == nullptr)
     {
         return Status::invalid_argument("file descriptor has no backing node");

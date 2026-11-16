@@ -15,7 +15,7 @@
 namespace ok
 {
 static_assert(OK_UAPI_VERSION_MAJOR == 0);
-static_assert(OK_UAPI_VERSION_MINOR == 16);
+static_assert(OK_UAPI_VERSION_MINOR == 17);
 static_assert(OK_UAPI_X86_64_SYSCALL == 1);
 static_assert(OK_SYS_READ == static_cast<u64>(syscall::Number::read));
 static_assert(OK_SYS_WRITE == static_cast<u64>(syscall::Number::write));

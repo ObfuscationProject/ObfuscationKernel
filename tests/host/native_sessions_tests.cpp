@@ -133,7 +133,7 @@ void profile(Kernel &kernel, sched::ProcessId parent, sched::ProcessId other,
 
 int main()
 {
-    static_assert(OK_NATIVE_SESSIONS_VERSION == 3 && OK_ESRCH == 3);
+    static_assert(OK_NATIVE_SESSIONS_VERSION == 4 && OK_ESRCH == 3);
     static_assert(OK_SYS_SETSID == static_cast<u64>(N::setsid));
     static_assert(OK_SYS_SETPGID == static_cast<u64>(N::setpgid));
     static Kernel kernel; CHECK(kernel.boot({}));

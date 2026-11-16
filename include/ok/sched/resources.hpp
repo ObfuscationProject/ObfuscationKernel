@@ -1,5 +1,6 @@
 #pragma once
 #include "ok/arch/execution.hpp"
+#include "ok/fs/terminal_node.hpp"
 #include "ok/sched/raw_pty_transport.hpp"
 #include "ok/net/tcp_stream_handle.hpp"
 #include "ok/core/fixed.hpp"
@@ -84,6 +85,10 @@ struct OpenFileDescription
     // AF_UNIX stream endpoints receive from pipe and transmit to unix_write_pipe.
     u16 unix_write_pipe{invalid_description};
     private_pty::Handle pty_endpoint{}; // One canonical typed PTY endpoint; never console/pipe/UNIX backing.
+    // The device node a path open converted (fstat reports it); none for raw
+    // pairs and the boot stdio. Console I/O reads it only to exempt a
+    // /dev/console open from job control (Linux redirected_tty_write).
+    fs::TerminalNodeKind terminal_origin{};
     UnixEndpointHandle unix_endpoint{}; // One pathname endpoint owner per canonical OFD.
     u32 native_udp_handle{0}; // Zero is not a UDP socket; final OFD release retires the handle.
     net::TcpStreamHandle native_tcp_handle{}; // One stream owner per shared OFD.
@@ -266,7 +271,10 @@ enum class ThreadWaitReason : u8
     udp_receive = 11,
     tcp_stream = 12,
     pty_read = 13,
-    pty_write = 14
+    pty_write = 14,
+    // A terminal call parked by job control, keyed by terminal (0 console,
+    // 1 + PTY slot); it re-dispatches when the wait completes.
+    job_control = 15
 };
 
 struct ThreadLocalState

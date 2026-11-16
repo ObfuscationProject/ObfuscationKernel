@@ -241,6 +241,10 @@ void test_profile(Kernel &kernel, sched::ProcessId pid, LargeNode &large, usize 
     CHECK(slot && slot->close_on_exec);
     const auto *desc = kernel.scheduler().open_description(slot->description);
     CHECK(desc && desc->flags == (posix::o_RDWR | posix::o_CREAT | posix::o_EXCL | posix::o_NONBLOCK));
+    // O_NOCTTY is decoded (it gates a terminal open's acquisition) but is never
+    // kept in the description, so F_GETFL omits it.
+    CHECK(Open::decode(Open::no_ctty).value().native_flags == posix::o_NOCTTY);
+    CHECK(!(desc->flags & posix::o_NOCTTY) && !(Open::status_flags(*desc) & Open::no_ctty));
     const char data[] = "payload";
     const std::span<const std::byte> bytes{reinterpret_cast<const std::byte *>(data), sizeof(data) - 1};
     CHECK(kernel.posix().write(4, bytes).value() == sizeof(data) - 1);

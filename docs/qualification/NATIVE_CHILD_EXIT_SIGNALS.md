@@ -3,8 +3,10 @@
 The native runtime connects group completion to typed process-shared SIGCHLD
 and checked deferred autoreaping. Its initial qualification was private Debug.
 The ordinary successor uses `OK_NATIVE_SIGNAL_RUNTIME` in both build modes,
-with Debug traces selected separately. This remains an exit-only serialized
-boot-CPU subset, not full POSIX signals or a general SMP lifecycle implementation.
+with Debug traces selected separately. This slice qualified an exit-only
+serialized boot-CPU subset, not full POSIX signals or a general SMP lifecycle
+implementation; stopped/continued child events were added by WT2.2 (see
+`TTY_JOB_CONTROL.md`).
 All ten architecture profiles retain their existing frame/delivery paths.
 
 The final live thread causes one group completion. A caught SIGCHLD action
@@ -14,8 +16,14 @@ retains it in real_blocked. Explicit SIG_IGN suppresses automatic generation
 even when blocked and detaches the completed child. SA_NOCLDWAIT also detaches
 the child but preserves caught/default admission. Default ignore without that
 flag retains the ordinary waitable zombie. Actions are sampled at completion;
-later disposition changes do not sweep old zombies. SA_NOCLDSTOP is retained as
-an exit-only no-op. Retaining either flag on another signal has no child effect.
+later disposition changes do not sweep old zombies. This slice retained
+SA_NOCLDSTOP as an exit-only no-op. Since WT2.2 it suppresses CLD_STOPPED and
+CLD_CONTINUED SIGCHLD (Linux `do_notify_parent_cldstop`):
+`ChildExitLifecycle::notify_job_state` queues them to a Linux parent only when
+SIGCHLD is caught, or is default and blocked or held in real_blocked, and is
+neither SIG_IGN nor flagged SA_NOCLDSTOP. See §9.4 of the
+[terminal contract](../modules/tty.md) and `TTY_JOB_CONTROL.md`. Retaining
+either flag on another signal has no child effect.
 
 The parent owner slot carries an epoch, and the child records the actual fork
 caller TID. A departing parent thread rebinds its children to the lowest live
@@ -50,8 +58,10 @@ the same checked completion transaction with SIGKILL, preserving a waitable
 zombie or deferred autoreap according to parent policy. It reports cleanup
 failure before scheduler reaping or UI callbacks. Non-Linux administrative
 cleanup and unpublished rollback retain their previous policy. Synchronization,
-real CPU accounting, general orphan adoption, stop/continue/job control and
-MIPS signal128 wait status remain open. See `NATIVE_SIGNAL_PRODUCTION.md` for
+real CPU accounting, general orphan adoption and MIPS signal128 wait status
+remain open; stop/continue and job control have been implemented since WT2.2
+(see §9 of the [terminal contract](../modules/tty.md) and
+`TTY_JOB_CONTROL.md`). See `NATIVE_SIGNAL_PRODUCTION.md` for
 the successor qualification boundary.
 
 SDK ABI31 is retained: private owner growth changes no exported layout, and the
@@ -97,3 +107,5 @@ receipts. No replay is counted as another guest execution.
 Production flags, CPU accounting, stopped/continued child events, general
 orphan adoption, SMP and physical platform acceptance remain outside this
 exit-only integration. It does not close M3 or the M0-M12 workstation plan.
+Stopped/continued child events have been implemented since WT2.2
+(`TTY_JOB_CONTROL.md`); this integration's receipts do not cover them.

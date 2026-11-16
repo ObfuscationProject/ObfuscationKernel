@@ -9,6 +9,7 @@
 #include "ok/fs/mount_retention.hpp"
 #include "ok/fs/mount_snapshot.hpp"
 #include "ok/fs/persistent_sync_profile.hpp"
+#include "ok/fs/terminal_node.hpp"
 
 #include "ok/core/fixed.hpp"
 #include "ok/core/types.hpp"
@@ -228,6 +229,12 @@ class Node
     [[nodiscard]] virtual const void *filesystem_identity() const
     {
         return nullptr;
+    }
+    // A terminal device node (/dev/tty, /dev/console, /dev/ptmx, /dev/pts/N).
+    // open() converts it through the scheduler, which re-validates the node.
+    [[nodiscard]] virtual TerminalNode terminal_node() const
+    {
+        return {};
     }
     // A provider that caches file contents exposes the node-owned page cache;
     // null means uncached I/O through read/write.
@@ -597,6 +604,13 @@ class VirtualFileSystem final
     // Automatic selection is for inspection only. Directory handles retain an ID.
     static constexpr usize automatic_mount_id = ~usize{0};
     Result<FixedString<96>> directory_path(Node &directory, usize mount_id = automatic_mount_id);
+    // The scheduler's terminal namespace, attached once before the device
+    // filesystem is (DeviceFileSystem::attach_terminals); the same object again
+    // succeeds, another one is busy.
+    Status attach_terminal_namespace(TerminalNamespace &terminals);
+    [[nodiscard]] TerminalNamespace *terminal_namespace() const;
+    // The device number of a registered (mounted) filesystem identity.
+    [[nodiscard]] Result<FilesystemDevice> filesystem_device(const void *identity) const;
 
     // A certificate proves only that admission failed before provider effects.
     // Moving transfers the one enqueue attempt; it never grants an operation.
@@ -716,6 +730,7 @@ class VirtualFileSystem final
         usize socket_references{};
     };
     FilesystemIdentities<9> identities_{};
+    TerminalNamespace *terminals_{};
     IdentitySequence<> inode_sequence_{};
     FileSystemMode mode_{FileSystemMode::ram_only};
     std::array<RamNode, max_ram_nodes> nodes_{};

@@ -36,6 +36,8 @@ inline Status check_process_sessions_model(sched::SchedulerState &scheduler)
             user::send_process_group_signal<64>(scheduler, origin, 0x80000000U, 0,
                 [](user::ProcessSignalSender, sched::ProcessId, i32) -> i64 { return 0; }) != -3 ||
             user::send_process_group_signal<64>(scheduler, origin, 0, 19,
+                [](user::ProcessSignalSender, sched::ProcessId, i32 signal) -> i64 { return signal == 19 ? 0 : -22; }) != 0 ||
+            user::send_process_group_signal<64>(scheduler, origin, 0xffffffffU, 19,
                 [](user::ProcessSignalSender, sched::ProcessId, i32) -> i64 { return 0; }) != -95)
             return Status::fault("bounded process group signal selector model failed");
         if (auto status = scheduler.set_process_group(parent.value(), static_cast<i32>(child.value()), 0); !status)

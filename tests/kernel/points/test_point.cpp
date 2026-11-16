@@ -14,6 +14,7 @@
 #include "realtime_checks.hpp"
 #include "native_credentials_checks.hpp"
 #include "process_sessions_checks.hpp"
+#include "job_control_checks.hpp"
 #include "archive_directory_checks.hpp"
 #include "console_input_checks.hpp"
 #include "console_control_checks.hpp"
@@ -23,10 +24,12 @@
 #include "pipe_vector_checks.hpp"
 #include "unix_socketpair_checks.hpp"
 #include "native_pty_checks.hpp"
+#include "devfs_terminal_checks.hpp"
 #include "unix_path_checks.hpp"
 #include "guarded_read_checks.hpp"
 #include "mount_retention_checks.hpp"
 #include "mount_snapshot_checks.hpp"
+#include "n_tty_checks.hpp"
 #include "smp_lock_checks.hpp"
 #include <array>
 #include <span>
@@ -518,6 +521,10 @@ Result<usize> run_kernel_test_points(Kernel &kernel)
         return status;
     if (auto status = runner.check_status("console-control", "scalar-copy-wire-model", tests::check_console_control_wire_model()); !status.ok())
         return status;
+    if (auto status = runner.check_status("tty", "n-tty-line-discipline-model", tests::check_n_tty_line_discipline_model()); !status.ok())
+        return status;
+    if (auto status = runner.check_status("tty", "termios-codec-model", tests::check_termios_codec_model()); !status.ok())
+        return status;
 
     if (auto status = runner.check_status("futex-wake-operation", "algorithm-model", tests::check_futex_wake_operation_algorithm()); !status.ok())
         return status;
@@ -539,6 +546,10 @@ Result<usize> run_kernel_test_points(Kernel &kernel)
         return status;
     if (auto status = runner.check_status("native-pty", "scheduler-OFD-ownership-model", tests::check_native_pty_ownership_model(kernel.scheduler())); !status.ok())
         return status;
+    if (auto status = runner.check_status("devfs", "terminal-namespace-model", tests::check_devfs_terminal_namespace_model()); !status.ok())
+        return status;
+    if (auto status = runner.check_status("tty-open", "ptmx-pts-ctty-model", tests::check_tty_open_model(kernel.scheduler())); !status.ok())
+        return status;
     if (auto status = runner.check_status("pipe-write-fragment", "scheduler-model", tests::check_pipe_write_fragment(kernel.scheduler())); !status.ok())
         return status;
 
@@ -548,6 +559,8 @@ Result<usize> run_kernel_test_points(Kernel &kernel)
     if (auto status = runner.check_status("native-credentials", "PCB-copy-model", tests::check_native_credentials_model()); !status.ok())
         return status;
     if (auto status = runner.check_status("process-sessions", "scheduler-lifecycle-model", tests::check_process_sessions_model(kernel.scheduler())); !status.ok())
+        return status;
+    if (auto status = runner.check_status("job-control", "scheduler-overlay-orphan-model", tests::check_job_control_model(kernel.scheduler())); !status.ok())
         return status;
 
     if (auto status = test_architecture_profiles(runner); !status.ok())

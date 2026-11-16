@@ -46,7 +46,8 @@ struct Fixture
     {
         const memory::MemoryRegion region{reinterpret_cast<uptr>(backing.data()), backing.size(), memory::RegionType::usable};
         CHECK(frames.initialize({&region, 1}, 4096, frames_metadata.bytes));
-        CHECK(pool.activate(frames, user::native::NativePagePool::Source::linker_reserved, 2));
+        // The store's file and cell tables grow from the object reserve.
+        CHECK(pool.activate(frames, user::native::NativePagePool::Source::linker_reserved, 4));
         CHECK(store.bind(pool) && scheduler.set_shared_memory_files(store));
         CHECK(console.start() && posix.initialize(vfs, console, scheduler));
         baseline();
@@ -90,9 +91,9 @@ struct Fixture
         const auto value = store.ledger();
         CHECK(value.files == files && value.aliases == aliases);
         CHECK(!value.retained_frames && !value.retiring_files && !value.reserved_cells && value.first_cleanup_failure);
-        CHECK(pool.user_count() == pages && pool.used_count() == pages && !pool.object_count());
+        CHECK(pool.user_count() == pages && pool.used_count() == pages + pool.object_count());
         CHECK(!pool.pinned_count() && !pool.pending_count());
-        CHECK(frames.free_frames() + pages == frames.total_frames());
+        CHECK(frames.free_frames() + pool.used_count() == frames.total_frames());
     }
 };
 template<class Function> void test(Function function)

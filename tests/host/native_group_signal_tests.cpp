@@ -108,9 +108,13 @@ void profile_selector(Kernel &kernel, u64 sender)
         0, 0xfeedfaceffffffffULL, callback) == -22);
     expect(user::send_process_group_signal<Codec::max_signal>(kernel.scheduler(), origin,
         0, Codec::max_signal + 1, callback) == -22);
-    expect(user::send_process_group_signal<Codec::max_signal>(kernel.scheduler(), origin,
-        0, 2, callback) == -95);
     expect(calls == 0);
+    // Every signal number reaches each member's callback.
+    usize members = 0;
+    for (const auto &process : kernel.scheduler().processes()) members += process.process_group_id() == origin.group;
+    expect(members && user::send_process_group_signal<Codec::max_signal>(kernel.scheduler(), origin,
+        0, Codec::stop_signal, callback) == 0);
+    expect(calls == members);
 }
 
 void mixed_permission_and_zero(Kernel &kernel)
@@ -126,14 +130,18 @@ void mixed_permission_and_zero(Kernel &kernel)
     expect(native_kill(kernel, sender, negative(allowed), 0) == 0);
     expect(linux_kill(kernel, sender, negative(allowed), u64{0x12345678} << 32) == 0);
     expect(signal_owners() == owners && !native::private_signal_find(allowed) && !native::private_signal_find(denied));
-    expect(native_kill(kernel, sender, negative(allowed), 2) == -95);
+    // Native SIGINT terminates the native member at the next step; the denied
+    // Linux member is untouched.
+    expect(native_kill(kernel, sender, negative(allowed), 2) == 0);
+    expect(native::private_signal_find(allowed)->deferred_fatal == 2 && !native::private_signal_find(denied));
+    native::private_signal_find(allowed)->deferred_fatal = 0;
     expect(linux_kill(kernel, sender, negative(allowed), 65) == -22);
     expect(native_kill(kernel, sender, 0xffffffffU, 0) == -95);
     expect(linux_kill(kernel, sender, 0x80000000U, 0) == -3);
     expect(native_kill(kernel, sender, negative(sched::max_task_id), 0) == -3);
     // Linux group dispatch reaches an allowed native recipient; denied Linux peer stays live.
     expect(linux_kill(kernel, sender, negative(allowed), 15) == 0);
-    expect(native::private_signal_find(allowed)->native_termination == 15);
+    expect(native::private_signal_find(allowed)->deferred_fatal == 15);
     expect(!native::private_signal_find(denied));
     expect(kernel.scheduler().find(allowed)->state() != sched::ProcessState::zombie);
     native::private_process_signal_fatal(kernel);
@@ -156,11 +164,15 @@ void queued_linux_and_positive_regressions(Kernel &kernel)
     kernel.scheduler().find_thread(child, child)->native_signal_mask.set(15);
     expect(native_kill(kernel, sender, negative(child), 15) == 0);
     auto *state = native::private_signal_find(child); CHECK(state);
-    expect(state->shared.pending_mask().contains(15) && !state->native_termination && !state->group_kill);
+    expect(state->shared.pending_mask().contains(15) && !state->deferred_fatal && !state->group_kill);
     auto *wider = state->table.find(10); CHECK(wider); *wider = {}; wider->handler = 1;
     expect(linux_kill(kernel, sender, child, 10) == 0);
-    expect(native_kill(kernel, sender, child, 10) == -95);
-    expect(linux_kill(kernel, sender, negative(child), 10) == -95);
+    expect(native_kill(kernel, sender, child, 10) == 0);
+    expect(linux_kill(kernel, sender, negative(child), 10) == 0 && !state->shared.pending_mask().contains(10));
+    // A caught native signal is queued for the Linux recipient.
+    auto *caught = state->table.find(12); CHECK(caught);
+    *caught = {}; caught->handler = handler; caught->flags = 0x04000004; caught->restorer = handler + 4;
+    expect(native_kill(kernel, sender, negative(child), 12) == 0 && state->shared.pending_mask().contains(12));
     // Signal zero cannot overwrite or consume accepted pending TERM.
     const auto owners = signal_owners();
     expect(linux_kill(kernel, sender, negative(child), 0) == 0);
@@ -184,7 +196,7 @@ void self_and_blocked(Kernel &kernel)
     expect(kernel.scheduler().find(sender)->state() != sched::ProcessState::zombie);
     expect(kernel.scheduler().find_thread(sender, sender)->native_active);
     expect(kernel.scheduler().find(child)->state() == sched::ProcessState::blocked);
-    expect(native::private_signal_find(sender)->native_termination == 9 && native::private_signal_find(child)->group_kill);
+    expect(native::private_signal_find(sender)->deferred_fatal == 9 && native::private_signal_find(child)->group_kill);
     native::private_process_signal_fatal(kernel);
     for (auto pid : {sender, child})
     {

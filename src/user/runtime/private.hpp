@@ -4,6 +4,8 @@
 // exactly one definition in one unit, and all state is constant-initialized.
 #include "ok/user/native_signal_config.hpp"
 #include "ok/uapi/signal.h"
+#include "ok/uapi/job_control.h"
+#include "ok/user/job_control_signals.hpp"
 #include "../native_lifecycle.hpp"
 #include "../signals/private_signal_scheduler_relocation.hpp"
 #include "ok/user/native_signal_action.hpp"
@@ -117,6 +119,11 @@ namespace hw = arch::execution;
 namespace lu = abi::linux_user;
 using LinuxExec = lu::ExecBootstrap<lu::configured_native_profile()>;
 using Personality = sched::UserPersonality;
+// Job-control numbering of a personality; native numbers are Linux generic.
+[[nodiscard]] constexpr const job::Numbering &private_job_numbering(Personality personality)
+{
+    return personality == Personality::linux ? job::linux_numbering<lu::configured_native_profile()> : job::native;
+}
 void copy_bytes(void *dst, const void *src, usize size);
 using Pages = MappingPages;
 extern NativePagePool page_pool;
@@ -521,7 +528,18 @@ struct PtyWait
     sched::private_pty::Handle endpoint{};
     PipeVectors vectors{};
     bool writing{};
+    Personality personality{Personality::native}; // Captured at admission; the owner must keep it.
+    u64 origin{};          // Linux syscall origin capture that bound this wait (0: none).
+    u64 deadline{};        // VTIME expiry (monotonic ns), 0 when no timer runs.
+    u64 received_mark{};   // Slave bytes received when the interbyte timer was last armed.
+    u8 timer{};            // Armed VTIME length in deciseconds.
+    bool interbyte{};      // The timer restarts on new input (VMIN > 0).
+    sched::private_pty::ReadTimer vtime{}; // VTIME captured when the read first waited.
 };
+// A blocked PTY write would move a byte now or fail at once (signal readiness).
+bool pty_write_ready(Kernel &kernel, const PtyWait &wait);
+SyscallOrigins::PtyReadBinding pty_read_origin_binding(memory::ObjectHandle object, const PtyWait &wait);
+SyscallOrigins::PtyWriteBinding pty_write_origin_binding(memory::ObjectHandle object, const PtyWait &wait);
 constexpr usize pty_wait_capacity = memory::KernelEntryStackPool::capacity;
 using PtyWaitObjectsLayout = memory::ObjectPool<PtyWait, NativePagePool, 1>;
 constexpr usize pty_wait_object_pages =
@@ -664,20 +682,63 @@ i64 resume_pipe_write(Kernel &kernel, sched::ProcessControlBlock &process,
                      memory::ObjectHandle object, bool &complete);
 i64 begin_pipe_write(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadId tid,
                     i32 fd, u16 description_id, uptr input, usize count, bool &complete, const PipeVectors &vectors = {});
-// This first PTY runtime is native-only.
+// PTY reads and writes of both personalities. A Linux wait binds its syscall
+// origin when armed, so a caught signal can interrupt or restart it.
 memory::ObjectHandle pty_wait_object(sched::ProcessId pid, sched::ThreadId tid);
 void cancel_pty_waits(Kernel &kernel, sched::ProcessId pid, sched::ThreadId tid = 0);
+// Retires one PTY wait object (the signal family's interruption).
+void cancel_pty_wait(Kernel &kernel, memory::ObjectHandle object, std::string_view outcome = "cancelled", i64 result = -125);
+// Completes PTY reads whose VTIME timer ran out (they retry with the timer
+// expired); true while a timer still runs.
+bool expire_tty_timers(Kernel &kernel, u64 now);
 void prune_pty_waits(Kernel &kernel);
 i64 resume_pty_io(Kernel &kernel, sched::ProcessControlBlock &process,
                   memory::ObjectHandle object, bool &complete);
 i64 begin_pty_io(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadId tid,
                  i32 fd, u16 description_id, uptr address, usize count, bool writing,
                  bool &complete, const PipeVectors &vectors = {});
+// Terminals (tty.cpp). Console ingress runs the line discipline and emits its
+// echo; writes go through OPOST and return the full count (at most 64 KiB per
+// call); reads copy out before they consume. Every path drains the terminal
+// outbox, as do the top of step() and the exit commit.
+void tty_console_input(Kernel &kernel, char value, sched::WakeSource source);
+// Writes check TOSTOP first; `fd` and `complete` serve a job-control park.
+// A description opened through /dev/console skips the job-control check of
+// reads and writes (Linux redirected_tty_write).
+i64 tty_console_write(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &caller,
+                      const sched::OpenFileDescription &description, std::span<const PipeVector> vectors, i32 fd,
+                      bool &complete);
+// `arguments`/`vectored`: the read or readv call a Linux wait binds.
+i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &caller,
+                     const sched::OpenFileDescription &description, std::span<const PipeVector> vectors,
+                     bool &complete, const std::array<uptr, 6> &arguments, bool vectored);
+// Native terminal ioctls (struct ok_termios); Linux uses TtyIoctlCodec in linux_bootstrap.hpp.
+i64 tty_terminal_control(Kernel &kernel, sched::ProcessControlBlock &process, const std::array<uptr, 6> &arguments,
+                         bool &complete);
+// The job-control gate (docs/modules/tty.md section 9.6, Linux
+// __tty_check_change). It acts only when `ref` is the caller's controlling
+// terminal, has a foreground group and the caller is not in it. A write is
+// checked only under TOSTOP. `park`: the caller's group got SIGTTIN/SIGTTOU
+// and the call waits in ThreadWaitReason::job_control until a continue, a
+// foreground change or a signal ends the park; it then re-dispatches.
+enum class TtyAccess : u8 { read, write, change };
+enum class TtyGate : u8 { go, io_error, park };
+TtyGate tty_check(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread,
+                  sched::TerminalRef ref, TtyAccess access);
+// Parks the running `thread` (would_block with `parked` set).
+Status tty_park(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread,
+                sched::TerminalRef ref, i32 fd, bool &parked);
+// tty_check then tty_park: {} to go on, io_error, or the park.
+Status tty_gate(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread,
+                sched::TerminalRef ref, TtyAccess access, i32 fd, bool &parked);
+// Sends queued terminal signals; true when any outbox held entries.
+bool tty_drain_outbox(Kernel &kernel);
 
 memory::ObjectHandle child_wait_object(sched::ProcessId pid, sched::ThreadId tid);
 // Return a ready child PID, ECHILD, EFAULT, zero for WNOHANG, or EAGAIN
 // exclusively for a matching live child. Never retain a canonical PCB pointer.
-i64 child_wait_probe(Kernel &kernel, sched::ProcessId pid, const ChildWaitRequest &request);
+i64 child_wait_probe(Kernel &kernel, sched::ProcessId pid, const ChildWaitRequest &request,
+                     ChildWaitReport *report = nullptr);
 void cancel_child_wait(Kernel &kernel, memory::ObjectHandle object,
                        std::string_view outcome = "cancelled", i64 result = -125);
 void cancel_child_wait(Kernel &kernel, sched::ProcessId pid);
@@ -720,7 +781,9 @@ struct PrivateSignalActions
     sched::SignalActionTable table{};
     PrivateProcessQueue shared{};
     bool group_kill{};
-    u8 native_termination{};
+    // A fatal default decided at generation (native recipients, and Linux
+    // recipients that cannot take it in a thread); applied at the next step.
+    u8 deferred_fatal{};
     ChildExitLineage lineage{};
 };
 extern std::array<PrivateSignalActions, sched::max_processes> private_signal_actions;
@@ -785,13 +848,17 @@ bool private_signal_call(Kernel &kernel, sched::ProcessControlBlock &process,
 // Interval timers (timers.cpp). An expiry signal is sent, dropped as ignored
 // or by a departed target, or stays owed to the timer until a later step.
 enum class PrivateTimerSend : u8 { sent, ignored, departed, retry };
+// `replay`: a retry whose CONT/stop side effects already ran.
 PrivateTimerSend private_timer_signal(Kernel &kernel, sched::ProcessControlBlock &process,
-                                      sched::ThreadId tid, sched::PendingSignalInfo info);
+                                      sched::ThreadId tid, sched::PendingSignalInfo info, bool replay = false);
 bool private_timer_call(Kernel &kernel, sched::ProcessControlBlock &process,
                         sched::ThreadControlBlock &thread, i64 &result);
 bool private_timer_service(Kernel &kernel, u64 now);
 void private_timer_exec(sched::ProcessId pid);
 void private_timer_discard(Kernel &kernel, sched::ProcessId pid, u32 signal);
+// A CONT or stop discarded `signal`: an expiry still owed to its timer goes
+// with the queued records (Linux flushed the record it queued at expiry).
+void private_timer_discard_owed(sched::ProcessId pid, u32 signal);
 void private_timer_thread_exit(sched::ProcessId pid, sched::ThreadId tid, const PrivateSignalQueue &queue);
 // The signal's action is ignored now (SIG_IGN, or a default that ignores it).
 bool private_signal_ignored(Kernel &kernel, sched::ProcessId pid, u32 signal);
@@ -801,6 +868,102 @@ PrivateTimerCounters private_timer_counters();
 Status private_child_exit_commit(Kernel &kernel, PrivateChildExit::Completion &completion);
 
 bool private_child_reap(Kernel &kernel);
+// Job control (jobctl.cpp). Delivery consumed a default stop: an orphaned
+// group (or init) discards TSTP/TTIN/TTOU, otherwise the process stops and its
+// parent is notified. The settle pass applies a pending default stop that only
+// threads parked in waits can take, then ends each job-control park of a
+// running Linux process whose interrupting signal is gone.
+bool private_jobctl_discard_stop(Kernel &kernel, const sched::ProcessControlBlock &process, u32 signal);
+void private_jobctl_stop(Kernel &kernel, sched::ProcessControlBlock &process, u32 signal);
+void private_jobctl_settle(Kernel &kernel);
+void private_terminal_park_settle(Kernel &kernel);
+i64 private_signal_wait_enqueue(Kernel &kernel, sched::ProcessControlBlock &recipient, sched::ThreadControlBlock &target,
+                                sched::PendingSignalInfo info);
+bool private_signal_admit_blocked(Kernel &kernel, const sched::ProcessControlBlock &recipient,
+                                  const sched::ThreadControlBlock &target);
+// The first pending signal `thread` would take that interrupts a wait (not
+// ignored, not a default stop), when its action is supported.
+bool private_signal_interrupting(Kernel &kernel, const sched::ProcessControlBlock &process,
+                                 const sched::ThreadControlBlock &thread, u32 &signal, sched::SignalAction &action);
+// Terminal waits of Linux processes (jobctl.cpp): console reads and PTY reads
+// and writes whose syscall origin is bound. Data, EOF or room wins over a
+// signal; otherwise a caught signal gives EINTR (a partial write its count) or
+// a restart under SA_RESTART, and a terminating default ends the process.
+bool private_terminal_signal_owned(Kernel &kernel, const sched::ProcessControlBlock &process,
+                                   const sched::ThreadControlBlock &thread);
+bool private_terminal_signal_ready(Kernel &kernel, const sched::ProcessControlBlock &process,
+                                   const sched::ThreadControlBlock &thread);
+bool private_terminal_signal_complete(Kernel &kernel, sched::ProcessControlBlock &process,
+                                      sched::ThreadControlBlock &thread);
+// The generation core (Linux prepare_signal/complete_signal order) shared by
+// kill, tkill/tgkill, group kill, process timers and kernel senders. The
+// signal in `info` is in the recipient's numbering; callers have done lookup,
+// range, permission and the zero probe.
+enum class JobSignalOutcome : u8 { accepted, ignored, departed, retry, refused, exhausted, full, invalid, unavailable };
+struct JobSignalRequest
+{
+    sched::PendingSignalInfo info{};
+    sched::ThreadId named{};   // Its mask decides ignored generation; 0 names the leader.
+    bool directed{};           // Only `named` may take the signal (tkill, tgkill, SIGEV_THREAD_ID).
+    bool kernel{};             // A caught signal no thread can take now is retried, not refused.
+    bool replay{};             // Owed retry: the CONT/stop side effects already ran.
+};
+JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBlock &recipient,
+                                         const JobSignalRequest &request);
+// kill/tkill/tgkill errno of an outcome.
+[[nodiscard]] constexpr i64 private_job_signal_result(JobSignalOutcome outcome)
+{
+    switch (outcome)
+    {
+    case JobSignalOutcome::accepted: case JobSignalOutcome::ignored: case JobSignalOutcome::departed: return 0;
+    case JobSignalOutcome::full: return -11;
+    case JobSignalOutcome::invalid: return -22;
+    case JobSignalOutcome::exhausted: case JobSignalOutcome::unavailable: return -12;
+    default: return -95;
+    }
+}
+// tkill/tgkill admission of a blocked target: job-control signals and stopped
+// targets reach the generation core without interrupting the wait.
+bool private_jobctl_admit_blocked(Kernel &kernel, const sched::ProcessControlBlock &recipient,
+                                  const sched::ThreadControlBlock &target, i32 signal);
+// Kernel-originated signals (Linux SEND_SIG_PRIV): SI_KERNEL, no permission
+// check, `signal` in native numbering and translated per recipient. A caught
+// signal that only threads in uninterruptible waits could take is owed and
+// retried by private_jobctl_service at every step until a wait completes.
+// Exit, pid-slot reuse (epoch change), an exec into another personality,
+// SIG_IGN or the opposite CONT/stop drops it; a same-personality exec keeps it.
+enum class KernelSignalSend : u8 { sent, ignored, departed, owed };
+KernelSignalSend send_kernel_process_signal(Kernel &kernel, sched::ProcessId pid, u32 signal);
+struct KernelGroupSignal { u8 matched{}, sent{}, ignored{}, departed{}, owed{}; };
+KernelGroupSignal send_kernel_group_signal(Kernel &kernel, sched::ProcessId group, u32 signal);
+bool private_jobctl_service(Kernel &kernel);
+void private_jobctl_retire(sched::ProcessId pid);
+void private_jobctl_discard_owed(sched::ProcessId pid, u32 signal);
+// Linux is_ignored(): SIG_IGN or blocked by `thread`; native processes have
+// SIG_IGN only. `signal` is in native numbering.
+bool private_signal_ignored_or_blocked(Kernel &kernel, const sched::ProcessControlBlock &process,
+                                       const sched::ThreadControlBlock &thread, u32 signal);
+bool private_group_orphaned(Kernel &kernel, sched::ProcessId group);
+// Linux __tty_check_change for a background member of the terminal's session
+// (`signal` is native SIGTTIN or SIGTTOU). `restart` means the caller's group
+// got the signal and the caller stopped or has a signal that interrupts a
+// park; otherwise the result is io_error (init drops its stop).
+enum class BackgroundAccess : u8 { allowed, io_error, restart };
+BackgroundAccess private_terminal_background(Kernel &kernel, sched::ProcessControlBlock &caller,
+                                             sched::ThreadControlBlock &thread, u32 signal);
+// Parks the running `thread` in ThreadWaitReason::job_control under `key` and,
+// for Linux, binds the park to its syscall origin; -11 with `complete` false.
+i64 private_job_control_park(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread,
+                             u64 key, i32 fd, bool &complete);
+// Native rt_sigaction: SIG_DFL and SIG_IGN only (ok/uapi/job_control.h).
+i64 native_signal_action(Kernel &kernel, sched::ProcessControlBlock &process, const std::array<uptr, 6> &arguments);
+// Exec: SIG_IGN kept under the new numbering (MIPS), except SIGCHLD in a
+// native image; owed kernel signals dropped on a personality change.
+void private_jobctl_exec(Kernel &kernel, sched::ProcessControlBlock &process, Personality previous);
+// The exit commit: init adoption, then the terminal outbox, then the
+// orphaned-group pass sending SIGHUP and SIGCONT (Linux kill_orphaned_pgrp).
+Status private_exit_commit(Kernel &kernel, sched::ProcessId pid, const PrivateChildExit::Completion &completion,
+                           const PrivateChildExit::Adoption &adoption);
 #endif
 void queue_pipe_sigpipe(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadId tid);
 bool finish_futex(Kernel &kernel, memory::ObjectHandle object, sched::WaitCompletion cause, i64 result);

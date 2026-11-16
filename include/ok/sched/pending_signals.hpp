@@ -40,7 +40,8 @@ struct PendingSignalInfo
         if (signal != (maximum_signal == 128 ? 18U : 17U) || !sender_pid || sender_pid > 0x7fffffffU)
             return false;
         return (code == 1 && child_status >= 0 && child_status <= 255) ||
-            (code == 2 && child_status > 0 && static_cast<u32>(child_status) <= maximum_signal);
+            ((code == 2 || code == 5 || code == 6) && child_status > 0 &&
+             static_cast<u32>(child_status) <= maximum_signal);
     }
 };
 

@@ -233,10 +233,19 @@ void permissions_and_lifecycle(Kernel &kernel)
         s->set_credentials(creds[match]); p->set_credentials({.uid=7,.euid=55,.suid=12});
         expect(kill(kernel, sender, g.peer, 0) == 0 && owners() == before);
     }
+    // A native recipient takes every signal: a terminating default is decided
+    // at generation. The probe still acquires nothing.
     p->resources().personality=sched::UserPersonality::native;
-    expect(kill(kernel,sender,g.peer,0)==0 && kill(kernel,sender,g.peer,10)==-95 && owners()==before);
+    expect(kill(kernel,sender,g.peer,0)==0 && owners()==before);
+    expect(kill(kernel,sender,g.peer,10)==0 && owners()==before+1 && native::private_signal_find(g.pid)->deferred_fatal==10);
+    native::private_signal_find(g.pid)->deferred_fatal=0;
     p->resources().personality=sched::UserPersonality::linux;
-    expect(kill(kernel,sender,g.pid,19)==-95 && kill(kernel,sender,g.pid,18)==-95 && owners()==before);
+    // SIGSTOP stops at generation (nothing is pending ahead of it); SIGCONT
+    // continues and leaves a WCONTINUED report.
+    expect(kill(kernel,sender,g.pid,19)==0 && p->job_control().stopped && kernel.scheduler().stopped_processes()==1);
+    expect(!shared(kernel,g).pending_mask().contains(19));
+    expect(kill(kernel,sender,g.pid,18)==0 && !p->job_control().stopped && p->job_control().continue_report);
+    expect(kernel.scheduler().stopped_processes()==0 && owners()==before+1);
     action(kernel, g, 10); expect(kill(kernel, sender, g.pid, 10) == 0);
     expect(kill(kernel,sender,(u64{1}<<32)|g.peer,(u64{1}<<32)|10)==0);
     auto *q = &shared(kernel, g); native::PrivateProcessQueue::Delivery ticket; expect(q->peek({}, ticket));
@@ -379,6 +388,10 @@ void blocked_fatal(Kernel &kernel)
         thread(kernel, g.pid, tid).syscall_pending = true;
     }
     expect(kill(kernel, sender, g.pid, 10) == -95);
+    // A terminating default no thread can take now is the Linux fatal shortcut.
+    expect(kill(kernel, sender, g.pid, 15) == 0 && native::private_signal_find(g.pid)->deferred_fatal == 15);
+    expect(!shared(kernel, g).pending_mask().contains(15));
+    native::private_signal_find(g.pid)->deferred_fatal = 0;
     for (auto &t : kernel.scheduler().find(g.pid)->threads()) t.native_signal_mask.set(10);
     expect(kill(kernel, sender, g.pid, 10) == 0 && shared(kernel, g).pending_mask().contains(10));
     const auto entries = mock::entries;

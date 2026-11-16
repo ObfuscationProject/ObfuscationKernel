@@ -468,32 +468,33 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
     const auto &a = decoded.value().arguments;
     if (is(Operation::ioctl))
     {
-        using Ioctl = lu::ConsoleIoctlCodec<Profile>;
-        std::optional<sched::ConsoleControlOperation> selected;
-        if (const auto operation = Ioctl::operation(a[1]))
-            switch (*operation)
-            {
-            case lu::ConsoleIoctlOperation::acquire: selected = sched::ConsoleControlOperation::acquire; break;
-            case lu::ConsoleIoctlOperation::get_sid: selected = sched::ConsoleControlOperation::get_session; break;
-            case lu::ConsoleIoctlOperation::get_pgrp: selected = sched::ConsoleControlOperation::get_foreground; break;
-            case lu::ConsoleIoctlOperation::set_pgrp: selected = sched::ConsoleControlOperation::set_foreground; break;
-            default: break;
-            }
-        const u64 argument = selected == sched::ConsoleControlOperation::acquire
-            ? static_cast<u32>(Ioctl::scalar_argument(a[2])) : a[2] & Codec::word_mask;
-        return console_control::dispatch<Codec::profile.big_endian>(
-            Ioctl::scalar_argument(a[0]), selected, argument,
-            [&](i32 fd) { return kernel.posix().console_control_descriptor(fd); },
-            [&](i32 fd, sched::ConsoleControlOperation operation, i32 value) {
-                return kernel.posix().console_control(fd, operation, value);
+        using Ioctl = lu::TtyIoctlCodec<Profile>;
+        using TerminalOperation = sched::ConsoleControlOperation;
+        std::optional<TerminalOperation> selected;
+        if (const auto operation = Ioctl::operation(a[1])) selected = static_cast<TerminalOperation>(*operation);
+        const auto fd = Ioctl::scalar_argument(a[0]);
+        bool parked = false;
+        const auto result = console_control::dispatch<Ioctl>(
+            fd, selected, a[2] & Codec::word_mask,
+            [&](i32 descriptor) { return kernel.posix().terminal_descriptor(descriptor); },
+            [&](const sched::TerminalSubject &subject, TerminalOperation operation) {
+                if (auto status = kernel.posix().terminal_check(subject, operation); !status) return status;
+                return native::terminal_request_gate(kernel, pid, subject, operation, fd, parked);
             },
             [&](u64 address, std::span<u8> bytes) {
                 return hw::copy_from_user(space, bytes.data(), static_cast<uptr>(address), bytes.size());
+            },
+            [&](const sched::TerminalSubject &subject, const sched::TerminalRequest &request) {
+                return kernel.posix().terminal_control(subject, request);
             },
             [&](u64 address, usize bytes) { return hw::user_range(space, static_cast<uptr>(address), bytes, true); },
             [&](u64 address, std::span<const u8> bytes) {
                 return hw::copy_to_user(space, static_cast<uptr>(address), bytes.data(), bytes.size());
             });
+        native::terminal_request_done(kernel);
+        // A job-control park re-dispatches this call; nothing is published.
+        if (parked) complete = false;
+        return result;
     }
     if (direct_message || (legacy_socketcall && (a[0] == 16 || a[0] == 17)))
     {
@@ -1170,25 +1171,44 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
     if (is(Operation::execve)) return shared(syscall::Number::execve);
     if (is(Operation::wait4))
     {
-        // Linux pid_t/options remain 32-bit scalars on LP64.
-        if ((static_cast<u32>(a[2]) & ~1U) || a[3]) return -22;
-        const native::ChildWaitRequest request{static_cast<i32>(a[0]), static_cast<uptr>(a[1]),
-            (static_cast<u32>(a[2]) & 1U) != 0, false, Codec::profile.big_endian};
+        // Linux pid_t/options remain 32-bit scalars on LP64. WNOHANG 1,
+        // WUNTRACED 2 and WCONTINUED 8; rusage is not implemented.
+        const u32 options = static_cast<u32>(a[2]);
+        const i32 selector = static_cast<i32>(a[0]);
+        if ((options & ~11U) || a[3]) return -22;
+        if (selector == (-2147483647 - 1)) return -3;
+        native::ChildWaitRequest request{selector, static_cast<uptr>(a[1]), (options & 1U) != 0, false,
+            Codec::profile.big_endian};
+        // Selector 0 names the caller's group when the call is made.
+        if (selector == 0) request.group = process->process_group_id();
+        else if (selector < -1) request.group = static_cast<u32>(-static_cast<i64>(selector));
+        request.stopped = (options & 2U) != 0;
+        request.continued = (options & 8U) != 0;
+        request.raw_options = options;
         return native::begin_child_wait(kernel, pid, request, complete);
     }
     if (is(Operation::waitid))
     {
-        // RV32 musl implements waitpid through waitid. This remains the
-        // WEXITED/P_ALL/P_PID subset; no groups, rusage, stops or WNOWAIT.
+        // RV32 musl implements waitpid through waitid: P_ALL, P_PID and
+        // P_PGID (0 = the caller's group); WEXITED 4, WSTOPPED 2, WCONTINUED
+        // 8, WNOHANG 1 and WNOWAIT 0x01000000. No rusage.
         if constexpr (Profile != lu::Profile::rv32) return -38;
         else
         {
             const u32 kind = static_cast<u32>(a[0]), id = static_cast<u32>(a[1]);
             const u32 options = static_cast<u32>(a[3]);
-            if (kind > 1 || (kind == 1 && (id == 0 || id > 0x7fffffffU)) ||
-                (options & ~5U) || !(options & 4U) || a[4]) return -22;
-            const native::ChildWaitRequest request{kind == 0 ? -1 : static_cast<i32>(id),
+            constexpr u32 nowait = 0x01000000U;
+            if (kind > 2 || (kind == 1 && (id == 0 || id > 0x7fffffffU)) || (kind == 2 && id > 0x7fffffffU) ||
+                (options & ~(15U | nowait)) || !(options & 14U) || a[4]) return -22;
+            native::ChildWaitRequest request{kind == 0 ? -1 : static_cast<i32>(id),
                 static_cast<uptr>(a[2]), (options & 1U) != 0, true, Codec::profile.big_endian};
+            if (kind == 2) request.group = id ? id : process->process_group_id();
+            request.exited = (options & 4U) != 0;
+            request.stopped = (options & 2U) != 0;
+            request.continued = (options & 8U) != 0;
+            request.nowait = (options & nowait) != 0;
+            request.idtype = static_cast<u8>(kind);
+            request.raw_options = options;
             return native::begin_child_wait(kernel, pid, request, complete);
         }
     }
@@ -1206,8 +1226,8 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
         FixedString<256> path;
         if (auto status = copy_pathname(space, static_cast<uptr>(a[relative ? 1 : 0]), path); !status.ok())
             return -syscall::ErrnoMapper::errno_for(status);
-        // No controlling-terminal acquisition exists in the common descriptor
-        // service, so O_NOCTTY imposes no additional action here.
+        // O_NOCTTY is decoded into the native flag: the common service skips
+        // the automatic controlling-terminal acquisition of a /dev/pts open.
         auto opened = kernel.posix().openat_limited(dirfd, path.view(), request.value().native_flags,
                                                     mode & 07777u, Open::max_regular_size(request.value()));
         return opened ? static_cast<i64>(opened.value()) : -syscall::ErrnoMapper::errno_for(opened.status());
@@ -1356,6 +1376,9 @@ template <lu::Profile Profile> Status complete(hw::UserFrame &frame, i64 result)
     using Codec = lu::Codec<Profile>;
     using Bridge = lu::NativeBridge<Profile>;
     using Operation = lu::Operation;
+    // Terminal opens return ENXIO and ENOSPC unchanged: both are one number on
+    // every profile, MIPS included.
+    static_assert(*Codec::errno_number(lu::Error::e_nxio) == 6 && *Codec::errno_number(lu::Error::e_nospc) == 28);
     if constexpr (Codec::profile.word_bytes == 4 &&
                   Codec::profile.error_convention == lu::ErrorConvention::negative)
     {

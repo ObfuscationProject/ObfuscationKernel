@@ -212,6 +212,37 @@ void profile(Kernel &kernel, sched::ProcessId pid, usize number_slot, std::array
             wait = call(lu::Operation::wait4, {high | 0xffffffffU, hw::user_begin, high | 1U, 0}, -10);
             CHECK(std::get<0>(wait) == -10 && std::get<1>(wait) == 0);
         }
+        // WUNTRACED 2 and WCONTINUED 8; any other option and INT_MIN fail first.
+        constexpr uptr status_at = hw::user_begin + 192;
+        const auto status = [&] {
+            u32 value = 0;
+            for (usize i = 0; i < 4; ++i)
+                value |= std::to_integer<u32>(mock::memory[status_at - hw::user_begin + i]) <<
+                    (8 * (lu::Codec<P>::profile.big_endian ? 3 - i : i));
+            return value;
+        };
+        CHECK(std::get<0>(call(lu::Operation::wait4, {static_cast<uptr>(-1), status_at, 4, 0})) == -22);
+        CHECK(std::get<0>(call(lu::Operation::wait4, {static_cast<uptr>(-1), status_at, 0x10, 0})) == -22);
+        CHECK(std::get<0>(call(lu::Operation::wait4, {0x80000000U, status_at, 1, 0})) == -3);
+        constexpr u32 stop = user::job::linux_numbering<P>.stop;
+        auto stopped = kernel.posix().fork(pid); CHECK(stopped);
+        CHECK(kernel.scheduler().stop_process(stopped.value(), stop));
+        // Without WUNTRACED a stopped child is not reported.
+        CHECK(std::get<0>(call(lu::Operation::wait4, {stopped.value(), status_at, 1, 0})) == 0);
+        CHECK(std::get<0>(call(lu::Operation::wait4, {stopped.value(), status_at, 3, 0})) == static_cast<i64>(stopped.value()));
+        CHECK(status() == ((stop << 8) | 0x7fU));
+        CHECK(std::get<0>(call(lu::Operation::wait4, {stopped.value(), status_at, 3, 0})) == 0);
+        CHECK(kernel.scheduler().continue_process(stopped.value()));
+        // Selector 0 is the caller's group; the report is consumed once.
+        CHECK(std::get<0>(call(lu::Operation::wait4, {0, status_at, 9, 0})) == static_cast<i64>(stopped.value()));
+        CHECK(status() == 0xffffU);
+        CHECK(std::get<0>(call(lu::Operation::wait4, {0, status_at, 9, 0})) == 0);
+        const auto group = kernel.scheduler().find(pid)->process_group_id();
+        CHECK(kernel.posix().exit(stopped.value(), 5));
+        CHECK(std::get<0>(call(lu::Operation::wait4, {static_cast<uptr>(-static_cast<i64>(group + 1000)), status_at, 1, 0})) == -10);
+        CHECK(std::get<0>(call(lu::Operation::wait4, {static_cast<uptr>(-static_cast<i64>(group)), status_at, 0, 0})) ==
+              static_cast<i64>(stopped.value()));
+        CHECK(status() == (5U << 8) && !kernel.scheduler().find(stopped.value()));
     }
     std::printf("PASS hosted Linux process %s: identity/TID, selected clone/fork routing, EAGAIN vs EOVERFLOW, exec forwarding and typed wait completion\n", lu::Codec<P>::profile.name);
 }
@@ -251,8 +282,12 @@ void waitid_rv32(Kernel &kernel, sched::ProcessId pid, sched::ProcessId adopted)
     for (usize i=0;i<128;++i) CHECK(mock::memory[output-hw::user_begin+i] == std::byte{});
     CHECK(call(1, child.value(), hw::user_begin+mock::memory.size()-127, 4, 0, done) == -14 && callbacks == 0);
     CHECK(kernel.scheduler().find(child.value()));
-    CHECK(call(2, child.value(), output, 4, 0, done) == -22 && callbacks == 0);
-    CHECK(call(1, child.value(), output, 0x1000004, 0, done) == -22 && callbacks == 0);
+    // P_PGID names a group: no child is in group <child pid>.
+    CHECK(call(2, child.value(), output, 5, 0, done) == -10 && callbacks == 0);
+    CHECK(call(3, 0, output, 5, 0, done) == -22 && call(2, 0x80000000U, output, 5, 0, done) == -22);
+    CHECK(call(1, child.value(), output, 0x1000000, 0, done) == -22 && callbacks == 0);
+    CHECK(call(1, child.value(), output, 0x14, 0, done) == -22 && callbacks == 0);
+    CHECK(call(1, child.value(), output, 0x1000005, 0, done) == 0 && done && callbacks == 0);
     CHECK(call(1, child.value(), output, 4, output, done) == -22 && callbacks == 0);
     CHECK(call(1, child.value(), output, 4, 0, done) == -11 && !done && callbacks == 0);
     CHECK(kernel.posix().exit(child.value(), 42));
@@ -266,6 +301,20 @@ void waitid_rv32(Kernel &kernel, sched::ProcessId pid, sched::ProcessId adopted)
     CHECK(kernel.scheduler().terminate_process(child.value(), 11));
     CHECK(call(0, 0, output, 4, 0, done) == 0 && done);
     CHECK(field(8)==2 && field(12)==child.value() && field(20)==11);
+    child = kernel.posix().fork(pid); CHECK(child);
+    // WSTOPPED and WCONTINUED reports, through P_PGID 0 (the caller's group).
+    CHECK(kernel.scheduler().stop_process(child.value(), 19));
+    CHECK(call(2, 0, output, 3, 0, done) == 0 && done);
+    CHECK(field(8)==5 && field(12)==child.value() && field(20)==19);
+    CHECK(call(2, 0, output, 0x1000003, 0, done) == 0 && field(12) == 0);
+    CHECK(kernel.scheduler().continue_process(child.value()));
+    CHECK(call(0, 0, output, 0x1000009, 0, done) == 0 && field(8)==6 && field(20)==18);
+    CHECK(call(0, 0, output, 9, 0, done) == 0 && field(8)==6);
+    CHECK(call(0, 0, output, 9, 0, done) == 0 && field(12) == 0);
+    CHECK(kernel.posix().exit(child.value(), 0));
+    // WNOWAIT reports an exit without reaping it.
+    CHECK(call(1, child.value(), output, 0x1000004, 0, done) == 0 && field(8) == 1 && kernel.scheduler().find(child.value()));
+    CHECK(call(1, child.value(), output, 4, 0, done) == 0 && field(8) == 1 && !kernel.scheduler().find(child.value()));
     std::puts("PASS hosted RV32 waitid: full siginfo, nohang zeroing, copy admission before reap, parent compaction, block/retry, exited/signalled status");
 }
 

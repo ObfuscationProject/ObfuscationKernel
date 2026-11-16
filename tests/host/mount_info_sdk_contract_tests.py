@@ -17,11 +17,12 @@ class MountInfoExportTests(unittest.TestCase):
             marker = profile.read_text()
             validate = fixtures.export_sdk.validate_native_mount_info_profile
             validate(headers)
-            cases = [(uapi, good.replace('MINOR 16', 'MINOR 10')),
-                     (uapi, good.replace('#define OK_UAPI_VERSION_MINOR 16',
+            cases = [(uapi, good.replace('MINOR 17', 'MINOR 10')),
+                     (uapi, good.replace('#define OK_UAPI_VERSION_MINOR 17',
                          '#define OK_UAPI_VERSION_MINOR 10 /* wrong compiled version */\n'
-                         '/*\n#define OK_UAPI_VERSION_MINOR 16\n*/')),
-                     (uapi, good.replace('MINOR 16', 'MINOR 17')),
+                         '/*\n#define OK_UAPI_VERSION_MINOR 17\n*/')),
+                     (uapi, good.replace('MINOR 17', 'MINOR 16')),
+                     (uapi, good.replace('MINOR 17', 'MINOR 18')),
                      (uapi, good.replace('uint32_t generation;', 'uintptr_t generation;')),
                      (uapi, good.replace('char path[OK_MOUNT_INFO_PATH_CAPACITY];', 'char *path;')),
                      (uapi, good.replace('uint32_t state;', 'uint32_t state; uint32_t extra;')),

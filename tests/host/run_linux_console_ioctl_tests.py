@@ -32,6 +32,7 @@ def main():
     tests = ('linux_console_ioctl_tests', 'linux_user_abi_tests',
              'linux_stat_codec_tests', 'linux_chmod_call_tests')
     sources = ['include/ok/abi/linux_console_ioctl.hpp', 'include/ok/abi/linux_profile_data.hpp',
+               'include/ok/abi/linux_termios.hpp', 'include/ok/tty/termios.hpp',
                'include/ok/abi/linux_user.hpp', 'scripts/generate_linux_abi.py',
                'docs/abi/linux-profiles.json', 'tests/host/linux_abi_generator_tests.py',
                'src/syscall/linux.cpp', 'include/ok/core/types.hpp',

@@ -360,7 +360,10 @@ template <K Kind> void returns() {
           x.stack == s && !limited.pending_mask().contains(8));
   }
   for (i32 sig = 1; sig <= 128; ++sig) {
-    CHECK(C::valid_info({sig, 128, 0, 0}) == (sig == 8 || sig == 14)); // FPE; ITIMER_REAL SIGALRM
+    // FPE; ITIMER_REAL SIGALRM; kernel terminal and orphan signals in MIPS
+    // numbering: HUP, INT, QUIT, WINCH 20, TSTP 24, CONT 25, TTIN 26, TTOU 27.
+    CHECK(C::valid_info({sig, 128, 0, 0}) == (sig == 8 || sig == 14 || sig == 1 || sig == 2 || sig == 3 ||
+                                              sig == 20 || sig == 24 || sig == 25 || sig == 26 || sig == 27));
     CHECK(!C::valid_info({sig, 128, 1, 0}) && !C::valid_info({sig, 128, 0, 1}));
   }
 }
@@ -469,6 +472,45 @@ template <K Kind> void policy_edges() {
   }
 }
 
+// MIPS numbering: STOP 23, TSTP 24, TTIN 26, TTOU 27 stop by default and are
+// consumed without a frame; 19-22 (PWR, WINCH, URG, IO) are not stops here.
+template <K Kind> void job_control_stops() {
+  for (u32 stop : {23u, 24u, 26u, 27u}) {
+    Fixture<Kind> x;
+    x.queue.discard(16);
+    CHECK(x.queue.enqueue({stop, 0, 7, 8}) == Q::Enqueue::queued);
+    const auto before = x.frame;
+    const auto mask = x.mask;
+    const auto actions = x.actions;
+    u32 signal{};
+    CHECK(x.deliver(signal) == D::Result::stop && signal == stop && !x.writes &&
+          !x.admissions && !x.queue.pending_mask().contains(stop));
+    CHECK(same(x.frame, before) && x.mask == mask && x.actions == actions);
+  }
+  for (u32 other : {19u, 20u, 21u, 22u, 25u}) {
+    Fixture<Kind> x;
+    x.queue.discard(16);
+    CHECK(x.queue.enqueue({other, 0, 7, 8}) == Q::Enqueue::queued);
+    u32 signal{};
+    const auto result = x.deliver(signal);
+    CHECK(signal == other && result != D::Result::stop &&
+          result == (other == 19 || other == 22 ? D::Result::terminate : D::Result::ignored));
+  }
+  for (u32 stop : {24u, 26u, 27u}) {
+    Fixture<Kind> x;
+    x.queue.discard(16);
+    CHECK(x.queue.enqueue({stop, 0, 7, 8}) == Q::Enqueue::queued);
+    x.actions.find(stop)->handler = 1;
+    u32 signal{};
+    CHECK(x.deliver(signal) == D::Result::ignored && !x.writes);
+    Fixture<Kind> y;
+    y.queue.discard(16);
+    *y.actions.find(stop) = *y.actions.find(16);
+    CHECK(y.queue.enqueue({stop, 0, 7, 8}) == Q::Enqueue::queued);
+    CHECK(y.deliver(signal) == D::Result::handler && signal == stop && y.writes == 1);
+  }
+}
+
 int main() {
   policy_edges<K::legacy>();
   policy_edges<K::realtime>();
@@ -476,5 +518,7 @@ int main() {
   transactions<K::realtime>();
   returns<K::legacy>();
   returns<K::realtime>();
+  job_control_stops<K::legacy>();
+  job_control_stops<K::realtime>();
   std::printf("PASS MIPS o32 policy: %u checks\n", checks);
 }

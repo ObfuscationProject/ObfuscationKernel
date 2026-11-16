@@ -22,6 +22,8 @@ i64 ErrnoMapper::errno_for(Status status)
         return 8;
     case StatusCode::argument_list_too_long:
         return 7;
+    case StatusCode::no_device:
+        return 6;
     case StatusCode::no_process:
         return 3;
     case StatusCode::name_too_long:

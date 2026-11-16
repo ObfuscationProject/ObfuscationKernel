@@ -5,6 +5,7 @@
 #include "ok/net/native_tcp_stream.hpp"
 #include "ok/user/native_shared_files.hpp"
 #include "ok/fs/vfs.hpp"
+#include "ok/fs/mode_policy.hpp"
 #if defined(OK_NATIVE_SIGNAL_RUNTIME)
 #include "../user/signals/private_signal_scheduler_relocation.hpp"
 #endif
@@ -39,7 +40,7 @@ bool process_has_runnable_thread(const ProcessControlBlock &process)
 
 bool process_allowed_on(const ProcessControlBlock &process, smp::CpuId cpu, ProcessId current)
 {
-    if (!process.can_run_on(cpu))
+    if (!process.can_run_on(cpu) || process.job_control().stopped)
     {
         return false;
     }
@@ -290,7 +291,13 @@ Result<usize> SchedulerState::exit_thread(ProcessId pid, ThreadId tid, smp::CpuI
         }
     process->set_state(running ? ProcessState::running : runnable ? ProcessState::runnable : ProcessState::blocked);
     thread->console_wait_epoch = 0;
-    if (!live) retire_console_process(pid);
+    // The last thread's exit is Linux group_dead: disassociate_ctty(1) runs
+    // before the lease retires, as in finish_process.
+    if (!live)
+    {
+        hangup_exiting_leader(*process);
+        retire_console_process(pid);
+    }
     return live;
 }
 
@@ -504,6 +511,9 @@ Status SchedulerState::enqueue_thread(ProcessId pid, ThreadId tid)
     if (thread->state != ProcessState::runnable || process->state() == ProcessState::zombie ||
         process->state() == ProcessState::exited)
         return Status::invalid_argument("only a runnable thread can be queued");
+    // A stopped process is never queued; the runtime's scan queues it after SIGCONT.
+    if (process->job_.stopped)
+        return Status::invalid_argument("a stopped process is not queued");
     if (thread->queued_cpu != no_cpu)
         return Status::success();
     const auto cpu = select_cpu(*process, *thread);
@@ -542,7 +552,7 @@ bool SchedulerState::eligible_on(ThreadRef ref, smp::CpuId queue, smp::CpuId cpu
 {
     const auto *process = find(ref.pid);
     if (!process || process->state() == ProcessState::zombie || process->state() == ProcessState::exited ||
-        !affinity_admits(*process, cpu))
+        process->job_.stopped || !affinity_admits(*process, cpu))
         return false;
     for (const auto &thread : process->threads())
         if (thread.tid == ref.tid)
@@ -568,7 +578,8 @@ std::optional<ThreadRef> SchedulerState::dequeue_thread(smp::CpuId cpu)
             continue;
         thread->queued_cpu = no_cpu;
         if (thread->state != ProcessState::runnable || thread->on_cpu != no_cpu ||
-            process->state() == ProcessState::zombie || process->state() == ProcessState::exited)
+            process->state() == ProcessState::zombie || process->state() == ProcessState::exited ||
+            process->job_.stopped)
             continue;
         if (!affinity_admits(*process, cpu))
         {
@@ -620,7 +631,7 @@ Status SchedulerState::mark_on_cpu(ProcessId pid, ThreadId tid, smp::CpuId cpu)
     if (current_thread_by_cpu_[cpu] != 0)
         return Status::busy("CPU already runs another thread");
     if (thread->state != ProcessState::runnable || process->state() == ProcessState::zombie ||
-        process->state() == ProcessState::exited || !affinity_admits(*process, cpu))
+        process->state() == ProcessState::exited || process->job_.stopped || !affinity_admits(*process, cpu))
         return Status::invalid_argument("thread cannot run on this CPU");
     occupy_cpu(cpu, *process, *thread);
     return Status::success();
@@ -970,6 +981,7 @@ SchedulerState::SchedulerState()
     descriptions_[2] =
         OpenFileDescription{.used = true, .writable = true, .console = true, .flags = 1u, .path = FixedString<96>{"stderr"}};
     initialize_resources(boot_resources_);
+    reset_console_terminal();
 }
 
 void SchedulerState::initialize_resources(ProcessResources &resources)
@@ -1052,19 +1064,10 @@ Result<u16> SchedulerState::allocate_description(OpenFileDescription description
         return Status::invalid_argument("new description cannot import prepared reservation authority");
     if (description.unix_queue_references)
         return Status::invalid_argument("new description cannot import UNIX queue ownership");
+    // Each bound PTY description owns one endpoint open, so only the prepared
+    // raw pair and the PTY bind calls create them.
     if (description.pty_endpoint)
-    {
-        if (!pty_transport_.readiness(description.pty_endpoint))
-            return Status::bad_descriptor("PTY description has no live canonical provider");
-        if (!description.readable || !description.writable || description.node || description.native_udp_handle ||
-            description.native_tcp_handle || description.native_shared_file || description.unix_endpoint ||
-            description.pipe != invalid_description || description.unix_write_pipe != invalid_description ||
-            description.console || description.input_console)
-            return Status::invalid_argument("PTY description cannot combine providers");
-        for (const auto &existing : descriptions_)
-            if (existing.used && existing.pty_endpoint == description.pty_endpoint)
-                return Status::already_exists("PTY endpoint already belongs to a canonical description");
-    }
+        return Status::invalid_argument("PTY descriptions are bound by a prepared pair or a PTY open");
     if (description.unix_endpoint)
     {
         const auto handle = description.unix_endpoint;
@@ -1178,15 +1181,21 @@ Status SchedulerState::release_description(u16 id)
         *open = {};
         if (pty_endpoint)
         {
+            // One open per final release. The master's last open hangs a ptmx
+            // slave up and queues SIGHUP and SIGCONT for the slave session's
+            // leader (Linux tty_signal_session_leader) inside the table.
             const auto retired = pty_transport_.retire(pty_endpoint);
             if (!retired) result = retired.status();
-            auto master = pty_endpoint; master.side = private_pty::Side::master;
-            auto slave = pty_endpoint; slave.side = private_pty::Side::slave;
-            for (const auto endpoint : {master, slave})
+            // Linux devpts_pty_kill: /dev/pts/N goes with the master's last open.
+            else if (pty_endpoint.side == private_pty::Side::master && retired.value().master_retired)
             {
-                wake_waiters(ThreadWaitReason::pty_read, pty_wait_key(endpoint));
-                wake_waiters(ThreadWaitReason::pty_write, pty_wait_key(endpoint));
+                remember_hangup(retired.value().hangup_leader, retired.value().hangup_foreground,
+                                static_cast<u16>(pty_endpoint.slot + 1));
+                terminal_namespace_.remove(pty_endpoint.slot, pty_endpoint.generation);
+                wake_waiters(ThreadWaitReason::job_control,
+                             job_control_key({static_cast<u16>(pty_endpoint.slot + 1), pty_endpoint.generation}));
             }
+            wake_pty(pty_endpoint, private_pty::wake_all);
         }
         if (unix_endpoint)
             result = release_unix_endpoint(unix_endpoint);
@@ -1394,7 +1403,7 @@ Status SchedulerState::activate_thread(ProcessId pid, ThreadId tid, smp::CpuId c
     auto *process = find(pid);
     if (!tid || cpu >= cpu_count_ || !process ||
         (process->state() != ProcessState::runnable && process->state() != ProcessState::running) ||
-        !process->can_run_on(cpu))
+        !process->can_run_on(cpu) || process->job_.stopped)
         return Status::invalid_argument("thread owner cannot be activated");
     auto selected = dispatch_selected(cpu, pid, tid);
     return selected ? Status::success() : selected.status();
@@ -1471,6 +1480,7 @@ Result<ProcessId> SchedulerState::fork_process(ProcessId parent, bool publish)
     child->session_ = source->session_;
     child->has_execed_ = false;
     child->console_epoch_ = console_input_.inherit(source->console_epoch_);
+    child->ctty_detached_ = source->ctty_detached_;
     child->set_credentials(source->credentials());
     child->set_execution(source->execution());
     child->set_address_space_id(next_address_space_id_++);
@@ -1559,6 +1569,7 @@ Result<ProcessId> SchedulerState::create_session(ProcessId caller)
             return Status::permission("calling process identity already names a process group");
     process->session_.id = caller;
     process->group_.id = caller;
+    process->ctty_detached_ = false;
     if (console_input_.inherit(process->console_epoch_)) cancel_console_epoch(process->console_epoch_);
     return caller;
 }
@@ -1657,11 +1668,16 @@ Status SchedulerState::finish_process(ProcessId pid, i32 code, u8 signal)
             return Status::busy("thread entry stacks must be retired before process exit");
     // Adoption is validated before the completion becomes observable.
     if (auto status = reparent_children_on_exit(pid); !status) return status;
+    // The terminal hangup is queued before the lease retires (its signals are
+    // drained before the orphan pass of the exit commit, as in Linux do_exit).
+    hangup_exiting_leader(*process);
     retire_console_process(pid);
     if (native_tcp_service_) native_tcp_service_->cancel_process(pid);
     process->set_exit_code(code);
     process->set_termination_signal(signal);
     process->set_state(ProcessState::zombie);
+    if (process->job_.stopped) --stopped_count_;
+    process->job_ = {};
     for (auto &thread : process->threads())
     {
         thread.native_deadline.cancel();
@@ -1676,6 +1692,7 @@ Status SchedulerState::finish_process(ProcessId pid, i32 code, u8 signal)
     clear_current(pid);
     wake_waiters(ThreadWaitReason::child, pid);
     wake_waiters(ThreadWaitReason::child, 0);
+    wake_waiters(ThreadWaitReason::child, child_group_wait_key(process->process_group_id()));
     return Status::success();
 }
 Status SchedulerState::reparent_children_on_exit(ProcessId pid)
@@ -2073,6 +2090,7 @@ Result<usize> SchedulerState::write_pipe_fragment(u16 pipe, std::span<const std:
 #include "unix_path.inc"
 #include "descriptor_reservation.inc"
 #include "pty_pair.inc"
+#include "terminal_open.inc"
 Status SchedulerState::block_current(ThreadWaitReason reason, u64 key)
 {
     auto registration = register_current_wait(reason, key);
@@ -2156,6 +2174,7 @@ void SchedulerState::wake_waiters(ThreadWaitReason reason, u64 key, WakeSource s
 }
 
 #include "console_input.inc"
+#include "job_control.inc"
 Status SchedulerState::close_shutdown_admission()
 {
     if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission was already closed");

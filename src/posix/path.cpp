@@ -311,6 +311,8 @@ fs::ModeChangeResult PosixService::change_mode_fd(Fd fd, u32 mode)
     auto *entry = descriptor(fd);
     if (!entry || !entry->used)
         return fs::ModeChangeResult::failure(Status::bad_descriptor("bad mode-change descriptor"));
+    if (const auto pts = scheduler_->pts_node(resources().files.entry(fd)->description); pts)
+        return fs::ModeChangeResult::failure(scheduler_->change_pts_mode(pts.value(), mode, user_credentials()));
     if (!entry->node)
         return fs::ModeChangeResult::unavailable();
     // The open description owns this node throughout the serialized operation.
@@ -337,7 +339,11 @@ fs::ModeChangeResult PosixService::change_mode_at(Fd dirfd, std::string_view pat
     if (!resolved)
         return resolved.status().code() == StatusCode::unsupported ? fs::ModeChangeResult::unavailable()
                                                                    : fs::ModeChangeResult::failure(resolved.status());
-    const auto result = resolved.value().node()->change_mode(mode, user_credentials());
+    auto *node = resolved.value().node();
+    const auto terminal = node->terminal_node();
+    const auto result = terminal.kind == fs::TerminalNodeKind::pts_slave
+        ? fs::ModeChangeResult::failure(scheduler_->change_pts_mode(terminal, mode, user_credentials()))
+        : node->change_mode(mode, user_credentials());
     const auto released = resolved.value().release();
     if (result.ok() && !released)
         return fs::ModeChangeResult::failure(released);
@@ -353,6 +359,8 @@ fs::ModeChangeResult PosixService::change_owner_fd(Fd fd, u32 uid, u32 gid)
         return fs::ModeChangeResult::failure(Status::bad_descriptor("bad ownership-change descriptor"));
     if (euid() != user::root_uid)
         return fs::ModeChangeResult::failure(Status::permission("ownership change requires root"));
+    if (const auto pts = scheduler_->pts_node(resources().files.entry(fd)->description); pts)
+        return fs::ModeChangeResult::failure(scheduler_->change_pts_owner(pts.value(), uid, gid, user_credentials()));
     if (!entry->node) return fs::ModeChangeResult::unavailable();
     return entry->node->change_owner(uid, gid, user_credentials());
 }
@@ -379,9 +387,13 @@ fs::ModeChangeResult PosixService::change_owner_at(Fd dirfd, std::string_view pa
     if (!resolved)
         return resolved.status().code() == StatusCode::unsupported ? fs::ModeChangeResult::unavailable()
                                                                    : fs::ModeChangeResult::failure(resolved.status());
+    auto *node = resolved.value().node();
+    const auto terminal = node->terminal_node();
     const auto result = euid() != user::root_uid ?
         fs::ModeChangeResult::failure(Status::permission("ownership change requires root")) :
-        resolved.value().node()->change_owner(uid, gid, user_credentials());
+        terminal.kind == fs::TerminalNodeKind::pts_slave ?
+        fs::ModeChangeResult::failure(scheduler_->change_pts_owner(terminal, uid, gid, user_credentials())) :
+        node->change_owner(uid, gid, user_credentials());
     const auto released = resolved.value().release();
     if (result.ok() && !released) return fs::ModeChangeResult::failure(released);
     return result;

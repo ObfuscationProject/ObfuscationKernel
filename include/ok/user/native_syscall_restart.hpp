@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ok/abi/linux_native.hpp"
+#include "ok/abi/linux_termios.hpp"
 #include "ok/abi/linux_udp_call.hpp"
 
 namespace ok::user::native
@@ -18,7 +19,10 @@ struct RestartAdapter
     using Trap = arch::execution::Trap;
     using Bridge = abi::linux_user::NativeBridge<Selected>;
     using Codec = abi::linux_user::Codec<Selected>;
-    enum class Family : u8 { none, pipe_read, futex_wait, child_wait, pipe_write, linux_udp_receive };
+    // terminal_control: the terminal requests Linux runs tty_check_change for
+    // (TCSETS, TCSETSW, TCSETSF, TCSBRK, TCFLSH, TIOCSPGRP), which a
+    // job-control park may restart.
+    enum class Family : u8 { none, pipe_read, futex_wait, child_wait, pipe_write, linux_udp_receive, terminal_control };
     struct Site { uptr instruction{}; u8 bytes{}; bool thumb{}; };
     struct Plan
     {
@@ -49,6 +53,19 @@ struct RestartAdapter
         const auto write = Codec::syscall_number(abi::linux_user::Operation::write);
         const auto writev = Codec::syscall_number(abi::linux_user::Operation::writev);
         if ((write && call.value().number == *write) || (writev && call.value().number == *writev)) return Family::pipe_write;
+        const auto ioctl = Codec::syscall_number(abi::linux_user::Operation::ioctl);
+        if (ioctl && call.value().number == *ioctl)
+        {
+            using Tty = abi::linux_user::TerminalIoctl;
+            switch (abi::linux_user::TtyIoctlCodec<Selected>::operation(call.value().arguments[1]).value_or(Tty::count))
+            {
+            case Tty::set_now: case Tty::set_drain: case Tty::set_flush: case Tty::drain_break: case Tty::flush:
+            case Tty::set_foreground:
+                return Family::terminal_control;
+            default:
+                return Family::none;
+            }
+        }
         const auto wait4 = Codec::syscall_number(abi::linux_user::Operation::wait4);
         const auto waitid = Codec::syscall_number(abi::linux_user::Operation::waitid);
         if ((wait4 && call.value().number == *wait4) ||

@@ -15,6 +15,9 @@
 #include "ok/sched/deadline.hpp"
 #include "ok/sched/console_input.hpp"
 #include "ok/sched/console_control.hpp"
+#include "ok/sched/terminal.hpp"
+#include "ok/sched/terminal_open.hpp"
+#include "ok/sched/job_control.hpp"
 #include "ok/sched/wait_registration.hpp"
 #include "ok/smp/cpu.hpp"
 #include "ok/smp/kernel_section.hpp"
@@ -106,6 +109,9 @@ struct ThreadControlBlock
     DeadlineWait native_deadline{};
     WaitRegistration wait_registration{};
     u32 console_wait_epoch{}; // Original input generation survives readiness wakes.
+    // The process's continue generation when a console or PTY data wait was
+    // armed; a continue since then re-runs the job-control check.
+    u32 terminal_gate_mark{};
     ThreadLocalState tls{};
     SignalMask native_signal_mask{};
     memory::KernelEntryStackHandle entry_stack{};
@@ -175,6 +181,7 @@ class ProcessControlBlock
     {
         termination_signal_ = signal;
     }
+    [[nodiscard]] const JobControlState &job_control() const { return job_; }
     [[nodiscard]] i32 wait_status() const
     {
         return termination_signal_ != 0 ? static_cast<i32>(termination_signal_)
@@ -222,6 +229,7 @@ class ProcessControlBlock
         return pid_;
     }
     [[nodiscard]] u32 console_epoch() const { return console_epoch_; }
+    [[nodiscard]] bool ctty_detached() const { return ctty_detached_; }
     [[nodiscard]] std::string_view name() const
     {
         return name_.view();
@@ -335,17 +343,25 @@ class ProcessControlBlock
 
   private:
     friend class SchedulerState;
+    friend struct ProcessTestAccess; // Hosted tests only.
     ProcessId pid_{0};
     u32 console_epoch_{}; // Only the scheduler may issue or inherit membership.
     ProcessId parent_pid_{0};
     ProcessGroup group_{};
     Session session_{};
+    bool ctty_detached_{}; // TIOCNOTTY by a non-leader (S8); fork inherits, setsid clears.
+    // Linux tty_old_pgrp (S8): a session leader whose terminal was hung up
+    // keeps that terminal's foreground group (and the terminal's storage index,
+    // whose outbox carries the signals) for its exit. Not inherited by fork.
+    ProcessId hangup_old_foreground_{};
+    u16 hangup_terminal_{};
     bool has_execed_{}; // Successful image replacement since this process was forked.
     SignalState signals_{};
     ProcessResources resources_{};
     StaticVector<ProcessId, max_process_children> children_{};
     i32 exit_code_{0};
     u8 termination_signal_{0};
+    JobControlState job_{}; // Only the scheduler stops or continues a process.
     FixedString<max_process_name> name_{};
     ProcessState state_{ProcessState::created};
     bool background_{false};
@@ -584,7 +600,12 @@ class SchedulerState
     Result<DescriptorReservation> prepare_descriptor(u64 pid);
     Result<PreparedPtyPair> prepare_pty_pair(u64 pid, u32 flags = 0);
     using PreparedPtyRead = private_pty::RawPtyTable<>::PreparedRead;
-    Result<PreparedPtyRead> prepare_pty_read(u16 description, usize count);
+    // `timer_expired`: a retry after the reader's VTIME timer ran out.
+    Result<PreparedPtyRead> prepare_pty_read(u16 description, usize count, bool timer_expired = false,
+                                             private_pty::ReadTimer timer = {});
+    using PtyReadState = private_pty::RawPtyTable<>::ReadState;
+    Result<PtyReadState> pty_read_state(u16 description, usize count, private_pty::ReadTimer timer = {}) const;
+    Result<bool> pty_write_progress(u16 description, std::byte next) const;
     Result<usize> commit_pty_read(PreparedPtyRead &preview);
     // Keys may spuriously collide across pair generations. Retained handle and
     // wait-ticket validation must compare the complete generation separately.
@@ -594,6 +615,39 @@ class SchedulerState
     Result<usize> write_pty_description(u16 description, std::span<const std::byte> input);
     Result<private_pty::Readiness> pty_description_readiness(u16 description) const;
     [[nodiscard]] private_pty::Audit pty_audit() const { return pty_transport_.audit(); }
+    // ptmx-style pairs (docs/modules/tty.md section 8). The devfs open path
+    // (S6) binds a fresh provider-free description that holds exactly one
+    // reference; each bound description owns one endpoint open, shared by dup,
+    // fork and SCM_RIGHTS, and its final release retires that open.
+    // bind_pty_multiplexer creates the pair (slave locked and dormant) and
+    // returns the master endpoint; bind_pty_slave admits one more slave open.
+    Result<private_pty::Handle> bind_pty_multiplexer(u16 description);
+    Status bind_pty_slave(u16 description, private_pty::Handle slave);
+    [[nodiscard]] Result<u32> pty_index(u16 description) const;
+    Status set_pty_lock(u16 description, bool locked);
+    // Each endpoint's open count equals the descriptions bound to it, outside
+    // an unpublished prepared raw pair (whose opens precede publication).
+    [[nodiscard]] Status terminal_audit() const;
+    // Terminal device nodes (docs/modules/tty.md sections 2 and 3). open()
+    // binds a fresh provider-free description holding exactly one reference;
+    // every check precedes the first change, and the node is re-validated
+    // here (index, generation, lock and liveness), never trusted. /dev/tty is
+    // the caller's derived controlling terminal or no_device (ENXIO);
+    // /dev/console never acquires; /dev/ptmx gives no_space (ENOSPC) when every
+    // pair slot, raw pairs included, is in use; a /dev/pts/N open without
+    // O_NOCTTY by a session leader without a terminal acquires an unowned,
+    // readable slave (Linux tty_open_proc_set_tty).
+    Result<TerminalOpenResult> open_terminal(ProcessId pid, u16 description, const TerminalOpenRequest &request);
+    // The node a terminal description reports to fstat; not_terminal for raw
+    // pairs and every other description.
+    [[nodiscard]] Result<TerminalStatus> terminal_status(u16 description) const;
+    // chmod and chown of a /dev/pts entry (owner or root; chown root only).
+    Status change_pts_mode(fs::TerminalNode node, u32 mode, user::Credentials caller);
+    Status change_pts_owner(fs::TerminalNode node, u32 uid, u32 gid, user::Credentials caller);
+    // The entry a description bound to a ptmx slave names; not_terminal otherwise.
+    [[nodiscard]] Result<fs::TerminalNode> pts_node(u16 description) const;
+    [[nodiscard]] fs::TerminalNamespace &terminal_namespace() { return terminal_namespace_; }
+    [[nodiscard]] const fs::TerminalNamespace &terminal_namespace() const { return terminal_namespace_; }
     // Each successful retain owns one reference, released exactly once. A pin
     // keeps the ID, backing node and pipe endpoint alive across fd close/reuse.
     Status retain_description(u16 id);
@@ -658,12 +712,40 @@ class SchedulerState
     Status flush_console(u32 expected_epoch);
     [[nodiscard]] bool console_authorized(ProcessId pid, u32 expected_epoch = 0) const;
     [[nodiscard]] Status console_read_authority(ProcessId pid, u32 expected_epoch = 0) const;
-    Result<i64> console_control(ConsoleControlOperation operation, i32 value = 0);
     [[nodiscard]] bool console_readable(ProcessId pid, u32 expected_epoch) const;
+    // Lease authority and a blocking read of `count` bytes that would complete now.
+    [[nodiscard]] bool console_read_ready(ProcessId pid, u32 expected_epoch, usize count) const;
     [[nodiscard]] Status shutdown_console_status() const;
-    Result<usize> read_console(ProcessId pid, u32 expected_epoch, std::span<std::byte> output);
+    // Console reads are planned, copied by the caller, then committed, so a
+    // failed copy-out consumes nothing. A plan that must wait gives would_block.
+    Result<TerminalLdisc::ReadPlan> prepare_console_read(ProcessId pid, u32 expected_epoch, usize count,
+                                                         bool nonblocking);
+    usize preview_console_read(const TerminalLdisc::ReadPlan &plan, std::span<std::byte> output,
+                               usize offset) const;
+    Status commit_console_read(const TerminalLdisc::ReadPlan &plan);
+    // One ingress byte through the console line discipline. ISIG signals go to
+    // the console outbox; echo stays in the ldisc for the runtime to emit.
     // `source` is the console's: interrupt once its UART line is bound.
-    void console_input(char value, WakeSource source = WakeSource::thread);
+    TerminalLdisc::Input console_input(char value, WakeSource source = WakeSource::thread);
+    // Terminals (docs/modules/tty.md sections 1, 4 and 5). The console is
+    // terminal 0; the runtime moves echo and output and drains the outbox.
+    [[nodiscard]] Terminal *terminal(TerminalRef ref);
+    [[nodiscard]] const Terminal *terminal(TerminalRef ref) const;
+    // Every terminal's storage by index (0 console, 1 + slot), live or not,
+    // for the outbox drain.
+    static constexpr usize terminal_count = 1 + private_pty::RawPtyTable<>::pair_capacity;
+    [[nodiscard]] Terminal &terminal_storage(usize index);
+    [[nodiscard]] Terminal &console_terminal() { return console_terminal_; }
+    [[nodiscard]] const Terminal &console_terminal() const { return console_terminal_; }
+    [[nodiscard]] Result<TerminalSubject> terminal_subject(u16 description) const;
+    [[nodiscard]] std::optional<TerminalRef> controlling_terminal(const ProcessControlBlock &process) const;
+    [[nodiscard]] TerminalJobFacts terminal_job_facts(ProcessId pid, TerminalRef ref) const;
+    Status acquire_terminal(TerminalRef ref, ProcessControlBlock &caller, bool readable, AcquireMode mode);
+    // Association checks of the running caller; they precede every copy-in.
+    Status terminal_check(const TerminalSubject &subject, ConsoleControlOperation operation);
+    Result<TerminalReply> terminal_control(const TerminalSubject &subject, const TerminalRequest &request);
+    // Job-control wait key of a terminal: 0 for the console, 1 + slot for a PTY.
+    [[nodiscard]] static constexpr u64 job_control_key(TerminalRef ref) { return ref.index; }
     // Trusted runtime ingress failure closes ownership before returning to userland.
     void abort_console_input();
     // Clears every CPU slot and moves queue entries off CPUs beyond the count;
@@ -707,6 +789,21 @@ class SchedulerState
     [[nodiscard]] const SchedulerRunQueue &run_queue(smp::CpuId cpu) const { return run_queues_.get(cpu); }
     Status set_runnable(ProcessId pid);
     Status block_process(ProcessId pid);
+    // Job-control overlay (job_control.inc). A stopped process keeps its
+    // threads and waits; the runtime never enters it until it is continued.
+    // Meanwhile enqueue_thread, stealing, mark_on_cpu and activate_thread
+    // refuse it, and dequeue_thread discards an entry queued before the stop.
+    // `signal` is in the process's own numbering. Stopping an already stopped
+    // process succeeds without change; a zombie gives already_exists.
+    Status stop_process(ProcessId pid, u8 signal);
+    // Returns true when the process was stopped.
+    bool continue_process(ProcessId pid);
+    void consume_job_report(ProcessId pid, bool stop);
+    [[nodiscard]] u16 stopped_processes() const { return stopped_count_; }
+    [[nodiscard]] bool process_group_orphaned(ProcessId group, ProcessId ignored = 0) const;
+    [[nodiscard]] bool process_group_has_stopped(ProcessId group) const;
+    // Child-wait key of a process-group selector; pid keys stay below 2^32.
+    [[nodiscard]] static constexpr u64 child_group_wait_key(ProcessId group) { return (u64{1} << 32) | group; }
 
     // No-argument native services act for the thread of the calling CPU.
     [[nodiscard]] ProcessId current_pid() const
@@ -770,17 +867,26 @@ class SchedulerState
     void clear_current(ProcessId pid);
     Status reparent_children_on_exit(ProcessId pid);
     Status finish_process(ProcessId pid, i32 code, u8 signal);
+    void wake_job_waiters(const ProcessControlBlock &process);
     [[nodiscard]] ProcessControlBlock *console_caller();
     void retire_console_process(ProcessId pid);
     void cancel_console_epoch(u32 epoch);
+    void reset_console_terminal();
+    void hangup_console(u32 epoch);
+    void hangup_exiting_leader(ProcessControlBlock &process);
+    void remember_hangup(ProcessId leader, ProcessId foreground, u16 terminal);
+    void clear_association(TerminalRef ref, Terminal &target);
+    [[nodiscard]] tty::Termios console_read_termios() const;
+    void wake_pty(private_pty::Handle endpoint, u8 wakes);
+    Status pty_terminal_check(const TerminalSubject &subject, ConsoleControlOperation operation);
+    void terminal_changed(TerminalRef ref);
+    Result<private_pty::Handle> bind_pty_multiplexer(u16 description, u32 uid, u32 gid);
     private_pty::RawPtyTable<> pty_transport_{}; // One stable table; handles never cross scheduler domains.
     ConsoleInputLease console_input_{};
     std::array<u64, wake_source_count> wakes_{};
-    struct ConsoleTerminal
-    {
-        u32 epoch{};
-        ProcessId session{}, foreground{};
-    } console_terminal_{};
+    u16 stopped_count_{};
+    Terminal console_terminal_{};
+    fs::TerminalNamespace terminal_namespace_{};
     [[nodiscard]] bool pipe_has_endpoint(u16 pipe, bool writable) const;
     friend class UnixReceive;
     friend class UnixAccept;
@@ -886,5 +992,9 @@ static_assert(max_unix_endpoints == unix_pathname_endpoint_capacity);
 static_assert(max_unix_backlog == unix_pathname_backlog_capacity);
 static_assert(SchedulerPolicy<RoundRobinPolicy>);
 static_assert(!std::is_polymorphic_v<Scheduler>);
+static_assert(fs::pts_capacity == private_pty::RawPtyTable<>::pair_capacity,
+              "every PTY pair slot has one /dev/pts entry");
+static_assert(std::is_same_v<private_pty::RawPtyTable<>::SlaveTerminal, Terminal>,
+              "every kernel PTY slave is a Terminal with the kernel line discipline");
 
 } // namespace ok::sched

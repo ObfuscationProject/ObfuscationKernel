@@ -9,6 +9,7 @@ record={'scope':'Internal signal actions only; all-ten hosted models, not runtim
 inputs=('include/ok/core/types.hpp','include/ok/abi/linux_user.hpp','include/ok/abi/linux_profile_data.hpp',
         'include/ok/sched/signal_mask.hpp','include/ok/sched/signal_action.hpp',
         'include/ok/user/native_signal_mask.hpp','include/ok/user/native_signal_action.hpp',
+        'include/ok/user/job_control_signals.hpp',
         'tests/host/native_signal_action_tests.cpp','tests/fixtures/signals/linux-action-layouts.json',
         'scripts/test_native_signal_action.py')
 for p in [root/name for name in inputs]:

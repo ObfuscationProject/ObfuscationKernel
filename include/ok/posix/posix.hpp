@@ -25,6 +25,7 @@ inline constexpr u32 o_APPEND = 0x0008;
 inline constexpr u32 o_NONBLOCK = 0x0800;
 inline constexpr u32 o_CREAT = 0x0040;
 inline constexpr u32 o_EXCL = 0x0080;
+inline constexpr u32 o_NOCTTY = 0x0100;
 inline constexpr u32 o_NOFOLLOW = 0x020000;
 inline constexpr u32 o_TRUNC = 0x0200;
 inline constexpr u32 o_CLOEXEC = 0x080000;
@@ -309,8 +310,11 @@ class PosixService final
                      fs::TimestampChange modification, u32 flags = 0);
     Result<i64> fcntl(Fd fd, u32 command, u64 argument);
     Result<i64> ioctl(Fd fd, u64 request, u64 argument);
-    [[nodiscard]] Status console_control_descriptor(Fd fd) const;
-    Result<i64> console_control(Fd fd, sched::ConsoleControlOperation operation, i32 value = 0);
+    // Terminal ioctl subjects are keyed by the open file description.
+    [[nodiscard]] Result<sched::TerminalSubject> terminal_descriptor(Fd fd) const;
+    Status terminal_check(const sched::TerminalSubject &subject, sched::ConsoleControlOperation operation);
+    Result<sched::TerminalReply> terminal_control(const sched::TerminalSubject &subject,
+                                                  const sched::TerminalRequest &request);
     [[nodiscard]] Result<std::string_view> current_directory();
     [[nodiscard]] std::string_view getcwd()
     {
@@ -320,6 +324,7 @@ class PosixService final
     Result<FileStatus> stat(std::string_view path);
     Result<FileStatus> statat(Fd dirfd, std::string_view path, u32 flags = 0);
     Result<FileStatus> fstat(Fd fd) const;
+    [[nodiscard]] FileStatus terminal_file_status(const sched::TerminalStatus &terminal) const;
     Result<usize> getdents64(Fd fd, std::span<std::byte> out);
     // The serialized consumer copies one complete record; it cannot yield or
     // reenter descriptor operations. Cursor commit follows successful copying.

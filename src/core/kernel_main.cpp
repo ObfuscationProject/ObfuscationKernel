@@ -130,8 +130,9 @@ namespace ok::detail
             const int serial = ok_platform_console_poll != nullptr ? ok_platform_console_poll() : -1;
             if (serial >= 0)
             {
+                // The raw byte: ICRNL in the console termios maps CR to LF.
                 if (native_userland_started)
-                    ok::ok_userland_input(static_cast<char>(serial == '\r' ? '\n' : serial),
+                    ok::ok_userland_input(static_cast<char>(serial),
                                           ok::interrupt::event_wake_source(EventSource::console));
                 else
                     static_cast<void>(ok::ok_gui_key_event(serial));

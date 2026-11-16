@@ -31,6 +31,10 @@ Implemented baseline syscall groups:
   `exit`, `exit_group`, `umask`.
 - Kernel debug: `ok_debug`.
 
+Terminal ioctls, `/dev/ptmx` and `/dev/pts` opens, `OK_O_NOCTTY`, job-control
+waits and native SIG_DFL/SIG_IGN dispositions (UAPI 0.17, `ok/uapi/termios.h`
+and `ok/uapi/job_control.h`) are described in the [terminal contract](tty.md).
+
 On x86_64, aarch64 and rv64 the native runtime runs the Linux `getpid`,
 `gettid`, `clock_gettime` and `clock_getres`, and `read`, `write`, `pread64`,
 `pwrite64`, `lseek`, `fsync` and `fdatasync` on ext4 regular files, as kernel

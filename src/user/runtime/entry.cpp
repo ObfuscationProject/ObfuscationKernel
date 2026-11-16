@@ -116,20 +116,11 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
             [&](Status failure) { if (runtime_failure) runtime_failure = failure; });
         return result ? static_cast<i64>(result.value()) : error(result.status());
     }
-    if (number == N::ioctl)
-        return console_control::dispatch<std::endian::native == std::endian::big>(
-            static_cast<i32>(a[0]), console_control::native_operation(a[1]), a[2],
-            [&](i32 fd) { return kernel.posix().console_control_descriptor(fd); },
-            [&](i32 fd, sched::ConsoleControlOperation operation, i32 value) {
-                return kernel.posix().console_control(fd, operation, value);
-            },
-            [&](u64 address, std::span<u8> bytes) {
-                return hw::copy_from_user(space, bytes.data(), static_cast<uptr>(address), bytes.size());
-            },
-            [&](u64 address, usize bytes) { return hw::user_range(space, static_cast<uptr>(address), bytes, true); },
-            [&](u64 address, std::span<const u8> bytes) {
-                return hw::copy_to_user(space, static_cast<uptr>(address), bytes.data(), bytes.size());
-            });
+#ifdef OK_PRIVATE_POLL_MASK
+    if (number == N::rt_sigaction && process->resources().personality == Personality::native)
+        return native_signal_action(kernel, *process, a);
+#endif
+    if (number == N::ioctl) return tty_terminal_control(kernel, *process, a, complete);
     if (caller->console_wait_epoch && !kernel.scheduler().console_authorized(pid, caller->console_wait_epoch))
     {
         caller->console_wait_epoch = 0;
@@ -456,8 +447,17 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         return exec_image(kernel, pid, process, calling_tid, space, a, complete);
     if (number == N::wait4)
     {
-        if ((a[2] & ~uptr{1}) || a[3]) return -22;
-        return begin_child_wait(kernel, pid, {static_cast<i32>(a[0]), a[1], (a[2] & 1) != 0}, complete);
+        constexpr uptr options = OK_WNOHANG | OK_WUNTRACED | OK_WCONTINUED;
+        const auto selector = static_cast<i32>(a[0]);
+        if ((a[2] & ~options) || a[3]) return -22;
+        if (selector == (-2147483647 - 1)) return -3;
+        ChildWaitRequest request{selector, a[1], (a[2] & OK_WNOHANG) != 0};
+        if (selector == 0) request.group = process->process_group_id();
+        else if (selector < -1) request.group = static_cast<u32>(-static_cast<i64>(selector));
+        request.stopped = (a[2] & OK_WUNTRACED) != 0;
+        request.continued = (a[2] & OK_WCONTINUED) != 0;
+        request.raw_options = static_cast<u32>(a[2]);
+        return begin_child_wait(kernel, pid, request, complete);
     }
 
     if (number == N::pipe || number == N::pipe2)
@@ -513,8 +513,14 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
                 : begin_pipe_read(kernel, *process, calling_tid, static_cast<i32>(a[0]),
                 slot->description, a[1], staged, complete, request);
         }
+        // A console read checks its mappings after the job check.
+        if (!writing && description->input_console)
+            return tty_console_read(kernel, *process, *caller, *description, {vectors.data(), a[2]}, complete, a, true);
         for (usize i = 0; i < a[2]; ++i)
             if (!hw::user_range(space, vectors[i].base, vectors[i].length, !writing)) return -14;
+        if (writing && description->console)
+            return tty_console_write(kernel, *process, *caller, *description, {vectors.data(), a[2]}, static_cast<i32>(a[0]),
+                                     complete);
         std::array<std::byte, sched::pipe_capacity> data{};
         const usize limit = data.size();
         if (total > limit) total = limit;
@@ -531,24 +537,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         sched::DescriptionPositionGuard shared_position(!writing && description->native_shared_file
                                                      ? kernel.scheduler().position_lock(description) : nullptr);
         Result<usize> result = usize{0};
-        if (writing && description->console)
-        {
-            emit({reinterpret_cast<const char *>(data.data()), total});
-            result = kernel.posix().write(static_cast<i32>(a[0]), {data.data(), total});
-        }
-        else if (!writing && description->input_console)
-        {
-            const auto epoch = caller->console_wait_epoch ? caller->console_wait_epoch : process->console_epoch();
-            result = kernel.scheduler().read_console(pid, epoch, {data.data(), total});
-            if (!result && result.status().code() == StatusCode::would_block &&
-                !(description->flags & posix::o_NONBLOCK))
-            {
-                caller->console_wait_epoch = epoch;
-                if (auto status = kernel.scheduler().block_current(sched::ThreadWaitReason::console_read, epoch); !status)
-                { caller->console_wait_epoch = 0; return error(status); }
-            }
-        }
-        else if (writing)
+        if (writing)
             result = kernel.posix().write(static_cast<i32>(a[0]), {data.data(), total});
         else if (description->native_shared_file)
             result = kernel.posix().pread(static_cast<i32>(a[0]), {data.data(), total}, description->offset);
@@ -624,6 +613,16 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
     if (number == N::read && description && description->readable && description->pipe != sched::invalid_description)
         return begin_pipe_read(kernel, *process, calling_tid, static_cast<i32>(a[0]), fd->description, a[1],
             a[2] < sched::pipe_capacity ? a[2] : sched::pipe_capacity, complete);
+    if (number == N::write && description && description->console && description->writable)
+    {
+        const PipeVector vector{a[1], a[2]};
+        return tty_console_write(kernel, *process, *caller, *description, {&vector, 1}, static_cast<i32>(a[0]), complete);
+    }
+    if (number == N::read && description && description->input_console)
+    {
+        const PipeVector vector{a[1], a[2]};
+        return tty_console_read(kernel, *process, *caller, *description, {&vector, 1}, complete, a, false);
+    }
     for (usize i = 0; i < 6; ++i)
         request.args[i] = a[i];
     if (number == N::lseek)
@@ -807,34 +806,6 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
             !hw::user_range(space, a[output_arg], output_size, true))
             return -14;
         request.args[output_arg] = reinterpret_cast<uptr>(buffer.data());
-    }
-    if (number == N::write && description && description->console && description->writable)
-    {
-        emit({reinterpret_cast<const char *>(buffer.data()), input_size});
-        static_cast<void>(kernel.console().write({reinterpret_cast<const char *>(buffer.data()), input_size}));
-        return static_cast<i64>(input_size);
-    }
-    if (number == N::read && description && description->input_console)
-    {
-        if (!description->readable) return -9;
-        const auto epoch = caller->console_wait_epoch ? caller->console_wait_epoch : process->console_epoch();
-        auto read = kernel.scheduler().read_console(pid, epoch, {buffer.data(), output_size});
-        if (!read && read.status().code() == StatusCode::would_block)
-        {
-            if (description->flags & posix::o_NONBLOCK)
-                return -11;
-            caller->console_wait_epoch = epoch;
-            auto status = kernel.scheduler().block_current(sched::ThreadWaitReason::console_read, epoch);
-            if (!status)
-            { caller->console_wait_epoch = 0; return error(status); }
-            complete = false;
-            return -11;
-        }
-        if (!read) return error(read.status());
-        const auto count = read.value();
-        if (!hw::copy_to_user(space, a[1], buffer.data(), count))
-            return -14;
-        return static_cast<i64>(count);
     }
     if (description && description->native_shared_file && (number == N::read || number == N::pread64))
     {
@@ -1054,6 +1025,13 @@ bool step(Kernel &kernel)
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
     // Expired timers queue their signals before interruptible waits are chosen.
     waiting_deadline |= private_timer_service(kernel, now.value());
+    // Terminal signals queued by scheduler paths, then kernel signals owed to
+    // waits that could not take them, retry here.
+    tty_drain_outbox(kernel);
+    private_jobctl_service(kernel);
+    // A fatal decision either service made applies before any thread of that
+    // process is entered (Linux complete_signal kills every thread at once).
+    private_process_signal_fatal(kernel);
     if (!runtime_failure) { started = false; return false; }
 #endif
     for (const auto &entry : poll_waits)
@@ -1126,6 +1104,13 @@ bool step(Kernel &kernel)
                 else
                     waiting_deadline = true;
             }
+    // PTY reads whose VTIME timer ran out retry with the timer expired.
+    waiting_deadline |= expire_tty_timers(kernel, now.value());
+    if (!runtime_failure) { started = false; return false; }
+#ifdef OK_PRIVATE_POLL_MASK
+    // A stop never interrupts a wait; settle the ones only parked threads can take.
+    private_jobctl_settle(kernel);
+#endif
     if (!runtime_failure || !started) { started = false; return false; }
     // On one CPU, threads run round robin in (pid, tid) order after the last
     // pick. With secondaries online, runnable threads go to their CPU's run
@@ -1142,8 +1127,9 @@ bool step(Kernel &kernel)
     Candidate chosen{}, first{};
     for (const auto &candidate : kernel.scheduler().processes())
     {
-        if (candidate.state() != sched::ProcessState::runnable && candidate.state() != sched::ProcessState::running &&
-            candidate.state() != sched::ProcessState::blocked)
+        // A stopped process is never entered; its waits still complete above.
+        if ((candidate.state() != sched::ProcessState::runnable && candidate.state() != sched::ProcessState::running &&
+             candidate.state() != sched::ProcessState::blocked) || candidate.job_control().stopped)
             continue;
         for (const auto &thread : candidate.threads())
         {
@@ -1158,7 +1144,8 @@ bool step(Kernel &kernel)
                             private_pipe_write_signal_ready(kernel, candidate, thread) ||
                             private_futex_signal_ready(kernel, candidate, thread) ||
                             private_poll_signal_ready(kernel, candidate, thread) ||
-                            private_child_signal_ready(kernel, candidate, thread);
+                            private_child_signal_ready(kernel, candidate, thread) ||
+                            private_terminal_signal_ready(kernel, candidate, thread);
 #endif
             if (!thread.native_active || thread.on_cpu != sched::no_cpu ||
                 (thread.state != sched::ProcessState::runnable && !interruptible))
@@ -1248,6 +1235,10 @@ bool step(Kernel &kernel)
         else if (private_poll_signal_ready(kernel, *owner, *selected))
         {
             if (!private_poll_signal_complete(kernel, *owner, *selected)) return runtime_failure.ok();
+        }
+        else if (private_terminal_signal_ready(kernel, *owner, *selected))
+        {
+            if (!private_terminal_signal_complete(kernel, *owner, *selected)) return runtime_failure.ok();
         }
         else if (selected->state == sched::ProcessState::blocked &&
                  !private_sleep_signal_complete(kernel, *owner, *selected)) return runtime_failure.ok();

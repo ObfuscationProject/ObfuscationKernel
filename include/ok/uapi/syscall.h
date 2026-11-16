@@ -4,19 +4,35 @@
 #include <stdint.h>
 
 #define OK_UAPI_VERSION_MAJOR 0
-#define OK_UAPI_VERSION_MINOR 16
+#define OK_UAPI_VERSION_MINOR 17
 #define OK_UAPI_VERSION_PATCH 0
 
 #define OK_UAPI_X86_64_SYSCALL 1
 #define OK_UAPI_SYSCALL_ARG_COUNT 6
 #define OK_NATIVE_CREDENTIALS_VERSION 1
-#define OK_NATIVE_SESSIONS_VERSION 3
+#define OK_NATIVE_SESSIONS_VERSION 4
 #define OK_NATIVE_CONSOLE_LEASE_VERSION 1
-#define OK_NATIVE_CONSOLE_CONTROL_VERSION 1
+#define OK_NATIVE_CONSOLE_CONTROL_VERSION 2
+#define OK_NATIVE_TTY_VERSION 1
+#define OK_NATIVE_JOB_CONTROL_VERSION 1
 #define OK_TIOCSCTTY 0x540eU
 #define OK_TIOCGPGRP 0x540fU
 #define OK_TIOCSPGRP 0x5410U
 #define OK_TIOCGSID 0x5429U
+#define OK_TCGETS 0x5401U
+#define OK_TCSETS 0x5402U
+#define OK_TCSETSW 0x5403U
+#define OK_TCSETSF 0x5404U
+#define OK_TCSBRK 0x5409U
+#define OK_TCFLSH 0x540bU
+#define OK_TIOCGWINSZ 0x5413U
+#define OK_TIOCSWINSZ 0x5414U
+#define OK_FIONREAD 0x541bU
+#define OK_TIOCNOTTY 0x5422U
+#define OK_TIOCGPTN 0x80045430U
+#define OK_TIOCSPTLCK 0x40045431U
+#define OK_PTS_MAJOR 136U
+#define OK_PTS_CAPACITY 8U
 #define OK_NATIVE_PERSISTENT_SYNC_VERSION 1
 #define OK_NATIVE_POWER_VERSION 1
 #define OK_NATIVE_METADATA_VERSION 1
@@ -188,7 +204,10 @@
 // Native only. Original PID 1 claims a new direct user child, returning a
 // positive bounded epoch. Revoke requires PID 1 and that expected epoch; flush
 // permits PID 1 or the active leader. Unused arguments must be zero. Input is
-// default-closed, never automatically echoed, and lost on revoke/leader death.
+// default-closed and lost on revoke/leader death. The console terminal starts in
+// the raw-compatible N_TTY default (ICRNL only, no echo, no ONLCR, byte at a
+// time) and is reset to it on claim, revoke and retirement; a getty sets
+// cooked mode with TCSETS (docs/modules/tty.md section 6).
 // A claim or flush with nonquiescent serial ingress fails closed with EIO.
 
 // Credential setters consume the low 32 bits of each ID argument. All-ones
@@ -202,8 +221,11 @@
 // PID arguments consume the low signed 32 bits on every architecture. Zero
 // selects the caller for getpgid/getsid/setpgid and the target PID for setpgid's
 // PGID. Fork inherits SID/PGID; successful exec and reparenting preserve them.
-// These operations establish process membership only. They do not acquire a
-// controlling terminal or provide PTYs, job control or group signal delivery.
+// A process's controlling terminal is derived from its session (the console or
+// a PTY slave, acquired by TIOCSCTTY or by opening /dev/pts/N without
+// OK_O_NOCTTY); setsid detaches it. Stop/continue, SIGTTIN/SIGTTOU, hangups and
+// orphaned-group SIGHUP/SIGCONT follow docs/modules/tty.md section 9; the
+// native numbers and wait options are in ok/uapi/job_control.h.
 
 #define OK_MFD_CLOEXEC 1U
 #define OK_MFD_ALLOW_SEALING 2U
@@ -217,7 +239,9 @@
 #define OK_EPERM 1
 #define OK_ENOENT 2
 #define OK_ESRCH 3
+#define OK_EINTR 4
 #define OK_EIO 5
+#define OK_ENXIO 6
 #define OK_EBADF 9
 #define OK_EAGAIN 11
 #define OK_ENOMEM 12
@@ -226,6 +250,7 @@
 #define OK_EEXIST 17
 #define OK_EINVAL 22
 #define OK_ENOTTY 25
+#define OK_ENOSPC 28
 #define OK_EPIPE 32
 #define OK_ENOSYS 38
 #define OK_ELOOP 40
@@ -307,6 +332,7 @@ typedef uint32_t ok_socklen_t; // Native accept address capacity and full output
 #define OK_O_APPEND 0x0008U
 #define OK_O_CREAT 0x0040U
 #define OK_O_EXCL 0x0080U
+#define OK_O_NOCTTY 0x0100U
 #define OK_O_TRUNC 0x0200U
 #define OK_O_NONBLOCK 0x0800U
 #define OK_O_CLOEXEC 0x080000U

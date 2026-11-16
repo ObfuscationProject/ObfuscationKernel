@@ -339,6 +339,46 @@ group, SIGTTIN/SIGTTOU/SIGHUP, devpts-style PTY allocation on top of the existin
 raw PTY pairs and console lease. Paired OS worktree `feat/getty-login`. Depends
 on WT1.2.
 
+Status: complete pending merge on `feat/tty-jobctl` (paired OS worktree
+`feat/getty-login`). The contract the OS builds against is
+[tty](modules/tty.md), where every section is landed; the per-slice log and
+evidence classes are in [TTY_JOB_CONTROL](qualification/TTY_JOB_CONTROL.md).
+Until S9a, existing `syscall.h` and `signal.h` lines, the profile markers,
+the module ABI and UAPI 0.16.0 stayed unchanged, so the unmodified OS consumed
+every intermediate SDK; native job-control constants live in
+`ok/uapi/job_control.h`, which stays its own header. The console keeps its
+raw-compatible termios default, raw `OK_SYS_PTY_PAIR` pairs keep the v1 hangup
+contract, and the 8 PTY slots are shared with `/dev/ptmx`. Slices:
+- S0: native PTY suites and the terminal SDK contract as hosted runners; the
+  contract published.
+- S1: termios values, the N_TTY template and generated Linux termios/ioctl
+  codecs (no wiring).
+- S2: stop/continue overlay and delivery; admission still refuses.
+- S3: signal generation, native SIG_DFL/SIG_IGN, WUNTRACED/WCONTINUED waits,
+  SIGCHLD stop reports, orphaned-group HUP+CONT.
+- S4: the console as a terminal object with N_TTY and terminal-control
+  dispatch; ISIG and SIGWINCH.
+- S5: PTY slaves as terminals, open counts, PTY ioctls, ptmx hangup data rules.
+- S6: `/dev/tty`, `/dev/console`, `/dev/ptmx` and `/dev/pts/N` in devfs and the
+  terminal open path.
+- S7: Linux PTY I/O and poll, EINTR/SA_RESTART on terminal waits, PTY VTIME.
+- S8: SIGTTIN/SIGTTOU background gates, TOSTOP, every hangup, TIOCNOTTY.
+- S9a: the seven terminal and job-control SDK markers (two new:
+  `native_tty_profile`, `native_job_control_profile`), UAPI 0.17.0, the
+  exporter validators and manifest keys, final docs.
+- S9b: module ABI 81, since `feat/net-core` took 79 and `feat/smp-bringup`
+  took 80 before this branch merged. Main (smp-bringup) is merged in, and
+  the stop overlay also gates the per-CPU run queues.
+
+Merge obligations: the S9a SDK is refused by the unmodified OS consumer
+(console input profile and UAPI 0.17), so `feat/getty-login` lands the
+matching `tools/kernel_sdk.py`, `tools/check_uapi.py` and SDK suite changes,
+the okcrt/test UAPI 0.17 pins, the okcrt `sigaction()`/`signal()` with SIG_DFL
+and SIG_IGN, the oksh/login SIGTTOU/SIGTTIN/SIGTSTP ignores and the devfs
+`attach_terminals` seam, and consumes SDK 81. Receipts
+(`hosted-tty`, `qemu-test-10`, `sdk-export-10`, `guest-tty-10`) are packaged
+in ObfuscationEvidence at merge.
+
 ### WT2.3 `feat/net-core` (XL)
 
 ICMP, neighbour cache, routing table, general TCP (retransmission, windows,
@@ -387,8 +427,8 @@ networking is not built into the pinned QEMU. Still open: ICMP errors to
 sockets, poll/select over sockets on queues, TCP getsockname/getpeername.
 Merge: the exported headers bump the module ABI once to 79
 (`docs/modules/modules.md`); the paired OS worktree `feat/net-services`
-consumes SDK 79 and merges right after the kernel. `feat/tty-jobctl` also
-plans 79; whichever merges second takes 80.
+consumes SDK 79 and merges right after the kernel. `feat/smp-bringup` then
+took 80, so `feat/tty-jobctl` takes 81.
 
 ### WT2.4 `feat/storage-durable` (XL)
 

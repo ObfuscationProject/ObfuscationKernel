@@ -1821,6 +1821,26 @@ void VirtualFileSystem::complete_metadata(const Node &node, Metadata &metadata) 
     }
 }
 
+Status VirtualFileSystem::attach_terminal_namespace(TerminalNamespace &terminals)
+{
+    smp::ScopedSpinLock guard(lock_);
+    if (terminals_ && terminals_ != &terminals) return Status::busy("VFS already has a terminal namespace");
+    terminals_ = &terminals;
+    return Status::success();
+}
+
+TerminalNamespace *VirtualFileSystem::terminal_namespace() const
+{
+    smp::ScopedSpinLock guard(lock_);
+    return terminals_;
+}
+
+Result<FilesystemDevice> VirtualFileSystem::filesystem_device(const void *identity) const
+{
+    smp::ScopedSpinLock guard(lock_);
+    return identities_.find(identity);
+}
+
 Result<Metadata> VirtualFileSystem::query_metadata(Node &node) const
 {
     OperationGuard operation(*this);
