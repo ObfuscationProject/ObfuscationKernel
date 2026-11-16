@@ -169,10 +169,15 @@ struct QuarantinedSpace
 extern std::array<QuarantinedSpace, sched::max_processes + 1> quarantined_spaces;
 // The runtime's failure and started state: written only by the kernel lock's
 // holder (a kernel section reads them at admission, under the lock). The
-// wrappers keep the Status and bool interfaces; every write, and every
-// Status reference handed out, is a require_exclusive site. A failure is
-// stored under runtime_status_lock (rank runtime_status, a leaf); `started`
-// is an atomic flag.
+// wrappers keep the Status and bool interfaces; every write is a
+// require_exclusive site. A failure is stored under runtime_status_lock
+// (rank runtime_status, a leaf); `started` is an atomic flag. The one
+// exception is bkl_sink(): a plain Status reference for the UDP and TCP
+// operation bodies (their original-description guards record release
+// failures into it), whose writes bypass runtime_status_lock and are safe
+// only while those families dispatch under the kernel lock. It is named, not
+// an implicit conversion, so no other write can bypass the lock unnoticed;
+// the package that takes UDP or TCP off the lock must replace it.
 extern smp::RankedSpinLock<smp::LockRank::runtime_status> runtime_status_lock;
 class RuntimeFailure final
 {
@@ -201,7 +206,8 @@ class RuntimeFailure final
     {
         checked() = value;
     }
-    operator Status &()
+    // Writes through this reference skip runtime_status_lock (see above).
+    [[nodiscard]] Status &bkl_sink()
     {
         return checked();
     }
@@ -1037,7 +1043,7 @@ class TcpImmediateRuntime final
         const auto route = access.linux_personality()
             ? AcceptCall::route(lu::NativeBridge<lu::configured_native_profile()>::snapshot(saved_frame))
             : lu::TcpCallRoute{access.operation(), false, 0, 0};
-        TcpOriginalDescription original{kernel.scheduler(), kernel.native_tcp(), runtime_failure};
+        TcpOriginalDescription original{kernel.scheduler(), kernel.native_tcp(), runtime_failure.bkl_sink()};
         const auto operation = [&]() -> Status
         {
             if (!access.live()) return Status::denied("TCP dispatch lost captured image");

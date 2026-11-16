@@ -476,7 +476,7 @@ class LinuxUdpOperationRuntimeAuthority final
             return set_linux_udp_result(process, thread.native_frame, value);
         };
         return linux_udp_operations.dispatch<lu::configured_native_profile()>(
-            kernel, process, thread, access, begin, publish, runtime_failure);
+            kernel, process, thread, access, begin, publish, runtime_failure.bkl_sink());
     }
 };
 
