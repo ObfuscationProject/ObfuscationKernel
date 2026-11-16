@@ -1,6 +1,8 @@
 #pragma once
 #include "ok/smp/lock.hpp"
 
+#include <type_traits>
+
 namespace ok::tests
 {
 namespace detail
@@ -62,6 +64,30 @@ inline Status check_ranked_lock_order()
         return Status::fault("release lock checks reported a violation");
     if (!released)
         return Status::fault("reverse-order locks were not released");
+    return Status::success();
+}
+
+// The booted kernel's fine locks: spin locks exactly on the profiles that
+// start secondaries (xmake/arch.lua defines OK_ARCH_SMP_START for them), an
+// UpLock elsewhere; either way a try on a held lock fails. A runtime check,
+// so freestanding compile-only users of this header still build.
+inline Status check_fine_lock_selection()
+{
+#if defined(OK_ARCH_TARGET_X86_64) || defined(OK_ARCH_TARGET_AARCH64) || defined(OK_ARCH_TARGET_RV64)
+    constexpr bool smp_profile = true;
+#else
+    constexpr bool smp_profile = false;
+#endif
+    using Fine = smp::FineLock<smp::LockRank::task>;
+    if (smp::concurrent_locks != smp_profile ||
+        std::is_same_v<Fine, smp::RankedSpinLock<smp::LockRank::task>> != smp_profile)
+        return Status::fault("fine locks do not match the profile's secondary-CPU start");
+    Fine lock;
+    lock.lock();
+    const bool held = lock.owned_by_current_cpu() && !lock.try_lock();
+    lock.unlock();
+    if (!held || lock.owned_by_current_cpu())
+        return Status::fault("a fine lock's try or owner answer is wrong");
     return Status::success();
 }
 } // namespace ok::tests

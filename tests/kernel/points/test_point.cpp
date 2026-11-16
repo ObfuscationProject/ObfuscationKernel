@@ -324,6 +324,11 @@ Status test_smp(TestPointRunner &runner)
     {
         return status;
     }
+    if (auto status = runner.check_status("smp", "fine-lock-selection", tests::check_fine_lock_selection());
+        !status.ok())
+    {
+        return status;
+    }
     return Status::success();
 }
 
