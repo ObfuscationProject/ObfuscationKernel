@@ -469,19 +469,29 @@ void check_fine_lock_selection()
     static_assert(!smp::concurrent_locks);
 #endif
     smp::UpLock<smp::LockRank::task> up;
+    expect(!up.owned_by_current_cpu(), "a free UpLock read as held");
     expect(!up.lock() && up.owned_by_current_cpu(), "UpLock lock() waited or was not held");
+    // A try on a held lock fails in both modes, as on a RankedSpinLock.
+    expect(!up.try_lock(), "try_lock of a held UpLock succeeded");
     up.unlock();
+    expect(!up.owned_by_current_cpu(), "a released UpLock read as held");
     {
         smp::UpLock<smp::LockRank::task>::Guard guard(up);
         expect(up.owned_by_current_cpu(), "UpLock guard did not hold");
     }
-    expect(up.try_lock(), "UpLock try_lock of a free lock failed");
+    expect(!up.owned_by_current_cpu(), "UpLock guard did not release");
+    expect(up.try_lock() && up.owned_by_current_cpu(), "UpLock try_lock of a free lock failed");
+    expect(!up.try_lock(), "a second try_lock of an UpLock succeeded");
     up.unlock();
 #if !defined(OK_LOCK_DEBUG)
-    static_assert(sizeof(smp::UpLock<smp::LockRank::task>) == 1); // Empty.
+    static_assert(sizeof(smp::UpLock<smp::LockRank::task>) == 1); // The held byte.
 #endif
+    // FineLock answers the same in both selections.
     Fine fine;
     expect(!fine.lock() && fine.owned_by_current_cpu(), "an uncontended FineLock waited or was not held");
+    expect(!fine.try_lock(), "try_lock of a held FineLock succeeded");
+    fine.unlock();
+    expect(!fine.owned_by_current_cpu() && fine.try_lock(), "a released FineLock was not free");
     fine.unlock();
 }
 

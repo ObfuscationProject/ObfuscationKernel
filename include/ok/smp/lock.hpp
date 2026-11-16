@@ -741,9 +741,9 @@ template <LockRank Rank> class RankedSpinLock final
 };
 
 // The same interface on a profile that runs one CPU: nothing can contend, so
-// it keeps only the owner word and the order checks, and only with
-// OK_LOCK_DEBUG; release builds compile it to nothing. Without the owner
-// word every hold reads as this CPU's.
+// it never spins. Debug builds keep the owner word and the order checks;
+// release builds keep one plain held byte, so try_lock and
+// owned_by_current_cpu answer as a RankedSpinLock's do in both modes.
 template <LockRank Rank> class UpLock final
 {
   public:
@@ -781,9 +781,12 @@ template <LockRank Rank> class UpLock final
             return;
         detail::lock_debug_released(this, Rank, cpu);
         owner_ = 0;
+#else
+        held_ = false;
 #endif
     }
 
+    // Fails while the lock is held, as a RankedSpinLock's try does.
     [[nodiscard]] bool try_lock() noexcept
     {
 #if defined(OK_LOCK_DEBUG)
@@ -793,16 +796,21 @@ template <LockRank Rank> class UpLock final
         owner_ = owner_value(cpu);
         detail::lock_debug_check_order(this, Rank, cpu);
         detail::lock_debug_acquired(this, Rank, cpu);
+#else
+        if (held_)
+            return false;
+        held_ = true;
 #endif
         return true;
     }
 
+    // One CPU runs, so a held lock is this CPU's.
     [[nodiscard]] bool owned_by_current_cpu() const noexcept
     {
 #if defined(OK_LOCK_DEBUG)
         return owner_ == owner_value(current_cpu());
 #else
-        return true;
+        return held_;
 #endif
     }
 
@@ -839,11 +847,15 @@ template <LockRank Rank> class UpLock final
             return;
         owner_ = owner_value(cpu);
         detail::lock_debug_acquired(this, recorded, cpu);
+#else
+        held_ = true;
 #endif
     }
 
 #if defined(OK_LOCK_DEBUG)
     u32 owner_{0};
+#else
+    bool held_{false};
 #endif
 };
 
@@ -864,7 +876,7 @@ static_assert(RankedLock<RankedSpinLock<LockRank::task>>);
 static_assert(RankedLock<UpLock<LockRank::task>>);
 
 // A held-lock annotation: counts held_asserts where OK_LOCK_DEBUG is defined
-// (a release UpLock keeps no owner to check) and does nothing otherwise.
+// and does nothing otherwise.
 template <typename L>
     requires requires(const L &lock) {
         { lock.owned_by_current_cpu() } -> std::same_as<bool>;
