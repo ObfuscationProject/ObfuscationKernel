@@ -40,27 +40,33 @@ template <typename Table> [[nodiscard]] consteval Table all_bkl()
 template <lu::Profile P> inline constexpr LinuxLockTable linux_lock_modes = all_bkl<LinuxLockTable>();
 inline constexpr NativeLockTable native_lock_modes = all_bkl<NativeLockTable>();
 
-// Only builds with kernel sections compiled in (x86_64, aarch64 and rv64 with
-// smp_sections=y) may dispatch a row unlocked; every other build forces the
-// lock on every row.
-#if defined(OK_SMP_SECTIONS)
-inline constexpr bool unlocked_dispatch_built = true;
+// The smp_sections=n arm (later smp_unlocked=n) and the private futex peer
+// fixture force the lock on every row, on every profile (xmake/arch.lua
+// add_ok_smp_sections defines OK_BKL_DISPATCH_FORCED). Every other build,
+// UP profiles included, follows the tables.
+#if defined(OK_BKL_DISPATCH_FORCED)
+inline constexpr bool bkl_dispatch_forced = true;
 #else
-inline constexpr bool unlocked_dispatch_built = false;
+inline constexpr bool bkl_dispatch_forced = false;
 #endif
+
+// One row of a table; indices past its end stay under the lock.
+template <typename Table>
+[[nodiscard]] constexpr bool row_requires_bkl(const Table &table, usize index, bool forced) noexcept
+{
+    return forced || index >= table.size() || table[index] == LockMode::bkl;
+}
 
 template <lu::Profile P> [[nodiscard]] constexpr bool bkl_required(lu::Operation operation) noexcept
 {
-    const auto index = static_cast<usize>(operation);
-    return !unlocked_dispatch_built || index >= linux_operation_count ||
-           linux_lock_modes<P>[index] == LockMode::bkl;
+    return row_requires_bkl(linux_lock_modes<P>, static_cast<usize>(operation), bkl_dispatch_forced);
 }
 
 // Unknown numbers stay under the lock.
 [[nodiscard]] constexpr bool native_bkl_required(u64 number) noexcept
 {
-    return !unlocked_dispatch_built || number >= native_syscall_limit ||
-           native_lock_modes[static_cast<usize>(number)] == LockMode::bkl;
+    return number >= native_syscall_limit ||
+           row_requires_bkl(native_lock_modes, static_cast<usize>(number), bkl_dispatch_forced);
 }
 
 } // namespace ok::user::native::dispatch_policy

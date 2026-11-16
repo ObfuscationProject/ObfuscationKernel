@@ -297,10 +297,16 @@ end
 -- Kernel sections (ok/smp/kernel_section.hpp) on the profiles that run
 -- kernel code on several CPUs; option smp_sections=n is the A/B arm. The
 -- private futex peer fixture keeps every syscall under the kernel lock.
+-- OK_BKL_DISPATCH_FORCED marks those two builds on every profile: they
+-- dispatch every syscall under the kernel lock whatever the bkl_required
+-- tables (src/user/runtime/dispatch_policy.hpp) say.
 function add_ok_smp_sections()
     local arch = ok_current_arch()
-    if (arch == "x86_64" or arch == "aarch64" or arch == "rv64") and has_config("smp_sections") and
-            not (get_config("private_futex_peer_fixture") and is_mode("debug")) then
+    local forced = not has_config("smp_sections") or
+            (get_config("private_futex_peer_fixture") and is_mode("debug"))
+    if forced then
+        add_defines("OK_BKL_DISPATCH_FORCED")
+    elseif arch == "x86_64" or arch == "aarch64" or arch == "rv64" then
         add_defines("OK_SMP_SECTIONS")
     end
 end
