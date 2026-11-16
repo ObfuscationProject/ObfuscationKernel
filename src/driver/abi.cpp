@@ -1,9 +1,14 @@
 #include "ok/driver/abi.hpp"
+#include "ok/smp/lock.hpp"
 
 namespace ok::driver
 {
 namespace
 {
+
+// Wait queue and slab internals of every driver ABI instance; a leaf.
+constinit smp::RankedSpinLock<smp::LockRank::driver_abi> driver_abi_lock{};
+using DriverAbiGuard = smp::RankedSpinLock<smp::LockRank::driver_abi>::Guard;
 
 bool id_matches(const OkDeviceId &driver_id, const OkDeviceId &device_id)
 {
@@ -224,26 +229,26 @@ Status OkDmaMapper::unmap(OkDmaMapping &mapping)
 
 Status OkMutex::lock()
 {
-    if (locked_)
+    if (locked_.test_and_set(std::memory_order_acquire))
     {
         return Status::would_block("mutex is already locked");
     }
-    locked_ = true;
     return Status::success();
 }
 
 Status OkMutex::unlock()
 {
-    if (!locked_)
+    if (!locked_.test(std::memory_order_relaxed))
     {
         return Status::invalid_argument("mutex is not locked");
     }
-    locked_ = false;
+    locked_.clear(std::memory_order_release);
     return Status::success();
 }
 
 Status OkWaitQueue::wait(u32 token)
 {
+    const DriverAbiGuard guard(driver_abi_lock);
     for (const auto waiter : waiters_)
     {
         if (waiter == token)
@@ -256,6 +261,7 @@ Status OkWaitQueue::wait(u32 token)
 
 Status OkWaitQueue::wake_one()
 {
+    const DriverAbiGuard guard(driver_abi_lock);
     if (waiters_.empty())
     {
         return Status::would_block("wait queue is empty");
@@ -265,12 +271,14 @@ Status OkWaitQueue::wake_one()
 
 Status OkWaitQueue::wake_all()
 {
+    const DriverAbiGuard guard(driver_abi_lock);
     waiters_.clear();
     return Status::success();
 }
 
 bool OkWaitQueue::waiting(u32 token) const
 {
+    const DriverAbiGuard guard(driver_abi_lock);
     for (const auto waiter : waiters_)
     {
         if (waiter == token)
@@ -283,6 +291,7 @@ bool OkWaitQueue::waiting(u32 token) const
 
 Result<void *> OkSlabAllocator::allocate(usize size)
 {
+    const DriverAbiGuard guard(driver_abi_lock);
     if (size == 0 || size > slots_[0].size())
     {
         return Status::invalid_argument("slab allocation size is invalid");
@@ -302,6 +311,7 @@ Result<void *> OkSlabAllocator::allocate(usize size)
 
 Status OkSlabAllocator::free(void *pointer)
 {
+    const DriverAbiGuard guard(driver_abi_lock);
     if (pointer == nullptr)
     {
         return Status::invalid_argument("slab free pointer is null");
