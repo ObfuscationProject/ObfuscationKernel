@@ -1523,7 +1523,8 @@ bool step(Kernel &kernel)
             result = resume_pipe_read(kernel, *process, object, complete);
         else if (const auto object = pipe_write_object(chosen.pid, chosen.tid); object.pool)
             result = resume_pipe_write(kernel, *process, object, complete);
-        else if (const auto stored = cpu_control_resume(*running))
+        // Only a re-dispatch: a newly trapped syscall never takes a stored result.
+        else if (const auto stored = trapped_this_step ? std::nullopt : cpu_control_resume(*running))
             result = *stored;
         else if ((process->resources().personality == Personality::native &&
                       native_unix_path_call(hw::syscall(running->native_frame), kernel.scheduler(), *process) != lu::UnixPathCall::none) ||

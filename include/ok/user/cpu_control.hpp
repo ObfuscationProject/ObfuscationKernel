@@ -15,7 +15,9 @@ namespace ok::user::native
 // whose control node is cpu_online come here before any node path; the call
 // either completes (a no-op, a refusal, a parse error) or files a request for
 // CPU 0's hotplug service and waits uninterruptibly (complete=false). The
-// re-dispatch returns the stored result and never reads the user buffer again.
+// step's resume chain hands the woken writer its stored result when it
+// dispatches the call again, so the re-dispatch never reaches this route and
+// never reads the user buffer again.
 i64 cpu_control_write(Kernel &kernel, sched::ProcessId pid, u16 cpu, uptr buffer, usize count, bool &complete);
 i64 cpu_control_writev(Kernel &kernel, sched::ProcessId pid, u16 cpu, uptr vectors, usize vector_count,
                        bool &complete);

@@ -1,6 +1,7 @@
 // User CPU hotplug and affinity (docs/modules/sysfs.md): the write route of
 // /sys/devices/system/cpu/cpuN/online, sched_getaffinity, sched_setaffinity
-// and getcpu, and the OK_SMP_HOTPLUG_USER and OK_SMP_AFFINITY_BROKEN reports.
+// and getcpu, and the OK_SMP_HOTPLUG_USER, OK_SMP_HOTPLUG_RECORDS and
+// OK_SMP_AFFINITY_BROKEN reports.
 // Everything here runs under the big kernel lock (smp-scaling WP1).
 #include "private.hpp"
 #include "ok/smp/hotplug.hpp"
@@ -97,7 +98,12 @@ std::optional<i64> cpu_control_resume(const sched::ThreadControlBlock &thread)
 
 void cpu_control_retire(const sched::ThreadControlBlock &thread)
 {
-    if (thread.entry_stack.pool) hotplug::abandon(thread.entry_stack.slot, thread.owner, thread.tid);
+    if (thread.entry_stack.pool) cpu_control_retire(thread.entry_stack, thread.owner, thread.tid);
+}
+
+void cpu_control_retire(memory::KernelEntryStackHandle lease, sched::ProcessId pid, sched::ThreadId tid)
+{
+    hotplug::abandon(lease.slot, pid, tid);
 }
 
 i64 sched_affinity_get(Kernel &kernel, sched::ProcessId pid, u64 target, u64 length, uptr output)
@@ -182,6 +188,12 @@ void report_cpu_hotplug()
     field("affinity_broken", runtime_kernel ? runtime_kernel->scheduler().affinity_broken() : 0);
     field("max_us", statistics.max_us);
     emit("\n");
+    // What became of requests whose writer left: abandoned while the service
+    // ran them, or dropped (armed or unconsumed) at teardown or exec.
+    emit_line("OK_SMP_HOTPLUG_RECORDS scope=hardware");
+    field("abandoned", statistics.abandoned);
+    field("dropped", statistics.dropped);
+    emit("\n");
 }
 } // namespace runtime_detail
 
@@ -189,8 +201,6 @@ i64 cpu_control_write(Kernel &kernel, sched::ProcessId pid, u16 cpu, uptr buffer
 {
     auto *caller = writer(kernel, pid);
     if (!caller) return -hotplug::errno_invalid;
-    if (const auto stored = hotplug::consume(caller->entry_stack.slot, caller->wait_registration.ticket()))
-        return *stored;
     if (count > hotplug::max_write) return -hotplug::errno_too_big;
     std::array<char, hotplug::parsed_bytes> text{};
     const usize copied = count < text.size() ? count : text.size();
@@ -205,8 +215,6 @@ i64 cpu_control_writev(Kernel &kernel, sched::ProcessId pid, u16 cpu, uptr vecto
 {
     auto *caller = writer(kernel, pid);
     if (!caller) return -hotplug::errno_invalid;
-    if (const auto stored = hotplug::consume(caller->entry_stack.slot, caller->wait_registration.ticket()))
-        return *stored;
     std::array<PipeVector, PipeVectors::capacity> vector{};
     if (vector_count > vector.size()) return -hotplug::errno_invalid;
     auto &space = kernel.scheduler().find(pid)->resources().native_space;
