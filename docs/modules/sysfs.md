@@ -111,7 +111,7 @@ States:
 - `abandoned`: the writer left while the service ran.
 
 Records hold identities, never pointers. Teardown of a writer, or exec, frees
-an armed or done record (counted `dropped`). A running one moves to a spare
+an armed or done record (counted `dropped_waiting` or `dropped_done`). A running one moves to a spare
 record past the lease slots, marked abandoned, so the lease slot is free for
 its next owner at once; the service frees the spare and counts it
 `abandoned`. The service runs one request at a time, so one spare suffices. A
@@ -243,12 +243,14 @@ The fields:
 
 It is followed by
 
-    OK_SMP_HOTPLUG_RECORDS scope=hardware abandoned= dropped=
+    OK_SMP_HOTPLUG_RECORDS scope=hardware abandoned= dropped_waiting= dropped_done=
 
 - `abandoned`: requests whose writer left (killed, or its image replaced by
   exec) while the service ran them; the CPU change still happened and nothing
   was completed;
-- `dropped`: armed or unconsumed requests freed when their writer left.
+- `dropped_waiting`: armed requests freed when their writer left while it
+  waited for the service (nothing was attempted);
+- `dropped_done`: results freed unconsumed when their writer left.
 
 CPU 0 writes the service counters; writers write theirs under the record
 lock. Each broken affinity also prints, from CPU 0 and never under a

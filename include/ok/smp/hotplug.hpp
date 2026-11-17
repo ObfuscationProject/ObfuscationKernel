@@ -104,8 +104,9 @@ struct Statistics
     u64 requests{}, offline{}, online{}, noop{}, failures{}, busy{}, orphaned{}, wedged{}, max_us{};
     // Reported as OK_SMP_HOTPLUG_RECORDS: requests whose writer left while
     // the service ran them (freed by the service, nothing completed), and
-    // armed or finished requests freed at the writer's teardown.
-    u64 abandoned{}, dropped{};
+    // requests freed at the writer's teardown or exec: armed (the writer
+    // still waited, nothing was attempted) or done (a result not consumed).
+    u64 abandoned{}, dropped_waiting{}, dropped_done{};
 };
 
 // Why a request is refused before anything is attempted.
@@ -226,7 +227,7 @@ template <Backend B> class HotplugService final
         if (record.pid != pid || record.tid != tid) return;
         if (record.state == RecordState::armed || record.state == RecordState::done)
         {
-            ++filed_.dropped;
+            ++(record.state == RecordState::armed ? filed_.dropped_waiting : filed_.dropped_done);
             free_locked(slot);
         }
         else if (record.state == RecordState::running && serving_ == slot)
@@ -309,7 +310,8 @@ template <Backend B> class HotplugService final
         total.noop += filed_.noop;
         total.busy += filed_.busy;
         total.failures += filed_.failures;
-        total.dropped += filed_.dropped;
+        total.dropped_waiting += filed_.dropped_waiting;
+        total.dropped_done += filed_.dropped_done;
         return total;
     }
     // A slot's record; `spare` names the abandoned record the pass still runs.

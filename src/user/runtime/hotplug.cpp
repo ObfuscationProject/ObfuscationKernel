@@ -189,10 +189,12 @@ void report_cpu_hotplug()
     field("max_us", statistics.max_us);
     emit("\n");
     // What became of requests whose writer left: abandoned while the service
-    // ran them, or dropped (armed or unconsumed) at teardown or exec.
+    // ran them, or dropped at teardown or exec while still waiting for the
+    // service or holding an unconsumed result.
     emit_line("OK_SMP_HOTPLUG_RECORDS scope=hardware");
     field("abandoned", statistics.abandoned);
-    field("dropped", statistics.dropped);
+    field("dropped_waiting", statistics.dropped_waiting);
+    field("dropped_done", statistics.dropped_done);
     emit("\n");
 }
 } // namespace runtime_detail

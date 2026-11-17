@@ -399,7 +399,7 @@ void exec_drops_leader_hotplug_request(Kernel &kernel)
     EXPECT(p.threads()[0].cpu_affinity_mask == 0x1);
     EXPECT(smp::hotplug::pending() == 0 && !smp::hotplug::finished(p.threads()[0].entry_stack.slot));
     EXPECT(!smp::hotplug::consume(p.threads()[0].entry_stack.slot, ticket));
-    EXPECT(smp::hotplug::statistics().dropped == before.dropped + 1);
+    EXPECT(smp::hotplug::statistics().dropped_waiting == before.dropped_waiting + 1);
     EXPECT(native::cpu_control_resume(p.threads()[0]) == std::nullopt);
     retire(kernel, g.pid);
     smp::detail::started.store(0x1);

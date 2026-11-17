@@ -262,7 +262,8 @@ void abandoned()
     CHECK(service->submit(backend, 8, leader).armed && service->pass(backend) && service->finished(8));
     service->abandon(8, 10, 71);
     CHECK(!service->finished(8) && !service->consume(8, leader.ticket));
-    CHECK(service->statistics().dropped == 3 && service->statistics().abandoned == 1);
+    CHECK(service->statistics().dropped_waiting == 1 && service->statistics().dropped_done == 2);
+    CHECK(service->statistics().abandoned == 1);
 }
 
 // The writer leaves while its request runs and a new thread receives its lease
