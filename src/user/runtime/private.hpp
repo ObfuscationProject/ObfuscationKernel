@@ -682,6 +682,9 @@ Status activate_pool(Kernel *kernel);
 Status check_runtime_objects();
 #endif
 bool same_space(const hw::AddressSpace &a, const hw::AddressSpace &b);
+// Counts translation_writer_asserts when a translation writer on a published
+// space runs without its owner's mm.
+void check_translation_writer(const sched::ProcessResources &resources, const char *site);
 // A user page fault of the process that owns `resources`, under its mm: a
 // write to a withheld page, or a fault on a translation replaced meanwhile.
 // True when the thread may resume.

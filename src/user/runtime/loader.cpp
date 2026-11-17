@@ -800,6 +800,7 @@ Status retire_then_install(sched::ProcessResources &resources, Image &image,
 {
     const sched::AddressSpaceGate::Hold hold(resources.mm);
     auto previous_space = resources.native_space;
+    check_translation_writer(resources, "exec retires the previous image");
     const auto retired = previous.retire(previous_space, resources.native_pages);
     sched::publish_native_space(resources, previous_space);
     if (!retired)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ok/arch/execution.hpp"
+#include "ok/smp/kernel_section.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -101,9 +102,15 @@ template <typename Space, usize FixedSlots = 0> class SpaceTable
         auto &entry = entries[space.slot];
         const auto generation = word(entry.generation).load(std::memory_order_acquire);
         if (generation != space.generation || !word(entry.used).load(std::memory_order_acquire) ||
-            word(entry.root).load(std::memory_order_acquire) != space.root ||
-            word(entry.retiring).load(std::memory_order_acquire))
+            word(entry.root).load(std::memory_order_acquire) != space.root)
             return nullptr;
+        if (word(entry.retiring).load(std::memory_order_acquire))
+        {
+            // A window opened after the writer marked the space retiring.
+            if (const auto cpu = smp::current_cpu(); cpu < smp::max_cpus)
+                smp::detail::owner_add(smp::evidence_cpus[cpu].retiring_rejects);
+            return nullptr;
+        }
         std::atomic_thread_fence(std::memory_order_acquire);
         return word(entry.generation).load(std::memory_order_relaxed) == generation ? &entry.space : nullptr;
     }

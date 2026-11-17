@@ -225,6 +225,15 @@ bool same_space(const hw::AddressSpace &a, const hw::AddressSpace &b)
 {
     return a.root == b.root && a.slot == b.slot && a.generation == b.generation;
 }
+// A translation writer (remap, protect, destroy) on a published space runs
+// holding its owner's mm (translation_writer_asserts).
+void check_translation_writer([[maybe_unused]] const sched::ProcessResources &resources,
+                              [[maybe_unused]] const char *site)
+{
+    if constexpr (smp::lock_debug_enabled)
+        if (!resources.mm.owned_by_current_cpu())
+            smp::count_check(smp::KernelCheck::translation_writer, site);
+}
 namespace
 {
 // The process whose live space `space` is. The kernel lock holder finds it
@@ -245,7 +254,7 @@ Result<usize> resolve_withheld([[maybe_unused]] sched::ProcessResources &resourc
 {
     usize resolved{};
 #ifdef OK_NATIVE_COW_FORK
-    smp::check_held(resources.mm, "copy-on-write resolution");
+    check_translation_writer(resources, "copy-on-write resolution");
     if (resources.mm.dead || !size || address > ~uptr{0} - (size - 1)) return resolved;
     const uptr last = address + size - 1;
     for (uptr page = address & ~(hw::page_size - 1);; page += hw::page_size)
@@ -800,6 +809,7 @@ Status replace_native_pages(sched::ProcessResources &resources, Pages &candidate
         return runtime_failure;
     }
 #endif
+    check_translation_writer(resources, "replace_native_pages retires the previous space");
     if (auto status = hw::destroy_space(previous); !status.ok())
     {
 #ifdef OK_PRIVATE_PPC32_SIGNAL
@@ -1126,6 +1136,8 @@ Status native_munmap(sched::ProcessResources &resources, uptr address, usize len
 Result<uptr> native_brk(sched::ProcessResources &resources, uptr address)
 {
     const sched::AddressSpaceGate::Hold hold(resources.mm);
+    if (resources.mm.dead)
+        return Status::no_process("native address space was torn down");
     if (!address)
         return resources.program_break;
     if (resources.program_break_base < hw::user_begin ||
@@ -1235,6 +1247,7 @@ i64 fork_process(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBloc
         child->resources().memory = child_memory;
 #ifdef OK_NATIVE_COW_FORK
         // One protect over the parent's records: one quiesce.
+        check_translation_writer(parent, "fork withholds the parent's writes");
         if (auto status = withhold_shared_writes(parent.native_pages, parent.native_space, page_pool); !status)
         {
             fatal = true;
