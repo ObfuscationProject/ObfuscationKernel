@@ -339,6 +339,10 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
     if (auto status = fs::require_access(metadata, {kernel.posix().euid(), kernel.posix().egid()}, fs::access_execute);
         !status.ok())
         return status;
+    // Retirement bookkeeping first: a load refused for want of it allocates
+    // nothing, not even the prefix run.
+    auto retained = ImageRetirementReservation::reserve();
+    if (!retained) return retained.status();
     ElfPrefix prefix;
     if (auto status = prefix.read(*node, metadata.size < ElfPrefix::initial_bytes ? metadata.size
                                                                                   : ElfPrefix::initial_bytes);
@@ -375,8 +379,6 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
     auto elf = sched::ElfLoader{}.load_prefix({image_bytes, prefix_size}, metadata.size, kernel.arch().architecture());
     if (!elf)
         return elf.status();
-    auto retained = ImageRetirementReservation::reserve();
-    if (!retained) return retained.status();
     Image image{std::move(retained.value())};
     lu::ExecMetadata linux_metadata{};
     bool dynamic_x86 = false;
