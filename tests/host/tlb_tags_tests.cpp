@@ -214,6 +214,20 @@ class Model
         spaces_[space_index].pages[page] = next_frame_++;
         spaces_[space_index].tag.changed();
     }
+    // A frame change in two steps: the leaf is cleared (frame 0, the page
+    // faults) and the generation moves; after quiesce_root the new frame is
+    // installed and, with `bump`, the generation moves again.
+    void clear(usize space_index, u32 page)
+    {
+        spaces_[space_index].pages[page] = 0;
+        spaces_[space_index].tag.changed();
+    }
+    void install(usize space_index, u32 page, bool bump)
+    {
+        spaces_[space_index].pages[page] = next_frame_++;
+        if (bump)
+            spaces_[space_index].tag.changed();
+    }
     // A touch between the publication and the end of quiesce_root: a hit on
     // the old frame is in flight (that frame is not freed yet), not stale.
     void touch_in_flight(usize cpu_index, u32 page)
@@ -339,6 +353,41 @@ void check_publish_then_quiesce(u32 bits)
     assert(bits == 0 || model.in_flight() == 1);
 }
 
+// The writer order for a new frame (clear, bump, quiesce_root, install,
+// bump): a CPU whose window was open across the clear may hit the old frame
+// it cached (still allocated, and no new frame exists yet); a CPU that entered
+// during the gap may cache the cleared entry (RISC-V may cache an invalid
+// one). After the install every entry reaches the new frame, which needs the
+// second bump; without it (`second_bump` false) the tagged CPU that cached
+// the cleared entry keeps faulting on it.
+u64 check_clear_then_install(u32 bits, bool second_bump)
+{
+    Model model(3, bits, 4);
+    const auto space = model.create();
+    for (usize cpu = 0; cpu < 3; ++cpu)
+    {
+        model.open(cpu, space);
+        model.touch(cpu, 1);
+        model.close(cpu);
+    }
+    model.open(1, space);
+    model.clear(space, 1);
+    model.touch_in_flight(1, 1);
+    model.open(2, space);
+    model.touch(2, 1);
+    model.close(2);
+    model.close(1); // quiesce_root returns once every window closed
+    model.install(space, 1, second_bump);
+    for (usize cpu = 0; cpu < 3; ++cpu)
+    {
+        model.open(cpu, space);
+        model.touch(cpu, 1);
+        model.close(cpu);
+    }
+    assert(bits == 0 || model.in_flight() == 1);
+    return model.stale();
+}
+
 // Random entries, remaps, retirements and creations on several CPUs with few
 // tags, so tags roll over and get reused constantly. No hit may ever return
 // a translation that is no longer in the page table.
@@ -392,10 +441,13 @@ int main()
     check_window_race();
     check_publish_then_quiesce(8);
     check_publish_then_quiesce(0);
+    assert(check_clear_then_install(8, true) == 0);
+    assert(check_clear_then_install(0, true) == 0);
+    assert(check_clear_then_install(8, false) == 1);
     check_random(2, 1);  // three user tags per CPU
     check_random(1, 7);  // one user tag per CPU
     check_random(16, 3); // the cache's own four slots bound it
     check_random(0, 5);  // untagged: every entry flushes
-    std::puts("OK_TLB_TAGS_MODEL scope=model selection=pass rollover=pass generation=pass race=pass publish_order=pass report=pass");
+    std::puts("OK_TLB_TAGS_MODEL scope=model selection=pass rollover=pass generation=pass race=pass publish_order=pass frame_change=pass report=pass");
     return 0;
 }

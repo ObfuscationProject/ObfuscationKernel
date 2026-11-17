@@ -3,8 +3,10 @@
 
 Host threads stand in for CPUs: kernel copies and user entries open their windows on a model
 backend that publishes entries and slots like the x86_64, aarch64 and rv64 backends; the writer
-publishes, bumps the TLB generation, calls the real ok::smp::quiesce_root and only then poisons what
-it freed. No reader may read poison; a control that frees before quiesce_root must be caught.
+clears a leaf whose frame changes, bumps the TLB generation, calls the real ok::smp::quiesce_root,
+installs the new frame and only then poisons what it freed. No reader may read poison, and no reader
+window may still use the old frame once the new one is reachable; controls that free before
+quiesce_root or install before it must be caught.
 Built with OK_HOSTED_LOCK_MODEL and OK_LOCK_DEBUG (--sanitize adds address and undefined
 sanitizers). ThreadSanitizer is not used: it does not model the seq_cst fences of the window pair
 and reports the pair as a race. Model coverage only (scope=model): no MMU, TLB, IPI or hardware
@@ -17,7 +19,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-MARKER = "OK_TRANSLATION_WINDOWS_MODEL scope=model ordered=pass control=pass window_wait=pass"
+MARKER = ("OK_TRANSLATION_WINDOWS_MODEL scope=model ordered=pass control=pass window_wait=pass "
+          "frame_change=pass")
 
 
 def main():

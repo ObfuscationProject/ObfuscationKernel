@@ -168,7 +168,11 @@ Status destroy_space(AddressSpace &space);
 // while the space executes. remap() and destroy_space() are the translation
 // writers: the caller holds the owning process's mm, and each returns only
 // after every window that could still use the old translation closed
-// (quiesce_root), so the caller may free what it reached.
+// (quiesce_root), so the caller may free what it reached. Where other CPUs
+// run (x86_64, aarch64, rv64) a new frame is installed only after that: the
+// page is unmapped meanwhile, so no CPU reaches the old and the new frame at
+// the same time. A user access in that gap faults and a kernel copy fails;
+// the runtime resumes the one and retries the other holding mm.
 Status remap(const AddressSpace &space, const PageMapping &mapping);
 // remap() for every record of `mappings` whose access the runtime changed in
 // place (the same frames; fork withholds write access), with one quiesce.

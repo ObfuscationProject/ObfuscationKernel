@@ -161,24 +161,44 @@ hw::AddressSpace create(u64 tag)
     return spaces.handle(*entry);
 }
 
-// Writer order for one leaf: publish, bump, quiesce, then free (poison).
-// `early_free` poisons before the quiesce (the order the protocol forbids);
-// `published` runs between the publication and the quiesce.
+enum class Order
+{
+    // The backends' order for a new frame: clear the leaf, bump, quiesce,
+    // install the new frame, bump again, then free the old one.
+    clear_first,
+    // Controls the protocol forbids: install the new frame before the
+    // quiesce (two frames reachable at once), or free before it.
+    publish_first,
+    early_free,
+};
+
+void bump(ModelSpace &value)
+{
+    const decltype(spaces_lock)::Guard guard(spaces_lock);
+    value.tlb.changed();
+}
+
+// Writer order for one leaf whose frame changes. `published` runs between
+// the first store and the quiesce.
 template <typename Published>
-void remap(const hw::AddressSpace &space, usize index, u64 tag, bool early_free, Published published)
+void remap(const hw::AddressSpace &space, usize index, u64 tag, Order order, Published published)
 {
     auto *value = spaces.find(space);
     CHECK(value);
     auto *table = table_of(*value);
-    auto *old = table->entry[index].exchange(new_frame(tag), std::memory_order_release);
-    if (early_free)
+    auto *replacement = new_frame(tag);
+    auto *old = table->entry[index].exchange(order == Order::clear_first ? nullptr : replacement,
+                                             std::memory_order_release);
+    if (order == Order::early_free)
         poison_frame(old);
-    {
-        const decltype(spaces_lock)::Guard guard(spaces_lock);
-        value->tlb.changed();
-    }
+    bump(*value);
     published();
     smp::quiesce_root(space.root);
+    if (order == Order::clear_first)
+    {
+        table->entry[index].store(replacement, std::memory_order_release);
+        bump(*value);
+    }
     poison_frame(old);
 }
 
@@ -199,9 +219,12 @@ void destroy(const hw::AddressSpace &space)
 }
 
 std::array<std::atomic<bool>, smp::max_cpus> kicked{};
-std::atomic<u64> poisoned{}, reads{}, rejects{}, user_runs{}, kicks{};
+std::atomic<u64> poisoned{}, reads{}, rejects{}, gaps{}, user_runs{}, kicks{};
 
-// One walk of the published space inside a window; returns poison hits.
+// One walk of the published space inside a window; returns poison hits. The
+// leaf is read once and the frame it names is the one used, as the backends'
+// copies do; a cleared leaf (a frame change in progress) is a fault the
+// caller retries.
 u64 walk(const hw::AddressSpace &space, ok::test::Sequence &random)
 {
     auto *value = spaces.find(space);
@@ -212,6 +235,11 @@ u64 walk(const hw::AddressSpace &space, ok::test::Sequence &random)
     }
     auto *table = table_of(*value);
     auto *frame = table->entry[random.next() % leaves].load(std::memory_order_acquire);
+    if (!frame)
+    {
+        gaps.fetch_add(1, std::memory_order_relaxed);
+        return 0;
+    }
     u64 hits = 0;
     for (const auto &word : frame->word)
         hits += word.load(std::memory_order_relaxed) == poison;
@@ -258,7 +286,7 @@ void kick(smp::CpuId cpu, u64) noexcept
 // reading. With the writer order the free waits for the window, so the
 // reader sees only live bytes; freeing before quiesce_root (the control) is
 // seen as poison. Returns the poisoned words the reader read.
-u64 window_across_remap(bool early_free)
+u64 window_across_remap(Order order)
 {
     const auto space = create(11);
     std::atomic<int> phase{0};
@@ -279,16 +307,52 @@ u64 window_across_remap(bool early_free)
         }
         while (phase.load() == 0)
             std::this_thread::yield();
-        remap(space, 0, 12, early_free, [&] { phase.store(2); });
+        remap(space, 0, 12, order, [&] { phase.store(2); });
     });
     destroy(space);
     return hits;
 }
 
+// A reader holds a kernel window on the old frame of a leaf while the writer
+// changes the frame. Returns whether the new frame was reachable before that
+// window closed: never with the backends' order (the leaf stays cleared until
+// quiesce_root returned), always with the publish-first control.
+bool new_frame_during_window(Order order)
+{
+    const auto space = create(21);
+    auto *table = table_of(*spaces.find(space));
+    std::atomic<int> phase{0};
+    bool reachable = false;
+    ok::test::race(2, [&](unsigned cpu) {
+        if (cpu == 1)
+        {
+            const smp::KernelWindow window(space.root);
+            auto *old = table->entry[0].load(std::memory_order_acquire);
+            CHECK(old && old->word[0].load() == 21);
+            phase.store(1);
+            while (phase.load() != 2)
+                std::this_thread::yield();
+            // The writer stored and now waits in quiesce_root for this window.
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            auto *now = table->entry[0].load(std::memory_order_acquire);
+            reachable = now != nullptr && now != old;
+            CHECK(old->word[0].load() == 21);
+            return;
+        }
+        while (phase.load() == 0)
+            std::this_thread::yield();
+        remap(space, 0, 22, order, [&] { phase.store(2); });
+    });
+    auto *installed = table->entry[0].load();
+    CHECK(installed && installed->word[0].load() == 22);
+    destroy(space);
+    return reachable;
+}
+
 // Readers race a writer that remaps leaves and replaces whole spaces.
 void race(unsigned rounds)
 {
-    poisoned = reads = rejects = user_runs = kicks = 0;
+    poisoned = reads = rejects = gaps = user_runs = kicks = 0;
     std::atomic<bool> stop{false};
     auto space = create(1);
     publish(space);
@@ -307,7 +371,7 @@ void race(unsigned rounds)
                     destroy(previous);
                 }
                 else
-                    remap(space, random.next() % leaves, round + 2, false, [] {});
+                    remap(space, random.next() % leaves, round + 2, Order::clear_first, [] {});
             }
             stop.store(true, std::memory_order_release);
             return;
@@ -355,19 +419,23 @@ int main()
     smp::detail::online.store((u32{1} << (readers + 2)) - 1);
     smp::detail::ipi_sender = kick;
     check_kernel_window_wait();
-    CHECK(window_across_remap(false) == 0);
+    CHECK(window_across_remap(Order::clear_first) == 0);
     // Negative control: freeing before quiesce_root is caught by the poison.
-    const auto control = window_across_remap(true);
+    const auto control = window_across_remap(Order::early_free);
     CHECK(control == words);
+    // A new frame is installed only once no window can use the old one.
+    CHECK(!new_frame_during_window(Order::clear_first));
+    CHECK(new_frame_during_window(Order::publish_first));
     race(20000);
     CHECK(poisoned == 0);
     CHECK(reads > 10000 && kicks > 0 && user_runs > 0);
-    std::printf("translation windows ordered: reads=%llu rejects=%llu user_runs=%llu kicks=%llu poisoned=0 "
-                "control_poisoned=%llu\n",
+    std::printf("translation windows ordered: reads=%llu rejects=%llu gaps=%llu user_runs=%llu kicks=%llu "
+                "poisoned=0 control_poisoned=%llu\n",
                 static_cast<unsigned long long>(reads.load()), static_cast<unsigned long long>(rejects.load()),
-                static_cast<unsigned long long>(user_runs.load()), static_cast<unsigned long long>(kicks.load()),
-                static_cast<unsigned long long>(control));
+                static_cast<unsigned long long>(gaps.load()), static_cast<unsigned long long>(user_runs.load()),
+                static_cast<unsigned long long>(kicks.load()), static_cast<unsigned long long>(control));
     CHECK(ok::test::lock_violations() == 0 && ok::test::lock_checks() == 0);
-    std::puts("OK_TRANSLATION_WINDOWS_MODEL scope=model ordered=pass control=pass window_wait=pass");
+    std::puts("OK_TRANSLATION_WINDOWS_MODEL scope=model ordered=pass control=pass window_wait=pass "
+              "frame_change=pass");
     return 0;
 }
