@@ -4,7 +4,8 @@
 // OK_IRQ_COMPLETIONS, OK_TIMER_LATENCY, OK_TIMERS), with secondary CPUs
 // what each CPU did (OK_SMP_CPUS, OK_SMP_IRQS), socket waits (OK_NET_WAITS),
 // where kernel sections are compiled in the OK_SMP_KERNEL lines and, with the
-// smp_hotplug_test knob, the CPU hotplug cycles (OK_SMP_HOTPLUG), then the
+// smp_hotplug_test knob, the CPU hotplug cycles (OK_SMP_HOTPLUG, and for a
+// failed cycle OK_SMP_HOTPLUG_FAILURE with the failing step), then the
 // lock checks and fine-lock evidence (OK_SMP_KERNEL_CHECKS, OK_SMP_LOCKS,
 // OK_SMP_WAKE, OK_SMP_MM, OK_SMP_AUDIT).
 #include "private.hpp"
@@ -278,6 +279,16 @@ void report_hotplug()
     emit(" failures="); emit_number(hotplug.failures);
     emit(" cpu="); emit_number(hotplug.cpu);
     emit("\n");
+    // The first and the latest failed cycle with the failing step's reason.
+    for (const bool first : {true, false})
+    {
+        const auto failure = smp::hotplug_failure(first);
+        if (!failure.cycle || (!first && hotplug.failures < 2)) continue;
+        emit_line("OK_SMP_HOTPLUG_FAILURE scope=hardware which="); emit(first ? "first" : "latest");
+        emit(" cycle="); emit_number(failure.cycle);
+        emit(" phase="); emit(failure.phase);
+        emit(" reason=\""); emit(failure.reason); emit("\"\n");
+    }
 #endif
 }
 // The lock order's assertion counters and the fine-lock evidence, after the

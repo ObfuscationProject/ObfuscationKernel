@@ -219,6 +219,7 @@ CpuId cycled_cpu() noexcept
 // Online time of the cycled CPU between two cycles.
 constexpr u64 hotplug_period_ns = 100'000'000;
 constinit HotplugStatistics hotplug_stats{};
+constinit std::array<HotplugFailure, 2> hotplug_failures{};
 u64 hotplug_next{};
 #endif
 
@@ -523,6 +524,15 @@ HotplugStatistics hotplug_statistics() noexcept
 #endif
 }
 
+HotplugFailure hotplug_failure([[maybe_unused]] bool first) noexcept
+{
+#if defined(OK_SMP_HOTPLUG_TEST) && defined(OK_ARCH_SMP_START)
+    return hotplug_failures[first ? 0 : 1];
+#else
+    return {};
+#endif
+}
+
 void hotplug_test_pass() noexcept
 {
 #if defined(OK_SMP_HOTPLUG_TEST) && defined(OK_ARCH_SMP_START)
@@ -540,11 +550,28 @@ void hotplug_test_pass() noexcept
         return;
     }
     // A stop that timed out leaves the CPU stopping: no restart, a failure.
-    bool cycled = true;
+    // The first step that failed is kept with its reason.
+    HotplugFailure failure{};
     if ((online_mask() & (u32{1} << cpu)) != 0)
-        cycled = stop_secondary_cpu(*bringup_kernel, cpu).ok();
-    cycled = state_of(cpu) == CpuState::offline && restart_secondary_cpu(*bringup_kernel, cpu).ok() && cycled;
-    ++(cycled ? hotplug_stats.cycles : hotplug_stats.failures);
+        if (const auto stopped = stop_secondary_cpu(*bringup_kernel, cpu); !stopped)
+            failure = {0, "stop", stopped.message()};
+    if (state_of(cpu) != CpuState::offline)
+    {
+        if (failure.phase.empty())
+            failure = {0, "state", "the cycled CPU is not offline"};
+    }
+    else if (const auto restarted = restart_secondary_cpu(*bringup_kernel, cpu); !restarted && failure.phase.empty())
+        failure = {0, "restart", restarted.message()};
+    if (failure.phase.empty())
+        ++hotplug_stats.cycles;
+    else
+    {
+        ++hotplug_stats.failures;
+        failure.cycle = hotplug_stats.cycles + hotplug_stats.failures;
+        if (hotplug_failures[0].cycle == 0)
+            hotplug_failures[0] = failure;
+        hotplug_failures[1] = failure;
+    }
     const auto after = arch::monotonic_nanoseconds();
     hotplug_next = (after ? after.value() : now.value()) + hotplug_period_ns;
 #endif

@@ -148,6 +148,17 @@ struct HotplugStatistics
     CpuId cpu{};
 };
 [[nodiscard]] HotplugStatistics hotplug_statistics() noexcept;
+// A failed cycle of that test: its number (1-based), the step that failed
+// (stop, restart, or state: the CPU was not offline to restart) and that
+// step's status message. `cycle` is 0 while none failed.
+struct HotplugFailure
+{
+    usize cycle{};
+    std::string_view phase{};
+    std::string_view reason{};
+};
+// The first and the latest failed cycle.
+[[nodiscard]] HotplugFailure hotplug_failure(bool first) noexcept;
 // One pass of that test from CPU 0's kernel loop (kernel lock held, no record
 // kept); a no-op unless the knob is built in.
 void hotplug_test_pass() noexcept;
