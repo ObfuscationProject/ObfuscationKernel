@@ -69,12 +69,10 @@ The native personality reaches it from the step's dispatch. Linux `write` and
 routes `pwrite64` before its positioned I/O. The offset of `pwrite64` is
 ignored, as on Linux.
 
-1. A finished request of this thread with its current wait ticket returns its
-   stored result once. A re-dispatch never reads the user buffer again.
-2. More than 4096 bytes is E2BIG; zero bytes returns 0.
-3. Up to 16 bytes are copied and parsed with Linux `kstrtobool`: `1yYtT` and
+1. More than 4096 bytes is E2BIG; zero bytes returns 0.
+2. Up to 16 bytes are copied and parsed with Linux `kstrtobool`: `1yYtT` and
    `on` are true, `0nNfF` and `of...` false; anything else is EINVAL.
-4. The thread registers its wait first (`ThreadWaitReason::cpu_hotplug`, 16,
+3. The thread registers its wait first (`ThreadWaitReason::cpu_hotplug`, 16,
    key 0), then files the request (`smp::hotplug::submit`). The result is
    one of:
    - success with the byte count, when the CPU already is in the requested
@@ -83,15 +81,19 @@ ignored, as on Linux.
      pending, or the CPU is `stopping`, `starting` or `boot`;
    - EIO, when the CPU is `halted`;
    - armed: the request is filed in the writer's record.
-5. A completed submission cancels the thread's own wait and returns.
-6. An armed one sends CPU 0 a kick if the writer runs elsewhere and returns
+4. A completed submission cancels the thread's own wait and returns.
+5. An armed one sends CPU 0 a kick if the writer runs elsewhere and returns
    incomplete. The thread waits uninterruptibly (no signal ends the wait).
 
 SIGKILL still ends a waiting writer: the fatal decision tears the process
 down, and the retirement of each thread (`retire_native_thread`) drops its
-record. When the thread is woken, the step's resume chain finds the finished
-record (a lock-free hint per record) and returns the stored result before
-anything decodes the frame.
+record. Exec drops the record of every old thread too, the surviving
+leader's included, since the new image keeps the leader's lease and wait
+ticket. When the woken thread is dispatched again, the step's resume chain
+finds the finished record (a lock-free hint per record) and returns the
+stored result once, keyed by the current wait ticket, before anything decodes
+the frame. The re-dispatch never reads the user buffer again, and a newly
+trapped syscall never takes a stored result.
 
 ## Records and the service
 
@@ -108,11 +110,12 @@ States:
 - `done`: a result its writer consumes once, keyed by its ticket;
 - `abandoned`: the writer left while the service ran.
 
-Records hold identities, never pointers. Teardown of a writer frees an armed or
-done record and marks a running one abandoned. A new request on a slot whose
-earlier result was never consumed replaces it. A slot still `running` or
-`abandoned` (its last owner died during the request) refuses new requests
-with EBUSY until the service frees it.
+Records hold identities, never pointers. Teardown of a writer, or exec, frees
+an armed or done record (counted `dropped`). A running one moves to a spare
+record past the lease slots, marked abandoned, so the lease slot is free for
+its next owner at once; the service frees the spare and counts it
+`abandoned`. The service runs one request at a time, so one spare suffices. A
+new request on a slot whose earlier result was never consumed replaces it.
 
 `smp::hotplug_service_pass()` (`src/smp/hotplug.cpp`) runs on CPU 0 after
 `ok_step_userland()` in the kernel loop. It runs outside the
@@ -128,7 +131,8 @@ and `restart_secondary_cpu` require. One pass:
 4. Holding no record lock: checks the CPU's state again, then stops or
    restarts it. Both release the kernel lock while they wait.
 5. CS3, under `hotplug_request`: stores the result if the record is still
-   running with the same generation. An abandoned record is freed instead.
+   running with the same generation. An abandoned record (the spare) is
+   freed instead.
    Then it completes the writer's wait, holding only the kernel lock.
 
 CPU 0 is never a target: `hotplug_request` refuses CPU 0 and the caller's own
@@ -164,7 +168,8 @@ marked offline in the topology, and a later `1` restarts it. The report counts
 Each thread has its own mask (`ThreadControlBlock::cpu_affinity_mask`). The
 process mask stays kernel placement policy: modules and drivers set it, and
 exec resets it. The effective mask is process & thread. Fork and clone copy
-the caller's thread mask, and exec keeps it.
+the caller's thread mask. Exec gives the new image's only thread (the old
+leader's TCB) the calling thread's mask, as Linux keeps the exec'ing task's.
 
 Every placement honors the effective mask:
 
@@ -236,6 +241,15 @@ The fields:
 - `affinity_broken`: every broken affinity;
 - `max_us`: the longest stop or restart.
 
+It is followed by
+
+    OK_SMP_HOTPLUG_RECORDS scope=hardware abandoned= dropped=
+
+- `abandoned`: requests whose writer left (killed, or its image replaced by
+  exec) while the service ran them; the CPU change still happened and nothing
+  was completed;
+- `dropped`: armed or unconsumed requests freed when their writer left.
+
 CPU 0 writes the service counters; writers write theirs under the record
 lock. Each broken affinity also prints, from CPU 0 and never under a
 scheduler lock,
@@ -260,12 +274,18 @@ where `cpu` is the lowest CPU the thread was confined to.
   open path as root and uid 1000.
 - `scripts/test_cpu_hotplug_service.py`: the service over a model backend:
   record lifecycle, consume-once results, no-op and coalesced requests,
-  refusals, orphaned and abandoned records, the result mapping, a wedged CPU,
-  service order and the parser. A race of host threads uses the real lock.
+  refusals, orphaned and abandoned records, a lease slot reused while its
+  abandoned request runs, a result dropped by exec, the result mapping, a
+  wedged CPU, service order and the parser. A race of host threads uses the
+  real lock.
+- `scripts/test_native_exec_eviction.py` (`exec_drops_leader_hotplug_request`):
+  a sibling's exec while the leader waits in a hotplug write, through the
+  actual runtime: the request is dropped and the new image keeps the caller's
+  affinity.
 - `scripts/test_run_queues.py` (`test_thread_affinity`, `test_kernel_tick`,
   `test_hotplug`): thread masks in every placement path, the stranded thread
   (queued, blocked or running on the CPU that leaves), the ring, the process
   mask precheck and the tick restriction.
 
-All three are model scope. Guest evidence comes from ObfuscationOS:
+All four are model scope. Guest evidence comes from ObfuscationOS:
 `scripts/test_cpu_sysfs.py` and `scripts/test_smp_stress.py --user-hotplug`.
