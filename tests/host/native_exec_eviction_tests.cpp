@@ -364,6 +364,48 @@ void leaseless_leader_exec(Kernel &kernel)
     return_elsewhere(kernel, g.pid, g.sibling, true);
     retire(kernel, g.pid);
 }
+// The leader waits in a CPU hotplug write when a sibling calls exec. The
+// leader's TCB, lease and wait ticket carry over to the new image, so its
+// request goes with the old image: the new image never sees its result. The
+// new image's only thread keeps the caller's affinity, not the leader's.
+void exec_drops_leader_hotplug_request(Kernel &kernel)
+{
+    // CPU 1 is online for the service's checks.
+    smp::cpu_record(1).state.store(static_cast<u8>(smp::CpuState::online));
+    smp::detail::online.store(0x3);
+    smp::detail::started.store(0x3);
+    const auto g = create(kernel);
+    constexpr uptr text = hw::user_begin + 640;
+    std::memcpy(mock::memory.data() + (text - hw::user_begin), "0\n", 2);
+    const auto before = smp::hotplug::statistics();
+    // The process's activation picks a thread; then the leader is made current.
+    EXPECT(kernel.posix().activate(g.pid)); EXPECT(kernel.scheduler().activate_thread(g.pid, g.pid));
+    EXPECT(kernel.scheduler().current_tid(0) == g.pid);
+    bool complete = true;
+    EXPECT(native::cpu_control_write(kernel, g.pid, 1, text, 2, complete) == 0 && !complete);
+    const auto &leader = thread(kernel, g.pid, g.pid);
+    const auto ticket = leader.wait_registration.ticket();
+    EXPECT(leader.state == sched::ProcessState::blocked && leader.wait_reason == sched::ThreadWaitReason::cpu_hotplug);
+    EXPECT(leader.wait_registration.pending(ticket) && smp::hotplug::pending() == 1);
+    // The blocked leader is confined to CPU 1; the caller runs on CPU 0.
+    thread(kernel, g.pid, g.pid).cpu_affinity_mask = 0x2;
+    thread(kernel, g.pid, g.sibling).cpu_affinity_mask = 0x1;
+    EXPECT(kernel.posix().activate(0));
+    EXPECT(exec(kernel, g.pid, g.sibling, complete) == 0 && !complete && nothing_reported());
+    EXPECT(native::runtime_status().ok() && native::started);
+    auto &p = process(kernel, g.pid);
+    EXPECT(p.threads().size() == 1 && p.threads()[0].tid == g.pid);
+    EXPECT(p.threads()[0].wait_registration.ticket() == ticket && !p.threads()[0].wait_registration.active());
+    EXPECT(p.threads()[0].cpu_affinity_mask == 0x1);
+    EXPECT(smp::hotplug::pending() == 0 && !smp::hotplug::finished(p.threads()[0].entry_stack.slot));
+    EXPECT(!smp::hotplug::consume(p.threads()[0].entry_stack.slot, ticket));
+    EXPECT(smp::hotplug::statistics().dropped == before.dropped + 1);
+    EXPECT(native::cpu_control_resume(p.threads()[0]) == std::nullopt);
+    retire(kernel, g.pid);
+    smp::detail::started.store(0x1);
+    smp::detail::online.store(0x1);
+    smp::cpu_record(1).state.store(static_cast<u8>(smp::CpuState::offline));
+}
 } // namespace
 
 int main()
@@ -380,6 +422,7 @@ int main()
     exec_without_other_cpu(kernel);
     breach_before_eviction_stops(kernel);
     leaseless_leader_exec(kernel);
+    exec_drops_leader_hotplug_request(kernel);
     const auto stacks = native::entry_stacks.accounting();
     EXPECT(!stacks.leased_slots && !stacks.active_slots && !stacks.quarantined_slots);
     EXPECT(stacks.reservations == stacks.releases && native::runtime_status().ok());

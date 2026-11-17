@@ -128,7 +128,8 @@ struct ThreadControlBlock
     // the entry; one whose thread blocked meanwhile is discarded when popped.
     smp::CpuId queued_cpu{no_cpu};
     // sched_setaffinity's mask; the thread runs on CPUs both it and the
-    // process mask allow. Fork and clone copy it, exec keeps it.
+    // process mask allow. Fork and clone copy it; exec gives the new image's
+    // only thread the calling thread's mask.
     u16 cpu_affinity_mask{cpu_affinity_any};
 };
 
