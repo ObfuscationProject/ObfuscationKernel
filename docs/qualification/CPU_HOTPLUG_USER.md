@@ -26,7 +26,8 @@ development tag (the lead waived it for this series).
   - `sched_getaffinity`, `sched_setaffinity` and `getcpu` on all ten Linux
     profiles (generator and data regenerated from musl 1.2.5 and Linux
     6.13.4) and in the native table.
-  - The `OK_SMP_HOTPLUG_USER` and `OK_SMP_AFFINITY_BROKEN` lines.
+  - The `OK_SMP_HOTPLUG_USER` and `OK_SMP_AFFINITY_BROKEN` lines, and the
+    `OK_SMP_HOTPLUG_RECORDS` line (below).
 - **ObfuscationOS** (paired change, delivered as a patch on `wt/os-smp-scaling`
   46b763d)
   - `/sys` is mounted after `/dev` (`modules/boot/storage.cpp`; the
@@ -63,12 +64,27 @@ development tag (the lead waived it for this series).
   step-level fatal pass (`private_process_signal_fatal` → `finish`), whose
   thread retirement drops its record (`cpu_control_retire` in
   `retire_native_thread`). WP4d replaces that pass with `pending_exit`.
-- **Resume.** A woken writer's result is returned by the step's resume chain
-  (a lock-free per-record hint, then `consume`), before any frame decoding.
-  It is also returned by the route itself. A result whose descriptor went away
-  is dropped by the slot's next request or at thread teardown.
-- **A slot still busy.** A slot whose last owner died while its request ran
-  answers a new request with EBUSY until the service frees it.
+- **Resume.** A woken writer's result is returned only by the step's resume
+  chain (a lock-free per-record hint, then `consume`), before any frame
+  decoding, and only when the call is dispatched again: a newly trapped
+  syscall never takes a stored result. The route itself does not consume. A
+  result whose writer went away is dropped by the slot's next request, at
+  thread teardown or at exec.
+- **A spare record.** Section 6.3 indexes records by lease slot only. A writer
+  that leaves while CPU 0 runs its request would keep its lease slot busy
+  for up to the stop or start timeout, and an unrelated new thread that
+  received the slot would get EBUSY. The running record therefore moves to one
+  spare record past the slots, marked abandoned, and the slot is free at
+  once. The service runs one request at a time, so one spare suffices.
+- **Exec.** Section 6.2 names only thread teardown. Exec keeps the old
+  leader's TCB, lease and wait ticket for the new image, so it also drops
+  (or abandons) the request of every old thread, the leader's included. The
+  new image's only thread takes the calling thread's affinity mask (section
+  6.5 says "exec keeps it"; Linux keeps the exec'ing task's mask).
+- **An extra evidence line.** Section 6.7 fixes the `OK_SMP_HOTPLUG_USER`
+  fields, so the fate of requests whose writer left is a separate line,
+  printed right after it: `OK_SMP_HOTPLUG_RECORDS scope=hardware abandoned=
+  dropped_waiting= dropped_done=` (docs/modules/sysfs.md).
 - **`chcpu -l` is local.** util-linux lists CPUs with `lscpu -e`. `chcpu`
   prints each message with one write, so kernel lines never split it.
 - **Mode 0555 on `cpuN/`.** The spec's 0555 is kept for `cpuN/` (Linux uses
@@ -83,8 +99,13 @@ development tag (the lead waived it for this series).
   while CPU 0 stops the other CPU. It can only kill a writer around the time
   it files, or one holding an unconsumed result, and the result races the
   writer's re-dispatch. The gate therefore requires at least one landed kill
-  everywhere. It requires at least one kill after the request was filed (the
-  CPU went offline although its writer died) only with three or more vCPUs.
+  everywhere. With three or more vCPUs the controller also forks writers of
+  `0` and of `1` that announce their write through shared memory and kills
+  each from another CPU without a system call in between, so kills land in
+  the uninterruptible wait. There the gate requires at least one kill after
+  filing (the CPU went offline although its writer died) and
+  `abandoned >= 1` (a writer killed while CPU 0 ran its request). Everywhere,
+  abandoned, dropped and orphaned requests may not exceed the kills.
 - **Release musl.** The shared release musl trees fail the probe builder's
   artifact check (`Scrt1.o` mismatch). Release runs used private builds of
   the pinned archive.
@@ -169,3 +190,71 @@ patch.
   - `smp_sections=n` at 2 vCPUs on each.
 - **Not run.** No BusyBox was in the staged rootfs, so the BusyBox bonus
   check (`echo 0 > .../cpu1/online`) was not run.
+
+## Review fixes and re-validation
+
+An adversarial review of the package found:
+
+- **Exec and a stored result (fixed).** Exec kept the surviving leader's
+  hotplug record, lease and wait ticket, so the new image's first syscall
+  could take the old image's stored result. Exec now drops or abandons every
+  old thread's record, and the resume chain consults a stored result only
+  when a woken writer is dispatched again (never for a newly trapped
+  syscall). The write route no longer consumes results itself.
+- **Exec and affinity (fixed).** A non-leader exec gave the new image the
+  old leader's thread mask; it now gets the calling thread's.
+- **A reused lease slot answered EBUSY (fixed).** A running record whose
+  writer leaves moves to the spare record, so the slot's next owner files
+  its own request at once.
+- **No hardware evidence of a kill in D state (fixed).** The new
+  `OK_SMP_HOTPLUG_RECORDS` line counts abandoned and dropped requests, and
+  the controller aims kills at the uninterruptible wait (with three or more
+  vCPUs) through a shared-memory announcement. The gate requires
+  `abandoned >= 1` at 4 vCPUs.
+- **writev and an armed pwrite were never exercised (fixed).** The
+  controller's direct writes rotate through `write`, `writev` (two vectors)
+  and `pwrite`, and it does not finish before each took a CPU offline and
+  back.
+- **No release gates at 4 vCPUs (run).** Below.
+
+Model tests: `test_cpu_hotplug_service.py` gained the reused-slot case and an
+exec drop of a done result; `test_native_exec_eviction.py` gained
+`exec_drops_leader_hotplug_request` (a sibling's exec while the leader waits
+in a real hotplug write, on ten profiles). The full hosted suite passed: 166
+passed, 0 failed, 59 not run (inputs, quarantine, no ext4 fixture).
+
+Kernel: `okernel_image` and `xmake test` pass at `-smp 1` on all ten
+profiles, and at `-smp 2` and `-smp 4` on x86_64, aarch64 and rv64. The
+native distro boot reaches `OK_USERLAND scope=hardware acceptance=pass` on all
+ten profiles (`distro10.sh`).
+
+Guest gates (private OS copy of 46b763d with the paired patch; release runs
+with private release musl builds). Every run passed with every
+`OK_SMP_KERNEL_CHECKS` counter at 0, `failures=0 wedged=0 orphaned=0` and
+online equal to offline:
+
+| Profile | Mode | vCPUs | cycles | killed (filed) | offline | abandoned | dropped waiting/done |
+|---|---|---|---|---|---|---|---|
+| x86_64 | debug | 2 | 40 | 3 (2) | 39 | 0 | 0/0 |
+| x86_64 | debug | 4 | 11 | 35 (3) | 61 | 4 | 3/14 |
+| x86_64 | release | 2 | 16 | 4 (1) | 25 | 0 | 0/1 |
+| x86_64 | release | 4 | 7 | 22 (1) | 49 | 7 | 0/8 |
+| aarch64 | debug | 2 | 35 | 4 (3) | 37 | 0 | 0/0 |
+| aarch64 | debug | 4 | 10 | 32 (3) | 56 | 15 | 4/5 |
+| aarch64 | release | 2 | 29 | 3 (1) | 30 | 0 | 0/0 |
+| aarch64 | release | 4 | 11 | 37 (3) | 58 | 10 | 6/10 |
+| rv64 | debug | 2 | 14 | 4 (1) | 41 | 0 | 0/0 |
+| rv64 | debug | 4 | 10 | 33 (4) | 54 | 13 | 3/11 |
+| rv64 | release | 2 | 6 | 6 (1) | 25 | 0 | 0/0 |
+| rv64 | release | 4 | 7 | 22 (1) | 36 | 8 | 1/4 |
+
+On each SMP profile the plain stress gate also passed in debug and release
+at 2 and 4 vCPUs, as did the futex probe at 2 vCPUs, `--smp_hotplug_test=y
+--require-hotplug` at 2 vCPUs (747, 542 and 546 cycles, `failures=0`) and
+`smp_sections=n` at 2 vCPUs. The first aarch64 debug 2-vCPU
+`--user-hotplug` run stopped at boot, before the probe: the distribution's
+`posix-check` failed right after reaping the child of its timing check
+(most likely the child's 200 ms window for its parent's progress; the runner
+cut the line off) while the host also ran the hosted suite and three kernel
+test lanes. No other of about 190 serial logs on the host shows it, and the
+rerun passed (the row above).
