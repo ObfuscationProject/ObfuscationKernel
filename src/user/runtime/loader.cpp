@@ -7,38 +7,63 @@ inline namespace runtime_detail
 {
 namespace
 {
-// ELF admission reads metadata from a file prefix into a kernel-object run of
-// its own, per load (no buffer is shared between loads on different CPUs) and
-// released when the load ends. The first read covers what admission usually
-// needs; an architecture check that needs more (a section table after debug
-// data, an ABI record after the text) grows it to the prefix it asks for.
+// ELF admission reads metadata from a file prefix. The first read covers what
+// admission usually needs and goes to a static buffer, which one load at a
+// time claims (always so while loads hold the kernel lock); a load that finds
+// it claimed by another CPU reads into a kernel-object run of its own. An
+// architecture check that needs more (a section table after debug data, an
+// ABI record after the text) grows the prefix into a run. Runs are released
+// when the load ends.
+#ifdef OK_PRIVATE_PPC32_SIGNAL
+// Pinned PPC musl debug files retain section tables after their debug data.
+constexpr usize elf_buffer_bytes = 512 * 1024;
+#else
+constexpr usize elf_buffer_bytes = 128 * 1024;
+#endif
+struct ElfBuffer
+{
+    std::atomic_flag claimed{};
+    std::array<std::byte, elf_buffer_bytes> bytes{};
+};
+constinit ElfBuffer elf_buffer{};
 class ElfPrefix final : private NonCopyable
 {
   public:
-#ifdef OK_PRIVATE_PPC32_SIGNAL
-    // Pinned PPC musl debug files retain section tables after their debug data.
-    static constexpr usize initial_bytes = 512 * 1024;
-#else
-    static constexpr usize initial_bytes = 128 * 1024;
-#endif
+    static constexpr usize initial_bytes = elf_buffer_bytes;
     static constexpr usize max_bytes = 16 * 1024 * 1024;
     ElfPrefix() = default;
-    ~ElfPrefix() { if (run_) static_cast<void>(page_pool.release_object_run(run_, pages_)); }
-    [[nodiscard]] std::byte *data() const { return reinterpret_cast<std::byte *>(run_); }
+    ~ElfPrefix() { release(); }
+    [[nodiscard]] std::byte *data() const
+    { return buffered_ ? elf_buffer.bytes.data() : reinterpret_cast<std::byte *>(run_); }
     [[nodiscard]] usize size() const { return size_; }
     [[nodiscard]] std::span<const std::byte> bytes() const { return {data(), size_}; }
+    // Gives the storage back; data() is empty afterwards.
+    void release()
+    {
+        if (run_) static_cast<void>(page_pool.release_object_run(run_, pages_));
+        if (buffered_) elf_buffer.claimed.clear(std::memory_order_release);
+        run_ = 0;
+        pages_ = size_ = 0;
+        buffered_ = false;
+    }
     [[nodiscard]] Status read(fs::Node &node, usize size)
     {
-        if (size > pages_ * hw::page_size)
+        if (size > capacity())
         {
             if (size > max_bytes) return Status::no_memory("ELF metadata prefix exceeds the admission bound");
-            if (auto status = activate_pool(); !status) return status;
-            const usize pages = (size + hw::page_size - 1) / hw::page_size;
-            auto run = page_pool.allocate_object_run(pages);
-            if (!run) return run.status();
-            if (run_) static_cast<void>(page_pool.release_object_run(run_, pages_));
-            run_ = run.value();
-            pages_ = pages;
+            if (!run_ && !buffered_ && size <= elf_buffer_bytes &&
+                !elf_buffer.claimed.test_and_set(std::memory_order_acquire))
+                buffered_ = true;
+            else
+            {
+                if (auto status = activate_pool(); !status) return status;
+                const usize pages = (size + hw::page_size - 1) / hw::page_size;
+                auto run = page_pool.allocate_object_run(pages);
+                if (!run) return run.status();
+                release();
+                run_ = run.value();
+                pages_ = pages;
+            }
         }
         for (usize offset = 0; offset < size;)
         {
@@ -55,8 +80,10 @@ class ElfPrefix final : private NonCopyable
     }
 
   private:
+    [[nodiscard]] usize capacity() const { return buffered_ ? elf_buffer_bytes : pages_ * hw::page_size; }
     uptr run_{};
     usize pages_{}, size_{};
+    bool buffered_{};
 };
 // The prefix the configured architecture's admission still needs, if more.
 usize admission_prefix([[maybe_unused]] std::span<const std::byte> bytes, [[maybe_unused]] usize file_bytes)
@@ -339,10 +366,6 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
     if (auto status = fs::require_access(metadata, {kernel.posix().euid(), kernel.posix().egid()}, fs::access_execute);
         !status.ok())
         return status;
-    // Retirement bookkeeping first: a load refused for want of it allocates
-    // nothing, not even the prefix run.
-    auto retained = ImageRetirementReservation::reserve();
-    if (!retained) return retained.status();
     ElfPrefix prefix;
     if (auto status = prefix.read(*node, metadata.size < ElfPrefix::initial_bytes ? metadata.size
                                                                                   : ElfPrefix::initial_bytes);
@@ -379,6 +402,8 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
     auto elf = sched::ElfLoader{}.load_prefix({image_bytes, prefix_size}, metadata.size, kernel.arch().architecture());
     if (!elf)
         return elf.status();
+    auto retained = ImageRetirementReservation::reserve();
+    if (!retained) return retained.status();
     Image image{std::move(retained.value())};
     lu::ExecMetadata linux_metadata{};
     bool dynamic_x86 = false;
@@ -528,6 +553,9 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
             return fail(status);
         const usize interpreter_prefix = interpreter_metadata.size < lu::X86DynamicExec::max_prefix_bytes ?
             interpreter_metadata.size : lu::X86DynamicExec::max_prefix_bytes;
+        // The image's own prefix is read no more; its storage (usually the
+        // static buffer) takes the interpreter's.
+        prefix.release();
         ElfPrefix interpreter_bytes;
         if (auto status = interpreter_bytes.read(*interpreter_node, interpreter_prefix); !status.ok())
             return fail(status.code() == StatusCode::invalid_argument
