@@ -60,9 +60,10 @@ namespace ok::user::native
 // where the runtime is. Takes mm of the process whose live space is `space`
 // (re-entrant on the CPU that holds it) and makes every withheld page of
 // [address, address + size) writable for `write`. Without `attempt` it
-// returns success when it resolved a page, not_found when none was withheld
-// and an error otherwise, releasing mm; with `attempt` it runs the attempt
-// before releasing mm and returns its status.
+// returns success when it resolved a page, not_found when none was withheld,
+// no_process when no live process owns the space and an error otherwise,
+// releasing mm; with `attempt` it runs the attempt before releasing mm and
+// returns its status.
 Status resolve_user_access(const arch::execution::AddressSpace &space, uptr address, usize size, bool write,
                            const uaccess::Attempt *attempt) __attribute__((weak));
 } // namespace ok::user::native
@@ -86,8 +87,9 @@ inline Status recover(const hw::AddressSpace &space, uptr address, usize size, b
     if (smp::in_section())
     {
         // A6: a section never rewrites page records; admission resolved its
-        // output range under the kernel lock.
-        if (write && hw::user_range(space, address, size, false))
+        // output range under the kernel lock, so a write fails here only on a
+        // page withheld since.
+        if (write)
             smp::detail::section_assert(&smp::SectionCpu::cow_refused, "copy-on-write resolution inside a section");
         return failed;
     }
@@ -96,7 +98,8 @@ inline Status recover(const hw::AddressSpace &space, uptr address, usize size, b
         const auto resolved = native::resolve_user_access(space, address, size, write, nullptr);
         if (resolved.code() == StatusCode::not_found)
             break;
-        if (!resolved)
+        // No live process owns the space: nothing to resolve or hold.
+        if (resolved.code() == StatusCode::no_process || !resolved)
             return failed;
         count(&smp::EvidenceCpu::uaccess_retries);
         if (auto status = attempt(); status)

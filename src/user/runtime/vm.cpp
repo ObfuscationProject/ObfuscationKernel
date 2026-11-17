@@ -1288,13 +1288,33 @@ i64 fork_process(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBloc
     return static_cast<i64>(child_pid);
 }
 } // namespace runtime_detail
-// uaccess (ok/user/uaccess.hpp) links this definition of its weak hook; it is
-// outside runtime_detail so that it is the entity the header declares.
-Status resolve_user_access(const hw::AddressSpace &space, uptr address, usize size, bool write,
-                           const uaccess::Attempt *attempt)
+Status prepare_memory()
+{
+#ifdef OK_KERNEL_FREESTANDING
+    if (memory_preparation_attempted) return memory_preparation;
+    memory_preparation_attempted = true;
+    // Discovery belongs to kernel boot; the runtime only requires its result.
+    memory_preparation = boot::discover_kernel_memory(emit).status;
+    return memory_preparation;
+#else
+    return Status::unsupported("hosted tests do not discover firmware");
+#endif
+}
+} // namespace ok::user::native
+// Backend translation tables are kernel objects of the native page pool.
+ok::Result<ok::uptr> ok::arch::execution::allocate_table_pages(usize pages, usize alignment)
+{ return user::native::page_pool.allocate_object_run(pages, alignment); }
+ok::Status ok::arch::execution::release_table_pages(uptr address, usize pages)
+{ return user::native::page_pool.release_object_run(address, pages); }
+// The definition of uaccess's weak hook (ok/user/uaccess.hpp). Qualified, so
+// it can only be the function the header declares (a definition inside the
+// inline runtime_detail namespace would be another one and leave the hook
+// null).
+ok::Status ok::user::native::resolve_user_access(const arch::execution::AddressSpace &space, uptr address,
+                                                 usize size, bool write, const uaccess::Attempt *attempt)
 {
     auto *owner = space_owner(space);
-    if (!owner) return attempt ? (*attempt)() : Status::not_found("user space has no live owner");
+    if (!owner) return attempt ? (*attempt)() : Status::no_process("user space has no live owner");
     auto &resources = owner->resources();
     // A write into a process waits for that process's sections, which walk
     // the records rewritten here; the drain runs before mm is taken.
@@ -1317,21 +1337,3 @@ Status resolve_user_access(const hw::AddressSpace &space, uptr address, usize si
     if (attempt) return (*attempt)();
     return resolved ? Status{} : Status::not_found("no withheld page in the user range");
 }
-Status prepare_memory()
-{
-#ifdef OK_KERNEL_FREESTANDING
-    if (memory_preparation_attempted) return memory_preparation;
-    memory_preparation_attempted = true;
-    // Discovery belongs to kernel boot; the runtime only requires its result.
-    memory_preparation = boot::discover_kernel_memory(emit).status;
-    return memory_preparation;
-#else
-    return Status::unsupported("hosted tests do not discover firmware");
-#endif
-}
-} // namespace ok::user::native
-// Backend translation tables are kernel objects of the native page pool.
-ok::Result<ok::uptr> ok::arch::execution::allocate_table_pages(usize pages, usize alignment)
-{ return user::native::page_pool.allocate_object_run(pages, alignment); }
-ok::Status ok::arch::execution::release_table_pages(uptr address, usize pages)
-{ return user::native::page_pool.release_object_run(address, pages); }

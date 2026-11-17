@@ -958,10 +958,6 @@ Status start(Kernel &kernel, fs::BootArchive archive)
 #if defined(OK_ENABLE_TEST_POINTS) && defined(OK_PRIVATE_FUTEX_PEER_FIXTURE)
     if (auto status = setup_peer_fixture(kernel, pid.value()); !status) return status;
 #endif
-    // uaccess resolves withheld pages through this weak hook; a kernel that
-    // linked without it would fail every kernel write to a copy-on-write page.
-    if (&resolve_user_access == nullptr)
-        return Status::not_initialized("user access resolution is not linked");
     started = true;
     runtime_kernel = &kernel;
     // This static singleton has one boot lifetime and no reconstruction/reset API.
