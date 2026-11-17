@@ -86,7 +86,7 @@ def main():
     xmake = Path(shutil.which('xmake')).resolve()
     cc1 = Path(subprocess.check_output([compiler, '-print-prog-name=cc1plus'], text=True).strip()).resolve()
     tools = {str(p): sha(p) for p in (compiler, xmake, cc1)}
-    shared = ['src/sched/scheduler.cpp', 'src/sched/process.cpp', 'src/posix/posix.cpp',
+    shared = ['src/sched/scheduler.cpp', 'src/sched/descriptions.cpp', 'src/sched/process.cpp', 'src/posix/posix.cpp',
               'src/posix/fd.cpp', 'src/posix/path.cpp', 'src/posix/process.cpp', 'src/fs/vfs.cpp',
               'src/driver/driver.cpp', 'src/smp/smp.cpp', 'src/arch/arch.cpp', 'src/arch/terminal_power.cpp',
               'src/syscall/linux.cpp', 'src/arch/x86_64/ops.cpp']

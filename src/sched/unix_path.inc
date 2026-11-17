@@ -1,4 +1,4 @@
-// Included in scheduler.cpp inside ok::sched. All operations are serialized.
+// Included in descriptions.cpp inside ok::sched. All operations are serialized.
 UnixAccept::UnixAccept(UnixAccept &&other) noexcept
     : owner_(std::exchange(other.owner_, nullptr)), resources_(std::exchange(other.resources_, nullptr)),
       listener_(other.listener_), child_(other.child_), endpoint_(other.endpoint_), token_(other.token_),

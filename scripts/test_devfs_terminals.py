@@ -12,7 +12,7 @@ import shutil
 import subprocess
 
 TEST = 'tests/host/devfs_terminal_tests.cpp'
-SOURCES = ('src/fs/devfs.cpp', 'src/sched/scheduler.cpp', 'src/sched/process.cpp', 'src/posix/posix.cpp',
+SOURCES = ('src/fs/devfs.cpp', 'src/sched/scheduler.cpp', 'src/sched/descriptions.cpp', 'src/sched/process.cpp', 'src/posix/posix.cpp',
            'src/posix/fd.cpp', 'src/posix/path.cpp', 'src/posix/process.cpp', 'src/fs/vfs.cpp',
            'src/driver/driver.cpp', 'src/smp/smp.cpp', 'src/arch/arch.cpp', 'src/arch/terminal_power.cpp',
            'src/syscall/linux.cpp', 'src/memory/memory.cpp', 'src/net/native_udp.cpp', 'src/arch/x86_64/ops.cpp')

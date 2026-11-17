@@ -7,7 +7,7 @@ p=argparse.ArgumentParser();p.add_argument('--output',required=True);p.add_argum
 out=Path(args.output).resolve();out.mkdir(parents=True,exist_ok=False);src=out/'source'
 sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
 tool_pins={str(Path(shutil.which(name)).resolve()):sha(Path(shutil.which(name)).resolve()) for name in ('xmake','g++')}
-files=list((root/'include').rglob('*.hpp'))+[root/'src/user/native_syscall_origin.hpp',root/'src/user/native_syscall_restart_publication.hpp',root/'src/sched/scheduler.cpp',root/'src/sched/process.cpp']
+files=list((root/'include').rglob('*.hpp'))+[root/'src/user/native_syscall_origin.hpp',root/'src/user/native_syscall_restart_publication.hpp',root/'src/sched/scheduler.cpp',root/'src/sched/descriptions.cpp',root/'src/sched/resource_drain.hpp',root/'src/sched/process.cpp']
 files += [root/('tests/host/'+n) for n in ('native_syscall_restart_publication_tests.cpp','native_signal_frame_mips64_n64_tests.cpp','native_signal_frame_ppc32_tests.cpp','native_signal_readiness_mips64_n64_tests.cpp')]
 files += [root/('tests/fixtures/signals/'+n) for n in ('linux_ppc32_layout.hpp','linux_mips64_n64_layout.hpp')]
 record={'runner_sha256':sha(Path(__file__)), 'tools':tool_pins, 'targets':args.targets,'scope':'Hosted owned-table and backend observation models; no native OS execution','status':'preparing','inputs':{},'commands':[]}
@@ -19,7 +19,7 @@ flags='"-O1", "-g", "-Wall", "-Wextra", "-Werror", "-fsanitize=address,undefined
 lua=['set_project("restart-publication-model")','set_languages("c++23")']
 for name,source in [('publication','native_syscall_restart_publication_tests'),('ppc-codec','native_signal_frame_ppc32_tests'),('n64-codec','native_signal_frame_mips64_n64_tests'),('n64-readiness','native_signal_readiness_mips64_n64_tests')]:
  lua += [f'target("{name}")','set_kind("binary")','set_targetdir("bin")','add_includedirs("include")','add_defines("OK_ARCH_TARGET_X86_64")',f'add_files("tests/host/{source}.cpp")',f'add_cxxflags({flags}, {{force=true}})','add_ldflags("-fsanitize=address,undefined", "-no-pie", "-Wl,--gc-sections", {force=true})']
- if name=='publication':lua += ['add_files("src/sched/scheduler.cpp", "src/sched/process.cpp")']
+ if name=='publication':lua += ['add_files("src/sched/scheduler.cpp", "src/sched/descriptions.cpp", "src/sched/process.cpp")']
  lua+=['target_end()']
 (src/'xmake.lua').write_text('\n'.join(lua)+'\n');record['project_sha256']=sha(src/'xmake.lua')
 env=dict(os.environ,XMAKE_ROOT='y',XMAKE_GLOBALDIR=str(out/'xmake-global'),PYTHONDONTWRITEBYTECODE='1',ASAN_OPTIONS='detect_leaks=0:halt_on_error=1',UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1')

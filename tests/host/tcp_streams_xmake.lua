@@ -26,6 +26,7 @@ target("tcp-streams")
     add_defines("OK_ARCH_TARGET_" .. arch:upper())
     add_cxxflags("-std=c++23", "-Wall", "-Wextra", "-Werror", "-fno-exceptions", "-ffunction-sections", "-fdata-sections", {force = true})
     add_files(path.join(source, "src/sched/scheduler.cpp"))
+    add_files(path.join(source, "src/sched/descriptions.cpp"))
     if kind == "object" then
         add_files(path.join(source, "tests/native/tcp_streams_object.cpp"))
         add_cxxflags("-ffreestanding", "-fno-stack-protector", "-fno-threadsafe-statics", {force = true})

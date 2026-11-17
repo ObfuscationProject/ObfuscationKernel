@@ -25,7 +25,7 @@ target("tcp-captured-accept")
     set_toolchains("tcp-captured-accept-selected")
     add_includedirs(path.join(source, "include"))
     add_defines("OK_ARCH_TARGET_X86_64")
-    for _, unit in ipairs({"tests/host/tcp_captured_accept_tests.cpp", "src/sched/scheduler.cpp", "src/sched/process.cpp",
+    for _, unit in ipairs({"tests/host/tcp_captured_accept_tests.cpp", "src/sched/scheduler.cpp", "src/sched/descriptions.cpp", "src/sched/process.cpp",
                           "src/arch/arch.cpp", "src/arch/x86_64/ops.cpp", "src/net/native_udp.cpp", "src/memory/memory.cpp"}) do
         add_files(path.join(source, unit))
     end

@@ -9,7 +9,7 @@ import re
 import shutil
 import subprocess
 
-SOURCES = ('tests/host/job_control_model_tests.cpp', 'src/sched/scheduler.cpp', 'src/sched/process.cpp',
+SOURCES = ('tests/host/job_control_model_tests.cpp', 'src/sched/scheduler.cpp', 'src/sched/descriptions.cpp', 'src/sched/process.cpp',
            'src/memory/memory.cpp', 'src/net/native_udp.cpp', 'src/fs/vfs.cpp', 'src/arch/arch.cpp',
            'src/arch/terminal_power.cpp', 'src/arch/x86_64/ops.cpp')
 MARKER = re.compile(r'^JOB_CONTROL_MODEL_PASS profiles=10 numberings=2 orphan_cases=([0-9]+) guest=0$')

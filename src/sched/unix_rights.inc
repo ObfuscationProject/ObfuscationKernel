@@ -1,4 +1,4 @@
-// Included in scheduler.cpp inside ok::sched. Queue edges own canonical OFDs.
+// Included in descriptions.cpp inside ok::sched. Queue edges own canonical OFDs.
 UnixReceive::UnixReceive(SchedulerState &owner, ProcessResources &resources, u16 description,
     u16 pipe, u64 revision, u64 token, bool peek, bool close_on_exec)
     : owner_(&owner), resources_(&resources), description_(description), pipe_(pipe),

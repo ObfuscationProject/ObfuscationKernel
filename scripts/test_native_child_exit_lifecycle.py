@@ -10,7 +10,7 @@ import subprocess
 import sys
 
 ARCHITECTURES = ('i386', 'x86_64', 'aarch64', 'arm32', 'rv64', 'rv32', 'loongarch64', 'mips', 'mips64', 'ppc')
-SOURCES = ('tests/host/native_child_exit_lifecycle_tests.cpp', 'src/sched/scheduler.cpp',
+SOURCES = ('tests/host/native_child_exit_lifecycle_tests.cpp', 'src/sched/scheduler.cpp', 'src/sched/descriptions.cpp',
            'src/sched/process.cpp', 'src/arch/arch.cpp', 'src/arch/terminal_power.cpp', 'src/fs/vfs.cpp',
            'src/memory/memory.cpp', 'src/net/native_udp.cpp', 'src/smp/smp.cpp')
 
