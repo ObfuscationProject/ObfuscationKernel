@@ -208,10 +208,21 @@ void orphaned()
     CHECK(service->record(7).state == RecordState::free && service->pending() == 0 && service->statistics().orphaned == 1);
 }
 
-// Teardown while armed frees the record; while running leaves it abandoned
-// to the service, which frees it and completes nothing.
+// Teardown while armed frees the record; while running moves it to the spare,
+// abandoned, and the service frees it and completes nothing. The lease slot
+// is free at once: a new thread that received it files its own request.
 Service *racing{};
 void abandon_running(Model &) { racing->abandon(8, 10, 71); }
+hotplug::Submission reused{};
+void abandon_then_reuse(Model &model)
+{
+    racing->abandon(8, 10, 71);
+    CHECK(racing->record(8).state == RecordState::free && racing->record(Service::spare).state == RecordState::abandoned);
+    // Another process's thread now holds lease slot 8 and writes another CPU.
+    const auto next = request(2, false, 99, 1);
+    model.waiting.push_back(next.ticket);
+    reused = racing->submit(Backend{&model}, 8, next);
+}
 void abandoned()
 {
     auto model = fresh();
@@ -229,6 +240,7 @@ void abandoned()
     model.waiting.push_back(running.ticket);
     CHECK(service->submit(backend, 8, running).armed && service->pass(backend) && model.stops == 1);
     CHECK(model.completed.empty() && service->record(8).state == RecordState::free && !service->finished(8));
+    CHECK(service->record(Service::spare).state == RecordState::free && service->statistics().abandoned == 1);
     // A result nobody consumed is dropped by teardown too.
     model.during = nullptr;
     const auto done = request(1, true, 71, 3);
@@ -243,6 +255,34 @@ void abandoned()
     model.waiting = {next.ticket};
     CHECK(service->submit(backend, 8, next).armed && !service->finished(8) && service->pending() == 1);
     CHECK(!service->consume(8, stale.ticket) && service->pass(backend) && *service->consume(8, next.ticket) == 2);
+    // Exec keeps the leader's lease and wait ticket for the new image: its
+    // unconsumed result goes with the old image and never reaches the new one.
+    const auto leader = request(1, false, 71, 6);
+    model.waiting = {leader.ticket};
+    CHECK(service->submit(backend, 8, leader).armed && service->pass(backend) && service->finished(8));
+    service->abandon(8, 10, 71);
+    CHECK(!service->finished(8) && !service->consume(8, leader.ticket));
+    CHECK(service->statistics().dropped == 3 && service->statistics().abandoned == 1);
+}
+
+// The writer leaves while its request runs and a new thread receives its lease
+// slot: the new request is armed, not refused, and served after the first.
+void reused_slot()
+{
+    auto model = fresh();
+    Backend backend{&model};
+    auto service = std::make_unique<Service>();
+    racing = service.get();
+    model.during = abandon_then_reuse;
+    const auto first = request(1, false, 71, 1);
+    model.waiting.push_back(first.ticket);
+    CHECK(service->submit(backend, 8, first).armed && service->pass(backend));
+    CHECK(reused.armed && service->pending() == 1 && service->record(8).state == RecordState::armed);
+    CHECK(service->record(Service::spare).state == RecordState::free && model.completed.empty());
+    model.during = nullptr;
+    CHECK(service->pass(backend) && model.state[2] == CpuState::offline && model.completed.size() == 1);
+    CHECK(*service->consume(8, ticket(99, 1)) == 2 && service->statistics().abandoned == 1);
+    CHECK(service->statistics().busy == 0 && service->record(8).state == RecordState::free);
 }
 
 // A stop that timed out: EIO, the CPU reads offline and refuses writes until
@@ -364,6 +404,7 @@ int main()
     results();
     orphaned();
     abandoned();
+    reused_slot();
     wedged();
     order();
     parser();

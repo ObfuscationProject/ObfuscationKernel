@@ -48,7 +48,9 @@ bool hotplug_service_pass() noexcept;
 namespace hotplug
 {
 // One record per entry-stack lease slot: a native thread owns its lease for
-// its lifetime, so it owns at most one request.
+// its lifetime, so it owns at most one request. The pass serves one request
+// at a time; when its writer leaves meanwhile, the record moves to one spare
+// past the slots, so the lease slot is free for its next owner at once.
 inline constexpr usize record_capacity = 128;
 
 inline constexpr i64 errno_busy = 16, errno_io = 5, errno_invalid = 22, errno_too_big = 7;
@@ -100,6 +102,10 @@ struct Submission
 struct Statistics
 {
     u64 requests{}, offline{}, online{}, noop{}, failures{}, busy{}, orphaned{}, wedged{}, max_us{};
+    // Reported as OK_SMP_HOTPLUG_RECORDS: requests whose writer left while
+    // the service ran them (freed by the service, nothing completed), and
+    // armed or finished requests freed at the writer's teardown.
+    u64 abandoned{}, dropped{};
 };
 
 // Why a request is refused before anything is attempted.
@@ -174,8 +180,8 @@ template <Backend B> class HotplugService final
         case Refusal::none: break;
         }
         auto &record = records_[slot];
-        // A running or abandoned record still belongs to the service: the
-        // slot's previous owner left during its request.
+        // Only its own writer, which waits for it, can find a running record
+        // in its slot (a writer that left moved it to the spare): refuse.
         if (record.state == RecordState::running || record.state == RecordState::abandoned)
         {
             ++filed_.busy;
@@ -209,16 +215,27 @@ template <Backend B> class HotplugService final
         return slot < record_capacity && finished_[slot].load(std::memory_order_acquire);
     }
 
-    // Teardown of the writer's thread: an armed or done record is freed, a
-    // running one is left to the service, which frees it.
+    // Teardown of the writer's thread, or exec replacing its image: an armed
+    // or done record is freed; a running one moves to the spare, abandoned,
+    // and the service frees it. The lease slot is free either way.
     void abandon(usize slot, u64 pid, u64 tid)
     {
         if (slot >= record_capacity) return;
         const typename Lock::Guard guard(lock_);
         auto &record = records_[slot];
         if (record.pid != pid || record.tid != tid) return;
-        if (record.state == RecordState::armed || record.state == RecordState::done) free_locked(slot);
-        else if (record.state == RecordState::running) record.state = RecordState::abandoned;
+        if (record.state == RecordState::armed || record.state == RecordState::done)
+        {
+            ++filed_.dropped;
+            free_locked(slot);
+        }
+        else if (record.state == RecordState::running && serving_ == slot)
+        {
+            records_[spare] = record;
+            records_[spare].state = RecordState::abandoned;
+            serving_ = spare;
+            free_locked(slot);
+        }
     }
 
     // One pass on CPU 0: recover wedged CPUs, then serve the oldest armed
@@ -240,30 +257,42 @@ template <Backend B> class HotplugService final
             records_[slot].state = RecordState::running;
             pending_.store(pending_.load(std::memory_order_relaxed) - 1, std::memory_order_release);
             taken = records_[slot];
+            serving_ = slot;
         }
         // CS2: the writer must still wait for this request.
         if (!backend.owner_waiting(taken.pid, taken.tid, taken.ticket))
         {
             const typename Lock::Guard guard(lock_);
-            if (records_[slot].generation == taken.generation) free_locked(slot);
-            ++served_.orphaned;
+            auto &record = records_[serving_];
+            if (record.generation == taken.generation)
+            {
+                ++(record.state == RecordState::abandoned ? served_.abandoned : served_.orphaned);
+                free_locked(serving_);
+            }
+            serving_ = idle;
             return true;
         }
         const auto result = serve(backend, taken);
-        // CS3: store the result unless the writer left meanwhile.
+        // CS3: store the result unless the writer left meanwhile (the record
+        // is then the abandoned spare).
         bool deliver = false;
         {
             const typename Lock::Guard guard(lock_);
-            auto &record = records_[slot];
+            const usize index = serving_;
+            auto &record = records_[index];
             if (record.generation == taken.generation && record.state == RecordState::running)
             {
                 record.result = result;
                 record.state = RecordState::done;
-                finished_[slot].store(true, std::memory_order_release);
+                finished_[index].store(true, std::memory_order_release);
                 deliver = true;
             }
             else if (record.generation == taken.generation && record.state == RecordState::abandoned)
-                free_locked(slot);
+            {
+                ++served_.abandoned;
+                free_locked(index);
+            }
+            serving_ = idle;
         }
         if (deliver) backend.complete(taken.ticket);
         return true;
@@ -280,17 +309,22 @@ template <Backend B> class HotplugService final
         total.noop += filed_.noop;
         total.busy += filed_.busy;
         total.failures += filed_.failures;
+        total.dropped += filed_.dropped;
         return total;
     }
+    // A slot's record; `spare` names the abandoned record the pass still runs.
     [[nodiscard]] Record record(usize slot)
     {
-        if (slot >= record_capacity) return {};
+        if (slot > spare) return {};
         const typename Lock::Guard guard(lock_);
         return records_[slot];
     }
 
+    static constexpr usize spare = record_capacity;
+
   private:
     using Lock = FineLock<LockRank::hotplug_request>;
+    static constexpr usize idle = record_capacity + 1;
 
     void free_locked(usize slot)
     {
@@ -349,8 +383,10 @@ template <Backend B> class HotplugService final
     }
 
     Lock lock_{};
-    std::array<Record, record_capacity> records_{};
-    std::array<std::atomic<bool>, record_capacity> finished_{};
+    // The lease slots, then the spare.
+    std::array<Record, record_capacity + 1> records_{};
+    std::array<std::atomic<bool>, record_capacity + 1> finished_{};
+    usize serving_{idle}; // The record the pass runs, under the record lock.
     u32 sequence_{};
     std::atomic<u32> pending_{};
     u32 wedged_{};
