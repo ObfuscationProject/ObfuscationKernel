@@ -259,33 +259,6 @@ Result<usize> resolve_withheld([[maybe_unused]] sched::ProcessResources &resourc
     return resolved;
 }
 } // namespace
-Status resolve_user_access(const hw::AddressSpace &space, uptr address, usize size, bool write,
-                           const uaccess::Attempt *attempt)
-{
-    auto *owner = space_owner(space);
-    if (!owner) return attempt ? (*attempt)() : Status::not_found("user space has no live owner");
-    auto &resources = owner->resources();
-    // A write into a process waits for that process's sections, which walk
-    // the records rewritten here; the drain runs before mm is taken.
-    if constexpr (smp_sections)
-        if (write) drain_if_pinned(owner->pid());
-    const sched::AddressSpaceGate::Hold hold(resources.mm);
-    if (!same_space(resources.native_space, space))
-        return attempt ? (*attempt)() : Status::not_found("user space was replaced");
-    usize resolved{};
-    if (write)
-    {
-        auto changed = resolve_withheld(resources, space, address, size);
-        if (!changed)
-        {
-            if (changed.status().code() != StatusCode::no_memory) runtime_failure = changed.status();
-            return attempt ? Status::fault("copy-on-write resolution failed") : changed.status();
-        }
-        resolved = changed.value();
-    }
-    if (attempt) return (*attempt)();
-    return resolved ? Status{} : Status::not_found("no withheld page in the user range");
-}
 bool resolve_user_fault(sched::ProcessResources &resources, const hw::Trap &trap)
 {
     const hw::AddressSpace space = resources.native_space;
@@ -1302,6 +1275,35 @@ i64 fork_process(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBloc
     return static_cast<i64>(child_pid);
 }
 } // namespace runtime_detail
+// uaccess (ok/user/uaccess.hpp) links this definition of its weak hook; it is
+// outside runtime_detail so that it is the entity the header declares.
+Status resolve_user_access(const hw::AddressSpace &space, uptr address, usize size, bool write,
+                           const uaccess::Attempt *attempt)
+{
+    auto *owner = space_owner(space);
+    if (!owner) return attempt ? (*attempt)() : Status::not_found("user space has no live owner");
+    auto &resources = owner->resources();
+    // A write into a process waits for that process's sections, which walk
+    // the records rewritten here; the drain runs before mm is taken.
+    if constexpr (smp_sections)
+        if (write) drain_if_pinned(owner->pid());
+    const sched::AddressSpaceGate::Hold hold(resources.mm);
+    if (!same_space(resources.native_space, space))
+        return attempt ? (*attempt)() : Status::not_found("user space was replaced");
+    usize resolved{};
+    if (write)
+    {
+        auto changed = resolve_withheld(resources, space, address, size);
+        if (!changed)
+        {
+            if (changed.status().code() != StatusCode::no_memory) runtime_failure = changed.status();
+            return attempt ? Status::fault("copy-on-write resolution failed") : changed.status();
+        }
+        resolved = changed.value();
+    }
+    if (attempt) return (*attempt)();
+    return resolved ? Status{} : Status::not_found("no withheld page in the user range");
+}
 Status prepare_memory()
 {
 #ifdef OK_KERNEL_FREESTANDING
