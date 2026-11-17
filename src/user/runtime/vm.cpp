@@ -246,8 +246,11 @@ sched::ProcessControlBlock *space_owner(const hw::AddressSpace &space)
         if (same_space(sched::read_native_space(process.resources()), space)) return &process;
     return nullptr;
 }
-// Holding the owner's mm: makes every withheld page of the range writable.
-// Returns how many it resolved.
+// Holding the owner's mm: makes every withheld page of the range writable
+// that an access could reach, from `address` up to its first page that is
+// not mapped readable (a copy stops there). Returns how many it resolved. The
+// cost is bounded by the mapped pages, never by `size`: the walk ends at the
+// first hole and the records are visited once.
 Result<usize> resolve_withheld([[maybe_unused]] sched::ProcessResources &resources,
                                [[maybe_unused]] const hw::AddressSpace &space, [[maybe_unused]] uptr address,
                                [[maybe_unused]] usize size)
@@ -255,14 +258,22 @@ Result<usize> resolve_withheld([[maybe_unused]] sched::ProcessResources &resourc
     usize resolved{};
 #ifdef OK_NATIVE_COW_FORK
     check_translation_writer(resources, "copy-on-write resolution");
-    if (resources.mm.dead || !size || address > ~uptr{0} - (size - 1)) return resolved;
-    const uptr last = address + size - 1;
-    for (uptr page = address & ~(hw::page_size - 1);; page += hw::page_size)
+    // A range outside the user window fails whatever is resolved.
+    if (resources.mm.dead || !size || address < hw::user_begin || address >= hw::user_end ||
+        size > hw::user_end - address)
+        return resolved;
+    const uptr first = address & ~(hw::page_size - 1);
+    const uptr limit = address + size;
+    uptr end = first;
+    while (end < limit && hw::user_range(space, end, 1)) end += hw::page_size;
+    auto &pages = resources.native_pages;
+    for (usize index = 0; index < pages.size() && end != first; ++index)
     {
-        auto changed = resolve_copy_on_write(resources.native_pages, space, page, page_pool);
+        const auto &page = pages[index];
+        if (!page.copy_on_write || page.virtual_address < first || page.virtual_address >= end) continue;
+        auto changed = resolve_copy_on_write_at(pages, space, index, page_pool);
         if (!changed) return changed.status();
         resolved += changed.value();
-        if (last - page < hw::page_size) break;
     }
     if (resolved) resources.mm.translations_changed();
 #endif

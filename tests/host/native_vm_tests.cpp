@@ -1712,6 +1712,49 @@ void check_copy_on_write_fork()
     CHECK(native::page_pool.reference_count(mock::page(parent.native_space, stack)->physical_address) == 1);
 }
 
+// The resolution behind a failed user access costs what is mapped, never the
+// length asked for: a range past the user window resolves nothing, and one up
+// to its end stops at the first page that is not mapped readable (a readv of
+// 2^62 bytes once walked 2^50 pages here holding mm and the kernel lock).
+void check_withheld_range_is_bounded()
+{
+    Fixture fixture;
+    auto &parent = fixture.resources;
+    const auto mapped = fixture.map(3 * hw::page_size);
+    CHECK(mapped);
+    sched::ProcessResources child;
+    fork_resources(parent, child);
+    const auto stack = hw::user_end - hw::page_size;
+    const auto start = mapped.value();
+    CHECK(mock::page(child.native_space, start)->copy_on_write && mock::page(child.native_space, stack)->copy_on_write);
+    CHECK(!mock::page(child.native_space, start + 3 * hw::page_size));
+    const usize frames = mock::used_frames();
+    const usize remaps = mock::remaps;
+    const auto sequence = child.mm.translation_sequence.load();
+    {
+        const sched::AddressSpaceGate::Hold hold(child.mm);
+        auto resolved = native::resolve_withheld(child, child.native_space, start, usize{1} << 62);
+        CHECK(resolved && resolved.value() == 0);
+        resolved = native::resolve_withheld(child, child.native_space, start + 3 * hw::page_size, hw::page_size);
+        CHECK(resolved && resolved.value() == 0);
+        CHECK(mock::used_frames() == frames && mock::remaps == remaps);
+        CHECK(child.mm.translation_sequence.load() == sequence);
+        // Up to the end of the user window: the three pages before the hole
+        // resolve, the stack page after it stays withheld.
+        resolved = native::resolve_withheld(child, child.native_space, start + 5, hw::user_end - start - 5);
+        CHECK(resolved && resolved.value() == 3);
+        CHECK(mock::used_frames() == frames + 3 && mock::remaps == remaps + 3);
+        CHECK(child.mm.translation_sequence.load() == sequence + 1);
+        for (usize page = 0; page < 3; ++page)
+            CHECK(!mock::page(child.native_space, start + page * hw::page_size)->copy_on_write);
+        CHECK(mock::page(child.native_space, stack)->copy_on_write);
+        resolved = native::resolve_withheld(child, child.native_space, stack + 8, 8);
+        CHECK(resolved && resolved.value() == 1 && !mock::page(child.native_space, stack)->copy_on_write);
+    }
+    native::release(child.native_space, child.native_pages);
+    CHECK(native::runtime_failure);
+}
+
 // A page fault resumes when the page was withheld (resolved now), or when a
 // translation changed in place since the entry began and the page now
 // permits the access: a sibling that faulted on a page another thread was
@@ -1797,6 +1840,7 @@ int main(int argc, char **)
     check_program_break();
 #ifdef OK_NATIVE_COW_FORK
     check_copy_on_write_fork();
+    check_withheld_range_is_bounded();
     check_fault_resume_after_change();
 #endif
     std::puts("PASS: native VM transaction tests (hosted backend model)");
