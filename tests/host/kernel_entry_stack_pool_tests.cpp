@@ -1,8 +1,14 @@
 #include "ok/memory/kernel_entry_stack_pool.hpp"
 
 #include <cstdio>
+#include <atomic>
 #include <cstdlib>
 #include <type_traits>
+#if defined(OK_HOSTED_LOCK_MODEL)
+#include "hosted_race.hpp"
+
+#include <atomic>
+#endif
 
 namespace ok::memory
 {
@@ -27,14 +33,15 @@ static_assert(Pool::capacity == 128 && Pool::usable_bytes == 65536 && Pool::slot
 static_assert(Pool::arena_bytes == 9 * 1024 * 1024);
 alignas(Pool::page_size) std::array<std::byte, Pool::arena_bytes> backing{};
 alignas(Pool::page_size) std::array<std::byte, Pool::arena_bytes> other_backing{};
-usize checks{};
+// Atomic: the race models check from several host threads.
+std::atomic<usize> checks{};
 
 void check(bool condition, const char *message)
 {
     ++checks;
     if (!condition)
     {
-        std::fprintf(stderr, "FAIL kernel-entry-stack-pool checks=%zu: %s\n", checks, message);
+        std::fprintf(stderr, "FAIL kernel-entry-stack-pool checks=%zu: %s\n", checks.load(), message);
         std::exit(1);
     }
 }
@@ -218,6 +225,61 @@ void counter_exhaustion()
     check(!view.value().valid(), "exhausted activation cannot revive old view");
     check(pool.release(last.value(), {90, 91}).ok(), "counter exhaustion still permits retirement");
 }
+#if defined(OK_HOSTED_LOCK_MODEL)
+// Four CPUs reserve, activate (each on itself), write their stacks,
+// deactivate and release leases at once; a fifth reads the accounting. Every
+// lease stays with its thread, its stack bytes with its owner, no canary is
+// damaged and every slot comes back clean.
+void concurrent_leases()
+{
+    static Pool pool;
+    check(pool.activate(backing).ok(), "race arena activation");
+    std::atomic<u64> foreign{0}, activations{0};
+    std::atomic<bool> done{false};
+    ok::test::race(5, [&](unsigned cpu) {
+        if (cpu == 5)
+        {
+            while (!done.load())
+            {
+                const auto accounting = pool.accounting();
+                check(accounting.active_slots <= 4 && accounting.quarantined_slots == 0, "race accounting");
+            }
+            return;
+        }
+        ok::test::Sequence random{cpu * 37u};
+        for (u64 round = 1; round <= 3000; ++round)
+        {
+            const Owner owner{cpu, round};
+            auto handle = pool.reserve(owner);
+            check(handle.ok(), "race reserve");
+            auto view = pool.activate_entry(handle.value(), owner, static_cast<u16>(cpu));
+            check(view.ok() && view.value().valid() && view.value().owner_tid() == round, "race activation");
+            auto *stack = reinterpret_cast<u64 *>(view.value().top() - 64);
+            for (usize i = 0; i < 8; ++i)
+                stack[i] = round * 8 + i + cpu;
+            if (random.next() % 3 == 0)
+                std::this_thread::yield();
+            for (usize i = 0; i < 8; ++i)
+                if (stack[i] != round * 8 + i + cpu)
+                    ++foreign;
+            check(pool.deactivate_entry(handle.value(), owner, static_cast<u16>(cpu)).ok(), "race deactivate");
+            check(pool.release(handle.value(), owner).ok(), "race release");
+            activations.fetch_add(1);
+        }
+        if (cpu == 4)
+            done.store(true);
+    });
+    done.store(true);
+    const auto accounting = pool.accounting();
+    check(foreign == 0 && accounting.leased_slots == 0 && accounting.active_slots == 0 &&
+              accounting.quarantined_slots == 0 && accounting.releases == activations.load(),
+          "race leases balance");
+    zero(backing, "race leaves the arena clean");
+    check(ok::test::lock_violations() == 0 && ok::test::lock_checks() == 0, "race lock order");
+    std::printf("kernel-entry-stack-pool race cpus=4 leases=%llu foreign=0\n",
+                static_cast<unsigned long long>(activations.load()));
+}
+#endif
 } // namespace
 
 int main()
@@ -230,5 +292,10 @@ int main()
         guard_failure(true, path);
     }
     counter_exhaustion();
-    std::printf("PASS kernel-entry-stack-pool checks=%zu scope=hosted-model guest=0 smp=0\n", checks);
+#if defined(OK_HOSTED_LOCK_MODEL)
+    concurrent_leases();
+    std::printf("PASS kernel-entry-stack-pool race checks=%zu scope=hosted-model threads=4 guest=0\n", checks.load());
+#else
+    std::printf("PASS kernel-entry-stack-pool checks=%zu scope=hosted-model guest=0 smp=0\n", checks.load());
+#endif
 }

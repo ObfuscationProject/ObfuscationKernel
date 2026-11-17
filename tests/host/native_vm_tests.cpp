@@ -182,6 +182,76 @@ struct FileNode final : fs::Node
     Status chown(u32, u32) override { return Status::unsupported("unused"); }
 };
 
+// Stage then build: a sibling's munmap and mmap that run while a file
+// mapping stages its bytes (here from inside the provider read, which runs
+// outside mm) are part of the records the mapping is then built from. A
+// candidate copied before the staging would resurrect the unmapped page on a
+// released frame and drop the sibling's new page.
+struct SiblingFileNode final : fs::Node
+{
+    FileNode file;
+    void (*sibling)(void *){};
+    void *context{};
+    mutable bool ran{};
+
+    std::string_view name() const override { return file.name(); }
+    fs::Metadata metadata() const override { return file.metadata(); }
+    Result<fs::FileBuffer> read(usize offset, usize count) const override
+    {
+        if (!ran && sibling)
+        {
+            ran = true;
+            sibling(context);
+        }
+        return file.read(offset, count);
+    }
+    Status write(usize, std::span<const std::byte>) override { return Status::unsupported("unused"); }
+    fs::Node *lookup(std::string_view) override { return nullptr; }
+    Status create(std::string_view, fs::NodeType) override { return Status::unsupported("unused"); }
+    Status chmod(u32) override { return Status::unsupported("unused"); }
+    Status chown(u32, u32) override { return Status::unsupported("unused"); }
+};
+
+void check_mmap_staging_builds_from_current_records()
+{
+    Fixture fixture;
+    auto &resources = fixture.resources;
+    const auto unmapped = fixture.map(hw::page_size, hw::user_begin + 0x40000);
+    CHECK(unmapped && unmapped.value() == hw::user_begin + 0x40000);
+    const auto users = native::page_pool.user_count();
+    struct Sibling
+    {
+        sched::ProcessResources *resources;
+        uptr unmap;
+        uptr map;
+        Result<uptr> mapped{Status::not_found()};
+    } sibling{&resources, unmapped.value(), hw::user_begin + 0x50000};
+    SiblingFileNode node;
+    node.context = &sibling;
+    node.sibling = [](void *raw) {
+        auto &work = *static_cast<Sibling *>(raw);
+        CHECK(!work.resources->mm.held());
+        CHECK(native::native_munmap(*work.resources, work.unmap, hw::page_size));
+        work.mapped = native::native_mmap(*work.resources, work.map, hw::page_size, 3, 0x22, ~uptr{0}, 0);
+    };
+    const uptr start = hw::user_begin + 0x60000;
+    auto mapped = native::native_mmap(resources, start, hw::page_size, 3, 0x2, 4, 0, &node, node.file.bytes.size());
+    CHECK(node.ran && mapped && mapped.value() == start);
+    CHECK(sibling.mapped && sibling.mapped.value() == sibling.map);
+    CHECK(!mock::page(resources.native_space, sibling.unmap));
+    CHECK(mock::page(resources.native_space, sibling.map));
+    const auto *page = mock::page(resources.native_space, start);
+    CHECK(page);
+    const auto *bytes = reinterpret_cast<const unsigned char *>(page->physical_address);
+    for (usize i = 0; i < hw::page_size; ++i)
+        CHECK(bytes[i] == static_cast<unsigned char>(node.file.bytes[i]));
+    // One page left, two arrived: every record owns exactly its own frame.
+    CHECK(native::page_pool.user_count() == users + 1);
+    for (const auto &record : resources.native_pages)
+        CHECK(native::page_pool.reference_count(record.physical_address) == 1);
+    CHECK(!resources.mm.held());
+}
+
 void check_private_file_mapping()
 {
     Fixture fixture;
@@ -1663,6 +1733,7 @@ int main(int argc, char **)
     check_fixed_replacement_retains_only_failed_removed_owner();
     check_munmap_retains_only_failed_removed_owner();
     check_range_retirement_capacity_preflight_is_read_only();
+    check_mmap_staging_builds_from_current_records();
     check_shared_file_write_request_uses_existing_rw_ptes();
     check_noop_unmap_with_exhausted_metadata_quota();
     check_munmap_failure_is_atomic_at_metadata_quota();

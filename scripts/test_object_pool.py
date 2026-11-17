@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Retain xmake-built object ownership model checks; no guest or SMP execution."""
+"""Retain xmake-built object ownership model checks; no guest or SMP execution.
+
+A second target defines OK_HOSTED_LOCK_MODEL and OK_LOCK_DEBUG: the pool lock is the real spin
+lock and host threads stand in for CPUs (scope=model, still no guest or SMP execution).
+"""
 from pathlib import Path
 import argparse
 import hashlib
@@ -8,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+from hosted_closure import include_closure
 
 
 def sha(path):
@@ -24,8 +29,9 @@ def main():
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     source = output / 'input'
-    names = ('include/ok/core/types.hpp', 'include/ok/memory/object_pool.hpp',
+    names = ('include/ok/core/types.hpp', 'include/ok/memory/object_pool.hpp', 'tests/host/hosted_race.hpp',
              'tests/host/object_pool_tests.cpp', 'scripts/test_object_pool.py')
+    names = tuple(sorted(include_closure(root, names)))
     for name in names:
         destination = source / name
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -44,7 +50,12 @@ def main():
     if args.sanitize:
         project += ['add_cxxflags("-fsanitize=address,undefined", "-fno-omit-frame-pointer", {force=true})',
                     'add_ldflags("-fsanitize=address,undefined", {force=true})']
-    project += ['target_end()']
+    project += ['target_end()',
+                'target("object-pool-race")', 'set_kind("binary")', 'set_targetdir("artifacts")',
+                'add_includedirs("include")', 'add_files("tests/host/object_pool_tests.cpp")',
+                'add_defines("OK_HOSTED_LOCK_MODEL", "OK_LOCK_DEBUG")', 'add_syslinks("pthread")',
+                'add_cxxflags("-O1", "-g", "-frtti", "-fno-exceptions", "-pthread", "-Wall", "-Wextra", "-Wpedantic", "-Werror", {force=true})',
+                'target_end()']
     (source / 'xmake.lua').write_text('\n'.join(project) + '\n')
     source_hashes = {name: sha(source / name) for name in (*names, 'xmake.lua')}
     state = dict(status='running', scope='hosted object ownership model', guest_execution=False,
@@ -80,6 +91,13 @@ def main():
         if not match:
             raise RuntimeError('missing exact model completion marker')
         state['checks'] = int(match.group(1))
+        race = source / 'artifacts/object-pool-race'
+        state['race_binary'] = dict(path=str(race), sha256=sha(race))
+        text = run([race], 'execute-race')
+        match = re.search(r'^PASS object-pool race checks=(\d+) scope=hosted-model threads=4 guest=0$', text, re.M)
+        if not match or 'mixed=0 stale=0' not in text:
+            raise RuntimeError('missing exact race model completion marker')
+        state['race_checks'] = int(match.group(1))
         for name, digest in source_hashes.items():
             if sha(source / name) != digest:
                 raise RuntimeError('retained source changed: ' + name)

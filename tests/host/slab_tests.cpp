@@ -4,7 +4,11 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <set>
+#if defined(OK_HOSTED_LOCK_MODEL)
+#include "hosted_race.hpp"
+#endif
 
 using namespace ok;
 using namespace ok::memory;
@@ -230,6 +234,64 @@ void memory_manager_policy()
     CHECK(memory.initialize_objects().code() == StatusCode::already_exists);
 }
 
+#if defined(OK_HOSTED_LOCK_MODEL)
+// Four CPUs allocate and release objects of every class and large runs at
+// once, each charging its own account and stamping its objects. No object is
+// handed out twice or changed under its owner, and every page and charge
+// comes back.
+void concurrent_objects()
+{
+    static Fixture fixture;
+    std::atomic<u64> corrupted{0}, allocations{0};
+    test::race(4, [&](unsigned cpu) {
+        test::Sequence random{cpu * 131u};
+        ChargeAccount owner;
+        struct Held
+        {
+            void *object{};
+            usize size{};
+        };
+        std::array<Held, 24> held{};
+        for (int round = 0; round < 4000; ++round)
+        {
+            auto &slot = held[random.next() % held.size()];
+            if (slot.object)
+            {
+                const auto *bytes = static_cast<const unsigned char *>(slot.object);
+                for (usize i = 0; i < slot.size; ++i)
+                    if (bytes[i] != static_cast<unsigned char>(cpu * 16 + i % 13))
+                        ++corrupted;
+                CHECK(fixture.slab.release(slot.object, slot.size, owner));
+                slot = {};
+                continue;
+            }
+            const usize choice = random.next() % 9;
+            const usize size = choice < 8 ? (usize{8} << (random.next() % 8)) + random.next() % 8 : 4096 + 100;
+            auto object = fixture.slab.allocate(size, owner);
+            if (!object)
+                continue;
+            auto *bytes = static_cast<unsigned char *>(object.value());
+            for (usize i = 0; i < size; ++i)
+                bytes[i] = static_cast<unsigned char>(cpu * 16 + i % 13);
+            slot = {object.value(), size};
+            allocations.fetch_add(1);
+        }
+        for (auto &slot : held)
+            if (slot.object)
+                CHECK(fixture.slab.release(slot.object, slot.size, owner));
+        CHECK(owner.used() == 0);
+    });
+    const auto accounting = fixture.slab.accounting();
+    usize live = 0;
+    for (const auto &entry : accounting.classes)
+        live += entry.live_objects;
+    CHECK(corrupted == 0 && live == 0 && accounting.large_allocations == 0 && allocations > 1000);
+    CHECK(test::lock_violations() == 0 && test::lock_checks() == 0);
+    std::printf("slab race cpus=4 allocations=%llu corrupted=0 live=0\n",
+                static_cast<unsigned long long>(allocations.load()));
+}
+#endif
+
 } // namespace
 
 int main()
@@ -241,6 +303,10 @@ int main()
     limits_and_reserve();
     large_objects();
     memory_manager_policy();
+#if defined(OK_HOSTED_LOCK_MODEL)
+    concurrent_objects();
+    std::puts("OK_HOST slab race=pass scope=model");
+#endif
     std::puts("OK_HOST slab classes=pass release=pass reclaim=pass limits=pass reserve=pass large=pass policy=pass");
     return 0;
 }

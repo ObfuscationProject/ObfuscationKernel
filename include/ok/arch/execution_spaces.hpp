@@ -32,7 +32,11 @@ inline constexpr usize fixed_space_slots = 64 + (64 + 1) + 16;
 // entry's root, generation, used and retiring words are written and read as
 // atomics, and a retiring entry no longer validates. The writer marks the
 // entry retiring before quiesce_root, so after it no window can still use the
-// entry's space, and release() may clear it.
+// entry's space, and release() may clear it. The generation doubles as the
+// entry's sequence: release() and acquire() change it first, behind a release
+// fence, and find() rereads it last, so a lookup that read any word of a
+// released or reused entry fails rather than mixing two lives of the slot.
+// A released entry stays retiring until it is acquired again.
 template <typename Space, usize FixedSlots = 0> class SpaceTable
 {
   public:
@@ -67,11 +71,12 @@ template <typename Space, usize FixedSlots = 0> class SpaceTable
             if (!word(entries[index].used).load(std::memory_order_relaxed))
             {
                 auto &entry = entries[index];
+                word(entry.generation).store(next_generation_++, std::memory_order_relaxed);
+                if (next_generation_ == 0) next_generation_ = 1;
+                std::atomic_thread_fence(std::memory_order_release);
                 entry.space = {};
                 word(entry.root).store(0, std::memory_order_relaxed);
                 word(entry.retiring).store(false, std::memory_order_relaxed);
-                word(entry.generation).store(next_generation_++, std::memory_order_relaxed);
-                if (next_generation_ == 0) next_generation_ = 1;
                 word(entry.used).store(true, std::memory_order_release);
                 ++live_;
                 return &entry;
@@ -92,13 +97,15 @@ template <typename Space, usize FixedSlots = 0> class SpaceTable
     [[nodiscard]] Space *find(const AddressSpace &space) const
     {
         auto *entries = this->entries();
-        if (entries == nullptr || space.slot >= capacity()) return nullptr;
+        if (entries == nullptr || space.slot >= capacity() || !space.root || !space.generation) return nullptr;
         auto &entry = entries[space.slot];
-        return word(entry.used).load(std::memory_order_acquire) && space.root &&
-                       word(entry.root).load(std::memory_order_acquire) == space.root &&
-                       word(entry.generation).load(std::memory_order_relaxed) == space.generation &&
-                       !word(entry.retiring).load(std::memory_order_acquire)
-                   ? &entry.space : nullptr;
+        const auto generation = word(entry.generation).load(std::memory_order_acquire);
+        if (generation != space.generation || !word(entry.used).load(std::memory_order_acquire) ||
+            word(entry.root).load(std::memory_order_acquire) != space.root ||
+            word(entry.retiring).load(std::memory_order_acquire))
+            return nullptr;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        return word(entry.generation).load(std::memory_order_relaxed) == generation ? &entry.space : nullptr;
     }
     // Writer order step 1 for a destroy: new windows no longer find the space;
     // quiesce_root then waits for the windows that found it earlier.
@@ -115,10 +122,11 @@ template <typename Space, usize FixedSlots = 0> class SpaceTable
         auto *entry = owned(space);
         if (!entry)
             return Status::invalid_argument("native address-space slot is foreign or free");
-        word(entry->used).store(false, std::memory_order_release);
-        word(entry->root).store(0, std::memory_order_relaxed);
         word(entry->generation).store(0, std::memory_order_relaxed);
-        word(entry->retiring).store(false, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        word(entry->retiring).store(true, std::memory_order_relaxed);
+        word(entry->used).store(false, std::memory_order_relaxed);
+        word(entry->root).store(0, std::memory_order_relaxed);
         entry->space = {};
         if (--live_ || fixed) return Status::success();
         const auto pages = pages_;

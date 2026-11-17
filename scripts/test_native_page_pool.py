@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Check actual native page ownership using hosted backing; no mapping/hardware qualification."""
+"""Check actual native page ownership using hosted backing; no mapping/hardware qualification.
+
+A second target defines OK_HOSTED_LOCK_MODEL and OK_LOCK_DEBUG: the page pool and frame locks are
+the real spin locks and host threads stand in for CPUs (scope=model).
+"""
 import argparse
 import hashlib
 import json
@@ -18,7 +22,8 @@ def run(output, sanitize, cxx):
     root = Path(__file__).resolve().parents[1]
     output.mkdir(parents=True, exist_ok=False)
     source = output / 'input'
-    names = ['src/memory/memory.cpp', 'tests/host/native_page_pool_tests.cpp', 'scripts/test_native_page_pool.py']
+    names = ['src/memory/memory.cpp', 'tests/host/native_page_pool_tests.cpp', 'tests/host/hosted_race.hpp',
+             'scripts/test_native_page_pool.py']
     names += [str(p.relative_to(root)) for p in sorted((root / 'include').rglob('*')) if p.is_file()]
     for name in names:
         target = source / name
@@ -36,6 +41,11 @@ def run(output, sanitize, cxx):
     if sanitize:
         project += ['add_cxxflags("-fsanitize=address,undefined", "-fno-omit-frame-pointer", {force=true})',
                     'add_ldflags("-fsanitize=address,undefined", {force=true})']
+    project += ['target_end()',
+                'target("native-page-provider-race")', 'set_kind("binary")', 'set_targetdir("artifacts")',
+                'add_includedirs("include")', 'add_defines("OK_ARCH_TARGET_X86_64", "OK_HOSTED_LOCK_MODEL", "OK_LOCK_DEBUG")',
+                'add_files("tests/host/native_page_pool_tests.cpp", "src/memory/memory.cpp")', 'add_syslinks("pthread")',
+                'add_cxxflags("-O1", "-g", "-frtti", "-fno-exceptions", "-pthread", "-Wall", "-Wextra", "-Wpedantic", "-Werror", {force=true})']
     (source / 'xmake.lua').write_text('\n'.join(project + ['target_end()']) + '\n')
     inputs = {name: sha(source / name) for name in [*names, 'xmake.lua']}
     result = dict(status='running', scope='Hosted actual native ownership provider over aligned local backing; no PTE, firmware, guest, physical or SMP qualification',
@@ -70,6 +80,12 @@ def run(output, sanitize, cxx):
         marker = command([binary], 'execute')
         if not marker.startswith('PASS native page provider:') or not marker.endswith('hosted=1 guest=0 smp=0\n'):
             raise RuntimeError('missing native page provider completion marker')
+        race = source / 'artifacts/native-page-provider-race'
+        result['race_binary'] = dict(path=str(race), sha256=sha(race))
+        race_text = command([race], 'execute-race')
+        if 'native page pool race cpus=4' not in race_text or 'wrong=0' not in race_text or \
+                'PASS native page provider:' not in race_text:
+            raise RuntimeError('missing native page pool race completion marker')
         for name, digest in inputs.items():
             if sha(source / name) != digest:
                 raise RuntimeError('retained source changed: ' + name)
