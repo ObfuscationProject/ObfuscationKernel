@@ -779,9 +779,7 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     cpu.user_rsp = 0;
     cpu.stack_top = old_stack_top;
     asm volatile("push %0; popfq" : : "r"(saved_mask) : "memory", "cc");
-    auto trap = cpu.last_trap;
-    trap.translation_changed = value->tlb.current().generation != tlb.generation;
-    return trap;
+    return cpu.last_trap;
 }
 
 Result<Trap> enter(AddressSpace &space, UserFrame &frame)

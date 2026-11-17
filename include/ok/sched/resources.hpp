@@ -225,8 +225,11 @@ struct MemoryLimits
 //
 // native_space is published under a seqcount: space_sequence is odd while
 // the holder rewrites the handle, so a reader without the gate (a user entry)
-// retries a torn copy. `dead` is set once teardown retired the space; a later
-// holder finds nothing to change.
+// retries a torn copy. translation_sequence moves after the holder changed a
+// translation of the live space in place (copy-on-write resolution); a page
+// fault taken while the change ran finds it moved once it holds the gate.
+// `dead` is set once teardown retired the space; a later holder finds
+// nothing to change.
 //
 // A process record is copied when the table compacts (reap), never while its
 // gate is held: a copy takes the sequence and `dead`, and a fresh gate.
@@ -235,7 +238,8 @@ class AddressSpaceGate final
   public:
     constexpr AddressSpaceGate() noexcept = default;
     AddressSpaceGate(const AddressSpaceGate &other) noexcept
-        : space_sequence(other.space_sequence.load(std::memory_order_relaxed)), dead(other.dead)
+        : space_sequence(other.space_sequence.load(std::memory_order_relaxed)),
+          translation_sequence(other.translation_sequence.load(std::memory_order_relaxed)), dead(other.dead)
     {
     }
     AddressSpaceGate &operator=(const AddressSpaceGate &other) noexcept
@@ -243,6 +247,8 @@ class AddressSpaceGate final
         if (this != &other)
         {
             space_sequence.store(other.space_sequence.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            translation_sequence.store(other.translation_sequence.load(std::memory_order_relaxed),
+                                       std::memory_order_relaxed);
             dead = other.dead;
         }
         return *this;
@@ -275,7 +281,16 @@ class AddressSpaceGate final
         bool entered_;
     };
 
+    // After the in-place change is complete (its translations installed);
+    // only the holder writes, with a load and a store.
+    void translations_changed() noexcept
+    {
+        translation_sequence.store(translation_sequence.load(std::memory_order_relaxed) + 1,
+                                   std::memory_order_release);
+    }
+
     std::atomic<u32> space_sequence{};
+    std::atomic<u32> translation_sequence{};
     bool dead{};
 
   private:

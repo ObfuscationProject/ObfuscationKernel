@@ -10,9 +10,7 @@ namespace sn=ok::user::native;
 using namespace ok;
 namespace ok::arch::execution::mips64_n64_private::detail {struct ModelAccess {Tracker tracker{};void exhaust_sequence(){tracker.sequence_=~u64{};}void exhaust_epoch(){tracker.epoch_=~u64{};}};}
 static_assert(!std::is_default_constructible_v<cpu::detail::Tracker>);
-// Trap gained translation_changed after its five words (smp-scaling WP3).
-static_assert(sizeof(hw::UserFrame)==816 && offsetof(hw::UserFrame,fp_state)==304 && sizeof(hw::Trap)==40 &&
-              offsetof(hw::Trap,kernel_stack_pointer)==24);
+static_assert(sizeof(hw::UserFrame)==816 && offsetof(hw::UserFrame,fp_state)==304 && sizeof(hw::Trap)==32);
 static usize checks;
 void check(bool value,int line) {++checks;if(!value){std::fprintf(stderr,"N64_LIFECYCLE_FAIL line=%d check=%zu\n",line,checks);std::exit(1);}}
 #define CHECK(x) check(static_cast<bool>(x),__LINE__)

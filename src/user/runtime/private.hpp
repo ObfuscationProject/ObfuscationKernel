@@ -688,7 +688,7 @@ void check_translation_writer(const sched::ProcessResources &resources, const ch
 // A user page fault of the process that owns `resources`, under its mm: a
 // write to a withheld page, or a fault on a translation replaced meanwhile.
 // True when the thread may resume.
-bool resolve_user_fault(sched::ProcessResources &resources, const hw::Trap &trap);
+bool resolve_user_fault(sched::ProcessResources &resources, const hw::Trap &trap, u32 translations);
 // Process teardown under its mm: retires the space and every frame, then
 // marks the address space dead.
 void release_address_space(sched::ProcessResources &resources);

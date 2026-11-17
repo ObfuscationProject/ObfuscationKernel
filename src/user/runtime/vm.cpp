@@ -264,17 +264,18 @@ Result<usize> resolve_withheld([[maybe_unused]] sched::ProcessResources &resourc
         resolved += changed.value();
         if (last - page < hw::page_size) break;
     }
+    if (resolved) resources.mm.translations_changed();
 #endif
     return resolved;
 }
 } // namespace
-bool resolve_user_fault(sched::ProcessResources &resources, const hw::Trap &trap)
+bool resolve_user_fault(sched::ProcessResources &resources, const hw::Trap &trap, u32 translations)
 {
-    const hw::AddressSpace space = resources.native_space;
     if constexpr (smp_sections)
         if (runtime_kernel) drain_if_pinned(runtime_kernel->scheduler().resources_owner(resources));
     const sched::AddressSpaceGate::Hold hold(resources.mm);
     if (resources.mm.dead) return false;
+    const hw::AddressSpace space = resources.native_space;
     // A write to a withheld page: copy it or regain write access.
     auto resolved = resolve_withheld(resources, space, trap.fault_address, 1);
     if (!resolved)
@@ -283,9 +284,14 @@ bool resolve_user_fault(sched::ProcessResources &resources, const hw::Trap &trap
         return false;
     }
     if (resolved.value()) return true;
-    // A fault on a translation another CPU replaced meanwhile (break before
-    // make): the page is mapped for any data access now, so it repeats.
-    return trap.translation_changed && hw::user_range(space, trap.fault_address, 1, true);
+    // Another CPU changed a translation in place since this entry began: the
+    // fault may have met the page unmapped while its new frame was installed,
+    // or still withheld while another thread resolved it. Holding mm, that
+    // writer is done; the access repeats if the page now permits any data
+    // access. (A fault the change did not cause faults again, and with no
+    // further change it is not resumed twice.)
+    return resources.mm.translation_sequence.load(std::memory_order_relaxed) != translations &&
+           hw::user_range(space, trap.fault_address, 1, true);
 }
 void release_address_space(sched::ProcessResources &resources)
 {

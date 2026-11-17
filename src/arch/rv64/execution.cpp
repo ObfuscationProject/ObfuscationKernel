@@ -453,7 +453,6 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     complete_irq(trap, cpu);
     // The assembly restored the masked status; re-enable only on the service stack.
     asm volatile("csrs mstatus, %0" : : "r"(saved_status & uptr{8}) : "memory");
-    trap.translation_changed = stored->tlb.current().generation != tlb.generation;
     return trap;
 }
 

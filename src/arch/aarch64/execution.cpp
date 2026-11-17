@@ -391,7 +391,7 @@ Result<AddressSpace> create_space(MappingView mappings)
 // Publishes one record's entry. A new output address needs break before
 // make: the entry goes invalid and every CPU drops this address in every ASID
 // before the new one appears (a user access meanwhile takes a translation
-// fault the runtime resumes, Trap::translation_changed). A permission change
+// fault the runtime resumes, ok/sched/resources.hpp). A permission change
 // alone is written in place.
 static Status write_leaf(Space &value, const PageMapping &mapping)
 {
@@ -618,9 +618,7 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     cpu.resume_sp = 0;
     cpu.stack_top = old_stack_top;
     asm volatile("msr daif, %0" : : "r"(saved_mask) : "memory");
-    auto trap = cpu.last_trap;
-    trap.translation_changed = value->tlb.current().generation != tlb.generation;
-    return trap;
+    return cpu.last_trap;
 }
 
 Result<Trap> enter(AddressSpace &space, UserFrame &frame)

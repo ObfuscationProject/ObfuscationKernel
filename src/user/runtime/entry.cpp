@@ -1319,6 +1319,8 @@ bool step(Kernel &kernel)
             started = false; return false;
         }
 #endif
+        // Before the entry: a fault on a translation changed meanwhile resumes.
+        const auto translations = process->resources().mm.translation_sequence.load(std::memory_order_acquire);
         auto trap = shared_capture.enter(syscall_origins, vfs_continuations, process, running, view, kernel.scheduler());
         // Another CPU retired this thread while it ran here; it also took over
         // the lease, so nothing of this entry remains to complete.
@@ -1439,7 +1441,7 @@ bool step(Kernel &kernel)
             }
         }
         else if (trap.value().kind == hw::TrapKind::page_fault &&
-                 resolve_user_fault(process->resources(), trap.value())) {}
+                 resolve_user_fault(process->resources(), trap.value(), translations)) {}
         else
         {
             emit("OK_NATIVE scope=hardware fault=contained\n");

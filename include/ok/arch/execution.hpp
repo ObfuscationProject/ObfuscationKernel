@@ -149,11 +149,6 @@ struct Trap
     uptr error_code{0};
     uptr fault_address{0};
     uptr kernel_stack_pointer{0};
-    // The space's translations changed while this entry ran (its TLB
-    // generation moved; x86_64, aarch64 and rv64). A page fault then may have
-    // met a translation in the middle of its replacement (aarch64 break
-    // before make) and is retried once the runtime finds the page mapped.
-    bool translation_changed{false};
 };
 
 [[nodiscard]] bool supported() noexcept;

@@ -1589,6 +1589,21 @@ Status protect(const AddressSpace &space, MappingView mappings)
     ++mock::protects;
     return Status::success();
 }
+// Records with access are the mock translation.
+bool user_range(const AddressSpace &space, uptr address, usize size, bool write)
+{
+    if (size == 0)
+        return true;
+    if (address < user_begin || address >= user_end || size > user_end - address)
+        return false;
+    for (uptr page = address & ~(page_size - 1); page < address + size; page += page_size)
+    {
+        const auto *record = mock::page(space, page);
+        if (!record || !(record->flags & (write ? page_write : page_read)))
+            return false;
+    }
+    return true;
+}
 } // namespace ok::arch::execution
 
 struct ForkOwner
@@ -1696,6 +1711,37 @@ void check_copy_on_write_fork()
     CHECK(native::runtime_failure);
     CHECK(native::page_pool.reference_count(mock::page(parent.native_space, stack)->physical_address) == 1);
 }
+
+// A page fault resumes when the page was withheld (resolved now), or when a
+// translation changed in place since the entry began and the page now
+// permits the access: a sibling that faulted on a page another thread was
+// resolving (or that met the page unmapped while its new frame went in).
+// Without such a change a fault on an accessible page is genuine.
+void check_fault_resume_after_change()
+{
+    Fixture fixture;
+    auto &parent = fixture.resources;
+    const auto mapped = fixture.map(hw::page_size);
+    CHECK(mapped);
+    sched::ProcessResources child;
+    fork_resources(parent, child);
+    hw::Trap trap{};
+    trap.kind = hw::TrapKind::page_fault;
+    trap.fault_address = mapped.value() + 12;
+    // Two threads fault on the withheld page before either is served.
+    const auto before = child.mm.translation_sequence.load();
+    CHECK(native::resolve_user_fault(child, trap, before));
+    CHECK(!mock::page(child.native_space, mapped.value())->copy_on_write);
+    CHECK(child.mm.translation_sequence.load() == before + 1);
+    CHECK(native::resolve_user_fault(child, trap, before));
+    // Entered after the change: the same fault is genuine.
+    CHECK(!native::resolve_user_fault(child, trap, before + 1));
+    // A change elsewhere does not make an unmapped page accessible.
+    trap.fault_address = mapped.value() + hw::page_size;
+    CHECK(!native::resolve_user_fault(child, trap, before));
+    native::release(child.native_space, child.native_pages);
+    CHECK(native::runtime_failure);
+}
 #endif
 
 int main(int argc, char **)
@@ -1751,6 +1797,7 @@ int main(int argc, char **)
     check_program_break();
 #ifdef OK_NATIVE_COW_FORK
     check_copy_on_write_fork();
+    check_fault_resume_after_change();
 #endif
     std::puts("PASS: native VM transaction tests (hosted backend model)");
 }
