@@ -87,9 +87,10 @@ inline Status recover(const hw::AddressSpace &space, uptr address, usize size, b
     if (smp::in_section())
     {
         // A6: a section never rewrites page records; admission resolved its
-        // output range under the kernel lock, so a write fails here only on a
-        // page withheld since.
-        if (write)
+        // output range under the kernel lock. A write that still meets a
+        // readable but unwritable page would need a resolution (counted); any
+        // other failure is the caller's fault.
+        if (write && hw::user_range(space, address, size, false))
             smp::detail::section_assert(&smp::SectionCpu::cow_refused, "copy-on-write resolution inside a section");
         return failed;
     }

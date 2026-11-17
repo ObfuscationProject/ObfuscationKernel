@@ -2,7 +2,8 @@
 // mock resolution hook: a refused access is resolved and retried at most
 // max_retries times, then attempted once more holding mm; a space no process
 // owns keeps its first result; with_user_word never resolves and never takes
-// a lock; user copies under a class A lock count class_asserts.
+// a lock; user copies under a class A lock count class_asserts; a section
+// resolves nothing and counts only a write refused on a readable page.
 // Model coverage only (scope=model).
 
 #include "ok/user/uaccess.hpp"
@@ -179,14 +180,38 @@ void check_user_word()
     lock.unlock();
     CHECK(smp::check_total(smp::KernelCheck::class_rule) == before + (smp::lock_debug_enabled ? 1 : 0));
 }
+// Inside a kernel section nothing is resolved (A6) and the first result
+// stands. A write that meets a readable but unwritable page would need a
+// resolution and is counted (cow_refused); a write to an unmapped page is
+// the caller's fault and is not.
+void check_section()
+{
+    const hw::AddressSpace space{1, 0, 1};
+    const u32 value = 5;
+    auto &cpu = smp::section_cpus[smp::current_cpu()];
+    const auto before = cpu.cow_refused.load();
+    smp::set_cpu_mode(smp::current_cpu(), smp::cpu_mode_section);
+    reset();
+    mock::withheld = 1;
+    CHECK(uaccess::copy_to_user(space, mock::base, &value, sizeof(value)).code() == StatusCode::fault);
+    CHECK(mock::attempts == 1 && mock::resolutions == 0 && cpu.cow_refused.load() == before + 1);
+    reset();
+    mock::unmapped = true;
+    CHECK(uaccess::copy_to_user(space, mock::base, &value, sizeof(value)).code() == StatusCode::fault);
+    u32 out{};
+    CHECK(uaccess::copy_from_user(space, &out, mock::base, sizeof(out)).code() == StatusCode::fault);
+    CHECK(mock::attempts == 2 && mock::resolutions == 0 && cpu.cow_refused.load() == before + 1);
+    smp::clear_cpu_mode(smp::current_cpu(), smp::cpu_mode_section);
+}
 } // namespace
 
 int main()
 {
     check_retries();
     check_user_word();
+    check_section();
     std::printf("OK_UACCESS_MODEL scope=model retries=pass final_attempt=pass ownerless=pass user_word=pass "
-                "class_rule=pass debug=%d\n",
+                "class_rule=pass section=pass debug=%d\n",
                 smp::lock_debug_enabled ? 1 : 0);
     return 0;
 }

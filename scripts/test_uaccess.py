@@ -2,8 +2,8 @@
 """Model the user-access recovery contract of ok/user/uaccess.hpp (smp-scaling WP3).
 
 A mock backend refuses withheld writes and a mock resolution hook stands in for the native
-runtime: bounded retries, the final attempt holding mm, ownerless spaces, with_user_word and the
-class A rule. Built with and without OK_LOCK_DEBUG. Model coverage only (scope=model).
+runtime: bounded retries, the final attempt holding mm, ownerless spaces, with_user_word, the
+class A rule and kernel sections. Built with and without OK_LOCK_DEBUG. Model coverage only (scope=model).
 """
 import argparse
 import os
