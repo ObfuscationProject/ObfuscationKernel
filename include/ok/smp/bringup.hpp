@@ -228,8 +228,13 @@ inline void begin_kernel_window(uptr root) noexcept
     auto &depth = detail::kernel_window_depth[cpu];
     if (depth++ != 0)
     {
+        // Widened before this window validates anything, with the same fence
+        // as the outermost one: a writer on `root` then sees it.
         if (record.kernel_root.load(std::memory_order_relaxed) != root)
+        {
             record.kernel_root.store(0, std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+        }
         return;
     }
     record.kernel_root.store(root, std::memory_order_relaxed);
