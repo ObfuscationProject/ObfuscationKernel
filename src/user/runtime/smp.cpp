@@ -31,7 +31,7 @@ static_assert(arch::execution::fixed_space_slots ==
 // the kernel lock, and never while bring-up still pings them.
 constinit std::atomic<bool> secondary_admission{};
 constinit std::array<bool, smp::max_cpus> runtime_step_active{};
-constinit std::array<bool, smp::max_cpus> runtime_idle{};
+constinit std::array<std::atomic<bool>, smp::max_cpus> runtime_idle{};
 
 Status require_cpu_service_stack()
 {
@@ -160,7 +160,7 @@ extern "C" bool ok_smp_cpu_leaving(ok::smp::CpuId cpu)
                        !entry_stacks.active_on(cpu);
     cpu_entries[cpu] = {};
     runtime_step_active[cpu] = false;
-    runtime_idle[cpu] = false;
+    runtime_idle[cpu].store(false, std::memory_order_relaxed);
     forget_cpu_cursor(cpu);
     if (runtime_kernel != nullptr && runtime_kernel->scheduler().current_tid(cpu) != 0)
         static_cast<void>(runtime_kernel->scheduler().activate(0, cpu));
@@ -194,5 +194,5 @@ extern "C" bool ok_smp_secondary_step(ok::smp::CpuId cpu)
     static_cast<void>(ok::interrupt::drain_platform_irqs());
     if (!started || runtime_kernel == nullptr) return false;
     const bool stepped = step(*runtime_kernel);
-    return stepped && !runtime_idle[cpu];
+    return stepped && !runtime_idle[cpu].load(std::memory_order_relaxed);
 }

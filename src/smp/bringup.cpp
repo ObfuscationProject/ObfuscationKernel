@@ -122,15 +122,17 @@ void set_state(CpuId cpu, CpuState state)
 constexpr u64 stop_timeout_ns = 2'000'000'000;
 
 // Stops and restarts run one at a time: x86 starts share one trampoline page.
-constinit std::atomic_flag hotplug_busy = ATOMIC_FLAG_INIT;
+// The turn is a try-only token (hotplug_turn): never waited for and outside
+// the lock-debug record, since its holder releases and retakes the kernel
+// lock while it waits (wait_unlocked).
 class HotplugTurn
 {
   public:
-    HotplugTurn() noexcept : owned_(!hotplug_busy.test_and_set(std::memory_order_acquire)) {}
+    HotplugTurn() noexcept : owned_(hotplug_turn.try_lock()) {}
     ~HotplugTurn()
     {
         if (owned_)
-            hotplug_busy.clear(std::memory_order_release);
+            hotplug_turn.unlock();
     }
     HotplugTurn(const HotplugTurn &) = delete;
     HotplugTurn &operator=(const HotplugTurn &) = delete;
@@ -149,6 +151,7 @@ constinit std::array<std::atomic<bool>, max_cpus> leave_faults{};
 // routed here, IPIs), and takes it again.
 template <typename Done> bool wait_unlocked(Done done, u64 timeout_ns)
 {
+    static_cast<void>(check_class_wait("hotplug wait under a spin lock"));
     bkl_unlock();
     const bool met = wait_for(
         [&] {

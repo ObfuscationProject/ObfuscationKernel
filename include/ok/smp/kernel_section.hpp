@@ -25,23 +25,27 @@ namespace ok::smp
 // footprint, waits for the working ones and commits the returning ones
 // through section_commit_handler before it mutates anything.
 //
-// Mode bits (cpu_modes, ok/smp/lock.hpp): BKL_HELD, SECTION, SPINNING and
-// KERNEL_WORK.
+// Mode bits (cpu_modes, ok/smp/lock.hpp): BKL_HELD, SECTION, SPINNING,
+// KERNEL_WORK, KERNEL_FREE and TOP_HALF.
 inline constexpr u32 mode_bkl_held = cpu_mode_bkl_held;
 inline constexpr u32 mode_section = cpu_mode_section;
 inline constexpr u32 mode_spinning = cpu_mode_spinning;
 inline constexpr u32 mode_kernel_work = cpu_mode_kernel_work;
+inline constexpr u32 mode_kernel_free = cpu_mode_kernel_free;
+inline constexpr u32 mode_top_half = cpu_mode_top_half;
 
-// Doing kernel work right now, not waiting: in a section, or holding the lock
-// in a stretch marked as work (bkl_mark_work), so an idle CPU scanning an
-// empty run queue under the lock does not count. A section's device polling
-// is the section's own I/O and counts.
+// Doing kernel work right now, not waiting: in a section, serving work
+// without the kernel lock (KERNEL_FREE), or holding the lock in a stretch
+// marked as work (bkl_mark_work), so an idle CPU scanning an empty run queue
+// under the lock does not count. A section's device polling is the section's
+// own I/O and counts.
 [[nodiscard]] inline bool productive(CpuId cpu) noexcept
 {
     const auto bits = cpu_mode(cpu);
     if ((bits & mode_spinning) != 0)
         return false;
-    return (bits & mode_section) != 0 || (bits & (mode_bkl_held | mode_kernel_work)) == (mode_bkl_held | mode_kernel_work);
+    return (bits & (mode_section | mode_kernel_free)) != 0 ||
+           (bits & (mode_bkl_held | mode_kernel_work)) == (mode_bkl_held | mode_kernel_work);
 }
 
 [[nodiscard]] inline bool in_section(CpuId cpu) noexcept
@@ -169,6 +173,49 @@ struct alignas(64) SectionCpu
 };
 inline constinit std::array<SectionCpu, max_cpus> section_cpus{};
 
+// Per-CPU evidence of the fine-locked paths (OK_SMP_WAKE, OK_SMP_MM,
+// OK_SMP_AUDIT), owner-written with detail::owner_add. The packages that
+// convert wakeups, memory and the audit feed them; until then they stay zero.
+struct alignas(64) EvidenceCpu
+{
+    // OK_SMP_WAKE
+    std::atomic<uptr> remote_wakes{};
+    std::atomic<uptr> wake_ipis{};
+    std::atomic<uptr> probes{};
+    std::atomic<uptr> steals{};
+    std::atomic<uptr> deadline_late_max_us{}; // A maximum, not a sum.
+    std::atomic<uptr> unqueued{};
+    // OK_SMP_MM
+    std::atomic<uptr> quiesce_rounds{};
+    std::atomic<uptr> kernel_windows{};
+    std::atomic<uptr> cow_copied{};
+    std::atomic<uptr> cow_reused{};
+    std::atomic<uptr> retiring_rejects{};
+    std::atomic<uptr> protect_pages{};
+    std::atomic<uptr> uaccess_retries{};
+    std::atomic<uptr> uaccess_held{};
+    // OK_SMP_AUDIT (repairs and poll readiness count as KernelCheck)
+    std::atomic<uptr> audit_passes{};
+};
+inline constinit std::array<EvidenceCpu, max_cpus> evidence_cpus{};
+
+[[nodiscard]] inline u64 evidence_total(std::atomic<uptr> EvidenceCpu::*counter) noexcept
+{
+    u64 total = 0;
+    for (const auto &cpu : evidence_cpus)
+        total += (cpu.*counter).load(std::memory_order_relaxed);
+    return total;
+}
+
+[[nodiscard]] inline u64 evidence_max(std::atomic<uptr> EvidenceCpu::*counter) noexcept
+{
+    u64 highest = 0;
+    for (const auto &cpu : evidence_cpus)
+        if (const u64 value = (cpu.*counter).load(std::memory_order_relaxed); value > highest)
+            highest = value;
+    return highest;
+}
+
 // The runtime closes admission before power-off; WP3's admission reads it.
 inline constinit std::atomic<bool> section_admission{};
 // require_exclusive checks the kernel lock once secondary CPUs are admitted.
@@ -279,6 +326,19 @@ inline bool require_exclusive(const char *site) noexcept
     if (!exclusive)
         detail::section_assert(&SectionCpu::exclusive_asserts, site);
     return exclusive;
+}
+
+// A path that stays under the big kernel lock (boot, modules, mounts, power,
+// CPU 0 rescue, hotplug execution and every syscall still marked
+// bkl_required): once armed, refused without the lock. Counted as
+// exclusive_asserts, which the OK_SMP_KERNEL_CHECKS line reports as
+// bkl_asserts. False on a violation.
+inline bool require_bkl(const char *site) noexcept
+{
+    const bool held = !exclusive_armed.load(std::memory_order_relaxed) || kernel_lock.owned_by_current_cpu();
+    if (!held)
+        detail::section_assert(&SectionCpu::exclusive_asserts, site);
+    return held;
 }
 
 // A mutator of `pid`'s footprint: no section of it may be working or returning.

@@ -276,8 +276,8 @@ void inline_release(const Bytes &image)
     CHECK(victim->phase_ == Ext4Node::Phase::vacant || victim->phase_ == Ext4Node::Phase::tombstone);
 }
 
-// The hold is recorded at fs_provider: below the description position lock
-// it is in order, above the scheduler rank it is an order violation.
+// The hold is recorded at fs_provider: after the description position lock
+// it is in order, after the mm gate it is an order violation.
 void recorded_rank(const Bytes &image)
 {
     if constexpr (!smp::lock_debug_enabled) return;
@@ -294,7 +294,7 @@ void recorded_rank(const Bytes &image)
     }
     CHECK(smp::lock_violation_count(7) == before);
     {
-        smp::RankedSpinLock<smp::LockRank::scheduler> higher;
+        smp::RankedSpinLock<smp::LockRank::mm> higher;
         higher.lock();
         CHECK(root->query_metadata());
         higher.unlock();

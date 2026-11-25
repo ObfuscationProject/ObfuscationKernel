@@ -19,7 +19,14 @@ SyscallOrigins syscall_origins{entry_stacks};
 VfsStatContinuation<lu::configured_native_profile()> vfs_continuations{entry_stacks};
 constinit RuntimeFlag started{};
 Kernel *runtime_kernel{};
+constinit smp::RankedSpinLock<smp::LockRank::runtime_status> runtime_status_lock{};
 constinit RuntimeFailure runtime_failure{};
+void fail_runtime(const Status &status)
+{
+    const decltype(runtime_status_lock)::Guard guard(runtime_status_lock);
+    runtime_failure.store_locked(status);
+    started = false;
+}
 ShutdownOwner original_shutdown_owner{};
 bool shutdown_admission_closed{}, shutdown_retirement_started{}, shutdown_retirement_completed{};
 namespace
@@ -172,10 +179,10 @@ void emit_entry_stack_stats()
     emit(" reservations="); emit_number(stats.reservations);
     emit(" releases="); emit_number(stats.releases);
     emit(" activations="); emit_number(stats.activations);
-    emit(" syscalls="); emit_number(entry_syscalls);
-    emit(" timers="); emit_number(entry_timers);
-    emit(" faults="); emit_number(entry_faults);
-    emit(" rejected="); emit_number(entry_rejections);
+    emit(" syscalls="); emit_number(entry_total(&EntryCpu::syscalls));
+    emit(" timers="); emit_number(entry_total(&EntryCpu::timers));
+    emit(" faults="); emit_number(entry_total(&EntryCpu::faults));
+    emit(" rejected="); emit_number(entry_total(&EntryCpu::rejections));
     emit(" guards=mapped-canaries smp=0\n");
     report_interrupts();
 }

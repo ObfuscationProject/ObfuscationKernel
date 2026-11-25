@@ -6,6 +6,7 @@
 #include "ok/smp/smp.hpp"
 
 #include <array>
+#include <atomic>
 #include <span>
 #include <string_view>
 
@@ -193,6 +194,8 @@ class OkRefCount final
 
 using OkSpinLock = smp::SpinLock;
 
+// A try-only mutex: lock() never waits and reports would_block when held. The
+// flag needs only an atomic swap, which every profile has.
 class OkMutex final
 {
   public:
@@ -200,13 +203,15 @@ class OkMutex final
     Status unlock();
     [[nodiscard]] bool locked() const
     {
-        return locked_;
+        return locked_.test(std::memory_order_acquire);
     }
 
   private:
-    bool locked_{false};
+    std::atomic_flag locked_{};
 };
 
+// OkWaitQueue and OkSlabAllocator keep their state under one driver ABI leaf
+// lock (src/driver/abi.cpp, rank driver_abi), so CPUs may call them at once.
 class OkWaitQueue final
 {
   public:

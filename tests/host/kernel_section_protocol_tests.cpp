@@ -343,6 +343,37 @@ void check_assertions()
     });
 }
 
+// require_bkl: once armed, refused without the kernel lock and counted as
+// exclusive_asserts (reported as bkl_asserts); unlike require_exclusive it
+// holds the lock's owner only. A CPU serving work without the kernel lock
+// (KERNEL_FREE) is productive unless it spins.
+void check_bkl_and_free_mode()
+{
+    on_cpu(12, [] {
+        auto &self = smp::section_cpus[12];
+        expect(smp::require_bkl("model bkl unarmed") && self.exclusive_asserts.load() == 0,
+               "unarmed require_bkl without the lock failed");
+        smp::arm_exclusive();
+        expect(!smp::require_bkl("model bkl armed") && self.exclusive_asserts.load() == 1,
+               "armed require_bkl without the lock passed");
+        smp::bkl_lock();
+        expect(smp::require_bkl("model bkl held") && self.exclusive_asserts.load() == 1,
+               "require_bkl under the lock failed");
+        smp::bkl_unlock();
+        smp::exclusive_armed.store(false);
+
+        expect(!smp::productive(12), "a CPU with no mode counted as productive");
+        smp::set_cpu_mode(12, smp::mode_kernel_free);
+        expect(smp::productive(12), "a CPU serving work without the kernel lock was not productive");
+        {
+            const smp::SpinningScope spinning;
+            expect(!smp::productive(12), "a spinning free CPU counted as productive");
+        }
+        smp::clear_cpu_mode(12, smp::mode_kernel_free);
+        expect(smp::cpu_mode(12) == 0, "mode bits left behind");
+    });
+}
+
 void check_family_counters()
 {
     on_cpu(9, [] {
@@ -375,6 +406,7 @@ int main()
     check_drain_scope();
     check_evidence();
     check_assertions();
+    check_bkl_and_free_mode();
     check_family_counters();
     expect(total(&smp::SectionCpu::section_asserts) == 0 && total(&smp::SectionCpu::drain_asserts) == 1,
            "protocol counted a section assertion or an unexpected drain assertion");
