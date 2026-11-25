@@ -241,8 +241,9 @@ void jobctl_orphan_pass(Kernel &kernel, sched::ProcessId pid, sched::ProcessId p
 bool private_jobctl_discard_stop(Kernel &kernel, const sched::ProcessControlBlock &process, u32 signal)
 {
     // Linux get_signal: TSTP, TTIN and TTOU to an orphaned group are dropped,
-    // and init (SIGNAL_UNKILLABLE) never stops on a default action.
-    return process.pid() == sched::user_init_pid || (signal != JobActions::stop_signal &&
+    // and init (SIGNAL_UNKILLABLE) never stops on a default action. The signal
+    // is in the recipient's numbering: native SIGSTOP is 19, Linux MIPS is 23.
+    return process.pid() == sched::user_init_pid || (signal != jobctl_numbering(process).stop &&
         kernel.scheduler().process_group_orphaned(process.process_group_id()));
 }
 
