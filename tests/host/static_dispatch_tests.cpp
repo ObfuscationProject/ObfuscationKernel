@@ -27,13 +27,16 @@ struct NewestRunnablePolicy
 {
     usize selections{0};
 
-    Result<sched::ProcessId> pick_next(std::span<const sched::ProcessControlBlock> processes, sched::ProcessId current,
-                                       smp::CpuId cpu)
+    Result<sched::ProcessId> pick_next(sched::ConstProcessRange processes, sched::ProcessId current, smp::CpuId cpu)
     {
         ++selections;
-        for (usize i = processes.size(); i != 0; --i)
+        // Slots hand out forward, so the last visible slot is the newest
+        // until the table wraps.
+        for (usize i = processes.capacity(); i != 0; --i)
         {
-            const auto &process = processes[i - 1];
+            const auto *found = processes.at(i - 1);
+            if (!found) continue;
+            const auto &process = *found;
             if (process.can_run_on(cpu) &&
                 (process.state() == sched::ProcessState::runnable || process.pid() == current))
             {

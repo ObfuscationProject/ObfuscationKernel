@@ -283,12 +283,22 @@ void permissions_and_lifecycle(Kernel &kernel)
     expect(kill(kernel, g, newpeer.value(), 0) == -3);
     expect(q->peek({}, ticket));
     // Group retirement invalidates both allocated and fallback shared tickets.
+    const auto retired_slot = kernel.scheduler().find(g.pid)->process_slot();
     native::finish(kernel, g.pid, 17);
     expect(!q->consume(ticket) && !v.consume(selected));
     expect(kill(kernel, g, g.pid, 0) == 0 && kill(kernel, g, g.pid, 10) == 0);
     expect(kill(kernel, g, g.pid, 65) == -22);
     CHECK(kernel.scheduler().reap_orphans());
-    const auto replacement = create(kernel);
+    // The shared table is indexed by process slot: the replacement must take
+    // the retired group's slot to reuse its entry (slots are handed out
+    // walking forward, so cycle until it wraps there).
+    auto replacement = create(kernel);
+    for (usize tries = 0; kernel.scheduler().find(replacement.pid)->process_slot() != retired_slot; ++tries)
+    {
+        CHECK(tries < sched::max_processes);
+        retire(kernel, replacement);
+        replacement = create(kernel);
+    }
     auto &rebound = shared(kernel, replacement);
     expect(&rebound == q && rebound.identity() != ticket.owner && rebound.identity().generation > ticket.owner.generation &&
            !q->consume(ticket));

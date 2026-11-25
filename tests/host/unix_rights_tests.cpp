@@ -217,7 +217,12 @@ void process_lifetime_guards()
         auto receive = f.posix.prepare_unix_receive(pair[1], out, 1); CHECK(receive);
         CHECK(f.posix.fork().status().code() == StatusCode::busy);
         CHECK(f.scheduler.exit_process(process.value(), 0).code() == StatusCode::busy);
-        CHECK(f.scheduler.reap_process(process.value()).code() == StatusCode::busy);
+        // The receiver cannot exit, so it cannot be reaped either. Reaping
+        // another process no longer waits for the receive: nothing moves.
+        CHECK(f.scheduler.reap_process(process.value()).code() == StatusCode::invalid_argument);
+        auto bystander = f.scheduler.create_user_process("bystander", arch::configured_arch_operations().make_user_context({1, 2, 0}));
+        CHECK(bystander && f.scheduler.exit_process(bystander.value(), 0) && f.scheduler.reap_process(bystander.value()));
+        CHECK(f.scheduler.find(process.value()));
         CHECK(f.scheduler.replace_image(process.value(), {}, {}).code() == StatusCode::busy);
         receive.value().cancel(); CHECK(f.scheduler.exit_process(process.value(), 0)); CHECK(f.scheduler.reap_process(process.value()));
     });

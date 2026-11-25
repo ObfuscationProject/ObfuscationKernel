@@ -81,7 +81,7 @@ void callback()
         const auto cpu = arch::configured_arch_operations().make_user_context({hw::user_begin, hw::user_begin + 4096});
         CHECK(scheduler.replace_image(c.pid, cpu, {}).code() == StatusCode::busy);
         CHECK(scheduler.exit_process(c.pid, 0).code() == StatusCode::busy);
-        CHECK(scheduler.reap_process(c.pid).code() == StatusCode::busy);
+        CHECK(scheduler.reap_process(c.pid).code() == StatusCode::invalid_argument);
         CHECK(!c.operations->open(c.pid));
     }
     if (c.calls != c.action_at) return;

@@ -236,7 +236,11 @@ void bounded_endpoints_and_prepared_process_lifetime()
         auto &resources = f.scheduler.find(made.value())->resources();
         auto accepted = f.scheduler.prepare_unix_accept(resources, f.id(listener)); CHECK(accepted);
         CHECK(f.scheduler.exit_process(made.value(), 0).code() == StatusCode::busy);
-        CHECK(f.scheduler.reap_process(made.value()).code() == StatusCode::busy);
+        // The owner cannot exit, so it is not reapable; reap has no global
+        // veto any more, because no record moves.
+        CHECK(f.scheduler.reap_process(made.value()).code() == StatusCode::invalid_argument);
+        auto bystander = f.scheduler.create_user_process("accept-bystander", context);
+        CHECK(bystander && f.scheduler.exit_process(bystander.value(), 0) && f.scheduler.reap_process(bystander.value()));
         CHECK(f.scheduler.replace_image(made.value(), {}, {}).code() == StatusCode::busy);
         accepted.value().cancel();
         CHECK(f.scheduler.exit_process(made.value(), 0)); CHECK(f.scheduler.reap_process(made.value()));

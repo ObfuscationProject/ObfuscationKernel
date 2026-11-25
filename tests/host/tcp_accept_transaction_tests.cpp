@@ -88,7 +88,7 @@ struct Copy
             CHECK(!fixture->scheduler.fork_process(fixture->pid));
             CHECK(fixture->scheduler.replace_image(fixture->pid, fixture->context, {}).code() == StatusCode::busy);
             CHECK(fixture->scheduler.exit_process(fixture->pid, 0).code() == StatusCode::busy);
-            CHECK(fixture->scheduler.reap_process(fixture->pid).code() == StatusCode::busy);
+            CHECK(fixture->scheduler.reap_process(fixture->pid).code() == StatusCode::invalid_argument);
             CHECK(!fixture->operations.open(fixture->pid));
         }
         if (calls == revoke_at) authority = false;

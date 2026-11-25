@@ -83,7 +83,7 @@ int main()
     CHECK(f.scheduler.open_description(listener_id)->references == 2);
     CHECK(f.scheduler.drain_all_resources().code() == StatusCode::busy);
     CHECK(!f.scheduler.fork_process(pid)); CHECK(f.scheduler.replace_image(pid, context, {}).code() == StatusCode::busy);
-    CHECK(f.scheduler.exit_process(pid, 0).code() == StatusCode::busy && f.scheduler.reap_process(pid).code() == StatusCode::busy);
+    CHECK(f.scheduler.exit_process(pid, 0).code() == StatusCode::busy && f.scheduler.reap_process(pid).code() == StatusCode::invalid_argument);
     CHECK(!f.scheduler.install_descriptor(process->resources(), reserved_fd, listener_id));
     CHECK(!f.scheduler.retain_description(reserved_id)); CHECK(!f.operations.open(pid));
     CHECK(f.scheduler.close_descriptor(process->resources(), fd)); CHECK(f.scheduler.open_description(listener_id)->references == 1);

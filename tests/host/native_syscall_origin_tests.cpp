@@ -195,11 +195,11 @@ void lifecycle(Kernel &kernel, bool thumb)
     expect(native::syscall_origins.validate_restart(permit.value(), id, captured, wait));
     const auto failed = native::replace_entry_stacks(native::entry_stacks, *p, [&] { return Status::denied("exec control"); });
     expect(!failed && !failed.committed && native::syscall_origins.validate_restart(permit.value(), id, captured, wait));
-    // Process compaction moves the canonical frame; no stored frame pointer is used.
+    // Reaping another process moves nothing: the frame stays where it was.
     auto *old_address = thread;
     native::release_process(kernel, first.pid); CHECK(kernel.scheduler().exit_process(first.pid, 0)); CHECK(kernel.scheduler().reap_orphans());
     p = kernel.scheduler().find(g.pid); thread = kernel.scheduler().find_thread(g.pid, g.reader);
-    expect(thread != old_address && origin(kernel, g) == id);
+    expect(thread == old_address && origin(kernel, g) == id);
     expect(native::syscall_origins.validate_restart(permit.value(), id, thread->native_frame, wait));
     // Actual runtime table replacement: failed destroy does not alter origins.
     mock::spaces_enabled = true; const auto previous_space = p->resources().native_space;

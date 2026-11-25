@@ -86,7 +86,7 @@ void test_identity_rearm_and_completion_order()
     CHECK(!thread->wait_registration.pending(administrative));
 }
 
-void test_compaction_and_lifecycle()
+void test_stable_slots_and_lifecycle()
 {
     Fixture f;
     const auto before = f.create(), owner = f.create(), after = f.create();
@@ -95,7 +95,8 @@ void test_compaction_and_lifecycle()
     CHECK(f.scheduler.exit_process(before, 0));
     CHECK(f.scheduler.reap_process(before));
     CHECK(f.scheduler.find(owner) && f.scheduler.find(after));
-    CHECK(reinterpret_cast<uptr>(f.scheduler.find(owner)) != old_address);
+    // Reaping another process moves nothing.
+    CHECK(reinterpret_cast<uptr>(f.scheduler.find(owner)) == old_address);
     CHECK(f.scheduler.find_thread(ticket.owner, ticket.thread)->wait_registration.pending(ticket));
     CHECK(f.scheduler.complete_wait(ticket, WaitCompletion::ready));
     const auto exiting = f.wait(owner);
@@ -318,7 +319,7 @@ int main()
 {
     test_signal_termination_range();
     test_identity_rearm_and_completion_order();
-    test_compaction_and_lifecycle();
+    test_stable_slots_and_lifecycle();
     test_current_thread_exec_and_fork();
     test_pipe_readiness_and_peer_exit();
     test_pipe_writer_peer_exit();
