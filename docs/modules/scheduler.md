@@ -83,11 +83,54 @@ stateful policy, priority/affinity, copied policy ownership, invalid CPU IDs,
 and compile-time rejection of a policy with an incompatible signature. These
 tests are not hardware preemption or SMP evidence.
 
+## Task storage
+
+Processes and threads live in fixed slots (`include/ok/sched/task_table.hpp`,
+smp-scaling WP2). Nothing moves or compacts, so a PCB or TCB pointer stays
+valid memory for the scheduler's lifetime; what it names is checked by id.
+
+- 64 `ProcessSlot`s. Each holds the slot's `task` lock, the `pid` and
+  `lifecycle` words that any CPU may load (free, embryo, live, exiting, zombie,
+  reaped), a pin count, the per-thread affinity words (`thread_affinity`, the
+  sched_setaffinity masks) and the PCB. Allocation walks forward from the last
+  allocated slot, so slot order follows creation order until it wraps. It
+  claims a slot (embryo), builds the PCB in place and publishes the pid,
+  holding `task_table` and then the slot's `task` lock. `find(pid)` scans the
+  64 pid words; `processes()` is a range over the [live, zombie] slots in
+  slot order, and the `SchedulerPolicy` concept takes that range.
+- `ProcessPin` (`SchedulerState::pin(pid)`) holds a [live, zombie] slot. Reap
+  marks the slot reaped and frees it at once when no pin is held; otherwise
+  the last unpin frees it. A reaped slot is invisible to lookups but keeps
+  its pid and PCB. Reap no longer drains kernel sections and no longer
+  refuses while UNIX receives or descriptor reservations are prepared
+  elsewhere, because no other record moves.
+- Each PCB has eight TCB slots; slot 0 is the group leader (tid == pid).
+  `slot_state` is free, embryo (reserved, unused until clone prepares in
+  place), live or exited. `live_threads()` yields live slots,
+  `thread_records()` live and exited ones, `leader()` slot 0 whatever its
+  state, `main_thread()` the leader while it lives and else the lowest live
+  slot. Thread exit keeps an exited record; a later clone reuses the first
+  exited record that holds nothing, and exec clears every sibling slot.
+- `ThreadHandle{index = slot * 8 + thread, tid}` names a thread while that
+  slot holds that tid (`thread_at`). `WaitTicket` carries the same index, so
+  `complete_wait` finds its waiter without a search; a ticket armed outside
+  `register_current_wait` (no index) is still found by its identities.
+- Each CPU has a `CpuSlot`: pid, tid, PCB and TCB pointers and its dispatch
+  counters, written by `occupy_cpu`/`vacate_cpu_slot`. The POSIX service reads
+  its caller from there (or from an explicit binding, which kernel sections
+  set), never by searching the table.
+
+Model tests: `scripts/test_task_table.py` (slot lifecycle, pins, ranges; a
+host-thread race of pins against reap and reallocation with the real lock)
+and `scripts/test_thread_lifecycle.py` (stale handles and tickets after slot
+reuse, pins against reap, exited-slot iteration).
+
 ## Per-CPU run queues
 
 `SchedulerState` owns one `CpuRunQueue` per CPU (`include/ok/sched/run_queue.hpp`):
-a bounded FIFO of `ThreadRef{pid, tid}` identities, never PCB/TCB addresses,
-because process storage compacts on reap and task identities are never reused.
+a bounded FIFO of `ThreadHandle{index, tid}` entries, never PCB/TCB addresses
+(see task storage below). `dequeue_thread` still returns the external
+`ThreadRef{pid, tid}`.
 Each queue has its own lock, selected at build time through `SchedulerRunQueue`
 and constrained by the `RunQueue` concept; every queue operation takes only that
 lock, so no path holds two queue locks. Queues are a mechanism: nothing enqueues
