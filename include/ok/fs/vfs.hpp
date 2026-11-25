@@ -5,6 +5,7 @@
 #include "ok/user/user.hpp"
 
 #include "ok/fs/attributes.hpp"
+#include "ok/fs/control_node.hpp"
 #include "ok/fs/mode_change.hpp"
 #include "ok/fs/mount_retention.hpp"
 #include "ok/fs/mount_snapshot.hpp"
@@ -233,6 +234,12 @@ class Node
     // A terminal device node (/dev/tty, /dev/console, /dev/ptmx, /dev/pts/N).
     // open() converts it through the scheduler, which re-validates the node.
     [[nodiscard]] virtual TerminalNode terminal_node() const
+    {
+        return {};
+    }
+    // A kernel control attribute (/sys). open() records it in the open file
+    // description; writes to a cpu_online node go to the CPU hotplug service.
+    [[nodiscard]] virtual ControlNode control_node() const
     {
         return {};
     }

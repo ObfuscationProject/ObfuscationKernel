@@ -73,7 +73,8 @@ if has_config("runtime_tests") then
             "src/memory/slab.cpp", "src/net/native_udp.cpp",
             "src/net/net.cpp", "src/posix/entropy.cpp", "src/posix/fd.cpp", "src/posix/path.cpp", "src/posix/posix.cpp",
             "src/posix/process.cpp", "src/sched/process.cpp", "src/sched/scheduler.cpp", "src/sched/descriptions.cpp", "src/smp/preempt.cpp",
-            "src/smp/smp.cpp", "src/syscall/linux.cpp", "src/syscall/syscall.cpp", "src/user/user.cpp",
+            "src/smp/smp.cpp", "src/smp/hotplug.cpp", "src/smp/bringup.cpp", "src/arch/smp_stub.cpp",
+            "src/syscall/linux.cpp", "src/syscall/syscall.cpp", "src/user/user.cpp",
             "src/arch/arch.cpp", "src/arch/terminal_power.cpp", "src/arch/x86_64/ops.cpp"}) do
             add_files(path.join(kernel, source))
         end

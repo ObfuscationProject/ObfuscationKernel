@@ -447,7 +447,10 @@
         "timer_gettime32": 261,
         "timer_gettime64": 408,
         "timer_getoverrun": 262,
-        "timer_delete": 263
+        "timer_delete": 263,
+        "sched_getaffinity": 242,
+        "sched_setaffinity": 241,
+        "getcpu": 318
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -991,7 +994,10 @@
         "timer_gettime32",
         "timer_gettime64",
         "timer_getoverrun",
-        "timer_delete"
+        "timer_delete",
+        "sched_getaffinity",
+        "sched_setaffinity",
+        "getcpu"
       ],
       "linux_errno_crosschecks": [
         "EPERM",
@@ -1217,7 +1223,10 @@
         "timer_gettime32": null,
         "timer_gettime64": null,
         "timer_getoverrun": 225,
-        "timer_delete": 226
+        "timer_delete": 226,
+        "sched_getaffinity": 204,
+        "sched_setaffinity": 203,
+        "getcpu": 309
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -1725,7 +1734,10 @@
         "timer_settime",
         "timer_gettime",
         "timer_getoverrun",
-        "timer_delete"
+        "timer_delete",
+        "sched_getaffinity",
+        "sched_setaffinity",
+        "getcpu"
       ],
       "linux_errno_crosschecks": [
         "EPERM",
@@ -1951,7 +1963,10 @@
         "timer_gettime32": null,
         "timer_gettime64": null,
         "timer_getoverrun": 109,
-        "timer_delete": 111
+        "timer_delete": 111,
+        "sched_getaffinity": 123,
+        "sched_setaffinity": 122,
+        "getcpu": 168
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -2433,7 +2448,10 @@
         "timer_settime",
         "timer_gettime",
         "timer_getoverrun",
-        "timer_delete"
+        "timer_delete",
+        "sched_getaffinity",
+        "sched_setaffinity",
+        "getcpu"
       ],
       "linux_errno_crosschecks": [
         "EPERM",
@@ -2659,7 +2677,10 @@
         "timer_gettime32": 259,
         "timer_gettime64": 408,
         "timer_getoverrun": 260,
-        "timer_delete": 261
+        "timer_delete": 261,
+        "sched_getaffinity": 242,
+        "sched_setaffinity": 241,
+        "getcpu": 345
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -3199,7 +3220,10 @@
         "timer_gettime32",
         "timer_gettime64",
         "timer_getoverrun",
-        "timer_delete"
+        "timer_delete",
+        "sched_getaffinity",
+        "sched_setaffinity",
+        "getcpu"
       ],
       "linux_errno_crosschecks": [
         "EPERM",
@@ -3425,7 +3449,10 @@
         "timer_gettime32": null,
         "timer_gettime64": null,
         "timer_getoverrun": 109,
-        "timer_delete": 111
+        "timer_delete": 111,
+        "sched_getaffinity": 123,
+        "sched_setaffinity": 122,
+        "getcpu": 168
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -3906,7 +3933,10 @@
         "timer_settime",
         "timer_gettime",
         "timer_getoverrun",
-        "timer_delete"
+        "timer_delete",
+        "sched_getaffinity",
+        "sched_setaffinity",
+        "getcpu"
       ],
       "linux_errno_crosschecks": [
         "EPERM",
@@ -4132,7 +4162,10 @@
         "timer_gettime32": null,
         "timer_gettime64": 408,
         "timer_getoverrun": 109,
-        "timer_delete": 111
+        "timer_delete": 111,
+        "sched_getaffinity": 123,
+        "sched_setaffinity": 122,
+        "getcpu": 168
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -4611,7 +4644,10 @@
         "timer_settime64",
         "timer_gettime64",
         "timer_getoverrun",
-        "timer_delete"
+        "timer_delete",
+        "sched_getaffinity",
+        "sched_setaffinity",
+        "getcpu"
       ],
       "linux_errno_crosschecks": [
         "EPERM",
@@ -4837,7 +4873,10 @@
         "timer_gettime32": null,
         "timer_gettime64": null,
         "timer_getoverrun": 109,
-        "timer_delete": 111
+        "timer_delete": 111,
+        "sched_getaffinity": 123,
+        "sched_setaffinity": 122,
+        "getcpu": 168
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -5316,7 +5355,10 @@
         "timer_settime",
         "timer_gettime",
         "timer_getoverrun",
-        "timer_delete"
+        "timer_delete",
+        "sched_getaffinity",
+        "sched_setaffinity",
+        "getcpu"
       ],
       "linux_errno_crosschecks": [
         "EPERM",
@@ -5542,7 +5584,10 @@
         "timer_gettime32": 4259,
         "timer_gettime64": 4408,
         "timer_getoverrun": 4260,
-        "timer_delete": 4261
+        "timer_delete": 4261,
+        "sched_getaffinity": 4240,
+        "sched_setaffinity": 4239,
+        "getcpu": 4312
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -6072,7 +6117,10 @@
         "timer_gettime32",
         "timer_gettime64",
         "timer_getoverrun",
-        "timer_delete"
+        "timer_delete",
+        "sched_getaffinity",
+        "sched_setaffinity",
+        "getcpu"
       ],
       "linux_errno_crosschecks": [
         "EPERM",
@@ -6298,7 +6346,10 @@
         "timer_gettime32": null,
         "timer_gettime64": null,
         "timer_getoverrun": 5219,
-        "timer_delete": 5220
+        "timer_delete": 5220,
+        "sched_getaffinity": 5196,
+        "sched_setaffinity": 5195,
+        "getcpu": 5271
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -6808,7 +6859,10 @@
         "timer_settime",
         "timer_gettime",
         "timer_getoverrun",
-        "timer_delete"
+        "timer_delete",
+        "sched_getaffinity",
+        "sched_setaffinity",
+        "getcpu"
       ],
       "linux_errno_crosschecks": [
         "EPERM",
@@ -7034,7 +7088,10 @@
         "timer_gettime32": 242,
         "timer_gettime64": 408,
         "timer_getoverrun": 243,
-        "timer_delete": 244
+        "timer_delete": 244,
+        "sched_getaffinity": 223,
+        "sched_setaffinity": 222,
+        "getcpu": 302
       },
       "errno_numbers": {
         "EPERM": 1,
@@ -7561,7 +7618,10 @@
         "timer_gettime32",
         "timer_gettime64",
         "timer_getoverrun",
-        "timer_delete"
+        "timer_delete",
+        "sched_getaffinity",
+        "sched_setaffinity",
+        "getcpu"
       ],
       "linux_errno_crosschecks": [
         "EPERM",

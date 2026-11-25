@@ -136,6 +136,9 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
     if (number == N::rt_sigaction && process->resources().personality == Personality::native)
         return native_signal_action(kernel, *process, a);
 #endif
+    if (number == N::sched_getaffinity) return sched_affinity_get(kernel, pid, a[0], a[1], a[2]);
+    if (number == N::sched_setaffinity) return sched_affinity_set(kernel, pid, a[0], a[1], a[2]);
+    if (number == N::getcpu) return cpu_number(kernel, pid, a[0], a[1]);
     if (number == N::ioctl) return tty_terminal_control(kernel, *process, a, complete);
     if (caller->console_wait_epoch && !kernel.scheduler().console_authorized(pid, caller->console_wait_epoch))
     {
@@ -491,6 +494,11 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         }
         return 0;
     }
+    if (number == N::writev)
+        if (const auto *slot = process->fd_table().entry(static_cast<i32>(a[0])); slot && slot->used)
+            if (const auto *description = kernel.scheduler().open_description(slot->description);
+                description && description->writable && description->control.kind == fs::ControlNodeKind::cpu_online)
+                return cpu_control_writev(kernel, pid, description->control.index, a[1], a[2], complete);
     if (number == N::readv || number == N::writev)
     {
         using Vector = PipeVector;
@@ -615,6 +623,10 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
     syscall::Request request{.number = number, .caller = pid};
     const auto *fd = process->fd_table().entry(static_cast<i32>(a[0]));
     const auto *description = fd && fd->used ? kernel.scheduler().open_description(fd->description) : nullptr;
+    // A CPU online attribute: the hotplug route, before every node path.
+    if ((number == N::write || number == N::pwrite64) && description && description->writable &&
+        description->control.kind == fs::ControlNodeKind::cpu_online)
+        return cpu_control_write(kernel, pid, description->control.index, a[1], a[2], complete);
     if ((number == N::read || number == N::write) && description && description->pty_endpoint)
     {
         const bool writing = number == N::write;
@@ -960,6 +972,8 @@ Status start(Kernel &kernel, fs::BootArchive archive)
 #endif
     started = true;
     runtime_kernel = &kernel;
+    // The kernel and preemption ticks leave native threads to the step.
+    kernel.scheduler().set_native_userland(true);
 #ifdef OK_NATIVE_COW_FORK
     hw::set_write_resolver(resolve_native_write);
 #endif
@@ -997,6 +1011,8 @@ bool step(Kernel &kernel)
         return false;
     if (!started)
         return false;
+    // CPU 0 reports threads whose affinity broke since its last step.
+    report_affinity_broken(kernel);
 #ifdef OK_PRIVATE_POLL_MASK
     private_process_signal_fatal(kernel);
     if (!runtime_failure) { started = false; return false; }
@@ -1140,13 +1156,13 @@ bool step(Kernel &kernel)
     };
     usize runnable_count = 0;
     Candidate chosen{}, first{};
-    for (const auto &candidate : kernel.scheduler().processes())
+    for (auto &candidate : kernel.scheduler().processes())
     {
         // A stopped process is never entered; its waits still complete above.
         if ((candidate.state() != sched::ProcessState::runnable && candidate.state() != sched::ProcessState::running &&
              candidate.state() != sched::ProcessState::blocked) || candidate.job_control().stopped)
             continue;
-        for (const auto &thread : candidate.threads())
+        for (auto &thread : candidate.threads())
         {
             bool interruptible = false;
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
@@ -1171,6 +1187,12 @@ bool step(Kernel &kernel)
                 runnable[runnable_count++] = entry;
                 continue;
             }
+            // Picked here directly: only on a CPU its affinity allows, once a
+            // mask whose CPUs all went offline was reset (broken affinity).
+            if (!kernel.scheduler().thread_admits(candidate, thread, cpu) &&
+                (!kernel.scheduler().repair_affinity(candidate, thread) ||
+                 !kernel.scheduler().thread_admits(candidate, thread, cpu)))
+                continue;
             if (!first.pid || before(entry, first)) first = entry;
             if (before(cursor, entry) && (!chosen.pid || before(entry, chosen))) chosen = entry;
         }
@@ -1501,6 +1523,9 @@ bool step(Kernel &kernel)
             result = resume_pipe_read(kernel, *process, object, complete);
         else if (const auto object = pipe_write_object(chosen.pid, chosen.tid); object.pool)
             result = resume_pipe_write(kernel, *process, object, complete);
+        // Only a re-dispatch: a newly trapped syscall never takes a stored result.
+        else if (const auto stored = trapped_this_step ? std::nullopt : cpu_control_resume(*running))
+            result = *stored;
         else if ((process->resources().personality == Personality::native &&
                       native_unix_path_call(hw::syscall(running->native_frame), kernel.scheduler(), *process) != lu::UnixPathCall::none) ||
                  (process->resources().personality == Personality::linux &&

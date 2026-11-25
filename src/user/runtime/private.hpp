@@ -320,6 +320,19 @@ Status validate_evicted_leases(std::span<const sched::ThreadControlBlock> thread
 Status commit_eviction(Kernel &kernel, const EvictionPlan &plan);
 // Plans and commits the eviction of one thread.
 Status evict_thread(Kernel &kernel, const sched::ThreadControlBlock &thread);
+// User CPU hotplug and affinity (hotplug.cpp). A thread's finished hotplug
+// request: the stored result, consumed once by the step's resume chain when
+// the woken writer is dispatched again (never for a newly trapped syscall).
+std::optional<i64> cpu_control_resume(const sched::ThreadControlBlock &thread);
+// A thread retires, or exec replaces its image: its armed or done record
+// goes, a running one is abandoned to the service.
+void cpu_control_retire(const sched::ThreadControlBlock &thread);
+void cpu_control_retire(memory::KernelEntryStackHandle lease, sched::ProcessId pid, sched::ThreadId tid);
+i64 sched_affinity_get(Kernel &kernel, sched::ProcessId pid, u64 target, u64 length, uptr output);
+i64 sched_affinity_set(Kernel &kernel, sched::ProcessId pid, u64 target, u64 length, uptr input);
+i64 cpu_number(Kernel &kernel, sched::ProcessId pid, uptr cpu, uptr node);
+void report_affinity_broken(Kernel &kernel);
+void report_cpu_hotplug();
 #ifdef OK_PRIVATE_MIPS_O32_SIGNAL
 // The backend owns capability/capture tokens; this table owns per-lease state.
 using PrivateMipsReadiness = MipsO32SignalReadiness;

@@ -111,6 +111,15 @@ struct Fixture
             thread(process.value()).dispatch_count = 1;
         return process.value();
     }
+    // A thread confined by its own mask (sched_setaffinity); the process mask
+    // stays every CPU, so offlining a CPU breaks the thread's affinity
+    // instead of being refused.
+    ProcessId create_pinned(u16 thread_mask, bool fresh = false)
+    {
+        const auto pid = create(cpu_affinity_any, fresh);
+        CHECK(scheduler.set_thread_affinity(*scheduler.find(pid), thread(pid), thread_mask));
+        return pid;
+    }
     // A further thread with a history on CPU 0, like create().
     Result<ThreadId> create_thread(ProcessId pid)
     {
@@ -442,8 +451,9 @@ void test_stopped_processes()
     CHECK(f.scheduler.clear_on_cpu(stopped, stopped, 2));
     CHECK(f.scheduler.enqueue_thread(stopped, stopped).code() == StatusCode::invalid_argument);
 
-    // Hotplug drops the entry of a process stopped while queued on the leaving CPU.
-    const auto far = f.create(0x8);
+    // Hotplug drops the entry of a process stopped while queued on the leaving
+    // CPU (confined by its thread mask: a process mask would refuse the offline).
+    const auto far = f.create_pinned(0x8);
     CHECK(f.enqueue(far) == 3);
     CHECK(f.scheduler.stop_process(far, 19));
     CHECK(f.scheduler.offline_cpu(3) && f.thread(far).queued_cpu == no_cpu);
@@ -468,9 +478,17 @@ void test_hotplug()
     CHECK(f.scheduler.offline_cpu(0).code() == StatusCode::invalid_argument);
     CHECK(f.scheduler.offline_cpu(4).code() == StatusCode::invalid_argument);
     CHECK(f.scheduler.online_cpu(4).code() == StatusCode::invalid_argument);
+    // A process mask is kernel placement policy: it must keep an online CPU,
+    // so offlining its last one is refused and changes nothing.
+    const auto kernel_pinned = f.create(0x8, true);
+    CHECK(f.enqueue(kernel_pinned) == 3);
+    CHECK(f.scheduler.offline_cpu(3).code() == StatusCode::busy && f.scheduler.online_cpus() == 0xf);
+    CHECK(f.thread(kernel_pinned).queued_cpu == 3 && f.length(3) == 1);
+    CHECK(f.dequeue(3) == kernel_pinned && f.scheduler.exit_process(kernel_pinned, 0));
+    // Thread masks do not refuse: such a thread's affinity breaks instead.
     std::vector<ProcessId> all{};
     for (const u16 affinity : {cpu_affinity_any, u16{0x8}, u16{0xc}, u16{0x2}, cpu_affinity_any, u16{0x8}})
-        all.push_back(f.create(affinity, true));
+        all.push_back(f.create_pinned(affinity, true));
     for (const auto pid : all)
         CHECK(f.enqueue(pid) < 4);
     const auto pinned = all[1];
@@ -479,7 +497,7 @@ void test_hotplug()
     const auto running = f.create(cpu_affinity_any, true);
     CHECK(f.scheduler.mark_on_cpu(running, running, 3));
     // A stale entry (its thread blocked) is dropped, not placed again.
-    const auto stale = f.create(0x8, true);
+    const auto stale = f.create_pinned(0x8, true);
     CHECK(f.enqueue(stale) == 3);
     CHECK(f.scheduler.block_process(stale));
 
@@ -487,7 +505,18 @@ void test_hotplug()
     CHECK(f.length(3) == 0 && f.thread(stale).queued_cpu == no_cpu);
     for (const auto pid : all)
         CHECK(f.thread(pid).queued_cpu < 3);
-    CHECK(f.thread(pinned).queued_cpu == 0 && f.thread(all[5]).queued_cpu == 0);
+    // The two threads confined to CPU 3 lost their only CPU: their masks reset
+    // and each is recorded once; the CPU 2-3 thread keeps CPU 2. The blocked
+    // one breaks only when it is placed again.
+    CHECK(f.thread(pinned).cpu_affinity_mask == cpu_affinity_any && f.thread(all[5]).cpu_affinity_mask == cpu_affinity_any);
+    CHECK(f.thread(all[2]).cpu_affinity_mask == 0xc && f.thread(all[2]).queued_cpu == 2);
+    CHECK(f.thread(stale).cpu_affinity_mask == 0x8 && f.scheduler.affinity_broken() == 2);
+    for (const auto expected : {pinned, all[5]})
+    {
+        const auto broken = f.scheduler.take_affinity_broken();
+        CHECK(broken && broken->pid == expected && broken->tid == expected && broken->cpu == 3);
+    }
+    CHECK(!f.scheduler.take_affinity_broken());
     f.check_consistent();
     CHECK(f.thread(running).on_cpu == 3 && f.scheduler.current_tid(3) == running);
     CHECK(!f.scheduler.dequeue_thread(3));
@@ -497,7 +526,7 @@ void test_hotplug()
     CHECK(f.enqueue(running) < 3);
 
     // Dequeue everything the online CPUs may run: each thread exactly once,
-    // and the threads pinned to CPU 3 wait on CPU 0.
+    // the broken ones included; nothing waits for CPU 3.
     std::vector<ProcessId> taken{};
     for (bool progress = true; progress;)
     {
@@ -505,20 +534,19 @@ void test_hotplug()
         for (smp::CpuId cpu = 0; cpu < 3; ++cpu)
             if (const auto pid = f.dequeue(cpu))
             {
-                CHECK(pid != pinned && pid != all[5]);
                 taken.push_back(pid);
                 progress = true;
             }
     }
     std::sort(taken.begin(), taken.end());
-    CHECK(std::adjacent_find(taken.begin(), taken.end()) == taken.end() && taken.size() == all.size() - 2 + 1);
-    CHECK(f.length(0) == 2 && f.thread(pinned).queued_cpu == 0);
+    CHECK(std::adjacent_find(taken.begin(), taken.end()) == taken.end() && taken.size() == all.size() + 1);
+    for (smp::CpuId cpu = 0; cpu < 4; ++cpu)
+        CHECK(f.length(cpu) == 0);
     f.check_consistent();
 
-    // Back online: CPU 3 takes its pinned threads from CPU 0.
+    // Back online: CPU 3 starts empty; the reset masks stay reset.
     CHECK(f.scheduler.online_cpu(3) && f.scheduler.online_cpus() == 0xf);
-    const auto first = f.dequeue(3), second = f.dequeue(3);
-    CHECK(((first == pinned && second == all[5]) || (first == all[5] && second == pinned)) && f.dequeue(3) == 0);
+    CHECK(f.dequeue(3) == 0 && f.thread(pinned).cpu_affinity_mask == cpu_affinity_any);
     f.check_consistent();
 
     // Repeated cycles of every secondary with traffic in between: no entry on
@@ -526,7 +554,7 @@ void test_hotplug()
     Fixture g;
     std::vector<ProcessId> threads{};
     for (unsigned i = 0; i < 24; ++i)
-        threads.push_back(g.create(i % 5 == 0 ? u16(1u << (i % 4)) : cpu_affinity_any, i % 3 == 0));
+        threads.push_back(g.create_pinned(i % 5 == 0 ? u16(1u << (i % 4)) : cpu_affinity_any, i % 3 == 0));
     u32 online = 0xf;
     unsigned seed = 7;
     std::vector<ProcessId> running_set{};
@@ -581,6 +609,116 @@ void test_hotplug()
         }
     }
     std::printf("hotplug threads=%zu rounds=400\n", threads.size());
+}
+
+// Per-thread masks (sched_setaffinity): the effective mask is process & thread,
+// and every placement, dequeue, steal and dispatch honors it.
+void test_thread_affinity()
+{
+    Fixture f;
+    const auto pid = f.create();
+    const auto second = f.create_thread(pid);
+    CHECK(second);
+    auto &main = f.thread(pid), &other = f.thread(pid, second.value());
+    auto &process = *f.scheduler.find(pid);
+    CHECK(main.cpu_affinity_mask == cpu_affinity_any && other.cpu_affinity_mask == cpu_affinity_any);
+    // A mask with no online CPU the process allows is refused and changes nothing.
+    CHECK(f.scheduler.set_cpu_affinity(pid, 0x7));
+    CHECK(f.scheduler.set_thread_affinity(process, other, 0x8).code() == StatusCode::invalid_argument);
+    CHECK(other.cpu_affinity_mask == cpu_affinity_any);
+    CHECK(f.scheduler.set_thread_affinity(process, other, 0xc));
+    CHECK(SchedulerState::effective_affinity(process, other) == 0x4);
+    CHECK(f.scheduler.set_thread_affinity(process, main, 0x2));
+    CHECK(f.enqueue(pid) == 1 && f.enqueue(pid, second.value()) == 2);
+    // Another CPU neither steals nor dispatches a thread its mask excludes.
+    CHECK(f.dequeue(0) == 0 && f.dequeue(3) == 0 && f.length(1) == 1 && f.length(2) == 1);
+    CHECK(f.scheduler.mark_on_cpu(pid, pid, 0).code() == StatusCode::invalid_argument);
+    CHECK(!f.scheduler.activate_thread(pid, second.value(), 1));
+    CHECK(f.scheduler.thread_admits(process, main, 1) && !f.scheduler.thread_admits(process, main, 2));
+    CHECK(f.dequeue(1) == pid && f.dequeue(2) == pid);
+    CHECK(f.scheduler.mark_on_cpu(pid, pid, 1) && f.scheduler.mark_on_cpu(pid, second.value(), 2));
+    CHECK(f.scheduler.clear_on_cpu(pid, pid, 1) && f.scheduler.clear_on_cpu(pid, second.value(), 2));
+    f.check_consistent();
+
+    // The strand case: a pinned thread's only CPU goes offline while it is
+    // queued, blocked or running there. It never waits for that CPU: its
+    // mask resets and the break is recorded once, with the CPU it lost.
+    Fixture g;
+    const auto queued = g.create_pinned(0x4), blocked = g.create_pinned(0x4), running = g.create_pinned(0x4);
+    CHECK(g.enqueue(queued) == 2 && g.scheduler.mark_on_cpu(running, running, 2));
+    CHECK(g.scheduler.block_process(blocked));
+    CHECK(g.scheduler.offline_cpu(2) && g.scheduler.online_cpus() == 0xb);
+    CHECK(g.thread(queued).queued_cpu != 2 && g.thread(queued).queued_cpu != no_cpu);
+    CHECK(g.thread(queued).cpu_affinity_mask == cpu_affinity_any && g.scheduler.affinity_broken() == 1);
+    // Still pinned while it is not placed; a direct pick repairs it first.
+    CHECK(g.thread(blocked).cpu_affinity_mask == 0x4 && g.thread(running).cpu_affinity_mask == 0x4);
+    CHECK(!g.scheduler.thread_admits(*g.scheduler.find(blocked), g.thread(blocked), 1));
+    CHECK(g.scheduler.repair_affinity(*g.scheduler.find(blocked), g.thread(blocked)));
+    CHECK(!g.scheduler.repair_affinity(*g.scheduler.find(blocked), g.thread(blocked)));
+    CHECK(g.scheduler.thread_admits(*g.scheduler.find(blocked), g.thread(blocked), 1));
+    // The running one leaves its CPU and is placed on an online one.
+    CHECK(g.scheduler.clear_on_cpu(running, running, 2));
+    const auto placed = g.enqueue(running);
+    CHECK(placed != 2 && placed < 4 && g.thread(running).cpu_affinity_mask == cpu_affinity_any);
+    CHECK(g.scheduler.affinity_broken() == 3);
+    for (const auto expected : {queued, blocked, running})
+    {
+        const auto broken = g.scheduler.take_affinity_broken();
+        CHECK(broken && broken->pid == expected && broken->cpu == 2);
+    }
+    CHECK(!g.scheduler.take_affinity_broken());
+    // Every queued thread is dequeued once, by an online CPU.
+    usize taken = 0;
+    for (smp::CpuId cpu : {0, 1, 3})
+        while (g.dequeue(cpu)) ++taken;
+    CHECK(taken == 2 && !g.scheduler.dequeue_thread(2));
+    g.check_consistent();
+    // A thread mask breaks; a process mask that still has an online CPU does not.
+    CHECK(g.scheduler.set_cpu_affinity(queued, 0x3));
+    CHECK(!g.scheduler.repair_affinity(*g.scheduler.find(queued), g.thread(queued)));
+
+    // The ring keeps the last 16 records; the count keeps every one.
+    Fixture h;
+    std::vector<ProcessId> many{};
+    for (unsigned i = 0; i < 20; ++i) many.push_back(h.create_pinned(0x2));
+    CHECK(h.scheduler.offline_cpu(1));
+    for (const auto pid : many) CHECK(h.enqueue(pid) != 1);
+    CHECK(h.scheduler.affinity_broken() == 20);
+    usize reported = 0;
+    while (const auto broken = h.scheduler.take_affinity_broken())
+    {
+        CHECK(broken->pid == many[4 + reported]);
+        ++reported;
+    }
+    CHECK(reported == 16);
+    std::printf("thread affinity strand=3 ring=16 broken=20\n");
+}
+
+// Once native userland started, the kernel and preemption ticks place only
+// kernel_thread records; native threads are the step's.
+void test_kernel_tick()
+{
+    Fixture f(1, 0x1);
+    const auto user = f.scheduler.create_user_process("native", f.context);
+    CHECK(user && f.scheduler.set_runnable(user.value()));
+    f.scheduler.set_native_userland(true);
+    CHECK(f.scheduler.schedule_next_on_cpu(0).status().code() == StatusCode::would_block);
+    CHECK(f.thread(user.value()).on_cpu == no_cpu && f.scheduler.current_pid(0) == 0);
+    const auto kernel = f.create();
+    const auto picked = f.scheduler.schedule_next_on_cpu(0);
+    CHECK(picked && picked.value() == kernel && f.scheduler.current_pid(0) == kernel);
+    CHECK(f.scheduler.activate(0, 0));
+    f.scheduler.set_native_userland(false);
+    // Before userland starts, the policy places every record.
+    bool user_placed = false;
+    for (unsigned round = 0; round < 4 && !user_placed; ++round)
+    {
+        const auto next = f.scheduler.schedule_next_on_cpu(0);
+        CHECK(next);
+        user_placed = next.value() == user.value();
+        CHECK(f.scheduler.activate(0, 0));
+    }
+    CHECK(user_placed);
 }
 
 // Host threads stand in for CPUs; each owns one queue and steals from the others.
@@ -646,6 +784,8 @@ int main()
     test_two_threads_one_process();
     test_stopped_processes();
     test_hotplug();
+    test_thread_affinity();
+    test_kernel_tick();
     test_contention();
     std::printf("OK_RUN_QUEUES scope=model checks=%zu model_cpus=4 host_threads=4 guest=0 hardware_smp=0\n", checks);
 }

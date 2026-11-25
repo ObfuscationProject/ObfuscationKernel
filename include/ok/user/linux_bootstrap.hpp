@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ok/user/cpu_control.hpp"
 #include "ok/user/native_child_wait.hpp"
 #include "ok/user/native_owned_stat_request.hpp"
 
@@ -450,6 +451,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
         count = 6;
     else if (is(Operation::vfork)) count = 0;
     else if (is(Operation::uname) || is(Operation::sysinfo)) count = 1;
+    else if (is(Operation::sched_getaffinity) || is(Operation::sched_setaffinity) || is(Operation::getcpu)) count = 3;
     else if (is(Operation::link) || is(Operation::symlink)) count = 2;
     else if (is(Operation::symlinkat) || is(Operation::chown) || is(Operation::lchown) || is(Operation::fchown) ||
              is(Operation::chown32) || is(Operation::lchown32) || is(Operation::fchown32))
@@ -682,6 +684,20 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
         hw::Syscall call{static_cast<uptr>(syscall::Number::umask), {static_cast<u32>(a[0])}};
         return native(call, complete);
     }
+    // Linux pid_t (a tid here), unsigned int len and the mask pointer; getcpu's
+    // two output pointers. The common handlers encode one native word.
+    if (is(Operation::sched_getaffinity) || is(Operation::sched_setaffinity) || is(Operation::getcpu))
+    {
+        const auto native_number = is(Operation::getcpu) ? syscall::Number::getcpu
+            : is(Operation::sched_getaffinity) ? syscall::Number::sched_getaffinity : syscall::Number::sched_setaffinity;
+        hw::Syscall call{static_cast<uptr>(native_number), {}};
+        if (is(Operation::getcpu))
+            call.arguments = {static_cast<uptr>(a[0] & Codec::word_mask), static_cast<uptr>(a[1] & Codec::word_mask)};
+        else
+            call.arguments = {static_cast<uptr>(static_cast<u32>(a[0])), static_cast<uptr>(static_cast<u32>(a[1])),
+                              static_cast<uptr>(a[2] & Codec::word_mask)};
+        return native(call, complete);
+    }
     if (is(Operation::mkdir) || is(Operation::mkdirat))
     {
         const bool relative = is(Operation::mkdirat);
@@ -722,6 +738,13 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
     }
     // The positioned, seek and clock bodies are shared with kernel sections.
     linux_file_io::ProcessAccess file_access{kernel.posix(), kernel.scheduler(), process->resources()};
+    if (is(Operation::pwrite64))
+        if (const auto *slot = process->fd_table().entry(static_cast<i32>(static_cast<u32>(a[0]))); slot && slot->used)
+            if (const auto *description = kernel.scheduler().open_description(slot->description);
+                description && description->writable && description->control.kind == fs::ControlNodeKind::cpu_online)
+                return native::cpu_control_write(kernel, pid, description->control.index,
+                                                 static_cast<uptr>(a[1] & Codec::word_mask),
+                                                 static_cast<usize>(a[2] & Codec::word_mask), complete);
     if (is(Operation::pread64) || is(Operation::pwrite64))
         return linux_file_io::linux_positioned_io<Profile>(file_access, is(Operation::pwrite64), decoded.value());
     if (is(Operation::ftruncate) || is(Operation::ftruncate64) ||

@@ -43,6 +43,7 @@ OPERATIONS += ['uname', 'sysinfo', 'link', 'linkat', 'symlink', 'symlinkat', 'ch
 OPERATIONS += ['getitimer', 'setitimer', 'alarm', 'timer_create', 'timer_settime', 'timer_settime32',
                'timer_settime64', 'timer_gettime', 'timer_gettime32', 'timer_gettime64',
                'timer_getoverrun', 'timer_delete']
+OPERATIONS += ['sched_getaffinity', 'sched_setaffinity', 'getcpu']
 ERRORS += ['ESRCH']
 ERRORS += ['ENOTTY']
 CONSOLE_IOCTLS = ['TIOCSCTTY', 'TIOCGSID', 'TIOCGPGRP', 'TIOCSPGRP']

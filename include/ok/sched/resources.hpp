@@ -1,5 +1,6 @@
 #pragma once
 #include "ok/arch/execution.hpp"
+#include "ok/fs/control_node.hpp"
 #include "ok/fs/terminal_node.hpp"
 #include "ok/sched/raw_pty_transport.hpp"
 #include "ok/net/tcp_stream_handle.hpp"
@@ -89,6 +90,9 @@ struct OpenFileDescription
     // pairs and the boot stdio. Console I/O reads it only to exempt a
     // /dev/console open from job control (Linux redirected_tty_write).
     fs::TerminalNodeKind terminal_origin{};
+    // A kernel control attribute this description opened; writes to a
+    // cpu_online one go to the CPU hotplug service (docs/modules/sysfs.md).
+    fs::ControlNode control{};
     UnixEndpointHandle unix_endpoint{}; // One pathname endpoint owner per canonical OFD.
     u32 native_udp_handle{0}; // Zero is not a UDP socket; final OFD release retires the handle.
     net::TcpStreamHandle native_tcp_handle{}; // One stream owner per shared OFD.
@@ -274,7 +278,10 @@ enum class ThreadWaitReason : u8
     pty_write = 14,
     // A terminal call parked by job control, keyed by terminal (0 console,
     // 1 + PTY slot); it re-dispatches when the wait completes.
-    job_control = 15
+    job_control = 15,
+    // A write to /sys/devices/system/cpu/cpuN/online waiting for CPU 0's
+    // hotplug service; uninterruptible, keyed 0 (docs/modules/sysfs.md).
+    cpu_hotplug = 16
 };
 
 struct ThreadLocalState

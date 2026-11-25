@@ -52,8 +52,8 @@ Status retire_native_thread(sched::ThreadControlBlock &thread
 {
     if (linux_udp_receive_object(thread.owner, thread.tid).pool)
         return Status::busy("native thread retirement must first retire its Linux UDP receive owner");
-    if (runtime_kernel)
-        if (auto status = evict_thread(*runtime_kernel, thread); !status) return status;
+    cpu_control_retire(thread); // Its hotplug record goes first (docs/modules/sysfs.md).
+    if (runtime_kernel) if (auto status = evict_thread(*runtime_kernel, thread); !status) return status;
     if (auto status = cancel_native_vfs_thread(thread); !status) return status;
 #ifdef OK_PRIVATE_POLL_MASK
     const auto signal_lease = thread.entry_stack;

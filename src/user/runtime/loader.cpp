@@ -714,7 +714,8 @@ Status arguments_from_user(const hw::AddressSpace &space, uptr pointer, Argument
 }
 namespace
 {
-Status install(sched::ProcessControlBlock &process, Image &image, sched::SignalMask mask = {})
+Status install(sched::ProcessControlBlock &process, Image &image, sched::SignalMask mask = {},
+               u16 thread_affinity = sched::cpu_affinity_any)
 {
     // Native bridges currently execute only on the boot CPU.
     bool previous_quarantined = false;
@@ -773,6 +774,8 @@ Status install(sched::ProcessControlBlock &process, Image &image, sched::SignalM
     resources.program_break_limit = hw::user_end - 0x100000 - 17 * hw::page_size;
     thread.tls = {};
     thread.native_signal_mask = mask;
+    // The exec'ing thread's affinity, which the new image's only thread keeps.
+    thread.cpu_affinity_mask = thread_affinity;
     thread.native_frame = image.frame;
     thread.native_active = true;
     thread.syscall_pending = false;
@@ -1087,6 +1090,14 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
 #else
     const auto inherited_mask = kernel.scheduler().find_thread(pid, calling_tid)->native_signal_mask;
 #endif
+    const auto inherited_affinity = kernel.scheduler().find_thread(pid, calling_tid)->cpu_affinity_mask;
+    // Every old thread's hotplug record goes with the old image, the
+    // surviving leader's too: its lease and wait ticket carry over.
+    std::array<RetainedEntryStack, sched::max_threads_per_process> hotplug_writers{};
+    usize hotplug_writer_count{};
+    for (const auto &old_thread : process->threads())
+        if (old_thread.entry_stack.pool)
+            hotplug_writers[hotplug_writer_count++] = {{pid, old_thread.tid}, old_thread.entry_stack, 0};
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
     const auto personality_before_exec = process->resources().personality;
     auto *pending_before_exec = private_signal_queue(*kernel.scheduler().find_thread(pid, calling_tid));
@@ -1160,6 +1171,8 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
         }, [&] {
             // Scheduler commit has escrowed the old entry stacks. A failed
             // futex discharge must retain them and both VM generations.
+            for (usize i = 0; i < hotplug_writer_count; ++i)
+                cpu_control_retire(hotplug_writers[i].handle, pid, hotplug_writers[i].owner.tid);
             if (auto status = cancel_futex(kernel, pid); !status) return status;
             const auto native_udp_retired = retire_native_udp_receives_for_exec(kernel, pid);
             const auto linux_udp_retired = retire_linux_udp_receives_for_exec(kernel, pid);
@@ -1216,7 +1229,7 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
         return 0;
     }
     if (auto status = retire_then_install(process->resources(), image.value(), previous_image_retirement.value(),
-            [&] { return install(*process, image.value(), inherited_mask); }); !status)
+            [&] { return install(*process, image.value(), inherited_mask, inherited_affinity); }); !status)
     {
         runtime_failure = status;
         started = false;
