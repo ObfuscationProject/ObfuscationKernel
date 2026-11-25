@@ -84,9 +84,10 @@ class NativeTcpEthernetExecutor final
             if (packet.family != Delivery::ipv4 && packet.family != Delivery::ipv6) { add(dropped_); continue; }
             if (packet.protocol == wire::protocol_icmp || packet.protocol == wire::protocol_icmpv6)
             {
-                const bool taken = packet.family == Delivery::ipv4
+                // Errors sent to a broadcast or multicast address are ignored (Linux icmp_rcv).
+                const bool taken = !packet.multicast && (packet.family == Delivery::ipv4
                     ? icmp_error<wire::Ipv4Family>(tcp, udp, packet.packet, now)
-                    : icmp_error<wire::Ipv6Family>(tcp, udp, packet.packet, now);
+                    : icmp_error<wire::Ipv6Family>(tcp, udp, packet.packet, now));
                 add(taken ? icmp_errors_ : dropped_);
                 continue;
             }

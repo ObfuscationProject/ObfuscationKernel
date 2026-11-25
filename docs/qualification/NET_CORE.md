@@ -128,13 +128,16 @@ queues, TCP socket names. This note grows with each slice.
   (Linux `icmp_err_convert` and `icmpv6_err_convert`; IPv4 protocol
   unreachable and codes 7 and 8 map to the nearest kind). `icmp_quote` reads
   the quoted header and the first eight transport bytes. The executor routes
-  each error by quoted protocol and endpoints.
+  each error by quoted protocol and endpoints. It ignores errors sent to a
+  broadcast or multicast address, as Linux `icmp_rcv` does.
   - TCP follows Linux `tcp_v4_err`. The quoted sequence must lie in
     [SND.UNA, SND.MAX). A hard error ends a handshake with that failure. A
     soft error, or a hard error on an established connection, is remembered
     and named if the connection later times out, and acknowledged progress
-    forgets it. Fragmentation needed and packet too big lower the peer MSS
-    (floored at 576 and 1280) and resend from SND.UNA. Failures map to
+    forgets it. Fragmentation needed and packet too big lower the MSS and
+    resend from SND.UNA. The MTU is floored at 576 for IPv4 and 1280 for
+    IPv6. The path limit is kept apart from the peer's MSS option, so a
+    report during the handshake survives the SYN-ACK. Failures map to
     ECONNREFUSED, EHOSTUNREACH, ENETUNREACH, EACCES and EPROTO, with per-profile
     numbers in `linux_tcp_data.hpp`.
   - UDP follows Linux `__udp4_lib_err`. Only a hard port-unreachable on a
@@ -165,8 +168,9 @@ queues, TCP socket names. This note grows with each slice.
   - UDP: `SO_ERROR` takes a pending refusal like a receive or send would.
     getsockopt on a UDP socket used to be ENOTSOCK.
   - `SO_TYPE` reports SOCK_STREAM or SOCK_DGRAM. Option lengths follow
-    `sock_getsockopt`: a negative length is EINVAL, at most four bytes are
-    copied, and the copied size is written back.
+    `sk_getsockopt`: the length is read, and a negative one is EINVAL,
+    before the error is taken. At most four bytes are copied, and the copied
+    size is written back.
 - TCP getsockname reports the bound name (an unbound stream reports the
   family's unspecified address). getpeername reports the peer of a connected
   stream and ENOTCONN in SYN_SENT, CLOSE and LISTEN (Linux `inet_getname`).
@@ -233,15 +237,17 @@ queues, TCP socket names. This note grows with each slice.
 - Socket errors and poll (hosted, scope=model):
   - `tcp_window_tests` covers ICMP errors built against the connection's own
     segments, both families: hard and soft errors, out-of-window quotes,
-    progress forgetting a soft error, the MTU floor, and the IPv4
-    classification table.
+    progress forgetting a soft error, the MTU floor, an MTU learned during
+    the handshake, and the IPv4 classification table.
   - `net_udp_tests` covers the connected-only, report-once UDP error.
-  - `tcp_streams_tests` routes errors through the executor and wakes a
-    connect waiter.
+  - `tcp_streams_tests` ignores a broadcast-addressed error, routes errors
+    through the executor and wakes a connect waiter.
   - `tcp_immediate_runtime_tests` covers ECONNREFUSED, EHOSTUNREACH and
-    ENETUNREACH from an ICMP-refused connect. Each is reported once, by a
+    ENETUNREACH from an ICMP-refused connect, and ECONNREFUSED from an
+    ICMPv6-refused one. Each is reported once, by a
     read, `SO_ERROR` or a second connect, and is then followed by EOF, EPIPE
-    and no POLLERR. It also covers TCP names, `SO_TYPE` and option lengths,
+    and no POLLERR. A negative `SO_ERROR` length leaves the error pending.
+    It also covers TCP names, `SO_TYPE` and option lengths,
     UDP sendto and `SO_ERROR` after a refusal (both personalities), the TCP
     poll states, and a blocking poll that stays unevaluated over idle passes
     until data arrives.

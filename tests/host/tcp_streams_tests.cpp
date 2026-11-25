@@ -530,9 +530,18 @@ void ethernet_icmp_errors()
     CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 1));
     CHECK(f.executor.state().icmp_errors == 0 && f.executor.state().dropped == 1);
     CHECK(f.waits.observe(ticket).value().completion == sched::WaitCompletion::none);
+    // Sent to the subnet broadcast address, the same error is ignored (Linux icmp_rcv).
+    {
+        Packet ip; auto built = wire::build_icmp_error<wire::Ipv4Family>(ip.bytes, peer.address.ipv4(), wire::Ipv4{192, 0, 2, 255}, 9,
+            wire::icmpv4::unreachable, wire::icmpv4::port_unreachable, 0, device.outgoing[0].view().subspan(14));
+        CHECK(built); ip.length = built.value(); device.push(ethernet(ip));
+    }
+    CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 2));
+    CHECK(f.executor.state().icmp_errors == 0 && f.executor.state().dropped == 2);
+    CHECK(f.waits.observe(ticket).value().completion == sched::WaitCompletion::none);
     device.push(icmp_unreachable(device.outgoing[0], wire::icmpv4::port_unreachable));
     CHECK(f.executor.poll(f.service, f.udp, f.waits, device, f.iss, 2));
-    CHECK(f.executor.state().icmp_errors == 1 && f.executor.state().dropped == 1);
+    CHECK(f.executor.state().icmp_errors == 1 && f.executor.state().dropped == 2);
     CHECK(f.waits.observe(ticket).value().completion == sched::WaitCompletion::ready); CHECK(f.waits.finish(ticket));
     auto ready = f.service.readiness(f.stream(fd.value())); CHECK(ready && ready.value().error);
     auto state = f.service.endpoints().state(ready.value().handle);

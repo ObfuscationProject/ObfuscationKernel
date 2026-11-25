@@ -316,7 +316,11 @@ class Connection final
         {
             const u32 header = local_.address.v6() ? 60 : 40, floor = local_.address.v6() ? 1280 : 576;
             const u32 mtu = error.mtu < floor ? floor : error.mtu;
-            if (mtu - header < peer_mss_) { peer_mss_ = static_cast<u16>(mtu - header); retransmit_head_ = sending(); }
+            // The path limit is kept apart from the peer's MSS option, so a
+            // report during the handshake survives the SYN-ACK (Linux pmtu).
+            const u16 limit = static_cast<u16>(mtu - header < 0xffffU ? mtu - header : 0xffffU);
+            if (!path_mss_ || limit < path_mss_) path_mss_ = limit;
+            if (limit < peer_mss_) { peer_mss_ = limit; retransmit_head_ = sending(); }
             return true;
         }
         const Failure failure = icmp_failure(error.kind);
@@ -534,6 +538,7 @@ class Connection final
             if (option.value()->kind == 2)
             { const u16 value = wire::be16(option.value()->data, 0); if (value) { peer_mss_ = value; break; } }
         }
+        if (path_mss_ && path_mss_ < peer_mss_) peer_mss_ = path_mss_;
         cc_.start(segment());
     }
     Ingress receive_syn(const wire::Tcp &seg, u64 now)
@@ -684,12 +689,12 @@ class Connection final
         passive_ = pending_syn_ = pending_ack_ = reset_pending_ = eof_ = write_shutdown_ = rtt_known_ = syn_retried_ = false;
         challenge_seen_ = listener_armed_ = rtt_timing_ = recovery_ = retransmit_head_ = fin_acknowledged_ = false;
         challenge_deadline_ = persist_deadline_ = rtt_sent_at_ = 0; rtt_sequence_ = 0; dupacks_ = 0; ooo_count_ = 0;
-        soft_error_ = Failure::none; error_reported_ = false;
+        soft_error_ = Failure::none; error_reported_ = false; path_mss_ = 0;
         cc_ = {}; cc_.start(segment());
         // Packet token generation and monotonic time survive control-block reuse.
     }
     State state_{State::closed}; Failure failure_{Failure::none}, soft_error_{Failure::none}; Endpoint local_{}, peer_{}, reset_peer_{};
-    bool error_reported_{};
+    bool error_reported_{}; u16 path_mss_{};
     std::array<std::byte, SendCapacity> tx_{}; std::array<std::byte, ReceiveCapacity> rx_{};
     usize tx_head_{}, tx_size_{}, rx_head_{}, rx_size_{};
     u32 snd_una_{}, snd_nxt_{}, snd_max_{}, rcv_nxt_{}, iss_{}, irs_{}, wl1_{}, wl2_{}, reset_seq_{}, recover_{}, rtt_sequence_{};

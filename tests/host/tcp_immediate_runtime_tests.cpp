@@ -312,6 +312,45 @@ void poll_until_data(Kernel &kernel, Group group, i32 fd, Peer &peer, std::span<
     expect(!caller->syscall_pending && static_cast<i64>(caller->native_frame.registers[14]) == 1 && !poll_wait(group.pid));
     std::memcpy(&entry, mock::memory.data() + 896, sizeof(entry)); expect(entry.revents == OK_POLLIN);
 }
+// The router answers an IPv6 SYN with port unreachable: the executor routes
+// the ICMPv6 error to the connection (after ipv6_exercise resolved the router).
+void icmp6_refusal(Kernel &kernel, u16 port)
+{
+    namespace wire = net::wire;
+    const auto self = wire::link_local_from_mac(link.local_mac), router = wire::link_local_from_mac(link.peer_mac);
+    const auto group = create(kernel, true);
+    const auto fd = invoke(kernel, group, 41, {10, OK_SOCK_STREAM | OK_SOCK_NONBLOCK, 6}); expect(fd >= 3);
+    const auto at = static_cast<uptr>(fd);
+    address6(10, self, port); expect(invoke(kernel, group, 49, {at, address_pointer, 28}) == 0);
+    address6(10, router, 7300); expect(invoke(kernel, group, 42, {at, address_pointer, 28}) == -115);
+    CHECK(kernel.poll_network());
+    bool quoted = false;
+    for (; extension.count; extension.head = (extension.head + 1) % extension.outgoing.size(), --extension.count)
+    {
+        const auto &frame = extension.outgoing[extension.head];
+        auto ethernet = wire::ethernet({frame.data(), extension.lengths[extension.head]}); CHECK(ethernet);
+        if (ethernet.value().type != wire::ethertype_ipv6) continue;
+        auto ip = wire::ipv6(ethernet.value().payload);
+        if (quoted || !ip || ip.value().protocol != wire::protocol_tcp) continue;
+        // Only this connection's SYN; earlier connections may still send.
+        auto segment = wire::tcp<wire::Ipv6Family>(ip.value());
+        if (!segment || segment.value().fields.source_port != port) continue;
+        auto &bytes = extension.incoming[extension.incoming_head];
+        auto built = wire::build_icmp_error<wire::Ipv6Family>(std::span{bytes}.subspan(14), router, self, 0,
+            wire::icmpv6::unreachable, wire::icmpv6::port_unreachable, 0, ethernet.value().payload);
+        CHECK(built && wire::build_ethernet(bytes, link.local_mac, link.peer_mac, wire::ethertype_ipv6, built.value()));
+        extension.incoming_lengths[extension.incoming_head] = built.value() + 14; extension.incoming_count = 1;
+        quoted = true;
+    }
+    expect(quoted);
+    const auto errors = kernel.native_ethernet_executor().state().icmp_errors;
+    CHECK(kernel.poll_network()); extension.head = extension.count = 0;
+    expect(kernel.native_ethernet_executor().state().icmp_errors == errors + 1);
+    expect(invoke(kernel, group, 0, {at, payload_pointer, 8}) == -111);
+    expect(invoke(kernel, group, 0, {at, payload_pointer, 8}) == 0);
+    expect(invoke(kernel, group, 3, {at}) == 0);
+    retire(kernel, group);
+}
 void exercise(Kernel &kernel, bool linux, u16 port)
 {
     auto group = create(kernel, linux);
@@ -433,6 +472,8 @@ void icmp_refusal(Kernel &kernel, bool linux, u16 port, u8 code, i64 expected, R
     }
     if (report == Report::option)
     {
+        // A negative length is EINVAL before the error is taken (sk_getsockopt).
+        expect(option_call(kernel, group, f, OK_SOL_SOCKET, OK_SO_ERROR, -1).result == -22);
         const auto taken = option_call(kernel, group, f, OK_SOL_SOCKET, OK_SO_ERROR);
         expect(taken.result == 0 && taken.length == 4 && taken.value == static_cast<u32>(-expected));
     }
@@ -483,6 +524,7 @@ void udp_refusal(Kernel &kernel, bool linux)
     extension.head = extension.count = 0;
     const auto f = static_cast<i32>(fd);
     refuse();
+    expect(option_call(kernel, group, f, OK_SOL_SOCKET, OK_SO_ERROR, -1).result == -22);
     auto taken = option_call(kernel, group, f, OK_SOL_SOCKET, OK_SO_ERROR);
     expect(taken.result == 0 && taken.length == 4 && taken.value == 111);
     taken = option_call(kernel, group, f, OK_SOL_SOCKET, OK_SO_ERROR);
@@ -529,6 +571,7 @@ int main()
     kernel.posix().set_entropy_source(&entropy);
     original_guard_closes(kernel);
     ipv6_exercise(kernel, false, 56001); ipv6_exercise(kernel, true, 56011);
+    icmp6_refusal(kernel, 56021);
     listener_errors(kernel, false, 55001); listener_errors(kernel, true, 55002);
     exercise(kernel, false, 54001); exercise(kernel, true, 54002);
     icmp_refusal(kernel, false, 53001, net::wire::icmpv4::port_unreachable, -111, Report::read);

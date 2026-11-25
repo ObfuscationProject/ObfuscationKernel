@@ -420,6 +420,19 @@ void icmp_errors()
         taken = c.icmp_error({K::mtu, false, 68}, iss + 1, 112); CHECK(taken && taken.value());
         CHECK(c.snapshot().peer_mss == 536);
     }
+    // A path MTU learned during the handshake survives the SYN-ACK's MSS option.
+    {
+        Connection<16384, 4096, 1460> c; CHECK(c.active_open(left, right, iss, 0)); const auto syn = take(c, 0);
+        const auto r = icmp_about(syn, icmpv4::unreachable, 4, 1000);
+        auto taken = c.icmp_error(r.error, r.quote.sequence, 5); CHECK(taken && taken.value());
+        const std::array<std::byte, 4> mss{std::byte{2}, std::byte{4}, std::byte{0x05}, std::byte{0xb4}};
+        Packet synack; TcpFields fields{0, 0, irs, iss + 1, tcp_syn | tcp_ack, 60000};
+        fields.source_port = right.port; fields.destination_port = left.port;
+        auto n = build_tcp(synack.bytes, right.address.ipv4(), left.address.ipv4(), 10, 64, fields, Bytes{mss.data(), mss.size()}, {});
+        CHECK(n); synack.length = n.value();
+        input(c, synack, 100); take(c, 100);
+        CHECK(c.snapshot().state == State::established && c.snapshot().peer_mss == 960);
+    }
     // IPv6: port unreachable refuses the handshake; parameter problem is hard too.
     {
         Connection<> c; CHECK(c.active_open(left6, right6, iss, 0)); const auto syn = take(c, 0);

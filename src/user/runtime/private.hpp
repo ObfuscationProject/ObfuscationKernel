@@ -1265,10 +1265,10 @@ class TcpImmediateRuntime final
         if (auto status = access.write(request.arguments[2], length_bytes); !status) return status;
         return usize{0};
     }
-    // An integer socket option (sock_getsockopt): the length is read, a
-    // negative one is EINVAL, at most four bytes of the value are copied in
-    // the profile's byte order and the copied size is written back.
-    static Result<usize> copy_socket_option(Access &access, const Request &request, u32 value, u32 &semantic)
+    // An integer socket option (sk_getsockopt): the length is read first and a
+    // negative one is EINVAL, before the value is taken (SO_ERROR consumes
+    // the pending error only once the length is known to be valid).
+    static Result<i32> socket_option_length(Access &access, const Request &request, u32 &semantic)
     {
         std::array<std::byte, 4> length_bytes{};
         if (auto status = access.read(request.arguments[4], length_bytes); !status) return status;
@@ -1282,8 +1282,14 @@ class TcpImmediateRuntime final
         }
         else length = std::bit_cast<i32>(std::bit_cast<u32>(raw));
         if (length < 0) { semantic = error(request, lu::UdpErrno::e_inval, 22); return Status::fault(); }
+        return length;
+    }
+    // Then at most four bytes of the value are copied in the profile's byte
+    // order and the copied size is written back.
+    static Result<usize> copy_socket_option(Access &access, const Request &request, i32 length, u32 value)
+    {
         const usize copied = static_cast<usize>(length) < 4 ? static_cast<usize>(length) : 4;
-        std::array<u8, 4> encoded{};
+        std::array<u8, 4> encoded{}, raw{};
         if (request.linux)
         {
             if (auto status = lu::UdpWire<lu::configured_native_profile()>::encode_socklen(encoded, value); !status) return status;
@@ -1298,6 +1304,7 @@ class TcpImmediateRuntime final
                 return status;
         }
         else raw = std::bit_cast<std::array<u8, 4>>(static_cast<u32>(copied));
+        std::array<std::byte, 4> length_bytes{};
         for (usize i = 0; i < raw.size(); ++i) length_bytes[i] = std::byte{raw[i]};
         if (auto status = access.write(request.arguments[4], length_bytes); !status) return status;
         return usize{0};
@@ -1323,6 +1330,7 @@ class TcpImmediateRuntime final
             const u32 so_type = request.linux ? lu::tcp_so_type[profile] : OK_SO_TYPE;
             if (level != sol_socket || (option != so_error && option != so_type))
                 return Status::unsupported("UDP socket option is outside SO_ERROR and SO_TYPE");
+            auto length = socket_option_length(access, request, semantic); if (!length) return length.status();
             u32 value = request.linux ? Constants::sock_dgram : OK_SOCK_DGRAM;
             if (option == so_error)
             {
@@ -1331,7 +1339,7 @@ class TcpImmediateRuntime final
                 else if (!taken) return taken;
                 else value = 0;
             }
-            return copy_socket_option(access, request, value, semantic);
+            return copy_socket_option(access, request, length.value(), value);
         }();
         if (!access.live()) return Status::denied("UDP option lost captured image before publication");
         return semantic ? Result<lu::Return>{lu::Return{0, semantic}} : translated(access, result);
@@ -1495,13 +1503,14 @@ class TcpImmediateRuntime final
                 const u32 so_type = request.linux ? lu::tcp_so_type[profile] : OK_SO_TYPE;
                 if (level != sol_socket || (option != so_error && option != so_type))
                     return Status::unsupported("TCP socket option is outside SO_ERROR and SO_TYPE");
+                auto length = socket_option_length(access, request, semantic_error); if (!length) return length.status();
                 u32 value = request.linux ? Constants::sock_stream : OK_SOCK_STREAM;
                 if (option == so_error)
                 {
                     auto taken = service.take_error(handle, true); if (!taken) return taken.status();
                     value = tcp_failure_errno(request, taken.value());
                 }
-                return copy_socket_option(access, request, value, semantic_error);
+                return copy_socket_option(access, request, length.value(), value);
             }
             // Defer unsupported operations before touching connection-only state;
             // a listener is a valid stream but not a connection handle.
