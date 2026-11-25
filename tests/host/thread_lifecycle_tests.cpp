@@ -191,7 +191,7 @@ void prepared_thread_publication()
     auto *published = f.scheduler.find_thread(pid, prepared.value());
     CHECK(published && published->state == ProcessState::runnable && published->native_active);
     CHECK(published->native_frame.pc == 0x991199 && published->tls.clear_tid_address == 0x8888);
-    while (!process->record_count() == sched::max_threads_per_process) CHECK(f.scheduler.create_thread(pid, f.context));
+    while (process->record_count() != sched::max_threads_per_process) CHECK(f.scheduler.create_thread(pid, f.context));
     auto full = f.scheduler.create_thread_prepared(pid, f.context,
         [&](ThreadControlBlock &) { ++calls; return Status::success(); });
     CHECK(!full && full.status().code() == StatusCode::would_block && calls == 2);
@@ -225,8 +225,8 @@ void entry_stack_lifetime_barriers()
         CHECK(!f.scheduler.reap_process(pid));
         CHECK(f.scheduler.find_thread(pid, peer) == thread);
         process->set_state(ProcessState::runnable);
-        while (!process->record_count() == sched::max_threads_per_process) CHECK(f.scheduler.create_thread(pid, f.context));
-        thread->state = ProcessState::exited;
+        while (process->record_count() != sched::max_threads_per_process) CHECK(f.scheduler.create_thread(pid, f.context));
+        thread->state = ProcessState::exited; thread->slot_state = ThreadSlotState::exited;
         CHECK(!f.scheduler.create_thread(pid, f.context));
         CHECK(f.scheduler.find_thread(pid, peer) == thread);
         thread->entry_stack = {}; thread->kernel_stack_top = 0;
@@ -262,9 +262,143 @@ void staged_fork_publication()
     CHECK(f.scheduler.find(ordinary.value())->state() == ProcessState::runnable);
 }
 
+// smp-scaling WP2: a reused TCB slot rejects the handles and wait tickets of
+// the thread that held it, and nothing moves when slots are reused or reaped.
+void slot_reuse_rejects_stale_handles_and_tickets()
+{
+    Fixture f;
+    const auto a = f.process(), peer = f.peer(a), b = f.process();
+    auto *pa = f.scheduler.find(a), *pb = f.scheduler.find(b);
+    auto *peer_tcb = f.scheduler.find_thread(a, peer);
+    const auto handle = SchedulerState::handle_of(*pa, *peer_tcb);
+    CHECK(handle.valid() && handle.tid == peer && f.scheduler.thread_at(handle) == peer_tcb);
+    CHECK(handle.index == thread_index(pa->process_slot(), 1));
+    CHECK(f.scheduler.activate_thread(a, peer));
+    auto ticket = f.scheduler.register_current_wait(ThreadWaitReason::futex, 1);
+    CHECK(ticket && ticket.value().index == handle.index);
+    // The completion finds the waiter by its slot.
+    CHECK(f.scheduler.complete_wait(ticket.value(), WaitCompletion::ready) && peer_tcb->state == ProcessState::runnable);
+    CHECK(f.scheduler.activate_thread(a, peer));
+    ticket = f.scheduler.register_current_wait(ThreadWaitReason::futex, 2); CHECK(ticket);
+    CHECK(f.scheduler.exit_thread(a, peer).value() == 1);
+    CHECK(f.scheduler.thread_at(handle) == peer_tcb && peer_tcb->slot_state == ThreadSlotState::exited);
+    // The same slot, a new thread: the old handle and ticket name nothing.
+    const auto fresh = f.peer(a);
+    CHECK(f.scheduler.find_thread(a, fresh) == peer_tcb && peer_tcb->slot_state == ThreadSlotState::live);
+    CHECK(!f.scheduler.thread_at(handle) && f.scheduler.thread_at(SchedulerState::handle_of(*pa, *peer_tcb)) == peer_tcb);
+    CHECK(!f.scheduler.complete_wait(ticket.value(), WaitCompletion::ready));
+    CHECK(f.scheduler.activate_thread(a, fresh));
+    const auto fresh_ticket = f.scheduler.register_current_wait(ThreadWaitReason::futex, 3);
+    CHECK(fresh_ticket && fresh_ticket.value().index == handle.index && !(fresh_ticket.value() == ticket.value()));
+    CHECK(!f.scheduler.complete_wait(ticket.value(), WaitCompletion::timeout) && peer_tcb->state == ProcessState::blocked);
+    CHECK(f.scheduler.complete_wait(fresh_ticket.value(), WaitCompletion::ready));
+    // A reaped process's slot is reused in place; no other PCB moves, and its
+    // old handles and tickets are rejected in the new process.
+    CHECK(f.scheduler.activate(0));
+    CHECK(f.scheduler.activate_thread(a, a));
+    const auto leader_ticket = f.scheduler.register_current_wait(ThreadWaitReason::child, 4); CHECK(leader_ticket);
+    const auto leader_handle = SchedulerState::handle_of(*pa, pa->leader());
+    const auto slot = pa->process_slot();
+    CHECK(f.scheduler.exit_process(a, 0) && f.scheduler.reap_process(a));
+    CHECK(!f.scheduler.find(a) && f.scheduler.find(b) == pb && !f.scheduler.slot_of(a));
+    CHECK(!f.scheduler.thread_at(leader_handle) && !f.scheduler.complete_wait(leader_ticket.value(), WaitCompletion::ready));
+    // Allocation walks forward from the last slot; fill up to wrap onto `slot`.
+    ProcessId reuser{};
+    for (usize i = 0; i < max_processes && !reuser; ++i)
+    {
+        const auto pid = f.process();
+        if (f.scheduler.find(pid)->process_slot() == slot) reuser = pid;
+    }
+    CHECK(reuser && f.scheduler.find(reuser) == pa && f.scheduler.find(b) == pb);
+    CHECK(!f.scheduler.thread_at(leader_handle) && !f.scheduler.thread_at(handle));
+    CHECK(f.scheduler.thread_at(SchedulerState::handle_of(*pa, pa->leader())) == &pa->leader());
+    CHECK(!f.scheduler.complete_wait(leader_ticket.value(), WaitCompletion::ready));
+}
+
+// A pinned slot outlives its reap: lookups no longer see the process, but the
+// slot keeps its pid and PCB and is not reallocated until the last unpin.
+void pin_holds_a_reaped_slot()
+{
+    Fixture f;
+    const auto pid = f.process();
+    auto *pcb = f.scheduler.find(pid);
+    const auto slot = pcb->process_slot();
+    auto pin = f.scheduler.pin(pid);
+    CHECK(pin && pin.get() == pcb);
+    auto second = f.scheduler.pin(pid);
+    CHECK(second && second.get() == pcb);
+    CHECK(f.scheduler.exit_process(pid, 3));
+    // A zombie is still visible and pinnable.
+    { auto zombie = f.scheduler.pin(pid); CHECK(zombie && zombie->state() == ProcessState::zombie); }
+    CHECK(f.scheduler.reap_process(pid));
+    CHECK(!f.scheduler.find(pid) && !f.scheduler.pin(pid) && f.scheduler.slot_of(pid) == slot);
+    CHECK(pin->pid() == pid && pin->exit_code() == 3);
+    // The reserved slot is skipped while every other slot is allocated.
+    usize created = 0;
+    for (auto next = f.scheduler.create_process("filler", f.context); next; next = f.scheduler.create_process("filler", f.context))
+    {
+        CHECK(f.scheduler.find(next.value())->process_slot() != slot);
+        ++created;
+    }
+    CHECK(created == max_processes - 1 && f.scheduler.process_count() == max_processes - 1);
+    second.release();
+    CHECK(f.scheduler.slot_of(pid) == slot && !f.scheduler.create_process("still-pinned", f.context));
+    pin = {};
+    CHECK(!f.scheduler.slot_of(pid));
+    const auto reuser = f.scheduler.create_process("after-unpin", f.context);
+    CHECK(reuser && f.scheduler.find(reuser.value()) == pcb && pcb->process_slot() == slot);
+    // A pin of an unknown or free pid is empty and changes nothing.
+    CHECK(!f.scheduler.pin(pid) && !f.scheduler.pin(0) && !f.scheduler.pin(max_task_id));
+    // Reaping an unpinned process frees its slot at once.
+    CHECK(f.scheduler.exit_process(reuser.value(), 0) && f.scheduler.reap_process(reuser.value()));
+    CHECK(!f.scheduler.slot_of(reuser.value()));
+}
+
+// Live and recorded iteration over the fixed TCB slots: exited records keep
+// their slot and are skipped by live_threads(); exec frees the siblings.
+void exited_slot_iteration()
+{
+    Fixture f;
+    const auto pid = f.process();
+    std::array<ThreadId, 4> tids{pid, f.peer(pid), f.peer(pid), f.peer(pid)};
+    auto *process = f.scheduler.find(pid);
+    std::array<ThreadControlBlock *, 4> tcbs{};
+    for (usize i = 0; i < tids.size(); ++i) tcbs[i] = f.scheduler.find_thread(pid, tids[i]);
+    for (usize i = 0; i < tids.size(); ++i) CHECK(&process->thread_slot(i) == tcbs[i]);
+    CHECK(f.scheduler.exit_thread(pid, tids[2]).value() == 3);
+    CHECK(process->live_count() == 3 && process->record_count() == 4);
+    std::array<ThreadId, 4> seen{};
+    usize n = 0;
+    for (const auto &thread : process->live_threads()) seen[n++] = thread.tid;
+    CHECK(n == 3 && seen[0] == tids[0] && seen[1] == tids[1] && seen[2] == tids[3]);
+    n = 0;
+    for (const auto &thread : process->thread_records()) seen[n++] = thread.tid;
+    CHECK(n == 4 && seen[2] == tids[2] && tcbs[2]->slot_state == ThreadSlotState::exited);
+    CHECK(process->main_thread() == tcbs[0] && &process->leader() == tcbs[0]);
+    // The leader's exit leaves its record in slot 0; the lowest live slot is main.
+    CHECK(f.scheduler.exit_thread(pid, pid).value() == 2);
+    CHECK(process->main_thread() == tcbs[1] && process->leader().tid == pid && process->leader().slot_state == ThreadSlotState::exited);
+    CHECK(f.scheduler.find_thread_by_tid(tids[3]) == tcbs[3] && !f.scheduler.find_thread_by_tid(tids[2]) &&
+          !f.scheduler.find_thread_by_tid(pid));
+    // A new thread takes the first reusable exited record (never the leader's).
+    const auto fresh = f.peer(pid);
+    CHECK(f.scheduler.find_thread(pid, fresh) == tcbs[2] && tcbs[1]->tid == tids[1] && tcbs[3]->tid == tids[3]);
+    // Exec keeps slot 0 and frees every sibling slot in place.
+    CHECK(f.scheduler.replace_image(pid, f.context, {}));
+    CHECK(process->record_count() == 1 && process->live_count() == 1 && process->main_thread() == tcbs[0]);
+    for (usize i = 1; i < max_threads_per_process; ++i) CHECK(process->thread_slot(i).slot_state == ThreadSlotState::free);
+    // Process exit keeps every record, exited; the slot is a zombie until reap.
+    const auto again = f.peer(pid);
+    CHECK(f.scheduler.find_thread(pid, again) == tcbs[1]);
+    CHECK(f.scheduler.exit_process(pid, 0));
+    CHECK(process->live_count() == 0 && process->record_count() == 2 && !process->main_thread());
+    CHECK(f.scheduler.process_count() == 1 && f.scheduler.find(pid) == process);
+}
+
 int main()
 {
     identities_and_reuse();peer_lifetime_and_group_boundary();capacity_and_cpu_ownership();exhaustion_and_owned_resources();distinct_cpu_processes();
     prepared_thread_publication();entry_stack_lifetime_barriers();staged_fork_publication();
+    slot_reuse_rejects_stale_handles_and_tickets();pin_holds_a_reaped_slot();exited_slot_iteration();
     std::printf("PASS thread lifecycle checks=%zu guest=0 smp=0\n",checks);
 }
