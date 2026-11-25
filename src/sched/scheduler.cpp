@@ -160,7 +160,7 @@ Result<ProcessId> SchedulerState::create_process_with_pid(ProcessId pid, std::st
     {
         return Status::overflow("process table capacity exceeded");
     }
-    // Built in place: the slot is free, so nothing else can reach its PCB.
+    // Built in place: the slot is an embryo, so nothing else reaches its PCB.
     auto &process = slot->pcb;
     process = ProcessControlBlock{pid, validated_name.view()};
     process.process_slot_ = static_cast<u16>(slot - slots_.data());
@@ -175,6 +175,7 @@ Result<ProcessId> SchedulerState::create_process_with_pid(ProcessId pid, std::st
     initialize_resources(process.resources());
     {
         // Published last: lookups see the slot only once the PCB is complete.
+        const TaskTableLock::Guard table{task_table_};
         TaskGuard guard{*slot};
         slot->pins = 0;
         slot->pid.store(static_cast<u32>(pid), std::memory_order_release);
@@ -976,11 +977,14 @@ ProcessPin SchedulerState::pin(ProcessId pid)
 
 ProcessSlot *SchedulerState::claim_process_slot()
 {
+    const TaskTableLock::Guard table{task_table_};
     for (usize offset = 0; offset < slots_.size(); ++offset)
     {
         auto &slot = slots_[(next_slot_ + offset) % slots_.size()];
         if (slot.state() != ProcessLifecycle::free) continue;
         next_slot_ = (next_slot_ + offset + 1) % slots_.size();
+        TaskGuard guard{slot};
+        slot.lifecycle.store(static_cast<u32>(ProcessLifecycle::embryo), std::memory_order_release);
         return &slot;
     }
     return nullptr;
@@ -988,6 +992,7 @@ ProcessSlot *SchedulerState::claim_process_slot()
 
 void SchedulerState::release_process_slot(ProcessSlot &slot)
 {
+    const TaskTableLock::Guard table{task_table_};
     TaskGuard guard{slot};
     slot.lifecycle.store(static_cast<u32>(ProcessLifecycle::reaped), std::memory_order_release);
     // A pinned slot keeps its pid and PCB; the last unpin frees it.
