@@ -15,7 +15,7 @@ import sys
 import tempfile
 
 ARCHITECTURES = ('i386', 'x86_64', 'aarch64', 'arm32', 'rv64', 'rv32', 'loongarch64', 'mips', 'mips64', 'ppc')
-SOURCES = ('tests/host/run_queue_tests.cpp', 'src/sched/scheduler.cpp', 'src/sched/process.cpp',
+SOURCES = ('tests/host/run_queue_tests.cpp', 'src/sched/scheduler.cpp', 'src/sched/descriptions.cpp', 'src/sched/process.cpp',
            'src/memory/memory.cpp', 'src/net/native_udp.cpp', 'src/fs/vfs.cpp', 'src/arch/arch.cpp', 'src/arch/terminal_power.cpp')
 
 

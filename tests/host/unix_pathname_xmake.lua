@@ -24,7 +24,7 @@ if has_config("sanitize") then
 end
 local runtime = {
     "src/fs/ext4_recovery.cpp", "src/memory/memory.cpp", "src/net/native_udp.cpp",
-    "src/sched/scheduler.cpp", "src/sched/process.cpp", "src/posix/posix.cpp", "src/posix/fd.cpp",
+    "src/sched/scheduler.cpp", "src/sched/descriptions.cpp", "src/sched/process.cpp", "src/posix/posix.cpp", "src/posix/fd.cpp",
     "src/posix/path.cpp", "src/posix/process.cpp", "src/fs/vfs.cpp", "src/driver/driver.cpp",
     "src/smp/smp.cpp", "src/arch/arch.cpp", "src/arch/x86_64/ops.cpp", "src/syscall/linux.cpp",
     "tests/host/ext4_realtime_model.cpp"

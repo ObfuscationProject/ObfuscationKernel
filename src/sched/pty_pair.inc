@@ -1,4 +1,4 @@
-// Included in scheduler.cpp inside ok::sched. Uses real descriptor reservations.
+// Included in descriptions.cpp inside ok::sched. Uses real descriptor reservations.
 PreparedPtyPair::PreparedPtyPair(SchedulerState &owner, DescriptorReservation first,
     DescriptorReservation second, private_pty::PairHandles handles, u32 flags)
     : owner_(&owner), first_(std::move(first)), second_(std::move(second)), handles_(handles), flags_(flags) {}

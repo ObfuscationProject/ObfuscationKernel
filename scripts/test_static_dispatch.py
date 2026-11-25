@@ -45,6 +45,7 @@ def main() -> None:
                 f"-DOK_EXPECT_CONCURRENT_LOCKS={int(architecture in SMP_START)}",
                 str(root / "tests/host/static_dispatch_tests.cpp"),
                 str(root / "src/sched/scheduler.cpp"),
+                str(root / "src/sched/descriptions.cpp"),
                 str(root / "src/sched/process.cpp"),
                 str(root / "src/memory/memory.cpp"),
                 str(root / "src/net/native_udp.cpp"),

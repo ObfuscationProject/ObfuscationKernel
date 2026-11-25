@@ -1,4 +1,4 @@
-// Included in scheduler.cpp inside ok::sched, after pty_pair.inc.
+// Included in descriptions.cpp inside ok::sched, after pty_pair.inc.
 // Terminal device nodes and open() (docs/modules/tty.md sections 2 and 3).
 
 namespace
