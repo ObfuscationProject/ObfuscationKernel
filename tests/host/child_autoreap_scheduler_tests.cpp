@@ -204,9 +204,11 @@ void detach_rejection_matrix()
     auto *process = f.scheduler.find(child);
     process->set_state(ProcessState::runnable);
     process->leader().state = ProcessState::runnable;
+    process->leader().slot_state = ThreadSlotState::live;
     CHECK(f.scheduler.activate(child));
     process->set_state(ProcessState::zombie);
     process->leader().state = ProcessState::exited;
+    process->leader().slot_state = ThreadSlotState::exited;
     rejected_without_mutation(f.scheduler, [&] { return f.scheduler.detach_completed_child_to_reaper(parent, child); });
 }
 

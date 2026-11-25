@@ -267,11 +267,12 @@ void waitid_rv32(Kernel &kernel, sched::ProcessId pid, sched::ProcessId adopted)
         return value;
     };
     bool done = true;
-    const auto *before_move = kernel.scheduler().find(pid);
+    const auto *before_reap = kernel.scheduler().find(pid);
     const auto adopted_uid = kernel.scheduler().find(adopted)->credentials().uid;
     CHECK(kernel.posix().exit(adopted, 27));
     CHECK(call(0, 0, output, 4, 0, done) == 0 && done);
-    CHECK(kernel.scheduler().find(pid) != before_move);
+    // Reaping the adopted child frees its slot in place: the caller's PCB stays.
+    CHECK(kernel.scheduler().find(pid) == before_reap);
     CHECK(field(12) == adopted && field(16) == adopted_uid && field(20) == 27);
     CHECK(!kernel.scheduler().find(adopted));
     auto child = kernel.posix().fork(pid); CHECK(child);
