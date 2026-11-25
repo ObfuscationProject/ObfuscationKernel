@@ -17,7 +17,7 @@ namespace
 
 bool process_has_runnable_thread(const ProcessControlBlock &process)
 {
-    for (const auto &thread : process.threads())
+    for (const auto &thread : process.live_threads())
     {
         if (thread.state == ProcessState::runnable)
         {
@@ -47,7 +47,7 @@ bool process_allowed_on(const ProcessControlBlock &process, smp::CpuId cpu, Proc
 // Whether a thread of the process occupies a CPU other than `except`.
 bool process_on_cpu(const ProcessControlBlock &process, smp::CpuId except = no_cpu)
 {
-    for (const auto &thread : process.threads())
+    for (const auto &thread : process.thread_records())
         if (thread.on_cpu != no_cpu && thread.on_cpu != except)
             return true;
     return false;
@@ -69,8 +69,8 @@ const ProcessControlBlock *session_process(const SchedulerState &scheduler, Proc
 {
     if (const auto *process = scheduler.find(task)) return process;
     for (const auto &process : scheduler.processes())
-        for (const auto &thread : process.threads())
-            if (thread.tid == task && thread.owner == process.pid() && thread.state != ProcessState::exited)
+        for (const auto &thread : process.live_threads())
+            if (thread.tid == task && thread.owner == process.pid())
                 return &process;
     return nullptr;
 }
@@ -83,36 +83,35 @@ ProcessControlBlock::ProcessControlBlock(ProcessId pid, std::string_view name, b
     static_cast<void>(name_.assign(name));
 }
 
-Result<ProcessId> RoundRobinPolicy::pick_next(std::span<const ProcessControlBlock> processes, ProcessId current,
-                                              smp::CpuId cpu)
+Result<ProcessId> RoundRobinPolicy::pick_next(ConstProcessRange processes, ProcessId current, smp::CpuId cpu)
 {
     if (processes.empty())
     {
         return Status::not_found("no processes available");
     }
 
+    // Slot order; the search starts after the current process's slot.
+    constexpr usize count = ConstProcessRange::capacity();
     usize start = 0;
-    for (usize i = 0; i < processes.size(); ++i)
-    {
-        if (processes[i].pid() == current)
+    for (usize i = 0; i < count; ++i)
+        if (const auto *process = processes.at(i); process && process->pid() == current)
         {
-            start = (i + 1) % processes.size();
+            start = (i + 1) % count;
             break;
         }
-    }
 
     u8 best_priority = scheduler_min_priority;
     bool found = false;
-    for (usize offset = 0; offset < processes.size(); ++offset)
+    for (usize offset = 0; offset < count; ++offset)
     {
-        const auto &process = processes[(start + offset) % processes.size()];
-        if (!process_allowed_on(process, cpu, current))
+        const auto *process = processes.at((start + offset) % count);
+        if (!process || !process_allowed_on(*process, cpu, current))
         {
             continue;
         }
-        if (!found || process.priority() > best_priority)
+        if (!found || process->priority() > best_priority)
         {
-            best_priority = process.priority();
+            best_priority = process->priority();
             found = true;
         }
     }
@@ -122,12 +121,12 @@ Result<ProcessId> RoundRobinPolicy::pick_next(std::span<const ProcessControlBloc
         return Status::would_block("no runnable process");
     }
 
-    for (usize offset = 0; offset < processes.size(); ++offset)
+    for (usize offset = 0; offset < count; ++offset)
     {
-        const auto &process = processes[(start + offset) % processes.size()];
-        if (process_allowed_on(process, cpu, current) && process.priority() == best_priority)
+        const auto *process = processes.at((start + offset) % count);
+        if (process && process_allowed_on(*process, cpu, current) && process->priority() == best_priority)
         {
-            return process.pid();
+            return process->pid();
         }
     }
 
@@ -149,32 +148,38 @@ Result<ProcessId> SchedulerState::create_process_with_pid(ProcessId pid, std::st
 {
     smp::check_exclusive("SchedulerState::create_process_with_pid");
     if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
-    if (processes_.full())
-    {
-        return Status::overflow("process table capacity exceeded");
-    }
     FixedString<max_process_name> validated_name;
     if (auto status = validated_name.assign(name); !status.ok())
     {
         return status;
     }
-    if (!pid || pid > max_task_id || find(pid))
+    if (!pid || pid > max_task_id || slot_of(pid))
         return Status::invalid_argument("process identity is unavailable");
-    ProcessControlBlock process{pid, validated_name.view()};
-    if (auto status = process.threads().push_back(ThreadControlBlock{
-            .tid = process.pid(),
-            .owner = process.pid(),
-            .state = ProcessState::created,
-            .context = initial_context,
-        });
-        !status.ok())
+    auto *slot = claim_process_slot();
+    if (!slot)
     {
-        return status;
+        return Status::overflow("process table capacity exceeded");
     }
+    // Built in place: the slot is free, so nothing else can reach its PCB.
+    auto &process = slot->pcb;
+    process = ProcessControlBlock{pid, validated_name.view()};
+    process.process_slot_ = static_cast<u16>(slot - slots_.data());
+    process.threads_[0] = ThreadControlBlock{
+        .tid = process.pid(),
+        .owner = process.pid(),
+        .state = ProcessState::created,
+        .context = initial_context,
+        .slot_state = ThreadSlotState::live,
+    };
+    for (auto &mask : slot->thread_affinity) mask.store(cpu_affinity_any, std::memory_order_relaxed);
     initialize_resources(process.resources());
-    auto slot = processes_.push_back_slot();
-    if (!slot) return slot.status();
-    *slot.value() = std::move(process);
+    {
+        // Published last: lookups see the slot only once the PCB is complete.
+        TaskGuard guard{*slot};
+        slot->pins = 0;
+        slot->pid.store(static_cast<u32>(pid), std::memory_order_release);
+        slot->lifecycle.store(static_cast<u32>(ProcessLifecycle::live), std::memory_order_release);
+    }
     return pid;
 }
 
@@ -263,21 +268,18 @@ Result<usize> SchedulerState::exit_thread(ProcessId pid, ThreadId tid, smp::CpuI
     thread->wait_reason = ThreadWaitReason::none;
     thread->wait_key = 0;
     thread->state = ProcessState::exited;
-    forget_queued(pid, *thread);
-    if (current_by_cpu_[cpu] == pid && current_thread_by_cpu_[cpu] == tid)
-    {
+    thread->slot_state = ThreadSlotState::exited;
+    forget_queued(*process, *thread);
+    if (cpu_slots_[cpu].pid == pid && cpu_slots_[cpu].tid == tid)
         vacate_cpu_slot(cpu);
-        if (cpu == 0) current_pid_ = 0;
-    }
     usize live = 0;
     bool runnable = false, running = false;
-    for (const auto &peer : process->threads())
-        if (peer.state != ProcessState::exited)
-        {
-            ++live;
-            running |= peer.state == ProcessState::running;
-            runnable |= peer.state == ProcessState::runnable || peer.state == ProcessState::created;
-        }
+    for (const auto &peer : process->live_threads())
+    {
+        ++live;
+        running |= peer.state == ProcessState::running;
+        runnable |= peer.state == ProcessState::runnable || peer.state == ProcessState::created;
+    }
     process->set_state(running ? ProcessState::running : runnable ? ProcessState::runnable : ProcessState::blocked);
     thread->console_wait_epoch = 0;
     // The last thread's exit is Linux group_dead: disassociate_ctty(1) runs
@@ -365,7 +367,7 @@ Status SchedulerState::set_priority(ProcessId pid, u8 priority)
         return Status::not_found("process not found");
     }
     process->set_priority(priority);
-    for (auto &thread : process->threads())
+    for (auto &thread : process->thread_records())
     {
         thread.priority = priority;
     }
@@ -422,30 +424,19 @@ Status SchedulerState::configure_cpus(usize cpu_count)
         return Status::overflow("scheduler cpu capacity exceeded");
     }
     cpu_count_ = cpu_count;
-    for (auto &process : processes_)
-        for (auto &thread : process.threads())
+    for (auto &process : process_range())
+        for (auto &thread : process.thread_records())
             thread.on_cpu = no_cpu;
     online_cpus_ &= configured_cpu_mask();
-    for (auto &pid : current_by_cpu_)
-    {
-        pid = 0;
-    }
-    for (auto &tid : current_thread_by_cpu_)
-    {
-        tid = 0;
-    }
-    for (auto &stats : cpu_stats_)
-    {
-        stats = {};
-    }
-    current_pid_ = 0;
+    for (auto &slot : cpu_slots_)
+        slot = {};
     // Entries of removed CPUs are placed again; a stale one is dropped here.
     for (auto cpu = static_cast<smp::CpuId>(cpu_count_); cpu < smp::max_cpus; ++cpu)
-        while (const auto ref = run_queues_.get(cpu).pop())
-            if (auto *thread = find_thread(ref->pid, ref->tid); thread && thread->queued_cpu == cpu)
+        while (const auto handle = run_queues_.get(cpu).pop())
+            if (auto *thread = thread_at(*handle); thread && thread->queued_cpu == cpu)
             {
                 thread->queued_cpu = no_cpu;
-                static_cast<void>(enqueue_thread(ref->pid, ref->tid));
+                static_cast<void>(enqueue_thread(thread->owner, thread->tid));
             }
     return Status::success();
 }
@@ -469,7 +460,7 @@ Status SchedulerState::offline_cpu(smp::CpuId cpu)
     // A process mask is kernel placement policy: it must keep an online CPU.
     // Thread masks do not refuse; such a thread's affinity breaks instead.
     const u32 remaining = online_cpus_ & ~(1u << cpu);
-    for (const auto &process : processes_)
+    for (const auto &process : process_range())
         if (process.state() != ProcessState::zombie && process.state() != ProcessState::exited &&
             (process.cpu_affinity_mask() & remaining) == 0)
             return Status::busy("a process allows no other online CPU");
@@ -478,11 +469,11 @@ Status SchedulerState::offline_cpu(smp::CpuId cpu)
     // whose thread no longer names this queue is stale and dropped. A thread
     // none of whose CPUs stays online gets its affinity broken there.
     auto &queue = run_queues_.get(cpu);
-    while (const auto ref = queue.pop())
-        if (auto *thread = find_thread(ref->pid, ref->tid); thread && thread->queued_cpu == cpu)
+    while (const auto handle = queue.pop())
+        if (auto *thread = thread_at(*handle); thread && thread->queued_cpu == cpu)
         {
             thread->queued_cpu = no_cpu;
-            static_cast<void>(enqueue_thread(ref->pid, ref->tid));
+            static_cast<void>(enqueue_thread(thread->owner, thread->tid));
         }
     return Status::success();
 }
@@ -514,7 +505,7 @@ Status SchedulerState::enqueue_thread(ProcessId pid, ThreadId tid)
     if (thread->queued_cpu != no_cpu)
         return Status::success();
     const auto cpu = select_cpu(*process, *thread);
-    if (auto status = run_queues_.get(cpu).push({pid, tid}); !status)
+    if (auto status = run_queues_.get(cpu).push(handle_of(*process, *thread)); !status)
         return status;
     thread->queued_cpu = cpu;
     return Status::success();
@@ -559,12 +550,12 @@ bool SchedulerState::repair_affinity(ProcessControlBlock &process, ThreadControl
 {
     const u16 allowed = effective_affinity(process, thread);
     // Only the thread mask breaks; a process mask keeps an online CPU (offline_cpu).
-    if ((allowed & online_cpus_) != 0 || thread.cpu_affinity_mask == cpu_affinity_any ||
+    if ((allowed & online_cpus_) != 0 || thread_affinity(process, thread) == cpu_affinity_any ||
         (process.cpu_affinity_mask() & online_cpus_) == 0)
         return false;
     smp::CpuId first = 0;
     while (first + 1u < smp::max_cpus && (allowed & (1u << first)) == 0) ++first;
-    thread.cpu_affinity_mask = cpu_affinity_any;
+    store_thread_affinity(process, thread, cpu_affinity_any);
     affinity_broken_[affinity_broken_total_ % affinity_broken_.size()] = {process.pid(), thread.tid, first};
     ++affinity_broken_total_;
     return true;
@@ -574,18 +565,19 @@ Status SchedulerState::set_thread_affinity(ProcessControlBlock &process, ThreadC
 {
     if ((process.cpu_affinity_mask() & mask & online_cpus_) == 0)
         return Status::invalid_argument("affinity names no online CPU the process allows");
-    thread.cpu_affinity_mask = mask;
+    store_thread_affinity(process, thread, mask);
     return {};
 }
 
 ThreadControlBlock *SchedulerState::find_thread_by_tid(ThreadId tid)
 {
     smp::check_exclusive("SchedulerState::find_thread_by_tid");
-    for (auto &process : processes_)
+    if (!tid) return nullptr;
+    for (auto &process : process_range())
     {
         if (process.state() == ProcessState::zombie || process.state() == ProcessState::exited) continue;
-        for (auto &thread : process.threads())
-            if (thread.tid == tid && thread.state != ProcessState::exited) return &thread;
+        for (auto &thread : process.live_threads())
+            if (thread.tid == tid) return &thread;
     }
     return nullptr;
 }
@@ -604,34 +596,36 @@ Result<ProcessId> SchedulerState::schedule_kernel_thread_on_cpu(smp::CpuId cpu)
     if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
     if (cpu >= cpu_count_) return Status::invalid_argument("scheduler cpu id out of range");
     const auto current = current_pid(cpu);
-    const usize count = processes_.size();
+    const auto range = process_range();
+    constexpr usize count = ProcessRange::capacity();
     usize start = 0;
     for (usize i = 0; i < count; ++i)
-        if (processes_[i].pid() == current) start = (i + 1) % count;
+        if (const auto *process = range.at(i); process && process->pid() == current) start = (i + 1) % count;
     // Highest priority first, then round robin after the current record.
     const ProcessControlBlock *best = nullptr;
     for (usize offset = 0; offset < count; ++offset)
     {
-        const auto &process = processes_[(start + offset) % count];
-        if (process.execution() != ProcessExecution::kernel_thread || !process_allowed_on(process, cpu, current))
+        const auto *process = range.at((start + offset) % count);
+        if (!process || process->execution() != ProcessExecution::kernel_thread ||
+            !process_allowed_on(*process, cpu, current))
             continue;
-        if (!best || process.priority() > best->priority()) best = &process;
+        if (!best || process->priority() > best->priority()) best = process;
     }
     if (!best) return Status::would_block("no runnable kernel thread");
     return dispatch_selected(cpu, best->pid());
 }
 
-bool SchedulerState::eligible_on(ThreadRef ref, smp::CpuId queue, smp::CpuId cpu) const
+bool SchedulerState::eligible_on(ThreadHandle handle, smp::CpuId queue, smp::CpuId cpu) const
 {
-    const auto *process = find(ref.pid);
-    if (!process || process->state() == ProcessState::zombie || process->state() == ProcessState::exited ||
-        process->job_.stopped)
+    const auto *thread = thread_at(handle);
+    if (!thread) return false;
+    const auto &slot = slots_[handle.index / max_threads_per_process];
+    const auto &process = slot.pcb;
+    if (!slot.visible() || process.state() == ProcessState::zombie || process.state() == ProcessState::exited ||
+        process.job_.stopped)
         return false;
-    for (const auto &thread : process->threads())
-        if (thread.tid == ref.tid)
-            return thread.queued_cpu == queue && thread.state == ProcessState::runnable && thread.on_cpu == no_cpu &&
-                   thread_admits(*process, thread, cpu);
-    return false;
+    return thread->queued_cpu == queue && thread->state == ProcessState::runnable && thread->on_cpu == no_cpu &&
+           thread_admits(process, *thread, cpu);
 }
 
 std::optional<ThreadRef> SchedulerState::dequeue_thread(smp::CpuId cpu)
@@ -643,13 +637,14 @@ std::optional<ThreadRef> SchedulerState::dequeue_thread(smp::CpuId cpu)
     // Bounded by the entries present on entry; moved entries never return here.
     for (auto budget = own.size(); budget != 0; --budget)
     {
-        const auto ref = own.pop();
-        if (!ref)
+        const auto handle = own.pop();
+        if (!handle)
             break;
-        auto *process = find(ref->pid);
-        auto *thread = find_thread(ref->pid, ref->tid);
+        auto *thread = thread_at(*handle);
         if (!thread || thread->queued_cpu != cpu)
             continue;
+        auto *process = &slot_process(handle->index);
+        const ThreadRef ref{thread->owner, thread->tid};
         thread->queued_cpu = no_cpu;
         if (thread->state != ProcessState::runnable || thread->on_cpu != no_cpu ||
             process->state() == ProcessState::zombie || process->state() == ProcessState::exited ||
@@ -657,7 +652,7 @@ std::optional<ThreadRef> SchedulerState::dequeue_thread(smp::CpuId cpu)
             continue;
         if (!thread_admits(*process, *thread, cpu))
         {
-            static_cast<void>(enqueue_thread(ref->pid, ref->tid));
+            static_cast<void>(enqueue_thread(ref.pid, ref.tid));
             continue;
         }
         return ref;
@@ -679,11 +674,12 @@ std::optional<ThreadRef> SchedulerState::dequeue_thread(smp::CpuId cpu)
             return std::nullopt;
         tried |= 1u << victim;
         const auto stolen = run_queues_.get(victim).try_take_first(
-            [&](ThreadRef ref) { return eligible_on(ref, victim, cpu); });
+            [&](ThreadHandle handle) { return eligible_on(handle, victim, cpu); });
         if (stolen)
         {
-            find_thread(stolen->pid, stolen->tid)->queued_cpu = no_cpu;
-            return stolen;
+            auto *thread = thread_at(*stolen);
+            thread->queued_cpu = no_cpu;
+            return ThreadRef{thread->owner, thread->tid};
         }
     }
 }
@@ -702,7 +698,7 @@ Status SchedulerState::mark_on_cpu(ProcessId pid, ThreadId tid, smp::CpuId cpu)
         return Status::success();
     if (thread->on_cpu != no_cpu)
         return Status::busy("thread is running on another CPU");
-    if (current_thread_by_cpu_[cpu] != 0)
+    if (cpu_slots_[cpu].occupied())
         return Status::busy("CPU already runs another thread");
     if (thread->state != ProcessState::runnable || process->state() == ProcessState::zombie ||
         process->state() == ProcessState::exited || process->job_.stopped || !thread_admits(*process, *thread, cpu))
@@ -724,7 +720,6 @@ Status SchedulerState::clear_on_cpu(ProcessId pid, ThreadId tid, smp::CpuId cpu)
     if (thread->on_cpu != cpu)
         return Status::invalid_argument("thread is not on this CPU");
     vacate_cpu_slot(cpu);
-    if (cpu == 0) current_pid_ = 0;
     if (thread->state == ProcessState::running)
         thread->state = ProcessState::runnable;
     if (process->state() == ProcessState::running && !process_on_cpu(*process))
@@ -732,25 +727,24 @@ Status SchedulerState::clear_on_cpu(ProcessId pid, ThreadId tid, smp::CpuId cpu)
     return Status::success();
 }
 
-void SchedulerState::forget_queued(ProcessId pid, ThreadControlBlock &thread)
+void SchedulerState::forget_queued(const ProcessControlBlock &process, ThreadControlBlock &thread)
 {
     if (thread.queued_cpu == no_cpu)
         return;
     if (thread.queued_cpu < smp::max_cpus)
-        static_cast<void>(run_queues_.get(thread.queued_cpu).remove({pid, thread.tid}));
+        static_cast<void>(run_queues_.get(thread.queued_cpu).remove(handle_of(process, thread)));
     thread.queued_cpu = no_cpu;
 }
 
 void SchedulerState::vacate_cpu_slot(usize cpu)
 {
-    if (current_thread_by_cpu_[cpu] != 0)
-        if (auto *thread = find_thread(current_by_cpu_[cpu], current_thread_by_cpu_[cpu]);
-            thread && thread->on_cpu == cpu)
-            thread->on_cpu = no_cpu;
-    current_by_cpu_[cpu] = 0;
-    current_thread_by_cpu_[cpu] = 0;
-    cpu_stats_[cpu].current_pid = 0;
-    cpu_stats_[cpu].current_tid = 0;
+    auto &slot = cpu_slots_[cpu];
+    if (slot.thread && slot.thread->tid == slot.tid && slot.thread->on_cpu == cpu)
+        slot.thread->on_cpu = no_cpu;
+    slot.pid = 0;
+    slot.tid = 0;
+    slot.process = nullptr;
+    slot.thread = nullptr;
 }
 
 void SchedulerState::occupy_cpu(smp::CpuId cpu, ProcessControlBlock &process, ThreadControlBlock &thread)
@@ -760,10 +754,10 @@ void SchedulerState::occupy_cpu(smp::CpuId cpu, ProcessControlBlock &process, Th
     if constexpr (smp::lock_debug_enabled)
         if (smp::exclusive_armed.load(std::memory_order_relaxed) && cpu != smp::current_cpu())
             smp::count_exclusive_violation("SchedulerState::occupy_cpu on another CPU");
-    if (const auto previous = current_thread_by_cpu_[cpu]; previous != 0 && previous != thread.tid)
-        if (auto *old = find_thread(current_by_cpu_[cpu], previous); old && old->on_cpu == cpu)
-            old->on_cpu = no_cpu;
-    forget_queued(process.pid(), thread);
+    auto &slot = cpu_slots_[cpu];
+    if (auto *old = slot.thread; old && old != &thread && old->tid == slot.tid && old->on_cpu == cpu)
+        old->on_cpu = no_cpu;
+    forget_queued(process, thread);
     thread.state = ProcessState::running;
     ++thread.dispatch_count;
     ++thread.cpu_time_ticks;
@@ -772,16 +766,15 @@ void SchedulerState::occupy_cpu(smp::CpuId cpu, ProcessControlBlock &process, Th
     process.set_state(ProcessState::running);
     const bool account_cpu = process_counts_as_cpu_work(process);
     process.record_dispatch(cpu, account_cpu);
-    if (cpu == 0) current_pid_ = process.pid();
-    current_by_cpu_[cpu] = process.pid();
-    current_thread_by_cpu_[cpu] = thread.tid;
-    ++cpu_stats_[cpu].dispatches;
+    slot.pid = process.pid();
+    slot.tid = thread.tid;
+    slot.process = &process;
+    slot.thread = &thread;
+    ++slot.dispatches;
     if (account_cpu)
     {
-        ++cpu_stats_[cpu].busy_dispatches;
+        ++slot.busy_dispatches;
     }
-    cpu_stats_[cpu].current_pid = process.pid();
-    cpu_stats_[cpu].current_tid = thread.tid;
 }
 
 Status SchedulerState::set_runnable(ProcessId pid)
@@ -794,13 +787,10 @@ Status SchedulerState::set_runnable(ProcessId pid)
     }
     if (process->state() == ProcessState::zombie || process->state() == ProcessState::exited)
         return Status::invalid_argument("cannot run an exited process");
-    bool live = false;
-    for (const auto &thread : process->threads()) live |= thread.state != ProcessState::exited;
-    if (!live) return Status::invalid_argument("process has no live thread");
+    if (process->live_count() == 0) return Status::invalid_argument("process has no live thread");
     process->set_state(ProcessState::runnable);
-    for (auto &thread : process->threads())
+    for (auto &thread : process->live_threads())
     {
-        if (thread.state == ProcessState::exited) continue;
         thread.wait_registration.cancel();
         thread.native_deadline.cancel();
         thread.wait_reason = ThreadWaitReason::none;
@@ -818,49 +808,43 @@ Status SchedulerState::block_process(ProcessId pid)
         return Status::not_found("process not found");
     }
     process->set_state(ProcessState::blocked);
-    for (auto &thread : process->threads())
+    for (auto &thread : process->live_threads())
     {
-        if (thread.state != ProcessState::exited)
-        {
-            thread.state = ProcessState::blocked;
-        }
+        thread.state = ProcessState::blocked;
     }
-    for (usize i = 0; i < current_by_cpu_.size(); ++i)
+    for (usize i = 0; i < cpu_slots_.size(); ++i)
     {
-        if (current_by_cpu_[i] == pid)
+        if (cpu_slots_[i].pid == pid)
         {
             vacate_cpu_slot(i);
         }
-    }
-    if (current_pid_ == pid)
-    {
-        current_pid_ = 0;
     }
     return Status::success();
 }
 
 Result<ThreadId> SchedulerState::pick_next_thread(ProcessControlBlock &process, ThreadId current, smp::CpuId cpu)
 {
-    auto &threads = process.threads();
-    if (threads.empty())
+    if (process.record_count() == 0)
     {
         return Status::not_found("process has no threads");
     }
 
+    // Slot order; the search starts after the current thread's slot.
+    constexpr usize count = max_threads_per_process;
     usize start = 0;
-    for (usize i = 0; i < threads.size(); ++i)
+    for (usize i = 0; i < count; ++i)
     {
-        if (threads[i].tid == current)
+        if (process.thread_slot(i).slot_state != ThreadSlotState::free && process.thread_slot(i).tid == current)
         {
-            start = (i + 1) % threads.size();
+            start = (i + 1) % count;
             break;
         }
     }
 
-    for (usize offset = 0; offset < threads.size(); ++offset)
+    for (usize offset = 0; offset < count; ++offset)
     {
-        auto &thread = threads[(start + offset) % threads.size()];
-        if (!thread_admits(process, thread, cpu))
+        auto &thread = process.thread_slot((start + offset) % count);
+        if (thread.slot_state != ThreadSlotState::live || !thread_admits(process, thread, cpu))
             continue;
         if (thread.state == ProcessState::runnable || (thread.state == ProcessState::running && thread.tid == current &&
                                                        !thread_running_on_other_cpu(thread, cpu)))
@@ -879,8 +863,8 @@ Result<ProcessId> SchedulerState::dispatch_selected(smp::CpuId cpu, Result<Proce
     {
         return Status::invalid_argument("scheduler cpu id out of range");
     }
-    const auto previous_pid = current_by_cpu_[cpu];
-    const auto previous_tid = current_thread_by_cpu_[cpu];
+    const auto previous_pid = cpu_slots_[cpu].pid;
+    const auto previous_tid = cpu_slots_[cpu].tid;
     if (!next)
     {
         return next.status();
@@ -897,7 +881,7 @@ Result<ProcessId> SchedulerState::dispatch_selected(smp::CpuId cpu, Result<Proce
 
     if (auto *current = find(previous_pid); current && current->state() == ProcessState::running)
     {
-        for (auto &thread : current->threads())
+        for (auto &thread : current->live_threads())
         {
             if (thread.tid == previous_tid && thread.state == ProcessState::running)
             {
@@ -936,7 +920,7 @@ ProcessId SchedulerState::current_pid(smp::CpuId cpu) const
     {
         return 0;
     }
-    return current_by_cpu_[cpu];
+    return cpu_slots_[cpu].pid;
 }
 
 ThreadId SchedulerState::current_tid(smp::CpuId cpu) const
@@ -945,39 +929,126 @@ ThreadId SchedulerState::current_tid(smp::CpuId cpu) const
     {
         return 0;
     }
-    return current_thread_by_cpu_[cpu];
+    return cpu_slots_[cpu].tid;
 }
 
 ProcessControlBlock *SchedulerState::find(ProcessId pid)
 {
     smp::check_exclusive("SchedulerState::find");
-    for (auto &process : processes_)
-    {
-        if (process.pid() == pid)
-        {
-            return &process;
-        }
-    }
-    return nullptr;
+    auto *slot = visible_slot(pid);
+    return slot ? &slot->pcb : nullptr;
 }
 
 const ProcessControlBlock *SchedulerState::find(ProcessId pid) const
 {
     smp::check_exclusive("SchedulerState::find");
-    for (const auto &process : processes_)
+    const auto *slot = visible_slot(pid);
+    return slot ? &slot->pcb : nullptr;
+}
+
+ProcessSlot *SchedulerState::visible_slot(ProcessId pid)
+{
+    for (auto &slot : slots_)
+        if (slot.names(pid)) return &slot;
+    return nullptr;
+}
+
+const ProcessSlot *SchedulerState::visible_slot(ProcessId pid) const
+{
+    for (const auto &slot : slots_)
+        if (slot.names(pid)) return &slot;
+    return nullptr;
+}
+
+std::optional<usize> SchedulerState::slot_of(ProcessId pid) const
+{
+    if (!pid) return std::nullopt;
+    for (usize i = 0; i < slots_.size(); ++i)
+        if (slots_[i].pid.load(std::memory_order_acquire) == pid) return i;
+    return std::nullopt;
+}
+
+ProcessPin SchedulerState::pin(ProcessId pid)
+{
+    auto *slot = visible_slot(pid);
+    return slot ? ProcessPin::acquire(*slot, pid) : ProcessPin{};
+}
+
+ProcessSlot *SchedulerState::claim_process_slot()
+{
+    for (usize offset = 0; offset < slots_.size(); ++offset)
     {
-        if (process.pid() == pid)
-        {
-            return &process;
-        }
+        auto &slot = slots_[(next_slot_ + offset) % slots_.size()];
+        if (slot.state() != ProcessLifecycle::free) continue;
+        next_slot_ = (next_slot_ + offset + 1) % slots_.size();
+        return &slot;
     }
     return nullptr;
+}
+
+void SchedulerState::release_process_slot(ProcessSlot &slot)
+{
+    TaskGuard guard{slot};
+    slot.lifecycle.store(static_cast<u32>(ProcessLifecycle::reaped), std::memory_order_release);
+    // A pinned slot keeps its pid and PCB; the last unpin frees it.
+    if (slot.pins == 0) ProcessPin::free_locked(slot);
+}
+
+void SchedulerState::free_thread_slot(ProcessControlBlock &process, ThreadControlBlock &thread)
+{
+    forget_queued(process, thread);
+    store_thread_affinity(process, thread, cpu_affinity_any);
+    thread = ThreadControlBlock{};
+}
+
+u16 SchedulerState::thread_affinity(const ProcessControlBlock &process, const ThreadControlBlock &thread) const
+{
+    const auto index = process.thread_index(thread);
+    if (index == invalid_thread_index || &slots_[index / max_threads_per_process].pcb != &process)
+        return cpu_affinity_any;
+    return static_cast<u16>(
+        slots_[index / max_threads_per_process].thread_affinity[index % max_threads_per_process].load(
+            std::memory_order_relaxed));
+}
+
+void SchedulerState::store_thread_affinity(const ProcessControlBlock &process, const ThreadControlBlock &thread,
+                                           u16 mask)
+{
+    const auto index = process.thread_index(thread);
+    if (index == invalid_thread_index || &slots_[index / max_threads_per_process].pcb != &process) return;
+    slots_[index / max_threads_per_process].thread_affinity[index % max_threads_per_process].store(
+        mask, std::memory_order_relaxed);
+}
+
+ThreadControlBlock *SchedulerState::thread_at(ThreadHandle handle)
+{
+    if (!handle.valid() || handle.index >= max_thread_slots) return nullptr;
+    auto &slot = slots_[handle.index / max_threads_per_process];
+    auto &thread = slot.pcb.threads_[handle.index % max_threads_per_process];
+    return slot.state() != ProcessLifecycle::free && thread.slot_state != ThreadSlotState::free &&
+                   thread.tid == handle.tid
+               ? &thread
+               : nullptr;
+}
+
+const ThreadControlBlock *SchedulerState::thread_at(ThreadHandle handle) const
+{
+    return const_cast<SchedulerState *>(this)->thread_at(handle);
+}
+
+bool SchedulerState::queued_on(smp::CpuId cpu, ThreadRef ref) const
+{
+    const auto *process = find(ref.pid);
+    if (!process || cpu >= smp::max_cpus) return false;
+    for (const auto &thread : process->thread_records())
+        if (thread.tid == ref.tid) return run_queues_.get(cpu).contains(handle_of(*process, thread));
+    return false;
 }
 
 usize SchedulerState::background_process_count() const
 {
     usize count = 0;
-    for (const auto &process : processes_)
+    for (const auto &process : process_range())
     {
         if (process.background())
         {
@@ -993,7 +1064,8 @@ CpuSchedulingStats SchedulerState::cpu_stats(smp::CpuId cpu) const
     {
         return {};
     }
-    return cpu_stats_[cpu];
+    const auto &slot = cpu_slots_[cpu];
+    return {slot.dispatches, slot.busy_dispatches, slot.pid, slot.tid};
 }
 
 u64 SchedulerState::total_dispatches() const
@@ -1001,7 +1073,7 @@ u64 SchedulerState::total_dispatches() const
     u64 total = 0;
     for (usize i = 0; i < cpu_count_; ++i)
     {
-        total += cpu_stats_[i].dispatches;
+        total += cpu_slots_[i].dispatches;
     }
     return total;
 }
@@ -1011,18 +1083,18 @@ u64 SchedulerState::total_accounted_dispatches() const
     u64 total = 0;
     for (usize i = 0; i < cpu_count_; ++i)
     {
-        total += cpu_stats_[i].busy_dispatches;
+        total += cpu_slots_[i].busy_dispatches;
     }
     return total;
 }
 
 u8 SchedulerState::cpu_usage_percent(smp::CpuId cpu) const
 {
-    if (cpu >= cpu_count_ || cpu_stats_[cpu].dispatches == 0)
+    if (cpu >= cpu_count_ || cpu_slots_[cpu].dispatches == 0)
     {
         return 0;
     }
-    return static_cast<u8>((cpu_stats_[cpu].busy_dispatches * 100u) / cpu_stats_[cpu].dispatches);
+    return static_cast<u8>((cpu_slots_[cpu].busy_dispatches * 100u) / cpu_slots_[cpu].dispatches);
 }
 
 u8 SchedulerState::process_usage_percent(ProcessId pid) const
@@ -1086,7 +1158,7 @@ DescriptionPositionLock *SchedulerState::position_lock(const OpenFileDescription
 }
 ProcessId SchedulerState::resources_owner(const ProcessResources &resources) const
 {
-    for (const auto &process : processes_)
+    for (const auto &process : process_range())
         if (&process.resources() == &resources)
             return process.pid();
     return 0;
@@ -1147,7 +1219,7 @@ Status SchedulerState::drain_all_resources()
     auto consumed = consume_resources(boot_resources_);
     if (!consumed && resource_drain_report_.first_failure)
         record_resource_failure(consumed, -1, invalid_description, 0, false);
-    for (auto &process : processes_)
+    for (auto &process : process_range())
     {
         consumed = consume_resources(process.resources());
         if (!consumed && resource_drain_report_.first_failure)
@@ -1179,10 +1251,8 @@ usize SchedulerState::open_description_count() const
 void SchedulerState::clear_current(ProcessId pid)
 {
     smp::check_drained(pid, "SchedulerState::clear_current");
-    if (current_pid_ == pid)
-        current_pid_ = 0;
-    for (usize cpu = 0; cpu < current_by_cpu_.size(); ++cpu)
-        if (current_by_cpu_[cpu] == pid)
+    for (usize cpu = 0; cpu < cpu_slots_.size(); ++cpu)
+        if (cpu_slots_[cpu].pid == pid)
             vacate_cpu_slot(cpu);
 }
 Status SchedulerState::activate(ProcessId pid, smp::CpuId cpu)
@@ -1191,15 +1261,14 @@ Status SchedulerState::activate(ProcessId pid, smp::CpuId cpu)
         return Status::invalid_argument("invalid activation CPU");
     if (pid == 0)
     {
-        if (auto *previous = find(current_by_cpu_[cpu]); previous != nullptr)
+        if (auto *previous = find(cpu_slots_[cpu].pid); previous != nullptr)
         {
-            for (auto &thread : previous->threads())
-                if (thread.tid == current_thread_by_cpu_[cpu] && thread.state == ProcessState::running)
+            for (auto &thread : previous->live_threads())
+                if (thread.tid == cpu_slots_[cpu].tid && thread.state == ProcessState::running)
                     thread.state = ProcessState::runnable;
             if (previous->state() == ProcessState::running && !process_on_cpu(*previous, cpu))
                 previous->set_state(ProcessState::runnable);
         }
-        if (cpu == 0) current_pid_ = 0;
         vacate_cpu_slot(cpu);
         return Status::success();
     }
@@ -1236,14 +1305,13 @@ Result<ProcessId> SchedulerState::fork_process(ProcessId parent, bool publish)
         return Status::not_found("parent process not found");
     if (source->resources().unix_receive_operations || source->resources().prepared_descriptor_operations)
         return Status::busy("prepared descriptor operation cannot be cloned by fork");
-    if (source->state() == ProcessState::zombie || source->state() == ProcessState::exited || source->threads().empty())
+    if (source->state() == ProcessState::zombie || source->state() == ProcessState::exited ||
+        source->record_count() == 0)
         return Status::invalid_argument("parent process is not alive");
-    bool live = false;
-    for (const auto &thread : source->threads()) live |= thread.state != ProcessState::exited;
-    if (!live) return Status::invalid_argument("cannot fork a retired thread group");
+    if (source->live_count() == 0) return Status::invalid_argument("cannot fork a retired thread group");
     // Fork capacity is a retryable process-resource limit (EAGAIN), not an
     // arithmetic overflow. Check before retaining cwd or descriptor ownership.
-    if (source->children().full() || processes_.full())
+    if (source->children().full() || process_range().size() == max_processes)
         return Status::would_block("fork process or child table capacity exceeded");
     // Preflight every duplicated OFD edge before publishing or retaining child state.
     for (const auto &slot : source->fd_table().entries()) if (slot.used)
@@ -1256,8 +1324,8 @@ Result<ProcessId> SchedulerState::fork_process(ProcessId parent, bool publish)
         if (open->references > ~usize{0} - increment)
             return Status::overflow("fork open description references would overflow");
     }
-    const ThreadControlBlock *calling_thread = &source->threads()[0];
-    for (const auto &thread : source->threads())
+    const ThreadControlBlock *calling_thread = &source->leader();
+    for (const auto &thread : source->thread_records())
         if (thread.tid == current_tid(smp::current_cpu()) && current_pid() == parent)
             calling_thread = &thread;
     if (source->resources().cwd_node)
@@ -1305,19 +1373,20 @@ Result<ProcessId> SchedulerState::fork_process(ProcessId parent, bool publish)
     child->set_background(source->background());
     child->set_priority(source->priority());
     child->set_cpu_affinity_mask(source->cpu_affinity_mask());
-    child->threads()[0].priority = calling_thread->priority;
-    child->threads()[0].tls = calling_thread->tls;
-    child->threads()[0].native_signal_mask = calling_thread->native_signal_mask;
-    child->threads()[0].cpu_affinity_mask = calling_thread->cpu_affinity_mask;
-    child->threads()[0].native_frame = calling_thread->native_frame;
-    child->threads()[0].native_active = false;
-    child->threads()[0].syscall_pending = false;
-    child->threads()[0].native_deadline = {};
-    child->threads()[0].tls.clear_tid_address = 0;
-    child->threads()[0].tls.set_tid_address = 0;
-    child->threads()[0].tls.robust_list = 0;
-    child->threads()[0].tls.robust_list_length = 0;
-    child->threads()[0].wait_reason = ThreadWaitReason::none;
+    auto &child_thread = child->leader();
+    child_thread.priority = calling_thread->priority;
+    child_thread.tls = calling_thread->tls;
+    child_thread.native_signal_mask = calling_thread->native_signal_mask;
+    store_thread_affinity(*child, child_thread, thread_affinity(*source, *calling_thread));
+    child_thread.native_frame = calling_thread->native_frame;
+    child_thread.native_active = false;
+    child_thread.syscall_pending = false;
+    child_thread.native_deadline = {};
+    child_thread.tls.clear_tid_address = 0;
+    child_thread.tls.set_tid_address = 0;
+    child_thread.tls.robust_list = 0;
+    child_thread.tls.robust_list_length = 0;
+    child_thread.wait_reason = ThreadWaitReason::none;
     static_cast<void>(source->add_child(child_pid.value()));
     if (publish) static_cast<void>(set_runnable(child_pid.value()));
     return child_pid;
@@ -1365,7 +1434,7 @@ Status SchedulerState::set_process_group(ProcessId caller, i32 pid, i32 pgid)
     if (pgid != pid)
     {
         bool same_session_group = false;
-        for (const auto &member : processes_)
+        for (const auto &member : process_range())
             if (member.process_group_id() == static_cast<ProcessId>(pgid) &&
                 member.session_id() == source->session_id())
                 same_session_group = true;
@@ -1383,7 +1452,7 @@ Result<ProcessId> SchedulerState::create_session(ProcessId caller)
         return Status::permission("calling process is already a session leader");
     // Membership, rather than the lifetime of the original group leader,
     // reserves an identity. Retained zombies remain members until reap.
-    for (const auto &member : processes_)
+    for (const auto &member : process_range())
         if (member.process_group_id() == caller)
             return Status::permission("calling process identity already names a process group");
     process->session_.id = caller;
@@ -1404,11 +1473,9 @@ Status SchedulerState::preflight_replace_image(ProcessId pid, const arch::CpuCon
         return Status::busy("prepared UNIX receive must finish before exec");
     if (process->state() == ProcessState::zombie || process->state() == ProcessState::exited)
         return Status::invalid_argument("cannot exec an exited process");
-    if (process->threads().empty())
+    if (process->record_count() == 0)
         return Status::invalid_argument("process has no thread");
-    bool live = false;
-    for (const auto &thread : process->threads()) live |= thread.state != ProcessState::exited;
-    if (!live) return Status::invalid_argument("cannot exec a retired thread group");
+    if (process->live_count() == 0) return Status::invalid_argument("cannot exec a retired thread group");
     return Status::success();
 }
 Status SchedulerState::replace_image(ProcessId pid, arch::CpuContext context, const MemoryMap &memory)
@@ -1417,7 +1484,7 @@ Status SchedulerState::replace_image(ProcessId pid, arch::CpuContext context, co
     smp::check_drained(pid, "SchedulerState::replace_image");
     if (auto status = preflight_replace_image(pid, context); !status) return status;
     auto *process = find(pid);
-    for (const auto &thread : process->threads())
+    for (const auto &thread : process->thread_records())
         if (thread.entry_stack.pool || thread.kernel_stack_top)
             return Status::busy("entry stack references must be escrowed before exec");
     if (native_tcp_service_) native_tcp_service_->cancel_process(pid);
@@ -1438,11 +1505,12 @@ Status SchedulerState::replace_image(ProcessId pid, arch::CpuContext context, co
     process->resources().program_break = process->resources().program_break_base;
     process->resources().next_mapping_address = 0x2000'0000;
     process->signals() = {};
-    for (usize index = 1; index < process->threads().size(); ++index)
-        forget_queued(pid, process->threads()[index]);
-    while (process->threads().size() > 1)
-        static_cast<void>(process->threads().erase_at(1));
-    auto &thread = process->threads()[0];
+    // Siblings hold nothing any more (their leases are escrowed): their
+    // slots are cleared in place and the leader's slot carries the image.
+    for (usize index = 1; index < max_threads_per_process; ++index)
+        if (process->thread_slot(index).slot_state != ThreadSlotState::free)
+            free_thread_slot(*process, process->thread_slot(index));
+    auto &thread = process->leader();
     thread.context = context;
     thread.tls = {};
     thread.native_deadline.cancel();
@@ -1451,6 +1519,7 @@ Status SchedulerState::replace_image(ProcessId pid, arch::CpuContext context, co
     thread.wait_reason = ThreadWaitReason::none;
     thread.wait_key = 0;
     thread.state = ProcessState::runnable;
+    thread.slot_state = ThreadSlotState::live;
     process->set_state(ProcessState::runnable);
     process->set_execution(context.mode == arch::PrivilegeMode::user ? ProcessExecution::user_process
                                                                      : ProcessExecution::kernel_thread);
@@ -1482,7 +1551,7 @@ Status SchedulerState::finish_process(ProcessId pid, i32 code, u8 signal)
         return Status::busy("prepared descriptor operation must finish before exit");
     if (process->state() == ProcessState::zombie || process->state() == ProcessState::exited)
         return Status::already_exists("process has already exited");
-    for (const auto &thread : process->threads())
+    for (const auto &thread : process->thread_records())
         if (thread.entry_stack.pool || thread.kernel_stack_top)
             return Status::busy("thread entry stacks must be retired before process exit");
     // Adoption is validated before the completion becomes observable.
@@ -1497,7 +1566,7 @@ Status SchedulerState::finish_process(ProcessId pid, i32 code, u8 signal)
     process->set_state(ProcessState::zombie);
     if (process->job_.stopped) --stopped_count_;
     process->job_ = {};
-    for (auto &thread : process->threads())
+    for (auto &thread : process->thread_records())
     {
         thread.native_deadline.cancel();
         thread.wait_registration.cancel();
@@ -1505,7 +1574,13 @@ Status SchedulerState::finish_process(ProcessId pid, i32 code, u8 signal)
         thread.wait_reason = ThreadWaitReason::none;
         thread.wait_key = 0;
         thread.state = ProcessState::exited;
-        forget_queued(pid, thread);
+        thread.slot_state = ThreadSlotState::exited;
+        forget_queued(*process, thread);
+    }
+    if (auto *slot = visible_slot(pid))
+    {
+        TaskGuard guard{*slot};
+        slot->lifecycle.store(static_cast<u32>(ProcessLifecycle::zombie), std::memory_order_release);
     }
     release_resources(process->resources());
     clear_current(pid);
@@ -1604,8 +1679,6 @@ Status SchedulerState::reparent_children(ProcessId from, ProcessId to)
 Status SchedulerState::reap_process(ProcessId pid)
 {
     smp::check_exclusive("SchedulerState::reap_process");
-    if (active_unix_receives_ || active_descriptor_reservations_)
-        return Status::busy("prepared UNIX receives prevent process compaction");
     // A dead init is a terminal boot condition; PID 1 is never recycled.
     if (pid == user_init_pid && find(pid))
         return Status::busy("init must remain available for recovery diagnosis");
@@ -1614,17 +1687,16 @@ Status SchedulerState::reap_process(ProcessId pid)
         return Status::not_found("process not found");
     if (process->state() != ProcessState::zombie && process->state() != ProcessState::exited)
         return Status::invalid_argument("process is not a zombie");
-    for (const auto &thread : process->threads())
+    for (const auto &thread : process->thread_records())
         if (thread.entry_stack.pool || thread.kernel_stack_top)
             return Status::busy("thread entry stacks must be retired before reaping");
     if (process->resources().native_space.root != 0 || !process->resources().native_pages.empty())
         return Status::busy("native address space must be released before reaping");
-    // Compaction below moves every later PCB, so no kernel section of any
-    // process may still hold one: wait for them and commit their results.
-    smp::drain_all();
+    // Nothing moves: other processes' PCBs, a kernel section's bound caller
+    // and pinned slots stay where they are, so no drain is needed.
     retire_console_process(pid);
 #if defined(OK_NATIVE_SIGNAL_RUNTIME)
-    if (auto status = user::native::private_signal_before_process_compaction(*this); !status)
+    if (auto status = user::native::private_signal_before_process_reap(*this); !status)
         return status;
 #endif
     const auto parent = process->parent_pid();
@@ -1633,23 +1705,14 @@ Status SchedulerState::reap_process(ProcessId pid)
     static_cast<void>(reparent_children(pid, 0));
     release_resources(process->resources());
     clear_current(pid);
-    for (auto &thread : process->threads())
-        forget_queued(pid, thread);
-    for (usize i = 0; i < processes_.size(); ++i)
-        if (processes_[i].pid() == pid)
-        {
-            // The erased process has released its external resources. Shift
-            // ownership once and clear the vacated final slot.
-            for (usize next = i + 1; next < processes_.size(); ++next)
-                processes_[next - 1] = std::move(processes_[next]);
-            if (auto status = processes_.pop_back(); !status) return status;
-#if defined(OK_NATIVE_SIGNAL_RUNTIME)
-            return user::native::private_signal_after_process_compaction(*this);
-#else
-            return Status::success();
-#endif
-        }
-    return Status::not_found("process not found");
+    for (auto &thread : process->thread_records())
+        forget_queued(*process, thread);
+    auto *slot = visible_slot(pid);
+    if (!slot) return Status::not_found("process not found");
+    // The process released its external resources. Its slot is freed now,
+    // or by the last unpin; the PCB stays in place until reallocation.
+    release_process_slot(*slot);
+    return Status::success();
 }
 
 Status SchedulerState::detach_completed_child_to_reaper(ProcessId parent, ProcessId child)
@@ -1668,7 +1731,7 @@ Status SchedulerState::detach_completed_child_to_reaper(ProcessId parent, Proces
     for (const auto id : owner->children()) links += id == child;
     if (links != 1)
         return Status::fault("completed child requires exactly one parent link");
-    for (const auto &other : processes_)
+    for (const auto &other : process_range())
         if (other.pid() != parent)
             for (const auto id : other.children())
                 if (id == child)
@@ -1677,13 +1740,13 @@ Status SchedulerState::detach_completed_child_to_reaper(ProcessId parent, Proces
         return Status::invalid_argument("child completion has not been published");
     if (!process->children().empty())
         return Status::busy("completed child descendants must be reparented first");
-    for (const auto &thread : process->threads())
+    for (const auto &thread : process->thread_records())
         if (thread.state != ProcessState::exited || thread.entry_stack.pool || thread.kernel_stack_top ||
             thread.native_active || thread.syscall_pending || thread.native_deadline.armed() ||
             thread.wait_registration.active() || thread.wait_reason != ThreadWaitReason::none || thread.wait_key)
             return Status::busy("completed child threads must be retired first");
     for (smp::CpuId cpu = 0; cpu < cpu_count_; ++cpu)
-        if (current_by_cpu_[cpu] == child)
+        if (cpu_slots_[cpu].pid == child)
             return Status::busy("completed child is still selected on a CPU");
     const auto &resources = process->resources();
     if (resources.native_space.root || !resources.native_pages.empty() || resources.files.open_count() ||
@@ -1702,15 +1765,13 @@ Status SchedulerState::detach_completed_child_to_reaper(ProcessId parent, Proces
 Status SchedulerState::reap_orphans_checked(OrphanReapProgress &progress)
 {
     progress = {};
-    for (usize i = 0; i < processes_.size();)
+    for (auto &slot : slots_)
     {
-        const auto &process = processes_[i];
+        if (!slot.visible()) continue;
+        const auto &process = slot.pcb;
         if (process.pid() == user_init_pid || process.parent_pid() != 0 ||
             (process.state() != ProcessState::zombie && process.state() != ProcessState::exited))
-        {
-            ++i;
             continue;
-        }
         const auto pid = process.pid();
         if (auto status = reap_process(pid); !status)
         {
@@ -1727,15 +1788,14 @@ Status SchedulerState::reap_orphans_checked(OrphanReapProgress &progress)
 usize SchedulerState::reap_orphans()
 {
     usize reaped = 0;
-    for (usize i = 0; i < processes_.size();)
+    for (auto &slot : slots_)
     {
-        const auto &process = processes_[i];
+        if (!slot.visible()) continue;
+        const auto &process = slot.pcb;
         if (process.pid() != user_init_pid && process.parent_pid() == 0 &&
             (process.state() == ProcessState::zombie || process.state() == ProcessState::exited) &&
             reap_process(process.pid()).ok())
             ++reaped;
-        else
-            ++i;
     }
     return reaped;
 }
@@ -1748,7 +1808,7 @@ ThreadControlBlock *SchedulerState::find_thread(ProcessId pid, ThreadId tid)
 {
     smp::check_exclusive("SchedulerState::find_thread");
     if (auto *process = find(pid))
-        for (auto &thread : process->threads())
+        for (auto &thread : process->thread_records())
             if (thread.tid == tid)
                 return &thread;
     return nullptr;
@@ -1773,14 +1833,14 @@ Result<WaitTicket> SchedulerState::register_current_wait(ThreadWaitReason reason
         return Status::not_found("no current thread to block");
     if (current->state != ProcessState::running)
         return Status::busy("wait owner is not running");
-    auto ticket = current->wait_registration.arm(process->pid(), current->tid);
+    auto ticket = current->wait_registration.arm(process->pid(), current->tid, process->thread_index(*current));
     if (!ticket)
         return ticket.status();
     current->state = ProcessState::blocked;
     current->wait_reason = reason;
     current->wait_key = key;
     bool runnable = false;
-    for (const auto &thread : process->threads())
+    for (const auto &thread : process->live_threads())
         if (thread.state == ProcessState::runnable || thread.state == ProcessState::running)
             runnable = true;
     if (!runnable)
@@ -1790,8 +1850,13 @@ Result<WaitTicket> SchedulerState::register_current_wait(ThreadWaitReason reason
 bool SchedulerState::complete_wait(WaitTicket ticket, WaitCompletion completion, WakeSource source)
 {
     smp::check_exclusive("SchedulerState::complete_wait");
-    auto *process = find(ticket.owner);
-    auto *thread = find_thread(ticket.owner, ticket.thread);
+    // O(1): the ticket names the waiter's slot; a reused slot holds another
+    // tid. A registration armed outside register_current_wait has no slot.
+    auto *thread = ticket.index != invalid_thread_index
+                       ? thread_at({ticket.index, static_cast<u32>(ticket.thread)})
+                       : find_thread(ticket.owner, ticket.thread);
+    if (thread && thread->owner != ticket.owner) thread = nullptr;
+    auto *process = thread ? find(ticket.owner) : nullptr;
     if (!process || !thread || process->state() == ProcessState::zombie ||
         process->state() == ProcessState::exited || thread->state != ProcessState::blocked ||
         !thread->wait_registration.complete(ticket, completion, source))
@@ -1809,11 +1874,11 @@ bool SchedulerState::complete_wait(WaitTicket ticket, WaitCompletion completion,
 void SchedulerState::wake_waiters(ThreadWaitReason reason, u64 key, WakeSource source)
 {
     smp::check_exclusive("SchedulerState::wake_waiters");
-    for (auto &process : processes_)
+    for (auto &process : process_range())
     {
         if (process.state() == ProcessState::zombie || process.state() == ProcessState::exited)
             continue;
-        for (auto &thread : process.threads())
+        for (auto &thread : process.live_threads())
             if (thread.state == ProcessState::blocked && thread.wait_reason == reason && thread.wait_key == key)
             {
                 static_cast<void>(complete_wait(thread.wait_registration.ticket(), WaitCompletion::ready, source));

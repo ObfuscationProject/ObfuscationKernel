@@ -26,9 +26,9 @@ Group create(Kernel &kernel)
     p->resources().personality = sched::UserPersonality::linux;
     p->resources().native_space = {0x100000 + made.value() * 4096, static_cast<u32>(made.value() % 16), 1};
     CHECK(native::allocate(p->resources().native_pages, hw::user_begin, hw::page_read | hw::page_write | hw::page_execute));
-    auto peer = kernel.scheduler().create_thread(p->pid(), p->threads()[0].context); CHECK(peer);
-    for (auto &thread : p->threads()) { CHECK(native::prepare_native_thread(thread)); thread.native_active = true; }
-    p->threads()[0].native_active = false;
+    auto peer = kernel.scheduler().create_thread(p->pid(), p->leader().context); CHECK(peer);
+    for (auto &thread : p->thread_records()) { CHECK(native::prepare_native_thread(thread)); thread.native_active = true; }
+    p->leader().native_active = false;
     CHECK(kernel.scheduler().set_runnable(p->pid()));
     CHECK(kernel.scheduler().activate_thread(p->pid(), p->pid())); CHECK(kernel.posix().activate(p->pid()));
     native::runtime_kernel = &kernel; native::started = true;

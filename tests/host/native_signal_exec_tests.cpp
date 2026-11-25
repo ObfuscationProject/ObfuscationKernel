@@ -321,7 +321,7 @@ void lookup_cases(Kernel &kernel,sched::ProcessId pid,uptr scratch)
 {
     auto *p=kernel.scheduler().find(pid);const auto space=p->resources().native_space;
     const auto leader=pid;
-    auto created=kernel.scheduler().create_thread_prepared(pid,p->threads()[0].context,[](auto &thread){
+    auto created=kernel.scheduler().create_thread_prepared(pid,p->leader().context,[](auto &thread){
         thread.native_active=true;return native::prepare_native_thread(thread);});CHECK(created);
     const auto peer=created.value();
     CHECK(kernel.scheduler().activate_thread(pid,peer));
@@ -343,7 +343,7 @@ void lookup_cases(Kernel &kernel,sched::ProcessId pid,uptr scratch)
     const auto before=mock::events.size();
     CHECK(query(kernel,pid,0xffffffffU,scratch,scratch)==-3);
     CHECK(query(kernel,pid,999999,scratch,scratch)==-3);
-    auto outside=kernel.scheduler().create_user_process("outside",p->threads()[0].context);CHECK(outside);
+    auto outside=kernel.scheduler().create_user_process("outside",p->leader().context);CHECK(outside);
     kernel.scheduler().find(outside.value())->resources().personality=sched::UserPersonality::linux;
     CHECK(query(kernel,pid,outside.value(),scratch,scratch)==-1);
     CHECK(mock::events.size()==before);mock::deny_write=0;
@@ -353,7 +353,7 @@ void lookup_cases(Kernel &kernel,sched::ProcessId pid,uptr scratch)
     bool complete=true;CHECK(native::dispatch(kernel,pid,{OK_SYS_EXIT,{0}},complete)==0 && !complete);
     CHECK(kernel.scheduler().activate_thread(pid,peer));
     CHECK(query(kernel,pid,leader,scratch,scratch+8)==0 && word(space,scratch)==0);
-    auto other=kernel.scheduler().create_thread_prepared(pid,p->threads()[0].context,[](auto &thread){
+    auto other=kernel.scheduler().create_thread_prepared(pid,p->leader().context,[](auto &thread){
         thread.native_active=true;return native::prepare_native_thread(thread);});CHECK(other);
     CHECK(kernel.scheduler().activate_thread(pid,other.value()));
     complete=true;CHECK(native::dispatch(kernel,pid,{OK_SYS_EXIT,{0}},complete)==0 && !complete);
@@ -361,8 +361,8 @@ void lookup_cases(Kernel &kernel,sched::ProcessId pid,uptr scratch)
     CHECK(query(kernel,pid,other.value(),scratch,scratch+8)==-3);
     // Fork resets registration while the original value remains unchanged.
     auto child=kernel.scheduler().fork_process(pid,false);CHECK(child);
-    CHECK(kernel.scheduler().find(child.value())->threads()[0].tls.robust_list==0);
-    CHECK(kernel.scheduler().find(child.value())->threads()[0].tls.robust_list_length==0);
+    CHECK(kernel.scheduler().find(child.value())->leader().tls.robust_list==0);
+    CHECK(kernel.scheduler().find(child.value())->leader().tls.robust_list_length==0);
     CHECK(kernel.scheduler().find_thread(pid,peer)->tls.robust_list==1);
     std::puts("PASS SDK28 lookup: caller/peer/signed32/overlap/fault-order/cross-group/leader-zombie/retired-peer/fork-reset guest=0");
 }
@@ -388,19 +388,19 @@ int main(int argc,char **argv)
     auto image=native::load(kernel,"/old",args);CHECK(image);
     auto created=kernel.scheduler().create_user_process("sdk28-mask-regression",kernel.arch().make_user_context({image.value().frame.pc,image.value().frame.sp}));CHECK(created);
     const auto pid=created.value();auto *process=kernel.scheduler().find(pid);
-    CHECK(native::prepare_native_thread(process->threads()[0]));native::install(*process,image.value());
+    CHECK(native::prepare_native_thread(process->leader()));native::install(*process,image.value());
     CHECK(process->resources().personality==sched::UserPersonality::linux);
-    CHECK(process->threads()[0].native_signal_mask==sched::SignalMask{});
+    CHECK(process->leader().native_signal_mask==sched::SignalMask{});
     CHECK(kernel.scheduler().set_runnable(pid));CHECK(kernel.posix().activate(pid));
     const auto old_space=process->resources().native_space;
-    const uptr scratch=process->threads()[0].native_frame.sp-4096;
+    const uptr scratch=process->leader().native_frame.sp-4096;
     if(std::strcmp(argv[2],"lookup")==0) {mock::observe=true;lookup_cases(kernel,pid,scratch);return 0;}
-    auto first=kernel.scheduler().create_thread_prepared(pid,process->threads()[0].context,[](auto &t){t.native_active=true;return native::prepare_native_thread(t);});CHECK(first);
-    auto second=kernel.scheduler().create_thread_prepared(pid,process->threads()[0].context,[](auto &t){t.native_active=true;return native::prepare_native_thread(t);});CHECK(second);
+    auto first=kernel.scheduler().create_thread_prepared(pid,process->leader().context,[](auto &t){t.native_active=true;return native::prepare_native_thread(t);});CHECK(first);
+    auto second=kernel.scheduler().create_thread_prepared(pid,process->leader().context,[](auto &t){t.native_active=true;return native::prepare_native_thread(t);});CHECK(second);
     const auto caller=first.value(), sibling=second.value();
     sched::SignalMask leader_mask, caller_mask, sibling_mask;
     leader_mask.set(10); caller_mask.set(12); sibling_mask.set(14);
-    process->threads()[0].native_signal_mask=leader_mask;
+    process->leader().native_signal_mask=leader_mask;
     kernel.scheduler().find_thread(pid,caller)->native_signal_mask=caller_mask;
     kernel.scheduler().find_thread(pid,sibling)->native_signal_mask=sibling_mask;
     const auto damaged=kernel.scheduler().find_thread(pid,caller)->entry_stack;
@@ -429,13 +429,13 @@ int main(int argc,char **argv)
         const auto result=native::dispatch(kernel,pid,{OK_SYS_EXECVE,{scratch,0,0,0,0,0}},complete);
         CHECK(result<0 && complete);mock::fail_create=false;
         if(!loader_failure) kernel.scheduler().find_thread(pid,caller)->kernel_stack_top^=1;
-        CHECK(process->threads().size()==3 && mock::frames()==old_frames && mock::live()==1);
-        CHECK(process->threads()[0].native_signal_mask==leader_mask);
+        CHECK(process->record_count()==3 && mock::frames()==old_frames && mock::live()==1);
+        CHECK(process->leader().native_signal_mask==leader_mask);
         CHECK(kernel.scheduler().find_thread(pid,caller)->native_signal_mask==caller_mask);
         CHECK(kernel.scheduler().find_thread(pid,sibling)->native_signal_mask==sibling_mask);
         CHECK(native::same_space(old_space,process->resources().native_space));
         CHECK(kernel.scheduler().find_thread(pid,caller)->tls.robust_list==head1);
-        CHECK(process->threads()[0].tls.robust_list==head0);
+        CHECK(process->leader().tls.robust_list==head0);
         CHECK(kernel.scheduler().find_thread(pid,sibling)->tls.robust_list==head2);
         CHECK(read32(old_space,head0+48)==(pid|0x80000000U));
         CHECK(read32(old_space,head1+48)==((oldowner?caller:pid)|0x80000000U));
@@ -450,7 +450,7 @@ int main(int argc,char **argv)
     }
     mock::events.clear();mock::check_old_destroy=true;native::started=true;native::runtime_kernel=&kernel;
     CHECK(native::dispatch(kernel,pid,{OK_SYS_EXECVE,{scratch,0,0,0,0,0}},complete)==0 && !complete);
-    CHECK(process->threads().size()==1 && process->threads()[0].tls.robust_list==0);
+    CHECK(process->record_count()==1 && process->leader().tls.robust_list==0);
     std::vector<uptr> order;
     for(const auto &e:mock::events) for(auto tracked:mock::tracked) if(e.address==tracked) {
         CHECK(native::same_space(e.space,old_space));order.push_back(e.address);
@@ -475,14 +475,14 @@ int main(int argc,char **argv)
         CHECK(!native::step(kernel) && mock::events.size()==events && mock::entries==entries);
     } else {
         CHECK(native::started && native::runtime_status() && mock::checked_old_destroys==1 && mock::live()==1);
-        CHECK(process->threads()[0].native_signal_mask==caller_mask);
+        CHECK(process->leader().native_signal_mask==caller_mask);
         CHECK(!native::same_space(old_space,process->resources().native_space));
         CHECK(native::entry_stacks.accounting().leased_slots==1 && native::entry_stacks.accounting().quarantined_slots==0);
         // The replacement maps the same user-stack addresses but its contents
         // were never targets of retirement writes.
         CHECK(kernel.scheduler().activate_thread(pid,pid));
         CHECK(query(kernel,pid,0,scratch,scratch+8)==0 && word(process->resources().native_space,scratch)==0);
-        auto &frame=process->threads()[0].native_frame;
+        auto &frame=process->leader().native_frame;
         frame.registers[14]=*lu::Codec<lu::Profile::x86_64>::syscall_number(lu::Operation::rt_sigprocmask);
         frame.registers[9]=999;frame.registers[10]=0;frame.registers[11]=scratch;frame.registers[5]=8;
         bool done=true;

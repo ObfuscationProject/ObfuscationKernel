@@ -34,9 +34,9 @@ Group create(Kernel &kernel)
     p->resources().native_space = {0x100000 + made.value() * 4096, static_cast<u32>(made.value() % 16), 1};
     CHECK(native::allocate(p->resources().native_pages, hw::user_begin, hw::page_read | hw::page_execute));
     CHECK(native::allocate(p->resources().native_pages, hw::user_begin + 4096, hw::page_read | hw::page_execute));
-    auto peer = kernel.scheduler().create_thread(p->pid(), p->threads()[0].context); CHECK(peer);
-    for (auto &thread : p->threads()) { CHECK(native::prepare_native_thread(thread)); thread.native_active = true; }
-    p->threads()[0].native_active = false;
+    auto peer = kernel.scheduler().create_thread(p->pid(), p->leader().context); CHECK(peer);
+    for (auto &thread : p->thread_records()) { CHECK(native::prepare_native_thread(thread)); thread.native_active = true; }
+    p->leader().native_active = false;
     CHECK(kernel.scheduler().set_runnable(p->pid()));
     CHECK(kernel.scheduler().activate_thread(p->pid(), p->pid())); CHECK(kernel.posix().activate(p->pid()));
     native::runtime_kernel = &kernel; native::started = true;
@@ -335,7 +335,7 @@ void consume_and_exec(Kernel &kernel, unsigned mode)
     {
         native::ExecRetirement retirement{*p, g.pid};
         auto replaced = native::replace_entry_stacks(native::entry_stacks, *p,
-            [&] { return kernel.posix().exec(g.pid, p->threads()[0].context, p->resources().memory); });
+            [&] { return kernel.posix().exec(g.pid, p->leader().context, p->resources().memory); });
         expect(replaced && replaced.committed); retirement.consume(kernel, *p);
         expect(!native::pipe_read_object(g.pid, g.reader).pool);
         auto image_retirement = native::ImageRetirementReservation::reserve(); CHECK(image_retirement);
@@ -351,12 +351,12 @@ void consume_and_exec(Kernel &kernel, unsigned mode)
         image.frame = read_frame(a.value()[0]);
         native::release(p->resources().native_space, p->resources().native_pages);
         CHECK(native::install(*p, image));
-        expect(!native::syscall_origins.live(native::syscall_origins.identity(*p, p->threads()[0])));
+        expect(!native::syscall_origins.live(native::syscall_origins.identity(*p, p->leader())));
         Group replacement{g.pid, g.pid}; step_arm(kernel, replacement, a.value()[0]);
         const auto replacement_id = origin(kernel, replacement);
         expect(replacement_id.image > id.image && replacement_id.capture > id.capture);
         expect(!native::syscall_origins.validate_restart(permit.value(), replacement_id,
-            p->threads()[0].native_frame, binding(kernel, replacement)));
+            p->leader().native_frame, binding(kernel, replacement)));
     }
     else if (mode == 2) { CHECK(native::retire_native_thread(*thread)); CHECK(kernel.scheduler().exit_thread(g.pid, g.reader)); native::prune_pipe_reads(kernel); }
     else if (mode == 3) { CHECK(native::set_result(*p, thread->native_frame, -4)); }
@@ -376,7 +376,7 @@ void shared_transaction(Kernel &kernel)
     auto g = create(kernel); auto a = kernel.posix().pipe(0), b = kernel.posix().pipe(0); CHECK(a && b);
     step_arm(kernel, g, a.value()[0]);
     auto *p = kernel.scheduler().find(g.pid);
-    auto made = kernel.scheduler().create_thread(g.pid, p->threads()[0].context); CHECK(made);
+    auto made = kernel.scheduler().create_thread(g.pid, p->leader().context); CHECK(made);
     auto *second = kernel.scheduler().find_thread(g.pid, made.value()); CHECK(native::prepare_native_thread(*second)); second->native_active = true;
     Group h{g.pid, made.value()}; step_arm(kernel, h, b.value()[0]);
     auto *first = kernel.scheduler().find_thread(g.pid, g.reader); second = kernel.scheduler().find_thread(h.pid, h.reader);

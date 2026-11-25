@@ -19,8 +19,8 @@ Group create(Kernel &kernel)
     auto made = kernel.scheduler().create_user_process("pipe-vectors",
         kernel.arch().make_user_context({hw::user_begin, hw::user_begin + 8192})); CHECK(made);
     auto *process = kernel.scheduler().find(made.value()); process->resources().personality = sched::UserPersonality::linux;
-    auto peer = kernel.scheduler().create_thread(process->pid(), process->threads()[0].context); CHECK(peer);
-    for (auto &thread : process->threads()) { CHECK(native::prepare_native_thread(thread)); thread.native_active = true; }
+    auto peer = kernel.scheduler().create_thread(process->pid(), process->leader().context); CHECK(peer);
+    for (auto &thread : process->thread_records()) { CHECK(native::prepare_native_thread(thread)); thread.native_active = true; }
     CHECK(kernel.scheduler().set_runnable(process->pid())); CHECK(kernel.scheduler().activate_thread(process->pid(), process->pid()));
     CHECK(kernel.posix().activate(process->pid())); return {process->pid(), peer.value()};
 }
@@ -223,7 +223,7 @@ void teardown(Kernel &kernel, bool writing, unsigned mode)
     {
         auto *p = kernel.scheduler().find(group.pid); native::ExecRetirement retirement{*p, group.pid};
         auto replaced = native::replace_entry_stacks(native::entry_stacks, *p, [&] {
-            return kernel.posix().exec(group.pid, p->threads()[0].context, p->resources().memory);
+            return kernel.posix().exec(group.pid, p->leader().context, p->resources().memory);
         }); CHECK(replaced && replaced.committed); retirement.consume(kernel, *p);
     }
     expect(!kernel.scheduler().open_description(id) && !object(group, writing).pool); retire(kernel, group);

@@ -14,14 +14,28 @@ namespace ok::sched
 using ProcessId = u64;
 using ThreadId = u64;
 
-// Placement records carry identities, never PCB/TCB addresses: process storage
-// compacts on reap, while task identities are never reused.
+// A thread named by its identities: the external form (syscalls, tests).
 struct ThreadRef
 {
     ProcessId pid{};
     ThreadId tid{};
 
     [[nodiscard]] constexpr bool operator==(const ThreadRef &) const = default;
+};
+
+inline constexpr u16 invalid_thread_index = 0xffff;
+
+// A thread named by its fixed TCB slot (process slot * 8 + thread slot) and
+// its id. Slots never move and tids are never reused (they stay below 2^30),
+// so a handle names its thread exactly while that slot still holds that tid.
+// Placement records carry handles, never PCB/TCB addresses.
+struct ThreadHandle
+{
+    u16 index{invalid_thread_index};
+    u32 tid{};
+
+    [[nodiscard]] constexpr bool valid() const { return index != invalid_thread_index && tid != 0; }
+    [[nodiscard]] constexpr bool operator==(const ThreadHandle &) const = default;
 };
 
 template <typename T>
@@ -33,35 +47,36 @@ concept RunQueueLock = requires(T &lock) {
 
 struct AnyThreadRef
 {
-    [[nodiscard]] constexpr bool operator()(ThreadRef) const { return true; }
+    template <typename Entry> [[nodiscard]] constexpr bool operator()(Entry) const { return true; }
 };
 
 // Every operation takes only this queue's lock and releases it before
 // returning, so a caller never holds two queue locks. `try_take_first` is the
 // stealing edge: it never spins on a contended victim.
 template <typename Q>
-concept RunQueue = requires(Q &queue, const Q &view, ThreadRef ref, AnyThreadRef any) {
+concept RunQueue = requires(Q &queue, const Q &view, typename Q::Entry ref, AnyThreadRef any) {
     { queue.push(ref) } -> std::same_as<Status>;
-    { queue.pop() } -> std::same_as<std::optional<ThreadRef>>;
+    { queue.pop() } -> std::same_as<std::optional<typename Q::Entry>>;
     { queue.remove(ref) } -> std::same_as<bool>;
-    { queue.try_take_first(any) } -> std::same_as<std::optional<ThreadRef>>;
+    { queue.try_take_first(any) } -> std::same_as<std::optional<typename Q::Entry>>;
     { view.contains(ref) } -> std::same_as<bool>;
     { view.size() } -> std::same_as<usize>;
 };
 
-// Bounded FIFO of thread identities owned by one CPU.
-template <usize Capacity, RunQueueLock Lock = smp::SpinLock> class CpuRunQueue final
+// Bounded FIFO of thread names (identities or handles) owned by one CPU.
+template <usize Capacity, RunQueueLock Lock = smp::SpinLock, typename EntryType = ThreadRef> class CpuRunQueue final
 {
     static_assert(Capacity != 0);
 
   public:
+    using Entry = EntryType;
     constexpr CpuRunQueue() = default;
     CpuRunQueue(const CpuRunQueue &) = delete;
     CpuRunQueue &operator=(const CpuRunQueue &) = delete;
 
     [[nodiscard]] static constexpr usize capacity() { return Capacity; }
 
-    Status push(ThreadRef ref)
+    Status push(Entry ref)
     {
         Guard guard{lock_};
         const auto count = count_.load(std::memory_order_relaxed);
@@ -72,7 +87,7 @@ template <usize Capacity, RunQueueLock Lock = smp::SpinLock> class CpuRunQueue f
         return {};
     }
 
-    std::optional<ThreadRef> pop()
+    std::optional<Entry> pop()
     {
         Guard guard{lock_};
         if (count_.load(std::memory_order_relaxed) == 0)
@@ -81,7 +96,7 @@ template <usize Capacity, RunQueueLock Lock = smp::SpinLock> class CpuRunQueue f
     }
 
     // O(n); the remaining entries keep their FIFO order.
-    bool remove(ThreadRef ref)
+    bool remove(Entry ref)
     {
         Guard guard{lock_};
         const auto index = find(ref);
@@ -94,12 +109,12 @@ template <usize Capacity, RunQueueLock Lock = smp::SpinLock> class CpuRunQueue f
     // Removes the oldest entry accepted by `eligible`, which runs under this
     // queue's lock. Returns nothing when the lock is contended.
     template <typename Predicate>
-        requires std::predicate<Predicate &, ThreadRef>
-    std::optional<ThreadRef> try_take_first(Predicate &&eligible)
+        requires std::predicate<Predicate &, Entry>
+    std::optional<Entry> try_take_first(Predicate &&eligible)
     {
         if (!lock_.try_lock())
             return std::nullopt;
-        std::optional<ThreadRef> taken{};
+        std::optional<Entry> taken{};
         const auto count = count_.load(std::memory_order_relaxed);
         for (usize index = 0; index < count; ++index)
             if (eligible(entries_[slot(index)]))
@@ -111,7 +126,7 @@ template <usize Capacity, RunQueueLock Lock = smp::SpinLock> class CpuRunQueue f
         return taken;
     }
 
-    [[nodiscard]] bool contains(ThreadRef ref) const
+    [[nodiscard]] bool contains(Entry ref) const
     {
         Guard guard{lock_};
         return find(ref) != Capacity;
@@ -136,7 +151,7 @@ template <usize Capacity, RunQueueLock Lock = smp::SpinLock> class CpuRunQueue f
 
     [[nodiscard]] usize slot(usize index) const { return (head_ + index) % Capacity; }
 
-    [[nodiscard]] usize find(ThreadRef ref) const
+    [[nodiscard]] usize find(Entry ref) const
     {
         const auto count = count_.load(std::memory_order_relaxed);
         for (usize index = 0; index < count; ++index)
@@ -146,7 +161,7 @@ template <usize Capacity, RunQueueLock Lock = smp::SpinLock> class CpuRunQueue f
     }
 
     // Caller holds the lock and passes an occupied index.
-    ThreadRef take(usize index)
+    Entry take(usize index)
     {
         const auto count = count_.load(std::memory_order_relaxed);
         const auto taken = entries_[slot(index)];
@@ -168,7 +183,7 @@ template <usize Capacity, RunQueueLock Lock = smp::SpinLock> class CpuRunQueue f
     mutable Lock lock_{};
     usize head_{};
     std::atomic<usize> count_{0};
-    std::array<ThreadRef, Capacity> entries_{};
+    std::array<Entry, Capacity> entries_{};
 };
 
 } // namespace ok::sched

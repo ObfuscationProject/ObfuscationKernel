@@ -236,13 +236,18 @@ void check_translation_writer([[maybe_unused]] const sched::ProcessResources &re
 }
 namespace
 {
-// The process whose live space `space` is. The kernel lock holder finds it
-// among the processes; the per-CPU caller binding replaces the scan once user
-// accesses run without that lock.
+// The process whose live space `space` is: almost always the caller this
+// CPU's slot names; otherwise (a copy into another process's space) the
+// kernel lock holder finds it among the processes.
 sched::ProcessControlBlock *space_owner(const hw::AddressSpace &space)
 {
     if (!runtime_kernel || !space.root) return nullptr;
-    for (auto &process : runtime_kernel->scheduler().processes())
+    auto &scheduler = runtime_kernel->scheduler();
+    if (const auto cpu = smp::current_cpu(); cpu < scheduler.cpu_count())
+        if (const auto &slot = scheduler.cpu_slot(cpu); slot.process && slot.process->pid() == slot.pid &&
+                                                        same_space(sched::read_native_space(slot.process->resources()), space))
+            return slot.process;
+    for (auto &process : scheduler.processes())
         if (same_space(sched::read_native_space(process.resources()), space)) return &process;
     return nullptr;
 }
@@ -1218,7 +1223,7 @@ i64 fork_process(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBloc
         return error(result.status());
     const auto child_pid = result.value();
     auto *child = kernel.scheduler().find(child_pid);
-    if (auto status = prepare_native_thread(child->threads()[0]); !status)
+    if (auto status = prepare_native_thread(child->leader()); !status)
     {
         finish(kernel, child_pid, 127);
         static_cast<void>(kernel.posix().wait(pid, child_pid));
@@ -1280,7 +1285,7 @@ i64 fork_process(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBloc
         static_cast<void>(kernel.posix().wait(pid, child_pid));
         return error(copied);
     }
-    if (auto status = encode_result(*child, child->threads()[0].native_frame, 0); !status.ok())
+    if (auto status = encode_result(*child, child->leader().native_frame, 0); !status.ok())
     {
         finish(kernel, child_pid, 127);
         static_cast<void>(kernel.posix().wait(pid, child_pid));
@@ -1294,8 +1299,8 @@ i64 fork_process(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBloc
         return error(status);
     }
 #endif
-    child->threads()[0].native_active = true;
-    child->threads()[0].syscall_pending = false;
+    child->leader().native_active = true;
+    child->leader().syscall_pending = false;
     if (auto status = kernel.scheduler().set_runnable(child_pid); !status)
     {
         finish(kernel, child_pid, 127);

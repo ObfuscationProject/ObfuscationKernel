@@ -30,7 +30,7 @@ i64 robust_registration(Kernel &kernel, sched::ProcessId pid, bool set, const st
             if (owner.execution() != sched::ProcessExecution::user_process ||
                 owner.resources().personality != sched::UserPersonality::linux)
                 continue;
-            for (const auto &thread : owner.threads())
+            for (const auto &thread : owner.thread_records())
                 if (thread.tid == static_cast<u32>(requested) &&
                     (thread.state != sched::ProcessState::exited || thread.tid == owner.pid()))
                     target = &thread;

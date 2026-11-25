@@ -263,17 +263,17 @@ Owner create_owner(Kernel &kernel, usize threads)
     CHECK(created);
     owner.pid = created.value();
     auto *process = kernel.scheduler().find(owner.pid);
-    CHECK(native::prepare_native_thread(process->threads()[0]));
-    owner.tids[0] = process->threads()[0].tid;
+    CHECK(native::prepare_native_thread(process->leader()));
+    owner.tids[0] = process->leader().tid;
     for (usize i = 1; i < threads; ++i)
     {
-        auto peer = kernel.scheduler().create_thread_prepared(owner.pid, process->threads()[0].context,
+        auto peer = kernel.scheduler().create_thread_prepared(owner.pid, process->leader().context,
             [](sched::ThreadControlBlock &created) { return native::prepare_native_thread(created); });
         CHECK(peer);
         owner.tids[i] = peer.value();
     }
     CHECK(kernel.scheduler().set_runnable(owner.pid));
-    for (auto &thread : process->threads())
+    for (auto &thread : process->thread_records())
     {
         thread.native_active = true;
         thread.native_frame.pc = hw::user_begin + thread.tid * 16;
@@ -416,7 +416,7 @@ void pressure_and_cleanup(Kernel &kernel)
     sched::MemoryMap memory;
     auto *exec_owner = kernel.scheduler().find(owners[3].pid);
     CHECK(native::replace_entry_stacks(native::entry_stacks, *exec_owner, [&] {
-        return kernel.scheduler().replace_image(owners[3].pid, exec_owner->threads()[0].context, memory);
+        return kernel.scheduler().replace_image(owners[3].pid, exec_owner->leader().context, memory);
     }));
     CHECK(native::step(kernel));
     CHECK(mock::outputs == exec_outputs);

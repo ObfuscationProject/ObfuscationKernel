@@ -11,18 +11,15 @@ static usize checks;
 #define CHECK(x) do { ++checks; if (!(x)) { std::fprintf(stderr, "%d: %s\n", __LINE__, #x); std::abort(); } } while (false)
 
 namespace {
-usize before_calls, after_calls, fail_before, fail_after;
-constexpr std::string_view before_failure = "injected pre-erase relocation failure";
-constexpr std::string_view after_failure = "injected post-erase relocation failure";
+usize before_calls, fail_before;
+constexpr std::string_view before_failure = "injected pre-reap hook failure";
 }
 namespace ok::user::native {
-Status private_signal_before_process_compaction(sched::SchedulerState &)
+// Reap has one hook, before the slot is released; slots never move, so no
+// post-erase relocation hook exists any more.
+Status private_signal_before_process_reap(sched::SchedulerState &)
 {
     return ++before_calls == fail_before ? Status::fault(before_failure) : Status::success();
-}
-Status private_signal_after_process_compaction(sched::SchedulerState &)
-{
-    return ++after_calls == fail_after ? Status::io_error(after_failure) : Status::success();
 }
 }
 
@@ -40,7 +37,7 @@ struct Fixture
     std::unique_ptr<Scheduler> storage{std::make_unique<Scheduler>()};
     Scheduler &scheduler{*storage};
     arch::CpuContext context{arch::configured_arch_operations().make_kernel_context(0x1000, 0x8000)};
-    Fixture() { before_calls = after_calls = fail_before = fail_after = 0; }
+    Fixture() { before_calls = fail_before = 0; }
     ProcessId process()
     {
         const auto result = scheduler.create_process("autoreap", context);
@@ -76,7 +73,7 @@ struct StorageSnapshot
     {
         for (const auto &process : scheduler.processes()) {
             processes[process_count++] = {process.pid(), 0, &process};
-            for (const auto &thread : process.threads())
+            for (const auto &thread : process.thread_records())
                 threads[thread_count++] = {process.pid(), thread.tid, &thread};
         }
     }
@@ -95,10 +92,10 @@ void rejected_without_mutation(Scheduler &scheduler, Action action)
 {
     auto image = std::make_unique<std::array<unsigned char, sizeof(Scheduler)>>();
     std::memcpy(image->data(), &scheduler, sizeof(scheduler));
-    const auto before = before_calls, after = after_calls;
+    const auto before = before_calls;
     CHECK(!action());
     CHECK(std::memcmp(image->data(), &scheduler, sizeof(scheduler)) == 0);
-    CHECK(before_calls == before && after_calls == after);
+    CHECK(before_calls == before);
 }
 
 void detach_lifetime_and_waiters()
@@ -129,13 +126,13 @@ void detach_lifetime_and_waiters()
     CHECK(f.scheduler.find(parent)->children()[0] == first && f.scheduler.find(parent)->children()[1] == last);
     CHECK(f.scheduler.find(grandchild)->state() == ProcessState::runnable);
     CHECK(!f.scheduler.wait_process(parent, child));
-    CHECK(before_calls == 0 && after_calls == 0);
+    CHECK(before_calls == 0);
     rejected_without_mutation(f.scheduler, [&] { return f.scheduler.detach_completed_child_to_reaper(parent, child); });
     OrphanReapProgress progress{99, 99, true};
     CHECK(f.scheduler.reap_orphans_checked(progress));
     CHECK(progress.reaped == 1 && !progress.failed_pid && !progress.failed_after_erase);
     CHECK(!f.scheduler.find(child) && f.scheduler.find(grandchild));
-    CHECK(before_calls == 1 && after_calls == 1);
+    CHECK(before_calls == 1);
     CHECK(!f.scheduler.complete_wait(selected.value(), WaitCompletion::interrupted));
     CHECK(!f.scheduler.complete_wait(any.value(), WaitCompletion::interrupted));
     CHECK(f.scheduler.reap_orphans_checked(progress));
@@ -165,7 +162,7 @@ void detach_rejection_matrix()
         f.finish(child);
         auto *owner = f.scheduler.find(parent);
         auto *process = f.scheduler.find(child);
-        auto &thread = process->threads()[0];
+        auto &thread = process->leader();
         ProcessId request_parent = parent, request_child = child;
         switch (mode) {
         case 0: request_parent = 0; break;
@@ -206,10 +203,10 @@ void detach_rejection_matrix()
     f.finish(child);
     auto *process = f.scheduler.find(child);
     process->set_state(ProcessState::runnable);
-    process->threads()[0].state = ProcessState::runnable;
+    process->leader().state = ProcessState::runnable;
     CHECK(f.scheduler.activate(child));
     process->set_state(ProcessState::zombie);
-    process->threads()[0].state = ProcessState::exited;
+    process->leader().state = ProcessState::exited;
     rejected_without_mutation(f.scheduler, [&] { return f.scheduler.detach_completed_child_to_reaper(parent, child); });
 }
 
@@ -225,27 +222,28 @@ void checked_reap_failures_and_legacy_behavior()
         CHECK(!status && status.code() == StatusCode::busy);
         CHECK(progress.reaped == 1 && progress.failed_pid == blocked && !progress.failed_after_erase);
         CHECK(!f.scheduler.find(first) && f.scheduler.find(blocked) && f.scheduler.find(last));
-        CHECK(before_calls == 1 && after_calls == 1);
+        CHECK(before_calls == 1);
         f.scheduler.find(blocked)->resources().native_space = {};
         CHECK(f.scheduler.reap_orphans_checked(progress));
         CHECK(progress.reaped == 2 && !progress.failed_pid && !progress.failed_after_erase);
     }
-    for (bool after : {false, true}) {
+    {
+        // A failing pre-reap hook stops the pass before that slot is released.
         Fixture f;
         const auto first = f.process(), failed = f.process(), last = f.process();
         f.finish(first); f.finish(failed); f.finish(last);
-        if (after) fail_after = 2; else fail_before = 2;
+        fail_before = 2;
         OrphanReapProgress progress;
         const auto status = f.scheduler.reap_orphans_checked(progress);
-        CHECK(!status && status.code() == (after ? StatusCode::io_error : StatusCode::fault));
-        CHECK(status.message() == (after ? after_failure : before_failure));
-        CHECK(progress.reaped == (after ? 2U : 1U));
-        CHECK(progress.failed_pid == failed && progress.failed_after_erase == after);
-        CHECK(!f.scheduler.find(first) && bool(f.scheduler.find(failed)) == !after && f.scheduler.find(last));
-        CHECK(before_calls == 2 && after_calls == (after ? 2U : 1U));
-        fail_before = fail_after = 0;
+        CHECK(!status && status.code() == StatusCode::fault);
+        CHECK(status.message() == before_failure);
+        CHECK(progress.reaped == 1U);
+        CHECK(progress.failed_pid == failed && !progress.failed_after_erase);
+        CHECK(!f.scheduler.find(first) && f.scheduler.find(failed) && f.scheduler.find(last));
+        CHECK(before_calls == 2);
+        fail_before = 0;
         CHECK(f.scheduler.reap_orphans_checked(progress));
-        CHECK(progress.reaped == (after ? 1U : 2U) && !progress.failed_pid && !progress.failed_after_erase);
+        CHECK(progress.reaped == 2U && !progress.failed_pid && !progress.failed_after_erase);
     }
     {
         Fixture f;

@@ -55,8 +55,8 @@ Group create(Kernel &kernel)
     p->resources().personality = sched::UserPersonality::linux;
     p->resources().native_space = {0x100000 + p->pid() * 4096, static_cast<u32>(p->pid() % 16), 1};
     CHECK(native::allocate(p->resources().native_pages, hw::user_begin, hw::page_read | hw::page_execute));
-    const auto peer = kernel.scheduler().create_thread(p->pid(), p->threads()[0].context); CHECK(peer);
-    for (auto &t : p->threads()) { CHECK(native::prepare_native_thread(t)); t.native_active = true; reset_frame(t); }
+    const auto peer = kernel.scheduler().create_thread(p->pid(), p->leader().context); CHECK(peer);
+    for (auto &t : p->thread_records()) { CHECK(native::prepare_native_thread(t)); t.native_active = true; reset_frame(t); }
     CHECK(kernel.scheduler().set_runnable(p->pid()));
     native::runtime_kernel = &kernel; native::started = true;
     return {p->pid(), peer.value()};
@@ -537,7 +537,7 @@ void owner_retirement(Kernel &kernel, bool suspend)
     expect(!kernel.scheduler().complete_wait(record.ticket, sched::WaitCompletion::ready));
     t.native_active = false; CHECK(kernel.scheduler().exit_thread(g.pid, g.peer));
     auto *p = kernel.scheduler().find(g.pid);
-    auto made = kernel.scheduler().create_thread_prepared(g.pid, p->threads()[0].context, [](auto &next) {
+    auto made = kernel.scheduler().create_thread_prepared(g.pid, p->leader().context, [](auto &next) {
         next.native_active = true; reset_frame(next); return native::prepare_native_thread(next);
     }); CHECK(made); auto &replacement = thread(kernel, g.pid, made.value());
     expect(!native::signal_waits.find(replacement)); input(mask({10}));
@@ -620,10 +620,10 @@ void fork_and_exec(Kernel &kernel, bool suspend)
     activate(kernel, g, g.peer); complete = true;
     expect(native::dispatch(kernel, g.pid, {OK_SYS_EXECVE, {scratch, 0, 0}}, complete) == 0 && !complete);
     auto *p = kernel.scheduler().find(g.pid);
-    expect(p->threads().size() == 1 && p->threads()[0].tid == g.pid);
-    expect(p->threads()[0].native_signal_mask == mask({2, 15}) && !native::signal_waits.find(p->threads()[0]));
+    expect(p->record_count() == 1 && p->leader().tid == g.pid);
+    expect(p->leader().native_signal_mask == mask({2, 15}) && !native::signal_waits.find(p->leader()));
     expect(!native::signal_waits.find(old_leader) && !kernel.scheduler().complete_wait(retired.ticket, sched::WaitCompletion::ready));
-    expect(!p->threads()[0].wait_registration.active()); retire(kernel, g);
+    expect(!p->leader().wait_registration.active()); retire(kernel, g);
 }
 
 void fatal_cleanup(Kernel &kernel, bool frame_fault)
@@ -649,7 +649,7 @@ void fatal_cleanup(Kernel &kernel, bool frame_fault)
     expect(!native::signal_waits.find(old_thread));
     auto *p = kernel.scheduler().find(g.pid);
     expect(p && p->state() == sched::ProcessState::zombie);
-    for (const auto &member : p->threads()) expect(!member.native_active && !member.entry_stack.pool);
+    for (const auto &member : p->thread_records()) expect(!member.native_active && !member.entry_stack.pool);
     retire(kernel, g);
 }
 void fatal_outside_wait(Kernel &kernel, bool process, bool suspend)

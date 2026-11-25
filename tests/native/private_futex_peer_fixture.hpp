@@ -31,7 +31,7 @@ Status peer_failure(const char *message)
 Status setup_peer_fixture(Kernel &kernel, sched::ProcessId pid)
 {
     auto *p = kernel.scheduler().find(pid);
-    if (!p || p->resources().personality != Personality::linux || p->threads().size() != 1)
+    if (!p || p->resources().personality != Personality::linux || p->record_count() != 1)
         return peer_failure("initial-image-is-not-single-linux-elf");
     peer_fixture = {};
     peer_fixture.pid = pid;
@@ -46,9 +46,9 @@ Status setup_peer_fixture(Kernel &kernel, sched::ProcessId pid)
             shared.results[round][role] = shared.observed[round][role] = shared.wakes[round][role] = tests::peer_unwritten;
     if (!hw::copy_to_user(p->resources().native_space, peer_address, &shared, sizeof(shared)))
         return peer_failure("shared-page-is-not-writable");
-    const auto entry = p->threads()[0].native_frame.pc;
-    const auto context = p->threads()[0].context;
-    peer_fixture.tids[0] = p->threads()[0].tid;
+    const auto entry = p->leader().native_frame.pc;
+    const auto context = p->leader().context;
+    peer_fixture.tids[0] = p->leader().tid;
     for (usize role = 1; role < 4; ++role)
     {
         auto thread = kernel.scheduler().create_thread(pid, context);

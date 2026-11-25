@@ -32,8 +32,8 @@ Group create(Kernel &kernel)
     p->resources().personality = sched::UserPersonality::linux;
     p->resources().native_space = {0x100000 + p->pid() * 4096, static_cast<u32>(p->pid() % 16), 1};
     CHECK(native::allocate(p->resources().native_pages, hw::user_begin, hw::page_read | hw::page_execute));
-    const auto peer = kernel.scheduler().create_thread(p->pid(), p->threads()[0].context); CHECK(peer);
-    for (auto &t : p->threads()) { CHECK(native::prepare_native_thread(t)); t.native_active = true; reset_frame(t); }
+    const auto peer = kernel.scheduler().create_thread(p->pid(), p->leader().context); CHECK(peer);
+    for (auto &t : p->thread_records()) { CHECK(native::prepare_native_thread(t)); t.native_active = true; reset_frame(t); }
     CHECK(kernel.scheduler().set_runnable(p->pid()));
     native::runtime_kernel = &kernel; native::started = true;
     return {p->pid(), peer.value()};
@@ -140,7 +140,7 @@ void routing(Kernel &kernel)
     const auto g = create(kernel), sender = create(kernel);
     kernel.scheduler().find(sender.pid)->set_credentials({.uid = 71, .euid = 0});
     action(kernel, g, 10); action(kernel, g, 12);
-    for (auto &t : kernel.scheduler().find(g.pid)->threads()) { t.native_signal_mask.set(10); t.native_signal_mask.set(12); }
+    for (auto &t : kernel.scheduler().find(g.pid)->thread_records()) { t.native_signal_mask.set(10); t.native_signal_mask.set(12); }
     expect(call(kernel, sender, sender.pid, lu::Operation::kill, {g.peer, 10}) == 0);
     expect(kill(kernel, sender, g.pid, 10) == 0);
     expect(shared(kernel, g).pending_mask().contains(10));
@@ -269,7 +269,7 @@ void permissions_and_lifecycle(Kernel &kernel)
     expect(shared(kernel, g).pending_mask().contains(10));
     retire(kernel, child);
     p = kernel.scheduler().find(g.pid);
-    auto newpeer = kernel.scheduler().create_thread_prepared(g.pid, p->threads()[0].context, [](auto &t) {
+    auto newpeer = kernel.scheduler().create_thread_prepared(g.pid, p->leader().context, [](auto &t) {
         t.native_active = true; reset_frame(t); return native::prepare_native_thread(t);
     }); CHECK(newpeer);
     expect(&shared(kernel, g) == q && view(kernel, g, newpeer.value()).peek({}, selected));
@@ -366,11 +366,11 @@ void nonleader_exec(Kernel &kernel)
         std::fprintf(stderr, "PROCESS_SIGNAL_EXEC result=%lld complete=%u\n",
                      static_cast<long long>(exec_result), static_cast<unsigned>(complete));
     expect(exec_result == 0 && !complete);
-    auto *p=kernel.scheduler().find(g.pid); expect(p&&p->threads().size()==1&&p->threads()[0].tid==g.pid);
+    auto *p=kernel.scheduler().find(g.pid); expect(p&&p->record_count()==1&&p->leader().tid==g.pid);
     expect(&shared(kernel,g)==q&&q->identity()==identity&&q->pending_mask().contains(10));
-    expect(native::private_signal_queue(p->threads()[0])->pending_mask().contains(12));
-    expect(!native::private_signal_queue(p->threads()[0])->pending_mask().contains(4));
-    expect(p->threads()[0].native_signal_mask.contains(10)&&p->threads()[0].native_signal_mask.contains(12));
+    expect(native::private_signal_queue(p->leader())->pending_mask().contains(12));
+    expect(!native::private_signal_queue(p->leader())->pending_mask().contains(4));
+    expect(p->leader().native_signal_mask.contains(10)&&p->leader().native_signal_mask.contains(12));
     expect(native::private_signal_table(kernel,g.pid)->find(10)->handler==0);
     expect(native::private_signal_table(kernel,g.pid)->find(14)->handler==1);
     expect(q->consume(ticket)); retire(kernel,g);
@@ -392,7 +392,7 @@ void blocked_fatal(Kernel &kernel)
     expect(kill(kernel, sender, g.pid, 15) == 0 && native::private_signal_find(g.pid)->deferred_fatal == 15);
     expect(!shared(kernel, g).pending_mask().contains(15));
     native::private_signal_find(g.pid)->deferred_fatal = 0;
-    for (auto &t : kernel.scheduler().find(g.pid)->threads()) t.native_signal_mask.set(10);
+    for (auto &t : kernel.scheduler().find(g.pid)->thread_records()) t.native_signal_mask.set(10);
     expect(kill(kernel, sender, g.pid, 10) == 0 && shared(kernel, g).pending_mask().contains(10));
     const auto entries = mock::entries;
     expect(kill(kernel, sender, g.peer, 9) == 0);
@@ -400,7 +400,7 @@ void blocked_fatal(Kernel &kernel)
     // Fatal service is independent of both frame readiness and wait admission.
     native::private_process_signal_fatal(kernel);
     expect(mock::entries == entries && kernel.scheduler().find(g.pid)->state() == sched::ProcessState::zombie);
-    for (const auto &t : kernel.scheduler().find(g.pid)->threads()) expect(!t.native_active && !t.entry_stack.pool);
+    for (const auto &t : kernel.scheduler().find(g.pid)->thread_records()) expect(!t.native_active && !t.entry_stack.pool);
     retire(kernel, g); retire(kernel, sender);
     // Self-kill publishes before the next step retires the current native image.
     const auto self = create(kernel);

@@ -106,7 +106,7 @@ bool jobctl_owe(const PrivateSignalActions &state, u32 signal)
 void jobctl_discard(PrivateSignalActions &state, sched::ProcessControlBlock &process, u32 signal)
 {
     state.shared.discard(signal);
-    for (auto &thread : process.threads())
+    for (auto &thread : process.thread_records())
         if (jobctl_live(thread))
             if (auto *queue = private_signal_queue(thread)) queue->discard(signal);
     private_jobctl_discard_owed(process.pid(), signal);
@@ -257,7 +257,7 @@ void private_jobctl_stop(Kernel &kernel, sched::ProcessControlBlock &process, u3
     }
     // A thread running on another CPU leaves user mode now (Linux
     // kick_process), not at its next tick; no step enters it again.
-    for (const auto &thread : process.threads())
+    for (const auto &thread : process.thread_records())
         if (thread.on_cpu != sched::no_cpu && thread.on_cpu != smp::current_cpu())
             smp::send_ipi(thread.on_cpu, smp::ipi_kick);
     jobctl_notify_parent(kernel, process, sched::ChildExitStatus::stopped(signal));
@@ -272,7 +272,7 @@ void private_jobctl_settle(Kernel &kernel)
             continue;
         auto *state = private_signal_find(process.pid());
         if (!state) continue;
-        for (auto &thread : process.threads())
+        for (auto &thread : process.thread_records())
         {
             if (!thread.native_active || thread.state != sched::ProcessState::blocked) continue;
             const auto signal = jobctl_take_stop(*state, thread);
@@ -291,7 +291,7 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
     // 1. A departed target accepts nothing; a live group needs a live thread.
     if (jobctl_completed(recipient)) return JobSignalOutcome::departed;
     bool live = false;
-    for (const auto &thread : recipient.threads()) live |= jobctl_live(thread);
+    for (const auto &thread : recipient.thread_records()) live |= jobctl_live(thread);
     if (!live) return request.kernel ? JobSignalOutcome::departed : JobSignalOutcome::refused;
     const auto &numbering = jobctl_numbering(recipient);
     const bool linux = recipient.resources().personality == Personality::linux;
@@ -326,7 +326,7 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
     }
     auto *named = scheduler.find_thread(pid, request.named ? request.named : pid);
     if (!named && !request.directed)
-        for (auto &thread : recipient.threads()) if (jobctl_live(thread)) { named = &thread; break; }
+        for (auto &thread : recipient.thread_records()) if (jobctl_live(thread)) { named = &thread; break; }
     if (request.directed && (!named || !jobctl_live(*named))) return JobSignalOutcome::departed;
     const bool named_blocks = linux && named && jobctl_blocks(*named, signal);
     // 5. Ignored, unless the named task blocks it (Linux sig_ignored). Init
@@ -348,7 +348,7 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
         bool now = !linux;
         if (linux && request.directed) now = jobctl_takes_now(*state, *named, signal, true);
         else if (linux)
-            for (auto &thread : recipient.threads())
+            for (auto &thread : recipient.thread_records())
                 if ((now = jobctl_takes_now(*state, thread, signal, false))) break;
         if (!now) return jobctl_enqueue(kernel, *state, recipient, request.directed ? named : nullptr, request.info);
         if (private_jobctl_discard_stop(kernel, recipient, signal)) return JobSignalOutcome::ignored;
@@ -369,7 +369,7 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
     // is the complete_signal fatal shortcut (never for init). CONT and the
     // stops already acted above, so they are queued rather than refused.
     bool unblocked = false, qualified = false;
-    for (auto &thread : recipient.threads())
+    for (auto &thread : recipient.thread_records())
     {
         if (!jobctl_live(thread) || (request.directed && &thread != named)) continue;
         if (thread.native_signal_mask.contains(signal)) continue;
@@ -854,7 +854,7 @@ void private_terminal_park_settle(Kernel &kernel)
     for (auto &process : kernel.scheduler().processes())
     {
         if (process.resources().personality != Personality::linux || process.job_control().stopped) continue;
-        for (auto &thread : process.threads())
+        for (auto &thread : process.thread_records())
         {
             if (thread.state != sched::ProcessState::blocked || thread.wait_reason != sched::ThreadWaitReason::job_control ||
                 !thread.wait_registration.active()) continue;

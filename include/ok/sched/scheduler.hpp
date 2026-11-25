@@ -7,6 +7,7 @@
 #include "ok/memory/kernel_entry_stack_pool.hpp"
 #include "ok/sched/resources.hpp"
 #include "ok/sched/run_queue.hpp"
+#include "ok/sched/task_table.hpp"
 #include "ok/sched/unix_rights.hpp"
 #include "ok/sched/unix_pathname_sdk_profile.hpp"
 #include "ok/sched/descriptor_reservation.hpp"
@@ -42,8 +43,6 @@ inline constexpr ProcessId user_init_pid = 1;
 // Common Linux-visible task namespace; zero is reserved for boot/service context.
 // Linux robust futex owner words reserve the upper two bits for state flags.
 inline constexpr u64 max_task_id = 0x3fffffffU;
-inline constexpr usize max_processes = 64;
-inline constexpr usize max_threads_per_process = 8;
 inline constexpr usize max_process_name = 32;
 inline constexpr u8 scheduler_min_priority = 0;
 inline constexpr u8 scheduler_default_priority = 16;
@@ -127,10 +126,10 @@ struct ThreadControlBlock
     // The run queue holding this thread's single entry. Dispatch and exit drop
     // the entry; one whose thread blocked meanwhile is discarded when popped.
     smp::CpuId queued_cpu{no_cpu};
-    // sched_setaffinity's mask; the thread runs on CPUs both it and the
-    // process mask allow. Fork and clone copy it; exec gives the new image's
-    // only thread the calling thread's mask.
-    u16 cpu_affinity_mask{cpu_affinity_any};
+    // Whether this fixed slot holds a thread (task_table.hpp). A live slot's
+    // state is never exited; an exited record keeps the slot until reused.
+    // The per-thread affinity mask is a slot word: ProcessSlot::thread_affinity.
+    ThreadSlotState slot_state{ThreadSlotState::free};
 };
 
 // A thread whose allowed CPUs all went offline (docs/modules/sysfs.md): its
@@ -345,13 +344,54 @@ class ProcessControlBlock
         }
         last_cpu_ = cpu;
     }
-    [[nodiscard]] StaticVector<ThreadControlBlock, max_threads_per_process> &threads()
+    // Fixed TCB slots (task_table.hpp): slot 0 is the group leader (tid ==
+    // pid) for every process; a TCB never moves while its slot is in use.
+    using LiveThreads = ThreadSlotRange<ThreadControlBlock, LiveThreadSlot>;
+    using ConstLiveThreads = ThreadSlotRange<const ThreadControlBlock, LiveThreadSlot>;
+    using ThreadRecords = ThreadSlotRange<ThreadControlBlock, RecordedThreadSlot>;
+    using ConstThreadRecords = ThreadSlotRange<const ThreadControlBlock, RecordedThreadSlot>;
+    // Threads that have not exited, in slot order.
+    [[nodiscard]] LiveThreads live_threads() { return {threads_.data(), threads_.size()}; }
+    [[nodiscard]] ConstLiveThreads live_threads() const { return {threads_.data(), threads_.size()}; }
+    // Live threads and exited records, in slot order: what still holds a slot.
+    [[nodiscard]] ThreadRecords thread_records() { return {threads_.data(), threads_.size()}; }
+    [[nodiscard]] ConstThreadRecords thread_records() const { return {threads_.data(), threads_.size()}; }
+    [[nodiscard]] usize live_count() const { return live_threads().size(); }
+    [[nodiscard]] usize record_count() const { return thread_records().size(); }
+    // The leader's slot, whatever its state; the process-wide records hang
+    // off it (signal queue, shutdown owner, the thread exec keeps).
+    [[nodiscard]] ThreadControlBlock &leader() { return threads_[0]; }
+    [[nodiscard]] const ThreadControlBlock &leader() const { return threads_[0]; }
+    // The leader while it lives, else the lowest live slot; null without one.
+    [[nodiscard]] ThreadControlBlock *main_thread();
+    [[nodiscard]] const ThreadControlBlock *main_thread() const;
+    // A slot by position, whatever its state (tests and slot walks).
+    [[nodiscard]] ThreadControlBlock &thread_slot(usize slot) { return threads_[slot]; }
+    [[nodiscard]] const ThreadControlBlock &thread_slot(usize slot) const { return threads_[slot]; }
+    // The position of a TCB of this process; max_threads_per_process otherwise.
+    [[nodiscard]] usize slot_of(const ThreadControlBlock &thread) const
     {
-        return threads_;
+        const auto *base = threads_.data();
+        for (usize i = 0; i < threads_.size(); ++i)
+            if (base + i == &thread) return i;
+        return max_threads_per_process;
     }
-    [[nodiscard]] const StaticVector<ThreadControlBlock, max_threads_per_process> &threads() const
+    // The process slot the scheduler placed this PCB in; 0xffff outside one.
+    [[nodiscard]] u16 process_slot() const { return process_slot_; }
+    // A thread's ThreadHandle index (process slot * 8 + thread slot).
+    [[nodiscard]] u16 thread_index(const ThreadControlBlock &thread) const
     {
-        return threads_;
+        const auto slot = slot_of(thread);
+        return process_slot_ == invalid_thread_index || slot == max_threads_per_process
+                   ? invalid_thread_index
+                   : sched::thread_index(process_slot_, slot);
+    }
+    // The first free slot, or null when all eight hold a record.
+    [[nodiscard]] ThreadControlBlock *free_thread_slot()
+    {
+        for (auto &thread : threads_)
+            if (thread.slot_state == ThreadSlotState::free) return &thread;
+        return nullptr;
     }
 
   private:
@@ -388,14 +428,21 @@ class ProcessControlBlock
     u64 accounted_cpu_time_ticks_{0};
     smp::CpuId last_cpu_{0};
     ProcessCpuAccounting cpu_accounting_{ProcessCpuAccounting::accounted};
-    StaticVector<ThreadControlBlock, max_threads_per_process> threads_{};
+    u16 process_slot_{invalid_thread_index};
+    std::array<ThreadControlBlock, max_threads_per_process> threads_{};
 };
+
+using ProcessSlot = BasicProcessSlot<ProcessControlBlock>;
+using ProcessPin = BasicProcessPin<ProcessSlot>;
+using ProcessRange = BasicProcessRange<ProcessSlot, ProcessControlBlock>;
+using ConstProcessRange = BasicProcessRange<const ProcessSlot, const ProcessControlBlock>;
+using CpuSlot = BasicCpuSlot<ProcessControlBlock, ThreadControlBlock>;
 
 // Policies are kernel build-time choices. The scheduler stores its policy by
 // value so copies cannot retain a pointer into a different scheduler instance.
 template <typename T>
 concept SchedulerPolicy =
-    requires(T &policy, std::span<const ProcessControlBlock> processes, ProcessId current, smp::CpuId cpu) {
+    requires(T &policy, ConstProcessRange processes, ProcessId current, smp::CpuId cpu) {
         { policy.pick_next(processes, current, cpu) } -> std::same_as<Result<ProcessId>>;
     };
 
@@ -406,12 +453,12 @@ class RoundRobinPolicy final
     {
         return "round-robin";
     }
-    Result<ProcessId> pick_next(std::span<const ProcessControlBlock> processes, ProcessId current, smp::CpuId cpu);
+    Result<ProcessId> pick_next(ConstProcessRange processes, ProcessId current, smp::CpuId cpu);
 };
 
 // A queue can hold every thread a process table admits. Lock types are a
 // build-time choice made here, not a runtime queue interface.
-using SchedulerRunQueue = CpuRunQueue<max_processes * max_threads_per_process, smp::SpinLock>;
+using SchedulerRunQueue = CpuRunQueue<max_thread_slots, smp::SpinLock, ThreadHandle>;
 static_assert(RunQueue<SchedulerRunQueue>);
 
 // One open description's offset and flags across one offset-dependent I/O,
@@ -514,18 +561,19 @@ class SchedulerState
         {
             return Status::invalid_argument("cannot create a thread for an exited process");
         }
-        bool live = false;
-        for (const auto &thread : process->threads()) live |= thread.state != ProcessState::exited;
-        if (!live) return Status::invalid_argument("cannot create a thread in a retired group");
+        if (process->live_count() == 0) return Status::invalid_argument("cannot create a thread in a retired group");
+        // An exited record that holds nothing is reused before a free slot;
+        // the leader's slot never is.
         ThreadControlBlock *retired = nullptr;
-        for (auto &thread : process->threads())
-            if (thread.state == ProcessState::exited && thread.tid != pid && !thread.native_active &&
+        for (auto &thread : process->thread_records())
+            if (thread.slot_state == ThreadSlotState::exited && thread.tid != pid && !thread.native_active &&
                 !thread.wait_registration.active() && !thread.entry_stack.pool && !thread.kernel_stack_top)
             {
                 retired = &thread;
                 break;
             }
-        if (!retired && process->threads().full())
+        ThreadControlBlock *slot = retired ? retired : process->free_thread_slot();
+        if (!slot)
             return Status::would_block("thread table capacity exceeded");
         if (next_task_id_ > max_task_id)
             return Status::overflow("task identity exhausted");
@@ -540,13 +588,11 @@ class SchedulerState
         if (auto status = std::forward<Prepare>(prepare)(created); !status)
             return status;
         created.state = ProcessState::runnable;
-        if (retired)
-        {
-            forget_queued(pid, *retired);
-            *retired = created;
-        }
-        else if (auto status = process->threads().push_back(created); !status.ok())
-            return status;
+        created.slot_state = ThreadSlotState::live;
+        if (retired) forget_queued(*process, *retired);
+        *slot = created;
+        // A new thread starts with every CPU; clone then copies its caller's mask.
+        store_thread_affinity(*process, *slot, cpu_affinity_any);
         if (process->state() == ProcessState::created || process->state() == ProcessState::blocked)
         {
             process->set_state(ProcessState::runnable);
@@ -774,10 +820,15 @@ class SchedulerState
     Status offline_cpu(smp::CpuId cpu);
     // A configured CPU joins the online set again; it starts with its empty queue.
     Status online_cpu(smp::CpuId cpu);
+    // A thread's own mask (sched_setaffinity), kept in its process slot's
+    // thread_affinity word; every CPU for a TCB outside the slot table.
+    [[nodiscard]] u16 thread_affinity(const ProcessControlBlock &process, const ThreadControlBlock &thread) const;
+    // Stores a thread's own mask without any check (clone, fork, exec, reset).
+    void store_thread_affinity(const ProcessControlBlock &process, const ThreadControlBlock &thread, u16 mask);
     // The CPUs a thread may run on: its process mask and its own.
-    [[nodiscard]] static u16 effective_affinity(const ProcessControlBlock &process, const ThreadControlBlock &thread)
+    [[nodiscard]] u16 effective_affinity(const ProcessControlBlock &process, const ThreadControlBlock &thread) const
     {
-        return static_cast<u16>(process.cpu_affinity_mask() & thread.cpu_affinity_mask);
+        return static_cast<u16>(process.cpu_affinity_mask() & thread_affinity(process, thread));
     }
     // Whether the thread may run on `cpu`; CPU 0 also admits a thread whose
     // effective mask names no configured CPU (the select_cpu fallback).
@@ -790,8 +841,26 @@ class SchedulerState
     // sched_setaffinity on a thread: invalid_argument when the process mask
     // and `mask` share no online CPU, else the thread mask becomes `mask`.
     Status set_thread_affinity(ProcessControlBlock &process, ThreadControlBlock &thread, u16 mask);
-    // A thread by its id alone (sched_*affinity name threads by tid).
+    // A live thread of a live process by its id alone (sched_*affinity name
+    // threads by tid): a scan of the slot table.
     [[nodiscard]] ThreadControlBlock *find_thread_by_tid(ThreadId tid);
+    // The live thread a handle names; null once its slot holds another tid.
+    [[nodiscard]] ThreadControlBlock *thread_at(ThreadHandle handle);
+    [[nodiscard]] const ThreadControlBlock *thread_at(ThreadHandle handle) const;
+    // The PCB of the slot a thread index falls in, whatever its lifecycle.
+    [[nodiscard]] ProcessControlBlock &slot_process(u16 index) { return slots_[index / max_threads_per_process].pcb; }
+    // A thread's handle; invalid for a TCB outside the slot table.
+    [[nodiscard]] static ThreadHandle handle_of(const ProcessControlBlock &process, const ThreadControlBlock &thread)
+    {
+        return {process.thread_index(thread), static_cast<u32>(thread.tid)};
+    }
+    // Pins the [live, zombie] process `pid` (spec 3.2); empty when none.
+    [[nodiscard]] ProcessPin pin(ProcessId pid);
+    // The process slot holding `pid` in any lifecycle but free; side tables
+    // indexed by process slot check their stored pid against it.
+    [[nodiscard]] std::optional<usize> slot_of(ProcessId pid) const;
+    // Whether a thread is queued on `cpu` (run queues hold handles).
+    [[nodiscard]] bool queued_on(smp::CpuId cpu, ThreadRef ref) const;
     // Broken-affinity records not yet reported, oldest first; the ring keeps
     // the last 16, the count every one.
     [[nodiscard]] std::optional<AffinityBroken> take_affinity_broken();
@@ -859,23 +928,26 @@ class SchedulerState
     {
         return cpu_count_;
     }
-    [[nodiscard]] usize process_count() const
-    {
-        return processes_.size();
-    }
+    // Processes in [live, zombie].
+    [[nodiscard]] usize process_count() const { return processes().size(); }
     [[nodiscard]] usize background_process_count() const;
+    // The [live, zombie] process `pid`: a scan of the 64 slot pid words.
     [[nodiscard]] ProcessControlBlock *find(ProcessId pid);
     [[nodiscard]] const ProcessControlBlock *find(ProcessId pid) const;
-    [[nodiscard]] std::span<ProcessControlBlock> processes()
+    // The [live, zombie] processes in slot order. The PCBs never move; the
+    // caller holds the kernel lock (the task table once it exists).
+    [[nodiscard]] ProcessRange processes()
     {
         smp::check_exclusive("SchedulerState::processes");
-        return {processes_.begin(), processes_.size()};
+        return {slots_.data(), slots_.size()};
     }
-    [[nodiscard]] std::span<const ProcessControlBlock> processes() const
+    [[nodiscard]] ConstProcessRange processes() const
     {
         smp::check_exclusive("SchedulerState::processes");
-        return {processes_.begin(), processes_.size()};
+        return {slots_.data(), slots_.size()};
     }
+    // What `cpu` runs: its caller binding, written by that CPU.
+    [[nodiscard]] const CpuSlot &cpu_slot(smp::CpuId cpu) const { return cpu_slots_[cpu]; }
     [[nodiscard]] CpuSchedulingStats cpu_stats(smp::CpuId cpu) const;
     [[nodiscard]] u64 total_dispatches() const;
     [[nodiscard]] u64 total_accounted_dispatches() const;
@@ -891,8 +963,21 @@ class SchedulerState
     {
         return cpu < cpu_count_ && (online_cpus_ & (1u << cpu)) != 0;
     }
-    // Drops the thread's queue entry, if any; storage moves never need this.
-    void forget_queued(ProcessId pid, ThreadControlBlock &thread);
+    // Drops the thread's queue entry, if any.
+    void forget_queued(const ProcessControlBlock &process, ThreadControlBlock &thread);
+    // processes() without the kernel-lock check, for the scheduler's own walks.
+    [[nodiscard]] ProcessRange process_range() { return {slots_.data(), slots_.size()}; }
+    [[nodiscard]] ConstProcessRange process_range() const { return {slots_.data(), slots_.size()}; }
+    // The [live, zombie] slot holding `pid`; null otherwise.
+    [[nodiscard]] ProcessSlot *visible_slot(ProcessId pid);
+    [[nodiscard]] const ProcessSlot *visible_slot(ProcessId pid) const;
+    // A free slot for a new process: the next free one after the last
+    // allocation, so slot order follows creation order until it wraps.
+    [[nodiscard]] ProcessSlot *claim_process_slot();
+    // Reaped: the slot is freed now, or by the last unpin.
+    void release_process_slot(ProcessSlot &slot);
+    // Clears an exited sibling's slot (exec): it holds no resource any more.
+    void free_thread_slot(ProcessControlBlock &process, ThreadControlBlock &thread);
     void vacate_cpu_slot(usize cpu);
     void occupy_cpu(smp::CpuId cpu, ProcessControlBlock &process, ThreadControlBlock &thread);
     // The CPU 0 fallback of select_cpu admits a thread whose affinity names no configured CPU.
@@ -902,7 +987,7 @@ class SchedulerState
     {
         return thread_admits(process, thread, cpu);
     }
-    [[nodiscard]] bool eligible_on(ThreadRef ref, smp::CpuId queue, smp::CpuId cpu) const;
+    [[nodiscard]] bool eligible_on(ThreadHandle handle, smp::CpuId queue, smp::CpuId cpu) const;
     Result<ProcessId> create_process_with_pid(ProcessId pid, std::string_view name,
                                                arch::CpuContext initial_context);
     [[nodiscard]] Result<ThreadId> pick_next_thread(ProcessControlBlock &process, ThreadId current, smp::CpuId cpu);
@@ -977,7 +1062,7 @@ class SchedulerState
     std::array<OpenFileDescription, max_open_descriptions> descriptions_{};
     std::array<DescriptionPositionLock, max_open_descriptions> positions_{};
     u64 next_unix_receive_token_{1}; // ABI58 diagnostic name; shared by UNIX receive, TCP accept and fd installation.
-    usize active_unix_receives_{}; // Process compaction cannot move a prepared resource owner.
+    usize active_unix_receives_{}; // Shutdown admission waits for prepared resource owners.
     usize active_descriptor_reservations_{};
     bool collecting_unix_rights_{};
     net::NativeUdpService *native_udp_service_{};
@@ -987,15 +1072,14 @@ class SchedulerState
     ResourceDrainReport resource_drain_report_{};
     ProcessResources boot_resources_{};
     SchedulingMode mode_{SchedulingMode::round_robin};
-    StaticVector<ProcessControlBlock, max_processes> processes_{};
+    // Process slots never move or compact (task_table.hpp).
+    std::array<ProcessSlot, max_processes> slots_{};
+    usize next_slot_{};
     friend struct SchedulerIdentityTestAccess;
     u64 next_task_id_{2};
     u64 next_address_space_id_{1};
-    ProcessId current_pid_{0};
     usize cpu_count_{1};
-    std::array<ProcessId, smp::max_cpus> current_by_cpu_{};
-    std::array<ThreadId, smp::max_cpus> current_thread_by_cpu_{};
-    std::array<CpuSchedulingStats, smp::max_cpus> cpu_stats_{};
+    std::array<CpuSlot, smp::max_cpus> cpu_slots_{};
     u32 online_cpus_{1};
     smp::PerCpu<SchedulerRunQueue> run_queues_{};
     std::array<AffinityBroken, 16> affinity_broken_{};

@@ -52,7 +52,7 @@ void native_boundary(Kernel &kernel, sched::ProcessId parent, sched::ProcessId o
     CHECK(invoke(kernel, child.value(), N::getsid) == static_cast<i64>(child.value()));
     CHECK(scheduler.activate(parent));
     CHECK(invoke(kernel, parent, N::setpgid, {child.value(), parent}) == -1);
-    const auto peer = scheduler.create_thread(child.value(), copy->threads()[0].context); CHECK(peer);
+    const auto peer = scheduler.create_thread(child.value(), copy->leader().context); CHECK(peer);
     CHECK(invoke(kernel, parent, N::getpgid, {peer.value()}) == static_cast<i64>(child.value()));
     CHECK(invoke(kernel, parent, N::getsid, {peer.value()}) == static_cast<i64>(child.value()));
     CHECK(invoke(kernel, parent, N::setpgid, {peer.value(), parent}) == -22);

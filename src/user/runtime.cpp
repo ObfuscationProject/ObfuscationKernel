@@ -190,14 +190,14 @@ namespace
 {
 Status validate_group_stacks(const sched::ProcessControlBlock &process)
 {
-    for (const auto &thread : process.threads())
+    for (const auto &thread : process.thread_records())
         if (auto status = validate_entry_stack(entry_stacks, thread); !status) return status;
     return Status::success();
 }
 Status retire_group_stacks(sched::ProcessControlBlock &process)
 {
     if (auto status = validate_group_stacks(process); !status) return status;
-    for (auto &thread : process.threads())
+    for (auto &thread : process.thread_records())
         if (auto status = retire_native_thread(thread
 #ifdef OK_PRIVATE_POLL_MASK
                                                , "group"
@@ -289,7 +289,7 @@ void finish(Kernel &kernel, sched::ProcessId pid, i32 code, u8 signal)
         if (!runtime_failure) return runtime_failure;
         emit_pool_stats();
         emit_entry_stack_stats();
-        for (auto &thread : process->threads())
+        for (auto &thread : process->thread_records())
         {
             thread.native_deadline.cancel();
             thread.native_active = false;
@@ -343,7 +343,7 @@ Status original_init_state(Kernel &kernel)
     if (ids.kernel_space || ids.uid || ids.euid || ids.suid || ids.gid || ids.egid || ids.sgid)
         return Status::denied("shutdown original init requires all six root identities");
     usize live{};
-    for (const auto &thread : process->threads())
+    for (const auto &thread : process->thread_records())
         live += thread.state != sched::ProcessState::exited;
     if (live != 1 || !leader->entry_stack.pool || !leader->kernel_stack_top)
         return Status::denied("shutdown original init must retain its single leader");
@@ -363,7 +363,7 @@ Status shutdown_quiesced_groups(Kernel &kernel, ShutdownOwner owner)
             return Status::busy("native shutdown requires quiesced user child groups");
         if (process.resources().native_space.root || !process.resources().native_pages.empty())
             return Status::busy("completed user child still retains native VM ownership");
-        for (const auto &thread : process.threads())
+        for (const auto &thread : process.thread_records())
             if (thread.native_active || thread.entry_stack.pool || thread.kernel_stack_top || thread.syscall_pending ||
                 thread.wait_registration.active() || thread.native_deadline.armed())
                 return Status::busy("completed user child still retains native continuation ownership");
@@ -470,7 +470,7 @@ NativeShutdownReport shutdown_report(Kernel &kernel)
         result.live_user_groups += process.state() != sched::ProcessState::zombie && process.state() != sched::ProcessState::exited;
         result.address_spaces += process.resources().native_space.root != 0;
         result.mapping_pages += process.resources().native_pages.size();
-        for (const auto &thread : process.threads())
+        for (const auto &thread : process.thread_records())
         {
             result.native_threads += thread.native_active;
             result.wait_members += thread.wait_registration.active() || thread.native_deadline.armed() || thread.syscall_pending;
@@ -631,7 +631,7 @@ Status terminate_native_process(Kernel &kernel, u64 pid, u8 signal)
     if (!process->resources().native_space.root || process->resources().native_pages.empty())
         return Status::invalid_argument("native termination requires a retained address space");
     usize live{};
-    for (const auto &thread : process->threads())
+    for (const auto &thread : process->thread_records())
         if (thread.state != sched::ProcessState::exited)
         {
             if (!thread.native_active || !thread.entry_stack.pool || !thread.kernel_stack_top)
@@ -665,7 +665,7 @@ void release_process(Kernel &kernel, u64 pid)
         clear_group_tids(kernel, *process);
         release_address_space(process->resources());
         emit_entry_stack_stats();
-        for (auto &thread : process->threads())
+        for (auto &thread : process->thread_records())
         {
             thread.native_deadline.cancel();
             thread.wait_registration.cancel();

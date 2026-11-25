@@ -15,7 +15,7 @@ int main()
     const auto pid = created.value();
     CHECK(kernel.posix().activate(pid));
     auto *process = kernel.scheduler().find(pid);
-    auto &thread = process->threads()[0];
+    auto &thread = process->leader();
     CHECK(native::prepare_native_thread(thread));
     thread.native_active = true;
     native::started = true;
@@ -72,7 +72,7 @@ int main()
     CHECK(native::step(kernel) && mock::outputs == before + 1);
     CHECK(kernel.scheduler().open_description(reader)->references == 1);
 
-    // Runtime cleanup finds the exact thread, even when it is not threads()[0].
+    // Runtime cleanup finds the exact thread, even when it is not leader().
     std::array<std::byte, 1> consumed{};
     CHECK(kernel.scheduler().read_pipe(kernel.scheduler().open_description(reader)->pipe, consumed, true));
     auto second = kernel.scheduler().create_thread_prepared(pid, thread.context,

@@ -122,7 +122,7 @@ Session open_console(Kernel &kernel)
     auto &scheduler = kernel.scheduler();
     scheduler.find(session.init)->resources().personality = sched::UserPersonality::native;
     session.login = fork(kernel, session.init);
-    scheduler.find(session.login)->threads()[0].native_active = true;
+    scheduler.find(session.login)->leader().native_active = true;
     const auto epoch = native_call(kernel, session.init, N::console_claim, {session.login});
     expect(epoch > 0);
     session.epoch = static_cast<u32>(epoch);
@@ -130,7 +130,7 @@ Session open_console(Kernel &kernel)
     expect(ioctl(kernel, session.login, OK_TIOCSCTTY) == 0);
     // A Linux job in its own foreground group, catching INT, QUIT and WINCH.
     session.job = fork(kernel, session.login);
-    scheduler.find(session.job)->threads()[0].native_active = true;
+    scheduler.find(session.job)->leader().native_active = true;
     expect(native_call(kernel, session.login, N::setpgid, {session.job, session.job}) == 0);
     scheduler.find(session.job)->resources().personality = sched::UserPersonality::linux;
     for (const u32 signal : {u32{OK_SIGINT}, u32{OK_SIGQUIT}, u32{OK_SIGWINCH}}) handle(kernel, session.job, signal);
@@ -393,7 +393,7 @@ PtySession pty_session(Kernel &kernel, const Session &s, std::array<i32, 2> &fds
     auto &scheduler = kernel.scheduler();
     PtySession p{};
     p.shell = fork(kernel, s.init);
-    scheduler.find(p.shell)->threads()[0].native_active = true;
+    scheduler.find(p.shell)->leader().native_active = true;
     expect(native_call(kernel, p.shell, N::setsid, {}) == static_cast<i64>(p.shell));
     fds = raw_pair(kernel, p.shell);
     // v1: TIOCGPGRP on either raw end of an unassociated pair is ENOTTY.
@@ -411,7 +411,7 @@ PtySession pty_session(Kernel &kernel, const Session &s, std::array<i32, 2> &fds
     expect(pty_call(kernel, p.shell, N::close, {static_cast<uptr>(other[0])}) == 0);
     expect(pty_call(kernel, p.shell, N::close, {static_cast<uptr>(other[1])}) == 0);
     p.job = fork(kernel, p.shell);
-    scheduler.find(p.job)->threads()[0].native_active = true;
+    scheduler.find(p.job)->leader().native_active = true;
     expect(native_call(kernel, p.shell, N::setpgid, {p.job, p.job}) == 0);
     scheduler.find(p.job)->resources().personality = sched::UserPersonality::linux;
     for (const u32 signal : {u32{OK_SIGINT}, u32{OK_SIGWINCH}}) handle(kernel, p.job, signal);
@@ -721,7 +721,7 @@ bool vmin_wake(Kernel &kernel, const Session &s)
 u64 member(Kernel &kernel, u64 parent, bool own_group)
 {
     const auto child = fork(kernel, parent);
-    kernel.scheduler().find(child)->threads()[0].native_active = true;
+    kernel.scheduler().find(child)->leader().native_active = true;
     for (const u32 signal : {u32{OK_SIGTTIN}, u32{OK_SIGTTOU}, u32{OK_SIGTSTP}}) disposition(kernel, child, signal, OK_SIG_DFL);
     if (own_group) expect(native_call(kernel, parent, N::setpgid, {child, child}) == 0);
     return child;
@@ -1026,7 +1026,7 @@ bool pty_job_control(Kernel &kernel, const Session &s, bool &pty_regated)
 u64 pty_leader(Kernel &kernel, const Session &s, std::array<i32, 2> &fds, sched::TerminalRef &ref)
 {
     const auto leader = fork(kernel, s.init);
-    kernel.scheduler().find(leader)->threads()[0].native_active = true;
+    kernel.scheduler().find(leader)->leader().native_active = true;
     expect(native_call(kernel, leader, N::setsid, {}) == static_cast<i64>(leader));
     fds = raw_pair(kernel, leader);
     expect(fd_ioctl(kernel, leader, fds[1], OK_TIOCSCTTY) == 0);
@@ -1139,7 +1139,7 @@ bool console_leader_thread_exit(Kernel &kernel, const Session &s)
 {
     auto &scheduler = kernel.scheduler();
     const auto leader = fork(kernel, s.init);
-    scheduler.find(leader)->threads()[0].native_active = true;
+    scheduler.find(leader)->leader().native_active = true;
     expect(native_call(kernel, s.init, N::console_claim, {leader}) > 0);
     expect(native_call(kernel, leader, N::setsid, {}) == static_cast<i64>(leader));
     expect(ioctl(kernel, leader, OK_TIOCSCTTY) == 0);
@@ -1155,7 +1155,7 @@ bool console_leader_thread_exit(Kernel &kernel, const Session &s)
     // A lease revoke hangs the console up; the leader keeps the foreground
     // group (tty_old_pgrp), which its later exit sends SIGHUP then SIGCONT.
     const auto revoked = fork(kernel, s.init);
-    scheduler.find(revoked)->threads()[0].native_active = true;
+    scheduler.find(revoked)->leader().native_active = true;
     const auto epoch = native_call(kernel, s.init, N::console_claim, {revoked});
     expect(epoch > 0 && native_call(kernel, revoked, N::setsid, {}) == static_cast<i64>(revoked));
     expect(ioctl(kernel, revoked, OK_TIOCSCTTY) == 0);

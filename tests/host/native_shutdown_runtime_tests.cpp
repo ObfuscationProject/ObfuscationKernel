@@ -29,7 +29,7 @@ void setup(Kernel &kernel)
     process.set_credentials(user::root_credentials());
     process.resources().native_space = {0x100000, 0, 1};
     CHECK(native::allocate(process.resources().native_pages, hw::user_begin, hw::page_read | hw::page_execute));
-    auto &thread = process.threads()[0];
+    auto &thread = process.leader();
     CHECK(native::prepare_native_thread(thread));
     thread.native_active = true;
     CHECK(native::private_signal_process(kernel, 1));
@@ -68,7 +68,7 @@ void authority(Kernel &kernel)
     process->set_parent(9); CHECK(!native::shutdown_caller(kernel)); process->set_parent(0);
     process->resources().personality = sched::UserPersonality::linux;
     CHECK(!native::shutdown_caller(kernel)); process->resources().personality = sched::UserPersonality::native;
-    auto child = kernel.scheduler().create_user_process("live-service", process->threads()[0].context); CHECK(child);
+    auto child = kernel.scheduler().create_user_process("live-service", process->leader().context); CHECK(child);
     kernel.scheduler().find(child.value())->set_parent(1);
     CHECK(process->add_child(child.value()));
     CHECK(kernel.scheduler().shutdown_console_status());
@@ -84,7 +84,7 @@ void authority(Kernel &kernel)
     CHECK(kernel.scheduler().find(1)->children().empty());
     CHECK(native::shutdown_check_commit(kernel, owner.value()));
     process = kernel.scheduler().find(1);
-    auto peer = kernel.scheduler().create_thread(1, process->threads()[0].context); CHECK(peer);
+    auto peer = kernel.scheduler().create_thread(1, process->leader().context); CHECK(peer);
     CHECK(!native::shutdown_caller(kernel)); CHECK(!native::shutdown_check_commit(kernel, owner.value()));
     CHECK(kernel.scheduler().exit_thread(1, peer.value(), 0));
     CHECK(native::shutdown_caller(kernel));
@@ -119,7 +119,7 @@ void retire(Kernel &kernel, std::string_view mode)
     CHECK(!native::shutdown_caller(kernel));
     if (mode == "borrow")
     {
-        native::SyscallOriginTestAccess::inject_borrow(native::syscall_origins, kernel.scheduler().find(1)->threads()[0]);
+        native::SyscallOriginTestAccess::inject_borrow(native::syscall_origins, kernel.scheduler().find(1)->leader());
         CHECK(native::shutdown_report(kernel).origin_borrows == 1);
     }
     if (mode == "table-failure") mock::fail_destroy_root = kernel.scheduler().find(1)->resources().native_space.root;

@@ -234,7 +234,7 @@ int main(int argc, char **argv)
     static Kernel kernel; CHECK(kernel.boot({}));
     auto process = kernel.scheduler().create_user_process("persistent-sync-test", kernel.arch().make_user_context({hw::user_begin, hw::user_end - 4096})); CHECK(process);
     pid = process.value(); CHECK(kernel.scheduler().set_runnable(pid));
-    auto *thread = &kernel.scheduler().find(pid)->threads()[0]; thread->native_active = true;
+    auto *thread = &kernel.scheduler().find(pid)->leader(); thread->native_active = true;
     CHECK(kernel.scheduler().activate_thread(pid, thread->tid)); CHECK(kernel.posix().activate(pid));
     CHECK(kernel.vfs().create("/persistent", fs::NodeType::directory));
     const std::string_view group = argv[2];

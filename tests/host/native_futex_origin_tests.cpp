@@ -65,7 +65,7 @@ template<Profile P> struct Fixture
         auto &t=thread();t.native_active=true;auto lease=pool.reserve({process->pid(),t.tid});CHECK(lease);t.entry_stack=lease.value();
         process->resources().personality=sched::UserPersonality::linux;process->resources().native_space={0x1000,1,1};
         CHECK(process->resources().native_pages.push_back({site,0x2000,hw::page_read|hw::page_execute}));CHECK(origins.prepare(t));}
-    auto &thread(){return process->threads()[0];}
+    auto &thread(){return process->leader();}
     ~Fixture(){origins.retire(thread());CHECK(pool.release(thread().entry_stack,{process->pid(),thread().tid}));}
     auto capture(u64 number,u32 operation,bool timed){selected=P;auto &t=thread();t.syscall_pending=false;t.native_frame=frame<P>(number,operation,timed);
         const auto before=copies;auto active=pool.activate_entry(t.entry_stack,{process->pid(),t.tid},0);CHECK(active);

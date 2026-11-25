@@ -77,8 +77,8 @@ void canonical_stack_exec(Kernel &kernel, bool nonleader, bool retired_leader, b
     bool complete{}; expect(exec(kernel, parent, caller, complete) == 0 && !complete);
     expect(native::runtime_status().ok());
     auto &process = *kernel.scheduler().find(parent);
-    expect(process.threads().size() == 1 && process.threads()[0].tid == parent);
-    const auto canonical = process.threads()[0].entry_stack;
+    expect(process.record_count() == 1 && process.leader().tid == parent);
+    const auto canonical = process.leader().entry_stack;
     const auto after = native::entry_stacks.accounting();
     if (!retired_leader)
     {
@@ -96,7 +96,7 @@ void canonical_stack_exec(Kernel &kernel, bool nonleader, bool retired_leader, b
     expect(native::private_signal_find(parent)->epoch == owner_epoch);
     expect(&native::private_signal_find(parent)->shared == shared && shared->identity() == shared_ticket.owner);
     expect(shared->consume(shared_ticket));
-    expect(native::private_signal_queue(process.threads()[0])->pending_mask().contains(12));
+    expect(native::private_signal_queue(process.leader())->pending_mask().contains(12));
     expect(native::private_signal_find(child)->lineage.parent_tid == parent);
     expect(native::private_signal_find(parent)->lineage.leader_cause == sched::ChildExitStatus{});
     if (nonleader) expect(!kernel.scheduler().find_thread(parent, caller));
@@ -131,7 +131,7 @@ void canonical_stack_pressure(Kernel &kernel)
             expect(!kernel.scheduler().find_thread(parent, parent)->entry_stack.pool);
             expect(native::private_signal_find(parent)->lineage.leader_cause == sched::ChildExitStatus::normal(17));
             expect(native::private_signal_find(child)->lineage.parent_tid == lineage.parent_tid);
-            expect(kernel.scheduler().find(parent)->threads().size() == 2);
+            expect(kernel.scheduler().find(parent)->record_count() == 2);
         }
         else
         {
@@ -187,7 +187,7 @@ void post_commit_space_failure(Kernel &kernel)
     auto &process = *kernel.scheduler().find(pid);
     auto old_space = process.resources().native_space;
     const auto old_page_count = process.resources().native_pages.size();
-    const auto lease = process.threads()[0].entry_stack;
+    const auto lease = process.leader().entry_stack;
     const auto page_count = native::page_pool.user_count();
     mock::fail_destroy_root = old_space.root;
     bool complete{}; expect(exec(kernel, pid, pid, complete) == 0 && !complete);

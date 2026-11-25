@@ -169,13 +169,14 @@ class PosixService final
     }
     [[nodiscard]] sched::ProcessId getpid() const;
     [[nodiscard]] sched::ThreadId gettid() const;
-    // Kernel sections (ok/smp/kernel_section.hpp): the caller a section on
-    // `cpu` acts for, bound by that CPU under the kernel lock before the
-    // section starts and unbound by it before the section ends. While bound,
-    // getpid, gettid, user_credentials, resources() and thread_local_state()
-    // read it and never the scheduler, so the boot fallback is unreachable.
-    void bind_section_caller(smp::CpuId cpu, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread);
-    void unbind_section_caller(smp::CpuId cpu);
+    // Caller identity (spec 3.5): getpid, gettid, user_credentials,
+    // resources() and thread_local_state() read this CPU's caller and never
+    // search the scheduler. The caller is the explicit binding when one is
+    // set (a kernel section binds its caller under the kernel lock before it
+    // starts and unbinds it before it ends), else the thread the scheduler's
+    // CPU slot names. Without either, the boot fallback applies.
+    void bind_cpu_caller(smp::CpuId cpu, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread);
+    void unbind_cpu_caller(smp::CpuId cpu);
     [[nodiscard]] sched::ProcessId getppid() const;
     Result<sched::ProcessId> getpgid(i32 pid = 0) const;
     Result<sched::ProcessId> getsid(i32 pid = 0) const;
@@ -386,13 +387,13 @@ class PosixService final
     [[nodiscard]] static bool node_backed(const FileDescriptor &entry);
     // Reads at the description's offset and moves it; the caller holds its position lock.
     Result<usize> read_node(FileDescriptor &entry, std::span<std::byte> out);
-    struct SectionCaller
+    struct CpuCaller
     {
         sched::ProcessControlBlock *process{};
         sched::ThreadControlBlock *thread{};
     };
-    // This CPU's bound section caller, or null.
-    [[nodiscard]] const SectionCaller *section_caller() const;
+    // This CPU's caller (binding, else CPU slot); null process without one.
+    [[nodiscard]] CpuCaller caller() const;
     // The boot resources stand in for a missing caller (A10 checks why).
     void boot_fallback(const char *site) const;
 
@@ -407,7 +408,7 @@ class PosixService final
     u64 clock_resolution_{1000000};
     driver::EntropySource *entropy_source_{nullptr};
     // Each entry is written and read only by its own CPU.
-    std::array<SectionCaller, smp::max_cpus> section_callers_{};
+    std::array<CpuCaller, smp::max_cpus> cpu_callers_{};
 };
 
 template <DirectoryPolicy Policy, typename Consumer>

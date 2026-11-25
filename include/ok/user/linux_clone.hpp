@@ -76,7 +76,6 @@ i64 clone_thread(Kernel &kernel, sched::ProcessId pid, const arch::execution::Us
         [&](sched::ThreadControlBlock &child) -> Status {
             child.native_frame = frame;
             child.native_signal_mask = caller->native_signal_mask;
-            child.cpu_affinity_mask = caller->cpu_affinity_mask;
             child.native_active = true;
             child.tls.fs_base = frame.fs_base;
             child.tls.gs_base = frame.gs_base;
@@ -85,6 +84,9 @@ i64 clone_thread(Kernel &kernel, sched::ProcessId pid, const arch::execution::Us
             return std::forward<PrepareThread>(prepare)(child);
         });
     if (!created) return -syscall::ErrnoMapper::errno_for(created.status());
+    // The new thread starts with its caller's mask (Linux copies it at clone).
+    if (const auto *child = kernel.scheduler().find_thread(pid, created.value()))
+        kernel.scheduler().store_thread_affinity(*process, *child, kernel.scheduler().thread_affinity(*process, *caller));
     if (flags & clone_flags::parent_settid)
     {
         std::array<u8, 4> bytes{};

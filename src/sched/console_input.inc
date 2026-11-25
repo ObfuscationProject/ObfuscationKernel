@@ -28,7 +28,7 @@ Result<u32> SchedulerState::claim_console(ProcessId target)
         !child->children().empty())
         return Status::denied("console claim requires a new direct user child");
     usize live = 0;
-    for (const auto &thread : child->threads()) live += thread.state != ProcessState::exited;
+    live += child->live_count();
     if (live != 1) return Status::denied("console claim requires one live child thread");
     auto issued = console_input_.claim(caller->pid(), target);
     if (issued)
@@ -68,7 +68,7 @@ bool SchedulerState::console_authorized(ProcessId pid, u32 expected_epoch) const
         if (!process || process->execution() != ProcessExecution::user_process ||
             process->state() == ProcessState::zombie || process->state() == ProcessState::exited)
             return false;
-        for (const auto &thread : process->threads())
+        for (const auto &thread : process->thread_records())
             if (thread.state != ProcessState::exited) return true;
         return false;
     };
@@ -391,7 +391,7 @@ Result<TerminalReply> SchedulerState::terminal_control(const TerminalSubject &su
             return Status::not_terminal("terminal is not the caller's controlling terminal");
         bool group = false, same_session = false;
         // Retained zombie membership reserves a PGID until normal reap.
-        for (const auto &member : processes_)
+        for (const auto &member : process_range())
             if (member.process_group_id() == static_cast<ProcessId>(value))
             {
                 group = true;
@@ -527,8 +527,8 @@ TerminalLdisc::Input SchedulerState::console_input(char value, WakeSource source
 
 void SchedulerState::cancel_console_epoch(u32 epoch)
 {
-    for (auto &process : processes_)
-        for (auto &thread : process.threads())
+    for (auto &process : process_range())
+        for (auto &thread : process.thread_records())
             if (thread.state == ProcessState::blocked && thread.wait_reason == ThreadWaitReason::console_read &&
                 thread.wait_key == epoch)
                 static_cast<void>(complete_wait(thread.wait_registration.ticket(), WaitCompletion::cancelled));

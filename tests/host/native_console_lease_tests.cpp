@@ -37,7 +37,7 @@ void activate(Kernel &kernel, sched::ProcessId pid, sched::ThreadId tid = 0)
 {
     auto *process = kernel.scheduler().find(pid); CHECK(process);
     if (process->state() == sched::ProcessState::created) CHECK(kernel.scheduler().set_runnable(pid));
-    if (!tid) tid = process->threads()[0].tid;
+    if (!tid) tid = process->leader().tid;
     auto *thread = kernel.scheduler().find_thread(pid, tid); CHECK(thread);
     thread->native_active = true;
     const auto status = kernel.scheduler().activate_thread(pid, tid);
@@ -71,7 +71,7 @@ sched::ProcessId child(Kernel &kernel, sched::ProcessId parent)
 {
     activate(kernel, parent);
     auto result = kernel.scheduler().fork_process(parent); CHECK(result);
-    kernel.scheduler().find(result.value())->threads()[0].native_active = true;
+    kernel.scheduler().find(result.value())->leader().native_active = true;
     return result.value();
 }
 
@@ -207,7 +207,7 @@ void runtime_ownership(Kernel &kernel)
     {
         activate(kernel, login);
         CHECK(scheduler.block_current(sched::ThreadWaitReason::console_read, static_cast<u64>(first)));
-        const auto &waiter = scheduler.find(login)->threads()[0];
+        const auto &waiter = scheduler.find(login)->leader();
         const auto interrupt_wakes = scheduler.wakes(sched::WakeSource::interrupt);
         native::input('w', sched::WakeSource::interrupt);
         CHECK(waiter.state == sched::ProcessState::runnable &&
@@ -274,9 +274,9 @@ void runtime_ownership(Kernel &kernel)
     CHECK(descendant_waiting.first == -11 && !descendant_waiting.second);
     const auto waiting = invoke(kernel, next_login, N::read, {0, out, 1});
     CHECK(waiting.first == -11 && !waiting.second);
-    CHECK(scheduler.exit_thread(next_login, scheduler.find(next_login)->threads()[0].tid));
+    CHECK(scheduler.exit_thread(next_login, scheduler.find(next_login)->leader().tid));
     CHECK(!scheduler.console_authorized(next_login));
-    CHECK(scheduler.find(surviving_child)->threads()[0].state == sched::ProcessState::runnable);
+    CHECK(scheduler.find(surviving_child)->leader().state == sched::ProcessState::runnable);
     CHECK(invoke(kernel, surviving_child, N::read, {0, out, 1}) == std::pair(i64{-13}, true));
     CHECK(!scheduler.console_authorized(surviving_child));
 

@@ -608,11 +608,11 @@ void test_exec_metadata_and_rollback()
                                                                                      : arch::Architecture::x86_64;
     CHECK(!f.posix.exec(pid, bad, map));
     CHECK(f.scheduler.find(pid)->fd_table().contains(closed.value()));
-    CHECK(f.scheduler.find(pid)->threads().size() == 2);
+    CHECK(f.scheduler.find(pid)->record_count() == 2);
     CHECK(f.posix.exec(pid, context, map));
     auto *process = f.scheduler.find(pid);
-    CHECK(process && process->threads().size() == 1 && process->threads()[0].context.program_counter == 0x600000);
-    CHECK(process->threads()[0].tls.fs_base == 0);
+    CHECK(process && process->record_count() == 1 && process->leader().context.program_counter == 0x600000);
+    CHECK(process->leader().tls.fs_base == 0);
     CHECK(!process->fd_table().contains(closed.value()) && process->fd_table().contains(kept.value()));
     CHECK(process->memory_map().contains(0x600000, 1));
     CHECK(f.posix.activate(pid));
@@ -871,7 +871,7 @@ void test_elf_validation_and_failed_exec()
     static Fixture f;
     sched::ProcessManager manager(f.scheduler);
     const auto pid = f.create("invalid-exec");
-    const auto original_entry = f.scheduler.find(pid)->threads()[0].context.program_counter;
+    const auto original_entry = f.scheduler.find(pid)->leader().context.program_counter;
     reset();
     set(56, 2, 2);
     set(120, 4, 1);
@@ -882,7 +882,7 @@ void test_elf_validation_and_failed_exec()
     set(160, 8, 4096);
     set(168, 8, 1);
     CHECK(!manager.execve(pid, image, architecture));
-    CHECK(f.scheduler.find(pid)->threads()[0].context.program_counter == original_entry);
+    CHECK(f.scheduler.find(pid)->leader().context.program_counter == original_entry);
     CHECK(f.scheduler.find(pid)->memory_map().area_count() == 0);
     CHECK(f.scheduler.process_count() == 1);
     CHECK(!manager.create_user_process("overlap", image, architecture));
@@ -965,7 +965,7 @@ void test_deadline_lifecycle()
     static Fixture f;
     const auto pid = f.create("deadline-owner");
     CHECK(f.posix.activate(pid));
-    auto &thread = f.scheduler.find(pid)->threads()[0];
+    auto &thread = f.scheduler.find(pid)->leader();
     auto generation = thread.native_deadline.arm(10, 1, 0, false);
     CHECK(generation);
     CHECK(f.scheduler.block_current(sched::ThreadWaitReason::deadline, generation.value()));
@@ -1128,7 +1128,7 @@ void test_fork_capacity_and_tid_identity()
     CHECK(f.scheduler.process_count() == 1 && f.scheduler.open_description(description)->references == base_refs);
     auto reused = f.posix.fork(parent);
     CHECK(reused && f.posix.activate(reused.value()));
-    CHECK(f.posix.gettid() == f.scheduler.find(reused.value())->threads()[0].tid);
+    CHECK(f.posix.gettid() == f.scheduler.find(reused.value())->leader().tid);
     CHECK(f.posix.gettid() == f.posix.getpid());
     CHECK(f.posix.exit(reused.value(), 23) && f.posix.activate(parent));
     CHECK(f.posix.wait(parent, reused.value()).value() == 23);

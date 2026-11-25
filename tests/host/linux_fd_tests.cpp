@@ -423,7 +423,7 @@ void loaded_image_cleanup(Kernel &kernel, sched::ProcessId pid)
     CHECK(kernel.posix().close(fd.value()));
     auto *process = kernel.scheduler().find(pid); CHECK(process);
     auto &resources = process->resources();
-    auto &thread = process->threads()[0];
+    auto &thread = process->leader();
     CHECK(native::entry_stacks.activate(native::entry_stack_arena));
     CHECK(native::prepare_native_thread(thread));
     native::Arguments args;

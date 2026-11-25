@@ -62,9 +62,9 @@ void setters(Kernel &kernel, sched::ProcessId pid, sched::ProcessId other)
         CHECK(kernel.scheduler().exit_thread(pid, peer.value()));
         process->set_credentials(user::root_credentials());
         CHECK(invoke(kernel, pid, numbers[index], {71, 72, 73}) == 0);
-        for (usize i = process->threads().size(); i > 1; --i)
-            if (process->threads()[i-1].state == sched::ProcessState::exited)
-                CHECK(process->threads().erase_at(i-1));
+        for (usize i = process->record_count(); i > 1; --i)
+            if (process->thread_slot(i-1).state == sched::ProcessState::exited)
+                process->thread_slot(i-1) = sched::ThreadControlBlock{}; // Frees the slot.
         process->set_credentials(user::kernel_credentials());
         CHECK(invoke(kernel, pid, numbers[index], {42, 43, 44}) == -1);
         CHECK(same(process->credentials(), user::kernel_credentials()));
@@ -128,7 +128,7 @@ void getters(Kernel &kernel, sched::ProcessId pid, sched::ProcessId other)
         const auto end = hw::user_begin + mock::memory.size() - 4;
         CHECK(invoke(kernel, pid, number, {end, end, end}) == 0 && read(mock::memory.size()-4) == values[2]);
         CHECK(invoke(kernel, pid, number, {end+1, end, end}) == -14);
-        const auto peer = kernel.scheduler().create_thread(pid, process->threads()[0].context); CHECK(peer);
+        const auto peer = kernel.scheduler().create_thread(pid, process->leader().context); CHECK(peer);
         CHECK(invoke(kernel, pid, number, addresses) == 0);
         CHECK(kernel.scheduler().exit_thread(pid, peer.value()));
     }

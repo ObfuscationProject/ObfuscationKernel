@@ -450,7 +450,7 @@ class SyscallOriginTable final : private NonCopyable
     }
     void revoke_frame(const sched::ProcessControlBlock &process, const Frame &frame)
     {
-        for (const auto &thread : process.threads())
+        for (const auto &thread : process.thread_records())
             if (&thread.native_frame == &frame) { revoke(thread); return; }
     }
 

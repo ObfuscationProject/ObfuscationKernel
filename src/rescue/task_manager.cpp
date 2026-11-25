@@ -189,7 +189,7 @@ template <usize Capacity> Status append_process_line(FixedString<Capacity> &out,
     {
         return status;
     }
-    if (auto status = append_padded_decimal(out, process.threads().size(), 3); !status.ok())
+    if (auto status = append_padded_decimal(out, process.record_count(), 3); !status.ok())
     {
         return status;
     }
@@ -824,7 +824,7 @@ Status KernelTaskManager::render_top_tui(Kernel &kernel, FixedString<4096> &out)
         {
             return status;
         }
-        if (auto status = append_padded_decimal(out, process.threads().size(), 3); !status.ok())
+        if (auto status = append_padded_decimal(out, process.record_count(), 3); !status.ok())
         {
             return status;
         }

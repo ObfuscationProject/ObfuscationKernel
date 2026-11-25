@@ -17,15 +17,15 @@ Owner owner(Kernel &kernel, usize count)
     CHECK(result);
     Owner result_owner{result.value(), {}};
     auto *process = kernel.scheduler().find(result_owner.pid);
-    result_owner.tids[0] = process->threads()[0].tid;
+    result_owner.tids[0] = process->leader().tid;
     for (usize i = 1; i < count; ++i)
     {
-        auto created = kernel.scheduler().create_thread(result_owner.pid, process->threads()[0].context);
+        auto created = kernel.scheduler().create_thread(result_owner.pid, process->leader().context);
         CHECK(created);
         result_owner.tids[i] = created.value();
     }
     CHECK(kernel.scheduler().set_runnable(result_owner.pid));
-    for (auto &thread : process->threads())
+    for (auto &thread : process->thread_records())
         thread.native_active = true;
     return result_owner;
 }

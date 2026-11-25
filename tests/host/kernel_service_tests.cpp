@@ -110,7 +110,7 @@ int main()
     preserved();
     const auto *blocked = kernel.scheduler().find(pid);
     CHECK(blocked->state() == sched::ProcessState::blocked &&
-          blocked->threads()[0].wait_reason == sched::ThreadWaitReason::child && blocked->threads()[0].wait_key == 77);
+          blocked->leader().wait_reason == sched::ThreadWaitReason::child && blocked->leader().wait_key == 77);
     static fs::VirtualFileSystem selected_root;
     CHECK(selected_root.create("/selected", fs::NodeType::regular));
     CHECK(kernel.posix().set_identity(0, 0) && kernel.posix().chdir("/"));

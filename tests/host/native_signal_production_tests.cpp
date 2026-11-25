@@ -34,7 +34,7 @@ void admin_policy(Kernel &kernel)
             const auto *completed = kernel.scheduler().find(child); expect(completed != nullptr);
             expect(completed->state() == sched::ProcessState::zombie && completed->wait_status() == 9);
             expect(!completed->resources().native_space.root && completed->resources().native_pages.empty());
-            expect(!completed->threads()[0].entry_stack.pool && !native::private_signal_find(child));
+            expect(!completed->leader().entry_stack.pool && !native::private_signal_find(child));
             const bool notified = disposition != 1 && (disposition > 1 || blocked);
             const bool autoreap = disposition == 1 || no_wait;
             expect(native::private_signal_find(parent)->shared.pending_mask().contains(sigchld) == notified);
@@ -90,7 +90,7 @@ void admin_failure(Kernel &kernel)
 }
 void ordinary_signal(Kernel &kernel)
 {
-    const auto pid = create(kernel); auto &process = *kernel.scheduler().find(pid); auto &thread = process.threads()[0];
+    const auto pid = create(kernel); auto &process = *kernel.scheduler().find(pid); auto &thread = process.leader();
     auto *entry = native::private_signal_table(kernel, pid)->find(10); entry->handler = handler;
     entry->flags = 0x04000004; entry->restorer = handler + 4;
     expect(native::private_process_kill(kernel, process, pid, 10) == 0);
@@ -162,7 +162,7 @@ void native_kill_lifecycle(Kernel &kernel)
         const auto *completed = kernel.scheduler().find(child); CHECK(completed);
         expect(completed->state() == sched::ProcessState::zombie && completed->wait_status() == signal);
         expect(completed->parent_pid() == parent && !completed->resources().native_space.root);
-        expect(completed->resources().native_pages.empty() && !completed->threads()[0].entry_stack.pool);
+        expect(completed->resources().native_pages.empty() && !completed->leader().entry_stack.pool);
         expect(!native::pipe_read_object(child, sibling).pool && !native::private_signal_find(child));
         expect(!kernel.scheduler().complete_wait(ticket, sched::WaitCompletion::ready));
         expect(native::pipe_read_objects.accounting().live_objects == 0);
@@ -176,7 +176,7 @@ void native_kill_lifecycle(Kernel &kernel)
     expect(native_kill(kernel, self, self, OK_SIGKILL) == 0);
     expect(native_kill(kernel, self, self, OK_SIGTERM) == 0);
     auto *process = kernel.scheduler().find(self); CHECK(process);
-    expect(process->state() == sched::ProcessState::running && process->threads()[0].native_active);
+    expect(process->state() == sched::ProcessState::running && process->leader().native_active);
     expect(native::private_signal_find(self)->deferred_fatal == OK_SIGKILL);
     native::private_process_signal_fatal(kernel);
     expect(kernel.scheduler().find(self)->wait_status() == OK_SIGKILL);
@@ -216,8 +216,8 @@ void native_admin_guards(Kernel &kernel)
     const auto unpublished = native_process(kernel);
     auto *rollback = kernel.scheduler().find(unpublished);
     rollback->set_state(sched::ProcessState::created);
-    rollback->threads()[0].state = sched::ProcessState::created;
-    rollback->threads()[0].native_active = false;
+    rollback->leader().state = sched::ProcessState::created;
+    rollback->leader().native_active = false;
     expect(!native::terminate_native_process(kernel, unpublished, OK_SIGKILL));
     expect(kernel.kill_process(unpublished).ok() && !kernel.scheduler().find(unpublished));
     expect(native::runtime_status().ok());

@@ -56,7 +56,7 @@ sched::ProcessId process(Kernel &kernel)
 {
     auto p=kernel.scheduler().create_user_process("native-robust",kernel.arch().make_user_context({hw::user_begin,hw::user_begin+4096}));CHECK(p);
     auto *owner=kernel.scheduler().find(p.value());owner->resources().personality=sched::UserPersonality::linux;
-    auto &leader=owner->threads()[0];CHECK(native::prepare_native_thread(leader));
+    auto &leader=owner->leader();CHECK(native::prepare_native_thread(leader));
     leader.native_active=true;leader.native_frame.pc=hw::user_begin;
     Bridge::set_stack_pointer(leader.native_frame,hw::user_begin+4096);
     CHECK(kernel.scheduler().set_runnable(p.value()));
@@ -101,7 +101,7 @@ void bytes(Mask mask)
 void syscall_masks(Kernel &kernel)
 {
     const auto pid = process(kernel); auto *p = kernel.scheduler().find(pid);
-    auto &mask = p->threads()[0].native_signal_mask;
+    auto &mask = p->leader().native_signal_mask;
     CHECK(mask == Mask{});
     CHECK(mask_call(kernel,pid,999,0,word)==0 && get(128)==0);
     CHECK(mask_call(kernel,pid,999,0,0,Masks::bytes+1)==-22);
@@ -120,13 +120,13 @@ void syscall_masks(Kernel &kernel)
 void inherited_masks(Kernel &kernel)
 {
     const auto pid=process(kernel); auto *p=kernel.scheduler().find(pid);
-    Mask leader_mask; leader_mask.set(10); p->threads()[0].native_signal_mask=leader_mask;
+    Mask leader_mask; leader_mask.set(10); p->leader().native_signal_mask=leader_mask;
     const auto peer=clone(kernel,pid,0); auto *caller=kernel.scheduler().find_thread(pid,peer);
     CHECK(caller->native_signal_mask==leader_mask);
     CHECK(kernel.scheduler().activate_thread(pid,peer));
     Mask peer_mask; peer_mask.set(12); if constexpr(Masks::mips) peer_mask.set(65);
     bytes(peer_mask); CHECK(mask_call(kernel,pid,Masks::replace,word,0)==0);
-    CHECK(caller->native_signal_mask==peer_mask && p->threads()[0].native_signal_mask==leader_mask);
+    CHECK(caller->native_signal_mask==peer_mask && p->leader().native_signal_mask==leader_mask);
     // The raw MIPS fifth clone argument must be in writable caller stack space.
     Bridge::set_stack_pointer(caller->native_frame,hw::user_begin+4096);
     arguments(caller->native_frame,lu::Operation::clone,{flags::shared_group,hw::user_begin+6144,0,0,0});
@@ -134,8 +134,8 @@ void inherited_masks(Kernel &kernel)
     CHECK(child>0 && complete && kernel.scheduler().find_thread(pid,child)->native_signal_mask==peer_mask);
     auto forked=kernel.scheduler().fork_process(pid,false); CHECK(forked);
     auto *fork=kernel.scheduler().find(forked.value());
-    CHECK(fork->threads()[0].native_signal_mask==peer_mask);
-    fork->threads()[0].native_signal_mask.set(12,false);
+    CHECK(fork->leader().native_signal_mask==peer_mask);
+    fork->leader().native_signal_mask.set(12,false);
     CHECK(caller->native_signal_mask==peer_mask);
     native::finish(kernel,forked.value(),0); CHECK(kernel.posix().wait(pid,forked.value()));
     // Exercise the mask-preserving install mechanism; actual exec argument/load
@@ -147,8 +147,8 @@ void inherited_masks(Kernel &kernel)
     auto retirement=native::ImageRetirementReservation::reserve(); CHECK(retirement);
     native::Image image{std::move(retirement.value())}; image.personality=sched::UserPersonality::linux;
     image.frame=hw::initial_frame(hw::user_begin,hw::user_begin+4096);
-    native::install(*p,image,saved); CHECK(p->threads()[0].native_signal_mask==peer_mask);
-    native::install(*p,image); CHECK(p->threads()[0].native_signal_mask==Mask{});
+    native::install(*p,image,saved); CHECK(p->leader().native_signal_mask==peer_mask);
+    native::install(*p,image); CHECK(p->leader().native_signal_mask==Mask{});
     exit(kernel,pid,pid); CHECK(kernel.scheduler().reap_orphans());
 }
 }

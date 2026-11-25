@@ -65,7 +65,7 @@ i64 dispatch(sched::ProcessControlBlock &process, Call call, const std::array<u6
         return 0;
     }
     usize live = 0;
-    for (const auto &thread : process.threads())
+    for (const auto &thread : process.thread_records())
         if (thread.state != sched::ProcessState::exited) ++live;
     // PCB credentials are shared. Per-thread Linux changes and libc setxid
     // synchronization need a separate mechanism before admitting this case.

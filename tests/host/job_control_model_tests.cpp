@@ -350,10 +350,10 @@ void overlay()
     CHECK((f.process(job).job_control() == sched::JobControlState{19, true, true, false, 0}));
     CHECK(s.stopped_processes() == 1 && s.process_group_has_stopped(job) && !s.process_group_has_stopped(shell));
     // Stopping twice changes nothing; the thread state is never touched.
-    const auto thread_state = f.process(job).threads()[0].state;
+    const auto thread_state = f.process(job).leader().state;
     CHECK(s.stop_process(job, 20));
     CHECK((f.process(job).job_control() == sched::JobControlState{19, true, true, false, 0}));
-    CHECK(s.stopped_processes() == 1 && f.process(job).threads()[0].state == thread_state);
+    CHECK(s.stopped_processes() == 1 && f.process(job).leader().state == thread_state);
     CHECK(f.process(job).state() == sched::ProcessState::runnable);
     // Never selected or activated while stopped.
     CHECK(!s.activate_thread(job, job));

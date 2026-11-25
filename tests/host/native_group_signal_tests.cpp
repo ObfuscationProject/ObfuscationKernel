@@ -202,7 +202,7 @@ void self_and_blocked(Kernel &kernel)
     {
         const auto *process = kernel.scheduler().find(pid); CHECK(process);
         expect(process->state() == sched::ProcessState::zombie && process->wait_status() == 9);
-        for (const auto &thread : process->threads()) expect(!thread.native_active && !thread.entry_stack.pool);
+        for (const auto &thread : process->thread_records()) expect(!thread.native_active && !thread.entry_stack.pool);
     }
     expect(kernel.scheduler().find(sched::user_init_pid)->state() != sched::ProcessState::zombie);
     release(kernel, child); release(kernel, sender);

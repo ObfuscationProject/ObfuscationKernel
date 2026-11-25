@@ -22,9 +22,9 @@ Group create(Kernel &kernel)
     auto *p=kernel.scheduler().find(made.value());p->resources().personality=sched::UserPersonality::linux;
     p->resources().native_space={0x100000+made.value()*4096,static_cast<u32>(made.value()%16),1};
     CHECK(native::allocate(p->resources().native_pages,hw::user_begin,hw::page_read|hw::page_write|hw::page_execute));
-    auto peer=kernel.scheduler().create_thread(p->pid(),p->threads()[0].context);CHECK(peer);
-    for(auto &t:p->threads()){CHECK(native::prepare_native_thread(t));t.native_active=true;}
-    p->threads()[0].native_active=false;CHECK(kernel.scheduler().set_runnable(p->pid()));CHECK(kernel.posix().activate(p->pid()));
+    auto peer=kernel.scheduler().create_thread(p->pid(),p->leader().context);CHECK(peer);
+    for(auto &t:p->thread_records()){CHECK(native::prepare_native_thread(t));t.native_active=true;}
+    p->leader().native_active=false;CHECK(kernel.scheduler().set_runnable(p->pid()));CHECK(kernel.posix().activate(p->pid()));
     auto child=kernel.posix().fork(p->pid());CHECK(child);
     native::runtime_kernel=&kernel;native::started=true;
     return{made.value(),peer.value(),child.value()};

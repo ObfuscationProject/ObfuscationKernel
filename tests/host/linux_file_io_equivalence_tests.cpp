@@ -221,7 +221,7 @@ template <lu::Profile P> struct Model
         CHECK(done && user::linux_bootstrap::complete<P>(f, result));
         return result;
     }
-    sched::ThreadControlBlock &thread() { return kernel.scheduler().find(pid)->threads()[0]; }
+    sched::ThreadControlBlock &thread() { return kernel.scheduler().find(pid)->leader(); }
     // Admission with the frame pending on the process's thread.
     native::Admission admit(const hw::UserFrame &call, native::SectionCall<P> &admitted)
     {
@@ -251,9 +251,9 @@ template <lu::Profile P> struct Model
     {
         auto &posix = kernel.posix();
         native::SectionAccess access{posix, kernel.scheduler(), kernel.scheduler().find(pid)->resources()};
-        posix.bind_section_caller(0, *admitted.process, *admitted.thread);
+        posix.bind_cpu_caller(0, *admitted.process, *admitted.thread);
         const auto result = native::section_work<P>(access, admitted);
-        posix.unbind_section_caller(0);
+        posix.unbind_cpu_caller(0);
         return result;
     }
     // A decline, its reason counted once and nothing else changed.
@@ -535,10 +535,10 @@ void equivalence(Kernel &kernel, sched::ProcessId pid, usize number_slot, std::a
                 reader = std::thread([&] {
                     const smp::ScopedHostedCpu cpu(1);
                     smp::set_cpu_mode(1, smp::mode_section);
-                    kernel.posix().bind_section_caller(1, process, t);
+                    kernel.posix().bind_cpu_caller(1, process, t);
                     entered.store(true);
                     second = kernel.posix().read(a.value(), second_out);
-                    kernel.posix().unbind_section_caller(1);
+                    kernel.posix().unbind_cpu_caller(1);
                     smp::clear_cpu_mode(1, smp::mode_section);
                     done.store(true);
                 });

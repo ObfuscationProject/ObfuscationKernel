@@ -215,7 +215,7 @@ void profile(Kernel &kernel,sched::ProcessId pid,sched::ProcessId other,usize nu
                     CHECK(call(operation,{(u64{0x12345678}<<32)|101,(u64{1}<<32)|102,(u64{1}<<32)|103})==0);
                     CHECK((group?process->credentials().gid:process->credentials().uid)==101);
                 }
-                const auto context=process->threads()[0].context;
+                const auto context=process->leader().context;
                 const auto peer=kernel.scheduler().create_thread(pid,context);CHECK(peer);
                 const auto shared=process->credentials();
                 CHECK(call(operation,{42,43,44})==-95 && same(process->credentials(),shared));
@@ -223,8 +223,8 @@ void profile(Kernel &kernel,sched::ProcessId pid,sched::ProcessId other,usize nu
                 process->set_credentials(user::root_credentials());
                 CHECK(call(operation,{71,72,73})==0);
                 // Retired thread slots are removed so this fixture can reuse capacity.
-                for(usize i=process->threads().size();i>1;--i)
-                    if(process->threads()[i-1].state==sched::ProcessState::exited)CHECK(process->threads().erase_at(i-1));
+                for(usize i=process->record_count();i>1;--i)
+                    if(process->thread_slot(i-1).state==sched::ProcessState::exited)process->thread_slot(i-1) = sched::ThreadControlBlock{};
             }
             else
             {
@@ -272,7 +272,7 @@ void lifecycle(Kernel &kernel,sched::ProcessId pid)
     auto *copy=kernel.scheduler().find(child.value());CHECK(copy && same(copy->credentials(),ids));
     copy->set_credentials(user::default_user_credentials());CHECK(same(parent->credentials(),ids));
     copy->set_credentials(ids);
-    auto context=copy->threads()[0].context;
+    auto context=copy->leader().context;
     auto invalid=context;invalid.architecture=static_cast<arch::Architecture>(255);
     CHECK(!kernel.scheduler().replace_image(child.value(),invalid,copy->memory_map()) && same(copy->credentials(),ids));
     CHECK(kernel.scheduler().replace_image(child.value(),context,copy->memory_map()));

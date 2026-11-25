@@ -45,12 +45,12 @@ template <lu::Profile Profile> void profile(Kernel &kernel)
     call.arguments[0] = clone_abi::clone_flags::shared_group | clone_abi::clone_flags::parent_settid;
     call.arguments[1] = hw::user_begin + 8192;
     call.arguments[2] = hw::user_begin + 128;
-    const usize before = process->threads().size();
+    const usize before = process->record_count();
     stores = 0; reject_store = false; parent_tid = {0x11, 0x22, 0x33, 0x44};
     usize preparations{};
     auto denied = clone_abi::clone_thread<Profile>(kernel, pid, frame, call, clone_abi::RejectThreadPreparation{});
     CHECK(denied == -syscall::ErrnoMapper::errno_for(Status::unsupported()));
-    CHECK(process->threads().size() == before && stores == 0);
+    CHECK(process->record_count() == before && stores == 0);
     auto failure = clone_abi::clone_thread<Profile>(kernel, pid, frame, call,
         [&](sched::ThreadControlBlock &child) -> Status {
             ++preparations;
@@ -61,7 +61,7 @@ template <lu::Profile Profile> void profile(Kernel &kernel)
             return Status::no_memory("injected failure after cleaned preparation");
         });
     CHECK(failure == -12 && preparations == 1 && stores == 0);
-    CHECK(process->threads().size() == before && pool.accounting().leased_slots == 0);
+    CHECK(process->record_count() == before && pool.accounting().leased_slots == 0);
     CHECK(parent_tid[0] == 0x11 && parent_tid[3] == 0x44);
     auto prepare = [&](sched::ThreadControlBlock &child) -> Status {
         ++preparations;

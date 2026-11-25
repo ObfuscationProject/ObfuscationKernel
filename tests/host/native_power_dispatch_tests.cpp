@@ -38,7 +38,7 @@ void setup(Kernel &kernel)
     process.set_credentials(user::root_credentials());
     process.resources().native_space = {0x100000, 0, 1};
     CHECK(native::allocate(process.resources().native_pages, hw::user_begin, hw::page_read | hw::page_execute));
-    auto &thread = process.threads()[0];
+    auto &thread = process.leader();
     CHECK(native::prepare_native_thread(thread));
     thread.native_active = true;
     CHECK(native::private_signal_process(kernel, 1));
@@ -112,27 +112,27 @@ void credentials(Kernel &kernel, usize expected_preflights, uptr action = OK_POW
     }
     process.set_credentials(user::root_credentials());
     process.set_parent(7); CHECK(prepare(kernel, action) == -1 && commit(kernel) == -1); process.set_parent(0);
-    auto peer = kernel.scheduler().create_thread(1, process.threads()[0].context); CHECK(peer);
+    auto peer = kernel.scheduler().create_thread(1, process.leader().context); CHECK(peer);
     CHECK(prepare(kernel, action) == -1 && commit(kernel) == -1);
     CHECK(kernel.scheduler().set_runnable(1));
     CHECK(kernel.scheduler().activate_thread(1, peer.value()));
     CHECK(prepare(kernel, action) == -1 && commit(kernel) == -1);
     CHECK(kernel.scheduler().exit_thread(1, peer.value(), 0));
-    CHECK(kernel.scheduler().activate_thread(1, process.threads()[0].tid));
+    CHECK(kernel.scheduler().activate_thread(1, process.leader().tid));
     unchanged(kernel, expected_preflights);
 }
 void policy(Kernel &kernel)
 {
     credentials(kernel, 0);
     auto *process = kernel.scheduler().find(1);
-    const auto leader = process->threads()[0].tid;
-    auto made = kernel.scheduler().create_user_process("service", process->threads()[0].context); CHECK(made);
+    const auto leader = process->leader().tid;
+    auto made = kernel.scheduler().create_user_process("service", process->leader().context); CHECK(made);
     const auto child = made.value();
     auto *service = kernel.scheduler().find(child);
     service->set_parent(1); CHECK(kernel.scheduler().find(1)->add_child(child));
     service->set_credentials(user::root_credentials());
     CHECK(kernel.scheduler().set_runnable(child));
-    CHECK(kernel.scheduler().activate_thread(child, service->threads()[0].tid));
+    CHECK(kernel.scheduler().activate_thread(child, service->leader().tid));
     CHECK(prepare(kernel) == -1 && commit(kernel) == -1); // Root child is not original init.
     CHECK(kernel.scheduler().activate_thread(1, leader));
     CHECK(prepare(kernel) == 1); // Reservation precedes retirement of a live service.
@@ -170,7 +170,7 @@ void preflight(Kernel &kernel)
 void pending(Kernel &kernel)
 {
     CHECK(prepare(kernel) == 1);
-    auto &thread = kernel.scheduler().find(1)->threads()[0];
+    auto &thread = kernel.scheduler().find(1)->leader();
     thread.syscall_pending = true;
     thread.native_frame.registers[14] = OK_SYS_POWER_COMMIT;
     thread.native_frame.registers[9] = 1;
@@ -187,7 +187,7 @@ void console(Kernel &kernel)
 {
     CHECK(kernel.scheduler().shutdown_console_status());
     auto *init = kernel.scheduler().find(1);
-    auto made = kernel.scheduler().create_user_process("leased-service", init->threads()[0].context); CHECK(made);
+    auto made = kernel.scheduler().create_user_process("leased-service", init->leader().context); CHECK(made);
     const auto child = made.value();
     kernel.scheduler().find(child)->set_parent(1); CHECK(kernel.scheduler().find(1)->add_child(child));
     auto epoch = kernel.scheduler().claim_console(child); CHECK(epoch);

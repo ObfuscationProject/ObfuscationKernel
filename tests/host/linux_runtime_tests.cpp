@@ -367,11 +367,11 @@ int main(int argc, char **argv)
     CHECK(made);
     const auto pid = made.value();
     auto *process = kernel.scheduler().find(pid);
-    CHECK(native::prepare_native_thread(process->threads()[0]));
+    CHECK(native::prepare_native_thread(process->leader()));
     native::install(*process, original.value());
     CHECK(kernel.posix().activate(pid));
     auto &resources = process->resources();
-    auto &thread = process->threads()[0];
+    auto &thread = process->leader();
     CHECK(resources.program_break == original.value().program_break &&
           resources.program_break_base == original.value().program_break);
     const uptr initial_break = resources.program_break;

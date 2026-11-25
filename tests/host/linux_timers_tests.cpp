@@ -37,8 +37,8 @@ Group create(Kernel &kernel)
     p->resources().personality = sched::UserPersonality::linux;
     p->resources().native_space = {0x100000 + p->pid() * 4096, static_cast<u32>(p->pid() % 16), 1};
     CHECK(native::allocate(p->resources().native_pages, hw::user_begin, hw::page_read | hw::page_execute));
-    const auto peer = kernel.scheduler().create_thread(p->pid(), p->threads()[0].context); CHECK(peer);
-    for (auto &t : p->threads()) { CHECK(native::prepare_native_thread(t)); t.native_active = true; reset_frame(t); }
+    const auto peer = kernel.scheduler().create_thread(p->pid(), p->leader().context); CHECK(peer);
+    for (auto &t : p->thread_records()) { CHECK(native::prepare_native_thread(t)); t.native_active = true; reset_frame(t); }
     CHECK(kernel.scheduler().set_runnable(p->pid()));
     native::runtime_kernel = &kernel; native::started = true;
     return {p->pid(), peer.value()};
@@ -150,7 +150,7 @@ void itimer_real(Kernel &kernel)
     service(kernel, 1100 * ms); expect(!pending(kernel, g, 14));
     // An interval timer queues one SIGALRM while it stays blocked and rearms on
     // its grid only after the dequeue.
-    for (auto &t : kernel.scheduler().find(g.pid)->threads()) t.native_signal_mask.set(14);
+    for (auto &t : kernel.scheduler().find(g.pid)->thread_records()) t.native_signal_mask.set(14);
     mock::now = 2000 * ms; itimerval(scratch, 10000, 10000);
     expect(call(kernel, g, g.pid, Op::setitimer, {0, scratch, 0}) == 0);
     service(kernel, 2010 * ms); expect(pending(kernel, g, 14));
@@ -163,7 +163,7 @@ void itimer_real(Kernel &kernel)
     service(kernel, 2050 * ms); expect(pending(kernel, g, 14) && take(kernel, g).signal == 14);
     // An ignored SIGALRM is dropped and leaves the timer inactive with its interval.
     action(kernel, g, 14, 1);
-    for (auto &t : kernel.scheduler().find(g.pid)->threads()) t.native_signal_mask = {};
+    for (auto &t : kernel.scheduler().find(g.pid)->thread_records()) t.native_signal_mask = {};
     service(kernel, 2051 * ms); service(kernel, 2060 * ms);
     expect(!pending(kernel, g, 14));
     expect(call(kernel, g, g.pid, Op::getitimer, {0, scratch + 64}) == 0 && get(scratch + 72) == 10000 && get(scratch + 88) == 0);
@@ -171,13 +171,13 @@ void itimer_real(Kernel &kernel)
     // A queued SIGALRM that sigaction discards was never dequeued: Linux leaves
     // the timer expired, so neither getitimer nor a later step rearms it.
     action(kernel, g, 14);
-    for (auto &t : kernel.scheduler().find(g.pid)->threads()) t.native_signal_mask.set(14);
+    for (auto &t : kernel.scheduler().find(g.pid)->thread_records()) t.native_signal_mask.set(14);
     mock::now = 2200 * ms; itimerval(scratch, 10000, 10000);
     expect(call(kernel, g, g.pid, Op::setitimer, {0, scratch, 0}) == 0);
     service(kernel, 2210 * ms); expect(pending(kernel, g, 14));
     sigaction(kernel, g, 14, 1); expect(!pending(kernel, g, 14));
     sigaction(kernel, g, 14, handler);
-    for (auto &t : kernel.scheduler().find(g.pid)->threads()) t.native_signal_mask = {};
+    for (auto &t : kernel.scheduler().find(g.pid)->thread_records()) t.native_signal_mask = {};
     service(kernel, 2215 * ms); service(kernel, 2230 * ms); expect(!pending(kernel, g, 14));
     expect(call(kernel, g, g.pid, Op::getitimer, {0, scratch + 64}) == 0 && get(scratch + 72) == 10000 &&
            get(scratch + 80) == 0 && get(scratch + 88) == 0);
@@ -322,14 +322,14 @@ void posix_timers(Kernel &kernel)
     // A queued periodic record that sigaction discards parks until the signal is
     // unignored, then queues again (posixtimer_sig_ignore/unignore).
     take(kernel, g);
-    for (auto &t : kernel.scheduler().find(g.pid)->threads()) t.native_signal_mask.set(42);
+    for (auto &t : kernel.scheduler().find(g.pid)->thread_records()) t.native_signal_mask.set(42);
     service(kernel, 13046 * ms); expect(pending(kernel, g, 42));
     // Still blocked: Linux keeps the record on its ignored list, not pending.
     sigaction(kernel, g, 42, 1); expect(!pending(kernel, g, 42));
     const auto settled = native::private_timer_counters().dequeued;
     service(kernel, 13047 * ms); service(kernel, 13080 * ms);
     expect(!pending(kernel, g, 42) && native::private_timer_counters().dequeued == settled);
-    for (auto &t : kernel.scheduler().find(g.pid)->threads()) t.native_signal_mask = {};
+    for (auto &t : kernel.scheduler().find(g.pid)->thread_records()) t.native_signal_mask = {};
     sigaction(kernel, g, 42, handler);
     service(kernel, 13081 * ms);
     native::PrivateProcessQueue::Delivery requeued;
@@ -368,7 +368,7 @@ void posix_timers(Kernel &kernel)
     // and both park, queueing nothing while the signal stays ignored.
     for (u32 id = 11; id < 14; ++id) expect(call(kernel, g, g.pid, Op::timer_delete, {id}) == 0);
     action(kernel, g, 12);
-    for (auto &t : kernel.scheduler().find(g.pid)->threads()) t.native_signal_mask.set(12);
+    for (auto &t : kernel.scheduler().find(g.pid)->thread_records()) t.native_signal_mask.set(12);
     sigevent(0, 12, 0);
     expect(call(kernel, g, g.pid, Op::timer_create, {1, event, id_out}) == 0 && get(id_out, 4) == 14);
     expect(call(kernel, g, g.pid, Op::timer_create, {1, event, id_out}) == 0 && get(id_out, 4) == 15);
@@ -382,7 +382,7 @@ void posix_timers(Kernel &kernel)
     const auto parked_dequeues = native::private_timer_counters().dequeued;
     service(kernel, 14011 * ms); service(kernel, 14050 * ms);
     expect(!pending(kernel, g, 12) && native::private_timer_counters().dequeued == parked_dequeues);
-    for (auto &t : kernel.scheduler().find(g.pid)->threads()) t.native_signal_mask = {};
+    for (auto &t : kernel.scheduler().find(g.pid)->thread_records()) t.native_signal_mask = {};
     sigaction(kernel, g, 12, handler);
     service(kernel, 14051 * ms);
     native::PrivateProcessQueue::Delivery first;
@@ -431,7 +431,7 @@ void lifecycle(Kernel &kernel)
     expect(call(kernel, g, g.pid, Op::timer_settime, {0, 0, spec, 0}) == 0);
     service(kernel, 30001 * ms); expect(pending(kernel, g, 44));
     // exec deletes POSIX timers and their records; ITIMER_REAL survives.
-    auto &process = *kernel.scheduler().find(g.pid); auto &leader = process.threads()[0];
+    auto &process = *kernel.scheduler().find(g.pid); auto &leader = process.leader();
     native::private_signal_exec(kernel, process, native::private_signal_queue(leader), *native::private_signal_altstack(leader));
     expect(native::runtime_status().ok() && !pending(kernel, g, 44));
     expect(call(kernel, g, g.pid, Op::timer_gettime, {0, old_spec}) == -22);

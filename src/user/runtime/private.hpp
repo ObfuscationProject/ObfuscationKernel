@@ -497,7 +497,7 @@ struct PollWaitIndex
     memory::ObjectHandle object{};
 };
 // This bounded index contains identities only; the records live in owned pages.
-extern std::array<PollWaitIndex, sched::max_processes> poll_waits;
+extern std::array<PollWaitIndex, memory::KernelEntryStackPool::capacity> poll_waits;
 Status activate_pool(Kernel *kernel = nullptr);
 void emit(std::string_view text);
 void emit_number(u64 value);
@@ -533,7 +533,7 @@ constexpr usize futex_object_pages =
     (sched::max_processes + FutexObjectsLayout::slots_per_page - 1) / FutexObjectsLayout::slots_per_page;
 using FutexObjects = memory::ObjectPool<FutexWait, NativePagePool, futex_object_pages>;
 extern FutexObjects futex_objects;
-extern std::array<PollWaitIndex, sched::max_processes> futex_waits;
+extern std::array<PollWaitIndex, memory::KernelEntryStackPool::capacity> futex_waits;
 
 // A blocking read owns the original request and open description. A
 // descriptor number is only a name in a mutable shared table, not ownership.

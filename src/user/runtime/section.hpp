@@ -204,7 +204,7 @@ Admission admit_section(Kernel &kernel, sched::ProcessControlBlock &process, sch
     const auto pid = process.pid();
     const auto tid = thread.tid;
     if (thread.owner != pid || thread.state != sched::ProcessState::running || !thread.native_active ||
-        process.threads().empty() || pty_wait_object(pid, tid).pool || linux_udp_receive_object(pid, tid).pool ||
+        process.record_count() == 0 || pty_wait_object(pid, tid).pool || linux_udp_receive_object(pid, tid).pool ||
         native_udp_receive_object(pid, tid).pool || child_wait_object(pid, tid).pool ||
         pipe_read_object(pid, tid).pool || pipe_write_object(pid, tid).pool ||
         vfs_continuations.pending(pid, tid) != decltype(vfs_continuations.pending(pid, tid)){} ||
@@ -268,10 +268,10 @@ Admission admit_section(Kernel &kernel, sched::ProcessControlBlock &process, sch
             // A8: compute the body's result here and let the kernel-lock path
             // answer; step() compares the two.
             SectionAccess access{kernel.posix(), kernel.scheduler(), process.resources()};
-            kernel.posix().bind_section_caller(cpu, process, thread);
+            kernel.posix().bind_cpu_caller(cpu, process, thread);
             SectionCall<Profile> shadow{family, &process, &thread, pid, tid, decoded.value(), false};
             const auto value = section_work<Profile>(access, shadow);
-            kernel.posix().unbind_section_caller(cpu);
+            kernel.posix().unbind_cpu_caller(cpu);
             shadow_expect(cpu, pid, tid, value);
             return decline(D::shadow);
         }
@@ -287,11 +287,11 @@ template <lu::Profile Profile> void run_section(Kernel &kernel, SectionCall<Prof
 {
     auto &posix = kernel.posix();
     SectionAccess access{posix, kernel.scheduler(), call.process->resources()};
-    posix.bind_section_caller(cpu, *call.process, *call.thread);
+    posix.bind_cpu_caller(cpu, *call.process, *call.thread);
     smp::count_section_family(call.family);
     smp::enter_section(call.pid, call.tid);
     const auto result = section_work<Profile>(access, call);
-    posix.unbind_section_caller(cpu);
+    posix.unbind_cpu_caller(cpu);
     // Waiting for the lock, serve this CPU's device lines: a lock holder may
     // wait for one routed here.
     smp::leave_section(result, [] { interrupt::lock_kernel_serving_interrupts(); });

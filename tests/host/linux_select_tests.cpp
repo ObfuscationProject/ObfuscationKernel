@@ -23,7 +23,7 @@ void selects(Kernel &kernel, sched::ProcessId pid, usize number_slot, std::array
     constexpr usize w=C::profile.word_bytes; constexpr bool big=C::profile.big_endian;
     constexpr uptr r=hw::user_begin+512,s=hw::user_begin+640,e=hw::user_begin+768,t=hw::user_begin+1024;
     constexpr uptr pack=hw::user_begin+2048,old=hw::user_begin+2560;
-    auto *process=kernel.scheduler().find(pid); auto &thread=process->threads()[0];
+    auto *process=kernel.scheduler().find(pid); auto &thread=process->leader();
     constexpr auto numbers=[] {
         if constexpr(P==lu::Profile::i386)return std::array<int,4>{82,142,308,413};
         if constexpr(P==lu::Profile::x86_64)return std::array<int,4>{23,-1,270,-1};
@@ -160,7 +160,7 @@ void selects(Kernel &kernel, sched::ProcessId pid, usize number_slot, std::array
 
 void select_lifetime(Kernel &kernel,sched::ProcessId pid)
 {
-    auto *process=kernel.scheduler().find(pid);auto &thread=process->threads()[0];
+    auto *process=kernel.scheduler().find(pid);auto &thread=process->leader();
     auto pair=kernel.posix().pipe();CHECK(pair);const auto rd=pair.value()[0],wr=pair.value()[1];
     const auto reader=process->fd_table().entry(rd)->description,writer=process->fd_table().entry(wr)->description;
     native::SelectRequest request{};request.sets={{hw::user_begin,0,0},{u32{1}<<rd,0,0},32,8};
@@ -232,7 +232,7 @@ int main()
     selects<lu::Profile::ppc>(kernel,pid,0,{3,4,5,6,7,8});
     select_lifetime(kernel,pid);
     // Cancelling the last wait leaves this fixture runnable, awaiting selection.
-    CHECK(kernel.scheduler().find(pid)->threads()[0].state == sched::ProcessState::runnable);
+    CHECK(kernel.scheduler().find(pid)->leader().state == sched::ProcessState::runnable);
     CHECK(kernel.posix().activate(pid));
     runtime_poll(kernel,pid); // Existing completion semantics remain executable here.
 }

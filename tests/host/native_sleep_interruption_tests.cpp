@@ -44,7 +44,7 @@ sched::ProcessId create(Kernel &kernel)
 {
     const auto made=kernel.scheduler().create_user_process("sleep-interruption",kernel.arch().make_user_context({hw::user_begin,hw::user_begin+8192})); CHECK(made);
     auto *p=kernel.scheduler().find(made.value());p->resources().personality=sched::UserPersonality::linux;
-    auto &thread=p->threads()[0];CHECK(native::prepare_native_thread(thread));thread.native_active=true;
+    auto &thread=p->leader();CHECK(native::prepare_native_thread(thread));thread.native_active=true;
     thread.native_frame.pc=hw::user_begin+64;Bridge::set_stack_pointer(thread.native_frame,hw::user_begin+8192);
     CHECK(kernel.scheduler().set_runnable(p->pid()));CHECK(kernel.scheduler().activate_thread(p->pid(),thread.tid));
     return p->pid();
@@ -73,7 +73,7 @@ void arm(Kernel &kernel,sched::ProcessId pid,lu::Operation op,bool absolute=fals
 }
 Sleep::Completion complete(Kernel &kernel,sched::ProcessId pid,sched::WaitTicket ticket)
 {
-    auto &process=*kernel.scheduler().find(pid);auto &thread=process.threads()[0];
+    auto &process=*kernel.scheduler().find(pid);auto &thread=process.leader();
     return Sleep::complete(kernel.scheduler(),process,thread,ticket,mock::now,
         [&](uptr address,std::span<const u8> bytes){return hw::copy_to_user(process.resources().native_space,address,bytes.data(),bytes.size()).ok();},
         [&](i64 result){return native::set_result(process,thread.native_frame,result).ok();});
@@ -91,7 +91,7 @@ void family(Kernel &kernel,lu::Operation op)
     const bool plain=op==lu::Operation::nanosleep||op==lu::Operation::nanosleep_time32;
     for(unsigned mode=0;mode<(plain?5U:7U);++mode)
     {
-        const auto pid=create(kernel);auto &thread=kernel.scheduler().find(pid)->threads()[0];
+        const auto pid=create(kernel);auto &thread=kernel.scheduler().find(pid)->leader();
         const bool absolute=mode>=5;const auto rem=mode==2||mode==5 ? 0 : mode==3||mode==6 ? hw::user_end-1 : mode==1 ? input : output;
         std::fill(mock::memory.begin()+512,mock::memory.begin()+528,std::byte{0xa5});
         arm(kernel,pid,op,absolute,rem);const auto ticket=thread.wait_registration.ticket();
@@ -119,7 +119,7 @@ void family(Kernel &kernel,lu::Operation op)
 }
 void ownership(Kernel &kernel,lu::Operation op)
 {
-    const auto pid=create(kernel);auto &p=*kernel.scheduler().find(pid);auto &t=p.threads()[0];arm(kernel,pid,op);
+    const auto pid=create(kernel);auto &p=*kernel.scheduler().find(pid);auto &t=p.leader();arm(kernel,pid,op);
     const auto old=t.wait_registration.ticket();CHECK(kernel.scheduler().complete_wait(old,sched::WaitCompletion::cancelled));
     arm(kernel,pid,op);const auto ticket=t.wait_registration.ticket();const auto frame=t.native_frame;const auto n=mock::outputs;
     expect(complete(kernel,pid,old).outcome==Sleep::Outcome::lost);expect(mock::outputs==n&&t.wait_registration.pending(ticket));
@@ -149,7 +149,7 @@ void selected_runtime(Kernel &kernel,lu::Operation op)
 {
     for(unsigned mode=0;mode<7;++mode)
     {
-        const auto pid=create(kernel);auto &p=*kernel.scheduler().find(pid);auto &t=p.threads()[0];
+        const auto pid=create(kernel);auto &p=*kernel.scheduler().find(pid);auto &t=p.leader();
         auto *actions=native::private_signal_table(kernel,pid);CHECK(actions);
         *actions->find(10)={.handler=hw::user_begin+128,.flags=0x04000000|0x10000000,.restorer=hw::user_begin+192};
         // Process mapping records carry their exact pool frame.

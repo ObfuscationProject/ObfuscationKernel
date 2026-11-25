@@ -274,7 +274,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::UserFrame &frame, bool &c
     using Codec = lu::Codec<Profile>;
     using Operation = lu::Operation;
     auto *process = kernel.scheduler().find(pid);
-    if (!process || process->threads().empty())
+    if (!process || process->record_count() == 0)
         return -3;
     auto &space = process->resources().native_space;
     const auto unix_operation = native::linux_unix_path_call<Profile>(frame, kernel.scheduler(), *process);

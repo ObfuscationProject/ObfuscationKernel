@@ -88,7 +88,7 @@ template <Profile P> struct Fixture
     typename Origin::Identity owner{};
     typename Origin::FutexBinding binding{};
     hw::UserFrame original{};
-    sched::ThreadControlBlock &thread(){return process.threads()[0];}
+    sched::ThreadControlBlock &thread(){return process.leader();}
     auto cap() const {if constexpr(is_n64)return n64_issuer.tracker.capability();else return ppc_issuer.capability();}
     Fixture() : process(make(scheduler))
     {
@@ -173,7 +173,7 @@ template <Profile P> struct Fixture
     auto stage(){return Pub::stage(origins,owner,binding,readiness,id,thread().native_frame,cap());}
     bool commit(typename Pub::FutexTransaction &tx)
     {return Pub::commit(tx,owner,binding,id,thread().native_frame,cap());}
-    bool ready()const{return readiness.ready(id,process.threads()[0].native_frame,cap());}
+    bool ready()const{return readiness.ready(id,process.leader().native_frame,cap());}
     void normal_refused()
     {
         if constexpr(is_n64) CHECK(!readiness.publish_linux_completion(id,thread().native_frame,cap(),0));

@@ -58,7 +58,7 @@ sched::ProcessId process(Kernel &kernel)
     auto *owner=kernel.scheduler().find(p.value());owner->resources().personality=sched::UserPersonality::linux;
     // Shared-domain futex keys resolve through an actual mapping record.
     CHECK(native::allocate(owner->resources().native_pages,hw::user_begin,hw::page_read|hw::page_write|hw::page_execute));
-    auto &leader=owner->threads()[0];CHECK(native::prepare_native_thread(leader));
+    auto &leader=owner->leader();CHECK(native::prepare_native_thread(leader));
     leader.native_active=true;leader.native_frame.pc=hw::user_begin;
     Bridge::set_stack_pointer(leader.native_frame,hw::user_begin+4096);
     CHECK(kernel.scheduler().set_runnable(p.value()));
@@ -118,7 +118,7 @@ void registration(Kernel &kernel)
     const auto pid = process(kernel); auto *p = kernel.scheduler().find(pid);
     CHECK(call(kernel, pid, lu::Operation::set_robust_list, {1, 3 * word_bytes}) == 0);
     CHECK(call(kernel, pid, lu::Operation::set_robust_list, {head, 3 * word_bytes + 1}) == -22);
-    CHECK(p->threads()[0].tls.robust_list == 1);
+    CHECK(p->leader().tls.robust_list == 1);
     const uptr output = hw::user_begin + 1600;
     CHECK(call(kernel, pid, lu::Operation::get_robust_list, {0, output, output + word_bytes}) == 0);
     CHECK(get_word(output) == 1 && get_word(output + word_bytes) == 3 * word_bytes);
@@ -170,9 +170,9 @@ void owner_death(Kernel &kernel)
     auto *retired = kernel.scheduler().find_thread(pid, owner);
     CHECK(retired->tls.robust_list == 0 && retired->tls.robust_list_length == 0);
     // The inaccessible owner address stops this list but cannot stop group exit.
-    p->threads()[0].tls.robust_list = 1;
+    p->leader().tls.robust_list = 1;
     exit(kernel, pid, pid, true); CHECK(p->state() == sched::ProcessState::zombie);
-    CHECK(p->threads()[0].tls.robust_list == 0); CHECK(kernel.scheduler().reap_orphans());
+    CHECK(p->leader().tls.robust_list == 0); CHECK(kernel.scheduler().reap_orphans());
 }
 void group_death(Kernel &kernel)
 {
@@ -181,7 +181,7 @@ void group_death(Kernel &kernel)
     list(peer); kernel.scheduler().find_thread(pid, peer)->tls.robust_list = head;
     exit(kernel, pid, pid, true);
     CHECK(get(owner_word - hw::user_begin) == 0xc0000000U);
-    for (const auto &thread : p->threads()) CHECK(thread.tls.robust_list == 0);
+    for (const auto &thread : p->thread_records()) CHECK(thread.tls.robust_list == 0);
     CHECK(kernel.scheduler().reap_orphans());
 }
 void exec_retirement(Kernel &kernel)
@@ -192,27 +192,27 @@ void exec_retirement(Kernel &kernel)
         const auto peer = clone(kernel, pid, 0);
         // Two registrations intentionally share a list. The sibling owns the
         // first word; the caller has a separate pending word in its own head.
-        list(pid); p->threads()[0].tls.robust_list = head;
+        list(pid); p->leader().tls.robust_list = head;
         const uptr peer_head = head + 256, pending = node + 256;
         put_word(peer_head, peer_head); put_word(peer_head + word_bytes, 2 * word_bytes);
         put_word(peer_head + 2 * word_bytes, pending); put_word(pending, peer_head);
         put(pending + 2 * word_bytes - hw::user_begin, (caller_old_owner ? peer : pid) | 0x80000000U);
         auto *caller = kernel.scheduler().find_thread(pid, peer); caller->tls.robust_list = peer_head;
         caller->tls.clear_tid_address = word; put(word - hw::user_begin, peer);
-        p->threads()[0].tls.clear_tid_address = hw::user_begin + 132; put(132, pid);
+        p->leader().tls.clear_tid_address = hw::user_begin + 132; put(132, pid);
         native::ExecRetirement retirement{*p, peer};
         CHECK(retirement.threads.size() == 2);
         auto failed = native::replace_entry_stacks(native::entry_stacks, *p,
             [] { return Status::busy("injected precommit refusal"); });
-        CHECK(!failed && !failed.committed && p->threads().size() == 2);
-        CHECK(p->threads()[0].tls.robust_list == head && caller->tls.robust_list == peer_head);
+        CHECK(!failed && !failed.committed && p->record_count() == 2);
+        CHECK(p->leader().tls.robust_list == head && caller->tls.robust_list == peer_head);
         CHECK(get(owner_word - hw::user_begin) == (pid | 0x80000000U));
         auto replaced = native::replace_entry_stacks(native::entry_stacks, *p, [&] {
             return kernel.scheduler().replace_image(pid, kernel.arch().make_user_context({hw::user_begin, hw::user_begin + 4096}), {});
         });
-        CHECK(replaced && replaced.committed && p->threads().size() == 1);
+        CHECK(replaced && replaced.committed && p->record_count() == 1);
         retirement.consume(kernel, *p);
-        CHECK(retirement.threads.empty() && p->threads()[0].tls.robust_list == 0);
+        CHECK(retirement.threads.empty() && p->leader().tls.robust_list == 0);
         CHECK(get(owner_word - hw::user_begin) == 0xc0000000U);
         CHECK(get(pending + 2 * word_bytes - hw::user_begin) == (caller_old_owner ? (peer | 0x80000000U) : 0xc0000000U));
         CHECK(get(132) == 0 && get(word - hw::user_begin) == peer);

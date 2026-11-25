@@ -30,7 +30,7 @@ SyscallOrigins::FutexBinding futex_origin_binding(memory::ObjectHandle object, c
         wait.timeout_address, wait.timeout.deadline(), wait.timeout.generation()};
 }
 constinit FutexObjects futex_objects{page_pool, sched::max_processes};
-std::array<PollWaitIndex, sched::max_processes> futex_waits{};
+std::array<PollWaitIndex, memory::KernelEntryStackPool::capacity> futex_waits{};
 namespace
 {
 u64 futex_queue_sequence{};
@@ -303,8 +303,8 @@ void clear_child_tid(Kernel &kernel, sched::ProcessControlBlock &process, sched:
 void clear_group_tids(Kernel &kernel, sched::ProcessControlBlock &process)
 {
     usize live = 0;
-    for (const auto &thread : process.threads()) live += thread.state != sched::ProcessState::exited;
-    for (auto &thread : process.threads())
+    live += process.live_count();
+    for (auto &thread : process.thread_records())
         if (thread.state != sched::ProcessState::exited)
         {
             static_cast<void>(retire_robust(kernel, process, thread.tls, thread.tid));

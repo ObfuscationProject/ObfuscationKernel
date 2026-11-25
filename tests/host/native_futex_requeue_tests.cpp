@@ -35,13 +35,13 @@ Owner owner(Kernel &kernel, usize count)
     auto *process = kernel.scheduler().find(made.value());
     process->resources().personality = sched::UserPersonality::linux;
     Owner result{made.value(), {}};
-    result.tids[0] = process->threads()[0].tid;
+    result.tids[0] = process->leader().tid;
     for (usize index = 1; index < count; ++index)
     {
-        const auto peer = kernel.scheduler().create_thread(result.pid, process->threads()[0].context);
+        const auto peer = kernel.scheduler().create_thread(result.pid, process->leader().context);
         CHECK(peer); result.tids[index] = peer.value();
     }
-    for (auto &thread : process->threads()) thread.native_active = true;
+    for (auto &thread : process->thread_records()) thread.native_active = true;
     CHECK(kernel.scheduler().set_runnable(result.pid));
     return result;
 }
@@ -78,7 +78,7 @@ void cleanup(Kernel &kernel, Owner group)
 {
     CHECK(native::cancel_futex(kernel, group.pid));
     auto *process = kernel.scheduler().find(group.pid);
-    for (auto &thread : process->threads())
+    for (auto &thread : process->thread_records())
         if (thread.entry_stack.pool) CHECK(native::retire_native_thread(thread));
     auto &pages = process->resources().native_pages;
     for (usize i = 0; i < pages.size(); ++i) CHECK(native::page_pool.release_reference(*pages.frame(i)));
@@ -278,7 +278,7 @@ void destructive_failure(Kernel &kernel, unsigned mode)
     const auto group = owner(kernel, 3);
     const auto backing = frame(); map(kernel, group, hw::user_begin, backing); put(source, 7);
     auto *process = kernel.scheduler().find(group.pid);
-    for (auto &thread : process->threads()) CHECK(native::prepare_native_thread(thread));
+    for (auto &thread : process->thread_records()) CHECK(native::prepare_native_thread(thread));
     const auto object = wait(kernel, group, 1, source, Domain::anonymous_shared_operation);
     auto *thread = kernel.scheduler().find_thread(group.pid, group.tids[1]);
     const auto stack = thread->entry_stack;

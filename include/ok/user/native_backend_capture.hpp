@@ -51,13 +51,13 @@ class BackendCapture final : private NonCopyable
 
     // The backend entry. The native runtime installs one that leaves the
     // kernel lock while user code runs on this CPU; the thread is named by its
-    // identity because its records may move while the lock is not held.
+    // identity because another CPU may retire it while the lock is not held.
     // Without one, the backend is entered directly.
     using Entry = Result<Trap> (*)(Space &space, Frame &frame, const View &view, Lease lease, u64 pid, u64 tid);
     explicit constexpr BackendCapture(Pool &pool, Entry entry = nullptr) : pool_(&pool), entry_(entry) {}
     void set_entry(Entry entry) { entry_ = entry; }
-    // On success `process`/`thread` name the canonical records again, which
-    // may have moved. A no_process status means another CPU retired the
+    // On success `process`/`thread` still name the canonical records (they
+    // never move). A no_process status means another CPU retired the
     // thread while it ran: its lease and frame are no longer this caller's.
     Result<Observation> enter(sched::SchedulerState &scheduler, sched::ProcessControlBlock *&process,
                               sched::ThreadControlBlock *&thread, const View &view)
@@ -80,9 +80,11 @@ class BackendCapture final : private NonCopyable
         auto trap = entry_ ? entry_(space, frame, view, lease, pid, tid)
                            : arch::execution::enter_owned(space, frame, view);
         if (!trap && trap.status().code() == StatusCode::no_process) return trap.status();
-        process = scheduler.find(pid);
-        thread = process ? scheduler.find_thread(pid, tid) : nullptr;
-        if (!process || !thread) return Status::no_process("native thread retired during its user entry");
+        // The records never move; a slot that another CPU retired or reused
+        // while this thread ran no longer carries these identities.
+        if (process->pid() != pid || thread->owner != pid || thread->tid != tid ||
+            thread->slot_state == sched::ThreadSlotState::free || scheduler.find(pid) != process)
+            return Status::no_process("native thread retired during its user entry");
         thread->native_frame = frame;
         // The backend ran on the copy; its capture now names the canonical frame.
         arch::execution::rebind_owned_capture(frame, thread->native_frame);

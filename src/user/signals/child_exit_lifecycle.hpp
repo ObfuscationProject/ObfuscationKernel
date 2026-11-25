@@ -59,7 +59,7 @@ struct ChildExitLifecycle
         if (!owns(old_owner, from) || !owns(new_owner, to))
             return Status::fault("init adoption signal owner missing");
         sched::ThreadId target_tid{};
-        for (const auto &thread : target->threads())
+        for (const auto &thread : target->thread_records())
             if (thread.native_active && thread.state != State::exited &&
                 (!target_tid || thread.tid < target_tid)) target_tid = thread.tid;
         if (!target_tid) return Status::fault("init adoption has no live signal thread");
@@ -333,7 +333,7 @@ struct ChildExitLifecycle
             owner->lineage.leader_cause = cause;
         }
         sched::ThreadId replacement{};
-        for (const auto &peer : process->threads())
+        for (const auto &peer : process->thread_records())
             if (peer.state != State::exited && peer.native_active && (!replacement || peer.tid < replacement))
                 replacement = peer.tid;
         return replacement ? rebind(scheduler, pid, tid, replacement, lookup) : Status::success();

@@ -91,8 +91,8 @@ Group create(Kernel &kernel)
     auto made = kernel.scheduler().create_user_process("exec-eviction",
         kernel.arch().make_user_context({image.value().frame.pc, image.value().frame.sp})); CHECK(made);
     auto &p = process(kernel, made.value());
-    CHECK(native::prepare_native_thread(p.threads()[0])); CHECK(native::install(p, image.value()));
-    auto sibling = kernel.scheduler().create_thread_prepared(p.pid(), p.threads()[0].context, [](auto &created)
+    CHECK(native::prepare_native_thread(p.leader())); CHECK(native::install(p, image.value()));
+    auto sibling = kernel.scheduler().create_thread_prepared(p.pid(), p.leader().context, [](auto &created)
         { created.native_active = true; return native::prepare_native_thread(created); });
     CHECK(sibling);
     CHECK(kernel.scheduler().set_runnable(p.pid()));
@@ -150,7 +150,7 @@ struct Snapshot
 Snapshot snapshot(Kernel &kernel, sched::ProcessId pid, sched::ThreadId tid)
 {
     const auto &running = thread(kernel, pid, tid);
-    return {process(kernel, pid).resources().native_space, process(kernel, pid).threads().size(), running.entry_stack,
+    return {process(kernel, pid).resources().native_space, process(kernel, pid).record_count(), running.entry_stack,
             running.native_frame.pc, running.kernel_stack_top, running.on_cpu, native::entry_stacks.accounting()};
 }
 // Nothing of the thread another CPU runs, or of the group, changed.
@@ -216,7 +216,7 @@ void exec_evicts_sibling(Kernel &kernel)
     EXPECT(exec(kernel, g.pid, g.pid, complete) == 0 && !complete && evict_reported(g.pid, g.pid));
     EXPECT(native::runtime_status().ok() && native::started);
     auto &p = process(kernel, g.pid);
-    EXPECT(p.threads().size() == 1 && p.threads()[0].tid == g.pid && p.threads()[0].entry_stack == leader_lease);
+    EXPECT(p.record_count() == 1 && p.leader().tid == g.pid && p.leader().entry_stack == leader_lease);
     EXPECT(!native::same_space(old_space, p.resources().native_space));
     EXPECT(!native::entry_stacks.active_on(other_cpu) && native::entry_stacks.accounting().active_slots == 0);
     EXPECT(native::entry_stacks.accounting().leased_slots == stacks.leased_slots - 1);
@@ -238,8 +238,8 @@ void exec_evicts_leader(Kernel &kernel)
     EXPECT(exec(kernel, g.pid, g.sibling, complete) == 0 && !complete && evict_reported(g.pid, g.sibling));
     EXPECT(native::runtime_status().ok() && native::started);
     auto &p = process(kernel, g.pid);
-    EXPECT(p.threads().size() == 1 && p.threads()[0].tid == g.pid && p.threads()[0].entry_stack == leader_lease);
-    EXPECT(p.threads()[0].on_cpu == sched::no_cpu);
+    EXPECT(p.record_count() == 1 && p.leader().tid == g.pid && p.leader().entry_stack == leader_lease);
+    EXPECT(p.leader().on_cpu == sched::no_cpu);
     EXPECT(native::entry_stacks.validate_inactive(leader_lease, {g.pid, g.pid}));
     EXPECT(!native::entry_stacks.validate_inactive(caller_lease, {g.pid, g.sibling}));
     EXPECT(native::entry_stacks.accounting().active_slots == 0);
@@ -253,7 +253,7 @@ void exec_without_other_cpu(Kernel &kernel)
     const auto g = create(kernel);
     bool complete{};
     EXPECT(exec(kernel, g.pid, g.sibling, complete) == 0 && !complete && nothing_reported());
-    EXPECT(process(kernel, g.pid).threads().size() == 1 && native::cpu_entries[other_cpu].pid == 0);
+    EXPECT(process(kernel, g.pid).record_count() == 1 && native::cpu_entries[other_cpu].pid == 0);
     retire(kernel, g.pid);
 }
 
@@ -264,13 +264,13 @@ void exec_without_other_cpu(Kernel &kernel)
 void expect_stopped(Kernel &kernel, sched::ProcessId pid, sched::ThreadId caller, bool elsewhere)
 {
     const auto space = process(kernel, pid).resources().native_space;
-    const auto threads = process(kernel, pid).threads().size();
+    const auto threads = process(kernel, pid).record_count();
     const auto pc = thread(kernel, pid, caller).native_frame.pc;
     bool complete{};
     EXPECT(exec(kernel, pid, caller, complete) == 0 && !complete && nothing_reported());
     EXPECT(!native::runtime_status().ok() && !native::started);
     EXPECT(native::same_space(process(kernel, pid).resources().native_space, space));
-    EXPECT(process(kernel, pid).threads().size() == threads && thread(kernel, pid, caller).native_frame.pc == pc);
+    EXPECT(process(kernel, pid).record_count() == threads && thread(kernel, pid, caller).native_frame.pc == pc);
     EXPECT(native::cpu_entries[other_cpu].pid == (elsewhere ? pid : 0) && !native::cpu_entries[other_cpu].revoked);
     native::runtime_failure = Status::success();
     native::started = true;
@@ -355,8 +355,8 @@ void leaseless_leader_exec(Kernel &kernel)
     EXPECT(exec(kernel, g.pid, caller.value(), complete) == 0 && !complete && evict_reported(g.pid, caller.value()));
     EXPECT(native::runtime_status().ok() && native::started);
     auto &p = process(kernel, g.pid);
-    EXPECT(p.threads().size() == 1 && p.threads()[0].tid == g.pid && p.threads()[0].entry_stack.pool);
-    EXPECT(p.threads()[0].entry_stack != sibling_lease && p.threads()[0].entry_stack != caller_lease);
+    EXPECT(p.record_count() == 1 && p.leader().tid == g.pid && p.leader().entry_stack.pool);
+    EXPECT(p.leader().entry_stack != sibling_lease && p.leader().entry_stack != caller_lease);
     EXPECT(!native::entry_stacks.validate_inactive(sibling_lease, {g.pid, g.sibling}));
     EXPECT(!native::entry_stacks.validate_inactive(caller_lease, {g.pid, caller.value()}));
     EXPECT(native::entry_stacks.accounting().active_slots == 0 &&
@@ -388,19 +388,19 @@ void exec_drops_leader_hotplug_request(Kernel &kernel)
     EXPECT(leader.state == sched::ProcessState::blocked && leader.wait_reason == sched::ThreadWaitReason::cpu_hotplug);
     EXPECT(leader.wait_registration.pending(ticket) && smp::hotplug::pending() == 1);
     // The blocked leader is confined to CPU 1; the caller runs on CPU 0.
-    thread(kernel, g.pid, g.pid).cpu_affinity_mask = 0x2;
-    thread(kernel, g.pid, g.sibling).cpu_affinity_mask = 0x1;
+    kernel.scheduler().store_thread_affinity(process(kernel, g.pid), thread(kernel, g.pid, g.pid), 0x2);
+    kernel.scheduler().store_thread_affinity(process(kernel, g.pid), thread(kernel, g.pid, g.sibling), 0x1);
     EXPECT(kernel.posix().activate(0));
     EXPECT(exec(kernel, g.pid, g.sibling, complete) == 0 && !complete && nothing_reported());
     EXPECT(native::runtime_status().ok() && native::started);
     auto &p = process(kernel, g.pid);
-    EXPECT(p.threads().size() == 1 && p.threads()[0].tid == g.pid);
-    EXPECT(p.threads()[0].wait_registration.ticket() == ticket && !p.threads()[0].wait_registration.active());
-    EXPECT(p.threads()[0].cpu_affinity_mask == 0x1);
-    EXPECT(smp::hotplug::pending() == 0 && !smp::hotplug::finished(p.threads()[0].entry_stack.slot));
-    EXPECT(!smp::hotplug::consume(p.threads()[0].entry_stack.slot, ticket));
+    EXPECT(p.record_count() == 1 && p.leader().tid == g.pid);
+    EXPECT(p.leader().wait_registration.ticket() == ticket && !p.leader().wait_registration.active());
+    EXPECT(kernel.scheduler().thread_affinity(p, p.leader()) == 0x1);
+    EXPECT(smp::hotplug::pending() == 0 && !smp::hotplug::finished(p.leader().entry_stack.slot));
+    EXPECT(!smp::hotplug::consume(p.leader().entry_stack.slot, ticket));
     EXPECT(smp::hotplug::statistics().dropped_waiting == before.dropped_waiting + 1);
-    EXPECT(native::cpu_control_resume(p.threads()[0]) == std::nullopt);
+    EXPECT(native::cpu_control_resume(p.leader()) == std::nullopt);
     retire(kernel, g.pid);
     smp::detail::started.store(0x1);
     smp::detail::online.store(0x1);

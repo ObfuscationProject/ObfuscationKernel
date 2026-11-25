@@ -442,7 +442,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
             for (const auto &entry : child_waits)
                 if (entry.pid == pid && entry.tid == calling_tid) cancel_child_wait(kernel, entry.object);
             usize live = 0;
-            for (const auto &peer : process->threads()) live += peer.state != sched::ProcessState::exited;
+            live += process->live_count();
             static_cast<void>(retire_robust(kernel, *process, thread->tls, thread->tid));
             clear_child_tid(kernel, *process, thread->tls, live > 1);
             if (!runtime_failure) { started = false; complete = false; return error(runtime_failure); }
@@ -975,7 +975,7 @@ Status start(Kernel &kernel, fs::BootArchive archive)
     // The kernel and preemption ticks leave native threads to the step.
     kernel.scheduler().set_native_userland(true);
     // This static singleton has one boot lifetime and no reconstruction/reset API.
-    original_shutdown_owner = {&original_shutdown_owner, 1, pid.value(), process->threads()[0].tid};
+    original_shutdown_owner = {&original_shutdown_owner, 1, pid.value(), process->leader().tid};
     emit("OK_NATIVE scope=hardware init=loaded\n");
     arm_kernel_checks();
     start_sections();
@@ -1114,7 +1114,7 @@ bool step(Kernel &kernel)
             waiting_deadline = true;
     }
     for (auto &candidate : kernel.scheduler().processes())
-        for (auto &thread : candidate.threads())
+        for (auto &thread : candidate.thread_records())
             if (thread.native_active && thread.native_deadline.armed())
             {
                 if (thread.wait_reason == sched::ThreadWaitReason::deadline &&
@@ -1159,7 +1159,7 @@ bool step(Kernel &kernel)
         if ((candidate.state() != sched::ProcessState::runnable && candidate.state() != sched::ProcessState::running &&
              candidate.state() != sched::ProcessState::blocked) || candidate.job_control().stopped)
             continue;
-        for (auto &thread : candidate.threads())
+        for (auto &thread : candidate.thread_records())
         {
             bool interruptible = false;
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))

@@ -373,7 +373,7 @@ Status KernelDebugShell::command_processes(std::string_view)
         {
             return status;
         }
-        if (auto status = append_padded_unsigned(process.threads().size(), 3); !status.ok())
+        if (auto status = append_padded_unsigned(process.record_count(), 3); !status.ok())
         {
             return status;
         }

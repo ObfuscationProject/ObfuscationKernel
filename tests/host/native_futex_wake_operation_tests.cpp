@@ -34,14 +34,14 @@ Owner owner(Kernel &kernel, usize count)
     CHECK(created);
     Owner result{created.value(), {}};
     auto *process = kernel.scheduler().find(result.pid);
-    result.tids[0] = process->threads()[0].tid;
+    result.tids[0] = process->leader().tid;
     for (usize i = 1; i < count; ++i)
     {
-        const auto made = kernel.scheduler().create_thread(result.pid, process->threads()[0].context);
+        const auto made = kernel.scheduler().create_thread(result.pid, process->leader().context);
         CHECK(made); result.tids[i] = made.value();
     }
     CHECK(kernel.scheduler().set_runnable(result.pid));
-    for (auto &thread : process->threads()) thread.native_active = true;
+    for (auto &thread : process->thread_records()) thread.native_active = true;
     return result;
 }
 void activate(Kernel &kernel, Owner a, usize index = 0)

@@ -40,8 +40,8 @@ struct Fixture
     {
         const auto *process = scheduler.find(pid);
         CHECK(process && process->state() == sched::ProcessState::running);
-        CHECK(process->threads()[0].state == sched::ProcessState::running);
-        CHECK(process->threads()[0].wait_reason == sched::ThreadWaitReason::none);
+        CHECK(process->leader().state == sched::ProcessState::running);
+        CHECK(process->leader().wait_reason == sched::ThreadWaitReason::none);
     }
     void ready(posix::Fd fd, Events expected, Events requested = io_events)
     {

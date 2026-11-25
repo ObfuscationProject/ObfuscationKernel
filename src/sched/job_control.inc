@@ -35,7 +35,7 @@ bool SchedulerState::continue_process(ProcessId pid)
     wake_job_waiters(*process);
     // Terminal calls blocked across the stop re-run their job-control check
     // (Linux restarts them after the stop interrupted the wait).
-    for (auto &thread : process->threads())
+    for (auto &thread : process->thread_records())
         if (thread.state == ProcessState::blocked &&
             (thread.wait_reason == ThreadWaitReason::console_read || thread.wait_reason == ThreadWaitReason::pty_read ||
              thread.wait_reason == ThreadWaitReason::pty_write || thread.wait_reason == ThreadWaitReason::job_control))
@@ -55,7 +55,7 @@ bool SchedulerState::process_group_orphaned(ProcessId group, ProcessId ignored) 
 }
 bool SchedulerState::process_group_has_stopped(ProcessId group) const
 {
-    for (const auto &process : processes_)
+    for (const auto &process : process_range())
         if (process.process_group_id() == group && process.job_.stopped) return true;
     return false;
 }

@@ -10,13 +10,12 @@
 using namespace ok;
 using namespace ok::sched;
 using namespace ok::user::native;
-static usize checks, before_calls, after_calls, fail_before, fail_after;
+static usize checks, before_calls, fail_before;
 #define CHECK(x) do { ++checks; if (!(x)) { std::fprintf(stderr, "%d: %s\n", __LINE__, #x); std::abort(); } } while (false)
 namespace ok::user::native {
-Status private_signal_before_process_compaction(SchedulerState &)
-{ return ++before_calls == fail_before ? Status::fault("injected pre-erase failure") : Status::success(); }
-Status private_signal_after_process_compaction(SchedulerState &)
-{ return ++after_calls == fail_after ? Status::fault("injected post-erase failure") : Status::success(); }
+// The only reap hook runs before the slot is released (slots never move).
+Status private_signal_before_process_reap(SchedulerState &)
+{ return ++before_calls == fail_before ? Status::fault("injected pre-reap failure") : Status::success(); }
 }
 constexpr auto profile = abi::linux_user::configured_native_profile();
 using Lifecycle = ChildExitLifecycle<profile>;
@@ -37,7 +36,7 @@ struct Fixture
     std::unique_ptr<std::array<Owner, max_processes>> owner_storage{std::make_unique<std::array<Owner, max_processes>>()};
     arch::CpuContext context{arch::configured_arch_operations().make_kernel_context(0x1000, 0x8000)};
     SignalMask real{}; ThreadId real_tid{};
-    Fixture() { before_calls = after_calls = fail_before = fail_after = 0; }
+    Fixture() { before_calls = fail_before = 0; }
     Owner *find(ProcessId pid)
     { for (auto &owner : *owner_storage) if (owner.pid == pid) return &owner; return nullptr; }
     auto lookup() { return [this](ProcessId pid) { return find(pid); }; }
@@ -59,7 +58,7 @@ struct Fixture
         const auto result = scheduler.create_process("child-exit", context); CHECK(result);
         auto *process = scheduler.find(result.value());
         process->resources().personality = UserPersonality::linux;
-        process->threads()[0].native_active = true;
+        process->leader().native_active = true;
         auto credentials = process->credentials(); credentials.uid = 0xfedcba98; process->set_credentials(credentials);
         CHECK(scheduler.set_runnable(result.value())); reserve(result.value()); return result.value();
     }
@@ -95,7 +94,7 @@ struct Fixture
     }
     Status transition(ProcessId pid, ChildExitStatus cause)
     {
-        for (auto &thread : scheduler.find(pid)->threads()) thread.native_active = false;
+        for (auto &thread : scheduler.find(pid)->thread_records()) thread.native_active = false;
         retire(pid);
         return cause.code() == 1 ? scheduler.exit_process(pid, cause.status())
                                 : scheduler.terminate_process(pid, static_cast<u8>(cause.status()));
@@ -131,7 +130,7 @@ void matrix()
                 const bool autoreap = disposition == 1 || no_wait;
                 CHECK(notification == (notified ? Lifecycle::Notification::queued : Lifecycle::Notification::skipped));
                 CHECK(f.scheduler.find(parent) == parent_address); CHECK(f.scheduler.find(child) == child_address);
-                CHECK(before_calls == 0 && after_calls == 0);
+                CHECK(before_calls == 0);
                 CHECK(child_address->parent_pid() == (autoreap ? 0 : parent));
                 CHECK(f.scheduler.find(parent)->children().size() == (autoreap ? 0 : 1));
                 CHECK(child_address->wait_status() == (killed ? 15 : 0x2300));
@@ -272,8 +271,8 @@ void pending_capacity_and_reap_faults()
     CHECK(f.scheduler.find(second)->parent_pid() == parent);
     fail_before = before_calls + 1; OrphanReapProgress progress;
     CHECK(!f.scheduler.reap_orphans_checked(progress)); CHECK(progress.reaped == 0 && progress.failed_pid == first);
-    fail_before = 0; fail_after = after_calls + 1;
-    CHECK(!f.scheduler.reap_orphans_checked(progress)); CHECK(progress.reaped == 1 && progress.failed_after_erase);
+    fail_before = 0;
+    CHECK(f.scheduler.reap_orphans_checked(progress)); CHECK(progress.reaped == 1 && !progress.failed_after_erase);
     CHECK(!f.scheduler.find(first));
     // Realtime saturation has no bearing on the standard SIGCHLD slot.
     Fixture rt; const auto p = rt.parent(); rt.action(p, 2);
@@ -294,7 +293,7 @@ void designated_init_adoption()
     CHECK(!f.scheduler.create_init_process(user_context));
     auto *init = f.scheduler.find(user_init_pid);
     init->resources().personality = UserPersonality::linux;
-    init->threads()[0].native_active = true;
+    init->leader().native_active = true;
     CHECK(f.scheduler.set_runnable(user_init_pid));
     f.reserve(user_init_pid);
 
@@ -303,7 +302,7 @@ void designated_init_adoption()
     const auto parent = created_parent.value();
     auto *process = f.scheduler.find(parent);
     process->resources().personality = UserPersonality::linux;
-    process->threads()[0].native_active = true;
+    process->leader().native_active = true;
     CHECK(f.scheduler.set_runnable(parent));
     f.reserve(parent);
     const auto child = f.child(parent);
@@ -350,7 +349,7 @@ void unpublished_init_fallback()
     const auto parent = service.value();
     auto *process = f.scheduler.find(parent);
     process->resources().personality = UserPersonality::linux;
-    process->threads()[0].native_active = true;
+    process->leader().native_active = true;
     CHECK(f.scheduler.set_runnable(parent));
     f.reserve(parent);
     const auto child = f.child(parent);

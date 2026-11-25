@@ -5,7 +5,7 @@ namespace {
 template <lu::Profile P>
 void sleeps(Kernel &kernel, sched::ProcessId pid, usize number_slot, std::array<usize,4> slots)
 {
-    auto *process=kernel.scheduler().find(pid);auto &thread=process->threads()[0];
+    auto *process=kernel.scheduler().find(pid);auto &thread=process->leader();
     constexpr uptr request=hw::user_begin+128, remainder=hw::user_begin+256;
     auto record=[&](i64 seconds,u64 nanoseconds,bool time64) {
         mock::memory.fill(std::byte{0x55});
@@ -363,7 +363,7 @@ void public_clock_boundaries(Kernel &kernel, sched::ProcessId pid)
 }
 
 void runtime_timeout(Kernel &kernel,sched::ProcessId pid) {
-    auto *process=kernel.scheduler().find(pid);auto &thread=process->threads()[0];
+    auto *process=kernel.scheduler().find(pid);auto &thread=process->leader();
     CHECK(native::prepare_native_thread(thread));
     process->resources().personality=sched::UserPersonality::linux;
     thread.native_active=true;thread.syscall_pending=true;

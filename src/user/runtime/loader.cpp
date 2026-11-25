@@ -744,7 +744,7 @@ Status install(sched::ProcessControlBlock &process, Image &image, sched::SignalM
         (process.resources().native_space.root && !previous_quarantined))
         return Status::busy("previous native image must retire before installation");
     auto &resources = process.resources();
-    auto &thread = process.threads()[0];
+    auto &thread = process.leader();
     if (auto status = cancel_native_vfs_thread(thread); !status) return status;
     const auto previous_thread = thread;
     const auto previous_memory = resources.memory;
@@ -754,6 +754,8 @@ Status install(sched::ProcessControlBlock &process, Image &image, sched::SignalM
     const auto previous_break = resources.program_break;
     const auto previous_break_limit = resources.program_break_limit;
     const auto previous_affinity = process.cpu_affinity_mask();
+    auto *scheduler = runtime_kernel ? &runtime_kernel->scheduler() : nullptr;
+    const auto previous_thread_affinity = scheduler ? scheduler->thread_affinity(process, thread) : sched::cpu_affinity_any;
     bool origin_prepared = false;
     auto fail_prepare = [&](Status status) {
         if (origin_prepared) syscall_origins.retire(thread);
@@ -766,6 +768,7 @@ Status install(sched::ProcessControlBlock &process, Image &image, sched::SignalM
         resources.program_break = previous_break;
         resources.program_break_limit = previous_break_limit;
         process.set_cpu_affinity_mask(previous_affinity);
+        if (scheduler) scheduler->store_thread_affinity(process, thread, previous_thread_affinity);
         return status;
     };
     // Native threads run on every online CPU; the scheduler places them.
@@ -794,7 +797,7 @@ Status install(sched::ProcessControlBlock &process, Image &image, sched::SignalM
     thread.tls = {};
     thread.native_signal_mask = mask;
     // The exec'ing thread's affinity, which the new image's only thread keeps.
-    thread.cpu_affinity_mask = thread_affinity;
+    if (scheduler) scheduler->store_thread_affinity(process, thread, thread_affinity);
     thread.native_frame = image.frame;
     thread.native_active = true;
     thread.syscall_pending = false;
@@ -855,13 +858,13 @@ class VfsImageRetirement final : private NonCopyable
   public:
     Status prepare(sched::SchedulerState &scheduler, sched::ProcessControlBlock &process)
     {
-        if (staged_ || scheduler.find(process.pid()) != &process || process.threads().empty())
+        if (staged_ || scheduler.find(process.pid()) != &process || process.record_count() == 0)
             return Status::denied("VFS image retirement has no canonical source image");
         staged_ = true;
         process_ = &process; scheduler_ = &scheduler; pid_ = process.pid();
         image_ = process.address_space_id(); space_ = process.resources().native_space;
         usize requests{};
-        for (const auto &thread : process.threads())
+        for (const auto &thread : process.thread_records())
         {
             auto handle = vfs_continuations.pending(pid_, thread.tid);
             const auto ticket = vfs_continuations.ticket(handle);
@@ -891,11 +894,11 @@ class VfsImageRetirement final : private NonCopyable
     {
         if (!prepared_ || consumed_ || scheduler_ != &scheduler || process_ != &process ||
             scheduler.find(pid_) != &process || process.pid() != pid_ || process.address_space_id() == image_ ||
-            !same_space(process.resources().native_space, space_) || process.threads().size() != 1)
+            !same_space(process.resources().native_space, space_) || process.record_count() != 1)
             return Status::fault("VFS image cancellation requires its committed scheduler image");
         if (vfs_continuations.pending_count(pid_) != requests_)
             return Status::fault("VFS image cancellation changed its staged request count");
-        const auto &leader = process.threads()[0];
+        const auto &leader = process.leader();
         const bool leader_lease = records_[0].lease.pool ? leader.entry_stack == records_[0].lease
             : !records_[0].handle.request && entry_stacks.validate_inactive(leader.entry_stack, {pid_, records_[0].tid}).ok();
         if (leader.tid != records_[0].tid || !leader_lease ||
@@ -957,7 +960,7 @@ struct ExecRetirement
     sched::ThreadId caller{};
     ExecRetirement(const sched::ProcessControlBlock &process, sched::ThreadId invoking) : caller(invoking)
     {
-        for (const auto &thread : process.threads())
+        for (const auto &thread : process.thread_records())
             if (thread.state != sched::ProcessState::exited)
                 static_cast<void>(threads.push_back({thread.tid, thread.tls}));
     }
@@ -1115,12 +1118,13 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
 #else
     const auto inherited_mask = kernel.scheduler().find_thread(pid, calling_tid)->native_signal_mask;
 #endif
-    const auto inherited_affinity = kernel.scheduler().find_thread(pid, calling_tid)->cpu_affinity_mask;
+    const auto inherited_affinity =
+        kernel.scheduler().thread_affinity(*process, *kernel.scheduler().find_thread(pid, calling_tid));
     // Every old thread's hotplug record goes with the old image, the
     // surviving leader's too: its lease and wait ticket carry over.
     std::array<RetainedEntryStack, sched::max_threads_per_process> hotplug_writers{};
     usize hotplug_writer_count{};
-    for (const auto &old_thread : process->threads())
+    for (const auto &old_thread : process->thread_records())
         if (old_thread.entry_stack.pool)
             hotplug_writers[hotplug_writer_count++] = {{pid, old_thread.tid}, old_thread.entry_stack, 0};
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
@@ -1129,7 +1133,7 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     const auto altstack_before_exec = *private_signal_altstack(*kernel.scheduler().find_thread(pid, calling_tid));
     std::array<RetainedEntryStack, sched::max_threads_per_process> old_signal_owners{};
     usize old_signal_owner_count{};
-    for (const auto &old_thread : process->threads())
+    for (const auto &old_thread : process->thread_records())
         if (old_thread.entry_stack.pool)
             old_signal_owners[old_signal_owner_count++] = {{pid, old_thread.tid}, old_thread.entry_stack, 0};
 #endif
@@ -1142,7 +1146,7 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
 #if defined(OK_PRIVATE_MIPS64_N64_SIGNAL) || defined(OK_PRIVATE_PPC32_SIGNAL)
     std::array<u32, sched::max_threads_per_process> previous_signal_slots{};
     usize previous_signal_count{};
-    for (const auto &old_thread : process->threads())
+    for (const auto &old_thread : process->thread_records())
         if (old_thread.entry_stack.pool) previous_signal_slots[previous_signal_count++] = old_thread.entry_stack.slot;
 #endif
     // Everything that can refuse the exec runs while sibling threads still run
@@ -1162,7 +1166,8 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     EntryStackPlan entry_plan;
     if (auto status = prepare_entry_stacks(entry_stacks, *process, entry_plan); !status)
         return error(status);
-    const std::span<const sched::ThreadControlBlock> old_threads{process->threads().begin(), process->threads().size()};
+    // Every slot in place; a free one names no owner.
+    const std::span<const sched::ThreadControlBlock> old_threads{&process->thread_slot(0), sched::max_threads_per_process};
     EvictionPlan eviction;
     if (auto status = prepare_eviction(pid, process->resources().native_space.root, old_threads, eviction); !status)
         return error(status);
@@ -1265,7 +1270,7 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     private_signal_exec(kernel, *process, pending_before_exec, altstack_before_exec);
     private_jobctl_exec(kernel, *process, personality_before_exec);
     for (usize index = 0; index < old_signal_owner_count; ++index)
-        if (old_signal_owners[index].handle != process->threads()[0].entry_stack)
+        if (old_signal_owners[index].handle != process->leader().entry_stack)
             private_signal_thread_retire(pid, old_signal_owners[index].owner.tid, old_signal_owners[index].handle);
 #endif
     complete = false; // The new image has its own entry register state.
@@ -1302,7 +1307,7 @@ Result<sched::ProcessId> install_init(Kernel &kernel, const fs::BootArchive &arc
     }
     auto *process = kernel.scheduler().find(pid.value());
     process->set_credentials(initial_credentials);
-    if (auto status = prepare_native_thread(process->threads()[0]); !status)
+    if (auto status = prepare_native_thread(process->leader()); !status)
     {
         finish(kernel, pid.value(), 127);
         return status;

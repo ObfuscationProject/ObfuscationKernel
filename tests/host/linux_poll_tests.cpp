@@ -147,7 +147,7 @@ void polls(Kernel &kernel, sched::ProcessId pid, usize number_slot, std::array<i
     constexpr usize signal_bytes=(P==lu::Profile::mips||P==lu::Profile::mips64)?16:8;
     constexpr u16 write_normal=signal_bytes==16?4:0x100;
     constexpr uptr fds=hw::user_begin+128, time=hw::user_begin+1024, mask=hw::user_begin+2048;
-    auto *process=kernel.scheduler().find(pid);auto &thread=process->threads()[0];
+    auto *process=kernel.scheduler().find(pid);auto &thread=process->leader();
     auto put=[&](usize offset,usize width,u64 value) {
         for(usize i=0;i<width;++i)mock::memory[offset+i]=static_cast<std::byte>(value>>(8*(big?width-i-1:i)));
     };
@@ -254,7 +254,7 @@ void polls(Kernel &kernel, sched::ProcessId pid, usize number_slot, std::array<i
 }
 void runtime_poll(Kernel &kernel,sched::ProcessId pid)
 {
-    auto *process=kernel.scheduler().find(pid);auto &thread=process->threads()[0];
+    auto *process=kernel.scheduler().find(pid);auto &thread=process->leader();
     CHECK(native::prepare_native_thread(thread));
     process->resources().personality=sched::UserPersonality::linux;thread.native_active=true;
     native::started=true;native::runtime_kernel=&kernel;mock::entries=0;mock::now=5000000000;

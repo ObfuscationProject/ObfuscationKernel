@@ -204,7 +204,7 @@ void group_release(Kernel &kernel, Provider &provider)
     require(!native::vfs_continuations.pending_count(f.pid) && f.process().resources().native_pages.empty());
     require(native::page_pool.used_count() < pages && !native::page_pool.handle(physical));
     require(native::entry_stacks.accounting().releases == before.releases + 3);
-    for (const auto &thread : f.process().threads()) require(!thread.entry_stack.pool && !thread.wait_registration.active());
+    for (const auto &thread : f.process().thread_records()) require(!thread.entry_stack.pool && !thread.wait_registration.active());
     for (auto ticket : tickets) require(!kernel.scheduler().complete_wait(ticket, sched::WaitCompletion::ready));
     const auto released_pages = native::page_pool.used_count();
     native::release_process(kernel, f.pid); require(native::entry_stacks.accounting().releases == before.releases + 3);
@@ -266,7 +266,7 @@ void image_transaction(Kernel &kernel, Provider &provider, unsigned mode)
     if (mode == 1)
     {
         require(!replaced && !replaced.committed && callbacks == 0 && replaced.retained_count == 0);
-        require(f.process().threads().size() == 3 && f.thread().entry_stack == leader_lease && f.thread(peer).entry_stack == peer_lease);
+        require(f.process().record_count() == 3 && f.thread().entry_stack == leader_lease && f.thread(peer).entry_stack == peer_lease);
         require(f.thread(caller).entry_stack == caller_lease && native::entry_stacks.accounting().releases == before.releases);
         require(native::vfs_continuations.pending(f.pid, f.pid) == leader_handle && native::vfs_continuations.pending(f.pid, peer) == peer_handle);
         require(f.thread().wait_registration.pending(leader_ticket) && f.thread(peer).wait_registration.pending(peer_ticket));
@@ -274,7 +274,7 @@ void image_transaction(Kernel &kernel, Provider &provider, unsigned mode)
     else if (mode == 2 || mode == 3)
     {
         require(!replaced && replaced.committed && callbacks == 1 && replaced.retained_count == 2);
-        require(f.process().threads().size() == 1 && f.thread().entry_stack == leader_lease);
+        require(f.process().record_count() == 1 && f.thread().entry_stack == leader_lease);
         require(native::entry_stacks.accounting().releases == before.releases && native::vfs_continuations.pending_count(f.pid) == 2);
         for (usize i = 0; i < replaced.retained_count; ++i)
             require(native::entry_stacks.validate_inactive(replaced.retained[i].handle, replaced.retained[i].owner).ok());
@@ -293,7 +293,7 @@ void image_transaction(Kernel &kernel, Provider &provider, unsigned mode)
     else
     {
         require(replaced && replaced.committed && callbacks == 1 && replaced.retained_count == 0);
-        require(f.process().threads().size() == 1 && f.thread().entry_stack == leader_lease);
+        require(f.process().record_count() == 1 && f.thread().entry_stack == leader_lease);
         require(native::entry_stacks.accounting().releases == before.releases + 2);
         require(!native::vfs_continuations.pending_count(f.pid));
         require(native::vfs_continuations.cancel(kernel.scheduler(), leader_handle).code() == StatusCode::not_found);
@@ -325,7 +325,7 @@ void retired_leader_transaction(Kernel &kernel, Provider &provider, bool failed)
         [&] { ++callbacks; return plan.consume(kernel.scheduler(), f.process()); });
     if (failed)
     {
-        require(!replaced && !replaced.committed && !callbacks && f.process().threads().size() == 3);
+        require(!replaced && !replaced.committed && !callbacks && f.process().record_count() == 3);
         require(!f.thread().entry_stack.pool && native::vfs_continuations.pending(f.pid, peer) == handle);
         require(native::entry_stacks.accounting().reservations == before.reservations + 1);
         require(native::entry_stacks.accounting().releases == before.releases + 1);
@@ -333,7 +333,7 @@ void retired_leader_transaction(Kernel &kernel, Provider &provider, bool failed)
     else
     {
         require(replaced && replaced.committed && callbacks == 1 && !native::vfs_continuations.pending_count(f.pid));
-        require(f.process().threads().size() == 1 && f.thread().entry_stack.pool && f.thread().entry_stack != old_leader);
+        require(f.process().record_count() == 1 && f.thread().entry_stack.pool && f.thread().entry_stack != old_leader);
         require(native::entry_stacks.accounting().reservations == before.reservations + 1);
         require(native::entry_stacks.accounting().releases == before.releases + 2);
     }

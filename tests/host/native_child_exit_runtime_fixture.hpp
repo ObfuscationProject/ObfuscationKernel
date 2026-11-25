@@ -28,7 +28,7 @@ u64 create(Kernel &kernel)
     process.resources().personality = sched::UserPersonality::linux;
     process.resources().native_space = {0x100000 + process.pid() * 4096, static_cast<u32>(process.pid() % 16), 1};
     CHECK(native::allocate(process.resources().native_pages, hw::user_begin, hw::page_read | hw::page_execute));
-    auto &thread = process.threads()[0]; CHECK(native::prepare_native_thread(thread)); thread.native_active = true; frame(thread);
+    auto &thread = process.leader(); CHECK(native::prepare_native_thread(thread)); thread.native_active = true; frame(thread);
     CHECK(native::private_signal_process(kernel, process.pid()));
     CHECK(kernel.scheduler().set_runnable(process.pid()));
     native::runtime_kernel = &kernel; native::started = true; return process.pid();
@@ -41,7 +41,7 @@ u64 create(Kernel &kernel)
     process.resources().personality = sched::UserPersonality::linux;
     process.resources().native_space = {0x100000 + process.pid() * 4096, static_cast<u32>(process.pid() % 16), 1};
     CHECK(native::allocate(process.resources().native_pages, hw::user_begin, hw::page_read | hw::page_execute));
-    auto &thread = process.threads()[0]; CHECK(native::prepare_native_thread(thread)); thread.native_active = true; frame(thread);
+    auto &thread = process.leader(); CHECK(native::prepare_native_thread(thread)); thread.native_active = true; frame(thread);
     CHECK(native::private_signal_process(kernel, process.pid()));
     CHECK(kernel.scheduler().set_runnable(process.pid()));
     native::runtime_kernel = &kernel; native::started = true; return process.pid();
@@ -56,7 +56,7 @@ u64 fork(Kernel &kernel, u64 parent, u64 caller = 0)
 }
 [[maybe_unused]] u64 peer(Kernel &kernel, u64 pid)
 {
-    const auto result = kernel.scheduler().create_thread_prepared(pid, kernel.scheduler().find(pid)->threads()[0].context,
+    const auto result = kernel.scheduler().create_thread_prepared(pid, kernel.scheduler().find(pid)->leader().context,
         [](auto &thread) { thread.native_active = true; frame(thread); return native::prepare_native_thread(thread); });
     CHECK(result); return result.value();
 }

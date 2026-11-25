@@ -538,7 +538,7 @@ Status test_kernel_process_backed_module()
     auto *process = scheduler.find(pid);
     if (pid == 0 || process == nullptr || process->name() != "mod:gui-worker" || !process->background() ||
         bound_manager.kernel_process_module_count() != 1 || scheduler.background_process_count() != 1 ||
-        process->threads().size() != scheduler.cpu_count() || bound_module.state() != ModuleState::started ||
+        process->record_count() != scheduler.cpu_count() || bound_module.state() != ModuleState::started ||
         module_execution_name(bound_module.manifest().execution) != "kernel-process")
     {
         return Status::fault("kernel-process module manager binding failed");

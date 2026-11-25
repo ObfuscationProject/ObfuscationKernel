@@ -153,12 +153,12 @@ void profile(Kernel &kernel, sched::ProcessId pid, usize number_slot, std::array
     CHECK(std::get<0>(call(lu::Operation::getppid, {}, 0, true)) == 0);
     CHECK(std::get<0>(call(lu::Operation::gettid, {}, 0, true)) == static_cast<i64>(pid));
     CHECK(std::get<0>(call(lu::Operation::set_tid_address, {hw::user_begin, 0, 0, 0}, 0, true)) == static_cast<i64>(pid));
-    CHECK(kernel.scheduler().find(pid)->threads()[0].tls.clear_tid_address == hw::user_begin);
+    CHECK(kernel.scheduler().find(pid)->leader().tls.clear_tid_address == hw::user_begin);
     CHECK(kernel.posix().gettid() == pid); // One task-ID domain; a leader TID equals TGID.
     bool native_done = true;
     CHECK(native::dispatch(kernel, pid, {OK_SYS_GETTID, {}}, native_done) == static_cast<i64>(kernel.posix().gettid()));
-    const auto leader = kernel.scheduler().find(pid)->threads()[0].tid;
-    auto peer = kernel.scheduler().create_thread(pid, kernel.scheduler().find(pid)->threads()[0].context);
+    const auto leader = kernel.scheduler().find(pid)->leader().tid;
+    auto peer = kernel.scheduler().create_thread(pid, kernel.scheduler().find(pid)->leader().context);
     CHECK(peer && peer.value() != pid && kernel.scheduler().activate_thread(pid, peer.value()));
     const auto copied = mock::copies;
     CHECK(std::get<0>(call(lu::Operation::getpid, {}, 0, true)) == static_cast<i64>(pid));

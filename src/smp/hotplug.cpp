@@ -49,9 +49,17 @@ struct KernelBackend
     bool owner_waiting(u64 pid, u64 tid, sched::WaitTicket ticket)
     {
         if (!hotplug_kernel) return false;
-        const auto *thread = hotplug_kernel->scheduler().find_thread(pid, tid);
-        return thread && thread->state == sched::ProcessState::blocked &&
-               thread->wait_reason == sched::ThreadWaitReason::cpu_hotplug && thread->wait_registration.pending(ticket);
+        // CS2: the writer's slot is pinned and its task lock held, so the
+        // process can neither be freed nor change its wait meanwhile.
+        const auto pinned = hotplug_kernel->scheduler().pin(pid);
+        if (!pinned) return false;
+        const sched::TaskGuard guard{*pinned.slot()};
+        for (const auto &thread : pinned->live_threads())
+            if (thread.tid == tid)
+                return thread.state == sched::ProcessState::blocked &&
+                       thread.wait_reason == sched::ThreadWaitReason::cpu_hotplug &&
+                       thread.wait_registration.pending(ticket);
+        return false;
     }
     Status stop(CpuId cpu) { return stop_secondary_cpu(*hotplug_kernel, cpu); }
     Status restart(CpuId cpu) { return restart_secondary_cpu(*hotplug_kernel, cpu); }

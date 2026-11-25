@@ -59,7 +59,7 @@ Group create(Kernel &kernel)
     auto *process = kernel.scheduler().find(made.value());
     process->resources().personality = sched::UserPersonality::linux;
     process->resources().native_space = {0x100000 + made.value() * 4096, static_cast<u32>(made.value() % 16), 1};
-    auto &thread = process->threads()[0]; CHECK(native::prepare_native_thread(thread));
+    auto &thread = process->leader(); CHECK(native::prepare_native_thread(thread));
     thread.native_active = true;
     CHECK(kernel.scheduler().set_runnable(made.value()));
     CHECK(kernel.scheduler().activate_thread(made.value(), made.value()));

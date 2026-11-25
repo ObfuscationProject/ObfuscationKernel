@@ -145,7 +145,7 @@ bool private_n64_capture(const sched::ProcessControlBlock &process, const sched:
 }
 Status private_n64_completion(const sched::ProcessControlBlock &process, const hw::UserFrame &frame, i64 result)
 {
-    for (const auto &thread : process.threads())
+    for (const auto &thread : process.thread_records())
         if (&thread.native_frame == &frame)
         {
             auto *state = private_n64_state(process, thread);
@@ -159,45 +159,6 @@ Status private_n64_completion(const sched::ProcessControlBlock &process, const h
         }
     return Status::fault("private n64 completion frame has no thread owner");
 }
-namespace
-{
-
-// These transactions run on the serialized service stack. A failed preflight
-// does not mutate scheduler storage or publish replacement page tables.
-bool private_n64_stage_relocation(Kernel &kernel)
-{
-    for (auto &entry : private_n64_states) entry.readiness.cancel_relocation();
-    for (const auto &process : kernel.scheduler().processes())
-        for (const auto &thread : process.threads())
-            if (thread.native_active)
-            {
-                auto *state = private_n64_state(process, thread);
-                if (!validate_entry_stack(entry_stacks, thread) || !state ||
-                    !state->stage_relocation(private_n64_identity(process, thread), thread.native_frame,
-                                             private_n64_backend::capability()))
-                {
-                    for (auto &entry : private_n64_states) entry.readiness.cancel_relocation();
-                    return false;
-                }
-            }
-    return true;
-}
-bool private_n64_commit_relocation(Kernel &kernel)
-{
-    bool valid = true;
-    for (const auto &process : kernel.scheduler().processes())
-        for (const auto &thread : process.threads())
-            if (thread.native_active)
-            {
-                auto *state = private_n64_state(process, thread);
-                valid &= validate_entry_stack(entry_stacks, thread).ok() && state &&
-                    state->commit_relocation(private_n64_identity(process, thread), thread.native_frame,
-                                              private_n64_backend::capability());
-            }
-    for (auto &entry : private_n64_states) entry.readiness.cancel_relocation();
-    return valid;
-}
-} // namespace
 bool private_n64_space_update(sched::ProcessResources &resources, hw::AddressSpace previous,
                               hw::AddressSpace next, bool commit)
 {
@@ -205,7 +166,7 @@ bool private_n64_space_update(sched::ProcessResources &resources, hw::AddressSpa
     for (const auto &process : runtime_kernel->scheduler().processes())
         if (&process.resources() == &resources)
         {
-            for (const auto &thread : process.threads())
+            for (const auto &thread : process.thread_records())
                 if (thread.native_active)
                 {
                     if (!validate_entry_stack(entry_stacks, thread)) return false;
@@ -343,7 +304,7 @@ Status private_ppc_completion(const sched::ProcessControlBlock &process, const h
     if (auto status = linux_bootstrap::complete<lu::Profile::ppc>(expected_result, result); !status) return status;
     const auto normalized = lu::NativeBridge<lu::Profile::ppc>::decode_return(expected_result);
     if (!normalized) return normalized.status();
-    for (const auto &thread : process.threads())
+    for (const auto &thread : process.thread_records())
         if (&thread.native_frame == &frame)
         {
             auto *state = private_ppc_state(process, thread);
@@ -382,47 +343,6 @@ void private_ppc_cancel_transactions()
         record.staged_space = {};
     }
 }
-namespace
-{
-bool private_ppc_stage_relocation(Kernel &kernel)
-{
-    for (const auto &process : kernel.scheduler().processes())
-        if (process.resources().personality == Personality::linux)
-            for (const auto &thread : process.threads())
-                if (thread.native_active)
-                {
-                    auto *record = private_ppc_record(process, thread);
-                    if (!record || !validate_entry_stack(entry_stacks, thread)) return false;
-                    if (record->initial)
-                    {
-                        if (!private_ppc_initial_valid(process, thread)) return false;
-                        record->initial_relocation = true;
-                    }
-                    else if (!record->readiness.stage_relocation(private_ppc_identity(process, thread),
-                        thread.native_frame, private_ppc_backend::capability())) return false;
-                }
-    return true;
-}
-bool private_ppc_commit_relocation(Kernel &kernel)
-{
-    for (const auto &process : kernel.scheduler().processes())
-        if (process.resources().personality == Personality::linux)
-            for (const auto &thread : process.threads())
-                if (thread.native_active)
-                {
-                    auto *record = private_ppc_record(process, thread);
-                    if (!record || !validate_entry_stack(entry_stacks, thread)) return false;
-                    if (record->initial)
-                    {
-                        if (!record->initial_relocation || !private_ppc_initial_valid(process, thread)) return false;
-                        record->initial_relocation = false;
-                    }
-                    else if (!record->readiness.commit_relocation(private_ppc_identity(process, thread),
-                        thread.native_frame, private_ppc_backend::capability())) return false;
-                }
-    return true;
-}
-} // namespace
 bool private_ppc_space_update(sched::ProcessResources &resources, hw::AddressSpace previous,
                               hw::AddressSpace next, bool commit)
 {
@@ -431,7 +351,7 @@ bool private_ppc_space_update(sched::ProcessResources &resources, hw::AddressSpa
     for (const auto &process : runtime_kernel->scheduler().processes())
         if (&process.resources() == &resources)
         {
-            for (const auto &thread : process.threads())
+            for (const auto &thread : process.thread_records())
                 if (thread.native_active)
                 {
                     if (!validate_entry_stack(entry_stacks, thread) || thread.entry_stack.slot >= private_ppc_states.size()) return false;
@@ -606,8 +526,15 @@ using PrivateSignalView = SignalPendingView<PrivateSignalQueue, PrivateProcessQu
 std::array<PrivateSignalActions, sched::max_processes> private_signal_actions{};
 std::array<PrivateSignalQueue, memory::KernelEntryStackPool::capacity> private_signal_queues{};
 std::array<sched::SignalAltstack, memory::KernelEntryStackPool::capacity> private_signal_altstacks{};
+// Indexed by process slot (the scheduler's slots never move) with a stored
+// pid check; an entry made without the runtime kernel is found by its pid.
 PrivateSignalActions *private_signal_find(sched::ProcessId pid)
 {
+    if (!pid) return nullptr;
+    if (runtime_kernel)
+        if (const auto slot = runtime_kernel->scheduler().slot_of(pid);
+            slot && private_signal_actions[*slot].pid == pid)
+            return &private_signal_actions[*slot];
     for (auto &entry : private_signal_actions) if (entry.pid == pid) return &entry;
     return nullptr;
 }
@@ -617,19 +544,24 @@ PrivateSignalActions *private_signal_process(Kernel &kernel, sched::ProcessId pi
     const auto *process = kernel.scheduler().find(pid);
     if (!pid || !process || process->state() == sched::ProcessState::zombie ||
         process->state() == sched::ProcessState::exited) return nullptr;
-    for (auto &entry : private_signal_actions)
-        if (entry.pid == pid) return &entry;
+    if (auto *entry = private_signal_find(pid)) return entry;
+    const auto claim = [&](PrivateSignalActions &entry) -> PrivateSignalActions * {
+        if (!entry.shared.reset({pid, pid, ++entry.epoch})) return nullptr;
+        entry.pid = pid;
+        entry.table = {};
+        entry.group_kill = false;
+        entry.deferred_fatal = 0;
+        entry.lineage = {};
+        return &entry;
+    };
+    // The process's own slot; its previous owner's process is gone.
+    const auto slot = kernel.scheduler().slot_of(pid);
+    if (slot && private_signal_actions[*slot].epoch != ~u64{0} &&
+        (!private_signal_actions[*slot].pid || !kernel.scheduler().find(private_signal_actions[*slot].pid)))
+        return claim(private_signal_actions[*slot]);
     for (auto &entry : private_signal_actions)
         if ((!entry.pid || !kernel.scheduler().find(entry.pid)) && entry.epoch != ~u64{0})
-        {
-            if (!entry.shared.reset({pid, pid, ++entry.epoch})) return nullptr;
-            entry.pid = pid;
-            entry.table = {};
-            entry.group_kill = false;
-            entry.deferred_fatal = 0;
-            entry.lineage = {};
-            return &entry;
-        }
+            return claim(entry);
     return nullptr;
 }
 namespace
@@ -783,9 +715,9 @@ Status private_signal_fork(Kernel &kernel, sched::ProcessId parent, sched::Threa
 {
     auto *parent_thread = kernel.scheduler().find_thread(parent, caller);
     auto *child_process = kernel.scheduler().find(child);
-    if (!parent_thread || !child_process || child_process->threads().empty())
+    if (!parent_thread || !child_process || child_process->record_count() == 0)
         return Status::fault("private signal fork thread owner");
-    auto &child_thread = child_process->threads()[0];
+    auto &child_thread = child_process->leader();
     auto *from = private_signal_table(kernel, parent);
     auto *to = private_signal_table(kernel, child);
     if (!from || !to)
@@ -820,7 +752,7 @@ void private_signal_exec(Kernel &kernel, sched::ProcessControlBlock &process, Pr
 {
     auto *owner = private_signal_find(process.pid());
     auto *actions = owner ? &owner->table : nullptr;
-    auto *next = private_signal_queue(process.threads()[0]);
+    auto *next = private_signal_queue(process.leader());
     if (!PrivateChildExit::owns(owner, process.pid()) || !actions || !next || !previous)
     {
         runtime_failure = Status::fault("private signal exec lost owner");
@@ -834,7 +766,7 @@ void private_signal_exec(Kernel &kernel, sched::ProcessControlBlock &process, Pr
     previous->discard_timers();
     next->discard_timers();
     owner->shared.discard_timers();
-    auto *stack = private_signal_altstack(process.threads()[0]);
+    auto *stack = private_signal_altstack(process.leader());
     if (!stack) { runtime_failure = Status::fault("private signal exec altstack owner"); started = false; return; }
     old_stack.clear_for_exec();
     *stack = old_stack;
@@ -2301,7 +2233,7 @@ bool private_signal_call(Kernel &kernel, sched::ProcessControlBlock &process,
                 private_timer_discard(kernel, process.pid(), signal);
                 private_jobctl_discard_owed(process.pid(), signal);
                 shared->discard(signal);
-                for (auto &peer : process.threads())
+                for (auto &peer : process.thread_records())
                     if (auto *pending = private_signal_queue(peer)) pending->discard(signal);
             });
         return true;
@@ -2721,54 +2653,12 @@ bool private_linux_udp_signal_complete(Kernel &kernel, sched::ProcessControlBloc
 #endif
 } // namespace runtime_detail
 #if defined(OK_NATIVE_SIGNAL_RUNTIME)
-Status private_signal_before_process_compaction(sched::SchedulerState &scheduler)
+// Reap no longer moves records (process slots are fixed), so the debug
+// fixtures keep their state; only departed Linux UDP receives are retired.
+Status private_signal_before_process_reap(sched::SchedulerState &scheduler)
 {
     if (runtime_kernel && &runtime_kernel->scheduler() == &scheduler)
         if (auto status = prune_departed_linux_udp_receives(*runtime_kernel); !status) return status;
-#ifdef OK_PRIVATE_PPC32_SIGNAL
-    if (runtime_kernel && &runtime_kernel->scheduler() == &scheduler &&
-        !private_ppc_stage_relocation(*runtime_kernel))
-    {
-        private_ppc_cancel_transactions();
-        runtime_failure = Status::fault("private PPC process compaction stage failed");
-        started = false;
-        return runtime_failure;
-    }
-#endif
-#ifdef OK_PRIVATE_MIPS64_N64_SIGNAL
-    if (runtime_kernel && &runtime_kernel->scheduler() == &scheduler &&
-        !private_n64_stage_relocation(*runtime_kernel))
-    {
-        runtime_failure = Status::fault("private n64 process compaction preflight failed");
-        return runtime_failure;
-    }
-#else
-    static_cast<void>(scheduler);
-#endif
-    return Status::success();
-}
-Status private_signal_after_process_compaction(sched::SchedulerState &scheduler)
-{
-#ifdef OK_PRIVATE_PPC32_SIGNAL
-    if (runtime_kernel && &runtime_kernel->scheduler() == &scheduler &&
-        !private_ppc_commit_relocation(*runtime_kernel))
-    {
-        private_ppc_cancel_transactions();
-        runtime_failure = Status::fault("private PPC process compaction commit failed");
-        started = false;
-        return runtime_failure;
-    }
-#endif
-#ifdef OK_PRIVATE_MIPS64_N64_SIGNAL
-    if (runtime_kernel && &runtime_kernel->scheduler() == &scheduler &&
-        !private_n64_commit_relocation(*runtime_kernel))
-    {
-        runtime_failure = Status::fault("private n64 process compaction commit failed");
-        return runtime_failure;
-    }
-#else
-    static_cast<void>(scheduler);
-#endif
     return Status::success();
 }
 #endif

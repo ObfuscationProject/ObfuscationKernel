@@ -47,7 +47,7 @@ u64 create(Kernel &kernel)
     process.resources().personality = sched::UserPersonality::linux;
     process.resources().native_space = {0x100000 + process.pid() * 4096, static_cast<u32>(process.pid() % 16), 1};
     CHECK(native::allocate(process.resources().native_pages, hw::user_begin, hw::page_read | hw::page_execute));
-    auto &thread = process.threads()[0]; CHECK(native::prepare_native_thread(thread)); thread.native_active = true; frame(thread);
+    auto &thread = process.leader(); CHECK(native::prepare_native_thread(thread)); thread.native_active = true; frame(thread);
     CHECK(native::private_signal_process(kernel, process.pid()));
     CHECK(kernel.scheduler().set_runnable(process.pid()));
     native::runtime_kernel = &kernel; native::started = true; return process.pid();
@@ -64,7 +64,7 @@ u64 fork(Kernel &kernel, u64 parent, u64 caller = 0)
 }
 u64 peer(Kernel &kernel, u64 pid)
 {
-    const auto result = kernel.scheduler().create_thread_prepared(pid, kernel.scheduler().find(pid)->threads()[0].context,
+    const auto result = kernel.scheduler().create_thread_prepared(pid, kernel.scheduler().find(pid)->leader().context,
         [](auto &thread) { thread.native_active = true; frame(thread); return native::prepare_native_thread(thread); });
     CHECK(result); return result.value();
 }
@@ -110,7 +110,7 @@ void matrix(Kernel &kernel, ExitObserver &observer)
             expect(kernel.scheduler().find(parent) == original_parent && kernel.scheduler().find(child) == original_child);
             expect(original_child->state() == sched::ProcessState::zombie && original_child->wait_status() == 9);
             expect(!original_child->resources().native_space.root && original_child->resources().native_pages.empty());
-            expect(!original_child->threads()[0].native_active && !original_child->threads()[0].entry_stack.pool);
+            expect(!original_child->leader().native_active && !original_child->leader().entry_stack.pool);
             expect(native::entry_stacks.accounting().leased_slots + 1 == before.leased_slots);
             expect(native::entry_stacks.accounting().releases == before.releases + 1);
             const bool notified = disposition != 1 && (disposition > 1 || blocked);

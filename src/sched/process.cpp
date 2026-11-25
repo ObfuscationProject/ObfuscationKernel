@@ -273,7 +273,24 @@ Status ProcessControlBlock::configure(ProcessId pid, ProcessId parent, std::stri
 
 Status ProcessControlBlock::add_thread(ThreadId tid, arch::CpuContext context, TaskState state)
 {
-    return threads_.push_back(ThreadControlBlock{.tid = tid, .owner = pid_, .state = state, .context = context});
+    auto *slot = free_thread_slot();
+    if (!slot) return Status::overflow("thread table capacity exceeded");
+    *slot = ThreadControlBlock{.tid = tid, .owner = pid_, .state = state, .context = context,
+                               .slot_state = state == TaskState::exited ? ThreadSlotState::exited : ThreadSlotState::live};
+    return Status::success();
+}
+
+ThreadControlBlock *ProcessControlBlock::main_thread()
+{
+    return const_cast<ThreadControlBlock *>(static_cast<const ProcessControlBlock &>(*this).main_thread());
+}
+
+const ThreadControlBlock *ProcessControlBlock::main_thread() const
+{
+    if (threads_[0].slot_state == ThreadSlotState::live && threads_[0].tid == pid_) return &threads_[0];
+    for (const auto &thread : threads_)
+        if (thread.slot_state == ThreadSlotState::live) return &thread;
+    return nullptr;
 }
 
 Status ProcessControlBlock::add_child(ProcessId child)

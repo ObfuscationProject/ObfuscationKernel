@@ -26,7 +26,7 @@ void actual_matrix(Kernel &kernel)
                 expect(native::runtime_status().ok());
                 expect(kernel.scheduler().find(parent) == borrowed_parent && kernel.scheduler().find(child) == borrowed_child);
                 expect(!borrowed_child->resources().native_space.root && borrowed_child->resources().native_pages.empty());
-                expect(borrowed_child->threads()[0].entry_stack.pool == nullptr);
+                expect(borrowed_child->leader().entry_stack.pool == nullptr);
                 const bool notified = disposition != 1 && (disposition > 1 || blocked);
                 const bool autoreap = disposition == 1 || no_wait;
                 expect(native::private_signal_find(parent)->shared.pending_mask().contains(sigchld) == notified);
@@ -120,7 +120,7 @@ void failclosed_owner_and_thread(Kernel &kernel)
     auto *owner = native::private_signal_find(parent); const auto epoch = owner->epoch;
     CHECK(owner->shared.enqueue_child_exit(sched::ChildExitStatus::normal(23), 123, 456) == native::PrivateProcessQueue::Enqueue::queued);
     const auto ticket = pending(parent);
-    auto &process = *kernel.scheduler().find(parent); auto &thread = process.threads()[0];
+    auto &process = *kernel.scheduler().find(parent); auto &thread = process.leader();
     auto *queue = native::private_signal_queue(thread); const auto stack = *native::private_signal_altstack(thread);
     owner->pid = 0;
     native::private_signal_exec(kernel, process, queue, stack);

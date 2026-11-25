@@ -15,7 +15,7 @@ void activate(Kernel &kernel, Pid pid)
 {
     auto *process = kernel.scheduler().find(pid); CHECK(process);
     if (process->state() == sched::ProcessState::created) CHECK(kernel.scheduler().set_runnable(pid));
-    process->threads()[0].native_active = true;
+    process->leader().native_active = true;
     CHECK(kernel.posix().activate(pid));
 }
 
@@ -71,7 +71,7 @@ void disposition(Kernel &kernel, Pid pid, u32 signal, u64 handler)
 void stopped_by(Kernel &kernel, Pid parent, Pid pid, u32 signal)
 {
     const auto *process = kernel.scheduler().find(pid);
-    const auto &thread = process->threads()[0];
+    const auto &thread = process->leader();
     CHECK(process->job_control().stopped && process->job_control().stop_signal == signal);
     CHECK(thread.state == sched::ProcessState::blocked && thread.wait_reason == sched::ThreadWaitReason::job_control &&
           thread.wait_key == 0);
@@ -359,7 +359,7 @@ void readiness_handoff(Kernel &kernel, Pid login, Pid peer)
         std::array<ActiveThread, sched::max_processes * sched::max_threads_per_process> saved{};
         usize saved_count{};
         for (auto &process : scheduler.processes())
-            for (auto &thread : process.threads())
+            for (auto &thread : process.thread_records())
                 if (process.pid() != login || thread.tid != tid)
                 {
                     CHECK(saved_count < saved.size());
@@ -408,7 +408,7 @@ void readiness_handoff(Kernel &kernel, Pid login, Pid peer)
         store_pid(static_cast<i32>(login)); CHECK(ioctl(kernel, login, OK_TIOCSPGRP, output) == 0);
         // A reader already blocked keeps its wait across a foreground change
         // (Linux checks at entry) and takes the next input.
-        const auto &blocked = scheduler.find(peer)->threads()[0];
+        const auto &blocked = scheduler.find(peer)->leader();
         CHECK(blocked.state == sched::ProcessState::blocked && blocked.wait_reason == sched::ThreadWaitReason::console_read);
         native::input('k');
         CHECK(invoke(kernel, peer, N::read, {0, output, 1}) == std::pair(i64{1}, true) && mock::memory[128] == std::byte{'k'});
@@ -517,7 +517,7 @@ void lifecycle(Kernel &kernel)
     CHECK(scheduler.console_authorized(login) && scheduler.console_authorized(peer));
     // The login shell's blocked read keeps its wait (Linux checks at entry and
     // never re-checks a sleeping reader) and takes the next input.
-    const auto &reader = scheduler.find(login)->threads()[0];
+    const auto &reader = scheduler.find(login)->leader();
     CHECK(reader.state == sched::ProcessState::blocked && reader.wait_reason == sched::ThreadWaitReason::console_read);
     native::input('b');
     CHECK(scheduler.console_authorized(peer)); // Ingress never revokes a background shell.
@@ -540,7 +540,7 @@ void lifecycle(Kernel &kernel)
     CHECK(invoke(kernel, peer, N::readv, {0, vectors, 2}) == std::pair(i64{-11}, false));
     store_pid(static_cast<i32>(login));
     CHECK(ioctl(kernel, login, OK_TIOCSPGRP, output) == 0);
-    CHECK(scheduler.find(peer)->threads()[0].wait_reason == sched::ThreadWaitReason::console_read);
+    CHECK(scheduler.find(peer)->leader().wait_reason == sched::ThreadWaitReason::console_read);
     native::input('e');
     CHECK(invoke(kernel, peer, N::readv, {0, vectors, 2}) == std::pair(i64{1}, true) && mock::memory[128] == std::byte{'e'});
     // A new background readv is checked (EIO under SIG_IGN).

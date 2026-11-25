@@ -10,6 +10,9 @@ struct WaitTicket
     u64 owner{};
     u64 thread{};
     u64 generation{};
+    // The waiter's TCB slot (ThreadHandle::index), so a completion finds it
+    // without a search; 0xffff for a registration outside the scheduler.
+    u16 index{0xffff};
 
     [[nodiscard]] constexpr bool operator==(const WaitTicket &) const = default;
 };
@@ -36,14 +39,15 @@ enum class WakeSource : u8
 inline constexpr usize wake_source_count = 4;
 
 // A single authoritative record belongs to one scheduler thread. The caller
-// serializes arm/complete/cancel on the boot CPU; this class supplies no IRQ or
-// SMP synchronization. Exclusive relocation keeps tickets valid; never duplicate
-// the record into another authoritative owner or reset it while tickets survive.
-// Do not reuse owner/thread identity before every external reference is drained.
+// serializes arm/complete/cancel; this class supplies no IRQ or SMP
+// synchronization. The record lives in a TCB slot that never moves; never
+// duplicate it into another authoritative owner. A slot reused by another
+// thread starts a new record, and old tickets never match it again because
+// thread identities are never reused.
 class WaitRegistration final
 {
   public:
-    Result<WaitTicket> arm(u64 owner, u64 thread)
+    Result<WaitTicket> arm(u64 owner, u64 thread, u16 index = 0xffff)
     {
         if (owner == 0 || thread == 0)
             return Status::invalid_argument("wait requires process and thread identities");
@@ -51,7 +55,7 @@ class WaitRegistration final
             return Status::busy("thread already owns a wait registration");
         if (ticket_.generation == ~u64{0})
             return Status::overflow("wait registration generation exhausted");
-        ticket_ = {owner, thread, ticket_.generation + 1};
+        ticket_ = {owner, thread, ticket_.generation + 1, index};
         completion_ = WaitCompletion::none;
         source_ = WakeSource::thread;
         active_ = true;

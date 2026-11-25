@@ -786,9 +786,9 @@ Status ModuleManager::ensure_kernel_process_threads(sched::ProcessId pid, Module
     }
 
     const auto target = module_thread_target(threading, kernel_process_scheduler_->cpu_count());
-    while (process->threads().size() < target)
+    while (process->record_count() < target)
     {
-        const auto worker = process->threads().size();
+        const auto worker = process->record_count();
         const auto context = kernel_process_arch_->make_kernel_context(
             kernel_process_entry_ + static_cast<uptr>(slot) * module_entry_stride +
                 static_cast<uptr>(worker) * module_thread_entry_stride,

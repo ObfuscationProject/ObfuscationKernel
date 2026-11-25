@@ -134,6 +134,8 @@ struct Fixture
         CHECK(found);
         return *found;
     }
+    // The thread's own mask (a process slot word).
+    u16 mask(ProcessId pid, ThreadId tid = 0) { return scheduler.thread_affinity(*scheduler.find(pid), thread(pid, tid)); }
     smp::CpuId enqueue(ProcessId pid, ThreadId tid = 0)
     {
         CHECK(scheduler.enqueue_thread(pid, tid ? tid : pid));
@@ -155,11 +157,11 @@ struct Fixture
             entries += length(cpu);
         usize recorded = 0;
         for (const auto &process : scheduler.processes())
-            for (const auto &thread : process.threads())
+            for (const auto &thread : process.thread_records())
                 if (thread.queued_cpu != no_cpu)
                 {
                     ++recorded;
-                    CHECK(scheduler.run_queue(thread.queued_cpu).contains({process.pid(), thread.tid}));
+                    CHECK(scheduler.queued_on(thread.queued_cpu, {process.pid(), thread.tid}));
                 }
         CHECK(recorded == entries);
     }
@@ -241,7 +243,7 @@ void test_stealing()
     // Steals the oldest entry the thief may run; the victim keeps the rest in order.
     CHECK(f.dequeue(1) == movable);
     CHECK(f.length(0) == 2 && f.thread(pinned).queued_cpu == 0 && f.thread(other).queued_cpu == 0);
-    CHECK(f.scheduler.run_queue(0).contains({pinned, pinned}) && f.scheduler.run_queue(0).contains({other, other}));
+    CHECK(f.scheduler.queued_on(0, {pinned, pinned}) && f.scheduler.queued_on(0, {other, other}));
     CHECK(f.dequeue(2) == other);
     CHECK(f.dequeue(3) == 0 && f.length(0) == 1 && f.thread(pinned).queued_cpu == 0);
     CHECK(f.dequeue(0) == pinned && f.dequeue(0) == 0);
@@ -305,21 +307,24 @@ void test_exit_and_erase_clean_queues()
     CHECK(worker);
     CHECK(f.enqueue(group) == 0 && f.enqueue(group, worker.value()) == 0);
     CHECK(f.scheduler.exit_thread(group, worker.value()));
-    CHECK(f.length(0) == 1 && !f.scheduler.run_queue(0).contains({group, worker.value()}));
+    CHECK(f.length(0) == 1 && !f.scheduler.queued_on(0, {group, worker.value()}));
 
     // Exec retires every other thread and its entry.
     const auto second = f.create_thread(group);
     CHECK(second && f.enqueue(group, second.value()) == 0 && f.length(0) == 2);
     CHECK(f.scheduler.replace_image(group, f.context, {}));
-    CHECK(f.length(0) == 1 && f.scheduler.run_queue(0).contains({group, group}));
+    CHECK(f.length(0) == 1 && f.scheduler.queued_on(0, {group, group}));
 
-    // Process exit removes the entries; reaping compacts storage under live entries.
+    // Process exit removes the entries; reaping frees the slot in place and
+    // moves nothing under live entries.
     const auto survivor = f.create();
     CHECK(f.enqueue(survivor) == 0);
+    const auto *kept = f.scheduler.find(survivor);
     CHECK(f.scheduler.exit_process(group, 0));
-    CHECK(f.length(0) == 1 && !f.scheduler.run_queue(0).contains({group, group}));
+    CHECK(f.length(0) == 1 && !f.scheduler.queued_on(0, {group, group}));
     CHECK(f.scheduler.reap_process(group));
-    CHECK(f.scheduler.find(group) == nullptr && f.scheduler.processes()[0].pid() == survivor);
+    CHECK(f.scheduler.find(group) == nullptr && f.scheduler.find(survivor) == kept);
+    CHECK((*f.scheduler.processes().begin()).pid() == survivor && f.scheduler.process_count() == 1);
     CHECK(f.dequeue(0) == survivor);
 
     // kill_process exits and erases in one step.
@@ -508,9 +513,9 @@ void test_hotplug()
     // The two threads confined to CPU 3 lost their only CPU: their masks reset
     // and each is recorded once; the CPU 2-3 thread keeps CPU 2. The blocked
     // one breaks only when it is placed again.
-    CHECK(f.thread(pinned).cpu_affinity_mask == cpu_affinity_any && f.thread(all[5]).cpu_affinity_mask == cpu_affinity_any);
-    CHECK(f.thread(all[2]).cpu_affinity_mask == 0xc && f.thread(all[2]).queued_cpu == 2);
-    CHECK(f.thread(stale).cpu_affinity_mask == 0x8 && f.scheduler.affinity_broken() == 2);
+    CHECK(f.mask(pinned) == cpu_affinity_any && f.mask(all[5]) == cpu_affinity_any);
+    CHECK(f.mask(all[2]) == 0xc && f.thread(all[2]).queued_cpu == 2);
+    CHECK(f.mask(stale) == 0x8 && f.scheduler.affinity_broken() == 2);
     for (const auto expected : {pinned, all[5]})
     {
         const auto broken = f.scheduler.take_affinity_broken();
@@ -546,7 +551,7 @@ void test_hotplug()
 
     // Back online: CPU 3 starts empty; the reset masks stay reset.
     CHECK(f.scheduler.online_cpu(3) && f.scheduler.online_cpus() == 0xf);
-    CHECK(f.dequeue(3) == 0 && f.thread(pinned).cpu_affinity_mask == cpu_affinity_any);
+    CHECK(f.dequeue(3) == 0 && f.mask(pinned) == cpu_affinity_any);
     f.check_consistent();
 
     // Repeated cycles of every secondary with traffic in between: no entry on
@@ -621,13 +626,13 @@ void test_thread_affinity()
     CHECK(second);
     auto &main = f.thread(pid), &other = f.thread(pid, second.value());
     auto &process = *f.scheduler.find(pid);
-    CHECK(main.cpu_affinity_mask == cpu_affinity_any && other.cpu_affinity_mask == cpu_affinity_any);
+    CHECK(f.mask(pid) == cpu_affinity_any && f.mask(pid, second.value()) == cpu_affinity_any);
     // A mask with no online CPU the process allows is refused and changes nothing.
     CHECK(f.scheduler.set_cpu_affinity(pid, 0x7));
     CHECK(f.scheduler.set_thread_affinity(process, other, 0x8).code() == StatusCode::invalid_argument);
-    CHECK(other.cpu_affinity_mask == cpu_affinity_any);
+    CHECK(f.mask(pid, second.value()) == cpu_affinity_any);
     CHECK(f.scheduler.set_thread_affinity(process, other, 0xc));
-    CHECK(SchedulerState::effective_affinity(process, other) == 0x4);
+    CHECK(f.scheduler.effective_affinity(process, other) == 0x4);
     CHECK(f.scheduler.set_thread_affinity(process, main, 0x2));
     CHECK(f.enqueue(pid) == 1 && f.enqueue(pid, second.value()) == 2);
     // Another CPU neither steals nor dispatches a thread its mask excludes.
@@ -649,9 +654,9 @@ void test_thread_affinity()
     CHECK(g.scheduler.block_process(blocked));
     CHECK(g.scheduler.offline_cpu(2) && g.scheduler.online_cpus() == 0xb);
     CHECK(g.thread(queued).queued_cpu != 2 && g.thread(queued).queued_cpu != no_cpu);
-    CHECK(g.thread(queued).cpu_affinity_mask == cpu_affinity_any && g.scheduler.affinity_broken() == 1);
+    CHECK(g.mask(queued) == cpu_affinity_any && g.scheduler.affinity_broken() == 1);
     // Still pinned while it is not placed; a direct pick repairs it first.
-    CHECK(g.thread(blocked).cpu_affinity_mask == 0x4 && g.thread(running).cpu_affinity_mask == 0x4);
+    CHECK(g.mask(blocked) == 0x4 && g.mask(running) == 0x4);
     CHECK(!g.scheduler.thread_admits(*g.scheduler.find(blocked), g.thread(blocked), 1));
     CHECK(g.scheduler.repair_affinity(*g.scheduler.find(blocked), g.thread(blocked)));
     CHECK(!g.scheduler.repair_affinity(*g.scheduler.find(blocked), g.thread(blocked)));
@@ -659,7 +664,7 @@ void test_thread_affinity()
     // The running one leaves its CPU and is placed on an online one.
     CHECK(g.scheduler.clear_on_cpu(running, running, 2));
     const auto placed = g.enqueue(running);
-    CHECK(placed != 2 && placed < 4 && g.thread(running).cpu_affinity_mask == cpu_affinity_any);
+    CHECK(placed != 2 && placed < 4 && g.mask(running) == cpu_affinity_any);
     CHECK(g.scheduler.affinity_broken() == 3);
     for (const auto expected : {queued, blocked, running})
     {

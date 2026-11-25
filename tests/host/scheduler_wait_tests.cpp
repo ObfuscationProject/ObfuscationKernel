@@ -51,7 +51,7 @@ void test_identity_rearm_and_completion_order()
     forged.owner = other;
     CHECK(!f.scheduler.complete_wait(forged, WaitCompletion::ready));
     forged = ticket;
-    forged.thread = f.scheduler.find(other)->threads()[0].tid;
+    forged.thread = f.scheduler.find(other)->leader().tid;
     CHECK(!f.scheduler.complete_wait(forged, WaitCompletion::ready));
     forged = ticket;
     ++forged.generation;
@@ -115,7 +115,7 @@ void test_current_thread_exec_and_fork()
 {
     Fixture f;
     const auto parent = f.create();
-    const auto first_tid = f.scheduler.find(parent)->threads()[0].tid;
+    const auto first_tid = f.scheduler.find(parent)->leader().tid;
     const auto second = f.scheduler.create_thread(parent, f.context);
     CHECK(second);
     CHECK(f.scheduler.activate(parent));
@@ -130,7 +130,7 @@ void test_current_thread_exec_and_fork()
     CHECK(f.scheduler.current_thread()->tid == first_tid);
     const auto child = f.scheduler.fork_process(parent);
     CHECK(child);
-    auto &child_thread = f.scheduler.find(child.value())->threads()[0];
+    auto &child_thread = f.scheduler.find(child.value())->leader();
     CHECK(child_thread.tid != first_tid && child_thread.owner == child.value());
     CHECK(!child_thread.wait_registration.pending(second_wait.value()));
     CHECK(child_thread.wait_reason == ThreadWaitReason::none && !child_thread.native_deadline.armed());
@@ -144,7 +144,7 @@ void test_current_thread_exec_and_fork()
     CHECK(f.scheduler.find(parent)->state() == ProcessState::blocked);
     MemoryMap empty;
     CHECK(f.scheduler.replace_image(parent, f.context, empty));
-    CHECK(f.scheduler.find(parent)->threads().size() == 1);
+    CHECK(f.scheduler.find(parent)->record_count() == 1);
     CHECK(!f.scheduler.current_thread());
     CHECK(!f.scheduler.complete_wait(second_again, WaitCompletion::ready));
     CHECK(!f.scheduler.complete_wait(first_wait, WaitCompletion::timeout));
@@ -296,9 +296,9 @@ void test_signal_termination_range()
         CHECK(dead && dead->state() == ProcessState::zombie);
         // Preserve the raw Linux-compatible word; 128 aliases the core bit.
         CHECK(dead->wait_status() == static_cast<i32>(signal));
-        CHECK(dead->threads()[0].state == ProcessState::exited);
+        CHECK(dead->leader().state == ProcessState::exited);
         CHECK(!f.scheduler.complete_wait(ticket, WaitCompletion::timeout));
-        CHECK(f.scheduler.find(parent)->threads()[0].state == ProcessState::runnable);
+        CHECK(f.scheduler.find(parent)->leader().state == ProcessState::runnable);
         CHECK(!f.scheduler.terminate_process(child.value(), static_cast<u8>(signal)));
         CHECK(f.scheduler.wait_process(parent, child.value()));
         CHECK(!f.scheduler.find(child.value()));

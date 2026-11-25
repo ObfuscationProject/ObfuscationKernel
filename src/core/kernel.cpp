@@ -1837,7 +1837,7 @@ Status Kernel::kill_process(sched::ProcessId pid)
     bool native_resources = process && (process->resources().native_space.root ||
                                        !process->resources().native_pages.empty());
     if (process)
-        for (const auto &thread : process->threads())
+        for (const auto &thread : process->thread_records())
             native_resources |= thread.native_active || thread.entry_stack.pool || thread.kernel_stack_top;
     const bool native_linux = process && process->resources().personality == sched::UserPersonality::linux &&
         process->state() != sched::ProcessState::created;

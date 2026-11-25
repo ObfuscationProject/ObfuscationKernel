@@ -113,7 +113,7 @@ i64 sched_affinity_get(Kernel &kernel, sched::ProcessId pid, u64 target, u64 len
     auto *thread = target_thread(kernel, pid, target);
     const auto *process = thread ? kernel.scheduler().find(thread->owner) : nullptr;
     if (!process) return -errno_search;
-    const auto bytes = encode_mask(sched::SchedulerState::effective_affinity(*process, *thread) & view.online);
+    const auto bytes = encode_mask(kernel.scheduler().effective_affinity(*process, *thread) & view.online);
     auto &space = kernel.scheduler().find(pid)->resources().native_space;
     if (!hw::copy_to_user(space, output, bytes.data(), bytes.size())) return -errno_fault;
     return static_cast<i64>(word_bytes);
@@ -139,7 +139,7 @@ i64 sched_affinity_set(Kernel &kernel, sched::ProcessId pid, u64 target, u64 len
     // A target running outside its new mask leaves its CPU now.
     const auto on = thread->on_cpu;
     if (on < smp::max_cpus && on != smp::current_cpu() &&
-        (sched::SchedulerState::effective_affinity(*process, *thread) & (1u << on)) == 0)
+        (kernel.scheduler().effective_affinity(*process, *thread) & (1u << on)) == 0)
         smp::send_ipi(on, smp::ipi_kick);
     return 0;
 }

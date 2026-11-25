@@ -53,7 +53,7 @@ struct Fixture
         CHECK(made && made.value() == 1);
         use(made.value());
         CHECK(posix.set_credentials(user::root_credentials()));
-        scheduler.find(made.value())->threads()[0].native_active = true;
+        scheduler.find(made.value())->leader().native_active = true;
         return made.value();
     }
     // Makes `child` init's direct child and the console lease leader.
@@ -64,7 +64,7 @@ struct Fixture
         CHECK(scheduler.find(init)->add_child(child));
         use(init);
         CHECK(scheduler.claim_console(child));
-        process->threads()[0].native_active = true;
+        process->leader().native_active = true;
     }
     u64 process(u32 uid, u32 gid)
     {
@@ -258,7 +258,7 @@ void dev_tty(Fixture &f, u64 leader, const Pty &pty)
     CHECK(shared >= 0 && f.description(static_cast<i32>(shared)).pty_endpoint == description.pty_endpoint);
     CHECK(f.posix.close(static_cast<i32>(shared)));
     // A non-leader's TIOCNOTTY detaches only the caller.
-    f.scheduler.find(member)->threads()[0].native_active = true;
+    f.scheduler.find(member)->leader().native_active = true;
     i32 none = 0;
     CHECK(f.ioctl(tty, OK_TIOCNOTTY, none) == 0 && f.scheduler.find(member)->ctty_detached());
     CHECK(f.open("/dev/tty", o_RDWR) == -6);

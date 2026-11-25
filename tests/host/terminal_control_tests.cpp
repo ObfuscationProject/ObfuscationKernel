@@ -154,7 +154,7 @@ void activate(Kernel &kernel, Pid pid)
 {
     auto *process = kernel.scheduler().find(pid); CHECK(process);
     if (process->state() == sched::ProcessState::created) CHECK(kernel.scheduler().set_runnable(pid));
-    process->threads()[0].native_active = true;
+    process->leader().native_active = true;
     CHECK(kernel.posix().activate(pid));
 }
 

@@ -104,11 +104,12 @@ inline Status prepare_entry_stacks(memory::KernelEntryStackPool &pool, sched::Pr
                                    EntryStackPlan &plan)
 {
     if (plan.prepared()) return Status::already_exists("entry stack plan is already prepared");
-    if (process.threads().empty()) return Status::invalid_argument("exec has no leader slot");
-    const usize count = process.threads().size();
+    if (process.record_count() == 0) return Status::invalid_argument("exec has no leader slot");
+    // Every slot, in place: records need not be contiguous.
+    const usize count = sched::max_threads_per_process;
     for (usize i = 0; i < count; ++i)
     {
-        const auto &thread = process.threads()[i];
+        const auto &thread = process.thread_slot(i);
         if (auto status = validate_entry_stack(pool, thread); !status) return status;
         plan.saved_[i] = {{thread.owner, thread.tid}, thread.entry_stack, thread.kernel_stack_top};
     }
@@ -122,7 +123,7 @@ inline Status prepare_entry_stacks(memory::KernelEntryStackPool &pool, sched::Pr
         if (!top)
         {
             // Preserve the charged lease for diagnosis if backing is damaged.
-            process.threads()[0].entry_stack = plan.leader_.handle;
+            process.leader().entry_stack = plan.leader_.handle;
             return top.status();
         }
         plan.leader_.top = top.value();
@@ -142,13 +143,13 @@ template <typename Commit, typename BeforeRetire>
 EntryStackReplacement commit_entry_stacks(memory::KernelEntryStackPool &pool, sched::ProcessControlBlock &process,
                                           EntryStackPlan &plan, Commit &&commit, BeforeRetire &&before_retire)
 {
-    if (plan.pool_ != &pool || plan.count_ != process.threads().size())
+    if (plan.pool_ != &pool || plan.count_ != sched::max_threads_per_process)
         return {Status::fault("entry stack plan does not match the thread group")};
     const usize count = plan.count_;
     const auto &saved = plan.saved_;
     for (usize i = 0; i < count; ++i)
     {
-        const auto &thread = process.threads()[i];
+        const auto &thread = process.thread_slot(i);
         if (thread.owner != saved[i].owner.pid || thread.tid != saved[i].owner.tid ||
             thread.entry_stack != saved[i].handle || thread.kernel_stack_top != saved[i].top)
             return {Status::fault("entry stack plan does not match the thread group")};
@@ -158,7 +159,7 @@ EntryStackReplacement commit_entry_stacks(memory::KernelEntryStackPool &pool, sc
                 return {status};
     }
     const auto leader = plan.leader_;
-    for (auto &thread : process.threads())
+    for (auto &thread : process.thread_records())
     {
         thread.entry_stack = {};
         thread.kernel_stack_top = 0;
@@ -168,13 +169,13 @@ EntryStackReplacement commit_entry_stacks(memory::KernelEntryStackPool &pool, sc
     {
         for (usize i = 0; i < count; ++i)
         {
-            process.threads()[i].entry_stack = saved[i].handle;
-            process.threads()[i].kernel_stack_top = saved[i].top;
+            process.thread_slot(i).entry_stack = saved[i].handle;
+            process.thread_slot(i).kernel_stack_top = saved[i].top;
         }
         if (auto released = plan.cancel(); !released)
         {
-            process.threads()[0].entry_stack = leader.handle;
-            process.threads()[0].kernel_stack_top = leader.top;
+            process.leader().entry_stack = leader.handle;
+            process.leader().kernel_stack_top = leader.top;
             return {released};
         }
         return {status};
@@ -182,7 +183,7 @@ EntryStackReplacement commit_entry_stacks(memory::KernelEntryStackPool &pool, sc
     // The leader's TCB owns the plan's lease from here on.
     plan.owns_leader_ = false;
     static_cast<void>(plan.cancel());
-    auto &thread = process.threads()[0];
+    auto &thread = process.leader();
     thread.entry_stack = leader.handle;
     thread.kernel_stack_top = leader.top;
     // Scheduler replacement is committed even if later retirement finds damage.
@@ -210,8 +211,8 @@ template <typename Commit, typename BeforeRetire>
 EntryStackReplacement replace_entry_stacks(memory::KernelEntryStackPool &pool, sched::ProcessControlBlock &process,
                                           Commit &&commit, BeforeRetire &&before_retire)
 {
-    if (process.threads().empty()) return {Status::invalid_argument("exec has no leader slot")};
-    for (const auto &thread : process.threads())
+    if (process.record_count() == 0) return {Status::invalid_argument("exec has no leader slot")};
+    for (const auto &thread : process.thread_records())
     {
         if (auto status = validate_entry_stack(pool, thread); !status) return {status};
         if (thread.entry_stack.pool)

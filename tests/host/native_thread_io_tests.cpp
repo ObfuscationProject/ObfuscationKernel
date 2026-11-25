@@ -10,8 +10,8 @@ int main()
     CHECK(created);
     const auto pid = created.value();
     auto *process = kernel.scheduler().find(pid);
-    const auto first = process->threads()[0].tid;
-    auto second = kernel.scheduler().create_thread(pid, process->threads()[0].context);
+    const auto first = process->leader().tid;
+    auto second = kernel.scheduler().create_thread(pid, process->leader().context);
     CHECK(second && kernel.scheduler().set_runnable(pid));
     CHECK(kernel.posix().activate(pid));
     auto descriptors = kernel.posix().pipe(0);

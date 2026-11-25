@@ -294,7 +294,7 @@ void controlling_terminal_derivation()
     CHECK(!s.controlling_terminal(f.process(other)) && !s.terminal_job_facts(other, ref).is_ctty);
     // Requests of the running caller, as the ioctl dispatch makes them.
     const auto request = [&](ProcessId pid, ConsoleControlOperation operation, i32 scalar = 0) -> Status {
-        f.process(pid).threads()[0].native_active = true;
+        f.process(pid).leader().native_active = true;
         CHECK(s.activate(pid));
         const auto subject = s.terminal_subject(slave_id);
         CHECK(subject);

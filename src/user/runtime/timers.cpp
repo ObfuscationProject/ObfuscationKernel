@@ -49,15 +49,30 @@ struct ProcessTimers
 constinit std::array<ProcessTimers, sched::max_processes> process_timers{};
 constinit PrivateTimerCounters timer_counters{};
 
+// Indexed by process slot with a stored pid check; an entry made without the
+// runtime kernel is found by its pid.
 ProcessTimers *find_timers(sched::ProcessId pid)
 {
+    if (!pid) return nullptr;
+    if (runtime_kernel)
+        if (const auto slot = runtime_kernel->scheduler().slot_of(pid); slot && process_timers[*slot].pid == pid)
+            return &process_timers[*slot];
     for (auto &entry : process_timers)
-        if (pid && entry.pid == pid) return &entry;
+        if (entry.pid == pid) return &entry;
     return nullptr;
 }
 ProcessTimers *acquire_timers(sched::ProcessId pid)
 {
     if (auto *entry = find_timers(pid)) return entry;
+    // The process's own slot; a stale entry there belongs to a freed slot.
+    if (runtime_kernel)
+        if (const auto slot = runtime_kernel->scheduler().slot_of(pid);
+            slot && (!process_timers[*slot].pid || !runtime_kernel->scheduler().slot_of(process_timers[*slot].pid)))
+        {
+            process_timers[*slot] = {};
+            process_timers[*slot].pid = pid;
+            return &process_timers[*slot];
+        }
     for (auto &entry : process_timers)
         if (!entry.pid)
         {

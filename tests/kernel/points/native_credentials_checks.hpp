@@ -39,7 +39,7 @@ inline Status check_native_credentials_model()
         if (auto status = process.add_thread(2, {}, sched::ProcessState::blocked); !status) return status;
         if (call(N::setgid, {3000}) != -95 || process.credentials().gid != 2000)
             return Status::fault("native credential live thread gate failed");
-        process.threads()[1].state = sched::ProcessState::exited;
+        process.thread_slot(1).state = sched::ProcessState::exited;
         if (call(N::setgid, {1000}) || call(N::setreuid, {1000, 1000}) || call(N::setuid, {1000}) ||
             call(N::setuid, {0}) != -1 || call(N::setgid, {0}) != -1 ||
             process.credentials().suid != 1000 || process.credentials().sgid != 1000)

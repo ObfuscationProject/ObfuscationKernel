@@ -15,8 +15,8 @@ Group create(Kernel &kernel)
     const auto pid = made.value();
     auto *process = kernel.scheduler().find(pid);
     process->resources().personality = sched::UserPersonality::linux;
-    const auto peer = kernel.scheduler().create_thread(pid, process->threads()[0].context); CHECK(peer);
-    for (auto &thread : process->threads())
+    const auto peer = kernel.scheduler().create_thread(pid, process->leader().context); CHECK(peer);
+    for (auto &thread : process->thread_records())
     {
         CHECK(native::prepare_native_thread(thread));
         thread.native_active = true;
@@ -121,7 +121,7 @@ void eof_and_fault(Kernel &kernel, unsigned mode)
 void multiple(Kernel &kernel)
 {
     auto g = create(kernel); auto a = kernel.posix().pipe(0); CHECK(a);
-    auto second = kernel.scheduler().create_thread(g.pid, kernel.scheduler().find(g.pid)->threads()[0].context); CHECK(second);
+    auto second = kernel.scheduler().create_thread(g.pid, kernel.scheduler().find(g.pid)->leader().context); CHECK(second);
     auto *thread = kernel.scheduler().find_thread(g.pid, second.value()); CHECK(native::prepare_native_thread(*thread)); thread->native_active = true;
     const auto id = description(kernel, g, a.value()[0]);
     arm(kernel, g, a.value()[0]); Group other{g.pid, second.value()}; const auto ticket = arm(kernel, other, a.value()[0], output + 1);
@@ -192,7 +192,7 @@ void lifecycle(Kernel &kernel)
             auto *p = kernel.scheduler().find(g.pid);
             native::ExecRetirement retirement{*p, g.pid};
             const auto replaced = native::replace_entry_stacks(native::entry_stacks, *p, [&] {
-                return kernel.posix().exec(g.pid, p->threads()[0].context, p->resources().memory);
+                return kernel.posix().exec(g.pid, p->leader().context, p->resources().memory);
             });
             CHECK(replaced && replaced.committed); retirement.consume(kernel, *p);
         }
@@ -251,15 +251,15 @@ void capacity(Kernel &kernel)
     {
         const auto g = create(kernel); owners[i] = g;
         auto *p = kernel.scheduler().find(g.pid);
-        while (p->threads().size() < sched::max_threads_per_process)
+        while (p->record_count() < sched::max_threads_per_process)
         {
-            const auto made = kernel.scheduler().create_thread(g.pid, p->threads()[0].context); CHECK(made);
+            const auto made = kernel.scheduler().create_thread(g.pid, p->leader().context); CHECK(made);
             auto *thread = kernel.scheduler().find_thread(g.pid, made.value());
             CHECK(native::prepare_native_thread(*thread)); thread->native_active = true;
         }
         const auto pipe = kernel.posix().pipe(0); CHECK(pipe);
         descriptions[i] = description(kernel, g, pipe.value()[0]);
-        for (const auto &thread : p->threads()) arm(kernel, {g.pid, thread.tid}, pipe.value()[0]);
+        for (const auto &thread : p->thread_records()) arm(kernel, {g.pid, thread.tid}, pipe.value()[0]);
         expect(kernel.scheduler().open_description(descriptions[i])->references == sched::max_threads_per_process + 1);
     }
     expect(native::pipe_read_objects.accounting().live_objects == native::pipe_read_capacity);

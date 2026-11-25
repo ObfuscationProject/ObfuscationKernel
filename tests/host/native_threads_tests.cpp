@@ -57,7 +57,7 @@ sched::ProcessId process(Kernel &kernel)
     auto *owner=kernel.scheduler().find(p.value());owner->resources().personality=sched::UserPersonality::linux;
     // Shared-domain futex keys resolve through an actual mapping record.
     CHECK(native::allocate(owner->resources().native_pages,hw::user_begin,hw::page_read|hw::page_write|hw::page_execute));
-    auto &leader=owner->threads()[0];CHECK(native::prepare_native_thread(leader));
+    auto &leader=owner->leader();CHECK(native::prepare_native_thread(leader));
     leader.native_active=true;leader.native_frame.pc=hw::user_begin;
     Bridge::set_stack_pointer(leader.native_frame,hw::user_begin+4096);
     CHECK(kernel.scheduler().set_runnable(p.value()));
@@ -93,14 +93,14 @@ void lifecycle(Kernel &kernel)
     const auto descriptions=kernel.scheduler().open_description_count();
     p->resources().native_space={.root=0x9000,.slot=2,.generation=3};
     const auto child=clone(kernel,pid,flags::settls|flags::parent_settid|flags::child_settid|flags::child_cleartid);
-    CHECK(get(132)==child && p->threads()[0].tls.clear_tid_address==0);
+    CHECK(get(132)==child && p->leader().tls.clear_tid_address==0);
     put(128,0x99887766);
     // CHILD_SETTID belongs to first child execution, not parent clone return.
     CHECK(get(128)==0x99887766);
-    p->threads()[0].native_active=false;
+    p->leader().native_active=false;
     CHECK(native::step(kernel));CHECK(get(128)==child && mock::last_frame.fp_state[5]==0xa7);
     put(128,static_cast<u32>(child));
-    p->threads()[0].native_active=true;
+    p->leader().native_active=true;
     const auto shared=clone(kernel,pid,0),private_waiter=clone(kernel,pid,0);
     for(auto pair : {std::pair{shared,native::FutexKeyDomain::anonymous_shared_operation},
                     std::pair{private_waiter,native::FutexKeyDomain::private_address_space}})
@@ -136,7 +136,7 @@ void key_permissions_and_last_exit(Kernel &kernel)
     request.operation=native::FutexOperation::wait;
     CHECK(native::futex(kernel,pid,request,done)==-14 && done);
     mock::write_forbidden=0;
-    put(128,123);p->threads()[0].tls.clear_tid_address=word;
+    put(128,123);p->leader().tls.clear_tid_address=word;
     exit(kernel,pid,pid);CHECK(get(128)==123 && p->state()==sched::ProcessState::zombie);
     CHECK(kernel.scheduler().reap_orphans());
 }

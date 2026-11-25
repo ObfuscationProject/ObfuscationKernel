@@ -20,7 +20,7 @@ struct Fixture
     ProcessId process()
     {
         auto p=scheduler.create_process("threads",context);CHECK(p);CHECK(scheduler.set_runnable(p.value()));
-        CHECK(scheduler.find(p.value())->threads()[0].tid==p.value());return p.value();
+        CHECK(scheduler.find(p.value())->leader().tid==p.value());return p.value();
     }
     ThreadId peer(ProcessId pid) {auto p=scheduler.create_thread(pid,context);CHECK(p);return p.value();}
 };
@@ -48,16 +48,16 @@ void identities_and_reuse()
     CHECK(f.scheduler.set_runnable(a));
     CHECK(thread->state==ProcessState::exited);
     const auto fresh=f.peer(a);
-    CHECK(fresh>c && p->threads().size()==2 && !f.scheduler.find_thread(a,peer));
+    CHECK(fresh>c && p->record_count()==2 && !f.scheduler.find_thread(a,peer));
     thread=f.scheduler.find_thread(a,fresh);
     CHECK(thread && thread->native_frame.pc==0 && !thread->tls.clear_tid_address);
     CHECK(!thread->wait_registration.active() && thread->wait_registration.ticket().generation==0);
     CHECK(!f.scheduler.complete_wait(ticket.value(),WaitCompletion::timeout));
     for (unsigned iteration=0;iteration<1000;++iteration)
     {
-        const auto latest=p->threads()[1].tid;
+        const auto latest=p->thread_slot(1).tid;
         CHECK(f.scheduler.exit_thread(a,latest).value()==1);
-        CHECK(f.peer(a)>latest && p->threads().size()==2);
+        CHECK(f.peer(a)>latest && p->record_count()==2);
     }
 }
 void peer_lifetime_and_group_boundary()
@@ -79,7 +79,7 @@ void peer_lifetime_and_group_boundary()
     // The leader can retire while its peer and process identity remain live.
     CHECK(f.scheduler.activate_thread(pid,pid));
     CHECK(f.scheduler.exit_thread(pid,pid).value()==1);
-    CHECK(p->state()==ProcessState::blocked && p->threads()[0].state==ProcessState::exited);
+    CHECK(p->state()==ProcessState::blocked && p->leader().state==ProcessState::exited);
     CHECK(f.scheduler.complete_wait(peer_wait.value(),WaitCompletion::ready));
     CHECK(p->state()==ProcessState::runnable);
     CHECK(f.scheduler.activate_thread(pid,b));
@@ -166,22 +166,22 @@ void prepared_thread_publication()
     auto *process = f.scheduler.find(pid);
     ThreadId failed_tid{};
     usize calls{};
-    const auto before = process->threads().size();
+    const auto before = process->record_count();
     auto failed = f.scheduler.create_thread_prepared(pid, f.context,
         [&](ThreadControlBlock &thread) -> Status {
             ++calls; failed_tid = thread.tid;
             CHECK(thread.owner == pid && thread.state == ProcessState::created);
             CHECK(!f.scheduler.find_thread(pid, thread.tid));
-            CHECK(process->threads().size() == before);
+            CHECK(process->record_count() == before);
             return Status::no_memory("injected entry stack reservation failure");
         });
     CHECK(!failed && failed.status().code() == StatusCode::no_memory && calls == 1);
-    CHECK(process->threads().size() == before && process->state() == ProcessState::runnable);
+    CHECK(process->record_count() == before && process->state() == ProcessState::runnable);
     auto prepared = f.scheduler.create_thread_prepared(pid, f.context,
         [&](ThreadControlBlock &thread) -> Status {
             ++calls;
             CHECK(thread.tid > failed_tid && !f.scheduler.find_thread(pid, thread.tid));
-            CHECK(thread.state == ProcessState::created && process->threads().size() == before);
+            CHECK(thread.state == ProcessState::created && process->record_count() == before);
             thread.native_frame.pc = 0x991199;
             thread.native_active = true;
             thread.tls.clear_tid_address = 0x8888;
@@ -191,7 +191,7 @@ void prepared_thread_publication()
     auto *published = f.scheduler.find_thread(pid, prepared.value());
     CHECK(published && published->state == ProcessState::runnable && published->native_active);
     CHECK(published->native_frame.pc == 0x991199 && published->tls.clear_tid_address == 0x8888);
-    while (!process->threads().full()) CHECK(f.scheduler.create_thread(pid, f.context));
+    while (!process->record_count() == sched::max_threads_per_process) CHECK(f.scheduler.create_thread(pid, f.context));
     auto full = f.scheduler.create_thread_prepared(pid, f.context,
         [&](ThreadControlBlock &) { ++calls; return Status::success(); });
     CHECK(!full && full.status().code() == StatusCode::would_block && calls == 2);
@@ -217,7 +217,7 @@ void entry_stack_lifetime_barriers()
         CHECK(thread->state == ProcessState::runnable);
         auto exec = f.scheduler.replace_image(pid, f.context, {});
         CHECK(!exec && exec.code() == StatusCode::busy);
-        CHECK(process->threads().size() == 2 && process->resources().program_break == 0x91919);
+        CHECK(process->record_count() == 2 && process->resources().program_break == 0x91919);
         CHECK(!f.scheduler.exit_process(pid, 77));
         CHECK(!f.scheduler.terminate_process(pid, 9));
         CHECK(process->state() == ProcessState::runnable && process->exit_code() == 0);
@@ -225,7 +225,7 @@ void entry_stack_lifetime_barriers()
         CHECK(!f.scheduler.reap_process(pid));
         CHECK(f.scheduler.find_thread(pid, peer) == thread);
         process->set_state(ProcessState::runnable);
-        while (!process->threads().full()) CHECK(f.scheduler.create_thread(pid, f.context));
+        while (!process->record_count() == sched::max_threads_per_process) CHECK(f.scheduler.create_thread(pid, f.context));
         thread->state = ProcessState::exited;
         CHECK(!f.scheduler.create_thread(pid, f.context));
         CHECK(f.scheduler.find_thread(pid, peer) == thread);
@@ -242,19 +242,19 @@ void staged_fork_publication()
     Fixture f; const auto pid = f.process();
     memory::KernelEntryStackPool identity;
     auto *parent = f.scheduler.find(pid);
-    parent->threads()[0].entry_stack = {&identity, 7, 19};
-    parent->threads()[0].kernel_stack_top = 0x51510;
-    parent->threads()[0].tls.robust_list = 0x61610;
-    parent->threads()[0].tls.robust_list_length = 24;
+    parent->leader().entry_stack = {&identity, 7, 19};
+    parent->leader().kernel_stack_top = 0x51510;
+    parent->leader().tls.robust_list = 0x61610;
+    parent->leader().tls.robust_list_length = 24;
     auto staged = f.scheduler.fork_process(pid, false); CHECK(staged);
     auto *child = f.scheduler.find(staged.value());
-    CHECK(child && child->state() == ProcessState::created && child->threads()[0].state == ProcessState::created);
-    CHECK(!child->threads()[0].entry_stack.pool && child->threads()[0].kernel_stack_top == 0);
-    CHECK(child->threads()[0].tls.robust_list == 0 && child->threads()[0].tls.robust_list_length == 0);
-    CHECK(parent->threads()[0].tls.robust_list == 0x61610 && parent->threads()[0].tls.robust_list_length == 24);
+    CHECK(child && child->state() == ProcessState::created && child->leader().state == ProcessState::created);
+    CHECK(!child->leader().entry_stack.pool && child->leader().kernel_stack_top == 0);
+    CHECK(child->leader().tls.robust_list == 0 && child->leader().tls.robust_list_length == 0);
+    CHECK(parent->leader().tls.robust_list == 0x61610 && parent->leader().tls.robust_list_length == 24);
     CHECK(child->parent_pid() == pid);
     CHECK(f.scheduler.set_runnable(staged.value()));
-    CHECK(child->state() == ProcessState::runnable && child->threads()[0].state == ProcessState::runnable);
+    CHECK(child->state() == ProcessState::runnable && child->leader().state == ProcessState::runnable);
     CHECK(f.scheduler.exit_process(staged.value(), 0)); CHECK(f.scheduler.reap_process(staged.value()));
     auto abandoned = f.scheduler.fork_process(pid, false); CHECK(abandoned);
     CHECK(f.scheduler.exit_process(abandoned.value(), 1)); CHECK(f.scheduler.reap_process(abandoned.value()));

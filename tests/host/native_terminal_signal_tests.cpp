@@ -414,7 +414,7 @@ ConsoleJob console_job(Kernel &kernel, u64 init)
     std::memcpy(user(argument_at), &c.job, 4);
     expect(console_call(kernel, c.login, N::ioctl, {0, OK_TIOCSPGRP, argument_at}) == 0);
     scheduler.find(c.job)->resources().personality = sched::UserPersonality::linux;
-    for (const auto pid : {init, c.login}) for (auto &thread : scheduler.find(pid)->threads()) thread.native_active = false;
+    for (const auto pid : {init, c.login}) for (auto &thread : scheduler.find(pid)->thread_records()) thread.native_active = false;
     c.saved = scheduler.console_terminal().termios;
     return c;
 }
@@ -423,7 +423,7 @@ void console_done(Kernel &kernel, u64 init, const ConsoleJob &c)
     auto &scheduler = kernel.scheduler();
     scheduler.console_terminal().ldisc.flush_input();
     scheduler.console_terminal().termios = c.saved;
-    for (const auto pid : {init, c.login}) for (auto &each : scheduler.find(pid)->threads()) each.native_active = true;
+    for (const auto pid : {init, c.login}) for (auto &each : scheduler.find(pid)->thread_records()) each.native_active = true;
     release(kernel, c.job);
     expect(console_call(kernel, init, N::console_revoke, {static_cast<uptr>(c.epoch)}) == 0);
     release(kernel, c.login);

@@ -6,7 +6,7 @@ namespace ok::user::native
 inline namespace runtime_detail
 {
 constinit PollObjects poll_objects{page_pool, sched::max_processes};
-std::array<PollWaitIndex, sched::max_processes> poll_waits{};
+std::array<PollWaitIndex, memory::KernelEntryStackPool::capacity> poll_waits{};
 SyscallOrigins::ChildBinding child_origin_binding(memory::ObjectHandle object, const ChildWait &wait)
 { return {object, wait.ticket, wait.request, wait.operation}; }
 constinit ChildWaitObjects child_wait_objects{page_pool, child_wait_capacity};
@@ -602,7 +602,7 @@ i64 begin_select(Kernel &kernel, sched::ProcessId pid, const SelectRequest &requ
 {
     static_assert(sched::max_process_fds == 32, "Select mask must follow descriptor table growth");
     auto *process = kernel.scheduler().find(pid);
-    if (!process || process->threads().empty() || kernel.scheduler().current_pid() != pid ||
+    if (!process || process->record_count() == 0 || kernel.scheduler().current_pid() != pid ||
         request.sets.count > sched::max_process_fds ||
         (request.sets.word_bytes != 4 && request.sets.word_bytes != 8)) return -22;
     const auto allowed = request.sets.count == 32 ? ~u32{0} : request.sets.count ? (u32{1} << request.sets.count) - 1 : 0;

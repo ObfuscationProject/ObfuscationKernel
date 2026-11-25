@@ -49,7 +49,7 @@ i64 dispatch(sched::ProcessControlBlock &process, Call call, const std::array<Wo
         return 0;
     }
     usize live = 0;
-    for (const auto &thread : process.threads())
+    for (const auto &thread : process.thread_records())
         if (thread.state != sched::ProcessState::exited) ++live;
     // PCB-wide credentials cannot yet synchronize identity changes across TCBs.
     if (live != 1) return -95;

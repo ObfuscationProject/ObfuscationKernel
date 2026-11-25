@@ -67,7 +67,7 @@ struct DirectedSignalTarget
     for (auto &process : scheduler.processes())
     {
         if (group && process.pid() != group) continue;
-        for (auto &thread : process.threads())
+        for (auto &thread : process.thread_records())
         {
             if (thread.tid != tid || thread.owner != process.pid()) continue;
             const bool retired = thread.state == sched::ProcessState::exited;

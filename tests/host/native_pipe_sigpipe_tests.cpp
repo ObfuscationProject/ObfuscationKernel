@@ -27,9 +27,9 @@ Group create(Kernel &kernel)
     auto creds = p->credentials(); creds.uid=1001; creds.euid=2002; p->set_credentials(creds);
     p->resources().native_space = {0x100000 + g.pid*4096, static_cast<u32>(g.pid%16), 1};
     CHECK(native::allocate(p->resources().native_pages, hw::user_begin, hw::page_read|hw::page_execute));
-    auto peer = kernel.scheduler().create_thread(g.pid,p->threads()[0].context); CHECK(peer); g.writer=peer.value();
-    for (auto &t : p->threads()) { CHECK(native::prepare_native_thread(t)); t.native_active=true; }
-    p->threads()[0].native_active=false;
+    auto peer = kernel.scheduler().create_thread(g.pid,p->leader().context); CHECK(peer); g.writer=peer.value();
+    for (auto &t : p->thread_records()) { CHECK(native::prepare_native_thread(t)); t.native_active=true; }
+    p->leader().native_active=false;
     CHECK(kernel.scheduler().set_runnable(g.pid)); CHECK(kernel.scheduler().activate_thread(g.pid,g.pid));
     auto fds=kernel.posix().pipe(0); CHECK(fds); g.fds=fds.value();
     native::runtime_kernel=&kernel; native::started=true; native::last_pid=native::last_tid=0;

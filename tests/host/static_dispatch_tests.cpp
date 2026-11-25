@@ -166,7 +166,7 @@ void test_reject_foreign_process_target()
     auto kernel_thread = processes.create_kernel_thread("kernel", arch::ArchOperations{}.make_kernel_context(1, 2));
     check(kernel_thread);
     check(processes.execve(kernel_thread.value(), {}, other).code() == StatusCode::unsupported);
-    check(processes.find(kernel_thread.value())->threads()[0].context.mode == arch::PrivilegeMode::kernel);
+    check(processes.find(kernel_thread.value())->leader().context.mode == arch::PrivilegeMode::kernel);
 }
 
 template <sched::SchedulerPolicy Policy>

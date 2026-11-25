@@ -35,9 +35,9 @@ Group create(Kernel &kernel)
     p->resources().personality=sched::UserPersonality::linux;
     p->resources().native_space={0x100000+g.pid*4096,static_cast<u32>(g.pid%16),1};
     CHECK(native::allocate(p->resources().native_pages,hw::user_begin,hw::page_read|hw::page_execute));
-    auto peer=kernel.scheduler().create_thread(g.pid,p->threads()[0].context); CHECK(peer);g.writer=peer.value();
-    for(auto &t:p->threads()){CHECK(native::prepare_native_thread(t));t.native_active=true;}
-    p->threads()[0].native_active=false;CHECK(kernel.scheduler().set_runnable(g.pid));
+    auto peer=kernel.scheduler().create_thread(g.pid,p->leader().context); CHECK(peer);g.writer=peer.value();
+    for(auto &t:p->thread_records()){CHECK(native::prepare_native_thread(t));t.native_active=true;}
+    p->leader().native_active=false;CHECK(kernel.scheduler().set_runnable(g.pid));
     CHECK(kernel.scheduler().activate_thread(g.pid,g.pid));auto fds=kernel.posix().pipe(0);CHECK(fds);g.fds=fds.value();
     native::runtime_kernel=&kernel;native::started=true;native::last_pid=native::last_tid=0;
     for(usize i=0;i<32768;++i)mock::memory[data-hw::user_begin+i]=static_cast<std::byte>((i*29+7)%251);
@@ -223,7 +223,7 @@ void lifecycle(Kernel &kernel,bool vector,unsigned mode)
     {
         native::ExecRetirement retirement{*p,g.pid};
         auto replaced=native::replace_entry_stacks(native::entry_stacks,*p,[&]{
-            return kernel.posix().exec(g.pid,p->threads()[0].context,p->resources().memory);
+            return kernel.posix().exec(g.pid,p->leader().context,p->resources().memory);
         });CHECK(replaced&&replaced.committed);retirement.consume(kernel,*p);
     }
     expect(!object(g).pool&&!native::pipe_write_objects.resolve(old));

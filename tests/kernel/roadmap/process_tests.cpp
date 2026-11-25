@@ -302,8 +302,8 @@ Status verify_process_lifecycle(Kernel &kernel, std::span<const std::byte> elf, 
         return user.status();
     }
     auto *user_process = processes.find(user.value());
-    if (user_process == nullptr || user_process->memory_map().area_count() == 0 || user_process->threads().empty() ||
-        user_process->threads()[0].context.mode != arch::PrivilegeMode::user)
+    if (user_process == nullptr || user_process->memory_map().area_count() == 0 || user_process->record_count() == 0 ||
+        user_process->leader().context.mode != arch::PrivilegeMode::user)
     {
         return Status::fault("user process ELF load failed");
     }
@@ -359,7 +359,7 @@ Status verify_process_lifecycle(Kernel &kernel, std::span<const std::byte> elf, 
     if (execed_child == nullptr || execed_child->memory_map().area_count() != 1 ||
         execed_child->fd_table().open_count() != fd_count_before_exec || !execed_child->fd_table().contains(7) ||
         execed_child->parent_pid() != user.value() ||
-        execed_child->threads()[0].context.mode != arch::PrivilegeMode::user)
+        execed_child->leader().context.mode != arch::PrivilegeMode::user)
     {
         return Status::fault("execve did not replace address space while preserving selected metadata");
     }
@@ -382,7 +382,7 @@ Status verify_process_lifecycle(Kernel &kernel, std::span<const std::byte> elf, 
     {
         return Status::fault("exit_group did not mark process zombie");
     }
-    for (const auto &thread : exited_child->threads())
+    for (const auto &thread : exited_child->thread_records())
     {
         if (thread.state != sched::TaskState::exited)
         {

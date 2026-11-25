@@ -42,8 +42,8 @@ Group create(Kernel &kernel,u32 flags=0)
     Group g{made.value()};auto *process=kernel.scheduler().find(g.pid);
     process->resources().personality=sched::UserPersonality::native;
     process->resources().native_space={0x100000+g.pid*4096,static_cast<u32>(g.pid%16),1};
-    const auto peer=kernel.scheduler().create_thread(g.pid,process->threads()[0].context);CHECK(peer);g.peer=peer.value();
-    for(auto &thread:process->threads()){CHECK(native::prepare_native_thread(thread));thread.native_active=true;}
+    const auto peer=kernel.scheduler().create_thread(g.pid,process->leader().context);CHECK(peer);g.peer=peer.value();
+    for(auto &thread:process->thread_records()){CHECK(native::prepare_native_thread(thread));thread.native_active=true;}
     CHECK(kernel.scheduler().set_runnable(g.pid));g.fds=pair(kernel,g,flags);
     for(usize index=0;index<32768;++index)mock::memory[input-hw::user_begin+index]=static_cast<std::byte>((index*29+7)%251);
     return g;
@@ -184,7 +184,7 @@ void lifecycle(Kernel &kernel,unsigned mode)
     {CHECK(native::retire_native_thread(*kernel.scheduler().find_thread(g.pid,g.peer)));CHECK(kernel.scheduler().exit_thread(g.pid,g.peer));native::prune_pty_waits(kernel);}
     else
     {auto *p=kernel.scheduler().find(g.pid);native::ExecRetirement retirement{*p,g.pid};
-        auto replaced=native::replace_entry_stacks(native::entry_stacks,*p,[&]{return kernel.posix().exec(g.pid,p->threads()[0].context,p->resources().memory);});
+        auto replaced=native::replace_entry_stacks(native::entry_stacks,*p,[&]{return kernel.posix().exec(g.pid,p->leader().context,p->resources().memory);});
         CHECK(replaced&&replaced.committed);retirement.consume(kernel,*p);}
     expect(!kernel.scheduler().open_description(saved.description)&&!native::pty_wait_object(g.pid,g.peer).pool);retire(kernel,g);
 }
