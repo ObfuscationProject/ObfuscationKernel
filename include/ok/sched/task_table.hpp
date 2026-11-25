@@ -60,9 +60,17 @@ enum class ProcessLifecycle : u32
 // slot's task lock (allocation also holds the task table) and loaded by
 // anyone; `pins` is read and written only under the task lock. Per-thread
 // words other CPUs may read without the PCB live here as well.
+// The task locks are spin locks on every profile, not FineLock: process slots
+// sit in the exported scheduler layout, and the Kernel SDK does not carry
+// OK_ARCH_SMP_START, so a FineLock (RankedSpinLock on SMP kernels, the smaller
+// UpLock in an OS build) would give the kernel and its OS consumer different
+// layouts. On a UP profile the lock is never contended.
+using TaskLock = smp::RankedSpinLock<smp::LockRank::task>;
+using TaskTableLock = smp::RankedSpinLock<smp::LockRank::task_table>;
+
 template <typename Pcb> struct BasicProcessSlot
 {
-    smp::FineLock<smp::LockRank::task> task{};
+    TaskLock task{};
     std::atomic<u32> pid{0};
     std::atomic<u32> lifecycle{static_cast<u32>(ProcessLifecycle::free)};
     // sched_setaffinity's per-thread masks (docs/modules/sysfs.md), by TCB

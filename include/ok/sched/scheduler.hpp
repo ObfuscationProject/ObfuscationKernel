@@ -1074,7 +1074,6 @@ class SchedulerState
     SchedulingMode mode_{SchedulingMode::round_robin};
     // Process slots never move or compact (task_table.hpp). Slot allocation
     // and release hold task_table, then the slot's task lock.
-    using TaskTableLock = smp::FineLock<smp::LockRank::task_table>;
     TaskTableLock task_table_{};
     std::array<ProcessSlot, max_processes> slots_{};
     usize next_slot_{};
