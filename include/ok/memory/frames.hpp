@@ -3,8 +3,10 @@
 #include "ok/core/concepts.hpp"
 #include "ok/core/types.hpp"
 #include "ok/memory/charges.hpp"
+#include "ok/smp/lock.hpp"
 
 #include <array>
+#include <atomic>
 #include <span>
 
 namespace ok::memory
@@ -67,8 +69,16 @@ enum class PageKind : u8
 // Physical frame ownership over runtime-sized metadata. The caller supplies the
 // metadata storage: at boot a range carved from discovered RAM, in models a
 // static array. Every check precedes the first metadata write, so a failed
-// initialization leaves the previous allocator intact. Single serialized
-// caller only; IRQ and SMP synchronization arrive with later worktrees.
+// initialization leaves the previous allocator intact.
+//
+// Locking: the bitmap, the counts, the generation sequence and each
+// descriptor's generation are changed only under `lock_` (rank frame, the
+// innermost memory lock), so any CPU may allocate, release or look up a
+// handle. A descriptor's other fields belong to the frame's current owner,
+// which changes them under its own lock (page_pool, slab, a page cache);
+// descriptor() returns the pointer only after checking the exact handle under
+// `lock_`. The counts are atomic words other CPUs read without the lock.
+// Interrupt top halves never allocate (rank frame is below irq_router).
 class FrameAllocator final : private NonCopyable
 {
   public:
@@ -125,11 +135,11 @@ class FrameAllocator final : private NonCopyable
     }
     [[nodiscard]] usize free_frames() const
     {
-        return frame_count_ - used_count_;
+        return frame_count_ - used_count_.load(std::memory_order_relaxed);
     }
     [[nodiscard]] usize used_frames() const
     {
-        return used_count_;
+        return used_count_.load(std::memory_order_relaxed);
     }
     [[nodiscard]] std::span<const FrameRange> ranges() const
     {
@@ -137,15 +147,24 @@ class FrameAllocator final : private NonCopyable
     }
 
   private:
+    using Lock = smp::FineLock<smp::LockRank::frame>;
+    using Guard = Lock::Guard;
+
     [[nodiscard]] bool used(usize index) const;
     void mark(usize index, bool value);
     [[nodiscard]] uptr address_for(usize index) const;
     [[nodiscard]] bool exact(const PhysicalFrame &frame) const;
     PhysicalFrame take(usize index);
+    // The caller holds lock_.
+    Result<PhysicalFrame> allocate_locked();
+    Status release_locked(PhysicalFrame frame);
+    [[nodiscard]] Result<PhysicalFrame> handle_at_locked(usize index) const;
+    void add_used(usize count, bool take);
 
+    mutable Lock lock_{};
     usize page_size_{4096};
     usize frame_count_{0};
-    usize used_count_{0};
+    std::atomic<usize> used_count_{0};
     usize next_free_hint_{0};
     u64 next_generation_{1};
     std::span<u64> bitmap_{};

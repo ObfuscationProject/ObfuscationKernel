@@ -234,7 +234,7 @@ bool copy_timer_id(hw::AddressSpace &space, u64 address, i32 id)
     std::array<u8, 4> bytes{};
     for (usize i = 0; i < 4; ++i)
         bytes[i] = static_cast<u8>(static_cast<u32>(id) >> (8 * (TimerCodec::Abi::profile.big_endian ? 3 - i : i)));
-    return hw::copy_to_user(space, address, bytes.data(), bytes.size()).ok();
+    return uaccess::copy_to_user(space, address, bytes.data(), bytes.size()).ok();
 }
 // The default sigevent carries the timer id as sival_int, the union's first int.
 constexpr u64 default_value(i32 id)
@@ -251,7 +251,7 @@ i64 create_timer(Kernel &kernel, sched::ProcessControlBlock &process, const std:
     if (a[1])
     {
         std::array<u8, TimerCodec::sigevent_bytes> bytes{};
-        if (!hw::copy_from_user(space, bytes.data(), a[1], bytes.size())) return -14;
+        if (!uaccess::copy_from_user(space, bytes.data(), a[1], bytes.size())) return -14;
         event = TimerCodec::decode_sigevent(bytes);
     }
     // clock_gettime serves these two clocks only; CPU-time clocks are absent.
@@ -298,7 +298,7 @@ i64 set_timer(Kernel &kernel, sched::ProcessControlBlock &process, const std::ar
     if (!a[2]) return -22;
     const auto size = TimerCodec::itimerspec_bytes(format);
     std::array<u8, 32> bytes{};
-    if (!hw::copy_from_user(space, bytes.data(), a[2], size)) return -14;
+    if (!uaccess::copy_from_user(space, bytes.data(), a[2], size)) return -14;
     auto next = TimerCodec::decode_itimerspec({bytes.data(), size}, format);
     if (!next) return -22;
     auto *timer = find_posix(find_timers(process.pid()), static_cast<i32>(static_cast<u32>(a[0])));
@@ -329,7 +329,7 @@ i64 set_timer(Kernel &kernel, sched::ProcessControlBlock &process, const std::ar
     {
         if (auto status = TimerCodec::encode_itimerspec({bytes.data(), size}, format, old); !status)
             return timer_failure(status);
-        if (!hw::copy_to_user(space, a[3], bytes.data(), size)) return -14;
+        if (!uaccess::copy_to_user(space, a[3], bytes.data(), size)) return -14;
     }
     return 0;
 }
@@ -347,7 +347,7 @@ i64 get_timer(Kernel &kernel, sched::ProcessControlBlock &process, const std::ar
     std::array<u8, 32> bytes{};
     if (auto status = TimerCodec::encode_itimerspec({bytes.data(), size}, format, {setting.interval, setting.value}); !status)
         return timer_failure(status);
-    return hw::copy_to_user(process.resources().native_space, a[1], bytes.data(), size) ? 0 : -14;
+    return uaccess::copy_to_user(process.resources().native_space, a[1], bytes.data(), size) ? 0 : -14;
 }
 
 i64 set_itimer(sched::ProcessControlBlock &process, const std::array<u64, 6> &a, u64 now)
@@ -357,7 +357,7 @@ i64 set_itimer(sched::ProcessControlBlock &process, const std::array<u64, 6> &a,
     std::array<u8, TimerCodec::itimerval_bytes> bytes{};
     if (a[1])
     {
-        if (!hw::copy_from_user(space, bytes.data(), a[1], bytes.size())) return -14;
+        if (!uaccess::copy_from_user(space, bytes.data(), a[1], bytes.size())) return -14;
         auto decoded = TimerCodec::decode_itimerval(bytes);
         if (!decoded) return -22;
         next = decoded.value();
@@ -372,7 +372,7 @@ i64 set_itimer(sched::ProcessControlBlock &process, const std::array<u64, 6> &a,
     if (next.value) ++timer_counters.armed;
     if (!a[2]) return 0;
     TimerCodec::encode_itimerval(bytes, {old.interval, old.value});
-    return hw::copy_to_user(space, a[2], bytes.data(), bytes.size()) ? 0 : -14;
+    return uaccess::copy_to_user(space, a[2], bytes.data(), bytes.size()) ? 0 : -14;
 }
 
 i64 get_itimer(sched::ProcessControlBlock &process, const std::array<u64, 6> &a, u64 now)
@@ -383,7 +383,7 @@ i64 get_itimer(sched::ProcessControlBlock &process, const std::array<u64, 6> &a,
     const auto setting = timers ? timers->real.itimer(now) : time::TimerSetting{};
     std::array<u8, TimerCodec::itimerval_bytes> bytes{};
     TimerCodec::encode_itimerval(bytes, {setting.interval, setting.value});
-    return hw::copy_to_user(process.resources().native_space, a[1], bytes.data(), bytes.size()) ? 0 : -14;
+    return uaccess::copy_to_user(process.resources().native_space, a[1], bytes.data(), bytes.size()) ? 0 : -14;
 }
 
 // alarm_setitimer: rounds the old remainder up to whole seconds.

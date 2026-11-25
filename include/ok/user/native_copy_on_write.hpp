@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ok/smp/kernel_section.hpp"
 #include "ok/user/native_mapping_pages.hpp"
 
 namespace ok::user::native
@@ -57,65 +58,84 @@ inline Status share_private_page(MappingPages &child, const arch::execution::Pag
 }
 
 // After the child space exists, withhold write access from every parent record
-// whose private frame is now shared. A failed remap leaves a writable
-// translation of a shared frame, so the caller must stop the runtime.
+// whose private frame is now shared, then re-synchronize the records from the
+// first to the last one changed with one protect (one quiesce, the parent's
+// mm held). A failed protect leaves a writable translation of a shared frame,
+// so the caller must stop the runtime.
 inline Status withhold_shared_writes(MappingPages &pages, const arch::execution::AddressSpace &space,
                                      const NativePagePool &pool)
 {
+    usize first = pages.size(), last = 0, withheld = 0;
     for (usize index = 0; index < pages.size(); ++index)
     {
         auto &page = pages[index];
         if (!(page.flags & arch::execution::page_write) || exclusive_frame(pool, page.physical_address)) continue;
         settle_access(page, page.flags, false);
-        if (auto status = arch::execution::remap(space, page); !status) return status;
+        if (first == pages.size()) first = index;
+        last = index;
+        ++withheld;
     }
-    return Status::success();
+    if (first == pages.size()) return Status::success();
+    auto status = arch::execution::protect(space, arch::execution::MappingView{&pages[first], last - first + 1});
+    if (status)
+        if (const auto cpu = smp::current_cpu(); cpu < smp::max_cpus)
+            smp::detail::owner_add(smp::evidence_cpus[cpu].protect_pages, withheld);
+    return status;
+}
+
+// Resolves the withheld record `index` of the live `space` that `pages`
+// describes. A sole remaining owner regains write access in place; otherwise
+// the record moves to a private copy. Returns false for any other record.
+inline Result<bool> resolve_copy_on_write_at(MappingPages &pages, const arch::execution::AddressSpace &space,
+                                             usize index, NativePagePool &pool)
+{
+    auto page = pages[index];
+    if (!page.copy_on_write || !page.flags) return false;
+    const auto *owner = pages.frame(index);
+    if (!owner || owner->address != page.physical_address)
+        return Status::fault("copy-on-write page lost its exact frame token");
+    const auto previous = *owner;
+    const bool exclusive = exclusive_frame(pool, previous.address);
+    auto frame = previous;
+    if (!exclusive)
+    {
+        auto copied = pool.allocate_frame();
+        if (!copied) return copied.status();
+        frame = copied.value();
+        auto *destination = reinterpret_cast<uptr *>(frame.address);
+        const auto *source = reinterpret_cast<const uptr *>(previous.address);
+        for (usize word = 0; word < arch::execution::page_size / sizeof(uptr); ++word)
+            destination[word] = source[word];
+        page.physical_address = frame.address;
+    }
+    settle_access(page, intended_access(page), true);
+    if (auto status = pages.replace(index, page, frame); !status)
+    {
+        if (!exclusive) static_cast<void>(pool.release_reference(frame));
+        return status;
+    }
+    // The record no longer names `previous`, so its reference goes even if
+    // the remap fails; another owner still holds that frame.
+    const auto mapped = arch::execution::remap(space, pages[index]);
+    if (!exclusive)
+        if (auto status = pool.release_reference(previous); !status) return status;
+    if (!mapped) return mapped;
+    ++(exclusive ? copy_on_write_stats.reused : copy_on_write_stats.copied);
+    if (const auto cpu = smp::current_cpu(); cpu < smp::max_cpus)
+        smp::detail::owner_add(exclusive ? smp::evidence_cpus[cpu].cow_reused : smp::evidence_cpus[cpu].cow_copied);
+    return true;
 }
 
 // Resolves a write to a withheld page of the live `space` that `pages`
-// describes. A sole remaining owner regains write access in place; otherwise
-// the record moves to a private copy. Returns false for any other page.
+// describes (resolve_copy_on_write_at for the record of `address`). Returns
+// false for any other page.
 inline Result<bool> resolve_copy_on_write(MappingPages &pages, const arch::execution::AddressSpace &space,
                                           uptr address, NativePagePool &pool)
 {
     const auto page_address = address & ~(arch::execution::page_size - 1);
     for (usize index = 0; index < pages.size(); ++index)
-    {
-        auto page = pages[index];
-        if (page.virtual_address != page_address) continue;
-        if (!page.copy_on_write || !page.flags) return false;
-        const auto *owner = pages.frame(index);
-        if (!owner || owner->address != page.physical_address)
-            return Status::fault("copy-on-write page lost its exact frame token");
-        const auto previous = *owner;
-        const bool exclusive = exclusive_frame(pool, previous.address);
-        auto frame = previous;
-        if (!exclusive)
-        {
-            auto copied = pool.allocate_frame();
-            if (!copied) return copied.status();
-            frame = copied.value();
-            auto *destination = reinterpret_cast<uptr *>(frame.address);
-            const auto *source = reinterpret_cast<const uptr *>(previous.address);
-            for (usize word = 0; word < arch::execution::page_size / sizeof(uptr); ++word)
-                destination[word] = source[word];
-            page.physical_address = frame.address;
-        }
-        settle_access(page, intended_access(page), true);
-        if (auto status = pages.replace(index, page, frame); !status)
-        {
-            if (!exclusive) static_cast<void>(pool.release_reference(frame));
-            return status;
-        }
-        // The record no longer names `previous`, so its reference goes even if
-        // the remap fails; another owner still holds that frame.
-        const auto mapped = arch::execution::remap(space, pages[index]);
-        if (!exclusive)
-            if (auto status = pool.release_reference(previous); !status) return status;
-        if (!mapped) return mapped;
-        ++(exclusive ? copy_on_write_stats.reused : copy_on_write_stats.copied);
-        return true;
-    }
+        if (pages[index].virtual_address == page_address)
+            return resolve_copy_on_write_at(pages, space, index, pool);
     return false;
 }
 

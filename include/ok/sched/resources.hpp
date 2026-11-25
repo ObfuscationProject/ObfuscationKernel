@@ -8,7 +8,9 @@
 #include "ok/memory/memory.hpp"
 #include "ok/user/native_mapping_pages.hpp"
 #include "ok/user/native_shared_file_handle.hpp"
+#include "ok/smp/gate.hpp"
 #include <array>
+#include <atomic>
 namespace ok::fs
 {
 class Node;
@@ -219,6 +221,86 @@ struct MemoryLimits
     }
 };
 
+// One process's address-space gate (rank mm, class B: its holder may wait
+// for quiesce_root, a frame copy or a lower gate). It covers the VM records
+// (native_pages, memory, mappings), native_space publication, the program
+// break, memory_limits, space_sequence and dead. Translation writers
+// (remap, destroy_space) of a live space run holding it.
+//
+// native_space is published under a seqcount: space_sequence is odd while
+// the holder rewrites the handle, so a reader without the gate (a user entry)
+// retries a torn copy. translation_sequence moves after the holder changed a
+// translation of the live space in place (copy-on-write resolution); a page
+// fault taken while the change ran finds it moved once it holds the gate.
+// `dead` is set once teardown retired the space; a later holder finds
+// nothing to change.
+//
+// A process record is copied when the table compacts (reap), never while its
+// gate is held: a copy takes the sequence and `dead`, and a fresh gate.
+class AddressSpaceGate final
+{
+  public:
+    constexpr AddressSpaceGate() noexcept = default;
+    AddressSpaceGate(const AddressSpaceGate &other) noexcept
+        : space_sequence(other.space_sequence.load(std::memory_order_relaxed)),
+          translation_sequence(other.translation_sequence.load(std::memory_order_relaxed)), dead(other.dead)
+    {
+    }
+    AddressSpaceGate &operator=(const AddressSpaceGate &other) noexcept
+    {
+        if (this != &other)
+        {
+            space_sequence.store(other.space_sequence.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            translation_sequence.store(other.translation_sequence.load(std::memory_order_relaxed),
+                                       std::memory_order_relaxed);
+            dead = other.dead;
+        }
+        return *this;
+    }
+
+    [[nodiscard]] Status enter() noexcept { return gate_.enter(); }
+    void leave() noexcept { gate_.leave(); }
+    [[nodiscard]] bool owned_by_current_cpu() const noexcept { return gate_.owned_by_current_cpu(); }
+    [[nodiscard]] bool held() const noexcept { return gate_.held(); }
+
+    // Holds the gate for a scope unless this CPU holds it already (a nested
+    // user-access resolution inside a held stretch).
+    class Hold final
+    {
+      public:
+        explicit Hold(AddressSpaceGate &gate) noexcept
+            : gate_(gate), entered_(!gate.owned_by_current_cpu() && gate.enter().ok())
+        {
+        }
+        ~Hold()
+        {
+            if (entered_)
+                gate_.leave();
+        }
+        Hold(const Hold &) = delete;
+        Hold &operator=(const Hold &) = delete;
+
+      private:
+        AddressSpaceGate &gate_;
+        bool entered_;
+    };
+
+    // After the in-place change is complete (its translations installed);
+    // only the holder writes, with a load and a store.
+    void translations_changed() noexcept
+    {
+        translation_sequence.store(translation_sequence.load(std::memory_order_relaxed) + 1,
+                                   std::memory_order_release);
+    }
+
+    std::atomic<u32> space_sequence{};
+    std::atomic<u32> translation_sequence{};
+    bool dead{};
+
+  private:
+    smp::ServingGate<smp::LockRank::mm> gate_{};
+};
+
 struct ProcessResources
 {
     usize unix_receive_operations{}; // Prepared UNIX receives/accepts prevent resource retirement.
@@ -238,7 +320,40 @@ struct ProcessResources
     uptr next_mapping_address{0x2000'0000};
     u32 file_mode_mask{0022};
     MemoryLimits memory_limits{};
+    AddressSpaceGate mm{};
 };
+
+// The mm holder publishes a new handle (seqcount writer).
+inline void publish_native_space(ProcessResources &resources, const arch::execution::AddressSpace &space) noexcept
+{
+    smp::check_held(resources.mm, "publish_native_space");
+    auto &sequence = resources.mm.space_sequence;
+    const auto start = sequence.load(std::memory_order_relaxed);
+    sequence.store(start + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    std::atomic_ref<uptr>{resources.native_space.root}.store(space.root, std::memory_order_relaxed);
+    std::atomic_ref<u32>{resources.native_space.slot}.store(space.slot, std::memory_order_relaxed);
+    std::atomic_ref<u32>{resources.native_space.generation}.store(space.generation, std::memory_order_relaxed);
+    sequence.store(start + 2, std::memory_order_release);
+}
+
+// A consistent copy of the handle without the gate (seqcount reader).
+[[nodiscard]] inline arch::execution::AddressSpace read_native_space(const ProcessResources &resources) noexcept
+{
+    auto &space = const_cast<arch::execution::AddressSpace &>(resources.native_space);
+    for (;;)
+    {
+        const auto before = resources.mm.space_sequence.load(std::memory_order_acquire);
+        const arch::execution::AddressSpace copy{
+            std::atomic_ref<uptr>{space.root}.load(std::memory_order_relaxed),
+            std::atomic_ref<u32>{space.slot}.load(std::memory_order_relaxed),
+            std::atomic_ref<u32>{space.generation}.load(std::memory_order_relaxed)};
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if ((before & 1) == 0 && resources.mm.space_sequence.load(std::memory_order_relaxed) == before)
+            return copy;
+        arch::ArchOperations::spin_pause();
+    }
+}
 
 inline constexpr usize max_process_pipes = 16;
 inline constexpr usize pipe_capacity = 4096;

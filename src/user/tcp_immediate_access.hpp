@@ -43,7 +43,7 @@ class TcpImmediateAccess final
             address > hw::user_end || size > hw::user_end - address || (size && address < hw::user_begin))
             return Status::fault("TCP copied interval exceeds the captured user range");
         auto space = capture_.address_space(); if (!space) return lost();
-        const bool admitted = hw::user_range(space.value(), static_cast<uptr>(address), size, write);
+        const bool admitted = uaccess::user_range(space.value(), static_cast<uptr>(address), size, write);
         if (!live()) return lost();
         return admitted ? Status{} : Status::fault("TCP copied interval is not fully mapped with required permission");
     }
@@ -52,7 +52,7 @@ class TcpImmediateAccess final
         if (auto status = preflight(address, output.size(), false); !status) return status;
         if (output.empty()) return {};
         auto space = capture_.address_space(); if (!space) return lost();
-        const auto copied = arch::execution::copy_from_user(space.value(), output.data(), static_cast<uptr>(address), output.size());
+        const auto copied = uaccess::copy_from_user(space.value(), output.data(), static_cast<uptr>(address), output.size());
         return live() ? copied : lost();
     }
     Status write(u64 address, std::span<const std::byte> input)
@@ -60,7 +60,7 @@ class TcpImmediateAccess final
         if (auto status = preflight(address, input.size(), true); !status) return status;
         if (input.empty()) return {};
         auto space = capture_.address_space(); if (!space) return lost();
-        const auto copied = arch::execution::copy_to_user(space.value(), static_cast<uptr>(address), input.data(), input.size());
+        const auto copied = uaccess::copy_to_user(space.value(), static_cast<uptr>(address), input.data(), input.size());
         return live() ? copied : lost();
     }
     void reset() { capture_.reset(); original_ = nullptr; }

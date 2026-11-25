@@ -170,12 +170,12 @@ Result<usize> copy_native_udp_datagram(Kernel &kernel, const hw::AddressSpace &s
     const usize copied = operation.count < received.value().payload.size()
         ? operation.count : received.value().payload.size();
     // Preflight every effective destination before publishing any output.
-    if ((copied && !hw::user_range(space, operation.output, copied, true)) ||
+    if ((copied && !uaccess::user_range(space, operation.output, copied, true)) ||
         (operation.source_address &&
-         (!hw::user_range(space, operation.source_address, name_size, true) ||
-          !hw::user_range(space, operation.source_length, sizeof(u32), true))))
+         (!uaccess::user_range(space, operation.source_address, name_size, true) ||
+          !uaccess::user_range(space, operation.source_length, sizeof(u32), true))))
         return Status::fault("native UDP receive output is not writable");
-    if (copied && !hw::copy_to_user(space, operation.output, received.value().payload.data(), copied))
+    if (copied && !uaccess::copy_to_user(space, operation.output, received.value().payload.data(), copied))
         return Status::fault("native UDP payload publication failed");
     if (operation.source_address && received.value().source.v6())
     {
@@ -186,8 +186,8 @@ Result<usize> copy_native_udp_datagram(Kernel &kernel, const hw::AddressSpace &s
         for (usize at = 0; at < 16; ++at) source.address[at] = received.value().source[at];
         source.scope_id = net::wire::link_local(received.value().source.ipv6()) ? 1u : 0u;
         constexpr u32 actual = sizeof(source);
-        if (!hw::copy_to_user(space, operation.source_address, &source, sizeof(source)) ||
-            !hw::copy_to_user(space, operation.source_length, &actual, sizeof(actual)))
+        if (!uaccess::copy_to_user(space, operation.source_address, &source, sizeof(source)) ||
+            !uaccess::copy_to_user(space, operation.source_length, &actual, sizeof(actual)))
             return Status::fault("native UDP source publication failed");
     }
     else if (operation.source_address)
@@ -198,8 +198,8 @@ Result<usize> copy_native_udp_datagram(Kernel &kernel, const hw::AddressSpace &s
         source.port_be[1] = static_cast<u8>(received.value().source_port);
         for (usize at = 0; at < 4; ++at) source.address[at] = received.value().source[at];
         constexpr u32 actual = sizeof(source);
-        if (!hw::copy_to_user(space, operation.source_address, &source, sizeof(source)) ||
-            !hw::copy_to_user(space, operation.source_length, &actual, sizeof(actual)))
+        if (!uaccess::copy_to_user(space, operation.source_address, &source, sizeof(source)) ||
+            !uaccess::copy_to_user(space, operation.source_length, &actual, sizeof(actual)))
             return Status::fault("native UDP source publication failed");
     }
     if (auto status = kernel.native_udp().consume(endpoint); !status) return status;
@@ -571,7 +571,7 @@ class LinuxUdpReceiveAccess final
         if (output.empty()) return {};
         auto space = borrow_.address_space();
         if (!space) return lost();
-        const auto status = hw::copy_from_user(space.value(), output.data(), address, output.size());
+        const auto status = uaccess::copy_from_user(space.value(), output.data(), address, output.size());
         return live() ? status : lost();
     }
     [[nodiscard]] Status write(u64 address, std::span<const std::byte> input)
@@ -580,7 +580,7 @@ class LinuxUdpReceiveAccess final
         if (input.empty()) return {};
         auto space = borrow_.address_space();
         if (!space) return lost();
-        const auto status = hw::copy_to_user(space.value(), address, input.data(), input.size());
+        const auto status = uaccess::copy_to_user(space.value(), address, input.data(), input.size());
         return live() ? status : lost();
     }
   private:
@@ -993,7 +993,7 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
         if (length != sizeof(ok_sockaddr_in))
             return Status::invalid_argument("native UDP address must be sixteen bytes");
         ok_sockaddr_in address{};
-        if (!hw::copy_from_user(space, &address, pointer, sizeof(address)))
+        if (!uaccess::copy_from_user(space, &address, pointer, sizeof(address)))
             return Status::fault("native UDP address is unreadable");
         if (address.family != OK_AF_INET)
             return Status::invalid_argument("native UDP requires AF_INET");
@@ -1007,7 +1007,7 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
     auto ipv6_from_user = [&](u64 pointer, u64 length, i64 mapped) -> Endpoint6 {
         if (length != sizeof(ok_sockaddr_in6)) return {.error = -OK_EINVAL};
         ok_sockaddr_in6 address{};
-        if (!hw::copy_from_user(space, &address, pointer, sizeof(address))) return {.error = -OK_EFAULT};
+        if (!uaccess::copy_from_user(space, &address, pointer, sizeof(address))) return {.error = -OK_EFAULT};
         if (address.family != OK_AF_INET6) return {.error = -OK_EAFNOSUPPORT};
         net::wire::Ipv6 bytes{};
         for (usize at = 0; at < bytes.size(); ++at) bytes[at] = address.address[at];
@@ -1084,7 +1084,7 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
                                           address.value().address[2], address.value().address[3]};
         }
         std::array<std::byte, net::NativeUdpService::datagram_capacity> payload{};
-        if (!hw::copy_from_user(space, payload.data(), a[1], static_cast<usize>(a[2]))) return -14;
+        if (!uaccess::copy_from_user(space, payload.data(), a[1], static_cast<usize>(a[2]))) return -14;
         std::array<std::byte, net::NativeUdpService::frame_capacity> frame{};
         auto length = kernel.native_udp().build_datagram(handle.value(), destination,
             port, {payload.data(), static_cast<usize>(a[2])}, frame);
@@ -1100,11 +1100,11 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
     u32 address_capacity{};
     if (a[4])
     {
-        if (!hw::copy_from_user(space, &address_capacity, a[5], sizeof(address_capacity))) return -14;
+        if (!uaccess::copy_from_user(space, &address_capacity, a[5], sizeof(address_capacity))) return -14;
         const usize name_size = ipv6 ? sizeof(ok_sockaddr_in6) : sizeof(ok_sockaddr_in);
         if (address_capacity < name_size) return -22;
-        if (!hw::user_range(space, a[4], name_size, true) ||
-            !hw::user_range(space, a[5], sizeof(address_capacity), true)) return -14;
+        if (!uaccess::user_range(space, a[4], name_size, true) ||
+            !uaccess::user_range(space, a[5], sizeof(address_capacity), true)) return -14;
     }
     const SyscallOrigins::NativeUdpReceiveRequest request{
         static_cast<i32>(a[0]), a[1], a[2], a[3], a[4], a[5], address_capacity};

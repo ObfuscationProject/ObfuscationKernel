@@ -1,7 +1,14 @@
 #include "ok/memory/object_pool.hpp"
 
 #include <cstdio>
+#include <atomic>
 #include <cstdlib>
+#if defined(OK_HOSTED_LOCK_MODEL)
+#include "hosted_race.hpp"
+
+#include <atomic>
+#include <mutex>
+#endif
 
 namespace ok::memory
 {
@@ -15,13 +22,14 @@ namespace
 {
 using namespace ok;
 using namespace ok::memory;
-usize checks{};
+// Atomic: the race models check from several host threads.
+std::atomic<usize> checks{};
 void check(bool value, const char *message)
 {
     ++checks;
     if (!value)
     {
-        std::fprintf(stderr, "FAIL object-pool checks=%zu: %s\n", checks, message);
+        std::fprintf(stderr, "FAIL object-pool checks=%zu: %s\n", checks.load(), message);
         std::exit(1);
     }
 }
@@ -324,6 +332,108 @@ void reentrancy()
     check(pool.destroy(created.value()).ok() && context.calls == 2, "outer destruction succeeds once");
     check(pool.trim_empty_pages().ok() && !provider.owned(), "reentry test cleanup");
 }
+#if defined(OK_HOSTED_LOCK_MODEL)
+// A provider several CPUs may call at once (a host mutex stands in for the
+// page pool's lock).
+struct SharedProvider
+{
+    static constexpr usize page_size = 4096;
+    static constexpr usize pages = 16;
+    struct Lease
+    {
+        std::span<std::byte> bytes{};
+        usize index{};
+    };
+    alignas(page_size) std::array<std::array<std::byte, page_size>, pages> backing{};
+    std::array<bool, pages> used{};
+    std::mutex mutex;
+    usize live{};
+
+    Result<Lease> allocate_kernel_page()
+    {
+        const std::lock_guard guard(mutex);
+        for (usize i = 0; i < pages; ++i)
+            if (!used[i])
+            {
+                used[i] = true;
+                ++live;
+                return Lease{{backing[i].data(), page_size}, i};
+            }
+        return Status::no_memory("shared provider exhausted");
+    }
+    Status release_kernel_page(Lease lease)
+    {
+        const std::lock_guard guard(mutex);
+        if (lease.index >= pages || !used[lease.index])
+            return Status::invalid_argument("foreign shared lease");
+        used[lease.index] = false;
+        --live;
+        return {};
+    }
+};
+
+struct Stamped
+{
+    u64 owner{};
+    u64 serial{};
+    std::array<u64, 6> payload{};
+};
+
+// Four CPUs create, resolve and destroy objects of one pool at once. A handle
+// resolves to its own object until destroyed and never afterwards; no slot
+// is handed out twice; the pages all come back.
+void concurrent_pool()
+{
+    static SharedProvider provider;
+    static ObjectPool<Stamped, SharedProvider, 4> pool{provider};
+    std::atomic<u64> mixed{0}, stale{0}, created{0};
+    // reentrancy() refused a nested create on this pool's lock (self-deadlock).
+    const auto violations = ok::test::lock_violations();
+    ok::test::race(4, [&](unsigned cpu) {
+        ok::test::Sequence random{cpu * 7919u};
+        std::array<ObjectHandle, 20> held{};
+        std::array<u64, 20> serials{};
+        ObjectHandle gone{};
+        for (u64 round = 1; round <= 6000; ++round)
+        {
+            const auto slot = random.next() % held.size();
+            if (held[slot].pool)
+            {
+                auto resolved = pool.resolve(held[slot]);
+                if (!resolved || resolved.value()->owner != cpu || resolved.value()->serial != serials[slot] ||
+                    resolved.value()->payload[5] != serials[slot] * 3)
+                    ++mixed;
+                check(pool.destroy(held[slot]).ok(), "race destroy");
+                gone = held[slot];
+                held[slot] = {};
+                continue;
+            }
+            if (gone.pool && pool.resolve(gone))
+                ++stale;
+            auto handle = pool.create();
+            if (!handle)
+                continue;
+            auto resolved = pool.resolve(handle.value());
+            check(resolved.ok(), "race resolve after create");
+            resolved.value()->owner = cpu;
+            resolved.value()->serial = round;
+            resolved.value()->payload[5] = round * 3;
+            held[slot] = handle.value();
+            serials[slot] = round;
+            created.fetch_add(1);
+        }
+        for (auto &handle : held)
+            if (handle.pool)
+                check(pool.destroy(handle).ok(), "race final destroy");
+    });
+    check(mixed == 0 && stale == 0 && created > 1000, "objects stay with their creators");
+    check(pool.accounting().live_objects == 0 && pool.trim_empty_pages().ok() && provider.live == 0,
+          "every page returns");
+    check(ok::test::lock_violations() == violations && ok::test::lock_checks() == 0, "no lock order violation");
+    std::printf("object-pool race cpus=4 created=%llu mixed=0 stale=0\n",
+                static_cast<unsigned long long>(created.load()));
+}
+#endif
 } // namespace
 
 int main()
@@ -334,5 +444,10 @@ int main()
     provider_validation();
     alignment_and_cleansing();
     reentrancy();
-    std::printf("PASS object-pool checks=%zu scope=hosted-model guest=0 smp=0\n", checks);
+#if defined(OK_HOSTED_LOCK_MODEL)
+    concurrent_pool();
+    std::printf("PASS object-pool race checks=%zu scope=hosted-model threads=4 guest=0\n", checks.load());
+#else
+    std::printf("PASS object-pool checks=%zu scope=hosted-model guest=0 smp=0\n", checks.load());
+#endif
 }

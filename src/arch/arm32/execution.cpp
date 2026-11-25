@@ -274,6 +274,14 @@ Result<AddressSpace> create_space(MappingView mappings)
     entry.value()->root = reinterpret_cast<uptr>(space.root);
     return spaces.handle(*entry.value());
 }
+// One CPU runs this profile, so each record simply goes through remap().
+Status protect(const AddressSpace &space, MappingView mappings)
+{
+    for (const auto &mapping : mappings)
+        if (mapping.flags != 0)
+            if (auto status = remap(space, mapping); !status) return status;
+    return Status::success();
+}
 Status remap(const AddressSpace &space, const PageMapping &mapping)
 {
     auto *stored = lookup(space);
@@ -386,9 +394,7 @@ bool user_range(const AddressSpace &space, uptr address, usize size, bool write)
     for (uptr cursor = address; cursor < address + size;)
     {
         const auto *page = mapping(*stored, cursor);
-        if (page == nullptr || (!(page->flags & (write ? page_write : page_read)) &&
-                                !(write && resolve_write(space, cursor & ~(page_size - 1)) &&
-                                  (page->flags & page_write))))
+        if (page == nullptr || !(page->flags & (write ? page_write : page_read)))
             return false;
         const auto next = (cursor & ~(page_size - 1)) + page_size;
         cursor = next < address + size ? next : address + size;

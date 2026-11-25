@@ -5,6 +5,7 @@
 #include "ok/posix/posix.hpp"
 #include "ok/sched/scheduler.hpp"
 #include "ok/syscall/linux.hpp"
+#include "ok/user/uaccess.hpp"
 #include "ok/time/public_clock.hpp"
 
 #include <array>
@@ -87,10 +88,10 @@ i64 regular_rw(A &access, bool writing, i32 fd, uptr address, usize requested, b
     };
     if (writing)
     {
-        if (!hw::copy_from_user(space, buffer.data(), address, size))
+        if (!uaccess::copy_from_user(space, buffer.data(), address, size))
             return -14;
     }
-    else if (!hw::user_range(space, address, size, true))
+    else if (!uaccess::user_range(space, address, size, true))
         return -14;
     const sched::DescriptionPositionGuard position(position_lock);
     auto result = transfer(size);
@@ -102,7 +103,7 @@ i64 regular_rw(A &access, bool writing, i32 fd, uptr address, usize requested, b
     if (writing)
         return static_cast<i64>(result.value());
     size = result.value();
-    if (size > buffer.size() || !hw::copy_to_user(space, address, buffer.data(), size))
+    if (size > buffer.size() || !uaccess::copy_to_user(space, address, buffer.data(), size))
         return -14;
     if (size != sched::pipe_capacity)
         return static_cast<i64>(size);
@@ -113,7 +114,7 @@ i64 regular_rw(A &access, bool writing, i32 fd, uptr address, usize requested, b
         auto more = transfer(wanted);
         if (!more || more.value() == 0) break;
         const auto chunk = more.value();
-        if (chunk > wanted || !hw::copy_to_user(space, address + total, buffer.data(), chunk)) break;
+        if (chunk > wanted || !uaccess::copy_to_user(space, address + total, buffer.data(), chunk)) break;
         total += chunk;
         if (chunk < wanted) break;
     }
@@ -147,15 +148,15 @@ i64 linux_positioned_io(A &access, bool writing, const lu::Call &call)
     std::array<std::byte, sched::pipe_capacity> buffer{};
     if (writing)
     {
-        if (!hw::copy_from_user(space, buffer.data(), static_cast<uptr>(a[1]), size)) return -14;
+        if (!uaccess::copy_from_user(space, buffer.data(), static_cast<uptr>(a[1]), size)) return -14;
         auto result = access.posix().template pwrite_with_policy<posix::PositionedWritePolicy::linux_append>(
             fd, {buffer.data(), size}, static_cast<usize>(offset.value()), limit);
         return result ? static_cast<i64>(result.value()) : failure(result.status());
     }
-    if (!hw::user_range(space, static_cast<uptr>(a[1]), size, true)) return -14;
+    if (!uaccess::user_range(space, static_cast<uptr>(a[1]), size, true)) return -14;
     auto result = access.posix().pread(fd, {buffer.data(), size}, static_cast<usize>(offset.value()));
     if (!result) return failure(result.status());
-    if (!hw::copy_to_user(space, static_cast<uptr>(a[1]), buffer.data(), result.value())) return -14;
+    if (!uaccess::copy_to_user(space, static_cast<uptr>(a[1]), buffer.data(), result.value())) return -14;
     return static_cast<i64>(result.value());
 }
 
@@ -200,7 +201,7 @@ i64 linux_lseek(A &access, bool wide, const lu::Call &call)
     // Linux commits the shared position before copying the result. EFAULT
     // must retain that position; do not preflight or undo the successful seek.
     const auto bytes = Seek::encode(result.value());
-    return hw::copy_to_user(access.space(), static_cast<uptr>(a[3]), bytes.data(), bytes.size()) ? 0 : -14;
+    return uaccess::copy_to_user(access.space(), static_cast<uptr>(a[3]), bytes.data(), bytes.size()) ? 0 : -14;
 }
 
 // fsync and fdatasync: the descriptor's provider synchronizes; both calls
@@ -234,7 +235,7 @@ i64 linux_clock_record(const hw::AddressSpace &space, const lu::Call &call, bool
         {record.data(), size}, format,
         {now.value().seconds, now.value().nanoseconds});
     if (!status) return -75;
-    return hw::copy_to_user(space, static_cast<uptr>(a[1]), record.data(), size) ? 0 : -14;
+    return uaccess::copy_to_user(space, static_cast<uptr>(a[1]), record.data(), size) ? 0 : -14;
 }
 
 } // namespace ok::user::linux_file_io

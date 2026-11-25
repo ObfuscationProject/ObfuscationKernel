@@ -199,7 +199,7 @@ Result<FutexWait::Key> resolve_futex_key(const sched::ProcessControlBlock &proce
     key.address = address;
     if (domain == FutexKeyDomain::private_address_space)
         return key;
-    if (!hw::user_range(process.resources().native_space, address, sizeof(u32),
+    if (!uaccess::user_range(process.resources().native_space, address, sizeof(u32),
                         access == FutexKeyAccess::retained_write))
         return Status::fault("ordinary futex word has invalid access");
     for (const auto &page : process.resources().native_pages)
@@ -216,7 +216,7 @@ Result<FutexWait::Key> resolve_futex_key(const sched::ProcessControlBlock &proce
             key.word_offset = address - page.virtual_address;
         }
         else if (access == FutexKeyAccess::read &&
-                 !hw::user_range(process.resources().native_space, address, sizeof(u32), true))
+                 !uaccess::user_range(process.resources().native_space, address, sizeof(u32), true))
             return Status::fault("ordinary private anonymous futex backing is read-only");
         return key;
     }
@@ -228,7 +228,7 @@ i64 wake_futex(Kernel &kernel, sched::ProcessId pid, uptr address, FutexKeyDomai
 struct FutexUserWords
 {
     const hw::AddressSpace &space;
-    Result<u32 *> operator()(uptr address, bool write) const { return hw::user_word(space, address, write); }
+    Result<u32 *> operator()(uptr address, bool write) const { return uaccess::user_word(space, address, write); }
 };
 } // namespace
 struct RobustUserAccess
@@ -242,7 +242,7 @@ struct RobustUserAccess
 
     Status read(u64 address, std::span<std::byte> bytes)
     {
-        return hw::copy_from_user(process.resources().native_space, bytes.data(),
+        return uaccess::copy_from_user(process.resources().native_space, bytes.data(),
             static_cast<uptr>(address), bytes.size());
     }
     Result<u32> load32(u64 address)
@@ -261,7 +261,7 @@ struct RobustUserAccess
     void wake_one(u64 address)
     {
         const auto pointer = static_cast<uptr>(address);
-        if (pointer % sizeof(u32) == 0 && hw::user_range(process.resources().native_space, pointer, sizeof(u32), true))
+        if (pointer % sizeof(u32) == 0 && uaccess::user_range(process.resources().native_space, pointer, sizeof(u32), true))
             static_cast<void>(wake_futex(kernel, process.pid(), pointer, FutexKeyDomain::anonymous_shared_operation, 1));
     }
 };
@@ -294,9 +294,9 @@ void clear_child_tid(Kernel &kernel, sched::ProcessControlBlock &process, sched:
         else
         {
             const u32 zero = 0;
-            static_cast<void>(hw::copy_to_user(space, address, &zero, sizeof(zero)));
+            static_cast<void>(uaccess::copy_to_user(space, address, &zero, sizeof(zero)));
         }
-        if (address % sizeof(u32) == 0 && hw::user_range(space, address, sizeof(u32), true))
+        if (address % sizeof(u32) == 0 && uaccess::user_range(space, address, sizeof(u32), true))
             static_cast<void>(wake_futex(kernel, process.pid(), address, FutexKeyDomain::anonymous_shared_operation, 1));
     }
 }

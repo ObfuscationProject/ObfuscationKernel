@@ -123,7 +123,7 @@ Status gather_pty_suffix(const hw::AddressSpace &space, std::span<std::byte> byt
     if (!wait.vectors.count)
     {
         if (wait.address > ~uptr{0} - wait.committed) return Status::fault("PTY input range wraps");
-        return hw::copy_from_user(space, bytes.data(), wait.address + wait.committed, bytes.size());
+        return uaccess::copy_from_user(space, bytes.data(), wait.address + wait.committed, bytes.size());
     }
     usize skip = wait.committed, copied = 0;
     for (usize index = 0; index < wait.vectors.count && copied < bytes.size(); ++index)
@@ -132,7 +132,7 @@ Status gather_pty_suffix(const hw::AddressSpace &space, std::span<std::byte> byt
         if (skip >= vector.length) { skip -= vector.length; continue; }
         const auto length = vector.length - skip < bytes.size() - copied ? vector.length - skip : bytes.size() - copied;
         if (vector.base > ~uptr{0} - skip) return Status::fault("PTY vector range wraps");
-        if (auto status = hw::copy_from_user(space, bytes.data() + copied, vector.base + skip, length); !status) return status;
+        if (auto status = uaccess::copy_from_user(space, bytes.data() + copied, vector.base + skip, length); !status) return status;
         copied += length; skip = 0;
     }
     return copied == bytes.size() ? Status{} : Status::fault("PTY input vector is short");

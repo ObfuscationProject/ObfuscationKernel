@@ -197,7 +197,7 @@ class Model
         cpus_[cpu_index].open = false;
     }
     // Rewrite one translation. Every window on the space is closed by now
-    // (quiesce_root); the generation moves after the rewrite.
+    // (quiesce_root); the generation moved after the rewrite.
     void remap(usize space_index, u32 page, bool bump = true)
     {
         for (usize cpu = 0; cpu < cpus_.size(); ++cpu)
@@ -205,6 +205,37 @@ class Model
         spaces_[space_index].pages[page] = next_frame_++;
         if (bump)
             spaces_[space_index].tag.changed();
+    }
+    // The writer order of the window protocol: publish the translation and
+    // bump the generation while windows on the space may still be open; the
+    // caller then closes them (quiesce_root) before the old frame is freed.
+    void remap_published(usize space_index, u32 page)
+    {
+        spaces_[space_index].pages[page] = next_frame_++;
+        spaces_[space_index].tag.changed();
+    }
+    // A frame change in two steps: the leaf is cleared (frame 0, the page
+    // faults) and the generation moves; after quiesce_root the new frame is
+    // installed and, with `bump`, the generation moves again.
+    void clear(usize space_index, u32 page)
+    {
+        spaces_[space_index].pages[page] = 0;
+        spaces_[space_index].tag.changed();
+    }
+    void install(usize space_index, u32 page, bool bump)
+    {
+        spaces_[space_index].pages[page] = next_frame_++;
+        if (bump)
+            spaces_[space_index].tag.changed();
+    }
+    // A touch between the publication and the end of quiesce_root: a hit on
+    // the old frame is in flight (that frame is not freed yet), not stale.
+    void touch_in_flight(usize cpu_index, u32 page)
+    {
+        const auto before = stale_;
+        touch(cpu_index, page);
+        in_flight_ += stale_ - before;
+        stale_ = before;
     }
     // The race quiesce_root resolves: `cpu` opened its window on the space
     // before the remap started and runs until the remap's quiesce closes it.
@@ -233,6 +264,7 @@ class Model
     }
 
     [[nodiscard]] u64 stale() const { return stale_; }
+    [[nodiscard]] u64 in_flight() const { return in_flight_; }
     [[nodiscard]] u64 hits() const { return hits_; }
     [[nodiscard]] u64 rollovers() const
     {
@@ -251,7 +283,7 @@ class Model
     TlbSpaceIds ids_;
     u32 pages_;
     u32 next_frame_{1};
-    u64 stale_{}, hits_{};
+    u64 stale_{}, hits_{}, in_flight_{};
 };
 
 void check_window_race()
@@ -291,6 +323,69 @@ void check_window_race()
     missing.touch(0, 2);
     missing.close(0);
     assert(missing.stale() == 1);
+}
+
+// The writer order (publish, bump, fence, quiesce_root, free): a CPU whose
+// window was open across the publication may hit what it cached before, while
+// the old frame is still allocated; once quiesce_root closed that window no
+// entry on any CPU hits the old translation, tagged or not.
+void check_publish_then_quiesce(u32 bits)
+{
+    Model model(3, bits, 4);
+    const auto space = model.create();
+    for (usize cpu = 0; cpu < 3; ++cpu)
+    {
+        model.open(cpu, space);
+        model.touch(cpu, 1);
+        model.close(cpu);
+    }
+    model.open(1, space);
+    model.remap_published(space, 1);
+    model.touch_in_flight(1, 1);
+    model.close(1); // quiesce_root returns once this window closed
+    for (usize cpu = 0; cpu < 3; ++cpu)
+    {
+        model.open(cpu, space);
+        model.touch(cpu, 1);
+        model.close(cpu);
+    }
+    assert(model.stale() == 0);
+    assert(bits == 0 || model.in_flight() == 1);
+}
+
+// The writer order for a new frame (clear, bump, quiesce_root, install,
+// bump): a CPU whose window was open across the clear may hit the old frame
+// it cached (still allocated, and no new frame exists yet); a CPU that entered
+// during the gap may cache the cleared entry (RISC-V may cache an invalid
+// one). After the install every entry reaches the new frame, which needs the
+// second bump; without it (`second_bump` false) the tagged CPU that cached
+// the cleared entry keeps faulting on it.
+u64 check_clear_then_install(u32 bits, bool second_bump)
+{
+    Model model(3, bits, 4);
+    const auto space = model.create();
+    for (usize cpu = 0; cpu < 3; ++cpu)
+    {
+        model.open(cpu, space);
+        model.touch(cpu, 1);
+        model.close(cpu);
+    }
+    model.open(1, space);
+    model.clear(space, 1);
+    model.touch_in_flight(1, 1);
+    model.open(2, space);
+    model.touch(2, 1);
+    model.close(2);
+    model.close(1); // quiesce_root returns once every window closed
+    model.install(space, 1, second_bump);
+    for (usize cpu = 0; cpu < 3; ++cpu)
+    {
+        model.open(cpu, space);
+        model.touch(cpu, 1);
+        model.close(cpu);
+    }
+    assert(bits == 0 || model.in_flight() == 1);
+    return model.stale();
 }
 
 // Random entries, remaps, retirements and creations on several CPUs with few
@@ -344,10 +439,15 @@ int main()
     check_selection();
     check_report();
     check_window_race();
+    check_publish_then_quiesce(8);
+    check_publish_then_quiesce(0);
+    assert(check_clear_then_install(8, true) == 0);
+    assert(check_clear_then_install(0, true) == 0);
+    assert(check_clear_then_install(8, false) == 1);
     check_random(2, 1);  // three user tags per CPU
     check_random(1, 7);  // one user tag per CPU
     check_random(16, 3); // the cache's own four slots bound it
     check_random(0, 5);  // untagged: every entry flushes
-    std::puts("OK_TLB_TAGS_MODEL scope=model selection=pass rollover=pass generation=pass race=pass report=pass");
+    std::puts("OK_TLB_TAGS_MODEL scope=model selection=pass rollover=pass generation=pass race=pass publish_order=pass frame_change=pass report=pass");
     return 0;
 }

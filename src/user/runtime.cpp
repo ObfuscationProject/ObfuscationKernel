@@ -212,7 +212,7 @@ Status string_from_user(const hw::AddressSpace &space, uptr address, FixedString
     for (usize i = 0; i < 256; ++i)
     {
         char c;
-        if (address + i < address || !hw::copy_from_user(space, &c, address + i, 1))
+        if (address + i < address || !uaccess::copy_from_user(space, &c, address + i, 1))
             return Status::fault("invalid user string");
         if (c == 0)
             return Status::success();
@@ -285,7 +285,7 @@ void finish(Kernel &kernel, sched::ProcessId pid, i32 code, u8 signal)
 #endif
         clear_group_tids(kernel, *process);
         if (!runtime_failure) return runtime_failure;
-        release(process->resources().native_space, process->resources().native_pages);
+        release_address_space(process->resources());
         if (!runtime_failure) return runtime_failure;
         emit_pool_stats();
         emit_entry_stack_stats();
@@ -485,10 +485,14 @@ NativeShutdownReport shutdown_report(Kernel &kernel)
     result.leased_entries = entries.leased_slots;
     result.quarantined_entries = entries.quarantined_slots;
     for (const auto &entry : stranded_entry_stacks) result.stranded_entries += entry.handle.pool != nullptr;
-    for (const auto &space : quarantined_spaces)
     {
-        result.quarantined_spaces += space.used || space.reserved || space.space.root || !space.pages.empty();
-        result.quarantined_pins += space.pinned_count;
+        const decltype(mm_retire_lock)::Guard guard(mm_retire_lock);
+        for (const auto &space : quarantined_spaces)
+        {
+            result.quarantined_spaces += space.used || space.reserved || space.busy || space.space.root ||
+                                         (!space.busy && !space.pages.empty());
+            if (!space.busy) result.quarantined_pins += space.pinned_count;
+        }
     }
     auto members = [&](const auto &waits) {
         for (const auto &entry : waits) result.wait_members += entry.pid || entry.tid || entry.object.pool;
@@ -659,7 +663,7 @@ void release_process(Kernel &kernel, u64 pid)
         private_signal_retire(pid);
 #endif
         clear_group_tids(kernel, *process);
-        release(process->resources().native_space, process->resources().native_pages);
+        release_address_space(process->resources());
         emit_entry_stack_stats();
         for (auto &thread : process->threads())
         {

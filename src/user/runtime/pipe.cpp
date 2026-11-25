@@ -29,10 +29,10 @@ std::array<PollWaitIndex, pipe_write_capacity> pipe_write_waits{};
 }
 bool pipe_ranges(const hw::AddressSpace &space, uptr address, usize count, const PipeVectors &vectors, bool output)
 {
-    if (!vectors.count) return hw::user_range(space, address, count, output);
+    if (!vectors.count) return uaccess::user_range(space, address, count, output);
     if (!vectors.staged_count(sched::pipe_capacity + 1)) return false;
     for (usize i = 0; i < vectors.count; ++i)
-        if (vectors.entries[i].length && !hw::user_range(space, vectors.entries[i].base, vectors.entries[i].length, output))
+        if (vectors.entries[i].length && !uaccess::user_range(space, vectors.entries[i].base, vectors.entries[i].length, output))
             return false;
     return true;
 }
@@ -40,13 +40,13 @@ namespace
 {
 Status pipe_gather(const hw::AddressSpace &space, std::span<std::byte> bytes, uptr address, const PipeVectors &vectors)
 {
-    if (!vectors.count) return hw::copy_from_user(space, bytes.data(), address, bytes.size());
+    if (!vectors.count) return uaccess::copy_from_user(space, bytes.data(), address, bytes.size());
     usize offset = 0;
     for (usize i = 0; i < vectors.count && offset < bytes.size(); ++i)
     {
         const auto length = vectors.entries[i].length < bytes.size() - offset ? vectors.entries[i].length : bytes.size() - offset;
         if (length)
-            if (auto status = hw::copy_from_user(space, bytes.data() + offset, vectors.entries[i].base, length); !status) return status;
+            if (auto status = uaccess::copy_from_user(space, bytes.data() + offset, vectors.entries[i].base, length); !status) return status;
         offset += length;
     }
     return offset == bytes.size() ? Status::success() : Status::fault("short copied pipe vector input");
@@ -54,13 +54,13 @@ Status pipe_gather(const hw::AddressSpace &space, std::span<std::byte> bytes, up
 } // namespace
 Status pipe_scatter(const hw::AddressSpace &space, uptr address, std::span<const std::byte> bytes, const PipeVectors &vectors)
 {
-    if (!vectors.count) return hw::copy_to_user(space, address, bytes.data(), bytes.size());
+    if (!vectors.count) return uaccess::copy_to_user(space, address, bytes.data(), bytes.size());
     usize offset = 0;
     for (usize i = 0; i < vectors.count && offset < bytes.size(); ++i)
     {
         const auto length = vectors.entries[i].length < bytes.size() - offset ? vectors.entries[i].length : bytes.size() - offset;
         if (length)
-            if (auto status = hw::copy_to_user(space, vectors.entries[i].base, bytes.data() + offset, length); !status) return status;
+            if (auto status = uaccess::copy_to_user(space, vectors.entries[i].base, bytes.data() + offset, length); !status) return status;
         offset += length;
     }
     return offset == bytes.size() ? Status::success() : Status::fault("short copied pipe vector output");
@@ -359,7 +359,7 @@ Status gather_pipe_write(const hw::AddressSpace &space, std::span<std::byte> byt
     if (!wait.vectors.count)
     {
         if (wait.input > ~uptr{0} - wait.committed) return Status::fault("pipe input overflow");
-        return hw::copy_from_user(space, bytes.data(), wait.input + wait.committed, bytes.size());
+        return uaccess::copy_from_user(space, bytes.data(), wait.input + wait.committed, bytes.size());
     }
     usize skip = wait.committed, copied = 0;
     for (usize i = 0; i < wait.vectors.count && copied < bytes.size(); ++i)
@@ -369,7 +369,7 @@ Status gather_pipe_write(const hw::AddressSpace &space, std::span<std::byte> byt
         const auto available = vector.length - skip;
         const auto length = available < bytes.size() - copied ? available : bytes.size() - copied;
         if (vector.base > ~uptr{0} - skip) return Status::fault("pipe vector input overflow");
-        if (auto status = hw::copy_from_user(space, bytes.data() + copied, vector.base + skip, length); !status)
+        if (auto status = uaccess::copy_from_user(space, bytes.data() + copied, vector.base + skip, length); !status)
             return status;
         copied += length; skip = 0;
     }

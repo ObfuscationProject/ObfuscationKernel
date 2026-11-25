@@ -1,4 +1,7 @@
 #include "../kernel/points/frame_allocator_checks.hpp"
+#if defined(OK_HOSTED_LOCK_MODEL)
+#include "hosted_race.hpp"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -175,6 +178,72 @@ void check_map_order_and_reference_oracle()
     }
 }
 
+#if defined(OK_HOSTED_LOCK_MODEL)
+// Four CPUs allocate, tag and release frames at once, single and contiguous,
+// while handle lookups run against stale handles. No frame may be handed out
+// twice, every descriptor keeps its owner's tag, and the counts balance.
+void check_concurrent_frames()
+{
+    constexpr usize count = 256;
+    static memory::FrameAllocator frames;
+    static memory::FrameMetadataStorage<count> metadata;
+    const std::array regions{memory::MemoryRegion{0x100000, count * 4096, memory::RegionType::usable}};
+    CHECK(frames.initialize(regions, 4096, metadata.bytes));
+    static std::array<std::atomic<u32>, count> owner{};
+    std::atomic<u64> duplicates{0}, lost{0}, stale_hits{0}, rounds{0};
+    test::race(4, [&](unsigned cpu) {
+        test::Sequence random{cpu * 977u};
+        memory::ChargeAccount account;
+        std::array<memory::PhysicalFrame, 40> held{};
+        memory::PhysicalFrame stale{};
+        for (int round = 0; round < 3000; ++round)
+        {
+            usize taken = 0;
+            const usize want = random.next() % held.size() + 1;
+            for (; taken < want; ++taken)
+            {
+                auto frame = frames.allocate();
+                if (!frame) break;
+                if (owner[frame.value().index].exchange(cpu) != 0) ++duplicates;
+                frames.descriptor(frame.value())->kind = static_cast<u8>(cpu);
+                held[taken] = frame.value();
+            }
+            // A contiguous run on every fourth round.
+            memory::PhysicalFrame run{};
+            const bool contiguous = random.next() % 4 == 0;
+            if (contiguous)
+                if (auto first = frames.allocate_contiguous(3, account); first)
+                {
+                    run = first.value();
+                    for (usize i = 0; i < 3; ++i)
+                        if (owner[run.index + i].exchange(cpu) != 0) ++duplicates;
+                }
+            if (stale.generation && frames.descriptor(stale) != nullptr) ++stale_hits;
+            for (usize i = 0; i < taken; ++i)
+            {
+                const auto *descriptor = frames.descriptor(held[i]);
+                if (descriptor == nullptr || descriptor->kind != cpu) ++lost;
+                owner[held[i].index].store(0);
+                CHECK(frames.release(held[i]));
+                stale = held[i];
+            }
+            if (run.generation)
+            {
+                for (usize i = 0; i < 3; ++i)
+                    owner[run.index + i].store(0);
+                CHECK(frames.release_contiguous(run, 3, account));
+            }
+            rounds.fetch_add(1);
+        }
+    });
+    CHECK(duplicates == 0 && lost == 0 && stale_hits == 0);
+    CHECK(frames.free_frames() == frames.total_frames() && frames.used_frames() == 0);
+    CHECK(test::lock_violations() == 0 && test::lock_checks() == 0);
+    std::printf("frame race cpus=4 rounds=%llu duplicates=0 lost=0 stale_hits=0\n",
+                static_cast<unsigned long long>(rounds.load()));
+}
+#endif
+
 int main()
 {
     CHECK(test::check_frame_allocator());
@@ -182,5 +251,10 @@ int main()
     check_boundaries();
     check_capacity_and_foreign_handles();
     check_map_order_and_reference_oracle();
+#if defined(OK_HOSTED_LOCK_MODEL)
+    check_concurrent_frames();
+    std::puts("PASS: runtime-sized physical frame bookkeeping, concurrent model (hosted model)");
+#else
     std::puts("PASS: runtime-sized physical frame bookkeeping (hosted model)");
+#endif
 }

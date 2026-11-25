@@ -3,6 +3,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <type_traits>
+#if defined(OK_HOSTED_LOCK_MODEL)
+#include "hosted_race.hpp"
+
+#include <atomic>
+#endif
 using namespace ok;
 using user::native::NativePagePool;
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr,"%d: %s\n",__LINE__,#x);std::abort(); } } while(false)
@@ -406,8 +411,67 @@ void object_runs_are_aligned_zeroed_and_reserve_bounded()
     CHECK(pool.release_object_run(single.value(), 1) && pool.used_count() == 0);
     CHECK(pool.allocations() == pool.releases() && frames.free_frames() == frames.total_frames());
 }
+#if defined(OK_HOSTED_LOCK_MODEL)
+// Four CPUs take frames and move their references, pins and shared marks at
+// once (fork sharing, waiter pins, pending release). Counts stay exact per
+// frame and every frame and counter returns to zero.
+void concurrent_references()
+{
+    static memory::FrameAllocator frames;
+    static memory::FrameMetadataStorage<512> metadata;
+    static NativePagePool pool;
+    const memory::MemoryRegion region{0x4000000, 512 * 4096, memory::RegionType::usable};
+    CHECK(frames.initialize({&region, 1}, 4096, metadata.bytes));
+    CHECK(pool.activate(frames, NativePagePool::Source::qualified_firmware));
+    std::atomic<u64> wrong{0}, rounds{0};
+    ok::test::race(4, [&](unsigned cpu) {
+        ok::test::Sequence random{cpu * 4241u};
+        for (int round = 0; round < 4000; ++round)
+        {
+            auto frame = pool.allocate_frame();
+            if (!frame)
+                continue;
+            const auto token = frame.value();
+            if (random.next() % 2)
+            {
+                // Copy-on-write sharing, a waiter pin, then both owners leave
+                // with the pin still held: the release waits for the unpin.
+                CHECK(pool.retain_copy(token));
+                CHECK(pool.pin(token));
+                if (pool.reference_count(token.address) != 2 || pool.pin_count(token).value() != 1)
+                    ++wrong;
+                CHECK(pool.release_reference(token));
+                CHECK(pool.release_reference(token));
+                if (!pool.valid(token) || pool.reference_count(token.address) != 0)
+                    ++wrong;
+                CHECK(pool.unpin(token));
+            }
+            else
+            {
+                CHECK(pool.mark_shared(token));
+                CHECK(pool.retain_shared(token));
+                if (!pool.is_shared(token.address) || pool.reference_count(token.address) != 2)
+                    ++wrong;
+                CHECK(pool.release_reference(token));
+                CHECK(pool.release_reference(token));
+            }
+            if (pool.valid(token))
+                ++wrong;
+            rounds.fetch_add(1);
+        }
+    });
+    CHECK(wrong == 0 && rounds > 1000);
+    CHECK(pool.used_count() == 0 && pool.pinned_count() == 0 && pool.pending_count() == 0);
+    CHECK(pool.allocations() == pool.releases() && frames.free_frames() == frames.total_frames());
+    CHECK(ok::test::lock_violations() == 0 && ok::test::lock_checks() == 0);
+    std::printf("native page pool race cpus=4 rounds=%llu wrong=0\n", static_cast<unsigned long long>(rounds.load()));
+}
+#endif
 int main()
 {
+#if defined(OK_HOSTED_LOCK_MODEL)
+    concurrent_references();
+#endif
     object_runs_are_aligned_zeroed_and_reserve_bounded();
     original_registry_checks();object_reserve_and_lease_checks();
     dropped_and_overwritten_leases_remain_auditable();

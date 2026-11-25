@@ -3,6 +3,7 @@
 #include "ok/abi/linux_native.hpp"
 #include "ok/core/kernel.hpp"
 #include "ok/syscall/linux.hpp"
+#include "ok/user/uaccess.hpp"
 
 namespace ok::user::linux_bootstrap
 {
@@ -55,7 +56,7 @@ i64 clone_thread(Kernel &kernel, sched::ProcessId pid, const arch::execution::Us
         if constexpr (Profile == lu::Profile::i386)
         {
             std::array<u8, 16> bytes{};
-            if (!hw::copy_from_user(space, bytes.data(), tls_argument, bytes.size())) return -14;
+            if (!uaccess::copy_from_user(space, bytes.data(), tls_argument, bytes.size())) return -14;
             auto word = [&](usize offset) {
                 u32 value = 0;
                 for (usize i = 0; i < 4; ++i) value |= static_cast<u32>(bytes[offset + i]) << (i * 8);
@@ -91,7 +92,7 @@ i64 clone_thread(Kernel &kernel, sched::ProcessId pid, const arch::execution::Us
             bytes[i] = static_cast<u8>(created.value() >> (8 * (Codec::profile.big_endian ? 3 - i : i)));
         // Linux ignores this store failure after task creation. The child store
         // is deferred until that TCB's first user entry, before its continuation.
-        static_cast<void>(hw::copy_to_user(space, static_cast<uptr>(a[2]), bytes.data(), bytes.size()));
+        static_cast<void>(uaccess::copy_to_user(space, static_cast<uptr>(a[2]), bytes.data(), bytes.size()));
     }
     return static_cast<i64>(created.value());
 }

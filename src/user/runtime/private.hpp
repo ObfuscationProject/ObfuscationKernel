@@ -18,6 +18,7 @@
 #include "ok/smp/bringup.hpp"
 #include "ok/smp/cpu.hpp"
 #include "ok/smp/kernel_section.hpp"
+#include "ok/user/uaccess.hpp"
 #include "ok/user/native_sleep.hpp"
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
 #define OK_PRIVATE_POLL_MASK 1
@@ -161,12 +162,35 @@ struct QuarantinedSpace
     usize pinned_count{};
     bool used{};
     bool reserved{};
+    // Claimed by one CPU that works on it with mm_retire_lock released.
+    bool busy{};
     bool table_retired{};
     bool pin_complete{};
 };
 // A process holds at most one live space and transactions build one
 // replacement at a time: one slot per process plus one candidate.
+//
+// mm_retire_lock (rank mm_retire) covers each slot's state words (used,
+// reserved, busy, space, table_retired, pin_complete) and quarantine_live.
+// A slot's pages, ownership bits and pin count belong to the CPU that
+// reserved it or claimed it busy; that CPU destroys tables and releases
+// frames after unlocking (entries are popped under the lock, destroyed
+// outside it).
 extern std::array<QuarantinedSpace, sched::max_processes + 1> quarantined_spaces;
+extern smp::FineLock<smp::LockRank::mm_retire> mm_retire_lock;
+// Slots in use, read without the lock to skip an empty retry pass.
+extern std::atomic<u32> quarantine_live;
+// A free slot reserved for the caller, or null when every slot is taken.
+[[nodiscard]] QuarantinedSpace *reserve_quarantine();
+void cancel_quarantine(QuarantinedSpace &saved);
+// The caller's reserved or free-claimed slot becomes used and stays busy.
+void publish_quarantine(QuarantinedSpace &saved, const hw::AddressSpace &space, bool table_retired,
+                        bool pin_complete);
+// Marks a used slot whose space matches (any, for root 0) busy for the caller.
+[[nodiscard]] QuarantinedSpace *claim_quarantine(const hw::AddressSpace &space, bool retired_only);
+void unclaim_quarantine(QuarantinedSpace &saved);
+void set_quarantine_state(QuarantinedSpace &saved, bool table_retired, bool pin_complete);
+[[nodiscard]] bool space_quarantined(const hw::AddressSpace &space);
 // The runtime's failure and started state: written only by the kernel lock's
 // holder (a kernel section reads them at admission, under the lock). The
 // wrappers keep the Status and bool interfaces; every write is a
@@ -671,9 +695,16 @@ Status activate_pool(Kernel *kernel);
 Status check_runtime_objects();
 #endif
 bool same_space(const hw::AddressSpace &a, const hw::AddressSpace &b);
-#ifdef OK_NATIVE_COW_FORK
-bool resolve_native_write(const hw::AddressSpace &space, uptr page);
-#endif
+// Counts translation_writer_asserts when a translation writer on a published
+// space runs without its owner's mm.
+void check_translation_writer(const sched::ProcessResources &resources, const char *site);
+// A user page fault of the process that owns `resources`, under its mm: a
+// write to a withheld page, or a fault on a translation replaced meanwhile.
+// True when the thread may resume.
+bool resolve_user_fault(sched::ProcessResources &resources, const hw::Trap &trap, u32 translations);
+// Process teardown under its mm: retires the space and every frame, then
+// marks the address space dead.
+void release_address_space(sched::ProcessResources &resources);
 const memory::PhysicalFrame *owned_frame(const Pages &pages, const hw::PageMapping &page);
 Status discharge_quarantine(QuarantinedSpace &saved, bool all = false, uptr begin = 0, usize size = 0);
 Status finish_quarantine(QuarantinedSpace &saved, bool retry_owners = true);

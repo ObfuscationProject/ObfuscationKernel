@@ -57,6 +57,7 @@ usize pages_for(usize size)
 
 Status SlabAllocator::initialize(FrameAllocator &frames, usize page_limit, usize reserve_frames)
 {
+    const Guard guard(lock_);
     if (frames_ != nullptr)
         return Status::already_exists("slab allocator is already initialized");
     if (!frames.initialized() || frames.page_size() != slab_page_size)
@@ -158,6 +159,12 @@ Result<PhysicalFrame> SlabAllocator::owned_page(uptr address, PageKind kind) con
 
 Result<void *> SlabAllocator::allocate(usize size, ChargeAccount &owner, AllocationContext context)
 {
+    const Guard guard(lock_);
+    return allocate_locked(size, owner, context);
+}
+
+Result<void *> SlabAllocator::allocate_locked(usize size, ChargeAccount &owner, AllocationContext context)
+{
     auto result = [&]() -> Result<void *> {
         if (frames_ == nullptr)
             return Status::not_initialized("slab allocator is not initialized");
@@ -207,6 +214,12 @@ Result<void *> SlabAllocator::allocate(usize size, ChargeAccount &owner, Allocat
 }
 
 Status SlabAllocator::release(void *object, usize size, ChargeAccount &owner)
+{
+    const Guard guard(lock_);
+    return release_locked(object, size, owner);
+}
+
+Status SlabAllocator::release_locked(void *object, usize size, ChargeAccount &owner)
 {
     if (frames_ == nullptr)
         return Status::not_initialized("slab allocator is not initialized");
@@ -309,6 +322,7 @@ Status SlabAllocator::release_large(void *object, usize size, ChargeAccount &own
 
 SlabAccounting SlabAllocator::accounting() const
 {
+    const Guard guard(lock_);
     SlabAccounting result{.large_allocations = large_allocations_,
                           .large_pages = large_pages_,
                           .pages = pages_.used(),

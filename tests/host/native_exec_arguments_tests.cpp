@@ -23,6 +23,7 @@ Status initialize() { return Status::unsupported(); }
 Result<AddressSpace> create_space(MappingView) { return Status::unsupported(); }
 Status destroy_space(AddressSpace &space) { space = {}; return Status::success(); }
 Status remap(const AddressSpace &, const PageMapping &) { return Status::success(); }
+Status protect(const AddressSpace &, MappingView) { return Status::success(); }
 Result<Trap> enter(AddressSpace &, UserFrame &) { return Status::unsupported(); }
 Result<Trap> enter_owned(AddressSpace &, UserFrame &, const KernelEntryStackView &) { return Status::unsupported(); }
 UserFrame initial_frame(uptr pc, uptr sp) { UserFrame f{}; f.pc = pc; f.sp = sp; return f; }

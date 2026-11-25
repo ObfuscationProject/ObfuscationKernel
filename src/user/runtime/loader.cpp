@@ -5,46 +5,65 @@ namespace ok::user::native
 {
 inline namespace runtime_detail
 {
+namespace
+{
+// ELF admission reads metadata from a file prefix. The first read covers what
+// admission usually needs and goes to a static buffer, which one load at a
+// time claims (always so while loads hold the kernel lock); a load that finds
+// it claimed by another CPU reads into a kernel-object run of its own. An
+// architecture check that needs more (a section table after debug data, an
+// ABI record after the text) grows the prefix into a run. Runs are released
+// when the load ends.
 #ifdef OK_PRIVATE_PPC32_SIGNAL
-namespace
-{
 // Pinned PPC musl debug files retain section tables after their debug data.
-// This bounded private prefix is metadata storage, not executable image memory.
-std::array<std::byte, 512 * 1024> elf_buffer{};
-} // namespace
+constexpr usize elf_buffer_bytes = 512 * 1024;
 #else
-namespace
-{
-std::array<std::byte, 128 * 1024> elf_buffer{};
-} // namespace
+constexpr usize elf_buffer_bytes = 128 * 1024;
 #endif
-namespace
+struct ElfBuffer
 {
-// ELF admission reads metadata from a file prefix. When an architecture check
-// needs more than the static buffer (a section table after debug data, an ABI
-// record after the text), the prefix it asks for is read into a kernel object
-// run, released when the load ends.
+    std::atomic_flag claimed{};
+    std::array<std::byte, elf_buffer_bytes> bytes{};
+};
+constinit ElfBuffer elf_buffer{};
 class ElfPrefix final : private NonCopyable
 {
   public:
+    static constexpr usize initial_bytes = elf_buffer_bytes;
     static constexpr usize max_bytes = 16 * 1024 * 1024;
     ElfPrefix() = default;
-    ~ElfPrefix() { if (run_) static_cast<void>(page_pool.release_object_run(run_, pages_)); }
-    [[nodiscard]] std::byte *data() const { return run_ ? reinterpret_cast<std::byte *>(run_) : elf_buffer.data(); }
+    ~ElfPrefix() { release(); }
+    [[nodiscard]] std::byte *data() const
+    { return buffered_ ? elf_buffer.bytes.data() : reinterpret_cast<std::byte *>(run_); }
     [[nodiscard]] usize size() const { return size_; }
     [[nodiscard]] std::span<const std::byte> bytes() const { return {data(), size_}; }
+    // Gives the storage back; data() is empty afterwards.
+    void release()
+    {
+        if (run_) static_cast<void>(page_pool.release_object_run(run_, pages_));
+        if (buffered_) elf_buffer.claimed.clear(std::memory_order_release);
+        run_ = 0;
+        pages_ = size_ = 0;
+        buffered_ = false;
+    }
     [[nodiscard]] Status read(fs::Node &node, usize size)
     {
-        if (size > elf_buffer.size())
+        if (size > capacity())
         {
             if (size > max_bytes) return Status::no_memory("ELF metadata prefix exceeds the admission bound");
-            if (auto status = activate_pool(); !status) return status;
-            const usize pages = (size + hw::page_size - 1) / hw::page_size;
-            auto run = page_pool.allocate_object_run(pages);
-            if (!run) return run.status();
-            if (run_) static_cast<void>(page_pool.release_object_run(run_, pages_));
-            run_ = run.value();
-            pages_ = pages;
+            if (!run_ && !buffered_ && size <= elf_buffer_bytes &&
+                !elf_buffer.claimed.test_and_set(std::memory_order_acquire))
+                buffered_ = true;
+            else
+            {
+                if (auto status = activate_pool(); !status) return status;
+                const usize pages = (size + hw::page_size - 1) / hw::page_size;
+                auto run = page_pool.allocate_object_run(pages);
+                if (!run) return run.status();
+                release();
+                run_ = run.value();
+                pages_ = pages;
+            }
         }
         for (usize offset = 0; offset < size;)
         {
@@ -61,8 +80,10 @@ class ElfPrefix final : private NonCopyable
     }
 
   private:
+    [[nodiscard]] usize capacity() const { return buffered_ ? elf_buffer_bytes : pages_ * hw::page_size; }
     uptr run_{};
     usize pages_{}, size_{};
+    bool buffered_{};
 };
 // The prefix the configured architecture's admission still needs, if more.
 usize admission_prefix([[maybe_unused]] std::span<const std::byte> bytes, [[maybe_unused]] usize file_bytes)
@@ -216,18 +237,13 @@ class ImageRetirementReservation final : private NonCopyable
     ~ImageRetirementReservation() { cancel(); }
     [[nodiscard]] static Result<ImageRetirementReservation> reserve()
     {
-        for (auto &saved : quarantined_spaces)
-            if (!saved.used && !saved.reserved)
-            {
-                saved.reserved = true;
-                return ImageRetirementReservation{saved};
-            }
+        if (auto *saved = reserve_quarantine()) return ImageRetirementReservation{*saved};
         return Status::no_memory("native image retirement bookkeeping is full");
     }
     [[nodiscard]] bool active() const { return saved_ != nullptr; }
     void cancel()
     {
-        if (saved_) saved_->reserved = false;
+        if (saved_) cancel_quarantine(*saved_);
         saved_ = nullptr;
     }
     Status retire(hw::AddressSpace &space, Pages &pages) { return transfer(space, pages, true); }
@@ -246,24 +262,31 @@ class ImageRetirementReservation final : private NonCopyable
         }
         auto &saved = *std::exchange(saved_, nullptr);
         saved.pages = std::move(pages);
-        saved.space = std::exchange(space, {});
-        saved.used = true;
-        saved.reserved = false;
-        saved.table_retired = saved.space.root == 0;
-        saved.pin_complete = saved.table_retired;
+        const auto table = std::exchange(space, {});
         saved.pinned_count = 0;
         saved.reset(QuarantinedSpace::Ownership::pending);
+        // The slot stays claimed by this CPU until the transfer ends.
+        publish_quarantine(saved, table, table.root == 0, table.root == 0);
+        const auto result = transfer_claimed(saved, table, destroy_table);
+        unclaim_quarantine(saved);
+        return result;
+    }
+    // The caller claimed `saved`, which names `table`.
+    static Status transfer_claimed(QuarantinedSpace &saved, hw::AddressSpace table, bool destroy_table)
+    {
         for (const auto &page : saved.pages)
             if (!owned_frame(saved.pages, page))
                 return Status::fault("native image retirement lost an exact owner token");
         Status result{};
-        if (!saved.table_retired && destroy_table)
+        bool retired = table.root == 0;
+        if (!retired && destroy_table)
         {
-            result = hw::destroy_space(saved.space);
-            saved.table_retired = result.ok();
-            saved.pin_complete = saved.table_retired;
+            // Destroyed outside mm_retire_lock: quiesce_root may wait here.
+            result = hw::destroy_space(table);
+            retired = result.ok();
+            if (retired) set_quarantine_state(saved, true, true);
         }
-        if (!saved.table_retired)
+        if (!retired)
         {
             for (usize index = 0; index < saved.pages.size(); ++index)
             {
@@ -273,14 +296,14 @@ class ImageRetirementReservation final : private NonCopyable
                 saved.pin_held(index) = true;
                 ++saved.pinned_count;
             }
-            saved.pin_complete = true;
+            set_quarantine_state(saved, false, true);
             if (!destroy_table) return Status::success();
         }
         const auto discharged = discharge_quarantine(saved);
-        if (!saved.table_retired) return !result ? result : discharged;
-        const auto retired = finish_quarantine(saved, false);
+        if (!retired) return !result ? result : discharged;
+        const auto finished = finish_quarantine(saved, false);
         if (!discharged) return discharged;
-        return retired;
+        return finished;
     }
     QuarantinedSpace *saved_{};
 };
@@ -344,7 +367,8 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
         !status.ok())
         return status;
     ElfPrefix prefix;
-    if (auto status = prefix.read(*node, metadata.size < elf_buffer.size() ? metadata.size : elf_buffer.size());
+    if (auto status = prefix.read(*node, metadata.size < ElfPrefix::initial_bytes ? metadata.size
+                                                                                  : ElfPrefix::initial_bytes);
         !status.ok())
         return status;
     // Each grown prefix can expose one further record (section names, then
@@ -529,19 +553,14 @@ Result<Image> load(Kernel &kernel, std::string_view path, const Arguments &args)
             return fail(status);
         const usize interpreter_prefix = interpreter_metadata.size < lu::X86DynamicExec::max_prefix_bytes ?
             interpreter_metadata.size : lu::X86DynamicExec::max_prefix_bytes;
-        usize interpreter_offset = 0;
-        while (interpreter_offset < interpreter_prefix)
-        {
-            auto bytes = interpreter_node->read(interpreter_offset, interpreter_prefix - interpreter_offset);
-            if (!bytes)
-                return fail(bytes.status());
-            if (bytes.value().size == 0 || bytes.value().size > interpreter_prefix - interpreter_offset)
-                return fail(Status::invalid_argument("truncated musl interpreter prefix"));
-            copy_bytes(elf_buffer.data() + interpreter_offset, bytes.value().data.data(), bytes.value().size);
-            interpreter_offset += bytes.value().size;
-        }
-        auto inspected = lu::X86DynamicExec::inspect(
-            {elf_buffer.data(), interpreter_prefix}, interpreter_metadata.size, true);
+        // The image's own prefix is read no more; its storage (usually the
+        // static buffer) takes the interpreter's.
+        prefix.release();
+        ElfPrefix interpreter_bytes;
+        if (auto status = interpreter_bytes.read(*interpreter_node, interpreter_prefix); !status.ok())
+            return fail(status.code() == StatusCode::invalid_argument
+                            ? Status::invalid_argument("truncated musl interpreter prefix") : status);
+        auto inspected = lu::X86DynamicExec::inspect(interpreter_bytes.bytes(), interpreter_metadata.size, true);
         if (!inspected)
             return fail(inspected.status());
         constexpr uptr interpreter_bias = 0x60000000;
@@ -682,7 +701,7 @@ Status argument_from_user(const hw::AddressSpace &space, uptr address, Arguments
         const uptr at = address + length;
         const usize to_page = hw::page_size - (at & (hw::page_size - 1));
         const usize count = to_page < chunk.size() ? to_page : chunk.size();
-        if (!hw::copy_from_user(space, chunk.data(), at, count)) return Status::fault("invalid user string");
+        if (!uaccess::copy_from_user(space, chunk.data(), at, count)) return Status::fault("invalid user string");
         usize used = 0;
         while (used < count && chunk[used]) ++used;
         length += used;
@@ -693,7 +712,7 @@ Status argument_from_user(const hw::AddressSpace &space, uptr address, Arguments
     // Copy into the arena now that the length is known and bounded.
     auto bytes = out.reserve(length, environment, environment ? out.envc() : out.argc());
     if (!bytes) return bytes.status();
-    if (!hw::copy_from_user(space, bytes.value(), address, length)) return Status::fault("invalid user string");
+    if (!uaccess::copy_from_user(space, bytes.value(), address, length)) return Status::fault("invalid user string");
     return Status::success();
 }
 Status arguments_from_user(const hw::AddressSpace &space, uptr pointer, Arguments &out, bool environment)
@@ -704,7 +723,7 @@ Status arguments_from_user(const hw::AddressSpace &space, uptr pointer, Argument
     {
         uptr value{};
         const uptr address = pointer + i * sizeof(uptr);
-        if (address < pointer || !hw::copy_from_user(space, &value, address, sizeof(value)))
+        if (address < pointer || !uaccess::copy_from_user(space, &value, address, sizeof(value)))
             return Status::fault("invalid argument vector");
         if (value == 0)
             return Status::success();
@@ -714,13 +733,13 @@ Status arguments_from_user(const hw::AddressSpace &space, uptr pointer, Argument
 }
 namespace
 {
+// Holding the process's mm (taken here unless the caller holds it).
 Status install(sched::ProcessControlBlock &process, Image &image, sched::SignalMask mask = {},
                u16 thread_affinity = sched::cpu_affinity_any)
 {
+    const sched::AddressSpaceGate::Hold hold(process.resources().mm);
     // Native bridges currently execute only on the boot CPU.
-    bool previous_quarantined = false;
-    for (const auto &saved : quarantined_spaces)
-        previous_quarantined |= saved.space.root && same_space(saved.space, process.resources().native_space);
+    const bool previous_quarantined = space_quarantined(process.resources().native_space);
     if (!process.resources().native_pages.empty() ||
         (process.resources().native_space.root && !previous_quarantined))
         return Status::busy("previous native image must retire before installation");
@@ -741,7 +760,7 @@ Status install(sched::ProcessControlBlock &process, Image &image, sched::SignalM
         vfs_continuations.revoke(thread);
         thread = previous_thread;
         resources.memory = previous_memory;
-        resources.native_space = previous_space;
+        sched::publish_native_space(resources, previous_space);
         resources.personality = previous_personality;
         resources.program_break_base = previous_break_base;
         resources.program_break = previous_break;
@@ -768,7 +787,7 @@ Status install(sched::ProcessControlBlock &process, Image &image, sched::SignalM
         emit(" physical_last="); emit_hex(last); emit(" owner=retained\n");
     }
     resources.personality = image.personality;
-    resources.native_space = image.space;
+    sched::publish_native_space(resources, image.space);
     resources.program_break_base = image.program_break;
     resources.program_break = image.program_break;
     resources.program_break_limit = hw::user_end - 0x100000 - 17 * hw::page_size;
@@ -806,11 +825,17 @@ Status install(sched::ProcessControlBlock &process, Image &image, sched::SignalM
     return Status::success();
 }
 } // namespace
+// The exec commit, under the process's mm: the old image retires (its tables
+// are destroyed, a translation write) and the new one is published.
 template <typename Install>
 Status retire_then_install(sched::ProcessResources &resources, Image &image,
                            ImageRetirementReservation &previous, Install &&install_image)
 {
-    const auto retired = previous.retire(resources.native_space, resources.native_pages);
+    const sched::AddressSpaceGate::Hold hold(resources.mm);
+    auto previous_space = resources.native_space;
+    check_translation_writer(resources, "exec retires the previous image");
+    const auto retired = previous.retire(previous_space, resources.native_pages);
+    sched::publish_native_space(resources, previous_space);
     if (!retired)
     {
         static_cast<void>(image.retire());

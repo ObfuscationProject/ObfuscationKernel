@@ -193,18 +193,18 @@ bool poll_output(const hw::AddressSpace &space, const PollWait &wait)
             const auto width = wait.sets.word_bytes;
             for (usize i = 0; i < width; ++i)
                 bytes[i] = static_cast<u8>(u64{wait.ready_sets[set]} >> (8 * (wait.big_endian ? width - 1 - i : i)));
-            if (!hw::copy_to_user(space, wait.sets.output[set], bytes.data(), width)) return false;
+            if (!uaccess::copy_to_user(space, wait.sets.output[set], bytes.data(), width)) return false;
         }
         return true;
     }
-    if (!wait.linux_events && !hw::user_range(space, wait.output, wait.count * sizeof(ok_pollfd), true))
+    if (!wait.linux_events && !uaccess::user_range(space, wait.output, wait.count * sizeof(ok_pollfd), true))
         return false;
     for (usize i = 0; i < wait.count; ++i)
     {
         const auto value = static_cast<u16>(wait.fds[i].revents);
         const std::array<u8, 2> bytes{static_cast<u8>(value >> (wait.big_endian ? 8 : 0)),
                                       static_cast<u8>(value >> (wait.big_endian ? 0 : 8))};
-        if (!hw::copy_to_user(space, wait.output + i * sizeof(ok_pollfd) + offsetof(ok_pollfd, revents),
+        if (!uaccess::copy_to_user(space, wait.output + i * sizeof(ok_pollfd) + offsetof(ok_pollfd, revents),
                               bytes.data(), bytes.size()))
             return false;
     }
@@ -222,7 +222,7 @@ namespace
 bool child_wait_output_valid(const sched::ProcessControlBlock &process, const ChildWaitRequest &request)
 {
     return !request.siginfo && !request.output ? true :
-        hw::user_range(process.resources().native_space, request.output, request.siginfo ? 128 : 4, true);
+        uaccess::user_range(process.resources().native_space, request.output, request.siginfo ? 128 : 4, true);
 }
 } // namespace
 i64 child_wait_probe(Kernel &kernel, sched::ProcessId pid, const ChildWaitRequest &request, ChildWaitReport *report)
@@ -379,7 +379,7 @@ i64 complete_child_wait(Kernel &kernel, sched::ProcessId pid, const ChildWaitReq
     const auto *parent = kernel.scheduler().find(pid);
     if (!parent) return -3;
     if (request.siginfo || (ready && request.output))
-        if (!hw::copy_to_user(parent->resources().native_space, request.output, bytes.data(), request.siginfo ? 128 : 4))
+        if (!uaccess::copy_to_user(parent->resources().native_space, request.output, bytes.data(), request.siginfo ? 128 : 4))
             return -14;
     return request.siginfo ? 0 : ready;
 }
@@ -469,7 +469,7 @@ void finish_poll_timeout(const hw::AddressSpace &space, const PollTimeoutOutput 
     }
     // Linux poll_select_finish ignores timeout copyout failure when there is no
     // signal restart. It must never replace the descriptor operation's result.
-    static_cast<void>(hw::copy_to_user(space, output.address, bytes.data(), output.field_bytes * 2));
+    static_cast<void>(uaccess::copy_to_user(space, output.address, bytes.data(), output.field_bytes * 2));
 }
 
 i64 begin_poll_signal_mask(Kernel &kernel, sched::ProcessId pid, sched::SignalMask requested)

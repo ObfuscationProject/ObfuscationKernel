@@ -44,12 +44,18 @@ range for metadata and buffers that need a single span.
 address on every profile except MIPS, where it is the KSEG0 alias the kernel and
 the execution backend already use.
 
-The allocator is immovable, must outlive its handles and requires externally
-serialized calls. This does not enforce mapping references or protect against a
-malicious kernel caller fabricating a complete valid handle. Callers must retire
-all translations, references and I/O pins before releasing a physical frame.
-Reclamation, reserves, OOM policy and IRQ/SMP synchronization remain required by
-the [Kernel allocation contract](../DEVELOPMENT.md#kernel-allocation-contract).
+The allocator is immovable and must outlive its handles. Any CPU may call it
+with interrupts masked, outside interrupt top halves: its own lock (rank
+`frame`, the innermost memory lock, `ok/smp/lock.hpp`) covers the bitmap, the
+counts, the generation sequence and each descriptor's generation, and
+`descriptor()` checks the exact handle under it. A descriptor's other fields
+belong to the frame's current owner, which changes them under its own lock. The
+used count is an atomic word read without the lock. This does not enforce
+mapping references or protect against a malicious kernel caller fabricating a
+complete valid handle. Callers must retire all translations, references and I/O
+pins before releasing a physical frame. Reclamation, reserves and OOM policy
+remain required by the
+[Kernel allocation contract](../DEVELOPMENT.md#kernel-allocation-contract).
 
 `MemoryManager::initialize(map, page_size, direct_offset)` is the boot form: it
 carves the metadata from the top of the highest usable range of a normalized
@@ -75,9 +81,11 @@ It follows the allocation contract below:
 - Accounting: every held frame charges the allocator's page account, limited to
   a quarter of the managed frames; every object charges its caller's
   `ChargeAccount` in bytes of its class (or pages for large objects).
-- Allocation context: `boot`, `kernel` and `atomic`, all on the serialized boot
-  CPU. Only `atomic` may take frames from the reserve of 1/128 of the managed
-  frames (16..256) that the others must leave free. Nothing blocks yet.
+- Allocation context: `boot`, `kernel` and `atomic`, on any CPU with interrupts
+  masked, outside interrupt top halves; one lock (rank `slab`) covers the class
+  lists, the slab headers, the page account and the counters, with the frame
+  lock inside it. Only `atomic` may take frames from the reserve of 1/128 of the
+  managed frames (16..256) that the others must leave free. Nothing blocks yet.
 - Reclamation: a slab page whose last object is released returns to the frame
   allocator unless it is its class's only partially used page; large objects
   return their frames on release. Failure returns `no_memory` and counts in
@@ -122,6 +130,41 @@ In kernel builds its page pool draws from the kernel allocator; hosted model
 builds keep a host-backed arena. Its hardware mappings and acceptance tests are
 distinct from the software VM models.
 
+## Locks and user-access windows
+
+Every allocator has its own lock at its global rank (`ok/smp/lock.hpp`), so
+the memory layer is safe for callers that do not hold the big kernel lock
+(smp-scaling WP3; today every caller still holds it):
+
+| Rank | Lock | Covers |
+|---|---|---|
+| 60 | `entry_stack` | `KernelEntryStackPool` records and per-CPU active slots; a slot is reserved under it, its canaries written and its backing cleared outside it |
+| 62 | `mm_retire` | the retirement quarantine's slot state words; a slot is popped (reserved or claimed busy) under it and its tables and frames are retired after unlocking |
+| 64 | `arch_spaces` | a backend's address-space slots, space ids and TLB generation bumps |
+| 66 | `shared_files` | the memfd file table, page indexes and retirement ledger; sizing stages its frames outside it |
+| 68 | `object_pool` | one `ObjectPool`'s pages, slot generations and counters |
+| 70 | `page_pool` | `NativePagePool` quotas, counters and the reference, pin and flag fields of native descriptors; object runs are reserved under it and zeroed after |
+| 72 | `slab` | the slab allocator |
+| 74 | `frame` | the frame allocator |
+
+Each process's address space has a class B gate, `ProcessResources::mm` (rank
+`mm`): VM records, the program break, the memory limits and the publication of
+`native_space` (a seqcount) change under it, and translation writers (remap,
+protect, destroy) of a published space run holding it. mmap stages its frames,
+shared-file aliases and file bytes before taking mm and then builds its
+candidate from the records as they are, so a sibling's change meanwhile is
+kept.
+
+User translations are reached through windows (`ok/smp/bringup.hpp`). A user
+entry opens a user window, and every kernel user access (`copy_*_user`,
+`user_range`, `user_word`) a kernel window, before it validates its space in
+the slot table; the writer publishes the new entry (or marks the slot
+retiring), bumps the TLB generation, fences and calls `quiesce_root`, which
+kicks user windows and waits for kernel windows, before anything the old entry
+reached is freed. Backends never call back into the runtime: a page whose write
+access is withheld (copy-on-write) is refused, and `ok/user/uaccess.hpp`
+resolves it under mm and retries, with a final attempt holding mm.
+
 ## Verification
 
 ```sh
@@ -131,7 +174,13 @@ python3 scripts/test_physical_map.py
 python3 scripts/test_physical_map.py --sanitize
 python3 scripts/test_slab.py --sanitize
 python3 scripts/test_boot_memory.py --sanitize
+python3 scripts/test_translation_windows.py
 ```
+
+The frame, slab, page pool, object pool and entry stack runners also build a
+race model (`OK_HOSTED_LOCK_MODEL`, `OK_LOCK_DEBUG`) whose host threads stand in
+for CPUs on the real locks; `test_translation_windows.py` races windows against
+a writer whose frees are poisoned. Both are model coverage only.
 
 The hosted suites test reserved overlap, sparse/duplicate/adjacent regions,
 unaligned bounds, maps larger than the former fixed table, many-range maps,

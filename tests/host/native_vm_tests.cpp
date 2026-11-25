@@ -182,6 +182,76 @@ struct FileNode final : fs::Node
     Status chown(u32, u32) override { return Status::unsupported("unused"); }
 };
 
+// Stage then build: a sibling's munmap and mmap that run while a file
+// mapping stages its bytes (here from inside the provider read, which runs
+// outside mm) are part of the records the mapping is then built from. A
+// candidate copied before the staging would resurrect the unmapped page on a
+// released frame and drop the sibling's new page.
+struct SiblingFileNode final : fs::Node
+{
+    FileNode file;
+    void (*sibling)(void *){};
+    void *context{};
+    mutable bool ran{};
+
+    std::string_view name() const override { return file.name(); }
+    fs::Metadata metadata() const override { return file.metadata(); }
+    Result<fs::FileBuffer> read(usize offset, usize count) const override
+    {
+        if (!ran && sibling)
+        {
+            ran = true;
+            sibling(context);
+        }
+        return file.read(offset, count);
+    }
+    Status write(usize, std::span<const std::byte>) override { return Status::unsupported("unused"); }
+    fs::Node *lookup(std::string_view) override { return nullptr; }
+    Status create(std::string_view, fs::NodeType) override { return Status::unsupported("unused"); }
+    Status chmod(u32) override { return Status::unsupported("unused"); }
+    Status chown(u32, u32) override { return Status::unsupported("unused"); }
+};
+
+void check_mmap_staging_builds_from_current_records()
+{
+    Fixture fixture;
+    auto &resources = fixture.resources;
+    const auto unmapped = fixture.map(hw::page_size, hw::user_begin + 0x40000);
+    CHECK(unmapped && unmapped.value() == hw::user_begin + 0x40000);
+    const auto users = native::page_pool.user_count();
+    struct Sibling
+    {
+        sched::ProcessResources *resources;
+        uptr unmap;
+        uptr map;
+        Result<uptr> mapped{Status::not_found()};
+    } sibling{&resources, unmapped.value(), hw::user_begin + 0x50000};
+    SiblingFileNode node;
+    node.context = &sibling;
+    node.sibling = [](void *raw) {
+        auto &work = *static_cast<Sibling *>(raw);
+        CHECK(!work.resources->mm.held());
+        CHECK(native::native_munmap(*work.resources, work.unmap, hw::page_size));
+        work.mapped = native::native_mmap(*work.resources, work.map, hw::page_size, 3, 0x22, ~uptr{0}, 0);
+    };
+    const uptr start = hw::user_begin + 0x60000;
+    auto mapped = native::native_mmap(resources, start, hw::page_size, 3, 0x2, 4, 0, &node, node.file.bytes.size());
+    CHECK(node.ran && mapped && mapped.value() == start);
+    CHECK(sibling.mapped && sibling.mapped.value() == sibling.map);
+    CHECK(!mock::page(resources.native_space, sibling.unmap));
+    CHECK(mock::page(resources.native_space, sibling.map));
+    const auto *page = mock::page(resources.native_space, start);
+    CHECK(page);
+    const auto *bytes = reinterpret_cast<const unsigned char *>(page->physical_address);
+    for (usize i = 0; i < hw::page_size; ++i)
+        CHECK(bytes[i] == static_cast<unsigned char>(node.file.bytes[i]));
+    // One page left, two arrived: every record owns exactly its own frame.
+    CHECK(native::page_pool.user_count() == users + 1);
+    for (const auto &record : resources.native_pages)
+        CHECK(native::page_pool.reference_count(record.physical_address) == 1);
+    CHECK(!resources.mm.held());
+}
+
 void check_private_file_mapping()
 {
     Fixture fixture;
@@ -1490,6 +1560,7 @@ void check_shared_file_write_request_uses_existing_rw_ptes()
 namespace mock
 {
 usize remaps{};
+usize protects{};
 bool fail_remap{};
 } // namespace mock
 
@@ -1505,6 +1576,33 @@ Status remap(const AddressSpace &space, const PageMapping &mapping)
     CHECK(mock::page(space, mapping.virtual_address) == &mapping);
     ++mock::remaps;
     return Status::success();
+}
+// One call for a run of records (fork); each accessible record is checked
+// like remap() but counted once for the whole run.
+Status protect(const AddressSpace &space, MappingView mappings)
+{
+    if (mock::fail_remap)
+        return Status::busy("injected protect failure");
+    for (const auto &mapping : mappings)
+        if (mapping.flags)
+            CHECK(mock::page(space, mapping.virtual_address) == &mapping);
+    ++mock::protects;
+    return Status::success();
+}
+// Records with access are the mock translation.
+bool user_range(const AddressSpace &space, uptr address, usize size, bool write)
+{
+    if (size == 0)
+        return true;
+    if (address < user_begin || address >= user_end || size > user_end - address)
+        return false;
+    for (uptr page = address & ~(page_size - 1); page < address + size; page += page_size)
+    {
+        const auto *record = mock::page(space, page);
+        if (!record || !(record->flags & (write ? page_write : page_read)))
+            return false;
+    }
+    return true;
 }
 } // namespace ok::arch::execution
 
@@ -1549,12 +1647,14 @@ void check_copy_on_write_fork()
     for (usize i = 0; i < hw::page_size; ++i) bytes[i] = static_cast<unsigned char>(i * 7 + 3);
     const usize frames = mock::used_frames();
     const usize remaps = mock::remaps;
+    const usize protects = mock::protects;
 
     sched::ProcessResources child;
     fork_resources(parent, child);
     CHECK(mock::used_frames() == frames);
-    // Private writable pages: the stack page and the anonymous mapping.
-    CHECK(mock::remaps == remaps + 2);
+    // Private writable pages, the stack page and the anonymous mapping, are
+    // withheld through one protect over the parent's records (one quiesce).
+    CHECK(mock::remaps == remaps && mock::protects == protects + 1);
     const auto *parent_record = mock::page(parent.native_space, private_page.value());
     const auto *child_record = mock::page(child.native_space, private_page.value());
     CHECK(parent_record->physical_address == child_record->physical_address);
@@ -1611,6 +1711,80 @@ void check_copy_on_write_fork()
     CHECK(native::runtime_failure);
     CHECK(native::page_pool.reference_count(mock::page(parent.native_space, stack)->physical_address) == 1);
 }
+
+// The resolution behind a failed user access costs what is mapped, never the
+// length asked for: a range past the user window resolves nothing, and one up
+// to its end stops at the first page that is not mapped readable (a readv of
+// 2^62 bytes once walked 2^50 pages here holding mm and the kernel lock).
+void check_withheld_range_is_bounded()
+{
+    Fixture fixture;
+    auto &parent = fixture.resources;
+    const auto mapped = fixture.map(3 * hw::page_size);
+    CHECK(mapped);
+    sched::ProcessResources child;
+    fork_resources(parent, child);
+    const auto stack = hw::user_end - hw::page_size;
+    const auto start = mapped.value();
+    CHECK(mock::page(child.native_space, start)->copy_on_write && mock::page(child.native_space, stack)->copy_on_write);
+    CHECK(!mock::page(child.native_space, start + 3 * hw::page_size));
+    const usize frames = mock::used_frames();
+    const usize remaps = mock::remaps;
+    const auto sequence = child.mm.translation_sequence.load();
+    {
+        const sched::AddressSpaceGate::Hold hold(child.mm);
+        auto resolved = native::resolve_withheld(child, child.native_space, start, usize{1} << 62);
+        CHECK(resolved && resolved.value() == 0);
+        resolved = native::resolve_withheld(child, child.native_space, start + 3 * hw::page_size, hw::page_size);
+        CHECK(resolved && resolved.value() == 0);
+        CHECK(mock::used_frames() == frames && mock::remaps == remaps);
+        CHECK(child.mm.translation_sequence.load() == sequence);
+        // Up to the end of the user window: the three pages before the hole
+        // resolve, the stack page after it stays withheld.
+        resolved = native::resolve_withheld(child, child.native_space, start + 5, hw::user_end - start - 5);
+        CHECK(resolved && resolved.value() == 3);
+        CHECK(mock::used_frames() == frames + 3 && mock::remaps == remaps + 3);
+        CHECK(child.mm.translation_sequence.load() == sequence + 1);
+        for (usize page = 0; page < 3; ++page)
+            CHECK(!mock::page(child.native_space, start + page * hw::page_size)->copy_on_write);
+        CHECK(mock::page(child.native_space, stack)->copy_on_write);
+        resolved = native::resolve_withheld(child, child.native_space, stack + 8, 8);
+        CHECK(resolved && resolved.value() == 1 && !mock::page(child.native_space, stack)->copy_on_write);
+    }
+    native::release(child.native_space, child.native_pages);
+    CHECK(native::runtime_failure);
+}
+
+// A page fault resumes when the page was withheld (resolved now), or when a
+// translation changed in place since the entry began and the page now
+// permits the access: a sibling that faulted on a page another thread was
+// resolving (or that met the page unmapped while its new frame went in).
+// Without such a change a fault on an accessible page is genuine.
+void check_fault_resume_after_change()
+{
+    Fixture fixture;
+    auto &parent = fixture.resources;
+    const auto mapped = fixture.map(hw::page_size);
+    CHECK(mapped);
+    sched::ProcessResources child;
+    fork_resources(parent, child);
+    hw::Trap trap{};
+    trap.kind = hw::TrapKind::page_fault;
+    trap.fault_address = mapped.value() + 12;
+    // Two threads fault on the withheld page before either is served.
+    const auto before = child.mm.translation_sequence.load();
+    CHECK(native::resolve_user_fault(child, trap, before));
+    CHECK(!mock::page(child.native_space, mapped.value())->copy_on_write);
+    CHECK(child.mm.translation_sequence.load() == before + 1);
+    CHECK(native::resolve_user_fault(child, trap, before));
+    // Entered after the change: the same fault is genuine.
+    CHECK(!native::resolve_user_fault(child, trap, before + 1));
+    // A change elsewhere does not make an unmapped page accessible.
+    trap.fault_address = mapped.value() + hw::page_size;
+    CHECK(!native::resolve_user_fault(child, trap, before));
+    native::release(child.native_space, child.native_pages);
+    CHECK(native::runtime_failure);
+}
 #endif
 
 int main(int argc, char **)
@@ -1648,6 +1822,7 @@ int main(int argc, char **)
     check_fixed_replacement_retains_only_failed_removed_owner();
     check_munmap_retains_only_failed_removed_owner();
     check_range_retirement_capacity_preflight_is_read_only();
+    check_mmap_staging_builds_from_current_records();
     check_shared_file_write_request_uses_existing_rw_ptes();
     check_noop_unmap_with_exhausted_metadata_quota();
     check_munmap_failure_is_atomic_at_metadata_quota();
@@ -1665,6 +1840,8 @@ int main(int argc, char **)
     check_program_break();
 #ifdef OK_NATIVE_COW_FORK
     check_copy_on_write_fork();
+    check_withheld_range_is_bounded();
+    check_fault_resume_after_change();
 #endif
     std::puts("PASS: native VM transaction tests (hosted backend model)");
 }

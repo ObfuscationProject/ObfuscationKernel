@@ -165,23 +165,20 @@ Status destroy_space(AddressSpace &space);
 // Re-synchronizes one present translation with its record after the runtime
 // changed that record in place (physical frame and/or flags). The handle stays
 // valid; only accessible records with an existing translation qualify. Not
-// while the space executes.
+// while the space executes. remap() and destroy_space() are the translation
+// writers: the caller holds the owning process's mm, and each returns only
+// after every window that could still use the old translation closed
+// (quiesce_root), so the caller may free what it reached. Where other CPUs
+// run (x86_64, aarch64, rv64) a new frame is installed only after that: the
+// page is unmapped meanwhile, so no CPU reaches the old and the new frame at
+// the same time. A user access in that gap faults and a kernel copy fails;
+// the runtime resumes the one and retries the other holding mm.
 Status remap(const AddressSpace &space, const PageMapping &mapping);
-
-// Deferred write access. A runtime that withholds write permission (copy-on-
-// write) installs a resolver; user_range() offers it each present, readable,
-// non-writable page of a kernel write once. A resolver that returns true has
-// made the page writable in place through remap().
-using WriteResolver = bool (*)(const AddressSpace &space, uptr page);
-inline constinit WriteResolver write_resolver{};
-inline void set_write_resolver(WriteResolver resolver) noexcept
-{
-    write_resolver = resolver;
-}
-[[nodiscard]] inline bool resolve_write(const AddressSpace &space, uptr page)
-{
-    return write_resolver != nullptr && write_resolver(space, page);
-}
+// remap() for every record of `mappings` whose access the runtime changed in
+// place (the same frames; fork withholds write access), with one quiesce.
+// Records without access (PROT_NONE) are skipped; every other one needs its
+// translation. The same writer contract as remap().
+Status protect(const AddressSpace &space, MappingView mappings);
 
 // Execute at user privilege until a real syscall, hardware timer interrupt or
 // CPU exception. Return to the original kernel call stack with the boot address
@@ -205,15 +202,20 @@ inline void rebind_owned_capture(const UserFrame &, const UserFrame &) noexcept 
 [[nodiscard]] Syscall syscall(const UserFrame &frame);
 void set_return_value(UserFrame &frame, i64 value);
 
+// User accesses. Each walks the translation tables inside a kernel window
+// (ok/smp/bringup.hpp) and never calls back into the runtime: a page whose
+// write access the runtime withholds (copy-on-write) is refused like any
+// unwritable page. Runtime callers go through ok/user/uaccess.hpp, which
+// resolves such a page outside the window and retries.
 [[nodiscard]] bool user_range(const AddressSpace &space, uptr address, usize size, bool write = false);
 Status copy_from_user(const AddressSpace &space, void *destination, uptr source, usize size);
 Status copy_to_user(const AddressSpace &space, uptr destination, const void *source, usize size);
 // The kernel pointer to the aligned 32-bit user word at `address` in its
 // backing frame, for single atomic accesses (futex words). Validates like
-// copy_from_user, or for `write` like copy_to_user, which first resolves
-// copy-on-write: invalid_argument if misaligned, fault if not accessible. The
-// pointer is valid only while the mapping cannot change; today the caller
-// holds the kernel lock, which every remap, unmap and space teardown takes.
+// copy_from_user, or for `write` like copy_to_user: invalid_argument if
+// misaligned, fault if not accessible. The pointer is valid only while the
+// mapping cannot change: the caller holds the owning mm, or keeps a kernel
+// window open around the access (uaccess::with_user_word).
 [[nodiscard]] Result<u32 *> user_word(const AddressSpace &space, uptr address, bool write);
 
 } // namespace ok::arch::execution

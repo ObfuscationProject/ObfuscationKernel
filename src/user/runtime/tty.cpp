@@ -118,7 +118,7 @@ Result<usize> tty_user_ranges(const hw::AddressSpace &space, std::span<const Pip
     for (const auto &vector : vectors)
     {
         const usize length = vector.length < limit - total ? vector.length : limit - total;
-        if (!hw::user_range(space, vector.base, length, write)) return Status::fault();
+        if (!uaccess::user_range(space, vector.base, length, write)) return Status::fault();
         total += length;
         if (total == limit) break;
     }
@@ -257,7 +257,7 @@ i64 tty_console_write(Kernel &kernel, sched::ProcessControlBlock &process, sched
             const usize remaining = total.value() - written < vector.length - position
                 ? total.value() - written : vector.length - position;
             const usize count = remaining < input.size() ? remaining : input.size();
-            if (!hw::copy_from_user(space, input.data(), vector.base + position, count))
+            if (!uaccess::copy_from_user(space, input.data(), vector.base + position, count))
                 return written ? static_cast<i64>(written) : i64{-14};
             std::span<const std::byte> pending{input.data(), count};
             while (!pending.empty())
@@ -334,7 +334,7 @@ i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched:
             const auto count = scheduler.preview_console_read(plan.value(),
                 std::span<std::byte>{chunk.data(), vector.length - position < chunk.size()
                     ? vector.length - position : chunk.size()}, offset);
-            if (!hw::copy_to_user(space, vector.base + position, chunk.data(), count)) return -14;
+            if (!uaccess::copy_to_user(space, vector.base + position, chunk.data(), count)) return -14;
             position += count;
             offset += count;
         }
@@ -379,14 +379,14 @@ i64 tty_terminal_control(Kernel &kernel, sched::ProcessControlBlock &process, co
             return terminal_request_gate(kernel, process.pid(), subject, operation, fd, parked);
         },
         [&](u64 address, std::span<u8> bytes) {
-            return hw::copy_from_user(space, bytes.data(), static_cast<uptr>(address), bytes.size());
+            return uaccess::copy_from_user(space, bytes.data(), static_cast<uptr>(address), bytes.size());
         },
         [&](const sched::TerminalSubject &subject, const sched::TerminalRequest &request) {
             return kernel.posix().terminal_control(subject, request);
         },
-        [&](u64 address, usize bytes) { return hw::user_range(space, static_cast<uptr>(address), bytes, true); },
+        [&](u64 address, usize bytes) { return uaccess::user_range(space, static_cast<uptr>(address), bytes, true); },
         [&](u64 address, std::span<const u8> bytes) {
-            return hw::copy_to_user(space, static_cast<uptr>(address), bytes.data(), bytes.size());
+            return uaccess::copy_to_user(space, static_cast<uptr>(address), bytes.data(), bytes.size());
         });
     tty_drain_outbox(kernel);
     if (parked) complete = false;
