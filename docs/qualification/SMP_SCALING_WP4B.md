@@ -25,7 +25,8 @@ ABI is not bumped.
   control) links the wait on `(reason, key)` before returning, so while the
   caller still holds the lock of the condition it checked (today the BKL).
   A thread slot's entries form a chain through the entries
-  (`SchedulerState::wait_links_` keeps its head and count, at most 16).
+  (`SchedulerState::wait_links_` keeps its head and count, at most
+  `max_wait_links` = 64, two per descriptor of a full poll).
 - **A2 wakes**. `wake_waiters` keeps its signature and its call sites: under
   the bucket lock it detaches up to 16 matching entries, releases the lock,
   and completes each one's wait as ready (`task`, then `run_queue`) if the
@@ -37,10 +38,10 @@ ABI is not bumped.
   after the pick (`settle_wait_links`), at its next arm, and for a thread
   being retired at exit, exec, thread exit, slot reuse and `cancel_poll`. A
   free thread slot keeps no entry and no deadline.
-- **Exhaustion**. With no entry (or no link slot) left, the arm still
-  succeeds: the wait counts `unqueued` (`OK_SMP_WAKE`) and gets a retry
-  deadline one 10 ms tick out, whose expiry completes it as ready so that its
-  owner re-evaluates.
+- **Exhaustion**. With no entry left in the pool, the arm still succeeds:
+  the wait counts `unqueued` (`OK_SMP_WAKE`, once per refused link) and gets
+  a retry deadline one 10 ms tick out, whose expiry completes it as ready so
+  that its owner re-evaluates.
 - **A3 polls** (`src/user/runtime/wait.cpp`). `poll_channels` maps each
   watched descriptor to the channels whose wakes cover what `poll_ready`
   consults: pipe and UNIX stream buffers (`pipe_read` on the read side,
@@ -50,7 +51,11 @@ ABI is not bumped.
   epoch; losing the console now also wakes that channel), UDP sockets and TCP
   streams. `arm_poll` registers the wait, links every channel, arms the
   timeout and only then evaluates readiness again; readiness found then
-  completes the poll at once.
+  completes the poll at once. A source no channel covers (a TCP stream with
+  no endpoint yet, which is always ready unless only exceptional conditions
+  are selected, or a description kind without a channel) marks the poll
+  `unwatched`, counts `OK_SMP_WAKE poll_retry` and re-evaluates on the 10 ms
+  retry deadline; so does a poll whose link the exhausted pool refused.
 - **UDP and TCP wake sites**. The UDP receive-change pass wakes
   `(udp_receive, socket slot)` for every socket whose readiness moved, and
   every socket's channel when the executor's readiness moved (transmit
@@ -68,7 +73,9 @@ ABI is not bumped.
   (`expire_deadlines`, every step on every CPU) pops up to 32 due keys per
   batch under the lock and acts after releasing it: `timeout` completes the
   wait as timed out, `retry` as ready, `probe` sets the probe of a pending
-  wait and queues it. Lateness feeds `OK_SMP_WAKE deadline_late_max_us`.
+  wait and queues it. Every due process key is handed to the caller in the
+  same call (its array has room for all 64). Lateness feeds `OK_SMP_WAKE
+  deadline_late_max_us`, except for process keys at 0 (due on every step).
 - **Thread keys**: deadline sleep, the poll timeout, the PTY VTIME timer
   (`expire_tty_timers` is gone), the exhaustion retry, and a timed signal
   wait (a probe key: the owner's probed dispatch finds the timeout).
@@ -82,16 +89,18 @@ ABI is not bumped.
   `poll_ready`: readiness or its timeout writes the output and the result;
   otherwise the readiness that woke it was consumed by a peer and it re-arms
   (Linux `do_poll`; a documented change). A timed-out sleep returns 0. A
-  result lets the thread enter user mode in the same step; a re-armed poll
-  parks again. A wait cancelled or interrupted some other way drops its
+  result lets the thread enter user mode in the same step, and a syscall it
+  traps there is dispatched in that step with its trap-time state; a
+  re-armed poll parks again. A wait cancelled or interrupted some other way drops its
   object and the call is dispatched again, as before. Wakers no longer write
   any owner field: the poll scan (completion, `revents`, result) and the TCB
   deadline scan are deleted, and `complete_wait` no longer cancels the
   owner's sleep record.
 - **Poll audit** (spec 4.10). Every fourth audit (every 1024th CPU 0 pass)
   probes and queues every parked poll waiter; its probed dispatch re-runs
-  `poll_ready`, and readiness no wake reported completes it and counts
-  `poll_audit_ready`.
+  `poll_ready` before the signal checks, and readiness no wake reported
+  completes it and counts `poll_audit_ready`. An `unwatched` poll is skipped
+  (its retry timer, not a wake, re-evaluates it).
 
 ## Deviations from the specification
 
@@ -130,10 +139,14 @@ ABI is not bumped.
   The per-step signal probe (`probe_interrupted_waits`) and `expire_futex`
   stay for WP4d and WP4c.
 - **Unwatched sources**: a TCP stream without an endpoint has no channel; a
-  poll on it counts `unqueued` and re-evaluates every 10 ms.
+  poll that parks on one (only possible when it selects exceptional
+  conditions only, since such a stream reports POLLHUP) counts `poll_retry`,
+  not `unqueued`, and re-evaluates every 10 ms. `poll_retry` is a new
+  `OK_SMP_WAKE` field; the OS parser does not read that line.
 - **Expiry placement**: deadlines expire where the timer service ran in the
   step (after the prunes and the futex expiry), on every CPU; CPU 0's loop
-  pass is its step. Up to 8 batches of 32 keys per step.
+  pass is its step. Up to 8 batches of 32 keys per step; every due process
+  key among them.
 - **The idle step's return value** no longer reports a pending poll without
   a timeout; only a non-empty heap counts as a pending deadline.
 
@@ -162,6 +175,45 @@ ABI is not bumped.
   `native_udp_receive_tests` and `tcp_immediate_runtime_tests` (the poll's
   entry on the socket channel replaces `socket_only`; an idle pass may report
   idle).
+- Added by the review (below): `native_console_control_tests` gains a poll
+  audit round (the poll's channel entry is dropped before the input, as a
+  missing wake site would leave it; with the signal runtime on, the audit's
+  probed pick must find the readiness once and complete the poll);
+  `native_udp_receive_tests` covers the audit on a lost socket wake, an
+  unwatched poll the audit skips, a nineteen-source poll that links every
+  channel with `unqueued` and `poll_retry` unchanged, and a syscall trapped
+  right after an owner-produced poll result (dispatched in the same step);
+  `deadline_heap_tests` hands out 63 due-each-step process keys and an
+  expired one in one call without recording lateness for the former.
+
+## Review fixes
+
+An adversarial review of the package found four defects; all are fixed.
+
+- **The poll audit never evaluated a probed poll.** The probed pick went
+  through `resume_interrupted_wait` first, whose last branch keeps a blocked
+  thread with no interrupting signal parked, so `audit_probed_poll` was
+  unreachable whenever the signal runtime is built (every kernel) and
+  `poll_audit_ready = 0` held vacuously. The audit now runs first. The
+  hosted console model reproduces the old failure and passes now.
+- **A syscall trapped right after an owner-produced result was not
+  dispatched** in that step: the guard that keeps the settled call from being
+  dispatched again also skipped the new one, which then ran in a later pass
+  without its trap-time flags (the MIPS branch-delay-slot UDP exclusion, the
+  guard against a stored control result). The guard now applies only when
+  nothing was trapped.
+- **A poll over more than 16 sources fell back to the 10 ms retry and
+  counted `unqueued`.** `max_wait_links` is now `2 * max_process_fds` (two
+  channels per descriptor at most). A source no channel covers counts the
+  new `OK_SMP_WAKE poll_retry` field; `unqueued` keeps meaning pool
+  exhaustion and is counted once per refused link (the poll arm counted it a
+  second time). Such polls are marked `unwatched` and the audit skips them.
+- **Due-each-step process keys could starve other timers and skewed
+  lateness.** With 32 or more processes whose key is 0 (a timer awaiting its
+  signal's dequeue), the 33rd process's expired timer was re-set to `now`
+  each step and never serviced, and popping a 0 key recorded the whole uptime
+  as `deadline_late_max_us`. The expiry now has room for all 64 process keys
+  and records no lateness for 0 keys.
 
 ## Validation
 
@@ -207,3 +259,29 @@ beca7c0 unless stated; logs under `smp-scaling/waveB/WP4b/logs`.
   scheduler) the same matrix passed except the two x86_64 debug runs at 4
   vCPUs, where posix-check's 4 MB mmap failed with ENOMEM (`free_frames`
   1563); after the change both pass with `free_frames` 1892.
+
+### After the review fixes
+
+Kernel at 251423d (the last kernel-source commit); logs under
+`smp-scaling/waveB/WP4b/review/logs`.
+
+- Hosted: the full suite with the toolchain root, 173 passed, 0 failed, 59
+  not run. The quarantined runners were run at 251423d and at the baseline
+  12c2d2d with their run logs kept: each fails at the same check or build
+  error on both (`linux_udp_sockname` passes on both).
+- Kernel: debug `xmake test` at `-smp 1` on all ten profiles and at 2 and 4
+  on x86_64, aarch64 and rv64 (16 of 16 `OK_TEST_PASS`); `legacy_select=y`
+  at `-smp 1` on x86_64.
+- OS (b8dceae unchanged, no OS patch): the native distro boot passes on all
+  ten profiles; the gate matrix above (debug and release at 2 and 4 vCPUs,
+  futex probe, `--require-hotplug`, `smp_sections=n`, CPU sysfs at 4 on
+  x86_64) passes on x86_64, aarch64 and rv64, 22 of 22, with every check
+  counter 0, `unqueued=0`, `poll_retry=0` and `max_lock_depth` 5 (debug) or
+  0 (release); the CPU sysfs probe passes on arm32 at one vCPU.
+- The poll audit still probed nothing in QEMU (`probes=0` in every gate and
+  distro run: no poll was parked at an audit pass). Its path is covered by
+  the hosted console and UDP runtime models.
+- `deadline_late_max_us` reached 3.9 to 4.0 s in two x86_64 2-vCPU debug
+  runs while distro10 and the three gate pipelines ran at once (the same
+  runs show a 3.9 s hotplug request); the same three runs repeated alone
+  gave 31 to 103 ms.
