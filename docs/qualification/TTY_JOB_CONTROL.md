@@ -81,6 +81,18 @@ section 14 of [tty](../modules/tty.md)). `test_run_queues.py`
 (`test_stopped_processes`, model) covers the gates; removing any one of the
 four fails it.
 
+## Fix: native SIGSTOP in an orphaned group on MIPS
+
+Up to main 5815814, `private_jobctl_discard_stop` compared a stop with the
+configured Linux profile's SIGSTOP whatever the recipient's personality.
+On mips and mips64 (Linux SIGSTOP 23) a native SIGSTOP (19) to a native
+process in an orphaned group was dropped and kill returned 0; it now compares
+in the recipient's numbering. `test_native_job_control.py` builds the
+orphan-stop binary for x86_64, mips and mips64; without the fix the MIPS ones
+fail. With the fix, the oksh job probe (with a peer-kill case added for the
+investigation) stops on native SIGSTOP in an orphaned group on all ten
+profiles in the guest.
+
 ## Paired ObfuscationOS obligations (`feat/getty-login`)
 
 1. Consumer: `tools/kernel_sdk.py` (marker strings and lines, the two new
