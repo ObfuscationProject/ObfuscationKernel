@@ -540,7 +540,14 @@ class SyscallOriginTable final : private NonCopyable
         const auto raw_call = Adapter::Bridge::decode_call(observation.frame(), 0);
         if (linux_unix_path_call<Selected>(observation.frame(), scheduler, process) != abi::linux_user::UnixPathCall::none)
             return {}; // UNIX precedes TCP and UDP origin capture.
-        const auto tcp_operation = linux_tcp_direct_call<Selected>(observation.frame(), scheduler, process);
+        auto tcp_operation = linux_tcp_direct_call<Selected>(observation.frame(), scheduler, process);
+        // A socketcall's descriptor lives in its argument array: one copied
+        // head decides whether TCP owns it (TcpSocketcall).
+        if (tcp_operation == abi::linux_user::TcpCall::none)
+            tcp_operation = linux_tcp_socketcall_call<Selected>(observation.frame(), scheduler, process,
+                [&](u64 address, std::span<std::byte> bytes) {
+                    return bool(hw::copy_from_user(observation.space(), bytes.data(), static_cast<uptr>(address), bytes.size()));
+                });
         if (raw_call && tcp_operation != abi::linux_user::TcpCall::none && Adapter::syscall_trap(observation.trap()))
         {
             record->identity.capture = sequence; record->identity.epoch = stage.epoch_;
