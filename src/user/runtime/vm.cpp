@@ -1351,6 +1351,11 @@ ok::Status ok::user::native::resolve_user_access(const arch::execution::AddressS
         }
         resolved = changed.value();
     }
+    // Under mm no translation is mid-replacement, so a range that is still
+    // inaccessible with nothing resolved is a genuine fault: fail without
+    // repeating the copy.
+    if (attempt && !resolved && !arch::execution::user_range(space, address, size, write))
+        return Status::fault("user range is not accessible");
     if (attempt) return (*attempt)();
     return resolved ? Status{} : Status::not_found("no withheld page in the user range");
 }
