@@ -888,11 +888,14 @@ std::optional<SchedulerState::Picked> SchedulerState::pick(smp::CpuId cpu)
                 continue;
             }
             const auto &process = slot.pcb;
-            if (thread.slot_state != ThreadSlotState::live || !thread.native_active || !queue_admits_state(thread) ||
+            if (thread.slot_state != ThreadSlotState::live || !queue_admits_state(thread) ||
                 slot.state() != ProcessLifecycle::live || process.state_ == ProcessState::zombie ||
                 process.state_ == ProcessState::exited || process.job_.stopped)
                 continue;
-            if (!thread_admits(process, thread, cpu))
+            // A thread with no native context yet (between creation and its
+            // image) keeps its place behind the others, as does one the
+            // affinity no longer admits here.
+            if (!thread.native_active || !thread_admits(process, thread, cpu))
                 placed = enqueue_locked(slot, thread, true);
             else
             {
