@@ -111,8 +111,17 @@ void lifecycle(Kernel &kernel)
     }
     exit(kernel,pid,child);
     CHECK(get(128)==0 && kernel.scheduler().find_thread(pid,child)->state==sched::ProcessState::exited);
-    const auto *awoken=kernel.scheduler().find_thread(pid,shared);
-    CHECK(awoken->state==sched::ProcessState::runnable && !awoken->syscall_pending);
+    auto *awoken=kernel.scheduler().find_thread(pid,shared);
+    // The clear-TID wake completes the wait; the waiter's resume produces 0.
+    CHECK(awoken->state==sched::ProcessState::runnable && awoken->syscall_pending);
+    CHECK(awoken->wait_registration.completion()==sched::WaitCompletion::ready);
+    CHECK(kernel.scheduler().activate_thread(pid,shared));
+    {
+        bool complete=true;const auto owned=native::resume_owned_wait(kernel,*p,*awoken,complete);
+        CHECK(owned && *owned==0 && complete);
+        awoken->syscall_pending=false;CHECK(native::set_result(*p,awoken->native_frame,*owned));
+    }
+    CHECK(!awoken->syscall_pending);
     auto result=Bridge::decode_return(awoken->native_frame);CHECK(result && result.value().value==0 && !result.value().error);
     CHECK(kernel.scheduler().find_thread(pid,private_waiter)->wait_registration.active());
     CHECK(p->resources().native_space.root==0x9000 && p->fd_table().contains(descriptors.value()[0]));
