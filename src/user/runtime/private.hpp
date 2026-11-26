@@ -1056,7 +1056,13 @@ class TcpImmediateRuntime final
             {
                 // Direct signatures own fd in a saved register, including
                 // O32. Accept socketcall selection belongs to the shared path.
-                original_fd = static_cast<i32>(static_cast<u32>(first_argument(saved_frame, access)));
+                const auto first = first_argument(saved_frame, access);
+                if (!first)
+                {
+                    auto encoded = mapped_error(access, first.status());
+                    return encoded ? publish(kernel, access, {0, encoded.value()}) : encoded.status();
+                }
+                original_fd = static_cast<i32>(static_cast<u32>(first.value()));
                 if (!access.live()) return Status::denied("TCP original capture lost image after fd head copy");
                 const auto *current = kernel.scheduler().find(pid);
                 if (!current) return Status::denied("TCP captured process disappeared before original selection");
@@ -1118,12 +1124,22 @@ class TcpImmediateRuntime final
         return operation;
     }
   private:
-    static u64 first_argument(const hw::UserFrame &frame, const Access &access)
+    using Socketcall = TcpSocketcall<lu::configured_native_profile()>;
+    // The descriptor argument: a register, or the first word of a legacy
+    // socketcall's argument array.
+    static Result<u64> first_argument(const hw::UserFrame &frame, Access &access)
     {
         if (!access.linux_personality()) return hw::syscall(frame).arguments[0];
         using Codec = lu::Codec<lu::configured_native_profile()>;
-        return lu::NativeBridge<lu::configured_native_profile()>::snapshot(frame).integer[
-            Codec::profile.argument_registers[0]] & Codec::word_mask;
+        const auto snapshot = lu::NativeBridge<lu::configured_native_profile()>::snapshot(frame);
+        if (const auto route = Socketcall::route(snapshot); route.call != Call::none)
+        {
+            if (auto status = Socketcall::interval(route); !status) return status;
+            std::array<std::byte, 4> head{};
+            if (auto status = access.read(route.array, head); !status) return status;
+            return Socketcall::word(head);
+        }
+        return snapshot.integer[Codec::profile.argument_registers[0]] & Codec::word_mask;
     }
     static usize argument_count(Call call)
     {
@@ -1149,6 +1165,20 @@ class TcpImmediateRuntime final
         const auto snapshot = lu::NativeBridge<lu::configured_native_profile()>::snapshot(frame);
         const u64 sp = static_cast<u64>(frame.sp) & Codec::word_mask;
         const u64 number = snapshot.integer[Codec::profile.number_register];
+        // A legacy socketcall: every argument comes from the copied array.
+        if (const auto socketcall = Socketcall::route(snapshot); socketcall.call != Call::none)
+        {
+            if (number != access.raw_syscall() || socketcall.call != request.operation)
+                return Status::denied("Linux TCP socketcall changed after capture");
+            if (auto status = Socketcall::interval(socketcall); !status) return status;
+            std::array<std::byte, 24> words{};
+            const auto copied = std::span{words}.first(socketcall.bytes());
+            if (auto status = access.read(socketcall.array, copied); !status) return status;
+            auto arguments = Socketcall::arguments(socketcall, copied);
+            if (!arguments || !access.live()) return arguments ? Status::denied("TCP copied argument authority expired") : arguments.status();
+            request.arguments = arguments.value();
+            return request;
+        }
         const auto route = AcceptCall::route(snapshot);
         if (number != access.raw_syscall() || route.socketcall || route.operation != request.operation)
             return Status::denied("Linux TCP operation changed after capture");

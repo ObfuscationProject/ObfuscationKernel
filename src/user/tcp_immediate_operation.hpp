@@ -8,6 +8,7 @@
 #include <ok/syscall/syscall.hpp>
 #include <ok/uapi/syscall.h>
 #include <ok/user/unix_pathname_operation.hpp>
+#include "tcp_socketcall.hpp"
 
 namespace ok::user::native
 {
@@ -77,5 +78,31 @@ template <abi::linux_user::Profile Selected> requires abi::linux_user::Supported
         operation == Call::readv || operation == Call::writev || operation == Call::sendto || operation == Call::recvfrom)
         return canonical_tcp_fd(scheduler, process, call.arguments[0]) ? operation : Call::none;
     return operation;
+}
+
+// A legacy socketcall on a TCP stream (TcpSocketcall): the first two
+// argument words, copied once through `read`, decide whether TCP owns it.
+// A call TCP does not own stays with the UDP and UNIX paths.
+template <abi::linux_user::Profile Selected, class Read>
+    requires abi::linux_user::SupportedProfile<Selected> &&
+        requires(Read read, u64 address, std::span<std::byte> bytes) { { read(address, bytes) } -> std::same_as<bool>; }
+[[nodiscard]] abi::linux_user::TcpCall linux_tcp_socketcall_call(const arch::execution::UserFrame &frame,
+    const sched::SchedulerState &scheduler, const sched::ProcessControlBlock &process, Read &&read)
+{
+    using Socketcall = TcpSocketcall<Selected>;
+    const auto route = Socketcall::route(abi::linux_user::NativeBridge<Selected>::snapshot(frame));
+    if (route.call == abi::linux_user::TcpCall::none || !Socketcall::interval(route)) return abi::linux_user::TcpCall::none;
+    std::array<std::byte, 8> head{};
+    if (!read(route.array, std::span<std::byte>{head})) return abi::linux_user::TcpCall::none;
+    const auto first = Socketcall::word(std::span<const std::byte>{head}.first(4));
+    const auto second = Socketcall::word(std::span<const std::byte>{head}.subspan(4, 4));
+    return Socketcall::owner(route, first, second, [&](u64 fd) {
+        using D = typename Socketcall::Descriptor;
+        if (canonical_tcp_fd(scheduler, process, fd)) return D::tcp;
+        if (fd > static_cast<u64>(__INT32_MAX__)) return D::other;
+        const auto *slot = process.fd_table().entry(static_cast<i32>(fd));
+        const auto *description = slot && slot->used ? scheduler.open_description(slot->description) : nullptr;
+        return description && description->references && description->native_udp_handle ? D::udp : D::other;
+    });
 }
 }
