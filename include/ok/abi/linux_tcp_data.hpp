@@ -29,6 +29,12 @@ inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_errno_e
 inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_errno_econnrefused{111U, 111U, 111U, 111U, 111U, 111U, 111U, 146U, 146U, 111U};
 inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_errno_econnreset{104U, 104U, 104U, 104U, 104U, 104U, 104U, 131U, 131U, 104U};
 inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_errno_einprogress{115U, 115U, 115U, 115U, 115U, 115U, 115U, 150U, 150U, 115U};
+// Linux asm-generic/errno.h and arch/mips errno.h (MIPS renumbers them):
+// errors an ICMP report leaves on a TCP connection.
+inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_errno_ehostunreach{113U, 113U, 113U, 113U, 113U, 113U, 113U, 148U, 148U, 113U};
+inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_errno_enetunreach{101U, 101U, 101U, 101U, 101U, 101U, 101U, 128U, 128U, 101U};
+inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_errno_eacces{13U, 13U, 13U, 13U, 13U, 13U, 13U, 13U, 13U, 13U};
+inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_errno_eproto{71U, 71U, 71U, 71U, 71U, 71U, 71U, 122U, 122U, 71U};
 inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_errno_eintr{4U, 4U, 4U, 4U, 4U, 4U, 4U, 4U, 4U, 4U};
 inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_errno_eisconn{106U, 106U, 106U, 106U, 106U, 106U, 106U, 133U, 133U, 106U};
 inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_errno_enotconn{107U, 107U, 107U, 107U, 107U, 107U, 107U, 134U, 134U, 107U};

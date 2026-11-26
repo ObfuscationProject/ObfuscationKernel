@@ -1,5 +1,6 @@
 // poll/select readiness waits and wait4 child waits.
 #include "private.hpp"
+#include <ok/net/tcp_stream_poll.hpp>
 
 namespace ok::user::native
 {
@@ -96,6 +97,43 @@ void cancel_poll(Kernel &kernel, sched::ProcessId pid)
             cancel_poll(kernel, entry.object);
 }
 
+
+void mark_poll_dirty(sched::WaitTicket ticket)
+{
+    for (const auto &entry : poll_waits)
+    {
+        if (!entry.pid) continue;
+        auto resolved = poll_objects.resolve(entry.object);
+        if (resolved && resolved.value()->ticket == ticket) { resolved.value()->dirty = true; return; }
+    }
+}
+// A poll over sockets only sleeps on their wait queues. A UDP descriptor
+// asking for output keeps the rescan: its writability follows transmit
+// credit, which signals no queue. Unconnected TCP streams have no queue.
+bool watch_poll_sockets(Kernel &kernel, PollWait &wait)
+{
+    auto *thread = kernel.scheduler().find_thread(wait.pid, wait.tid);
+    if (!wait.count || !thread || !thread->wait_registration.pending(wait.ticket)) return false;
+    for (usize i = 0; i < wait.count; ++i)
+    {
+        const auto *description = kernel.scheduler().open_description(wait.descriptions[i]);
+        if (!description) return false;
+        if (description->native_tcp_handle)
+        {
+            // The stream queues signal a poll through this notice.
+            kernel.native_tcp_waits().set_foreign_notice(nullptr, [](void *, sched::WaitTicket ticket) { mark_poll_dirty(ticket); });
+            if (!kernel.native_tcp_waits().watch(description->native_tcp_handle, thread->wait_registration)) return false;
+        }
+        else if (description->native_udp_handle)
+        {
+            if ((static_cast<u16>(wait.fds[i].events) & (OK_POLLOUT | wait.write_normal)) ||
+                !watch_udp_socket(*thread, description->native_udp_handle))
+                return false;
+        }
+        else return false;
+    }
+    return true;
+}
 template <posix::ReadinessPolicy Policy>
 Result<posix::DescriptorReadiness> retained_description_readiness(
     Kernel &kernel, u16 id, posix::ReadyEvents requested)
@@ -103,6 +141,8 @@ Result<posix::DescriptorReadiness> retained_description_readiness(
     const auto *description = kernel.scheduler().open_description(id);
     if (!description || !description->references)
         return posix::DescriptorReadiness{.events = posix::ReadyEvents::invalid};
+    if (description->native_tcp_handle)
+        return net::native_tcp_descriptor_readiness(kernel.native_tcp(), description->native_tcp_handle, requested);
     if (!description->native_udp_handle)
         return kernel.posix().poll_description<Policy>(id, requested);
     const auto joined = kernel.native_udp_executor().readiness(
@@ -581,6 +621,7 @@ static i64 begin_readiness_wait(Kernel &kernel, sched::ProcessId pid, const Poll
     if (!poll_signal_masks.bind(*current, object, wait->ticket)) return done(-22);
 #endif
     *entry = {pid, current->tid, object};
+    wait->socket_only = watch_poll_sockets(kernel, *wait);
     if (process->resources().personality == Personality::linux && (wait->select_sets || wait->linux_events))
     {
         wait->syscall = poll_syscall_number(current->native_frame, wait->select_sets);

@@ -184,6 +184,14 @@ class NativeTcpStreamService final
         auto endpoint = endpoint_handle(handle); return endpoint ? table_.readiness(endpoint.value())
             : Result<tcp::Readiness>{endpoint.status()};
     }
+    // The stream's pending error, reported once; a stream without an
+    // endpoint has none.
+    Result<tcp::Failure> take_error(TcpStreamHandle handle, bool soft = false)
+    {
+        if (!valid(handle)) return Status::bad_descriptor("stale TCP stream handle");
+        auto endpoint = endpoint_handle(handle); if (!endpoint) return tcp::Failure::none;
+        return table_.take_error(endpoint.value(), soft);
+    }
     [[nodiscard]] Result<usize> peek(TcpStreamHandle handle, std::span<std::byte> bytes) const
     {
         if (aliases({bytes.data(), bytes.size()})) return Status::invalid_argument("TCP stream peek aliases its owner");

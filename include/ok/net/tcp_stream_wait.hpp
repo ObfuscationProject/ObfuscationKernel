@@ -40,6 +40,18 @@ class TcpStreamWaits final
     ~TcpStreamWaits() { static_cast<void>(shutdown()); }
     [[nodiscard]] Status status() const { return status_; }
     [[nodiscard]] const TcpWaitStats &stats() const { return stats_; }
+    // Another waiter (poll, select) on a connected stream's readiness: its
+    // ticket is no TCP record, so a readiness edge passes it to the foreign
+    // notice and drops it; the waiter enlists again when it keeps waiting.
+    Status watch(TcpStreamHandle stream, sched::WaitRegistration &registration)
+    {
+        auto snapshot = service_.snapshot(stream); if (!snapshot) return snapshot.status();
+        if (!snapshot.value().endpoint) return Status::not_found("TCP stream has no endpoint to watch");
+        auto status = queue(*snapshot.value().endpoint).enlist(registration);
+        return status || status.code() == StatusCode::already_exists ? Status{} : status;
+    }
+    void set_foreign_notice(void *context, void (*notice)(void *, sched::WaitTicket))
+    { foreign_context_ = context; foreign_notice_ = notice; }
     [[nodiscard]] usize records() const
     { usize count{}; for (const auto &record : waits_) count += record.used; return count; }
     Result<sched::WaitTicket> arm(u64 pid, i32 fd, u8 interests, std::optional<u64> deadline = {})
@@ -112,7 +124,12 @@ class TcpStreamWaits final
         service_.endpoints().take_changed([&](tcp::Handle handle) {
             queue(handle).notify([&](sched::WaitTicket ticket) {
                 auto *record = find(ticket);
-                return !record || record->completion != sched::WaitCompletion::none || evaluate(*record, source);
+                if (!record)
+                {
+                    if (foreign_notice_) foreign_notice_(foreign_context_, ticket);
+                    return true;
+                }
+                return record->completion != sched::WaitCompletion::none || evaluate(*record, source);
             });
         });
         for (auto &record : waits_) if (record.used && record.completion == sched::WaitCompletion::none)
@@ -217,5 +234,6 @@ class TcpStreamWaits final
     sched::SchedulerState &scheduler_; NativeTcpStreamService &service_;
     std::array<Record, capacity> waits_{}; std::array<sched::WaitQueue<capacity>, queue_count> queues_{};
     TcpWaitStats stats_{}; Status status_{}; bool bound_{true};
+    void *foreign_context_{}; void (*foreign_notice_)(void *, sched::WaitTicket){};
 };
 }

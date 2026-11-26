@@ -1035,8 +1035,6 @@ bool step(Kernel &kernel)
     static_cast<void>(kernel.scheduler().reap_orphans());
 #endif
     if (!runtime_failure) { started = false; return false; }
-    if (auto status = notify_udp_receives(kernel); !status)
-    { fail_runtime(status); return false; }
     if (auto status = scan_native_udp_receives(kernel); !status)
     { fail_runtime(status); return false; }
     if (auto status = scan_linux_udp_receives(kernel); !status)
@@ -1085,6 +1083,13 @@ bool step(Kernel &kernel)
             cancel_poll(kernel, object);
             continue;
         }
+        // Socket-only polls wait for a queue signal or their timeout.
+        if (wait.socket_only && !wait.dirty && !(wait.timeout.armed() && now.value() >= wait.timeout.deadline()))
+        {
+            waiting_deadline = true;
+            continue;
+        }
+        wait.dirty = false;
         auto ready = poll_ready(kernel, wait);
         const bool expired = wait.timeout.complete(now.value(), wait.timeout.generation());
         if (!ready || ready.value() != 0 || expired)
@@ -1111,7 +1116,11 @@ bool step(Kernel &kernel)
             cancel_poll(kernel, object, cause == sched::WaitCompletion::timeout ? "timeout" : "ready", result);
         }
         else
+        {
             waiting_deadline = true;
+            // A queue drops a waiter it signalled; keep watching.
+            if (wait.socket_only) wait.socket_only = watch_poll_sockets(kernel, wait);
+        }
     }
     for (auto &candidate : kernel.scheduler().processes())
         for (auto &thread : candidate.threads())
