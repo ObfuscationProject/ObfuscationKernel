@@ -1103,7 +1103,8 @@ Status SchedulerState::mark_on_cpu(ProcessId pid, ThreadId tid, smp::CpuId cpu)
     if (cpu_slots_[cpu].occupied())
         return Status::busy("CPU already runs another thread");
     if (thread->state != ProcessState::runnable || process->state() == ProcessState::zombie ||
-        process->state() == ProcessState::exited || process->job_.stopped || !thread_admits(*process, *thread, cpu))
+        process->state() == ProcessState::exited || process->job_.stopped || !thread_admits(*process, *thread, cpu) ||
+        (in_table(*process) && task_slot(*process).flagged(RunFlag::frozen)))
         return Status::invalid_argument("thread cannot run on this CPU");
     occupy_cpu(cpu, *process, *thread);
     return Status::success();

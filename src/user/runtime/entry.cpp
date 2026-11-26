@@ -1233,8 +1233,11 @@ bool step(Kernel &kernel)
     for (auto &candidate : kernel.scheduler().processes())
     {
         // A stopped process is never entered; its waits still complete above.
+        // A pending exit is picked stopped or not, in any state (spec 4.8).
+        const bool exiting = kernel.scheduler().exit_pending(candidate.pid());
         if ((candidate.state() != sched::ProcessState::runnable && candidate.state() != sched::ProcessState::running &&
-             candidate.state() != sched::ProcessState::blocked) || candidate.job_control().stopped)
+             candidate.state() != sched::ProcessState::blocked) || (candidate.job_control().stopped && !exiting) ||
+            kernel.scheduler().frozen(candidate.pid()))
             continue;
         for (auto &thread : candidate.thread_records())
         {
@@ -1252,6 +1255,7 @@ bool step(Kernel &kernel)
                             private_child_signal_ready(kernel, candidate, thread) ||
                             private_terminal_signal_ready(kernel, candidate, thread);
 #endif
+            interruptible |= exiting;
             if (!thread.native_active || thread.on_cpu != sched::no_cpu ||
                 (thread.state != sched::ProcessState::runnable && !interruptible))
                 continue;
@@ -1311,16 +1315,14 @@ bool step(Kernel &kernel)
     }
     // Serving a thread: this kernel-lock stretch is work (overlap evidence).
     smp::bkl_mark_work();
+    // The delivery point (spec 4.8), before anything resumes. The scan picks
+    // without occupying the CPU, so the exit runs for no thread of the group.
+    if (deliver_pending_exit(kernel, chosen.pid)) return runtime_failure.ok();
     if (const auto settled = resume_interrupted_wait(kernel, chosen, now.value());
         settled != InterruptedWait::proceed)
         return settled == InterruptedWait::stay ? runtime_failure.ok() : false;
     if (!kernel.scheduler().mark_on_cpu(chosen.pid, chosen.tid, cpu))
         return false;
-    if (deliver_pending_exit(kernel, chosen.pid))
-    {
-        static_cast<void>(kernel.posix().activate(0));
-        return runtime_failure.ok();
-    }
     kernel.scheduler().settle_wait_links(cpu);
 #else
     // The queue path (spec 4.2) on every profile: threads are queued by the
