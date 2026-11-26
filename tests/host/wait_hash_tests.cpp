@@ -245,8 +245,12 @@ void scheduler_owner_unlink()
     // A wake of the old channel reaches nothing now.
     f.scheduler.wake_waiters(ThreadWaitReason::pipe_read, 7);
     CHECK(f.thread(pid).wait_registration.pending(third.value()));
+    // A completed wait of the caller needs no entry: nothing is linked.
+    CHECK(f.scheduler.watch_channel(first.value(), ThreadWaitReason::pipe_read, 12) && f.linked(12) == 0);
     // Watching for a ticket other than the caller's own is refused.
-    CHECK(!f.scheduler.watch_channel(first.value(), ThreadWaitReason::pipe_read, 12) && f.linked(12) == 0);
+    auto foreign = third.value();
+    ++foreign.thread;
+    CHECK(!f.scheduler.watch_channel(foreign, ThreadWaitReason::pipe_read, 12) && f.linked(12) == 0);
     // Exit drops the entries and the deadline of every thread.
     CHECK(f.scheduler.arm_wait_deadline(third.value(), 500));
     f.scheduler.put_prev(0);
@@ -298,6 +302,43 @@ void scheduler_exhaustion()
     f.scheduler.wake_waiters(ThreadWaitReason::pipe_read, 21);
     CHECK(!f.thread(pid).wait_registration.pending(linked.value()));
     f.scheduler.put_prev(0);
+    expect_clean_checks();
+}
+
+// The poll part of the audit (spec 4.10): a parked poll waiter is probed and
+// queued, so that its owner's dispatch re-evaluates readiness; it is picked
+// blocked and, its wait still pending, parks again unqueued. Other parked
+// waits and a probed or queued poll are left alone.
+void scheduler_poll_audit()
+{
+    Fixture f;
+    const smp::ScopedHostedCpu cpu{0};
+    const auto pid = f.process();
+    const auto other = f.process();
+    f.run(pid);
+    auto poll = f.scheduler.register_current_wait(ThreadWaitReason::poll, 0);
+    CHECK(poll && f.scheduler.watch_channel(poll.value(), ThreadWaitReason::pipe_read, 31));
+    f.scheduler.put_prev(0);
+    f.run(other);
+    auto pipe = f.scheduler.register_current_wait(ThreadWaitReason::pipe_read, 32);
+    CHECK(pipe);
+    f.scheduler.put_prev(0);
+    CHECK(f.thread(pid).queued_cpu == no_cpu && f.thread(other).queued_cpu == no_cpu);
+    CHECK(f.scheduler.probe_poll_waiters() == 1);
+    CHECK(f.thread(pid).probe && f.thread(pid).queued_cpu != no_cpu && f.thread(other).queued_cpu == no_cpu);
+    CHECK(f.scheduler.probe_poll_waiters() == 0); // Already probed and queued.
+    const auto picked = f.scheduler.pick(0);
+    CHECK(picked && picked->ref.pid == pid && picked->probed && !f.thread(pid).probe);
+    CHECK(f.thread(pid).wait_registration.pending(poll.value()) && !f.scheduler.resume_current(0));
+    // Its entry stays linked while the wait is pending.
+    f.scheduler.settle_wait_links(0);
+    CHECK(f.linked(31) == 1);
+    f.scheduler.put_prev(0);
+    CHECK(f.thread(pid).state == ProcessState::blocked && f.thread(pid).queued_cpu == no_cpu);
+    // A wake of its channel still completes it.
+    f.scheduler.wake_waiters(ThreadWaitReason::pipe_read, 31);
+    CHECK(!f.thread(pid).wait_registration.pending(poll.value()) && f.thread(pid).queued_cpu != no_cpu);
+    f.scheduler.wake_waiters(ThreadWaitReason::pipe_read, 32);
     expect_clean_checks();
 }
 
@@ -365,6 +406,8 @@ void a3_insert_then_check()
             f.run(pid);
             auto wait = f.scheduler.register_current_wait(ThreadWaitReason::poll, 0);
             CHECK(wait);
+            // A wake that took the entry before the link was recorded leaves
+            // the wait complete and nothing to watch: still true.
             CHECK(f.scheduler.watch_channel(wait.value(), ThreadWaitReason::pipe_read, key));
             linked.store(round, std::memory_order_release);
             for (usize spin = 0; spin < (round % 5) * 40; ++spin) std::atomic_signal_fence(std::memory_order_seq_cst);
@@ -449,6 +492,7 @@ int main()
     hash_batches();
     scheduler_owner_unlink();
     scheduler_exhaustion();
+    scheduler_poll_audit();
     a3_insert_then_check();
     wake_versus_release();
     std::printf("OK_WAIT_HASH scope=model checks=%zu buckets=%zu entries=%zu model_cpus=%zu guest=0 hardware_smp=0\n",

@@ -833,7 +833,9 @@ class SchedulerState
     // Links the caller's pending wait on one more channel (spec 4.3 A3: a
     // poll links every watched channel, then checks readiness). False when
     // the entry pool or the wait's link slots are exhausted; the wait then
-    // re-evaluates within a tick (counted as unqueued).
+    // re-evaluates within a tick (counted as unqueued). A wait that completed
+    // meanwhile needs no entry (true); a ticket that is not the caller's is
+    // refused (false).
     bool watch_channel(WaitTicket ticket, ThreadWaitReason reason, u64 key);
     // Owner unlink (spec 4.3): drops the entries a thread's waits left
     // linked. The owner calls it once its wait is over, the quiescer for a

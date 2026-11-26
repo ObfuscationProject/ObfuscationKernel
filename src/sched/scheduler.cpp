@@ -2328,21 +2328,23 @@ bool SchedulerState::link_wait(WaitTicket ticket, ThreadWaitReason reason, u64 k
     else
     {
         // No entry: the wait cannot be woken through its channel. It
-        // completes ready within a tick and its owner re-evaluates it.
-        unqueued_waits_.store(unqueued_waits_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
-        const auto cpu = smp::current_cpu();
-        if (cpu < smp::max_cpus) smp::detail::owner_add(smp::evidence_cpus[cpu].unqueued);
+        // completes ready within a tick and its owner re-evaluates it. A wait
+        // that is no longer pending needs nothing.
         u64 now{};
         {
             const DeadlineLock::Guard guard{deadline_lock_};
             now = deadline_clock_;
         }
-        static_cast<void>(arm_wait_deadline(ticket, now + wait_retry_ns, DeadlineAction::retry));
+        if (!arm_wait_deadline(ticket, now + wait_retry_ns, DeadlineAction::retry)) return true;
+        unqueued_waits_.store(unqueued_waits_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        const auto cpu = smp::current_cpu();
+        if (cpu < smp::max_cpus) smp::detail::owner_add(smp::evidence_cpus[cpu].unqueued);
         return false;
     }
-    // The wait completed meanwhile: the entry is not recorded, so drop it now.
+    // The wait completed meanwhile (a waker may have taken the entry
+    // already): nothing is left to watch, so the entry goes now.
     static_cast<void>(wait_channels_.release(entry));
-    return false;
+    return true;
 }
 
 bool SchedulerState::watch_channel(WaitTicket ticket, ThreadWaitReason reason, u64 key)
