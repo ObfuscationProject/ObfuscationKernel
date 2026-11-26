@@ -1015,9 +1015,15 @@ class TcpImmediateRuntime final
         // Only owned frame values and captured IDs survive copied callbacks.
         const auto saved_frame = thread.native_frame;
         const u64 pid = access.pid();
-        const auto route = access.linux_personality()
-            ? AcceptCall::route(lu::NativeBridge<lu::configured_native_profile()>::snapshot(saved_frame))
-            : lu::TcpCallRoute{access.operation(), false, 0, 0};
+        // The effective call: a legacy socketcall selector (TcpSocketcall), the
+        // copied accept route, or the direct call.
+        const auto route = [&]() -> lu::TcpCallRoute {
+            if (!access.linux_personality()) return {access.operation(), false, 0, 0};
+            const auto snapshot = lu::NativeBridge<lu::configured_native_profile()>::snapshot(saved_frame);
+            if (const auto socketcall = Socketcall::route(snapshot); socketcall.call != Call::none)
+                return {socketcall.call, true, socketcall.array, socketcall.bytes()};
+            return AcceptCall::route(snapshot);
+        }();
         TcpOriginalDescription original{kernel.scheduler(), kernel.native_tcp(), runtime_failure};
         const auto operation = [&]() -> Status
         {
