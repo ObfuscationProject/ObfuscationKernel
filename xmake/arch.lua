@@ -311,6 +311,14 @@ function add_ok_smp_sections()
     end
 end
 
+-- Native thread selection: the run queues on every profile, or with
+-- legacy_select=y the (pid, tid) scan of the step (the A/B arm until WP6).
+function add_ok_legacy_select()
+    if has_config("legacy_select") then
+        add_defines("OK_LEGACY_SELECT")
+    end
+end
+
 function add_ok_kernel_gui_option()
     add_options("kernel_gui")
     if has_config("kernel_gui") then

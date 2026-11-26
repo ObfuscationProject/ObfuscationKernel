@@ -310,12 +310,11 @@ extern Kernel *runtime_kernel;
 extern RuntimeFailure runtime_failure;
 extern ShutdownOwner original_shutdown_owner;
 extern bool shutdown_admission_closed, shutdown_retirement_started, shutdown_retirement_completed;
-// Per CPU: inside step(), and whether its last step found nothing to run.
+// Per CPU: inside step(). Whether its last step found nothing to run is the
+// scheduler's idle flag (SchedulerState::enter_idle).
 extern std::array<bool, smp::max_cpus> runtime_step_active;
-// Written by its own CPU; another CPU reads it to decide whether to wake it.
-extern std::array<std::atomic<bool>, smp::max_cpus> runtime_idle;
 bool any_step_active();
-// A CPU leaving (hotplug): its round-robin cursor starts fresh on return.
+// A CPU leaving (hotplug): the legacy scan's cursor starts fresh on return.
 void forget_cpu_cursor(smp::CpuId cpu);
 // The calling CPU's service stack: the linked boot stack on CPU 0, the stack
 // bring-up allocated on a secondary.

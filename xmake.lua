@@ -46,6 +46,12 @@ option("smp_sections")
     set_description("Run converted syscalls as kernel sections without the big kernel lock (x86_64, aarch64, rv64)")
 option_end()
 
+option("legacy_select")
+    set_default(false)
+    set_showmenu(true)
+    set_description("Select native threads with the (pid, tid) scan instead of the run queues (A/B arm until WP6)")
+option_end()
+
 option("x86_tsc_skew_test")
     set_default(false)
     set_showmenu(true)
@@ -324,6 +330,7 @@ target("okernel")
     add_ok_debug_test_points()
     add_ok_debug_lock_checks()
     add_ok_smp_sections()
+    add_ok_legacy_select()
     if get_config("private_futex_peer_fixture") and is_mode("debug") then
         add_defines("OK_PRIVATE_FUTEX_PEER_FIXTURE")
     end
@@ -403,6 +410,7 @@ target("okernel_image")
     add_ok_debug_test_points()
     add_ok_debug_lock_checks()
     add_ok_smp_sections()
+    add_ok_legacy_select()
     if get_config("private_futex_peer_fixture") and is_mode("debug") then
         add_defines("OK_PRIVATE_FUTEX_PEER_FIXTURE")
     end

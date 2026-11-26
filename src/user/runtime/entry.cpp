@@ -31,19 +31,24 @@ u64 entry_total()
 }
 namespace
 {
+using Candidate = sched::ThreadRef;
+#if defined(OK_LEGACY_SELECT)
+// The legacy scan's state (legacy_select=y): the last pick on one CPU and,
+// per CPU, the last thread picked because a signal interrupted its wait.
 sched::ProcessId last_pid{};
 sched::ThreadId last_tid{};
-using Candidate = sched::ThreadRef;
-// Per CPU, the last thread picked because a signal interrupted its wait.
 constinit std::array<Candidate, smp::max_cpus> last_interrupted{};
 // With secondaries online, the threads one step() hands to run queues. Only
 // the kernel-lock holder fills and reads it, within one selection, so a single
 // static buffer serves every CPU and no step zeroes 8 KiB on its stack.
 constinit std::array<Candidate, sched::max_processes * sched::max_threads_per_process> runnable{};
+#endif
 } // namespace
-void forget_cpu_cursor(smp::CpuId cpu)
+void forget_cpu_cursor([[maybe_unused]] smp::CpuId cpu)
 {
+#if defined(OK_LEGACY_SELECT)
     if (cpu < smp::max_cpus) last_interrupted[cpu] = {};
+#endif
 }
 struct RuntimeStepGuard
 {
@@ -982,14 +987,111 @@ Status start(Kernel &kernel, fs::BootArchive archive)
     secondary_admission.store(true, std::memory_order_release);
     return Status::success();
 }
+namespace
+{
+// A picked thread whose wait a signal interrupts, or whose readiness wake
+// lost its data to a peer, completes that wait before it runs: the runtime's
+// per-wait signal completions in order. `stay`: the thread does not run now.
+enum class InterruptedWait : u8
+{
+    proceed,
+    stay,
+    failed,
+};
+InterruptedWait resume_interrupted_wait([[maybe_unused]] Kernel &kernel, [[maybe_unused]] sched::ThreadRef chosen,
+                                        [[maybe_unused]] u64 now)
+{
+#if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
+    auto *selected = kernel.scheduler().find_thread(chosen.pid, chosen.tid);
+    if (!selected) return InterruptedWait::proceed;
+    auto *owner = kernel.scheduler().find(chosen.pid);
+    if (!owner) return InterruptedWait::failed;
+    // Also inspect runnable continuations whose readiness wake lost its
+    // data to a peer. A wake alone has not completed the original read.
+    if (linux_udp_receive_object(chosen.pid, chosen.tid).pool)
+    {
+        if (private_linux_udp_signal_ready(kernel, *owner, *selected) &&
+            !private_linux_udp_signal_complete(kernel, *owner, *selected)) return InterruptedWait::stay;
+    }
+    else if (private_signal_wait_ready(kernel, *owner, *selected, now))
+    {
+        if (!private_signal_wait_complete(kernel, *owner, *selected, now)) return InterruptedWait::stay;
+    }
+    else if (private_pipe_signal_ready(kernel, *owner, *selected))
+    {
+        if (!private_pipe_signal_complete(kernel, *owner, *selected)) return InterruptedWait::stay;
+    }
+    else if (private_pipe_write_signal_ready(kernel, *owner, *selected))
+    {
+        if (!private_pipe_write_signal_complete(kernel, *owner, *selected)) return InterruptedWait::stay;
+    }
+    else if (private_child_signal_ready(kernel, *owner, *selected))
+    {
+        if (!private_child_signal_complete(kernel, *owner, *selected)) return InterruptedWait::stay;
+    }
+    else if (private_futex_signal_ready(kernel, *owner, *selected))
+    {
+        if (!private_futex_signal_complete(kernel, *owner, *selected)) return InterruptedWait::stay;
+    }
+    else if (private_poll_signal_ready(kernel, *owner, *selected))
+    {
+        if (!private_poll_signal_complete(kernel, *owner, *selected)) return InterruptedWait::stay;
+    }
+    else if (private_terminal_signal_ready(kernel, *owner, *selected))
+    {
+        if (!private_terminal_signal_complete(kernel, *owner, *selected)) return InterruptedWait::stay;
+    }
+    else if (selected->state == sched::ProcessState::blocked &&
+             !private_sleep_signal_complete(kernel, *owner, *selected)) return InterruptedWait::stay;
+#endif
+    return InterruptedWait::proceed;
+}
+#if !defined(OK_LEGACY_SELECT)
+// Until signal generation sets probes itself (spec 4.7), each step marks the
+// parked threads whose wait a pending signal would interrupt and queues them;
+// pick admits them blocked and resume_interrupted_wait settles the wait.
+void probe_interrupted_waits([[maybe_unused]] Kernel &kernel, [[maybe_unused]] u64 now)
+{
+#if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
+    for (auto &candidate : kernel.scheduler().processes())
+    {
+        if (candidate.state() == sched::ProcessState::created || candidate.state() == sched::ProcessState::zombie ||
+            candidate.state() == sched::ProcessState::exited || candidate.job_control().stopped)
+            continue;
+        for (auto &thread : candidate.live_threads())
+        {
+            if (!thread.native_active || thread.state != sched::ProcessState::blocked || thread.probe ||
+                thread.on_cpu != sched::no_cpu || thread.queued_cpu != sched::no_cpu)
+                continue;
+            bool interruptible = false;
+            if (linux_udp_receive_object(candidate.pid(), thread.tid).pool)
+                interruptible = private_linux_udp_signal_ready(kernel, candidate, thread);
+            else
+                interruptible = private_signal_wait_ready(kernel, candidate, thread, now) ||
+                                private_sleep_signal_ready(kernel, candidate, thread) ||
+                                private_pipe_signal_ready(kernel, candidate, thread) ||
+                                private_pipe_write_signal_ready(kernel, candidate, thread) ||
+                                private_futex_signal_ready(kernel, candidate, thread) ||
+                                private_poll_signal_ready(kernel, candidate, thread) ||
+                                private_child_signal_ready(kernel, candidate, thread) ||
+                                private_terminal_signal_ready(kernel, candidate, thread);
+            if (interruptible) static_cast<void>(kernel.scheduler().probe_parked(candidate, thread));
+        }
+    }
+#endif
+}
+// CPU 0 audits the queue state every 256th step pass (spec 4.10).
+constinit u32 audit_countdown{};
+#endif
+} // namespace
 bool idle()
 {
-    return runtime_idle[smp::current_cpu()].load(std::memory_order_relaxed);
+    return runtime_kernel != nullptr && runtime_kernel->scheduler().cpu_idle(smp::current_cpu());
 }
 
 bool step(Kernel &kernel)
 {
-    runtime_idle[smp::current_cpu()].store(false, std::memory_order_relaxed);
+    if (runtime_kernel != nullptr) runtime_kernel->scheduler().leave_idle(smp::current_cpu());
     if (shutdown_admission_closed || native_shutdown_pending()) return false;
     if (runtime_step_active[smp::current_cpu()])
     { fail_runtime(Status::busy("native step is not reentrant")); return false; }
@@ -1149,6 +1251,8 @@ bool step(Kernel &kernel)
     private_jobctl_settle(kernel);
 #endif
     if (!runtime_failure || !started) { started = false; return false; }
+#if defined(OK_LEGACY_SELECT)
+    // legacy_select=y keeps the (pid, tid) scan until WP6 deletes it.
     // On one CPU, threads run round robin in (pid, tid) order after the last
     // pick. With secondaries online, runnable threads go to their CPU's run
     // queue and each CPU takes the next one from its own queue or steals; a
@@ -1211,7 +1315,7 @@ bool step(Kernel &kernel)
         // An idle CPU that was handed work looks at its queue now.
         const auto *queued = kernel.scheduler().find_thread(entry.pid, entry.tid);
         if (queued && queued->queued_cpu != cpu && queued->queued_cpu < smp::max_cpus &&
-            runtime_idle[queued->queued_cpu].load(std::memory_order_relaxed))
+            kernel.scheduler().cpu_idle(queued->queued_cpu))
             smp::send_ipi(queued->queued_cpu, smp::ipi_reschedule);
     }
     if (!chosen.pid)
@@ -1238,57 +1342,59 @@ bool step(Kernel &kernel)
         }
     if (!chosen.pid)
     {
-        runtime_idle[cpu].store(true, std::memory_order_relaxed);
+        kernel.scheduler().mark_idle(cpu);
         return waiting_deadline;
     }
     // Serving a thread: this kernel-lock stretch is work (overlap evidence).
     smp::bkl_mark_work();
-#if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
-    if (auto *selected = kernel.scheduler().find_thread(chosen.pid, chosen.tid); selected)
-    {
-        auto *owner = kernel.scheduler().find(chosen.pid);
-        if (!owner) return false;
-        // Also inspect runnable continuations whose readiness wake lost its
-        // data to a peer. A wake alone has not completed the original read.
-        if (linux_udp_receive_object(chosen.pid, chosen.tid).pool)
-        {
-            if (private_linux_udp_signal_ready(kernel, *owner, *selected) &&
-                !private_linux_udp_signal_complete(kernel, *owner, *selected)) return runtime_failure.ok();
-        }
-        else if (private_signal_wait_ready(kernel, *owner, *selected, now.value()))
-        {
-            if (!private_signal_wait_complete(kernel, *owner, *selected, now.value())) return runtime_failure.ok();
-        }
-        else if (private_pipe_signal_ready(kernel, *owner, *selected))
-        {
-            if (!private_pipe_signal_complete(kernel, *owner, *selected)) return runtime_failure.ok();
-        }
-        else if (private_pipe_write_signal_ready(kernel, *owner, *selected))
-        {
-            if (!private_pipe_write_signal_complete(kernel, *owner, *selected)) return runtime_failure.ok();
-        }
-        else if (private_child_signal_ready(kernel, *owner, *selected))
-        {
-            if (!private_child_signal_complete(kernel, *owner, *selected)) return runtime_failure.ok();
-        }
-        else if (private_futex_signal_ready(kernel, *owner, *selected))
-        {
-            if (!private_futex_signal_complete(kernel, *owner, *selected)) return runtime_failure.ok();
-        }
-        else if (private_poll_signal_ready(kernel, *owner, *selected))
-        {
-            if (!private_poll_signal_complete(kernel, *owner, *selected)) return runtime_failure.ok();
-        }
-        else if (private_terminal_signal_ready(kernel, *owner, *selected))
-        {
-            if (!private_terminal_signal_complete(kernel, *owner, *selected)) return runtime_failure.ok();
-        }
-        else if (selected->state == sched::ProcessState::blocked &&
-                 !private_sleep_signal_complete(kernel, *owner, *selected)) return runtime_failure.ok();
-    }
-#endif
+    if (const auto settled = resume_interrupted_wait(kernel, chosen, now.value());
+        settled != InterruptedWait::proceed)
+        return settled == InterruptedWait::stay ? runtime_failure.ok() : false;
     if (!kernel.scheduler().mark_on_cpu(chosen.pid, chosen.tid, cpu))
         return false;
+#else
+    // The queue path (spec 4.2) on every profile: threads are queued by the
+    // transitions that make them runnable, and each CPU takes the next one
+    // from its own queue or steals one. UP profiles and -smp 1 use queue 0.
+    const auto cpu = smp::current_cpu();
+    probe_interrupted_waits(kernel, now.value());
+    if (cpu == 0 && ++audit_countdown == 256)
+    {
+        audit_countdown = 0;
+        smp::detail::owner_add(smp::evidence_cpus[0].audit_passes);
+        static_cast<void>(kernel.scheduler().audit_queues());
+    }
+    if (!runtime_failure || !started) { started = false; return false; }
+    auto picked = kernel.scheduler().pick(cpu);
+    // The idle handshake: after enter_idle publishes this CPU idle, a push to
+    // its queue wakes it; work already queued is taken first.
+    for (usize retry = 0; !picked && retry < 2; ++retry)
+    {
+        const auto check = kernel.scheduler().enter_idle(cpu);
+        if (check == sched::SchedulerState::IdleCheck::halt) return waiting_deadline;
+        picked = kernel.scheduler().pick(cpu);
+        // Another queue's entries only hint at a steal: without one this CPU
+        // halts with its flag still published.
+        if (!picked && check == sched::SchedulerState::IdleCheck::steal_hint) return waiting_deadline;
+    }
+    if (!picked) return true;
+    kernel.scheduler().leave_idle(cpu);
+    const Candidate chosen = picked->ref;
+    // Serving a thread: this kernel-lock stretch is work (overlap evidence).
+    smp::bkl_mark_work();
+    if (const auto settled = resume_interrupted_wait(kernel, chosen, now.value());
+        settled != InterruptedWait::proceed)
+    {
+        static_cast<void>(kernel.posix().activate(0));
+        return settled == InterruptedWait::stay ? runtime_failure.ok() : false;
+    }
+    // A probed thread runs only once its resume completed the wait.
+    if (!kernel.scheduler().resume_current(cpu))
+    {
+        static_cast<void>(kernel.posix().activate(0));
+        return true;
+    }
+#endif
     auto *process = kernel.scheduler().find(chosen.pid);
     auto *running = kernel.scheduler().current_thread();
     if (linux_udp_receive_object(chosen.pid, chosen.tid).pool && !running->syscall_pending)
