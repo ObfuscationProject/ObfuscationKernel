@@ -1273,7 +1273,7 @@ class TcpImmediateRuntime final
             const u16 port = next_ephemeral_;
             next_ephemeral_ = port == 65535 ? u16{49152} : static_cast<u16>(port + 1);
             const net::tcp::Endpoint local{address, port};
-            const auto status = service.bind(handle, local);
+            const auto status = service.bind(handle, local, true);
             if (status) return local;
             if (status.code() != StatusCode::already_exists) return status;
         }
@@ -1374,6 +1374,59 @@ class TcpImmediateRuntime final
         if (auto status = access.write(request.arguments[4], length_bytes); !status) return status;
         return usize{0};
     }
+    // Socket option names. SOL_SOCKET and the protocol's own level read the
+    // length first (sk_getsockopt, do_tcp_getsockopt, udp_lib_getsockopt), as
+    // does SOL_IP (do_ip_getsockopt) and SOL_IPV6 on an IPv6 socket; there an
+    // unknown option is ENOPROTOOPT. Any other level is EOPNOTSUPP on IPv4
+    // (do_ip_getsockopt) and ENOPROTOOPT on IPv6 (ipv6_getsockopt).
+    enum class SocketOption : u8 { none, type, error, reuse_address, keep_alive, send_buffer, receive_buffer,
+                                   accept_connection, protocol, domain, no_delay };
+    enum class OptionLevel : u8 { known, foreign };
+    struct OptionName { OptionLevel level{OptionLevel::foreign}; SocketOption option{SocketOption::none}; };
+    static constexpr u32 sol_ip = 0, sol_ipv6 = 41;
+    static OptionName option_name(const Request &request, u32 protocol, net::Family family)
+    {
+        const u32 level = static_cast<u32>(request.arguments[1]), option = static_cast<u32>(request.arguments[2]);
+        const auto value = [&](const std::array<u32, static_cast<usize>(lu::Profile::count)> &linux_values, u32 native)
+        { return request.linux ? linux_values[profile] : native; };
+        if (level == value(lu::tcp_sol_socket, OK_SOL_SOCKET))
+        {
+            const std::array<std::pair<u32, SocketOption>, 9> names{{
+                {value(lu::tcp_so_type, OK_SO_TYPE), SocketOption::type},
+                {value(lu::tcp_so_error, OK_SO_ERROR), SocketOption::error},
+                {value(lu::tcp_so_reuseaddr, OK_SO_REUSEADDR), SocketOption::reuse_address},
+                {value(lu::tcp_so_keepalive, OK_SO_KEEPALIVE), SocketOption::keep_alive},
+                {value(lu::tcp_so_sndbuf, OK_SO_SNDBUF), SocketOption::send_buffer},
+                {value(lu::tcp_so_rcvbuf, OK_SO_RCVBUF), SocketOption::receive_buffer},
+                {value(lu::tcp_so_acceptconn, OK_SO_ACCEPTCONN), SocketOption::accept_connection},
+                {value(lu::tcp_so_protocol, OK_SO_PROTOCOL), SocketOption::protocol},
+                {value(lu::tcp_so_domain, OK_SO_DOMAIN), SocketOption::domain}}};
+            for (const auto &[number, name] : names) if (option == number) return {OptionLevel::known, name};
+            return {OptionLevel::known, SocketOption::none};
+        }
+        if (level == protocol)
+            return {OptionLevel::known, protocol == OK_IPPROTO_TCP && option == (request.linux ? lu::tcp_nodelay : OK_TCP_NODELAY)
+                ? SocketOption::no_delay : SocketOption::none};
+        if (level == sol_ip || (family == net::Family::ipv6 && level == sol_ipv6)) return {OptionLevel::known, SocketOption::none};
+        return {};
+    }
+    static u32 enoprotoopt(const Request &request) { return tcp_error(request, lu::tcp_errno_enoprotoopt, OK_ENOPROTOOPT); }
+    // getsockopt of an integer option; `value` yields the option's value.
+    template <class Value>
+    static Result<usize> get_option(Access &access, const Request &request, u32 protocol, net::Family family,
+                                    u32 &semantic, Value &&value)
+    {
+        const auto name = option_name(request, protocol, family);
+        if (name.level == OptionLevel::foreign)
+        {
+            semantic = family == net::Family::ipv6 ? enoprotoopt(request) : error(request, lu::UdpErrno::e_opnotsupp, 95);
+            return Status::fault();
+        }
+        auto length = socket_option_length(access, request, semantic); if (!length) return length.status();
+        if (name.option == SocketOption::none) { semantic = enoprotoopt(request); return Status::fault(); }
+        auto selected = value(name.option); if (!selected) return selected.status();
+        return copy_socket_option(access, request, length.value(), selected.value());
+    }
     // The UDP endpoint of a descriptor, or 0.
     static u32 udp_socket(Kernel &kernel, const sched::ProcessControlBlock &process, i32 fd)
     {
@@ -1384,27 +1437,32 @@ class TcpImmediateRuntime final
     }
     // getsockopt on a UDP socket: SO_ERROR takes a pending ICMP refusal
     // (reported once, like a receive or send would), SO_TYPE is SOCK_DGRAM.
+    // The buffers are the fixed receive queue and one datagram; UDP stores
+    // no options, so SO_REUSEADDR and SO_KEEPALIVE read 0.
     static Result<lu::Return> udp_option(Kernel &kernel, Access &access, const Request &request, u32 udp)
     {
         u32 semantic{};
         auto result = [&]() -> Result<usize> {
-            constexpr auto profile = static_cast<usize>(lu::configured_native_profile());
-            const u32 level = static_cast<u32>(request.arguments[1]), option = static_cast<u32>(request.arguments[2]);
-            const u32 sol_socket = request.linux ? lu::tcp_sol_socket[profile] : OK_SOL_SOCKET;
-            const u32 so_error = request.linux ? lu::tcp_so_error[profile] : OK_SO_ERROR;
-            const u32 so_type = request.linux ? lu::tcp_so_type[profile] : OK_SO_TYPE;
-            if (level != sol_socket || (option != so_error && option != so_type))
-                return Status::unsupported("UDP socket option is outside SO_ERROR and SO_TYPE");
-            auto length = socket_option_length(access, request, semantic); if (!length) return length.status();
-            u32 value = request.linux ? Constants::sock_dgram : OK_SOCK_DGRAM;
-            if (option == so_error)
-            {
-                const auto taken = kernel.native_udp().take_error(udp);
-                if (taken.code() == StatusCode::connection_refused) value = tcp_error(request, lu::tcp_errno_econnrefused, 111);
-                else if (!taken) return taken;
-                else value = 0;
-            }
-            return copy_socket_option(access, request, length.value(), value);
+            auto family = kernel.native_udp().family(udp); if (!family) return family.status();
+            return get_option(access, request, OK_IPPROTO_UDP, family.value(), semantic, [&](SocketOption option) -> Result<u32> {
+                using Udp = std::remove_cvref_t<decltype(kernel.native_udp())>;
+                switch (option)
+                {
+                case SocketOption::type: return request.linux ? Constants::sock_dgram : OK_SOCK_DGRAM;
+                case SocketOption::error:
+                {
+                    const auto taken = kernel.native_udp().take_error(udp);
+                    if (taken.code() == StatusCode::connection_refused) return tcp_error(request, lu::tcp_errno_econnrefused, 111);
+                    if (!taken) return taken;
+                    return u32{0};
+                }
+                case SocketOption::send_buffer: return static_cast<u32>(Udp::datagram_capacity);
+                case SocketOption::receive_buffer: return static_cast<u32>(Udp::queue_capacity * Udp::datagram_capacity);
+                case SocketOption::protocol: return OK_IPPROTO_UDP;
+                case SocketOption::domain: return family.value() == net::Family::ipv6 ? OK_AF_INET6 : OK_AF_INET;
+                default: return u32{0};
+                }
+            });
         }();
         if (!access.live()) return Status::denied("UDP option lost captured image before publication");
         return semantic ? Result<lu::Return>{lu::Return{0, semantic}} : translated(access, result);
@@ -1502,23 +1560,37 @@ class TcpImmediateRuntime final
             }
             if (request.operation == Call::connect)
             {
-                if (!nonblocking) return Status::unsupported("blocking TCP connect requires its captured continuation");
                 auto state = service.snapshot(handle); if (!state) return state.status();
+                // __inet_stream_connect on a started stream: a listener or a
+                // connected socket is EISCONN. A connecting one is EALREADY
+                // during the handshake; once established the call connects it
+                // (0); once closed it reports the error, or ECONNABORTED when
+                // that was already reported, and disconnects so that the next
+                // connect starts a new attempt.
                 if (state.value().endpoint)
                 {
-                    if (state.value().endpoint->kind != net::tcp::HandleKind::connection)
-                        return Status::invalid_argument("TCP listener cannot connect");
+                    if (state.value().endpoint->kind != net::tcp::HandleKind::connection ||
+                        state.value().state != net::TcpSocketState::connecting)
+                    { semantic_error = tcp_error(request, lu::tcp_errno_eisconn, 106); return Status::fault(); }
                     auto protocol = service.endpoints().state(*state.value().endpoint); if (!protocol) return protocol.status();
-                    // inet_stream_connect: a failed attempt reports its error once.
-                    if (protocol.value().transport.error_pending)
+                    const auto current = protocol.value().transport.state;
+                    if (current == net::tcp::State::syn_sent || current == net::tcp::State::syn_received)
                     {
-                        auto taken = service.take_error(handle); if (!taken) return taken.status();
-                        semantic_error = tcp_failure_errno(request, taken.value()); return Status::fault();
+                        if (!nonblocking) return Status::unsupported("blocking TCP connect requires its captured continuation");
+                        semantic_error = tcp_error(request, lu::tcp_errno_ealready, 114); return Status::fault();
                     }
-                    semantic_error = protocol.value().transport.state == net::tcp::State::syn_sent
-                        ? tcp_error(request, lu::tcp_errno_ealready, 114) : tcp_error(request, lu::tcp_errno_eisconn, 106);
+                    if (current != net::tcp::State::closed && current != net::tcp::State::time_wait)
+                    {
+                        if (auto status = service.mark_connected(handle); !status) return status;
+                        return usize{0};
+                    }
+                    auto taken = service.take_error(handle); if (!taken) return taken.status();
+                    const u32 failure = tcp_failure_errno(request, taken.value());
+                    if (auto status = service.disconnect(handle); !status) return status;
+                    semantic_error = failure ? failure : tcp_error(request, lu::tcp_errno_econnaborted, 103);
                     return Status::fault();
                 }
+                if (!nonblocking) return Status::unsupported("blocking TCP connect requires its captured continuation");
                 auto peer = address(access, request, state.value().family,
                     error(request, lu::UdpErrno::e_netunreach, 101), semantic_error);
                 if (!peer) return peer.status();
@@ -1571,24 +1643,71 @@ class TcpImmediateRuntime final
             }
             if (request.operation == Call::getsockopt)
             {
-                // SOL_SOCKET only: SO_ERROR takes the pending error, else a
-                // remembered soft ICMP error; SO_TYPE is SOCK_STREAM. Other
-                // levels and options stay EOPNOTSUPP.
-                constexpr auto profile = static_cast<usize>(lu::configured_native_profile());
-                const u32 level = static_cast<u32>(a[1]), option = static_cast<u32>(a[2]);
-                const u32 sol_socket = request.linux ? lu::tcp_sol_socket[profile] : OK_SOL_SOCKET;
-                const u32 so_error = request.linux ? lu::tcp_so_error[profile] : OK_SO_ERROR;
-                const u32 so_type = request.linux ? lu::tcp_so_type[profile] : OK_SO_TYPE;
-                if (level != sol_socket || (option != so_error && option != so_type))
-                    return Status::unsupported("TCP socket option is outside SO_ERROR and SO_TYPE");
-                auto length = socket_option_length(access, request, semantic_error); if (!length) return length.status();
-                u32 value = request.linux ? Constants::sock_stream : OK_SOCK_STREAM;
-                if (option == so_error)
+                // SO_ERROR takes the pending error, else a remembered soft
+                // ICMP error. The buffers are the connection's fixed ones.
+                auto stream = service.snapshot(handle); if (!stream) return stream.status();
+                const auto &current = stream.value();
+                return get_option(access, request, OK_IPPROTO_TCP, current.family, semantic_error,
+                    [&](SocketOption option) -> Result<u32> {
+                        using Table = net::NativeTcpStreamService::Table;
+                        switch (option)
+                        {
+                        case SocketOption::type: return request.linux ? Constants::sock_stream : OK_SOCK_STREAM;
+                        case SocketOption::error:
+                        {
+                            auto taken = service.take_error(handle, true); if (!taken) return taken.status();
+                            return tcp_failure_errno(request, taken.value());
+                        }
+                        case SocketOption::reuse_address: return u32{current.options.reuse_address};
+                        case SocketOption::keep_alive: return u32{current.options.keep_alive};
+                        case SocketOption::no_delay: return u32{current.options.no_delay};
+                        case SocketOption::send_buffer: return static_cast<u32>(Table::send_bytes);
+                        case SocketOption::receive_buffer: return static_cast<u32>(Table::receive_bytes);
+                        case SocketOption::accept_connection:
+                            return u32{current.endpoint && current.endpoint->kind == net::tcp::HandleKind::listener};
+                        case SocketOption::protocol: return OK_IPPROTO_TCP;
+                        case SocketOption::domain: return current.family == net::Family::ipv6 ? OK_AF_INET6 : OK_AF_INET;
+                        case SocketOption::none: break;
+                        }
+                        return Status::invalid_argument("unnamed TCP socket option");
+                    });
+            }
+            if (request.operation == Call::setsockopt)
+            {
+                // sk_setsockopt and do_tcp_setsockopt check the length and copy
+                // an int before naming the option; other levels are
+                // ENOPROTOOPT without reading (ip_setsockopt, ipv6_setsockopt).
+                // SO_REUSEADDR, SO_KEEPALIVE and TCP_NODELAY are remembered;
+                // the fixed buffers ignore SO_SNDBUF and SO_RCVBUF.
+                auto stream = service.snapshot(handle); if (!stream) return stream.status();
+                const u32 level = static_cast<u32>(a[1]);
+                const auto name = option_name(request, OK_IPPROTO_TCP, stream.value().family);
+                if (name.level == OptionLevel::foreign || level == sol_ip || level == sol_ipv6)
+                { semantic_error = enoprotoopt(request); return Status::fault(); }
+                if (static_cast<i32>(static_cast<u32>(a[4])) < 4)
+                { semantic_error = error(request, lu::UdpErrno::e_inval, 22); return Status::fault(); }
+                std::array<std::byte, 4> bytes{};
+                if (auto status = access.read(a[3], bytes); !status) return status;
+                std::array<u8, 4> raw{};
+                for (usize i = 0; i < raw.size(); ++i) raw[i] = std::to_integer<u8>(bytes[i]);
+                i32 value{};
+                if (request.linux)
                 {
-                    auto taken = service.take_error(handle, true); if (!taken) return taken.status();
-                    value = tcp_failure_errno(request, taken.value());
+                    auto decoded = lu::UdpWire<lu::configured_native_profile()>::decode_socklen(raw); if (!decoded) return decoded.status();
+                    value = decoded.value();
                 }
-                return copy_socket_option(access, request, length.value(), value);
+                else value = std::bit_cast<i32>(raw);
+                auto options = stream.value().options;
+                switch (name.option)
+                {
+                case SocketOption::reuse_address: options.reuse_address = value != 0; break;
+                case SocketOption::keep_alive: options.keep_alive = value != 0; break;
+                case SocketOption::no_delay: options.no_delay = value != 0; break;
+                case SocketOption::send_buffer: case SocketOption::receive_buffer: return usize{0};
+                default: semantic_error = enoprotoopt(request); return Status::fault();
+                }
+                if (auto status = service.set_options(handle, options); !status) return status;
+                return usize{0};
             }
             // Defer unsupported operations before touching connection-only state;
             // a listener is a valid stream but not a connection handle.
@@ -1614,8 +1733,14 @@ class TcpImmediateRuntime final
                 if (length) if (auto status = access.read(a[4], std::span{ignored}.first(static_cast<usize>(length))); !status) return status;
             }
             auto stream = service.snapshot(handle); if (!stream) return stream.status();
+            // Without a connection a send is EPIPE (sk_stream_wait_connect, for
+            // a listener too) and a read or shutdown is ENOTCONN.
             if (!stream.value().endpoint || stream.value().endpoint->kind != net::tcp::HandleKind::connection)
-            { semantic_error = tcp_error(request, lu::tcp_errno_enotconn, 107); return Status::fault(); }
+            {
+                semantic_error = request.operation == Call::write || sendto ? tcp_error(request, lu::tcp_errno_epipe, 32)
+                                                                           : tcp_error(request, lu::tcp_errno_enotconn, 107);
+                return Status::fault();
+            }
             auto protocol = service.endpoints().state(*stream.value().endpoint); if (!protocol) return protocol.status();
             const auto &state = protocol.value().transport;
             // The failure is reported once (Linux sock_error); afterwards the

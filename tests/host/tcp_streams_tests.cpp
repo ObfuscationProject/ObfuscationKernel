@@ -404,6 +404,63 @@ void ipv6_accept()
     CHECK(f.scheduler.close_descriptor(f.process().resources(), accepted.value()));
     CHECK(f.scheduler.close_descriptor(f.process().resources(), listener.value()));
 }
+// The socket layer's connect state (__inet_stream_connect) and stored options.
+void socket_state_and_options()
+{
+    auto owner = fixture(); auto &f = *owner;
+    u64 base = f.service.now();
+    // A refused attempt is dropped by disconnect: an explicit binding stays,
+    // a local endpoint connect chose (inet_autobind) is released, and the
+    // stream connects again.
+    for (bool automatic : {false, true})
+    {
+        const tcp::Endpoint mine{local.address, static_cast<u16>(33001 + automatic)};
+        auto opened = f.operations.open(f.pid); CHECK(opened); const auto handle = f.stream(opened.value());
+        auto fresh = f.service.snapshot(handle); CHECK(fresh);
+        CHECK(fresh.value().state == TcpSocketState::unconnected && !fresh.value().automatic && fresh.value().options == TcpSocketOptions{});
+        CHECK(!f.service.mark_connected(handle)); CHECK(!f.service.disconnect(handle));
+        CHECK(f.service.bind(handle, mine, automatic)); CHECK(f.service.connect(handle, peer, 100, base)); f.take(base);
+        auto started = f.service.snapshot(handle).value();
+        CHECK(started.state == TcpSocketState::connecting && started.automatic == automatic && started.endpoint);
+        CHECK(!f.service.connect(handle, peer, 100, base));
+        f.ingress(packet(peer, mine, 0, 101, wire::tcp_rst | tcp_ack), base + 1);
+        CHECK(f.service.endpoints().state(*started.endpoint).value().transport.state == tcp::State::closed);
+        CHECK(f.service.disconnect(handle));
+        auto dropped = f.service.snapshot(handle).value();
+        CHECK(dropped.state == TcpSocketState::unconnected && !dropped.endpoint && !dropped.automatic);
+        CHECK(dropped.local == (automatic ? tcp::Endpoint{IpAddress{}, 0} : mine));
+        CHECK(!f.service.endpoints().local_reserved(mine).value());
+        CHECK(!f.service.endpoints().state(*started.endpoint));
+        CHECK(!f.service.disconnect(handle));
+        if (automatic) CHECK(f.service.bind(handle, mine, true));
+        CHECK(f.service.connect(handle, peer, 300, base + 2)); f.take(base + 2);
+        f.ingress(packet(peer, mine, 500, 301, tcp_syn | tcp_ack), base + 3); f.take(base + 3);
+        CHECK(f.service.mark_connected(handle)); CHECK(!f.service.mark_connected(handle));
+        CHECK(f.service.snapshot(handle).value().state == TcpSocketState::connected);
+        CHECK(f.scheduler.close_descriptor(f.process().resources(), opened.value()));
+        base = f.service.now();
+    }
+    // Options are stored per stream; an accepted stream inherits its
+    // listener's (sk_clone) and starts connected with an explicit name.
+    const tcp::Endpoint server{local.address, 9000}, client{peer.address, 41000};
+    auto listener = f.operations.open(f.pid, true); CHECK(listener);
+    const auto listening = f.stream(listener.value());
+    CHECK(f.operations.bind(f.pid, listener.value(), server)); CHECK(f.operations.listen(f.pid, listener.value(), 2));
+    const TcpSocketOptions chosen{true, true, false};
+    CHECK(f.service.set_options(listening, chosen) && f.service.snapshot(listening).value().options == chosen);
+    CHECK(!f.service.disconnect(listening));
+    f.ingress(packet(client, server, 10, 0, tcp_syn), base + 4);
+    auto reply = f.take(base + 4); auto ip = wire::ipv4(reply.view()); CHECK(ip);
+    auto segment = wire::tcp(ip.value()); CHECK(segment && segment.value().fields.flags == (tcp_syn | tcp_ack));
+    f.ingress(packet(client, server, 11, segment.value().fields.sequence + 1, tcp_ack), base + 5);
+    auto accepted = f.operations.accept(f.pid, listener.value()); CHECK(accepted);
+    auto child = f.service.snapshot(f.stream(accepted.value())); CHECK(child);
+    CHECK(child.value().state == TcpSocketState::connected && !child.value().automatic && child.value().options == chosen);
+    CHECK(f.service.set_options(f.stream(accepted.value()), {}) && f.service.snapshot(listening).value().options == chosen);
+    CHECK(f.scheduler.close_descriptor(f.process().resources(), accepted.value()));
+    CHECK(f.scheduler.close_descriptor(f.process().resources(), listener.value()));
+    CHECK(!f.service.set_options(listening, chosen));
+}
 struct Device
 {
     std::array<Packet, 8> incoming{}, outgoing{}; usize first{}, count{}, sent{}, reaps{}, receives{};
@@ -576,7 +633,7 @@ int main()
     linux_ipv6_profile<abi::linux_user::Profile::rv64>(); linux_ipv6_profile<abi::linux_user::Profile::rv32>();
     linux_ipv6_profile<abi::linux_user::Profile::loongarch64>(); linux_ipv6_profile<abi::linux_user::Profile::mips>();
     linux_ipv6_profile<abi::linux_user::Profile::mips64>(); linux_ipv6_profile<abi::linux_user::Profile::ppc>();
-    ipv6_accept();
+    ipv6_accept(); socket_state_and_options();
     ethernet_integration(); ethernet_link_passes(); ethernet_failure_controls(); ethernet_icmp_errors();
     std::printf("TCP_STREAMS_HOSTED_PASS checks=%zu real_scheduler=1 guest_execution=0 socket_execution=0 nic_execution=0\n", checks);
 }

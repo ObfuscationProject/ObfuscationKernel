@@ -401,6 +401,10 @@ void exercise(Kernel &kernel, bool linux, u16 port)
     CHECK(kernel.poll_network()); extension.receive_peer(peer); extension.send_peer(peer);
     CHECK(kernel.poll_network()); extension.receive_peer(peer);
     expect(peer.snapshot().state == net::tcp::State::established);
+    // The next connect observes the established attempt (0), then EISCONN.
+    address(link.peer_ip, 7000);
+    expect(invoke(kernel, group, 42, {static_cast<uptr>(fd), address_pointer, 16}) == 0);
+    expect(invoke(kernel, group, 42, {static_cast<uptr>(fd), address_pointer, 16}) == -106);
     const std::array<std::byte, 5> english{std::byte{'h'}, std::byte{'e'}, std::byte{'l'}, std::byte{'l'}, std::byte{'o'}};
     std::copy(english.begin(), english.end(), mock::memory.begin() + 128);
     expect(invoke(kernel, group, 1, {static_cast<uptr>(fd), payload_pointer, english.size()}) == 5);
@@ -435,9 +439,11 @@ void listener_errors(Kernel &kernel, bool linux, u16 port)
     expect(invoke(kernel, group, 49, {static_cast<uptr>(fd), address_pointer, 16}) == 0);
     expect(invoke(kernel, group, 50, {static_cast<uptr>(fd), 2}) == 0);
     expect(invoke(kernel, group, 0, {static_cast<uptr>(fd), payload_pointer, 8}) == -107);
-    expect(invoke(kernel, group, 1, {static_cast<uptr>(fd), payload_pointer, 8}) == -107);
+    // A send waits for a connection (sk_stream_wait_connect): EPIPE.
+    expect(invoke(kernel, group, 1, {static_cast<uptr>(fd), payload_pointer, 8}) == -32);
     expect(invoke(kernel, group, 48, {static_cast<uptr>(fd), OK_SHUT_WR}) == -107);
-    expect(invoke(kernel, group, 42, {static_cast<uptr>(fd), address_pointer, 16}) == -22);
+    // __inet_stream_connect: a listening socket is EISCONN.
+    expect(invoke(kernel, group, 42, {static_cast<uptr>(fd), address_pointer, 16}) == -106);
     // Accept is implemented; an empty nonblocking listener would block.
     for (u32 accept : {43u, 288u})
         expect(invoke(kernel, group, accept, {static_cast<uptr>(fd), 0, 0}) == -11);
@@ -454,13 +460,17 @@ void listener_errors(Kernel &kernel, bool linux, u16 port)
     expect(name.result == -22 && name.record[0] == 0xa5);
     expect(name_call(kernel, group, 52, static_cast<i32>(fd), 16).result == -107);
     expect(invoke(kernel, group, 51, {static_cast<uptr>(fd), 0, name_length_pointer}) == -14);
-    expect(invoke(kernel, group, 55, {static_cast<uptr>(fd), 0, 0}) == -95);
+    // SOL_IP reads the length first (do_ip_getsockopt); a listener accepts.
+    expect(invoke(kernel, group, 55, {static_cast<uptr>(fd), 0, 0}) == -14);
+    const auto accepting = option_call(kernel, group, static_cast<i32>(fd), OK_SOL_SOCKET, OK_SO_ACCEPTCONN);
+    expect(accepting.result == 0 && accepting.length == 4 && accepting.value == 1);
     expect(invoke(kernel, group, 3, {static_cast<uptr>(fd)}) == 0);
     retire(kernel, group);
 }
 // The gateway answers the SYN with an ICMP unreachable: the handshake fails
 // with the errno Linux tcp_v4_err reports for it.
-// `report` picks what reports the failure: a read, SO_ERROR or a second connect.
+// `report` picks what reports the failure: a read, SO_ERROR or a second
+// connect. Port 0 leaves the stream unbound, so connect binds it.
 enum class Report { read, option, connect };
 void icmp_refusal(Kernel &kernel, bool linux, u16 port, u8 code, i64 expected, Report report)
 {
@@ -469,7 +479,8 @@ void icmp_refusal(Kernel &kernel, bool linux, u16 port, u8 code, i64 expected, R
     constexpr i16 both = OK_POLLIN | OK_POLLOUT;
     // Unconnected is TCP_CLOSE: writable and hung up (Linux tcp_poll).
     expect(poll_now(kernel, group, static_cast<i32>(fd), both) == (OK_POLLOUT | OK_POLLHUP));
-    address(link.local_ip, port); expect(invoke(kernel, group, 49, {static_cast<uptr>(fd), address_pointer, 16}) == 0);
+    if (port)
+    { address(link.local_ip, port); expect(invoke(kernel, group, 49, {static_cast<uptr>(fd), address_pointer, 16}) == 0); }
     address(link.peer_ip, 7100);
     expect(invoke(kernel, group, 42, {static_cast<uptr>(fd), address_pointer, 16}) == -115);
     expect(poll_now(kernel, group, static_cast<i32>(fd), both) == 0);
@@ -514,18 +525,39 @@ void icmp_refusal(Kernel &kernel, bool linux, u16 port, u8 code, i64 expected, R
     }
     auto none = option_call(kernel, group, f, OK_SOL_SOCKET, OK_SO_ERROR);
     expect(none.result == 0 && none.length == 4 && none.value == 0);
-    // Then the closed connection reads EOF, writes EPIPE and has no POLLERR.
-    expect(poll_now(kernel, group, f, both) == (OK_POLLIN | OK_POLLOUT | OK_POLLHUP));
-    expect(invoke(kernel, group, 0, {static_cast<uptr>(fd), payload_pointer, 8}) == 0);
+    if (report != Report::connect)
+    {
+        // Then the closed connection reads EOF, writes EPIPE and has no POLLERR.
+        expect(poll_now(kernel, group, f, both) == (OK_POLLIN | OK_POLLOUT | OK_POLLHUP));
+        expect(invoke(kernel, group, 0, {static_cast<uptr>(fd), payload_pointer, 8}) == 0);
+        expect(invoke(kernel, group, 1, {static_cast<uptr>(fd), payload_pointer, 8}) == -32);
+        expect(name_call(kernel, group, 52, f, 16).result == -107);
+        // A connect observes the closed attempt: its error was already
+        // reported, so ECONNABORTED (sock_error), and it disconnects.
+        address(link.peer_ip, 7100);
+        expect(invoke(kernel, group, 42, {static_cast<uptr>(fd), address_pointer, 16}) == -103);
+    }
+    // Disconnected (tcp_disconnect): unconnected again, so writable and hung
+    // up, reads ENOTCONN and sends EPIPE. An explicit binding stays; the one
+    // connect chose is dropped.
+    expect(poll_now(kernel, group, f, both) == (OK_POLLOUT | OK_POLLHUP));
+    expect(invoke(kernel, group, 0, {static_cast<uptr>(fd), payload_pointer, 8}) == -107);
     expect(invoke(kernel, group, 1, {static_cast<uptr>(fd), payload_pointer, 8}) == -32);
     expect(name_call(kernel, group, 52, f, 16).result == -107);
+    const auto name = name_call(kernel, group, 51, f, 16);
+    expect(name.result == 0 && name.record[2] == static_cast<u8>(port >> 8) && name.record[3] == static_cast<u8>(port));
+    expect(std::all_of(name.record.begin() + 4, name.record.begin() + 8, [&](u8 byte) { return port || byte == 0; }));
     // SO_TYPE; a short capacity copies a prefix and reports it; negative is EINVAL.
     auto type = option_call(kernel, group, f, OK_SOL_SOCKET, OK_SO_TYPE);
     expect(type.result == 0 && type.length == 4 && type.value == OK_SOCK_STREAM);
     type = option_call(kernel, group, f, OK_SOL_SOCKET, OK_SO_TYPE, 1);
     expect(type.result == 0 && type.length == 1 && (type.value & 0xff) == OK_SOCK_STREAM && (type.value >> 8) == 0xa5a5a5);
     expect(option_call(kernel, group, f, OK_SOL_SOCKET, OK_SO_TYPE, -1).result == -22);
-    expect(option_call(kernel, group, f, 6, 1).result == -95);
+    // The next connect starts a new attempt from the same stream.
+    address(link.peer_ip, 7100);
+    expect(invoke(kernel, group, 42, {static_cast<uptr>(fd), address_pointer, 16}) == -115);
+    expect(invoke(kernel, group, 42, {static_cast<uptr>(fd), address_pointer, 16}) == -114);
+    CHECK(kernel.poll_network()); extension.head = extension.count = 0;
     expect(invoke(kernel, group, 3, {static_cast<uptr>(fd)}) == 0);
     retire(kernel, group);
 }
@@ -566,7 +598,23 @@ void udp_refusal(Kernel &kernel, bool linux)
     expect(taken.result == 0 && taken.value == 0);
     const auto type = option_call(kernel, group, f, OK_SOL_SOCKET, OK_SO_TYPE);
     expect(type.result == 0 && type.length == 4 && type.value == OK_SOCK_DGRAM);
-    expect(option_call(kernel, group, f, 0, 1).result == -95);
+    // The fixed queue and datagram sizes; UDP stores no options.
+    struct Read { u32 option, value; };
+    for (const auto &[option, value] : {Read{OK_SO_SNDBUF, 1472}, Read{OK_SO_RCVBUF, 2944}, Read{OK_SO_PROTOCOL, 17},
+                                        Read{OK_SO_DOMAIN, 2}, Read{OK_SO_ACCEPTCONN, 0}, Read{OK_SO_REUSEADDR, 0},
+                                        Read{OK_SO_KEEPALIVE, 0}})
+    {
+        const auto got = option_call(kernel, group, f, OK_SOL_SOCKET, option);
+        expect(got.result == 0 && got.length == 4 && got.value == value);
+    }
+    // SOL_IP and SOL_UDP read the length, then ENOPROTOOPT; another level is
+    // EOPNOTSUPP (do_ip_getsockopt), TCP's included.
+    expect(option_call(kernel, group, f, 0, 1).result == -92);
+    expect(option_call(kernel, group, f, 17, 1).result == -92);
+    expect(option_call(kernel, group, f, 17, 1, -1).result == -22);
+    expect(option_call(kernel, group, f, OK_SOL_SOCKET, 1234).result == -92);
+    expect(option_call(kernel, group, f, 6, 1).result == -95);
+    expect(option_call(kernel, group, f, 41, 1).result == -95);
     expect(invoke(kernel, group, 3, {static_cast<uptr>(fd)}) == 0);
     retire(kernel, group);
 }
@@ -594,6 +642,69 @@ void autobind_connect(Kernel &kernel, bool linux)
     CHECK(kernel.poll_network()); extension.head = extension.count = 0;
     expect(invoke(kernel, group, 3, {static_cast<uptr>(fd)}) == 0);
     expect(invoke(kernel, group, 3, {static_cast<uptr>(other)}) == 0);
+    retire(kernel, group);
+}
+// setsockopt(fd, level, option, &value, length) with an int at the address.
+i64 set_option(Kernel &kernel, Group group, i32 fd, u32 level, u32 option, i32 value, i32 length = 4)
+{
+    std::memcpy(mock::memory.data() + 768, &value, sizeof(value));
+    return invoke(kernel, group, 54, {static_cast<uptr>(fd), level, option, address_pointer, static_cast<uptr>(static_cast<u32>(length))});
+}
+// The options a TCP socket reads and, through the Linux personality, sets.
+void socket_options(Kernel &kernel, bool linux, u16 port)
+{
+    const auto group = create(kernel, linux);
+    const auto fd = invoke(kernel, group, 41, {2, OK_SOCK_STREAM | OK_SOCK_NONBLOCK, 6}); expect(fd >= 3);
+    const auto f = static_cast<i32>(fd);
+    const auto read = [&](u32 level, u32 option) {
+        const auto got = option_call(kernel, group, f, level, option);
+        expect(got.result == 0 && got.length == 4); return got.value;
+    };
+    expect(read(OK_SOL_SOCKET, OK_SO_SNDBUF) == 1024 && read(OK_SOL_SOCKET, OK_SO_RCVBUF) == 1024);
+    expect(read(OK_SOL_SOCKET, OK_SO_PROTOCOL) == 6 && read(OK_SOL_SOCKET, OK_SO_DOMAIN) == 2);
+    expect(read(OK_SOL_SOCKET, OK_SO_ACCEPTCONN) == 0 && read(OK_SOL_SOCKET, OK_SO_REUSEADDR) == 0);
+    expect(read(OK_SOL_SOCKET, OK_SO_KEEPALIVE) == 0 && read(OK_IPPROTO_TCP, OK_TCP_NODELAY) == 0);
+    // A known level's unknown option is ENOPROTOOPT after the length; a level
+    // IPv4 TCP does not know is EOPNOTSUPP without reading it.
+    expect(option_call(kernel, group, f, OK_SOL_SOCKET, 1234).result == -92);
+    expect(option_call(kernel, group, f, OK_SOL_SOCKET, 1234, -1).result == -22);
+    expect(option_call(kernel, group, f, OK_IPPROTO_TCP, 99).result == -92);
+    expect(option_call(kernel, group, f, 0, 1).result == -92);
+    expect(option_call(kernel, group, f, 41, 1).result == -95);
+    expect(option_call(kernel, group, f, 17, 1).result == -95);
+    expect(invoke(kernel, group, 55, {static_cast<uptr>(fd), OK_IPPROTO_TCP, 99, address_pointer, 0}) == -14);
+    expect(invoke(kernel, group, 55, {static_cast<uptr>(fd), 41, 1, address_pointer, 0}) == -95);
+    if (!linux)
+        expect(set_option(kernel, group, f, OK_SOL_SOCKET, OK_SO_REUSEADDR, 1) == -38);
+    else
+    {
+        // Flags are remembered as booleans; the fixed buffers ignore a size.
+        expect(set_option(kernel, group, f, OK_SOL_SOCKET, OK_SO_REUSEADDR, 1) == 0 && read(OK_SOL_SOCKET, OK_SO_REUSEADDR) == 1);
+        expect(set_option(kernel, group, f, OK_SOL_SOCKET, OK_SO_KEEPALIVE, 7) == 0 && read(OK_SOL_SOCKET, OK_SO_KEEPALIVE) == 1);
+        expect(set_option(kernel, group, f, OK_IPPROTO_TCP, OK_TCP_NODELAY, 1) == 0 && read(OK_IPPROTO_TCP, OK_TCP_NODELAY) == 1);
+        expect(set_option(kernel, group, f, OK_IPPROTO_TCP, OK_TCP_NODELAY, 0) == 0 && read(OK_IPPROTO_TCP, OK_TCP_NODELAY) == 0);
+        expect(set_option(kernel, group, f, OK_SOL_SOCKET, OK_SO_SNDBUF, 65536) == 0 && read(OK_SOL_SOCKET, OK_SO_SNDBUF) == 1024);
+        expect(set_option(kernel, group, f, OK_SOL_SOCKET, OK_SO_RCVBUF, 65536) == 0 && read(OK_SOL_SOCKET, OK_SO_RCVBUF) == 1024);
+        const auto options = kernel.native_tcp().snapshot(stream(kernel, group, f)).value().options;
+        expect(options.reuse_address && options.keep_alive && !options.no_delay);
+        // Read-only and unknown names are ENOPROTOOPT once an int was copied.
+        for (u32 option : {OK_SO_TYPE, OK_SO_ERROR, OK_SO_ACCEPTCONN, OK_SO_PROTOCOL, OK_SO_DOMAIN, 1234u})
+            expect(set_option(kernel, group, f, OK_SOL_SOCKET, option, 1) == -92);
+        expect(set_option(kernel, group, f, OK_IPPROTO_TCP, 99, 1) == -92);
+        expect(set_option(kernel, group, f, OK_SOL_SOCKET, OK_SO_REUSEADDR, 0, 3) == -22);
+        expect(set_option(kernel, group, f, OK_SOL_SOCKET, 1234, 0, -1) == -22);
+        expect(invoke(kernel, group, 54, {static_cast<uptr>(fd), OK_SOL_SOCKET, OK_SO_REUSEADDR, 0, 4}) == -14);
+        expect(invoke(kernel, group, 54, {static_cast<uptr>(fd), OK_SOL_SOCKET, 1234, 0, 4}) == -14);
+        // Other levels are ENOPROTOOPT without reading (ip_setsockopt).
+        expect(invoke(kernel, group, 54, {static_cast<uptr>(fd), 0, 1, 0, 0}) == -92);
+        expect(invoke(kernel, group, 54, {static_cast<uptr>(fd), 41, 1, 0, 0}) == -92);
+        expect(invoke(kernel, group, 54, {static_cast<uptr>(fd), 17, 1, 0, 0}) == -92);
+        expect(read(OK_SOL_SOCKET, OK_SO_REUSEADDR) == 1 && read(OK_SOL_SOCKET, OK_SO_KEEPALIVE) == 1);
+    }
+    address(link.local_ip, port); expect(invoke(kernel, group, 49, {static_cast<uptr>(fd), address_pointer, 16}) == 0);
+    expect(invoke(kernel, group, 50, {static_cast<uptr>(fd), 2}) == 0);
+    expect(read(OK_SOL_SOCKET, OK_SO_ACCEPTCONN) == 1);
+    expect(invoke(kernel, group, 3, {static_cast<uptr>(fd)}) == 0);
     retire(kernel, group);
 }
 void original_guard_closes(Kernel &kernel)
@@ -640,6 +751,9 @@ int main()
     icmp_refusal(kernel, false, 53005, net::wire::icmpv4::port_unreachable, -111, Report::option);
     icmp_refusal(kernel, true, 53003, 10, -113, Report::connect);
     icmp_refusal(kernel, true, 53004, 6, -101, Report::read);
+    icmp_refusal(kernel, true, 0, net::wire::icmpv4::port_unreachable, -111, Report::option);
+    icmp_refusal(kernel, false, 0, net::wire::icmpv4::port_unreachable, -111, Report::connect);
+    socket_options(kernel, false, 52001); socket_options(kernel, true, 52002);
     udp_refusal(kernel, false); udp_refusal(kernel, true);
     autobind_connect(kernel, false); autobind_connect(kernel, true);
     const auto before = kernel.native_udp_executor().state(); expect(before.active && !before.failed);

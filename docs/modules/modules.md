@@ -19,7 +19,7 @@ Each module exposes a `ModuleManifest` with:
 - `ModuleResourceBudget` for maximum threads, services, memory pages, and
   handles.
 
-The current contract is module ABI 82 with public UAPI 0.17.0 and SDK manifest
+The current contract is module ABI 83 with public UAPI 0.17.0 and SDK manifest
 schema 1. The exporter writes the same generation into every SDK manifest, and
 the OS consumer rejects a mismatched generation before linking. Rebuild native
 extensions against the exact architecture/mode/compiler SDK; older generations
@@ -107,6 +107,30 @@ Roadmap tests cover:
 - the built-in module graph used by the kernel debug suite.
 
 ## ABI history
+
+ABI83 (`net-socket-options`, a WT2.3 follow-up) changes exported declarations
+against ABI82 (`git diff fd8abee.. -- include/`); UAPI stays 0.17.0 and only
+gains defines:
+
+- Streams. `ok/net/native_tcp_stream.hpp` adds `TcpSocketState` and
+  `TcpSocketOptions`; `TcpStreamSnapshot` appends `state`, `automatic` and
+  `options`, and the private stream record gains them, which changes the
+  service layout. `NativeTcpStreamService::bind` takes an `automatic` flag
+  (default false), and the service gains `mark_connected`, `disconnect` and
+  `set_options`; `connect` and accept set the socket state.
+- Endpoints. `EndpointTable` exports `send_bytes` and `receive_bytes`.
+- Linux tables. `ok/abi/linux_tcp_data.hpp` gains the per-profile
+  `tcp_so_reuseaddr`, `tcp_so_keepalive`, `tcp_so_sndbuf`, `tcp_so_rcvbuf`,
+  `tcp_so_acceptconn`, `tcp_so_protocol`, `tcp_so_domain` and
+  `tcp_errno_enoprotoopt`, and `tcp_sol_tcp` and `tcp_nodelay`.
+- UAPI defines. `ok/uapi/syscall.h` adds `OK_ENOPROTOOPT`,
+  `OK_SO_REUSEADDR`, `OK_SO_KEEPALIVE`, `OK_SO_SNDBUF`, `OK_SO_RCVBUF`,
+  `OK_SO_ACCEPTCONN`, `OK_SO_PROTOCOL`, `OK_SO_DOMAIN` and `OK_TCP_NODELAY`;
+  no existing value or record changes.
+
+Every exported marker, the exporter's validators and manifest, the
+compile-time assertions and the SDK contract tests move to 83, refuse 82 and
+84, and keep refusing the older values they listed.
 
 ABI82 (`net-socket-gaps`, the WT2.3 follow-up) changes exported declarations
 against ABI81 (`git diff 5815814.. -- include/`); UAPI stays 0.17.0:
