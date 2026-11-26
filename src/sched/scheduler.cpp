@@ -972,7 +972,7 @@ usize SchedulerState::audit_queues()
     for (auto &slot : slots_)
     {
         if (slot.state() != ProcessLifecycle::live) continue;
-        smp::CpuId placed = no_cpu;
+        u32 placed = 0;
         {
             TaskGuard guard{slot};
             auto &process = slot.pcb;
@@ -984,26 +984,26 @@ usize SchedulerState::audit_queues()
                     (slot.queued_cpu[index].load(std::memory_order_relaxed) != thread.queued_cpu ||
                      slot.on_cpu[index].load(std::memory_order_relaxed) != thread.on_cpu))
                     smp::count_check(smp::KernelCheck::queue, "placement mirror differs from its TCB");
-                if (!thread.native_active || thread.on_cpu != no_cpu) continue;
-                // stuck_completed: the wait completed without a wake.
+                if (!thread.native_active || thread.on_cpu != no_cpu || thread.queued_cpu != no_cpu) continue;
                 if (thread.state == ProcessState::blocked && !thread.wait_registration.active())
                 {
+                    // stuck_completed: the wait completed without a wake.
                     smp::count_check(smp::KernelCheck::audit_repairs, "audit: blocked thread with a completed wait");
                     thread.wait_reason = ThreadWaitReason::none;
                     thread.wait_key = 0;
                     thread.state = ProcessState::runnable;
-                    ++repairs;
                 }
-                // orphan_runnable: may run, but nothing holds an entry for it.
-                if (thread.queued_cpu == no_cpu && queue_admits_state(thread))
-                {
+                else if (queue_admits_state(thread))
+                    // orphan_runnable: may run, but nothing holds an entry for it.
                     smp::count_check(smp::KernelCheck::audit_repairs, "audit: runnable thread neither queued nor on a CPU");
-                    ++repairs;
-                    if (const auto cpu = enqueue_locked(slot, thread); cpu != no_cpu) placed = cpu;
-                }
+                else
+                    continue;
+                ++repairs;
+                if (const auto cpu = enqueue_locked(slot, thread); cpu != no_cpu) placed |= 1u << cpu;
             }
         }
-        notify_cpu(placed);
+        for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
+            if ((placed & (1u << cpu)) != 0) notify_cpu(cpu);
     }
     return repairs;
 }

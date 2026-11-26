@@ -315,8 +315,178 @@ void test_signal_termination_range()
     }
 }
 
+// The queue path (smp-scaling WP4a, spec 4.1 and 4.2) on one model CPU
+// and on two: transitions queue user threads, pick validates entries, and
+// the process state follows its threads.
+struct QueueFixture
+{
+    std::unique_ptr<Scheduler> owned{std::make_unique<Scheduler>()};
+    Scheduler &scheduler{*owned};
+    arch::CpuContext context{arch::configured_arch_operations().make_kernel_context(0x1000, 0x8000)};
+    explicit QueueFixture(usize cpus = 1)
+    {
+        CHECK(scheduler.configure_cpus(cpus));
+        CHECK(scheduler.set_online_cpus((1u << cpus) - 1));
+    }
+    ProcessId user()
+    {
+        auto pid = scheduler.create_user_process("queued-user", context);
+        CHECK(pid);
+        scheduler.find_thread(pid.value(), pid.value())->native_active = true;
+        CHECK(scheduler.set_runnable(pid.value()));
+        return pid.value();
+    }
+    ThreadControlBlock &thread(ProcessId pid, ThreadId tid = 0) { return *scheduler.find_thread(pid, tid ? tid : pid); }
+    // Picks on `cpu` and checks the identity.
+    void run(ProcessId pid, ThreadId tid = 0, smp::CpuId cpu = 0)
+    {
+        const auto picked = scheduler.pick(cpu);
+        CHECK(picked && picked->ref == (ThreadRef{pid, tid ? tid : pid}) && !picked->probed);
+        CHECK(thread(pid, tid).state == ProcessState::running && thread(pid, tid).on_cpu == cpu);
+    }
+};
+
+void test_queue_path_transitions()
+{
+    QueueFixture f;
+    const auto pid = f.user();
+    // Created and made runnable: queued on the only CPU.
+    CHECK(f.thread(pid).queued_cpu == 0 && f.scheduler.run_queue(0).size() == 1);
+    CHECK(f.scheduler.find(pid)->state() == ProcessState::runnable);
+    f.run(pid);
+    CHECK(f.scheduler.find(pid)->state() == ProcessState::running && f.scheduler.run_queue(0).empty());
+    // Armed, then completed while still on the CPU: put_prev queues it.
+    auto ticket = f.scheduler.register_current_wait(ThreadWaitReason::poll, 3);
+    CHECK(ticket && f.scheduler.find(pid)->state() == ProcessState::blocked);
+    CHECK(f.scheduler.complete_wait(ticket.value(), WaitCompletion::ready));
+    CHECK(f.thread(pid).queued_cpu == no_cpu && f.thread(pid).on_cpu == 0);
+    CHECK(f.scheduler.find(pid)->state() == ProcessState::runnable);
+    f.scheduler.put_prev(0);
+    CHECK(f.thread(pid).queued_cpu == 0 && f.thread(pid).on_cpu == no_cpu);
+    CHECK(f.thread(pid).state == ProcessState::runnable && !f.scheduler.cpu_slot(0).occupied());
+    // Parked, then completed: the completion queues it.
+    f.run(pid);
+    ticket = f.scheduler.register_current_wait(ThreadWaitReason::poll, 4);
+    CHECK(ticket);
+    f.scheduler.put_prev(0);
+    CHECK(f.thread(pid).queued_cpu == no_cpu && f.scheduler.run_queue(0).empty());
+    CHECK(f.scheduler.find(pid)->state() == ProcessState::blocked);
+    CHECK(f.scheduler.complete_wait(ticket.value(), WaitCompletion::timeout));
+    CHECK(f.thread(pid).queued_cpu == 0 && f.scheduler.run_queue(0).size() == 1);
+    CHECK(f.scheduler.wakes(WakeSource::timer) == 1 && f.scheduler.wakes(WakeSource::thread) == 1);
+    // A clone is queued at creation, after the queued leader (FIFO).
+    auto sibling = f.scheduler.create_thread_prepared(pid, f.context, [](ThreadControlBlock &created) {
+        created.native_active = true;
+        return Status::success();
+    });
+    CHECK(sibling && f.thread(pid, sibling.value()).queued_cpu == 0 && f.scheduler.run_queue(0).size() == 2);
+    f.run(pid);
+    f.scheduler.put_prev(0);
+    f.run(pid, sibling.value());
+    f.scheduler.put_prev(0);
+    f.run(pid);
+    f.scheduler.put_prev(0);
+    // A stopped process's entries are dropped at pick; continue queues them again.
+    CHECK(f.scheduler.stop_process(pid, 19));
+    CHECK(!f.scheduler.pick(0) && f.scheduler.run_queue(0).empty());
+    CHECK(f.thread(pid).queued_cpu == no_cpu && f.thread(pid, sibling.value()).queued_cpu == no_cpu);
+    CHECK(f.scheduler.continue_process(pid));
+    CHECK(f.scheduler.run_queue(0).size() == 2);
+    // A parked thread whose wait a signal would interrupt: probed, picked
+    // blocked, and runnable only once its resume completes the wait.
+    f.run(pid);
+    ticket = f.scheduler.register_current_wait(ThreadWaitReason::pipe_read, 5);
+    CHECK(ticket);
+    f.scheduler.put_prev(0);
+    CHECK(f.scheduler.probe_parked(*f.scheduler.find(pid), f.thread(pid)));
+    CHECK(!f.scheduler.probe_parked(*f.scheduler.find(pid), f.thread(pid)));
+    f.run(pid, sibling.value());
+    f.scheduler.put_prev(0);
+    const auto probed = f.scheduler.pick(0);
+    CHECK(probed && probed->ref == (ThreadRef{pid, pid}) && probed->probed);
+    CHECK(f.thread(pid).state == ProcessState::blocked && !f.thread(pid).probe && f.thread(pid).on_cpu == 0);
+    CHECK(!f.scheduler.resume_current(0));
+    CHECK(f.scheduler.complete_wait(ticket.value(), WaitCompletion::interrupted));
+    CHECK(f.scheduler.resume_current(0) && f.thread(pid).state == ProcessState::running);
+    f.scheduler.put_prev(0);
+    // A kernel_thread record is never queued by a transition.
+    auto kernel = f.scheduler.create_process("kernel-record", f.context);
+    CHECK(kernel && f.scheduler.set_runnable(kernel.value()));
+    CHECK(f.thread(kernel.value()).queued_cpu == no_cpu);
+    // Nothing for the audit to repair; an orphaned runnable thread is repaired once.
+    CHECK(f.scheduler.audit_queues() == 0);
+    // A missed enqueue (the leader made runnable behind the scheduler's back)
+    // and a blocked thread without a pending wait: one repair each.
+    CHECK(f.scheduler.block_process(pid) && f.scheduler.run_queue(0).empty());
+    f.thread(pid).state = ProcessState::runnable;
+    const auto repairs = smp::check_total(smp::KernelCheck::audit_repairs);
+    CHECK(f.scheduler.audit_queues() == 2 && f.thread(pid).queued_cpu == 0);
+    CHECK(f.thread(pid, sibling.value()).state == ProcessState::runnable && f.thread(pid, sibling.value()).queued_cpu == 0);
+    CHECK(smp::check_total(smp::KernelCheck::audit_repairs) == repairs + 2 && f.scheduler.audit_queues() == 0);
+    CHECK(smp::check_total(smp::KernelCheck::queue) == 0 && smp::check_total(smp::KernelCheck::pin) == 0);
+}
+
+void test_queue_path_two_cpus()
+{
+    QueueFixture f{2};
+    const auto pid = f.user();
+    CHECK(f.thread(pid).queued_cpu == 0);
+    // CPU 1 steals from CPU 0's queue; the CPU slot pins the process.
+    {
+        const smp::ScopedHostedCpu cpu{1};
+        f.run(pid, 0, 1);
+        CHECK(f.scheduler.cpu_slot(1).occupied() && f.scheduler.pin(pid));
+        f.scheduler.put_prev(1);
+    }
+    CHECK(f.thread(pid).queued_cpu == 1 && f.thread(pid).last_cpu == 1);
+    // An offline CPU's queue is closed and its entries move.
+    CHECK(f.scheduler.offline_cpu(1));
+    CHECK(f.scheduler.run_queue(1).closed() && f.thread(pid).queued_cpu == 0);
+    CHECK(f.scheduler.online_cpu(1) && !f.scheduler.run_queue(1).closed());
+    // An entry the affinity no longer admits is queued again where it may run.
+    CHECK(f.scheduler.set_thread_affinity(*f.scheduler.find(pid), f.thread(pid), 1u << 1));
+    CHECK(!f.scheduler.pick(0) && f.thread(pid).queued_cpu == 1);
+    // The idle handshake: an empty system halts; the waker's push wakes it.
+    // Without concurrent locks (a UP build) only the own queue counts and no
+    // CPU is ever woken by another.
+    constexpr bool concurrent = smp::concurrent_locks;
+    CHECK(f.scheduler.enter_idle(0) ==
+          (concurrent ? SchedulerState::IdleCheck::steal_hint : SchedulerState::IdleCheck::halt));
+    {
+        const smp::ScopedHostedCpu cpu{1};
+        f.run(pid, 0, 1);
+        auto ticket = f.scheduler.register_current_wait(ThreadWaitReason::poll, 9);
+        CHECK(ticket);
+        f.scheduler.put_prev(1);
+        CHECK(f.scheduler.enter_idle(1) == SchedulerState::IdleCheck::halt && f.scheduler.cpu_idle(1));
+        CHECK(!f.scheduler.take_wake_request(1));
+        {
+            const smp::ScopedHostedCpu waker{0};
+            CHECK(f.scheduler.complete_wait(ticket.value(), WaitCompletion::ready));
+        }
+        CHECK(f.scheduler.take_wake_request(1) == concurrent && !f.scheduler.take_wake_request(1));
+        CHECK(f.scheduler.enter_idle(1) == SchedulerState::IdleCheck::own_work && !f.scheduler.cpu_idle(1));
+        f.run(pid, 0, 1);
+        f.scheduler.put_prev(1);
+    }
+    // A reaped process keeps its slot while a pin holds it; the CPU slot's
+    // own pin went with the exit's put_prev of CPU 1.
+    {
+        const smp::ScopedHostedCpu cpu{1};
+        f.run(pid, 0, 1);
+    }
+    auto held = f.scheduler.pin(pid);
+    CHECK(held && f.scheduler.exit_process(pid, 0) && !f.scheduler.cpu_slot(1).occupied());
+    CHECK(f.scheduler.reap_process(pid) && !f.scheduler.find(pid) && f.scheduler.slot_of(pid));
+    held.release();
+    CHECK(!f.scheduler.slot_of(pid));
+    CHECK(smp::check_total(smp::KernelCheck::queue) == 0 && smp::check_total(smp::KernelCheck::pin) == 0);
+}
+
 int main()
 {
+    test_queue_path_transitions();
+    test_queue_path_two_cpus();
     test_signal_termination_range();
     test_identity_rearm_and_completion_order();
     test_stable_slots_and_lifecycle();
