@@ -1,9 +1,9 @@
 // Wait channels (smp-scaling WP4b, spec 4.3) on the real spin locks
 // (OK_HOSTED_LOCK_MODEL) with the lock-order checks on (OK_LOCK_DEBUG): the
-// hash itself (FIFO wakes, batches, generations, exhaustion), the
+// hash itself (FIFO wakes, batches, owner release, exhaustion), the
 // scheduler's use of it (A1 links, A2 wakes, owner unlink, exhaustion
 // retry, teardown), and host-thread races: the A3 insert-then-check of a
-// poll against a waker, and wakes against owner unlinks. Host threads stand
+// poll against a waker, and wakes against owner releases. Host threads stand
 // in for CPUs; no AP starts, no IPI is sent and no guest runs (scope=model).
 #include "ok/sched/scheduler.hpp"
 
@@ -40,7 +40,11 @@ constexpr auto pipe_read = static_cast<u8>(ThreadWaitReason::pipe_read);
 constexpr auto never = DeadlineHeap<deadline_keys>::never;
 using SmallHash = WaitHash<4, 8, smp::RankedSpinLock<smp::LockRank::wait_hash>>;
 
-WaitTicket ticket(u64 thread, u64 generation = 1) { return {thread, thread, generation, static_cast<u16>(thread)}; }
+constexpr u16 none = 0xffff;
+WaitHashTicket ticket(u64 thread, u64 generation = 1)
+{
+    return {static_cast<u32>(thread), static_cast<u32>(generation), static_cast<u16>(thread)};
+}
 
 void expect_clean_checks()
 {
@@ -68,63 +72,69 @@ template <typename Hash> Keys colliding_keys()
 }
 
 // Wakes take the channel's entries oldest first and leave the other channels
-// of the bucket alone; a handle names an entry only while that insertion is
-// linked: a waker's take or an owner's unlink moves its generation.
+// of the bucket alone. A taken entry stays its owner's until the owner
+// releases it; release frees it once, linked or not, and keeps the owner's
+// chain through `owner_next`.
 void hash_basics()
 {
     auto hash = std::make_unique<SmallHash>();
     const auto keys = colliding_keys<SmallHash>();
     const auto a = hash->insert(pipe_read, keys.first, ticket(1));
-    const auto b = hash->insert(pipe_read, keys.collides, ticket(2));
-    const auto c = hash->insert(pipe_read, keys.first, ticket(3));
+    const auto b = hash->insert(pipe_read, keys.collides, ticket(2), a);
+    const auto c = hash->insert(pipe_read, keys.first, ticket(3), b);
     const auto d = hash->insert(pipe_read, keys.apart, ticket(4));
-    CHECK(a && b && c && d && hash->claimed() == 4);
-    CHECK(a->bucket == b->bucket && a->bucket != d->bucket);
+    CHECK(a != none && b != none && c != none && d != none && hash->claimed() == 4);
+    CHECK(SmallHash::bucket_of(pipe_read, keys.first) == SmallHash::bucket_of(pipe_read, keys.collides));
+    CHECK(SmallHash::bucket_of(pipe_read, keys.first) != SmallHash::bucket_of(pipe_read, keys.apart));
     CHECK(hash->linked(pipe_read, keys.first) == 2 && hash->linked(pipe_read, keys.collides) == 1);
     // Another reason with the same key is another channel.
     CHECK(hash->linked(static_cast<u8>(ThreadWaitReason::pipe_write), keys.first) == 0);
-    std::array<WaitTicket, SmallHash::wake_batch> out{};
+    std::array<WaitHashTicket, SmallHash::wake_batch> out{};
     auto taken = hash->take(pipe_read, keys.first, out);
     CHECK(taken.count == 2 && !taken.more && out[0] == ticket(1) && out[1] == ticket(3));
     CHECK(hash->linked(pipe_read, keys.first) == 0 && hash->linked(pipe_read, keys.collides) == 1);
-    CHECK(hash->claimed() == 2);
-    // The waker took them: the owners' handles are stale now.
-    CHECK(!hash->unlink(*a) && !hash->unlink(*c));
-    // An owner drops its own entry once; its handle is then stale too.
-    CHECK(hash->unlink(*b) && !hash->unlink(*b));
+    // Taken entries stay claimed until their owner releases them.
+    CHECK(hash->claimed() == 4);
+    // The owner's chain c -> b -> a: release walks it; a taken entry was
+    // not linked any more, a pending one is detached.
+    u16 next = none;
+    CHECK(!hash->release(c, next) && next == b);
+    CHECK(hash->release(b, next) && next == a);
+    CHECK(!hash->release(a, next) && next == none);
     CHECK(hash->linked(pipe_read, keys.collides) == 0 && hash->claimed() == 1);
-    // A reused entry has a new generation: the old handle cannot reach it.
+    // A released entry is free: a second release does nothing.
+    CHECK(!hash->release(b, next) && next == none && hash->claimed() == 1);
+    // A freed entry is reused.
     const auto reused = hash->insert(pipe_read, keys.collides, ticket(5));
-    CHECK(reused && hash->claimed() == 2);
-    CHECK(!hash->unlink(*a) && !hash->unlink(*b) && !hash->unlink(*c));
-    CHECK(hash->linked(pipe_read, keys.collides) == 1);
-    CHECK(hash->unlink(*reused) && hash->unlink(*d) && hash->claimed() == 0);
-    // An empty channel takes nothing.
+    CHECK(reused != none && hash->claimed() == 2 && hash->linked(pipe_read, keys.collides) == 1);
+    CHECK(hash->release(reused) && hash->release(d) && hash->claimed() == 0);
+    // An empty channel takes nothing; a bad index releases nothing.
     taken = hash->take(pipe_read, keys.apart, out);
     CHECK(taken.count == 0 && !taken.more);
-    // A broken handle (bad index or bucket) is refused.
-    CHECK(!hash->unlink({}) && !hash->unlink({7, 200, 0}) && !hash->unlink({100, 0, 0}));
+    CHECK(!hash->release(none) && !hash->release(100));
 }
 
-// The pool is fixed: an insert beyond it fails and counts, and a freed entry
-// serves the next insert.
+// The pool is fixed: an insert beyond it fails and counts, and a released
+// entry serves the next insert.
 void hash_exhaustion()
 {
     auto hash = std::make_unique<SmallHash>();
-    std::array<WaitHashHandle, SmallHash::capacity()> handles{};
-    for (usize i = 0; i < handles.size(); ++i)
+    std::array<u16, SmallHash::capacity()> entries{};
+    for (usize i = 0; i < entries.size(); ++i)
     {
-        const auto handle = hash->insert(pipe_read, i, ticket(i + 1));
-        CHECK(handle);
-        handles[i] = *handle;
+        entries[i] = hash->insert(pipe_read, i, ticket(i + 1));
+        CHECK(entries[i] != none);
     }
     CHECK(hash->claimed() == SmallHash::capacity() && hash->exhausted() == 0);
-    CHECK(!hash->insert(pipe_read, 99, ticket(9)) && hash->exhausted() == 1);
-    CHECK(!hash->insert(pipe_read, 99, ticket(9)) && hash->exhausted() == 2);
-    CHECK(hash->unlink(handles[3]));
+    CHECK(hash->insert(pipe_read, 99, ticket(9)) == none && hash->exhausted() == 1);
+    // A taken entry still counts until it is released.
+    std::array<WaitHashTicket, SmallHash::wake_batch> out{};
+    CHECK(hash->take(pipe_read, 3, out).count == 1);
+    CHECK(hash->insert(pipe_read, 99, ticket(9)) == none && hash->exhausted() == 2);
+    CHECK(!hash->release(entries[3]));
     const auto again = hash->insert(pipe_read, 99, ticket(9));
-    CHECK(again && again->index == handles[3].index && again->generation != handles[3].generation);
-    for (usize i = 0; i < handles.size(); ++i) static_cast<void>(hash->unlink(i == 3 ? *again : handles[i]));
+    CHECK(again == entries[3]);
+    for (usize i = 0; i < entries.size(); ++i) static_cast<void>(hash->release(entries[i]));
     CHECK(hash->claimed() == 0);
 }
 
@@ -135,9 +145,10 @@ void hash_batches()
     using Hash = WaitHash<2, 64, smp::RankedSpinLock<smp::LockRank::wait_hash>>;
     auto hash = std::make_unique<Hash>();
     const auto keys = colliding_keys<Hash>();
-    for (u64 i = 1; i <= 40; ++i) CHECK(hash->insert(pipe_read, keys.first, ticket(i)));
-    CHECK(hash->insert(pipe_read, keys.collides, ticket(99)));
-    std::array<WaitTicket, Hash::wake_batch> out{};
+    std::vector<u16> entries;
+    for (u64 i = 1; i <= 40; ++i) entries.push_back(hash->insert(pipe_read, keys.first, ticket(i)));
+    const auto other = hash->insert(pipe_read, keys.collides, ticket(99));
+    std::array<WaitHashTicket, Hash::wake_batch> out{};
     u64 next = 1;
     usize passes = 0;
     for (;;)
@@ -149,7 +160,9 @@ void hash_batches()
         if (!taken.more) break;
     }
     CHECK(next == 41 && passes == 3);
-    CHECK(hash->linked(pipe_read, keys.collides) == 1 && hash->claimed() == 1);
+    CHECK(hash->linked(pipe_read, keys.collides) == 1 && hash->claimed() == 41);
+    for (const auto entry : entries) CHECK(!hash->release(entry));
+    CHECK(hash->release(other) && hash->claimed() == 0);
 }
 
 struct Fixture
@@ -252,12 +265,12 @@ void scheduler_exhaustion()
     const smp::ScopedHostedCpu cpu{0};
     const auto pid = f.process();
     auto &channels = f.scheduler.wait_channels();
-    std::vector<WaitHashHandle> fillers;
+    std::vector<u16> fillers;
     for (usize i = 0; i < wait_hash_entries; ++i)
     {
-        const auto handle = channels.insert(static_cast<u8>(ThreadWaitReason::child), 1000 + i, ticket(400));
-        CHECK(handle);
-        fillers.push_back(*handle);
+        const auto entry = channels.insert(static_cast<u8>(ThreadWaitReason::child), 1000 + i, ticket(400));
+        CHECK(entry != none);
+        fillers.push_back(entry);
     }
     CHECK(channels.claimed() == wait_hash_entries);
     const auto unqueued = smp::evidence_total(&smp::EvidenceCpu::unqueued);
@@ -276,7 +289,7 @@ void scheduler_exhaustion()
     CHECK(f.thread(pid).wait_registration.completion() == WaitCompletion::ready);
     CHECK(f.thread(pid).state == ProcessState::runnable && f.thread(pid).queued_cpu != no_cpu);
     CHECK(f.scheduler.earliest_deadline() == never);
-    for (const auto &handle : fillers) CHECK(channels.unlink(handle));
+    for (const auto entry : fillers) CHECK(channels.release(entry));
     CHECK(channels.claimed() == 0);
     // Entries are back: the next arm links again.
     f.run(pid);
@@ -390,10 +403,11 @@ void a3_insert_then_check()
                 woken.load());
 }
 
-// Wakes against owner unlinks on one channel: four CPUs link and drop their
-// own entries while two wake the channel. Every entry is freed exactly once
-// (the pool ends empty) and no lock order is broken.
-void wake_versus_unlink()
+// Wakes against owner releases on one channel: four CPUs link and release
+// their own entries while two wake the channel. Every entry is detached once
+// (by a take or by its release), freed once by its owner (the pool ends
+// empty), and no lock order is broken.
+void wake_versus_release()
 {
     auto hash = std::make_unique<WaitChannels>();
     std::atomic<bool> stop{false};
@@ -405,17 +419,16 @@ void wake_versus_unlink()
             u64 generation = 1;
             while (!stop.load(std::memory_order_acquire))
             {
-                const auto handle = hash->insert(pipe_read, 5, ticket(cpu + 1, generation++));
-                CHECK(handle);
+                const auto entry = hash->insert(pipe_read, 5, ticket(cpu + 1, generation++));
+                CHECK(entry != none);
                 for (int spin = 0; spin < 16; ++spin) std::atomic_signal_fence(std::memory_order_seq_cst);
-                if (hash->unlink(*handle)) owner_unlinks.fetch_add(1, std::memory_order_relaxed);
-                CHECK(!hash->unlink(*handle));
+                if (hash->release(entry)) owner_unlinks.fetch_add(1, std::memory_order_relaxed);
             }
         });
     for (smp::CpuId cpu = cpus; cpu < cpus + 2; ++cpu)
         threads.emplace_back([&, cpu] {
             const smp::ScopedHostedCpu hosted{cpu};
-            std::array<WaitTicket, WaitChannels::wake_batch> out{};
+            std::array<WaitHashTicket, WaitChannels::wake_batch> out{};
             while (!stop.load(std::memory_order_acquire))
                 taken.fetch_add(hash->take(pipe_read, 5, out).count, std::memory_order_relaxed);
         });
@@ -425,7 +438,7 @@ void wake_versus_unlink()
     CHECK(hash->claimed() == 0 && hash->linked(pipe_read, 5) == 0);
     CHECK(owner_unlinks.load() > 0 && taken.load() > 0);
     expect_clean_checks();
-    std::printf("wake_vs_unlink owner_unlinks=%zu taken=%zu\n", owner_unlinks.load(), taken.load());
+    std::printf("wake_vs_release owner_unlinks=%zu taken=%zu\n", owner_unlinks.load(), taken.load());
 }
 } // namespace
 
@@ -437,7 +450,7 @@ int main()
     scheduler_owner_unlink();
     scheduler_exhaustion();
     a3_insert_then_check();
-    wake_versus_unlink();
+    wake_versus_release();
     std::printf("OK_WAIT_HASH scope=model checks=%zu buckets=%zu entries=%zu model_cpus=%zu guest=0 hardware_smp=0\n",
                 checks.load(), wait_hash_buckets, wait_hash_entries, cpus + 2);
 }

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Wait channels of smp-scaling WP4b (spec 4.3) under all ten profiles.
 
-The wait hash itself (FIFO wakes, batches, generations, exhaustion), the
+The wait hash itself (FIFO wakes, batches, owner release, exhaustion), the
 scheduler's channel links (A1 arms, A2 wakes, owner unlink, the exhaustion
 retry, teardown) and host-thread races on the real spin locks
 (OK_HOSTED_LOCK_MODEL) with the lock-order checks on (OK_LOCK_DEBUG): the A3
-insert-then-check of a poll against a waker, and wakes against owner unlinks.
+insert-then-check of a poll against a waker, and wakes against owner releases.
 Model coverage only: host threads stand in for CPUs; no AP starts, no IPI is
 sent and no guest or hardware SMP executes.
 """

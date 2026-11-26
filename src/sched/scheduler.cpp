@@ -2307,17 +2307,21 @@ bool SchedulerState::link_wait(WaitTicket ticket, ThreadWaitReason reason, u64 k
 {
     if (ticket.index >= max_thread_slots) return false;
     auto &links = wait_links_[ticket.index];
-    std::optional<WaitHashHandle> handle{};
+    u16 entry = WaitChannels::none;
     if (links.count < max_wait_links)
-        handle = wait_channels_.insert(static_cast<u8>(reason), key, ticket);
-    if (handle)
+        entry = wait_channels_.insert(static_cast<u8>(reason), key,
+                                      {static_cast<u32>(ticket.thread), static_cast<u32>(ticket.generation), ticket.index},
+                                      links.head);
+    if (entry != WaitChannels::none)
     {
         auto &slot = slots_[ticket.index / max_threads_per_process];
         TaskHold hold{slot};
         const auto &thread = slot.pcb.threads_[ticket.index % max_threads_per_process];
         if (thread.wait_registration.pending(ticket) && links.count < max_wait_links)
         {
-            links.handles[links.count++] = *handle;
+            // The entry chains to the previous head (the owner's alone).
+            links.head = entry;
+            ++links.count;
             return true;
         }
     }
@@ -2337,7 +2341,7 @@ bool SchedulerState::link_wait(WaitTicket ticket, ThreadWaitReason reason, u64 k
         return false;
     }
     // The wait completed meanwhile: the entry is not recorded, so drop it now.
-    static_cast<void>(wait_channels_.unlink(*handle));
+    static_cast<void>(wait_channels_.release(entry));
     return false;
 }
 
@@ -2362,8 +2366,26 @@ void SchedulerState::release_wait_links(u16 index)
         taken = links;
         links = {};
     }
-    // A handle whose entry a waker took no longer matches its generation.
-    for (usize i = 0; i < taken.count; ++i) static_cast<void>(wait_channels_.unlink(taken.handles[i]));
+    // Each entry is detached if no waker took it, then freed.
+    u16 next = taken.head;
+    for (usize i = 0; i < taken.count && next != WaitChannels::none; ++i)
+    {
+        const u16 entry = next;
+        static_cast<void>(wait_channels_.release(entry, next));
+    }
+}
+
+std::optional<WaitTicket> SchedulerState::pending_ticket(u16 index, u32 thread, u32 generation)
+{
+    if (index >= max_thread_slots) return std::nullopt;
+    auto &slot = slots_[index / max_threads_per_process];
+    TaskHold hold{slot};
+    const auto &tcb = slot.pcb.threads_[index % max_threads_per_process];
+    const auto ticket = tcb.wait_registration.ticket();
+    if (tcb.slot_state == ThreadSlotState::free || static_cast<u32>(tcb.tid) != thread ||
+        !tcb.wait_registration.active() || static_cast<u32>(ticket.generation) != generation)
+        return std::nullopt;
+    return ticket;
 }
 
 void SchedulerState::release_wait_links(const ProcessControlBlock &process, const ThreadControlBlock &thread)
@@ -2411,9 +2433,11 @@ bool SchedulerState::arm_wait_deadline(WaitTicket ticket, u64 deadline, Deadline
     const DeadlineLock::Guard guard{deadline_lock_};
     auto &entry = deadline_waits_[ticket.index];
     // One wait, one deadline: the earlier of two arms of the same wait.
-    if (deadlines_.contains(ticket.index) && entry.ticket == ticket && deadlines_.when(ticket.index) <= deadline)
+    const DeadlineEntry armed{static_cast<u32>(ticket.thread), static_cast<u32>(ticket.generation), action};
+    if (deadlines_.contains(ticket.index) && entry.thread == armed.thread && entry.generation == armed.generation &&
+        deadlines_.when(ticket.index) <= deadline)
         return true;
-    entry = {ticket, action};
+    entry = armed;
     deadlines_.set(ticket.index, deadline);
     publish_earliest_locked();
     return true;
@@ -2489,17 +2513,20 @@ usize SchedulerState::expire_deadlines(u64 now, std::span<u16, 32> processes)
                 processes[written++] = static_cast<u16>(item.key - deadline_thread_keys);
                 continue;
             }
-            // The ticket rejects a wait that completed or re-armed meanwhile.
+            // Only the wait the key was armed for: one that completed or
+            // re-armed meanwhile does not match.
+            const auto ticket = pending_ticket(item.key, item.entry.thread, item.entry.generation);
+            if (!ticket) continue;
             switch (item.entry.action)
             {
             case DeadlineAction::timeout:
-                static_cast<void>(complete_wait(item.entry.ticket, WaitCompletion::timeout));
+                static_cast<void>(complete_wait(*ticket, WaitCompletion::timeout));
                 break;
             case DeadlineAction::retry:
-                static_cast<void>(complete_wait(item.entry.ticket, WaitCompletion::ready, WakeSource::timer));
+                static_cast<void>(complete_wait(*ticket, WaitCompletion::ready, WakeSource::timer));
                 break;
             case DeadlineAction::probe:
-                static_cast<void>(probe_wait(item.entry.ticket));
+                static_cast<void>(probe_wait(*ticket));
                 break;
             }
         }
@@ -2585,14 +2612,16 @@ u64 SchedulerState::wakes(WakeSource source) const
 void SchedulerState::wake_waiters(ThreadWaitReason reason, u64 key, WakeSource source)
 {
     smp::check_exclusive("SchedulerState::wake_waiters");
-    std::array<WaitTicket, WaitChannels::wake_batch> batch{};
+    std::array<WaitHashTicket, WaitChannels::wake_batch> batch{};
     for (;;)
     {
-        // Unlinked under the bucket lock, completed after releasing it
-        // (bucket -> task never nests). A stale ticket completes nothing.
+        // Detached under the bucket lock, completed after releasing it
+        // (bucket -> task never nests). A wait that completed or re-armed
+        // since it linked the entry does not match.
         const auto taken = wait_channels_.take(static_cast<u8>(reason), key, batch);
         for (usize i = 0; i < taken.count; ++i)
-            static_cast<void>(complete_wait(batch[i], WaitCompletion::ready, source));
+            if (const auto ticket = pending_ticket(batch[i].index, batch[i].thread, batch[i].generation))
+                static_cast<void>(complete_wait(*ticket, WaitCompletion::ready, source));
         if (!taken.more) break;
     }
 }

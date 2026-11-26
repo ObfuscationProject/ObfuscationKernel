@@ -489,9 +489,11 @@ using WaitChannels = WaitHash<wait_hash_buckets, wait_hash_entries, WaitHashLock
 // The channel entries one wait may hold (a poll over many descriptors); a
 // wait that needs more re-evaluates on a timer instead (wait_hash_unqueued).
 inline constexpr usize max_wait_links = 16;
+// A thread slot's channel entries: the head of its chain through them
+// (WaitHash keeps the links) and how many there are. The owner's alone.
 struct WaitLinks
 {
-    std::array<WaitHashHandle, max_wait_links> handles{};
+    u16 head{0xffff};
     u8 count{};
 };
 
@@ -1191,6 +1193,8 @@ class SchedulerState
     bool link_wait(WaitTicket ticket, ThreadWaitReason reason, u64 key);
     void release_wait_links(u16 index);
     void publish_earliest_locked();
+    // The full ticket of the pending wait a compact one names, if still pending.
+    [[nodiscard]] std::optional<WaitTicket> pending_ticket(u16 index, u32 thread, u32 generation);
     void count_wake(WakeSource source);
     [[nodiscard]] bool steal_eligible(ThreadHandle handle, smp::CpuId victim, smp::CpuId cpu) const;
     // The CPU 0 fallback of select_cpu admits a thread whose affinity names no configured CPU.
@@ -1313,9 +1317,12 @@ class SchedulerState
     // and the earliest deadline for lock-free checks.
     DeadlineLock deadline_lock_{};
     DeadlineHeap<deadline_keys> deadlines_{};
+    // The wait a thread key belongs to (its tid and the low 32 bits of its
+    // generation; the slot is the key) and what its expiry does.
     struct DeadlineEntry
     {
-        WaitTicket ticket{};
+        u32 thread{};
+        u32 generation{};
         DeadlineAction action{};
     };
     std::array<DeadlineEntry, deadline_thread_keys> deadline_waits_{};
