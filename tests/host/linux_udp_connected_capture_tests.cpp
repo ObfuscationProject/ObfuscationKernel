@@ -119,7 +119,9 @@ template <lu::Profile P> void state_and_precedence(Kernel &kernel,bool socketcal
   const auto untouched=kernel.native_udp().binding(f.endpoint).value();
   const auto before=mock::copies;
   expect(peername(f,0,~uptr{0})==-static_cast<i64>(lu::UdpConstants<P>::not_connected_errno_number()));
-  expect(mock::copies==before+(socketcall?1:0));
+  // A socketcall is classified at capture from one copied argument head
+  // (TcpSocketcall decides whether TCP owns the descriptor); decode copies again.
+  expect(mock::copies==before+(socketcall?2:0));
   input<P>();
   expect(connect(f,16,-1,0)==error<P>(lu::UdpErrno::e_badf));
   expect(connect(f,-1,0,0)==error<P>(lu::UdpErrno::e_inval));
