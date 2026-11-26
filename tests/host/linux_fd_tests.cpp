@@ -42,9 +42,10 @@ namespace ok::user::native
 struct SyscallOriginTestAccess
 {
     template <lu::Profile P> static u64 exhaust(SyscallOriginTable<P> &table)
-    { const auto previous = table.image_sequence_; table.image_sequence_ = ~u64{0}; return previous; }
-    template <lu::Profile P> static void restore(SyscallOriginTable<P> &table, u64 previous) { table.image_sequence_ = previous; }
-    template <lu::Profile P> static u64 sequence(const SyscallOriginTable<P> &table) { return table.image_sequence_; }
+    { return table.image_sequence_.exchange_count(smp::PerCpuSequence::limit); }
+    template <lu::Profile P> static void restore(SyscallOriginTable<P> &table, u64 previous) { table.image_sequence_.exchange_count(previous); }
+    // The calling CPU's count of the per-CPU sequence.
+    template <lu::Profile P> static u64 sequence(const SyscallOriginTable<P> &table) { return table.image_sequence_.count(); }
     template <lu::Profile P> static bool vacant(const SyscallOriginTable<P> &table, usize slot)
     {
         using Table = SyscallOriginTable<P>;
@@ -68,9 +69,10 @@ struct VfsStatContinuationTestAccess
         [[nodiscard]] bool operator==(const Snapshot &) const = default;
     };
     template <lu::Profile P> static u64 exhaust(VfsStatContinuation<P> &table)
-    { const auto previous = table.images_; table.images_ = ~u64{0}; return previous; }
-    template <lu::Profile P> static void restore(VfsStatContinuation<P> &table, u64 previous) { table.images_ = previous; }
-    template <lu::Profile P> static u64 sequence(const VfsStatContinuation<P> &table) { return table.images_; }
+    { return table.images_.exchange_count(smp::PerCpuSequence::limit); }
+    template <lu::Profile P> static void restore(VfsStatContinuation<P> &table, u64 previous) { table.images_.exchange_count(previous); }
+    // The calling CPU's count of the per-CPU sequence.
+    template <lu::Profile P> static u64 sequence(const VfsStatContinuation<P> &table) { return table.images_.count(); }
     template <lu::Profile P> static Snapshot snapshot(const VfsStatContinuation<P> &table, usize slot)
     {
         const auto &r = table.records_[slot];
@@ -490,7 +492,7 @@ void loaded_image_cleanup(Kernel &kernel, sched::ProcessId pid)
             ++calls; return native::install(*process, replacement.value(), {{0x44, 0x55}});
         }).code() == StatusCode::overflow);
         CHECK(calls == 1 && native::runtime_failure.code() == StatusCode::overflow);
-        CHECK(native::VfsStatContinuationTestAccess::sequence(native::vfs_continuations) == ~u64{0});
+        CHECK(native::VfsStatContinuationTestAccess::sequence(native::vfs_continuations) == smp::PerCpuSequence::limit);
         native::VfsStatContinuationTestAccess::restore(native::vfs_continuations, vfs_sequence);
         CHECK(native::SyscallOriginTestAccess::sequence(native::syscall_origins) == origin_sequence + 1);
         CHECK(native::SyscallOriginTestAccess::vacant(native::syscall_origins, lease.slot));
@@ -612,7 +614,7 @@ void loaded_image_cleanup(Kernel &kernel, sched::ProcessId pid)
         const auto vfs_sequence = native::VfsStatContinuationTestAccess::exhaust(native::vfs_continuations);
         const auto allocations = native::page_pool.allocations();
         CHECK(native::prepare_native_thread(unpublished).code() == StatusCode::overflow);
-        CHECK(native::VfsStatContinuationTestAccess::sequence(native::vfs_continuations) == ~u64{0});
+        CHECK(native::VfsStatContinuationTestAccess::sequence(native::vfs_continuations) == smp::PerCpuSequence::limit);
         native::VfsStatContinuationTestAccess::restore(native::vfs_continuations, vfs_sequence);
         CHECK(native::SyscallOriginTestAccess::sequence(native::syscall_origins) == origin_sequence + 1);
         CHECK(native::SyscallOriginTestAccess::vacant(native::syscall_origins, retired_lease.slot));

@@ -70,6 +70,12 @@ class PerCpuSequence final
         const auto cpu = current_cpu();
         return cpu >= max_cpus || counts_[cpu] == limit;
     }
+    // How many values this CPU handed out.
+    [[nodiscard]] u64 count() const noexcept
+    {
+        const auto cpu = current_cpu();
+        return cpu < max_cpus ? counts_[cpu] : 0;
+    }
     // Fault injection for hosted tests: replaces this CPU's count (`limit`
     // exhausts it) and returns the previous one.
     u64 exchange_count(u64 count) noexcept
