@@ -189,6 +189,14 @@ const PosixService::FileDescriptor *PosixService::descriptor(Fd fd) const
     return scheduler_ == nullptr || slot == nullptr || !slot->used ? nullptr
                                                                    : scheduler_->open_description(slot->description);
 }
+sched::PinnedDescription PosixService::pin(Fd fd)
+{
+    if (scheduler_ == nullptr) return {};
+    // Only the caller's own thread closes a single-threaded process's slots.
+    const auto bound = caller();
+    const bool shared = !bound.process || bound.process->live_count() > 1;
+    return scheduler_->pin_descriptor(resources(), fd, shared);
+}
 Result<Fd> PosixService::allocate_fd(Fd minimum)
 {
     if (minimum < 0)

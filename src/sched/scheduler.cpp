@@ -1769,7 +1769,17 @@ Result<ProcessId> SchedulerState::fork_process(ProcessId parent, bool publish)
     const auto &parent_resources = source->resources();
     auto &child_resources = child->resources();
     child_resources.personality = parent_resources.personality;
-    child_resources.files = parent_resources.files;
+    {
+        // The parent's table under its files lock, the duplicated references
+        // under ofd_table (files -> ofd_table); the child is not visible yet.
+        const FilesLock::Lock::Guard files(source->resources().files_lock.lock());
+        const OfdTableLock::Guard table(ofd_table_);
+        child_resources.files = parent_resources.files;
+        for (const auto &slot : child_resources.files.entries())
+            if (slot.used)
+                if (auto *description = open_description(slot.description))
+                    ++description->references;
+    }
     child_resources.memory = parent_resources.memory;
     child_resources.mappings = parent_resources.mappings;
     child_resources.cwd = parent_resources.cwd;
@@ -1781,10 +1791,6 @@ Result<ProcessId> SchedulerState::fork_process(ProcessId parent, bool publish)
     child_resources.next_mapping_address = parent_resources.next_mapping_address;
     child_resources.file_mode_mask = parent_resources.file_mode_mask;
     child_resources.memory_limits = parent_resources.memory_limits;
-    for (const auto &slot : child->fd_table().entries())
-        if (slot.used)
-            if (auto *description = open_description(slot.description))
-                ++description->references;
     child->set_parent(parent);
     child->group_ = source->group_;
     child->session_ = source->session_;
@@ -1913,12 +1919,8 @@ Status SchedulerState::replace_image(ProcessId pid, arch::CpuContext context, co
         if (thread.entry_stack.pool || thread.kernel_stack_top)
             return Status::busy("entry stack references must be escrowed before exec");
     if (native_tcp_service_) native_tcp_service_->cancel_process(pid);
-    for (i32 fd = 0; fd < static_cast<i32>(max_process_fds); ++fd)
-    {
-        const auto *slot = process->fd_table().entry(fd);
-        if (slot->used && slot->close_on_exec)
-            static_cast<void>(close_descriptor(process->resources(), fd));
-    }
+    // Cleared under the files lock a batch at a time, released after it (spec 4.12).
+    static_cast<void>(close_on_exec_descriptors(process->resources()));
     process->memory_map() = memory;
     // Ordinary successful exec retains effective IDs and refreshes saved IDs.
     // Executable set-ID bits and secure-exec are not enabled by this transition.

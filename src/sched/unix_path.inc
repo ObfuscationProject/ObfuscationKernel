@@ -35,6 +35,7 @@ bool SchedulerState::is_unix_socket(u16 description) const
 }
 Result<UnixEndpointHandle> SchedulerState::reserve_unix_endpoint()
 {
+    const OfdGuard table(ofd_table_);
     if (next_unix_endpoint_generation_ == ~u64{0})
         return Status::overflow("UNIX endpoint generation cannot wrap");
     for (usize index = 0; index < unix_endpoints_.size(); ++index)
@@ -67,22 +68,27 @@ Status SchedulerState::shutdown_endpoint_status() const
 Result<i32> SchedulerState::create_unix_socket(ProcessResources &resources, bool close_on_exec, u32 status_flags)
 {
     if (status_flags & ~0x0800u) return Status::invalid_argument("unsupported UNIX status flags");
-    i32 fd = -1;
-    for (i32 candidate = 0; candidate < static_cast<i32>(max_process_fds); ++candidate)
-        if (!resources.files.contains(candidate)) { fd = candidate; break; }
-    if (fd < 0) return Status::process_file_limit("UNIX socket descriptor table is full");
-    auto endpoint = reserve_unix_endpoint(); if (!endpoint) return endpoint.status();
+    auto reserved = reserve_descriptor_slot(resources);
+    if (!reserved)
+        return reserved.status().code() == StatusCode::process_file_limit
+            ? Status::process_file_limit("UNIX socket descriptor table is full") : reserved.status();
+    auto slot = reserved.value();
+    const auto fd = slot.fd;
+    auto endpoint = reserve_unix_endpoint();
+    if (!endpoint) { cancel_descriptor_slot(resources, slot); return endpoint.status(); }
     auto description = allocate_description({.readable = true, .writable = true,
         .flags = 2u | status_flags, .unix_endpoint = endpoint.value()});
     if (!description)
     {
+        cancel_descriptor_slot(resources, slot);
         static_cast<void>(release_unix_endpoint(endpoint.value()));
         return description.status();
     }
-    const auto installed = install_descriptor(resources, fd, description.value(), close_on_exec);
+    const auto installed = install_reserved_descriptor(resources, slot, description.value(), close_on_exec);
     if (!installed)
     {
-        *open_description(description.value()) = {};
+        cancel_descriptor_slot(resources, slot);
+        discard_description(description.value());
         static_cast<void>(release_unix_endpoint(endpoint.value()));
         return installed;
     }
@@ -100,6 +106,7 @@ Status SchedulerState::bind_unix_socket(u16 description, fs::SocketPathReference
 {
     if (auto status = validate_unix_bind(description); !status) return status;
     if (!binding.valid()) return Status::invalid_argument("UNIX bind has no retained socket identity");
+    const OfdGuard table(ofd_table_);
     for (const auto &existing : unix_endpoints_)
         if (existing.used && existing.binding && existing.binding->same_identity(binding))
             return Status::already_exists("socket node already has a live UNIX endpoint");
@@ -110,6 +117,7 @@ Status SchedulerState::bind_unix_socket(u16 description, fs::SocketPathReference
 }
 Status SchedulerState::listen_unix_socket(u16 description, usize backlog, UnixPeerCredentials credentials)
 {
+    const OfdGuard table(ofd_table_);
     auto *endpoint = unix_endpoint(description);
     if (!is_unix_socket(description) || !endpoint)
         return Status::bad_descriptor("listen requires a pathname UNIX socket");
@@ -141,35 +149,60 @@ Status SchedulerState::connect_unix_socket(u16 description, const fs::SocketPath
     if (!listener) return Status::not_found("socket node has no live UNIX listener");
     if (listener->pending_count >= listener->backlog || listener->pending_count == max_unix_backlog)
         return Status::would_block("UNIX listener backlog is full");
+    const auto listener_slot = static_cast<usize>(listener - unix_endpoints_.data());
+    const auto listener_generation = listener->generation;
     std::array<u16, 2> buffers{invalid_description, invalid_description};
-    usize count{};
-    for (usize index = 0; index < pipes_.size() && count != buffers.size(); ++index)
-        if (!pipes_[index].used) buffers[count++] = static_cast<u16>(index);
-    if (count != buffers.size()) return Status::system_file_limit("UNIX connection needs two stream buffers");
-    auto server = reserve_unix_endpoint(); if (!server) return server.status();
+    if (!claim_pipes(buffers)) return Status::system_file_limit("UNIX connection needs two stream buffers");
+    const auto undo_pipes = [&] { unclaim_pipe(buffers[0]); unclaim_pipe(buffers[1]); };
+    auto server = reserve_unix_endpoint();
+    if (!server) { undo_pipes(); return server.status(); }
     auto child = allocate_description({.readable = true, .writable = true, .flags = 2u,
         .pipe = buffers[1], .unix_write_pipe = buffers[0], .unix_endpoint = server.value()});
     if (!child)
     {
+        undo_pipes();
         static_cast<void>(release_unix_endpoint(server.value()));
         return child.status();
     }
-    // All fallible admission has completed. Queue ownership is published with
-    // both transport endpoints, so data may precede accept without false EOF.
-    pipes_[buffers[0]] = PipeBuffer{.used = true};
-    pipes_[buffers[1]] = PipeBuffer{.used = true};
-    auto *client_open = open_description(description);
-    client_open->pipe = buffers[0]; client_open->unix_write_pipe = buffers[1];
-    client->state = UnixEndpointState::connected;
-    client->peer_credentials = listener->listen_credentials;
-    auto *server_endpoint = unix_endpoint(child.value());
-    server_endpoint->state = UnixEndpointState::connected;
-    server_endpoint->peer_credentials = credentials;
-    auto *server_open = open_description(child.value());
-    server_open->references = 1; server_open->unix_queue_references = 1;
-    listener->pending[listener->pending_count++] = child.value();
+    u16 listener_description = invalid_description;
+    {
+        // All fallible admission has completed. Queue ownership is published with
+        // both transport endpoints, so data may precede accept without false EOF.
+        // The client and listener are checked again under the table lock.
+        const OfdGuard table(ofd_table_);
+        auto &queue = unix_endpoints_[listener_slot];
+        client = unix_endpoint(description);
+        if (!client || (client->state != UnixEndpointState::unbound && client->state != UnixEndpointState::bound) ||
+            !queue.used || queue.generation != listener_generation || queue.state != UnixEndpointState::listening ||
+            queue.pending_count >= queue.backlog || queue.pending_count == max_unix_backlog)
+            listener = nullptr;
+        else
+        {
+            listener = &queue;
+            auto *client_open = open_description(description);
+            client_open->pipe = buffers[0]; client_open->unix_write_pipe = buffers[1];
+            count_pipe_endpoints(*client_open, +1);
+            client->state = UnixEndpointState::connected;
+            client->peer_credentials = listener->listen_credentials;
+            auto *server_endpoint = unix_endpoint(child.value());
+            server_endpoint->state = UnixEndpointState::connected;
+            server_endpoint->peer_credentials = credentials;
+            auto *server_open = open_description(child.value());
+            server_open->references = 1; server_open->unix_queue_references = 1;
+            count_pipe_endpoints(*server_open, +1);
+            listener->pending[listener->pending_count++] = child.value();
+            listener_description = listener->description;
+        }
+    }
+    if (!listener)
+    {
+        discard_description(child.value());
+        static_cast<void>(release_unix_endpoint(server.value()));
+        undo_pipes();
+        return Status::busy("UNIX listener or socket changed during connect");
+    }
     // A poll on the listener watches this channel (its readiness: pending_count).
-    wake_waiters(ThreadWaitReason::pipe_read, unix_listener_wait_key(listener->description));
+    wake_waiters(ThreadWaitReason::pipe_read, unix_listener_wait_key(listener_description));
     return {};
 }
 Result<UnixPeerCredentials> SchedulerState::unix_peer_credentials(u16 description) const
@@ -198,6 +231,9 @@ Result<UnixAccept> SchedulerState::prepare_unix_accept(ProcessResources &resourc
     bool close_on_exec, u32 status_flags)
 {
     if (status_flags & ~0x0800u) return Status::invalid_argument("unsupported UNIX accept status flags");
+    if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
+    const FilesGuard files(resources.files_lock.lock());
+    const OfdGuard table(ofd_table_);
     auto *endpoint = unix_endpoint(description);
     if (!is_unix_socket(description) || !endpoint || endpoint->state != UnixEndpointState::listening)
         return Status::invalid_argument("UNIX accept requires a live listener");
@@ -211,62 +247,75 @@ Result<UnixAccept> SchedulerState::prepare_unix_accept(ProcessResources &resourc
     if (fd < 0) return Status::process_file_limit("UNIX accept descriptor table is full");
     const auto child = endpoint->pending[0];
     if (!canonical_unix_description(child)) return Status::io_error("UNIX listener child lost its canonical owner");
-    auto token = next_descriptor_token(); if (!token) return token.status();
-    if (auto status = retain_description(description); !status) return status;
-    if (auto status = retain_description(child); !status)
-    {
-        record_resource_failure(release_description(description), -1, description, 0, false);
-        return status;
-    }
-    endpoint->accept_token = token.value();
-    resources.files.entry(fd)->reservation = token.value();
+    if (next_unix_receive_token_ == ~u64{0}) return Status::overflow("shared descriptor operation token exhausted");
+    auto *listener_open = open_description(description);
+    auto *child_open = open_description(child);
+    if (listener_open->references == ~usize{0} || child_open->references == ~usize{0})
+        return Status::overflow("open description reference limit exceeded");
+    // Both are live (a listener's description and a canonical child): these
+    // holds are plain references, with no first retain.
+    const auto token = next_unix_receive_token_++;
+    ++listener_open->references;
+    ++child_open->references;
+    endpoint->accept_token = token;
+    resources.files.entry(fd)->reservation = token;
     ++resources.unix_receive_operations; ++active_unix_receives_;
-    return UnixAccept{*this, resources, description, child, open_description(description)->unix_endpoint,
-        token.value(), fd, close_on_exec, status_flags, unix_endpoint(child)->peer_credentials};
+    return UnixAccept{*this, resources, description, child, listener_open->unix_endpoint,
+        token, fd, close_on_exec, status_flags, unix_endpoint(child)->peer_credentials};
 }
 void SchedulerState::cancel_unix_accept(UnixAccept &operation)
 {
     auto &resources = *operation.resources_;
     const auto listener = operation.listener_, child = operation.child_;
-    auto *slot = resources.files.entry(operation.fd_);
-    if (slot && !slot->used && slot->reservation == operation.token_) *slot = {};
-    if (auto *endpoint = unix_endpoint(listener); endpoint &&
-        open_description(listener)->unix_endpoint == operation.endpoint_ && endpoint->accept_token == operation.token_)
-        endpoint->accept_token = 0;
-    --resources.unix_receive_operations; --active_unix_receives_;
+    {
+        const FilesGuard files(resources.files_lock.lock());
+        auto *slot = resources.files.entry(operation.fd_);
+        if (slot && !slot->used && slot->reservation == operation.token_) *slot = {};
+        const OfdGuard table(ofd_table_);
+        if (auto *endpoint = unix_endpoint(listener); endpoint &&
+            open_description(listener)->unix_endpoint == operation.endpoint_ && endpoint->accept_token == operation.token_)
+            endpoint->accept_token = 0;
+        --resources.unix_receive_operations; --active_unix_receives_;
+    }
     operation.owner_ = nullptr; operation.resources_ = nullptr;
     record_resource_failure(release_description(child), -1, child, 0, false);
     record_resource_failure(release_description(listener), -1, listener, 0, false);
 }
 Result<i32> SchedulerState::commit_unix_accept(UnixAccept &operation)
 {
-    auto *endpoint = unix_endpoint(operation.listener_);
-    auto *slot = operation.resources_->files.entry(operation.fd_);
-    if (!endpoint || open_description(operation.listener_)->unix_endpoint != operation.endpoint_ ||
-        endpoint->state != UnixEndpointState::listening || endpoint->accept_token != operation.token_ ||
-        !endpoint->pending_count || endpoint->pending[0] != operation.child_ || !slot || slot->used ||
-        slot->reservation != operation.token_ || !canonical_unix_description(operation.child_))
-    {
-        cancel_unix_accept(operation);
-        return Status::busy("UNIX accepted child or descriptor reservation became stale");
-    }
     const auto listener = operation.listener_, child = operation.child_;
     const auto fd = operation.fd_;
-    auto *open = open_description(child);
-    if (!open->unix_queue_references)
+    Status failed{};
+    {
+        const FilesGuard files(operation.resources_->files_lock.lock());
+        const OfdGuard table(ofd_table_);
+        auto *endpoint = unix_endpoint(operation.listener_);
+        auto *slot = operation.resources_->files.entry(operation.fd_);
+        if (!endpoint || open_description(operation.listener_)->unix_endpoint != operation.endpoint_ ||
+            endpoint->state != UnixEndpointState::listening || endpoint->accept_token != operation.token_ ||
+            !endpoint->pending_count || endpoint->pending[0] != operation.child_ || !slot || slot->used ||
+            slot->reservation != operation.token_ || !canonical_unix_description(operation.child_))
+            failed = Status::busy("UNIX accepted child or descriptor reservation became stale");
+        else if (auto *open = open_description(child); !open->unix_queue_references)
+            failed = Status::io_error("UNIX accept queue lost its ownership classification");
+        else
+        {
+            open->flags = 2u | operation.status_flags_;
+            *slot = FileDescriptor{.used = true, .close_on_exec = operation.close_on_exec_,
+                .description = child, .installation = operation.token_};
+            for (usize index = 1; index < endpoint->pending_count; ++index)
+                endpoint->pending[index - 1] = endpoint->pending[index];
+            endpoint->pending[--endpoint->pending_count] = invalid_description;
+            endpoint->accept_token = 0;
+            --open->unix_queue_references;
+            --operation.resources_->unix_receive_operations; --active_unix_receives_;
+        }
+    }
+    if (!failed)
     {
         cancel_unix_accept(operation);
-        return Status::io_error("UNIX accept queue lost its ownership classification");
+        return failed;
     }
-    open->flags = 2u | operation.status_flags_;
-    *slot = FileDescriptor{.used = true, .close_on_exec = operation.close_on_exec_,
-        .description = child, .installation = operation.token_};
-    for (usize index = 1; index < endpoint->pending_count; ++index)
-        endpoint->pending[index - 1] = endpoint->pending[index];
-    endpoint->pending[--endpoint->pending_count] = invalid_description;
-    endpoint->accept_token = 0;
-    --open->unix_queue_references;
-    --operation.resources_->unix_receive_operations; --active_unix_receives_;
     operation.owner_ = nullptr; operation.resources_ = nullptr;
     // The preview's child hold is now the fd hold. Consume the detached queue
     // hold and listener preview only after publication and memory-only changes.
@@ -276,36 +325,44 @@ Result<i32> SchedulerState::commit_unix_accept(UnixAccept &operation)
 }
 Status SchedulerState::release_unix_pending(u16 child)
 {
-    auto *open = open_description(child);
-    if (!open || !open->unix_queue_references)
-        return Status::bad_descriptor("UNIX pending queue lost its child owner");
-    --open->unix_queue_references;
+    {
+        const OfdGuard table(ofd_table_);
+        auto *open = open_description(child);
+        if (!open || !open->unix_queue_references)
+            return Status::bad_descriptor("UNIX pending queue lost its child owner");
+        --open->unix_queue_references;
+    }
     return release_description(child);
 }
 Status SchedulerState::release_unix_endpoint(UnixEndpointHandle handle)
 {
     if (!handle) return Status::bad_descriptor("invalid UNIX endpoint retirement");
-    auto &endpoint = unix_endpoints_[handle.slot];
-    if (!endpoint.used || endpoint.generation != handle.generation)
-        return Status::bad_descriptor("stale UNIX endpoint retirement");
-    const auto children = endpoint.pending;
-    const auto count = endpoint.pending_count;
+    std::array<u16, max_unix_backlog> children{};
+    usize count{};
     std::optional<fs::SocketPathReference> binding;
-    if (endpoint.binding) binding.emplace(std::move(*endpoint.binding));
-    endpoint.binding.reset();
-    endpoint.used = false; endpoint.generation = 0; endpoint.description = invalid_description;
-    endpoint.pending_count = 0; endpoint.pending.fill(invalid_description); endpoint.accept_token = 0;
-    endpoint.state = UnixEndpointState::unbound; endpoint.backlog = 0;
-    endpoint.listen_credentials = {}; endpoint.peer_credentials = {};
     Status result{};
-    // Remove all queue classifications before any release callback. These
-    // detached holds are temporary external collection roots until consumed.
-    for (usize index = 0; index < count; ++index)
     {
-        auto *open = open_description(children[index]);
-        if (!open || !open->unix_queue_references)
-        { if (result) result = Status::bad_descriptor("UNIX endpoint queue lost child ownership"); }
-        else --open->unix_queue_references;
+        const OfdGuard table(ofd_table_);
+        auto &endpoint = unix_endpoints_[handle.slot];
+        if (!endpoint.used || endpoint.generation != handle.generation)
+            return Status::bad_descriptor("stale UNIX endpoint retirement");
+        children = endpoint.pending;
+        count = endpoint.pending_count;
+        if (endpoint.binding) binding.emplace(std::move(*endpoint.binding));
+        endpoint.binding.reset();
+        endpoint.used = false; endpoint.generation = 0; endpoint.description = invalid_description;
+        endpoint.pending_count = 0; endpoint.pending.fill(invalid_description); endpoint.accept_token = 0;
+        endpoint.state = UnixEndpointState::unbound; endpoint.backlog = 0;
+        endpoint.listen_credentials = {}; endpoint.peer_credentials = {};
+        // Remove all queue classifications before any release callback. These
+        // detached holds are temporary external collection roots until consumed.
+        for (usize index = 0; index < count; ++index)
+        {
+            auto *open = open_description(children[index]);
+            if (!open || !open->unix_queue_references)
+            { if (result) result = Status::bad_descriptor("UNIX endpoint queue lost child ownership"); }
+            else --open->unix_queue_references;
+        }
     }
     for (usize index = 0; index < count; ++index)
     {

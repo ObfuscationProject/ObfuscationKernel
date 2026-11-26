@@ -381,6 +381,9 @@ class PosixService final
     [[nodiscard]] sched::ThreadLocalState &thread_local_state();
     [[nodiscard]] FileDescriptor *descriptor(Fd fd);
     [[nodiscard]] const FileDescriptor *descriptor(Fd fd) const;
+    // pin(fd) (spec 3.6): the description, held by a reference while the
+    // caller's process may run another thread that could close the slot.
+    [[nodiscard]] sched::PinnedDescription pin(Fd fd);
     [[nodiscard]] Result<Fd> allocate_fd(Fd minimum = 0);
     [[nodiscard]] Result<fs::ResolveContext> path_context(Fd dirfd, std::string_view path);
     [[nodiscard]] Status copy_descriptor(Fd source, Fd target, u32 flags);
@@ -417,7 +420,8 @@ template <DirectoryPolicy Policy, typename Consumer>
     }
 Result<usize> PosixService::enumerate_directory(Fd fd, Consumer &&consumer)
 {
-    auto *description = descriptor(fd);
+    auto pinned = pin(fd);
+    auto *description = pinned.get();
     if (!description || !description->used)
         return Status::bad_descriptor("bad directory descriptor");
     if (!description->node)

@@ -19,6 +19,7 @@ i32 DescriptorReservation::publish_checked(OpenFileDescription description, bool
 
 Result<u64> SchedulerState::next_descriptor_token()
 {
+    const OfdGuard table(ofd_table_);
     if (next_unix_receive_token_ == ~u64{0})
         return Status::overflow("shared descriptor operation token exhausted");
     return next_unix_receive_token_++;
@@ -32,15 +33,29 @@ Result<DescriptorReservation> SchedulerState::prepare_descriptor(u64 pid)
     auto &resources = process->resources();
     if (active_descriptor_reservations_ == ~usize{0} || resources.prepared_descriptor_operations == ~usize{0})
         return Status::overflow("prepared descriptor operation count exhausted");
-    i32 fd = -1;
-    for (i32 candidate = 3; candidate < static_cast<i32>(max_process_fds); ++candidate)
-        if (!resources.files.contains(candidate)) { fd = candidate; break; }
-    if (fd < 0) return Status::process_file_limit("prepared descriptor table is full");
     auto token = next_descriptor_token(); if (!token) return token.status();
     auto id = allocate_description({}); if (!id) return id.status();
-    open_description(id.value())->reservation = token.value();
-    resources.files.entry(fd)->reservation = token.value();
-    ++resources.prepared_descriptor_operations; ++active_descriptor_reservations_;
+    i32 fd = -1;
+    {
+        const FilesGuard files(resources.files_lock.lock());
+        for (i32 candidate = 3; candidate < static_cast<i32>(max_process_fds); ++candidate)
+            if (!resources.files.contains(candidate)) { fd = candidate; break; }
+        if (fd >= 0)
+        {
+            resources.files.entry(fd)->reservation = token.value();
+            ++resources.prepared_descriptor_operations;
+        }
+    }
+    if (fd < 0)
+    {
+        discard_description(id.value());
+        return Status::process_file_limit("prepared descriptor table is full");
+    }
+    {
+        const OfdGuard table(ofd_table_);
+        open_description(id.value())->reservation = token.value();
+        ++active_descriptor_reservations_;
+    }
     return DescriptorReservation{*this, pid, fd, id.value(), token.value()};
 }
 Status SchedulerState::validate_descriptor_reservation(const DescriptorReservation &operation) const
@@ -64,9 +79,14 @@ Status SchedulerState::cancel_descriptor_reservation(DescriptorReservation &oper
 {
     if (auto status = validate_descriptor_reservation(operation); !status) return status;
     auto &resources = find(operation.pid_)->resources();
-    *resources.files.entry(operation.fd_) = {};
-    *open_description(operation.description_) = {};
-    --resources.prepared_descriptor_operations; --active_descriptor_reservations_;
+    {
+        const FilesGuard files(resources.files_lock.lock());
+        *resources.files.entry(operation.fd_) = {};
+        --resources.prepared_descriptor_operations;
+        const OfdGuard table(ofd_table_);
+        *open_description(operation.description_) = {};
+        --active_descriptor_reservations_;
+    }
     operation.owner_ = nullptr;
     return {};
 }
@@ -75,10 +95,16 @@ i32 SchedulerState::publish_descriptor_reservation(DescriptorReservation &operat
 {
     auto &resources = find(operation.pid_)->resources();
     description.used = true; description.reservation = 0; description.references = 1;
-    *open_description(operation.description_) = description;
-    *resources.files.entry(operation.fd_) = FileDescriptor{.used = true, .close_on_exec = close_on_exec,
-        .description = operation.description_, .installation = operation.token_};
-    --resources.prepared_descriptor_operations; --active_descriptor_reservations_;
+    {
+        const FilesGuard files(resources.files_lock.lock());
+        const OfdGuard table(ofd_table_);
+        *open_description(operation.description_) = description;
+        count_pipe_endpoints(description, +1);
+        --active_descriptor_reservations_;
+        *resources.files.entry(operation.fd_) = FileDescriptor{.used = true, .close_on_exec = close_on_exec,
+            .description = operation.description_, .installation = operation.token_};
+        --resources.prepared_descriptor_operations;
+    }
     operation.owner_ = nullptr;
     return operation.fd_;
 }
