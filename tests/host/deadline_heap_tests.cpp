@@ -175,7 +175,7 @@ struct Fixture
     }
     usize expire(u64 now)
     {
-        std::array<u16, 32> due{};
+        std::array<u16, max_processes> due{};
         return scheduler.expire_deadlines(now, due);
     }
 };
@@ -259,7 +259,7 @@ void scheduler_process_keys()
     f.scheduler.set_process_deadline(9, 50);
     f.scheduler.set_process_deadline(9, Heap::never); // Removed again.
     CHECK(f.scheduler.earliest_deadline() == 100);
-    std::array<u16, 32> due{};
+    std::array<u16, max_processes> due{};
     CHECK(f.scheduler.expire_deadlines(103, due) == 4);
     std::sort(due.begin(), due.begin() + 4);
     CHECK(due[0] == 0 && due[1] == 1 && due[2] == 2 && due[3] == 3);
@@ -281,6 +281,25 @@ void scheduler_process_keys()
     CHECK(f.expire(2000 + 5'000'000) == 0 && f.scheduler.earliest_deadline() == never);
     for (const auto pid : pids) CHECK(f.thread(pid).wait_registration.completion() == WaitCompletion::timeout);
     CHECK(smp::evidence_max(&smp::EvidenceCpu::deadline_late_max_us) == 5000);
+    // Keys due on every step (0: a timer awaiting its signal's dequeue) on
+    // all but one process slot: the last slot's ordinary expiry is handed out
+    // in the same call, not deferred behind them, and the 0 keys record no
+    // lateness (they would claim the whole uptime).
+    for (usize slot = 0; slot + 1 < max_processes; ++slot) f.scheduler.set_process_deadline(slot, 0);
+    f.scheduler.set_process_deadline(max_processes - 1, 3'000'000'000);
+    for (usize round = 0; round < 3; ++round)
+    {
+        std::array<u16, max_processes> due{};
+        CHECK(f.scheduler.expire_deadlines(3'000'000'000 + round, due) == (round == 0 ? max_processes : max_processes - 1));
+        std::sort(due.begin(), due.begin() + (round == 0 ? max_processes : max_processes - 1));
+        for (usize slot = 0; slot + 1 < max_processes; ++slot) CHECK(due[slot] == slot);
+        if (round == 0) CHECK(due[max_processes - 1] == max_processes - 1);
+        // The caller's service sets them again; the timer slot has expired.
+        for (usize slot = 0; slot + 1 < max_processes; ++slot) f.scheduler.set_process_deadline(slot, 0);
+    }
+    CHECK(smp::evidence_max(&smp::EvidenceCpu::deadline_late_max_us) == 5000);
+    for (usize slot = 0; slot < max_processes; ++slot) f.scheduler.set_process_deadline(slot, Heap::never);
+    CHECK(f.scheduler.earliest_deadline() == never);
     expect_clean_checks();
 }
 
@@ -302,7 +321,7 @@ void expiry_versus_completion()
             while (armed.load(std::memory_order_acquire) != round) std::this_thread::yield();
             started.store(round, std::memory_order_release);
             for (usize spin = 0; spin < (round % 5) * 30; ++spin) std::atomic_signal_fence(std::memory_order_seq_cst);
-            std::array<u16, 32> due{};
+            std::array<u16, max_processes> due{};
             CHECK(f.scheduler.expire_deadlines(round * 10, due) == 0);
             done.store(round, std::memory_order_release);
         }

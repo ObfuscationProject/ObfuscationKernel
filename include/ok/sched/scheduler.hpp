@@ -850,8 +850,10 @@ class SchedulerState
     void set_process_deadline(usize process_slot, u64 deadline);
     // Expires every due deadline (spec 4.6): thread keys complete, probe or
     // retry their wait here; due process slots are written to `processes`
-    // for the caller's timer service. Returns how many it wrote.
-    usize expire_deadlines(u64 now, std::span<u16, 32> processes);
+    // for the caller's timer service. It has room for every process key, so
+    // none waits behind keys that are due on every step. Returns how many
+    // it wrote.
+    usize expire_deadlines(u64 now, std::span<u16, max_processes> processes);
     // The earliest armed deadline, loaded without the lock.
     [[nodiscard]] u64 earliest_deadline() const { return earliest_.load(std::memory_order_acquire); }
     [[nodiscard]] u64 deadline_of(u16 key);

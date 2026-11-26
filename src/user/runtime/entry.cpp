@@ -1165,7 +1165,7 @@ bool step(Kernel &kernel)
     // Due deadlines (spec 4.6): thread keys time out, retry or probe their
     // wait here; due process keys run their timers below. Poll timeouts,
     // sleeps and PTY VTIME timers are thread keys, so no step scans them.
-    std::array<u16, 32> due_timers{};
+    std::array<u16, sched::max_processes> due_timers{};
     const usize due_timer_count = kernel.scheduler().expire_deadlines(now.value(), due_timers);
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
     // Expired timers queue their signals before interruptible waits are chosen.

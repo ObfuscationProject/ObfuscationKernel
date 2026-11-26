@@ -563,7 +563,7 @@ u64 heap_deadline(Kernel &kernel, u64 pid, u64 tid)
 // An expiry pass at `now` with nothing else of the step.
 void expire(Kernel &kernel, u64 now)
 {
-    std::array<u16, 32> due{};
+    std::array<u16, sched::max_processes> due{};
     static_cast<void>(kernel.scheduler().expire_deadlines(now, due));
 }
 // VTIME: a VMIN 0 read returns 0 when its timer runs out; below VMIN the

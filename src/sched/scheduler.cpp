@@ -2461,8 +2461,11 @@ u64 SchedulerState::deadline_of(u16 key)
     return deadlines_.when(key);
 }
 
-usize SchedulerState::expire_deadlines(u64 now, std::span<u16, 32> processes)
+usize SchedulerState::expire_deadlines(u64 now, std::span<u16, max_processes> processes)
 {
+    // Every process key fits in `processes`: a key popped here is set again
+    // only by the caller's service, after this call.
+    static_assert(deadline_keys - deadline_thread_keys == max_processes);
     usize written = 0;
     // Bounded batches: pop under the lock, act after releasing it.
     for (usize pass = 0; pass < 8; ++pass)
@@ -2484,13 +2487,9 @@ usize SchedulerState::expire_deadlines(u64 now, std::span<u16, 32> processes)
                 const auto when = deadlines_.earliest();
                 const auto key = deadlines_.pop_due(now);
                 if (!key) break;
-                // A process key needs room in the caller's array; it waits otherwise.
-                if (*key >= deadline_thread_keys && written + count >= processes.size())
-                {
-                    deadlines_.set(*key, now);
-                    break;
-                }
-                if (now - when > late) late = now - when;
+                // A process key at 0 is due on every step (a timer awaiting
+                // its signal's dequeue or the wall clock): it was not late.
+                if (when != 0 && now - when > late) late = now - when;
                 due[count].key = *key;
                 if (*key < deadline_thread_keys)
                 {

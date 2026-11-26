@@ -287,7 +287,7 @@ void scheduler_exhaustion()
     f.scheduler.wake_waiters(ThreadWaitReason::pipe_read, 21);
     CHECK(f.thread(pid).wait_registration.pending(wait.value()));
     f.scheduler.put_prev(0);
-    std::array<u16, 32> due{};
+    std::array<u16, max_processes> due{};
     CHECK(f.scheduler.expire_deadlines(retry - 1, due) == 0 && f.thread(pid).wait_registration.pending(wait.value()));
     CHECK(f.scheduler.expire_deadlines(retry, due) == 0);
     CHECK(f.thread(pid).wait_registration.completion() == WaitCompletion::ready);

@@ -288,7 +288,7 @@ void test_finite_wait_capacity()
     CHECK(f.scheduler.wait_channels().linked(static_cast<u8>(ThreadWaitReason::pipe_read), 101) == 0);
     for (usize pass = 0; pass < capacity && f.scheduler.earliest_deadline() != DeadlineHeap<deadline_keys>::never; ++pass)
     {
-        std::array<u16, 32> due{};
+        std::array<u16, max_processes> due{};
         CHECK(f.scheduler.expire_deadlines(1'000'000'000, due) == 0);
     }
     CHECK(f.scheduler.earliest_deadline() == DeadlineHeap<deadline_keys>::never);
