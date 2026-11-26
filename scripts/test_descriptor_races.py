@@ -5,7 +5,8 @@ Host-thread races on the real files, ofd_table, pipe, wait_hash, task and run
 queue spin locks (OK_HOSTED_LOCK_MODEL) with the lock-order checks on
 (OK_LOCK_DEBUG): a close against a pinned read, two threads reserving and
 publishing descriptor slots (openat), a pipe reader arming against a writer
-(no lost wake) and the AF_UNIX rights collection against a send.
+(no lost wake), the AF_UNIX rights collection against a send and PTY reads
+retrying a commit another reader overtook (tty prepare/copy/commit).
 Model coverage only: host threads stand in for CPUs; no AP starts, no IPI is
 sent and no guest or hardware SMP executes.
 """

@@ -78,6 +78,7 @@ Result<private_pty::Readiness> SchedulerState::pty_description_readiness(u16 id)
     const auto *open = open_description(id);
     if (!open || !open->references || open->reservation || !open->pty_endpoint)
         return Status::bad_descriptor("description is not a retained raw PTY");
+    const TtyLock::Guard tty(tty_lock_);
     return pty_transport_.readiness(open->pty_endpoint);
 }
 void SchedulerState::wake_pty(private_pty::Handle endpoint, u8 wakes)
@@ -100,9 +101,15 @@ Result<usize> SchedulerState::read_pty_description(u16 id, std::span<std::byte> 
     auto *open = open_description(id);
     if (!open || !open->references || open->reservation || !open->readable || !open->pty_endpoint)
         return Status::bad_descriptor("description is not a readable retained raw PTY");
-    auto result = pty_transport_.read(open->pty_endpoint, output, pty_nonblocking(*open));
+    const auto endpoint = open->pty_endpoint;
+    const bool nonblocking = pty_nonblocking(*open);
+    // The PTY table under the tty lock; the wakes after it (A2).
+    auto result = [&] {
+        const TtyLock::Guard tty(tty_lock_);
+        return pty_transport_.read(endpoint, output, nonblocking);
+    }();
     if (!result) return result.status();
-    wake_pty(open->pty_endpoint, result.value().change.wakes);
+    wake_pty(endpoint, result.value().change.wakes);
     return result.value().bytes;
 }
 Result<usize> SchedulerState::write_pty_description(u16 id, std::span<const std::byte> input)
@@ -110,11 +117,15 @@ Result<usize> SchedulerState::write_pty_description(u16 id, std::span<const std:
     auto *open = open_description(id);
     if (!open || !open->references || open->reservation || !open->writable || !open->pty_endpoint)
         return Status::bad_descriptor("description is not a writable retained raw PTY");
-    auto result = pty_transport_.write(open->pty_endpoint, input);
+    const auto endpoint = open->pty_endpoint;
+    auto result = [&] {
+        const TtyLock::Guard tty(tty_lock_);
+        return pty_transport_.write(endpoint, input);
+    }();
     if (!result) return result.status();
     // Master input stores bytes in the slave's N_TTY: its readers are woken
     // on every stored byte (Linux __receive_buf), its echo wakes master readers.
-    wake_pty(open->pty_endpoint, result.value().change.wakes);
+    wake_pty(endpoint, result.value().change.wakes);
     return result.value().bytes;
 }
 
@@ -124,7 +135,47 @@ Result<SchedulerState::PreparedPtyRead> SchedulerState::prepare_pty_read(u16 id,
     auto *open = open_description(id);
     if (!open || !open->references || open->reservation || !open->readable || !open->pty_endpoint)
         return Status::bad_descriptor("description is not a readable retained raw PTY");
+    const TtyLock::Guard tty(tty_lock_);
     return pty_transport_.prepare_read(open->pty_endpoint, count, pty_nonblocking(*open), timer_expired, timer);
+}
+usize SchedulerState::preview_pty_read(const PreparedPtyRead &preview, std::span<std::byte> output, usize offset) const
+{
+    const TtyLock::Guard tty(tty_lock_);
+    return preview.copy(output, offset);
+}
+Result<usize> SchedulerState::stage_pty_read(u16 id, private_pty::Handle endpoint, usize count, bool timer_expired,
+                                             private_pty::ReadTimer timer, std::span<std::byte> staged,
+                                             std::optional<PreparedPtyRead> *preview)
+{
+    auto *open = open_description(id);
+    if (!open || !open->references || open->reservation || !open->readable || !open->pty_endpoint)
+        return Status::bad_descriptor("description is not a readable retained raw PTY");
+    if (open->pty_endpoint != endpoint) return Status::bad_descriptor("PTY preview endpoint changed");
+    const bool nonblocking = pty_nonblocking(*open);
+    Result<private_pty::Transfer> dequeued{private_pty::Transfer{}};
+    usize size{};
+    {
+        const TtyLock::Guard tty(tty_lock_);
+        auto prepared = pty_transport_.prepare_read(endpoint, count, nonblocking, timer_expired, timer);
+        if (!prepared) return prepared.status();
+        auto &planned = prepared.value();
+        size = planned.size();
+        if (size > staged.size() || planned.copy(staged.first(size)) != size)
+        {
+            planned.cancel();
+            return Status::fault("PTY read plan exceeds its staging");
+        }
+        if (preview)
+        {
+            preview->emplace(std::move(planned));
+            return size;
+        }
+        dequeued = planned.commit();
+    }
+    if (!dequeued) return dequeued.status();
+    if (dequeued.value().bytes != size) return Status::fault("PTY read dequeued another size");
+    wake_pty(endpoint, dequeued.value().change.wakes);
+    return size;
 }
 Result<SchedulerState::PtyReadState> SchedulerState::pty_read_state(u16 id, usize count,
                                                                     private_pty::ReadTimer timer) const
@@ -132,6 +183,7 @@ Result<SchedulerState::PtyReadState> SchedulerState::pty_read_state(u16 id, usiz
     const auto *open = open_description(id);
     if (!open || !open->references || open->reservation || !open->readable || !open->pty_endpoint)
         return Status::bad_descriptor("description is not a readable retained raw PTY");
+    const TtyLock::Guard tty(tty_lock_);
     return pty_transport_.read_state(open->pty_endpoint, count, timer);
 }
 Result<bool> SchedulerState::pty_write_progress(u16 id, std::byte next) const
@@ -139,6 +191,7 @@ Result<bool> SchedulerState::pty_write_progress(u16 id, std::byte next) const
     const auto *open = open_description(id);
     if (!open || !open->references || open->reservation || !open->writable || !open->pty_endpoint)
         return Status::bad_descriptor("description is not a writable retained raw PTY");
+    const TtyLock::Guard tty(tty_lock_);
     return pty_transport_.write_progress(open->pty_endpoint, next);
 }
 Result<usize> SchedulerState::commit_pty_read(PreparedPtyRead &preview)
@@ -146,7 +199,12 @@ Result<usize> SchedulerState::commit_pty_read(PreparedPtyRead &preview)
     if (!preview.owned_by(pty_transport_))
         return Status::busy("PTY read preview belongs to a different or retired owner");
     const auto endpoint = preview.endpoint();
-    const auto result = preview.commit();
+    // The revision check and the dequeue under the tty lock: a preview another
+    // reader overtook since its copy fails with busy and is prepared again.
+    const auto result = [&] {
+        const TtyLock::Guard tty(tty_lock_);
+        return preview.commit();
+    }();
     if (!result) return result.status();
     wake_pty(endpoint, result.value().change.wakes);
     return result.value().bytes;

@@ -301,49 +301,55 @@ i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched:
     if (!total) return -14;
     const auto epoch = caller.console_wait_epoch ? caller.console_wait_epoch : process.console_epoch();
     const bool nonblocking = description.flags & posix::o_NONBLOCK;
-    const auto plan = scheduler.prepare_console_read(process.pid(), epoch, total.value(), nonblocking);
-    if (!plan)
+    // prepare (tty lock), copy-out (no lock), commit (tty lock, revision): a
+    // commit another reader overtook is prepared again (spec 4.13).
+    for (usize attempt = 0;; ++attempt)
     {
-        if (plan.status().code() != StatusCode::would_block || nonblocking) return error(plan.status());
-        caller.console_wait_epoch = epoch;
-        caller.terminal_gate_mark = process.job_control().continue_generation;
-        auto ticket = scheduler.register_current_wait(sched::ThreadWaitReason::console_read, epoch);
-        if (!ticket)
+        const auto plan = scheduler.prepare_console_read(process.pid(), epoch, total.value(), nonblocking);
+        if (!plan)
         {
-            caller.console_wait_epoch = 0;
-            return error(ticket.status());
-        }
-        // A Linux read binds each wait of its re-dispatched call, so a caught
-        // signal can interrupt or restart it (terminal signal family).
-        if (process.resources().personality == Personality::linux)
-            if (const auto origin = syscall_origins.identity(process, caller); origin.capture)
+            if (plan.status().code() != StatusCode::would_block || nonblocking) return error(plan.status());
+            caller.console_wait_epoch = epoch;
+            caller.terminal_gate_mark = process.job_control().continue_generation;
+            auto ticket = scheduler.register_current_wait(sched::ThreadWaitReason::console_read, epoch);
+            if (!ticket)
             {
-                const SyscallOrigins::ConsoleReadBinding binding{ticket.value(), static_cast<i32>(arguments[0]),
-                    arguments[1], arguments[2], epoch, vectored, total.value()};
-                if (!syscall_origins.bind_console_read(origin, caller.native_frame, binding)) syscall_origins.revoke(caller);
+                caller.console_wait_epoch = 0;
+                return error(ticket.status());
             }
-        complete = false;
-        return -11;
-    }
-    // Copy out first and consume only after every copy worked: EFAULT keeps the input.
-    std::array<std::byte, tty_chunk> chunk{};
-    usize offset = 0;
-    for (const auto &vector : vectors)
-        for (usize position = 0; position < vector.length && offset < plan.value().copy;)
-        {
-            const auto count = scheduler.preview_console_read(plan.value(),
-                std::span<std::byte>{chunk.data(), vector.length - position < chunk.size()
-                    ? vector.length - position : chunk.size()}, offset);
-            if (!uaccess::copy_to_user(space, vector.base + position, chunk.data(), count)) return -14;
-            position += count;
-            offset += count;
+            // A Linux read binds each wait of its re-dispatched call, so a caught
+            // signal can interrupt or restart it (terminal signal family).
+            if (process.resources().personality == Personality::linux)
+                if (const auto origin = syscall_origins.identity(process, caller); origin.capture)
+                {
+                    const SyscallOrigins::ConsoleReadBinding binding{ticket.value(), static_cast<i32>(arguments[0]),
+                        arguments[1], arguments[2], epoch, vectored, total.value()};
+                    if (!syscall_origins.bind_console_read(origin, caller.native_frame, binding)) syscall_origins.revoke(caller);
+                }
+            complete = false;
+            return -11;
         }
-    if (auto status = scheduler.commit_console_read(plan.value()); !status)
-    {
-        runtime_failure = status;
-        return error(status);
+        // Copy out first and consume only after every copy worked: EFAULT keeps the input.
+        std::array<std::byte, tty_chunk> chunk{};
+        usize offset = 0;
+        for (const auto &vector : vectors)
+            for (usize position = 0; position < vector.length && offset < plan.value().copy;)
+            {
+                const auto count = scheduler.preview_console_read(plan.value(),
+                    std::span<std::byte>{chunk.data(), vector.length - position < chunk.size()
+                        ? vector.length - position : chunk.size()}, offset);
+                if (!uaccess::copy_to_user(space, vector.base + position, chunk.data(), count)) return -14;
+                position += count;
+                offset += count;
+            }
+        if (auto status = scheduler.commit_console_read(plan.value()); !status)
+        {
+            if (status.code() == StatusCode::busy && attempt + 1 < sched::SchedulerState::pty_read_attempts) continue;
+            runtime_failure = status;
+            return error(status);
+        }
+        return static_cast<i64>(plan.value().copy);
     }
-    return static_cast<i64>(plan.value().copy);
 }
 
 i64 tty_terminal_control(Kernel &kernel, sched::ProcessControlBlock &process, const std::array<uptr, 6> &a,

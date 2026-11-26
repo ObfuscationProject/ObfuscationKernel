@@ -153,26 +153,13 @@ Result<usize> attempt_pty_io(Kernel &kernel, sched::ProcessControlBlock &process
         {
             if (!pipe_ranges(space, wait.address, wait.count, wait.vectors, true))
                 return Status::fault("PTY output mapping changed");
-            auto prepared = kernel.scheduler().prepare_pty_read(wait.description, wait.count, timer_expired, wait.vtime);
-            if (!prepared) return prepared.status();
-            auto &preview = prepared.value();
-            if (preview.endpoint() != wait.endpoint)
-            { preview.cancel(); return Status::bad_descriptor("PTY preview endpoint changed"); }
-            // The plan is copied out first and consumed only after the copy worked.
-            std::array<std::byte, sched::private_pty::RawPtyTable<>::queue_capacity> staged{};
-            const auto count = preview.size();
-            if (preview.copy({staged.data(), count}) != count)
-            { preview.cancel(); return Status::busy("PTY preview changed before copy-out"); }
-            if (!pipe_scatter(space, wait.address, {staged.data(), count}, wait.vectors))
-            { preview.cancel(); return Status::fault("PTY output copy failed before dequeue"); }
-            auto consumed = kernel.scheduler().commit_pty_read(preview);
-            if (!consumed || consumed.value() != count)
-            {
-                preview.cancel();
-                runtime_failure = Status::fault("PTY serialized read commit changed");
-                return runtime_failure;
-            }
-            return count;
+            // The plan is copied out first and consumed only after the copy
+            // worked; a commit another reader overtook is prepared again.
+            return kernel.scheduler().read_pty_prepared(wait.description, wait.endpoint, wait.count, timer_expired,
+                wait.vtime, [&](std::span<const std::byte> staged) -> Status {
+                    return pipe_scatter(space, wait.address, staged, wait.vectors)
+                        ? Status{} : Status::fault("PTY output copy failed before dequeue");
+                });
         }();
         if (auto status = kernel.scheduler().release_description(wait.description); !status)
         { runtime_failure = status; return status; }

@@ -585,6 +585,10 @@ class DescriptionPositionGuard final
 // profile, like the task locks (task_table.hpp).
 using OfdTableLock = smp::RankedSpinLock<smp::LockRank::ofd_table>;
 using PipeLock = smp::RankedSpinLock<smp::LockRank::pipe>;
+// The terminals (rank tty): the PTY table, the console terminal and its line
+// discipline. A read is prepared and previewed under it, copied out without
+// it and committed under it against the preview's revision.
+using TtyLock = smp::RankedSpinLock<smp::LockRank::tty>;
 
 class SchedulerState;
 // One pin of an open description (spec 3.6; SchedulerState::pin_descriptor).
@@ -769,6 +773,47 @@ class SchedulerState
     Result<PtyReadState> pty_read_state(u16 description, usize count, private_pty::ReadTimer timer = {}) const;
     Result<bool> pty_write_progress(u16 description, std::byte next) const;
     Result<usize> commit_pty_read(PreparedPtyRead &preview);
+    // The previewed bytes from `offset` on, under the tty lock; 0 once stale.
+    [[nodiscard]] usize preview_pty_read(const PreparedPtyRead &preview, std::span<std::byte> output,
+                                         usize offset = 0) const;
+    // Prepares a PTY read and copies its plan into `staged` in one tty hold.
+    // With a `preview` to fill, the bytes stay queued until commit_pty_read;
+    // without one they are dequeued in that same hold (and the peers woken).
+    Result<usize> stage_pty_read(u16 description, private_pty::Handle endpoint, usize count, bool timer_expired,
+                                 private_pty::ReadTimer timer, std::span<std::byte> staged,
+                                 std::optional<PreparedPtyRead> *preview);
+    // A PTY read as prepare and preview (tty lock), copy-out (`copy`, no lock)
+    // and commit (tty lock, revision check; spec 4.13). A commit another
+    // reader or a writer overtook (busy) is prepared again. The last attempt
+    // dequeues while it stages, so a read always progresses; only its copy-out
+    // runs after the dequeue (a fault there loses the bytes, as a pipe read's
+    // does).
+    static constexpr usize pty_read_attempts = 8;
+    template <typename Copy>
+    Result<usize> read_pty_prepared(u16 description, private_pty::Handle endpoint, usize count, bool timer_expired,
+                                    private_pty::ReadTimer timer, Copy &&copy)
+    {
+        for (usize attempt = 0;; ++attempt)
+        {
+            const bool last = attempt + 1 == pty_read_attempts;
+            std::array<std::byte, private_pty::RawPtyTable<>::queue_capacity> staged{};
+            std::optional<PreparedPtyRead> preview;
+            auto size = stage_pty_read(description, endpoint, count, timer_expired, timer, staged,
+                                       last ? nullptr : &preview);
+            if (!size) return size;
+            if (auto status = copy(std::span<const std::byte>{staged.data(), size.value()}); !status)
+            {
+                if (preview) preview->cancel();
+                return status;
+            }
+            if (last) return size;
+            auto consumed = commit_pty_read(*preview);
+            if (consumed && consumed.value() == size.value()) return size;
+            preview->cancel();
+            if (consumed) return Status::fault("PTY read commit took another size");
+            if (consumed.status().code() != StatusCode::busy) return consumed;
+        }
+    }
     // Keys may spuriously collide across pair generations. Retained handle and
     // wait-ticket validation must compare the complete generation separately.
     static constexpr u64 pty_wait_key(private_pty::Handle endpoint)
@@ -1319,6 +1364,7 @@ class SchedulerState
     void terminal_changed(TerminalRef ref);
     Result<private_pty::Handle> bind_pty_multiplexer(u16 description, u32 uid, u32 gid);
     private_pty::RawPtyTable<> pty_transport_{}; // One stable table; handles never cross scheduler domains.
+    mutable TtyLock tty_lock_{};
     ConsoleInputLease console_input_{};
     // Completed waits by CPU and source, each row written by its CPU.
     std::array<std::array<std::atomic<uptr>, wake_source_count>, smp::max_cpus> wakes_{};

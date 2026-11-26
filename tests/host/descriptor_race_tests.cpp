@@ -366,6 +366,84 @@ void unix_gc_versus_send()
     expect_clean_checks();
     std::printf("unix_gc_vs_send rounds=%zu sent=%zu refused=%zu\n", rounds, sent.load(), refused.load());
 }
+// tty commit retry (spec 4.13): two CPUs read one PTY master as prepare
+// (tty lock), copy-out (no lock) and commit (tty lock, revision check) while
+// a third writes the slave. A reader whose preview another reader overtook
+// fails its commit and prepares again; every byte is read exactly once, each
+// read a contiguous run of what was written.
+void tty_commit_retry()
+{
+    Fixture f;
+    const auto pid = f.process();
+    auto &resources = f.resources(pid);
+    const smp::ScopedHostedCpu boot{0};
+    auto prepared = f.scheduler.prepare_pty_pair(pid, 0x0800u);
+    CHECK(prepared);
+    CHECK(prepared.value().validate());
+    prepared.value().publish_checked();
+    const auto fds = prepared.value().descriptors();
+    const auto master = f.description(pid, fds[0]);
+    const auto slave = f.description(pid, fds[1]);
+    const auto endpoint = f.scheduler.open_description(master)->pty_endpoint;
+    constexpr usize total = 200000;
+    // Printable bytes only: output processing changes nothing else.
+    const auto value = [](usize position) { return static_cast<std::byte>(32 + position % 95); };
+    std::atomic<usize> read{0}, copies{0}, reads{0}, broken{0};
+    std::vector<std::thread> readers;
+    for (smp::CpuId cpu = 1; cpu <= 2; ++cpu)
+        readers.emplace_back([&, cpu] {
+            const smp::ScopedHostedCpu hosted{cpu};
+            std::array<std::byte, 7> out{};
+            while (read.load(std::memory_order_acquire) < total)
+            {
+                usize staged = 0;
+                auto got = f.scheduler.read_pty_prepared(master, endpoint, out.size(), false, {},
+                    [&](std::span<const std::byte> bytes) -> Status {
+                        copies.fetch_add(1, std::memory_order_relaxed);
+                        for (usize index = 0; index < bytes.size(); ++index) out[index] = bytes[index];
+                        staged = bytes.size();
+                        return {};
+                    });
+                if (!got)
+                {
+                    if (got.status().code() != StatusCode::would_block)
+                        std::fprintf(stderr, "pty read: %u %.*s\n", static_cast<unsigned>(got.status().code()),
+                                     static_cast<int>(got.status().message().size()), got.status().message().data());
+                    CHECK(got.status().code() == StatusCode::would_block);
+                    std::this_thread::yield();
+                    continue;
+                }
+                CHECK(got.value() == staged && staged != 0);
+                // A contiguous run of the written sequence.
+                for (usize index = 1; index < staged; ++index)
+                    if ((std::to_integer<usize>(out[index]) - 32) != (std::to_integer<usize>(out[index - 1]) - 32 + 1) % 95)
+                        broken.fetch_add(1);
+                reads.fetch_add(1, std::memory_order_relaxed);
+                read.fetch_add(staged, std::memory_order_acq_rel);
+            }
+        });
+    std::array<std::byte, 64> chunk{};
+    for (usize written = 0; written < total;)
+    {
+        const auto count = total - written < chunk.size() ? total - written : chunk.size();
+        for (usize index = 0; index < count; ++index) chunk[index] = value(written + index);
+        auto result = f.scheduler.write_pty_description(slave, {chunk.data(), count});
+        if (result) written += result.value();
+        else
+        {
+            CHECK(result.status().code() == StatusCode::would_block);
+            std::this_thread::yield();
+        }
+    }
+    for (auto &thread : readers) thread.join();
+    CHECK(read.load() == total && broken.load() == 0);
+    // Some commits were overtaken and retried.
+    CHECK(copies.load() > reads.load());
+    for (const auto fd : fds) CHECK(f.scheduler.close_descriptor(resources, fd));
+    expect_clean_checks();
+    std::printf("tty_commit_retry bytes=%zu reads=%zu retried_copies=%zu\n", total, reads.load(),
+                copies.load() - reads.load());
+}
 } // namespace
 
 int main()
@@ -374,6 +452,7 @@ int main()
     two_thread_openat();
     pipe_no_lost_wake();
     unix_gc_versus_send();
+    tty_commit_retry();
     std::printf("OK_DESCRIPTOR_RACES scope=model checks=%zu model_cpus=%zu guest=0 hardware_smp=0\n", checks.load(),
                 cpus);
 }
