@@ -14,6 +14,7 @@
 
 #include "ok/core/fixed.hpp"
 #include "ok/core/types.hpp"
+#include "ok/smp/gate.hpp"
 #include "ok/smp/smp.hpp"
 
 #include <array>
@@ -665,13 +666,20 @@ class VirtualFileSystem final
 
   private:
     friend class SocketPathReference;
+    friend class RamNode;
     // One namespace operation spans callbacks, but its admission memory lock
     // never does. Synchronous contention returns busy, including reentrancy.
+    // Operations hold the vfs_namespace gate shared, so several CPUs walk and
+    // change the namespace at once (RAM topology under ram_topology, each
+    // provider under its own gate); mount, detach and the boot imports hold
+    // it exclusive (spec 4.13). Admission never waits for the gate.
+    enum class OperationMode : u8 { shared, exclusive };
     class OperationGuard final
     {
       public:
-        explicit OperationGuard(const VirtualFileSystem &owner, OperationContention *contention = nullptr)
-            : owner_(owner), admission_(owner.enter_operation(contention)) {}
+        explicit OperationGuard(const VirtualFileSystem &owner, OperationContention *contention = nullptr,
+                                OperationMode mode = OperationMode::shared)
+            : owner_(owner), admission_(owner.enter_operation(contention, mode)) {}
         OperationGuard(const OperationGuard &) = delete;
         OperationGuard &operator=(const OperationGuard &) = delete;
         ~OperationGuard() { if (admission_) owner_.leave_operation(admission_.value()); }
@@ -681,8 +689,14 @@ class VirtualFileSystem final
         const VirtualFileSystem &owner_;
         Result<u64> admission_;
     };
-    [[nodiscard]] Result<u64> enter_operation(OperationContention *contention = nullptr) const;
+    [[nodiscard]] Result<u64> enter_operation(OperationContention *contention = nullptr,
+                                              OperationMode mode = OperationMode::shared) const;
     void leave_operation(u64 serial) const;
+    // Some CPU holds the namespace gate, shared or exclusive.
+    [[nodiscard]] bool operation_active() const
+    {
+        return namespace_.exclusive_held() || namespace_.shared_holders() != 0;
+    }
     enum class OperationWaitPhase : u8 { unused, waiting, ready };
     struct OperationWait
     {
@@ -746,7 +760,14 @@ class VirtualFileSystem final
     RamNode *root_{nullptr};
     usize socket_path_references_{}, ram_mounts_{}, ram_detaches_{};
     mutable u64 operation_serial_{};
-    mutable bool operation_active_{};
+    // The vfs_namespace gate: mounts_ and mount crossing (spec 2, rank 14).
+    mutable smp::SharedGate<smp::LockRank::vfs_namespace> namespace_{};
+    // The RAM filesystems' topology (RamNode parent_ and children arrays;
+    // create, unlink, rename and link), taken by every lookup step that
+    // retains a child. One lock for every RAM tree of this VFS.
+    mutable smp::RankedSpinLock<smp::LockRank::ram_topology> ram_topology_{};
+    // The RAM node and file-buffer pools (an unranked leaf).
+    mutable smp::SpinLock ram_pool_{};
     Status mount_cleanup_failure_{};
     mutable std::array<OperationWait, operation_wait_capacity> operation_waits_{};
     mutable smp::SpinLock lock_{};

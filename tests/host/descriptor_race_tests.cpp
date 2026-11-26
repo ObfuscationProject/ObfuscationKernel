@@ -6,6 +6,7 @@
 // Host threads stand in for CPUs; no AP starts, no IPI is sent and no guest
 // runs (scope=model). The kernel still runs these paths under the big kernel
 // lock; the model checks that the fine locks alone keep them correct.
+#include "ok/fs/vfs.hpp"
 #include "ok/sched/scheduler.hpp"
 
 #include <array>
@@ -444,6 +445,74 @@ void tty_commit_retry()
     std::printf("tty_commit_retry bytes=%zu reads=%zu retried_copies=%zu\n", total, reads.load(),
                 copies.load() - reads.load());
 }
+// RAM rename vs lookup (spec 4.13): with the namespace gate shared, one CPU
+// moves a directory between two parents while two others resolve both paths
+// and name what they found. The ram_topology lock makes the rename atomic:
+// a lookup finds the directory under exactly the name it asked for, and its
+// path from the root is always one of the two whole names.
+void ram_rename_versus_lookup()
+{
+    auto vfs = std::make_unique<fs::VirtualFileSystem>();
+    {
+        const smp::ScopedHostedCpu boot{0};
+        CHECK(vfs->create("/a", fs::NodeType::directory));
+        CHECK(vfs->create("/b", fs::NodeType::directory));
+        CHECK(vfs->create("/a/d", fs::NodeType::directory));
+    }
+    constexpr usize renames = 20000;
+    std::atomic<bool> stop{false};
+    std::atomic<usize> found{0}, missed{0}, moved{0};
+    std::vector<std::thread> lookers;
+    for (smp::CpuId cpu = 2; cpu <= 3; ++cpu)
+        lookers.emplace_back([&, cpu] {
+            const smp::ScopedHostedCpu hosted{cpu};
+            const std::array<std::string_view, 2> paths{"/a/d", "/b/d"};
+            for (usize pass = 0; !stop.load(std::memory_order_acquire); ++pass)
+            {
+                const auto path = paths[(pass + cpu) % 2];
+                auto resolved = vfs->resolve({}, path);
+                if (!resolved)
+                {
+                    CHECK(resolved.status().code() == StatusCode::not_found);
+                    missed.fetch_add(1, std::memory_order_relaxed);
+                    continue;
+                }
+                auto reference = std::move(resolved.value());
+                auto named = vfs->directory_path(*reference.node(), reference.handle().mount_id);
+                if (!named)
+                {
+                    // Moved between the walk and its re-resolution: not torn.
+                    CHECK(named.status().code() == StatusCode::not_found);
+                    moved.fetch_add(1, std::memory_order_relaxed);
+                }
+                else
+                {
+                    // Moved on since the lookup is fine; a torn name is not.
+                    CHECK(named.value().view() == "/a/d" || named.value().view() == "/b/d");
+                    found.fetch_add(1, std::memory_order_relaxed);
+                }
+                CHECK(reference.release());
+            }
+        });
+    {
+        const smp::ScopedHostedCpu cpu{1};
+        for (usize round = 0; round < renames; ++round)
+        {
+            CHECK(vfs->rename("/a/d", "/b/d"));
+            CHECK(vfs->rename("/b/d", "/a/d"));
+        }
+        stop.store(true, std::memory_order_release);
+    }
+    for (auto &thread : lookers) thread.join();
+    {
+        const smp::ScopedHostedCpu boot{0};
+        CHECK(vfs->resolve({}, "/a/d") && !vfs->resolve({}, "/b/d"));
+    }
+    CHECK(found.load() > 0 && missed.load() > 0);
+    expect_clean_checks();
+    std::printf("ram_rename_vs_lookup renames=%zu found=%zu missed=%zu moved=%zu\n", 2 * renames, found.load(),
+                missed.load(), moved.load());
+}
 } // namespace
 
 int main()
@@ -453,6 +522,7 @@ int main()
     pipe_no_lost_wake();
     unix_gc_versus_send();
     tty_commit_retry();
+    ram_rename_versus_lookup();
     std::printf("OK_DESCRIPTOR_RACES scope=model checks=%zu model_cpus=%zu guest=0 hardware_smp=0\n", checks.load(),
                 cpus);
 }
