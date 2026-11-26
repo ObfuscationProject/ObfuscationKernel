@@ -1094,8 +1094,10 @@ class TcpImmediateRuntime final
                 return encoded ? publish(kernel, access, {0, encoded.value()}) : encoded.status();
             }
             auto result = execute(kernel, pid, access, original, request.value());
-            if (result && request.value().operation == Call::write && request.value().linux &&
-                result.value().error == lu::tcp_errno_epipe[profile])
+            const bool raises = request.value().operation == Call::write ||
+                (request.value().operation == Call::sendto &&
+                 !(static_cast<u32>(request.value().arguments[3]) & *Constants::message(lu::UdpMessage::nosignal)));
+            if (result && raises && request.value().linux && result.value().error == lu::tcp_errno_epipe[profile])
             {
                 if (!access.live()) return Status::denied("TCP SIGPIPE lost captured image/descriptor");
                 auto *current = kernel.scheduler().find(pid);
@@ -1514,8 +1516,27 @@ class TcpImmediateRuntime final
             }
             // Defer unsupported operations before touching connection-only state;
             // a listener is a valid stream but not a connection handle.
-            if (request.operation != Call::shutdown && request.operation != Call::read && request.operation != Call::write)
+            const bool sendto = request.operation == Call::sendto, recvfrom = request.operation == Call::recvfrom;
+            if (request.operation != Call::shutdown && request.operation != Call::read && request.operation != Call::write &&
+                !sendto && !recvfrom)
                 return Status::unsupported("TCP operation requires the next checked continuation slice");
+            // sendto/recvfrom are write/read with flags (tcp_sendmsg, tcp_recvmsg).
+            // MSG_DONTWAIT is already the immediate behaviour; MSG_NOSIGNAL
+            // suppresses SIGPIPE and MSG_PEEK leaves the bytes queued.
+            const u32 flags = sendto || recvfrom ? static_cast<u32>(a[3]) : 0;
+            const u32 dontwait = request.linux ? *Constants::message(lu::UdpMessage::dontwait) : OK_MSG_DONTWAIT;
+            const u32 peek = request.linux ? *Constants::message(lu::UdpMessage::peek) : OK_MSG_PEEK;
+            const u32 nosignal = request.linux ? *Constants::message(lu::UdpMessage::nosignal) : OK_MSG_NOSIGNAL;
+            if ((sendto && (flags & ~(dontwait | nosignal))) || (recvfrom && (flags & ~(dontwait | peek))))
+                return Status::unsupported("TCP message flag is outside DONTWAIT, NOSIGNAL and PEEK");
+            // __sys_sendto copies a destination before sending; TCP then ignores it.
+            if (sendto && a[4])
+            {
+                const i32 length = static_cast<i32>(static_cast<u32>(a[5]));
+                if (length < 0 || length > 128) { semantic_error = error(request, lu::UdpErrno::e_inval, 22); return Status::fault(); }
+                std::array<std::byte, 128> ignored{};
+                if (length) if (auto status = access.read(a[4], std::span{ignored}.first(static_cast<usize>(length))); !status) return status;
+            }
             auto stream = service.snapshot(handle); if (!stream) return stream.status();
             if (!stream.value().endpoint || stream.value().endpoint->kind != net::tcp::HandleKind::connection)
             { semantic_error = tcp_error(request, lu::tcp_errno_enotconn, 107); return Status::fault(); }
@@ -1540,16 +1561,35 @@ class TcpImmediateRuntime final
             const usize size = a[2] < payload_.size() ? static_cast<usize>(a[2]) : payload_.size();
             if (state.state == net::tcp::State::syn_sent || state.state == net::tcp::State::syn_received)
                 return Status::would_block("TCP handshake is not complete");
-            if (request.operation == Call::read)
+            if (request.operation == Call::read || recvfrom)
             {
-                // A failed connection whose error was reported reads EOF (tcp_recvmsg, SOCK_DONE).
-                if (state.failure != net::tcp::Failure::none) return usize{0};
-                auto preview = service.peek(handle, std::span{payload_}.first(size)); if (!preview) return preview.status();
-                if (preview.value())
-                    if (auto status = access.write(a[1], {payload_.data(), preview.value()}); !status) return status;
-                auto consumed = service.read(handle, std::span{payload_}.first(preview.value()));
-                if (!consumed || consumed.value() != preview.value()) return Status::fault("TCP bytes changed after checked output");
-                return consumed;
+                auto received = [&]() -> Result<usize> {
+                    // A failed connection whose error was reported reads EOF (tcp_recvmsg, SOCK_DONE).
+                    if (state.failure != net::tcp::Failure::none) return usize{0};
+                    auto preview = service.peek(handle, std::span{payload_}.first(size)); if (!preview) return preview.status();
+                    if (preview.value())
+                        if (auto status = access.write(a[1], {payload_.data(), preview.value()}); !status) return status;
+                    if (flags & peek) return preview;
+                    auto consumed = service.read(handle, std::span{payload_}.first(preview.value()));
+                    if (!consumed || consumed.value() != preview.value()) return Status::fault("TCP bytes changed after checked output");
+                    return consumed;
+                }();
+                if (!received || !recvfrom || !a[4]) return received;
+                // TCP names no source (msg_namelen 0): __sys_recvfrom writes a
+                // zero length after the data, so a bad length fails after it.
+                // socket_option_length reads the length word named by argument 4.
+                auto length = socket_option_length(access, Request{request.operation, request.linux,
+                    {a[0], a[1], a[2], a[3], a[5], a[5]}}, semantic_error);
+                if (!length) return length.status();
+                std::array<u8, 4> raw{};
+                if (request.linux)
+                {
+                    if (auto status = lu::UdpWire<lu::configured_native_profile()>::encode_socklen(raw, 0); !status) return status;
+                }
+                std::array<std::byte, 4> zero{};
+                for (usize i = 0; i < raw.size(); ++i) zero[i] = std::byte{raw[i]};
+                if (auto status = access.write(a[5], zero); !status) return status;
+                return received;
             }
             if (state.write_shutdown || (state.state != net::tcp::State::established && state.state != net::tcp::State::close_wait))
             { semantic_error = tcp_error(request, lu::tcp_errno_epipe, 32); return Status::fault(); }

@@ -312,6 +312,40 @@ void poll_until_data(Kernel &kernel, Group group, i32 fd, Peer &peer, std::span<
     expect(!caller->syscall_pending && static_cast<i64>(caller->native_frame.registers[14]) == 1 && !poll_wait(group.pid));
     std::memcpy(&entry, mock::memory.data() + 896, sizeof(entry)); expect(entry.revents == OK_POLLIN);
 }
+// sendto/recvfrom on a connected stream are write/read with flags: TCP
+// ignores a destination (after copying it) and names no source, so a
+// requested source length becomes 0 (Linux __sys_sendto, __sys_recvfrom).
+void stream_messages(Kernel &kernel, Group group, i32 fd, Peer &peer)
+{
+    const auto at = static_cast<uptr>(fd);
+    const std::array<std::byte, 3> data{std::byte{'s'}, std::byte{'n'}, std::byte{'d'}};
+    std::copy(data.begin(), data.end(), mock::memory.begin() + 128);
+    expect(invoke(kernel, group, 44, {at, payload_pointer, 3, 0x100, 0, 0}) == -95); // MSG_WAITALL
+    address(link.peer_ip, 9);
+    expect(invoke(kernel, group, 44, {at, payload_pointer, 3, 0, address_pointer, 129}) == -22);
+    expect(invoke(kernel, group, 44, {at, payload_pointer, 3, OK_MSG_NOSIGNAL | OK_MSG_DONTWAIT, address_pointer, 16}) == 3);
+    CHECK(kernel.poll_network()); extension.receive_peer(peer);
+    std::array<std::byte, 8> got{}; auto read = peer.read(got); CHECK(read);
+    expect(read.value() == 3 && got[0] == std::byte{'s'} && got[2] == std::byte{'d'});
+    const auto deliver = [&] {
+        CHECK(peer.write(data)); extension.send_peer(peer); CHECK(kernel.poll_network()); extension.receive_peer(peer);
+    };
+    const auto capacity = [](i32 value) { std::memcpy(mock::memory.data() + 1000, &value, sizeof(value)); };
+    const auto length = [] { i32 value{}; std::memcpy(&value, mock::memory.data() + 1000, sizeof(value)); return value; };
+    deliver();
+    expect(invoke(kernel, group, 45, {at, payload_pointer, 8, 0x100, 0, 0}) == -95);
+    capacity(16);
+    expect(invoke(kernel, group, 45, {at, payload_pointer, 8, OK_MSG_PEEK, address_pointer, name_length_pointer}) == 3);
+    expect(length() == 0);
+    capacity(16);
+    expect(invoke(kernel, group, 45, {at, payload_pointer, 8, OK_MSG_DONTWAIT, address_pointer, name_length_pointer}) == 3);
+    expect(length() == 0 && mock::memory[128] == std::byte{'s'});
+    expect(invoke(kernel, group, 45, {at, payload_pointer, 8, 0, 0, 0}) == -11);
+    // A negative source length is EINVAL after the bytes were taken.
+    deliver(); capacity(-1);
+    expect(invoke(kernel, group, 45, {at, payload_pointer, 8, 0, address_pointer, name_length_pointer}) == -22);
+    expect(invoke(kernel, group, 45, {at, payload_pointer, 8, 0, 0, 0}) == -11);
+}
 // The router answers an IPv6 SYN with port unreachable: the executor routes
 // the ICMPv6 error to the connection (after ipv6_exercise resolved the router).
 void icmp6_refusal(Kernel &kernel, u16 port)
@@ -383,6 +417,7 @@ void exercise(Kernel &kernel, bool linux, u16 port)
     expect(invoke(kernel, group, 0, {static_cast<uptr>(fd), payload_pointer, english.size()}) == 5);
     expect(std::equal(english.begin(), english.end(), mock::memory.begin() + 128));
     expect(invoke(kernel, group, 0, {static_cast<uptr>(fd), 0, 0}) == 0);
+    stream_messages(kernel, group, static_cast<i32>(fd), peer);
     auto duplicate = invoke(kernel, group, 32, {static_cast<uptr>(fd)}); expect(duplicate >= 3);
     expect(invoke(kernel, group, 3, {static_cast<uptr>(fd)}) == 0); expect(kernel.native_tcp().valid(handle));
     CHECK(peer.shutdown_write()); extension.send_peer(peer); CHECK(kernel.poll_network()); extension.receive_peer(peer);
