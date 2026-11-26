@@ -138,6 +138,7 @@ void add_channel(PollChannels &channels, usize &count, bool &unwatched, sched::T
 {
     for (usize i = 0; i < count; ++i)
         if (channels[i].reason == reason && channels[i].key == key) return;
+    // Two channels per descriptor at most (max_wait_links).
     if (count == channels.size()) { unwatched = true; return; }
     channels[count++] = {reason, key};
 }
@@ -147,8 +148,9 @@ void add_channel(PollChannels &channels, usize &count, bool &unwatched, sched::T
 // endpoints, the console input, UDP sockets (the receive-change pass, which
 // also follows transmit credit) and TCP streams (their wait pass). Regular
 // files, memfds and console output are always ready and need none. A source
-// without a channel (a TCP stream with no endpoint yet) sets `unwatched`:
-// that poll re-evaluates on a timer.
+// without a channel sets `unwatched` and that poll re-evaluates on a timer:
+// a TCP stream with no endpoint yet (always ready unless only exceptional
+// conditions are selected) or a description kind no channel serves.
 usize poll_channels(Kernel &kernel, const PollWait &wait, PollChannels &channels, bool &unwatched)
 {
     using Reason = sched::ThreadWaitReason;
@@ -219,15 +221,19 @@ Result<usize> arm_poll(Kernel &kernel, sched::ThreadControlBlock &thread, memory
     static_cast<void>(thread); static_cast<void>(object); static_cast<void>(previous); static_cast<void>(rearm);
 #endif
     PollChannels channels{};
-    bool unwatched = false;
-    const usize count = poll_channels(kernel, wait, channels, unwatched);
+    bool channel_less = false;
+    const usize count = poll_channels(kernel, wait, channels, channel_less);
+    // A link the exhausted pool refused counts unqueued there.
+    bool linked = true;
     for (usize i = 0; i < count; ++i)
-        if (!scheduler.watch_channel(wait.ticket, channels[i].reason, channels[i].key)) unwatched = true;
-    if (unwatched)
+        if (!scheduler.watch_channel(wait.ticket, channels[i].reason, channels[i].key)) linked = false;
+    wait.unwatched = channel_less || !linked;
+    if (wait.unwatched)
     {
-        // No wake reaches a source without a channel: re-evaluate on a timer.
-        if (const auto cpu = smp::current_cpu(); cpu < smp::max_cpus)
-            smp::detail::owner_add(smp::evidence_cpus[cpu].unqueued);
+        // No wake reaches a source without an entry: re-evaluate on a timer.
+        // A source no channel covers is no exhaustion: it counts poll_retry.
+        if (const auto cpu = smp::current_cpu(); channel_less && cpu < smp::max_cpus)
+            smp::detail::owner_add(smp::evidence_cpus[cpu].poll_retries);
         if (auto now = arch::monotonic_nanoseconds(); now)
             static_cast<void>(scheduler.arm_wait_deadline(wait.ticket, now.value() + poll_retry_ns,
                                                           sched::DeadlineAction::retry));
@@ -864,6 +870,9 @@ void audit_probed_poll(Kernel &kernel, sched::ThreadRef chosen)
     auto resolved = poll_objects.resolve(object);
     if (!resolved || !thread->wait_registration.pending(resolved.value()->ticket)) return;
     auto &wait = *resolved.value();
+    // A source with no channel entry is re-evaluated by its retry timer, not
+    // woken: readiness there is no missing wake.
+    if (wait.unwatched) return;
     const auto ready = poll_ready(kernel, wait);
     if (ready && ready.value() == 0) return;
     smp::count_check(smp::KernelCheck::poll_audit_ready, "poll audit: readiness without a wake");

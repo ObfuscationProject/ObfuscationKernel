@@ -347,6 +347,7 @@ void report_kernel_checks()
     field("steals", smp::evidence_total(&smp::EvidenceCpu::steals));
     field("deadline_late_max_us", smp::evidence_max(&smp::EvidenceCpu::deadline_late_max_us));
     field("unqueued", smp::evidence_total(&smp::EvidenceCpu::unqueued));
+    field("poll_retry", smp::evidence_total(&smp::EvidenceCpu::poll_retries));
     emit("\nOK_SMP_MM scope=hardware");
     field("mm_acquired", runtime_lock_stat(smp::LockStat::mm, false));
     field("mm_contended", runtime_lock_stat(smp::LockStat::mm, true));

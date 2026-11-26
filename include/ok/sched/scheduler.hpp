@@ -486,9 +486,9 @@ inline constexpr usize wait_hash_entries = 1024;
 inline constexpr usize wait_hash_entries = 256;
 #endif
 using WaitChannels = WaitHash<wait_hash_buckets, wait_hash_entries, WaitHashLock>;
-// The channel entries one wait may hold (a poll over many descriptors); a
-// wait that needs more re-evaluates on a timer instead (wait_hash_unqueued).
-inline constexpr usize max_wait_links = 16;
+// The channel entries one wait may hold: a poll links at most two channels
+// (read and write side) per descriptor, so no poll runs out of them.
+inline constexpr usize max_wait_links = 2 * max_process_fds;
 // A thread slot's channel entries: the head of its chain through them
 // (WaitHash keeps the links) and how many there are. The owner's alone.
 struct WaitLinks

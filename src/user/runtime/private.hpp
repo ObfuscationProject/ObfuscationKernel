@@ -483,6 +483,9 @@ struct PollWait
     std::array<u32, 3> ready_sets{};
     // Set by poll_ready(): the device source of a ready console or socket.
     sched::WakeSource ready_source{sched::WakeSource::thread};
+    // Set by its last arm: a watched source has no channel entry (no channel
+    // covers it, or the pool was exhausted) and a timer re-evaluates it.
+    bool unwatched{};
 };
 using PollObjectsLayout = memory::ObjectPool<PollWait, NativePagePool, 1>;
 constexpr usize poll_object_pages = (sched::max_processes + PollObjectsLayout::slots_per_page - 1) /

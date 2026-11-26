@@ -184,7 +184,8 @@ struct alignas(64) EvidenceCpu
     std::atomic<uptr> probes{};
     std::atomic<uptr> steals{};
     std::atomic<uptr> deadline_late_max_us{}; // A maximum, not a sum.
-    std::atomic<uptr> unqueued{};
+    std::atomic<uptr> unqueued{}; // A wait the exhausted channel pool left unlinked.
+    std::atomic<uptr> poll_retries{}; // A poll arm with a source no channel covers.
     // OK_SMP_MM
     std::atomic<uptr> quiesce_rounds{};
     std::atomic<uptr> kernel_windows{};
