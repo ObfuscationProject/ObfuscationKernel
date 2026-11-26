@@ -175,6 +175,18 @@ Status Ext4Node::write(usize offset, std::span<const std::byte> input)
     if (!fs_) return Status::not_found("ext4 node has no owner");
     return fs_->operation(this, [&] { return write_active(offset, input); });
 }
+// The size and the write in one gate operation (atomic O_APPEND).
+Result<usize> Ext4Node::append(std::span<const std::byte> input)
+{
+    if (!fs_) return Status::not_found("ext4 node has no owner");
+    return fs_->operation(this, [&]() -> Result<usize> {
+        auto current = query_metadata_active();
+        if (!current) return current.status();
+        const auto offset = current.value().size;
+        if (auto status = write_active(offset, input); !status) return status;
+        return offset;
+    });
+}
 Status Ext4Node::truncate(usize size)
 {
     if (!fs_) return Status::not_found("ext4 node has no owner");

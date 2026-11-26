@@ -451,6 +451,20 @@ Result<FileBuffer> RamNode::read(usize offset, usize count) const
 Status RamNode::write(usize offset, std::span<const std::byte> data)
 {
     smp::ScopedSpinLock guard(lock_);
+    return write_locked(offset, data);
+}
+
+// The end of file and the write under one node lock hold.
+Result<usize> RamNode::append(std::span<const std::byte> data)
+{
+    smp::ScopedSpinLock guard(lock_);
+    const auto offset = metadata_.size;
+    if (auto status = write_locked(offset, data); !status) return status;
+    return offset;
+}
+
+Status RamNode::write_locked(usize offset, std::span<const std::byte> data)
+{
     if (readonly_)
         return Status::denied("file has read-only archive backing");
     if (metadata_.type != NodeType::regular && metadata_.type != NodeType::device &&

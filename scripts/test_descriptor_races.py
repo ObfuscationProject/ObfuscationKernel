@@ -7,7 +7,8 @@ queue spin locks (OK_HOSTED_LOCK_MODEL) with the lock-order checks on
 publishing descriptor slots (openat), a pipe reader arming against a writer
 (no lost wake), the AF_UNIX rights collection against a send and PTY reads
 retrying a commit another reader overtook (tty prepare/copy/commit), and a RAM
-directory renamed between two parents against lookups (ram_topology).
+directory renamed between two parents against lookups (ram_topology) and two
+CPUs appending to one RAM file (atomic O_APPEND, Node::append).
 Model coverage only: host threads stand in for CPUs; no AP starts, no IPI is
 sent and no guest or hardware SMP executes.
 """

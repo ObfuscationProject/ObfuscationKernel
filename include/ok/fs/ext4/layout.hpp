@@ -176,6 +176,7 @@ class Ext4Node final : public Node
     Result<Node *> lookup_child_retained(std::string_view child) override;
     Result<FileBuffer> read(usize offset, usize count) const override;
     Status write(usize offset, std::span<const std::byte> data) override;
+    Result<usize> append(std::span<const std::byte> data) override;
     Status truncate(usize size) override;
     Status sync() override;
     // Every provider call takes the filesystem's operation gate.

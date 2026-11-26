@@ -675,14 +675,17 @@ Result<usize> PosixService::write(Fd fd, std::span<const std::byte> in)
     // The offset, or end of file with O_APPEND, stays this write's until the
     // offset moves past the written bytes.
     sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
-    usize offset = entry->offset;
     if ((entry->flags & o_APPEND) != 0)
     {
-        auto metadata = entry->node->query_metadata();
-        if (!metadata)
-            return metadata.status();
-        offset = metadata.value().size;
+        // Atomic O_APPEND (spec 4.13): the provider reads the end of file and
+        // writes there in one step, against every other description's write.
+        auto appended = entry->node->append(in);
+        if (!appended)
+            return appended.status();
+        entry->offset = appended.value() + in.size();
+        return in.size();
     }
+    usize offset = entry->offset;
     if (in.size() > ~usize{0} - offset)
         return Status::overflow("write offset overflow");
     if (auto status = entry->node->write(offset, in); !status.ok())

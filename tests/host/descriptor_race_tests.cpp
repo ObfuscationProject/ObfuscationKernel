@@ -513,6 +513,50 @@ void ram_rename_versus_lookup()
     std::printf("ram_rename_vs_lookup renames=%zu found=%zu missed=%zu moved=%zu\n", 2 * renames, found.load(),
                 missed.load(), moved.load());
 }
+// Atomic O_APPEND (spec 4.13, Node::append): two CPUs append 8-byte records
+// to one RAM file through the node, as two descriptions' O_APPEND writes do.
+// Each append reads the end and writes under one node lock hold: no record
+// is torn or overwritten, and each returned offset is its record's.
+void append_versus_append()
+{
+    auto vfs = std::make_unique<fs::VirtualFileSystem>();
+    fs::Node *node{};
+    {
+        const smp::ScopedHostedCpu boot{0};
+        CHECK(vfs->create("/log", fs::NodeType::regular));
+        node = vfs->lookup("/log");
+        CHECK(node);
+    }
+    constexpr usize records = fs::max_file_data / 8 / 2;
+    std::array<std::array<usize, records>, 2> offsets{};
+    std::vector<std::thread> writers;
+    for (usize side = 0; side < 2; ++side)
+        writers.emplace_back([&, side] {
+            const smp::ScopedHostedCpu hosted{static_cast<smp::CpuId>(side + 1)};
+            std::array<std::byte, 8> record{};
+            for (usize index = 0; index < records; ++index)
+            {
+                record.fill(static_cast<std::byte>(side ? 0xb0 + index % 16 : 0x10 + index % 16));
+                auto appended = node->append(record);
+                CHECK(appended && appended.value() % 8 == 0);
+                offsets[side][index] = appended.value();
+            }
+        });
+    for (auto &thread : writers) thread.join();
+    const smp::ScopedHostedCpu boot{0};
+    auto metadata = node->query_metadata();
+    CHECK(metadata && metadata.value().size == 2 * records * 8);
+    for (usize side = 0; side < 2; ++side)
+        for (usize index = 0; index < records; ++index)
+        {
+            auto bytes = node->read(offsets[side][index], 8);
+            CHECK(bytes && bytes.value().size == 8);
+            const auto expected = static_cast<std::byte>(side ? 0xb0 + index % 16 : 0x10 + index % 16);
+            for (usize at = 0; at < 8; ++at) CHECK(bytes.value().data[at] == expected);
+        }
+    expect_clean_checks();
+    std::printf("append_vs_append records=%zu size=%zu\n", 2 * records, metadata.value().size);
+}
 } // namespace
 
 int main()
@@ -523,6 +567,7 @@ int main()
     unix_gc_versus_send();
     tty_commit_retry();
     ram_rename_versus_lookup();
+    append_versus_append();
     std::printf("OK_DESCRIPTOR_RACES scope=model checks=%zu model_cpus=%zu guest=0 hardware_smp=0\n", checks.load(),
                 cpus);
 }

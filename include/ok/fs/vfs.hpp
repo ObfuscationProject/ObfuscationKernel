@@ -174,6 +174,19 @@ class Node
     [[nodiscard]] virtual Metadata metadata() const = 0;
     virtual Result<FileBuffer> read(usize offset, usize count) const = 0;
     virtual Status write(usize offset, std::span<const std::byte> data) = 0;
+    // O_APPEND (spec 4.13): writes `data` at the end of the file as one step
+    // and returns the offset written at. A provider overrides it to read the
+    // size and write under one hold of its lock or operation gate, so that no
+    // other description's write moves the end in between; this default
+    // (size, then write) is atomic only while its caller holds the kernel lock.
+    virtual Result<usize> append(std::span<const std::byte> data)
+    {
+        auto current = query_metadata();
+        if (!current) return current.status();
+        const auto offset = current.value().size;
+        if (auto status = write(offset, data); !status) return status;
+        return offset;
+    }
     virtual Status truncate(usize)
     {
         return Status::unsupported("truncate unavailable");
@@ -468,6 +481,7 @@ class RamNode final : public Node
     [[nodiscard]] Metadata metadata() const override;
     Result<FileBuffer> read(usize offset, usize count) const override;
     Status write(usize offset, std::span<const std::byte> data) override;
+    Result<usize> append(std::span<const std::byte> data) override;
     Status truncate(usize size) override;
     Status retain() override;
     Status release() override;
@@ -503,6 +517,7 @@ class RamNode final : public Node
     friend class VirtualFileSystem;
     [[nodiscard]] bool reusable() const;
     Status configure_locked(std::string_view name, NodeType type, FileBuffer *data);
+    Status write_locked(usize offset, std::span<const std::byte> data);
     template <typename Operation>
     Result<Node *> with_child_identity(std::string_view child, Operation &&operation);
     [[nodiscard]] usize child_index(std::string_view name) const;
