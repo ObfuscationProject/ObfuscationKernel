@@ -1574,7 +1574,9 @@ bool step(Kernel &kernel)
                 sectioned = true;
             }
         }
-    if (!sectioned && !owned_settled && running->native_active && running->syscall_pending)
+    // A call whose wait the owner settled above is not dispatched again; a
+    // syscall the thread trapped after entering with that result is.
+    if (!sectioned && !(owned_settled && !trapped_this_step) && running->native_active && running->syscall_pending)
     {
         // The choke point: every other syscall of this process waits for
         // its sections and commits their results first.

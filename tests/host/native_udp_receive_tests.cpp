@@ -375,6 +375,108 @@ void poll_sleeps_on_socket_queue(Kernel &kernel)
     packet(kernel, g.port, payload);
     expect(native::step(kernel));
     expect(!caller.syscall_pending && result(kernel, g) == 1);
+    CHECK(kernel.native_udp().consume(g.endpoint));
+    // The poll audit (spec 4.10): a datagram whose wake is lost (its change
+    // taken without waking the channel, as a missing wake site would) leaves
+    // the poll parked until an audit probes it. The probed pick evaluates it
+    // even though no signal interrupts it: the readiness counts
+    // poll_audit_ready once and the owner produces the poll's result.
+    wait = arm_poll(OK_POLLIN);
+    expect(wait && !wait->unwatched && udp_poll_links(kernel, g.endpoint) == 1);
+    packet(kernel, g.port, payload);
+    expect(kernel.native_udp().take_changed([](u32) {}) == 1);
+    const auto audited = smp::check_total(smp::KernelCheck::poll_audit_ready);
+    const auto probes = smp::evidence_total(&smp::EvidenceCpu::probes);
+    usize passes = 0;
+    for (; passes < 4 * 256 + 1 && caller.syscall_pending; ++passes) static_cast<void>(native::step(kernel));
+    expect(!caller.syscall_pending && result(kernel, g) == 1 && !poll_wait(g.pid));
+    expect(passes > 1 && smp::check_total(smp::KernelCheck::poll_audit_ready) == audited + 1);
+    expect(smp::evidence_total(&smp::EvidenceCpu::probes) > probes);
+    expect(udp_poll_links(kernel, g.endpoint) == 0);
+    std::memcpy(&entry, mock::memory.data() + 896, sizeof(entry));
+    expect(entry.revents == OK_POLLIN);
+    CHECK(kernel.native_udp().consume(g.endpoint));
+    // Its timer re-evaluates a poll whose source no wake reaches: an audit
+    // that finds such a poll ready reports nothing. (No UDP poll is
+    // unwatched; the flag stands in for one here.)
+    wait = arm_poll(OK_POLLIN);
+    expect(wait && !wait->unwatched);
+    wait->unwatched = true;
+    packet(kernel, g.port, payload);
+    expect(kernel.native_udp().take_changed([](u32) {}) == 1);
+    const auto quiet = smp::check_total(smp::KernelCheck::poll_audit_ready);
+    for (passes = 0; passes < 4 * 256 + 1 && smp::evidence_total(&smp::EvidenceCpu::probes) == probes + 1; ++passes)
+        static_cast<void>(native::step(kernel));
+    expect(smp::evidence_total(&smp::EvidenceCpu::probes) == probes + 2);
+    expect(caller.syscall_pending && poll_wait(g.pid) == wait);
+    expect(smp::check_total(smp::KernelCheck::poll_audit_ready) == quiet);
+    // A wake then completes it as usual.
+    kernel.scheduler().wake_waiters(sched::ThreadWaitReason::udp_receive, native::udp_poll_channel(g.endpoint));
+    expect(native::step(kernel));
+    expect(!caller.syscall_pending && result(kernel, g) == 1 && !poll_wait(g.pid));
+    CHECK(kernel.native_udp().consume(g.endpoint));
+    // A call trapped right after the owner produced the poll's result (spec
+    // 4.4: the thread enters user mode in the same step) is dispatched in
+    // that step with its trap-time state, not left for a later pass.
+    wait = arm_poll(OK_POLLIN);
+    expect(wait && udp_poll_links(kernel, g.endpoint) == 1);
+    packet(kernel, g.port, payload);
+    const auto entries = mock::entries;
+    mock::entry_trap = {hw::TrapKind::syscall, 256};
+    mock::owned_hook = [](hw::AddressSpace &, hw::UserFrame &next, const hw::KernelEntryStackView &) {
+        next.registers[14] = OK_SYS_GETPID;
+    };
+    expect(native::step(kernel));
+    mock::owned_hook = nullptr;
+    mock::entry_trap = {hw::TrapKind::timer};
+    expect(mock::entries == entries + 1 && !poll_wait(g.pid));
+    expect(!caller.syscall_pending && result(kernel, g) == static_cast<i64>(g.pid));
+    std::memcpy(&entry, mock::memory.data() + 896, sizeof(entry));
+    expect(entry.revents == OK_POLLIN);
+    retire(kernel, g);
+}
+// A poll over many descriptors links a channel for each source (up to two
+// per descriptor): eighteen pipe ends and a socket take nineteen entries,
+// leave no source unwatched and count neither unqueued nor poll_retry.
+void poll_links_every_descriptor(Kernel &kernel)
+{
+    const auto g = create(kernel, 51050);
+    auto &caller = thread(kernel, g);
+    select(kernel, g);
+    constexpr usize pipes = 9;
+    std::array<ok_pollfd, 2 * pipes + 1> fds{};
+    for (usize i = 0; i < pipes; ++i)
+    {
+        bool complete = true;
+        expect(native::dispatch(kernel, g.pid, {OK_SYS_PIPE, {hw::user_begin + 768, 0, 0, 0, 0, 0}}, complete) == 0);
+        std::array<i32, 2> ends{}; std::memcpy(ends.data(), mock::memory.data() + 768, sizeof(ends));
+        fds[2 * i] = {ends[0], OK_POLLIN, 0};
+        fds[2 * i + 1] = {ends[1], OK_POLLIN, 0}; // Not ready: a write end never reads.
+    }
+    fds.back() = {g.fd, OK_POLLIN, 0};
+    std::memcpy(mock::memory.data() + 1024, fds.data(), sizeof(fds));
+    const auto unqueued = smp::evidence_total(&smp::EvidenceCpu::unqueued);
+    const auto retries = smp::evidence_total(&smp::EvidenceCpu::poll_retries);
+    const auto links = kernel.scheduler().wait_channels().claimed();
+    CHECK(kernel.scheduler().activate_thread(g.pid, g.pid));
+    hw::UserFrame captured{}; captured.pc = hw::user_begin + 256; captured.sp = hw::user_begin + 4096;
+    captured.registers[14] = OK_SYS_POLL; captured.registers[9] = hw::user_begin + 1024;
+    captured.registers[10] = fds.size(); captured.registers[11] = ~uptr{0};
+    caller.native_frame = captured; mock::entry_trap = {hw::TrapKind::syscall, 256};
+    native::last_pid = native::last_tid = 0;
+    expect(native::step(kernel)); expect(caller.syscall_pending);
+    mock::entry_trap = {hw::TrapKind::timer};
+    auto *wait = poll_wait(g.pid);
+    expect(wait && !wait->unwatched && udp_poll_links(kernel, g.endpoint) == 1);
+    expect(kernel.scheduler().wait_channels().claimed() == links + fds.size());
+    expect(smp::evidence_total(&smp::EvidenceCpu::unqueued) == unqueued);
+    expect(smp::evidence_total(&smp::EvidenceCpu::poll_retries) == retries);
+    expect(kernel.scheduler().earliest_deadline() == sched::DeadlineHeap<sched::deadline_keys>::never);
+    packet(kernel, g.port, payload);
+    expect(native::step(kernel));
+    expect(!caller.syscall_pending && result(kernel, g) == 1 && !poll_wait(g.pid));
+    expect(kernel.scheduler().wait_channels().claimed() == links);
+    CHECK(kernel.native_udp().consume(g.endpoint));
     retire(kernel, g);
 }
 void ipv6_native_calls(Kernel &kernel)
@@ -445,6 +547,7 @@ int main()
     ipv6_native_calls(kernel);
     icmp_refusal_wakes_receiver(kernel);
     poll_sleeps_on_socket_queue(kernel);
+    poll_links_every_descriptor(kernel);
     expect(kernel.native_udp().active_sockets() == 0);
     expect(native::entry_stacks.accounting().leased_slots == 0);
     const auto owners = native::native_udp_receive_objects.accounting();
