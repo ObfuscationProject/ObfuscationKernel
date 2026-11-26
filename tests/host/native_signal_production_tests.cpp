@@ -2,6 +2,7 @@
 #define OK_SYSCALL_ORIGIN_MODEL 1
 #define OK_PIPE_WRITE_SIGNAL_MODEL 1
 #include "native_child_exit_runtime_fixture.hpp"
+#include "native_pending_exit.hpp"
 
 #ifndef OK_NATIVE_SIGNAL_RUNTIME
 #error "Ordinary signal runtime tests require the production runtime definition"
@@ -158,7 +159,7 @@ void native_kill_lifecycle(Kernel &kernel)
         expect(native_kill(kernel, parent, child, signal) == 0);
         expect(kernel.scheduler().find(child)->state() != sched::ProcessState::zombie);
         expect(native::private_signal_find(child)->deferred_fatal == signal);
-        native::private_process_signal_fatal(kernel);
+        native::deliver_pending_exits(kernel);
         const auto *completed = kernel.scheduler().find(child); CHECK(completed);
         expect(completed->state() == sched::ProcessState::zombie && completed->wait_status() == signal);
         expect(completed->parent_pid() == parent && !completed->resources().native_space.root);
@@ -178,14 +179,14 @@ void native_kill_lifecycle(Kernel &kernel)
     auto *process = kernel.scheduler().find(self); CHECK(process);
     expect(process->state() == sched::ProcessState::running && process->leader().native_active);
     expect(native::private_signal_find(self)->deferred_fatal == OK_SIGKILL);
-    native::private_process_signal_fatal(kernel);
+    native::deliver_pending_exits(kernel);
     expect(kernel.scheduler().find(self)->wait_status() == OK_SIGKILL);
     release(kernel, self);
     // A native sender uses the Linux recipient's established pending-signal path.
     const auto sender = native_process(kernel), linux = create(kernel);
     expect(native_kill(kernel, sender, linux, OK_SIGKILL) == 0);
     expect(native::private_signal_find(linux)->group_kill);
-    native::private_process_signal_fatal(kernel);
+    native::deliver_pending_exits(kernel);
     expect(kernel.scheduler().find(linux)->wait_status() == OK_SIGKILL);
     release(kernel, linux); release(kernel, sender);
 }

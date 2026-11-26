@@ -4,6 +4,7 @@
 #define OK_SYSCALL_ORIGIN_MODEL 1
 #define OK_PIPE_WRITE_SIGNAL_MODEL 1
 #include "native_clock_model.hpp"
+#include "native_pending_exit.hpp"
 #include <source_location>
 
 namespace
@@ -408,7 +409,7 @@ void blocked_fatal(Kernel &kernel)
     expect(kill(kernel, sender, g.peer, 9) == 0);
     expect(kernel.scheduler().find(g.pid)->state() == sched::ProcessState::blocked);
     // Fatal service is independent of both frame readiness and wait admission.
-    native::private_process_signal_fatal(kernel);
+    native::deliver_pending_exits(kernel);
     expect(mock::entries == entries && kernel.scheduler().find(g.pid)->state() == sched::ProcessState::zombie);
     for (const auto &t : kernel.scheduler().find(g.pid)->thread_records()) expect(!t.native_active && !t.entry_stack.pool);
     retire(kernel, g); retire(kernel, sender);

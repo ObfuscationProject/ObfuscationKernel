@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Retain and execute exec with a sibling thread on a modelled second CPU through the actual runtime."""
+"""Retain and execute exec and exit_group with a sibling thread on a modelled second CPU (a host thread) through the actual runtime."""
 from pathlib import Path
 import argparse,hashlib,json,os,shutil,subprocess,sys
 
@@ -14,7 +14,7 @@ def main():
  parser.add_argument('--arch',choices=('all',*ARCHES),default='all');parser.add_argument('--sanitize',action='store_true');parser.add_argument('--cxx',default='g++');args=parser.parse_args()
  root=Path(__file__).resolve().parents[1];out=args.output.resolve();out.mkdir(parents=True,exist_ok=False);source=out/'source'
  arches=ARCHES if args.arch=='all' else (args.arch,)
- record=dict(status='preparing',scope='Hosted actual runtime, loader, entry stack pool and scheduler, selected architecture profiles. The second CPU is a modelled entry record and lease; mock trap/copy/mapping backends; no guest, hardware isolation, physical or SMP evidence.',sanitizer=args.sanitize,leak_detection=False,architectures=list(arches),source_sha256={},commands=[],rows=[])
+ record=dict(status='preparing',scope='Hosted actual runtime, loader, entry stack pool and scheduler, selected architecture profiles. The second CPU is a host thread holding a sibling in modelled user mode (scheduler slot and active lease) that returns through the frozen check and put_prev; mock trap/copy/mapping backends; no guest, hardware isolation, physical or SMP evidence.',sanitizer=args.sanitize,leak_detection=False,architectures=list(arches),source_sha256={},commands=[],rows=[])
  def save():
   p=out/'result.json.tmp';p.write_text(json.dumps(record,indent=2)+'\n');p.replace(out/'result.json')
  def run(argv,label):
@@ -41,7 +41,7 @@ def main():
   cxx=Path(shutil.which(args.cxx) or args.cxx).resolve();xmake=Path(shutil.which('xmake') or '').resolve()
   if not cxx.is_file() or not xmake.is_file():raise ValueError('xmake and compiler required')
   record['tool_sha256']={str(p):sha(p) for p in (cxx,xmake)}
-  flags=['-frtti','-Wall','-Wextra','-Wpedantic','-Werror','-ffunction-sections','-fdata-sections'];ld=['-Wl,--gc-sections']
+  flags=['-frtti','-pthread','-Wall','-Wextra','-Wpedantic','-Werror','-ffunction-sections','-fdata-sections'];ld=['-pthread','-Wl,--gc-sections']
   if args.sanitize:flags+=['-fsanitize=address,undefined','-fno-omit-frame-pointer','-fno-pie'];ld+=['-fsanitize=address,undefined','-no-pie']
   lua=['set_project("hosted-runtime-native-exec-eviction")','set_languages("c++23")','set_optimize("fast")','toolchain("poll-host")','    set_kind("standalone")','    set_toolset("cxx", '+json.dumps(str(cxx))+')','    set_toolset("ld", '+json.dumps(str(cxx))+')','toolchain_end()']
   for arch in arches:
@@ -52,7 +52,7 @@ def main():
    run([xmake,'build','-P',source,'-j2','-v','native-exec-eviction-'+arch],arch+'-build')
    binary=source/'bin'/('native-exec-eviction-'+arch);output=run([binary],arch+'-run')
    expected='PASS native exec eviction checks='
-   if expected not in output or 'scope=hosted-model guest=0 smp=0' not in output:raise ValueError('missing exact exec eviction success marker')
+   if expected not in output or 'scope=hosted-model model_cpus=2 guest=0 smp=0' not in output:raise ValueError('missing exact exec eviction success marker')
    record['rows'].append(dict(architecture=arch,status='passed',binary_sha256=sha(binary),output=output.strip()));save();print('PASS',arch,'hosted native exec eviction',flush=True)
   for name,digest in record['source_sha256'].items():
    if sha(source/name)!=digest:raise ValueError('retained source changed: '+name)

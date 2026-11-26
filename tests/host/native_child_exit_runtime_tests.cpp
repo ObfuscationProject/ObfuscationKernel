@@ -4,6 +4,7 @@
 #define OK_SYSCALL_ORIGIN_MODEL 1
 #define OK_PIPE_WRITE_SIGNAL_MODEL 1
 #include "native_child_exit_runtime_fixture.hpp"
+#include "native_pending_exit.hpp"
 
 namespace {
 void actual_matrix(Kernel &kernel)
@@ -20,7 +21,7 @@ void actual_matrix(Kernel &kernel)
                 if (killed)
                 {
                     expect(native::private_process_kill(kernel, *kernel.scheduler().find(parent), child, 9) == 0);
-                    native::private_process_signal_fatal(kernel);
+                    native::deliver_pending_exits(kernel);
                 }
                 else raw_exit(kernel, child, child, 23, true);
                 expect(native::runtime_status().ok());

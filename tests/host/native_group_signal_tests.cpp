@@ -3,6 +3,7 @@
 #define OK_SYSCALL_ORIGIN_MODEL 1
 #define OK_PIPE_WRITE_SIGNAL_MODEL 1
 #include "native_child_exit_runtime_fixture.hpp"
+#include "native_pending_exit.hpp"
 
 namespace
 {
@@ -144,7 +145,7 @@ void mixed_permission_and_zero(Kernel &kernel)
     expect(native::private_signal_find(allowed)->deferred_fatal == 15);
     expect(!native::private_signal_find(denied));
     expect(kernel.scheduler().find(allowed)->state() != sched::ProcessState::zombie);
-    native::private_process_signal_fatal(kernel);
+    native::deliver_pending_exits(kernel);
     expect(kernel.scheduler().find(allowed)->state() == sched::ProcessState::zombie);
     expect(kernel.scheduler().find(allowed)->wait_status() == 15);
     expect(kernel.scheduler().find(denied)->state() != sched::ProcessState::zombie);
@@ -179,7 +180,7 @@ void queued_linux_and_positive_regressions(Kernel &kernel)
     expect(signal_owners() == owners && state->shared.pending_mask().contains(15));
     expect(native_kill(kernel, sender, negative(child), 9) == 0);
     expect(state->group_kill);
-    native::private_process_signal_fatal(kernel);
+    native::deliver_pending_exits(kernel);
     expect(kernel.scheduler().find(child)->state() == sched::ProcessState::zombie);
     expect(kernel.scheduler().find(child)->wait_status() == 9);
     release(kernel, child); release(kernel, sender);
@@ -197,7 +198,7 @@ void self_and_blocked(Kernel &kernel)
     expect(kernel.scheduler().find_thread(sender, sender)->native_active);
     expect(kernel.scheduler().find(child)->state() == sched::ProcessState::blocked);
     expect(native::private_signal_find(sender)->deferred_fatal == 9 && native::private_signal_find(child)->group_kill);
-    native::private_process_signal_fatal(kernel);
+    native::deliver_pending_exits(kernel);
     for (auto pid : {sender, child})
     {
         const auto *process = kernel.scheduler().find(pid); CHECK(process);
@@ -215,14 +216,14 @@ void reaped_leader_and_zombie(Kernel &kernel)
     const auto member = fork(kernel, leader);
     personality(kernel, member, sched::UserPersonality::native);
     expect(native_kill(kernel, sender, leader, 9) == 0);
-    native::private_process_signal_fatal(kernel);
+    native::deliver_pending_exits(kernel);
     CHECK(kernel.scheduler().wait_process(sender, leader));
     expect(!kernel.scheduler().find(leader) && kernel.scheduler().find(member)->process_group_id() == leader);
     native::private_signal_retire(member);
     const auto owners = signal_owners();
     expect(linux_kill(kernel, sender, negative(leader), 0) == 0 && signal_owners() == owners);
     expect(native_kill(kernel, sender, negative(leader), 15) == 0);
-    native::private_process_signal_fatal(kernel);
+    native::deliver_pending_exits(kernel);
     expect(kernel.scheduler().find(member)->state() == sched::ProcessState::zombie);
     const auto zombie_owners = signal_owners();
     expect(linux_kill(kernel, sender, negative(leader), 0) == 0 && signal_owners() == zombie_owners);

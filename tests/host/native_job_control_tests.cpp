@@ -4,6 +4,7 @@
 #define OK_SYSCALL_ORIGIN_MODEL 1
 #define OK_PIPE_WRITE_SIGNAL_MODEL 1
 #include "native_child_exit_runtime_fixture.hpp"
+#include "native_pending_exit.hpp"
 
 namespace
 {
@@ -218,12 +219,12 @@ void linux_stop_continue(Kernel &kernel)
     // continue (Linux wants_signal); the process stays stopped.
     expect(linux_kill(kernel, parent, child, 15) == 0 && !native::private_signal_find(child)->deferred_fatal);
     expect(shared(child).pending_mask().contains(15) && job(kernel, child).stopped);
-    native::private_process_signal_fatal(kernel);
+    native::deliver_pending_exits(kernel);
     expect(job(kernel, child).stopped && kernel.scheduler().find(child)->state() != sched::ProcessState::zombie);
     expect(linux_call(kernel, parent, lu::Operation::wait4, {negative(child), status_at, 3, 0}) == static_cast<i64>(child));
     expect(status_word() == ((19U << 8) | 0x7f));
     expect(linux_kill(kernel, parent, child, 9) == 0 && native::private_signal_find(child)->group_kill);
-    native::private_process_signal_fatal(kernel);
+    native::deliver_pending_exits(kernel);
     expect(kernel.scheduler().find(child)->state() == sched::ProcessState::zombie);
     expect(kernel.scheduler().find(child)->wait_status() == 9 && kernel.scheduler().stopped_processes() == 0);
     expect(linux_call(kernel, parent, lu::Operation::wait4, {negative(child), status_at, 1, 0}) == static_cast<i64>(child));
@@ -331,12 +332,12 @@ void native_dispositions(Kernel &kernel)
     expect(native_kill(kernel, parent, child, OK_SIGSTOP) == 0 && job(kernel, child).stopped);
     expect(native_kill(kernel, parent, child, OK_SIGINT) == 0 && native_kill(kernel, parent, child, OK_SIGHUP) == 0);
     expect(native::private_signal_find(child)->deferred_fatal == OK_SIGINT);
-    native::private_process_signal_fatal(kernel);
+    native::deliver_pending_exits(kernel);
     expect(job(kernel, child).stopped && kernel.scheduler().find(child)->state() != sched::ProcessState::zombie);
     expect(native_kill(kernel, parent, child, OK_SIGCONT) == 0 && !job(kernel, child).stopped);
     // A process condemned by a fatal signal no longer stops.
     expect(native_kill(kernel, parent, child, OK_SIGSTOP) == 0 && !job(kernel, child).stopped);
-    native::private_process_signal_fatal(kernel);
+    native::deliver_pending_exits(kernel);
     expect(kernel.scheduler().find(child)->wait_status() == OK_SIGINT);
     expect(native_call(kernel, parent, N::wait4, {child, status_at, 0, 0}) == static_cast<i64>(child) &&
            status_word() == OK_SIGINT);
