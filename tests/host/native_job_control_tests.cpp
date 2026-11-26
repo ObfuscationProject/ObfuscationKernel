@@ -690,8 +690,9 @@ void timer_retry(Kernel &kernel)
     release(kernel, sender); release(kernel, pid);
 }
 
-// A fatal default the owed drain decides in a step ends the process in that
-// step: its runnable thread is never entered again.
+// A fatal default the owed drain decides in a step sets the group's pending
+// exit (spec 4.8): the group's next picked thread applies it before it is
+// entered again.
 void same_step_fatal(Kernel &kernel)
 {
     const auto parent = create(kernel), pid = fork(kernel, parent);
@@ -703,6 +704,9 @@ void same_step_fatal(Kernel &kernel)
     handle(kernel, pid, 1, 0);
     native::started = true;
     static_cast<void>(native::step(kernel));
+    expect(native::runtime_status().ok() && kernel.scheduler().exit_pending(pid));
+    for (usize step = 0; step < 8 && kernel.scheduler().find(pid)->state() != sched::ProcessState::zombie; ++step)
+        static_cast<void>(native::step(kernel));
     expect(native::runtime_status().ok());
     expect(kernel.scheduler().find(pid)->state() == sched::ProcessState::zombie);
     expect(kernel.scheduler().find(pid)->wait_status() == 1);
