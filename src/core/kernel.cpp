@@ -684,10 +684,45 @@ Status Kernel::handle_gui_taskbar_launcher(gui::TaskbarApp app)
     return Status::success();
 }
 
+bool Kernel::flush_transmit_backlog_locked()
+{
+    smp::check_held(net_stack_, "Kernel::flush_transmit_backlog_locked");
+    auto *owner = extension();
+    if (!owner) return transmit_backlog_.empty();
+    return transmit_backlog_.flush([&](std::span<const std::byte> frame) {
+        return owner->network_try_transmit(*this, frame);
+    });
+}
+
+Status Kernel::transmit_datagram(std::span<const std::byte> frame)
+{
+    auto *owner = extension();
+    if (!owner) return Status::not_initialized("native UDP transmitter is unavailable");
+    {
+        // Try-transmit under net_stack: the NIC's ring takes the frame now or
+        // it waits in the backlog, behind any older one (spec 4.13).
+        const smp::RankedSpinLock<smp::LockRank::net_stack>::Guard stack(net_stack_);
+        if (flush_transmit_backlog_locked())
+        {
+            const auto sent = owner->network_try_transmit(*this, frame);
+            if (sent || sent.code() != StatusCode::would_block) return sent;
+        }
+        if (auto queued = transmit_backlog_.push(frame); !queued) return queued;
+    }
+    // The poller offers the backlog again on its next pass.
+    interrupt::post_event(interrupt::EventSource::network);
+    return {};
+}
+
 Status Kernel::poll_network()
 {
     if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
     if (network_poll_active_) return Status::busy("Ethernet poll is not reentrant");
+    {
+        // Frames a send could not hand to the NIC go first, in order.
+        const smp::RankedSpinLock<smp::LockRank::net_stack>::Guard stack(net_stack_);
+        if (!flush_transmit_backlog_locked()) interrupt::post_event(interrupt::EventSource::network);
+    }
     struct PollScope
     {
         bool &active;

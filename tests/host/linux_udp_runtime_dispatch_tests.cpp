@@ -214,12 +214,22 @@ void send_effects(Kernel &kernel, Group group)
     const auto empty = peer.ingest({extension.transmitted.data(), extension.size}, reply); CHECK(empty);
     expect(empty.value().queued_handle == sender && peer.peek(sender).value().payload.empty());
     CHECK(peer.consume(sender));
+    // Try-transmit (spec 4.13): a frame the device cannot take now waits in
+    // the kernel's backlog and the send succeeds; once that is full, ENOBUFS.
     extension.submission_status = Status::would_block("synthetic device credit exhausted");
+    const auto backlog_capacity = 4u;
+    for (usize queued = 0; queued < backlog_capacity; ++queued)
+        expect(invoke(kernel, group, lu::UdpCall::sendto,
+            {fd, payload_address, 3, 0, input_address, 16}) == 3);
+    expect(kernel.transmit_backlog().size() == backlog_capacity);
     expect(invoke(kernel, group, lu::UdpCall::sendto,
-        {fd, payload_address, 3, 0, input_address, 16}) == error(E::e_again));
+        {fd, payload_address, 3, 0, input_address, 16}) == error(E::e_nobufs));
+    expect(kernel.transmit_backlog().refused() == 1);
+    // A link that refuses for good drops the backlog and fails the send.
     extension.submission_status = Status::not_initialized("synthetic link down");
     expect(invoke(kernel, group, lu::UdpCall::sendto,
         {fd, payload_address, 3, 0, input_address, 16}) == error(E::e_netdown));
+    expect(kernel.transmit_backlog().empty() && kernel.transmit_backlog().dropped() == backlog_capacity);
     extension.submission_status = Status::success();
     const auto *process = kernel.scheduler().find(group.pid); CHECK(process);
     const auto *slot = process->fd_table().entry(group.fd); CHECK(slot);
@@ -414,9 +424,10 @@ void autobind_persistence_runtime(Kernel &kernel, Group owner)
         {fd, payload_address, 3, 1, input_address, 16}) == error(E::e_opnotsupp));
     check_binding(kernel, group, true, group.port);
 
+    // A frame the device cannot take now is queued (spec 4.13 try-transmit).
     extension.submission_status = Status::would_block("synthetic device credit exhausted");
     expect(invoke(kernel, group, lu::UdpCall::sendto,
-        {fd, payload_address, 3, 0, input_address, 16}) == error(E::e_again));
+        {fd, payload_address, 3, 0, input_address, 16}) == 3);
     check_binding(kernel, group, true, group.port);
     extension.submission_status = Status::not_initialized("synthetic link down");
     expect(invoke(kernel, group, lu::UdpCall::sendto,

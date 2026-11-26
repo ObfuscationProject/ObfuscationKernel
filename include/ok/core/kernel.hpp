@@ -18,6 +18,7 @@
 #include "ok/net/native_udp.hpp"
 #include "ok/net/native_tcp_ethernet.hpp"
 #include "ok/net/tcp_stream_checked.hpp"
+#include "ok/net/transmit_backlog.hpp"
 #include "ok/posix/posix.hpp"
 #include "ok/sched/scheduler.hpp"
 #include "ok/smp/smp.hpp"
@@ -116,6 +117,11 @@ class Kernel final
     // online; the scheduler then places work on the online ones only.
     Status publish_cpu_topology(usize discovered, u32 online_mask);
     Status poll_network();
+    // A datagram send's frame (spec 4.13): offered to the NIC at once under
+    // the net_stack lock; when the NIC would block it is queued for the
+    // network poller, and a full queue refuses it (no_space, ENOBUFS).
+    Status transmit_datagram(std::span<const std::byte> frame);
+    [[nodiscard]] const net::TransmitBacklog<> &transmit_backlog() const { return transmit_backlog_; }
     Status activate_native_tcp();
     // Configures the link once: the distribution's interface configuration
     // when it has one, else its static link.
@@ -393,6 +399,12 @@ class Kernel final
     net::TcpStreamOperations native_tcp_operations_;
     net::TcpStreamWaits native_tcp_waits_;
     net::NativeTcpEthernetExecutor native_ethernet_executor_;
+    // The network stack's lock (rank net_stack) and the datagram frames the
+    // NIC could not take at once.
+    smp::RankedSpinLock<smp::LockRank::net_stack> net_stack_{};
+    net::TransmitBacklog<> transmit_backlog_{};
+    // Under net_stack: offers the backlog to the NIC; true when it is empty.
+    bool flush_transmit_backlog_locked();
     net::LinkProbe network_probe_;
     ModuleManager kernel_modules_;
     driver::DriverManager drivers_;

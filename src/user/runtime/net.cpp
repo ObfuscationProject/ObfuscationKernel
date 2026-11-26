@@ -416,7 +416,21 @@ Status scan_native_udp_receives(Kernel &kernel)
 }
 namespace
 {
-linux_udp::OperationScratch linux_udp_operations;
+// One operation scratch per CPU on the profiles that run several (spec
+// 4.13); its busy_ guard stays an assertion against same-CPU re-entry.
+#if defined(OK_ARCH_SMP_START)
+smp::PerCpu<linux_udp::OperationScratch> linux_udp_operation_scratch;
+linux_udp::OperationScratch &linux_udp_operations()
+{
+    return linux_udp_operation_scratch.get(smp::current_cpu());
+}
+#else
+linux_udp::OperationScratch linux_udp_operation_scratch;
+linux_udp::OperationScratch &linux_udp_operations()
+{
+    return linux_udp_operation_scratch;
+}
+#endif
 } // namespace
 
 // UDP errors are already target-numbered. Generic bootstrap translation would
@@ -484,7 +498,7 @@ class LinuxUdpOperationRuntimeAuthority final
             thread.syscall_pending = false;
             return set_linux_udp_result(process, thread.native_frame, value);
         };
-        return linux_udp_operations.dispatch<lu::configured_native_profile()>(
+        return linux_udp_operations().dispatch<lu::configured_native_profile()>(
             kernel, process, thread, access, begin, publish, runtime_failure.bkl_sink());
     }
 };
@@ -713,7 +727,20 @@ Status prune_departed_linux_udp_receives(Kernel &kernel)
 namespace
 {
 
-linux_udp::ReceiveScratch linux_udp_owned_receive_scratch;
+// Per CPU on the SMP-capable profiles, as the operation scratch.
+#if defined(OK_ARCH_SMP_START)
+smp::PerCpu<linux_udp::ReceiveScratch> linux_udp_owned_receive_scratches;
+linux_udp::ReceiveScratch &linux_udp_owned_receive_scratch()
+{
+    return linux_udp_owned_receive_scratches.get(smp::current_cpu());
+}
+#else
+linux_udp::ReceiveScratch linux_udp_owned_receive_scratches;
+linux_udp::ReceiveScratch &linux_udp_owned_receive_scratch()
+{
+    return linux_udp_owned_receive_scratches;
+}
+#endif
 Result<usize> copy_linux_udp_received(Kernel &kernel, memory::ObjectHandle object)
 {
     auto admitted = LinuxUdpReceiveAccess::acquire(kernel, object);
@@ -723,7 +750,7 @@ Result<usize> copy_linux_udp_received(Kernel &kernel, memory::ObjectHandle objec
     if (!resolved) return resolved.status();
     const auto operation = resolved.value()->operation;
     const auto endpoint = resolved.value()->endpoint;
-    const auto received = linux_udp_owned_receive_scratch.receive<lu::configured_native_profile()>(
+    const auto received = linux_udp_owned_receive_scratch().receive<lu::configured_native_profile()>(
         kernel.native_udp(), endpoint, access, {.payload=operation.payload, .count=operation.count,
         .source=operation.address, .source_length=operation.source_length, .flags=operation.flags});
     return access.live() ? received : Result<usize>{Status::denied("Linux UDP receive lost borrowed completion")};
@@ -1116,8 +1143,10 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
         if (!length) return error(length.status());
         // Held for neighbour resolution: the interface transmits it later.
         if (!length.value()) return static_cast<i64>(a[2]);
-        if (auto status = extension->network_transmit(kernel, {frame.data(), length.value()}); !status)
-            return error(status);
+        // Try-transmit: a frame the NIC cannot take now waits in the kernel's
+        // backlog; a full backlog is ENOBUFS (spec 4.13; Linux sendto does the same).
+        if (auto status = kernel.transmit_datagram({frame.data(), length.value()}); !status)
+            return status.code() == StatusCode::no_space ? -OK_ENOBUFS : error(status);
         return static_cast<i64>(a[2]);
     }
     if (a[3]) return -22; // MSG_TRUNC and all other receive flags are unsupported.
