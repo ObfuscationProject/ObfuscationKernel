@@ -80,6 +80,29 @@ void delay(usize round, usize side)
     for (usize spin = 0; spin < units * 150; ++spin) std::atomic_signal_fence(std::memory_order_seq_cst);
 }
 
+// Some rounds force the order of the two racing sections (round % 4 == 0:
+// side 0 first; == 1: side 1 first) and the others race freely, so both
+// orders occur however a loaded host schedules the threads.
+class Order
+{
+  public:
+    // Before a side's racing section: waits while the other side goes first.
+    void before(usize round, usize side)
+    {
+        const auto first = round % 4;
+        if (first < 2 && first != side)
+            while (done_.load(std::memory_order_acquire) != round) std::this_thread::yield();
+    }
+    // After the section the other side may have to wait for.
+    void after(usize round, usize side)
+    {
+        if (round % 4 == side) done_.store(round, std::memory_order_release);
+    }
+
+  private:
+    std::atomic<usize> done_{~usize{0}};
+};
+
 struct Fixture
 {
     std::unique_ptr<Scheduler> owned{std::make_unique<Scheduler>()};
@@ -124,6 +147,7 @@ void close_versus_pinned_read()
     constexpr usize rounds = 20000;
     Barrier barrier{2};
     std::atomic<usize> pinned_rounds{0}, read_bytes{0}, late_pins{0};
+    Order order;
     std::array<i32, 2> fds{};
     u16 reader{}, pipe{};
     std::thread closer([&] {
@@ -132,7 +156,9 @@ void close_versus_pinned_read()
         {
             barrier.arrive_and_wait();
             delay(round, 1);
+            order.before(round, 1);
             CHECK(f.scheduler.close_descriptor(resources, fds[0]));
+            order.after(round, 1);
             barrier.arrive_and_wait();
         }
     });
@@ -149,7 +175,11 @@ void close_versus_pinned_read()
             CHECK(f.scheduler.write_pipe_fragment(pipe, {&byte, 1}, true));
             barrier.arrive_and_wait();
             delay(round, 0);
-            if (auto pinned = f.scheduler.pin_descriptor(resources, fds[0], true))
+            order.before(round, 0);
+            auto pinned = f.scheduler.pin_descriptor(resources, fds[0], true);
+            // The closer may close the slot now, while the pin holds it.
+            order.after(round, 0);
+            if (pinned)
             {
                 pinned_rounds.fetch_add(1, std::memory_order_relaxed);
                 CHECK(pinned.referenced() && pinned.id() == reader);
@@ -163,6 +193,7 @@ void close_versus_pinned_read()
                     auto ready = f.scheduler.pipe_readiness(pipe);
                     CHECK(ready && ready.value().readers && ready.value().writers);
                 }
+                CHECK(pinned.reset());
             }
             else
                 late_pins.fetch_add(1, std::memory_order_relaxed);
@@ -196,10 +227,13 @@ void two_thread_openat()
     Barrier barrier{2};
     std::array<i32, 2> got{};
     std::atomic<usize> collisions{0}, swapped{0};
+    Order order;
     const auto open_one = [&](usize who, usize round) {
         delay(round, who);
+        order.before(round, who);
         auto slot = f.scheduler.reserve_descriptor_slot(resources);
         CHECK(slot);
+        order.after(round, who);
         delay(round + 5, 1 - who);
         auto description = f.scheduler.allocate_description({});
         CHECK(description);
@@ -256,14 +290,17 @@ void pipe_no_lost_wake()
     constexpr usize rounds = 20000;
     Barrier barrier{2};
     std::atomic<usize> lost{0}, read_first{0};
+    Order order;
     std::thread writer([&] {
         const smp::ScopedHostedCpu cpu{1};
         for (usize round = 0; round < rounds; ++round)
         {
             barrier.arrive_and_wait();
             delay(round, 1);
+            order.before(round, 1);
             const std::byte byte{0x21};
             CHECK(f.scheduler.write_pipe_fragment(pipe, {&byte, 1}, true));
+            order.after(round, 1);
             barrier.arrive_and_wait();
         }
     });
@@ -274,6 +311,7 @@ void pipe_no_lost_wake()
             f.run(pid);
             barrier.arrive_and_wait();
             delay(round, 0);
+            order.before(round, 0);
             std::array<std::byte, 1> out{};
             auto read = f.scheduler.read_pipe(pipe, out, true);
             std::optional<WaitTicket> ticket;
@@ -286,6 +324,7 @@ void pipe_no_lost_wake()
                 CHECK(armed);
                 ticket = armed.value();
             }
+            order.after(round, 0);
             f.scheduler.put_prev(0);
             barrier.arrive_and_wait();
             if (ticket)
@@ -327,14 +366,17 @@ void unix_gc_versus_send()
     Barrier barrier{2};
     std::array<i32, 2> sockets{}, pipe_fds{};
     std::atomic<usize> sent{0}, refused{0};
+    Order order;
     std::thread closer([&] {
         const smp::ScopedHostedCpu cpu{1};
         for (usize round = 0; round < rounds; ++round)
         {
             barrier.arrive_and_wait();
             delay(round, 1);
+            order.before(round, 1);
             CHECK(f.scheduler.close_descriptor(resources, sockets[1]));
             CHECK(f.scheduler.close_descriptor(resources, pipe_fds[0]));
+            order.after(round, 1);
             barrier.arrive_and_wait();
         }
     });
@@ -350,9 +392,11 @@ void unix_gc_versus_send()
             const auto passed_pipe = f.scheduler.open_description(f.description(pid, pipe_fds[0]))->pipe;
             barrier.arrive_and_wait();
             delay(round, 0);
+            order.before(round, 0);
             const std::byte payload{0x7e};
             const std::array<i32, 1> rights{pipe_fds[0]};
             auto result = f.scheduler.send_unix_rights(resources, sockets[0], {&payload, 1}, rights);
+            order.after(round, 0);
             (result ? sent : refused).fetch_add(1, std::memory_order_relaxed);
             barrier.arrive_and_wait();
             CHECK(f.scheduler.close_descriptor(resources, sockets[0]));
@@ -438,8 +482,26 @@ void tty_commit_retry()
     }
     for (auto &thread : readers) thread.join();
     CHECK(read.load() == total && broken.load() == 0);
-    // Some commits were overtaken and retried.
-    CHECK(copies.load() > reads.load());
+    // A preview another read overtook fails its commit (busy), whatever the
+    // host's scheduling did above: stage four bytes, take two, commit.
+    const std::array<std::byte, 8> eight{std::byte{'a'}, std::byte{'b'}, std::byte{'c'}, std::byte{'d'},
+                                         std::byte{'e'}, std::byte{'f'}, std::byte{'g'}, std::byte{'h'}};
+    CHECK(f.scheduler.write_pty_description(slave, eight));
+    std::array<std::byte, 8> staged{};
+    std::optional<Scheduler::PreparedPtyRead> preview;
+    auto planned = f.scheduler.stage_pty_read(master, endpoint, 4, false, {}, staged, &preview);
+    CHECK(planned && planned.value() == 4 && preview && staged[0] == std::byte{'a'});
+    std::array<std::byte, 2> two{};
+    CHECK(f.scheduler.read_pty_description(master, two) && two[1] == std::byte{'b'});
+    auto stale = f.scheduler.commit_pty_read(*preview);
+    CHECK(!stale && stale.status().code() == StatusCode::busy);
+    preview->cancel();
+    // The retrying read then gets the bytes after the overtaking read's.
+    auto retried = f.scheduler.read_pty_prepared(master, endpoint, 6, false, {}, [&](std::span<const std::byte> bytes) {
+        CHECK(bytes.size() == 6 && bytes[0] == std::byte{'c'} && bytes[5] == std::byte{'h'});
+        return Status{};
+    });
+    CHECK(retried && retried.value() == 6);
     for (const auto fd : fds) CHECK(f.scheduler.close_descriptor(resources, fd));
     expect_clean_checks();
     std::printf("tty_commit_retry bytes=%zu reads=%zu retried_copies=%zu\n", total, reads.load(),
