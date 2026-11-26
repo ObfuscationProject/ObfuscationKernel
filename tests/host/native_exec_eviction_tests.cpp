@@ -11,11 +11,11 @@ struct SyscallOriginTestAccess
 {
     static u16 &borrows(SyscallOrigins &table, memory::KernelEntryStackHandle lease)
     { return table.records_[lease.slot].linux_udp_borrows; }
-    static u64 &images(SyscallOrigins &table) { return table.image_sequence_; }
+    static smp::PerCpuSequence &images(SyscallOrigins &table) { return table.image_sequence_; }
 };
 struct VfsStatContinuationTestAccess
 {
-    template <typename Table> static u64 &images(Table &table) { return table.images_; }
+    template <typename Table> static smp::PerCpuSequence &images(Table &table) { return table.images_; }
 };
 } // namespace ok::user::native
 namespace console
@@ -301,16 +301,17 @@ void breach_before_eviction_stops(Kernel &kernel)
     untouched(kernel, g.pid, g.sibling, before);
     borrows = 0;
     // Exhausted syscall origin and VFS continuation image sequences.
+    // (The sequences are per CPU: the calling CPU's count is exhausted.)
     auto &origin_images = native::SyscallOriginTestAccess::images(native::syscall_origins);
-    const auto origin_saved = std::exchange(origin_images, ~u64{0});
+    const auto origin_saved = origin_images.exchange_count(smp::PerCpuSequence::limit);
     expect_stopped(kernel, g.pid, g.pid, true);
     untouched(kernel, g.pid, g.sibling, before);
-    origin_images = origin_saved;
+    origin_images.exchange_count(origin_saved);
     auto &vfs_images = native::VfsStatContinuationTestAccess::images(native::vfs_continuations);
-    const auto vfs_saved = std::exchange(vfs_images, ~u64{0});
+    const auto vfs_saved = vfs_images.exchange_count(smp::PerCpuSequence::limit);
     expect_stopped(kernel, g.pid, g.pid, true);
     untouched(kernel, g.pid, g.sibling, before);
-    vfs_images = vfs_saved;
+    vfs_images.exchange_count(vfs_saved);
     return_elsewhere(kernel, g.pid, g.sibling, false);
     EXPECT(thread(kernel, g.pid, g.sibling).native_frame.pc == hw::user_begin + 0x123);
     // On one CPU the same breach stops the runtime the same way.

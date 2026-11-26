@@ -2,6 +2,8 @@
 
 #include "ok/smp/smp.hpp"
 
+#include <array>
+
 namespace ok::smp
 {
 
@@ -45,5 +47,42 @@ class ScopedHostedCpu final
     return 0;
 #endif
 }
+
+// Identities that stay unique across CPUs without a shared counter (spec
+// 4.14): each CPU counts its own and tags the value with its id in the low
+// four bits. Only the counting CPU writes its counter; next() gives 0 once
+// that CPU's count is exhausted. Values never repeat, and those of one CPU
+// increase.
+class PerCpuSequence final
+{
+  public:
+    static_assert(max_cpus <= 16, "the CPU tag takes four bits");
+    static constexpr u64 limit = ~u64{0} >> 4;
+
+    [[nodiscard]] u64 next() noexcept
+    {
+        const auto cpu = current_cpu();
+        if (cpu >= max_cpus || counts_[cpu] == limit) return 0;
+        return (++counts_[cpu] << 4) | cpu;
+    }
+    [[nodiscard]] bool exhausted() const noexcept
+    {
+        const auto cpu = current_cpu();
+        return cpu >= max_cpus || counts_[cpu] == limit;
+    }
+    // Fault injection for hosted tests: replaces this CPU's count (`limit`
+    // exhausts it) and returns the previous one.
+    u64 exchange_count(u64 count) noexcept
+    {
+        const auto cpu = current_cpu();
+        if (cpu >= max_cpus) return 0;
+        const auto previous = counts_[cpu];
+        counts_[cpu] = count;
+        return previous;
+    }
+
+  private:
+    std::array<u64, max_cpus> counts_{};
+};
 
 } // namespace ok::smp

@@ -42,12 +42,12 @@ class VfsStatContinuation final : private NonCopyable
             return status;
         auto &record = records_[thread.entry_stack.slot];
         if (record.pending) return Status::busy("VFS continuation must retire before image preparation");
-        if (images_ == ~u64{0}) return Status::overflow("VFS continuation image sequence exhausted");
+        if (images_.exhausted()) return Status::overflow("VFS continuation image sequence exhausted");
         record = {};
         record.lease = thread.entry_stack;
         record.pid = thread.owner;
         record.tid = thread.tid;
-        record.image = ++images_;
+        record.image = images_.next();
         return {};
     }
     // What prepare checks that exec's retirement does not settle first (it
@@ -56,7 +56,7 @@ class VfsStatContinuation final : private NonCopyable
     {
         if (lease.pool != pool_ || lease.slot >= capacity)
             return Status::invalid_argument("VFS continuation prepare names a foreign lease");
-        if (images_ == ~u64{0}) return Status::overflow("VFS continuation image sequence exhausted");
+        if (images_.exhausted()) return Status::overflow("VFS continuation image sequence exhausted");
         return {};
     }
 
@@ -103,8 +103,8 @@ class VfsStatContinuation final : private NonCopyable
         stage.owner_ = nullptr; stage.image_ = 0;
         if (observation.trap().kind != arch::execution::TrapKind::syscall || process.resources().personality != sched::UserPersonality::linux)
             return {};
-        if (captures_ == ~u64{0}) return Status::overflow("VFS continuation capture sequence exhausted");
-        record->capture = ++captures_;
+        if (captures_.exhausted()) return Status::overflow("VFS continuation capture sequence exhausted");
+        record->capture = captures_.next();
         record->epoch = observation.epoch();
         record->space = observation.space();
         record->frame = observation.frame();
@@ -181,8 +181,8 @@ class VfsStatContinuation final : private NonCopyable
         if (request.path.empty() || request.path.view().front() != '/') return terminal(*record, -95);
         const auto *process = scheduler.find(pid);
         request.credentials = {process->credentials().euid, process->credentials().egid};
-        if (requests_ == ~u64{0}) return terminal(*record, -75);
-        request.sequence = ++requests_;
+        if (requests_.exhausted()) return terminal(*record, -75);
+        request.sequence = requests_.next();
         request.vfs = &vfs;
         record->pending.emplace(std::move(request));
         return attempt(scheduler, *record, admit, copy, complete);
@@ -427,7 +427,8 @@ class VfsStatContinuation final : private NonCopyable
     Pool *pool_{};
     BackendCapture legacy_capture_;
     std::array<Record, capacity> records_{};
-    u64 images_{}, captures_{}, requests_{};
+    // Per-CPU tagged sequences (spec 4.14), written by the running CPU only.
+    smp::PerCpuSequence images_{}, captures_{}, requests_{};
 };
 
 } // namespace ok::user::native

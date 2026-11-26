@@ -7,10 +7,11 @@ namespace ok::user::native
 {
 struct SyscallOriginTestAccess
 {
+    // The calling CPU's count of the per-CPU sequences; ~0 exhausts it.
     static u64 capture(SyscallOrigins &table, u64 next)
-    { const auto previous = table.capture_sequence_; table.capture_sequence_ = next; return previous; }
+    { return table.capture_sequence_.exchange_count(next == ~u64{0} ? smp::PerCpuSequence::limit : next); }
     static u64 image(SyscallOrigins &table, u64 next)
-    { const auto previous = table.image_sequence_; table.image_sequence_ = next; return previous; }
+    { return table.image_sequence_.exchange_count(next == ~u64{0} ? smp::PerCpuSequence::limit : next); }
 };
 }
 namespace

@@ -376,11 +376,11 @@ class SyscallOriginTable final : private NonCopyable
         auto &record = records_[thread.entry_stack.slot];
         if (record.linux_udp_borrows) return Status::busy("syscall origin prepare has a live Linux UDP borrow");
         record = {};
-        if (image_sequence_ == ~u64{0}) return Status::overflow("syscall origin image sequence exhausted");
+        if (image_sequence_.exhausted()) return Status::overflow("syscall origin image sequence exhausted");
         record.identity.lease = thread.entry_stack;
         record.identity.pid = thread.owner;
         record.identity.tid = thread.tid;
-        record.identity.image = ++image_sequence_;
+        record.identity.image = image_sequence_.next();
         return Status::success();
     }
     // The checks prepare makes of a lease's record, for exec to make before it
@@ -390,7 +390,7 @@ class SyscallOriginTable final : private NonCopyable
         if (lease.pool != pool_ || lease.slot >= capacity)
             return Status::invalid_argument("syscall origin prepare names a foreign lease");
         if (records_[lease.slot].linux_udp_borrows) return Status::busy("syscall origin prepare has a live Linux UDP borrow");
-        if (image_sequence_ == ~u64{0}) return Status::overflow("syscall origin image sequence exhausted");
+        if (image_sequence_.exhausted()) return Status::overflow("syscall origin image sequence exhausted");
         return Status::success();
     }
     struct Ownership
@@ -503,8 +503,8 @@ class SyscallOriginTable final : private NonCopyable
             const auto tcp_operation = native_tcp_call(call, scheduler, process);
             if (tcp_operation != abi::linux_user::TcpCall::none && Adapter::syscall_trap(observation.trap()))
             {
-                if (capture_sequence_ == ~u64{0}) return Status::overflow("TCP capture sequence exhausted");
-                record->identity.capture = ++capture_sequence_;
+                if (capture_sequence_.exhausted()) return Status::overflow("TCP capture sequence exhausted");
+                record->identity.capture = capture_sequence_.next();
                 record->identity.epoch = stage.epoch_;
                 record->identity.space = observation.space();
                 record->identity.lower = view.lower(); record->identity.top = view.top();
@@ -519,9 +519,9 @@ class SyscallOriginTable final : private NonCopyable
                 call.number != static_cast<uptr>(syscall::Number::recvfrom) ||
                 call.arguments[0] > static_cast<uptr>(__INT32_MAX__) || call.arguments[3] ||
                 bool(call.arguments[4]) != bool(call.arguments[5])) return {};
-            if (capture_sequence_ == ~u64{0})
+            if (capture_sequence_.exhausted())
                 return Status::overflow("syscall origin capture sequence exhausted");
-            record->identity.capture = ++capture_sequence_;
+            record->identity.capture = capture_sequence_.next();
             record->identity.epoch = stage.epoch_;
             record->identity.space = observation.space();
             record->identity.lower = view.lower();
@@ -535,9 +535,9 @@ class SyscallOriginTable final : private NonCopyable
             return {};
         }
         if (process.resources().personality != sched::UserPersonality::linux) return {};
-        if (capture_sequence_ == ~u64{0})
+        if (capture_sequence_.exhausted())
             return Status::overflow("syscall origin capture sequence exhausted");
-        const u64 sequence = ++capture_sequence_;
+        const u64 sequence = capture_sequence_.next();
         const auto raw_call = Adapter::Bridge::decode_call(observation.frame(), 0);
         if (linux_unix_path_call<Selected>(observation.frame(), scheduler, process) != abi::linux_user::UnixPathCall::none)
             return {}; // UNIX precedes TCP and UDP origin capture.
@@ -1750,7 +1750,9 @@ class SyscallOriginTable final : private NonCopyable
     Pool *pool_{};
     BackendCapture legacy_capture_;
     std::array<Record, capacity> records_{};
-    u64 image_sequence_{}, capture_sequence_{};
+    // Per-CPU tagged sequences (spec 4.14): the running CPU stages and
+    // observes its own thread's records, so no CPU writes another's counter.
+    smp::PerCpuSequence image_sequence_{}, capture_sequence_{};
 };
 
 } // namespace ok::user::native

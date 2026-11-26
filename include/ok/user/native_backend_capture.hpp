@@ -72,10 +72,11 @@ class BackendCapture final : private NonCopyable
         auto &entry = entries_[lease.slot];
         if (entry.lease == lease && entry.epoch == epoch.value())
             return Status::already_exists("backend already invoked for this active lease epoch");
-        if (sequence_ == ~u64{0}) return Status::overflow("shared backend capture sequence exhausted");
+        const auto sequence = sequence_.next();
+        if (!sequence) return Status::overflow("shared backend capture sequence exhausted");
         Space space = process->resources().native_space;
         // Consume the epoch even on backend failure; replay requires a new entry.
-        entry = {lease, epoch.value(), ++sequence_, 0};
+        entry = {lease, epoch.value(), sequence, 0};
         Frame frame = thread->native_frame;
         auto trap = entry_ ? entry_(space, frame, view, lease, pid, tid)
                            : arch::execution::enter_owned(space, frame, view);
@@ -152,7 +153,9 @@ class BackendCapture final : private NonCopyable
     struct Record { Lease lease{}; u64 epoch{}, sequence{}; u8 claimed{}; };
     Pool *pool_{};
     Entry entry_{};
+    // By lease slot: only the CPU the lease is active on touches its record.
     std::array<Record, Pool::capacity> entries_{};
-    u64 sequence_{};
+    // Per CPU (spec 4.14): each CPU tags the sequences of its own entries.
+    smp::PerCpuSequence sequence_{};
 };
 } // namespace ok::user::native

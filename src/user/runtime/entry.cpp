@@ -42,6 +42,12 @@ constinit std::array<Candidate, smp::max_cpus> last_interrupted{};
 // the kernel-lock holder fills and reads it, within one selection, so a single
 // static buffer serves every CPU and no step zeroes 8 KiB on its stack.
 constinit std::array<Candidate, sched::max_processes * sched::max_threads_per_process> runnable{};
+#else
+// The queue path keeps no selection cursor. Hosted step models still reset
+// these names before a step; nothing reads them.
+[[maybe_unused]] sched::ProcessId last_pid{};
+[[maybe_unused]] sched::ThreadId last_tid{};
+[[maybe_unused]] constinit std::array<Candidate, smp::max_cpus> last_interrupted{};
 #endif
 } // namespace
 void forget_cpu_cursor([[maybe_unused]] smp::CpuId cpu)
