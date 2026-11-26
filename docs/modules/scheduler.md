@@ -129,7 +129,7 @@ reuse, pins against reap, exited-slot iteration).
 
 `SchedulerState` owns one `CpuRunQueue` per CPU (`include/ok/sched/run_queue.hpp`):
 a bounded FIFO of `ThreadHandle{index, tid}` entries, never PCB/TCB addresses
-(see task storage below). `dequeue_thread` still returns the external
+(see Task storage above). `dequeue_thread` still returns the external
 `ThreadRef{pid, tid}`.
 Each queue has its own lock, selected at build time through `SchedulerRunQueue`
 and constrained by the `RunQueue` concept; every queue operation takes only that
