@@ -63,7 +63,10 @@ concept RunQueue = requires(Q &queue, const Q &view, typename Q::Entry ref, AnyT
     { view.size() } -> std::same_as<usize>;
 };
 
-// Bounded FIFO of thread names (identities or handles) owned by one CPU.
+// Bounded FIFO of thread names (identities or handles) owned by one CPU. A
+// closed queue (its CPU is offline) refuses pushes; `size()` is an atomic
+// mirror of the entry count that idle checks and victim choice load without
+// the lock.
 template <usize Capacity, RunQueueLock Lock = smp::SpinLock, typename EntryType = ThreadRef> class CpuRunQueue final
 {
     static_assert(Capacity != 0);
@@ -79,6 +82,8 @@ template <usize Capacity, RunQueueLock Lock = smp::SpinLock, typename EntryType 
     Status push(Entry ref)
     {
         Guard guard{lock_};
+        if (closed_.load(std::memory_order_relaxed))
+            return Status::denied("CPU run queue is closed");
         const auto count = count_.load(std::memory_order_relaxed);
         if (count == Capacity)
             return Status::overflow("CPU run queue is full");
@@ -136,6 +141,15 @@ template <usize Capacity, RunQueueLock Lock = smp::SpinLock, typename EntryType 
     [[nodiscard]] usize size() const { return count_.load(std::memory_order_relaxed); }
     [[nodiscard]] bool empty() const { return size() == 0; }
 
+    // Closing does not drain: the caller pops the remaining entries and
+    // places them again. A push that raced the close was refused.
+    void set_closed(bool closed)
+    {
+        Guard guard{lock_};
+        closed_.store(closed, std::memory_order_relaxed);
+    }
+    [[nodiscard]] bool closed() const { return closed_.load(std::memory_order_relaxed); }
+
   private:
     class Guard final
     {
@@ -183,6 +197,7 @@ template <usize Capacity, RunQueueLock Lock = smp::SpinLock, typename EntryType 
     mutable Lock lock_{};
     usize head_{};
     std::atomic<usize> count_{0};
+    std::atomic<bool> closed_{false};
     std::array<Entry, Capacity> entries_{};
 };
 

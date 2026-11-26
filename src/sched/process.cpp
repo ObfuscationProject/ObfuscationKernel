@@ -285,6 +285,18 @@ ThreadControlBlock *ProcessControlBlock::main_thread()
     return const_cast<ThreadControlBlock *>(static_cast<const ProcessControlBlock &>(*this).main_thread());
 }
 
+ProcessState ProcessControlBlock::derived_state() const
+{
+    if (state_ == TaskState::created || state_ == TaskState::zombie || state_ == TaskState::exited) return state_;
+    bool runnable = false;
+    for (const auto &thread : live_threads())
+    {
+        if (thread.state == TaskState::running) return TaskState::running;
+        runnable |= thread.state == TaskState::runnable || thread.state == TaskState::created;
+    }
+    return runnable ? TaskState::runnable : TaskState::blocked;
+}
+
 const ThreadControlBlock *ProcessControlBlock::main_thread() const
 {
     if (threads_[0].slot_state == ThreadSlotState::live && threads_[0].tid == pid_) return &threads_[0];

@@ -1,6 +1,7 @@
 // Included in scheduler.cpp inside ok::sched. Serialized boot-CPU job-control overlay.
 // Stopping or continuing never touches thread states or wait registrations:
 // blocked waits stay armed and still complete while the process is stopped.
+// The stop flag is mirrored in the slot's run flags under its task lock.
 void SchedulerState::wake_job_waiters(const ProcessControlBlock &process)
 {
     wake_waiters(ThreadWaitReason::child, process.pid());
@@ -15,10 +16,16 @@ Status SchedulerState::stop_process(ProcessId pid, u8 signal)
         return Status::already_exists("process has already exited");
     if (!signal) return Status::invalid_argument("stop requires a signal");
     if (process->job_.stopped) return Status::success();
-    process->job_.stopped = true;
-    process->job_.stop_signal = signal;
-    process->job_.stop_report = true;
-    process->job_.continue_report = false;
+    {
+        // Queued entries are dropped when popped; running threads trap out.
+        auto &slot = task_slot(*process);
+        TaskGuard guard{slot};
+        process->job_.stopped = true;
+        process->job_.stop_signal = signal;
+        process->job_.stop_report = true;
+        process->job_.continue_report = false;
+        slot.set_flag(RunFlag::stopped, true);
+    }
     ++stopped_count_;
     wake_job_waiters(*process);
     return Status::success();
@@ -27,10 +34,22 @@ bool SchedulerState::continue_process(ProcessId pid)
 {
     auto *process = find(pid);
     if (!process || !process->job_.stopped) return false;
-    process->job_.stopped = false;
-    process->job_.stop_report = false;
-    process->job_.continue_report = true;
-    ++process->job_.continue_generation;
+    u32 placed = 0;
+    {
+        // Every off-CPU thread that may run is queued again (spec 4.9).
+        auto &slot = task_slot(*process);
+        TaskGuard guard{slot};
+        process->job_.stopped = false;
+        process->job_.stop_report = false;
+        process->job_.continue_report = true;
+        ++process->job_.continue_generation;
+        slot.set_flag(RunFlag::stopped, false);
+        for (auto &thread : process->live_threads())
+            if (thread.on_cpu == no_cpu)
+                if (const auto cpu = enqueue_locked(slot, thread); cpu != no_cpu) placed |= 1u << cpu;
+    }
+    for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
+        if ((placed & (1u << cpu)) != 0) notify_cpu(cpu);
     --stopped_count_;
     wake_job_waiters(*process);
     // Terminal calls blocked across the stop re-run their job-control check

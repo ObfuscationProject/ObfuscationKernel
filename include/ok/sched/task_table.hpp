@@ -20,6 +20,7 @@ namespace ok::sched
 inline constexpr usize max_processes = 64;
 inline constexpr usize max_threads_per_process = 8;
 inline constexpr usize max_thread_slots = max_processes * max_threads_per_process;
+static_assert(max_threads_per_process == 8, "the slot placement mirrors list eight initial words");
 static_assert(max_thread_slots < invalid_thread_index);
 
 // A TCB slot: free (no record), embryo (being prepared by clone), live (a
@@ -51,6 +52,20 @@ enum class ProcessLifecycle : u32
            lifecycle == ProcessLifecycle::zombie;
 }
 
+// The placement word of a thread that is neither on a CPU nor queued (the
+// scheduler's no_cpu).
+inline constexpr u32 no_cpu_word = 0xffff;
+
+// Process run flags (ProcessSlot::run_flags). Only `stopped` is fed so far;
+// the group transitions that set the others come with quiesce_group.
+enum class RunFlag : u32
+{
+    stopped = 1,
+    frozen = 2,
+    exiting = 4,
+    pending_exit = 8,
+};
+
 [[nodiscard]] constexpr u16 thread_index(usize process_slot, usize thread_slot)
 {
     return static_cast<u16>(process_slot * max_threads_per_process + thread_slot);
@@ -76,6 +91,17 @@ template <typename Pcb> struct BasicProcessSlot
     // sched_setaffinity's per-thread masks (docs/modules/sysfs.md), by TCB
     // slot; the effective mask is the process mask & this one.
     std::array<std::atomic<u32>, max_threads_per_process> thread_affinity{};
+    // Placement mirrors of the TCB fields of the same names, by TCB slot:
+    // the CPU running the thread and the run queue holding its one entry.
+    // Stored under the task lock together with the TCB field; stealing and
+    // the idle check load them without it (spec 3.4).
+    std::array<std::atomic<u32>, max_threads_per_process> on_cpu{
+        {no_cpu_word, no_cpu_word, no_cpu_word, no_cpu_word, no_cpu_word, no_cpu_word, no_cpu_word, no_cpu_word}};
+    std::array<std::atomic<u32>, max_threads_per_process> queued_cpu{
+        {no_cpu_word, no_cpu_word, no_cpu_word, no_cpu_word, no_cpu_word, no_cpu_word, no_cpu_word, no_cpu_word}};
+    // RunFlag bits and the process affinity mask, mirrored under the task lock.
+    std::atomic<u32> run_flags{0};
+    std::atomic<u32> affinity{0xffff};
     u32 pins{};
     Pcb pcb{};
 
@@ -84,6 +110,17 @@ template <typename Pcb> struct BasicProcessSlot
         return static_cast<ProcessLifecycle>(lifecycle.load(std::memory_order_acquire));
     }
     [[nodiscard]] bool visible() const { return lifecycle_visible(state()); }
+    [[nodiscard]] bool flagged(RunFlag flag) const
+    {
+        return (run_flags.load(std::memory_order_acquire) & static_cast<u32>(flag)) != 0;
+    }
+    // Caller holds the task lock: a load and a store, never a read-modify-write.
+    void set_flag(RunFlag flag, bool set)
+    {
+        const auto flags = run_flags.load(std::memory_order_relaxed);
+        run_flags.store(set ? flags | static_cast<u32>(flag) : flags & ~static_cast<u32>(flag),
+                        std::memory_order_release);
+    }
     // Whether the slot names `id` and is visible; a lock-free first test that
     // a pin repeats under the task lock. The pid is loaded again after the
     // lifecycle: a free and a reallocation between the two first loads would

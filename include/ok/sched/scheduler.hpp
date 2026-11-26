@@ -50,6 +50,7 @@ inline constexpr u8 scheduler_max_priority = 31;
 inline constexpr u16 cpu_affinity_any = 0xffffu;
 // Marks a thread that is neither on a CPU nor placed on a run queue.
 inline constexpr smp::CpuId no_cpu = 0xffff;
+static_assert(no_cpu == no_cpu_word);
 
 struct PipeReadiness
 {
@@ -130,6 +131,10 @@ struct ThreadControlBlock
     // state is never exited; an exited record keeps the slot until reused.
     // The per-thread affinity mask is a slot word: ProcessSlot::thread_affinity.
     ThreadSlotState slot_state{ThreadSlotState::free};
+    // A blocked thread whose wait a pending signal may interrupt: the queue
+    // admits it so that its resume re-evaluates the wait (spec 4.7). Written
+    // under the task lock; pick clears it.
+    bool probe{false};
 };
 
 // A thread whose allowed CPUs all went offline (docs/modules/sysfs.md): its
@@ -246,10 +251,15 @@ class ProcessControlBlock
     {
         return name_.view();
     }
+    // Only the lifecycle is stored: created, live (stored as runnable),
+    // zombie or exited. A live process is running, runnable or blocked as
+    // its live threads are (spec 4.1), so no thread transition rewrites it.
     [[nodiscard]] ProcessState state() const
     {
-        return state_;
+        return derived_state();
     }
+    [[nodiscard]] ProcessState derived_state() const;
+    // Stores a lifecycle value; running and blocked are derived, never stored.
     void set_state(ProcessState state)
     {
         state_ = state;
@@ -458,7 +468,10 @@ class RoundRobinPolicy final
 
 // A queue can hold every thread a process table admits. Lock types are a
 // build-time choice made here, not a runtime queue interface.
-using SchedulerRunQueue = CpuRunQueue<max_thread_slots, smp::SpinLock, ThreadHandle>;
+// The queue lock is a spin lock on every profile, not a FineLock, for the
+// reason the task locks are (task_table.hpp): one exported layout.
+using SchedulerQueueLock = smp::RankedSpinLock<smp::LockRank::run_queue>;
+using SchedulerRunQueue = CpuRunQueue<max_thread_slots, SchedulerQueueLock, ThreadHandle>;
 static_assert(RunQueue<SchedulerRunQueue>);
 
 // One open description's offset and flags across one offset-dependent I/O,
@@ -589,14 +602,7 @@ class SchedulerState
             return status;
         created.state = ProcessState::runnable;
         created.slot_state = ThreadSlotState::live;
-        if (retired) forget_queued(*process, *retired);
-        *slot = created;
-        // A new thread starts with every CPU; clone then copies its caller's mask.
-        store_thread_affinity(*process, *slot, cpu_affinity_any);
-        if (process->state() == ProcessState::created || process->state() == ProcessState::blocked)
-        {
-            process->set_state(ProcessState::runnable);
-        }
+        install_thread(*process, *slot, created);
         return tid;
     }
 
@@ -759,12 +765,15 @@ class SchedulerState
     Result<WaitTicket> register_current_wait(ThreadWaitReason reason, u64 key);
     // `source` names what made the wait ready; completed waits are counted by
     // the source their registration recorded.
+    // Under the waiter's task lock: a completed parked waiter is queued (and
+    // its CPU woken after the unlock); an armed one is queued by put_prev.
     bool complete_wait(WaitTicket ticket, WaitCompletion completion, WakeSource source = WakeSource::thread);
     [[nodiscard]] ThreadControlBlock *find_thread(ProcessId pid, ThreadId tid);
     [[nodiscard]] ThreadControlBlock *current_thread();
     void wake_waiters(ThreadWaitReason reason, u64 key, WakeSource source = WakeSource::thread);
-    // Ready and timed-out waits completed so far, by wake source.
-    [[nodiscard]] u64 wakes(WakeSource source) const { return wakes_[static_cast<usize>(source)]; }
+    // Ready and timed-out waits completed so far, by wake source: the sum of
+    // the per-CPU counters, each written only by its CPU.
+    [[nodiscard]] u64 wakes(WakeSource source) const;
     // Native single-console input; descriptor possession never grants membership.
     Result<u32> claim_console(ProcessId target);
     Status revoke_console(u32 expected_epoch);
@@ -902,6 +911,62 @@ class SchedulerState
     // Vacates the CPU; the thread returns to runnable unless it blocked or exited.
     Status clear_on_cpu(ProcessId pid, ThreadId tid, smp::CpuId cpu);
     [[nodiscard]] const SchedulerRunQueue &run_queue(smp::CpuId cpu) const { return run_queues_.get(cpu); }
+
+    // The queue path (spec 4.2). Every transition that leaves a thread
+    // runnable off its CPU queues it under its task lock: completion of a
+    // parked wait, put_prev, thread and process creation, continue, the
+    // probe of an interruptible wait and the audit. Only user_process
+    // threads are queued this way; kernel_thread records keep the policy
+    // dispatch of Kernel::tick.
+    struct Picked
+    {
+        ThreadRef ref{};
+        bool probed{}; // Admitted blocked: its resume re-evaluates the wait.
+    };
+    // Takes the next thread for `cpu` and occupies the CPU with it: its own
+    // queue first, then the longest other online queue it can try-lock.
+    // Each entry is validated under its task lock against the queue it came
+    // from; stale and superseded entries are dropped, one the affinity no
+    // longer admits here is queued again. A runnable thread becomes running;
+    // a probed one stays blocked until its resume completes the wait.
+    std::optional<Picked> pick(smp::CpuId cpu);
+    // Vacates this CPU (spec 4.2 put_prev): a running thread becomes
+    // runnable and is queued if it may run, the CPU-slot pin is dropped and
+    // on_cpu is released last.
+    void put_prev(smp::CpuId cpu) { vacate_cpu_slot(cpu); }
+    // After a probed pick: whether the thread on `cpu` is runnable now (its
+    // resume completed the wait); it then becomes running.
+    bool resume_current(smp::CpuId cpu);
+    // Marks a parked thread whose wait a pending signal may interrupt and
+    // queues it (until signal generation sets probes itself). False when it
+    // was not parked, already probed or could not be queued.
+    bool probe_parked(ProcessControlBlock &process, ThreadControlBlock &thread);
+    // The idle handshake, idle side (spec 4.2): publishes `cpu` idle, fences,
+    // then loads the queue counts. `halt`: every queue is empty, and a push
+    // from now on sees the flag and wakes this CPU. `own_work`: its own queue
+    // holds entries; the flag is cleared and the caller picks again.
+    // `steal_hint`: only other queues hold entries; the flag stays published
+    // and the caller may try one more steal before it halts (a push to
+    // another queue wakes that queue's CPU, not this one).
+    enum class IdleCheck : u8
+    {
+        halt,
+        own_work,
+        steal_hint,
+    };
+    IdleCheck enter_idle(smp::CpuId cpu);
+    void leave_idle(smp::CpuId cpu) { idle_[cpu].store(false, std::memory_order_relaxed); }
+    // Publishes `cpu` idle without the check (the legacy_select=y scan).
+    void mark_idle(smp::CpuId cpu) { idle_[cpu].store(true, std::memory_order_relaxed); }
+    [[nodiscard]] bool cpu_idle(smp::CpuId cpu) const { return idle_[cpu].load(std::memory_order_relaxed); }
+    // A waker found `cpu` idle after its push (the IPI it sent, kept for
+    // hosted models that have no interrupt controller). Taking clears it.
+    bool take_wake_request(smp::CpuId cpu) { return wake_requests_[cpu].exchange(0, std::memory_order_acquire) != 0; }
+    // Repair audit (spec 4.10): a user thread that may run but is neither on
+    // a CPU nor queued is queued (orphan_runnable); a blocked thread whose
+    // registration completed becomes runnable (stuck_completed). Each repair
+    // counts audit_repairs. Returns the repairs.
+    usize audit_queues();
     Status set_runnable(ProcessId pid);
     Status block_process(ProcessId pid);
     // Job-control overlay (job_control.inc). A stopped process keeps its
@@ -986,6 +1051,33 @@ class SchedulerState
     void free_thread_slot(ProcessControlBlock &process, ThreadControlBlock &thread);
     void vacate_cpu_slot(usize cpu);
     void occupy_cpu(smp::CpuId cpu, ProcessControlBlock &process, ThreadControlBlock &thread);
+    // The task-lock layer (spec 4.2). `task_slot` names the slot of a PCB in
+    // the table; callers of the *_locked functions hold that slot's task lock.
+    // A transition that queues a thread wakes the chosen CPU after unlocking.
+    [[nodiscard]] ProcessSlot &task_slot(const ProcessControlBlock &process)
+    {
+        return slots_[process.process_slot_];
+    }
+    [[nodiscard]] bool in_table(const ProcessControlBlock &process) const
+    {
+        return process.process_slot_ < slots_.size() && &slots_[process.process_slot_].pcb == &process;
+    }
+    void install_thread(ProcessControlBlock &process, ThreadControlBlock &slot, const ThreadControlBlock &created);
+    // Queues `thread` on an online CPU its affinity admits, unless it is
+    // queued already or may not run; returns the CPU it was pushed to, or
+    // no_cpu. Wake that CPU with notify_cpu after the unlock. `requeue`
+    // places an entry again (offline, affinity) whatever its process kind.
+    smp::CpuId enqueue_locked(ProcessSlot &slot, ThreadControlBlock &thread, bool requeue = false);
+    [[nodiscard]] smp::CpuId select_from(const ThreadControlBlock &thread, u32 allowed) const;
+    // Pops every entry of `cpu`'s queue and places the live ones again.
+    void drain_queue(smp::CpuId cpu);
+    void notify_cpu(smp::CpuId cpu);
+    void set_queued_locked(ProcessSlot &slot, ThreadControlBlock &thread, smp::CpuId cpu);
+    void set_on_cpu_locked(ProcessSlot &slot, ThreadControlBlock &thread, smp::CpuId cpu);
+    void forget_queued_locked(ProcessSlot &slot, ThreadControlBlock &thread);
+    void occupy_locked(smp::CpuId cpu, ProcessSlot &slot, ThreadControlBlock &thread);
+    void count_wake(WakeSource source);
+    [[nodiscard]] bool steal_eligible(ThreadHandle handle, smp::CpuId victim, smp::CpuId cpu) const;
     // The CPU 0 fallback of select_cpu admits a thread whose affinity names no configured CPU.
     [[nodiscard]] bool affinity_admits(const ProcessControlBlock &process, smp::CpuId cpu) const;
     [[nodiscard]] bool affinity_admits(const ProcessControlBlock &process, const ThreadControlBlock &thread,
@@ -1022,7 +1114,11 @@ class SchedulerState
     Result<private_pty::Handle> bind_pty_multiplexer(u16 description, u32 uid, u32 gid);
     private_pty::RawPtyTable<> pty_transport_{}; // One stable table; handles never cross scheduler domains.
     ConsoleInputLease console_input_{};
-    std::array<u64, wake_source_count> wakes_{};
+    // Completed waits by CPU and source, each row written by its CPU.
+    std::array<std::array<std::atomic<uptr>, wake_source_count>, smp::max_cpus> wakes_{};
+    // The idle handshake: a CPU's idle flag, and the wake a pusher owes it.
+    std::array<std::atomic<bool>, smp::max_cpus> idle_{};
+    std::array<std::atomic<u32>, smp::max_cpus> wake_requests_{};
     u16 stopped_count_{};
     Terminal console_terminal_{};
     fs::TerminalNamespace terminal_namespace_{};
