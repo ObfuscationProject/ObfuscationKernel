@@ -146,7 +146,7 @@ Status checkpoint_peer_fixture(Kernel &kernel)
         }
         else
         {
-            if (!finish_futex(kernel, peer_object(3), sched::WaitCompletion::ready, 0))
+            if (!wake_futex_object(kernel, peer_object(3)))
                 return peer_failure("peer-control-completion");
             ++peer_fixture.controls;
         }
@@ -176,7 +176,7 @@ Status checkpoint_peer_fixture(Kernel &kernel)
         peer_fixture.admitted = false;
         for (usize i = 0; i < 3; ++i)
         {
-            if (!finish_futex(kernel, peer_object(i), sched::WaitCompletion::ready, 0))
+            if (!wake_futex_object(kernel, peer_object(i)))
                 return peer_failure("waiter-control-completion");
             ++peer_fixture.controls;
         }

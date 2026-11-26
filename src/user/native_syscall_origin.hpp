@@ -790,6 +790,21 @@ class SyscallOriginTable final : private NonCopyable
             thread->wait_registration.ticket() == binding.ticket && !thread->wait_registration.active() &&
             thread->wait_registration.completion() == sched::WaitCompletion::cancelled;
     }
+    // A FUTEX_WAIT whose wait completed (woken, timed out or cancelled) and
+    // whose owner has not produced its result yet: the binding still names
+    // the record's capture and frame. validate_bound admits a pending wait
+    // only, so a completed one can neither restart nor be published as one.
+    [[nodiscard]] bool validate_completed_futex(const Identity &identity, const Frame &frame,
+                                                const FutexBinding &binding) const
+    {
+        const auto *record = resolve(identity, false);
+        const auto *thread = record && record->scheduler ? record->scheduler->find_thread(identity.pid, identity.tid) : nullptr;
+        return record && record->kind == Kind::linux_restart && record->bound &&
+            family_admits<FutexBinding>(record->family) && record->terminal == terminal_tag<FutexBinding>() &&
+            record->futex_binding == binding && same_frame(record->frame, frame) && thread && thread->syscall_pending &&
+            thread->wait_registration.ticket() == binding.ticket && !thread->wait_registration.active() &&
+            thread->wait_registration.completion() != sched::WaitCompletion::none;
+    }
     bool advance_pipe_write(const Identity &identity, const Frame &frame,
                             const PipeWriteBinding &before, const PipeWriteBinding &after)
     {

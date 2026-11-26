@@ -19,6 +19,7 @@
 #include "ok/smp/cpu.hpp"
 #include "ok/smp/kernel_section.hpp"
 #include "ok/user/uaccess.hpp"
+#include "futex_buckets.hpp"
 #include "ok/user/native_sleep.hpp"
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
 #define OK_PRIVATE_POLL_MASK 1
@@ -522,6 +523,11 @@ struct FutexWait
     bool pin_owned{};
     memory::PhysicalFrame pending_transfer_frame{};
     bool pending_transfer_pin_owned{};
+    // Queue position (futex_buckets.hpp): guarded by the bucket that lists
+    // the wait; `bucket` (futex_no_bucket when unlisted) is also loaded by
+    // the owner without a lock. A waker never retires the record.
+    FutexWait *bucket_prev{}, *bucket_next{};
+    u32 bucket{futex_no_bucket};
     u64 queue_sequence{};
     sched::WaitTicket ticket{};
     sched::DeadlineWait timeout{};
@@ -536,6 +542,10 @@ constexpr usize futex_object_pages =
 using FutexObjects = memory::ObjectPool<FutexWait, NativePagePool, futex_object_pages>;
 extern FutexObjects futex_objects;
 extern std::array<PollWaitIndex, memory::KernelEntryStackPool::capacity> futex_waits;
+// The 64 futex hash buckets (spec 4.5): FineLock<futex_bucket> each.
+using FutexBucketTable = FutexBuckets<FutexWait, smp::FineLock<smp::LockRank::futex_bucket>>;
+extern FutexBucketTable futex_buckets;
+[[nodiscard]] u32 futex_bucket_of(const FutexWait::Key &key);
 
 // A blocking read owns the original request and open description. A
 // descriptor number is only a name in a mutable shared table, not ownership.
@@ -842,10 +852,18 @@ void report_network_waits();
 // pass wakes it for each socket whose readiness moved, and every socket when
 // the executor's did (transmit credit, link failure).
 [[nodiscard]] constexpr u64 udp_poll_channel(u32 endpoint) { return endpoint & 0xffu; }
-// The owned result of a thread's completed poll or sleep, settled at its
-// dispatch (spec 4.4); empty when it has none and dispatch goes on.
+// The owned result of a thread's completed poll, futex WAIT or sleep,
+// settled at its dispatch (spec 4.4); empty when it has none and dispatch
+// goes on.
 std::optional<i64> resume_owned_wait(Kernel &kernel, sched::ProcessControlBlock &process,
                                      sched::ThreadControlBlock &thread, bool &complete);
+// A completed futex WAIT's result (spec 4.4): ready 0, timeout -110, any
+// other completion -4. The wait leaves its queue if it is still listed (a
+// timeout or a cancel left it there) and its record is retired. Empty when
+// the record is not this continuation's (it is retired) or the runtime
+// stopped.
+std::optional<i64> resume_futex(Kernel &kernel, sched::ProcessControlBlock &process,
+                                sched::ThreadControlBlock &thread, memory::ObjectHandle object);
 // The poll audit's probed waiter (spec 4.10): readiness no wake reported
 // completes its wait and counts poll_audit_ready.
 void audit_probed_poll(Kernel &kernel, sched::ThreadRef chosen);
@@ -1058,8 +1076,38 @@ Status private_exit_commit(Kernel &kernel, sched::ProcessId pid, const PrivateCh
                            const PrivateChildExit::Adoption &adoption);
 #endif
 void queue_pipe_sigpipe(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadId tid);
-bool finish_futex(Kernel &kernel, memory::ObjectHandle object, sched::WaitCompletion cause, i64 result);
-bool expire_futex(Kernel &kernel, u64 now);
+// Completes one queued futex wait as a WAKE would (the peer fixture's
+// control completion); its owner produces the result when it resumes.
+bool wake_futex_object(Kernel &kernel, memory::ObjectHandle object);
+enum class FutexInterrupt : u8
+{
+    interrupted, // Published and interrupted.
+    completed,   // A waker, the timeout or a cancel completed it first.
+    failed,      // The publication or the interrupt failed.
+};
+// The signal side of spec 4.5, at the owner's probed dispatch. Under the
+// bucket that lists the wait, it leaves the queue; while it is still pending
+// `publish` writes the interrupted call's outcome into the owner's frame
+// (its syscall origin validates only while the wait is pending) and the
+// ticket is interrupted. A wait some other completion reached first is left
+// to the resume, which produces that result; the signal stays pending. With
+// the kernel lock held no timeout expires between the pending check and the
+// interrupt, so `failed` means a lost publication (the runtime stops).
+template <typename Publish>
+FutexInterrupt interrupt_futex_wait(Kernel &kernel, FutexWait &wait, Publish &&publish)
+{
+    const auto index = futex_buckets.lock_linked(wait);
+    if (index == FutexBucketTable::none) return FutexInterrupt::completed;
+    futex_buckets.unlink(index, wait);
+    auto outcome = FutexInterrupt::completed;
+    if (kernel.scheduler().wait_pending(wait.ticket))
+        outcome = std::forward<Publish>(publish)() &&
+                          kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::interrupted)
+                      ? FutexInterrupt::interrupted
+                      : FutexInterrupt::failed;
+    futex_buckets[index].lock.unlock();
+    return outcome;
+}
 
 void finish(Kernel &kernel, sched::ProcessId pid, i32 code, u8 signal);
 

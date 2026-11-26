@@ -65,6 +65,18 @@ i64 execute(Kernel &kernel, Owner a, u32 op, u32 limit1 = 1, u32 limit2 = 1,
     activate(kernel, a);
     return native::futex_wake_operation(kernel, a.pid, {address1, address2, limit1, limit2, op, big});
 }
+// A woken waiter's resume, as the step runs it: 0, and its record retired.
+bool woke(Kernel &kernel, Owner a, usize index, memory::ObjectHandle object)
+{
+    activate(kernel, a, index);
+    auto *process = kernel.scheduler().find(a.pid);
+    auto *thread = kernel.scheduler().current_thread();
+    bool complete = true;
+    const auto result = native::resume_owned_wait(kernel, *process, *thread, complete);
+    if (!result || *result != 0) return false;
+    thread->syscall_pending = false;
+    return native::set_result(*process, thread->native_frame, *result).ok() && !native::futex_objects.resolve(object);
+}
 void arithmetic()
 {
     using Operation = lu::FutexWakeOperation;
@@ -105,20 +117,21 @@ void runtime(Kernel &kernel)
     auto foreign = wait(kernel, b, 1, first);
     const auto objects = native::futex_objects.accounting().allocations;
     CHECK(execute(kernel, a, encode(1, 0, 3, 7)) == 2 && get(second) == 10);
-    CHECK(!native::futex_objects.resolve(one) && !native::futex_objects.resolve(two));
-    CHECK(native::futex_objects.resolve(foreign));
     CHECK(native::futex_objects.accounting().allocations == objects);
     CHECK(kernel.scheduler().find_thread(a.pid, a.tids[1])->wait_registration.completion() == sched::WaitCompletion::ready);
     CHECK(kernel.scheduler().find_thread(a.pid, a.tids[2])->wait_registration.completion() == sched::WaitCompletion::ready);
+    // Each owner's resume produces its result and retires its record.
+    CHECK(woke(kernel, a, 1, one) && woke(kernel, a, 2, two));
+    CHECK(native::futex_objects.resolve(foreign));
     one = wait(kernel, a, 1, first); two = wait(kernel, a, 2, second);
     CHECK(execute(kernel, a, encode(0, 0, 7, 99)) == 1 && get(second) == 7);
-    CHECK(!native::futex_objects.resolve(one) && native::futex_objects.resolve(two));
+    CHECK(woke(kernel, a, 1, one) && native::futex_objects.resolve(two));
     CHECK(execute(kernel, a, encode(0, 0, 7, 7), 1, 0xffffffffU) == 1);
-    CHECK(!native::futex_objects.resolve(two));
+    CHECK(woke(kernel, a, 2, two));
     one = wait(kernel, a, 1, first); two = wait(kernel, a, 2, first);
     auto three = wait(kernel, a, 3, first);
     CHECK(execute(kernel, a, encode(1, 0, 1, 7), 0, 1, first, first) == 2 && get(first) == 8);
-    CHECK(!native::futex_objects.resolve(one) && !native::futex_objects.resolve(two));
+    CHECK(woke(kernel, a, 1, one) && woke(kernel, a, 2, two));
     CHECK(native::futex_objects.resolve(three));
     const auto check_pending = [&] { CHECK(native::futex_objects.resolve(three) && native::futex_objects.resolve(foreign)); };
     put(second, 7);

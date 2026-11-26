@@ -855,6 +855,8 @@ std::optional<i64> resume_owned_wait(Kernel &kernel, sched::ProcessControlBlock 
     if (thread.wait_registration.active()) return std::nullopt;
     if (const auto object = poll_object(process.pid(), thread.tid); object.pool)
         return resume_poll(kernel, process, thread, object, complete);
+    if (const auto object = futex_object(process.pid(), thread.tid); object.pool)
+        return resume_futex(kernel, process, thread, object);
     if (thread.native_deadline.armed()) return resume_sleep(thread);
     return std::nullopt;
 }
