@@ -1,7 +1,7 @@
 // PTY pair I/O continuations and their owners (raw pairs and ptmx-style pairs),
 // for both personalities. A Linux wait binds its syscall origin when armed; the
 // terminal signal family (jobctl.cpp) interrupts or restarts it. A read that
-// waits below VMIN or with VMIN 0 runs its VTIME timer (expire_tty_timers).
+// waits below VMIN or with VMIN 0 runs its VTIME timer (a deadline-heap key).
 // Slave reads, and slave writes under TOSTOP, pass the job-control gate at
 // entry and again when a continue ended their wait.
 #include "private.hpp"
@@ -239,6 +239,12 @@ Status pty_arm_timer(Kernel &kernel, PtyWait &wait)
     wait.timer = value.timer_deciseconds; wait.interbyte = interbyte; wait.received_mark = value.received;
     return {};
 }
+// A running VTIME timer is the wait's deadline (spec 4.6): its expiry
+// completes the wait as timed out and the read retries with the timer expired.
+void pty_arm_deadline(Kernel &kernel, const PtyWait &wait)
+{
+    if (wait.deadline) static_cast<void>(kernel.scheduler().arm_wait_deadline(wait.ticket, wait.deadline));
+}
 // A Linux wait carries its bound origin to the new ticket (and write progress).
 void pty_rebind(sched::ProcessControlBlock &process, const sched::ThreadControlBlock &thread,
                 memory::ObjectHandle object, const PtyWait &before, const PtyWait &after)
@@ -326,6 +332,7 @@ i64 resume_pty_io(Kernel &kernel, sched::ProcessControlBlock &process,
         if (!registration)
         { const auto result = pty_terminal_result(wait, error(registration.status())); cancel_pty_wait(kernel, object, "error", result); return result; }
         wait.ticket = registration.value();
+        pty_arm_deadline(kernel, wait);
         thread->terminal_gate_mark = process.job_control().continue_generation;
         pty_rebind(process, *thread, object, before, wait);
         emit_pty_wait(wait, false, "rearm"); complete = false; return -11;
@@ -399,6 +406,7 @@ i64 begin_pty_io(Kernel &kernel, sched::ProcessControlBlock &process, sched::Thr
     if (!registration)
     { const auto result = pty_terminal_result(wait, error(registration.status())); cancel_pty_wait(kernel, object); return result; }
     wait.ticket = registration.value(); wait.request = wait.ticket.generation;
+    pty_arm_deadline(kernel, wait);
     thread->terminal_gate_mark = process.job_control().continue_generation;
     *slot = {wait.pid, wait.tid, object};
     if (wait.personality == Personality::linux)

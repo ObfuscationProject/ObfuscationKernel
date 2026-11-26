@@ -77,6 +77,8 @@ struct LinuxSleepInterruption
         const bool expired = now >= out.deadline;
         if (!scheduler.complete_wait(ticket, expired ? sched::WaitCompletion::timeout : sched::WaitCompletion::interrupted))
             return {};
+        // The sleep's own record goes with its wait (the owner settles it).
+        thread.native_deadline.cancel();
         out.result = expired ? 0 : -4;
         if (!expired && !out.request.absolute && out.request.remainder)
         {

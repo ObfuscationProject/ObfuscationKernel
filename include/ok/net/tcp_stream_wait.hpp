@@ -52,6 +52,21 @@ class TcpStreamWaits final
     }
     void set_foreign_notice(void *context, void (*notice)(void *, sched::WaitTicket))
     { foreign_context_ = context; foreign_notice_ = notice; }
+    // A stream's poll channel (sched::ThreadWaitReason::tcp_stream; spec 4.3):
+    // poll() wakes it whenever its endpoint's readiness moved. The top bit
+    // keeps it apart from the generation keys of the waits this class arms.
+    [[nodiscard]] static constexpr u64 poll_channel_key(tcp::Handle handle)
+    {
+        const usize index = handle.kind == tcp::HandleKind::connection ? handle.slot : Table::connection_slots + handle.slot;
+        return (u64{1} << 63) | index;
+    }
+    // Empty for a stream that has no endpoint yet (nothing to wake it).
+    [[nodiscard]] std::optional<u64> poll_channel(TcpStreamHandle stream)
+    {
+        auto snapshot = service_.snapshot(stream);
+        if (!snapshot || !snapshot.value().endpoint) return std::nullopt;
+        return poll_channel_key(*snapshot.value().endpoint);
+    }
     [[nodiscard]] usize records() const
     { usize count{}; for (const auto &record : waits_) count += record.used; return count; }
     Result<sched::WaitTicket> arm(u64 pid, i32 fd, u8 interests, std::optional<u64> deadline = {})
@@ -122,6 +137,8 @@ class TcpStreamWaits final
     {
         if (!status_) return status_;
         service_.endpoints().take_changed([&](tcp::Handle handle) {
+            // The TCP wake site of poll (spec 4.3).
+            scheduler_.wake_waiters(sched::ThreadWaitReason::tcp_stream, poll_channel_key(handle), source);
             queue(handle).notify([&](sched::WaitTicket ticket) {
                 auto *record = find(ticket);
                 if (!record)

@@ -70,6 +70,10 @@ void cancel_poll(Kernel &kernel, memory::ObjectHandle object, std::string_view r
             entry = {};
     if (wait.ticket.generation)
         static_cast<void>(kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::cancelled));
+    // Owner unlink (spec 4.3): the channels the poll watched drop its entries.
+    if (auto *process = kernel.scheduler().find(wait.pid))
+        if (auto *owner = kernel.scheduler().find_thread(wait.pid, wait.tid); owner && !owner->wait_registration.active())
+            kernel.scheduler().release_wait_links(*process, *owner);
     for (usize i = 0; i < wait.count; ++i)
         if (wait.descriptions[i] != sched::invalid_description)
             if (auto status = kernel.scheduler().release_description(wait.descriptions[i]); !status)
@@ -97,42 +101,141 @@ void cancel_poll(Kernel &kernel, sched::ProcessId pid)
             cancel_poll(kernel, entry.object);
 }
 
-
-void mark_poll_dirty(sched::WaitTicket ticket)
+// Ownership only, like the pipe and PTY prunes: drops a poll whose owner is
+// gone or whose wait was replaced. Readiness and timeouts are not evaluated
+// here; wakes and deadlines complete a poll and its owner settles it.
+void prune_poll_waits(Kernel &kernel)
 {
     for (const auto &entry : poll_waits)
     {
         if (!entry.pid) continue;
-        auto resolved = poll_objects.resolve(entry.object);
-        if (resolved && resolved.value()->ticket == ticket) { resolved.value()->dirty = true; return; }
+        const auto object = entry.object;
+        auto resolved = poll_objects.resolve(object);
+        if (!resolved) { runtime_failure = resolved.status(); continue; }
+        const auto &wait = *resolved.value();
+        const auto *process = kernel.scheduler().find(wait.pid);
+        const auto *thread = kernel.scheduler().find_thread(wait.pid, wait.tid);
+        if (!process || !thread || !thread->native_active ||
+            process->state() == sched::ProcessState::zombie || process->state() == sched::ProcessState::exited ||
+            thread->state == sched::ProcessState::exited || thread->wait_registration.ticket() != wait.ticket ||
+            (thread->wait_registration.active() &&
+             (thread->state != sched::ProcessState::blocked || thread->wait_reason != sched::ThreadWaitReason::poll)))
+            cancel_poll(kernel, object);
     }
 }
-// A poll over sockets only sleeps on their wait queues. A UDP descriptor
-// asking for output keeps the rescan: its writability follows transmit
-// credit, which signals no queue. Unconnected TCP streams have no queue.
-bool watch_poll_sockets(Kernel &kernel, PollWait &wait)
+
+
+namespace
 {
-    auto *thread = kernel.scheduler().find_thread(wait.pid, wait.tid);
-    if (!wait.count || !thread || !thread->wait_registration.pending(wait.ticket)) return false;
+// One wait channel a poll links (spec 4.3 poll_channels).
+struct PollChannel
+{
+    sched::ThreadWaitReason reason{};
+    u64 key{};
+};
+using PollChannels = std::array<PollChannel, sched::max_wait_links>;
+void add_channel(PollChannels &channels, usize &count, bool &unwatched, sched::ThreadWaitReason reason, u64 key)
+{
+    for (usize i = 0; i < count; ++i)
+        if (channels[i].reason == reason && channels[i].key == key) return;
+    if (count == channels.size()) { unwatched = true; return; }
+    channels[count++] = {reason, key};
+}
+// The channels whose wakes cover every readiness source poll_ready consults
+// for the watched descriptors: pipe and UNIX stream buffers (read side,
+// write side, their peers' closes), a UNIX listener's accept queue, PTY
+// endpoints, the console input, UDP sockets (the receive-change pass, which
+// also follows transmit credit) and TCP streams (their wait pass). Regular
+// files, memfds and console output are always ready and need none. A source
+// without a channel (a TCP stream with no endpoint yet) sets `unwatched`:
+// that poll re-evaluates on a timer.
+usize poll_channels(Kernel &kernel, const PollWait &wait, PollChannels &channels, bool &unwatched)
+{
+    using Reason = sched::ThreadWaitReason;
+    auto &scheduler = kernel.scheduler();
+    usize count = 0;
     for (usize i = 0; i < wait.count; ++i)
     {
-        const auto *description = kernel.scheduler().open_description(wait.descriptions[i]);
-        if (!description) return false;
+        const auto id = wait.descriptions[i];
+        if (wait.fds[i].fd < 0 || id == sched::invalid_description) continue;
+        const auto *description = scheduler.open_description(id);
+        if (!description || !description->references) continue;
+        const auto requested = static_cast<u16>(wait.fds[i].events);
+        const bool output = (requested & (OK_POLLOUT | wait.write_normal)) != 0;
         if (description->native_tcp_handle)
         {
-            // The stream queues signal a poll through this notice.
-            kernel.native_tcp_waits().set_foreign_notice(nullptr, [](void *, sched::WaitTicket ticket) { mark_poll_dirty(ticket); });
-            if (!kernel.native_tcp_waits().watch(description->native_tcp_handle, thread->wait_registration)) return false;
+            if (const auto key = kernel.native_tcp_waits().poll_channel(description->native_tcp_handle))
+                add_channel(channels, count, unwatched, Reason::tcp_stream, *key);
+            else unwatched = true;
         }
         else if (description->native_udp_handle)
+            add_channel(channels, count, unwatched, Reason::udp_receive, udp_poll_channel(description->native_udp_handle));
+        else if (description->pty_endpoint)
         {
-            if ((static_cast<u16>(wait.fds[i].events) & (OK_POLLOUT | wait.write_normal)) ||
-                !watch_udp_socket(*thread, description->native_udp_handle))
-                return false;
+            const auto key = sched::SchedulerState::pty_wait_key(description->pty_endpoint);
+            add_channel(channels, count, unwatched, Reason::pty_read, key);
+            if (output) add_channel(channels, count, unwatched, Reason::pty_write, key);
         }
-        else return false;
+        else if (description->native_shared_file) {}
+        else if (scheduler.is_unix_socket(id) && description->pipe == sched::invalid_description)
+            add_channel(channels, count, unwatched, Reason::pipe_read, sched::SchedulerState::unix_listener_wait_key(id));
+        else if (description->pipe != sched::invalid_description)
+        {
+            if (description->readable) add_channel(channels, count, unwatched, Reason::pipe_read, description->pipe);
+            if (description->writable)
+                add_channel(channels, count, unwatched, Reason::pipe_write,
+                            description->unix_write_pipe != sched::invalid_description ? description->unix_write_pipe
+                                                                                         : description->pipe);
+        }
+        else if (description->input_console)
+            add_channel(channels, count, unwatched, Reason::console_read, wait.console_epoch);
+        else if (description->console || description->node) {}
+        else unwatched = true;
     }
-    return true;
+    return count;
+}
+// How soon a poll some of whose sources have no channel re-evaluates.
+constexpr u64 poll_retry_ns = 10'000'000;
+} // namespace
+// Arms a poll's wait (spec 4.3 A3): registers it, links every watched
+// channel, then checks readiness again. A waker sets its condition before it
+// scans its bucket, and the poll linked before it checked: either the check
+// sees the condition or the waker sees the entry. Returns the ready count
+// of that check (non-zero: the caller completes the poll now and cancels the
+// wait), or 0 once the wait is armed with its timeout.
+Result<usize> arm_poll(Kernel &kernel, sched::ThreadControlBlock &thread, memory::ObjectHandle object, PollWait &wait,
+                       bool rearm)
+{
+    auto &scheduler = kernel.scheduler();
+    auto registration = scheduler.register_current_wait(sched::ThreadWaitReason::poll, 0);
+    if (!registration) return registration.status();
+    const auto previous = wait.ticket;
+    wait.ticket = registration.value();
+#ifdef OK_PRIVATE_POLL_MASK
+    if (!rearm && !poll_signal_masks.bind(thread, object, wait.ticket))
+        return Status::invalid_argument("poll signal mask is not admitted");
+    if (rearm) poll_signal_masks.rebind(thread, object, previous, wait.ticket);
+#else
+    static_cast<void>(thread); static_cast<void>(object); static_cast<void>(previous); static_cast<void>(rearm);
+#endif
+    PollChannels channels{};
+    bool unwatched = false;
+    const usize count = poll_channels(kernel, wait, channels, unwatched);
+    for (usize i = 0; i < count; ++i)
+        if (!scheduler.watch_channel(wait.ticket, channels[i].reason, channels[i].key)) unwatched = true;
+    if (unwatched)
+    {
+        // No wake reaches a source without a channel: re-evaluate on a timer.
+        if (const auto cpu = smp::current_cpu(); cpu < smp::max_cpus)
+            smp::detail::owner_add(smp::evidence_cpus[cpu].unqueued);
+        if (auto now = arch::monotonic_nanoseconds(); now)
+            static_cast<void>(scheduler.arm_wait_deadline(wait.ticket, now.value() + poll_retry_ns,
+                                                          sched::DeadlineAction::retry));
+    }
+    if (wait.timeout.armed()) static_cast<void>(scheduler.arm_wait_deadline(wait.ticket, wait.timeout.deadline()));
+    auto ready = poll_ready(kernel, wait);
+    if (!ready) return ready.status();
+    return ready.value();
 }
 template <posix::ReadinessPolicy Policy>
 Result<posix::DescriptorReadiness> retained_description_readiness(
@@ -613,15 +716,11 @@ static i64 begin_readiness_wait(Kernel &kernel, sched::ProcessId pid, const Poll
         if (wait->timeout.complete(now.value(), armed.value()))
             return done(poll_output(space, *wait) ? 0 : -14);
     }
-    auto registration = kernel.scheduler().register_current_wait(sched::ThreadWaitReason::poll, 0);
-    if (!registration)
-        return done(error(registration.status()));
-    wait->ticket = registration.value();
-#ifdef OK_PRIVATE_POLL_MASK
-    if (!poll_signal_masks.bind(*current, object, wait->ticket)) return done(-22);
-#endif
     *entry = {pid, current->tid, object};
-    wait->socket_only = watch_poll_sockets(kernel, *wait);
+    auto armed = arm_poll(kernel, *current, object, *wait, false);
+    if (!armed) return done(armed.status().code() == StatusCode::invalid_argument ? -22 : error(armed.status()));
+    // Ready between the first check and the links: complete now.
+    if (armed.value()) return done(poll_output(space, *wait) ? static_cast<i64>(armed.value()) : -14);
     if (process->resources().personality == Personality::linux && (wait->select_sets || wait->linux_events))
     {
         wait->syscall = poll_syscall_number(current->native_frame, wait->select_sets);
@@ -673,4 +772,102 @@ i64 begin_select(Kernel &kernel, sched::ProcessId pid, const SelectRequest &requ
     readiness.read_normal = readiness.write_normal = 0;
     return begin_readiness_wait(kernel, pid, readiness, complete, &request.sets);
 }
+
+inline namespace runtime_detail
+{
+namespace
+{
+// resume_poll (spec 4.4): the owner re-runs poll_ready after its wait
+// completed. Readiness or the timeout produces the result; otherwise the
+// readiness that woke it was consumed by a peer meanwhile and the poll
+// re-arms (Linux do_poll), which is a documented change from completing on
+// the wake. A wait cancelled or interrupted some other way drops the object
+// and the call is dispatched again, as before.
+std::optional<i64> resume_poll(Kernel &kernel, sched::ProcessControlBlock &process, sched::ThreadControlBlock &thread,
+                               memory::ObjectHandle object, bool &complete)
+{
+    auto resolved = poll_objects.resolve(object);
+    if (!resolved)
+    {
+        runtime_failure = resolved.status();
+        return error(resolved.status());
+    }
+    auto &wait = *resolved.value();
+    const auto completion = thread.wait_registration.completion();
+    if (wait.pid != process.pid() || wait.tid != thread.tid || thread.wait_registration.active() ||
+        thread.wait_registration.ticket() != wait.ticket ||
+        (completion != sched::WaitCompletion::ready && completion != sched::WaitCompletion::timeout))
+    {
+        cancel_poll(kernel, object);
+        return std::nullopt;
+    }
+    auto &space = process.resources().native_space;
+    const auto now = arch::monotonic_nanoseconds();
+    if (!now)
+    {
+        cancel_poll(kernel, object);
+        return error(now.status());
+    }
+    auto ready = poll_ready(kernel, wait);
+    const bool expired = wait.timeout.armed() && now.value() >= wait.timeout.deadline();
+    if (ready && ready.value() == 0 && !expired)
+    {
+        auto armed = arm_poll(kernel, thread, object, wait, true);
+        if (armed && !armed.value())
+        {
+            complete = false;
+            return 0;
+        }
+        if (!armed)
+        {
+            const auto result = error(armed.status());
+            cancel_poll(kernel, object, "error", result);
+            return result;
+        }
+        ready = armed.value();
+    }
+    i64 result = ready ? static_cast<i64>(ready.value()) : error(ready.status());
+    if (ready && !poll_output(space, wait)) result = -14;
+    finish_poll_timeout(space, wait.timeout_output, now.value());
+    cancel_poll(kernel, object, ready && !ready.value() ? "timeout" : "ready", result);
+    return result;
+}
+// Deadline sleep (spec 4.4): a timed-out wait returns 0. Any other end of
+// the wait (a cancel) drops the deadline and dispatches the call again.
+std::optional<i64> resume_sleep(sched::ThreadControlBlock &thread)
+{
+    const bool timed_out = thread.wait_registration.completion() == sched::WaitCompletion::timeout;
+    thread.native_deadline.cancel();
+    if (!timed_out) return std::nullopt;
+    return 0;
+}
+} // namespace
+
+std::optional<i64> resume_owned_wait(Kernel &kernel, sched::ProcessControlBlock &process,
+                                     sched::ThreadControlBlock &thread, bool &complete)
+{
+    if (thread.wait_registration.active()) return std::nullopt;
+    if (const auto object = poll_object(process.pid(), thread.tid); object.pool)
+        return resume_poll(kernel, process, thread, object, complete);
+    if (thread.native_deadline.armed()) return resume_sleep(thread);
+    return std::nullopt;
+}
+
+void audit_probed_poll(Kernel &kernel, sched::ThreadRef chosen)
+{
+    auto *thread = kernel.scheduler().current_thread();
+    if (!thread || thread->tid != chosen.tid || thread->state != sched::ProcessState::blocked ||
+        thread->wait_reason != sched::ThreadWaitReason::poll || !thread->wait_registration.active())
+        return;
+    const auto object = poll_object(chosen.pid, chosen.tid);
+    if (!object.pool) return;
+    auto resolved = poll_objects.resolve(object);
+    if (!resolved || !thread->wait_registration.pending(resolved.value()->ticket)) return;
+    auto &wait = *resolved.value();
+    const auto ready = poll_ready(kernel, wait);
+    if (ready && ready.value() == 0) return;
+    smp::count_check(smp::KernelCheck::poll_audit_ready, "poll audit: readiness without a wake");
+    static_cast<void>(kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::ready, wait.ready_source));
+}
+} // namespace runtime_detail
 } // namespace ok::user::native

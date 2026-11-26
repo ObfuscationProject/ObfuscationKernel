@@ -553,6 +553,19 @@ void console_read_ready(Kernel &kernel, u64 init)
     console_done(kernel, init, c);
 }
 
+// The reader's VTIME timer as its deadline-heap key (spec 4.6); never when
+// it has none.
+u64 heap_deadline(Kernel &kernel, u64 pid, u64 tid)
+{
+    const auto *process = kernel.scheduler().find(pid);
+    return kernel.scheduler().deadline_of(process->thread_index(thread_of(kernel, pid, tid)));
+}
+// An expiry pass at `now` with nothing else of the step.
+void expire(Kernel &kernel, u64 now)
+{
+    std::array<u16, 32> due{};
+    static_cast<void>(kernel.scheduler().expire_deadlines(now, due));
+}
 // VTIME: a VMIN 0 read returns 0 when its timer runs out; below VMIN the
 // timer restarts on new input; a signal interrupts a timed wait.
 void vtime(Kernel &kernel)
@@ -566,7 +579,9 @@ void vtime(Kernel &kernel)
     auto object = native::pty_wait_object(pid, reader);
     expect(pending(kernel, pid, reader) && native::pty_wait_objects.resolve(object).value()->deadline == mock::now + 200000000ULL);
     mock::now += 199999999ULL;
-    expect(native::expire_tty_timers(kernel, mock::now) && pending(kernel, pid, reader));
+    expect(heap_deadline(kernel, pid, reader) == mock::now + 1);
+    expire(kernel, mock::now);
+    expect(pending(kernel, pid, reader) && heap_deadline(kernel, pid, reader) == mock::now + 1);
     mock::now += 1;
     resume(kernel, pid, reader);
     expect(!pending(kernel, pid, reader) && result_of(kernel, pid, reader) == 0 && !native::pty_wait_object(pid, reader).pool);
@@ -640,7 +655,7 @@ void vtime(Kernel &kernel)
     enter(kernel, pid, reader, linux_read, fds[1], read_at, 10);
     enqueue(kernel, pid, reader, 10);
     expect(native::private_terminal_signal_complete(kernel, *kernel.scheduler().find(pid), thread_of(kernel, pid, reader)));
-    expect(result_of(kernel, pid, reader) == -4 && !native::expire_tty_timers(kernel, mock::now));
+    expect(result_of(kernel, pid, reader) == -4 && heap_deadline(kernel, pid, reader) == sched::DeadlineHeap<sched::deadline_keys>::never);
     release(kernel, pid);
 }
 

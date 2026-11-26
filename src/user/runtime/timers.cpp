@@ -239,6 +239,60 @@ void service_posix(Kernel &kernel, sched::ProcessControlBlock &process, PosixTim
         break;
     }
 }
+// When the process's timers next need the service (spec 4.6 process keys):
+// the earliest armed expiry, or now (0) while one waits for its signal's
+// dequeue, an owed or parked signal, or the wall clock (TIMER_ABSTIME on
+// CLOCK_REALTIME); never once nothing is armed.
+u64 timers_next(const ProcessTimers &timers)
+{
+    constexpr u64 never = sched::DeadlineHeap<sched::deadline_keys>::never;
+    if (!timers.pid) return never;
+    if (timers.real_owed || timers.real.state() == TimerState::signalled) return 0;
+    u64 next = timers.real.state() == TimerState::armed ? timers.real.expiry() : never;
+    for (const auto &timer : timers.posix)
+    {
+        if (!timer.used) continue;
+        if (timer.owed || timer.parked || (timer.timer.state() == TimerState::signalled && !timer.stalled)) return 0;
+        if (timer.timer.state() != TimerState::armed || timer.timer.quiet()) continue;
+        if (timer.realtime) return 0;
+        if (timer.timer.expiry() < next) next = timer.timer.expiry();
+    }
+    return next;
+}
+// Publishes the entry's next service time as its process key: the entry at
+// index i is key 512 + i (an entry sits at its process's slot).
+void schedule_timers(const ProcessTimers &timers)
+{
+    if (!runtime_kernel) return;
+    const auto index = static_cast<usize>(&timers - process_timers.data());
+    runtime_kernel->scheduler().set_process_deadline(index, timers_next(timers));
+}
+void schedule_timers(sched::ProcessId pid)
+{
+    if (const auto *timers = find_timers(pid)) schedule_timers(*timers);
+}
+// One process's pass; false when the process is gone (its entry cleared).
+bool service_timers(Kernel &kernel, ProcessTimers &timers, u64 now)
+{
+    auto *process = kernel.scheduler().find(timers.pid);
+    if (!process || process->state() == sched::ProcessState::zombie ||
+        process->state() == sched::ProcessState::exited)
+    {
+        timers = {};
+        schedule_timers(timers);
+        return false;
+    }
+    service_real(kernel, *process, timers, now);
+    for (auto &timer : timers.posix)
+    {
+        if (!timer.used) continue;
+        auto base = base_now(timer, now);
+        if (!base) continue; // A realtime timer waits for the wall clock.
+        service_posix(kernel, *process, timer, base.value());
+    }
+    schedule_timers(timers);
+    return true;
+}
 i64 timer_failure(Status status)
 {
     return -static_cast<i64>(syscall::ErrnoMapper::errno_for(status));
@@ -459,6 +513,8 @@ bool private_timer_call(Kernel &kernel, sched::ProcessControlBlock &process,
             result = 0;
         }
     }
+    // Whatever the call changed, the process key follows (spec 4.6).
+    schedule_timers(process.pid());
     return true;
 }
 
@@ -467,33 +523,34 @@ bool private_timer_service(Kernel &kernel, u64 now)
     bool pending = false;
     for (auto &timers : process_timers)
     {
-        if (!timers.pid) continue;
-        auto *process = kernel.scheduler().find(timers.pid);
-        if (!process || process->state() == sched::ProcessState::zombie ||
-            process->state() == sched::ProcessState::exited)
-        {
-            timers = {};
-            continue;
-        }
-        service_real(kernel, *process, timers, now);
+        if (!timers.pid || !service_timers(kernel, timers, now)) continue;
         pending |= timers.real.state() != TimerState::disarmed || timers.real_owed;
-        for (auto &timer : timers.posix)
-        {
-            if (!timer.used) continue;
-            auto base = base_now(timer, now);
-            if (!base) continue; // A realtime timer waits for the wall clock.
-            service_posix(kernel, *process, timer, base.value());
-            pending |= timer.timer.state() != TimerState::disarmed || timer.owed;
-        }
+        for (const auto &timer : timers.posix)
+            if (timer.used) pending |= timer.timer.state() != TimerState::disarmed || timer.owed;
         if (!runtime_failure) return pending;
     }
     return pending;
 }
 
+void private_timer_service_due(Kernel &kernel, u64 now, std::span<const u16> slots)
+{
+    for (const auto slot : slots)
+    {
+        if (slot >= process_timers.size()) continue;
+        auto &timers = process_timers[slot];
+        if (!timers.pid) continue;
+        static_cast<void>(service_timers(kernel, timers, now));
+        if (!runtime_failure) return;
+    }
+}
+
 void private_timer_exec(sched::ProcessId pid)
 {
     if (auto *timers = find_timers(pid))
+    {
         for (auto &timer : timers->posix) timer = {};
+        schedule_timers(*timers);
+    }
 }
 
 // sigaction made `signal` ignored and is about to discard its pending records.
@@ -526,6 +583,7 @@ void private_timer_discard(Kernel &kernel, sched::ProcessId pid, u32 signal)
         else if (timer.timer.state() == TimerState::signalled && record_queued(kernel, pid, timer))
             timer.parked = true;
     }
+    schedule_timers(*timers);
 }
 
 // Like a queued record flushed by the opposite CONT/stop: an interval timer
@@ -533,8 +591,11 @@ void private_timer_discard(Kernel &kernel, sched::ProcessId pid, u32 signal)
 void private_timer_discard_owed(sched::ProcessId pid, u32 signal)
 {
     if (auto *timers = find_timers(pid))
+    {
         for (auto &timer : timers->posix)
             if (timer.used && timer.owed && timer.signal == signal) timer.owed = timer.replay = false;
+        schedule_timers(*timers);
+    }
 }
 
 // A SIGEV_THREAD_ID target is exiting and its queue can still be read: a record
@@ -557,11 +618,16 @@ void private_timer_thread_exit(sched::ProcessId pid, sched::ThreadId tid, const 
             ++timer_counters.dequeued;
         }
     }
+    schedule_timers(*timers);
 }
 
 void private_timer_retire(sched::ProcessId pid)
 {
-    if (auto *timers = find_timers(pid)) *timers = {};
+    if (auto *timers = find_timers(pid))
+    {
+        *timers = {};
+        schedule_timers(*timers);
+    }
 }
 
 PrivateTimerCounters private_timer_counters()

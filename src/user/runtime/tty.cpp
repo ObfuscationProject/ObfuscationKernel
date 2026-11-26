@@ -1,6 +1,6 @@
 // Terminals in the runtime: console ingress with echo, console output through
-// OPOST, prepared console reads (a Linux one binds its wait for signals), PTY
-// VTIME expiry, terminal ioctls for the native personality, the job-control
+// OPOST, prepared console reads (a Linux one binds its wait for signals),
+// terminal ioctls for the native personality, the job-control
 // gate of every terminal call (SIGTTIN, SIGTTOU, TOSTOP; docs/modules/tty.md
 // section 9.6), and the signal outboxes of the console and every PTY slave.
 // The scheduler owns the terminal objects; this unit moves their bytes to the
@@ -344,24 +344,6 @@ i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched:
         return error(status);
     }
     return static_cast<i64>(plan.value().copy);
-}
-
-bool expire_tty_timers(Kernel &kernel, u64 now)
-{
-    bool pending = false;
-    for (const auto &entry : pty_waits)
-    {
-        if (!entry.pid) continue;
-        auto resolved = pty_wait_objects.resolve(entry.object);
-        if (!resolved) { runtime_failure = resolved.status(); continue; }
-        const auto &wait = *resolved.value();
-        const auto *thread = kernel.scheduler().find_thread(wait.pid, wait.tid);
-        if (!wait.deadline || !thread || !thread->wait_registration.pending(wait.ticket)) continue;
-        if (now < wait.deadline) { pending = true; continue; }
-        // The read retries with the timer expired (resume_pty_io).
-        static_cast<void>(kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::timeout));
-    }
-    return pending;
 }
 
 i64 tty_terminal_control(Kernel &kernel, sched::ProcessControlBlock &process, const std::array<uptr, 6> &a,

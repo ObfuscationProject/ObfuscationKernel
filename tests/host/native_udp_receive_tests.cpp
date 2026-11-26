@@ -320,10 +320,15 @@ void icmp_refusal_wakes_receiver(Kernel &kernel)
     expect(call(OK_SYS_RECVFROM, {static_cast<uptr>(g.fd), output, 8, 0, 0, 0}) == 3);
     retire(kernel, g);
 }
-// A blocking poll over UDP sockets sleeps on their wait queues: an idle pass
-// does not evaluate it, and a datagram signals the queue so the next pass
-// completes it. Asking for POLLOUT keeps the rescan, since writability
-// follows transmit credit, which signals no queue.
+// A blocking poll over UDP sockets sleeps on its socket's wait channel
+// (spec 4.3): an idle pass does not complete it, and a datagram wakes the
+// channel so the next pass completes it. Asking for POLLOUT watches the same
+// channel, which the executor's readiness moves (transmit credit) also wake.
+usize udp_poll_links(Kernel &kernel, u32 endpoint)
+{
+    return kernel.scheduler().wait_channels().linked(static_cast<u8>(sched::ThreadWaitReason::udp_receive),
+                                                     native::udp_poll_channel(endpoint));
+}
 native::PollWait *poll_wait(sched::ProcessId pid)
 {
     for (const auto &entry : native::poll_waits)
@@ -350,21 +355,23 @@ void poll_sleeps_on_socket_queue(Kernel &kernel)
         return poll_wait(g.pid);
     };
     auto *wait = arm_poll(OK_POLLIN);
-    expect(wait && wait->socket_only && !wait->dirty);
+    expect(wait && udp_poll_links(kernel, g.endpoint) == 1);
     for (usize pass = 0; pass < 3; ++pass)
     {
-        expect(native::step(kernel)); expect(caller.syscall_pending && poll_wait(g.pid) == wait);
-        expect(wait->socket_only && !wait->dirty);
+        // An idle pass: nothing is due, so the step may report idle.
+        static_cast<void>(native::step(kernel)); expect(caller.syscall_pending && poll_wait(g.pid) == wait);
+        expect(udp_poll_links(kernel, g.endpoint) == 1);
     }
     packet(kernel, g.port, payload);
     expect(native::step(kernel));
     expect(!caller.syscall_pending && result(kernel, g) == 1 && !poll_wait(g.pid));
+    expect(udp_poll_links(kernel, g.endpoint) == 0);
     ok_pollfd entry{}; std::memcpy(&entry, mock::memory.data() + 896, sizeof(entry));
     expect(entry.revents == OK_POLLIN);
     CHECK(kernel.native_udp().consume(g.endpoint));
     wait = arm_poll(OK_POLLIN | OK_POLLOUT);
-    expect(wait && !wait->socket_only);
-    expect(native::step(kernel)); expect(caller.syscall_pending);
+    expect(wait && udp_poll_links(kernel, g.endpoint) == 1);
+    static_cast<void>(native::step(kernel)); expect(caller.syscall_pending);
     packet(kernel, g.port, payload);
     expect(native::step(kernel));
     expect(!caller.syscall_pending && result(kernel, g) == 1);

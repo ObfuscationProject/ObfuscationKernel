@@ -1088,6 +1088,7 @@ void probe_interrupted_waits([[maybe_unused]] Kernel &kernel, [[maybe_unused]] u
 }
 // CPU 0 audits the queue state every 256th step pass (spec 4.10).
 constinit u32 audit_countdown{};
+constinit u32 poll_audit_countdown{};
 #endif
 } // namespace
 // The last step found nothing, and nothing was queued here since: CPU 0's
@@ -1155,14 +1156,20 @@ bool step(Kernel &kernel)
     prune_pipe_writes(kernel);
     prune_pty_waits(kernel);
     prune_child_waits(kernel);
+    prune_poll_waits(kernel);
     if (!runtime_failure) { started = false; return false; }
     bool waiting_deadline = expire_futex(kernel, now.value());
 #ifdef OK_PRIVATE_POLL_MASK
     waiting_deadline |= private_signal_wait_pending(kernel);
 #endif
+    // Due deadlines (spec 4.6): thread keys time out, retry or probe their
+    // wait here; due process keys run their timers below. Poll timeouts,
+    // sleeps and PTY VTIME timers are thread keys, so no step scans them.
+    std::array<u16, 32> due_timers{};
+    const usize due_timer_count = kernel.scheduler().expire_deadlines(now.value(), due_timers);
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
     // Expired timers queue their signals before interruptible waits are chosen.
-    waiting_deadline |= private_timer_service(kernel, now.value());
+    private_timer_service_due(kernel, now.value(), {due_timers.data(), due_timer_count});
     // Terminal signals queued by scheduler paths, then kernel signals owed to
     // waits that could not take them, retry here.
     tty_drain_outbox(kernel);
@@ -1171,90 +1178,10 @@ bool step(Kernel &kernel)
     // process is entered (Linux complete_signal kills every thread at once).
     private_process_signal_fatal(kernel);
     if (!runtime_failure) { started = false; return false; }
+#else
+    static_cast<void>(due_timer_count);
 #endif
-    for (const auto &entry : poll_waits)
-    {
-        if (entry.pid == 0)
-            continue;
-        const auto object = entry.object;
-        auto resolved = poll_objects.resolve(object);
-        if (!resolved)
-        {
-            runtime_failure = resolved.status();
-            started = false;
-            return false;
-        }
-        auto &wait = *resolved.value();
-        auto *candidate = kernel.scheduler().find(wait.pid);
-        auto *owner = kernel.scheduler().find_thread(wait.pid, wait.tid);
-        if (candidate == nullptr || owner == nullptr || !owner->native_active ||
-            !owner->wait_registration.pending(wait.ticket) ||
-            owner->wait_reason != sched::ThreadWaitReason::poll ||
-            candidate->state() == sched::ProcessState::zombie || candidate->state() == sched::ProcessState::exited)
-        {
-            cancel_poll(kernel, object);
-            continue;
-        }
-        // Socket-only polls wait for a queue signal or their timeout.
-        if (wait.socket_only && !wait.dirty && !(wait.timeout.armed() && now.value() >= wait.timeout.deadline()))
-        {
-            waiting_deadline = true;
-            continue;
-        }
-        wait.dirty = false;
-        auto ready = poll_ready(kernel, wait);
-        const bool expired = wait.timeout.complete(now.value(), wait.timeout.generation());
-        if (!ready || ready.value() != 0 || expired)
-        {
-            const auto cause = ready && ready.value() == 0 && expired
-                ? sched::WaitCompletion::timeout : sched::WaitCompletion::ready;
-            if (!kernel.scheduler().complete_wait(wait.ticket, cause, wait.ready_source))
-            {
-                cancel_poll(kernel, object);
-                continue;
-            }
-            i64 result = ready ? static_cast<i64>(ready.value()) : error(ready.status());
-            if (ready && !poll_output(candidate->resources().native_space, wait))
-                result = -14;
-            finish_poll_timeout(candidate->resources().native_space, wait.timeout_output, now.value());
-            auto &thread = *owner;
-            thread.syscall_pending = false;
-            if (auto status = set_result(*candidate, thread.native_frame, result); !status.ok())
-            {
-                runtime_failure = status;
-                finish(kernel, candidate->pid(), 127);
-                continue;
-            }
-            cancel_poll(kernel, object, cause == sched::WaitCompletion::timeout ? "timeout" : "ready", result);
-        }
-        else
-        {
-            waiting_deadline = true;
-            // A queue drops a waiter it signalled; keep watching.
-            if (wait.socket_only) wait.socket_only = watch_poll_sockets(kernel, wait);
-        }
-    }
-    for (auto &candidate : kernel.scheduler().processes())
-        for (auto &thread : candidate.thread_records())
-            if (thread.native_active && thread.native_deadline.armed())
-            {
-                if (thread.wait_reason == sched::ThreadWaitReason::deadline &&
-                    thread.native_deadline.complete(now.value(), thread.wait_key) &&
-                    kernel.scheduler().complete_wait(thread.wait_registration.ticket(), sched::WaitCompletion::timeout))
-                {
-                    thread.syscall_pending = false;
-                    if (auto status = set_result(candidate, thread.native_frame, 0); !status.ok())
-                    {
-                        runtime_failure = status;
-                        finish(kernel, candidate.pid(), 127);
-                        continue;
-                    }
-                }
-                else
-                    waiting_deadline = true;
-            }
-    // PTY reads whose VTIME timer ran out retry with the timer expired.
-    waiting_deadline |= expire_tty_timers(kernel, now.value());
+    waiting_deadline |= kernel.scheduler().earliest_deadline() != sched::DeadlineHeap<sched::deadline_keys>::never;
     if (!runtime_failure) { started = false; return false; }
 #ifdef OK_PRIVATE_POLL_MASK
     // A stop never interrupts a wait; settle the ones only parked threads can take.
@@ -1362,6 +1289,7 @@ bool step(Kernel &kernel)
         return settled == InterruptedWait::stay ? runtime_failure.ok() : false;
     if (!kernel.scheduler().mark_on_cpu(chosen.pid, chosen.tid, cpu))
         return false;
+    kernel.scheduler().settle_wait_links(cpu);
 #else
     // The queue path (spec 4.2) on every profile: threads are queued by the
     // transitions that make them runnable, and each CPU takes the next one
@@ -1373,6 +1301,13 @@ bool step(Kernel &kernel)
         audit_countdown = 0;
         smp::detail::owner_add(smp::evidence_cpus[0].audit_passes);
         static_cast<void>(kernel.scheduler().audit_queues());
+        // Every 4th audit probes the parked polls (spec 4.10): a ready one
+        // that no wake completed is a missing wake site (poll_audit_ready).
+        if (++poll_audit_countdown == 4)
+        {
+            poll_audit_countdown = 0;
+            static_cast<void>(kernel.scheduler().probe_poll_waiters());
+        }
     }
     if (!runtime_failure || !started) { started = false; return false; }
     auto picked = kernel.scheduler().pick(cpu);
@@ -1398,6 +1333,10 @@ bool step(Kernel &kernel)
         static_cast<void>(kernel.posix().activate(0));
         return settled == InterruptedWait::stay ? runtime_failure.ok() : false;
     }
+    // A poll the audit probed: readiness no wake reported completes it here.
+    if (picked->probed) audit_probed_poll(kernel, chosen);
+    // Owner unlink (spec 4.3): what a finished wait left on its channels goes.
+    kernel.scheduler().settle_wait_links(cpu);
     // A probed thread runs only once its resume completed the wait.
     if (!kernel.scheduler().resume_current(cpu))
     {
@@ -1416,6 +1355,31 @@ bool step(Kernel &kernel)
     bool linux_udp_delay_slot = false;
     // A syscall trapped by this step's entry, not a continuation resumed.
     bool trapped_this_step = false;
+    // A completed poll or sleep produces its own result on its owner's CPU
+    // (spec 4.4) before anything decodes its frame; a result lets the thread
+    // enter user mode in this same step, a re-armed poll parks it again.
+    bool owned_settled = false;
+    if (running->native_active)
+    {
+        bool owned_complete = true;
+        if (const auto owned = resume_owned_wait(kernel, *process, *running, owned_complete))
+        {
+            owned_settled = true;
+            if (owned_complete)
+            {
+                running->syscall_pending = false;
+                running->console_wait_epoch = 0;
+                if (auto status = set_result(*process, running->native_frame, *owned); !status.ok())
+                {
+                    runtime_failure = status;
+                    finish(kernel, chosen.pid, 127);
+                    static_cast<void>(kernel.posix().activate(0));
+                    started = false;
+                    return false;
+                }
+            }
+        }
+    }
     if (!running->syscall_pending)
     {
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
@@ -1608,7 +1572,7 @@ bool step(Kernel &kernel)
                 sectioned = true;
             }
         }
-    if (!sectioned && running->native_active && running->syscall_pending)
+    if (!sectioned && !owned_settled && running->native_active && running->syscall_pending)
     {
         // The choke point: every other syscall of this process waits for
         // its sections and commits their results first.

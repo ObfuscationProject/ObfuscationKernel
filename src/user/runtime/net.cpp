@@ -26,12 +26,6 @@ sched::WaitQueue<udp_queue_capacity> &udp_receive_queue(u32 endpoint)
     return udp_receive_queues[index && index <= udp_receive_queues.size() ? index - 1 : 0];
 }
 } // namespace
-bool watch_udp_socket(sched::ThreadControlBlock &thread, u32 endpoint)
-{
-    if (!thread.wait_registration.active()) return false;
-    const auto status = udp_receive_queue(endpoint).enlist(thread.wait_registration);
-    return status || status.code() == StatusCode::already_exists;
-}
 namespace
 {
 void enlist_udp_receive(Kernel &kernel, sched::ProcessId pid, sched::ThreadId tid, u32 endpoint)
@@ -973,12 +967,24 @@ Status notify_udp_receives(Kernel &kernel)
             const auto *thread = kernel.scheduler().find_thread(wait.pid, wait.tid);
             return !thread || !thread->wait_registration.pending(ticket);
         }
-        // Not a receive wait: a poll or select watching this socket.
-        mark_poll_dirty(ticket);
+        // Not a receive wait (none other enlists here): drop it.
         return true;
     };
-    kernel.native_udp().take_changed([&](u32 handle) { if (!all) udp_receive_queue(handle).notify(evaluate); });
-    if (all) for (auto &queue : udp_receive_queues) queue.notify(evaluate);
+    // The UDP wake sites of poll (spec 4.3): each socket whose readiness
+    // moved wakes its poll channel; a move of the executor's readiness
+    // (transmit credit, link failure) wakes every socket's.
+    auto &scheduler = kernel.scheduler();
+    const auto source = interrupt::event_wake_source(interrupt::EventSource::network);
+    kernel.native_udp().take_changed([&](u32 handle) {
+        if (!all) udp_receive_queue(handle).notify(evaluate);
+        scheduler.wake_waiters(sched::ThreadWaitReason::udp_receive, udp_poll_channel(handle), source);
+    });
+    if (all)
+    {
+        for (auto &queue : udp_receive_queues) queue.notify(evaluate);
+        for (u32 slot = 1; slot <= udp_receive_queues.size(); ++slot)
+            scheduler.wake_waiters(sched::ThreadWaitReason::udp_receive, udp_poll_channel(slot), source);
+    }
     if (udp_receive_rescan)
     {
         bool waiting = false;

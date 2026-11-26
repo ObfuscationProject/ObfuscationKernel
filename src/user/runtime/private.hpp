@@ -483,9 +483,6 @@ struct PollWait
     std::array<u32, 3> ready_sets{};
     // Set by poll_ready(): the device source of a ready console or socket.
     sched::WakeSource ready_source{sched::WakeSource::thread};
-    // Every descriptor is a socket whose wait queue holds this wait: it is
-    // evaluated only after a queue signalled (dirty) or its timeout.
-    bool socket_only{}, dirty{};
 };
 using PollObjectsLayout = memory::ObjectPool<PollWait, NativePagePool, 1>;
 constexpr usize poll_object_pages = (sched::max_processes + PollObjectsLayout::slots_per_page - 1) /
@@ -682,6 +679,7 @@ u64 poll_syscall_number(const hw::UserFrame &frame, bool select_sets);
 void cancel_poll(Kernel &kernel, memory::ObjectHandle object, std::string_view reason = "cancelled", i64 result = -4);
 
 void cancel_poll(Kernel &kernel, sched::ProcessId pid);
+void prune_poll_waits(Kernel &kernel);
 
 Result<usize> poll_ready(Kernel &kernel, PollWait &wait);
 
@@ -767,9 +765,6 @@ memory::ObjectHandle pty_wait_object(sched::ProcessId pid, sched::ThreadId tid);
 void cancel_pty_waits(Kernel &kernel, sched::ProcessId pid, sched::ThreadId tid = 0);
 // Retires one PTY wait object (the signal family's interruption).
 void cancel_pty_wait(Kernel &kernel, memory::ObjectHandle object, std::string_view outcome = "cancelled", i64 result = -125);
-// Completes PTY reads whose VTIME timer ran out (they retry with the timer
-// expired); true while a timer still runs.
-bool expire_tty_timers(Kernel &kernel, u64 now);
 void prune_pty_waits(Kernel &kernel);
 i64 resume_pty_io(Kernel &kernel, sched::ProcessControlBlock &process,
                   memory::ObjectHandle object, bool &complete);
@@ -840,11 +835,17 @@ UdpWaitCounters udp_wait_statistics();
 // The kernel's TCP wait counters, bound when the runtime starts.
 extern const net::TcpWaitStats *tcp_wait_stats;
 void report_network_waits();
-// Enlists a thread's armed registration in a UDP socket's wait queue.
-bool watch_udp_socket(sched::ThreadControlBlock &thread, u32 endpoint);
-// Marks the poll wait holding `ticket` for evaluation (a socket queue signalled it).
-void mark_poll_dirty(sched::WaitTicket ticket);
-bool watch_poll_sockets(Kernel &kernel, PollWait &wait);
+// A UDP socket's poll channel (udp_receive, its slot): the receive-change
+// pass wakes it for each socket whose readiness moved, and every socket when
+// the executor's did (transmit credit, link failure).
+[[nodiscard]] constexpr u64 udp_poll_channel(u32 endpoint) { return endpoint & 0xffu; }
+// The owned result of a thread's completed poll or sleep, settled at its
+// dispatch (spec 4.4); empty when it has none and dispatch goes on.
+std::optional<i64> resume_owned_wait(Kernel &kernel, sched::ProcessControlBlock &process,
+                                     sched::ThreadControlBlock &thread, bool &complete);
+// The poll audit's probed waiter (spec 4.10): readiness no wake reported
+// completes its wait and counts poll_audit_ready.
+void audit_probed_poll(Kernel &kernel, sched::ThreadRef chosen);
 // Installs the lock-violation recorder and arms require_exclusive; once,
 // just before secondary CPUs are admitted (src/user/runtime/interrupts.cpp).
 void arm_kernel_checks();
@@ -937,7 +938,11 @@ PrivateTimerSend private_timer_signal(Kernel &kernel, sched::ProcessControlBlock
                                       sched::ThreadId tid, sched::PendingSignalInfo info, bool replay = false);
 bool private_timer_call(Kernel &kernel, sched::ProcessControlBlock &process,
                         sched::ThreadControlBlock &thread, i64 &result);
+// Every process's timers (models, and any pass that must see all of them).
 bool private_timer_service(Kernel &kernel, u64 now);
+// The timers of the process slots whose deadline key expired (spec 4.6);
+// each one's key is set to its next expiry again.
+void private_timer_service_due(Kernel &kernel, u64 now, std::span<const u16> slots);
 void private_timer_exec(sched::ProcessId pid);
 void private_timer_discard(Kernel &kernel, sched::ProcessId pid, u32 signal);
 // A CONT or stop discarded `signal`: an expiry still owed to its timer goes

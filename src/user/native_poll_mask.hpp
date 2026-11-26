@@ -49,6 +49,14 @@ public:
         r->object = object; r->ticket = ticket; r->phase = Phase::waiting;
         return true;
     }
+    // A poll that re-armed after a wake (resume_poll) keeps its mask under
+    // its new ticket.
+    void rebind(sched::ThreadControlBlock &thread, memory::ObjectHandle object, sched::WaitTicket previous,
+                sched::WaitTicket ticket)
+    {
+        auto *r = find(thread);
+        if (r && r->phase == Phase::waiting && r->object == object && r->ticket == previous) r->ticket = ticket;
+    }
     void complete(sched::ThreadControlBlock &thread, memory::ObjectHandle object,
                   sched::WaitTicket ticket, bool interrupted)
     {

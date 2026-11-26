@@ -288,6 +288,14 @@ native::PollWait *poll_wait(sched::ProcessId pid)
             if (auto resolved = native::poll_objects.resolve(entry.object)) return resolved.value();
     return nullptr;
 }
+// The poll's entries on the stream's wait channel (spec 4.3).
+usize tcp_poll_links(Kernel &kernel, Group group, i32 fd)
+{
+    const auto *slot = kernel.scheduler().find(group.pid)->fd_table().entry(fd);
+    const auto *open = slot && slot->used ? kernel.scheduler().open_description(slot->description) : nullptr;
+    const auto key = open ? kernel.native_tcp_waits().poll_channel(open->native_tcp_handle) : std::nullopt;
+    return key ? kernel.scheduler().wait_channels().linked(static_cast<u8>(sched::ThreadWaitReason::tcp_stream), *key) : 0;
+}
 void poll_until_data(Kernel &kernel, Group group, i32 fd, Peer &peer, std::span<const std::byte> data)
 {
     auto *caller = kernel.scheduler().find_thread(group.pid, group.pid); CHECK(caller);
@@ -302,10 +310,11 @@ void poll_until_data(Kernel &kernel, Group group, i32 fd, Peer &peer, std::span<
     expect(native::step(kernel));
     expect(caller->syscall_pending);
     mock::entry_trap = {hw::TrapKind::timer};
-    auto *wait = poll_wait(group.pid); expect(wait && wait->socket_only && !wait->dirty);
+    auto *wait = poll_wait(group.pid); expect(wait && tcp_poll_links(kernel, group, fd) == 1);
     for (usize pass = 0; pass < 3; ++pass)
     {
-        expect(native::step(kernel)); expect(caller->syscall_pending && wait->socket_only && !wait->dirty);
+        // An idle pass: nothing is due, so the step may report idle.
+        static_cast<void>(native::step(kernel)); expect(caller->syscall_pending && tcp_poll_links(kernel, group, fd) == 1);
     }
     CHECK(peer.write(data)); extension.send_peer(peer); CHECK(kernel.poll_network()); extension.receive_peer(peer);
     expect(native::step(kernel));

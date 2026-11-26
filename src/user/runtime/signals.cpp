@@ -1746,6 +1746,14 @@ PrivateSignalWaitSelection private_signal_wait_select(Kernel &kernel, const sche
     }
     return {};
 }
+// A timed signal wait's timeout is a deadline-heap key that probes it (spec
+// 4.3 A5): the owner's probed dispatch finds the timeout and completes it.
+void private_signal_wait_deadline(Kernel &kernel, const PrivateSignalWaitState::Record &record)
+{
+    if (record.timeout.armed())
+        static_cast<void>(kernel.scheduler().arm_wait_deadline(record.ticket, record.timeout.deadline(),
+                                                               sched::DeadlineAction::probe));
+}
 } // namespace
 bool private_signal_wait_ready(Kernel &kernel, const sched::ProcessControlBlock &process,
                                 const sched::ThreadControlBlock &thread, u64 now)
@@ -1795,6 +1803,7 @@ bool private_signal_wait_complete(Kernel &kernel, sched::ProcessControlBlock &pr
         if (!ticket)
         { runtime_failure = ticket.status(); started = false; return false; }
         const auto old = r.ticket; r.ticket = ticket.value();
+        private_signal_wait_deadline(kernel, r);
         private_signal_wait_trace_rearm(r, old, thread, "ready");
         return false; // The logical wait still blocks; never enter user mode.
     }
@@ -1899,6 +1908,7 @@ bool private_signal_wait_call(Kernel &kernel, sched::ProcessControlBlock &proces
     }
     complete = false; result = 0;
     const auto &record = *signal_waits.find(thread);
+    private_signal_wait_deadline(kernel, record);
     if constexpr (native_signal_diagnostics)
     {
         emit("OK_NATIVE_SIGNAL_WAIT_ARM"); private_signal_wait_identity(record);

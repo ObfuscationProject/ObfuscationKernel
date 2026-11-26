@@ -340,8 +340,8 @@ void readiness_handoff(Kernel &kernel, Pid login, Pid peer)
         CHECK(waiter->wait_registration.pending(ticket) && native::poll_objects.resolve(object));
         CHECK(native::poll_objects.accounting().live_objects == live_objects + 1);
         CHECK(scheduler.open_description(description)->references == references + 1);
-        // Direct admission above models the saved syscall; completion itself is
-        // performed by the actual runtime scan, followed by one synthetic timer.
+        // Direct admission above models the saved syscall; the result is
+        // produced by the owner's runtime step, followed by one synthetic timer.
         const auto original_frame = waiter->native_frame;
         waiter->native_frame = hw::initial_frame(hw::user_begin + 1024, hw::user_begin + 4096);
         waiter->native_frame.registers[0] = 99;
@@ -353,8 +353,11 @@ void readiness_handoff(Kernel &kernel, Pid login, Pid peer)
         CHECK(waiter->wait_registration.pending(ticket) && mock::outputs == outputs);
         const char nonce = select ? 'S' : 'P';
         native::input(nonce);
-        CHECK(waiter->state == sched::ProcessState::blocked && waiter->syscall_pending);
-        CHECK(waiter->wait_registration.pending(ticket) && mock::outputs == outputs);
+        // The console wake completes the poll through its channel entry (spec
+        // 4.3); the owner's step produces the result (spec 4.4).
+        CHECK(waiter->state == sched::ProcessState::runnable && waiter->syscall_pending);
+        CHECK(!waiter->wait_registration.pending(ticket) && mock::outputs == outputs);
+        CHECK(waiter->wait_registration.completion() == sched::WaitCompletion::ready);
         struct ActiveThread { Pid pid{}; sched::ThreadId tid{}; bool active{}; };
         std::array<ActiveThread, sched::max_processes * sched::max_threads_per_process> saved{};
         usize saved_count{};
