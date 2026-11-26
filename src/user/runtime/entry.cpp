@@ -1558,6 +1558,7 @@ bool step(Kernel &kernel)
         // pending, a fault is taken again) and put_prev takes it off the CPU.
         if (trap && smp::bkl_thread_frozen(chosen.pid))
         {
+            smp::detail::owner_add(smp::evidence_cpus[cpu].frozen_skips);
             if (trap.value().kind == hw::TrapKind::syscall) running->syscall_pending = true;
             else if (trap.value().kind == hw::TrapKind::timer) ++running->cpu_time_ticks;
             static_cast<void>(kernel.posix().activate(0));

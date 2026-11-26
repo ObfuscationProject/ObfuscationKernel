@@ -43,6 +43,8 @@ template <QuiesceHost Host> void wait_group_quiesced(SchedulerState &scheduler, 
 {
     if (scheduler.group_quiesced(pid, claimer)) return;
     static_cast<void>(smp::check_class_wait("quiesce_group under a spin lock"));
+    if (const auto self = smp::current_cpu(); self < smp::max_cpus)
+        smp::detail::owner_add(smp::evidence_cpus[self].group_waits);
     const bool held = host.kernel_lock_held();
     if (held) host.release_kernel_lock();
     {

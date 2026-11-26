@@ -329,6 +329,8 @@ bool deliver_pending_exit(Kernel &kernel, sched::ProcessId pid)
         state->deferred_fatal = 0;
     }
 #endif
+    if (const auto cpu = smp::current_cpu(); cpu < smp::max_cpus)
+        smp::detail::owner_add(smp::evidence_cpus[cpu].exit_deliveries);
     finish(kernel, pid, request->code, request->signal);
     return true;
 }
