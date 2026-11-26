@@ -472,7 +472,7 @@ i64 dispatch(Kernel &kernel, sched::ProcessId pid, hw::Syscall call, bool &compl
         return 0;
     }
     if (number == N::fork)
-        return fork_process(kernel, pid, process, calling_tid);
+        return fork_process(kernel, pid, process, calling_tid, complete);
     if (number == N::execve)
         return exec_image(kernel, pid, process, calling_tid, space, a, complete);
     if (number == N::wait4)
@@ -990,6 +990,9 @@ Status start(Kernel &kernel, fs::BootArchive archive)
     emit("OK_NATIVE scope=hardware init=loaded\n");
     arm_kernel_checks();
     start_sections();
+    // Every kernel lock acquisition made for a thread asks whether a group
+    // transition froze its group (spec 4.8).
+    smp::bkl_frozen_check = group_frozen;
     secondary_admission.store(true, std::memory_order_release);
     return Status::success();
 }
@@ -1053,11 +1056,14 @@ InterruptedWait resume_interrupted_wait([[maybe_unused]] Kernel &kernel, [[maybe
     return InterruptedWait::proceed;
 }
 #if !defined(OK_LEGACY_SELECT)
-// Until signal generation sets probes itself (spec 4.7), each step marks the
-// parked threads whose wait a pending signal would interrupt and queues them;
-// pick admits them blocked and resume_interrupted_wait settles the wait.
-void probe_interrupted_waits([[maybe_unused]] Kernel &kernel, [[maybe_unused]] u64 now)
+// Signal generation probes the waits a pending signal may interrupt (spec
+// 4.7), and each owner checks again when it parks. The audit (spec 4.10)
+// looks for a parked, unprobed thread whose wait a pending signal would
+// interrupt: a missed probe, repaired (probed and queued) and counted in
+// audit_repairs. Returns the repairs.
+usize audit_signal_probes([[maybe_unused]] Kernel &kernel, [[maybe_unused]] u64 now)
 {
+    usize repairs = 0;
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
     for (auto &candidate : kernel.scheduler().processes())
     {
@@ -1081,15 +1087,41 @@ void probe_interrupted_waits([[maybe_unused]] Kernel &kernel, [[maybe_unused]] u
                                 private_poll_signal_ready(kernel, candidate, thread) ||
                                 private_child_signal_ready(kernel, candidate, thread) ||
                                 private_terminal_signal_ready(kernel, candidate, thread);
-            if (interruptible) static_cast<void>(kernel.scheduler().probe_parked(candidate, thread));
+            if (interruptible && kernel.scheduler().probe_parked(candidate, thread))
+            {
+                smp::count_check(smp::KernelCheck::audit_repairs, "audit: interrupted wait without a probe");
+                ++repairs;
+            }
         }
     }
 #endif
+    return repairs;
 }
 // CPU 0 audits the queue state every 256th step pass (spec 4.10).
 constinit u32 audit_countdown{};
 constinit u32 poll_audit_countdown{};
 #endif
+// The owner check at park (spec 4.7): a thread that leaves its CPU blocked
+// records whether a signal can interrupt its wait (its interruptible class,
+// read from its own wait objects while it still owns them), and is probed
+// when a pending signal already interrupts it; put_prev then queues it.
+void settle_park([[maybe_unused]] Kernel &kernel, [[maybe_unused]] smp::CpuId cpu)
+{
+#if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
+    const auto &slot = kernel.scheduler().cpu_slot(cpu);
+    if (!slot.occupied() || !slot.process || !slot.thread) return;
+    auto &process = *slot.process;
+    auto &thread = *slot.thread;
+    if (!thread.native_active || thread.state != sched::ProcessState::blocked || !thread.wait_registration.active())
+        return;
+    const bool interruptible = private_signal_admit_blocked(kernel, process, thread);
+    u32 signal{};
+    sched::SignalAction action{};
+    const bool pending = interruptible && private_signal_interrupting(kernel, process, thread, signal, action);
+    kernel.scheduler().settle_park(cpu, interruptible ? sched::WaitClass::interruptible : sched::WaitClass::none,
+                                   pending);
+#endif
+}
 } // namespace
 // The last step found nothing, and nothing was queued here since: CPU 0's
 // loop may complete waits between its step and its idle wait.
@@ -1123,10 +1155,6 @@ bool step(Kernel &kernel)
         return false;
     // CPU 0 reports threads whose affinity broke since its last step.
     report_affinity_broken(kernel);
-#ifdef OK_PRIVATE_POLL_MASK
-    private_process_signal_fatal(kernel);
-    if (!runtime_failure) { started = false; return false; }
-#endif
 #if defined(OK_ENABLE_TEST_POINTS) && defined(OK_PRIVATE_FUTEX_PEER_FIXTURE)
     if (auto status = checkpoint_peer_fixture(kernel); !status)
     { fail_runtime(status); return false; }
@@ -1174,9 +1202,8 @@ bool step(Kernel &kernel)
     // waits that could not take them, retry here.
     tty_drain_outbox(kernel);
     private_jobctl_service(kernel);
-    // A fatal decision either service made applies before any thread of that
-    // process is entered (Linux complete_signal kills every thread at once).
-    private_process_signal_fatal(kernel);
+    // A fatal decision either service made set a pending exit (spec 4.8):
+    // the group's next picked thread applies it before anything else.
     if (!runtime_failure) { started = false; return false; }
 #else
     static_cast<void>(due_timer_count);
@@ -1289,18 +1316,23 @@ bool step(Kernel &kernel)
         return settled == InterruptedWait::stay ? runtime_failure.ok() : false;
     if (!kernel.scheduler().mark_on_cpu(chosen.pid, chosen.tid, cpu))
         return false;
+    if (deliver_pending_exit(kernel, chosen.pid))
+    {
+        static_cast<void>(kernel.posix().activate(0));
+        return runtime_failure.ok();
+    }
     kernel.scheduler().settle_wait_links(cpu);
 #else
     // The queue path (spec 4.2) on every profile: threads are queued by the
     // transitions that make them runnable, and each CPU takes the next one
     // from its own queue or steals one. UP profiles and -smp 1 use queue 0.
     const auto cpu = smp::current_cpu();
-    probe_interrupted_waits(kernel, now.value());
     if (cpu == 0 && ++audit_countdown == 256)
     {
         audit_countdown = 0;
         smp::detail::owner_add(smp::evidence_cpus[0].audit_passes);
         static_cast<void>(kernel.scheduler().audit_queues());
+        static_cast<void>(audit_signal_probes(kernel, now.value()));
         // Every 4th audit probes the parked polls (spec 4.10): a ready one
         // that no wake completed is a missing wake site (poll_audit_ready).
         if (++poll_audit_countdown == 4)
@@ -1327,6 +1359,14 @@ bool step(Kernel &kernel)
     const Candidate chosen = picked->ref;
     // Serving a thread: this kernel-lock stretch is work (overlap evidence).
     smp::bkl_mark_work();
+    // The delivery point (spec 4.8): a pending exit (a kill, a fatal
+    // decision) is applied by this thread of the group before anything
+    // resumes; its lease is inactive and it holds no lock but the kernel's.
+    if (deliver_pending_exit(kernel, chosen.pid))
+    {
+        static_cast<void>(kernel.posix().activate(0));
+        return runtime_failure.ok();
+    }
     // A probed poll (the audit's or a signal's): readiness no wake reported
     // completes it here. This comes first: a probed wait that no signal
     // interrupts stays parked in resume_interrupted_wait.
@@ -1435,13 +1475,6 @@ bool step(Kernel &kernel)
         // Before the entry: a fault on a translation changed meanwhile resumes.
         const auto translations = process->resources().mm.translation_sequence.load(std::memory_order_acquire);
         auto trap = shared_capture.enter(syscall_origins, vfs_continuations, process, running, view, kernel.scheduler());
-        // Another CPU retired this thread while it ran here; it also took over
-        // the lease, so nothing of this entry remains to complete.
-        if (!trap && trap.status().code() == StatusCode::no_process)
-        {
-            count_entry(&EntryCpu::rejections);
-            return true;
-        }
         const auto capture = trap ? trap.value().kernel_stack_pointer : 0;
         const bool captured = capture != 0 && view.contains(capture);
         const bool needs_capture = trap && (trap.value().kind == hw::TrapKind::syscall ||
@@ -1517,6 +1550,17 @@ bool step(Kernel &kernel)
             else count_entry(&EntryCpu::faults);
         }
         else count_entry(&EntryCpu::rejections);
+        // The frozen check (spec 4.8): a group transition froze this
+        // thread's group while it ran user code. It skips trap handling and
+        // dispatch; the frame keeps the trap (a trapped syscall stays
+        // pending, a fault is taken again) and put_prev takes it off the CPU.
+        if (trap && smp::bkl_thread_frozen(chosen.pid))
+        {
+            if (trap.value().kind == hw::TrapKind::syscall) running->syscall_pending = true;
+            else if (trap.value().kind == hw::TrapKind::timer) ++running->cpu_time_ticks;
+            static_cast<void>(kernel.posix().activate(0));
+            return runtime_failure.ok();
+        }
         if (!trap)
         {
             finish(kernel, chosen.pid, 127);
@@ -1762,6 +1806,7 @@ bool step(Kernel &kernel)
             }
         }
     }
+    settle_park(kernel, cpu);
     static_cast<void>(kernel.posix().activate(0));
     // The committing syscall's result is published before leaving all step locals.
     if (native_shutdown_pending()) return false;

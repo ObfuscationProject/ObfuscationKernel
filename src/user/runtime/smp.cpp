@@ -1,9 +1,11 @@
 // Several CPUs serve native threads. Each CPU's loop holds the kernel lock
-// except while it runs user code; the entry it is in then is recorded here so
-// that a CPU retiring that thread can take the entry over.
+// except while it runs user code. A group transition (exec, exit_group)
+// freezes the other threads of its process and waits, with the kernel lock
+// released, until each left its CPU through its own put_prev (spec 4.8).
 #include "private.hpp"
 #include "ok/arch/execution_spaces.hpp"
 #include "ok/interrupt/platform.hpp"
+#include "ok/sched/group_quiesce.hpp"
 #include "ok/smp/bringup.hpp"
 #include "ok/smp/kernel_section.hpp"
 
@@ -13,18 +15,38 @@ inline namespace runtime_detail
 {
 namespace
 {
-struct CpuEntry
-{
-    sched::ProcessId pid{};
-    sched::ThreadId tid{};
-    memory::KernelEntryStackHandle lease{};
-    bool revoked{};
-};
-constinit std::array<CpuEntry, smp::max_cpus> cpu_entries{};
 // A backend with fixed slot storage holds every process's space, every
 // quarantined one and an exec candidate per CPU.
 static_assert(arch::execution::fixed_space_slots ==
               sched::max_processes + std::tuple_size_v<decltype(quarantined_spaces)> + smp::max_cpus);
+
+// The runtime's side of quiesce_group: the kernel lock (released while the
+// claimer waits, taken again serving this CPU's device lines), this CPU's
+// interrupts and the monotonic clock.
+struct RuntimeQuiesceHost
+{
+    bool kernel_lock_held() const { return smp::kernel_lock.owned_by_current_cpu(); }
+    void release_kernel_lock() { smp::bkl_unlock(); }
+    void retake_kernel_lock()
+    {
+        interrupt::lock_kernel_serving_interrupts();
+        smp::bkl_mark_work();
+    }
+    void serve() { interrupt::serve_local_interrupts(); }
+    u64 now_ns() const
+    {
+        const auto now = arch::monotonic_nanoseconds();
+        return now ? now.value() : 0;
+    }
+};
+static_assert(sched::QuiesceHost<RuntimeQuiesceHost>);
+
+void kick(u32 cpus)
+{
+    const auto self = smp::current_cpu();
+    for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
+        if (cpu != self && (cpus & (1u << cpu)) != 0) smp::send_ipi(cpu, smp::ipi_kick);
+}
 } // namespace
 
 // Set once the runtime serves threads; secondary CPUs only then contend for
@@ -53,96 +75,80 @@ bool any_step_active()
 }
 
 Result<hw::Trap> enter_unlocked(hw::AddressSpace &space, hw::UserFrame &frame, const hw::KernelEntryStackView &view,
-                                memory::KernelEntryStackHandle lease, u64 pid, u64 tid)
+                                memory::KernelEntryStackHandle, u64, u64)
 {
-    auto &entry = cpu_entries[smp::current_cpu()];
-    entry = {pid, tid, lease, false};
     smp::begin_user(space.root);
     smp::bkl_unlock();
     auto trap = hw::enter_owned(space, frame, view);
     smp::end_user();
-    // The holder may wait for a device line routed to this CPU.
+    // The holder may wait for a device line routed to this CPU. A group
+    // transition of this thread's process may hold its group frozen: the
+    // step asks after its capture (smp::bkl_thread_frozen).
     interrupt::lock_kernel_serving_interrupts();
     // This stretch serves the trap.
     smp::bkl_mark_work();
-    const bool revoked = entry.revoked;
-    entry = {};
-    if (revoked) return Status::no_process("another CPU retired this thread during its user entry");
     return trap;
 }
 
-Status prepare_eviction(sched::ProcessId pid, uptr root, std::span<const sched::ThreadControlBlock> threads,
-                        EvictionPlan &plan)
+bool group_frozen(u64 pid) noexcept
 {
-    plan = {pid, root, 0};
-    const auto self = smp::current_cpu();
-    for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
-    {
-        const auto &entry = cpu_entries[cpu];
-        if (cpu == self || entry.revoked || entry.pid != pid) continue;
-        const sched::ThreadControlBlock *thread{};
-        for (const auto &member : threads)
-            if (member.owner == pid && member.tid == entry.tid) thread = &member;
-        if (!thread) continue;
-        // The pool has this lease active on that CPU, so deactivating it
-        // cannot be refused.
-        if (auto status = entry_stacks.validate_active(entry.lease, {entry.pid, entry.tid}, cpu); !status)
-            return status;
-        plan.cpus |= u32{1} << cpu;
-    }
-    return {};
+    return runtime_kernel != nullptr && runtime_kernel->scheduler().frozen(pid);
 }
 
-Status validate_evicted_leases(std::span<const sched::ThreadControlBlock> threads, const EvictionPlan &plan)
+sched::QuiesceResult quiesce_group(Kernel &kernel, sched::ProcessId pid, sched::ThreadId claimer,
+                                   sched::GroupTransition kind, sched::ExitRequest request)
 {
-    for (const auto &thread : threads)
+    RuntimeQuiesceHost host;
+    return sched::quiesce_group(kernel.scheduler(), pid, claimer, kind, host, request);
+}
+
+void request_group_exit(Kernel &kernel, sched::ProcessId pid, sched::ExitRequest request)
+{
+    kick(kernel.scheduler().request_group_exit(pid, request));
+}
+
+bool quiesce_for_exit(Kernel &kernel, sched::ProcessId pid, i32 code, u8 signal)
+{
+    const auto cpu = smp::current_cpu();
+    const sched::ExitRequest request{code, signal};
+    const auto &slot = kernel.scheduler().cpu_slot(cpu < smp::max_cpus ? cpu : 0);
+    const bool own = cpu < smp::max_cpus && slot.occupied() && slot.pid == pid;
+    if (cpu < smp::max_cpus && slot.occupied() && !own && slot.process &&
+        slot.process->execution() == sched::ProcessExecution::user_process)
     {
-        if (!thread.entry_stack.pool) continue;
-        bool planned = false;
-        for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
+        // A thread of another process never waits for this group (spec
+        // 4.8). It exits a group none of whose threads is on a CPU (a fork
+        // child it undoes) at once; any other group gets a pending exit,
+        // which one of its own threads applies at its next pick.
+        const auto claim = kernel.scheduler().claim_transition(pid, 0, sched::GroupTransition::exit, request, true);
+        switch (claim.outcome)
         {
-            if ((plan.cpus & (u32{1} << cpu)) == 0 || cpu_entries[cpu].tid != thread.tid) continue;
-            // The CPU runs the thread on the lease its TCB names.
-            if (cpu_entries[cpu].lease != thread.entry_stack)
-                return Status::fault("CPU entry does not name its thread's lease");
-            planned = true;
+        case sched::SchedulerState::ClaimOutcome::claimed:
+        case sched::SchedulerState::ClaimOutcome::held:
+        case sched::SchedulerState::ClaimOutcome::departed:
+            return true;
+        case sched::SchedulerState::ClaimOutcome::busy:
+            request_group_exit(kernel, pid, request);
+            return false;
+        default:
+            return false;
         }
-        if (!planned)
+    }
+    // A thread of the group claims for itself; a CPU that runs no user
+    // thread (its kernel loop, boot) claims for none: nothing waits for it.
+    const sched::ThreadId claimer = own ? slot.tid : 0;
+    return quiesce_group(kernel, pid, claimer, sched::GroupTransition::exit, request) != sched::QuiesceResult::lost;
+}
+
+Status validate_quiesced_leases(std::span<const sched::ThreadControlBlock> threads)
+{
+    // Every lease of a quiesced group is inactive: each sibling left its CPU
+    // through put_prev, after its step deactivated its lease (spec 3.10).
+    for (const auto &thread : threads)
+        if (thread.entry_stack.pool)
             if (auto status = entry_stacks.validate_inactive(thread.entry_stack, {thread.owner, thread.tid}); !status)
                 return status;
-    }
     return {};
-}
-
-Status commit_eviction(Kernel &kernel, const EvictionPlan &plan)
-{
-    if (!plan.cpus) return {};
-    // Every CPU in this address space leaves user mode. Each then waits for the
-    // kernel lock this CPU holds, so its lease is no longer in use.
-    smp::require_exclusive("commit_eviction");
-    smp::quiesce_root(plan.root);
-    Status failure{};
-    for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
-    {
-        if ((plan.cpus & (u32{1} << cpu)) == 0) continue;
-        auto &entry = cpu_entries[cpu];
-        // A damaged lease is still revoked and quarantined; finish the others.
-        if (auto status = entry_stacks.deactivate_entry(entry.lease, {entry.pid, entry.tid}, cpu); !status && failure)
-            failure = status;
-        static_cast<void>(kernel.scheduler().clear_on_cpu(entry.pid, entry.tid, cpu));
-        entry.revoked = true;
-    }
-    return failure;
-}
-
-Status evict_thread(Kernel &kernel, const sched::ThreadControlBlock &thread)
-{
-    const auto *process = kernel.scheduler().find(thread.owner);
-    EvictionPlan plan;
-    if (auto status = prepare_eviction(thread.owner, process ? process->resources().native_space.root : 0,
-                                       {&thread, 1}, plan); !status)
-        return status;
-    return commit_eviction(kernel, plan);
 }
 } // namespace runtime_detail
 } // namespace ok::user::native
@@ -155,9 +161,7 @@ extern "C" bool ok_smp_cpu_leaving(ok::smp::CpuId cpu)
 {
     using namespace ok::user::native;
     if (cpu == 0 || cpu >= ok::smp::max_cpus) return false;
-    const bool clean = cpu_entries[cpu].pid == 0 && !cpu_entries[cpu].lease.pool && !runtime_step_active[cpu] &&
-                       !entry_stacks.active_on(cpu);
-    cpu_entries[cpu] = {};
+    const bool clean = !runtime_step_active[cpu] && !entry_stacks.active_on(cpu);
     runtime_step_active[cpu] = false;
     forget_cpu_cursor(cpu);
     if (runtime_kernel != nullptr)

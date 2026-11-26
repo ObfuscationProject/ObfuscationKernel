@@ -15,6 +15,7 @@
 #include "ok/user/native_group_signal_profile.hpp"
 #include "ok/user/native_console_control_profile.hpp"
 #include "ok/core/native_shutdown.hpp"
+#include "ok/sched/group_quiesce.hpp"
 #include "ok/smp/bringup.hpp"
 #include "ok/smp/cpu.hpp"
 #include "ok/smp/kernel_section.hpp"
@@ -324,25 +325,25 @@ extern std::atomic<bool> secondary_admission;
 // CPU runs user code (src/user/runtime/smp.cpp).
 Result<hw::Trap> enter_unlocked(hw::AddressSpace &space, hw::UserFrame &frame, const hw::KernelEntryStackView &view,
                                 memory::KernelEntryStackHandle lease, u64 pid, u64 tid);
-// Takes over the entry of every other CPU that is running a thread, so its
-// lease and address space can be retired. Planning can refuse and changes
-// nothing; a plan's commit fails only on an invariant breach (a damaged
-// lease), and it still revokes every planned entry.
-struct EvictionPlan
-{
-    sched::ProcessId pid{};
-    uptr root{};
-    u32 cpus{};
-};
-// Plans every thread of `threads` (all of process `pid`) that another CPU runs.
-Status prepare_eviction(sched::ProcessId pid, uptr root, std::span<const sched::ThreadControlBlock> threads,
-                        EvictionPlan &plan);
-// Whether every leased thread of `threads` is inactive once `plan` commits:
-// planned ones run on the lease their TCB names, the others are inactive.
-Status validate_evicted_leases(std::span<const sched::ThreadControlBlock> threads, const EvictionPlan &plan);
-Status commit_eviction(Kernel &kernel, const EvictionPlan &plan);
-// Plans and commits the eviction of one thread.
-Status evict_thread(Kernel &kernel, const sched::ThreadControlBlock &thread);
+// Group transitions (spec 4.8, smp.cpp). The frozen check of a kernel lock
+// acquisition made for a thread of `pid` (smp::bkl_frozen_check).
+bool group_frozen(u64 pid) noexcept;
+// Claims exec or exit for `claimer` and waits, the kernel lock released,
+// until no other thread of the group runs on a CPU.
+sched::QuiesceResult quiesce_group(Kernel &kernel, sched::ProcessId pid, sched::ThreadId claimer,
+                                   sched::GroupTransition kind, sched::ExitRequest request = {});
+// A kill or fatal decision that never waits: pending_exit, probes, queue
+// entries for parked threads and kicks for running ones (spec 4.8).
+void request_group_exit(Kernel &kernel, sched::ProcessId pid, sched::ExitRequest request);
+// finish's quiesce: false when the exit is left to the group (another exit
+// claims it, an exec runs, or the caller is a thread of another process and
+// the group exits at its next pick).
+bool quiesce_for_exit(Kernel &kernel, sched::ProcessId pid, i32 code, u8 signal);
+// Every lease of a quiesced group is inactive.
+Status validate_quiesced_leases(std::span<const sched::ThreadControlBlock> threads);
+// The delivery point (spec 4.8): a picked thread of a process with a pending
+// exit exits the group with the recorded status. False when none is pending.
+bool deliver_pending_exit(Kernel &kernel, sched::ProcessId pid);
 // User CPU hotplug and affinity (hotplug.cpp). A thread's finished hotplug
 // request: the stored result, consumed once by the step's resume chain when
 // the woken writer is dispatched again (never for a newly trapped syscall).
@@ -930,7 +931,6 @@ bool private_signal_wait_complete(Kernel &kernel, sched::ProcessControlBlock &pr
                                    sched::ThreadControlBlock &thread, u64 now);
 bool private_signal_wait_pending(Kernel &kernel);
 i64 native_process_kill(Kernel &kernel, const sched::ProcessControlBlock &sender, u64 raw_pid, u64 raw_signal);
-void private_process_signal_fatal(Kernel &kernel);
 bool private_signal_call(Kernel &kernel, sched::ProcessControlBlock &process,
                          sched::ThreadControlBlock &thread, bool &complete, i64 &result);
 // Interval timers (timers.cpp). An expiry signal is sent, dropped as ignored
@@ -973,6 +973,16 @@ i64 private_signal_wait_enqueue(Kernel &kernel, sched::ProcessControlBlock &reci
                                 sched::PendingSignalInfo info);
 bool private_signal_admit_blocked(Kernel &kernel, const sched::ProcessControlBlock &recipient,
                                   const sched::ThreadControlBlock &target);
+// Whether a signal can interrupt a waiting thread's wait (spec 4.7): the
+// interruptible class its owner recorded at park; for a parked thread the
+// old predicate (private_signal_admit_blocked) runs as its shadow and a
+// disagreement counts admit_shadow_mismatch. False for a thread not waiting.
+bool private_wait_interruptible(Kernel &kernel, const sched::ProcessControlBlock &process,
+                                const sched::ThreadControlBlock &thread);
+// Generation's probe (spec 4.7): after a signal was queued for `process`,
+// every waiting thread whose wait it may interrupt is probed; a parked one
+// is queued so that its resume re-evaluates the wait.
+void private_signal_probe(Kernel &kernel, sched::ProcessControlBlock &process);
 // The first pending signal `thread` would take that interrupts a wait (not
 // ignored, not a default stop), when its action is supported.
 bool private_signal_interrupting(Kernel &kernel, const sched::ProcessControlBlock &process,
@@ -1699,7 +1709,7 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
                     hw::AddressSpace &space, syscall::Number number, const std::array<uptr, 6> &a,
                     bool &complete);
 i64 fork_process(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock *process,
-                 sched::ThreadId calling_tid);
+                 sched::ThreadId calling_tid, bool &complete);
 i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock *process,
                sched::ThreadId calling_tid, hw::AddressSpace &space, const std::array<uptr, 6> &a,
                bool &complete);
