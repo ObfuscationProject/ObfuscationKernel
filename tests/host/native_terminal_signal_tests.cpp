@@ -97,6 +97,9 @@ bool step_into(Kernel &kernel, u64 pid, u64 tid)
     std::array<sched::ThreadRef, sched::max_processes * sched::max_threads_per_process> aside{};
     usize count{};
     bool chosen{};
+    // A probed thread (blocked) is dropped by dequeue_thread; it is chosen too.
+    const auto &target = thread_of(kernel, pid, tid);
+    chosen = target.state == sched::ProcessState::blocked && target.probe && target.queued_cpu != sched::no_cpu;
     while (const auto next = kernel.scheduler().dequeue_thread(0))
         if (next->pid == pid && next->tid == tid) chosen = true;
         else aside[count++] = *next;
@@ -139,6 +142,8 @@ void enqueue(Kernel &kernel, u64 pid, u64 tid, u32 signal)
 {
     auto *queue = native::private_signal_queue(thread_of(kernel, pid, tid)); CHECK(queue);
     expect(queue->enqueue({signal, -6, static_cast<u32>(pid), 0}) == native::PrivateSignalQueue::Enqueue::queued);
+    // Generation probes the waits a queued signal may interrupt (spec 4.7).
+    native::private_signal_probe(kernel, *kernel.scheduler().find(pid));
 }
 i64 linux_kill(Kernel &kernel, u64 sender, u64 target, u64 signal)
 {

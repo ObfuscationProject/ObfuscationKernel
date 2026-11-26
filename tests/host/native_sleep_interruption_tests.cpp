@@ -186,6 +186,9 @@ void selected_runtime(Kernel &kernel,lu::Operation op)
         }
         if(mode==5) {actions->find(10)->handler=0;p.resources().native_pages.clear();}
         if(mode==6) mock::now=t.native_deadline.deadline();
+        // Generation probes the waits a queued signal may interrupt (spec 4.7);
+        // the model queued its signals directly and changed masks and actions.
+        native::private_signal_probe(kernel,p);
         native::started=true;CHECK(native::step(kernel));
         if(mode==5)
         {

@@ -88,6 +88,8 @@ void direct(Kernel &kernel, Group g, u64 tid, u32 signal)
 {
     auto *q = native::private_signal_queue(thread(kernel, g.pid, tid)); CHECK(q);
     expect(q->enqueue({signal, -6, static_cast<u32>(g.pid), 0}) == native::PrivateSignalQueue::Enqueue::queued);
+    // Generation probes the waits a queued signal may interrupt (spec 4.7).
+    native::private_signal_probe(kernel, *kernel.scheduler().find(g.pid));
 }
 u64 get(uptr address, usize bytes = 8)
 {
@@ -641,10 +643,13 @@ void fatal_cleanup(Kernel &kernel, bool frame_fault)
     }
     else
     {
-        expect(kill(kernel, g, g.peer, 9) == 0);
-        const auto entries = mock::entries; mock::clock_fail = true;
-        expect(!native::step(kernel)); mock::clock_fail = false;
-        expect(mock::entries == entries); native::runtime_failure = Status::success(); native::started = true;
+        // SIGKILL sets the group's pending exit; its next pick applies it,
+        // before the waiter is entered (spec 4.8).
+        expect(kill(kernel, g, g.peer, 9) == 0 && kernel.scheduler().exit_pending(g.pid));
+        const auto entries = mock::entries; mock::entry_trap = {hw::TrapKind::timer};
+        for (usize step = 0; step < 4 && kernel.scheduler().find(g.pid)->state() != sched::ProcessState::zombie; ++step)
+            static_cast<void>(native::step(kernel));
+        expect(mock::entries == entries && native::runtime_status().ok()); native::started = true;
     }
     expect(!native::signal_waits.find(old_thread));
     auto *p = kernel.scheduler().find(g.pid);

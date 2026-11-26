@@ -17,4 +17,20 @@ inline usize deliver_pending_exits(Kernel &kernel)
     for (usize i = 0; i < count; ++i) static_cast<void>(deliver_pending_exit(kernel, pending[i]));
     return count;
 }
+// A model that undoes a fatal decision it provoked (to test the next one)
+// clears the group's pending exit with the signal state's record of it.
+inline void forget_pending_exit(Kernel &kernel, sched::ProcessId pid)
+{
+    if (auto *state = private_signal_find(pid))
+    {
+        state->group_kill = false;
+        state->deferred_fatal = 0;
+    }
+    if (auto pin = kernel.scheduler().pin(pid))
+    {
+        const sched::TaskGuard guard{*pin.slot()};
+        pin.slot()->set_flag(sched::RunFlag::pending_exit, false);
+        pin.slot()->exit_request = {};
+    }
+}
 } // namespace ok::user::native

@@ -135,7 +135,7 @@ void mixed_permission_and_zero(Kernel &kernel)
     // Linux member is untouched.
     expect(native_kill(kernel, sender, negative(allowed), 2) == 0);
     expect(native::private_signal_find(allowed)->deferred_fatal == 2 && !native::private_signal_find(denied));
-    native::private_signal_find(allowed)->deferred_fatal = 0;
+    native::forget_pending_exit(kernel, allowed);
     expect(linux_kill(kernel, sender, negative(allowed), 65) == -22);
     expect(native_kill(kernel, sender, 0xffffffffU, 0) == -95);
     expect(linux_kill(kernel, sender, 0x80000000U, 0) == -3);
