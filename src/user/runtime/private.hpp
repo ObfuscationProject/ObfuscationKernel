@@ -1253,6 +1253,33 @@ class TcpImmediateRuntime final
         name.size = bytes.size();
         return name;
     }
+    // The source address the interface selects for a peer.
+    static Result<net::IpAddress> connect_source(Kernel &kernel, const net::IpAddress &peer)
+    {
+        if (peer.v4())
+        {
+            auto source = kernel.network_interface().source(peer.ipv4()); if (!source) return source.status();
+            return net::IpAddress{source.value()};
+        }
+        auto source = kernel.network_interface().source(peer.ipv6()); if (!source) return source.status();
+        return net::IpAddress{source.value()};
+    }
+    // Binds the next free port of the ephemeral range 49152-65535.
+    static Result<net::tcp::Endpoint> autobind(net::NativeTcpStreamService &service, net::TcpStreamHandle handle,
+                                               net::IpAddress address)
+    {
+        for (u32 attempt = 0; attempt < 16384; ++attempt)
+        {
+            const u16 port = next_ephemeral_;
+            next_ephemeral_ = port == 65535 ? u16{49152} : static_cast<u16>(port + 1);
+            const net::tcp::Endpoint local{address, port};
+            const auto status = service.bind(handle, local);
+            if (status) return local;
+            if (status.code() != StatusCode::already_exists) return status;
+        }
+        return Status::no_space("no free ephemeral TCP port");
+    }
+    static inline constinit u16 next_ephemeral_ = 49152;
     // The errno a failed connection reports (Linux tcp_v4_err, tcp_reset,
     // tcp_write_err); `none` is 0.
     static u32 tcp_failure_errno(const Request &request, net::tcp::Failure failure)
@@ -1497,9 +1524,22 @@ class TcpImmediateRuntime final
                 if (!peer) return peer.status();
                 if (!kernel.native_udp().reachable(peer.value().address))
                 { semantic_error = error(request, lu::UdpErrno::e_netunreach, 101); return Status::fault(); }
+                // An unbound stream binds first (inet_autobind, inet_hash_connect):
+                // the source address the route selects and a free ephemeral port.
+                net::tcp::Endpoint local = state.value().local;
+                if (!local.port)
+                {
+                    auto source = connect_source(kernel, peer.value().address);
+                    if (!source) { semantic_error = error(request, lu::UdpErrno::e_netunreach, 101); return Status::fault(); }
+                    auto bound = autobind(service, handle, source.value());
+                    if (!bound && bound.status().code() == StatusCode::no_space)
+                    { semantic_error = error(request, lu::UdpErrno::e_addrnotavail, 99); return Status::fault(); }
+                    if (!bound) return bound.status();
+                    local = bound.value();
+                }
                 auto now = kernel.native_tcp_now(); if (!now) return now.status();
                 if (!access.live()) return Status::denied("TCP connect lost image during clock acquisition");
-                auto iss = kernel.native_tcp_iss(state.value().local, peer.value()); if (!iss) return iss.status();
+                auto iss = kernel.native_tcp_iss(local, peer.value()); if (!iss) return iss.status();
                 if (!access.live()) return Status::denied("TCP connect lost image during entropy acquisition");
                 const auto status = service.connect(handle, peer.value(), iss.value(), now.value());
                 if (status) semantic_error = tcp_error(request, lu::tcp_errno_einprogress, 115);

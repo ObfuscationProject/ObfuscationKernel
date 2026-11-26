@@ -570,6 +570,32 @@ void udp_refusal(Kernel &kernel, bool linux)
     expect(invoke(kernel, group, 3, {static_cast<uptr>(fd)}) == 0);
     retire(kernel, group);
 }
+// connect on an unbound stream binds it first (inet_autobind): the source
+// address the interface selects and a port of the ephemeral range.
+void autobind_connect(Kernel &kernel, bool linux)
+{
+    const auto group = create(kernel, linux);
+    const auto fd = invoke(kernel, group, 41, {2, OK_SOCK_STREAM | OK_SOCK_NONBLOCK, 6}); expect(fd >= 3);
+    const auto f = static_cast<i32>(fd);
+    auto name = name_call(kernel, group, 51, f, 16);
+    expect(name.result == 0 && name.record[2] == 0 && name.record[3] == 0);
+    address(link.peer_ip, 7400);
+    expect(invoke(kernel, group, 42, {static_cast<uptr>(fd), address_pointer, 16}) == -115);
+    name = name_call(kernel, group, 51, f, 16);
+    const u16 port = static_cast<u16>((name.record[2] << 8) | name.record[3]);
+    expect(name.result == 0 && name.length == 16 && port >= 49152);
+    expect(std::equal(link.local_ip.begin(), link.local_ip.end(), name.record.begin() + 4));
+    // A second unbound stream takes another port.
+    const auto other = invoke(kernel, group, 41, {2, OK_SOCK_STREAM | OK_SOCK_NONBLOCK, 6}); expect(other >= 3);
+    address(link.peer_ip, 7400); // name_call wrote its record over the address.
+    expect(invoke(kernel, group, 42, {static_cast<uptr>(other), address_pointer, 16}) == -115);
+    const auto second = name_call(kernel, group, 51, static_cast<i32>(other), 16);
+    expect(second.result == 0 && static_cast<u16>((second.record[2] << 8) | second.record[3]) != port);
+    CHECK(kernel.poll_network()); extension.head = extension.count = 0;
+    expect(invoke(kernel, group, 3, {static_cast<uptr>(fd)}) == 0);
+    expect(invoke(kernel, group, 3, {static_cast<uptr>(other)}) == 0);
+    retire(kernel, group);
+}
 void original_guard_closes(Kernel &kernel)
 {
     const auto group = create(kernel, false);
@@ -615,6 +641,7 @@ int main()
     icmp_refusal(kernel, true, 53003, 10, -113, Report::connect);
     icmp_refusal(kernel, true, 53004, 6, -101, Report::read);
     udp_refusal(kernel, false); udp_refusal(kernel, true);
+    autobind_connect(kernel, false); autobind_connect(kernel, true);
     const auto before = kernel.native_udp_executor().state(); expect(before.active && !before.failed);
     extension.failed = true; expect(!kernel.poll_network());
     const auto after = kernel.native_udp_executor().state(); expect(after.failed && after.readiness_sequence > before.readiness_sequence);
