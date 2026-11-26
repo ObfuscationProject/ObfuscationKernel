@@ -120,9 +120,55 @@ big kernel lock (BKL); the task and run queue locks nest above it. Baseline:
 - **Hosted step models keep their cursor writes.** Forty-two hosted tests
   drive `native::step`; 24 of them reset `last_pid`/`last_tid` first. In the
   queue build those names are kept (marked unused) so the tests compile; the
-  step ignores them. The tests run the queue path.
+  step ignores them. The tests run the queue path. The terminal signal model
+  (`test_native_terminal_signal.py`) steers which thread a step enters: on
+  the queue path it vacates the CPU and sets the other queued threads aside
+  for that step; it also runs a second time built with `OK_LEGACY_SELECT`.
+- **The legacy arm is not the pre-WP4a runtime.** `legacy_select=y` keeps the
+  `(pid, tid)` scan, but the transitions still queue threads and send wake
+  IPIs; only the step's selection differs.
+
+## Review fixes
+
+- **Exec from a sibling queued nothing.** A leader that was parked (futex,
+  join, a CPU hotplug write) or had exited when a sibling called exec was
+  made runnable by `replace_image` without a queue entry; the sibling's CPU
+  slot no longer named a live thread, so its `put_prev` queued nothing
+  either, and only the audit (an `audit_repairs` count) would have found the
+  new image. `replace_image` now queues a leader that is on no CPU, and
+  `free_thread_slot` resets the slot's placement mirrors with the TCB (the
+  caller's `on_cpu` mirror used to keep its CPU). Tests:
+  `test_queue_path_exec_from_sibling` (scheduler waits: parked and exited
+  leader) and the exec eviction model (`leaseless_leader_exec`,
+  `exec_drops_leader_hotplug_request`: the leader is queued and the audit
+  repairs nothing); both fail without the fix.
+- **Terminal waits on the queue path.** The terminal signal model ran only on
+  the legacy scan. It now runs on both; on the queue path a SIGINT to a
+  parked PTY reader is probed, picked blocked and settled on its CPU before
+  the handler is entered (checked through `OK_SMP_WAKE probes`).
 
 ## Validation
+
+After the review fixes (kernel at 045a9cf; logs under
+`smp-scaling/waveB/WP4a/review/logs`): the full hosted suite (171 passed, 0
+failed, 59 not run), the exec eviction, terminal signal and scheduler wait
+runners also with `--sanitize` on x86_64; debug `xmake test` at `-smp 1` on
+all ten profiles and at 2 and 4 on x86_64, aarch64 and rv64 (16 of 16
+`OK_TEST_PASS`); `legacy_select=y` `xmake test -smp 1` on x86_64 (its
+configuration records `legacy_select = true` and its ELF holds the scan's
+state, not the audit countdown) and its x86_64 distro boot (`OK_SMP_AUDIT
+passes=0`); the native distro boot on all ten profiles (`OK_SMP_AUDIT
+passes=12` or 13, `repairs=0`, every check counter 0); and at 2 vCPUs on
+x86_64, aarch64 and rv64 the `--user-hotplug` gate in debug and release, the
+futex probe, `--smp_hotplug_test=y --require-hotplug` and `smp_sections=n`,
+plus the CPU sysfs probe on x86_64: 16 runs, every check counter 0,
+`max_lock_depth` 5 in debug and 0 in release. The first x86_64
+`--user-hotplug` attempt failed in the SDK export (`boot16.bin` not found
+when xmake copied it; the file was in the build tree afterwards), which also
+skipped that set's futex and sysfs probes; all three passed on the rerun.
+The runs at 4 vCPUs were not repeated after the fixes.
+
+The implementer's validation, before the review fixes:
 
 All runs are QEMU TCG on the pinned SysToolchain QEMU 10.2 (`scope=hardware`
 means the emulated machine); model tests print `scope=model`. Kernel sources
@@ -162,8 +208,8 @@ at cef820c; later commits change tests, runner scripts and documentation only
   at 4 vCPUs on x86_64 and at one on arm32. All 22 runs passed with every
   check counter (`lock_violations`, the assertion counters including
   `queue_asserts` and `pin_asserts`, `admit_shadow_mismatch`,
-  `quiesce_timeouts`, `audit_repairs`, `poll_audit_ready`) and `unqueued` at
-  zero; `max_lock_depth` was 5 in debug kernels and 0 in release ones. The
+  `quiesce_timeouts`, `audit_repairs`, `poll_audit_ready`) at zero (`unqueued`
+  is 0 too, but nothing writes it before WP4b's wait hash); `max_lock_depth` was 5 in debug kernels and 0 in release ones. The
   queue path's evidence in those runs: `OK_SMP_WAKE remote` 317 to 3044,
   `ipis` 133 to 306, `steals` 287 to 1327, and 54 to 278 audit passes per
   run. No run exercised a probed pick (`probes=0`): the stress workers do not
