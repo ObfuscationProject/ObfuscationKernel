@@ -66,6 +66,28 @@ class TaskHold final
     bool taken_;
 };
 
+// Holds the task table unless this CPU holds it already: a group send holds
+// it across its callbacks (spec 4.7), which may reach slot allocation or
+// release.
+class TableHold final
+{
+  public:
+    explicit TableHold(TaskTableLock &lock) : lock_(lock), taken_(!lock.owned_by_current_cpu())
+    {
+        if (taken_) lock_.lock();
+    }
+    ~TableHold()
+    {
+        if (taken_) lock_.unlock();
+    }
+    TableHold(const TableHold &) = delete;
+    TableHold &operator=(const TableHold &) = delete;
+
+  private:
+    TaskTableLock &lock_;
+    bool taken_;
+};
+
 // A thread the queue may hold: runnable, or blocked with a probe pending.
 bool queue_admits_state(const ThreadControlBlock &thread)
 {
@@ -196,10 +218,13 @@ Result<ProcessId> SchedulerState::create_process_with_pid(ProcessId pid, std::st
     for (auto &word : slot->queued_cpu) word.store(no_cpu, std::memory_order_relaxed);
     slot->run_flags.store(0, std::memory_order_relaxed);
     slot->affinity.store(cpu_affinity_any, std::memory_order_relaxed);
+    slot->transition = GroupTransition::none;
+    slot->transition_tid = 0;
+    slot->exit_request = {};
     initialize_resources(process.resources());
     {
         // Published last: lookups see the slot only once the PCB is complete.
-        const TaskTableLock::Guard table{task_table_};
+        const TableHold table{task_table_};
         publish_slot(*slot, pid);
     }
     return pid;
@@ -594,9 +619,9 @@ smp::CpuId SchedulerState::enqueue_locked(ProcessSlot &slot, ThreadControlBlock 
     // Kernel_thread records keep the Kernel::tick policy; an entry that is
     // only placed again keeps its queue whatever its process.
     if (!requeue && process.execution() != ProcessExecution::user_process) return no_cpu;
-    if (thread.slot_state != ThreadSlotState::live || !queue_admits_state(thread) ||
+    if (thread.slot_state != ThreadSlotState::live || !may_queue(slot, thread) ||
         process.state_ == ProcessState::zombie || process.state_ == ProcessState::exited ||
-        slot.state() != ProcessLifecycle::live || process.job_.stopped)
+        slot.state() != ProcessLifecycle::live)
         return no_cpu;
     static_cast<void>(repair_affinity(process, thread));
     u32 allowed = effective_affinity(process, thread) & online_cpus_;
@@ -653,6 +678,16 @@ void SchedulerState::set_on_cpu_locked(ProcessSlot &slot, ThreadControlBlock &th
     thread.on_cpu = cpu;
     if (const auto index = slot.pcb.slot_of(thread); index < max_threads_per_process)
         slot.on_cpu[index].store(cpu, std::memory_order_release);
+}
+
+bool SchedulerState::may_queue(const ProcessSlot &slot, const ThreadControlBlock &thread)
+{
+    // A frozen group runs only its claimer (spec 4.8); a pending exit is
+    // admitted in any state, stopped or not, so that a thread applies it.
+    const auto flags = slot.run_flags.load(std::memory_order_relaxed);
+    if ((flags & static_cast<u32>(RunFlag::frozen)) != 0) return false;
+    if ((flags & static_cast<u32>(RunFlag::pending_exit)) != 0) return true;
+    return !slot.pcb.job_.stopped && queue_admits_state(thread);
 }
 
 bool SchedulerState::affinity_admits(const ProcessControlBlock &process, smp::CpuId cpu) const
@@ -744,7 +779,7 @@ bool SchedulerState::eligible_on(ThreadHandle handle, smp::CpuId queue, smp::Cpu
     const auto &slot = slots_[handle.index / max_threads_per_process];
     const auto &process = slot.pcb;
     if (!slot.visible() || process.state() == ProcessState::zombie || process.state() == ProcessState::exited ||
-        process.job_.stopped)
+        process.job_.stopped || slot.flagged(RunFlag::frozen))
         return false;
     return thread->queued_cpu == queue && thread->state == ProcessState::runnable && thread->on_cpu == no_cpu &&
            thread_admits(process, *thread, cpu);
@@ -775,7 +810,7 @@ std::optional<ThreadRef> SchedulerState::dequeue_thread(smp::CpuId cpu)
             set_queued_locked(slot, thread, no_cpu);
             if (thread.state != ProcessState::runnable || thread.on_cpu != no_cpu ||
                 process->state() == ProcessState::zombie || process->state() == ProcessState::exited ||
-                process->job_.stopped)
+                process->job_.stopped || slot.flagged(RunFlag::frozen))
                 continue;
             if (!thread_admits(*process, thread, cpu))
                 placed = enqueue_locked(slot, thread, true);
@@ -890,9 +925,9 @@ std::optional<SchedulerState::Picked> SchedulerState::pick(smp::CpuId cpu)
                 continue;
             }
             const auto &process = slot.pcb;
-            if (thread.slot_state != ThreadSlotState::live || !queue_admits_state(thread) ||
+            if (thread.slot_state != ThreadSlotState::live || !may_queue(slot, thread) ||
                 slot.state() != ProcessLifecycle::live || process.state_ == ProcessState::zombie ||
-                process.state_ == ProcessState::exited || process.job_.stopped)
+                process.state_ == ProcessState::exited)
                 continue;
             // A thread with no native context yet (between creation and its
             // image) keeps its place behind the others, as does one the
@@ -933,18 +968,53 @@ bool SchedulerState::probe_parked(ProcessControlBlock &process, ThreadControlBlo
     smp::CpuId placed = no_cpu;
     {
         TaskHold hold{slot};
-        if (thread.state != ProcessState::blocked || thread.on_cpu != no_cpu || thread.queued_cpu != no_cpu ||
-            thread.probe)
+        if (thread.state != ProcessState::blocked || !thread.wait_registration.active() || thread.on_cpu != no_cpu ||
+            thread.queued_cpu != no_cpu || thread.probe)
             return false;
+        // A stopped or frozen group keeps the probe without an entry: its
+        // continue or unfreeze queues the thread (spec 4.9).
         thread.probe = true;
         placed = enqueue_locked(slot, thread);
-        if (placed == no_cpu)
-        {
-            thread.probe = false;
-            return false;
-        }
     }
     notify_cpu(placed);
+    return true;
+}
+
+void SchedulerState::settle_park(smp::CpuId cpu, WaitClass wait_class, bool probe)
+{
+    if (cpu >= smp::max_cpus) return;
+    auto &current = cpu_slots_[cpu];
+    if (!current.occupied() || !current.process || !current.thread || current.thread->tid != current.tid ||
+        !in_table(*current.process))
+        return;
+    auto &thread = *current.thread;
+    TaskHold hold{task_slot(*current.process)};
+    if (thread.state != ProcessState::blocked || !thread.wait_registration.active()) return;
+    thread.wait_class = wait_class;
+    // The owner check at park: put_prev queues a probed thread.
+    if (probe) thread.probe = true;
+}
+
+SchedulerState::WaitView SchedulerState::wait_view(const ProcessControlBlock &process, const ThreadControlBlock &thread)
+{
+    if (!in_table(process)) return WaitView::not_waiting;
+    TaskHold hold{task_slot(process)};
+    if (thread.state != ProcessState::blocked || !thread.wait_registration.active()) return WaitView::not_waiting;
+    return thread.on_cpu != no_cpu ? WaitView::armed : WaitView::parked;
+}
+
+bool SchedulerState::probe_armed(ProcessControlBlock &process, ThreadControlBlock &thread)
+{
+    if (!in_table(process)) return false;
+    smp::CpuId cpu = no_cpu;
+    {
+        TaskHold hold{task_slot(process)};
+        if (thread.state != ProcessState::blocked || !thread.wait_registration.active() || thread.on_cpu == no_cpu)
+            return false;
+        thread.probe = true;
+        cpu = thread.on_cpu;
+    }
+    if (cpu != smp::current_cpu() && cpu < smp::max_cpus) smp::send_ipi(cpu, smp::ipi_kick);
     return true;
 }
 
@@ -973,7 +1043,7 @@ SchedulerState::IdleCheck SchedulerState::enter_idle(smp::CpuId cpu)
 usize SchedulerState::audit_queues()
 {
     usize repairs = 0;
-    const TaskTableLock::Guard table{task_table_};
+    const TableHold table{task_table_};
     for (auto &slot : slots_)
     {
         if (slot.state() != ProcessLifecycle::live) continue;
@@ -981,7 +1051,10 @@ usize SchedulerState::audit_queues()
         {
             TaskGuard guard{slot};
             auto &process = slot.pcb;
-            if (process.execution() != ProcessExecution::user_process || process.job_.stopped) continue;
+            // A frozen group's threads stay unqueued on purpose (spec 4.8).
+            if (process.execution() != ProcessExecution::user_process || slot.flagged(RunFlag::frozen) ||
+                (process.job_.stopped && !slot.flagged(RunFlag::pending_exit)))
+                continue;
             for (auto &thread : process.live_threads())
             {
                 const auto index = process.slot_of(thread);
@@ -998,7 +1071,7 @@ usize SchedulerState::audit_queues()
                     thread.wait_key = 0;
                     thread.state = ProcessState::runnable;
                 }
-                else if (queue_admits_state(thread))
+                else if (may_queue(slot, thread))
                     // orphan_runnable: may run, but nothing holds an entry for it.
                     smp::count_check(smp::KernelCheck::audit_repairs, "audit: runnable thread neither queued nor on a CPU");
                 else
@@ -1399,13 +1472,13 @@ ProcessPin SchedulerState::pin(ProcessId pid)
 
 ProcessSlot *SchedulerState::claim_process_slot()
 {
-    const TaskTableLock::Guard table{task_table_};
+    const TableHold table{task_table_};
     return claim_free_slot(slots_.data(), slots_.size(), next_slot_);
 }
 
 void SchedulerState::release_process_slot(ProcessSlot &slot)
 {
-    const TaskTableLock::Guard table{task_table_};
+    const TableHold table{task_table_};
     release_slot(slot);
 }
 
@@ -1959,6 +2032,13 @@ Status SchedulerState::replace_image(ProcessId pid, arch::CpuContext context, co
         auto &slot = task_slot(*process);
         TaskHold hold{slot};
         forget_wait_deadline_locked(process->thread_index(thread));
+        // The exec claim ends with its commit: no sibling is left to thaw.
+        if (slot.transition == GroupTransition::exec)
+        {
+            slot.transition = GroupTransition::none;
+            slot.transition_tid = 0;
+            slot.set_flag(RunFlag::frozen, false);
+        }
         if (thread.on_cpu == no_cpu) placed = enqueue_locked(slot, thread);
     }
     notify_cpu(placed);
@@ -2004,7 +2084,6 @@ Status SchedulerState::finish_process(ProcessId pid, i32 code, u8 signal)
     {
         TaskGuard guard{*slot};
         process->set_state(ProcessState::zombie);
-        if (process->job_.stopped) --stopped_count_;
         process->job_ = {};
         slot->set_flag(RunFlag::stopped, false);
         for (auto &thread : process->thread_records())
@@ -2296,6 +2375,7 @@ Result<WaitTicket> SchedulerState::register_current_wait(ThreadWaitReason reason
         current->wait_reason = reason;
         current->wait_key = key;
         current->probe = false;
+        current->wait_class = WaitClass::unknown;
     }
     // Spec 4.3 A1: linked on its channel after the arm, before the caller
     // releases the lock of the condition it checked.
@@ -2630,7 +2710,7 @@ void SchedulerState::wake_waiters(ThreadWaitReason reason, u64 key, WakeSource s
 usize SchedulerState::probe_poll_waiters()
 {
     usize probed = 0;
-    const TaskTableLock::Guard table{task_table_};
+    const TableHold table{task_table_};
     for (auto &slot : slots_)
     {
         if (slot.state() != ProcessLifecycle::live) continue;
@@ -2638,7 +2718,9 @@ usize SchedulerState::probe_poll_waiters()
         {
             TaskGuard guard{slot};
             auto &process = slot.pcb;
-            if (process.execution() != ProcessExecution::user_process || process.job_.stopped) continue;
+            if (process.execution() != ProcessExecution::user_process || process.job_.stopped ||
+                slot.flagged(RunFlag::frozen))
+                continue;
             for (auto &thread : process.live_threads())
             {
                 if (!thread.native_active || thread.state != ProcessState::blocked || thread.probe ||
@@ -2663,6 +2745,7 @@ usize SchedulerState::probe_poll_waiters()
 
 #include "console_input.inc"
 #include "job_control.inc"
+#include "group_transition.inc"
 Status SchedulerState::close_shutdown_admission()
 {
     if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission was already closed");

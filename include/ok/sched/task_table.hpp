@@ -56,14 +56,31 @@ enum class ProcessLifecycle : u32
 // scheduler's no_cpu).
 inline constexpr u32 no_cpu_word = 0xffff;
 
-// Process run flags (ProcessSlot::run_flags). Only `stopped` is fed so far;
-// the group transitions that set the others come with quiesce_group.
+// Process run flags (ProcessSlot::run_flags): a job-control stop, a group
+// transition that keeps the other threads off every CPU (frozen), and an exit
+// that a thread of the group applies at its next pick (pending_exit).
 enum class RunFlag : u32
 {
     stopped = 1,
     frozen = 2,
     exiting = 4,
     pending_exit = 8,
+};
+
+// A group transition (spec 4.8): exec or exit_group, claimed by one thread of
+// the process (or by no thread, 0, for an exit a CPU outside the group runs).
+enum class GroupTransition : u8
+{
+    none,
+    exec,
+    exit,
+};
+
+// The status a pending exit ends the process with (exit code or signal).
+struct ExitRequest
+{
+    i32 code{};
+    u8 signal{};
 };
 
 [[nodiscard]] constexpr u16 thread_index(usize process_slot, usize thread_slot)
@@ -103,6 +120,11 @@ template <typename Pcb> struct BasicProcessSlot
     std::atomic<u32> run_flags{0};
     std::atomic<u32> affinity{0xffff};
     u32 pins{};
+    // Under the task lock: the group transition in progress and the thread
+    // that claimed it, and the status of a pending exit (RunFlag::pending_exit).
+    GroupTransition transition{GroupTransition::none};
+    u32 transition_tid{};
+    ExitRequest exit_request{};
     Pcb pcb{};
 
     [[nodiscard]] ProcessLifecycle state() const
