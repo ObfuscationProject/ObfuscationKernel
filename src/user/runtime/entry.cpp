@@ -1090,9 +1090,13 @@ void probe_interrupted_waits([[maybe_unused]] Kernel &kernel, [[maybe_unused]] u
 constinit u32 audit_countdown{};
 #endif
 } // namespace
+// The last step found nothing, and nothing was queued here since: CPU 0's
+// loop may complete waits between its step and its idle wait.
 bool idle()
 {
-    return runtime_kernel != nullptr && runtime_kernel->scheduler().cpu_idle(smp::current_cpu());
+    const auto cpu = smp::current_cpu();
+    return runtime_kernel != nullptr && runtime_kernel->scheduler().cpu_idle(cpu) &&
+           runtime_kernel->scheduler().run_queue(cpu).empty();
 }
 
 bool step(Kernel &kernel)
