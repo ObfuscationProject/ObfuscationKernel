@@ -361,6 +361,13 @@ each slice.
   - `linux_socket_option_tests` (in `test_net_core.py`) checks the option
     names and errno values of all ten profiles against musl 1.2.5 and that
     a profile's names are distinct.
+  - Guest: the paired OS `net-socketcall` fixture now sets and reads the
+    options, is refused by the peer's closed port, reports ECONNREFUSED by
+    `SO_ERROR` and ECONNABORTED by the next connect, reconnects the same
+    socket to the echo service and checks 0 then EISCONN. It passes on i386,
+    mips and ppc (`reconnect=pass options=pass`). The ten-profile kernel
+    tests, `net_probe` (clean and with 10 % loss) and native userland
+    acceptance pass at ABI 83.
 - Probe: `net_probe_tests` runs `LinkProbe` against a scripted slirp-like
   gateway (exact marker text), also with ten percent TCP loss each way.
 - QEMU device execution (paired OS `feat/net-services`):
