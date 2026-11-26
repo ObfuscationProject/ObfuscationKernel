@@ -16,12 +16,18 @@ number is not bumped here.
   count, the per-thread `thread_affinity` words and the PCB. Allocation claims
   the next free slot after the last one (embryo), builds the PCB in place and
   publishes the pid, holding `task_table` (rank 46) and then the slot's `task`
-  lock. `find(pid)` scans the 64 pid words; `processes()` returns a
+  lock. Claim, publish and release are the `task_table.hpp` functions
+  `claim_free_slot`, `publish_slot` and `release_slot`, which the scheduler
+  and the task-table model share; a free slot that still counts a pin is
+  skipped and counts `pin_asserts`, and publish counts a pin it finds rather
+  than zeroing it. `find(pid)` scans the 64 pid words; `processes()` returns a
   `ProcessRange` over the [live, zombie] slots, and the `SchedulerPolicy`
   concept takes that range (`RoundRobinPolicy` and the kernel-thread round
   robin walk slot positions).
-- **ProcessPin** (`SchedulerState::pin`). Under the slot's `task` lock it
-  rechecks pid and lifecycle and counts a pin. Reap marks the slot reaped and
+- **ProcessPin** (`SchedulerState::pin`). Its lock-free first test loads the
+  pid, the lifecycle and the pid again, so a free and a reallocation between
+  the loads cannot pair an old pid with the new process's `live`. Under the
+  slot's `task` lock it rechecks pid and lifecycle and counts a pin. Reap marks the slot reaped and
   frees it when no pin is held; otherwise the last unpin frees it. Underflow
   counts `pin_asserts`. The CPU 0 hotplug service's CS2 now pins the writer's
   process and checks its wait under that `task` lock.
@@ -108,6 +114,12 @@ number is not bumped here.
   section binding) overrides it. The section API is renamed
   `bind_cpu_caller`/`unbind_cpu_caller`. No CPU-slot pin is taken: pick and
   put_prev take it in WP4a.
+- **`find`, `visible_slot` and `thread_at` stay kernel-lock lookups.** Spec
+  3.2 has `find(pid)` scan lock-free and then pin. Here `find` and
+  `thread_at` count `bkl_asserts` without the BKL (`check_exclusive`), and
+  their results are unpinned: a slot can be reaped and reused once the BKL
+  is dropped. A caller without the kernel lock uses `pin(pid)`; WP4a routes
+  its lock-free selection and stealing through pins.
 - **`find_thread_by_tid` and `processes()` readers do not take
   `task_table`.** Only slot allocation and release take it; every reader still
   runs under the BKL. The rescue task manager, status and shell readers are

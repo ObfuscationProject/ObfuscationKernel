@@ -95,9 +95,13 @@ valid memory for the scheduler's lifetime; what it names is checked by id.
   sched_setaffinity masks) and the PCB. Allocation walks forward from the last
   allocated slot, so slot order follows creation order until it wraps. It
   claims a slot (embryo), builds the PCB in place and publishes the pid,
-  holding `task_table` and then the slot's `task` lock. `find(pid)` scans the
-  64 pid words; `processes()` is a range over the [live, zombie] slots in
-  slot order, and the `SchedulerPolicy` concept takes that range.
+  holding `task_table` and then the slot's `task` lock (`claim_free_slot`,
+  `publish_slot` and `release_slot`, which the task-table model drives as
+  well). A free slot that still counts a pin is never claimed; it counts
+  `pin_asserts`. `find(pid)` scans the 64 pid words under the kernel lock;
+  a caller without it uses `pin(pid)`. `processes()` is a range over the
+  [live, zombie] slots in slot order, and the `SchedulerPolicy` concept takes
+  that range.
 - `ProcessPin` (`SchedulerState::pin(pid)`) holds a [live, zombie] slot. Reap
   marks the slot reaped and frees it at once when no pin is held; otherwise
   the last unpin frees it. A reaped slot is invisible to lookups but keeps
