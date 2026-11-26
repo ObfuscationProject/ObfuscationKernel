@@ -43,6 +43,19 @@ inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_errno_e
 inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_sol_socket{1U, 1U, 1U, 1U, 1U, 1U, 1U, 65535U, 65535U, 1U};
 inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_so_error{4U, 4U, 4U, 4U, 4U, 4U, 4U, 4103U, 4103U, 4U};
 inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_so_type{3U, 3U, 3U, 3U, 3U, 3U, 3U, 4104U, 4104U, 3U};
+// Linux asm-generic/socket.h and arch/mips socket.h (PowerPC renumbers only
+// the low-water marks, timeouts and credentials); TCP_NODELAY is
+// include/uapi/linux/tcp.h on every profile.
+inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_so_reuseaddr{2U, 2U, 2U, 2U, 2U, 2U, 2U, 4U, 4U, 2U};
+inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_so_keepalive{9U, 9U, 9U, 9U, 9U, 9U, 9U, 8U, 8U, 9U};
+inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_so_sndbuf{7U, 7U, 7U, 7U, 7U, 7U, 7U, 4097U, 4097U, 7U};
+inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_so_rcvbuf{8U, 8U, 8U, 8U, 8U, 8U, 8U, 4098U, 4098U, 8U};
+inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_so_acceptconn{30U, 30U, 30U, 30U, 30U, 30U, 30U, 4105U, 4105U, 30U};
+inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_so_protocol{38U, 38U, 38U, 38U, 38U, 38U, 38U, 4136U, 4136U, 38U};
+inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_so_domain{39U, 39U, 39U, 39U, 39U, 39U, 39U, 4137U, 4137U, 39U};
+inline constexpr u32 tcp_sol_tcp = 6U;
+inline constexpr u32 tcp_nodelay = 1U;
+inline constexpr std::array<u32, static_cast<usize>(Profile::count)> tcp_errno_enoprotoopt{92U, 92U, 92U, 92U, 92U, 92U, 92U, 99U, 99U, 92U};
 template <Profile Selected> requires SupportedProfile<Selected>
 [[nodiscard]] constexpr TcpCall tcp_call(u32 number)
 {

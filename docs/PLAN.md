@@ -439,6 +439,16 @@ Follow-up `net-socket-gaps` closes the open items:
 It bumps the module ABI to 82; its paired OS worktree consumes SDK 82 on
 top of the ABI 81 OS consumer change set that `feat/getty-login` carries.
 
+Follow-up `net-socketcall` (no ABI change) routes TCP through legacy
+socketcall on i386, MIPS and PowerPC, adds stream sendto/recvfrom and binds an
+unbound stream on connect; its paired OS fixture runs a socketcall program
+in the guest on those three profiles.
+
+Follow-up `net-socket-options` (exported stream and option headers, module
+ABI 83) follows Linux `__inet_stream_connect`, so a failed
+connect can be retried, and adds the common `SOL_SOCKET` options,
+`TCP_NODELAY`, setsockopt and ENOPROTOOPT.
+
 ### WT2.4 `feat/storage-durable` (XL)
 
 Default journalled writer (JBD2 ordered mode), write-back through the page

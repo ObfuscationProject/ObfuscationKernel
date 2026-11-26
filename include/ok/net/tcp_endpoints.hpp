@@ -71,6 +71,8 @@ class EndpointTable final
   public:
     static constexpr u64 retirement_ms = 240000;
     static constexpr usize connection_slots = Connections, listener_slots = Listeners;
+    // Each connection's fixed send and receive buffers (SO_SNDBUF, SO_RCVBUF).
+    static constexpr usize send_bytes = SendBytes, receive_bytes = ReceiveBytes;
     // An IPv6 header, a SYN's options and one segment.
     static constexpr usize packet_capacity = 40 + 24 + SegmentBytes;
     explicit EndpointTable(TableIdentity identity, EndpointLimits limits = {}) : identity_{identity.value}, limits_{limits}

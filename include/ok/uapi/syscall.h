@@ -257,6 +257,7 @@
 #define OK_EOVERFLOW 75
 #define OK_ENOTSOCK 88
 #define OK_EMSGSIZE 90
+#define OK_ENOPROTOOPT 92
 #define OK_EOPNOTSUPP 95
 #define OK_EAFNOSUPPORT 97
 #define OK_EADDRINUSE 98
@@ -293,6 +294,14 @@
 #define OK_SO_ERROR 4U
 #define OK_SO_TYPE 3U
 #define OK_SO_PEERCRED 17U
+#define OK_SO_REUSEADDR 2U
+#define OK_SO_KEEPALIVE 9U
+#define OK_SO_SNDBUF 7U
+#define OK_SO_RCVBUF 8U
+#define OK_SO_ACCEPTCONN 30U
+#define OK_SO_PROTOCOL 38U
+#define OK_SO_DOMAIN 39U
+#define OK_TCP_NODELAY 1U
 #define OK_UNIX_PATH_CAPACITY 108U
 
 struct ok_sockaddr_un

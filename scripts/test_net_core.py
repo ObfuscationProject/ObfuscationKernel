@@ -31,7 +31,7 @@ FLAGS = {
 }
 # Each hosted model test is its own binary with its own main.
 TESTS = ('net_ip_tests', 'net_neighbour_route_tests', 'net_interface_tests', 'tcp_window_tests', 'net_udp_tests', 'net_probe_tests',
-         'tcp_socketcall_tests')
+         'tcp_socketcall_tests', 'linux_socket_option_tests')
 # Kernel sources a hosted test links besides its own file.
 SOURCES = {'net_udp_tests': ('src/net/native_udp.cpp',)}
 # Kernel headers outside include/ a hosted test reads (copied, not compiled).

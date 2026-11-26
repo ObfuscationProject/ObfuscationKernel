@@ -13,12 +13,25 @@ struct TcpAcceptReservation
     u64 operation{};
     tcp::AcceptPreview endpoint{};
 };
+// The socket layer's view of a connection attempt (Linux `socket.state`):
+// a nonblocking connect stays `connecting` until a later connect observes
+// its outcome, as `__inet_stream_connect` does.
+enum class TcpSocketState : u8 { unconnected, connecting, connected };
+// Options a socket stores for getsockopt. An accepted stream inherits its
+// listener's options, as `sk_clone` copies them.
+struct TcpSocketOptions
+{
+    bool reuse_address{}, keep_alive{}, no_delay{};
+    friend constexpr bool operator==(const TcpSocketOptions &, const TcpSocketOptions &) = default;
+};
 // `family` is the socket() domain; an unbound local endpoint is its
-// unspecified address.
+// unspecified address. `automatic` marks a local endpoint connect chose
+// (inet_autobind); a disconnect drops it again.
 struct TcpStreamSnapshot
 {
     TcpStreamHandle handle{}; tcp::Endpoint local{}; std::optional<tcp::Handle> endpoint{};
     Family family{Family::ipv4};
+    TcpSocketState state{TcpSocketState::unconnected}; bool automatic{}; TcpSocketOptions options{};
 };
 // The scheduler emits actual close/exec/exit events. A callback retains no
 // caller buffer and must consume its wait edge before releasing its OFD pin.
@@ -54,7 +67,8 @@ class NativeTcpStreamService final
     [[nodiscard]] Result<TcpStreamSnapshot> snapshot(TcpStreamHandle handle) const
     {
         const auto *entry = find(handle); if (!entry) return stale();
-        return TcpStreamSnapshot{handle, entry->local, entry->endpoint, entry->family};
+        return TcpStreamSnapshot{handle, entry->local, entry->endpoint, entry->family, entry->state, entry->automatic,
+            entry->options};
     }
     Status set_wait_observer(TcpWaitObserver observer)
     {
@@ -97,7 +111,7 @@ class NativeTcpStreamService final
         { auto status = drain(entry); if (!status && first) first = status; }
         return first;
     }
-    Status bind(TcpStreamHandle handle, tcp::Endpoint local)
+    Status bind(TcpStreamHandle handle, tcp::Endpoint local, bool automatic = false)
     {
         auto *entry = find(handle); if (!entry) return stale();
         if (entry->endpoint || entry->local.port) return Status::invalid_argument("TCP stream is already bound or started");
@@ -108,7 +122,7 @@ class NativeTcpStreamService final
         for (const auto &other : streams_)
             if ((other.used || other.closing) && other.local == local)
                 return Status::already_exists("TCP local endpoint is reserved by a stream owner");
-        entry->local = local; return {};
+        entry->local = local; entry->automatic = automatic; return {};
     }
     Status listen(TcpStreamHandle handle, usize backlog)
     {
@@ -123,7 +137,36 @@ class NativeTcpStreamService final
         if (entry->endpoint) return Status::already_exists("TCP stream has already started");
         if (peer.address.family != entry->family) return Status::invalid_argument("TCP endpoint family differs from the stream");
         auto endpoint = table_.connect(entry->local, peer, iss, now); if (!endpoint) return endpoint.status();
-        entry->endpoint = endpoint.value(); return {};
+        entry->endpoint = endpoint.value(); entry->state = TcpSocketState::connecting; return {};
+    }
+    // A connect that observed its attempt established.
+    Status mark_connected(TcpStreamHandle handle)
+    {
+        auto *entry = find(handle); if (!entry) return stale();
+        if (entry->state != TcpSocketState::connecting) return Status::invalid_argument("TCP stream is not connecting");
+        entry->state = TcpSocketState::connected; return {};
+    }
+    // A connect that observed its attempt closed (`sk->prot->disconnect`):
+    // the connection is released and the stream is unconnected again. An
+    // explicit binding stays; a local endpoint connect chose is dropped.
+    Status disconnect(TcpStreamHandle handle)
+    {
+        auto *entry = find(handle); if (!entry) return stale();
+        if (!entry->endpoint || entry->endpoint->kind != tcp::HandleKind::connection)
+            return Status::invalid_argument("TCP stream has no connection to drop");
+        if (auto status = table_.release(*entry->endpoint, now()); !status) return status;
+        entry->endpoint.reset(); entry->state = TcpSocketState::unconnected;
+        if (entry->automatic)
+        {
+            entry->local = {entry->family == Family::ipv6 ? IpAddress{wire::Ipv6{}} : IpAddress{}, 0};
+            entry->automatic = false;
+        }
+        return {};
+    }
+    Status set_options(TcpStreamHandle handle, TcpSocketOptions options)
+    {
+        auto *entry = find(handle); if (!entry) return stale();
+        entry->options = options; return {};
     }
     Result<TcpStreamHandle> accept(TcpStreamHandle listener)
     {
@@ -133,7 +176,10 @@ class NativeTcpStreamService final
         auto state = table_.state(accepted.value());
         if (!state)
         { static_cast<void>(table_.release(accepted.value(), now())); return state.status(); }
-        return allocate(selected.value(), state.value().local, accepted.value());
+        const auto options = find(listener)->options;
+        const auto stream = allocate(selected.value(), state.value().local, accepted.value());
+        streams_[stream.slot].state = TcpSocketState::connected; streams_[stream.slot].options = options;
+        return stream;
     }
     Result<TcpAcceptReservation> prepare_accept(TcpStreamHandle listener)
     {
@@ -169,6 +215,8 @@ class NativeTcpStreamService final
         // All reservations were checked before endpoint ownership transfer.
         entry.local = reservation.endpoint.local; entry.family = entry.local.address.family; entry.endpoint = accepted.value();
         entry.prepared = {}; entry.prepared_listener = {}; entry.reservation = 0; entry.used = true;
+        entry.state = TcpSocketState::connected; entry.automatic = false;
+        entry.options = find(reservation.listener)->options;
         return reservation.stream;
     }
     Status cancel_accept(const TcpAcceptReservation &reservation)
@@ -237,6 +285,7 @@ class NativeTcpStreamService final
     {
         bool used{}, closing{}; u64 generation{}, reservation{};
         tcp::Endpoint local{}; std::optional<tcp::Handle> endpoint{}; Family family{Family::ipv4};
+        TcpSocketState state{TcpSocketState::unconnected}; bool automatic{}; TcpSocketOptions options{};
         tcp::AcceptPreview prepared{};
         TcpStreamHandle prepared_listener{};
     };
@@ -289,7 +338,7 @@ class NativeTcpStreamService final
     TcpStreamHandle allocate(usize slot, tcp::Endpoint local, std::optional<tcp::Handle> endpoint)
     {
         auto &entry = streams_[slot]; ++entry.generation; entry.used = true; entry.local = local; entry.endpoint = endpoint;
-        entry.family = local.address.family;
+        entry.family = local.address.family; entry.state = TcpSocketState::unconnected; entry.automatic = false; entry.options = {};
         return {identity_, entry.generation, static_cast<u32>(slot)};
     }
     Table table_;

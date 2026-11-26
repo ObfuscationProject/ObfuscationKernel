@@ -165,14 +165,14 @@ each slice.
 - A failure is reported once, as Linux `sock_error` clears `sk_err`.
   - TCP: the next read, write, connect or `getsockopt(SO_ERROR)` takes it.
     Afterwards the closed connection reads EOF, writes EPIPE and polls
-    without POLLERR. `SO_ERROR` also takes a remembered soft ICMP error
+    without POLLERR, until a connect disconnects it (see Connect states). `SO_ERROR` also takes a remembered soft ICMP error
     (`sk_err_soft`).
   - UDP: `SO_ERROR` takes a pending refusal like a receive or send would.
     getsockopt on a UDP socket used to be ENOTSOCK.
   - `SO_TYPE` reports SOCK_STREAM or SOCK_DGRAM. Option lengths follow
     `sk_getsockopt`: the length is read, and a negative one is EINVAL,
     before the error is taken. At most four bytes are copied, and the copied
-    size is written back.
+    size is written back. The other options are under Socket options.
 - TCP getsockname reports the bound name (an unbound stream reports the
   family's unspecified address). getpeername reports the peer of a connected
   stream and ENOTCONN in SYN_SENT, CLOSE and LISTEN (Linux `inet_getname`).
@@ -212,6 +212,51 @@ each slice.
   takes the source address the interface selects and the next free port of
   49152-65535; EADDRNOTAVAIL when none is free. Before, it was EINVAL.
 
+## Connect states and socket options
+
+- A stream keeps the socket layer's state (`TcpSocketState`: unconnected,
+  connecting, connected), as Linux `socket.state`, and connect follows
+  `__inet_stream_connect`:
+  - A listener or a connected stream is EISCONN; a listener used to be EINVAL.
+  - A connecting stream is EALREADY during the handshake. Once established,
+    the next connect returns 0 and marks it connected; the one after is
+    EISCONN.
+  - Once the attempt closed, connect reports its error, or ECONNABORTED when
+    it was already reported (by a read, a write or `SO_ERROR`). It then
+    disconnects: the connection is released, an explicit binding stays and
+    a binding connect chose is dropped (`inet_put_port`, `inet_reset_saddr`).
+    The next connect starts a new attempt. Before, a reported failure left
+    the stream EISCONN for good.
+  - A disconnected or never connected stream polls writable and hung up,
+    reads ENOTCONN and sends EPIPE (`sk_stream_wait_connect`, also for a
+    listener, which used to be ENOTCONN).
+- Socket options (`ok/abi/linux_tcp_data.hpp` per profile, MIPS renumbers
+  them; native `OK_SO_*` in `ok/uapi/syscall.h`):
+
+  | Option | TCP | UDP |
+  | --- | --- | --- |
+  | `SO_TYPE`, `SO_ERROR` | as before | as before |
+  | `SO_REUSEADDR`, `SO_KEEPALIVE` | stored flag | 0 |
+  | `SO_SNDBUF`, `SO_RCVBUF` | 1024, 1024 (fixed buffers) | 1472, 2944 |
+  | `SO_ACCEPTCONN` | 1 on a listener | 0 |
+  | `SO_PROTOCOL`, `SO_DOMAIN` | 6, the family | 17, the family |
+  | `TCP_NODELAY` | stored flag | - |
+
+  - getsockopt reads the length first at `SOL_SOCKET`, the protocol's own
+    level, `SOL_IP` and (IPv6) `SOL_IPV6`, where an unknown option is
+    ENOPROTOOPT. Any other level is EOPNOTSUPP on IPv4 (`do_ip_getsockopt`)
+    and ENOPROTOOPT on IPv6 (`ipv6_getsockopt`). Before, everything except
+    `SO_ERROR` and `SO_TYPE` was EOPNOTSUPP.
+  - setsockopt (Linux personality; the native ABI has no setsockopt call)
+    sets `SO_REUSEADDR`, `SO_KEEPALIVE` and `TCP_NODELAY` on a TCP stream and
+    accepts `SO_SNDBUF` and `SO_RCVBUF` without resizing. At `SOL_SOCKET` and
+    `SOL_TCP` a length below an int is EINVAL and the int is copied before
+    the name is checked; read-only and unknown names are ENOPROTOOPT. Other
+    levels are ENOPROTOOPT without a copy (`ip_setsockopt`). An accepted
+    stream inherits its listener's options (`sk_clone`).
+  - The stored flags change nothing on the wire yet: there is no Nagle delay
+    to disable, no keepalive timer and no TIME_WAIT reuse in bind.
+
 ## Not yet
 
 - TCP: no window scaling, timestamps, SACK or delayed ACKs. Path MTU
@@ -219,11 +264,11 @@ each slice.
   MSS is never raised again and there is no black-hole detection.
 
 - An ICMP error is not checked against the packet's original destination
-  beyond the quoted endpoints. There is no `IP_RECVERR` error queue, and
-  getsockopt knows only `SO_ERROR` and `SO_TYPE` (other options are
-  EOPNOTSUPP rather than ENOPROTOOPT; setsockopt stays unsupported). A
-  second connect after a failed one whose error was reported is EISCONN
-  rather than a new attempt.
+  beyond the quoted endpoints. There is no `IP_RECVERR` error queue.
+- Socket options: no IP-level options, no `SO_LINGER`, timeouts or
+  `SO_BROADCAST`; `SO_KEEPALIVE` sends no probes and `SO_REUSEADDR` does not
+  relax bind. setsockopt on a UDP socket is still ENOTSOCK, and shutdown of
+  a listener is ENOTCONN where Linux returns 0.
 - Linux TCP calls are immediate. A blocking socket's read, write or connect
   that would wait returns EAGAIN or EOPNOTSUPP instead of sleeping. Bind needs
   a specified unicast address, so there is no wildcard listener. The mmsg
@@ -303,6 +348,19 @@ each slice.
   - Guest: the paired OS `net-socketcall` fixture (`scripts/test_net_socketcall.py`)
     runs a freestanding Linux program that drives TCP and UDP only through
     socketcall against the scripted peer. It passes on i386, mips and ppc.
+- Connect states and options:
+  - `tcp_streams_tests` covers the stream states, disconnect with an
+    explicit and an automatic binding, a second attempt from the same
+    stream, stored options and their inheritance by an accepted stream.
+  - `tcp_immediate_runtime_tests` covers, in both personalities, connect
+    after an established attempt (0, then EISCONN), after a failure reported
+    by a read, `SO_ERROR` or connect (ECONNABORTED, then a new attempt), with
+    an explicit and an automatic binding, the listener cases, every option's
+    value for TCP and UDP, the level and length rules of getsockopt and
+    setsockopt, and that native setsockopt is ENOSYS.
+  - `linux_socket_option_tests` (in `test_net_core.py`) checks the option
+    names and errno values of all ten profiles against musl 1.2.5 and that
+    a profile's names are distinct.
 - Probe: `net_probe_tests` runs `LinkProbe` against a scripted slirp-like
   gateway (exact marker text), also with ten percent TCP loss each way.
 - QEMU device execution (paired OS `feat/net-services`):
