@@ -5,7 +5,7 @@ namespace ok::user
 {
 inline constexpr std::string_view native_job_control_profile = "bootcpu-overlay-stop-cont-wuntraced-wcontinued-pgrp-wait-nocldstop-owed-kernel-v1";
 inline constexpr u32 native_job_control_version = 1;
-inline constexpr u32 native_job_control_module_abi = 82;
+inline constexpr u32 native_job_control_module_abi = 83;
 inline constexpr u32 native_job_control_serialized_boot_cpu = 1;
 inline constexpr u32 native_job_control_process_capacity = 64;
 inline constexpr u32 native_job_control_signal_max = 64;
