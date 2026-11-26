@@ -309,8 +309,11 @@ void readiness_handoff(Kernel &kernel, Pid login, Pid peer)
 {
     auto &scheduler = kernel.scheduler();
     CHECK(native::entry_stacks.activate(native::entry_stack_arena));
-    for (const bool select : {false, true})
+    // Round 2 is the poll audit (spec 4.10): the poll's channel entry is
+    // dropped before the input, as a missing wake site would leave it.
+    for (const int round : {0, 1, 2})
     {
+        const bool select = round == 1, audited = round == 2;
         store_pid(static_cast<i32>(login)); CHECK(ioctl(kernel, login, OK_TIOCSPGRP, output) == 0);
         activate(kernel, login);
         const auto tid = scheduler.current_thread()->tid;
@@ -351,13 +354,23 @@ void readiness_handoff(Kernel &kernel, Pid login, Pid peer)
         store_pid(static_cast<i32>(peer)); CHECK(ioctl(kernel, peer, OK_TIOCSPGRP, output) == 0);
         CHECK(waiter->state == sched::ProcessState::blocked && waiter->syscall_pending);
         CHECK(waiter->wait_registration.pending(ticket) && mock::outputs == outputs);
-        const char nonce = select ? 'S' : 'P';
+        const char nonce = select ? 'S' : audited ? 'A' : 'P';
+        if (audited) scheduler.release_wait_links(*scheduler.find(login), *waiter);
         native::input(nonce);
-        // The console wake completes the poll through its channel entry (spec
-        // 4.3); the owner's step produces the result (spec 4.4).
-        CHECK(waiter->state == sched::ProcessState::runnable && waiter->syscall_pending);
-        CHECK(!waiter->wait_registration.pending(ticket) && mock::outputs == outputs);
-        CHECK(waiter->wait_registration.completion() == sched::WaitCompletion::ready);
+        if (audited)
+        {
+            // No wake reached it: still blocked, with readable input.
+            CHECK(waiter->state == sched::ProcessState::blocked && waiter->syscall_pending);
+            CHECK(waiter->wait_registration.pending(ticket) && mock::outputs == outputs);
+        }
+        else
+        {
+            // The console wake completes the poll through its channel entry
+            // (spec 4.3); the owner's step produces the result (spec 4.4).
+            CHECK(waiter->state == sched::ProcessState::runnable && waiter->syscall_pending);
+            CHECK(!waiter->wait_registration.pending(ticket) && mock::outputs == outputs);
+            CHECK(waiter->wait_registration.completion() == sched::WaitCompletion::ready);
+        }
         struct ActiveThread { Pid pid{}; sched::ThreadId tid{}; bool active{}; };
         std::array<ActiveThread, sched::max_processes * sched::max_threads_per_process> saved{};
         usize saved_count{};
@@ -374,7 +387,22 @@ void readiness_handoff(Kernel &kernel, Pid login, Pid peer)
         const auto last_tid = native::last_tid;
         const auto entries = mock::entries;
         native::started = true; native::last_pid = 0; native::last_tid = 0;
-        CHECK(native::step(kernel));
+        const auto audit_ready = smp::check_total(smp::KernelCheck::poll_audit_ready);
+        if (audited)
+        {
+            // Every 4th audit (each 256th CPU 0 step) probes the parked poll.
+            // Its probed pick finds the readiness although no signal
+            // interrupts the wait, counts it once and completes the poll.
+            usize passes = 0;
+            for (; passes <= 4 * 256 && scheduler.find_thread(login, tid)->syscall_pending; ++passes)
+                static_cast<void>(native::step(kernel));
+            CHECK(passes > 1 && smp::check_total(smp::KernelCheck::poll_audit_ready) == audit_ready + 1);
+        }
+        else
+        {
+            CHECK(native::step(kernel));
+            CHECK(smp::check_total(smp::KernelCheck::poll_audit_ready) == audit_ready);
+        }
         CHECK(native::runtime_status() && mock::entries == entries + 1);
         waiter = scheduler.find_thread(login, tid); CHECK(waiter);
         CHECK(!waiter->syscall_pending && !waiter->wait_registration.pending(ticket));

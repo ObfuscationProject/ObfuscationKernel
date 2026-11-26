@@ -1327,14 +1327,16 @@ bool step(Kernel &kernel)
     const Candidate chosen = picked->ref;
     // Serving a thread: this kernel-lock stretch is work (overlap evidence).
     smp::bkl_mark_work();
+    // A probed poll (the audit's or a signal's): readiness no wake reported
+    // completes it here. This comes first: a probed wait that no signal
+    // interrupts stays parked in resume_interrupted_wait.
+    if (picked->probed) audit_probed_poll(kernel, chosen);
     if (const auto settled = resume_interrupted_wait(kernel, chosen, now.value());
         settled != InterruptedWait::proceed)
     {
         static_cast<void>(kernel.posix().activate(0));
         return settled == InterruptedWait::stay ? runtime_failure.ok() : false;
     }
-    // A poll the audit probed: readiness no wake reported completes it here.
-    if (picked->probed) audit_probed_poll(kernel, chosen);
     // Owner unlink (spec 4.3): what a finished wait left on its channels goes.
     kernel.scheduler().settle_wait_links(cpu);
     // A probed thread runs only once its resume completed the wait.
