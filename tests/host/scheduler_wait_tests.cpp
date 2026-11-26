@@ -483,10 +483,50 @@ void test_queue_path_two_cpus()
     CHECK(smp::check_total(smp::KernelCheck::queue) == 0 && smp::check_total(smp::KernelCheck::pin) == 0);
 }
 
+// Exec from a sibling while the leader is parked, or after it exited: the
+// leader carries the new image but is on no CPU, so exec itself queues it.
+void test_queue_path_exec_from_sibling()
+{
+    QueueFixture f;
+    const auto user = arch::configured_arch_operations().make_user_context({0x40'0000, 0x80'0000});
+    const auto repairs = smp::check_total(smp::KernelCheck::audit_repairs);
+    for (const bool leader_exited : {false, true})
+    {
+        const auto pid = f.user();
+        auto sibling = f.scheduler.create_thread_prepared(pid, f.context, [](ThreadControlBlock &created) {
+            created.native_active = true;
+            return Status::success();
+        });
+        CHECK(sibling);
+        f.run(pid);
+        if (leader_exited)
+            CHECK(f.scheduler.exit_thread(pid, pid, 0));
+        else
+        {
+            CHECK(f.scheduler.register_current_wait(ThreadWaitReason::futex, 6));
+            f.scheduler.put_prev(0);
+        }
+        CHECK(f.thread(pid).on_cpu == no_cpu && f.thread(pid).queued_cpu == no_cpu);
+        f.run(pid, sibling.value());
+        CHECK(f.scheduler.replace_image(pid, user, {}));
+        CHECK(f.scheduler.find(pid)->record_count() == 1 && !f.scheduler.cpu_slot(0).occupied());
+        CHECK(f.thread(pid).state == ProcessState::runnable && f.thread(pid).queued_cpu == 0);
+        CHECK(f.scheduler.run_queue(0).size() == 1 && f.scheduler.audit_queues() == 0);
+        // The loader's install gives the new image its native context.
+        f.thread(pid).native_active = true;
+        f.run(pid);
+        f.scheduler.put_prev(0);
+        CHECK(f.scheduler.exit_process(pid, 0) && f.scheduler.reap_process(pid));
+    }
+    CHECK(smp::check_total(smp::KernelCheck::queue) == 0 && smp::check_total(smp::KernelCheck::pin) == 0);
+    CHECK(smp::check_total(smp::KernelCheck::audit_repairs) == repairs);
+}
+
 int main()
 {
     test_queue_path_transitions();
     test_queue_path_two_cpus();
+    test_queue_path_exec_from_sibling();
     test_signal_termination_range();
     test_identity_rearm_and_completion_order();
     test_stable_slots_and_lifecycle();

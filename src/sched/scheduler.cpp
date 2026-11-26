@@ -1406,7 +1406,18 @@ void SchedulerState::free_thread_slot(ProcessControlBlock &process, ThreadContro
 {
     forget_queued(process, thread);
     store_thread_affinity(process, thread, cpu_affinity_any);
+    if (!in_table(process))
+    {
+        thread = ThreadControlBlock{};
+        return;
+    }
+    // The placement mirrors follow the reset (exec frees its caller while
+    // the caller's CPU slot still names it; that put_prev then skips it).
+    auto &slot = task_slot(process);
+    TaskHold hold{slot};
     thread = ThreadControlBlock{};
+    set_on_cpu_locked(slot, thread, no_cpu);
+    set_queued_locked(slot, thread, no_cpu);
 }
 
 u16 SchedulerState::thread_affinity(const ProcessControlBlock &process, const ThreadControlBlock &thread) const
@@ -1929,6 +1940,16 @@ Status SchedulerState::replace_image(ProcessId pid, arch::CpuContext context, co
                                                                      : ProcessExecution::kernel_thread);
     process->set_address_space_id(next_address_space_id_++);
     process->has_execed_ = true;
+    // A leader that was parked or had exited while a sibling called exec is
+    // on no CPU: nothing else queues it. On its CPU, put_prev below does.
+    smp::CpuId placed = no_cpu;
+    if (in_table(*process))
+    {
+        auto &slot = task_slot(*process);
+        TaskHold hold{slot};
+        if (thread.on_cpu == no_cpu) placed = enqueue_locked(slot, thread);
+    }
+    notify_cpu(placed);
     clear_current(pid);
     return Status::success();
 }

@@ -358,6 +358,9 @@ void leaseless_leader_exec(Kernel &kernel)
     auto &p = process(kernel, g.pid);
     EXPECT(p.record_count() == 1 && p.leader().tid == g.pid && p.leader().entry_stack.pool);
     EXPECT(p.leader().entry_stack != sibling_lease && p.leader().entry_stack != caller_lease);
+    // The revived leader is queued: nothing else would select the new image.
+    EXPECT(p.leader().state == sched::ProcessState::runnable && p.leader().on_cpu == sched::no_cpu &&
+           p.leader().queued_cpu != sched::no_cpu);
     EXPECT(!native::entry_stacks.validate_inactive(sibling_lease, {g.pid, g.sibling}));
     EXPECT(!native::entry_stacks.validate_inactive(caller_lease, {g.pid, caller.value()}));
     EXPECT(native::entry_stacks.accounting().active_slots == 0 &&
@@ -397,6 +400,11 @@ void exec_drops_leader_hotplug_request(Kernel &kernel)
     auto &p = process(kernel, g.pid);
     EXPECT(p.record_count() == 1 && p.leader().tid == g.pid);
     EXPECT(p.leader().wait_registration.ticket() == ticket && !p.leader().wait_registration.active());
+    // The parked leader carries the new image: nothing but its queue entry
+    // would select it, and its placement mirrors match.
+    EXPECT(p.leader().state == sched::ProcessState::runnable && p.leader().on_cpu == sched::no_cpu &&
+           p.leader().queued_cpu != sched::no_cpu);
+    EXPECT(kernel.scheduler().audit_queues() == 0);
     EXPECT(kernel.scheduler().thread_affinity(p, p.leader()) == 0x1);
     EXPECT(smp::hotplug::pending() == 0 && !smp::hotplug::finished(p.leader().entry_stack.slot));
     EXPECT(!smp::hotplug::consume(p.leader().entry_stack.slot, ticket));
