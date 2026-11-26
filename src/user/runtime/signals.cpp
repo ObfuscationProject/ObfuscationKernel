@@ -2031,6 +2031,18 @@ bool private_wait_interruptible(Kernel &kernel, const sched::ProcessControlBlock
         smp::count_check(smp::KernelCheck::admit_shadow_mismatch, "interruptible class differs from its predicate");
     return recorded;
 }
+bool private_wait_signal_ready(Kernel &kernel, const sched::ProcessControlBlock &process,
+                               const sched::ThreadControlBlock &thread, u64 now)
+{
+    if (linux_udp_receive_object(process.pid(), thread.tid).pool)
+        return private_linux_udp_signal_ready(kernel, process, thread);
+    return private_signal_wait_ready(kernel, process, thread, now) || private_sleep_signal_ready(kernel, process, thread) ||
+           private_pipe_signal_ready(kernel, process, thread) ||
+           private_pipe_write_signal_ready(kernel, process, thread) ||
+           private_futex_signal_ready(kernel, process, thread) || private_poll_signal_ready(kernel, process, thread) ||
+           private_child_signal_ready(kernel, process, thread) ||
+           private_terminal_signal_ready(kernel, process, thread);
+}
 void private_signal_probe(Kernel &kernel, sched::ProcessControlBlock &process)
 {
     auto &scheduler = kernel.scheduler();
@@ -2041,9 +2053,9 @@ void private_signal_probe(Kernel &kernel, sched::ProcessControlBlock &process)
         const auto view = scheduler.wait_view(process, thread);
         if (view == sched::SchedulerState::WaitView::not_waiting || !private_wait_interruptible(kernel, process, thread))
             continue;
-        u32 signal{};
-        sched::SignalAction action{};
-        if (!private_signal_interrupting(kernel, process, thread, signal, action)) continue;
+        // The per-family readiness the resume settles (a pending signal that
+        // interrupts the wait, or an ignored one a signal wait discards).
+        if (!private_wait_signal_ready(kernel, process, thread, 0)) continue;
         // A parked waiter is queued (a stopped or frozen group keeps the
         // probe for its continue or thaw); an armed one is queued by put_prev.
         if (view == sched::SchedulerState::WaitView::armed) static_cast<void>(scheduler.probe_armed(process, thread));

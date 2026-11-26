@@ -571,9 +571,10 @@ Status SchedulerState::enqueue_thread(ProcessId pid, ThreadId tid)
         TaskHold hold{slot};
         if (thread->on_cpu != no_cpu)
             return Status::success();
-        if (thread->state != ProcessState::runnable || process->state() == ProcessState::zombie ||
+        // A probed blocked thread may be queued too (its resume re-evaluates).
+        if (!queue_admits_state(*thread) || process->state() == ProcessState::zombie ||
             process->state() == ProcessState::exited)
-            return Status::invalid_argument("only a runnable thread can be queued");
+            return Status::invalid_argument("only a runnable or probed thread can be queued");
         // A stopped process is never queued; continue_process queues it.
         if (process->job_.stopped)
             return Status::invalid_argument("a stopped process is not queued");

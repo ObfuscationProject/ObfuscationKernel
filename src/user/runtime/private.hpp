@@ -983,6 +983,11 @@ bool private_wait_interruptible(Kernel &kernel, const sched::ProcessControlBlock
 // every waiting thread whose wait it may interrupt is probed; a parked one
 // is queued so that its resume re-evaluates the wait.
 void private_signal_probe(Kernel &kernel, sched::ProcessControlBlock &process);
+// Whether a pending signal settles `thread`'s wait at its next dispatch: the
+// readiness of the per-family signal completions the resume runs (a signal
+// that interrupts the wait, or an ignored one a signal wait discards).
+bool private_wait_signal_ready(Kernel &kernel, const sched::ProcessControlBlock &process,
+                               const sched::ThreadControlBlock &thread, u64 now);
 // The first pending signal `thread` would take that interrupts a wait (not
 // ignored, not a default stop), when its action is supported.
 bool private_signal_interrupting(Kernel &kernel, const sched::ProcessControlBlock &process,

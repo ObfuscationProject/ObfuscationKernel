@@ -1075,19 +1075,8 @@ usize audit_signal_probes([[maybe_unused]] Kernel &kernel, [[maybe_unused]] u64 
             if (!thread.native_active || thread.state != sched::ProcessState::blocked || thread.probe ||
                 thread.on_cpu != sched::no_cpu || thread.queued_cpu != sched::no_cpu)
                 continue;
-            bool interruptible = false;
-            if (linux_udp_receive_object(candidate.pid(), thread.tid).pool)
-                interruptible = private_linux_udp_signal_ready(kernel, candidate, thread);
-            else
-                interruptible = private_signal_wait_ready(kernel, candidate, thread, now) ||
-                                private_sleep_signal_ready(kernel, candidate, thread) ||
-                                private_pipe_signal_ready(kernel, candidate, thread) ||
-                                private_pipe_write_signal_ready(kernel, candidate, thread) ||
-                                private_futex_signal_ready(kernel, candidate, thread) ||
-                                private_poll_signal_ready(kernel, candidate, thread) ||
-                                private_child_signal_ready(kernel, candidate, thread) ||
-                                private_terminal_signal_ready(kernel, candidate, thread);
-            if (interruptible && kernel.scheduler().probe_parked(candidate, thread))
+            if (private_wait_signal_ready(kernel, candidate, thread, now) &&
+                kernel.scheduler().probe_parked(candidate, thread))
             {
                 smp::count_check(smp::KernelCheck::audit_repairs, "audit: interrupted wait without a probe");
                 ++repairs;
@@ -1115,9 +1104,7 @@ void settle_park([[maybe_unused]] Kernel &kernel, [[maybe_unused]] smp::CpuId cp
     if (!thread.native_active || thread.state != sched::ProcessState::blocked || !thread.wait_registration.active())
         return;
     const bool interruptible = private_signal_admit_blocked(kernel, process, thread);
-    u32 signal{};
-    sched::SignalAction action{};
-    const bool pending = interruptible && private_signal_interrupting(kernel, process, thread, signal, action);
+    const bool pending = interruptible && private_wait_signal_ready(kernel, process, thread, 0);
     kernel.scheduler().settle_park(cpu, interruptible ? sched::WaitClass::interruptible : sched::WaitClass::none,
                                    pending);
 #endif
@@ -1149,6 +1136,9 @@ bool step(Kernel &kernel)
     if (auto retired = shared_files.retry_retirement(); !retired) runtime_failure = retired;
     // The outer loop also handles GUI/services when no native task is ready.
     if (!runtime_failure) { started = false; return false; }
+    // A thread a caller left on this CPU parks with the owner check too (the
+    // step itself always leaves its CPU empty).
+    settle_park(kernel, smp::current_cpu());
     if (!kernel.posix().activate(0))
         return false;
     if (!started)
