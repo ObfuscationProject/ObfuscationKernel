@@ -58,8 +58,15 @@ void test_identity_rearm_and_completion_order()
     CHECK(!f.scheduler.complete_wait(forged, WaitCompletion::timeout));
     CHECK(thread->wait_registration.pending(ticket));
     CHECK(thread->native_deadline.arm(10, 0, 20, false));
+    const auto key = f.scheduler.find(ticket.owner)->thread_index(*thread);
+    CHECK(f.scheduler.arm_wait_deadline(ticket, 30));
+    CHECK(f.scheduler.deadline_of(key) == 30 && f.scheduler.earliest_deadline() == 30);
     CHECK(f.scheduler.complete_wait(ticket, WaitCompletion::ready));
-    CHECK(!thread->native_deadline.armed());
+    // The wait's heap key goes with it; the sleep record is the owner's.
+    CHECK(f.scheduler.deadline_of(key) == DeadlineHeap<deadline_keys>::never);
+    CHECK(f.scheduler.earliest_deadline() == DeadlineHeap<deadline_keys>::never);
+    CHECK(thread->native_deadline.armed());
+    thread->native_deadline.cancel();
     CHECK(thread->state == ProcessState::runnable && thread->wait_reason == ThreadWaitReason::none);
     CHECK(thread->wait_key == 0 && !thread->wait_registration.pending(ticket));
     CHECK(!f.scheduler.complete_wait(ticket, WaitCompletion::timeout));
@@ -261,7 +268,7 @@ void test_finite_wait_capacity()
         CHECK(!f.scheduler.create_thread(pid, f.context));
         for (usize thread = 0; thread < max_threads_per_process; ++thread)
         {
-            tickets[count] = f.wait(pid, ThreadWaitReason::poll, 101);
+            tickets[count] = f.wait(pid, ThreadWaitReason::pipe_read, 101);
             for (usize old = count - thread; old < count; ++old)
                 CHECK(tickets[old].thread != tickets[count].thread);
             ++count;
@@ -271,7 +278,20 @@ void test_finite_wait_capacity()
     CHECK(count == capacity && f.scheduler.process_count() == max_processes);
     CHECK(!f.scheduler.create_process("overflow", f.context));
     CHECK(!f.scheduler.schedule_next());
-    f.scheduler.wake_waiters(ThreadWaitReason::poll, 101);
+    // Every wait is linked on the channel while the entry pool lasts (256
+    // entries on the UP profiles); the rest count as unqueued and retry on a
+    // deadline, so each wait still completes.
+    const usize linked = f.scheduler.wait_channels().linked(static_cast<u8>(ThreadWaitReason::pipe_read), 101);
+    CHECK(linked == (capacity < wait_hash_entries ? capacity : wait_hash_entries));
+    CHECK(f.scheduler.unqueued_waits() == capacity - linked);
+    f.scheduler.wake_waiters(ThreadWaitReason::pipe_read, 101);
+    CHECK(f.scheduler.wait_channels().linked(static_cast<u8>(ThreadWaitReason::pipe_read), 101) == 0);
+    for (usize pass = 0; pass < capacity && f.scheduler.earliest_deadline() != DeadlineHeap<deadline_keys>::never; ++pass)
+    {
+        std::array<u16, 32> due{};
+        CHECK(f.scheduler.expire_deadlines(1'000'000'000, due) == 0);
+    }
+    CHECK(f.scheduler.earliest_deadline() == DeadlineHeap<deadline_keys>::never);
     for (const auto &ticket : tickets)
     {
         auto *thread = f.scheduler.find_thread(ticket.owner, ticket.thread);

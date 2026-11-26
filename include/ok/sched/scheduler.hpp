@@ -19,6 +19,7 @@
 #include "ok/sched/terminal.hpp"
 #include "ok/sched/terminal_open.hpp"
 #include "ok/sched/job_control.hpp"
+#include "ok/sched/wait_hash.hpp"
 #include "ok/sched/wait_registration.hpp"
 #include "ok/smp/cpu.hpp"
 #include "ok/smp/kernel_section.hpp"
@@ -474,6 +475,55 @@ using SchedulerQueueLock = smp::RankedSpinLock<smp::LockRank::run_queue>;
 using SchedulerRunQueue = CpuRunQueue<max_thread_slots, SchedulerQueueLock, ThreadHandle>;
 static_assert(RunQueue<SchedulerRunQueue>);
 
+// Wait channels (wait_hash.hpp; spec 4.3): 64 buckets under the wait_hash
+// rank, 1024 entries on the SMP-capable profiles and 256 on the others. A
+// spin lock on every profile for the reason the task locks are.
+using WaitHashLock = smp::RankedSpinLock<smp::LockRank::wait_hash>;
+inline constexpr usize wait_hash_buckets = 64;
+#if defined(__x86_64__) || defined(__aarch64__) || (defined(__riscv) && __riscv_xlen == 64)
+inline constexpr usize wait_hash_entries = 1024;
+#else
+inline constexpr usize wait_hash_entries = 256;
+#endif
+using WaitChannels = WaitHash<wait_hash_buckets, wait_hash_entries, WaitHashLock>;
+// The channel entries one wait may hold (a poll over many descriptors); a
+// wait that needs more re-evaluates on a timer instead (wait_hash_unqueued).
+inline constexpr usize max_wait_links = 16;
+struct WaitLinks
+{
+    std::array<WaitHashHandle, max_wait_links> handles{};
+    u8 count{};
+};
+
+// Deadlines (spec 4.6): one indexed heap over a key per thread slot (its
+// active wait's deadline) and one per process slot (its earliest timer).
+inline constexpr usize deadline_thread_keys = max_thread_slots;
+inline constexpr usize deadline_keys = max_thread_slots + max_processes;
+static_assert(deadline_keys == 576);
+using DeadlineLock = smp::RankedSpinLock<smp::LockRank::deadline>;
+// What a thread key does when it expires: complete the wait as timed out,
+// complete it as ready so that its owner re-evaluates (a wait without a
+// channel entry), or probe it so that its owner re-checks (a signal wait).
+enum class DeadlineAction : u8
+{
+    timeout,
+    retry,
+    probe,
+};
+// The heap's earliest deadline, read without the lock: an atomic word on the
+// 64-bit profiles; a plain one on the 32-bit ones, which run one CPU and have
+// no 64-bit atomics.
+#if defined(__LP64__) || defined(_LP64)
+using DeadlineWord = std::atomic<u64>;
+#else
+struct DeadlineWord
+{
+    u64 value{~u64{0}};
+    [[nodiscard]] u64 load(std::memory_order) const { return value; }
+    void store(u64 next, std::memory_order) { value = next; }
+};
+#endif
+
 // One open description's offset and flags across one offset-dependent I/O,
 // with the provider call that depends on them (ok/smp/lock.hpp rank
 // ofd_position). Taken in both modes: under the kernel lock and in a kernel
@@ -761,15 +811,64 @@ class SchedulerState
     Result<usize> write_pipe_fragment(u16 pipe, std::span<const std::byte> in, bool atomic_request);
     [[nodiscard]] Result<PipeReadiness> pipe_readiness(u16 pipe) const;
     Status block_current(ThreadWaitReason reason, u64 key);
-    // Serialized boot-CPU wait ownership. Tokens never identify a TCB address.
+    // Arms the calling thread's wait (spec 4.2). The caller has checked its
+    // condition under the object's lock (today the kernel lock) and keeps
+    // holding it: a wait whose reason is a wait channel is linked on
+    // (reason, key) before this returns (spec 4.3 A1), and the owner first
+    // drops whatever its previous wait left linked. Tokens never identify a
+    // TCB address.
     Result<WaitTicket> register_current_wait(ThreadWaitReason reason, u64 key);
+    // The reasons whose waits wake_waiters completes, so their waits are
+    // linked on their own channel when armed: child, pipe, console, PTY and
+    // job-control waits. Every other wait completes by its ticket.
+    [[nodiscard]] static constexpr bool channel_reason(ThreadWaitReason reason)
+    {
+        return reason == ThreadWaitReason::child || reason == ThreadWaitReason::pipe_read ||
+               reason == ThreadWaitReason::pipe_write || reason == ThreadWaitReason::console_read ||
+               reason == ThreadWaitReason::pty_read || reason == ThreadWaitReason::pty_write ||
+               reason == ThreadWaitReason::job_control;
+    }
+    // Links the caller's pending wait on one more channel (spec 4.3 A3: a
+    // poll links every watched channel, then checks readiness). False when
+    // the entry pool or the wait's link slots are exhausted; the wait then
+    // re-evaluates within a tick (counted as unqueued).
+    bool watch_channel(WaitTicket ticket, ThreadWaitReason reason, u64 key);
+    // Owner unlink (spec 4.3): drops the entries a thread's waits left
+    // linked. The owner calls it once its wait is over, the quiescer for a
+    // thread it retires. Takes the bucket locks: no task lock may be held.
+    void release_wait_links(const ProcessControlBlock &process, const ThreadControlBlock &thread);
+    // The thread running on `cpu`, once its wait is no longer pending.
+    void settle_wait_links(smp::CpuId cpu);
+    // Arms the deadline of the caller's pending wait (spec 4.6): keeps the
+    // earlier of an existing deadline of the same wait and this one.
+    bool arm_wait_deadline(WaitTicket ticket, u64 deadline, DeadlineAction action = DeadlineAction::timeout);
+    // A process slot's earliest timer expiry; DeadlineHeap::never removes it.
+    void set_process_deadline(usize process_slot, u64 deadline);
+    // Expires every due deadline (spec 4.6): thread keys complete, probe or
+    // retry their wait here; due process slots are written to `processes`
+    // for the caller's timer service. Returns how many it wrote.
+    usize expire_deadlines(u64 now, std::span<u16, 32> processes);
+    // The earliest armed deadline, loaded without the lock.
+    [[nodiscard]] u64 earliest_deadline() const { return earliest_.load(std::memory_order_acquire); }
+    [[nodiscard]] u64 deadline_of(u16 key);
+    [[nodiscard]] WaitChannels &wait_channels() { return wait_channels_; }
+    // Waits linked on no channel for want of an entry (re-evaluated on a timer).
+    [[nodiscard]] u64 unqueued_waits() const { return unqueued_waits_.load(std::memory_order_relaxed); }
     // `source` names what made the wait ready; completed waits are counted by
     // the source their registration recorded.
     // Under the waiter's task lock: a completed parked waiter is queued (and
     // its CPU woken after the unlock); an armed one is queued by put_prev.
+    // The wait's deadline goes with it.
     bool complete_wait(WaitTicket ticket, WaitCompletion completion, WakeSource source = WakeSource::thread);
+    // Sets the probe of a pending wait (spec 4.7 A5: a timed signal wait
+    // reached its deadline) and queues the thread if it is parked.
+    bool probe_wait(WaitTicket ticket);
     [[nodiscard]] ThreadControlBlock *find_thread(ProcessId pid, ThreadId tid);
     [[nodiscard]] ThreadControlBlock *current_thread();
+    // Spec 4.3 A2: unlinks the channel's entries a batch at a time under the
+    // bucket lock and completes each one as ready after releasing it, until
+    // the bucket holds no match. The caller holds the lock of the condition
+    // it made true (today the kernel lock), never a task lock.
     void wake_waiters(ThreadWaitReason reason, u64 key, WakeSource source = WakeSource::thread);
     // Ready and timed-out waits completed so far, by wake source: the sum of
     // the per-CPU counters, each written only by its CPU.
@@ -967,6 +1066,11 @@ class SchedulerState
     // registration completed becomes runnable (stuck_completed). Each repair
     // counts audit_repairs. Returns the repairs.
     usize audit_queues();
+    // The poll part of the audit (spec 4.10): every parked poll waiter is
+    // probed and queued, so that its owner re-evaluates readiness; one that
+    // finds readiness no wake reported counts poll_audit_ready. Returns the
+    // waiters probed.
+    usize probe_poll_waiters();
     Status set_runnable(ProcessId pid);
     Status block_process(ProcessId pid);
     // Job-control overlay (job_control.inc). A stopped process keeps its
@@ -984,6 +1088,9 @@ class SchedulerState
     [[nodiscard]] bool process_group_has_stopped(ProcessId group) const;
     // Child-wait key of a process-group selector; pid keys stay below 2^32.
     [[nodiscard]] static constexpr u64 child_group_wait_key(ProcessId group) { return (u64{1} << 32) | group; }
+    // The pipe_read channel of a UNIX listener's accept queue; pipe keys are
+    // descriptions below 2^16.
+    [[nodiscard]] static constexpr u64 unix_listener_wait_key(u16 description) { return (u64{1} << 16) | description; }
 
     // No-argument native services act for the thread of the calling CPU.
     [[nodiscard]] ProcessId current_pid() const
@@ -1076,6 +1183,14 @@ class SchedulerState
     void set_on_cpu_locked(ProcessSlot &slot, ThreadControlBlock &thread, smp::CpuId cpu);
     void forget_queued_locked(ProcessSlot &slot, ThreadControlBlock &thread);
     void occupy_locked(smp::CpuId cpu, ProcessSlot &slot, ThreadControlBlock &thread);
+    // Caller holds the thread's task lock: its wait deadline goes (the
+    // deadline lock nests above the task lock).
+    void forget_wait_deadline_locked(u16 index);
+    // Links a pending wait of thread slot `index` on (reason, key) and records
+    // the handle; on exhaustion the wait retries within a tick.
+    bool link_wait(WaitTicket ticket, ThreadWaitReason reason, u64 key);
+    void release_wait_links(u16 index);
+    void publish_earliest_locked();
     void count_wake(WakeSource source);
     [[nodiscard]] bool steal_eligible(ThreadHandle handle, smp::CpuId victim, smp::CpuId cpu) const;
     // The CPU 0 fallback of select_cpu admits a thread whose affinity names no configured CPU.
@@ -1189,6 +1304,27 @@ class SchedulerState
     std::array<AffinityBroken, 16> affinity_broken_{};
     u64 affinity_broken_total_{}, affinity_broken_taken_{};
     bool native_userland_{};
+    // Wait channels and the entries each thread slot's waits linked there
+    // (written by the owner, or by the quiescer of a thread it retires).
+    WaitChannels wait_channels_{};
+    std::array<WaitLinks, max_thread_slots> wait_links_{};
+    std::atomic<u32> unqueued_waits_{};
+    // Deadlines (spec 4.6): the heap, the wait each thread key belongs to,
+    // and the earliest deadline for lock-free checks.
+    DeadlineLock deadline_lock_{};
+    DeadlineHeap<deadline_keys> deadlines_{};
+    struct DeadlineEntry
+    {
+        WaitTicket ticket{};
+        DeadlineAction action{};
+    };
+    std::array<DeadlineEntry, deadline_thread_keys> deadline_waits_{};
+    DeadlineWord earliest_{~u64{0}};
+    // The latest `now` an expiry pass saw (under the deadline lock): the base
+    // of a retry deadline, so the scheduler reads no clock itself.
+    u64 deadline_clock_{};
+    // How soon a wait without a channel entry re-evaluates.
+    static constexpr u64 wait_retry_ns = 10'000'000;
 };
 
 template <SchedulerPolicy Policy = RoundRobinPolicy> class BasicScheduler final : public SchedulerState

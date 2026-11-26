@@ -288,6 +288,7 @@ Result<usize> SchedulerState::exit_thread(ProcessId pid, ThreadId tid, smp::CpuI
         TaskHold hold{slot};
         thread->wait_registration.cancel();
         thread->native_deadline.cancel();
+        forget_wait_deadline_locked(process->thread_index(*thread));
         thread->syscall_pending = false;
         thread->native_active = false;
         thread->wait_reason = ThreadWaitReason::none;
@@ -297,6 +298,7 @@ Result<usize> SchedulerState::exit_thread(ProcessId pid, ThreadId tid, smp::CpuI
         thread->slot_state = ThreadSlotState::exited;
         forget_queued_locked(slot, *thread);
     }
+    release_wait_links(*process, *thread);
     if (cpu_slots_[cpu].pid == pid && cpu_slots_[cpu].tid == tid)
         vacate_cpu_slot(cpu);
     const usize live = process->live_count();
@@ -1172,9 +1174,12 @@ void SchedulerState::install_thread(ProcessControlBlock &process, ThreadControlB
         return;
     }
     auto &slot = task_slot(process);
+    // A reused exited record's channel entries and deadline go first.
+    release_wait_links(process, slot_thread);
     smp::CpuId placed = no_cpu;
     {
         TaskHold hold{slot};
+        forget_wait_deadline_locked(process.thread_index(slot_thread));
         // A reused exited record may still name a stale queue entry.
         forget_queued_locked(slot, slot_thread);
         slot_thread = created;
@@ -1211,6 +1216,7 @@ Status SchedulerState::set_runnable(ProcessId pid)
         {
             thread.wait_registration.cancel();
             thread.native_deadline.cancel();
+            forget_wait_deadline_locked(process->thread_index(thread));
             thread.wait_reason = ThreadWaitReason::none;
             thread.wait_key = 0;
             thread.probe = false;
@@ -1219,6 +1225,7 @@ Status SchedulerState::set_runnable(ProcessId pid)
                 if (const auto cpu = enqueue_locked(slot, thread); cpu != no_cpu) placed |= 1u << cpu;
         }
     }
+    for (const auto &thread : process->live_threads()) release_wait_links(*process, thread);
     for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
         if ((placed & (1u << cpu)) != 0) notify_cpu(cpu);
     return Status::success();
@@ -1411,10 +1418,13 @@ void SchedulerState::free_thread_slot(ProcessControlBlock &process, ThreadContro
         thread = ThreadControlBlock{};
         return;
     }
+    // A free slot keeps no channel entry and no deadline (spec 3.3).
+    release_wait_links(process, thread);
     // The placement mirrors follow the reset (exec frees its caller while
     // the caller's CPU slot still names it; that put_prev then skips it).
     auto &slot = task_slot(process);
     TaskHold hold{slot};
+    forget_wait_deadline_locked(process.thread_index(thread));
     thread = ThreadControlBlock{};
     set_on_cpu_locked(slot, thread, no_cpu);
     set_queued_locked(slot, thread, no_cpu);
@@ -1945,8 +1955,10 @@ Status SchedulerState::replace_image(ProcessId pid, arch::CpuContext context, co
     smp::CpuId placed = no_cpu;
     if (in_table(*process))
     {
+        release_wait_links(*process, thread);
         auto &slot = task_slot(*process);
         TaskHold hold{slot};
+        forget_wait_deadline_locked(process->thread_index(thread));
         if (thread.on_cpu == no_cpu) placed = enqueue_locked(slot, thread);
     }
     notify_cpu(placed);
@@ -1999,6 +2011,7 @@ Status SchedulerState::finish_process(ProcessId pid, i32 code, u8 signal)
         {
             thread.native_deadline.cancel();
             thread.wait_registration.cancel();
+            forget_wait_deadline_locked(process->thread_index(thread));
             thread.syscall_pending = false;
             thread.wait_reason = ThreadWaitReason::none;
             thread.wait_key = 0;
@@ -2009,6 +2022,10 @@ Status SchedulerState::finish_process(ProcessId pid, i32 code, u8 signal)
         }
         slot->lifecycle.store(static_cast<u32>(ProcessLifecycle::zombie), std::memory_order_release);
     }
+    // A zombie keeps no channel entry and no timer deadline.
+    for (const auto &thread : process->thread_records()) release_wait_links(*process, thread);
+    if (const auto index = process->process_slot(); index < max_processes)
+        set_process_deadline(index, DeadlineHeap<deadline_keys>::never);
     release_resources(process->resources());
     clear_current(pid);
     wake_waiters(ThreadWaitReason::child, pid);
@@ -2262,19 +2279,252 @@ Result<WaitTicket> SchedulerState::register_current_wait(ThreadWaitReason reason
     auto *current = running.thread;
     if (current == nullptr || current->tid != running.tid || current->owner != process->pid())
         return Status::not_found("no current thread to block");
-    // Armed under the task lock (spec 4.2): a completion either finds the
-    // wait registered or has not started.
-    TaskHold hold{task_slot(*process)};
-    if (current->state != ProcessState::running)
-        return Status::busy("wait owner is not running");
-    auto ticket = current->wait_registration.arm(process->pid(), current->tid, process->thread_index(*current));
-    if (!ticket)
-        return ticket.status();
-    current->state = ProcessState::blocked;
-    current->wait_reason = reason;
-    current->wait_key = key;
-    current->probe = false;
-    return ticket;
+    // Owner unlink: entries the previous wait left go before this one links.
+    release_wait_links(*process, *current);
+    WaitTicket armed{};
+    {
+        // Armed under the task lock (spec 4.2): a completion either finds the
+        // wait registered or has not started.
+        TaskHold hold{task_slot(*process)};
+        if (current->state != ProcessState::running)
+            return Status::busy("wait owner is not running");
+        auto ticket = current->wait_registration.arm(process->pid(), current->tid, process->thread_index(*current));
+        if (!ticket)
+            return ticket.status();
+        armed = ticket.value();
+        current->state = ProcessState::blocked;
+        current->wait_reason = reason;
+        current->wait_key = key;
+        current->probe = false;
+    }
+    // Spec 4.3 A1: linked on its channel after the arm, before the caller
+    // releases the lock of the condition it checked.
+    if (channel_reason(reason)) static_cast<void>(link_wait(armed, reason, key));
+    return armed;
+}
+
+bool SchedulerState::link_wait(WaitTicket ticket, ThreadWaitReason reason, u64 key)
+{
+    if (ticket.index >= max_thread_slots) return false;
+    auto &links = wait_links_[ticket.index];
+    std::optional<WaitHashHandle> handle{};
+    if (links.count < max_wait_links)
+        handle = wait_channels_.insert(static_cast<u8>(reason), key, ticket);
+    if (handle)
+    {
+        auto &slot = slots_[ticket.index / max_threads_per_process];
+        TaskHold hold{slot};
+        const auto &thread = slot.pcb.threads_[ticket.index % max_threads_per_process];
+        if (thread.wait_registration.pending(ticket) && links.count < max_wait_links)
+        {
+            links.handles[links.count++] = *handle;
+            return true;
+        }
+    }
+    else
+    {
+        // No entry: the wait cannot be woken through its channel. It
+        // completes ready within a tick and its owner re-evaluates it.
+        unqueued_waits_.store(unqueued_waits_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        const auto cpu = smp::current_cpu();
+        if (cpu < smp::max_cpus) smp::detail::owner_add(smp::evidence_cpus[cpu].unqueued);
+        u64 now{};
+        {
+            const DeadlineLock::Guard guard{deadline_lock_};
+            now = deadline_clock_;
+        }
+        static_cast<void>(arm_wait_deadline(ticket, now + wait_retry_ns, DeadlineAction::retry));
+        return false;
+    }
+    // The wait completed meanwhile: the entry is not recorded, so drop it now.
+    static_cast<void>(wait_channels_.unlink(*handle));
+    return false;
+}
+
+bool SchedulerState::watch_channel(WaitTicket ticket, ThreadWaitReason reason, u64 key)
+{
+    smp::check_exclusive("SchedulerState::watch_channel");
+    if (ticket.index >= max_thread_slots) return false;
+    const auto cpu = smp::current_cpu();
+    if (cpu >= smp::max_cpus || cpu_slots_[cpu].thread == nullptr || cpu_slots_[cpu].tid != ticket.thread)
+        return false;
+    return link_wait(ticket, reason, key);
+}
+
+void SchedulerState::release_wait_links(u16 index)
+{
+    if (index >= max_thread_slots) return;
+    auto &links = wait_links_[index];
+    WaitLinks taken{};
+    {
+        auto &slot = slots_[index / max_threads_per_process];
+        TaskHold hold{slot};
+        taken = links;
+        links = {};
+    }
+    // A handle whose entry a waker took no longer matches its generation.
+    for (usize i = 0; i < taken.count; ++i) static_cast<void>(wait_channels_.unlink(taken.handles[i]));
+}
+
+void SchedulerState::release_wait_links(const ProcessControlBlock &process, const ThreadControlBlock &thread)
+{
+    if (in_table(process)) release_wait_links(process.thread_index(thread));
+}
+
+void SchedulerState::settle_wait_links(smp::CpuId cpu)
+{
+    if (cpu >= smp::max_cpus) return;
+    const auto &current = cpu_slots_[cpu];
+    if (!current.occupied() || !current.process || !current.thread || !in_table(*current.process)) return;
+    const auto index = current.process->thread_index(*current.thread);
+    if (index >= max_thread_slots || wait_links_[index].count == 0) return;
+    {
+        TaskHold hold{task_slot(*current.process)};
+        if (current.thread->wait_registration.active()) return;
+    }
+    release_wait_links(index);
+}
+
+void SchedulerState::publish_earliest_locked()
+{
+    earliest_.store(deadlines_.earliest(), std::memory_order_release);
+}
+
+void SchedulerState::forget_wait_deadline_locked(u16 index)
+{
+    if (index >= deadline_thread_keys) return;
+    const DeadlineLock::Guard guard{deadline_lock_};
+    if (deadlines_.remove(index))
+    {
+        deadline_waits_[index] = {};
+        publish_earliest_locked();
+    }
+}
+
+bool SchedulerState::arm_wait_deadline(WaitTicket ticket, u64 deadline, DeadlineAction action)
+{
+    if (ticket.index >= deadline_thread_keys) return false;
+    auto &slot = slots_[ticket.index / max_threads_per_process];
+    TaskHold hold{slot};
+    const auto &thread = slot.pcb.threads_[ticket.index % max_threads_per_process];
+    if (!thread.wait_registration.pending(ticket)) return false;
+    const DeadlineLock::Guard guard{deadline_lock_};
+    auto &entry = deadline_waits_[ticket.index];
+    // One wait, one deadline: the earlier of two arms of the same wait.
+    if (deadlines_.contains(ticket.index) && entry.ticket == ticket && deadlines_.when(ticket.index) <= deadline)
+        return true;
+    entry = {ticket, action};
+    deadlines_.set(ticket.index, deadline);
+    publish_earliest_locked();
+    return true;
+}
+
+void SchedulerState::set_process_deadline(usize process_slot, u64 deadline)
+{
+    if (process_slot >= max_processes) return;
+    const auto key = static_cast<u16>(deadline_thread_keys + process_slot);
+    const DeadlineLock::Guard guard{deadline_lock_};
+    if (deadline == DeadlineHeap<deadline_keys>::never) deadlines_.remove(key);
+    else deadlines_.set(key, deadline);
+    publish_earliest_locked();
+}
+
+u64 SchedulerState::deadline_of(u16 key)
+{
+    const DeadlineLock::Guard guard{deadline_lock_};
+    return deadlines_.when(key);
+}
+
+usize SchedulerState::expire_deadlines(u64 now, std::span<u16, 32> processes)
+{
+    usize written = 0;
+    // Bounded batches: pop under the lock, act after releasing it.
+    for (usize pass = 0; pass < 8; ++pass)
+    {
+        struct Due
+        {
+            u16 key{};
+            DeadlineEntry entry{};
+        };
+        std::array<Due, 32> due{};
+        usize count = 0;
+        u64 late = 0;
+        {
+            const DeadlineLock::Guard guard{deadline_lock_};
+            if (now > deadline_clock_) deadline_clock_ = now;
+            while (count < due.size())
+            {
+                if (deadlines_.earliest() > now) break;
+                const auto when = deadlines_.earliest();
+                const auto key = deadlines_.pop_due(now);
+                if (!key) break;
+                // A process key needs room in the caller's array; it waits otherwise.
+                if (*key >= deadline_thread_keys && written + count >= processes.size())
+                {
+                    deadlines_.set(*key, now);
+                    break;
+                }
+                if (now - when > late) late = now - when;
+                due[count].key = *key;
+                if (*key < deadline_thread_keys)
+                {
+                    due[count].entry = deadline_waits_[*key];
+                    deadline_waits_[*key] = {};
+                }
+                ++count;
+            }
+            publish_earliest_locked();
+        }
+        if (const auto cpu = smp::current_cpu(); cpu < smp::max_cpus && late / 1000 > 0)
+        {
+            auto &record = smp::evidence_cpus[cpu].deadline_late_max_us;
+            if (late / 1000 > record.load(std::memory_order_relaxed))
+                record.store(static_cast<uptr>(late / 1000), std::memory_order_relaxed);
+        }
+        for (usize i = 0; i < count; ++i)
+        {
+            const auto &item = due[i];
+            if (item.key >= deadline_thread_keys)
+            {
+                processes[written++] = static_cast<u16>(item.key - deadline_thread_keys);
+                continue;
+            }
+            // The ticket rejects a wait that completed or re-armed meanwhile.
+            switch (item.entry.action)
+            {
+            case DeadlineAction::timeout:
+                static_cast<void>(complete_wait(item.entry.ticket, WaitCompletion::timeout));
+                break;
+            case DeadlineAction::retry:
+                static_cast<void>(complete_wait(item.entry.ticket, WaitCompletion::ready, WakeSource::timer));
+                break;
+            case DeadlineAction::probe:
+                static_cast<void>(probe_wait(item.entry.ticket));
+                break;
+            }
+        }
+        if (count < due.size()) break;
+    }
+    return written;
+}
+
+bool SchedulerState::probe_wait(WaitTicket ticket)
+{
+    if (ticket.index >= max_thread_slots) return false;
+    auto &slot = slots_[ticket.index / max_threads_per_process];
+    smp::CpuId placed = no_cpu;
+    {
+        TaskHold hold{slot};
+        auto &thread = slot.pcb.threads_[ticket.index % max_threads_per_process];
+        if (thread.tid != ticket.thread || thread.state != ProcessState::blocked ||
+            !thread.wait_registration.pending(ticket) || thread.probe)
+            return false;
+        thread.probe = true;
+        // A parked waiter is queued now; an armed one by its put_prev.
+        if (thread.on_cpu == no_cpu) placed = enqueue_locked(slot, thread);
+    }
+    notify_cpu(placed);
+    return true;
 }
 bool SchedulerState::complete_wait(WaitTicket ticket, WaitCompletion completion, WakeSource source)
 {
@@ -2306,7 +2556,9 @@ bool SchedulerState::complete_wait(WaitTicket ticket, WaitCompletion completion,
             return false;
         if (completion == WaitCompletion::ready || completion == WaitCompletion::timeout)
             count_wake(thread->wait_registration.source());
-        thread->native_deadline.cancel();
+        // The wait's deadline goes with it (task -> deadline). A sleep's own
+        // record (native_deadline) is the owner's: its resume settles it.
+        forget_wait_deadline_locked(process.thread_index(*thread));
         thread->wait_reason = ThreadWaitReason::none;
         thread->wait_key = 0;
         thread->probe = false;
@@ -2333,16 +2585,50 @@ u64 SchedulerState::wakes(WakeSource source) const
 void SchedulerState::wake_waiters(ThreadWaitReason reason, u64 key, WakeSource source)
 {
     smp::check_exclusive("SchedulerState::wake_waiters");
-    for (auto &process : process_range())
+    std::array<WaitTicket, WaitChannels::wake_batch> batch{};
+    for (;;)
     {
-        if (process.state() == ProcessState::zombie || process.state() == ProcessState::exited)
-            continue;
-        for (auto &thread : process.live_threads())
-            if (thread.state == ProcessState::blocked && thread.wait_reason == reason && thread.wait_key == key)
-            {
-                static_cast<void>(complete_wait(thread.wait_registration.ticket(), WaitCompletion::ready, source));
-            }
+        // Unlinked under the bucket lock, completed after releasing it
+        // (bucket -> task never nests). A stale ticket completes nothing.
+        const auto taken = wait_channels_.take(static_cast<u8>(reason), key, batch);
+        for (usize i = 0; i < taken.count; ++i)
+            static_cast<void>(complete_wait(batch[i], WaitCompletion::ready, source));
+        if (!taken.more) break;
     }
+}
+
+usize SchedulerState::probe_poll_waiters()
+{
+    usize probed = 0;
+    const TaskTableLock::Guard table{task_table_};
+    for (auto &slot : slots_)
+    {
+        if (slot.state() != ProcessLifecycle::live) continue;
+        u32 placed = 0;
+        {
+            TaskGuard guard{slot};
+            auto &process = slot.pcb;
+            if (process.execution() != ProcessExecution::user_process || process.job_.stopped) continue;
+            for (auto &thread : process.live_threads())
+            {
+                if (!thread.native_active || thread.state != ProcessState::blocked || thread.probe ||
+                    thread.wait_reason != ThreadWaitReason::poll || !thread.wait_registration.active() ||
+                    thread.on_cpu != no_cpu || thread.queued_cpu != no_cpu)
+                    continue;
+                thread.probe = true;
+                if (const auto cpu = enqueue_locked(slot, thread); cpu != no_cpu)
+                {
+                    placed |= 1u << cpu;
+                    ++probed;
+                }
+                else
+                    thread.probe = false;
+            }
+        }
+        for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
+            if ((placed & (1u << cpu)) != 0) notify_cpu(cpu);
+    }
+    return probed;
 }
 
 #include "console_input.inc"

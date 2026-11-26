@@ -532,6 +532,8 @@ void SchedulerState::cancel_console_epoch(u32 epoch)
             if (thread.state == ProcessState::blocked && thread.wait_reason == ThreadWaitReason::console_read &&
                 thread.wait_key == epoch)
                 static_cast<void>(complete_wait(thread.wait_registration.ticket(), WaitCompletion::cancelled));
+    // Polls watching the console channel see the lost authority (POLLHUP).
+    wake_waiters(ThreadWaitReason::console_read, epoch);
 }
 
 void SchedulerState::retire_console_process(ProcessId pid)

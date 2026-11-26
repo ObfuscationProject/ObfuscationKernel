@@ -168,6 +168,8 @@ Status SchedulerState::connect_unix_socket(u16 description, const fs::SocketPath
     auto *server_open = open_description(child.value());
     server_open->references = 1; server_open->unix_queue_references = 1;
     listener->pending[listener->pending_count++] = child.value();
+    // A poll on the listener watches this channel (its readiness: pending_count).
+    wake_waiters(ThreadWaitReason::pipe_read, unix_listener_wait_key(listener->description));
     return {};
 }
 Result<UnixPeerCredentials> SchedulerState::unix_peer_credentials(u16 description) const
