@@ -158,8 +158,10 @@ threads are. No thread transition rewrites a process state.
 Transitions queue a `user_process` thread whenever it may run and is neither
 on a CPU nor queued (`enqueue_locked`, spec 4.2): completion of a parked wait
 (`complete_wait`), `put_prev`, clone (`install_thread`), `set_runnable`
-(spawn, fork, init), `continue_process`, the probe of an interruptible wait
-and the repair audit. `kernel_thread` records are never queued this way; the
+(spawn, fork, init), `continue_process`, exec (`replace_image` queues a
+leader that was parked or had exited when a sibling called exec; a leader
+that called exec itself is queued by the `put_prev` of its CPU), the probe of
+an interruptible wait and the repair audit. `kernel_thread` records are never queued this way; the
 kernel tick keeps dispatching them through its policy. A thread may run when
 it is runnable, or blocked with `probe` set (a pending signal may interrupt
 its wait), its process is live and not stopped. After the unlock the waker
