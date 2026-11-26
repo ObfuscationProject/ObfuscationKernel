@@ -165,4 +165,45 @@ ABI is not bumped.
 
 ## Validation
 
-See the result notes under `smp-scaling/waveB/WP4b` for the logs.
+All runs are QEMU TCG on the pinned SysToolchain QEMU 10.2 (`scope=hardware`
+means the emulated machine); model tests print `scope=model`. Kernel at
+beca7c0 unless stated; logs under `smp-scaling/waveB/WP4b/logs`.
+
+- Hosted: the full `scripts/hosted_suite.py` with the toolchain root: 173
+  passed, 0 failed, 59 not run (inputs, quarantine, ext4 fixture), including
+  the new `test_wait_hash.py` and `test_deadline_heap.py` on all ten
+  profiles. That run started at ee9d2b6; the 17 runners that cover the
+  scheduler, the waits and the runtime steps were rerun at beca7c0 and pass.
+  The A3 model ran 20000 rounds with both interleavings (in one run 3857
+  polls saw the condition at their check and 11952 were completed through
+  their entry, none lost); the expiry race 20000 rounds (about a hundred
+  expiries won, the rest completions). The quarantined runners fail at the
+  same check or build step as on the baseline 12c2d2d (`linux_udp_sockname`
+  passes on both).
+- Kernel: debug `xmake test` at `-smp 1` on all ten profiles and at 2 and 4
+  on x86_64, aarch64 and rv64 (16 of 16 `OK_TEST_PASS`); `legacy_select=y`
+  `xmake test -smp 1` on x86_64 (at 123b796).
+- OS (private copy of `wt/os-smp-scaling` b8dceae, unchanged; no OS patch):
+  native distro boot to `OK_USERLAND scope=hardware acceptance=pass` on all
+  ten profiles, every check counter 0, `unqueued=0`, `OK_SMP_AUDIT
+  repairs=0 poll_ready=0`. On x86_64, aarch64 and rv64: `test_smp_stress.py
+  --user-hotplug` in debug at 2 and 4 vCPUs and in release at 2 and 4, the
+  futex probe at 2, `--smp_hotplug_test=y --require-hotplug` at 2 and
+  `smp_sections=n` at 2; the CPU sysfs probe at 4 vCPUs on x86_64 and at
+  one on arm32. All 22 runs pass with every check counter (`lock_violations`,
+  the assertion counters, `admit_shadow_mismatch`, `quiesce_timeouts`,
+  `audit_repairs`, `poll_audit_ready`) at zero, `unqueued=0`, and
+  `max_lock_depth` 5 in debug kernels and 0 in release ones. In the first
+  pass the x86_64 SDK export for two of them failed in xmake (`boot16.bin`
+  not found, as WP4a saw); both passed on the rerun.
+- Evidence in those runs: `OK_SMP_LOCKS wait_hash` 24334 to 25448
+  acquisitions without contention in the debug stress runs; `OK_SMP_WAKE
+  deadline_late_max_us` 10 ms to 340 ms (a deadline expires at the next step
+  of any CPU; the stress runs keep CPUs in long kernel stretches and stop
+  CPUs for hotplug); `probes=0` (the stress workers neither poll nor take
+  signals in waits, so the poll audit probed nothing there; the wait hash
+  model covers it).
+- Before the storage was compacted (ee9d2b6's parent, 153 KB per
+  scheduler) the same matrix passed except the two x86_64 debug runs at 4
+  vCPUs, where posix-check's 4 MB mmap failed with ENOMEM (`free_frames`
+  1563); after the change both pass with `free_frames` 1892.
