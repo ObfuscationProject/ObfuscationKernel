@@ -225,7 +225,7 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
     {
         if (line >= max_irq_lines)
             return Status{StatusCode::not_found, "irq line not bound"};
-        Status result{StatusCode::not_found, "irq handler not bound to this line"};
+        auto result = Status::not_found("irq handler not bound to this line");
         auto &entry = lines_[line];
         {
             Guard guard(lock_);
