@@ -120,7 +120,8 @@ valid memory for the scheduler's lifetime; what it names is checked by id.
   `complete_wait` finds its waiter without a search; a ticket armed outside
   `register_current_wait` (no index) is still found by its identities.
 - Each CPU has a `CpuSlot`: pid, tid, PCB and TCB pointers and its dispatch
-  counters, written by `occupy_cpu`/`vacate_cpu_slot`. The POSIX service reads
+  counters, written by `occupy_cpu`/`vacate_cpu_slot`; occupying a CPU takes a
+  pin on the process slot that vacating it drops. The POSIX service reads
   its caller from there (or from an explicit binding, which kernel sections
   set), never by searching the table.
 
@@ -133,40 +134,87 @@ reuse, pins against reap, exited-slot iteration).
 
 `SchedulerState` owns one `CpuRunQueue` per CPU (`include/ok/sched/run_queue.hpp`):
 a bounded FIFO of `ThreadHandle{index, tid}` entries, never PCB/TCB addresses
-(see Task storage above). `dequeue_thread` still returns the external
-`ThreadRef{pid, tid}`.
-Each queue has its own lock, selected at build time through `SchedulerRunQueue`
-and constrained by the `RunQueue` concept; every queue operation takes only that
-lock, so no path holds two queue locks. Queues are a mechanism: nothing enqueues
-implicitly, and the native runtime still picks threads by its own scan.
+(see Task storage above). Each queue has its own `run_queue` lock (rank 56, a
+`RankedSpinLock` on every profile so that the exported layout is one),
+selected at build time through `SchedulerRunQueue` and constrained by the
+`RunQueue` concept; every queue operation takes only that lock, so no path
+holds two queue locks. A queue keeps an atomic mirror of its entry count,
+which idle checks and victim choice load without the lock, and a `closed`
+flag: the queue of an offline CPU refuses pushes.
 
-- `set_online_cpus(mask)` keeps CPU 0 online and refuses unconfigured CPUs; the
-  default is CPU 0 only. `configure_cpus` intersects the online set with the new
-  count and places entries of removed CPUs again.
-- CPU hotplug uses `offline_cpu(cpu)` and `online_cpu(cpu)`. A secondary CPU
-  that leaves the online set has its queue popped and every live entry placed
-  again on an online queue, and stale entries are dropped, so no thread is lost
-  or queued twice. Its current slot stays until that CPU vacates it.
-  `online_cpu` only sets the bit again, and the CPU starts with an empty queue.
-- `enqueue_thread` places a runnable thread once (`queued_cpu`); a thread already
-  queued or on a CPU is left alone. `select_cpu` prefers the last CPU while it is
-  online and allowed, then the allowed online CPU with the shortest queue (lowest
-  id on a tie), and otherwise CPU 0. It never picks an offline CPU. CPU 0 runs such
-  an entry only when the affinity names no configured CPU. Otherwise the entry
-  waits on CPU 0's queue until a CPU it allows comes online and dequeues or
-  steals it.
-- `dequeue_thread(cpu)` pops the CPU's own queue, discarding stale entries
-  (threads that blocked after they were queued) and moving entries whose
-  affinity changed. An empty queue steals the oldest eligible entry from the longest
-  other online queue, try-locking each victim after releasing its own lock.
-- `mark_on_cpu` dispatches a thread on a vacant online CPU and refuses a thread
-  already on another CPU; `clear_on_cpu` vacates it. `on_cpu` mirrors each CPU's
-  current slot and replaces the per-CPU scan that guarded double dispatch.
-- Thread exit, exec, process exit and reap remove the affected entries, so each
-  queue holds at most one entry per thread record and cannot overflow.
-- A preempted thread leaves its process `running` while another of its threads
-  is still on a CPU; with one CPU the transitions are unchanged.
+### Task locks and placement (smp-scaling WP4a)
 
-`python3 -B scripts/test_run_queues.py --sanitize` is the hosted model suite
-(`OK_RUN_QUEUES scope=model`). Host threads stand in for CPUs in its contention
-case; it is not AP start, IPI or hardware SMP evidence.
+Every thread transition runs under its process slot's `task` lock (rank 52),
+still inside the big kernel lock; the queue lock nests above it. Each TCB's
+`on_cpu` and `queued_cpu` have atomic mirrors in its process slot, and the slot
+mirrors the stop flag (`run_flags`) and the process affinity mask; they are
+stored with the TCB field under the task lock and loaded without it only by
+stealing. A write without the task lock counts `queue_asserts`.
+
+A process stores only its lifecycle (created, live, zombie, exited);
+`state()` is `derived_state()`: running, runnable or blocked as its live
+threads are. No thread transition rewrites a process state.
+
+Transitions queue a `user_process` thread whenever it may run and is neither
+on a CPU nor queued (`enqueue_locked`, spec 4.2): completion of a parked wait
+(`complete_wait`), `put_prev`, clone (`install_thread`), `set_runnable`
+(spawn, fork, init), `continue_process`, the probe of an interruptible wait
+and the repair audit. `kernel_thread` records are never queued this way; the
+kernel tick keeps dispatching them through its policy. A thread may run when
+it is runnable, or blocked with `probe` set (a pending signal may interrupt
+its wait), its process is live and not stopped. After the unlock the waker
+fences and wakes the chosen CPU with a reschedule IPI if that CPU published
+itself idle.
+
+- `pick(cpu)` takes the next entry from the CPU's own queue (bounded by the
+  count it found plus one), then steals the oldest entry another online queue
+  holds for this CPU, try-locking victims in order of length; the steal
+  predicate loads only the slot mirrors. Each entry is validated under its
+  task lock against the queue it came from: a stale entry (slot reused) or a
+  superseded one (the thread names another queue) is dropped and leaves the
+  field alone; one the affinity no longer admits is queued again where it may
+  run. A runnable thread becomes running; a probed one stays blocked until its
+  resume completes the wait (`resume_current`). Pick fills the `CpuSlot` and
+  takes the slot pin of spec 3.2 (b).
+- `put_prev(cpu)` (and `vacate_cpu_slot`, which `activate(0)`, exit, exec and
+  remote eviction use) turns a running thread back to runnable, queues it if
+  it may run, drops the CPU-slot pin and releases `on_cpu` last.
+- `enter_idle(cpu)` is the idle side of the handshake: it publishes the CPU
+  idle, fences and loads the queue counts. `halt` when every queue is empty;
+  `own_work` (the flag is cleared) when its own queue holds entries;
+  `steal_hint` when only other queues do, so the caller may try one more steal
+  and then halts with the flag published. A push to its own queue after the
+  fence sees the flag and wakes it.
+- `set_online_cpus`, `configure_cpus`, `offline_cpu(cpu)` and `online_cpu(cpu)`
+  keep each queue's closed flag equal to "the CPU is offline". A CPU that
+  leaves the online set has its queue closed and popped, and every live entry
+  placed again on an online queue (stale entries are dropped), so no thread is
+  lost or queued twice. `online_cpu` reopens the queue.
+- Placement (`select_cpu`/`select_from`) prefers the last CPU while it is
+  online and allowed, then the allowed online CPU with the shortest queue
+  (lowest id on a tie), and otherwise CPU 0, never an offline CPU. CPU 0 runs
+  such an entry only when the affinity names no configured CPU. A push a
+  closed queue refuses tries the next allowed CPU.
+- `audit_queues()`, run by CPU 0 every 256th step in debug and release
+  kernels (spec 4.10), visits every live user process under `task_table` and
+  then its `task` lock. A thread that may run but is neither on a CPU nor
+  queued (orphan_runnable), or is blocked without a pending wait
+  (stuck_completed), is made runnable and queued; each repair counts
+  `audit_repairs` (OK_SMP_AUDIT), which the gates require to stay 0.
+- Completed waits are counted per CPU and per source (`wakes()` sums them).
+- The explicit `enqueue_thread`, `dequeue_thread`, `mark_on_cpu` and
+  `clear_on_cpu` remain for the hosted models and the `legacy_select=y`
+  scan; they take the same task locks.
+
+The native step uses the queues on every profile, UP and `-smp 1` included
+(queue 0 only on one CPU), so threads run in FIFO order. `xmake f
+--legacy_select=y` keeps the earlier `(pid, tid)` scan of the step as the A/B
+arm until it is deleted; the transitions above queue threads in both builds.
+
+`python3 -B scripts/test_run_queues.py --sanitize` is the hosted queue model
+(`OK_RUN_QUEUES scope=model`); `scripts/test_scheduler_waits.py` models the
+queue-path transitions, probes, the idle check and the repair audit; and
+`scripts/test_wait_park_race.py` races park against complete, steal against
+re-enqueue and idle against a push on host threads with the real locks
+(`OK_WAIT_PARK_RACE scope=model`). Host threads stand in for CPUs; none of
+these is AP start, IPI or hardware SMP evidence.
