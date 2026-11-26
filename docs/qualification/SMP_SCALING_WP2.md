@@ -144,36 +144,65 @@ number is not bumped here.
   accept owner is refused reap with `invalid_argument` rather than the
   global `busy` veto and another process reaps meanwhile (unix_rights,
   unix_path_owner, and the three TCP accept tests; `test_net_runtime.py` builds
-  `tcp_accept_transaction_tests`, no runner builds the other two), and
-  the shared signal queue reuse test cycles processes until the replacement
+  `tcp_accept_transaction_tests`, no runner builds the other two, which are
+  only syntax-checked, see below), and the shared signal queue reuse test
+  cycles processes until the replacement
   takes the retired slot.
 
 ## Validation
 
 All runs are QEMU TCG on the pinned SysToolchain QEMU 10.2 (`scope=hardware`
 means the emulated machine); model tests print `scope=model`. Kernel sources
-at 0e72e0d (after the merge of the integration head 4bbabdf).
+at 9024a15 (the review fixes on top of the merge of the integration head
+4bbabdf); later commits change documentation only.
 
-- Hosted: the full `scripts/hosted_suite.py` with the toolchain root, 170
-  passed and 0 failed, including the new `test_task_table.py` (slot
-  lifecycle, pins, ranges, and a host-thread race of pins against reap and
-  reallocation with the real task lock) and the updated
+- Hosted: the full `scripts/hosted_suite.py` with the toolchain root,
+  `--ext4-fixture` and `--quarantined`: 176 passed and 0 failed. This
+  includes the new `test_task_table.py` and the updated
   `test_thread_lifecycle.py` (stale handle and ticket after slot reuse, pin
-  against reap, exited-slot iteration), `test_child_autoreap_scheduler.py`
-  and `test_run_queues.py`. That run predates a comment-only header change;
-  those runners plus `test_scheduler_waits.py` and `test_smp_locks.py` were
-  rerun on the final sources. The five ext4 fixture runners
-  (`--ext4-fixture`) passed. `scripts/test_net_runtime.py --sanitize`: all 18
-  socket runtime suites passed.
+  against reap, exited-slot iteration), `test_child_autoreap_scheduler.py`,
+  `test_run_queues.py`, `test_scheduler_waits.py`, `test_smp_locks.py` and
+  `test_net_runtime.py`. `test_task_table.py` runs the slot functions the
+  scheduler uses (`claim_free_slot`, `publish_slot`, `release_slot`): slot
+  lifecycle, next-fit claims, pin accounting faults, ranges, and a
+  host-thread race of pins against reap and reallocation with the real task
+  locks; it also passes with `--sanitize`. Two mutations of
+  `release_slot`/`claim_free_slot` were checked to fail it: freeing a pinned
+  slot fails the race on the counted fault, and also dropping the claim's
+  pin test fails it on a torn PCB.
+- Quarantined runners: `native_signal_exec`, `native_child_wait_signal`,
+  `native_process_signal_waits`, `native_poll_objects`,
+  `native_shutdown_runtime`, `linux_select` and `linux_udp_signal` fail at
+  the same check (or the same compile errors) as on the pre-WP2 base 4bbabdf;
+  `linux_udp_sockname` passes on both. The three quarantined ext4 fixture
+  runners are not handed the fixture by the suite and stop at argument
+  parsing.
+- Sources no hosted run compiles. Syntax-only compiles (`g++
+  -fsyntax-only`, with the defines their runners pass) of the WP2-edited
+  tests that are input-dependent or have no runner: linux_runtime,
+  native_futex_origin, native_futex_restart_publication,
+  native_pipe_vector_publication, native_syscall_restart_publication,
+  native_signal_production, persistent_sync, admin_runtime_review,
+  native_pipe_write_publication, native_pty_runtime, native_vfs_lifecycle,
+  tcp_accept_failed_holder, tcp_captured_accept and unix_path_owner, plus
+  the quarantined sources above. All are clean except linux_runtime,
+  native_vfs_lifecycle, native_power_dispatch and native_shutdown_runtime,
+  which fail with the same errors on 4bbabdf (stale `Image` and per-CPU
+  shutdown fields, older than WP2). These are compile checks, not runs: the
+  input-dependent suites (PPC model ELFs, OS-built ELFs and fixtures) did not
+  run, and nothing runs `native_signal_ppc32`, so the removed PPC32 and n64
+  relocation hooks are covered only by the distro boots below.
 - Kernel: debug `xmake test` at `-smp 1` on all ten profiles, and at `-smp 2`
-  and `-smp 4` on x86_64, aarch64 and rv64.
+  and `-smp 4` on x86_64, aarch64 and rv64: 16 of 16 lanes with
+  `OK_TEST_PASS`.
 - OS (private copy of `wt/os-smp-scaling` b8dceae, unchanged): native distro
-  boot to `OK_USERLAND scope=hardware acceptance=pass` on all ten profiles;
-  on x86_64, aarch64 and rv64, `test_smp_stress.py --user-hotplug` debug at 2
-  and 4 vCPUs and release at 2, the futex probe at 2,
-  `--smp_hotplug_test=y --require-hotplug` at 2 and `smp_sections=n` at 2;
-  the CPU sysfs probe at 4 vCPUs on x86_64 and at one on arm32. Every run
-  passed with every check counter (`lock_violations`, the assertion counters,
+  boot to `OK_USERLAND scope=hardware acceptance=pass` on all ten profiles.
+  On x86_64, aarch64 and rv64: `test_smp_stress.py --user-hotplug` in debug
+  and in release, each at 2 and 4 vCPUs; the futex probe at 2;
+  `--smp_hotplug_test=y --require-hotplug` at 2 (no hotplug failures); and
+  `smp_sections=n` at 2. The CPU sysfs probe passed at 4 vCPUs on x86_64 and
+  at one on arm32. Every run passed with every check counter
+  (`lock_violations`, the assertion counters including `pin_asserts`,
   `admit_shadow_mismatch`, `quiesce_timeouts`, `audit_repairs`,
   `poll_audit_ready`) and `unqueued` at zero; `max_lock_depth` was 5 in debug
-  kernels.
+  kernels and 0 in release ones.
