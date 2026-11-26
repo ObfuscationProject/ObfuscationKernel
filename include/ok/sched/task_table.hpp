@@ -172,6 +172,54 @@ template <typename Slot> class BasicProcessPin final
     Slot *slot_{};
 };
 
+// Slot allocation and release (spec 3.2), shared by the scheduler and the
+// task-table models. Each one runs with the task table held.
+
+// Claims the first free slot from `next` on as an embryo (next-fit) and
+// advances `next` past it. A free slot holds no pin: one that does is a pin
+// accounting fault, counted and skipped, never handed out.
+template <typename Slot> [[nodiscard]] Slot *claim_free_slot(Slot *slots, usize count, usize &next)
+{
+    for (usize offset = 0; offset < count; ++offset)
+    {
+        const usize index = (next + offset) % count;
+        auto &slot = slots[index];
+        if (slot.state() != ProcessLifecycle::free) continue;
+        TaskGuard guard{slot};
+        if (slot.state() != ProcessLifecycle::free) continue;
+        if (slot.pins != 0)
+        {
+            smp::count_check(smp::KernelCheck::pin, "free process slot still pinned");
+            continue;
+        }
+        next = (index + 1) % count;
+        slot.lifecycle.store(static_cast<u32>(ProcessLifecycle::embryo), std::memory_order_release);
+        return &slot;
+    }
+    return nullptr;
+}
+
+// Publishes an embryo whose PCB is complete under `id`: lookups and pins see
+// the slot from here on. An embryo is invisible, so it cannot have gained a
+// pin; a pin found here is counted, and kept rather than overwritten.
+template <typename Slot> void publish_slot(Slot &slot, u64 id)
+{
+    TaskGuard guard{slot};
+    if (slot.pins != 0 || slot.state() != ProcessLifecycle::embryo)
+        smp::count_check(smp::KernelCheck::pin, "published process slot not an unpinned embryo");
+    slot.pid.store(static_cast<u32>(id), std::memory_order_release);
+    slot.lifecycle.store(static_cast<u32>(ProcessLifecycle::live), std::memory_order_release);
+}
+
+// Reaped: the slot is freed now when nothing pins it, else by the last unpin.
+// A pinned slot keeps its pid and PCB meanwhile.
+template <typename Slot> void release_slot(Slot &slot)
+{
+    TaskGuard guard{slot};
+    slot.lifecycle.store(static_cast<u32>(ProcessLifecycle::reaped), std::memory_order_release);
+    if (slot.pins == 0) BasicProcessPin<Slot>::free_locked(slot);
+}
+
 // The [live, zombie] processes of a slot table, in slot order. Iteration loads
 // each slot's lifecycle; callers hold the kernel lock (later the task table).
 template <typename Slot, typename Pcb> class BasicProcessRange final

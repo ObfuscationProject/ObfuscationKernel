@@ -176,10 +176,7 @@ Result<ProcessId> SchedulerState::create_process_with_pid(ProcessId pid, std::st
     {
         // Published last: lookups see the slot only once the PCB is complete.
         const TaskTableLock::Guard table{task_table_};
-        TaskGuard guard{*slot};
-        slot->pins = 0;
-        slot->pid.store(static_cast<u32>(pid), std::memory_order_release);
-        slot->lifecycle.store(static_cast<u32>(ProcessLifecycle::live), std::memory_order_release);
+        publish_slot(*slot, pid);
     }
     return pid;
 }
@@ -978,25 +975,13 @@ ProcessPin SchedulerState::pin(ProcessId pid)
 ProcessSlot *SchedulerState::claim_process_slot()
 {
     const TaskTableLock::Guard table{task_table_};
-    for (usize offset = 0; offset < slots_.size(); ++offset)
-    {
-        auto &slot = slots_[(next_slot_ + offset) % slots_.size()];
-        if (slot.state() != ProcessLifecycle::free) continue;
-        next_slot_ = (next_slot_ + offset + 1) % slots_.size();
-        TaskGuard guard{slot};
-        slot.lifecycle.store(static_cast<u32>(ProcessLifecycle::embryo), std::memory_order_release);
-        return &slot;
-    }
-    return nullptr;
+    return claim_free_slot(slots_.data(), slots_.size(), next_slot_);
 }
 
 void SchedulerState::release_process_slot(ProcessSlot &slot)
 {
     const TaskTableLock::Guard table{task_table_};
-    TaskGuard guard{slot};
-    slot.lifecycle.store(static_cast<u32>(ProcessLifecycle::reaped), std::memory_order_release);
-    // A pinned slot keeps its pid and PCB; the last unpin frees it.
-    if (slot.pins == 0) ProcessPin::free_locked(slot);
+    release_slot(slot);
 }
 
 void SchedulerState::free_thread_slot(ProcessControlBlock &process, ThreadControlBlock &thread)

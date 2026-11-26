@@ -41,15 +41,23 @@ using Pin = BasicProcessPin<Slot>;
 using Range = BasicProcessRange<Slot, FakePcb>;
 using ConstRange = BasicProcessRange<const Slot, const FakePcb>;
 
-// Allocation and reap as the scheduler does them, under the slot's task lock.
+// Allocation and reap through the functions SchedulerState uses
+// (claim_process_slot, create_process_with_pid, release_process_slot): claim
+// an embryo under the task table, build the PCB outside every lock, publish.
+TaskTableLock table{};
 bool allocate(Slot &slot, u64 id)
 {
-    TaskGuard guard{slot};
-    if (slot.state() != ProcessLifecycle::free || slot.pins != 0) return false;
-    slot.pcb.id = id;
-    slot.pcb.payload.fill(id);
-    slot.pid.store(static_cast<u32>(id), std::memory_order_release);
-    slot.lifecycle.store(static_cast<u32>(ProcessLifecycle::live), std::memory_order_release);
+    Slot *claimed = nullptr;
+    {
+        const TaskTableLock::Guard guard{table};
+        usize next = 0;
+        claimed = claim_free_slot(&slot, 1, next);
+    }
+    if (!claimed) return false;
+    claimed->pcb.id = id;
+    claimed->pcb.payload.fill(id);
+    const TaskTableLock::Guard guard{table};
+    publish_slot(*claimed, id);
     return true;
 }
 void set_state(Slot &slot, ProcessLifecycle lifecycle)
@@ -59,10 +67,10 @@ void set_state(Slot &slot, ProcessLifecycle lifecycle)
 }
 void reap(Slot &slot)
 {
-    TaskGuard guard{slot};
-    slot.lifecycle.store(static_cast<u32>(ProcessLifecycle::reaped), std::memory_order_release);
-    if (slot.pins == 0) Pin::free_locked(slot);
+    const TaskTableLock::Guard guard{table};
+    release_slot(slot);
 }
+u64 pin_faults() { return smp::check_total(smp::KernelCheck::pin); }
 
 void lifecycle_and_pins()
 {
@@ -90,10 +98,51 @@ void lifecycle_and_pins()
     check(allocate(slot, 9) && slot.pcb.id == 9, "a freed slot is reallocated");
     reap(slot);
     check(slot.state() == ProcessLifecycle::free, "an unpinned reap frees at once");
+    check(pin_faults() == 0, "no pin accounting fault so far");
     for (auto state : {ProcessLifecycle::embryo, ProcessLifecycle::reaped, ProcessLifecycle::free})
         check(!lifecycle_visible(state), "embryo, reaped and free are invisible");
     for (auto state : {ProcessLifecycle::live, ProcessLifecycle::exiting, ProcessLifecycle::zombie})
         check(lifecycle_visible(state), "live, exiting and zombie are visible");
+}
+
+// claim_free_slot is next-fit and skips non-free slots; a free slot that
+// still holds a pin (a broken release) is counted and never handed out, and
+// publish keeps a pin it should not find instead of zeroing it.
+void claim_and_faults()
+{
+    static std::array<Slot, 4> slots{};
+    usize next = 2;
+    {
+        const TaskTableLock::Guard guard{table};
+        check(claim_free_slot(slots.data(), slots.size(), next) == &slots[2] && next == 3, "next-fit from `next`");
+        check(slots[2].state() == ProcessLifecycle::embryo && !slots[2].visible(), "a claimed slot is an embryo");
+        check(claim_free_slot(slots.data(), slots.size(), next) == &slots[3] && next == 0, "next wraps");
+        check(claim_free_slot(slots.data(), slots.size(), next) == &slots[0] && next == 1, "and resumes at 0");
+    }
+    check(!Pin::acquire(slots[2], 0) && slots[2].pid.load() == 0, "an embryo is not pinnable");
+    {
+        const TaskTableLock::Guard guard{table};
+        publish_slot(slots[2], 21);
+    }
+    check(slots[2].names(21) && pin_faults() == 0, "a published embryo is visible");
+    const u64 faults = pin_faults();
+    slots[1].pins = 1; // a free slot left pinned by a broken release
+    {
+        const TaskTableLock::Guard guard{table};
+        check(claim_free_slot(slots.data(), slots.size(), next) == nullptr, "a pinned free slot is not claimed");
+    }
+    check(pin_faults() == faults + 1 && slots[1].state() == ProcessLifecycle::free, "and is counted");
+    slots[1].pins = 0;
+    {
+        const TaskTableLock::Guard guard{table};
+        check(claim_free_slot(slots.data(), slots.size(), next) == &slots[1], "an unpinned free slot is claimed");
+        slots[1].pins = 2; // a pin an embryo cannot have gained
+        publish_slot(slots[1], 11);
+    }
+    check(pin_faults() == faults + 2 && slots[1].pins == 2 && slots[1].names(11), "publish counts and keeps a pin");
+    slots[1].pins = 0;
+    for (auto &slot : slots) reap(slot);
+    for (auto &slot : slots) check(slot.state() == ProcessLifecycle::free && slot.pid.load() == 0, "all freed");
 }
 
 void ranges()
@@ -144,15 +193,17 @@ void ranges()
 }
 
 #if defined(OK_HOSTED_LOCK_MODEL)
-// CPU 1 reaps and reallocates four slots without pause; CPUs 2-4 pin whatever
-// pid a slot names and check that the PCB stays the one they pinned for the
-// whole hold. A pinned slot must never be reallocated under its holder.
+// CPU 1 reaps and reallocates four slots without pause, through the
+// scheduler's claim, publish and release; CPUs 2-4 pin whatever pid a slot
+// names and check that the PCB stays the one they pinned for the whole hold.
+// A pinned slot must never be reallocated under its holder.
 void pins_race_reap()
 {
     static std::array<Slot, 4> slots{};
     static std::atomic<bool> stop{false};
     static std::atomic<u64> pins_taken{0}, torn{0}, reallocations{0};
     for (usize i = 0; i < slots.size(); ++i) check(allocate(slots[i], 1 + i), "race setup");
+    const u64 faults = pin_faults();
     test::race(4, [](unsigned cpu) {
         if (cpu == 1)
         {
@@ -181,6 +232,7 @@ void pins_race_reap()
     u32 pins_left = 0;
     for (auto &slot : slots) pins_left += slot.pins;
     check(torn.load() == 0, "no pinned PCB is reallocated under its holder");
+    check(pin_faults() == faults, "no slot was freed or published while pinned");
     check(pins_left == 0, "every pin is dropped");
     check(pins_taken.load() > 0 && reallocations.load() > 0, "the race pinned and reallocated");
     check(test::lock_violations() == 0, "the task lock is taken in order");
@@ -194,6 +246,7 @@ void pins_race_reap()
 int main()
 {
     lifecycle_and_pins();
+    claim_and_faults();
     ranges();
 #if defined(OK_HOSTED_LOCK_MODEL)
     pins_race_reap();
