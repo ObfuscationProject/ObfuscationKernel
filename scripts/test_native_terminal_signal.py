@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Run Linux terminal waits on the actual runtime: PTY read/write/ppoll of the Linux personality on all ten profiles,
-caught signals interrupting PTY and console waits (EINTR, SA_RESTART, partial writes) and PTY VTIME timers."""
+caught signals interrupting PTY and console waits (EINTR, SA_RESTART, partial writes) and PTY VTIME timers.
+
+The model steers which thread each step enters through the legacy (pid, tid)
+scan's cursor, so it builds the runtime with OK_LEGACY_SELECT (xmake option
+legacy_select=y); the queue path's selection has its own models."""
 from pathlib import Path
 import argparse,hashlib,json,os,re,shutil,subprocess,resource,sys
 
@@ -47,7 +51,7 @@ def main():
   if args.sanitize:flags+=['-fsanitize=address,undefined','-fno-omit-frame-pointer','-fno-pie'];ld+=['-fsanitize=address,undefined','-no-pie']
   lua=['set_project("hosted-native-terminal-signal")','set_languages("c++23")','set_optimize("fast")','toolchain("poll-host")','    set_kind("standalone")','    set_toolset("cxx", '+json.dumps(str(cxx))+')','    set_toolset("ld", '+json.dumps(str(cxx))+')','toolchain_end()']
   for arch in arches:
-   lua += ['target("native-terminal-signal-'+arch+'")','    set_kind("binary")','    set_toolchains("poll-host")','    add_includedirs("include")','    set_targetdir("bin")','    add_defines("OK_ARCH_TARGET_'+arch.upper()+'")','    add_cxxflags('+', '.join(json.dumps(s) for s in flags)+', {force=true})','    add_ldflags('+', '.join(json.dumps(s) for s in ld)+', {force=true})','    add_files('+', '.join(json.dumps(s) for s in [*sources,f'src/arch/{arch}/ops.cpp'])+')','target_end()']
+   lua += ['target("native-terminal-signal-'+arch+'")','    set_kind("binary")','    set_toolchains("poll-host")','    add_includedirs("include")','    set_targetdir("bin")','    add_defines("OK_ARCH_TARGET_'+arch.upper()+'", "OK_LEGACY_SELECT")','    add_cxxflags('+', '.join(json.dumps(s) for s in flags)+', {force=true})','    add_ldflags('+', '.join(json.dumps(s) for s in ld)+', {force=true})','    add_files('+', '.join(json.dumps(s) for s in [*sources,f'src/arch/{arch}/ops.cpp'])+')','target_end()']
   (source/'xmake.lua').write_text('\n'.join(lua)+'\n');record['generated_project_sha256']=sha(source/'xmake.lua');record['status']='running';save()
   run([xmake,'f','-P',source,'-c','-y','--ccache=n'],'configure')
   for arch in arches:

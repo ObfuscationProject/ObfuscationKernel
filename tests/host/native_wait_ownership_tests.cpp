@@ -104,9 +104,11 @@ int main()
     CHECK(kernel.scheduler().open_description(reader)->references == 1);
     CHECK(kernel.scheduler().complete_wait(thread.wait_registration.ticket(), WaitCompletion::ready));
     thread.native_active = true;
-    CHECK(native::step(kernel) && mock::last_frame.pc == hw::user_begin + 128);
+    // The run queue is FIFO: the peer was queued when it was put back, before
+    // the leader's completion queued the leader. Then they alternate.
     CHECK(native::step(kernel) && mock::last_frame.pc == hw::user_begin + 256);
     CHECK(native::step(kernel) && mock::last_frame.pc == hw::user_begin + 128);
+    CHECK(native::step(kernel) && mock::last_frame.pc == hw::user_begin + 256);
     native::release_process(kernel, pid);
     CHECK(native::entry_stacks.accounting().leased_slots == 0 && native::runtime_status());
     CHECK(kernel.scheduler().terminate_process(pid, 9));
