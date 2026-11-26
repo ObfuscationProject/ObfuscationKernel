@@ -844,7 +844,8 @@ class SchedulerState
     // A live thread of a live process by its id alone (sched_*affinity name
     // threads by tid): a scan of the slot table.
     [[nodiscard]] ThreadControlBlock *find_thread_by_tid(ThreadId tid);
-    // The live thread a handle names; null once its slot holds another tid.
+    // The thread record (live or exited) a handle names; null once its slot
+    // was freed or holds another tid.
     [[nodiscard]] ThreadControlBlock *thread_at(ThreadHandle handle);
     [[nodiscard]] const ThreadControlBlock *thread_at(ThreadHandle handle) const;
     // The PCB of the slot a thread index falls in, whatever its lifecycle.
