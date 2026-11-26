@@ -155,16 +155,22 @@ using IrqHandler = void (*)(void *context, IrqLine line);
 // SMP: line records, handler lists, statistics and every chip
 // read-modify-write sequence sit under one irq_router lock, taken with
 // interrupts masked and never held while a handler runs. A drain claims a
-// line's pending flag by atomic exchange, so one CPU at a time runs that
-// line's handlers, and the line stays masked from its top half until they
-// returned. Handlers of different lines, and unbind() against a running
-// handler, are serialized by the caller (the kernel lock).
+// line's pending flag by atomic exchange and then, under the lock, the line's
+// `running` word (the draining CPU), so one CPU at a time runs that line's
+// handlers, from a snapshot. A drain that finds the line running elsewhere
+// gives the pending flag back and skips it; the running CPU, after clearing
+// `running`, checks `pending` again and serves the line once more. Handlers
+// of different lines run concurrently on different CPUs.
 //
 // A chip that drops edges arriving while a line is masked (the x86 I/O APIC;
 // loses_masked_edges()) keeps its edge-triggered lines unmasked instead: an
 // edge during the bottom half runs another top half, which marks the line
-// pending again, and its handlers run once more. Two drains of such a line on
-// different CPUs are then serialized by the caller (the kernel lock) as well.
+// pending again, and the recheck serves it without waiting for a later drain.
+//
+// unbind() removes the handler under the lock and then waits, outside it and
+// serving this CPU's interrupts, until no other CPU runs the line's handlers,
+// so the caller may free the handler's context once it returns. A handler that
+// unbinds its own line does not wait for itself.
 template <IrqChip Chip> class IrqRouter final : private NonCopyable
 {
   public:
@@ -219,21 +225,29 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
     {
         if (line >= max_irq_lines)
             return Status{StatusCode::not_found, "irq line not bound"};
-        Guard guard(lock_);
+        Status result{StatusCode::not_found, "irq handler not bound to this line"};
         auto &entry = lines_[line];
-        for (usize i = 0; i < entry.count; ++i)
         {
-            if (entry.handlers[i].handler != handler || entry.handlers[i].context != context)
-                continue;
-            for (usize j = i + 1; j < entry.count; ++j)
-                entry.handlers[j - 1] = entry.handlers[j];
-            entry.handlers[--entry.count] = {};
-            if (entry.count != 0)
-                return Status::success();
-            reset(entry);
-            return chip_.mask(line);
+            Guard guard(lock_);
+            for (usize i = 0; i < entry.count; ++i)
+            {
+                if (entry.handlers[i].handler != handler || entry.handlers[i].context != context)
+                    continue;
+                for (usize j = i + 1; j < entry.count; ++j)
+                    entry.handlers[j - 1] = entry.handlers[j];
+                entry.handlers[--entry.count] = {};
+                result = Status::success();
+                if (entry.count == 0)
+                {
+                    reset(entry);
+                    result = chip_.mask(line);
+                }
+                break;
+            }
         }
-        return Status{StatusCode::not_found, "irq handler not bound to this line"};
+        if (result.code() != StatusCode::not_found)
+            wait_not_running(entry);
+        return result;
     }
     // Delivers a bound line to `target` from now on and pins it there: follow()
     // no longer moves it. An interrupt the old CPU already claimed still runs
@@ -358,30 +372,58 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
         if (!any_pending_.exchange(false, std::memory_order_acq_rel))
             return 0;
         usize serviced = 0;
+        const auto self = running_value(smp::current_cpu());
         for (IrqLine line = 0; line < max_irq_lines; ++line)
         {
             auto &entry = lines_[line];
-            if (!entry.pending.load(std::memory_order_relaxed) ||
-                !entry.pending.exchange(false, std::memory_order_acq_rel))
-                continue;
-            // This CPU owns the masked line until it unmasks it. The handlers
-            // run from a snapshot, without the lock.
-            std::array<Handler, max_line_handlers> handlers{};
-            usize count = 0;
+            // The recheck after the handlers: an edge that arrived while they
+            // ran (an unmasked I/O APIC line), or a pending flag a concurrent
+            // drain gave back, is served now.
+            while (entry.pending.load(std::memory_order_relaxed) &&
+                   entry.pending.exchange(false, std::memory_order_acq_rel))
             {
+                // This CPU owns the line until it unmasks it and clears
+                // `running`. The handlers run from a snapshot, without the lock.
+                std::array<Handler, max_line_handlers> handlers{};
+                usize count = 0;
+                {
+                    Guard guard(lock_);
+                    if (entry.running.load(std::memory_order_relaxed) != 0)
+                    {
+                        // Another CPU (or this one, from inside a handler)
+                        // runs the line: it serves the flag at its recheck.
+                        entry.pending.store(true, std::memory_order_relaxed);
+                        any_pending_.store(true, std::memory_order_seq_cst);
+                        break;
+                    }
+                    entry.running.store(self, std::memory_order_relaxed);
+                    running_lines_.store(running_lines_.load(std::memory_order_relaxed) + 1,
+                                         std::memory_order_relaxed);
+                    handlers = entry.handlers;
+                    count = entry.count;
+                }
+                for (usize i = 0; i < count; ++i)
+                    handlers[i].handler(handlers[i].context, line);
                 Guard guard(lock_);
-                handlers = entry.handlers;
-                count = entry.count;
+                bump(serviced_[line]);
+                ++serviced;
+                if (entry.count != 0 && !chip_.unmask(line).ok())
+                    bump(controller_errors_);
+                running_lines_.store(running_lines_.load(std::memory_order_relaxed) - 1, std::memory_order_relaxed);
+                entry.running.store(0, std::memory_order_release);
             }
-            for (usize i = 0; i < count; ++i)
-                handlers[i].handler(handlers[i].context, line);
-            Guard guard(lock_);
-            bump(serviced_[line]);
-            ++serviced;
-            if (entry.count != 0 && !chip_.unmask(line).ok())
-                bump(controller_errors_);
         }
         return serviced;
+    }
+    // Some CPU runs a line's handlers now: a waiter whose completion such a
+    // handler may raise should not halt (nothing would end the halt).
+    [[nodiscard]] bool running() const
+    {
+        return running_lines_.load(std::memory_order_relaxed) != 0;
+    }
+    [[nodiscard]] bool running(IrqLine line) const
+    {
+        return line < max_irq_lines && lines_[line].running.load(std::memory_order_acquire) != 0;
     }
     // Some line may be pending (sequentially consistent with the top half's
     // store, so a waiter that published itself first cannot miss it).
@@ -423,7 +465,34 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
         // Placed by retarget(), which follow() leaves alone.
         bool pinned{false};
         std::atomic<bool> pending{false};
+        // The CPU running the handlers (running_value), 0 when none. Set and
+        // cleared under the lock; unbind() waits for it without the lock.
+        std::atomic<u32> running{0};
     };
+    [[nodiscard]] static constexpr u32 running_value(smp::CpuId cpu)
+    {
+        return static_cast<u32>(cpu) + 1;
+    }
+    // After an unbind: no other CPU may still run a handler snapshot taken
+    // before it. Spins outside the lock, serving this CPU's interrupts (a
+    // handler may wait for a line routed here). W0: holds no class A lock.
+    void wait_not_running(const Line &entry)
+    {
+        const auto self = running_value(smp::current_cpu());
+        const auto busy = [&] {
+            const auto cpu = entry.running.load(std::memory_order_acquire);
+            return cpu != 0 && cpu != self;
+        };
+        if (!busy())
+            return;
+        static_cast<void>(smp::check_class_wait("irq unbind waits for a running handler"));
+        const smp::SpinningScope spinning;
+        while (busy())
+        {
+            smp::serve_while_spinning();
+            arch::ArchOperations::spin_pause();
+        }
+    }
     // Counters change only under the lock and are read without it. A load
     // and a store avoid read-modify-write atomics, which not every profile
     // has.
@@ -453,6 +522,8 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
     std::array<std::atomic<usize>, max_irq_lines> delivered_{};
     std::array<std::atomic<usize>, max_irq_lines> serviced_{};
     std::atomic<bool> any_pending_{false};
+    // Lines whose handlers run now; changed under the lock.
+    std::atomic<u32> running_lines_{0};
     std::atomic<usize> spurious_{0};
     std::atomic<usize> controller_errors_{0};
 };

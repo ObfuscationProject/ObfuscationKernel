@@ -117,9 +117,16 @@ struct alignas(64) CpuInterrupts
     std::atomic<usize> serviced{};
     // Set by a top half, tick or IPI this CPU took; ends its wait.
     std::atomic<bool> woken{};
-    // Inside wait_for_interrupt(): a top half on another CPU sends an IPI.
-    std::atomic<bool> waiting{};
+    // Inside wait_for_interrupt(): the line it waits for (waiting_any for any
+    // line, 0 when not waiting). A top half of that line on another CPU sends
+    // it an IPI; other lines do not.
+    std::atomic<u32> waiting_line{};
 };
+constexpr u32 waiting_any = ~u32{0};
+[[nodiscard]] constexpr u32 waiting_value(IrqLine line)
+{
+    return static_cast<u32>(line) + 1;
+}
 constinit std::array<CpuInterrupts, smp::max_cpus> cpu_interrupts{};
 
 CpuInterrupts &local_interrupts()
@@ -134,9 +141,10 @@ void bump(std::atomic<usize> &counter, usize amount = 1)
 }
 
 // A top half made `line` pending: every other CPU waiting in
-// wait_for_interrupt() may need it (a driver holding the kernel lock drains
-// only on its own CPU), so each gets an IPI. The fence orders the pending
-// store before the `waiting` loads, against the waiter's opposite order.
+// wait_for_interrupt() for that line, or for any line, may need it (a driver
+// holding the kernel lock drains only on its own CPU), so each gets an IPI.
+// The fence orders the pending store before the `waiting_line` loads, against
+// the waiter's opposite order.
 // Waiters hold the kernel lock, so there is at most one; a line bind() placed
 // then moves to it, and the completions it waits for next end its halt
 // directly instead of through another CPU's IPI.
@@ -149,7 +157,8 @@ void wake_waiters(smp::CpuId self, IrqLine line)
     usize woken = 0;
     smp::CpuId waiter = 0;
     for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu)
-        if ((others & (u32{1} << cpu)) != 0 && cpu_interrupts[cpu].waiting.load(std::memory_order_relaxed))
+        if (const auto waits = cpu_interrupts[cpu].waiting_line.load(std::memory_order_relaxed);
+            (others & (u32{1} << cpu)) != 0 && (waits == waiting_any || waits == waiting_value(line)))
         {
             smp::send_ipi(cpu, smp::ipi_device);
             waiter = cpu;
@@ -620,24 +629,27 @@ void claim_platform_irq()
 
 namespace
 {
-// `device`: the caller waits for a line it will drain itself, so top halves
-// on other CPUs end the wait (wake_waiters).
-bool wait_here(bool device)
+// `waits`: the line (waiting_value) or waiting_any a device waiter drains
+// itself, so top halves of it on other CPUs end the wait (wake_waiters); 0
+// for the kernel loop's idle.
+bool wait_here(u32 waits)
 {
     auto &self = local_interrupts();
     // Published before the pending check, against a top half on another CPU
-    // that stores pending and then reads `waiting`. A wake that arrives after
-    // the publication is an IPI still pending at this CPU's controller, so
-    // the halt below takes it.
+    // that stores pending and then reads `waiting_line`. A wake that arrives
+    // after the publication is an IPI still pending at this CPU's controller,
+    // so the halt below takes it.
     self.woken.store(false, std::memory_order_relaxed);
-    if (device)
+    if (waits != 0)
     {
-        self.waiting.store(true, std::memory_order_relaxed);
+        self.waiting_line.store(waits, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_seq_cst);
     }
-    if (router.pending())
+    // A device waiter does not halt while another CPU runs a bottom half: the
+    // completion that handler raises sends no interrupt to end the halt.
+    if (router.pending() || (waits != 0 && router.running()))
     {
-        self.waiting.store(false, std::memory_order_relaxed);
+        self.waiting_line.store(0, std::memory_order_relaxed);
         return true;
     }
     bump(self.waits);
@@ -645,12 +657,11 @@ bool wait_here(bool device)
     // spurious claim) halts again rather than returning with nothing to do.
     while (!self.woken.load(std::memory_order_relaxed))
         halt_until_interrupt();
-    self.waiting.store(false, std::memory_order_relaxed);
+    self.waiting_line.store(0, std::memory_order_relaxed);
     return true;
 }
-} // namespace
 
-bool wait_for_interrupt()
+bool wait_device(u32 waits)
 {
     // A device wait never holds a spin lock (I2).
     static_cast<void>(smp::check_class_wait("device wait under a spin lock"));
@@ -670,14 +681,25 @@ bool wait_for_interrupt()
         return false;
     // A halt that keeps the kernel lock is a wait, not kernel work.
     const smp::SpinningScope spinning;
-    return wait_here(true);
+    return wait_here(waits);
+}
+} // namespace
+
+bool wait_for_interrupt()
+{
+    return wait_device(waiting_any);
+}
+
+bool wait_for_line(IrqLine line)
+{
+    return wait_device(line < max_irq_lines ? waiting_value(line) : waiting_any);
 }
 
 bool idle_until_interrupt()
 {
     if (!platform_irqs_started() || !platform_irqs_supported())
         return false;
-    return wait_here(false);
+    return wait_here(0);
 }
 
 usize platform_irq_delivered(IrqLine line)
