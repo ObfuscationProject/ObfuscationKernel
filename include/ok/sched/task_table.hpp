@@ -85,10 +85,14 @@ template <typename Pcb> struct BasicProcessSlot
     }
     [[nodiscard]] bool visible() const { return lifecycle_visible(state()); }
     // Whether the slot names `id` and is visible; a lock-free first test that
-    // a pin repeats under the task lock.
+    // a pin repeats under the task lock. The pid is loaded again after the
+    // lifecycle: a free and a reallocation between the two first loads would
+    // otherwise pair the old pid with the new process's `live` (the new pid
+    // is stored before its `live`, and ids are never reused).
     [[nodiscard]] bool names(u64 id) const
     {
-        return id != 0 && pid.load(std::memory_order_acquire) == id && visible();
+        return id != 0 && pid.load(std::memory_order_acquire) == id && visible() &&
+               pid.load(std::memory_order_acquire) == id;
     }
 };
 

@@ -845,7 +845,8 @@ class SchedulerState
     // threads by tid): a scan of the slot table.
     [[nodiscard]] ThreadControlBlock *find_thread_by_tid(ThreadId tid);
     // The thread record (live or exited) a handle names; null once its slot
-    // was freed or holds another tid.
+    // was freed or holds another tid. Kernel lock held: the TCB fields are
+    // read without the task lock, so a lock-free caller pins first.
     [[nodiscard]] ThreadControlBlock *thread_at(ThreadHandle handle);
     [[nodiscard]] const ThreadControlBlock *thread_at(ThreadHandle handle) const;
     // The PCB of the slot a thread index falls in, whatever its lifecycle.
@@ -855,7 +856,8 @@ class SchedulerState
     {
         return {process.thread_index(thread), static_cast<u32>(thread.tid)};
     }
-    // Pins the [live, zombie] process `pid` (spec 3.2); empty when none.
+    // Pins the [live, zombie] process `pid` (spec 3.2); empty when none. The
+    // lookup for a caller without the kernel lock.
     [[nodiscard]] ProcessPin pin(ProcessId pid);
     // The process slot holding `pid` in any lifecycle but free; side tables
     // indexed by process slot check their stored pid against it.
@@ -933,6 +935,8 @@ class SchedulerState
     [[nodiscard]] usize process_count() const { return processes().size(); }
     [[nodiscard]] usize background_process_count() const;
     // The [live, zombie] process `pid`: a scan of the 64 slot pid words.
+    // Kernel lock held; the PCB is unpinned, so a caller without the kernel
+    // lock uses pin() instead.
     [[nodiscard]] ProcessControlBlock *find(ProcessId pid);
     [[nodiscard]] const ProcessControlBlock *find(ProcessId pid) const;
     // The [live, zombie] processes in slot order. The PCBs never move; the
@@ -969,7 +973,8 @@ class SchedulerState
     // processes() without the kernel-lock check, for the scheduler's own walks.
     [[nodiscard]] ProcessRange process_range() { return {slots_.data(), slots_.size()}; }
     [[nodiscard]] ConstProcessRange process_range() const { return {slots_.data(), slots_.size()}; }
-    // The [live, zombie] slot holding `pid`; null otherwise.
+    // The [live, zombie] slot holding `pid`; null otherwise. Only a pin or
+    // the kernel lock keeps the slot from being reaped and reused after.
     [[nodiscard]] ProcessSlot *visible_slot(ProcessId pid);
     [[nodiscard]] const ProcessSlot *visible_slot(ProcessId pid) const;
     // A free slot for a new process: the next free one after the last

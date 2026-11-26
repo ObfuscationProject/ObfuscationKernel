@@ -1012,6 +1012,7 @@ void SchedulerState::store_thread_affinity(const ProcessControlBlock &process, c
 
 ThreadControlBlock *SchedulerState::thread_at(ThreadHandle handle)
 {
+    smp::check_exclusive("SchedulerState::thread_at");
     if (!handle.valid() || handle.index >= max_thread_slots) return nullptr;
     auto &slot = slots_[handle.index / max_threads_per_process];
     auto &thread = slot.pcb.threads_[handle.index % max_threads_per_process];
