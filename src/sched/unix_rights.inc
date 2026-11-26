@@ -368,8 +368,12 @@ Result<usize> SchedulerState::commit_unix_receive(UnixReceive &operation)
 // the detached references are released after the lock is dropped.
 Status SchedulerState::collect_unix_rights()
 {
-    if (collecting_unix_rights_) return {};
-    collecting_unix_rights_ = true;
+    {
+        // One collection at a time; the flag is claimed under ofd_table.
+        const OfdGuard table(ofd_table_);
+        if (collecting_unix_rights_) return {};
+        collecting_unix_rights_ = true;
+    }
     Status result{};
     for (;;)
     {
@@ -449,6 +453,9 @@ Status SchedulerState::collect_unix_rights()
         if (result && !released) result = released;
         // Callback-driven reuse requires a fresh graph, never a borrowed pointer.
     }
-    collecting_unix_rights_ = false;
+    {
+        const OfdGuard table(ofd_table_);
+        collecting_unix_rights_ = false;
+    }
     return result;
 }
