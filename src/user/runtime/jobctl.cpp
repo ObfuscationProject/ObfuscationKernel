@@ -131,8 +131,46 @@ void jobctl_notify_parent(Kernel &kernel, const sched::ProcessControlBlock &chil
     {
         runtime_failure = result;
         started = false;
+        return;
     }
+    // The parent's SIGCHLD probes its waits after the child's task lock was
+    // released (spec 4.7 step 4); the child channel was woken by the overlay.
+    if (notification == PrivateChildExit::Notification::queued)
+        if (auto *recipient = kernel.scheduler().find(child.parent_pid())) private_signal_probe(kernel, *recipient);
 }
+
+// A fatal decision (spec 4.8): the signal state records it (group_kill or
+// deferred_fatal) and the group gets a pending exit that one of its own
+// threads applies at its next pick; no CPU waits for the group. A stopped
+// native process dies only after SIGCONT; SIGKILL acts at once.
+void jobctl_condemn(Kernel &kernel, PrivateSignalActions &state, const sched::ProcessControlBlock &recipient)
+{
+    const bool kill = state.group_kill || state.deferred_fatal == OK_SIGKILL;
+    if (!kill && recipient.job_control().stopped) return;
+    const auto signal = state.group_kill ? u8{OK_SIGKILL} : state.deferred_fatal;
+    if (signal) request_group_exit(kernel, recipient.pid(), {0, signal});
+}
+
+// Holds the task table unless this CPU holds it already (a group send
+// enumerates under it, spec 4.7).
+class TaskTableHold final
+{
+  public:
+    TaskTableHold(sched::TaskTableLock &lock, bool wanted) : lock_(lock), taken_(wanted && !lock.owned_by_current_cpu())
+    {
+        if (taken_) lock_.lock();
+    }
+    ~TaskTableHold()
+    {
+        if (taken_) lock_.unlock();
+    }
+    TaskTableHold(const TaskTableHold &) = delete;
+    TaskTableHold &operator=(const TaskTableHold &) = delete;
+
+  private:
+    sched::TaskTableLock &lock_;
+    bool taken_;
+};
 
 // Linux stops at dequeue; this kernel stops at generation when `thread` would
 // dequeue the stop next: it does not block it (a sigtimedwait takes signals it
@@ -249,17 +287,16 @@ bool private_jobctl_discard_stop(Kernel &kernel, const sched::ProcessControlBloc
 void private_jobctl_stop(Kernel &kernel, sched::ProcessControlBlock &process, u32 signal)
 {
     if (process.job_control().stopped) return;
+    // Under the task table (spec 4.9): stop_process sets the flag under the
+    // task lock and kicks every CPU running a thread of the process out of
+    // user mode (Linux kick_process); no step enters it again.
+    const TaskTableHold table{kernel.scheduler().task_table_lock(), true};
     if (auto status = kernel.scheduler().stop_process(process.pid(), static_cast<u8>(signal)); !status)
     {
         runtime_failure = status;
         started = false;
         return;
     }
-    // A thread running on another CPU leaves user mode now (Linux
-    // kick_process), not at its next tick; no step enters it again.
-    for (const auto &thread : process.thread_records())
-        if (thread.on_cpu != sched::no_cpu && thread.on_cpu != smp::current_cpu())
-            smp::send_ipi(thread.on_cpu, smp::ipi_kick);
     jobctl_notify_parent(kernel, process, sched::ChildExitStatus::stopped(signal));
 }
 
@@ -283,8 +320,9 @@ void private_jobctl_settle(Kernel &kernel)
     }
     private_terminal_park_settle(kernel);
 }
-JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBlock &recipient,
-                                         const JobSignalRequest &request)
+namespace
+{
+JobSignalOutcome generate_signal(Kernel &kernel, sched::ProcessControlBlock &recipient, const JobSignalRequest &request)
 {
     auto &scheduler = kernel.scheduler();
     const auto pid = recipient.pid();
@@ -313,15 +351,20 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
             for (const auto stop : {numbering.stop, numbering.tstp, numbering.ttin, numbering.ttou})
                 jobctl_discard(*state, recipient, stop);
             if (scheduler.continue_process(pid))
+            {
                 jobctl_notify_parent(kernel, recipient, sched::ChildExitStatus::continued(numbering.cont));
+                // A native fatal default decided while stopped applies now.
+                if (state->deferred_fatal) jobctl_condemn(kernel, *state, recipient);
+            }
         }
     }
-    // 4. SIGKILL acts at the next step, stopped or not; init ignores it.
+    // 4. SIGKILL acts at the group's next pick, stopped or not; init ignores it.
     if (signal == numbering.kill)
     {
         if (init) return JobSignalOutcome::ignored;
         if (linux) state->group_kill = true;
         else state->deferred_fatal = static_cast<u8>(signal);
+        jobctl_condemn(kernel, *state, recipient);
         return JobSignalOutcome::accepted;
     }
     auto *named = scheduler.find_thread(pid, request.named ? request.named : pid);
@@ -357,10 +400,11 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
     }
     // 7. Native processes never queue: a terminating default is decided now
     // and the first fatal signal wins (KILL above always wins). A stopped
-    // native process applies it only after SIGCONT (private_process_signal_fatal).
+    // native process applies it only after SIGCONT (jobctl_condemn).
     if (!linux)
     {
         if (!state->deferred_fatal) state->deferred_fatal = static_cast<u8>(signal);
+        jobctl_condemn(kernel, *state, recipient);
         return JobSignalOutcome::accepted;
     }
     // 8. Linux: queue for a thread that can take it. A stopped process takes
@@ -374,14 +418,17 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
         if (!jobctl_live(thread) || (request.directed && &thread != named)) continue;
         if (thread.native_signal_mask.contains(signal)) continue;
         unblocked = true;
+        // A waiting thread qualifies by its wait's interruptible class (spec
+        // 4.7), recorded when it parked.
         qualified |= thread.state == sched::ProcessState::runnable || thread.state == sched::ProcessState::running ||
-                     private_signal_admit_blocked(kernel, recipient, thread);
+                     private_wait_interruptible(kernel, recipient, thread);
     }
     if (!ignored && unblocked && !qualified && !recipient.job_control().stopped)
     {
         if (!init && default_action && kind == job::DefaultAction::terminate)
         {
             if (!state->deferred_fatal) state->deferred_fatal = static_cast<u8>(signal);
+            jobctl_condemn(kernel, *state, recipient);
             return JobSignalOutcome::accepted;
         }
         const bool acted = !request.replay && (signal == numbering.cont || job::stop_family(numbering, signal));
@@ -390,6 +437,30 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
     }
     return jobctl_enqueue(kernel, *state, recipient, request.directed ? named : nullptr, request.info);
 }
+} // namespace
+
+// The generation lock order (spec 4.7): the stop family and SIGCONT take
+// the task table first (orphaned-group checks, the stop and continue of the
+// overlay, the child-channel wakes); every other signal takes none. Under
+// it, each task lock is taken by the overlay, the probe and the pending
+// exit in turn, never two at once, and the parent's (its SIGCHLD) only
+// after the target's was released. A queued signal then probes the waits
+// it may interrupt.
+JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBlock &recipient,
+                                         const JobSignalRequest &request)
+{
+    const auto &numbering = jobctl_numbering(recipient);
+    const auto signal = request.info.signal;
+    const bool lineage = signal && signal <= numbering.max &&
+                         (job::stop_family(numbering, signal) || signal == numbering.cont);
+    const auto pid = recipient.pid();
+    const TaskTableHold table{kernel.scheduler().task_table_lock(), lineage};
+    const auto outcome = generate_signal(kernel, recipient, request);
+    if (outcome == JobSignalOutcome::accepted)
+        if (auto *process = kernel.scheduler().find(pid); process && process == &recipient)
+            private_signal_probe(kernel, *process);
+    return outcome;
+}
 
 bool private_jobctl_admit_blocked(Kernel &kernel, const sched::ProcessControlBlock &recipient,
                                   const sched::ThreadControlBlock &target, i32 signal)
@@ -397,7 +468,7 @@ bool private_jobctl_admit_blocked(Kernel &kernel, const sched::ProcessControlBlo
     const auto &numbering = jobctl_numbering(recipient);
     const auto value = static_cast<u32>(signal);
     return recipient.job_control().stopped || value == numbering.kill || value == numbering.cont ||
-           job::stop_family(numbering, value) || private_signal_admit_blocked(kernel, recipient, target);
+           job::stop_family(numbering, value) || private_wait_interruptible(kernel, recipient, target);
 }
 
 KernelSignalSend send_kernel_process_signal(Kernel &kernel, sched::ProcessId pid, u32 signal)
@@ -422,6 +493,8 @@ KernelSignalSend send_kernel_process_signal(Kernel &kernel, sched::ProcessId pid
 
 KernelGroupSignal send_kernel_group_signal(Kernel &kernel, sched::ProcessId group, u32 signal)
 {
+    // The group is enumerated and signalled under the task table (spec 4.7).
+    const TaskTableHold table{kernel.scheduler().task_table_lock(), true};
     // Snapshot PIDs only; each send may change the process table.
     std::array<sched::ProcessId, sched::max_processes> targets{};
     usize count = 0;
