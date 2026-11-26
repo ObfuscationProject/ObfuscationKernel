@@ -82,6 +82,32 @@ usize take(Kernel &kernel, u64 pid, i32 fd, usize count)
     return read ? read.value() : 0;
 }
 
+// One step() that enters (pid, tid) if anything does. The legacy scan
+// (OK_LEGACY_SELECT) takes it from its (pid, tid) cursor. The queue path has
+// no cursor: the CPU is vacated and the other queued threads are set aside
+// for this one step, so its pick finds only the thread, queued already or by
+// the step's own probe of an interrupted wait; they are queued again after.
+bool step_into(Kernel &kernel, u64 pid, u64 tid)
+{
+#if defined(OK_LEGACY_SELECT)
+    native::last_pid = pid; native::last_tid = tid - 1;
+    return native::step(kernel);
+#else
+    CHECK(kernel.posix().activate(0));
+    std::array<sched::ThreadRef, sched::max_processes * sched::max_threads_per_process> aside{};
+    usize count{};
+    bool chosen{};
+    while (const auto next = kernel.scheduler().dequeue_thread(0))
+        if (next->pid == pid && next->tid == tid) chosen = true;
+        else aside[count++] = *next;
+    if (chosen) CHECK(kernel.scheduler().enqueue_thread(pid, tid));
+    const auto stepped = native::step(kernel);
+    for (usize index = 0; index < count; ++index)
+        static_cast<void>(kernel.scheduler().enqueue_thread(aside[index].pid, aside[index].tid));
+    return stepped;
+#endif
+}
+
 // The Linux x86_64 syscall instruction at `site`, entered through step().
 void enter(Kernel &kernel, u64 pid, u64 tid, u64 number, u64 a0, u64 a1, u64 a2)
 {
@@ -92,8 +118,7 @@ void enter(Kernel &kernel, u64 pid, u64 tid, u64 number, u64 a0, u64 a1, u64 a2)
     thread.native_frame.registers[9] = a0; thread.native_frame.registers[10] = a1; thread.native_frame.registers[11] = a2;
     *user(site) = std::byte{0x0f}; *user(site + 1) = std::byte{0x05};
     mock::entry_trap = {hw::TrapKind::syscall, 256};
-    native::last_pid = pid; native::last_tid = tid - 1;
-    expect(native::step(kernel));
+    expect(step_into(kernel, pid, tid));
     ++linux_calls;
 }
 bool pending(Kernel &kernel, u64 pid, u64 tid) { return thread_of(kernel, pid, tid).syscall_pending; }
@@ -102,8 +127,7 @@ i64 result_of(Kernel &kernel, u64 pid, u64 tid) { return static_cast<i64>(thread
 void resume(Kernel &kernel, u64 pid, u64 tid)
 {
     mock::entry_trap = {hw::TrapKind::timer};
-    native::last_pid = pid; native::last_tid = tid - 1;
-    static_cast<void>(native::step(kernel));
+    static_cast<void>(step_into(kernel, pid, tid));
 }
 void caught(Kernel &kernel, u64 pid, u32 signal, bool restart)
 {
@@ -191,9 +215,17 @@ void pty_read_step(Kernel &kernel)
     enter(kernel, pid, reader, linux_read, fds[1], read_at, 10);
     expect(pending(kernel, pid, reader));
     expect(native::send_kernel_process_signal(kernel, pid, OK_SIGINT) == native::KernelSignalSend::sent);
+    const auto probes = smp::evidence_cpus[0].probes.load();
     resume(kernel, pid, reader);
     const auto &thread = thread_of(kernel, pid, reader);
     expect(!thread.syscall_pending && !native::pty_wait_object(pid, reader).pool && thread.native_frame.pc == handler);
+#if !defined(OK_LEGACY_SELECT)
+    // The queue path probed the parked reader, picked it blocked and settled
+    // the wait on its CPU before entering the handler.
+    expect(smp::evidence_cpus[0].probes.load() == probes + 1 && !thread.probe);
+#else
+    expect(smp::evidence_cpus[0].probes.load() == probes);
+#endif
     release(kernel, pid);
 }
 

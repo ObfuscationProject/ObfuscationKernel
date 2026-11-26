@@ -2,9 +2,11 @@
 """Run Linux terminal waits on the actual runtime: PTY read/write/ppoll of the Linux personality on all ten profiles,
 caught signals interrupting PTY and console waits (EINTR, SA_RESTART, partial writes) and PTY VTIME timers.
 
-The model steers which thread each step enters through the legacy (pid, tid)
-scan's cursor, so it builds the runtime with OK_LEGACY_SELECT (xmake option
-legacy_select=y); the queue path's selection has its own models."""
+Each profile runs twice: on the queue path (the default selection; the model
+sets the other queued threads aside for each step it steers) and with
+OK_LEGACY_SELECT (xmake option legacy_select=y), whose (pid, tid) cursor it
+steers instead. A signal interrupting a parked wait is settled after pick on
+the first and before mark_on_cpu on the second."""
 from pathlib import Path
 import argparse,hashlib,json,os,re,shutil,subprocess,resource,sys
 
@@ -51,14 +53,17 @@ def main():
   if args.sanitize:flags+=['-fsanitize=address,undefined','-fno-omit-frame-pointer','-fno-pie'];ld+=['-fsanitize=address,undefined','-no-pie']
   lua=['set_project("hosted-native-terminal-signal")','set_languages("c++23")','set_optimize("fast")','toolchain("poll-host")','    set_kind("standalone")','    set_toolset("cxx", '+json.dumps(str(cxx))+')','    set_toolset("ld", '+json.dumps(str(cxx))+')','toolchain_end()']
   for arch in arches:
-   lua += ['target("native-terminal-signal-'+arch+'")','    set_kind("binary")','    set_toolchains("poll-host")','    add_includedirs("include")','    set_targetdir("bin")','    add_defines("OK_ARCH_TARGET_'+arch.upper()+'", "OK_LEGACY_SELECT")','    add_cxxflags('+', '.join(json.dumps(s) for s in flags)+', {force=true})','    add_ldflags('+', '.join(json.dumps(s) for s in ld)+', {force=true})','    add_files('+', '.join(json.dumps(s) for s in [*sources,f'src/arch/{arch}/ops.cpp'])+')','target_end()']
+   for variant,defines in (('',''),('legacy-',', "OK_LEGACY_SELECT"')):
+    lua += ['target("native-terminal-signal-'+variant+arch+'")','    set_kind("binary")','    set_toolchains("poll-host")','    add_includedirs("include")','    set_targetdir("bin")','    add_defines("OK_ARCH_TARGET_'+arch.upper()+'"'+defines+')','    add_cxxflags('+', '.join(json.dumps(s) for s in flags)+', {force=true})','    add_ldflags('+', '.join(json.dumps(s) for s in ld)+', {force=true})','    add_files('+', '.join(json.dumps(s) for s in [*sources,f'src/arch/{arch}/ops.cpp'])+')','target_end()']
   (source/'xmake.lua').write_text('\n'.join(lua)+'\n');record['generated_project_sha256']=sha(source/'xmake.lua');record['status']='running';save()
   run([xmake,'f','-P',source,'-c','-y','--ccache=n'],'configure')
   for arch in arches:
-   run([xmake,'build','-P',source,'-j2','-v','native-terminal-signal-'+arch],arch+'-build')
-   binary=source/'bin'/('native-terminal-signal-'+arch);output=run([binary],arch+'-run')
-   if not re.search(r'^NATIVE_TERMINAL_SIGNAL_RUNTIME_PASS linux_calls=[0-9]+ profiles=10 eintr=1 restart=1 partial_write=1 console_read=1 poll=1 vtime=1 job_control_park=1 hosted=1 guest=0$',output,re.M):raise ValueError('missing exact success marker')
-   record['rows'].append(dict(architecture=arch,status='passed',binary_sha256=sha(binary),output=output.strip()));save();print('PASS',arch,'hosted Linux terminal waits (PTY I/O and ppoll on ten profiles, EINTR, SA_RESTART, partial writes, console reads, VTIME, job-control park)',flush=True)
+   for variant,selection in (('','queue'),('legacy-','legacy_select')):
+    name='native-terminal-signal-'+variant+arch
+    run([xmake,'build','-P',source,'-j2','-v',name],variant+arch+'-build')
+    binary=source/'bin'/name;output=run([binary],variant+arch+'-run')
+    if not re.search(r'^NATIVE_TERMINAL_SIGNAL_RUNTIME_PASS linux_calls=[0-9]+ profiles=10 eintr=1 restart=1 partial_write=1 console_read=1 poll=1 vtime=1 job_control_park=1 hosted=1 guest=0$',output,re.M):raise ValueError('missing exact success marker')
+    record['rows'].append(dict(architecture=arch,selection=selection,status='passed',binary_sha256=sha(binary),output=output.strip()));save();print('PASS',arch,selection,'hosted Linux terminal waits (PTY I/O and ppoll on ten profiles, EINTR, SA_RESTART, partial writes, console reads, VTIME, job-control park)',flush=True)
   for name,digest in record['source_sha256'].items():
    if sha(source/name)!=digest:raise ValueError('retained source changed: '+name)
   record['status']='passed'
