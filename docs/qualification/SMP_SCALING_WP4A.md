@@ -124,4 +124,47 @@ big kernel lock (BKL); the task and run queue locks nest above it. Baseline:
 
 ## Validation
 
-(filled in below)
+All runs are QEMU TCG on the pinned SysToolchain QEMU 10.2 (`scope=hardware`
+means the emulated machine); model tests print `scope=model`. Kernel sources
+at cef820c; later commits change tests, runner scripts and documentation only
+(the lanes, boots and gates ran on ce0fae4).
+
+- Hosted: the full `scripts/hosted_suite.py` with the toolchain root: 171
+  passed, 0 failed, 59 not run (inputs, quarantine, ext4 fixture). This
+  includes the new `test_wait_park_race.py` on all ten profiles and the
+  extended `test_scheduler_waits.py`, `test_run_queues.py`,
+  `test_task_table.py`, `test_thread_lifecycle.py` and the 42 step-driving
+  runtime models. `test_wait_park_race.py --sanitize` also passes on x86_64.
+  The race model ran 20000 park rounds with both interleavings (in one run
+  1191 completions found the thread armed and 18809 parked), about six
+  million picks with 1.6 to 2.2 million steals, and 20000 idle rounds with
+  about 20000 halts and no lost wake. Mutations: dropping the parked
+  completion's enqueue fails the park race; dropping both handshake fences
+  was not detected on the x86 host (its locked operations close the window
+  in practice), so the fences rest on review and on TCG runs.
+- Quarantined runners (`--quarantined`): `native_child_wait_signal`,
+  `native_process_signal_waits`, `native_poll_objects`, `native_signal_exec`,
+  `native_shutdown_runtime`, `linux_select` and `linux_udp_signal` fail at the
+  same check or compile error as on WP2's head; `linux_udp_sockname` passes.
+- Kernel: debug `xmake test` at `-smp 1` on all ten profiles and at `-smp 2`
+  and `-smp 4` on x86_64, aarch64 and rv64: 16 of 16 lanes with
+  `OK_TEST_PASS`.
+- `legacy_select=y`: `xmake test -smp 1` on x86_64 passes, and the x86_64
+  native distro boot reaches `OK_USERLAND scope=hardware acceptance=pass`
+  (its kernel has no queue-path symbols and reports `OK_SMP_AUDIT passes=0`).
+- OS (private copy of `wt/os-smp-scaling` b8dceae, unchanged; no OS patch):
+  native distro boot to `OK_USERLAND scope=hardware acceptance=pass` on all
+  ten profiles, each through the queue path (`OK_SMP_AUDIT passes=12` or 13,
+  `repairs=0`). On x86_64, aarch64 and rv64: `test_smp_stress.py
+  --user-hotplug` in debug and in release, each at 2 and 4 vCPUs; the futex
+  probe at 2; `--smp_hotplug_test=y --require-hotplug` at 2 (495 to 660
+  cycles, no failures); and `smp_sections=n` at 2. The CPU sysfs probe passed
+  at 4 vCPUs on x86_64 and at one on arm32. All 22 runs passed with every
+  check counter (`lock_violations`, the assertion counters including
+  `queue_asserts` and `pin_asserts`, `admit_shadow_mismatch`,
+  `quiesce_timeouts`, `audit_repairs`, `poll_audit_ready`) and `unqueued` at
+  zero; `max_lock_depth` was 5 in debug kernels and 0 in release ones. The
+  queue path's evidence in those runs: `OK_SMP_WAKE remote` 317 to 3044,
+  `ipis` 133 to 306, `steals` 287 to 1327, and 54 to 278 audit passes per
+  run. No run exercised a probed pick (`probes=0`): the stress workers do not
+  interrupt parked waits with signals; the hosted signal models do.
