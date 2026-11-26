@@ -261,6 +261,8 @@ Result<usize> NativeUdpService::build_datagram(u32 handle, IpAddress destination
     if (destination.family != socket->family) return Status::invalid_argument("UDP address family differs from the socket");
     if (!reachable(destination))
         return Status::invalid_argument("UDP destination has no route");
+    // sock_alloc_send_pskb reports a pending error before sending.
+    if (auto pending = take_error(handle); !pending) return pending;
     const bool v6 = socket->family == Family::ipv6;
     const usize header = v6 ? 48 : 28;
     if (payload.size() > datagram_capacity || header + payload.size() > 1500)
@@ -396,11 +398,36 @@ Result<NativeUdpFrame> NativeUdpService::queue(const IpAddress &source, const Ip
     // The caller decides whether an unbound datagram counts as dropped.
     return NativeUdpFrame{NativeUdpFrameKind::unbound};
 }
+Result<bool> NativeUdpService::icmp_error(const IpAddress &local, u16 local_port, const IpAddress &peer,
+                                         u16 peer_port, wire::IcmpErrorClass error)
+{
+    if (auto state = status(); !state) return state;
+    if (!error.hard || error.kind != wire::IcmpErrorKind::refused) return false;
+    for (auto &socket : sockets_)
+    {
+        if (!socket.used || !socket.bound || !socket.associated || socket.family != local.family ||
+            socket.port != local_port || (!socket.address.unspecified() && socket.address != local) ||
+            socket.peer_address != peer || socket.peer_port != peer_port)
+            continue;
+        if (!readiness_sequence_.advance()) return status();
+        socket.refused = socket.changed = true;
+        return true;
+    }
+    return false;
+}
+Status NativeUdpService::take_error(u32 handle)
+{
+    auto *socket = find(handle);
+    if (!socket) return Status::bad_descriptor("stale UDP socket handle");
+    if (!socket->refused) return Status::success();
+    socket->refused = false;
+    return Status::connection_refused("UDP peer refused an earlier datagram");
+}
 Result<NativeUdpReadiness> NativeUdpService::readiness(u32 handle) const
 {
     const auto *socket = find(handle);
     if (!socket) return Status::bad_descriptor("stale UDP socket handle");
-    return NativeUdpReadiness{socket->count, readiness_sequence_.value(), readiness_sequence_.terminal()};
+    return NativeUdpReadiness{socket->count, readiness_sequence_.value(), readiness_sequence_.terminal(), socket->refused};
 }
 Result<NativeUdpBindingSnapshot> NativeUdpService::binding(u32 handle) const
 {

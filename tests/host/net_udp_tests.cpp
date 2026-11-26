@@ -122,11 +122,48 @@ void ipv4_through_interface()
     auto eth = wire::ethernet({frame.data(), built.value()}); CHECK(eth && eth.value().destination == router_mac);
     CHECK(!f.udp.build_datagram(socket.value(), IpAddress{224, 0, 0, 1}, 53, payload, frame));
 }
+// Port unreachable for a connected socket's datagram (Linux __udp4_lib_err):
+// only a hard error on a connected socket is kept, and it is reported once.
+void icmp_refusal()
+{
+    Fixture f;
+    const IpAddress peer{93, 184, 216, 34}, self{self4};
+    auto connected = f.udp.open(); CHECK(connected && f.udp.connect(connected.value(), peer, 53));
+    const u16 port = f.udp.binding(connected.value()).value().port;
+    auto other = f.udp.open(); CHECK(other && f.udp.bind(other.value(), self, 7000));
+    const wire::IcmpErrorClass refused{wire::IcmpErrorKind::refused, true, 0};
+    // Soft errors, unconnected sockets and other peers are not told.
+    auto soft = f.udp.icmp_error(self, port, peer, 53, {wire::IcmpErrorKind::host_unreachable, false, 0});
+    CHECK(soft && !soft.value());
+    auto unconnected = f.udp.icmp_error(self, 7000, peer, 53, refused); CHECK(unconnected && !unconnected.value());
+    auto elsewhere = f.udp.icmp_error(self, port, peer, 54, refused); CHECK(elsewhere && !elsewhere.value());
+    const auto before = f.udp.readiness(connected.value()); CHECK(before && !before.value().error);
+    (void)f.udp.take_changed([](u32) {});
+    auto taken = f.udp.icmp_error(self, port, peer, 53, refused); CHECK(taken && taken.value());
+    const auto after = f.udp.readiness(connected.value());
+    CHECK(after && after.value().error && after.value().sequence != before.value().sequence);
+    CHECK(!after.value().may_wait(after.value().sequence));
+    // The socket is reported changed, so its waiters are woken.
+    usize woken = 0; u32 seen = 0;
+    CHECK(f.udp.take_changed([&](u32 handle) { ++woken; seen = handle; }) == 1 && woken == 1 && seen == connected.value());
+    // The next send fails with it and the one after goes out.
+    std::array<std::byte, net::NativeUdpService::frame_capacity> frame{};
+    auto failed = f.udp.build_datagram(connected.value(), peer, 53, payload, frame);
+    CHECK(!failed && failed.status().code() == StatusCode::connection_refused);
+    CHECK(!f.udp.readiness(connected.value()).value().error);
+    CHECK(f.udp.build_datagram(connected.value(), peer, 53, payload, frame));
+    // A receiver takes it the same way, once.
+    taken = f.udp.icmp_error(self, port, peer, 53, refused); CHECK(taken && taken.value());
+    CHECK(f.udp.take_error(connected.value()).code() == StatusCode::connection_refused);
+    CHECK(f.udp.take_error(connected.value()));
+    CHECK(f.udp.take_error(0xdead).code() == StatusCode::bad_descriptor);
+}
 }
 
 int main()
 {
     ipv6_sockets();
     ipv4_through_interface();
+    icmp_refusal();
     std::printf("PASS net udp scope=model checks=%zu\n", checks);
 }

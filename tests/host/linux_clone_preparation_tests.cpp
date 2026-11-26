@@ -29,7 +29,7 @@ Status copy_to_user(const AddressSpace &, uptr address, const void *source, usiz
     for (usize i = 0; i < 4; ++i) parent_tid[i] = bytes[i];
     return Status::success();
 }
-// uaccess's recovery asks after a refused store; no page is withheld here.
+// uaccess asks whether a failed copy hit mapped pages; the injected failure is a real fault.
 bool user_range(const AddressSpace &, uptr, usize, bool)
 {
     return false;

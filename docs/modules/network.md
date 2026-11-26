@@ -23,7 +23,10 @@ Layers:
   and Linux personalities. A socket keeps its `socket()` family; IPv6 sockets
   are v6-only. Linux records go through `ok/abi/linux_udp_address.hpp`
   (`sockaddr_in`, `sockaddr_in6` per profile); the native UAPI has
-  `ok_sockaddr_in` and `ok_sockaddr_in6`.
+  `ok_sockaddr_in` and `ok_sockaddr_in6`. ICMP errors reach the TCP
+  connection or connected UDP socket they quote (Linux hard/soft rules).
+  Poll and select over TCP streams follow `tcp_poll`, and a poll over
+  sockets only sleeps on their wait queues.
 - `NetworkStack`/`SocketTable` (`net.hpp`) remain the loopback debug stack of
   the rescue shell and task manager.
 

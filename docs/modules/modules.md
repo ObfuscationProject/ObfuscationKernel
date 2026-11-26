@@ -19,7 +19,7 @@ Each module exposes a `ModuleManifest` with:
 - `ModuleResourceBudget` for maximum threads, services, memory pages, and
   handles.
 
-The current contract is module ABI 81 with public UAPI 0.17.0 and SDK manifest
+The current contract is module ABI 82 with public UAPI 0.17.0 and SDK manifest
 schema 1. The exporter writes the same generation into every SDK manifest, and
 the OS consumer rejects a mismatched generation before linking. Rebuild native
 extensions against the exact architecture/mode/compiler SDK; older generations
@@ -107,6 +107,35 @@ Roadmap tests cover:
 - the built-in module graph used by the kernel debug suite.
 
 ## ABI history
+
+ABI82 (`net-socket-gaps`, the WT2.3 follow-up) changes exported declarations
+against ABI81 (`git diff 5815814.. -- include/`); UAPI stays 0.17.0:
+
+- Status. `StatusCode` appends `connection_refused` after `no_device`, with
+  `Status::connection_refused` (ECONNREFUSED).
+- ICMP. `ok/net/icmp.hpp` gains `IcmpErrorKind`, `IcmpErrorClass`,
+  `classify_icmp_error<Family>`, `IcmpQuote<Family>` and `icmp_quote<Family>`.
+- TCP. `tcp::Failure` appends `host_unreachable`, `network_unreachable`,
+  `prohibited` and `protocol`. `tcp::Snapshot` appends `error_pending`.
+  `tcp::Connection` gains `icmp_error` and `take_error`, a remembered soft
+  error and a reported flag, which change its layout. `EndpointTable` gains
+  `icmp_error` and `take_error`, and `NativeTcpStreamService` gains
+  `take_error`.
+- Executor and waits. `TcpEthernetState` appends `icmp_errors`, and
+  `NativeTcpEthernetExecutor` gains its ICMP counter. `TcpStreamWaits` gains
+  `watch` and `set_foreign_notice` and the notice members, which change its
+  layout. The new `ok/net/tcp_stream_poll.hpp` exports
+  `native_tcp_descriptor_readiness`.
+- UDP. `NativeUdpReadiness` appends `error`. `NativeUdpService` gains
+  `icmp_error` and `take_error`, and its socket record gains `refused`.
+- Linux tables. `ok/abi/linux_tcp_data.hpp` gains the per-profile
+  `tcp_errno_ehostunreach`, `tcp_errno_enetunreach`, `tcp_errno_eacces` and
+  `tcp_errno_eproto`.
+
+feat/tty-jobctl took 81, so this branch takes 82. Every exported marker, the
+exporter's validators and manifest, the compile-time assertions and the SDK
+contract tests move to 82, refuse 81 and 83, and keep refusing the older
+values they listed.
 
 ABI81 (`feat/tty-jobctl`, WT2.2) changes exported declarations against
 ABI80 (`git diff 931f252.. -- include/`):

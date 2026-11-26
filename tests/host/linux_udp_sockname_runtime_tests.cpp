@@ -50,7 +50,7 @@ void name(Kernel &kernel,i32 fd,u32 endpoint,u32 capacity=16) {
   expect(kernel.native_udp().binding(endpoint).value()==binding.value());
   const auto after=kernel.native_udp().readiness(endpoint);CHECK(after);
   expect(after.value().sequence==readiness.value().sequence && after.value().queued_datagrams==readiness.value().queued_datagrams);
-  std::array<u8,16> bytes{};CHECK(lu::UdpWire<lu::Profile::x86_64>::encode_address(bytes,{2,binding.value().port,binding.value().address}));
+  std::array<u8,16> bytes{};CHECK(lu::UdpWire<lu::Profile::x86_64>::encode_address(bytes,{2,binding.value().port,binding.value().address.ipv4()}));
   for(usize i=0;i<32;++i) expect(mock::memory[128+i]==(i<std::min<usize>(capacity,16)?std::byte{bytes[i]}:std::byte{0xa7}));
 }
 u32 endpoint(Kernel &kernel,i32 fd) {

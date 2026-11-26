@@ -181,7 +181,8 @@ void send_effects(Kernel &kernel, Group group)
     expect(invoke(kernel, group, lu::UdpCall::sendto,
         {fd, payload_address, 3, 0, input_address, ~uptr{}}) == error(E::e_inval));
     expect(extension.submissions == submits && mock::copies == copies + 1);
-    address(52001, {192, 0, 2, 99});
+    // Any routable peer is admitted; multicast has no route in this profile.
+    address(52001, {224, 0, 0, 1});
     expect(invoke(kernel, group, lu::UdpCall::sendto,
         {fd, payload_address, 3, 0, input_address, 16}) == error(E::e_netunreach));
     expect(extension.submissions == submits && mock::copies == copies + 2);
@@ -385,7 +386,7 @@ void autobind_order_runtime(Kernel &kernel, Group owner)
     fresh_send_error(kernel, owner, {0, payload_address, 65536, 0, input_address, 16}, E::e_msgsize, true, 1);
     address(0, network_fixture.peer_ip);
     fresh_send_error(kernel, owner, {0, payload_address, 3, 0, input_address, 16}, E::e_inval, true, 1);
-    address(52001, {192, 0, 2, 99});
+    address(52001, {224, 0, 0, 1});
     fresh_send_error(kernel, owner, {0, payload_address, 1473, 0, input_address, 16}, E::e_netunreach, true, 1);
     address(52001, network_fixture.peer_ip);
     fresh_send_error(kernel, owner, {0, payload_address, 1473, 0, input_address, 16}, E::e_msgsize, true, 1);
