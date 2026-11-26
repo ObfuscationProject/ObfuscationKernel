@@ -108,7 +108,7 @@ void release_error(const Bytes &input)
     CHECK(status.code() == StatusCode::io_error);
     CHECK(status.message() == "injected ext4 reclaim failure");
     CHECK(!node->references_ && node->phase_ == Ext4Node::Phase::retiring);
-    CHECK(storage->failed_ && !storage->operation_active_);
+    CHECK(storage->failed_ && !storage->gate_.held());
     const auto writes = disk.writes.load(), flushes = disk.flushes.load();
     CHECK(path.value().release());
     CHECK(!node->query_metadata());
@@ -139,7 +139,7 @@ void unlink_cleanup_error(const Bytes &input)
     CHECK(status.message() == "injected ext4 reclaim failure");
     CHECK(disk.failures == 1 && !disk.fail_when_retiring);
     CHECK(node->phase_ == Ext4Node::Phase::retiring && !node->references_);
-    CHECK(storage->failed_ && !storage->operation_active_);
+    CHECK(storage->failed_ && !storage->gate_.held());
     const auto writes = disk.writes.load(), flushes = disk.flushes.load();
     CHECK(!root->create("after-failure", NodeType::regular));
     CHECK(!storage->sync());
@@ -172,14 +172,14 @@ void release_while_other_cpu_owns(const Bytes &input)
     });
     while (!disk.held.load()) std::this_thread::yield();
     const auto writes = disk.writes.load();
-    CHECK(storage->operation_owner_.load() == 1 + 1);
+    CHECK(storage->gate_.owner() == 1 + 1);
     CHECK(path.value().release());
     CHECK(!node->references_ && node->phase_ == Ext4Node::Phase::detached && disk.writes.load() == writes);
     disk.go = true;
     owner.join();
     CHECK(node->phase_ == Ext4Node::Phase::vacant || node->phase_ == Ext4Node::Phase::tombstone);
     CHECK(disk.writes.load() > writes && !storage->failed_);
-    CHECK(!storage->operation_active_ && storage->operation_owner_.load() == 0);
+    CHECK(!storage->gate_.held() && storage->gate_.owner() == 0);
     CHECK(path.value().release());
 }
 }

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Hosted model tests of the ext4 operation gate across CPUs.
+"""Hosted model tests of the filesystem provider gates (rank fs_provider) across CPUs.
 
 Model coverage only: host threads stand in for CPUs through ScopedHostedCpu over
-file-backed ext4 images made by mke2fs; no guest CPU, interrupt or device
-transport executes. Runs the gate concurrency test and the VFS/ext4 callback
-lock control and release integration tests, each built with OK_LOCK_DEBUG and
-again without it (--sanitize adds ASan/UBSan, --tsan ThreadSanitizer instead).
+file-backed ext4 images made by mke2fs and an in-memory simplefs disk; no guest
+CPU, interrupt or device transport executes. Runs the ext4 gate concurrency test
+(the ext4 gate is an smp::ServingGate), the VFS/ext4 callback lock control and
+release integration tests and the simplefs provider gate test, each built with
+OK_LOCK_DEBUG and again without it (--sanitize adds ASan/UBSan, --tsan
+ThreadSanitizer instead).
 """
 import argparse
 import os
@@ -18,8 +20,9 @@ TESTS = (
     ("ext4-gate-concurrency", "tests/host/ext4_gate_concurrency_tests.cpp"),
     ("vfs-ext4-callback-lock-control", "tests/host/vfs_ext4_callback_lock_control.cpp"),
     ("vfs-ext4-release-integration", "tests/host/vfs_ext4_release_integration_tests.cpp"),
+    ("simplefs-provider-gate", "tests/host/provider_gate_tests.cpp"),
 )
-SOURCES = ("src/fs/ext4_fs.cpp", "src/fs/vfs.cpp", "tests/host/ext4_realtime_model.cpp")
+SOURCES = ("src/fs/ext4_fs.cpp", "src/fs/vfs.cpp", "src/fs/simplefs.cpp", "tests/host/ext4_realtime_model.cpp")
 
 
 def main():

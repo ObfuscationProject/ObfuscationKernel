@@ -57,55 +57,37 @@ bool power_of(u32 value, u32 base)
 }
 } // namespace
 
-void Ext4FileSystem::claim_operation_locked()
-{
-    operation_active_ = true;
-    operation_owner_.store(static_cast<u32>(smp::current_cpu()) + 1, std::memory_order_relaxed);
-}
 Status Ext4FileSystem::begin_operation(const Ext4Node *node, bool mounting)
 {
-    const auto self = static_cast<u32>(smp::current_cpu()) + 1;
+    // The fs_provider gate (smp::ServingGate): a re-entry on the owning CPU is
+    // busy; a waiter spins SPINNING and serves its interrupts, since the
+    // holder may wait for a device line routed to it. The identity checks
+    // run once this CPU holds the gate.
+    if (!gate_.enter()) return Status::busy("ext4 backend operation is active");
+    Status refused{};
     {
-        // Only this CPU sets or clears its own ownership, so a reentry stays one.
         smp::ScopedSpinLock guard(identity_lock_);
-        if (operation_active_ && operation_owner_.load(std::memory_order_relaxed) == self)
-            return Status::busy("ext4 backend operation is active");
-    }
-    smp::lock_debug_may_wait(this, smp::LockRank::fs_provider);
-    for (;;)
-    {
+        if (mounting)
         {
-            smp::ScopedSpinLock guard(identity_lock_);
-            if (!operation_active_)
-            {
-                if (mounting)
-                {
-                    if (mounted_) return Status::busy("ext4 already published; cache reinitialization is forbidden");
-                }
-                else
-                {
-                    if (!mounted_) return Status::not_initialized("ext4 unmounted");
-                    if (node && (node->fs_ != this ||
-                        (node->phase_ != Ext4Node::Phase::linked &&
-                         !(node->phase_ == Ext4Node::Phase::detached && node->references_))))
-                        return Status::not_found("ext4 node identity is no longer live");
-                }
-                claim_operation_locked();
-                break;
-            }
+            if (mounted_) refused = Status::busy("ext4 already published; cache reinitialization is forbidden");
         }
-        // Another CPU owns the gate and finishes in bounded time; its identity
-        // checks are made again once this CPU gets it.
-        // The owner may wait for a device line routed to this CPU.
-        const smp::SpinningScope spinning;
-        while (operation_owner_.load(std::memory_order_relaxed) != 0)
+        else if (!mounted_)
+            refused = Status::not_initialized("ext4 unmounted");
+        else if (node && (node->fs_ != this ||
+                          (node->phase_ != Ext4Node::Phase::linked &&
+                           !(node->phase_ == Ext4Node::Phase::detached && node->references_))))
+            refused = Status::not_found("ext4 node identity is no longer live");
+        if (!refused && !mounted_)
         {
-            smp::serve_while_spinning();
-            arch::ArchOperations::spin_pause();
+            // Nothing to drain on an unmounted filesystem.
+            gate_.leave();
+            return refused;
         }
     }
-    smp::lock_debug_hold(this, smp::LockRank::fs_provider);
-    return {};
+    if (refused) return {};
+    // A release may have left a detached node to this holder: drain it.
+    const auto finished = finish_operation();
+    return finished ? refused : finished;
 }
 Status Ext4FileSystem::drain_detached()
 {
@@ -114,7 +96,7 @@ Status Ext4FileSystem::drain_detached()
         u32 number{};
         {
             smp::ScopedSpinLock guard(identity_lock_);
-            if (!operation_active_) return Status::fault("ext4 cleanup lacks operation admission");
+            if (!gate_.owned_by_current_cpu()) return Status::fault("ext4 cleanup lacks operation admission");
             for (const auto &node : nodes_)
                 if (node.phase_ == Ext4Node::Phase::detached && !node.references_)
                 { number = node.ino_; break; }
@@ -132,11 +114,7 @@ Status Ext4FileSystem::drain_detached()
 Status Ext4FileSystem::finish_operation()
 {
     // Run by the owning CPU; the gate opens with the identity lock held.
-    const auto open_gate = [this] {
-        smp::lock_debug_release(this, smp::LockRank::fs_provider);
-        operation_owner_.store(0, std::memory_order_relaxed);
-        operation_active_ = false;
-    };
+    const auto open_gate = [this] { gate_.leave(); };
     for (;;)
     {
         const auto status = drain_detached();
@@ -1278,7 +1256,7 @@ Status Ext4FileSystem::destroy(u32 ino)
     Ext4Node *victim{};
     {
         smp::ScopedSpinLock guard(identity_lock_);
-        if (!operation_active_ || ino < first_inode_)
+        if (!gate_.owned_by_current_cpu() || ino < first_inode_)
             return Status::busy("ext4 destruction requires admission and a nonreserved inode");
         for (auto &node : nodes_)
             if (node.ino_ == ino && node.phase_ == Ext4Node::Phase::detached) { victim = &node; break; }
@@ -1591,13 +1569,12 @@ Status Ext4Node::release()
         smp::ScopedSpinLock guard(fs_->identity_lock_);
         if (!references_) return Status::invalid_argument("ext4 unbalanced release");
         --references_; // Consumed even if later cleanup fails.
-        // An active gate, here or on another CPU, drains this node when it finishes.
-        if (references_ || phase_ != Phase::detached || fs_->operation_active_) return {};
-        fs_->claim_operation_locked();
+        // An active gate, here or on another CPU, drains this node when it
+        // finishes: its holder checks for detached nodes under this lock
+        // before it opens the gate.
+        if (references_ || phase_ != Phase::detached || !fs_->gate_.try_enter()) return {};
     }
     // The gate was free: this inline cleanup is an operation of its own.
-    smp::lock_debug_may_wait(fs_, smp::LockRank::fs_provider);
-    smp::lock_debug_hold(fs_, smp::LockRank::fs_provider);
     return fs_->finish_operation();
 }
 Node *Ext4Node::lookup(std::string_view name)

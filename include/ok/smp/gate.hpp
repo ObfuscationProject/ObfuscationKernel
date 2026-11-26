@@ -104,6 +104,12 @@ template <LockRank Rank> class ServingGate final
         return taken_.test(std::memory_order_relaxed);
     }
 
+    // The holding CPU + 1, 0 when free (evidence and tests; it may change at once).
+    [[nodiscard]] u32 owner() const noexcept
+    {
+        return owner_.load(std::memory_order_relaxed);
+    }
+
     // Holds the gate for a scope when enter() succeeded; status() says why not.
     class Guard final
     {

@@ -27,7 +27,7 @@ struct Monitor
     void check(char kind)
     {
         CHECK(vfs->lock_.try_lock());
-        const bool active = vfs->operation_active_;
+        const bool active = vfs->operation_active();
         vfs->lock_.unlock();
         ++calls;
         if (reenter && active)
@@ -180,7 +180,7 @@ void early_and_reentrant()
     CHECK(!f.vfs->resolve({}, "/absent")); CHECK(f.vfs->stat("/file")); ++early_returns;
     f.vfs->operation_serial_ = ~u64{0};
     failed = f.vfs->stat("/file"); CHECK(!failed && failed.status().code() == StatusCode::overflow);
-    CHECK(!f.vfs->operation_active_); CHECK(f.vfs->lock_.try_lock()); f.vfs->lock_.unlock(); ++early_returns;
+    CHECK(!f.vfs->operation_active()); CHECK(f.vfs->lock_.try_lock()); f.vfs->lock_.unlock(); ++early_returns;
 }
 }
 

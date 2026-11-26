@@ -129,7 +129,8 @@ class FatFileSystem final
     u64 write_sequence_{};
     u32 bitmap_{}, upcase_{}, bitmap_bytes_{}, upcase_bytes_{}, upcase_checksum_{};
     u16 fsinfo_{0xffff}, backup_boot_{0xffff};
-    bool mounted_{}, writable_{}, dirty_{}, failed_{}, busy_{};
-    mutable smp::SpinLock lock_{};
+    bool mounted_{}, writable_{}, dirty_{}, failed_{};
+    // The operation gate (rank fs_provider; Guard).
+    smp::ServingGate<smp::LockRank::fs_provider> gate_{};
 };
 } // namespace ok::fs

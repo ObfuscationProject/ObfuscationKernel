@@ -93,7 +93,9 @@ class SimpleDiskFileSystem final
     driver::BlockDevice *device_{nullptr};
     SimpleFsInfo info_{};
     bool mounted_{false};
-    mutable smp::SpinLock lock_{};
+    // The operation gate (rank fs_provider): every call, its device I/O included.
+    mutable smp::ServingGate<smp::LockRank::fs_provider> gate_{};
+    using ProviderGuard = smp::ServingGate<smp::LockRank::fs_provider>::Guard;
 };
 
 } // namespace ok::fs

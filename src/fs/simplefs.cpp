@@ -63,7 +63,8 @@ bool ranges_overlap(u32 left_start, u32 left_count, u32 right_start, u32 right_c
 
 Status SimpleDiskFileSystem::format(driver::BlockDevice &device, std::string_view label)
 {
-    smp::ScopedSpinLock guard(lock_);
+    const ProviderGuard guard(gate_);
+    if (!guard.status()) return guard.status();
     const auto geometry = device.geometry();
     if (geometry.block_size != driver::block_sector_size)
     {
@@ -117,7 +118,8 @@ Status SimpleDiskFileSystem::format(driver::BlockDevice &device, std::string_vie
 
 Status SimpleDiskFileSystem::mount(driver::BlockDevice &device)
 {
-    smp::ScopedSpinLock guard(lock_);
+    const ProviderGuard guard(gate_);
+    if (!guard.status()) return guard.status();
     device_ = &device;
     mounted_ = true;
     if (auto status = load_info(); !status.ok())
@@ -132,7 +134,8 @@ Status SimpleDiskFileSystem::mount(driver::BlockDevice &device)
 
 Result<SimpleFsInfo> SimpleDiskFileSystem::info() const
 {
-    smp::ScopedSpinLock guard(lock_);
+    const ProviderGuard guard(gate_);
+    if (!guard.status()) return guard.status();
     if (!mounted_)
     {
         return Status::not_initialized("SimpleFS is not mounted");
@@ -142,7 +145,8 @@ Result<SimpleFsInfo> SimpleDiskFileSystem::info() const
 
 Result<SimpleFsDirectoryListing> SimpleDiskFileSystem::list_root()
 {
-    smp::ScopedSpinLock guard(lock_);
+    const ProviderGuard guard(gate_);
+    if (!guard.status()) return guard.status();
     if (auto status = ensure_mounted(); !status.ok())
     {
         return status;
@@ -181,7 +185,8 @@ Result<SimpleFsDirectoryListing> SimpleDiskFileSystem::list_root()
 
 Status SimpleDiskFileSystem::create(std::string_view path, NodeType type)
 {
-    smp::ScopedSpinLock guard(lock_);
+    const ProviderGuard guard(gate_);
+    if (!guard.status()) return guard.status();
     if (auto status = ensure_mounted(); !status.ok())
     {
         return status;
@@ -227,7 +232,8 @@ Status SimpleDiskFileSystem::create(std::string_view path, NodeType type)
 
 Status SimpleDiskFileSystem::unlink(std::string_view path)
 {
-    smp::ScopedSpinLock guard(lock_);
+    const ProviderGuard guard(gate_);
+    if (!guard.status()) return guard.status();
     if (auto status = ensure_mounted(); !status.ok())
     {
         return status;
@@ -251,7 +257,8 @@ Status SimpleDiskFileSystem::unlink(std::string_view path)
 
 Status SimpleDiskFileSystem::chmod(std::string_view path, u32 mode)
 {
-    smp::ScopedSpinLock guard(lock_);
+    const ProviderGuard guard(gate_);
+    if (!guard.status()) return guard.status();
     if (auto status = ensure_mounted(); !status.ok())
     {
         return status;
@@ -273,7 +280,8 @@ Status SimpleDiskFileSystem::chmod(std::string_view path, u32 mode)
 
 Status SimpleDiskFileSystem::chown(std::string_view path, u32 uid, u32 gid)
 {
-    smp::ScopedSpinLock guard(lock_);
+    const ProviderGuard guard(gate_);
+    if (!guard.status()) return guard.status();
     if (auto status = ensure_mounted(); !status.ok())
     {
         return status;
@@ -296,7 +304,8 @@ Status SimpleDiskFileSystem::chown(std::string_view path, u32 uid, u32 gid)
 
 Status SimpleDiskFileSystem::write_file(std::string_view path, std::span<const std::byte> data)
 {
-    smp::ScopedSpinLock guard(lock_);
+    const ProviderGuard guard(gate_);
+    if (!guard.status()) return guard.status();
     if (auto status = ensure_mounted(); !status.ok())
     {
         return status;
@@ -362,7 +371,8 @@ Status SimpleDiskFileSystem::write_file(std::string_view path, std::span<const s
 
 Result<FileBuffer> SimpleDiskFileSystem::read_file(std::string_view path)
 {
-    smp::ScopedSpinLock guard(lock_);
+    const ProviderGuard guard(gate_);
+    if (!guard.status()) return guard.status();
     if (auto status = ensure_mounted(); !status.ok())
     {
         return status;
@@ -411,7 +421,8 @@ Result<FileBuffer> SimpleDiskFileSystem::read_file(std::string_view path)
 
 Result<usize> SimpleDiskFileSystem::read_file_into(std::string_view path, std::span<std::byte> out)
 {
-    smp::ScopedSpinLock guard(lock_);
+    const ProviderGuard guard(gate_);
+    if (!guard.status()) return guard.status();
     if (auto status = ensure_mounted(); !status.ok())
     {
         return status;
@@ -459,7 +470,8 @@ Result<usize> SimpleDiskFileSystem::read_file_into(std::string_view path, std::s
 
 Result<Metadata> SimpleDiskFileSystem::stat(std::string_view path)
 {
-    smp::ScopedSpinLock guard(lock_);
+    const ProviderGuard guard(gate_);
+    if (!guard.status()) return guard.status();
     if (auto status = ensure_mounted(); !status.ok())
     {
         return status;
