@@ -87,6 +87,99 @@ inline Result<usize> build_icmp_error(std::span<std::byte> output, const typenam
                               type, code, rest, offending.first(offending.size() < room ? offending.size() : room));
 }
 
+// What an ICMP error means to the transport that sent the quoted packet
+// (RFC 1122 section 4.2.3.9, RFC 4443 section 3; the hard/soft split follows
+// Linux icmp_err_convert and icmpv6_err_convert). Hard errors may end a
+// connection attempt; soft ones are only remembered. `mtu` is the next-hop
+// MTU of "fragmentation needed" and "packet too big".
+enum class IcmpErrorKind : u8 { none, refused, host_unreachable, network_unreachable, prohibited, protocol, mtu };
+struct IcmpErrorClass
+{
+    IcmpErrorKind kind{};
+    bool hard{};
+    u32 mtu{};
+};
+
+template <AddressFamily Family>
+inline constexpr IcmpErrorClass classify_icmp_error(const Icmp &message)
+{
+    using K = IcmpErrorKind;
+    if constexpr (Family::version == 4)
+    {
+        if (message.type == icmpv4::time_exceeded) return {K::host_unreachable, false, 0};
+        if (message.type == icmpv4::parameter_problem) return {K::protocol, true, 0};
+        if (message.type != icmpv4::unreachable) return {};
+        switch (message.code)
+        {
+        case 0: case 11: return {K::network_unreachable, false, 0};
+        case 1: case 5: case 12: return {K::host_unreachable, false, 0};
+        // Linux reports protocol unreachable (2) as ENOPROTOOPT and codes 7
+        // and 8 as EHOSTDOWN and ENONET; they map to the nearest kind here.
+        case 2: case 3: return {K::refused, true, 0};
+        case 4: return {K::mtu, false, message.rest & 0xffffu};
+        case 6: case 9: return {K::network_unreachable, true, 0};
+        default: return {K::host_unreachable, true, 0};
+        }
+    }
+    else
+    {
+        if (message.type == icmpv6::packet_too_big) return {K::mtu, false, message.rest};
+        if (message.type == icmpv6::time_exceeded) return {K::host_unreachable, false, 0};
+        if (message.type == icmpv6::parameter_problem) return {K::protocol, true, 0};
+        if (message.type != icmpv6::unreachable) return {};
+        switch (message.code)
+        {
+        case icmpv6::no_route: return {K::network_unreachable, false, 0};
+        case icmpv6::address_unreachable: return {K::host_unreachable, false, 0};
+        case 2: return {K::host_unreachable, true, 0};
+        case icmpv6::port_unreachable: return {K::refused, true, 0};
+        case 1: case 5: case 6: return {K::prohibited, true, 0};
+        default: return {K::protocol, false, 0};
+        }
+    }
+}
+
+// The transport header an ICMP error quotes: the offending packet was ours,
+// so its source is the local endpoint and its destination the peer. Only
+// the IP header and the first eight transport bytes (ports and, for TCP, the
+// sequence number) are required; the quote may be truncated after them.
+template <AddressFamily Family>
+struct IcmpQuote
+{
+    typename Family::Address source{}, destination{};
+    u8 protocol{};
+    u16 source_port{}, destination_port{};
+    u32 sequence{};
+};
+
+template <AddressFamily Family>
+inline Result<IcmpQuote<Family>> icmp_quote(const Icmp &message)
+{
+    const Bytes body = message.body;
+    IcmpQuote<Family> quote{};
+    usize header{};
+    if constexpr (Family::version == 4)
+    {
+        if (body.size() < 20 || (byte(body, 0) >> 4) != 4) return Status::invalid_argument("ICMP error quotes no IPv4 header");
+        header = (byte(body, 0) & 15u) * 4u;
+        if (header < 20) return Status::invalid_argument("quoted IPv4 header length is invalid");
+        if (be16(body, 6) & 0x1fffu) return Status::unsupported("ICMP error quotes a non-first fragment");
+        quote.protocol = byte(body, 9);
+        for (usize i = 0; i < 4; ++i) { quote.source[i] = byte(body, 12 + i); quote.destination[i] = byte(body, 16 + i); }
+    }
+    else
+    {
+        if (body.size() < 40 || (byte(body, 0) >> 4) != 6) return Status::invalid_argument("ICMP error quotes no IPv6 header");
+        header = 40;
+        quote.protocol = byte(body, 6);
+        for (usize i = 0; i < 16; ++i) { quote.source[i] = byte(body, 8 + i); quote.destination[i] = byte(body, 24 + i); }
+    }
+    if (body.size() < header + 8) return Status::invalid_argument("ICMP error quotes no transport ports");
+    quote.source_port = be16(body, header); quote.destination_port = be16(body, header + 2);
+    quote.sequence = tcp_detail::be32(body, header + 4);
+    return quote;
+}
+
 // Neighbour discovery (RFC 4861) over Ethernet.
 struct PrefixInformation
 {

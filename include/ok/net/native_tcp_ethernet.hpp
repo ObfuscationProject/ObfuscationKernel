@@ -11,6 +11,8 @@ struct TcpEthernetState
     StatusCode cause{StatusCode::ok};
     // The last device pass stopped at its receive budget; frames may remain.
     bool receive_backlog{};
+    // ICMP errors a TCP connection or UDP socket took.
+    u64 icmp_errors{};
 };
 
 // What the kernel loop asks of one pass. Without a device event (the link's
@@ -36,7 +38,7 @@ class NativeTcpEthernetExecutor final
     NativeTcpEthernetExecutor(NativeTcpEthernetExecutor &&) = delete;
     NativeTcpEthernetExecutor &operator=(NativeTcpEthernetExecutor &&) = delete;
     [[nodiscard]] TcpEthernetState state() const
-    { return {retired_, credit_, controls_, received_, tcp_received_, udp_received_, submitted_, dropped_, dropped_control_, cause_, backlog_}; }
+    { return {retired_, credit_, controls_, received_, tcp_received_, udp_received_, submitted_, dropped_, dropped_control_, cause_, backlog_, icmp_errors_}; }
     Status retire(NativeTcpStreamService &tcp, TcpStreamWaits &waits, Status cause)
     {
         const auto drained = tcp.endpoints().retire(); if (!drained) return drained;
@@ -80,6 +82,15 @@ class NativeTcpEthernetExecutor final
             const auto packet = nic->receive(wire::Bytes{incoming_.data(), received.value()}, now);
             if (packet.family == Delivery::control) continue;
             if (packet.family != Delivery::ipv4 && packet.family != Delivery::ipv6) { add(dropped_); continue; }
+            if (packet.protocol == wire::protocol_icmp || packet.protocol == wire::protocol_icmpv6)
+            {
+                // Errors sent to a broadcast or multicast address are ignored (Linux icmp_rcv).
+                const bool taken = !packet.multicast && (packet.family == Delivery::ipv4
+                    ? icmp_error<wire::Ipv4Family>(tcp, udp, packet.packet, now)
+                    : icmp_error<wire::Ipv6Family>(tcp, udp, packet.packet, now));
+                add(taken ? icmp_errors_ : dropped_);
+                continue;
+            }
             if (packet.protocol == wire::protocol_tcp)
             {
                 auto accepted = tcp.endpoints().ingest(packet.packet, now, iss);
@@ -157,9 +168,30 @@ class NativeTcpEthernetExecutor final
     }
   private:
     static void add(u64 &count) { if (count != ~u64{0}) ++count; }
+    // Routes an ICMP error to the transport endpoint of the packet it quotes.
+    template <wire::AddressFamily Family>
+    static bool icmp_error(NativeTcpStreamService &tcp, NativeUdpService &udp, wire::Bytes packet, u64 now)
+    {
+        auto ip = Family::parse(packet); if (!ip) return false;
+        auto message = wire::icmp<Family>(ip.value());
+        if (!message || !wire::icmp_error<Family>(message.value().type)) return false;
+        const auto error = wire::classify_icmp_error<Family>(message.value());
+        auto quote = wire::icmp_quote<Family>(message.value());
+        if (error.kind == wire::IcmpErrorKind::none || !quote) return false;
+        const auto &q = quote.value();
+        if (q.protocol == wire::protocol_tcp)
+        {
+            auto taken = tcp.endpoints().icmp_error({q.source, q.source_port}, {q.destination, q.destination_port},
+                                                    error, q.sequence, now);
+            return taken && taken.value();
+        }
+        if (q.protocol != wire::protocol_udp) return false;
+        auto taken = udp.icmp_error(q.source, q.source_port, q.destination, q.destination_port, error);
+        return taken && taken.value();
+    }
     std::array<std::byte, 1514> incoming_{}, outgoing_{};
     usize controls_{}, credit_{};
-    u64 received_{}, tcp_received_{}, udp_received_{}, submitted_{}, dropped_{}, dropped_control_{};
+    u64 received_{}, tcp_received_{}, udp_received_{}, submitted_{}, dropped_{}, dropped_control_{}, icmp_errors_{};
     bool retired_{}, backlog_{}; StatusCode cause_{StatusCode::ok};
 };
 }

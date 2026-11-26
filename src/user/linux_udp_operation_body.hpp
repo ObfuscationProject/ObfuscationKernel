@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ok/abi/linux_tcp_data.hpp>
 #include "linux_udp_original_ofd.hpp"
 #include "linux_udp_receive_authority.hpp"
 #include "linux_udp_receive_order.hpp"
@@ -244,6 +245,8 @@ class OperationScratch final
         case StatusCode::message_size: return error<Target>(Error::e_msgsize);
         case StatusCode::overflow: return error<Target>(Error::e_overflow);
         case StatusCode::bad_descriptor: return error<Target>(Error::e_badf);
+        case StatusCode::connection_refused:
+            return -static_cast<i64>(abi::linux_user::tcp_errno_econnrefused[static_cast<usize>(Target)]);
         default: return error<Target>(Error::e_io);
         }
     }

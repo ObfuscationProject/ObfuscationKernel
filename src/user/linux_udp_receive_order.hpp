@@ -44,6 +44,8 @@ class ReceiveScratch final
         if (output.flags & ~(peek | trunc | dontwait))
             return Status::unsupported("Linux UDP receive flag outside this profile");
         if (!access.live()) return Status::fault("Linux UDP receive image access expired");
+        // A pending ICMP error is reported before any queued datagram.
+        if (auto pending = service.take_error(original_endpoint); !pending) return pending;
         const auto selected = service.peek(original_endpoint);
         if (!selected) return selected.status();
         const auto &packet = selected.value();

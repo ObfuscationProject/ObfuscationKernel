@@ -423,12 +423,21 @@ the kernel link probe (`network_probe`, `OK_NET_*` markers). Gate evidence:
 the paired OS `net_probe` image passes the probe on all ten profiles under
 QEMU against a scripted external peer (gateway ARP, IPv4 and IPv6 ping,
 SLAAC, an 8 KiB TCP echo, also with ten percent TCP loss); QEMU's user
-networking is not built into the pinned QEMU. Still open: ICMP errors to
-sockets, poll/select over sockets on queues, TCP getsockname/getpeername.
+networking is not built into the pinned QEMU.
 Merge: the exported headers bump the module ABI once to 79
 (`docs/modules/modules.md`); the paired OS worktree `feat/net-services`
 consumes SDK 79 and merges right after the kernel. `feat/smp-bringup` then
 took 80, so `feat/tty-jobctl` takes 81.
+
+Follow-up `net-socket-gaps` closes the open items:
+- ICMP errors reach TCP connections and connected UDP sockets.
+- Socket errors are reported once, including through `SO_ERROR`.
+- poll/select work over TCP streams, which were ENOSYS before.
+- A poll over sockets only sleeps on their wait queues.
+- TCP getsockname/getpeername are implemented.
+
+It bumps the module ABI to 82; its paired OS worktree consumes SDK 82 on
+top of the ABI 81 OS consumer change set that `feat/getty-login` carries.
 
 ### WT2.4 `feat/storage-durable` (XL)
 

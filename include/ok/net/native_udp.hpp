@@ -34,10 +34,12 @@ struct NativeUdpReadiness
     usize queued_datagrams{};
     u64 sequence{};
     bool terminal{};
+    // An ICMP error is pending; the next receive or send reports it.
+    bool error{};
     [[nodiscard]] bool readable() const { return queued_datagrams != 0; }
     [[nodiscard]] bool may_wait(u64 observed) const
     {
-        return !readable() && !terminal && sequence == observed;
+        return !readable() && !error && !terminal && sequence == observed;
     }
 };
 
@@ -111,6 +113,13 @@ class NativeUdpService final
     Result<usize> build_datagram(u32 handle, IpAddress destination, u16 port,
                                  wire::Bytes payload, std::span<std::byte> frame);
     Result<NativeUdpFrame> ingest(wire::Bytes frame, std::span<std::byte> reply);
+    // An ICMP error quoting a datagram local -> peer. As Linux does without
+    // IP_RECVERR, only a hard "refused" error on a connected socket is kept;
+    // the next receive or send reports it once (ECONNREFUSED).
+    Result<bool> icmp_error(const IpAddress &local, u16 local_port, const IpAddress &peer, u16 peer_port,
+                            wire::IcmpErrorClass error);
+    // Returns and clears a pending error (success when none).
+    Status take_error(u32 handle);
     // A complete IPv4 or IPv6 packet the interface accepted for a local address.
     Result<NativeUdpFrame> deliver(wire::Bytes packet);
     // Pure copied receive snapshot, including zero-length datagrams. No device
@@ -123,7 +132,8 @@ class NativeUdpService final
     Status consume(u32 handle);
     [[nodiscard]] usize active_sockets() const;
     // Visits each socket handle whose receive readiness moved (a datagram was
-    // queued or the socket closed) since the previous call, once.
+    // queued, an ICMP error arrived or the socket closed) since the previous
+    // call, once.
     template <class Visit>
         requires requires(Visit &visit, u32 handle) { visit(handle); }
     usize take_changed(Visit &&visit)
@@ -156,7 +166,7 @@ class NativeUdpService final
     };
     struct Socket
     {
-        bool used{}, bound{}, retired{}, associated{}, address_locked{}, port_locked{}, changed{};
+        bool used{}, bound{}, retired{}, associated{}, address_locked{}, port_locked{}, changed{}, refused{};
         Family family{Family::ipv4};
         u32 generation{};
         u16 port{};
