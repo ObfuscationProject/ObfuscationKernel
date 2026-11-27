@@ -509,12 +509,31 @@ Status SchedulerState::commit_console_read(const TerminalLdisc::ReadPlan &plan)
     return console_terminal_.ldisc.consume(plan) ? Status{} : Status::busy("console input changed during the read");
 }
 
+Result<usize> SchedulerState::stage_console_read(ProcessId pid, u32 expected_epoch, usize count, bool nonblocking,
+                                                 std::span<std::byte> staged)
+{
+    const auto *caller = console_caller();
+    if (!caller || caller->pid() != pid)
+        return Status::denied("console read has no current lease authority");
+    if (auto status = console_read_authority(pid, expected_epoch); !status) return status;
+    const TtyLock::Guard tty(tty_lock_);
+    auto &ldisc = console_terminal_.ldisc;
+    const auto plan = ldisc.plan_read(console_read_termios(), count, nonblocking, false);
+    using Wait = TerminalLdisc::ReadWait;
+    if (plan.wait == Wait::would_block) return Status::would_block("console input is not ready");
+    if (plan.wait != Wait::none) return Status::would_block("console read waits for input");
+    if (plan.copy > staged.size() || ldisc.preview(plan, staged.first(plan.copy)) != plan.copy)
+        return Status::fault("console read plan exceeds its staging");
+    if (!ldisc.consume(plan)) return Status::fault("console input changed inside one tty hold");
+    return plan.copy;
+}
+
 TerminalLdisc::Input SchedulerState::console_input(char value, WakeSource source)
 {
     if (console_input_.active() && !console_authorized(console_input_.leader(), console_input_.epoch()))
         abort_console_input();
-    if (!console_input_.admit()) return {};
     const TtyLock::Guard tty(tty_lock_);
+    if (!console_input_.admit()) return {};
     auto &console = console_terminal_;
     const std::array<std::byte, 1> bytes{static_cast<std::byte>(value)};
     // A full read buffer drops the byte (a UART overrun); there is no writer to hold back.

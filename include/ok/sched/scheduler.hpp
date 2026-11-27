@@ -1027,6 +1027,11 @@ class SchedulerState
     usize preview_console_read(const TerminalLdisc::ReadPlan &plan, std::span<std::byte> output,
                                usize offset) const;
     Status commit_console_read(const TerminalLdisc::ReadPlan &plan);
+    // The bounded fallback after overtaken commits (as the PTY read's last
+    // attempt): plans, copies into `staged` and consumes in one tty hold, so
+    // the read progresses; the caller's copy-out follows the dequeue.
+    Result<usize> stage_console_read(ProcessId pid, u32 expected_epoch, usize count, bool nonblocking,
+                                     std::span<std::byte> staged);
     // One ingress byte through the console line discipline. ISIG signals go to
     // the console outbox; echo stays in the ldisc for the runtime to emit.
     // `source` is the console's: interrupt once its UART line is bound.

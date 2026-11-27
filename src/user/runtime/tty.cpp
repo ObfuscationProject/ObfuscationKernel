@@ -301,34 +301,54 @@ i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched:
     if (!total) return -14;
     const auto epoch = caller.console_wait_epoch ? caller.console_wait_epoch : process.console_epoch();
     const bool nonblocking = description.flags & posix::o_NONBLOCK;
+    // No input to read (yet): EAGAIN, or the console-read wait.
+    const auto unready = [&](const Status &status) -> i64 {
+        if (status.code() != StatusCode::would_block || nonblocking) return error(status);
+        caller.console_wait_epoch = epoch;
+        caller.terminal_gate_mark = process.job_control().continue_generation;
+        auto ticket = scheduler.register_current_wait(sched::ThreadWaitReason::console_read, epoch);
+        if (!ticket)
+        {
+            caller.console_wait_epoch = 0;
+            return error(ticket.status());
+        }
+        // A Linux read binds each wait of its re-dispatched call, so a caught
+        // signal can interrupt or restart it (terminal signal family).
+        if (process.resources().personality == Personality::linux)
+            if (const auto origin = syscall_origins.identity(process, caller); origin.capture)
+            {
+                const SyscallOrigins::ConsoleReadBinding binding{ticket.value(), static_cast<i32>(arguments[0]),
+                    arguments[1], arguments[2], epoch, vectored, total.value()};
+                if (!syscall_origins.bind_console_read(origin, caller.native_frame, binding)) syscall_origins.revoke(caller);
+            }
+        complete = false;
+        return -11;
+    };
     // prepare (tty lock), copy-out (no lock), commit (tty lock, revision): a
-    // commit another reader overtook is prepared again (spec 4.13).
+    // commit another reader or new input overtook is prepared again (spec
+    // 4.13). The last attempt stages and consumes in one hold, so a steady
+    // input stream cannot starve the read; only its copy-out follows the
+    // dequeue (a fault then loses the bytes, as Linux's tty_read does through
+    // its kernel buffer).
     for (usize attempt = 0;; ++attempt)
     {
-        const auto plan = scheduler.prepare_console_read(process.pid(), epoch, total.value(), nonblocking);
-        if (!plan)
+        if (attempt + 1 == sched::SchedulerState::pty_read_attempts)
         {
-            if (plan.status().code() != StatusCode::would_block || nonblocking) return error(plan.status());
-            caller.console_wait_epoch = epoch;
-            caller.terminal_gate_mark = process.job_control().continue_generation;
-            auto ticket = scheduler.register_current_wait(sched::ThreadWaitReason::console_read, epoch);
-            if (!ticket)
+            std::array<std::byte, tty_console_read_limit> staged{};
+            const auto size = scheduler.stage_console_read(process.pid(), epoch, total.value(), nonblocking, staged);
+            if (!size) return unready(size.status());
+            usize offset = 0;
+            for (const auto &vector : vectors)
             {
-                caller.console_wait_epoch = 0;
-                return error(ticket.status());
+                if (offset == size.value()) break;
+                const usize count = vector.length < size.value() - offset ? vector.length : size.value() - offset;
+                if (!uaccess::copy_to_user(space, vector.base, staged.data() + offset, count)) return -14;
+                offset += count;
             }
-            // A Linux read binds each wait of its re-dispatched call, so a caught
-            // signal can interrupt or restart it (terminal signal family).
-            if (process.resources().personality == Personality::linux)
-                if (const auto origin = syscall_origins.identity(process, caller); origin.capture)
-                {
-                    const SyscallOrigins::ConsoleReadBinding binding{ticket.value(), static_cast<i32>(arguments[0]),
-                        arguments[1], arguments[2], epoch, vectored, total.value()};
-                    if (!syscall_origins.bind_console_read(origin, caller.native_frame, binding)) syscall_origins.revoke(caller);
-                }
-            complete = false;
-            return -11;
+            return static_cast<i64>(size.value());
         }
+        const auto plan = scheduler.prepare_console_read(process.pid(), epoch, total.value(), nonblocking);
+        if (!plan) return unready(plan.status());
         // Copy out first and consume only after every copy worked: EFAULT keeps the input.
         std::array<std::byte, tty_chunk> chunk{};
         usize offset = 0;
@@ -344,8 +364,8 @@ i64 tty_console_read(Kernel &kernel, sched::ProcessControlBlock &process, sched:
             }
         if (auto status = scheduler.commit_console_read(plan.value()); !status)
         {
-            if (status.code() == StatusCode::busy && attempt + 1 < sched::SchedulerState::pty_read_attempts) continue;
-            runtime_failure = status;
+            // Overtaken (busy): prepared again; the last attempt cannot be.
+            if (status.code() == StatusCode::busy) continue;
             return error(status);
         }
         return static_cast<i64>(plan.value().copy);
