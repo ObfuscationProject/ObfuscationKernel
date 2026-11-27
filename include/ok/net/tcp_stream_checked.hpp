@@ -34,11 +34,10 @@ class TcpStreamOperations final
         if (mutating_) return Status::busy("TCP operation is not reentrant");
         Mutation mutation{mutating_};
         auto *process = canonical(pid); if (!process) return Status::denied("TCP process/service is not canonical");
-        auto fd = vacant(*process); if (!fd) return fd.status();
-        auto id = scheduler_.allocate_description({}); if (!id) return id.status();
+        auto slot = reserve(*process); if (!slot) return slot.status();
         auto stream = service_.open(family);
-        if (!stream) { *scheduler_.open_description(id.value()) = {}; return stream.status(); }
-        return publish(*process, fd.value(), id.value(), stream.value(), nonblocking, close_on_exec);
+        if (!stream) { scheduler_.cancel_descriptor_slot(process->resources(), slot.value()); return stream.status(); }
+        return publish(*process, slot.value(), stream.value(), nonblocking, close_on_exec);
     }
     template <class Action>
     auto with_stream(u64 pid, i32 fd, Action &&action) -> decltype(action(TcpStreamHandle{}))
@@ -70,11 +69,10 @@ class TcpStreamOperations final
     {
         return with_stream(pid, listener, [&](TcpStreamHandle handle) -> Result<i32> {
             auto *process = canonical(pid);
-            auto fd = vacant(*process); if (!fd) return fd.status();
-            auto id = scheduler_.allocate_description({}); if (!id) return id.status();
+            auto slot = reserve(*process); if (!slot) return slot.status();
             auto accepted = service_.accept(handle);
-            if (!accepted) { *scheduler_.open_description(id.value()) = {}; return accepted.status(); }
-            return publish(*process, fd.value(), id.value(), accepted.value(), nonblocking, close_on_exec);
+            if (!accepted) { scheduler_.cancel_descriptor_slot(process->resources(), slot.value()); return accepted.status(); }
+            return publish(*process, slot.value(), accepted.value(), nonblocking, close_on_exec);
         });
     }
     Result<PreparedTcpAccept> prepare_accept(u64 pid, i32 listener, bool nonblocking = false, bool close_on_exec = false)
@@ -161,26 +159,40 @@ class TcpStreamOperations final
         auto *process = scheduler_.native_tcp_service() == &service_ ? scheduler_.find(pid) : nullptr;
         return process && process->state() != sched::ProcessState::zombie && process->state() != sched::ProcessState::exited ? process : nullptr;
     }
-    static Result<i32> vacant(const sched::ProcessControlBlock &process)
+    // The lowest free slot from 3, reserved under the files lock before the
+    // stream exists (spec 4.13), so a sibling's open cannot take it meanwhile.
+    Result<sched::SchedulerState::DescriptorSlot> reserve(sched::ProcessControlBlock &process)
     {
-        for (i32 fd = 3; fd < static_cast<i32>(sched::max_process_fds); ++fd)
-            if (!process.fd_table().contains(fd)) return fd;
-        return Status::process_file_limit("TCP process descriptor table is full");
+        auto slot = scheduler_.reserve_descriptor_slot(process.resources(), 3);
+        if (!slot && slot.status().code() == StatusCode::process_file_limit)
+            return Status::process_file_limit("TCP process descriptor table is full");
+        return slot;
     }
-    Result<i32> publish(sched::ProcessControlBlock &process, i32 fd, u16 id,
+    // Allocates the stream's description (under ofd_table) and publishes it
+    // into the reserved slot. On a failure nothing stays published: the slot
+    // is given back and the stream closed, unless the publication's own
+    // release already retired it with the description.
+    Result<i32> publish(sched::ProcessControlBlock &process, sched::SchedulerState::DescriptorSlot slot,
                         TcpStreamHandle stream, bool nonblocking, bool close_on_exec)
     {
-        auto *reserved = scheduler_.open_description(id);
-        *reserved = sched::OpenFileDescription{.used = true, .readable = true, .writable = true,
-            .flags = 2u | (nonblocking ? nonblock : 0u), .native_tcp_handle = stream};
-        const auto status = scheduler_.install_descriptor(process.resources(), fd, id, close_on_exec);
-        if (!status)
+        auto &resources = process.resources();
+        const auto fd = slot.fd;
+        auto id = scheduler_.allocate_description(sched::OpenFileDescription{.used = true, .readable = true,
+            .writable = true, .flags = 2u | (nonblocking ? nonblock : 0u), .native_tcp_handle = stream});
+        Status status = id ? scheduler_.install_reserved_descriptor(resources, slot, id.value(), close_on_exec)
+                           : id.status();
+        if (status) return fd;
+        scheduler_.cancel_descriptor_slot(resources, slot);
+        if (id)
         {
-            *reserved = {}; // Consume the unpublished edge before service retirement.
-            const auto retired = service_.close(stream); if (!retired && failure_) failure_ = retired;
-            return status;
+            // Still unpublished (no reference taken): the stream is ours to close.
+            const auto *open = scheduler_.open_description(id.value());
+            const bool unpublished = open && open->used && !open->references && open->native_tcp_handle == stream;
+            scheduler_.discard_description(id.value());
+            if (!unpublished) return status;
         }
-        return fd;
+        const auto retired = service_.close(stream); if (!retired && failure_) failure_ = retired;
+        return status;
     }
     sched::SchedulerState &scheduler_; NativeTcpStreamService &service_;
     std::array<std::byte, 1024> scratch_{}; bool mutating_{}; Status failure_{};
