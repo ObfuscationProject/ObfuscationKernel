@@ -549,10 +549,14 @@ bool SchedulerState::pipe_has_endpoint(u16 pipe, bool writable) const
 {
     if (pipe >= pipes_.size()) return false;
     const bool counted = (writable ? pipes_[pipe].writers : pipes_[pipe].readers) != 0;
-    // The scan reads the table without ofd_table: valid while pipes stay
-    // under the kernel lock (debug kernels only).
+    // The scan reads the description table, which is valid only under
+    // ofd_table or the kernel lock (debug kernels only). A caller holding
+    // just the pipe lock (ofd_table is a lower rank) outside the kernel lock
+    // skips it rather than compare against a moving table.
+    const bool scan_valid = ofd_table_.owned_by_current_cpu() || !smp::exclusive_armed.load(std::memory_order_relaxed) ||
+        smp::kernel_lock.owned_by_current_cpu();
     if constexpr (smp::lock_debug_enabled)
-        if (pipes_[pipe].used && pipe_endpoint_audit(pipe, writable) != counted)
+        if (scan_valid && pipes_[pipe].used && pipe_endpoint_audit(pipe, writable) != counted)
         {
             smp::count_check(smp::KernelCheck::audit_repairs, "pipe endpoint count differs from the table");
             return !counted;
