@@ -462,6 +462,35 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
     return outcome;
 }
 
+// Linux copy_process refuses a fork while a signal is pending (spec 4.12).
+// A pending fatal default the caller can take is decided now as the group's
+// pending exit, so the fork's publication undoes the child: a kill(-pgrp)
+// queued on the parent before the child existed cannot miss the child.
+void private_fork_condemn(Kernel &kernel, sched::ProcessControlBlock &process, const sched::ThreadControlBlock &thread)
+{
+    if (process.resources().personality != Personality::linux || process.pid() == sched::user_init_pid) return;
+    auto *state = private_signal_process(kernel, process.pid());
+    if (!state || state->group_kill || state->deferred_fatal) return;
+    JobPendingView view{private_signal_queue(thread), &state->shared};
+    if (!view) return;
+    const auto &numbering = jobctl_numbering(process);
+    auto blocked = thread.native_signal_mask;
+    JobPendingView::Delivery next;
+    while (view.peek(blocked, next))
+    {
+        const auto signal = next.info.signal;
+        const auto *action = state->table.find(signal);
+        if (action && action->handler == sched::SignalAction::default_handler &&
+            job::default_action(numbering, signal) == job::DefaultAction::terminate)
+        {
+            state->deferred_fatal = static_cast<u8>(signal);
+            jobctl_condemn(kernel, *state, process);
+            return;
+        }
+        blocked.set(signal);
+    }
+}
+
 bool private_jobctl_admit_blocked(Kernel &kernel, const sched::ProcessControlBlock &recipient,
                                   const sched::ThreadControlBlock &target, i32 signal)
 {

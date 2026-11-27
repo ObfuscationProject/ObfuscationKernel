@@ -1040,6 +1040,10 @@ JobSignalOutcome private_generate_signal(Kernel &kernel, sched::ProcessControlBl
 }
 // tkill/tgkill admission of a blocked target: job-control signals and stopped
 // targets reach the generation core without interrupting the wait.
+// Before fork publication: a pending fatal default `thread` can take becomes
+// the group's pending exit (spec 4.12; Linux copy_process with a signal
+// pending).
+void private_fork_condemn(Kernel &kernel, sched::ProcessControlBlock &process, const sched::ThreadControlBlock &thread);
 bool private_jobctl_admit_blocked(Kernel &kernel, const sched::ProcessControlBlock &recipient,
                                   const sched::ThreadControlBlock &target, i32 signal);
 // Kernel-originated signals (Linux SEND_SIG_PRIV): SI_KERNEL, no permission

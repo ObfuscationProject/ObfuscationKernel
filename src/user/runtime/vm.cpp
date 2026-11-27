@@ -1305,6 +1305,11 @@ i64 fork_process(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBloc
     // lock. A parent with a pending exit (a kill of its group meanwhile, a
     // fatal decision) undoes the child; the call stays pending and the
     // parent exits at its next pick, so no child escapes a group kill.
+#ifdef OK_PRIVATE_POLL_MASK
+    if (auto *parent = kernel.scheduler().find(pid))
+        if (const auto *caller = kernel.scheduler().find_thread(pid, calling_tid))
+            private_fork_condemn(kernel, *parent, *caller);
+#endif
     if (auto status = kernel.scheduler().publish_fork(pid, child_pid); !status)
     {
         finish(kernel, child_pid, 127);
