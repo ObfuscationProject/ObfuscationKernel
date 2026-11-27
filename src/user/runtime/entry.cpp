@@ -1517,7 +1517,12 @@ bool step(Kernel &kernel)
             else count_entry(&EntryCpu::faults);
         }
         else count_entry(&EntryCpu::rejections);
-        if (!trap)
+        // A sibling replaced the address space before this entry reached user
+        // mode (counted as a rejected entry and in OK_SMP_MM retiring_rejects):
+        // nothing ran, and the thread enters the current space at its next
+        // dispatch, as after a preemption.
+        if (!trap && trap.status().code() == StatusCode::would_block) {}
+        else if (!trap)
         {
             finish(kernel, chosen.pid, 127);
             emit("OK_NATIVE scope=hardware enter=failed reason=");

@@ -447,7 +447,9 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     if (cpu.executing.load(std::memory_order_relaxed))
         return Status::busy("nested native entry is unsupported");
     // The caller opened this hart's user window (begin_user), so the space
-    // validated here cannot retire before the window closes.
+    // validated here is not freed before the window closes. A replacement
+    // that marked it retiring first is refused here; the shared capture sees
+    // the new space and the thread enters that one at its next dispatch.
     const auto *stored = lookup(space);
     if (stored == nullptr)
         return Status::not_initialized("native address space is unavailable");

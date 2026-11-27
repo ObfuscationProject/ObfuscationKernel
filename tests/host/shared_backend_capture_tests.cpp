@@ -9,6 +9,8 @@ bool user_range(const AddressSpace &, uptr address, usize bytes, bool)
 { return address >= user_begin && address < user_end && bytes <= user_end - address; }
 Status copy_from_user(const AddressSpace &, void *, uptr, usize)
 { return Status::fault("this synthetic statx capture has no executable provider mapping"); }
+// Decoded only for native-personality captures; these are Linux ones.
+Syscall syscall(const UserFrame &) { return {}; }
 }
 static_assert(!std::is_default_constructible_v<native::BackendCapture::Observation>);
 static_assert(!std::is_copy_constructible_v<native::BackendCapture::Observation>);
@@ -96,13 +98,51 @@ void capability_guards()
         CHECK(f.pool.deactivate_entry(f.thread().entry_stack, {f.pid, f.pid}, 0)); ++capability_cases;
     }
 }
+// A sibling that replaces the address space while an entry is between its
+// window and the backend's lookup marks the entered space retiring, and the
+// backend refuses it (spec 4.11). The capture reports would_block, so the step
+// retries in the new space; a refusal with the space unchanged stays fatal.
+static sched::ProcessResources *replaced_resources{};
+static usize replaced_spaces{};
+static Result<hw::Trap> replacing_entry(hw::AddressSpace &space, hw::UserFrame &, const hw::KernelEntryStackView &,
+                                        memory::KernelEntryStackHandle, u64, u64)
+{
+    if (replaced_resources)
+    {
+        const sched::AddressSpaceGate::Hold hold{replaced_resources->mm};
+        auto replacement = space;
+        replacement.root += hw::page_size;
+        ++replacement.generation;
+        sched::publish_native_space(*replaced_resources, replacement);
+    }
+    return Status::not_initialized("native address space is unavailable");
+}
+void replaced_space_retries()
+{
+    using F = Fixture<lu::Profile::x86_64>;
+    for (const bool replace : {true, false})
+    {
+        F f; native::BackendCapture backend(f.pool, replacing_entry);
+        auto &process = *f.scheduler->find(f.pid);
+        const auto original = process.resources().native_space;
+        replaced_resources = replace ? &process.resources() : nullptr;
+        auto view = f.pool.activate_entry(f.thread().entry_stack, {f.pid, f.pid}, 0); CHECK(view);
+        const auto trap = backend.enter(*f.scheduler, process, f.thread(), view.value());
+        CHECK(!trap);
+        CHECK(trap.status().code() == (replace ? StatusCode::would_block : StatusCode::not_initialized));
+        CHECK(replace != (process.resources().native_space.generation == original.generation));
+        CHECK(f.pool.deactivate_entry(f.thread().entry_stack, {f.pid, f.pid}, 0));
+        replaced_resources = nullptr;
+        if (replace) ++replaced_spaces;
+    }
+}
 int main()
 {
     shared_statx<lu::Profile::i386>(); shared_statx<lu::Profile::x86_64>();
     shared_statx<lu::Profile::aarch64>(); shared_statx<lu::Profile::arm32>();
     shared_statx<lu::Profile::rv64>(); shared_statx<lu::Profile::rv32>();
     shared_statx<lu::Profile::loongarch64>(); shared_statx<lu::Profile::mips>();
-    shared_statx<lu::Profile::mips64>(); shared_statx<lu::Profile::ppc>(); capability_guards();
-    std::printf("PASS shared owned capture checks=%zu profiles=%zu capability_guards=%zu hosted_backend_entries=%zu duplicate_backend_calls=0 guest=0 signal_statx_restart=0\n",
-        checks, shared_cases, capability_cases, hosted_entries);
+    shared_statx<lu::Profile::mips64>(); shared_statx<lu::Profile::ppc>(); capability_guards(); replaced_space_retries();
+    std::printf("PASS shared owned capture checks=%zu profiles=%zu capability_guards=%zu replaced_spaces=%zu hosted_backend_entries=%zu duplicate_backend_calls=0 guest=0 signal_statx_restart=0\n",
+        checks, shared_cases, capability_cases, replaced_spaces, hosted_entries);
 }

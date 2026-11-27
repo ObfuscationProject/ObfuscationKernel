@@ -96,7 +96,13 @@ class BackendCapture final : private NonCopyable
         // A sibling on another CPU may have replaced the address space while
         // this thread ran (mmap, munmap, mprotect): the old tables were
         // quiesced before they were freed, and the trap belongs to the live one.
+        const Space entered = space;
         space = process->resources().native_space;
+        // A replacement that marked the entered space retiring after this
+        // entry read its handle makes the backend refuse it (spec 4.11): no
+        // user code ran, and the next dispatch enters the current space.
+        if (!trap && !same_space(entered, space))
+            return Status::would_block("native address space was replaced during the entry");
         if (!trap) return trap.status();
         const auto stack = trap.value().kernel_stack_pointer;
         const bool required = trap.value().kind == arch::execution::TrapKind::syscall ||
