@@ -164,7 +164,9 @@ that called exec itself is queued by the `put_prev` of its CPU), the probe of
 an interruptible wait and the repair audit. `kernel_thread` records are never queued this way; the
 kernel tick keeps dispatching them through its policy. A thread may run when
 it is runnable, or blocked with `probe` set (a pending signal may interrupt
-its wait), its process is live and not stopped. After the unlock the waker
+its wait), its process is live, not stopped and not frozen; a thread of a
+process with a pending exit may run in any state, stopped or not, unless
+its group is frozen (see group transitions below). After the unlock the waker
 fences and wakes the chosen CPU with a reschedule IPI if that CPU published
 itself idle.
 
@@ -178,8 +180,8 @@ itself idle.
   run. A runnable thread becomes running; a probed one stays blocked until its
   resume completes the wait (`resume_current`). Pick fills the `CpuSlot` and
   takes the slot pin of spec 3.2 (b).
-- `put_prev(cpu)` (and `vacate_cpu_slot`, which `activate(0)`, exit, exec and
-  remote eviction use) turns a running thread back to runnable, queues it if
+- `put_prev(cpu)` (and `vacate_cpu_slot`, which `activate(0)`, exit and exec
+  use) turns a running thread back to runnable, queues it if
   it may run, drops the CPU-slot pin and releases `on_cpu` last.
 - `enter_idle(cpu)` is the idle side of the handshake: it publishes the CPU
   idle, fences and loads the queue counts. `halt` when every queue is empty;
@@ -207,6 +209,24 @@ itself idle.
 - The explicit `enqueue_thread`, `dequeue_thread`, `mark_on_cpu` and
   `clear_on_cpu` remain for the hosted models and the `legacy_select=y`
   scan; they take the same task locks.
+
+Group transitions (spec 4.8, `src/sched/group_transition.inc`,
+`include/ok/sched/group_quiesce.hpp`): exec and exit_group claim their
+process under its task lock (`claim_transition`). The claim sets the
+`frozen` run flag, so pick and `enqueue_locked` refuse every other thread of
+the group, drops their queue entries and names the CPUs that still run one.
+`quiesce_group` then kicks those CPUs and, holding no spin lock and with the
+kernel lock released, waits until every sibling's `on_cpu` mirror reads
+`no_cpu`; each 2 s of waiting counts `quiesce_timeouts` and kicks again. A
+second exec gets `exec_held` and returns to the boundary; an exit wanted
+while an exec runs sets `pending_exit` (exit beats exec at the exec's
+commit check, `exec_superseded`). A failed exec thaws the group
+(`unfreeze`). A kill never waits: `request_group_exit` sets `pending_exit`
+with its status, probes and queues the parked threads and returns the CPUs
+to kick; the group's next picked thread exits it. Fork publishes its child
+with `publish_fork`, which refuses a parent with a pending exit under the
+task table, and no thread joins a group with a pending exit or a
+transition. `stopped_processes()` scans the slots' stop flags.
 
 The native step uses the queues on every profile, UP and `-smp 1` included
 (queue 0 only on one CPU), so threads run in FIFO order. `xmake f

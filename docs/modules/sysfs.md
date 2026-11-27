@@ -85,8 +85,9 @@ ignored, as on Linux.
 5. An armed one sends CPU 0 a kick if the writer runs elsewhere and returns
    incomplete. The thread waits uninterruptibly (no signal ends the wait).
 
-SIGKILL still ends a waiting writer: the fatal decision tears the process
-down, and the retirement of each thread (`retire_native_thread`) drops its
+SIGKILL still ends a waiting writer: the kill sets the process's pending
+exit and queues its parked threads; the first one picked exits the group,
+and the retirement of each thread (`retire_native_thread`) drops its
 record. Exec drops the record of every old thread too, the surviving
 leader's included, since the new image keeps the leader's lease and wait
 ticket. When the woken thread is dispatched again, the step's resume chain
