@@ -67,7 +67,14 @@ The module ABI is not bumped.
   is still pending the interrupted call's outcome is published (EINTR, or the
   restart) and the ticket is interrupted. A wait some other completion
   reached first is left to the resume, which produces that result, and the
-  signal stays pending.
+  signal stays pending. Every completion of an untimed wait other than the
+  signal's holds its bucket (WAKE, WAKE_OP, REQUEUE) or runs while the owner
+  is off its CPU (the quiescer's cancel), so the pending check, the
+  publication and the interrupt of an untimed wait cannot be split. Only an
+  untimed wait restarts, and its restart permit validates only while the
+  wait is pending. The expiry of a timed wait holds `task` alone, so a timed
+  wait is interrupted first and its EINTR published after: an expiry that
+  lands in between finds the wait complete.
 - **Teardown**. `cancel_futex` takes the record off its queue first (exit,
   exec, thread exit, a lost origin binding).
 - **Deleted**: `expire_futex` (the per-step futex scan), `finish_futex`
@@ -80,15 +87,14 @@ The module ABI is not bumped.
 
 ## Deviations from the specification
 
-- **Signal publication under the bucket.** The futex syscall origin
-  validates only while the wait is pending (the restart permit relies on
-  it), so the signal path publishes the outcome under the bucket after a
-  pending check and then interrupts. With the BKL held no timeout expires in
-  between; once the step leaves the BKL (WP6) a timeout that completes the
-  wait between the check and the interrupt reports `futex signal lost
-  current wait` and stops the runtime, as the old order did. WP6 must close
-  that window (let the restart permit accept an interrupted completion, or
-  have the expiry of a futex key take the bucket).
+- **Signal publication under the bucket.** Spec 4.5 cancels the ticket
+  first and then returns EINTR. The restart permit of an untimed wait
+  validates only while the wait is pending, so an untimed wait is published
+  first and interrupted after, all under its bucket; no completion of an
+  untimed wait can come between without the bucket. A timed wait (which
+  never restarts) follows the spec's order: interrupted first, EINTR
+  published after. A timeout landing during a timed wait's publication
+  therefore cannot stop the runtime once the step leaves the BKL (WP6).
 - **`validate_completed_futex`** (new in `src/user/native_syscall_origin.hpp`)
   admits a completed futex wait whose owner has not produced its result;
   `validate_bound` keeps admitting pending waits only, so a completed wait
@@ -112,7 +118,9 @@ The module ABI is not bumped.
   ten profiles, the actual runtime and scheduler built with
   `OK_HOSTED_LOCK_MODEL` and `OK_LOCK_DEBUG`): a timed-out waiter against
   WAKE(1) (the second waiter wakes; the first resumes with -110), signal
-  against wake in both orders and against a timeout, a failed publication,
+  against wake in both orders and against a timeout, an expiry landing
+  during a timed wait's publication (the signal still wins), a failed
+  publication,
   requeue across buckets (FIFO behind the destination's waiter, destination
   sequence, owner unlink from the destination), an equal-bucket pair for
   WAKE_OP and CMP_REQUEUE and a different-bucket pair through `lock_as`, with
@@ -136,38 +144,136 @@ The module ABI is not bumped.
   `native_threads_tests` (the clear-TID waiter's result is produced at its
   resume).
 
+## Review follow-up
+
+- **A user entry whose address space a sibling replaced is retried** (spec
+  4.11; WP3's reader protocol). A user entry opens its window and releases
+  the BKL; a sibling's mmap, mprotect or munmap (`replace_native_pages`)
+  could then mark the old `SpaceTable` slot retiring before the backend's
+  `find()`, which refused it, and the step finished the process with status
+  127 (`OK_NATIVE enter=failed reason=native address space is unavailable`,
+  seen once in the first x86_64 release run at 2 vCPUs). The shared capture
+  (`BackendCapture::enter`, `include/ok/user/native_backend_capture.hpp`) now
+  compares the entered handle with the process's current one after the
+  entry: a failed entry into a space that was replaced meanwhile returns
+  `would_block`, and the step treats it like a preemption (no user code ran,
+  the frame is unchanged, the next dispatch enters the current space). A
+  refusal with the space unchanged stays fatal. The rejection still counts in
+  `OK_ENTRY_STACKS rejected=` and `OK_SMP_MM retiring_rejects=`. The x86_64,
+  aarch64 and rv64 backend comments no longer claim that a windowed space
+  cannot retire. Test: `test_shared_backend_capture.py` (new runner for the
+  existing, until now unregistered `tests/host/shared_backend_capture_tests.cpp`,
+  which needed a hosted `syscall()` definition): the replaced space yields
+  `would_block`, the next activation enters the new space, an unchanged
+  space keeps the backend's status; it fails without the fix.
+- **A woken futex wait no longer blocks a sibling's mmap, mprotect or
+  munmap.** A wait a WAKE or its timeout completed keeps its syscall-origin
+  binding until its owner's resume produces the result (before this package
+  the waker retired it). `replace_native_pages` preflights every live origin
+  of the process (`stage_space`, then `commit_space`), and that check
+  (`current_owner`) admitted only a pending futex wait, so in that window a
+  sibling's address-space change failed with `syscall origin space preflight
+  lost owner` (EACCES). musl's pthread_join then leaked the joined thread's
+  stack and a later pthread_create met EAGAIN. Found by the guest futex
+  lanes at 2 vCPUs on rv64 (2 of 12 runs; a kernel with a debug print showed
+  the failing munmap), not reproduced at d7fde31 (9 of 9 clean). The
+  preflight now also admits a completed, unproduced futex wait
+  (`completed_futex_wait`); `current_bound_wait`, and so a restart, still
+  admits only a pending one. The hosted model of the origin table
+  (`test_native_futex_origin.py`, an inputs runner the suite never runs) no
+  longer builds: it omits the uapi headers and several sources, and with
+  those added its fixture's origin `prepare` fails. The guest lanes are the
+  test of this fix.
+- **Signal against expiry of a timed wait** (above): closed for WP6 instead
+  of left as a note. Test in `native_futex_bucket_tests.cpp`: an expiry run
+  from inside the publication of a timed wait; it fails with the old order.
+- **Guest futex lanes on ten profiles.** The xmake test points cover the
+  algorithms only, and distro10 boots take no futex bucket (`OK_SMP_LOCKS
+  futex=0:0`). The paired OS change (the package's `os.patch`) adds
+  `scripts/test_futex_lanes.py`, which boots the native distro once and runs
+  eight static-musl probes in turn, then requires every `OK_SMP_KERNEL_CHECKS`
+  counter 0, `max_lock_depth <= 12` and, in debug, futex bucket acquisitions:
+  - the new `tests/musl/futex_buckets.c`: wait/wake, a timeout that leaves no
+    queued wait, a timed-out waiter queued ahead of an untimed one against
+    WAKE(1) (the untimed one must wake), CMP_REQUEUE between two words and
+    signal against wake (the wait returns 0 exactly when the wake counted
+    it, EINTR otherwise);
+  - the existing `native_futex_signal.c` (EINTR, SA_RESTART restarts, timed
+    EINTR and timeouts of raw FUTEX_WAIT traps; 76 cases per form and ABI),
+    `native_futex_wake_operation.c`, `native_shared_futex.c`,
+    `native_threads.c` (clear-TID exit wakes), `native_robust_lists.c`,
+    `private_futex.c` and `futex_smp_atomic.c`.
+
+  ppc's libc printf needs a soft-float libgcc the toolchain does not ship, so
+  on ppc the three printf probes run through `ppc_*.c` wrappers that define
+  the double helpers as traps (`tests/musl/ppc_integer_printf.h`), and
+  `futex_buckets.c` writes its line without stdio. The shared ppc musl tree
+  had failed its build without the pinned Clang frontend; the lanes use one
+  rebuilt with it, and mips64 links the pinned binary128 soft-fp runtime
+  (both under the scratch `waveB/WP4c/musl`).
+- **`futexgate.sh`** (spec section 7, gate 4) does not exist in the scratch
+  tree or any package's logs; the futex probe gate is the OS
+  `test_futex_smp_atomic.py` (gate.sh `PROBE=futex_smp_atomic`) plus the
+  futex lanes above at 2 and 4 vCPUs.
+- **docs/modules/smp.md** is not edited by packages; the text describing the
+  buckets and the FUTEX_WAKE behaviour change is proposed in the package
+  report for the integration (WP7c rewrites that document).
+
 ## Validation
 
-Kernel sources (`src`, `include`) are those of 421adfa throughout; a3645ee
-changes `tests/host` only. All QEMU runs are TCG on the SysToolchain QEMU
-10.2, with private OS copies of b8dceae (the WP2, WP4a and WP4b OS patches are
-empty; this package has no OS change).
+All QEMU runs are TCG on the SysToolchain QEMU 10.2 with private OS copies
+of b8dceae (the WP2, WP4a and WP4b OS patches are empty) plus this package's
+OS patch. Unless named, results are at f29bb53 (the last kernel source
+change; later commits change documentation only).
 
-- **Hosted suite** (`--toolchain-root`, `--jobs 8`, at a3645ee): 172 passed,
-  2 failed, 59 not run. The new `test_native_futex_bucket.py` passes on ten
-  profiles, as do `test_native_futex`, `test_native_futex_operations`,
-  `test_native_futex_signal`, `test_native_threads`, `test_robust_futex`,
-  `test_futex_word`, `test_scheduler_waits` and `test_native_exec_eviction`.
-  The two failures are interleaving-coverage checks of unchanged race models,
-  run at a host load average near 38: `test_wait_hash` (i386,
-  `checked > 0 && woken > 0`) passes on a rerun; `test_wait_park_race`
-  (`before_park > 0 && after_park > 0`) failed once more alone, then passed
-  twice, and fails the same check at d7fde31 under the same load.
+- **Hosted suite** (`--toolchain-root`, `--jobs 8`): 175 passed, 0 failed,
+  59 not run. It includes the new `test_shared_backend_capture.py` and
+  `test_native_futex_bucket.py` on ten profiles, `test_native_futex`,
+  `test_native_futex_operations`, `test_native_futex_signal`,
+  `test_native_threads`, `test_robust_futex` and `test_futex_word`. An earlier
+  run (at ec412ef, host load near 30) failed the interleaving-coverage
+  checks of `test_wait_hash` (i386, `checked > 0 && woken > 0`) and
+  `test_wait_park_race` (`before_park > 0 && after_park > 0`), as the
+  implementer's run had; both passed when rerun alone, and this package does
+  not touch them.
 - **Kernel lanes**: debug `xmake test` at `-smp 1` on all ten profiles and at
   2 and 4 on x86_64, aarch64 and rv64: 16/16 `OK_TEST_PASS`.
 - **distro10**: all ten profiles `OK_USERLAND acceptance=pass`.
-- **Gates** on x86_64, aarch64 and rv64: `--user-hotplug` debug at 2 and 4
-  vCPUs, release at 2 and 4, `PROBE=futex_smp_atomic` at 2 and 4,
-  `--smp_hotplug_test=y --require-hotplug` at 2, `SECTIONS=off` at 2, and the
-  CPU sysfs probe at 4 on x86_64 and at 1 on arm32. Every
-  `OK_SMP_KERNEL_CHECKS` counter is 0, `unqueued=0`, `max_lock_depth` is 5 in
-  debug and 0 in release.
-- **One kernel-side failure, not from this package**: the first x86_64
-  release run at 2 vCPUs ended `SMP_STRESS_FAIL reason=worker-4-round-0-line-10127`
-  (the worker exited 127) after `OK_NATIVE enter=failed reason=native address
-  space is unavailable`, with `retiring_rejects=1`. A user entry opens its
-  window and releases the kernel lock; a sibling's mmap, mprotect or munmap
-  (`replace_native_pages`) then marks the old space retiring, `find()`
-  rejects it and the step finishes the process. The entry and the retiring
-  state come from WP3 and are not touched here. Four reruns of that gate
-  pass with every counter 0.
+- **Gates at 2 vCPUs** on x86_64, aarch64 and rv64: `--user-hotplug` debug,
+  `PROBE=futex_smp_atomic`, MODE=release (five runs on x86_64),
+  `--smp_hotplug_test=y --require-hotplug`, `SECTIONS=off`, and the CPU sysfs
+  probe on x86_64: 20/20 pass; every `OK_SMP_KERNEL_CHECKS` counter 0,
+  `unqueued=0`, `max_lock_depth` 5 in debug and 0 in release.
+- **Guest futex lanes** (`test_futex_lanes.py`, eight probes per boot):
+  ten of ten profiles at `-smp 1` (ppc through its `ppc_` wrappers); at 2
+  and 4 vCPUs on x86_64, aarch64 and rv64: 6/6 pass.
+  Each debug run takes about 15000 futex bucket acquisitions with
+  `lock_violations=0`, `class_asserts=0` and `max_lock_depth` 6. Repeats of
+  the rv64 lane at 2 vCPUs: 12/12 pass with no thread-create retry.
+- **Before the origin fix** (ec412ef: the entry retry and the signal
+  order): the same 2-vCPU gate matrix passed
+  except one x86_64 `--smp_hotplug_test=y` run, which failed a CPU restart
+  with `OK_SMP_HOTPLUG_FAILURE ... reason="x86 secondary TSC was not
+  synchronized"`. That kernel-side failure also appears in the WP4d and WP5
+  runs of this gate (packages without these changes); three reruns pass.
+  One of those release runs (x86_64 rel2r3) recorded `retiring_rejects=1`
+  and `OK_ENTRY_STACKS rejected=1` with no `enter=failed` and passed: a
+  replaced space was retried in a guest. The x86_64 release gate at 2
+  vCPUs passed 10 of 10 runs across the two rounds.
+- **A/B for the origin fix** (rv64 at 2 vCPUs, `futex_buckets` probe only):
+  d7fde31 12/12 clean (no retry); a8d96ae (the implementer's head) 10/10
+  pass with three
+  thread-create retries; 02dcc61 (before the origin fix) 2 failures in
+  12 runs (EAGAIN from pthread_create); f29bb53 12/12 clean.
+- **Not reproduced as package failures**: the boot-time `POSIX_CHECK failed:
+  child_status(child) == 0 errno=16` of the OS self-test, which ended one
+  x86_64 distro boot and two lane boots (rv64, aarch64) before any probe ran.
+  It appears in waveA integration and WP4b and WP4d logs.
+- **Not run**: release `xmake test` lanes, gates at 4 vCPUs after the review
+  fixes (the implementer's 4-vCPU runs predate them), the `legacy_select=y`
+  lane, and the `OK_PRIVATE_SIGNAL_DELIVERY_FIXTURE` and
+  `qualify_private_futex_peers.py` lanes. Their OS-side evidence tools pin
+  older SDK ABIs (`native_signal_production_evidence.py` admits ABI 31) and
+  the peer fixture's accepted execution profile is x86_64; the futex lanes
+  above cover the same WAIT, WAKE, timeout and signal behaviour on all ten
+  profiles.
