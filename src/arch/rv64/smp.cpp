@@ -162,6 +162,11 @@ void park_self(ok::smp::CpuId) noexcept
 // outside the online mask, and its mailbox entry keeps it from a restart.
 void abandon(ok::smp::CpuId, u64) noexcept {}
 
+std::string_view start_failure(ok::smp::CpuId) noexcept
+{
+    return {};
+}
+
 bool parked(ok::smp::CpuId, u64 hardware_id) noexcept
 {
     return hardware_id < ok::smp::max_cpus &&

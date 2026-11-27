@@ -234,6 +234,11 @@ void park_self(ok::smp::CpuId) noexcept
 // mask, and AFFINITY_INFO keeps it from being restarted.
 void abandon(ok::smp::CpuId, u64) noexcept {}
 
+std::string_view start_failure(ok::smp::CpuId) noexcept
+{
+    return {};
+}
+
 bool parked(ok::smp::CpuId, u64 hardware_id) noexcept
 {
     if (conduit == boot::CpuStartMethod::none)

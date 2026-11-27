@@ -138,6 +138,13 @@ Status stop_secondary_cpu(Kernel &kernel, CpuId cpu);
 // its reported identity, rejoins the online mask and the scheduler, and must
 // answer one IPI.
 Status restart_secondary_cpu(Kernel &kernel, CpuId cpu);
+// Why the latest of those two calls failed, as a report token, empty after a
+// success; CPU 0 reads it right after the call. Stop: request, turn-busy,
+// not-online, mask-busy, scheduler, park-timeout, leave-fault. Restart:
+// request, turn-busy, not-parked, the architecture's start_failure() or
+// start-error when start() failed, start-timeout (not online within the
+// start timeout), wrong-identity, scheduler, ipi-timeout.
+[[nodiscard]] std::string_view transition_failure() noexcept;
 
 // The smp_hotplug_test debug knob: once userland runs, CPU 0's kernel loop
 // stops and restarts the highest started secondary periodically.

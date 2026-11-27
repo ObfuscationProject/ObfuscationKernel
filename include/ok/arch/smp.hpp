@@ -57,5 +57,10 @@ void stop_local() noexcept;
 // rv64 cannot; such a CPU idles outside the online mask and parked() stays
 // false, so it is not restarted.
 void abandon(ok::smp::CpuId cpu, u64 hardware_id) noexcept;
+// On the requesting CPU: why the latest start() of `cpu` failed, as a report
+// token (x86_64: "tsc-absent", "tsc-silent", "tsc-loose", "tsc-refused" or
+// "tsc-uncorrected" for its clock handshake); empty when it did not fail or
+// the architecture names no reason.
+[[nodiscard]] std::string_view start_failure(ok::smp::CpuId cpu) noexcept;
 
 } // namespace ok::arch::smp

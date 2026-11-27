@@ -154,7 +154,39 @@ The service maps the CPU state first, then the `Status`:
 | `fault`: the CPU left with a user entry or section recorded (it is offline) | EIO |
 | `invalid_argument` or `denied` (an inconsistent state after the recheck) | EIO |
 
-Every EIO counts in `failures`.
+Every EIO counts in `failures`. An online write that fails with EIO leaves
+the CPU offline when its start failed (as Linux returns EIO for a CPU that
+did not come up) and a later `1` tries again; only `ipi-timeout` leaves it
+online.
+
+### Failure reasons
+
+`stop_secondary_cpu` and `restart_secondary_cpu` name why they failed
+(`smp::transition_failure()`), and the service keeps each failure with that
+reason until a report prints it (`OK_SMP_HOTPLUG_FAIL`, below):
+
+| Reason | What failed |
+|---|---|
+| `halted` | the CPU is halted (a start gave up on it with another identity); refused before anything ran |
+| `park-timeout` | a stop: the CPU did not park within 2 s (it is wedged) |
+| `leave-fault` | a stop: the CPU left with a user entry or section recorded |
+| `not-online`, `not-parked`, `request`, `scheduler` | an inconsistent state after the recheck |
+| `tsc-absent` | an x86 restart: the CPU did not join the clock handshake within 2 s |
+| `tsc-silent` | an x86 restart: the CPU stopped answering the handshake for 100 ms |
+| `tsc-loose` | an x86 restart: no round of a measurement was within 50 us, so the offset is unknown |
+| `tsc-refused`, `tsc-uncorrected` | an x86 restart: the CPU refused the offset, or a tight measurement still found it after the correction |
+| `start-error` | a restart: the architecture's start request failed for another reason |
+| `start-timeout` | a restart: the CPU did not come online within 2 s |
+| `wrong-identity` | a restart: the CPU came up reporting another identity (it is halted) |
+| `ipi-timeout` | a restart: the CPU came online but did not answer its IPI |
+
+`tsc-absent`, `tsc-silent`, `tsc-loose` and `start-timeout` measure how
+promptly the CPUs answer, not their clocks. Under QEMU TCG each vCPU is a
+host thread; when the host is loaded they are rarely scheduled together, a
+handshake round then spans host scheduling latencies, and a restart spends
+its 16 batches of 64 rounds (9 to 18 s in loaded runs, holding the kernel
+lock) without a round under 50 us. The x86 start fails closed: the CPU stays
+parked and the write is EIO.
 
 ### Wedged CPUs
 
@@ -242,6 +274,17 @@ The fields:
 - `affinity_broken`: every broken affinity;
 - `max_us`: the longest stop or restart.
 
+Then every failure not reported yet, once, oldest first:
+
+    OK_SMP_HOTPLUG_FAIL scope=hardware failure= cpu= want= errno= reason= us=
+
+- `failure`: its number among the `failures`, from 1; the service keeps the
+  latest 8 until a report takes them, so a gap means older ones were lost;
+- `cpu` and `want`: the CPU and the value written (1 online, 0 offline);
+- `errno`: what the writer got (5, EIO);
+- `reason`: from the table under Failure reasons;
+- `us`: how long the stop or restart ran (0 when refused).
+
 It is followed by
 
     OK_SMP_HOTPLUG_RECORDS scope=hardware abandoned= dropped_waiting= dropped_done=
@@ -265,7 +308,9 @@ where `cpu` is the lowest CPU the thread was confined to.
 
 - No rate limit; root only, as on Linux.
 - A stop can occupy CPU 0 for up to 2 s.
-- An x86 restart holds the kernel lock across INIT and the TSC handshake.
+- An x86 restart holds the kernel lock across INIT and the TSC handshake;
+  on a loaded TCG host that handshake can take 9 to 18 s and still fail
+  (`tsc-loose`).
 - Device lines are not moved back onto a restarted CPU.
 - Everything here runs under the kernel lock (smp-scaling WP1): the route,
   the service, completion and wakeup.
@@ -278,9 +323,12 @@ where `cpu` is the lowest CPU the thread was confined to.
 - `scripts/test_cpu_hotplug_service.py`: the service over a model backend:
   record lifecycle, consume-once results, no-op and coalesced requests,
   refusals, orphaned and abandoned records, a lease slot reused while its
-  abandoned request runs, a result dropped by exec, the result mapping, a
-  wedged CPU, service order and the parser. A race of host threads uses the
-  real lock.
+  abandoned request runs, a result dropped by exec, the result mapping, the
+  failure reports (reasons, numbering, a failed start left offline and
+  restarted later, the ring dropping the oldest), a wedged CPU, service
+  order and the parser. A race of host threads uses the real lock.
+- `scripts/test_tsc_sync.py`: the x86 handshake's decisions name why an
+  unsynced one failed (silent, loose, refused, uncorrected).
 - `scripts/test_native_exec_eviction.py` (`exec_drops_leader_hotplug_request`):
   a sibling's exec while the leader waits in a hotplug write, through the
   actual runtime: the request is dropped and the new image keeps the caller's
@@ -290,5 +338,5 @@ where `cpu` is the lowest CPU the thread was confined to.
   (queued, blocked or running on the CPU that leaves), the ring, the process
   mask precheck and the tick restriction.
 
-All four are model scope. Guest evidence comes from ObfuscationOS:
+All five are model scope. Guest evidence comes from ObfuscationOS:
 `scripts/test_cpu_sysfs.py` and `scripts/test_smp_stress.py --user-hotplug`.

@@ -1,7 +1,8 @@
 // The user CPU hotplug service (include/ok/smp/hotplug.hpp) over a model
 // backend: record lifecycle and consume-once results, no-op and coalesced
-// requests, refusals, orphaned and abandoned records, result mapping, a
-// wedged CPU and its recovery, service order, the kstrtobool parser, and
+// requests, refusals, orphaned and abandoned records, result mapping, the
+// failure reports, a wedged CPU and its recovery, service order, the
+// kstrtobool parser, and
 // (built with OK_HOSTED_LOCK_MODEL) host threads filing and abandoning
 // requests while another serves them. Model scope: no CPU stops or starts.
 #include "ok/smp/hotplug.hpp"
@@ -21,7 +22,7 @@ static usize checks{};
 namespace
 {
 // What the model's stop or restart does.
-enum class Outcome : u8 { succeed, busy, timeout, fault, invalid };
+enum class Outcome : u8 { succeed, busy, timeout, fault, invalid, start_failed };
 
 struct Model
 {
@@ -33,6 +34,8 @@ struct Model
     std::vector<sched::WaitTicket> waiting{}, completed{};
     usize stops{}, restarts{};
     u64 clock{};
+    // The reason a failed start names (start_failed), and the latest failure's.
+    std::string_view start_reason{"tsc-loose"}, reason{};
     // Runs inside stop/restart, while the record is running (abandon races).
     void (*during)(Model &){};
     void *service{};
@@ -65,13 +68,25 @@ struct Backend
         ++(want ? model->restarts : model->stops);
         model->clock += 1500;
         if (model->during) model->during(*model);
+        model->reason = {};
         switch (model->outcome)
         {
         case Outcome::succeed: model->state[cpu] = want ? CpuState::online : CpuState::offline; return {};
-        case Outcome::busy: return Status::busy("a process allows no other online CPU");
-        case Outcome::timeout: model->state[cpu] = CpuState::stopping; return Status::io_error("did not park");
-        case Outcome::fault: model->state[cpu] = CpuState::offline; return Status::fault("left with a record");
-        case Outcome::invalid: return Status::invalid_argument("CPU is not online");
+        case Outcome::busy: model->reason = "mask-busy"; return Status::busy("a process allows no other online CPU");
+        case Outcome::timeout:
+            model->state[cpu] = CpuState::stopping;
+            model->reason = "park-timeout";
+            return Status::io_error("did not park");
+        case Outcome::fault:
+            model->state[cpu] = CpuState::offline;
+            model->reason = "leave-fault";
+            return Status::fault("left with a record");
+        case Outcome::invalid: model->reason = "not-online"; return Status::invalid_argument("CPU is not online");
+        case Outcome::start_failed:
+            // A start that gave up leaves the CPU parked and offline.
+            model->state[cpu] = CpuState::offline;
+            model->reason = model->start_reason;
+            return Status::io_error("x86 secondary TSC was not synchronized");
         }
         return {};
     }
@@ -82,6 +97,7 @@ struct Backend
         model->completed.push_back(ticket);
         std::erase(model->waiting, ticket);
     }
+    [[nodiscard]] std::string_view failure() const { return model->reason; }
     bool recover(CpuId cpu)
     {
         if (!model->parks_late[cpu] || model->state[cpu] != CpuState::stopping) return false;
@@ -173,6 +189,10 @@ void refusals()
     model.state[3] = CpuState::halted;
     CHECK(service->submit(backend, 0, request(3, true, 41, 4)).result == -hotplug::errno_io);
     CHECK(service->pending() == 0 && service->record(0).state == RecordState::free);
+    // Only the EIO refusal is a failure, reported once.
+    const auto halted = service->take_failure();
+    CHECK(halted && halted->number == 1 && halted->cpu == 3 && halted->want && halted->error == hotplug::errno_io);
+    CHECK(halted->reason == "halted" && halted->us == 0 && !service->take_failure());
     CHECK(service->submit(backend, hotplug::record_capacity, request(3, true, 41, 5)).result == -hotplug::errno_invalid);
     const auto statistics = service->statistics();
     CHECK(statistics.busy == 5 && statistics.failures == 1 && statistics.requests == 6);
@@ -193,7 +213,62 @@ void results()
         model.waiting.push_back(filed.ticket);
         CHECK(service->submit(backend, 9, filed).armed && service->pass(backend));
         CHECK(*service->consume(9, filed.ticket) == expected && service->wedged() == 0);
+        // EBUSY is no failure; each EIO names the backend's reason.
+        const auto failure = service->take_failure();
+        CHECK(outcome == Outcome::busy ? !failure : failure && failure->reason == model.reason && failure->us == 1);
     }
+}
+
+// Every counted failure is reported once as OK_SMP_HOTPLUG_FAIL would print
+// it: numbered, with the CPU, the value, EIO, the reason and the duration;
+// the latest failure_capacity are kept until a report takes them.
+void failure_reports()
+{
+    auto model = fresh();
+    Backend backend{&model};
+    auto service = std::make_unique<Service>();
+    model.state[1] = CpuState::offline;
+    model.outcome = Outcome::start_failed;
+    const auto online = request(1, true, 61, 1);
+    model.waiting.push_back(online.ticket);
+    CHECK(service->submit(backend, 4, online).armed && service->pass(backend));
+    CHECK(*service->consume(4, online.ticket) == -hotplug::errno_io && model.state[1] == CpuState::offline);
+    auto failure = service->take_failure();
+    CHECK(failure && failure->number == 1 && failure->cpu == 1 && failure->want && failure->error == hotplug::errno_io);
+    CHECK(failure->reason == "tsc-loose" && failure->us == 1 && !service->take_failure());
+    // A later "1" restarts it: the failed start left it offline, not wedged.
+    model.outcome = Outcome::succeed;
+    const auto again = request(1, true, 61, 2);
+    model.waiting.push_back(again.ticket);
+    CHECK(service->submit(backend, 4, again).armed && service->pass(backend) && *service->consume(4, again.ticket) == 2);
+    CHECK(model.state[1] == CpuState::online && service->wedged() == 0 && !service->take_failure());
+    // A backend that names no reason.
+    model.outcome = Outcome::start_failed;
+    model.start_reason = {};
+    model.state[1] = CpuState::offline;
+    const auto unnamed = request(1, true, 61, 3);
+    model.waiting.push_back(unnamed.ticket);
+    CHECK(service->submit(backend, 4, unnamed).armed && service->pass(backend));
+    CHECK(*service->consume(4, unnamed.ticket) == -hotplug::errno_io);
+    failure = service->take_failure();
+    CHECK(failure && failure->number == 2 && failure->reason == "unknown");
+    // More failures than the ring holds before a report: the oldest are
+    // skipped, the numbers show the gap, and none is reported twice.
+    model.start_reason = "tsc-silent";
+    constexpr u64 burst = hotplug::failure_capacity + 3;
+    for (u64 index = 0; index < burst; ++index)
+    {
+        const auto failing = request(1, true, 61, 4 + index);
+        model.waiting.push_back(failing.ticket);
+        CHECK(service->submit(backend, 4, failing).armed && service->pass(backend));
+        CHECK(*service->consume(4, failing.ticket) == -hotplug::errno_io);
+    }
+    for (u64 number = 2 + burst - hotplug::failure_capacity + 1; number <= 2 + burst; ++number)
+    {
+        failure = service->take_failure();
+        CHECK(failure && failure->number == number && failure->reason == "tsc-silent");
+    }
+    CHECK(!service->take_failure() && service->statistics().failures == 2 + burst);
 }
 
 // A writer that no longer waits (killed, its wait ended): freed, no completion.
@@ -298,6 +373,8 @@ void wedged()
     model.waiting.push_back(filed.ticket);
     CHECK(service->submit(backend, 3, filed).armed && service->pass(backend));
     CHECK(*service->consume(3, filed.ticket) == -hotplug::errno_io && service->wedged() == 0b100);
+    const auto timeout = service->take_failure();
+    CHECK(timeout && !timeout->want && timeout->cpu == 2 && timeout->reason == "park-timeout");
     CHECK(!backend.online(2) && service->submit(backend, 3, request(2, true, 81, 2)).result == -hotplug::errno_busy);
     CHECK(!service->pass(backend) && service->wedged() == 0b100); // Still stopping.
     model.parks_late[2] = true;
@@ -351,6 +428,7 @@ void race()
         Status stop(CpuId cpu) { shared.stops.fetch_add(1); shared.state[cpu].store(false); return {}; }
         Status restart(CpuId cpu) { shared.state[cpu].store(true); return {}; }
         void complete(sched::WaitTicket) { shared.completions.fetch_add(1); }
+        [[nodiscard]] std::string_view failure() const { return {}; }
         bool recover(CpuId) { return false; }
         [[nodiscard]] u64 now_ns() const { return 0; }
     };
@@ -403,6 +481,7 @@ int main()
     no_ops();
     refusals();
     results();
+    failure_reports();
     orphaned();
     abandoned();
     reused_slot();

@@ -94,6 +94,35 @@ enum class Verdict : u8
     return "unsynced";
 }
 
+// Why a synchronization ended unsynced. `silent` and `loose` measure how
+// promptly the target answered (a preempted vCPU, host load), not its clock.
+enum class Failure : u8
+{
+    none,
+    silent,      // the target stopped answering within the answer timeout
+    loose,       // no round of a measurement was within max_error
+    refused,     // the target refused the software offset
+    uncorrected, // a tight measurement still found the offset after the correction
+};
+
+[[nodiscard]] constexpr std::string_view name(Failure failure) noexcept
+{
+    switch (failure)
+    {
+    case Failure::none:
+        return "none";
+    case Failure::silent:
+        return "silent";
+    case Failure::loose:
+        return "loose";
+    case Failure::refused:
+        return "refused";
+    case Failure::uncorrected:
+        break;
+    }
+    return "uncorrected";
+}
+
 [[nodiscard]] constexpr Verdict worse(Verdict a, Verdict b) noexcept
 {
     return a < b ? b : a;
@@ -148,6 +177,7 @@ struct Outcome
     i64 adjusted{};     // sent to the target's TSC_ADJUST
     i64 offset{};       // sent to what the target's clock reads subtract
     u64 tolerance{};    // the offset `final` was allowed beyond its bound
+    Failure failure{};  // why, when unsynced
 };
 
 // The tightest round over up to `attempts` measurements of `rounds` rounds,
@@ -182,6 +212,11 @@ template <SyncLink Link> [[nodiscard]] Outcome synchronize(Link &link, const Pol
 {
     Outcome outcome{};
     const auto tight = [&](const Estimate &estimate) { return estimate.valid() && estimate.error <= policy.max_error; };
+    // An estimate that proves nothing: no answer, or no round tight enough.
+    const auto unproven = [&](const Estimate &estimate) {
+        outcome.failure = estimate.valid() ? Failure::loose : Failure::silent;
+        return outcome;
+    };
     const auto verified = [&](const Estimate &basis) {
         outcome.final = measure(link, policy);
         outcome.tolerance = saturating_add(policy.slack, basis.error);
@@ -190,7 +225,7 @@ template <SyncLink Link> [[nodiscard]] Outcome synchronize(Link &link, const Pol
     outcome.initial = outcome.final = measure(link, policy);
     outcome.tolerance = policy.slack;
     if (!tight(outcome.initial))
-        return outcome;
+        return unproven(outcome.initial);
     if (within(outcome.initial, policy.slack))
     {
         outcome.verdict = Verdict::sync;
@@ -204,6 +239,7 @@ template <SyncLink Link> [[nodiscard]] Outcome synchronize(Link &link, const Pol
         if (reply == Reply::silent)
         {
             outcome.adjusted = -basis.offset;
+            outcome.failure = Failure::silent;
             return outcome;
         }
         if (reply == Reply::done)
@@ -215,16 +251,28 @@ template <SyncLink Link> [[nodiscard]] Outcome synchronize(Link &link, const Pol
                 return outcome;
             }
             if (!tight(outcome.final))
-                return outcome;
+                return unproven(outcome.final);
             basis = outcome.final;
         }
     }
     const auto reply = link.add_offset(basis.offset);
     if (reply == Reply::refused)
+    {
+        outcome.failure = Failure::refused;
         return outcome;
+    }
     outcome.offset = basis.offset;
-    if (reply == Reply::done && verified(basis))
+    if (reply == Reply::silent)
+    {
+        outcome.failure = Failure::silent;
+        return outcome;
+    }
+    if (verified(basis))
         outcome.verdict = Verdict::offset;
+    else if (!tight(outcome.final))
+        return unproven(outcome.final);
+    else
+        outcome.failure = Failure::uncorrected;
     return outcome;
 }
 
