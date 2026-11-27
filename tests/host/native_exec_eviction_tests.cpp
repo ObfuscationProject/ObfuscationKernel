@@ -8,6 +8,11 @@
 // the thread off its CPU. The caller holds the kernel lock as the step does.
 #define OK_SYSCALL_ORIGIN_MODEL 1
 #define OK_NATIVE_VFS_CONTINUATION_MODEL 1
+#define OK_FRAME_SYSCALL_MODEL 1 // A frame names its syscall: registers[14], arguments from registers[9].
+// A second set of cases runs the sibling's actual step on the other CPU
+// (step_* below): its pick, its user entry through enter_unlocked (the kernel
+// lock released around a mock trap), the frozen check and put_prev, and the
+// dispatch of a kept syscall after the thaw.
 #include <atomic>
 #include <thread>
 #include "native_clock_model.hpp"
@@ -18,6 +23,13 @@ struct SyscallOriginTestAccess
     static u16 &borrows(SyscallOrigins &table, memory::KernelEntryStackHandle lease)
     { return table.records_[lease.slot].linux_udp_borrows; }
     static smp::PerCpuSequence &images(SyscallOrigins &table) { return table.image_sequence_; }
+    static bool owns(SyscallOrigins &table, memory::KernelEntryStackHandle lease, u64 pid, u64 tid)
+    {
+        const auto &identity = table.records_[lease.slot].identity;
+        return identity.lease == lease && identity.pid == pid && identity.tid == tid && identity.image != 0;
+    }
+    static bool live(SyscallOrigins &table, memory::KernelEntryStackHandle lease)
+    { return table.records_[lease.slot].live || table.records_[lease.slot].bound; }
 };
 struct VfsStatContinuationTestAccess
 {
@@ -561,6 +573,205 @@ void exec_drops_leader_hotplug_request(Kernel &kernel)
     smp::detail::online.store(0x1);
     smp::cpu_record(1).state.store(static_cast<u8>(smp::CpuState::offline));
 }
+
+// The sibling's actual step on CPU 1 (spec 4.8). It picks the sibling,
+// enters user mode through enter_unlocked, which releases the kernel lock
+// around the mock entry, and stays there until the group is frozen; then the
+// trap returns, the post-user relock takes the kernel lock the exec released
+// for its wait, the frozen check skips trap handling and dispatch, and
+// put_prev takes the thread off the CPU.
+std::atomic<bool> in_user{false};
+std::atomic<sched::ProcessId> hold_pid{0};
+void hold_in_user(hw::AddressSpace &, hw::UserFrame &, const hw::KernelEntryStackView &)
+{
+    in_user.store(true, std::memory_order_release);
+    if (const auto pid = hold_pid.load(std::memory_order_acquire))
+        while (!native::runtime_kernel->scheduler().frozen(pid)) std::this_thread::yield();
+}
+bool step_on_other_cpu(Kernel &kernel)
+{
+    bool stepped{};
+    std::thread cpu([&] {
+        const smp::ScopedHostedCpu hosted{other_cpu};
+        smp::bkl_lock();
+        stepped = native::step(kernel);
+        smp::bkl_unlock();
+    });
+    cpu.join();
+    return stepped;
+}
+// The sibling may run only on CPU 1 and the caller only on CPU 0; the
+// sibling's entry is in CPU 1's queue.
+void confine(Kernel &kernel, const Group &g)
+{
+    auto &p = process(kernel, g.pid);
+    kernel.scheduler().store_thread_affinity(p, thread(kernel, g.pid, g.pid), 0x1);
+    kernel.scheduler().store_thread_affinity(p, thread(kernel, g.pid, g.sibling), 0x2);
+    for (const smp::CpuId cpu : {smp::CpuId{0}, other_cpu})
+        while (kernel.scheduler().dequeue_thread(cpu)) {}
+    EXPECT(kernel.scheduler().enqueue_thread(g.pid, g.sibling));
+    EXPECT(kernel.scheduler().enqueue_thread(g.pid, g.pid));
+    EXPECT(thread(kernel, g.pid, g.sibling).queued_cpu == other_cpu);
+}
+constexpr uptr sibling_pc = hw::user_begin + 0x123;
+constexpr uptr untouched_result = 0x5a5a;
+bool mips_profile()
+{
+    const auto architecture = arch::configured_arch_operations().architecture();
+    return architecture == arch::Architecture::mips || architecture == arch::Architecture::mips64;
+}
+hw::Trap trap_of(hw::TrapKind kind)
+{
+    // On MIPS the syscall sits in a branch delay slot (Cause.BD, ExcCode 8).
+    if (kind == hw::TrapKind::syscall && mips_profile()) return {kind, 8, (8u << 2) | 0x80000000u};
+    return {kind, 256};
+}
+// Runs the sibling's step on CPU 1 while the caller's exec runs on CPU 0
+// holding the kernel lock; returns the exec's result.
+i64 exec_against_step(Kernel &kernel, const Group &g, bool &complete)
+{
+    in_user.store(false);
+    hold_pid.store(g.pid);
+    mock::owned_hook = hold_in_user;
+    i64 result{};
+    {
+        bool stepped{};
+        std::thread cpu([&] {
+            const smp::ScopedHostedCpu hosted{other_cpu};
+            smp::bkl_lock();
+            stepped = native::step(kernel);
+            smp::bkl_unlock();
+        });
+        while (!in_user.load(std::memory_order_acquire)) std::this_thread::yield();
+        result = exec(kernel, g.pid, g.pid, complete);
+        cpu.join();
+        EXPECT(stepped);
+    }
+    mock::owned_hook = nullptr;
+    hold_pid.store(0);
+    return result;
+}
+
+// exec refused after its quiesce, for each trap the sibling may take while
+// frozen: the step kept the frame (a syscall stays pending without
+// dispatch, as its trap; a timer tick is counted; a fault is taken again)
+// and the thaw queued the sibling on CPU 1. Its next step dispatches the
+// kept syscall exactly once, as the trap it was, without entering user mode;
+// after any other trap it enters user mode again.
+void step_frozen_sibling_thaws(Kernel &kernel, hw::TrapKind kind)
+{
+    const auto g = create(kernel);
+    confine(kernel, g);
+    auto &sibling = thread(kernel, g.pid, g.sibling);
+    sibling.native_frame.pc = sibling_pc;
+    sibling.native_frame.registers[14] = OK_SYS_GETPID;
+    sibling.native_frame.registers[0] = untouched_result;
+    const bool syscall = kind == hw::TrapKind::syscall;
+    const auto ticks = sibling.cpu_time_ticks;
+    mock::entry_trap = trap_of(kind);
+    const auto entries = mock::entries;
+    const auto skips = smp::evidence_cpus[other_cpu].frozen_skips.load();
+    const auto waits = smp::evidence_cpus[0].group_waits.load();
+    process(kernel, g.pid).resources().unix_receive_operations = 1; // exec refuses after its quiesce.
+    bool complete{};
+    EXPECT(exec_against_step(kernel, g, complete) < 0 && complete && nothing_reported());
+    process(kernel, g.pid).resources().unix_receive_operations = 0;
+    EXPECT(mock::entries == entries + 1);
+    EXPECT(smp::evidence_cpus[other_cpu].frozen_skips.load() == skips + 1);
+    EXPECT(smp::evidence_cpus[0].group_waits.load() == waits + 1);
+    thawed(kernel, g.pid, g.sibling, sibling_pc, syscall);
+    EXPECT(sibling.queued_cpu == other_cpu);
+    EXPECT(sibling.syscall_deferred == syscall && sibling.syscall_delay_slot == (syscall && mips_profile()));
+    EXPECT(sibling.native_frame.registers[0] == untouched_result);
+    // Its dispatch counts one tick; a timer trap kept by the frozen check, one more.
+    EXPECT(sibling.cpu_time_ticks == ticks + 1 + (kind == hw::TrapKind::timer ? 1 : 0));
+    // The thawed sibling's next step on CPU 1.
+    mock::entry_trap = {hw::TrapKind::timer};
+    EXPECT(step_on_other_cpu(kernel));
+    EXPECT(native::runtime_status().ok() && native::started);
+    if (syscall)
+    {
+        EXPECT(mock::entries == entries + 1);
+        EXPECT(sibling.native_frame.registers[0] == g.pid);
+        EXPECT(!sibling.syscall_pending && !sibling.syscall_deferred && !sibling.syscall_delay_slot);
+    }
+    else
+        EXPECT(mock::entries == entries + 2 && !sibling.syscall_pending);
+    EXPECT(sibling.on_cpu == sched::no_cpu && kernel.scheduler().current_tid(other_cpu) == 0);
+    EXPECT(!native::entry_stacks.active_on(other_cpu));
+    retire(kernel, g.pid);
+}
+
+// exec commits with the sibling quiesced by its own step: the sibling's
+// trapped syscall (its origin record staged at its entry, never dispatched)
+// goes with the old image, and its lease and records are released.
+void step_sibling_erased_by_exec(Kernel &kernel)
+{
+    const auto g = create(kernel);
+    confine(kernel, g);
+    auto &sibling = thread(kernel, g.pid, g.sibling);
+    const auto sibling_lease = sibling.entry_stack;
+    sibling.native_frame.registers[14] = OK_SYS_GETPID;
+    EXPECT(native::SyscallOriginTestAccess::owns(native::syscall_origins, sibling_lease, g.pid, g.sibling));
+    mock::entry_trap = trap_of(hw::TrapKind::syscall);
+    bool complete{};
+    EXPECT(exec_against_step(kernel, g, complete) == 0 && !complete && nothing_reported());
+    EXPECT(native::runtime_status().ok() && native::started);
+    auto &p = process(kernel, g.pid);
+    EXPECT(p.record_count() == 1 && p.leader().tid == g.pid && !kernel.scheduler().frozen(g.pid));
+    EXPECT(!kernel.scheduler().find_thread(g.pid, g.sibling) && kernel.scheduler().current_tid(other_cpu) == 0);
+    EXPECT(!native::entry_stacks.validate_inactive(sibling_lease, {g.pid, g.sibling}));
+    // The old image's origin records are revoked (exec's revoke_process); the
+    // slot's record is reset when its lease is prepared again.
+    EXPECT(!native::SyscallOriginTestAccess::live(native::syscall_origins, sibling_lease));
+    EXPECT(native::entry_stacks.accounting().active_slots == 0);
+    retire(kernel, g.pid);
+}
+
+// A kill accepted before an exit_group decides the group's status (Linux
+// do_group_exit after SIGNAL_GROUP_EXIT): the kill lands while the caller
+// already trapped exit_group(0), which then exits with SIGKILL.
+void exit_group_after_kill_reports_kill(Kernel &kernel)
+{
+    const auto g = create(kernel);
+    native::request_group_exit(kernel, g.pid, {0, 9});
+    bool complete{};
+    EXPECT(call(kernel, g.pid, g.pid, OK_SYS_EXIT_GROUP, 0, complete) == 0 && !complete);
+    auto &p = process(kernel, g.pid);
+    EXPECT(p.state() == sched::ProcessState::zombie && p.wait_status() == 9);
+    EXPECT(kernel.scheduler().reap_orphans());
+}
+
+// A CPU running no thread of the group claims with its own identity: a
+// second such exit claim while the first waits is another's, never its own,
+// and leaves the group to the first.
+void kernel_claimers_are_distinct(Kernel &kernel)
+{
+    const auto g = create(kernel);
+    run_elsewhere(kernel, g.pid, g.sibling);
+    using Outcome = sched::SchedulerState::ClaimOutcome;
+    const auto first = sched::SchedulerState::kernel_claimer(0);
+    const auto second = sched::SchedulerState::kernel_claimer(1);
+    EXPECT(first != second && first > sched::max_task_id && second > sched::max_task_id);
+    EXPECT(kernel.scheduler().claim_transition(g.pid, first, sched::GroupTransition::exit).outcome == Outcome::claimed);
+    EXPECT(kernel.scheduler().claim_transition(g.pid, second, sched::GroupTransition::exit).outcome ==
+           Outcome::exit_held);
+    EXPECT(kernel.scheduler().claim_transition(g.pid, first, sched::GroupTransition::exit).outcome == Outcome::held);
+    EXPECT(!kernel.scheduler().group_quiesced(g.pid, first));
+    EXPECT(native::entry_stacks.deactivate_entry(thread(kernel, g.pid, g.sibling).entry_stack, {g.pid, g.sibling},
+                                                 other_cpu));
+    {
+        const smp::ScopedHostedCpu hosted{other_cpu};
+        kernel.scheduler().put_prev(other_cpu);
+    }
+    EXPECT(kernel.scheduler().group_quiesced(g.pid, first));
+    // CPU 0's own exit of the group (no thread of it current) is the held claim.
+    EXPECT(kernel.posix().activate(0));
+    native::finish(kernel, g.pid, 3);
+    EXPECT(native::runtime_status().ok() && process(kernel, g.pid).state() == sched::ProcessState::zombie);
+    EXPECT(process(kernel, g.pid).exit_code() == 3);
+    EXPECT(kernel.scheduler().reap_orphans());
+}
 } // namespace
 
 int main()
@@ -582,9 +793,21 @@ int main()
     breach_after_quiesce_stops(kernel);
     leaseless_leader_exec(kernel);
     exec_drops_leader_hotplug_request(kernel);
+    exit_group_after_kill_reports_kill(kernel);
+    kernel_claimers_are_distinct(kernel);
+    // The sibling's own step from here on (the runtime's user entry).
+    native::shared_capture.set_entry(native::enter_unlocked);
+    for (const auto kind : {hw::TrapKind::syscall, hw::TrapKind::timer, hw::TrapKind::page_fault})
+        step_frozen_sibling_thaws(kernel, kind);
+    step_sibling_erased_by_exec(kernel);
+    native::shared_capture.set_entry(nullptr);
     const auto stacks = native::entry_stacks.accounting();
     EXPECT(!stacks.leased_slots && !stacks.active_slots && !stacks.quarantined_slots);
     EXPECT(stacks.reservations == stacks.releases && native::runtime_status().ok());
     EXPECT(smp::check_total(smp::KernelCheck::quiesce_timeouts) == 0);
+    // Lock order and the class rule hold across the kernel lock's release
+    // inside the dispatcher (OK_LOCK_DEBUG, OK_HOSTED_LOCK_MODEL).
+    for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu) EXPECT(smp::lock_violation_count(cpu) == 0);
+    EXPECT(smp::check_total(smp::KernelCheck::class_rule) == 0);
     std::printf("PASS native exec eviction checks=%zu scope=hosted-model model_cpus=2 guest=0 smp=0\n", checks);
 }

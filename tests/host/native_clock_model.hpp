@@ -179,7 +179,7 @@ UserFrame initial_frame(uptr pc, uptr sp)
 }
 Syscall syscall(const UserFrame &frame)
 {
-#if defined(OK_POLL_TEMP_MASK_MODEL) || defined(OK_CHILD_WAIT_SIGNAL_MODEL) || defined(OK_PIPE_WRITE_SIGNAL_MODEL) || defined(OK_NATIVE_POWER_MODEL)
+#if defined(OK_POLL_TEMP_MASK_MODEL) || defined(OK_CHILD_WAIT_SIGNAL_MODEL) || defined(OK_PIPE_WRITE_SIGNAL_MODEL) || defined(OK_NATIVE_POWER_MODEL) || defined(OK_FRAME_SYSCALL_MODEL)
     return {frame.registers[14], {frame.registers[9], frame.registers[10], frame.registers[11],
             frame.registers[5], frame.registers[7], frame.registers[6]}};
 #else
