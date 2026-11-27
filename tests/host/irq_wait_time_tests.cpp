@@ -470,6 +470,38 @@ static void check_irq_self_unbind()
     CHECK(router.top_half(7) && router.drain() == 1 && state.unbound && !router.bound(7) && !router.running());
 }
 
+// A device that edges on every handler run (an unmasked edge line under a
+// flood): one drain runs the line's handlers twice (the run and its recheck)
+// and leaves it pending for the next drain instead of staying on it.
+struct Flooding
+{
+    interrupt::IrqRouter<EdgeModelIrqChip> *router{};
+    int calls{};
+};
+static void flooding_service(void *context, interrupt::IrqLine line)
+{
+    auto &state = *static_cast<Flooding *>(context);
+    ++state.calls;
+    CHECK(state.router->top_half(line));
+}
+static void check_irq_flood_bounded()
+{
+    EdgeModelIrqChip chip;
+    interrupt::IrqRouter<EdgeModelIrqChip> router(chip);
+    CHECK(chip.initialize().ok());
+    Flooding state{&router};
+    CHECK(router.bind(8, interrupt::IrqTrigger::edge, flooding_service, &state).ok());
+    smp::ScopedHostedCpu hosted(1);
+    CHECK(router.top_half(8));
+    CHECK(router.drain() == 2 && state.calls == 2 && router.pending() && !router.running(8));
+    CHECK(router.drain() == 2 && state.calls == 4 && router.pending());
+    CHECK(router.serviced(8) == 4 && !chip.masked(8));
+    CHECK(router.unbind(8, flooding_service, &state).ok());
+    // The flag the last run left is served without a handler.
+    CHECK(router.drain() <= 1 && !router.pending() && state.calls == 4);
+    CHECK(router.controller_errors() == 0);
+}
+
 static void check_wait_queue()
 {
     sched::WaitQueue<2> queue;
@@ -901,6 +933,7 @@ int main()
     check_irq_router_concurrency();
     check_irq_unbind_waits_for_running();
     check_irq_self_unbind();
+    check_irq_flood_bounded();
     check_wait_queue();
     check_wait_queue_enlist();
     check_wake_source();

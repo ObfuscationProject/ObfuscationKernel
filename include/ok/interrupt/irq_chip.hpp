@@ -176,6 +176,8 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
   public:
     // A line may be shared (PCI INTx); its handlers run in bind order.
     static constexpr usize max_line_handlers = 4;
+    // Handler runs of one line per drain: the first and one recheck.
+    static constexpr usize drain_passes = 2;
 
     constexpr explicit IrqRouter(Chip &chip) : chip_(chip)
     {
@@ -378,10 +380,17 @@ template <IrqChip Chip> class IrqRouter final : private NonCopyable
             auto &entry = lines_[line];
             // The recheck after the handlers: an edge that arrived while they
             // ran (an unmasked I/O APIC line), or a pending flag a concurrent
-            // drain gave back, is served now.
-            while (entry.pending.load(std::memory_order_relaxed) &&
-                   entry.pending.exchange(false, std::memory_order_acq_rel))
+            // drain gave back, is served now, once. A line that is pending
+            // again after that (a device that keeps edging) is left for the
+            // next drain, so it cannot hold this one on a single line.
+            for (usize pass = 0; entry.pending.load(std::memory_order_relaxed); ++pass)
             {
+                if (pass == drain_passes)
+                {
+                    any_pending_.store(true, std::memory_order_seq_cst);
+                    break;
+                }
+                if (!entry.pending.exchange(false, std::memory_order_acq_rel)) break;
                 // This CPU owns the line until it unmasks it and clears
                 // `running`. The handlers run from a snapshot, without the lock.
                 std::array<Handler, max_line_handlers> handlers{};
