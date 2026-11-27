@@ -2,7 +2,8 @@
 // (OK_HOSTED_LOCK_MODEL) with the lock-order checks on (OK_LOCK_DEBUG).
 //
 // The actual runtime and scheduler with hosted user copies: a timed-out
-// waiter against WAKE(1), signal against wake, requeue across buckets and an
+// waiter against WAKE(1), signal against wake (and against the expiry of a
+// timed wait during its publication), requeue across buckets and an
 // equal-bucket pair for WAKE_OP and CMP_REQUEUE, with no lock-order report.
 // Then host-thread races on the bucket list itself (FutexBuckets with real
 // futex_bucket locks): compare-and-queue against a waker that changes the

@@ -3,7 +3,8 @@
 
 The actual runtime and scheduler with hosted user copies, built on the real
 spin locks (OK_HOSTED_LOCK_MODEL) with the lock-order checks on
-(OK_LOCK_DEBUG): a timed-out waiter against WAKE(1), signal against wake,
+(OK_LOCK_DEBUG): a timed-out waiter against WAKE(1), signal against wake and
+against the expiry of a timed wait during its publication,
 requeue across buckets and an equal-bucket pair. Then host-thread races on
 the bucket list: compare-and-queue against a waker, a requeue moving a wait
 while its owner unlinks it, and a signal's interrupt against WAKE(1).
