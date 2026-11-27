@@ -866,6 +866,13 @@ class SchedulerState
     // its CPU woken after the unlock); an armed one is queued by put_prev.
     // The wait's deadline goes with it.
     bool complete_wait(WaitTicket ticket, WaitCompletion completion, WakeSource source = WakeSource::thread);
+    // The same for a waker that holds a lock its wakes must not kick under
+    // (a futex bucket): the CPU a completed waiter was queued on joins
+    // `kicks` instead of being woken; notify_cpus wakes them after unlocking.
+    bool complete_wait(WaitTicket ticket, WaitCompletion completion, WakeSource source, u32 &kicks);
+    void notify_cpus(u32 kicks);
+    // Whether `ticket` is its thread's pending wait, read under its task lock.
+    [[nodiscard]] bool wait_pending(WaitTicket ticket);
     // Sets the probe of a pending wait (spec 4.7 A5: a timed signal wait
     // reached its deadline) and queues the thread if it is parked.
     bool probe_wait(WaitTicket ticket);

@@ -74,6 +74,46 @@ i64 wake(Kernel &kernel, Owner group, uptr address, u32 limit = 1,
         {native::FutexOperation::wake, address, limit, {}, false, false, domain}, complete);
     CHECK(complete); return result;
 }
+// The owner's resume as the step runs it once the waiter is picked.
+std::optional<i64> resume(Kernel &kernel, Owner group, usize index)
+{
+    activate(kernel, group, index);
+    auto *process = kernel.scheduler().find(group.pid);
+    auto *thread = kernel.scheduler().current_thread();
+    bool complete = true;
+    const auto result = native::resume_owned_wait(kernel, *process, *thread, complete);
+    if (result)
+    {
+        thread->syscall_pending = false;
+        CHECK(native::set_result(*process, thread->native_frame, *result));
+    }
+    return result;
+}
+// A woken waiter's resume produces 0 and retires its record.
+bool woke(Kernel &kernel, Owner group, usize index, memory::ObjectHandle object)
+{
+    return resume(kernel, group, index) == i64{0} && !native::futex_objects.resolve(object);
+}
+void expire(Kernel &kernel, u64 now)
+{
+    std::array<u16, sched::max_processes> due{};
+    static_cast<void>(kernel.scheduler().expire_deadlines(now, due));
+}
+// The bucket sequences a test drives to their boundary, restored after.
+struct Sequences
+{
+    std::array<u64, native::futex_bucket_count> saved{};
+    Sequences() { for (u32 i = 0; i < saved.size(); ++i) saved[i] = native::futex_buckets[i].sequence; }
+    void exhaust(u32 index) { native::futex_buckets[index].sequence = ~u64{0}; }
+    void restore() { for (u32 i = 0; i < saved.size(); ++i) native::futex_buckets[i].sequence = saved[i]; }
+};
+u32 bucket(Kernel &kernel, Owner group, uptr address)
+{
+    native::FutexWait::Key key{};
+    key.domain = Domain::private_address_space; key.pid = group.pid; key.address = address;
+    static_cast<void>(kernel);
+    return native::futex_bucket_of(key);
+}
 void cleanup(Kernel &kernel, Owner group)
 {
     CHECK(native::cancel_futex(kernel, group.pid));
@@ -115,7 +155,7 @@ void ordering(Kernel &kernel)
     auto a = wait(kernel, group, 1), b = wait(kernel, group, 2, source, Domain::private_address_space, true);
     auto c = wait(kernel, group, 3), d = wait(kernel, group, 4, destination);
     const auto outside = wait(kernel, foreign, 1);
-    CHECK(wake(kernel, group, source) == 1 && !native::futex_objects.resolve(a));
+    CHECK(wake(kernel, group, source) == 1 && woke(kernel, group, 1, a));
     a = wait(kernel, group, 1); // The low slot is recycled after B/C were queued.
     const auto before = *native::futex_objects.resolve(b).value();
     const auto binding = native::futex_origin_binding(b, before);
@@ -125,13 +165,13 @@ void ordering(Kernel &kernel)
     CHECK(native::futex_origin_binding(b, moved) == binding && moved.domain == before.domain);
     CHECK(moved.timeout.deadline() == before.timeout.deadline() && moved.timeout.generation() == before.timeout.generation());
     CHECK(kernel.scheduler().find_thread(group.pid, group.tids[2])->wait_key == source);
-    CHECK(wake(kernel, group, destination) == 1 && !native::futex_objects.resolve(d));
-    CHECK(wake(kernel, group, destination) == 1 && !native::futex_objects.resolve(b));
+    CHECK(wake(kernel, group, destination) == 1 && woke(kernel, group, 4, d));
+    CHECK(wake(kernel, group, destination) == 1 && woke(kernel, group, 2, b));
     const auto sequence = native::futex_objects.resolve(c).value()->queue_sequence;
     CHECK(requeue(kernel, group, 0, 1, source, source) == 1);
     CHECK(native::futex_objects.resolve(c).value()->queue_sequence == sequence);
-    CHECK(wake(kernel, group, source) == 1 && !native::futex_objects.resolve(c));
-    CHECK(wake(kernel, group, source, 0) == 1 && !native::futex_objects.resolve(a));
+    CHECK(wake(kernel, group, source) == 1 && woke(kernel, group, 3, c));
+    CHECK(wake(kernel, group, source, 0) == 1 && woke(kernel, group, 1, a));
     CHECK(native::futex_objects.resolve(outside));
     cleanup(kernel, group); cleanup(kernel, foreign);
 }
@@ -160,17 +200,19 @@ void admission(Kernel &kernel)
     CHECK(requeue(kernel, group, 0, 0, source, destination, true, 0x01020304U,
                   Domain::private_address_space, true) == 0);
     put(source, 7);
-    const auto sequence = native::futex_queue_sequence;
-    native::futex_queue_sequence = ~u64{0}; // Reach the otherwise impractical boundary.
+    // Reach the otherwise impractical boundary of both buckets' sequences.
+    Sequences sequences;
+    sequences.exhaust(bucket(kernel, group, source)); sequences.exhaust(bucket(kernel, group, destination));
     CHECK(requeue(kernel, group, 1, 1) == -75);
     CHECK(native::futex_objects.resolve(one) && native::futex_objects.resolve(two));
+    CHECK(kernel.scheduler().find_thread(group.pid, group.tids[1])->wait_registration.active());
     CHECK(requeue(kernel, group, 0, 1, source, source) == 1);
     activate(kernel, group, 3);
     bool complete = true;
     CHECK(native::futex(kernel, group.pid, {native::FutexOperation::wait, source, 7}, complete) == -75 && complete);
-    native::futex_queue_sequence = sequence;
+    sequences.restore();
     CHECK(requeue(kernel, group, 0x7fffffffU, 0x7fffffffU) == 2);
-    CHECK(!native::futex_objects.resolve(one) && !native::futex_objects.resolve(two));
+    CHECK(woke(kernel, group, 1, one) && woke(kernel, group, 2, two));
     cleanup(kernel, group);
 }
 void shared(Kernel &kernel)
@@ -202,7 +244,10 @@ void shared(Kernel &kernel)
     CHECK(native::page_pool.release_reference(old)); CHECK(pages.clear()); pages = std::move(replacement);
     CHECK(!native::page_pool.valid(old));
     CHECK(wake(kernel, group, destination, 9, Domain::anonymous_shared_operation) == 2);
-    CHECK(!native::futex_objects.resolve(a) && !native::futex_objects.resolve(b));
+    // The pins go with the records, at each owner's resume.
+    CHECK(native::page_pool.pin_count(next).value() == 2);
+    CHECK(woke(kernel, group, 1, a) && woke(kernel, peer, 1, b));
+    CHECK(native::page_pool.pin_count(next).value() == 0);
     cleanup(kernel, peer); cleanup(kernel, group);
 
     const auto same = owner(kernel, 2);
@@ -263,7 +308,8 @@ void retained_failure(Kernel &kernel, bool pending_failure)
     CHECK(native::page_pool.pin_count(old).value() == 1 && native::page_pool.pin_count(next).value() == 1);
     CHECK(requeue(kernel, group, 0, 1) == -5 && wake(kernel, group, source) == -5);
     CHECK(native::futex_wake_operation(kernel, group.pid, {source, destination, 1, 1, 0}) == -5);
-    CHECK(!native::expire_futex(kernel, ~u64{0}));
+    CHECK(!native::resume_futex(kernel, *kernel.scheduler().find(group.pid),
+                                *kernel.scheduler().find_thread(group.pid, group.tids[1]), object));
     if (pending_failure) native::NativePagePoolFaultProbe::unpin(native::page_pool, next, 1);
     CHECK(!native::cancel_futex(kernel, object));
     CHECK(native::futex_objects.resolve(object));
@@ -324,10 +370,16 @@ void wake_cleanup_failure(Kernel &kernel)
     const auto first = wait(kernel, group, 1, source, Domain::anonymous_shared_operation);
     const auto second = wait(kernel, group, 2, source, Domain::anonymous_shared_operation);
     native::NativePagePoolFaultProbe::unpin(native::page_pool, backing, 1);
-    CHECK(wake(kernel, group, source, 2, Domain::anonymous_shared_operation) == -5);
-    CHECK(native::futex_objects.resolve(first) && native::futex_objects.resolve(second));
+    // A waker never unpins or retires a record: both wake.
+    CHECK(wake(kernel, group, source, 2, Domain::anonymous_shared_operation) == 2);
     CHECK(kernel.scheduler().find_thread(group.pid, group.tids[1])->wait_registration.completion() == sched::WaitCompletion::ready);
-    CHECK(kernel.scheduler().find_thread(group.pid, group.tids[2])->wait_registration.active());
+    CHECK(kernel.scheduler().find_thread(group.pid, group.tids[2])->wait_registration.completion() == sched::WaitCompletion::ready);
+    CHECK(native::page_pool.pin_count(backing).value() == 2);
+    // The first owner's resume meets the refused unpin: the runtime stops,
+    // nothing is produced and the record stays discoverable.
+    CHECK(!resume(kernel, group, 1) && !native::runtime_failure);
+    CHECK(native::futex_objects.resolve(first) && native::futex_objects.resolve(second));
+    CHECK(kernel.scheduler().find_thread(group.pid, group.tids[1])->syscall_pending);
     CHECK(native::page_pool.pin_count(backing).value() == 2);
     CHECK(native::cancel_futex(kernel, group.pid)); reset_injected_failure(); cleanup(kernel, group);
 }
@@ -338,9 +390,14 @@ void stale_generation(Kernel &kernel)
     native::PollWaitIndex *index{};
     for (auto &entry : native::futex_waits) if (entry.object == object) index = &entry;
     CHECK(index); ++index->object.generation; // Test-only stale-handle injection.
-    CHECK(requeue(kernel, group, 1, 1) == -5);
+    // The queues hold the records themselves: the requeue wakes the waiter.
+    CHECK(requeue(kernel, group, 1, 1) == 1);
+    CHECK(kernel.scheduler().find_thread(group.pid, group.tids[1])->wait_registration.completion() ==
+          sched::WaitCompletion::ready);
+    // Its resume finds the index stale: the runtime stops and nothing is produced.
+    CHECK(!resume(kernel, group, 1) && !native::runtime_failure);
     CHECK(native::futex_objects.resolve(object));
-    CHECK(kernel.scheduler().find_thread(group.pid, group.tids[1])->wait_registration.active());
+    CHECK(kernel.scheduler().find_thread(group.pid, group.tids[1])->syscall_pending);
     index->object = object; // Restore injected metadata before explicit retirement.
     CHECK(native::cancel_futex(kernel, object)); reset_injected_failure(); cleanup(kernel, group);
 }
@@ -350,49 +407,44 @@ void stale_and_timeout(Kernel &kernel)
     const auto timed = wait(kernel, group, 1, source, Domain::private_address_space, true);
     const auto old = *native::futex_objects.resolve(timed).value();
     CHECK(requeue(kernel, group, 0, 1) == 1);
-    CHECK(!native::expire_futex(kernel, old.timeout.deadline()));
-    CHECK(!native::futex_objects.resolve(timed));
+    // The timeout completes the moved wait through its heap key; the resume
+    // unlinks it from the destination bucket and produces -110.
+    expire(kernel, old.timeout.deadline());
     CHECK(kernel.scheduler().find_thread(group.pid, group.tids[1])->wait_registration.completion() == sched::WaitCompletion::timeout);
+    CHECK(native::futex_objects.resolve(timed).value()->bucket == bucket(kernel, group, destination));
+    CHECK(resume(kernel, group, 1) == i64{-110} && !native::futex_objects.resolve(timed));
+    CHECK(!native::futex_buckets[bucket(kernel, group, destination)].head);
     const auto stale = wait(kernel, group, 1);
     auto *thread = kernel.scheduler().find_thread(group.pid, group.tids[1]);
     CHECK(kernel.scheduler().complete_wait(thread->wait_registration.ticket(), sched::WaitCompletion::cancelled));
     activate(kernel, group, 1);
     const auto replacement = kernel.scheduler().register_current_wait(sched::ThreadWaitReason::futex, source); CHECK(replacement);
+    // A record whose wait is over leaves the queue uncounted; the thread's
+    // replacement wait is untouched.
     CHECK(requeue(kernel, group, 1, 1) == 0 && thread->wait_registration.pending(replacement.value()));
-    CHECK(!native::expire_futex(kernel, mock::now) && !native::futex_objects.resolve(stale));
+    CHECK(native::futex_objects.resolve(stale).value()->bucket == native::futex_no_bucket);
+    CHECK(native::cancel_futex(kernel, stale) && !native::futex_objects.resolve(stale));
     CHECK(thread->wait_registration.pending(replacement.value()));
     CHECK(kernel.scheduler().complete_wait(replacement.value(), sched::WaitCompletion::cancelled));
     cleanup(kernel, group);
 }
-void snapshot_ticket_substitution(Kernel &kernel)
+// REQUEUE chooses pending waits only: one that is over (cancelled here)
+// leaves the queue uncounted and the next pending one moves.
+void requeue_skips_completed(Kernel &kernel)
 {
-    const auto group = owner(kernel, 2); put(source, 7);
-    const auto object = wait(kernel, group, 1);
-    auto *record = native::futex_objects.resolve(object).value();
-    const auto original = *record;
-    const auto snapshot = native::snapshot_futex_queue(kernel, original.key);
-    CHECK(snapshot && snapshot.value().count == 1);
-    const auto &selected = snapshot.value().entries[0];
-    CHECK(selected.object == object && selected.sequence == original.queue_sequence &&
-          native::exact_futex_key(selected.key, original.key) && selected.pid == group.pid &&
-          selected.tid == group.tids[1] && selected.binding == native::futex_origin_binding(object, original));
-    CHECK(kernel.scheduler().complete_wait(original.ticket, sched::WaitCompletion::cancelled));
-    activate(kernel, group, 1);
-    const auto replacement = kernel.scheduler().register_current_wait(sched::ThreadWaitReason::futex, source);
-    CHECK(replacement && replacement.value() != original.ticket);
-    record->ticket = replacement.value(); // Same-object/same-sequence test-only ticket substitution.
-    CHECK(native::pending_futex_wait(kernel, *record)); // Current-state validation alone would accept it.
-    CHECK(record->queue_sequence == selected.sequence && native::exact_futex_key(record->key, selected.key));
-    CHECK(!native::selected_futex_wait(kernel, selected, original.key));
-    CHECK(!native::runtime_failure && native::futex_objects.resolve(object));
-    auto *thread = kernel.scheduler().find_thread(group.pid, group.tids[1]);
-    CHECK(thread->syscall_pending && thread->wait_registration.pending(replacement.value()));
-    CHECK(record->ticket == replacement.value() && record->queue_sequence == original.queue_sequence);
-    record->ticket = original.ticket; // Restore only injected metadata for explicit old-object retirement.
-    CHECK(native::cancel_futex(kernel, object));
-    CHECK(thread->wait_registration.pending(replacement.value()));
-    CHECK(kernel.scheduler().complete_wait(replacement.value(), sched::WaitCompletion::cancelled));
-    reset_injected_failure(); cleanup(kernel, group);
+    const auto group = owner(kernel, 4); put(source, 7);
+    const auto a = wait(kernel, group, 1), b = wait(kernel, group, 2), c = wait(kernel, group, 3);
+    CHECK(kernel.scheduler().complete_wait(native::futex_objects.resolve(a).value()->ticket,
+                                           sched::WaitCompletion::cancelled));
+    CHECK(requeue(kernel, group, 0, 1) == 1);
+    CHECK(native::futex_objects.resolve(a).value()->bucket == native::futex_no_bucket);
+    CHECK(native::futex_objects.resolve(b).value()->key.address == destination);
+    CHECK(native::futex_objects.resolve(c).value()->key.address == source);
+    CHECK(wake(kernel, group, destination) == 1 && woke(kernel, group, 2, b));
+    CHECK(resume(kernel, group, 1) == i64{-4} && !native::futex_objects.resolve(a));
+    CHECK(wake(kernel, group, source, 5) == 1 && woke(kernel, group, 3, c));
+    CHECK(native::runtime_status());
+    cleanup(kernel, group);
 }
 template <lu::Profile P> void adapter(Kernel &kernel, Owner group, usize number_slot, std::array<usize, 6> slots)
 {
@@ -441,7 +493,7 @@ int main()
     ordering(kernel); admission(kernel); shared(kernel); stale_and_timeout(kernel);
     preflight(kernel, false); preflight(kernel, true);
     retained_failure(kernel, false); retained_failure(kernel, true);
-    wake_cleanup_failure(kernel); stale_generation(kernel); snapshot_ticket_substitution(kernel);
+    wake_cleanup_failure(kernel); stale_generation(kernel); requeue_skips_completed(kernel);
     for (unsigned mode = 0; mode < 3; ++mode) destructive_failure(kernel, mode);
     const auto group = owner(kernel, 1);
     adapter<lu::Profile::i386>(kernel, group, 7, {4, 6, 5, 1, 0, 2});

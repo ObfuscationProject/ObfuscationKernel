@@ -1,4 +1,14 @@
 // Futex wait/wake/requeue/wake-op, shared futex keys and robust-list retirement.
+//
+// Queues (spec 4.5): 64 hash buckets (futex_buckets.hpp), each a futex_bucket
+// spin lock over the FIFO list of the waits queued on its keys. WAIT compares
+// the user word and queues under the bucket, so a waker that changes the word
+// before its WAKE either is seen by the compare or finds the wait queued. A
+// WAKE unlinks each matching wait it visits and completes the ones still
+// pending, counting only those; WAKE_OP and CMP_REQUEUE hold the caller's mm
+// and both buckets. Wakers never write the owner's frame or free its record:
+// the owner's resume (resume_futex) unlinks a wait a timeout or a cancel left
+// queued, produces the result and retires the record.
 #include "private.hpp"
 #include "../futex_word.hpp"
 
@@ -15,12 +25,10 @@ bool same_futex_key(const FutexWait::Key &left, const FutexWait::Key &right)
     return left.frame.owner == right.frame.owner && left.frame.index == right.frame.index &&
            left.frame.generation == right.frame.generation && left.word_offset == right.word_offset;
 }
-bool exact_futex_key(const FutexWait::Key &left, const FutexWait::Key &right)
+bool same_futex_frame(const memory::PhysicalFrame &left, const memory::PhysicalFrame &right)
 {
-    return left.domain == right.domain && left.pid == right.pid && left.address == right.address &&
-           left.frame.owner == right.frame.owner && left.frame.index == right.frame.index &&
-           left.frame.generation == right.frame.generation && left.frame.address == right.frame.address &&
-           left.word_offset == right.word_offset && left.shared == right.shared;
+    return left.owner == right.owner && left.index == right.index &&
+        left.generation == right.generation && left.address == right.address;
 }
 } // namespace
 SyscallOrigins::FutexBinding futex_origin_binding(memory::ObjectHandle object, const FutexWait &wait)
@@ -31,19 +39,30 @@ SyscallOrigins::FutexBinding futex_origin_binding(memory::ObjectHandle object, c
 }
 constinit FutexObjects futex_objects{page_pool, sched::max_processes};
 std::array<PollWaitIndex, memory::KernelEntryStackPool::capacity> futex_waits{};
-namespace
+constinit FutexBucketTable futex_buckets{};
+
+// A digest of exactly the fields same_futex_key compares.
+u32 futex_bucket_of(const FutexWait::Key &key)
 {
-u64 futex_queue_sequence{};
-Result<u64> reserve_futex_sequences(usize count)
-{
-    if (count > ~u64{0} - futex_queue_sequence)
-        return Status::overflow("futex queue sequence exhausted");
-    if (!count) return u64{0};
-    const auto first = futex_queue_sequence + 1;
-    futex_queue_sequence += count;
-    return first;
+    u32 digest = static_cast<u32>(key.domain) | (key.shared ? 0x100U : 0U);
+    const auto mix = [&digest](u64 value) {
+        for (unsigned half = 0; half < 2; ++half, value >>= 32)
+            digest ^= static_cast<u32>(value) + 0x9e3779b9U + (digest << 6) + (digest >> 2);
+    };
+    if (key.shared)
+    {
+        mix(reinterpret_cast<uptr>(key.frame.owner));
+        mix(static_cast<u64>(key.frame.index));
+        mix(static_cast<u64>(key.frame.generation));
+        mix(static_cast<u64>(key.word_offset));
+    }
+    else
+    {
+        mix(static_cast<u64>(key.pid));
+        mix(static_cast<u64>(key.address));
+    }
+    return FutexBucketTable::index_of(digest);
 }
-} // namespace
 
 [[maybe_unused]] memory::ObjectHandle futex_object(sched::ProcessId pid, sched::ThreadId tid)
 {
@@ -103,6 +122,46 @@ void emit_shared_futex_wake(const FutexWait::Key &key, usize count)
     static_cast<void>(key); static_cast<void>(count);
 #endif
 }
+Status stop_futex_runtime(Status status)
+{
+    runtime_failure = status;
+    started = false;
+    return status;
+}
+// The record's own unlink (spec 4.3 owner unlink): takes `wait` off the
+// queue that lists it and runs `then(listed)` while that bucket is still
+// held, or holding nothing when no queue lists it any more.
+template <typename Then> auto owner_unlink(FutexWait &wait, Then &&then)
+{
+    const auto index = futex_buckets.lock_linked(wait);
+    if (index == FutexBucketTable::none) return then(false);
+    futex_buckets.unlink(index, wait);
+    auto result = then(true);
+    futex_buckets[index].lock.unlock();
+    return result;
+}
+// WAKE's step for one listed wait, holding its bucket: the wait leaves the
+// queue whatever happens next (the ticket is read first: after the unlink
+// the record is its owner's alone), then completes if it is still pending.
+// A wait that timed out, was interrupted or cancelled is not counted.
+bool wake_listed(Kernel &kernel, u32 index, FutexWait &wait, u32 &kicks)
+{
+    const auto ticket = wait.ticket;
+    futex_buckets.unlink(index, wait);
+    return kernel.scheduler().complete_wait(ticket, sched::WaitCompletion::ready, sched::WakeSource::thread, kicks);
+}
+// Wakes the waits of `key` in queue order until `limit` of them woke.
+usize wake_queued(Kernel &kernel, u32 index, const FutexWait::Key &key, usize limit, u32 &kicks)
+{
+    usize woken = 0;
+    for (auto *wait = futex_buckets[index].head; wait != nullptr && woken < limit;)
+    {
+        auto *next = wait->bucket_next;
+        if (same_futex_key(wait->key, key) && wake_listed(kernel, index, *wait, kicks)) ++woken;
+        wait = next;
+    }
+    return woken;
+}
 } // namespace
 Status cancel_futex(Kernel &kernel, memory::ObjectHandle object, std::string_view reason, i64 result)
 {
@@ -113,6 +172,8 @@ Status cancel_futex(Kernel &kernel, memory::ObjectHandle object, std::string_vie
         started = false;
         return resolved.status();
     }
+    // Off its queue first: no waker reaches the record once it is unlisted.
+    static_cast<void>(owner_unlink(*resolved.value(), [](bool listed) { return listed; }));
     const auto wait = *resolved.value();
     const auto ticket = wait.ticket;
     syscall_origins.retire_futex(wait.pid, wait.tid, futex_origin_binding(object, wait));
@@ -230,6 +291,33 @@ struct FutexUserWords
     const hw::AddressSpace &space;
     Result<u32 *> operator()(uptr address, bool write) const { return uaccess::user_word(space, address, write); }
 };
+// A word already resolved: its pointer, valid while the caller holds the
+// owning mm (or the kernel window with_user_word opened).
+struct FutexHeldWord
+{
+    u32 *word;
+    Result<u32 *> operator()(uptr, bool) const { return word; }
+};
+// WAKE_OP and REQUEUE hold the caller's mm around their resolutions and
+// both buckets (spec 4.5): no translation writer changes the words then, so
+// a failed resolution is a genuine fault and no retry is needed. Holding only
+// the kernel lock, the caller first waits for its process's kernel sections,
+// which walk the page records a resolution rewrites; with the kernel lock
+// held no section of the process is admitted until it returns, so a
+// resolution under mm finds none to wait for.
+class FutexMmHold final
+{
+  public:
+    explicit FutexMmHold(sched::ProcessControlBlock &process) : hold_(prepare(process)) {}
+
+  private:
+    static sched::AddressSpaceGate &prepare(sched::ProcessControlBlock &process)
+    {
+        if constexpr (smp_sections) drain_if_pinned(process.pid());
+        return process.resources().mm;
+    }
+    sched::AddressSpaceGate::Hold hold_;
+};
 } // namespace
 struct RobustUserAccess
 {
@@ -311,143 +399,70 @@ void clear_group_tids(Kernel &kernel, sched::ProcessControlBlock &process)
             clear_child_tid(kernel, process, thread.tls, live-- > 1);
         }
 }
-struct FutexQueueEntry
-{
-    memory::ObjectHandle object{};
-    u64 sequence{};
-    FutexWait::Key key{};
-    sched::ProcessId pid{};
-    sched::ThreadId tid{};
-    SyscallOrigins::FutexBinding binding{};
-    u64 origin{};
-    SyscallOrigins::Identity origin_identity{};
-};
-struct FutexQueueSnapshot
-{
-    std::array<FutexQueueEntry, sched::max_processes> entries{};
-    usize count{};
-};
 namespace
 {
-Status stop_futex_runtime(Status status)
-{
-    runtime_failure = status;
-    started = false;
-    return status;
-}
-bool pending_futex_wait(Kernel &kernel, const FutexWait &wait)
-{
-    const auto *process = kernel.scheduler().find(wait.pid);
-    const auto *thread = kernel.scheduler().find_thread(wait.pid, wait.tid);
-    return process && thread && thread->native_active && thread->syscall_pending &&
-        process->state() != sched::ProcessState::zombie && process->state() != sched::ProcessState::exited &&
-        thread->state == sched::ProcessState::blocked && thread->wait_reason == sched::ThreadWaitReason::futex &&
-        thread->wait_key == wait.address && wait.ticket.owner == wait.pid && wait.ticket.thread == wait.tid &&
-        thread->wait_registration.pending(wait.ticket);
-}
-Status validate_futex_origin(Kernel &kernel, memory::ObjectHandle object, const FutexWait &wait)
+// The completed wait still names its captured syscall origin: the result
+// goes into the frame that trapped.
+Status validate_futex_origin(const sched::ProcessControlBlock &process, const sched::ThreadControlBlock &thread,
+                             memory::ObjectHandle object, const FutexWait &wait)
 {
     if (!wait.origin) return Status::success();
-    auto *process = kernel.scheduler().find(wait.pid);
-    auto *thread = kernel.scheduler().find_thread(wait.pid, wait.tid);
-    if (!process || !thread) return Status::fault("futex queue lost captured thread");
-    const auto identity = syscall_origins.identity(*process, *thread);
+    const auto identity = syscall_origins.identity(process, thread);
     if (identity.capture != wait.origin ||
-        !syscall_origins.validate_bound(identity, thread->native_frame, futex_origin_binding(object, wait)))
-        return Status::fault("futex queue lost captured origin");
+        !syscall_origins.validate_completed_futex(identity, thread.native_frame, futex_origin_binding(object, wait)))
+        return Status::fault("futex wait lost its captured origin");
     return Status::success();
 }
-Result<FutexQueueSnapshot> snapshot_futex_queue(Kernel &kernel, const FutexWait::Key &key)
-{
-    if (!runtime_failure) return runtime_failure;
-    FutexQueueSnapshot snapshot;
-    for (const auto &entry : futex_waits)
-    {
-        if (!entry.pid) continue;
-        auto resolved = futex_objects.resolve(entry.object);
-        if (!resolved) return stop_futex_runtime(resolved.status());
-        const auto &wait = *resolved.value();
-        if (wait.pid != entry.pid || wait.tid != entry.tid)
-            return stop_futex_runtime(Status::fault("futex queue index lost exact owner"));
-        if (!same_futex_key(wait.key, key) || !pending_futex_wait(kernel, wait)) continue;
-        if (!wait.queue_sequence || wait.pending_transfer_pin_owned || wait.pin_owned != wait.key.shared)
-            return stop_futex_runtime(Status::fault("futex queue has invalid sequence or pending transfer"));
-        if (auto status = validate_futex_origin(kernel, entry.object, wait); !status)
-            return stop_futex_runtime(status);
-        if (snapshot.count == snapshot.entries.size())
-            return stop_futex_runtime(Status::overflow("futex queue snapshot exceeds capacity"));
-        usize position = snapshot.count++;
-        while (position && snapshot.entries[position - 1].sequence > wait.queue_sequence)
-        {
-            snapshot.entries[position] = snapshot.entries[position - 1];
-            --position;
-        }
-        if ((position && snapshot.entries[position - 1].sequence == wait.queue_sequence) ||
-            (position + 1 < snapshot.count && snapshot.entries[position + 1].sequence == wait.queue_sequence))
-            return stop_futex_runtime(Status::fault("futex queue sequence was reused"));
-        SyscallOrigins::Identity origin_identity{};
-        if (wait.origin)
-        {
-            const auto *process = kernel.scheduler().find(wait.pid);
-            const auto *thread = kernel.scheduler().find_thread(wait.pid, wait.tid);
-            if (!process || !thread)
-                return stop_futex_runtime(Status::fault("futex snapshot lost captured owner"));
-            origin_identity = syscall_origins.identity(*process, *thread);
-        }
-        snapshot.entries[position] = {entry.object, wait.queue_sequence, wait.key, wait.pid, wait.tid,
-            futex_origin_binding(entry.object, wait), wait.origin, origin_identity};
-    }
-    return snapshot;
-}
-Result<FutexWait *> selected_futex_wait(Kernel &kernel, const FutexQueueEntry &entry, const FutexWait::Key &key)
-{
-    auto resolved = futex_objects.resolve(entry.object);
-    if (!resolved) return stop_futex_runtime(resolved.status());
-    auto &wait = *resolved.value();
-    if (wait.queue_sequence != entry.sequence || !same_futex_key(wait.key, key) ||
-        !exact_futex_key(wait.key, entry.key) || wait.pid != entry.pid || wait.tid != entry.tid ||
-        futex_origin_binding(entry.object, wait) != entry.binding || wait.origin != entry.origin ||
-        !pending_futex_wait(kernel, wait))
-        return stop_futex_runtime(Status::fault("selected futex lost exact pending continuation"));
-    if (entry.origin)
-    {
-        const auto *process = kernel.scheduler().find(entry.pid);
-        const auto *thread = kernel.scheduler().find_thread(entry.pid, entry.tid);
-        if (!process || !thread || syscall_origins.identity(*process, *thread) != entry.origin_identity ||
-            !syscall_origins.validate_bound(entry.origin_identity, thread->native_frame, entry.binding))
-            return stop_futex_runtime(Status::fault("selected futex lost original captured origin"));
-    }
-    return &wait;
-}
 } // namespace
-bool finish_futex(Kernel &kernel, memory::ObjectHandle object, sched::WaitCompletion cause, i64 result)
+std::optional<i64> resume_futex(Kernel &kernel, sched::ProcessControlBlock &process,
+                                sched::ThreadControlBlock &thread, memory::ObjectHandle object)
 {
-    if (!runtime_failure) return false;
+    if (!runtime_failure) return std::nullopt;
     auto resolved = futex_objects.resolve(object);
     if (!resolved)
     {
-        runtime_failure = resolved.status();
-        return false;
+        stop_futex_runtime(resolved.status());
+        return std::nullopt;
     }
-    const auto wait = *resolved.value();
-    auto *process = kernel.scheduler().find(wait.pid);
-    auto *thread = kernel.scheduler().find_thread(wait.pid, wait.tid);
-    const bool completed = process && thread && thread->native_active &&
-                           thread->wait_reason == sched::ThreadWaitReason::futex && thread->wait_key == wait.address &&
-                           kernel.scheduler().complete_wait(wait.ticket, cause);
-    if (completed)
+    auto &wait = *resolved.value();
+    if (wait.pid != process.pid() || wait.tid != thread.tid)
     {
-        thread->syscall_pending = false;
-        if (auto status = set_result(*process, thread->native_frame, result); !status)
-        {
-            runtime_failure = status;
-            finish(kernel, wait.pid, 127);
-            return false;
-        }
+        stop_futex_runtime(Status::fault("futex wait index lost its exact owner"));
+        return std::nullopt;
     }
-    if (auto status = cancel_futex(kernel, object, cause == sched::WaitCompletion::ready ? "ready" :
-        cause == sched::WaitCompletion::timeout ? "timeout" : "cancelled", result); !status) return false;
-    return completed;
+    // A timeout or a cancel completed the wait without unlinking it.
+    static_cast<void>(owner_unlink(wait, [](bool listed) { return listed; }));
+    // A record this continuation no longer owns is retired; nothing is
+    // produced and the frame stays as it is. A replacement ticket belongs to
+    // another continuation and is untouched.
+    if (thread.wait_registration.active() || thread.wait_registration.ticket() != wait.ticket)
+    {
+        static_cast<void>(cancel_futex(kernel, object));
+        return std::nullopt;
+    }
+    if (auto status = validate_futex_origin(process, thread, object, wait); !status)
+    {
+        stop_futex_runtime(status);
+        return std::nullopt;
+    }
+    const auto cause = thread.wait_registration.completion();
+    const i64 result = cause == sched::WaitCompletion::ready ? 0 : cause == sched::WaitCompletion::timeout ? -110 : -4;
+    if (!cancel_futex(kernel, object, cause == sched::WaitCompletion::ready ? "ready" :
+        cause == sched::WaitCompletion::timeout ? "timeout" : "cancelled", result)) return std::nullopt;
+    return result;
+}
+bool wake_futex_object(Kernel &kernel, memory::ObjectHandle object)
+{
+    if (!runtime_failure) return false;
+    auto resolved = futex_objects.resolve(object);
+    if (!resolved) return false;
+    u32 kicks = 0;
+    const auto index = futex_buckets.lock_linked(*resolved.value());
+    if (index == FutexBucketTable::none) return false;
+    const bool woken = wake_listed(kernel, index, *resolved.value(), kicks);
+    futex_buckets[index].lock.unlock();
+    kernel.scheduler().notify_cpus(kicks);
+    return woken;
 }
 namespace
 {
@@ -458,81 +473,18 @@ i64 wake_futex(Kernel &kernel, sched::ProcessId pid, uptr address, FutexKeyDomai
     if (!caller) return -22;
     auto key = resolve_futex_key(*caller, address, domain);
     if (!key) return error(key.status());
-    auto snapshot = snapshot_futex_queue(kernel, key.value());
-    if (!snapshot) return -5;
+    const auto index = futex_bucket_of(key.value());
+    u32 kicks = 0;
     usize count = 0;
-    for (usize index = 0; index < snapshot.value().count && count < limit; ++index)
     {
-        const auto &entry = snapshot.value().entries[index];
-        if (!selected_futex_wait(kernel, entry, key.value())) return -5;
-        if (!finish_futex(kernel, entry.object, sched::WaitCompletion::ready, 0))
-        {
-            if (runtime_failure) stop_futex_runtime(Status::fault("selected futex wake failed"));
-            return -5;
-        }
-        if (!runtime_failure) return -5;
-        ++count;
+        const FutexBucketTable::Guard guard{futex_buckets, index};
+        count = wake_queued(kernel, index, key.value(), limit, kicks);
     }
+    kernel.scheduler().notify_cpus(kicks);
     emit_shared_futex_wake(key.value(), count);
     return static_cast<i64>(count);
 }
 } // namespace
-bool expire_futex(Kernel &kernel, u64 now)
-{
-    if (!runtime_failure) return false;
-    bool pending = false;
-    for (const auto &entry : futex_waits)
-    {
-        if (!entry.pid)
-            continue;
-        const auto object = entry.object;
-        auto resolved = futex_objects.resolve(object);
-        if (!resolved)
-        {
-            runtime_failure = resolved.status();
-            started = false;
-            return false;
-        }
-        auto &wait = *resolved.value();
-        auto *process = kernel.scheduler().find(wait.pid);
-        auto *thread = kernel.scheduler().find_thread(wait.pid, wait.tid);
-        // External scheduler cancellation owns the same completed ticket, but
-        // has not encoded the saved syscall result. Never replay an old WAIT.
-        // A replacement ticket belongs to another continuation and is untouched.
-        if (process && thread && thread->native_active &&
-            process->state() != sched::ProcessState::zombie && process->state() != sched::ProcessState::exited &&
-            !thread->wait_registration.active() && thread->wait_registration.ticket() == wait.ticket &&
-            (thread->state == sched::ProcessState::runnable || thread->state == sched::ProcessState::running))
-        {
-            const auto cause = thread->wait_registration.completion();
-            const i64 result = cause == sched::WaitCompletion::ready ? 0 :
-                               cause == sched::WaitCompletion::timeout ? -110 : -4;
-            thread->syscall_pending = false;
-            if (auto status = set_result(*process, thread->native_frame, result); !status)
-            {
-                runtime_failure = status;
-                finish(kernel, wait.pid, 127);
-            }
-            else cancel_futex(kernel, object, cause == sched::WaitCompletion::ready ? "ready" :
-                cause == sched::WaitCompletion::timeout ? "timeout" : "cancelled", result);
-            if (!runtime_failure) return false;
-            continue;
-        }
-        if (!process || !thread || !thread->native_active || process->state() == sched::ProcessState::zombie ||
-            process->state() == sched::ProcessState::exited || !thread->wait_registration.pending(wait.ticket) ||
-            thread->wait_reason != sched::ThreadWaitReason::futex || thread->wait_key != wait.address)
-        {
-            if (!cancel_futex(kernel, object)) return false;
-            continue;
-        }
-        if (wait.timeout.complete(now, wait.timeout.generation()))
-            static_cast<void>(finish_futex(kernel, object, sched::WaitCompletion::timeout, -110));
-        else
-            pending = true;
-        if (!runtime_failure) return false;
-    }
-    return pending;
-}
 } // namespace runtime_detail
 
 i64 futex_wake_operation(Kernel &kernel, sched::ProcessId pid, const FutexWakeOperationRequest &request)
@@ -549,53 +501,42 @@ i64 futex_wake_operation(Kernel &kernel, sched::ProcessId pid, const FutexWakeOp
     if (request.first_address % sizeof(u32) || request.second_address % sizeof(u32)) return -22;
     if (request.first_address > hw::user_end - sizeof(u32) ||
         request.second_address > hw::user_end - sizeof(u32)) return -14;
+    const auto operation = lu::FutexWakeOperation::decode(request.encoded_operation);
+    const FutexMmHold mm{*process};
     const auto first = resolve_futex_key(*process, request.first_address, request.domain);
     if (!first) return error(first.status());
     const auto second = resolve_futex_key(*process, request.second_address, request.domain);
     if (!second) return error(second.status());
-    const auto &space = process->resources().native_space;
-    const auto operation = lu::FutexWakeOperation::decode(request.encoded_operation);
     // Reject an undefined arithmetic operation without reading or modifying
     // user memory. Linux compares only after the modification has succeeded.
     if (operation.operation > 4) return -38;
-    // One atomic read-modify-write of the backing frame, after copy-on-write
-    // resolved, so user atomics on other CPUs are neither lost nor torn. The
-    // kernel lock orders it and the wakes against every other futex call.
-    const auto previous = futex_word_wake_operation(FutexUserWords{space}, request.second_address,
-                                                    operation, request.big_endian);
-    if (!previous) return -14;
-    const auto comparison = operation.compare(previous.value());
-    if (!comparison) return error(comparison.status());
+    // Copy-on-write resolved under mm, so the frame stays the word's until
+    // mm is released.
+    const auto word = uaccess::user_word(process->resources().native_space, request.second_address, true);
+    if (!word) return -14;
     const auto limit = [](u32 value) { return std::bit_cast<i32>(value) <= 0 ? 1U : value; };
-    const auto woke_first = wake_futex(kernel, pid, request.first_address, request.domain, limit(request.first_limit));
-    if (woke_first < 0 || !comparison.value()) return woke_first;
-    const auto woke_second = wake_futex(kernel, pid, request.second_address, request.domain, limit(request.second_limit));
-    return woke_second < 0 ? woke_second : woke_first + woke_second;
-}
-namespace
-{
-
-bool same_futex_frame(const memory::PhysicalFrame &left, const memory::PhysicalFrame &right)
-{
-    return left.owner == right.owner && left.index == right.index &&
-        left.generation == right.generation && left.address == right.address;
-}
-Status rollback_futex_transfer_pins(const FutexQueueSnapshot &snapshot, usize begin, usize count)
-{
-    for (usize index = begin; index < begin + count; ++index)
+    const auto first_index = futex_bucket_of(first.value()), second_index = futex_bucket_of(second.value());
+    u32 kicks = 0;
+    i64 result = 0;
     {
-        auto resolved = futex_objects.resolve(snapshot.entries[index].object);
-        if (!resolved) return stop_futex_runtime(resolved.status());
-        auto &wait = *resolved.value();
-        if (!wait.pending_transfer_pin_owned) continue;
-        if (auto status = page_pool.unpin(wait.pending_transfer_frame); !status)
-            return stop_futex_runtime(status);
-        wait.pending_transfer_pin_owned = false;
-        wait.pending_transfer_frame = {};
+        const FutexBucketTable::PairGuard pair{futex_buckets, first_index, second_index};
+        // One atomic read-modify-write of the backing frame: user atomics on
+        // other CPUs are neither lost nor torn; the buckets order it against
+        // every WAIT compare on either word.
+        const auto previous = futex_word_wake_operation(FutexHeldWord{word.value()}, request.second_address,
+                                                        operation, request.big_endian);
+        if (!previous) return -14;
+        const auto comparison = operation.compare(previous.value());
+        if (!comparison) return error(comparison.status());
+        result = static_cast<i64>(wake_queued(kernel, first_index, first.value(), limit(request.first_limit), kicks));
+        if (comparison.value())
+            result += static_cast<i64>(
+                wake_queued(kernel, second_index, second.value(), limit(request.second_limit), kicks));
     }
-    return Status::success();
+    kernel.scheduler().notify_cpus(kicks);
+    return result;
 }
-} // namespace
+
 i64 futex_requeue(Kernel &kernel, sched::ProcessId pid, const FutexRequeueRequest &request)
 {
     if (!runtime_failure) return -5;
@@ -613,92 +554,129 @@ i64 futex_requeue(Kernel &kernel, sched::ProcessId pid, const FutexRequeueReques
     if (request.domain != FutexKeyDomain::private_address_space &&
         request.domain != FutexKeyDomain::anonymous_shared_operation) return -38;
     if (std::bit_cast<i32>(request.wake_limit) < 0 || std::bit_cast<i32>(request.requeue_limit) < 0) return -22;
+    const FutexMmHold mm{*process};
     const auto source = resolve_futex_key(*process, request.source_address, request.domain, FutexKeyAccess::read);
     if (!source) return error(source.status());
     const auto destination = resolve_futex_key(*process, request.destination_address, request.domain, FutexKeyAccess::read);
     if (!destination) return error(destination.status());
+    u32 *compared = nullptr;
     if (request.compare)
     {
-        // One atomic load. The kernel lock keeps the compare and the requeue
-        // indivisible against every other futex call; finer-grained locking
-        // must load with both queue locks held.
-        const auto value = futex_word_load(FutexUserWords{process->resources().native_space},
-                                           request.source_address, request.big_endian);
-        if (!value) return -14;
-        if (value.value() != request.expected) return -11;
+        auto word = uaccess::user_word(process->resources().native_space, request.source_address, false);
+        if (!word) return -14;
+        compared = word.value();
     }
-    auto selected = snapshot_futex_queue(kernel, source.value());
-    if (!selected) return -5;
-    const auto &snapshot = selected.value();
-    const usize wakes = request.wake_limit < snapshot.count ? request.wake_limit : snapshot.count;
-    const usize remaining = snapshot.count - wakes;
-    const usize transfers = request.requeue_limit < remaining ? request.requeue_limit : remaining;
+    const auto from = futex_bucket_of(source.value()), to = futex_bucket_of(destination.value());
     const bool same_key = same_futex_key(source.value(), destination.value());
-    auto sequences = reserve_futex_sequences(same_key ? 0 : transfers);
-    if (!sequences) return error(sequences.status());
-    // All fallible new pins precede wakes/key publication. Each successful pin
-    // has a discoverable waiter owner before the next fallible operation.
-    for (usize index = wakes; index < wakes + transfers; ++index)
+    // The pending waits chosen in queue order: the first `wakes` are woken,
+    // the next `transfers` move to the destination.
+    std::array<FutexWait *, futex_waits.size()> chosen{};
+    usize wakes = 0, transfers = 0, woken = 0;
+    u32 kicks = 0;
     {
-        auto resolved = selected_futex_wait(kernel, snapshot.entries[index], source.value());
-        if (!resolved) return -5;
-        auto &wait = *resolved.value();
-        if (destination.value().shared &&
-            (!wait.pin_owned || !same_futex_frame(wait.key.frame, destination.value().frame)))
+        const FutexBucketTable::PairGuard pair{futex_buckets, from, to};
+        if (compared)
         {
+            // One atomic load with both buckets held: indivisible from the
+            // requeue for every WAIT and WAKE on either word.
+            const auto value = futex_word_load(FutexHeldWord{compared}, request.source_address, request.big_endian);
+            if (!value) return -14;
+            if (value.value() != request.expected) return -11;
+        }
+        for (auto *wait = futex_buckets[from].head; wait != nullptr;)
+        {
+            auto *next = wait->bucket_next;
+            if ((wakes == request.wake_limit && transfers == request.requeue_limit) ||
+                wakes + transfers == chosen.size())
+                break;
+            if (same_futex_key(wait->key, source.value()))
+            {
+                // A wait that timed out, was interrupted or cancelled leaves
+                // the queue uncounted; its owner retires the record.
+                if (!kernel.scheduler().wait_pending(wait->ticket)) futex_buckets.unlink(from, *wait);
+                else if (wakes < request.wake_limit) chosen[wakes++] = wait;
+                else chosen[wakes + transfers++] = wait;
+            }
+            wait = next;
+        }
+        if (!same_key && !futex_buckets.sequences_left(to, transfers))
+            return error(Status::overflow("futex queue sequence exhausted"));
+        // Every fallible new pin precedes the wakes and the moves; each one
+        // has a discoverable waiter owner before the next fallible operation.
+        for (usize index = wakes; index < wakes + transfers; ++index)
+        {
+            auto &wait = *chosen[index];
+            if (!destination.value().shared || (wait.pin_owned && same_futex_frame(wait.key.frame, destination.value().frame)))
+                continue;
             if (auto status = page_pool.pin(destination.value().frame); !status)
             {
-                if (!rollback_futex_transfer_pins(snapshot, wakes, transfers)) return -5;
+                for (usize undo = wakes; undo < index; ++undo)
+                {
+                    auto &pinned = *chosen[undo];
+                    if (!pinned.pending_transfer_pin_owned) continue;
+                    if (auto failure = page_pool.unpin(pinned.pending_transfer_frame); !failure)
+                    {
+                        stop_futex_runtime(failure);
+                        return -5;
+                    }
+                    pinned.pending_transfer_pin_owned = false;
+                    pinned.pending_transfer_frame = {};
+                }
                 return error(status);
             }
             wait.pending_transfer_frame = destination.value().frame;
             wait.pending_transfer_pin_owned = true;
         }
-    }
-    for (usize index = 0; index < wakes; ++index)
-    {
-        if (!selected_futex_wait(kernel, snapshot.entries[index], source.value()) ||
-            !finish_futex(kernel, snapshot.entries[index].object, sched::WaitCompletion::ready, 0))
+        for (usize index = 0; index < wakes; ++index)
+            if (wake_listed(kernel, from, *chosen[index], kicks)) ++woken;
+        for (usize index = wakes; index < wakes + transfers; ++index)
         {
-            if (runtime_failure) stop_futex_runtime(Status::fault("requeue wake lost exact continuation"));
-            return -5;
-        }
-        if (!runtime_failure) return -5;
-    }
-    for (usize index = wakes; index < wakes + transfers; ++index)
-    {
-        auto resolved = selected_futex_wait(kernel, snapshot.entries[index], source.value());
-        if (!resolved) return -5;
-        auto &wait = *resolved.value();
-        const bool reuse = wait.pin_owned && destination.value().shared &&
-            same_futex_frame(wait.key.frame, destination.value().frame);
-        if (wait.pin_owned && !reuse)
-        {
-            if (auto status = page_pool.unpin(wait.key.frame); !status)
+            auto &wait = *chosen[index];
+            const bool reuse = wait.pin_owned && destination.value().shared &&
+                same_futex_frame(wait.key.frame, destination.value().frame);
+            if (wait.pin_owned && !reuse)
             {
-                stop_futex_runtime(status);
-                return -5;
+                if (auto status = page_pool.unpin(wait.key.frame); !status)
+                {
+                    stop_futex_runtime(status);
+                    transfers = 0;
+                    break;
+                }
+                wait.pin_owned = false;
             }
-            wait.pin_owned = false;
-        }
-        wait.key = destination.value();
-        if (!reuse)
-        {
-            wait.pin_owned = wait.pending_transfer_pin_owned;
-            wait.pending_transfer_pin_owned = false;
-            wait.pending_transfer_frame = {};
-        }
-        if (!same_key) wait.queue_sequence = sequences.value() + (index - wakes);
+            wait.key = destination.value();
+            if (!reuse)
+            {
+                wait.pin_owned = wait.pending_transfer_pin_owned;
+                wait.pending_transfer_pin_owned = false;
+                wait.pending_transfer_frame = {};
+            }
+            // A requeue onto its own key keeps the wait's place and number.
+            if (!same_key) futex_buckets.move(from, to, wait);
 #if defined(OK_ENABLE_TEST_POINTS) && defined(OK_PRIVATE_SIGNAL_DELIVERY_FIXTURE)
-        emit("OK_NATIVE_FUTEX_REQUEUE_TRANSFER pid="); emit_number(wait.pid); emit(" tid="); emit_number(wait.tid);
-        emit(" wait="); emit_number(wait.ticket.generation); emit(" origin="); emit_number(wait.origin);
-        emit(" address="); emit_number(wait.address); emit(" destination="); emit_number(request.destination_address);
-        emit(" sequence="); emit_number(wait.queue_sequence); emit(" key_shared="); emit_number(wait.key.shared);
-        emit("\n");
+            emit("OK_NATIVE_FUTEX_REQUEUE_TRANSFER pid="); emit_number(wait.pid); emit(" tid="); emit_number(wait.tid);
+            emit(" wait="); emit_number(wait.ticket.generation); emit(" origin="); emit_number(wait.origin);
+            emit(" address="); emit_number(wait.address); emit(" destination="); emit_number(request.destination_address);
+            emit(" sequence="); emit_number(wait.queue_sequence); emit(" key_shared="); emit_number(wait.key.shared);
+            emit("\n");
 #endif
+        }
     }
-    return static_cast<i64>(wakes + transfers);
+    kernel.scheduler().notify_cpus(kicks);
+    if (!runtime_failure) return -5;
+    return static_cast<i64>(woken + transfers);
 }
+
+namespace
+{
+// WAIT's compare-and-queue under the bucket (spec 4.5), one attempt.
+enum class FutexQueueAttempt : u8
+{
+    queued,
+    failed,        // `result` holds the syscall's error.
+    needs_resolve, // The word is not accessible now: resolve and retry.
+};
+} // namespace
 
 i64 futex(Kernel &kernel, sched::ProcessId pid, const FutexRequest &request, bool &complete)
 {
@@ -742,21 +720,8 @@ i64 futex(Kernel &kernel, sched::ProcessId pid, const FutexRequest &request, boo
         const u32 limit = static_cast<i32>(request.value) <= 0 ? 1 : request.value;
         return wake_futex(kernel, pid, request.address, request.domain, limit);
     }
-    // One atomic load. The kernel lock orders the load, compare and enqueue
-    // against every waker; finer-grained locking must hold the queue lock
-    // across all three or a wake between them is lost.
-    const auto value = futex_word_load(FutexUserWords{process->resources().native_space}, request.address,
-                                       request.big_endian);
-    if (!value)
-        return -14;
-    if (value.value() != request.value)
-        return -11;
-    if (request.timed)
-    {
-        auto now = arch::monotonic_nanoseconds();
-        if (!now) return error(now.status());
-        if (deadline.complete(now.value(), deadline.generation())) return -110;
-    }
+    // Everything fallible that needs no bucket comes first: the index slot,
+    // the frame pin and the record.
     PollWaitIndex *slot = nullptr;
     for (auto &entry : futex_waits)
     {
@@ -767,8 +732,6 @@ i64 futex(Kernel &kernel, sched::ProcessId pid, const FutexRequest &request, boo
     }
     if (!slot)
         return -12;
-    auto sequence = reserve_futex_sequences(1);
-    if (!sequence) return error(sequence.status());
 #ifndef OK_KERNEL_FREESTANDING
     if (auto status = activate_pool(); !status)
         return error(status);
@@ -777,7 +740,7 @@ i64 futex(Kernel &kernel, sched::ProcessId pid, const FutexRequest &request, boo
     if (pinned)
         if (auto status = page_pool.pin(key.value().frame); !status)
             return error(status);
-    auto rollback_pin = [&](Status failure) -> i64
+    auto rollback_pin = [&](i64 result) -> i64
     {
         if (pinned)
             if (auto status = page_pool.unpin(key.value().frame); !status)
@@ -786,22 +749,24 @@ i64 futex(Kernel &kernel, sched::ProcessId pid, const FutexRequest &request, boo
                 started = false;
                 return -5;
             }
-        return error(failure);
+        return result;
     };
     auto allocated = futex_objects.create();
     if (!allocated)
-        return rollback_pin(allocated.status());
+        return rollback_pin(error(allocated.status()));
     const auto object = allocated.value();
-    auto resolved = futex_objects.resolve(object);
-    if (!resolved)
+    // The record was never queued: it goes without an owner unlink.
+    auto rollback = [&](i64 result) -> i64
     {
-        const auto failure = resolved.status();
         if (auto status = futex_objects.destroy(object); !status)
         { runtime_failure = status; started = false; return -5; }
         if (auto status = futex_objects.trim_empty_pages(); !status)
         { runtime_failure = status; started = false; return -5; }
-        return rollback_pin(failure);
-    }
+        return rollback_pin(result);
+    };
+    auto resolved = futex_objects.resolve(object);
+    if (!resolved)
+        return rollback(error(resolved.status()));
     auto &wait = *resolved.value();
     wait.pid = pid;
     wait.tid = current->tid;
@@ -809,16 +774,62 @@ i64 futex(Kernel &kernel, sched::ProcessId pid, const FutexRequest &request, boo
     wait.domain = request.domain;
     wait.key = key.value();
     wait.pin_owned = pinned;
-    wait.queue_sequence = sequence.value();
     wait.timeout = deadline;
     wait.expected = request.value;
-    auto registration = kernel.scheduler().register_current_wait(sched::ThreadWaitReason::futex, request.address);
-    if (!registration)
+    const auto &space = process->resources().native_space;
+    const auto index = futex_bucket_of(key.value());
+    i64 result = 0;
+    // Under the bucket: one atomic load of the word, the compare, the arm
+    // (bucket -> task, then the deadline) and the queueing. A waker that
+    // changes the word and then wakes either is seen here or finds the wait.
+    const auto attempt = [&]() -> FutexQueueAttempt {
+        const FutexBucketTable::Guard guard{futex_buckets, index};
+        u32 value = 0;
+        const auto access = uaccess::with_user_word(space, request.address, uaccess::WordAccess::read, [&](u32 &word) {
+            value = futex_word_order(FutexWordAccess<futex_word_hardware_atomic>::load(&word), request.big_endian);
+        });
+        if (access == uaccess::WordResult::needs_resolve) return FutexQueueAttempt::needs_resolve;
+        if (access == uaccess::WordResult::misaligned) { result = -22; return FutexQueueAttempt::failed; }
+        if (value != request.value) { result = -11; return FutexQueueAttempt::failed; }
+        if (request.timed)
+        {
+            auto now = arch::monotonic_nanoseconds();
+            if (!now) { result = error(now.status()); return FutexQueueAttempt::failed; }
+            if (now.value() >= deadline.deadline()) { result = -110; return FutexQueueAttempt::failed; }
+        }
+        if (!futex_buckets.sequences_left(index, 1))
+        {
+            result = error(Status::overflow("futex queue sequence exhausted"));
+            return FutexQueueAttempt::failed;
+        }
+        auto registration = kernel.scheduler().register_current_wait(sched::ThreadWaitReason::futex, request.address);
+        if (!registration) { result = error(registration.status()); return FutexQueueAttempt::failed; }
+        wait.ticket = registration.value();
+        if (request.timed)
+            static_cast<void>(kernel.scheduler().arm_wait_deadline(wait.ticket, deadline.deadline()));
+        futex_buckets.link_tail(index, wait);
+        return FutexQueueAttempt::queued;
+    };
+    // A word that is not accessible now is resolved without the bucket and
+    // tried again; the last attempt holds mm, under which no translation
+    // changes, so it queues or meets a genuine fault.
+    auto outcome = attempt();
+    for (usize retry = 0; outcome == FutexQueueAttempt::needs_resolve && retry < uaccess::max_retries; ++retry)
     {
-        cancel_futex(kernel, object);
-        return error(registration.status());
+        if (!uaccess::user_range(space, request.address, sizeof(u32), false))
+            return rollback(-14);
+        uaccess::detail::count(&smp::EvidenceCpu::uaccess_retries);
+        outcome = attempt();
     }
-    wait.ticket = registration.value();
+    if (outcome == FutexQueueAttempt::needs_resolve)
+    {
+        uaccess::detail::count(&smp::EvidenceCpu::uaccess_held);
+        const FutexMmHold mm{*process};
+        outcome = attempt();
+        if (outcome == FutexQueueAttempt::needs_resolve) result = -14;
+    }
+    if (outcome != FutexQueueAttempt::queued)
+        return rollback(result);
     *slot = {pid, current->tid, object};
     const auto origin = syscall_origins.identity(*process, *current);
     if (syscall_origins.live(origin))

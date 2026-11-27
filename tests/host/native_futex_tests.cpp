@@ -71,6 +71,29 @@ i64 wake(Kernel &kernel, Owner owner, usize index, u32 count, uptr address = wor
     CHECK(done && copies == mock::copies);
     return result;
 }
+// The owner's resume as the step runs it once the waiter is picked: the
+// result its completed WAIT produces (empty when it produces none).
+std::optional<i64> resume(Kernel &kernel, Owner owner, usize index)
+{
+    activate(kernel, owner, index);
+    auto *process = kernel.scheduler().find(owner.pid);
+    auto *thread = kernel.scheduler().current_thread();
+    bool complete = true;
+    const auto result = native::resume_owned_wait(kernel, *process, *thread, complete);
+    if (result)
+    {
+        CHECK(complete);
+        thread->syscall_pending = false;
+        CHECK(native::set_result(*process, thread->native_frame, *result));
+    }
+    return result;
+}
+// Deadline expiry as a step runs it.
+void expire(Kernel &kernel, u64 now)
+{
+    std::array<u16, sched::max_processes> due{};
+    static_cast<void>(kernel.scheduler().expire_deadlines(now, due));
+}
 void lifetimes(Kernel &kernel)
 {
     auto a = owner(kernel, 4), b = owner(kernel, 2);
@@ -79,29 +102,42 @@ void lifetimes(Kernel &kernel)
     auto foreign = wait(kernel, b, 1);
     CHECK(wake(kernel, a, 0, 9, word + 4) == 0);
     CHECK(wake(kernel, a, 0, 0) == 1);
-    CHECK(!native::futex_objects.resolve(first) && native::futex_objects.resolve(second));
     auto *peer = kernel.scheduler().find_thread(a.pid, a.tids[1]);
-    CHECK(!peer->syscall_pending && peer->native_frame.registers[0] == 0);
+    // The waker completed the wait; the frame and the record stay the owner's.
     CHECK(peer->wait_registration.completion() == sched::WaitCompletion::ready);
+    CHECK(peer->syscall_pending && peer->native_frame.registers[0] == 0x123456);
+    CHECK(native::futex_objects.resolve(first) && native::futex_objects.resolve(second));
+    CHECK(resume(kernel, a, 1) == i64{0});
+    CHECK(!native::futex_objects.resolve(first) && native::futex_objects.resolve(second));
+    CHECK(!peer->syscall_pending && peer->native_frame.registers[0] == 0);
     // Wake does not copy/recompare memory even after unmap/remap of the word.
     mock::forbidden = word;
     put(128, 4, 99);
     CHECK(wake(kernel, a, 0, 0xffffffffU) == 1);
+    CHECK(resume(kernel, a, 2) == i64{0});
     CHECK(!native::futex_objects.resolve(second) && native::futex_objects.resolve(foreign));
     mock::forbidden = 0;
-    CHECK(wake(kernel, b, 0, 1) == 1 && !native::futex_objects.resolve(foreign));
+    CHECK(wake(kernel, b, 0, 1) == 1 && resume(kernel, b, 1) == i64{0} && !native::futex_objects.resolve(foreign));
     put(128, 4, 7);
+    // A timeout completes the wait through its heap key and leaves it queued:
+    // a WAKE then skips it uncounted, and its owner produces -110.
     auto deadline = wait(kernel, a, 1, true);
-    CHECK(native::expire_futex(kernel, mock::now + 16));
-    CHECK(native::futex_objects.resolve(deadline));
-    CHECK(!native::expire_futex(kernel, mock::now + 17));
+    expire(kernel, mock::now + 16);
+    CHECK(peer->wait_registration.active() && native::futex_objects.resolve(deadline));
+    expire(kernel, mock::now + 17);
+    CHECK(peer->wait_registration.completion() == sched::WaitCompletion::timeout);
+    CHECK(native::futex_objects.resolve(deadline).value()->bucket != native::futex_no_bucket);
+    CHECK(wake(kernel, a, 0, 1) == 0);
+    CHECK(native::futex_objects.resolve(deadline).value()->bucket == native::futex_no_bucket);
+    CHECK(resume(kernel, a, 1) == i64{-110});
     CHECK(!native::futex_objects.resolve(deadline));
     CHECK(!peer->syscall_pending && static_cast<i64>(peer->native_frame.registers[0]) == -110);
-    CHECK(peer->wait_registration.completion() == sched::WaitCompletion::timeout);
     CHECK(wake(kernel, a, 0, 1) == 0);
     auto early = wait(kernel, a, 1, true);
     CHECK(wake(kernel, a, 0, 1) == 1);
-    CHECK(!native::expire_futex(kernel, mock::now + 17));
+    expire(kernel, mock::now + 17);
+    CHECK(peer->wait_registration.completion() == sched::WaitCompletion::ready);
+    CHECK(resume(kernel, a, 1) == i64{0});
     CHECK(peer->native_frame.registers[0] == 0 && !native::futex_objects.resolve(early));
     // An old object's cancellation cannot consume a replacement scheduler ticket.
     auto stale = wait(kernel, a, 1);
@@ -110,19 +146,31 @@ void lifetimes(Kernel &kernel)
     activate(kernel, a, 1);
     auto replacement = kernel.scheduler().register_current_wait(sched::ThreadWaitReason::futex, word);
     CHECK(replacement && replacement.value().generation != old_ticket.generation);
-    CHECK(!native::expire_futex(kernel, mock::now));
+    CHECK(wake(kernel, a, 0, 1) == 0 && peer->wait_registration.pending(replacement.value()));
+    CHECK(native::cancel_futex(kernel, stale));
     CHECK(!native::futex_objects.resolve(stale) && peer->wait_registration.pending(replacement.value()));
     CHECK(peer->native_frame.registers[0] == 0x123456);
     CHECK(kernel.scheduler().complete_wait(replacement.value(), sched::WaitCompletion::cancelled));
+    // The resume retires a record that is not its continuation's and leaves
+    // the frame alone.
+    stale = wait(kernel, a, 1);
+    old_ticket = peer->wait_registration.ticket();
+    CHECK(kernel.scheduler().complete_wait(old_ticket, sched::WaitCompletion::cancelled));
+    activate(kernel, a, 1);
+    replacement = kernel.scheduler().register_current_wait(sched::ThreadWaitReason::futex, word);
+    CHECK(replacement && kernel.scheduler().complete_wait(replacement.value(), sched::WaitCompletion::cancelled));
+    CHECK(!resume(kernel, a, 1) && !native::futex_objects.resolve(stale));
+    CHECK(peer->native_frame.registers[0] == 0x123456 && native::runtime_status());
     // External cancellation is completed once, never replayed as another WAIT.
     auto cancelled = wait(kernel, a, 1);
     CHECK(kernel.scheduler().complete_wait(peer->wait_registration.ticket(), sched::WaitCompletion::cancelled));
-    CHECK(!native::expire_futex(kernel, mock::now));
+    CHECK(resume(kernel, a, 1) == i64{-4});
     CHECK(!native::futex_objects.resolve(cancelled) && !peer->syscall_pending);
     CHECK(static_cast<i64>(peer->native_frame.registers[0]) == -4);
+    CHECK(!resume(kernel, a, 1));
     auto made_runnable = wait(kernel, a, 1);
     CHECK(kernel.scheduler().set_runnable(a.pid));
-    CHECK(!native::expire_futex(kernel, mock::now));
+    CHECK(resume(kernel, a, 1) == i64{-4});
     CHECK(!native::futex_objects.resolve(made_runnable) && !peer->syscall_pending);
     CHECK(static_cast<i64>(peer->native_frame.registers[0]) == -4);
     activate(kernel, a, 1);
@@ -133,12 +181,15 @@ void lifetimes(Kernel &kernel)
     timed.value = 99;
     CHECK(native::private_futex(kernel, a.pid, timed, done) == -11 && done);
     mock::copy_clock_step = 0;
+    CHECK(!native::futex_objects.accounting().live_objects);
     auto drained = wait(kernel, a, 1);
     native::release_process(kernel, a.pid);
     CHECK(!native::futex_objects.resolve(drained) && !peer->wait_registration.active());
     CHECK(!native::futex_objects.accounting().live_objects && !native::page_pool.object_count());
     CHECK(kernel.scheduler().exit_process(a.pid, 0));
     CHECK(kernel.scheduler().exit_process(b.pid, 0));
+    for (u32 index = 0; index < native::futex_bucket_count; ++index)
+        CHECK(!native::futex_buckets[index].head && !native::futex_buckets[index].tail);
 }
 
 template <lu::Profile P> void adapter(Kernel &kernel, Owner a, usize number_slot, std::array<usize, 4> slots)

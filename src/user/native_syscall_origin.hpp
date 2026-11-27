@@ -790,6 +790,21 @@ class SyscallOriginTable final : private NonCopyable
             thread->wait_registration.ticket() == binding.ticket && !thread->wait_registration.active() &&
             thread->wait_registration.completion() == sched::WaitCompletion::cancelled;
     }
+    // A FUTEX_WAIT whose wait completed (woken, timed out or cancelled) and
+    // whose owner has not produced its result yet: the binding still names
+    // the record's capture and frame. validate_bound admits a pending wait
+    // only, so a completed one can neither restart nor be published as one.
+    [[nodiscard]] bool validate_completed_futex(const Identity &identity, const Frame &frame,
+                                                const FutexBinding &binding) const
+    {
+        const auto *record = resolve(identity, false);
+        const auto *thread = record && record->scheduler ? record->scheduler->find_thread(identity.pid, identity.tid) : nullptr;
+        return record && record->kind == Kind::linux_restart && record->bound &&
+            family_admits<FutexBinding>(record->family) && record->terminal == terminal_tag<FutexBinding>() &&
+            record->futex_binding == binding && same_frame(record->frame, frame) && thread && thread->syscall_pending &&
+            thread->wait_registration.ticket() == binding.ticket && !thread->wait_registration.active() &&
+            thread->wait_registration.completion() != sched::WaitCompletion::none;
+    }
     bool advance_pipe_write(const Identity &identity, const Frame &frame,
                             const PipeWriteBinding &before, const PipeWriteBinding &after)
     {
@@ -1727,7 +1742,20 @@ class SyscallOriginTable final : private NonCopyable
             owned(*thread) == &record && same_space(process->resources().native_space, space) &&
             same_frame(thread->native_frame, record.frame) &&
             pool_->validate_inactive(thread->entry_stack, {thread->owner, thread->tid}).ok() &&
-            (!record.bound || current_bound_wait(record));
+            (!record.bound || current_bound_wait(record) || completed_futex_wait(record));
+    }
+    // A FUTEX_WAIT a waker or its timeout completed keeps its binding until its
+    // owner produces the result at its next dispatch (resume_futex). A sibling
+    // that replaces the address space meanwhile carries the record along; the
+    // wait is not current for a restart (current_bound_wait admits pending
+    // futex waits only).
+    [[nodiscard]] static bool completed_futex_wait(const Record &record)
+    {
+        if (record.kind != Kind::linux_restart || record.family != Adapter::Family::futex_wait ||
+            record.terminal != Terminal::none) return false;
+        const auto *thread = record.scheduler ? record.scheduler->find_thread(record.identity.pid, record.identity.tid) : nullptr;
+        return thread && thread->syscall_pending && thread->wait_registration.ticket() == record.futex_binding.ticket &&
+            !thread->wait_registration.active() && thread->wait_registration.completion() != sched::WaitCompletion::none;
     }
     [[nodiscard]] static bool executable(const sched::ProcessResources &resources, uptr address, usize bytes)
     {

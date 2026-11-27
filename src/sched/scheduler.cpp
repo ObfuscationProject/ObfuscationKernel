@@ -2556,6 +2556,27 @@ bool SchedulerState::probe_wait(WaitTicket ticket)
 }
 bool SchedulerState::complete_wait(WaitTicket ticket, WaitCompletion completion, WakeSource source)
 {
+    u32 kicks = 0;
+    const bool completed = complete_wait(ticket, completion, source, kicks);
+    notify_cpus(kicks);
+    return completed;
+}
+void SchedulerState::notify_cpus(u32 kicks)
+{
+    for (smp::CpuId cpu = 0; kicks != 0 && cpu < smp::max_cpus; ++cpu, kicks >>= 1)
+        if ((kicks & 1U) != 0) notify_cpu(cpu);
+}
+bool SchedulerState::wait_pending(WaitTicket ticket)
+{
+    if (ticket.index >= max_thread_slots) return false;
+    auto &slot = slots_[ticket.index / max_threads_per_process];
+    TaskHold hold{slot};
+    const auto &thread = slot.pcb.threads_[ticket.index % max_threads_per_process];
+    return thread.slot_state != ThreadSlotState::free && thread.tid == ticket.thread &&
+           thread.owner == ticket.owner && thread.wait_registration.pending(ticket);
+}
+bool SchedulerState::complete_wait(WaitTicket ticket, WaitCompletion completion, WakeSource source, u32 &kicks)
+{
     smp::check_exclusive("SchedulerState::complete_wait");
     // O(1): the ticket names the waiter's slot; a reused slot holds another
     // tid. A registration armed outside register_current_wait has no slot.
@@ -2594,7 +2615,7 @@ bool SchedulerState::complete_wait(WaitTicket ticket, WaitCompletion completion,
         // A parked waiter is queued now; an armed one by its put_prev.
         if (thread->on_cpu == no_cpu) placed = enqueue_locked(*slot, *thread);
     }
-    notify_cpu(placed);
+    if (placed < smp::max_cpus) kicks |= u32{1} << placed;
     return true;
 }
 

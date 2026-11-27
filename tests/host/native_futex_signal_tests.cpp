@@ -149,6 +149,31 @@ void recipient_step(Kernel &kernel, unsigned mode)
         CHECK(native::X86SignalFrame::place(thread->native_frame.sp, hw::user_begin, hw::user_end, placement));
         mock::write_forbidden = placement.address;
     }
+    // A FUTEX_WAKE by the leader, which then leaves the CPU.
+    const auto leader_wake = [&] {
+        CHECK(kernel.scheduler().activate_thread(group.pid, group.pid));
+        bool complete = true;
+        const auto woken = native::futex(kernel, group.pid, {native::FutexOperation::wake, word, 1}, complete);
+        CHECK(complete);
+        kernel.scheduler().put_prev(0);
+        return woken;
+    };
+    // Signal against wake (spec 4.5). The wake first: it wins, the waiter's
+    // resume produces 0 and the signal stays pending for delivery.
+    if (mode == 5)
+    {
+        expect(leader_wake() == 1);
+        expect(!native::private_futex_signal_ready(kernel, *p, *thread));
+        expect(!native::private_futex_signal_complete(kernel, *p, *thread));
+        expect(native::futex_object(group.pid, group.waiter).pool && thread->syscall_pending);
+        expect(native::private_signal_queue(*thread)->pending_mask().contains(10));
+    }
+    // The signal first: the wait leaves its queue, so the wake finds nobody.
+    if (mode == 6)
+    {
+        expect(native::private_futex_signal_complete(kernel, *p, *thread));
+        expect(leader_wake() == 0);
+    }
     mock::entry_trap = {hw::TrapKind::timer}; const auto before = mock::entries;
     expect(native::step(kernel));
     mock::write_forbidden = 0;
@@ -164,9 +189,10 @@ void recipient_step(Kernel &kernel, unsigned mode)
         expect(mock::entries == before + 1 && mock::last_frame.pc == handler);
         std::array<std::byte, native::X86SignalFrame::prefix_bytes> saved{};
         CHECK(hw::copy_from_user(p->resources().native_space, saved.data(), mock::last_frame.sp, saved.size()));
-        expect(native::X86SignalFrame::get(saved, native::X86SignalFrame::context_offset + 128, 8) == (mode == 0 ? site : site + 2));
+        const bool restarted = mode == 0 || mode == 6;
+        expect(native::X86SignalFrame::get(saved, native::X86SignalFrame::context_offset + 128, 8) == (restarted ? site : site + 2));
         expect(native::X86SignalFrame::get(saved, native::X86SignalFrame::context_offset + 104, 8) ==
-            (mode == 0 ? futex_number : mode == 1 ? 0 : static_cast<u64>(-110)));
+            (restarted ? futex_number : mode == 1 || mode == 5 ? 0 : static_cast<u64>(-110)));
         expect(!thread->syscall_pending);
         retire(kernel, group);
     }
@@ -179,7 +205,7 @@ int main()
     for (bool timed : {false, true}) for (bool restart : {false, true}) for (u32 op : {0U, 128U})
         publication(kernel, timed, restart, op);
     for (unsigned mode = 0; mode < 11; ++mode) eligibility(kernel, mode);
-    for (unsigned mode = 0; mode < 5; ++mode) recipient_step(kernel, mode);
+    for (unsigned mode = 0; mode < 7; ++mode) recipient_step(kernel, mode);
     expect(native::entry_stacks.accounting().leased_slots == 0);
     expect(native::futex_objects.accounting().live_objects == 0);
     std::printf("FUTEX_SIGNAL_MODEL_PASS hosted=1 native=0 checks=%zu\n", checks);

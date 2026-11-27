@@ -634,7 +634,9 @@ static Result<Trap> enter_impl(AddressSpace &space, UserFrame &frame, uptr stack
     if (!stack_top && !cpu.stack_top)
         return Status::invalid_argument("a secondary CPU enters native code only on an owned kernel stack");
     // The caller opened this CPU's user window (begin_user), so the space
-    // validated here cannot retire before the window closes.
+    // validated here is not freed before the window closes. A replacement
+    // that marked it retiring first is refused here; the shared capture sees
+    // the new space and the thread enters that one at its next dispatch.
     const auto *value = storage(space);
     if (value == nullptr)
         return Status::not_initialized("native address space is unavailable");

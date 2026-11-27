@@ -1158,7 +1158,7 @@ bool step(Kernel &kernel)
     prune_child_waits(kernel);
     prune_poll_waits(kernel);
     if (!runtime_failure) { started = false; return false; }
-    bool waiting_deadline = expire_futex(kernel, now.value());
+    bool waiting_deadline = false;
 #ifdef OK_PRIVATE_POLL_MASK
     waiting_deadline |= private_signal_wait_pending(kernel);
 #endif
@@ -1357,8 +1357,8 @@ bool step(Kernel &kernel)
     bool linux_udp_delay_slot = false;
     // A syscall trapped by this step's entry, not a continuation resumed.
     bool trapped_this_step = false;
-    // A completed poll or sleep produces its own result on its owner's CPU
-    // (spec 4.4) before anything decodes its frame; a result lets the thread
+    // A completed poll, futex WAIT or sleep produces its own result on its
+    // owner's CPU (spec 4.4) before anything decodes its frame; a result lets the thread
     // enter user mode in this same step, a re-armed poll parks it again.
     bool owned_settled = false;
     if (running->native_active)
@@ -1517,7 +1517,12 @@ bool step(Kernel &kernel)
             else count_entry(&EntryCpu::faults);
         }
         else count_entry(&EntryCpu::rejections);
-        if (!trap)
+        // A sibling replaced the address space before this entry reached user
+        // mode (counted as a rejected entry and in OK_SMP_MM retiring_rejects):
+        // nothing ran, and the thread enters the current space at its next
+        // dispatch, as after a preemption.
+        if (!trap && trap.status().code() == StatusCode::would_block) {}
+        else if (!trap)
         {
             finish(kernel, chosen.pid, 127);
             emit("OK_NATIVE scope=hardware enter=failed reason=");
