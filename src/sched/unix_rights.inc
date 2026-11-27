@@ -174,7 +174,10 @@ Result<usize> SchedulerState::send_unix_rights(ProcessResources &resources, i32 
             const auto *open = open_description(ids[index]);
             if (!open || !open->references)
                 return Status::bad_descriptor("UNIX right has no live description");
-            if (open->references == ~usize{0})
+            // A description passed n times takes n references in this hold.
+            usize taken{};
+            for (usize other = 0; other < descriptors.size(); ++other) taken += ids[other] == ids[index];
+            if (open->references > ~usize{0} - taken)
                 return Status::overflow("open description reference limit exceeded");
         }
         if (payload.empty()) return usize{0};
@@ -241,6 +244,25 @@ Result<UnixReceive> SchedulerState::prepare_unix_receive(ProcessResources &resou
             open->references == ~usize{0})
             return Status::overflow("UNIX prepared operation limit exceeded");
         if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
+        // A right the receive would hold whose description cannot take another
+        // reference fails the receive before anything changes.
+        u16 pending = invalid_description;
+        static_cast<void>(unix_read_count(pipe, preview.size(), pending));
+        if (pending != invalid_description)
+        {
+            const auto &record = buffer.rights[pending];
+            const auto limit = descriptor_capacity < max_unix_rights ? descriptor_capacity : max_unix_rights;
+            const auto held = record.count < limit ? record.count : limit;
+            for (usize index = 0; index < held; ++index)
+            {
+                const auto *right = open_description(record.descriptions[index]);
+                usize taken{};
+                for (usize other = 0; other < held; ++other)
+                    taken += record.descriptions[other] == record.descriptions[index];
+                if (right && right->references > ~usize{0} - taken)
+                    return Status::overflow("open description reference limit exceeded");
+            }
+        }
         ++open->references; // The operation's hold of the stream.
         const auto token = next_unix_receive_token_++;
         std::optional<UnixReceive> prepared;
