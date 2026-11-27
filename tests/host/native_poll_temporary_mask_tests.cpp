@@ -65,6 +65,8 @@ void enqueue(Kernel &kernel, Group g, u32 signal=10)
 {
     auto *t=kernel.scheduler().find_thread(g.pid,g.waiter);
     expect(native::private_signal_queue(*t)->enqueue({signal,-6,static_cast<u32>(g.pid),0})==native::PrivateSignalQueue::Enqueue::queued);
+    // Generation probes the waits a queued signal may interrupt (spec 4.7).
+    native::private_signal_probe(kernel,*kernel.scheduler().find(g.pid));
 }
 void invoke(Kernel &kernel, Group g, i32 fd, bool select, bool timed=true, unsigned error=0, uptr stack=hw::user_begin+8192)
 {

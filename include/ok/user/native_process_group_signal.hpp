@@ -37,6 +37,20 @@ template <u32 MaximumSignal, typename Deliver>
     const auto group = selector == 0 ? sender.group
                                     : static_cast<sched::ProcessId>(-static_cast<i64>(selector));
     if (!group) return -3;
+    // The group is enumerated and signalled under the task table (spec 4.7):
+    // a fork publishes its child under it too, so a member forked meanwhile
+    // either is signalled here or sees its parent's pending exit and is
+    // undone (spec 4.12). Generation takes it only when not held already.
+    const bool held = scheduler.task_table_lock().owned_by_current_cpu();
+    if (!held) scheduler.task_table_lock().lock();
+    struct Release
+    {
+        sched::TaskTableLock *lock;
+        ~Release()
+        {
+            if (lock) lock->unlock();
+        }
+    } release{held ? nullptr : &scheduler.task_table_lock()};
     std::array<sched::ProcessId, sched::max_processes> targets{};
     usize count = 0;
     for (const auto &process : scheduler.processes())

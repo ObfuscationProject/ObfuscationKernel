@@ -98,6 +98,14 @@ enum class ProcessCpuAccounting : u8
     passive,
 };
 
+// The interruptible class of a wait (spec 4.7).
+enum class WaitClass : u8
+{
+    unknown,
+    none,
+    interruptible,
+};
+
 struct ThreadControlBlock
 {
     ThreadId tid{0};
@@ -107,6 +115,11 @@ struct ThreadControlBlock
     arch::execution::UserFrame native_frame{};
     bool native_active{false};
     bool syscall_pending{false};
+    // A syscall trapped while its group was frozen and kept pending without
+    // dispatch (spec 4.8); its dispatch after the thaw is that trap's, with
+    // the trap's MIPS branch-delay-slot exclusion.
+    bool syscall_deferred{false};
+    bool syscall_delay_slot{false};
     DeadlineWait native_deadline{};
     WaitRegistration wait_registration{};
     u32 console_wait_epoch{}; // Original input generation survives readiness wakes.
@@ -136,6 +149,10 @@ struct ThreadControlBlock
     // admits it so that its resume re-evaluates the wait (spec 4.7). Written
     // under the task lock; pick clears it.
     bool probe{false};
+    // Whether a signal can interrupt the active wait (spec 4.7), recorded by
+    // the owner when it parks, so that generation decides from it without
+    // reading the wait's objects; unknown from the arm until then.
+    WaitClass wait_class{WaitClass::unknown};
 };
 
 // A thread whose allowed CPUs all went offline (docs/modules/sysfs.md): its
@@ -627,6 +644,11 @@ class SchedulerState
             return Status::invalid_argument("cannot create a thread for an exited process");
         }
         if (process->live_count() == 0) return Status::invalid_argument("cannot create a thread in a retired group");
+        // Spec 4.12: no thread joins a group that exits or runs a transition;
+        // the caller exits at its next pick.
+        if (in_table(*process) && (task_slot(*process).flagged(RunFlag::pending_exit) ||
+                                   task_slot(*process).transition != GroupTransition::none))
+            return Status::interrupted("thread group has a pending exit or transition");
         // An exited record that holds nothing is reused before a free slot;
         // the leader's slot never is.
         ThreadControlBlock *retired = nullptr;
@@ -1050,9 +1072,90 @@ class SchedulerState
     // resume completed the wait); it then becomes running.
     bool resume_current(smp::CpuId cpu);
     // Marks a parked thread whose wait a pending signal may interrupt and
-    // queues it (until signal generation sets probes itself). False when it
-    // was not parked, already probed or could not be queued.
+    // queues it (signal generation, spec 4.7). False when it was not parked
+    // or already probed. A stopped or frozen group keeps the probe without an
+    // entry: continue and unfreeze queue it.
     bool probe_parked(ProcessControlBlock &process, ThreadControlBlock &thread);
+    // The owner's record of its wait when it parks (spec 4.7): the
+    // interruptible class, and a probe when a pending signal already
+    // interrupts it (the owner check at park). The thread runs on `cpu`.
+    void settle_park(smp::CpuId cpu, WaitClass wait_class, bool probe);
+    // Generation's view of a thread (spec 4.7): armed (on a CPU, its owner
+    // will check at park), parked, or not waiting.
+    enum class WaitView : u8
+    {
+        not_waiting,
+        armed,
+        parked,
+    };
+    [[nodiscard]] WaitView wait_view(const ProcessControlBlock &process, const ThreadControlBlock &thread);
+    // Probes an armed thread (its put_prev queues it) and kicks its CPU out
+    // of user mode; false when it is not armed.
+    bool probe_armed(ProcessControlBlock &process, ThreadControlBlock &thread);
+
+    // Group transitions (spec 4.8). A claim is taken under the task lock: it
+    // freezes the group (pick and enqueue refuse its threads), drops every
+    // other thread's queue entry and names the CPUs that still run one of
+    // them; the claimer then waits until none does (group_quiesce.hpp).
+    enum class ClaimOutcome : u8
+    {
+        claimed,      // Frozen by this claim; `kick` names the CPUs to wait for.
+        held,         // This claimer holds it already.
+        exit_held,    // Another thread exits the group: return to the boundary.
+        exec_held,    // Another exec runs; its commit exits this thread.
+        exit_pending, // An exec runs: exit beats it (pending_exit is set).
+        busy,         // `quiesced_only` and a thread of the group runs on a CPU.
+        departed,     // No live process.
+    };
+    struct GroupClaim
+    {
+        ClaimOutcome outcome{ClaimOutcome::departed};
+        u32 kick{};
+        // An exit claim taken while a pending exit was already recorded: the
+        // kill came first, so the group exits with its status (Linux
+        // do_group_exit after SIGNAL_GROUP_EXIT).
+        std::optional<ExitRequest> owed{};
+    };
+    // The claimer identity of a CPU that claims for no thread of the group
+    // (its kernel loop, a legacy scan's delivery): above every task id and
+    // distinct per CPU, so two such claims never take each other's for their
+    // own.
+    [[nodiscard]] static constexpr ThreadId kernel_claimer(smp::CpuId cpu)
+    {
+        return max_task_id + 1 + (cpu < smp::max_cpus ? cpu : smp::max_cpus);
+    }
+    // `quiesced_only`: claim only when no other thread of the group is on a
+    // CPU (a caller that must not wait), else busy and nothing changes.
+    GroupClaim claim_transition(ProcessId pid, ThreadId claimer, GroupTransition kind,
+                                ExitRequest request = {}, bool quiesced_only = false);
+    // Lock-free: no thread of `pid` other than `claimer` runs on a CPU (the
+    // on_cpu mirrors, loaded with acquire after each put_prev's release).
+    [[nodiscard]] bool group_quiesced(ProcessId pid, ThreadId claimer) const;
+    // The CPUs a thread of `pid` other than `claimer` runs on.
+    [[nodiscard]] u32 group_cpus(ProcessId pid, ThreadId claimer) const;
+    // An exec claim ends: the group thaws, and every other thread that may
+    // run is queued again (exec failure, spec 4.8 unfreeze).
+    void unfreeze(ProcessId pid, ThreadId claimer);
+    // Exec's commit check: a pending exit beats the exec; the claim becomes
+    // an exit claim and the request is returned.
+    [[nodiscard]] std::optional<ExitRequest> exec_superseded(ProcessId pid, ThreadId claimer);
+    // A kill or fatal decision that must not wait (spec 4.8): pending_exit
+    // with its status (SIGKILL overrides an earlier request), a probe on
+    // every waiting thread and an entry for every parked one. Returns the
+    // CPUs to kick; false-y when the process is not live.
+    u32 request_group_exit(ProcessId pid, ExitRequest request);
+    // A pending exit of `pid`, read under its task lock.
+    [[nodiscard]] std::optional<ExitRequest> pending_exit(ProcessId pid);
+    [[nodiscard]] bool exit_pending(ProcessId pid) const;
+    [[nodiscard]] bool frozen(ProcessId pid) const;
+    [[nodiscard]] GroupTransition transition(ProcessId pid) const;
+    // Fork publication (spec 4.12): under the task table, the parent's task
+    // lock refuses a parent with a pending exit (the child is undone and the
+    // call restarts); otherwise the child becomes runnable.
+    Status publish_fork(ProcessId parent, ProcessId child);
+    // The task table lock (rank 46): lineage, group enumeration, and signal
+    // generation of the stop family and SIGCONT (spec 4.7).
+    [[nodiscard]] TaskTableLock &task_table_lock() { return task_table_; }
     // The idle handshake, idle side (spec 4.2): publishes `cpu` idle, fences,
     // then loads the queue counts. `halt`: every queue is empty, and a push
     // from now on sees the flag and wakes this CPU. `own_work`: its own queue
@@ -1096,7 +1199,8 @@ class SchedulerState
     // Returns true when the process was stopped.
     bool continue_process(ProcessId pid);
     void consume_job_report(ProcessId pid, bool stop);
-    [[nodiscard]] u16 stopped_processes() const { return stopped_count_; }
+    // A scan of the slots' stop flags (spec 4.9).
+    [[nodiscard]] u16 stopped_processes() const;
     [[nodiscard]] bool process_group_orphaned(ProcessId group, ProcessId ignored = 0) const;
     [[nodiscard]] bool process_group_has_stopped(ProcessId group) const;
     // Child-wait key of a process-group selector; pid keys stay below 2^32.
@@ -1155,6 +1259,10 @@ class SchedulerState
     }
     // Drops the thread's queue entry, if any.
     void forget_queued(const ProcessControlBlock &process, ThreadControlBlock &thread);
+    // Whether a queue may hold the thread (caller holds its task lock): not
+    // frozen; a pending exit in any state; otherwise not stopped, and
+    // runnable or probed.
+    [[nodiscard]] static bool may_queue(const ProcessSlot &slot, const ThreadControlBlock &thread);
     // processes() without the kernel-lock check, for the scheduler's own walks.
     [[nodiscard]] ProcessRange process_range() { return {slots_.data(), slots_.size()}; }
     [[nodiscard]] ConstProcessRange process_range() const { return {slots_.data(), slots_.size()}; }
@@ -1249,7 +1357,6 @@ class SchedulerState
     // The idle handshake: a CPU's idle flag, and the wake a pusher owes it.
     std::array<std::atomic<bool>, smp::max_cpus> idle_{};
     std::array<std::atomic<u32>, smp::max_cpus> wake_requests_{};
-    u16 stopped_count_{};
     Terminal console_terminal_{};
     fs::TerminalNamespace terminal_namespace_{};
     [[nodiscard]] bool pipe_has_endpoint(u16 pipe, bool writable) const;

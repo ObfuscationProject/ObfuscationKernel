@@ -64,6 +64,8 @@ void enqueue(Kernel &kernel, Group group, u32 signal = 10)
     auto *thread = kernel.scheduler().find_thread(group.pid, group.reader);
     auto *queue = native::private_signal_queue(*thread); CHECK(queue);
     expect(queue->enqueue({signal, -6, static_cast<u32>(group.pid), 0}) == native::PrivateSignalQueue::Enqueue::queued);
+    // Generation probes the waits a queued signal may interrupt (spec 4.7).
+    native::private_signal_probe(kernel, *kernel.scheduler().find(group.pid));
 }
 void publication(Kernel &kernel, bool restart, bool already_ready, bool fd_reused)
 {

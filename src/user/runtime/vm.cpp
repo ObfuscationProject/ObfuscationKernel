@@ -1216,7 +1216,7 @@ Status store(Pages &pages, uptr address, const void *data, usize count)
     return Status::success();
 }
 i64 fork_process(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock *process,
-                 [[maybe_unused]] sched::ThreadId calling_tid)
+                 [[maybe_unused]] sched::ThreadId calling_tid, bool &complete)
 {
     auto result = kernel.posix().fork(pid, false);
     if (!result)
@@ -1301,11 +1301,22 @@ i64 fork_process(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBloc
 #endif
     child->leader().native_active = true;
     child->leader().syscall_pending = false;
-    if (auto status = kernel.scheduler().set_runnable(child_pid); !status)
+    // Publication (spec 4.12): under the task table and the parent's task
+    // lock. A parent with a pending exit (a kill of its group meanwhile, a
+    // fatal decision) undoes the child; the call stays pending and the
+    // parent exits at its next pick, so no child escapes a group kill.
+#ifdef OK_PRIVATE_POLL_MASK
+    if (auto *parent = kernel.scheduler().find(pid))
+        if (const auto *caller = kernel.scheduler().find_thread(pid, calling_tid))
+            private_fork_condemn(kernel, *parent, *caller);
+#endif
+    if (auto status = kernel.scheduler().publish_fork(pid, child_pid); !status)
     {
         finish(kernel, child_pid, 127);
         static_cast<void>(kernel.posix().wait(pid, child_pid));
-        return error(status);
+        if (status.code() != StatusCode::interrupted) return error(status);
+        complete = false;
+        return 0;
     }
     return static_cast<i64>(child_pid);
 }

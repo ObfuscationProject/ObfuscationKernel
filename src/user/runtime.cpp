@@ -53,7 +53,8 @@ Status retire_native_thread(sched::ThreadControlBlock &thread
     if (linux_udp_receive_object(thread.owner, thread.tid).pool)
         return Status::busy("native thread retirement must first retire its Linux UDP receive owner");
     cpu_control_retire(thread); // Its hotplug record goes first (docs/modules/sysfs.md).
-    if (runtime_kernel) if (auto status = evict_thread(*runtime_kernel, thread); !status) return status;
+    // No CPU runs the thread: it is the caller, or a quiesced group's sibling
+    // (spec 4.8), or it never ran; its lease is inactive (spec 3.10).
     if (auto status = cancel_native_vfs_thread(thread); !status) return status;
 #ifdef OK_PRIVATE_POLL_MASK
     const auto signal_lease = thread.entry_stack;
@@ -250,6 +251,13 @@ Status set_result(const sched::ProcessControlBlock &process, hw::UserFrame &fram
 
 void finish(Kernel &kernel, sched::ProcessId pid, i32 code, u8 signal)
 {
+    // exit_group (spec 4.8): no other thread of the group runs on a CPU from
+    // here on, or the exit is left to the group itself. A kill accepted
+    // before the claim decides the status.
+    sched::ExitRequest request{code, signal};
+    if (!quiesce_for_exit(kernel, pid, request)) return;
+    code = request.code;
+    signal = request.signal;
     if constexpr (smp_sections) smp::drain(pid); // Its sections end, results committed, before teardown.
     const auto *initial = kernel.scheduler().find(pid);
     if (!initial) return;
@@ -310,6 +318,30 @@ void finish(Kernel &kernel, sched::ProcessId pid, i32 code, u8 signal)
     if (status) status = transition();
 #endif
     if (!status) { runtime_failure = status; started = false; }
+}
+sched::ExitRequest owed_exit([[maybe_unused]] sched::ProcessId pid, sched::ExitRequest request)
+{
+#ifdef OK_PRIVATE_POLL_MASK
+    // A fatal signal decision is applied: the signal state's record of it
+    // names the signal (SIGKILL wins), and goes.
+    if (auto *state = private_signal_find(pid); state && (state->group_kill || state->deferred_fatal))
+    {
+        request = {0, state->group_kill ? u8{OK_SIGKILL} : state->deferred_fatal};
+        state->group_kill = false;
+        state->deferred_fatal = 0;
+    }
+#endif
+    return request;
+}
+bool deliver_pending_exit(Kernel &kernel, sched::ProcessId pid)
+{
+    auto request = kernel.scheduler().pending_exit(pid);
+    if (!request) return false;
+    *request = owed_exit(pid, *request);
+    if (const auto cpu = smp::current_cpu(); cpu < smp::max_cpus)
+        smp::detail::owner_add(smp::evidence_cpus[cpu].exit_deliveries);
+    finish(kernel, pid, request->code, request->signal);
+    return true;
 }
 } // namespace runtime_detail
 namespace
@@ -641,6 +673,11 @@ Status terminate_native_process(Kernel &kernel, u64 pid, u8 signal)
         }
     if (!live) return Status::invalid_argument("native termination has no live native thread");
     finish(kernel, pid, 0, signal);
+    if (!runtime_failure) return runtime_failure;
+    // Another CPU's transition held the group: its exit, or an exec that this
+    // kill now ends at its commit check. That CPU completes the exit; this one
+    // runs no thread of the group and waits with the kernel lock released.
+    if (!wait_group_completed(kernel, pid)) return Status::busy("native termination left to the group");
     return runtime_failure;
 }
 void release_process(Kernel &kernel, u64 pid)

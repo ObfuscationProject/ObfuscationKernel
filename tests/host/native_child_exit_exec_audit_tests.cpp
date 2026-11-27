@@ -171,7 +171,7 @@ void leader_first_fatal(Kernel &kernel, u32 signal)
     raw_exit(kernel, child, child, 17);
     const auto *borrowed = kernel.scheduler().find_thread(child, survivor);
     expect(native::private_process_kill(kernel, *kernel.scheduler().find(parent), child, signal) == 0);
-    if (signal == 9) native::private_process_signal_fatal(kernel);
+    if (signal == 9) native::deliver_pending_exits(kernel);
     else expect(!native::private_signal_deliver(kernel, *kernel.scheduler().find(child),
                                               *kernel.scheduler().find_thread(child, survivor)));
     expect(native::runtime_status().ok());

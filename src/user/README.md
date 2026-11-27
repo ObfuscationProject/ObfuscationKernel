@@ -23,7 +23,7 @@ header the units share; it declares exactly what crosses a unit boundary.
 | `runtime/timers.cpp` | Linux interval timers: `ITIMER_REAL`, `alarm` and the `timer_create` family, their expiry service and signal records |
 | `runtime/interrupts.cpp` | The interrupt report (`OK_IRQ_PLATFORM`, `OK_IRQ_EVENTS`, `OK_IRQ_COMPLETIONS`, `OK_TIMER_LATENCY`, `OK_TIMERS`, `OK_SMP_CPUS`, `OK_SMP_IRQS`, `OK_NET_WAITS`, the `OK_SMP_KERNEL` lines, `OK_SMP_HOTPLUG` and `OK_SMP_HOTPLUG_FAILURE` with the `smp_hotplug_test` knob), the lock-violation recorder and the arming of the kernel-section checks |
 | `runtime/entry.cpp` | `start`/`step`, user entry through entry-stack leases, syscall dispatch, the kernel-section hook and the choke-point drain |
-| `runtime/smp.cpp` | Secondary CPUs' share of the runtime: the unlocked user entry, per-CPU entries and their eviction (`prepare_eviction`, `commit_eviction`), the secondary step and the hotplug leave hook (`ok_smp_cpu_leaving`) |
+| `runtime/smp.cpp` | Secondary CPUs' share of the runtime: the unlocked user entry, group transitions (`quiesce_group` with the kernel lock released, the frozen check, `request_group_exit`, finish's `quiesce_for_exit`), the secondary step and the hotplug leave hook (`ok_smp_cpu_leaving`) |
 | `runtime/section.cpp` | Kernel sections: the commit handler, decline accounting with its no-effect digest, the shadow comparison of identity calls; `runtime/section.hpp` holds admission, the section bodies and `run_section` (templates `entry.cpp` instantiates for the configured profile) |
 
 Self-contained helpers that hosted tests also include stay as headers beside the

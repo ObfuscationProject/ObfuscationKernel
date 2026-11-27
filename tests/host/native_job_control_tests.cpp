@@ -4,6 +4,7 @@
 #define OK_SYSCALL_ORIGIN_MODEL 1
 #define OK_PIPE_WRITE_SIGNAL_MODEL 1
 #include "native_child_exit_runtime_fixture.hpp"
+#include "native_pending_exit.hpp"
 
 namespace
 {
@@ -218,12 +219,12 @@ void linux_stop_continue(Kernel &kernel)
     // continue (Linux wants_signal); the process stays stopped.
     expect(linux_kill(kernel, parent, child, 15) == 0 && !native::private_signal_find(child)->deferred_fatal);
     expect(shared(child).pending_mask().contains(15) && job(kernel, child).stopped);
-    native::private_process_signal_fatal(kernel);
+    native::deliver_pending_exits(kernel);
     expect(job(kernel, child).stopped && kernel.scheduler().find(child)->state() != sched::ProcessState::zombie);
     expect(linux_call(kernel, parent, lu::Operation::wait4, {negative(child), status_at, 3, 0}) == static_cast<i64>(child));
     expect(status_word() == ((19U << 8) | 0x7f));
     expect(linux_kill(kernel, parent, child, 9) == 0 && native::private_signal_find(child)->group_kill);
-    native::private_process_signal_fatal(kernel);
+    native::deliver_pending_exits(kernel);
     expect(kernel.scheduler().find(child)->state() == sched::ProcessState::zombie);
     expect(kernel.scheduler().find(child)->wait_status() == 9 && kernel.scheduler().stopped_processes() == 0);
     expect(linux_call(kernel, parent, lu::Operation::wait4, {negative(child), status_at, 1, 0}) == static_cast<i64>(child));
@@ -331,12 +332,12 @@ void native_dispositions(Kernel &kernel)
     expect(native_kill(kernel, parent, child, OK_SIGSTOP) == 0 && job(kernel, child).stopped);
     expect(native_kill(kernel, parent, child, OK_SIGINT) == 0 && native_kill(kernel, parent, child, OK_SIGHUP) == 0);
     expect(native::private_signal_find(child)->deferred_fatal == OK_SIGINT);
-    native::private_process_signal_fatal(kernel);
+    native::deliver_pending_exits(kernel);
     expect(job(kernel, child).stopped && kernel.scheduler().find(child)->state() != sched::ProcessState::zombie);
     expect(native_kill(kernel, parent, child, OK_SIGCONT) == 0 && !job(kernel, child).stopped);
     // A process condemned by a fatal signal no longer stops.
     expect(native_kill(kernel, parent, child, OK_SIGSTOP) == 0 && !job(kernel, child).stopped);
-    native::private_process_signal_fatal(kernel);
+    native::deliver_pending_exits(kernel);
     expect(kernel.scheduler().find(child)->wait_status() == OK_SIGINT);
     expect(native_call(kernel, parent, N::wait4, {child, status_at, 0, 0}) == static_cast<i64>(child) &&
            status_word() == OK_SIGINT);
@@ -689,8 +690,9 @@ void timer_retry(Kernel &kernel)
     release(kernel, sender); release(kernel, pid);
 }
 
-// A fatal default the owed drain decides in a step ends the process in that
-// step: its runnable thread is never entered again.
+// A fatal default the owed drain decides in a step sets the group's pending
+// exit (spec 4.8): the group's next picked thread applies it before it is
+// entered again.
 void same_step_fatal(Kernel &kernel)
 {
     const auto parent = create(kernel), pid = fork(kernel, parent);
@@ -702,10 +704,59 @@ void same_step_fatal(Kernel &kernel)
     handle(kernel, pid, 1, 0);
     native::started = true;
     static_cast<void>(native::step(kernel));
+    expect(native::runtime_status().ok() && kernel.scheduler().exit_pending(pid));
+    for (usize step = 0; step < 8 && kernel.scheduler().find(pid)->state() != sched::ProcessState::zombie; ++step)
+        static_cast<void>(native::step(kernel));
     expect(native::runtime_status().ok());
     expect(kernel.scheduler().find(pid)->state() == sched::ProcessState::zombie);
     expect(kernel.scheduler().find(pid)->wait_status() == 1);
     release(kernel, pid);
+    drain(parent);
+    release(kernel, parent);
+}
+
+// Linux copy_process refuses a fork while a signal is pending (spec 4.12). A
+// SIGTERM to the group queued on a running parent (no thread was parked, so
+// it is only queued) before that parent trapped fork condemns it at the
+// fork's publication: the child is undone, the call stays pending and the
+// parent exits with SIGTERM at its next pick. With SIGTERM caught the fork
+// publishes its child.
+void fork_with_pending_fatal(Kernel &kernel)
+{
+    const auto parent = create(kernel), pid = fork(kernel, parent);
+    grouped(kernel, parent, pid);
+    expect(linux_kill(kernel, parent, negative(pid), 15) == 0 && shared(pid).pending_mask().contains(15));
+    expect(!kernel.scheduler().exit_pending(pid) && !native::private_signal_find(pid)->deferred_fatal);
+    usize processes = 0;
+    for (const auto &process : kernel.scheduler().processes()) processes += process.pid() != 0;
+    activate(kernel, pid, pid);
+    mock::spaces_enabled = true;
+    bool complete = true;
+    expect(native::dispatch(kernel, pid, {OK_SYS_FORK, {}}, complete) == 0 && !complete);
+    expect(native::runtime_status().ok() && kernel.scheduler().exit_pending(pid));
+    usize after = 0;
+    for (const auto &process : kernel.scheduler().processes())
+    {
+        after += process.pid() != 0;
+        expect(process.parent_pid() != pid);
+    }
+    expect(after == processes);
+    CHECK(kernel.posix().activate(0));
+    expect(native::deliver_pending_exits(kernel) == 1);
+    expect(kernel.scheduler().find(pid)->state() == sched::ProcessState::zombie);
+    expect(kernel.scheduler().find(pid)->wait_status() == 15);
+    release(kernel, pid);
+    drain(parent);
+    // Caught: no fatal decision, the child is published.
+    const auto caught = fork(kernel, parent);
+    grouped(kernel, parent, caught);
+    handle(kernel, caught, 15);
+    expect(linux_kill(kernel, parent, negative(caught), 15) == 0 && shared(caught).pending_mask().contains(15));
+    const auto grandchild = fork(kernel, caught);
+    expect(!kernel.scheduler().exit_pending(caught) && kernel.scheduler().find(grandchild)->parent_pid() == caught);
+    release(kernel, grandchild);
+    drain(caught);
+    release(kernel, caught);
     drain(parent);
     release(kernel, parent);
 }
@@ -750,6 +801,7 @@ int main()
     acted_not_refused(kernel);
     timer_retry(kernel);
     same_step_fatal(kernel);
+    fork_with_pending_fatal(kernel);
     shutdown_stopped(kernel);
     expect(native::runtime_status().ok() && kernel.scheduler().stopped_processes() == 0);
     expect(kernel.scheduler().find(init)->state() != sched::ProcessState::zombie);

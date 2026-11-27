@@ -97,6 +97,8 @@ void enqueue(Kernel &kernel, Group group, u32 signal = 10)
             return native::private_signal_admit_blocked(kernel, recipient, target);
         });
     expect(result == 0);
+    // Generation probes the waits a queued signal may interrupt (spec 4.7).
+    native::private_signal_probe(kernel, *process);
 }
 void publication(Kernel &kernel, unsigned kind, bool timed, bool restart, unsigned fault)
 {

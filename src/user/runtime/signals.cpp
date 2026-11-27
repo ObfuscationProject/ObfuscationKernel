@@ -2019,6 +2019,61 @@ bool private_signal_admit_blocked(Kernel &kernel, const sched::ProcessControlBlo
            private_poll_signal_owned(kernel, recipient, target, poll) ||
            private_terminal_signal_owned(kernel, recipient, target);
 }
+bool private_wait_interruptible(Kernel &kernel, const sched::ProcessControlBlock &process,
+                                const sched::ThreadControlBlock &thread)
+{
+    switch (kernel.scheduler().wait_view(process, thread))
+    {
+    case sched::SchedulerState::WaitView::not_waiting:
+        return false;
+    case sched::SchedulerState::WaitView::armed:
+        // Its owner still runs and may change its wait objects: its own
+        // record decides, or the predicate for a wait not parked yet.
+        return thread.wait_class == sched::WaitClass::interruptible ||
+               (thread.wait_class == sched::WaitClass::unknown && private_signal_admit_blocked(kernel, process, thread));
+    case sched::SchedulerState::WaitView::parked:
+        break;
+    }
+    // Parked: nobody but a quiescer changes the wait's objects, so the old
+    // predicate may read them as the class's shadow (spec 4.7, until WP7b).
+    const bool admitted = private_signal_admit_blocked(kernel, process, thread);
+    if (thread.wait_class == sched::WaitClass::unknown) return admitted;
+    const bool recorded = thread.wait_class == sched::WaitClass::interruptible;
+    if (recorded != admitted)
+        smp::count_check(smp::KernelCheck::admit_shadow_mismatch, "interruptible class differs from its predicate");
+    return recorded;
+}
+bool private_wait_signal_ready(Kernel &kernel, const sched::ProcessControlBlock &process,
+                               const sched::ThreadControlBlock &thread, u64 now)
+{
+    if (linux_udp_receive_object(process.pid(), thread.tid).pool)
+        return private_linux_udp_signal_ready(kernel, process, thread);
+    return private_signal_wait_ready(kernel, process, thread, now) || private_sleep_signal_ready(kernel, process, thread) ||
+           private_pipe_signal_ready(kernel, process, thread) ||
+           private_pipe_write_signal_ready(kernel, process, thread) ||
+           private_futex_signal_ready(kernel, process, thread) || private_poll_signal_ready(kernel, process, thread) ||
+           private_child_signal_ready(kernel, process, thread) ||
+           private_terminal_signal_ready(kernel, process, thread);
+}
+void private_signal_probe(Kernel &kernel, sched::ProcessControlBlock &process)
+{
+    auto &scheduler = kernel.scheduler();
+    if (process.state() == sched::ProcessState::zombie || process.state() == sched::ProcessState::exited) return;
+    for (auto &thread : process.live_threads())
+    {
+        if (!thread.native_active) continue;
+        const auto view = scheduler.wait_view(process, thread);
+        if (view == sched::SchedulerState::WaitView::not_waiting || !private_wait_interruptible(kernel, process, thread))
+            continue;
+        // The per-family readiness the resume settles (a pending signal that
+        // interrupts the wait, or an ignored one a signal wait discards).
+        if (!private_wait_signal_ready(kernel, process, thread, 0)) continue;
+        // A parked waiter is queued (a stopped or frozen group keeps the
+        // probe for its continue or thaw); an armed one is queued by put_prev.
+        if (view == sched::SchedulerState::WaitView::armed) static_cast<void>(scheduler.probe_armed(process, thread));
+        else static_cast<void>(scheduler.probe_parked(process, thread));
+    }
+}
 namespace
 {
 // Linux kill_pid_info for one process. The signal is in the Linux numbering;
@@ -2119,15 +2174,17 @@ PrivateTimerSend private_timer_signal(Kernel &kernel, sched::ProcessControlBlock
         auto *target = kernel.scheduler().find_thread(process.pid(), tid);
         if (!target || target->state == sched::ProcessState::exited || !target->native_active)
             return PrivateTimerSend::departed;
-        if (target->state == sched::ProcessState::blocked && !private_signal_admit_blocked(kernel, process, *target))
+        if (target->state == sched::ProcessState::blocked && !private_wait_interruptible(kernel, process, *target))
             return PrivateTimerSend::retry;
         const auto *real = signal_waits.real_blocked(*target);
         const bool blocks = target->native_signal_mask.contains(signal) || (real && real->contains(signal));
         if ((ignored || private_init_drops(process, signal, *action)) && !blocks) return PrivateTimerSend::ignored;
         auto *queue = private_signal_queue(*target);
         if (!queue) return PrivateTimerSend::retry;
-        return queue->enqueue_timer(signal, info.timer, info.overrun, info.value) == PrivateSignalQueue::Enqueue::queued
-            ? PrivateTimerSend::sent : PrivateTimerSend::retry;
+        if (queue->enqueue_timer(signal, info.timer, info.overrun, info.value) != PrivateSignalQueue::Enqueue::queued)
+            return PrivateTimerSend::retry;
+        private_signal_probe(kernel, process);
+        return PrivateTimerSend::sent;
     }
     // Process-directed timers, and job-control signals of thread timers, go
     // through the generation core as kernel senders.
@@ -2138,32 +2195,6 @@ PrivateTimerSend private_timer_signal(Kernel &kernel, sched::ProcessControlBlock
     case JobSignalOutcome::departed: return PrivateTimerSend::departed;
     default: return PrivateTimerSend::retry;
     }
-}
-void private_process_signal_fatal(Kernel &kernel)
-{
-    // Stable side-table iteration survives group teardown and PCB compaction.
-    for (auto &state : private_signal_actions)
-        if (state.pid && (state.group_kill || state.deferred_fatal))
-        {
-            const auto pid = state.pid;
-            const auto *process = kernel.scheduler().find(pid);
-            const bool live = process && process->state() != sched::ProcessState::zombie &&
-                              process->state() != sched::ProcessState::exited;
-            // Only SIGKILL acts on a stopped process; a native fatal default
-            // waits for SIGCONT (Linux keeps it pending until then).
-            if (live && !state.group_kill && state.deferred_fatal != OK_SIGKILL && process->job_control().stopped)
-                continue;
-            const auto signal = state.group_kill ? u8{9} : state.deferred_fatal;
-            state.group_kill = false;
-            state.deferred_fatal = 0;
-            if (!live)
-            {
-                private_signal_retire(pid);
-                continue;
-            }
-            finish(kernel, pid, 0, signal);
-            if (!runtime_failure) return;
-        }
 }
 bool private_signal_call(Kernel &kernel, sched::ProcessControlBlock &process,
                          sched::ThreadControlBlock &thread, bool &complete, i64 &result)
@@ -2406,6 +2437,9 @@ Status private_child_exit_commit(Kernel &kernel, PrivateChildExit::Completion &c
         emit(" coalesced="); emit_number(notification == PrivateChildExit::Notification::coalesced);
         emit(" autoreap="); emit_number(completion.autoreap); emit("\n");
     }
+    // The parent's SIGCHLD probes the waits it may interrupt (spec 4.7).
+    if (notification == PrivateChildExit::Notification::queued && completion.parent)
+        if (auto *parent = kernel.scheduler().find(completion.parent)) private_signal_probe(kernel, *parent);
     return Status::success();
 }
 

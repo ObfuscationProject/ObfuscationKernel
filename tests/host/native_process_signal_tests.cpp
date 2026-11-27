@@ -4,6 +4,7 @@
 #define OK_SYSCALL_ORIGIN_MODEL 1
 #define OK_PIPE_WRITE_SIGNAL_MODEL 1
 #include "native_clock_model.hpp"
+#include "native_pending_exit.hpp"
 #include <source_location>
 
 namespace
@@ -238,7 +239,7 @@ void permissions_and_lifecycle(Kernel &kernel)
     p->resources().personality=sched::UserPersonality::native;
     expect(kill(kernel,sender,g.peer,0)==0 && owners()==before);
     expect(kill(kernel,sender,g.peer,10)==0 && owners()==before+1 && native::private_signal_find(g.pid)->deferred_fatal==10);
-    native::private_signal_find(g.pid)->deferred_fatal=0;
+    native::forget_pending_exit(kernel, g.pid);
     p->resources().personality=sched::UserPersonality::linux;
     // SIGSTOP stops at generation (nothing is pending ahead of it); SIGCONT
     // continues and leaves a WCONTINUED report.
@@ -401,25 +402,27 @@ void blocked_fatal(Kernel &kernel)
     // A terminating default no thread can take now is the Linux fatal shortcut.
     expect(kill(kernel, sender, g.pid, 15) == 0 && native::private_signal_find(g.pid)->deferred_fatal == 15);
     expect(!shared(kernel, g).pending_mask().contains(15));
-    native::private_signal_find(g.pid)->deferred_fatal = 0;
+    native::forget_pending_exit(kernel, g.pid);
     for (auto &t : kernel.scheduler().find(g.pid)->thread_records()) t.native_signal_mask.set(10);
     expect(kill(kernel, sender, g.pid, 10) == 0 && shared(kernel, g).pending_mask().contains(10));
     const auto entries = mock::entries;
     expect(kill(kernel, sender, g.peer, 9) == 0);
     expect(kernel.scheduler().find(g.pid)->state() == sched::ProcessState::blocked);
     // Fatal service is independent of both frame readiness and wait admission.
-    native::private_process_signal_fatal(kernel);
+    native::deliver_pending_exits(kernel);
     expect(mock::entries == entries && kernel.scheduler().find(g.pid)->state() == sched::ProcessState::zombie);
     for (const auto &t : kernel.scheduler().find(g.pid)->thread_records()) expect(!t.native_active && !t.entry_stack.pool);
     retire(kernel, g); retire(kernel, sender);
-    // Self-kill publishes before the next step retires the current native image.
+    // Self-kill publishes a pending exit (spec 4.8): the caller's group exits
+    // at its next pick, before any of its threads is entered again.
     const auto self = create(kernel);
     expect(call(kernel, self, self.peer, lu::Operation::kill, {self.pid, 9}) == 0);
-    expect(thread(kernel, self.pid, self.peer).native_active);
-    native::started = true; mock::clock_fail = true;
-    expect(!native::step(kernel)); mock::clock_fail = false;
+    expect(thread(kernel, self.pid, self.peer).native_active && kernel.scheduler().exit_pending(self.pid));
+    native::started = true;
+    for (usize step = 0; step < 4 && kernel.scheduler().find(self.pid)->state() != sched::ProcessState::zombie; ++step)
+        static_cast<void>(native::step(kernel));
     expect(kernel.scheduler().find(self.pid)->state() == sched::ProcessState::zombie && mock::entries == entries);
-    // Clock failure after teardown is unrelated to signal lifetime.
+    expect(kernel.scheduler().find(self.pid)->wait_status() == 9);
     native::runtime_failure = Status::success(); retire(kernel, self);
 }
 } // namespace

@@ -1089,10 +1089,52 @@ Status resolve_scripts(Kernel &kernel, FixedString<256> &path, Arguments &argume
     }
 }
 } // namespace
+namespace
+{
+// An exec claim that ends without a commit thaws the group (spec 4.8): every
+// sibling kept its frame and continues.
+class ExecThaw final
+{
+  public:
+    ExecThaw(sched::SchedulerState &scheduler, sched::ProcessId pid, sched::ThreadId claimer)
+        : scheduler_(scheduler), pid_(pid), claimer_(claimer)
+    {
+    }
+    ~ExecThaw()
+    {
+        if (armed_) scheduler_.unfreeze(pid_, claimer_);
+    }
+    ExecThaw(const ExecThaw &) = delete;
+    ExecThaw &operator=(const ExecThaw &) = delete;
+    void disarm() { armed_ = false; }
+
+  private:
+    sched::SchedulerState &scheduler_;
+    sched::ProcessId pid_;
+    sched::ThreadId claimer_;
+    bool armed_{true};
+};
+} // namespace
 i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock *process,
                sched::ThreadId calling_tid, hw::AddressSpace &space, const std::array<uptr, 6> &a,
                bool &complete)
 {
+    // quiesce_group first (spec 4.8, 4.12): every other thread of the group
+    // leaves its CPU before anything is read, so nothing captured below
+    // needs revalidating after the wait, which releases the kernel lock.
+    // Another transition of the group returns this call to the boundary
+    // with its syscall pending: an exit or the winning exec ends this thread.
+    switch (quiesce_group(kernel, pid, calling_tid, sched::GroupTransition::exec))
+    {
+    case sched::QuiesceResult::quiesced:
+        break;
+    case sched::QuiesceResult::lost:
+        complete = false;
+        return 0;
+    case sched::QuiesceResult::departed:
+        return error(Status::no_process("exec caller's group departed"));
+    }
+    ExecThaw thaw{kernel.scheduler(), pid, calling_tid};
     FixedString<256> path;
     Arguments arguments;
     if (auto status = string_from_user(space, a[0], path); !status.ok())
@@ -1149,11 +1191,11 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     for (const auto &old_thread : process->thread_records())
         if (old_thread.entry_stack.pool) previous_signal_slots[previous_signal_count++] = old_thread.entry_stack.slot;
 #endif
-    // Everything that can refuse the exec runs while sibling threads still run
-    // on other CPUs. Evicting one discards its entry, so it would lose its user
-    // progress if the exec then failed: after eviction only commits remain,
-    // and those fail only on an invariant breach, which stops the runtime
-    // without resuming the caller's frame, so it receives no error.
+    // Every sibling is off its CPU and frozen with its frame kept: a refusal
+    // thaws the group (ExecThaw) and no sibling loses user progress. Past
+    // the preflights only commits remain, and those fail only on an
+    // invariant breach, which stops the runtime without resuming the
+    // caller's frame, so it receives no error.
     const auto stop = [&](Status status) -> i64 {
         static_cast<void>(image.value().retain_for_diagnosis());
         runtime_failure = status;
@@ -1168,10 +1210,7 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
         return error(status);
     // Every slot in place; a free one names no owner.
     const std::span<const sched::ThreadControlBlock> old_threads{&process->thread_slot(0), sched::max_threads_per_process};
-    EvictionPlan eviction;
-    if (auto status = prepare_eviction(pid, process->resources().native_space.root, old_threads, eviction); !status)
-        return error(status);
-    if (auto status = validate_evicted_leases(old_threads, eviction); !status) return error(status);
+    if (auto status = validate_quiesced_leases(old_threads); !status) return error(status);
     // These predict retirement and install steps whose failure is an invariant
     // breach that stops the runtime; finding it first stops it the same way.
     if (auto status = prepare_cancel_futex(pid); !status) return stop(status);
@@ -1179,21 +1218,21 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     if (auto status = prepare_linux_udp_receives_for_exec(pid); !status) return stop(status);
     if (auto status = syscall_origins.preflight_prepare(entry_plan.leader().handle); !status) return stop(status);
     if (auto status = vfs_continuations.preflight_prepare(entry_plan.leader().handle); !status) return stop(status);
-    // The point of no return: siblings leave the other CPUs, and replacement
-    // releases their leases. Exec is the caller's own syscall, so no kernel
-    // section of this process may still be pinned.
-    smp::check_drained(pid, "exec_image before eviction");
-    if (auto status = commit_eviction(kernel, eviction); !status) return stop(status);
-    // Only an exec that took other CPUs' entries over reports it (never on one CPU).
-    if (eviction.cpus)
+    // The commit check (spec 4.8): exit beats exec. A pending exit set while
+    // the claim waited (a kill, a sibling's exit_group) converts the claim,
+    // and this thread exits the group in place of the exec.
+    if (const auto superseded = kernel.scheduler().exec_superseded(pid, calling_tid))
     {
-        // Counted per CPU: std::popcount calls a libgcc helper that the
-        // mips64 kernel cannot link.
-        u64 evicted{};
-        for (smp::CpuId cpu = 0; cpu < smp::max_cpus; ++cpu) evicted += (eviction.cpus >> cpu) & 1;
-        emit("OK_NATIVE_EXEC_EVICT pid="); emit_number(pid); emit(" tid="); emit_number(calling_tid);
-        emit(" evicted="); emit_number(evicted); emit("\n");
+        thaw.disarm();
+        finish(kernel, pid, superseded->code, superseded->signal);
+        complete = false;
+        return 0;
     }
+    // The point of no return: replacement releases the siblings' leases.
+    // Every sibling left its CPU, so no kernel section of this process may
+    // still be pinned.
+    smp::check_drained(pid, "exec_image commit");
+    thaw.disarm();
     bool vfs_retired{};
     const auto replaced = commit_entry_stacks(entry_stacks, *process, entry_plan,
         [&] {
@@ -1232,10 +1271,10 @@ i64 exec_image(Kernel &kernel, sched::ProcessId pid, sched::ProcessControlBlock 
     {
         if (!replaced.committed)
         {
-            // The leases are back in their TCBs. Without an evicted sibling the
-            // old image simply continues; an evicted one lost its entry.
-            if (!eviction.cpus) return error(replaced.status);
-            return stop(replaced.status);
+            // The leases are back in their TCBs: the old image continues,
+            // its siblings thawed with their frames.
+            kernel.scheduler().unfreeze(pid, calling_tid);
+            return error(replaced.status);
         }
         // Exec cannot return to the old image after scheduler commit. Keep
         // both VM generations and every unreleased lease for diagnosis.
