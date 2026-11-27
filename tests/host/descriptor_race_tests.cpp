@@ -354,19 +354,43 @@ void pipe_no_lost_wake()
 
 // The AF_UNIX rights collection against a send (spec 4.13): one CPU passes
 // the read end of a pipe over a socket pair, another closes the receiving
-// socket and the passed descriptor. The send either fails (peer gone) or
-// queues the right; a right left on a stream nobody can read is collected.
-// Every round ends with the table and the pipes as they were.
+// socket and the passed descriptor, a third runs the collection. A right
+// stays in flight on a seed pair the whole time (reachable, never collected),
+// so every release runs the collection too: the collection's graph build
+// races the send's single ofd_table -> pipe hold. The send either fails (peer
+// gone) or queues the right; a right left on a stream nobody can read is
+// collected. Every round ends with the table and the pipes as they were.
 void unix_gc_versus_send()
 {
     Fixture f;
     const auto pid = f.process();
     auto &resources = f.resources(pid);
     constexpr usize rounds = 10000;
-    Barrier barrier{2};
+    // The seed: a pipe's read end in flight on a live pair.
+    auto seed = f.scheduler.create_unix_socketpair(resources);
+    auto seed_pipe = f.scheduler.create_pipe(resources);
+    CHECK(seed && seed_pipe);
+    {
+        const std::byte payload{0x5a};
+        const std::array<i32, 1> rights{seed_pipe.value()[0]};
+        CHECK(f.scheduler.send_unix_rights(resources, seed.value()[0], {&payload, 1}, rights));
+    }
+    const auto baseline = f.scheduler.open_description_count();
+    Barrier barrier{3};
     std::array<i32, 2> sockets{}, pipe_fds{};
-    std::atomic<usize> sent{0}, refused{0};
+    std::atomic<usize> sent{0}, refused{0}, collections{0};
     Order order;
+    std::thread collector([&] {
+        const smp::ScopedHostedCpu cpu{2};
+        for (usize round = 0; round < rounds; ++round)
+        {
+            barrier.arrive_and_wait();
+            delay(round, round & 1);
+            CHECK(f.scheduler.collect_unix_rights());
+            collections.fetch_add(1, std::memory_order_relaxed);
+            barrier.arrive_and_wait();
+        }
+    });
     std::thread closer([&] {
         const smp::ScopedHostedCpu cpu{1};
         for (usize round = 0; round < rounds; ++round)
@@ -401,15 +425,22 @@ void unix_gc_versus_send()
             barrier.arrive_and_wait();
             CHECK(f.scheduler.close_descriptor(resources, sockets[0]));
             CHECK(f.scheduler.close_descriptor(resources, pipe_fds[1]));
-            // Nothing is left: no description, no right, no buffer.
-            CHECK(f.scheduler.open_description_count() == f.baseline);
+            // Nothing of the round is left: no description, no right, no
+            // buffer; the seed's right is still in flight.
+            CHECK(f.scheduler.open_description_count() == baseline);
             CHECK(!f.scheduler.pipe_readiness(passed_pipe));
         }
     }
     closer.join();
-    CHECK(sent.load() > 0 && refused.load() > 0);
+    collector.join();
+    CHECK(sent.load() > 0 && refused.load() > 0 && collections.load() == rounds);
+    // The seed pair and its pipe go; the right in flight is collected with them.
+    for (const auto fd : {seed.value()[0], seed.value()[1], seed_pipe.value()[0], seed_pipe.value()[1]})
+        CHECK(f.scheduler.close_descriptor(resources, fd));
+    CHECK(f.scheduler.open_description_count() == f.baseline);
     expect_clean_checks();
-    std::printf("unix_gc_vs_send rounds=%zu sent=%zu refused=%zu\n", rounds, sent.load(), refused.load());
+    std::printf("unix_gc_vs_send rounds=%zu sent=%zu refused=%zu collections=%zu\n", rounds, sent.load(),
+                refused.load(), collections.load());
 }
 // tty commit retry (spec 4.13): two CPUs read one PTY master as prepare
 // (tty lock), copy-out (no lock) and commit (tty lock, revision check) while
