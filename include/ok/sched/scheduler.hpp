@@ -1099,7 +1099,19 @@ class SchedulerState
     {
         ClaimOutcome outcome{ClaimOutcome::departed};
         u32 kick{};
+        // An exit claim taken while a pending exit was already recorded: the
+        // kill came first, so the group exits with its status (Linux
+        // do_group_exit after SIGNAL_GROUP_EXIT).
+        std::optional<ExitRequest> owed{};
     };
+    // The claimer identity of a CPU that claims for no thread of the group
+    // (its kernel loop, a legacy scan's delivery): above every task id and
+    // distinct per CPU, so two such claims never take each other's for their
+    // own.
+    [[nodiscard]] static constexpr ThreadId kernel_claimer(smp::CpuId cpu)
+    {
+        return max_task_id + 1 + (cpu < smp::max_cpus ? cpu : smp::max_cpus);
+    }
     // `quiesced_only`: claim only when no other thread of the group is on a
     // CPU (a caller that must not wait), else busy and nothing changes.
     GroupClaim claim_transition(ProcessId pid, ThreadId claimer, GroupTransition kind,

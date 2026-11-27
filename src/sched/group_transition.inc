@@ -18,6 +18,7 @@ SchedulerState::GroupClaim SchedulerState::claim_transition(ProcessId pid, Threa
     if (slot->transition == GroupTransition::exit)
     {
         claim.outcome = slot->transition_tid == claimer ? ClaimOutcome::held : ClaimOutcome::exit_held;
+        if (claim.outcome == ClaimOutcome::held && slot->flagged(RunFlag::pending_exit)) claim.owed = slot->exit_request;
         return claim;
     }
     if (slot->transition == GroupTransition::exec)
@@ -26,7 +27,11 @@ SchedulerState::GroupClaim SchedulerState::claim_transition(ProcessId pid, Threa
         {
             // The exec claimer exits instead (its commit check found a
             // pending exit): the group stays frozen and quiesced.
-            if (kind == GroupTransition::exit) slot->transition = GroupTransition::exit;
+            if (kind == GroupTransition::exit)
+            {
+                slot->transition = GroupTransition::exit;
+                if (slot->flagged(RunFlag::pending_exit)) claim.owed = slot->exit_request;
+            }
             claim.outcome = ClaimOutcome::held;
             return claim;
         }
@@ -54,6 +59,8 @@ SchedulerState::GroupClaim SchedulerState::claim_transition(ProcessId pid, Threa
             }
     slot->transition = kind;
     slot->transition_tid = static_cast<u32>(claimer);
+    // A kill accepted before this exit claim decides the group's status.
+    if (kind == GroupTransition::exit && slot->flagged(RunFlag::pending_exit)) claim.owed = slot->exit_request;
     slot->set_flag(RunFlag::frozen, true);
     for (auto &thread : process.live_threads())
     {

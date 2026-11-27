@@ -12,6 +12,7 @@
 #include "ok/smp/bringup.hpp"
 
 #include <concepts>
+#include <optional>
 
 namespace ok::sched
 {
@@ -72,11 +73,13 @@ template <QuiesceHost Host> void wait_group_quiesced(SchedulerState &scheduler, 
 // another thread of the group and waits for them (W0: no spin lock held;
 // the kernel lock released meanwhile). An exit wanted while an exec runs
 // sets pending_exit and returns lost (exit beats exec at the exec's commit).
+// An exit claim stores in `owed` the status of a kill accepted before it.
 template <QuiesceHost Host>
 QuiesceResult quiesce_group(SchedulerState &scheduler, ProcessId pid, ThreadId claimer, GroupTransition kind,
-                            Host &host, ExitRequest request = {})
+                            Host &host, ExitRequest request = {}, std::optional<ExitRequest> *owed = nullptr)
 {
     const auto claim = scheduler.claim_transition(pid, claimer, kind, request);
+    if (owed && claim.owed) *owed = claim.owed;
     switch (claim.outcome)
     {
     case SchedulerState::ClaimOutcome::claimed:
