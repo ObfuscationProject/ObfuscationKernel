@@ -111,7 +111,7 @@ vtable, `VirtualFileSystem`, the ext4, FAT and simplefs providers,
   `RankedSpinLock<device>` held for memory and register work only (never
   across the transmit wait); `DeviceSignal::take` is one word exchange on
   the three SMP profiles; the drivers wait on their own bound line. The
-  stress probe gains RAM metadata (open, stat, rename, O_APPEND, unlink),
+  stress probe gains RAM metadata (create, lookup, rename, O_APPEND, unlink),
   pipe ping-pong, PTY echo and datagram socket rounds, which the runner
   requires.
 
@@ -132,9 +132,12 @@ vtable, `VirtualFileSystem`, the ext4, FAT and simplefs providers,
   the Ethernet executor's poll are not under it, because the TCP waits
   release descriptions (`ofd_table`, a lower rank) from inside the poll. WP7a
   has to split that release out before the poll can hold `net_stack`.
-- **No journalled ext4 per-mount gate.** The journalled mount keeps its
-  admission flags under `lock_` (busy on contention); wrapping its ~30 entry
-  points in a gate without nesting needs its own change.
+- **No journalled ext4 per-mount gate.** The journalled mount
+  (`Ext4MountedMetadata`, `Ext4OwnedTransaction`, include/ok/fs/ext4/) is
+  instantiated only by host and native tests; no kernel source under `src/`
+  mounts it, so nothing reaches it outside the provider gate of the mounted
+  ext4. It keeps its admission flags under its unranked `lock_` (busy on
+  contention). The gate belongs to the change that wires it into a mount.
 - **`drain_platform_irqs` keeps `require_exclusive`.** Bottom halves leave the
   BKL in WP7a; the running flag makes concurrent drains safe already.
 - **No loopback datagrams in the stress probe.** The native UDP service has
@@ -142,8 +145,10 @@ vtable, `VirtualFileSystem`, the ext4, FAT and simplefs providers,
   exercises socket admission, ephemeral bind, sends to the static link peer
   and close; a refused socket counts `udp_nolink`, and udp + udp_nolink must
   equal the rounds.
-- **stat on the RAM filesystem.** The scratch ext4 refuses stat (no
-  qualified stat policy), so the metadata round runs under /run.
+- **No stat in the metadata round.** The musl probe's stat returns
+  EOPNOTSUPP on the scratch ext4 and on /run alike in this boot, so the
+  round (under /run, the RAM filesystem the new locks cover) looks names up
+  with open and reads sizes as end-of-file offsets.
 - **pwrite with O_APPEND** still reads the size and writes (under the
   position lock and the BKL); its offset limit check comes before the write.
 - **The runtime's begin/resume pipe paths** keep their non-blocking attempt,
@@ -171,7 +176,58 @@ vtable, `VirtualFileSystem`, the ext4, FAT and simplefs providers,
   the frame; a full backlog is ENOBUFS; a link that refuses drops it),
   `linux_udp_receive_ownership_tests` (per-CPU scratch accessor), the VFS and
   ext4 admission tests (`operation_active()`, the gate's owner).
+- Behaviour change in two existing tests: a pipe wait holds its description,
+  so `dup2` over the waited slot drops a reference that is not the last and
+  wakes nobody (before, a spurious wake). `native_pipe_read_continuation`
+  now expects the wait to stay pending until A's data arrives;
+  `native_syscall_origin` checks that the wait stays pending and forces the
+  spurious completion itself, so its rearm checks still run.
+- `unix_rights_tests` (in `test_native_pty.py`) caught the send's and the
+  receive's reference-limit checks counting a right passed twice as one;
+  both now count each description's occurrences before any change.
 
 ## Validation
 
-See the end of this file once the gates ran.
+All guest runs are QEMU 10.2 TCG from the SysToolchain (`scope=hardware`
+means QEMU device execution); model tests are `scope=model`. Kernel sources
+of every run below equal f601e29's; the OS is b8dceae plus this package's
+OS patch. Logs: `~/.cache/smp-scaling/waveB/WP5/logs2/`.
+
+- **Hosted suite** (`--jobs 8`): 173 passed, 2 failed, 59 not run. The two
+  failures are the WP4 race runners' interleaving-coverage checks under the
+  suite's load (`wait_park_race_tests.cpp:178`, `wait_hash_tests.cpp:444`;
+  no lost wake). Both pass alone; under four concurrent runners
+  `wait_park_race` fails the same check on the start commit d7fde31 too, and
+  `wait_hash` (code WP5 does not touch) failed once on f601e29 and not on
+  d7fde31 in two rounds. New runners `test_descriptor_races.py` and
+  `test_transmit_backlog.py` pass, as do the adapted ones.
+- `test_net_runtime.py --sanitize`: 18/18 socket suites pass.
+- `xmake test`: `-smp 1` on the ten profiles and `-smp 2`/`4` on x86_64,
+  aarch64 and rv64, 16/16 `OK_TEST_PASS`.
+- **distro10** (native distribution, `--require-native`): ten profiles
+  PASS, every `OK_SMP_KERNEL_CHECKS` counter 0, `unqueued=0`.
+- **Gates** on x86_64, aarch64 and rv64: `--user-hotplug` debug at 2 and 4
+  vCPUs, release at 2 and 4, `PROBE=futex_smp_atomic` at 2,
+  `--smp_hotplug_test=y --require-hotplug` at 2, `SECTIONS=off` at 2; the CPU
+  sysfs probe at 4 on x86_64 and at 1 on arm32. All pass with every check
+  counter 0, `unqueued=0`, `max_lock_depth` 5 (debug) and 0 (release). Every
+  stress run counts metadata, pipes and ptys = 240 and `udp_nolink` = 240.
+  Two x86_64 first runs failed on an x86 restart under host load and passed
+  when rerun: uh2 (`chcpu -e` got EIO, the user-hotplug request counted
+  `failures=1`) and hot2 (`OK_SMP_HOTPLUG_FAILURE phase=restart reason="x86
+  secondary TSC was not synchronized"`, the same failure WP4d's hot2 logged).
+  A second hot2 attempt failed at boot with `OK_TSC_SYNC result=unsynced`
+  (secondary start failed before userland); the third passed. No run showed
+  a kernel failure line or a nonzero check counter.
+- `OK_SMP_LOCKS` at 4 vCPUs (debug): no class A contention (everything still
+  nests in the BKL); `fs_provider` 600 to 800 contended of about 81,000
+  (sections run ext4 file I/O without the BKL).
+- **OS runners** (SDK-only and distribution): `test_virtio_block.py`
+  (legacy and modern) on x86_64, aarch64 and rv64; `test_virtio_net.py`
+  (x86_64), `test_virtio_net_mmio.py` (aarch64, rv64); `test_static_udp.py`
+  and `test_virtio_poll.py` on the three; on x86_64
+  `test_native_udp_socket.py` (native sendto through the backlog to an
+  external peer), `test_persistent_ext4.py --require-native` and
+  `test_unix_rights.py` (two guest runs). All pass.
+- Not run: `test_unix_pathname.py` accepts only an ABI 65 SDK
+  (`--expected-abi` must be 65); there is no current consumer to run it.
