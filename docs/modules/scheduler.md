@@ -221,12 +221,19 @@ kernel lock released, waits until every sibling's `on_cpu` mirror reads
 second exec gets `exec_held` and returns to the boundary; an exit wanted
 while an exec runs sets `pending_exit` (exit beats exec at the exec's
 commit check, `exec_superseded`). A failed exec thaws the group
-(`unfreeze`). A kill never waits: `request_group_exit` sets `pending_exit`
+(`unfreeze`). A CPU that claims for no thread of the group (its kernel
+loop, a legacy scan's delivery) claims as `kernel_claimer(cpu)`, an
+identity above every task id, so two such claims never take each other's
+for their own. An exit claim taken while `pending_exit` is recorded returns
+that status (`GroupClaim::owed`): a kill accepted first decides how the
+group exits. A kill never waits: `request_group_exit` sets `pending_exit`
 with its status, probes and queues the parked threads and returns the CPUs
 to kick; the group's next picked thread exits it. Fork publishes its child
 with `publish_fork`, which refuses a parent with a pending exit under the
 task table, and no thread joins a group with a pending exit or a
-transition. `stopped_processes()` scans the slots' stop flags.
+transition. A syscall a frozen thread trapped stays pending with
+`syscall_deferred` (and its MIPS delay-slot exclusion in
+`syscall_delay_slot`), and its dispatch after a thaw is that trap's. `stopped_processes()` scans the slots' stop flags.
 
 The native step uses the queues on every profile, UP and `-smp 1` included
 (queue 0 only on one CPU), so threads run in FIFO order. `xmake f
