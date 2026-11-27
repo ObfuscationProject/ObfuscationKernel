@@ -81,6 +81,7 @@ def run_suite(args):
         files.update((root / 'src').rglob('*.hpp'))
         files.update((root / 'src').rglob('*.inc'))
         files.add(Path(__file__).resolve())
+        files.add(root / 'tests/host/race_coverage.hpp')
         for path in sorted(files):
             relative = str(path.relative_to(root))
             digest = sha(path)

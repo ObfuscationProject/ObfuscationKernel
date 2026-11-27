@@ -5,6 +5,7 @@
 // process keys, batched expiry and expiry racing completion on host threads.
 // Host threads stand in for CPUs; no guest runs (scope=model).
 #include "ok/sched/scheduler.hpp"
+#include "race_coverage.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -306,21 +307,27 @@ void scheduler_process_keys()
 // Expiry against completion on host threads: CPU 1 expires a wait's deadline
 // while CPU 0 completes the wait as ready. Exactly one of them completes it,
 // the heap never keeps the key, and each round's thread is queued once.
+// Rounds continue past the usual budget until both outcomes occurred
+// (race_coverage.hpp).
 void expiry_versus_completion()
 {
     Fixture f;
     const auto pid = f.process();
-    constexpr usize rounds = 20000;
-    std::atomic<u64> armed{0}, started{0}, done{0};
+    test::CoverageRounds rounds{20000, 200000};
+    std::atomic<u64> armed{0}, started{0}, done{0}, nudged{0};
+    std::atomic<bool> finished{false};
     WaitTicket shared{};
     std::atomic<usize> timeouts{0}, readies{0};
     std::thread expirer([&] {
         const smp::ScopedHostedCpu cpu{1};
-        for (u64 round = 1; round <= rounds; ++round)
+        for (u64 round = 1;; ++round)
         {
-            while (armed.load(std::memory_order_acquire) != round) std::this_thread::yield();
+            while (armed.load(std::memory_order_acquire) != round && !finished.load(std::memory_order_acquire))
+                std::this_thread::yield();
+            if (armed.load(std::memory_order_acquire) != round) break;
             started.store(round, std::memory_order_release);
             for (usize spin = 0; spin < (round % 5) * 30; ++spin) std::atomic_signal_fence(std::memory_order_seq_cst);
+            if (nudged.load(std::memory_order_relaxed) == round) test::nudge();
             std::array<u16, max_processes> due{};
             CHECK(f.scheduler.expire_deadlines(round * 10, due) == 0);
             done.store(round, std::memory_order_release);
@@ -328,8 +335,12 @@ void expiry_versus_completion()
     });
     {
         const smp::ScopedHostedCpu cpu{0};
-        for (u64 round = 1; round <= rounds; ++round)
+        for (u64 round = 1; rounds.next(readies.load() > 0 && timeouts.load() > 0); ++round)
         {
+            // A nudged extension round delays the expiry while no wait
+            // completed ready, else the completion.
+            const bool late = rounds.nudged();
+            if (late && readies.load() == 0) nudged.store(round, std::memory_order_relaxed);
             f.run(pid);
             auto wait = f.scheduler.register_current_wait(ThreadWaitReason::deadline, round);
             CHECK(wait);
@@ -341,6 +352,7 @@ void expiry_versus_completion()
             if (round % 2)
                 while (started.load(std::memory_order_acquire) != round) std::this_thread::yield();
             for (usize spin = 0; spin < (round % 4) * 20; ++spin) std::atomic_signal_fence(std::memory_order_seq_cst);
+            if (late && readies.load() != 0) test::nudge();
             const bool won = f.scheduler.complete_wait(shared, WaitCompletion::ready);
             while (done.load(std::memory_order_acquire) != round) std::this_thread::yield();
             const auto completion = f.thread(pid).wait_registration.completion();
@@ -351,10 +363,13 @@ void expiry_versus_completion()
             CHECK(f.thread(pid).state == ProcessState::runnable && f.thread(pid).queued_cpu != no_cpu);
         }
     }
+    finished.store(true, std::memory_order_release);
     expirer.join();
-    CHECK(readies.load() + timeouts.load() == rounds && readies.load() > 0 && timeouts.load() > 0);
+    std::printf("expiry_vs_completion rounds=%zu min_rounds=%zu ready=%zu timeout=%zu\n", rounds.rounds(),
+                rounds.minimum(), readies.load(), timeouts.load());
+    std::fflush(stdout);
+    CHECK(readies.load() + timeouts.load() == rounds.rounds() && readies.load() > 0 && timeouts.load() > 0);
     expect_clean_checks();
-    std::printf("expiry_vs_completion rounds=%zu ready=%zu timeout=%zu\n", rounds, readies.load(), timeouts.load());
 }
 } // namespace
 

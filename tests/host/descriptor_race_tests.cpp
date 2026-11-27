@@ -8,6 +8,7 @@
 // lock; the model checks that the fine locks alone keep them correct.
 #include "ok/fs/vfs.hpp"
 #include "ok/sched/scheduler.hpp"
+#include "race_coverage.hpp"
 
 #include <array>
 #include <atomic>
@@ -552,7 +553,9 @@ void ram_rename_versus_lookup()
         CHECK(vfs->create("/b", fs::NodeType::directory));
         CHECK(vfs->create("/a/d", fs::NodeType::directory));
     }
-    constexpr usize renames = 20000;
+    // Renames continue past the usual budget until lookups both found and
+    // missed the directory (race_coverage.hpp).
+    test::CoverageRounds renames{20000, 200000};
     std::atomic<bool> stop{false};
     std::atomic<usize> found{0}, missed{0}, moved{0};
     std::vector<std::thread> lookers;
@@ -589,22 +592,25 @@ void ram_rename_versus_lookup()
         });
     {
         const smp::ScopedHostedCpu cpu{1};
-        for (usize round = 0; round < renames; ++round)
+        while (renames.next(found.load() > 0 && missed.load() > 0))
         {
             CHECK(vfs->rename("/a/d", "/b/d"));
+            // A nudged extension round lets the lookers run mid-move.
+            if (renames.nudged()) test::nudge();
             CHECK(vfs->rename("/b/d", "/a/d"));
         }
         stop.store(true, std::memory_order_release);
     }
     for (auto &thread : lookers) thread.join();
+    std::printf("ram_rename_vs_lookup renames=%zu min_renames=%zu found=%zu missed=%zu moved=%zu\n",
+                2 * renames.rounds(), 2 * renames.minimum(), found.load(), missed.load(), moved.load());
+    std::fflush(stdout);
     {
         const smp::ScopedHostedCpu boot{0};
         CHECK(vfs->resolve({}, "/a/d") && !vfs->resolve({}, "/b/d"));
     }
     CHECK(found.load() > 0 && missed.load() > 0);
     expect_clean_checks();
-    std::printf("ram_rename_vs_lookup renames=%zu found=%zu missed=%zu moved=%zu\n", 2 * renames, found.load(),
-                missed.load(), moved.load());
 }
 // Atomic O_APPEND (spec 4.13, Node::append): two CPUs append 8-byte records
 // to one RAM file through the node, as two descriptions' O_APPEND writes do.

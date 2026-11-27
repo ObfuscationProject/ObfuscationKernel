@@ -6,6 +6,7 @@
 // poll against a waker, and wakes against owner releases. Host threads stand
 // in for CPUs; no AP starts, no IPI is sent and no guest runs (scope=model).
 #include "ok/sched/scheduler.hpp"
+#include "race_coverage.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -370,13 +371,23 @@ class Barrier
 // under that lock and wakes the channel while still holding it. Whichever
 // order they run in, the poll ends complete: either its check saw the
 // condition (it completes itself) or the waker found its entry. A wait still
-// pending after both finished is a lost wakeup.
+// pending after both finished is a lost wakeup. Rounds continue past the
+// usual budget until both outcomes occurred (race_coverage.hpp).
 void a3_insert_then_check()
 {
     Fixture f;
     const auto pid = f.process();
-    constexpr usize rounds = 20000;
+    test::CoverageRounds rounds{20000, 200000};
     constexpr u64 key = 77;
+    // A round's plan, published by the poller before the round's first gate.
+    enum : u8
+    {
+        run = 1,
+        link_first = 2,  // The waker waits for the poller's link.
+        poller_late = 4, // The poller is nudged before it arms.
+        waker_late = 8,  // The waker is nudged before it sets the condition.
+    };
+    std::atomic<u8> plan{0};
     smp::RankedSpinLock<smp::LockRank::pipe> object_lock{};
     bool condition = false; // Guarded by object_lock.
     Barrier barrier{2};
@@ -384,13 +395,15 @@ void a3_insert_then_check()
     std::atomic<usize> checked{0}, woken{0}, lost{0};
     std::thread waker([&] {
         const smp::ScopedHostedCpu cpu{1};
-        for (usize round = 1; round <= rounds; ++round)
+        for (usize round = 1;; ++round)
         {
             barrier.arrive_and_wait();
-            // Odd rounds let the poller link first; even ones race it.
-            if (round % 2)
+            const auto step = plan.load(std::memory_order_acquire);
+            if (!(step & run)) break;
+            if (step & link_first)
                 while (linked.load(std::memory_order_acquire) != round) std::this_thread::yield();
             for (usize spin = 0; spin < (round % 7) * 30; ++spin) std::atomic_signal_fence(std::memory_order_seq_cst);
+            if (step & waker_late) test::nudge();
             object_lock.lock();
             condition = true;
             f.scheduler.wake_waiters(ThreadWaitReason::pipe_read, key);
@@ -400,9 +413,20 @@ void a3_insert_then_check()
     });
     {
         const smp::ScopedHostedCpu cpu{0};
-        for (usize round = 1; round <= rounds; ++round)
+        for (usize round = 1;; ++round)
         {
+            const bool more = rounds.next(checked.load() > 0 && woken.load() > 0);
+            // Odd rounds let the poller link first; even ones race it. A
+            // nudged extension round delays the poller of a racing round
+            // while no poll saw the condition (the waker can then finish
+            // before the link), else the waker after the link.
+            u8 step = more ? run : 0;
+            if (rounds.nudged()) step |= checked.load() == 0 ? poller_late : waker_late | link_first;
+            else if (round % 2) step |= link_first;
+            plan.store(step, std::memory_order_release);
             barrier.arrive_and_wait();
+            if (!more) break;
+            if (step & poller_late) test::nudge();
             f.run(pid);
             auto wait = f.scheduler.register_current_wait(ThreadWaitReason::poll, 0);
             CHECK(wait);
@@ -436,14 +460,15 @@ void a3_insert_then_check()
         }
     }
     waker.join();
+    std::printf("a3_insert_then_check rounds=%zu min_rounds=%zu self_completed=%zu woken=%zu lost=%zu\n",
+                rounds.rounds(), rounds.minimum(), checked.load(), woken.load(), lost.load());
+    std::fflush(stdout);
     CHECK(lost.load() == 0);
     CHECK(f.scheduler.wait_channels().claimed() == 0);
     expect_clean_checks();
     // Both interleavings happened: some polls saw the condition at their
     // check, others slept and were completed through their entry.
     CHECK(checked.load() > 0 && woken.load() > 0);
-    std::printf("a3_insert_then_check rounds=%zu self_completed=%zu woken=%zu lost=0\n", rounds, checked.load(),
-                woken.load());
 }
 
 // Wakes against owner releases on one channel: four CPUs link and release
@@ -475,13 +500,16 @@ void wake_versus_release()
             while (!stop.load(std::memory_order_acquire))
                 taken.fetch_add(hash->take(pipe_read, 5, out).count, std::memory_order_relaxed);
         });
-    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    // Until both detach paths occurred (race_coverage.hpp).
+    const auto ran = test::run_until_covered(std::chrono::milliseconds(1500), std::chrono::seconds(30),
+                                             [&] { return owner_unlinks.load() > 0 && taken.load() > 0; });
     stop.store(true, std::memory_order_release);
     for (auto &thread : threads) thread.join();
+    std::printf("wake_vs_release ms=%zu owner_unlinks=%zu taken=%zu\n", ran, owner_unlinks.load(), taken.load());
+    std::fflush(stdout);
     CHECK(hash->claimed() == 0 && hash->linked(pipe_read, 5) == 0);
     CHECK(owner_unlinks.load() > 0 && taken.load() > 0);
     expect_clean_checks();
-    std::printf("wake_vs_release owner_unlinks=%zu taken=%zu\n", owner_unlinks.load(), taken.load());
 }
 } // namespace
 
