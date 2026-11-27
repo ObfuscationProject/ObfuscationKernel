@@ -574,6 +574,55 @@ void exec_drops_leader_hotplug_request(Kernel &kernel)
     smp::cpu_record(1).state.store(static_cast<u8>(smp::CpuState::offline));
 }
 
+// Kernel::kill_process's termination on CPU 0 (no thread of the group current)
+// while CPU 1 exits the group under its own claim (a legacy scan's delivery):
+// the second exit claim is CPU 1's (exit_held), so CPU 0 waits, releasing the
+// kernel lock, until CPU 1's exit completed; then the kill reports success
+// and the process can be reaped.
+void kill_waits_for_exit_in_flight(Kernel &kernel)
+{
+    smp::detail::online.store(0x3);
+    const auto g = create(kernel);
+    using Outcome = sched::SchedulerState::ClaimOutcome;
+    const auto cpu1 = sched::SchedulerState::kernel_claimer(other_cpu);
+    EXPECT(kernel.scheduler().claim_transition(g.pid, cpu1, sched::GroupTransition::exit).outcome == Outcome::claimed);
+    EXPECT(kernel.posix().activate(0));
+    std::atomic<bool> waiting{false};
+    std::thread cpu([&] {
+        const smp::ScopedHostedCpu hosted{other_cpu};
+        // CPU 0's termination released the kernel lock to wait.
+        while (!waiting.load(std::memory_order_acquire)) std::this_thread::yield();
+        smp::bkl_lock();
+        native::finish(kernel, g.pid, 0, 9);
+        smp::bkl_unlock();
+    });
+    smp::bkl_lock();
+    const auto before = smp::check_total(smp::KernelCheck::quiesce_timeouts);
+    waiting.store(true, std::memory_order_release);
+    const auto killed = native::terminate_native_process(kernel, g.pid, 9);
+    EXPECT(smp::kernel_lock.owned_by_current_cpu());
+    smp::bkl_unlock();
+    cpu.join();
+    EXPECT(killed.ok() && native::runtime_status().ok());
+    EXPECT(smp::check_total(smp::KernelCheck::quiesce_timeouts) == before);
+    EXPECT(process(kernel, g.pid).state() == sched::ProcessState::zombie && process(kernel, g.pid).wait_status() == 9);
+    EXPECT(kernel.scheduler().reap_process(g.pid));
+    // On one CPU nothing else could end that wait: the kill reports busy.
+    smp::detail::online.store(0x1);
+    const auto h = create(kernel);
+    EXPECT(kernel.scheduler().claim_transition(h.pid, cpu1, sched::GroupTransition::exit).outcome == Outcome::claimed);
+    EXPECT(kernel.posix().activate(0));
+    smp::bkl_lock();
+    EXPECT(native::terminate_native_process(kernel, h.pid, 9).code() == StatusCode::busy);
+    smp::bkl_unlock();
+    EXPECT(process(kernel, h.pid).state() != sched::ProcessState::zombie);
+    {
+        const smp::ScopedHostedCpu hosted{other_cpu};
+        native::finish(kernel, h.pid, 0, 9);
+    }
+    EXPECT(process(kernel, h.pid).state() == sched::ProcessState::zombie && kernel.scheduler().reap_process(h.pid));
+}
+
 // The sibling's actual step on CPU 1 (spec 4.8). It picks the sibling,
 // enters user mode through enter_unlocked, which releases the kernel lock
 // around the mock entry, and stays there until the group is frozen; then the
@@ -795,6 +844,7 @@ int main()
     exec_drops_leader_hotplug_request(kernel);
     exit_group_after_kill_reports_kill(kernel);
     kernel_claimers_are_distinct(kernel);
+    kill_waits_for_exit_in_flight(kernel);
     // The sibling's own step from here on (the runtime's user entry).
     native::shared_capture.set_entry(native::enter_unlocked);
     for (const auto kind : {hw::TrapKind::syscall, hw::TrapKind::timer, hw::TrapKind::page_fault})
