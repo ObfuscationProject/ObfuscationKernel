@@ -331,14 +331,23 @@ bool group_frozen(u64 pid) noexcept;
 // Claims exec or exit for `claimer` and waits, the kernel lock released,
 // until no other thread of the group runs on a CPU.
 sched::QuiesceResult quiesce_group(Kernel &kernel, sched::ProcessId pid, sched::ThreadId claimer,
-                                   sched::GroupTransition kind, sched::ExitRequest request = {});
+                                   sched::GroupTransition kind, sched::ExitRequest request = {},
+                                   std::optional<sched::ExitRequest> *owed = nullptr);
 // A kill or fatal decision that never waits: pending_exit, probes, queue
 // entries for parked threads and kicks for running ones (spec 4.8).
 void request_group_exit(Kernel &kernel, sched::ProcessId pid, sched::ExitRequest request);
 // finish's quiesce: false when the exit is left to the group (another exit
 // claims it, an exec runs, or the caller is a thread of another process and
 // the group exits at its next pick).
-bool quiesce_for_exit(Kernel &kernel, sched::ProcessId pid, i32 code, u8 signal);
+// A kill accepted before the exit claim replaces `request` with its status.
+bool quiesce_for_exit(Kernel &kernel, sched::ProcessId pid, sched::ExitRequest &request);
+// On a CPU that runs no thread of `pid` and holds the kernel lock: waits,
+// releasing it between checks, until the group another CPU exits completed.
+// False on one CPU or without the kernel lock (nothing would end the wait).
+bool wait_group_completed(Kernel &kernel, sched::ProcessId pid);
+// The status a recorded kill or fatal decision owes: the signal state names
+// its signal (SIGKILL wins) and is consumed.
+sched::ExitRequest owed_exit(sched::ProcessId pid, sched::ExitRequest request);
 // Every lease of a quiesced group is inactive.
 Status validate_quiesced_leases(std::span<const sched::ThreadControlBlock> threads);
 // The delivery point (spec 4.8): a picked thread of a process with a pending

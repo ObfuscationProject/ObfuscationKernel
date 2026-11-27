@@ -96,10 +96,11 @@ bool group_frozen(u64 pid) noexcept
 }
 
 sched::QuiesceResult quiesce_group(Kernel &kernel, sched::ProcessId pid, sched::ThreadId claimer,
-                                   sched::GroupTransition kind, sched::ExitRequest request)
+                                   sched::GroupTransition kind, sched::ExitRequest request,
+                                   std::optional<sched::ExitRequest> *owed)
 {
     RuntimeQuiesceHost host;
-    return sched::quiesce_group(kernel.scheduler(), pid, claimer, kind, host, request);
+    return sched::quiesce_group(kernel.scheduler(), pid, claimer, kind, host, request, owed);
 }
 
 void request_group_exit(Kernel &kernel, sched::ProcessId pid, sched::ExitRequest request)
@@ -107,12 +108,12 @@ void request_group_exit(Kernel &kernel, sched::ProcessId pid, sched::ExitRequest
     kick(kernel.scheduler().request_group_exit(pid, request));
 }
 
-bool quiesce_for_exit(Kernel &kernel, sched::ProcessId pid, i32 code, u8 signal)
+bool quiesce_for_exit(Kernel &kernel, sched::ProcessId pid, sched::ExitRequest &request)
 {
     const auto cpu = smp::current_cpu();
-    const sched::ExitRequest request{code, signal};
     const auto &slot = kernel.scheduler().cpu_slot(cpu < smp::max_cpus ? cpu : 0);
     const bool own = cpu < smp::max_cpus && slot.occupied() && slot.pid == pid;
+    std::optional<sched::ExitRequest> owed{};
     if (cpu < smp::max_cpus && slot.occupied() && !own && slot.process &&
         slot.process->execution() == sched::ProcessExecution::user_process)
     {
@@ -120,7 +121,9 @@ bool quiesce_for_exit(Kernel &kernel, sched::ProcessId pid, i32 code, u8 signal)
         // 4.8). It exits a group none of whose threads is on a CPU (a fork
         // child it undoes) at once; any other group gets a pending exit,
         // which one of its own threads applies at its next pick.
-        const auto claim = kernel.scheduler().claim_transition(pid, 0, sched::GroupTransition::exit, request, true);
+        const auto claim = kernel.scheduler().claim_transition(pid, sched::SchedulerState::kernel_claimer(cpu),
+                                                               sched::GroupTransition::exit, request, true);
+        if (claim.owed) request = owed_exit(pid, *claim.owed);
         switch (claim.outcome)
         {
         case sched::SchedulerState::ClaimOutcome::claimed:
@@ -135,9 +138,52 @@ bool quiesce_for_exit(Kernel &kernel, sched::ProcessId pid, i32 code, u8 signal)
         }
     }
     // A thread of the group claims for itself; a CPU that runs no user
-    // thread (its kernel loop, boot) claims for none: nothing waits for it.
-    const sched::ThreadId claimer = own ? slot.tid : 0;
-    return quiesce_group(kernel, pid, claimer, sched::GroupTransition::exit, request) != sched::QuiesceResult::lost;
+    // thread (its kernel loop, boot, a legacy scan's delivery) claims for no
+    // thread: nothing waits for it. Its identity is its CPU's, so a second
+    // such claim of the group is another's (exit_held), never its own.
+    const sched::ThreadId claimer = own ? slot.tid : sched::SchedulerState::kernel_claimer(cpu);
+    const auto result = quiesce_group(kernel, pid, claimer, sched::GroupTransition::exit, request, &owed);
+    if (owed) request = owed_exit(pid, *owed);
+    return result != sched::QuiesceResult::lost;
+}
+
+bool wait_group_completed(Kernel &kernel, sched::ProcessId pid)
+{
+    auto done = [&] {
+        const auto *process = kernel.scheduler().find(pid);
+        return !process || process->state() == sched::ProcessState::zombie ||
+               process->state() == sched::ProcessState::exited;
+    };
+    if (done()) return true;
+    // Only another CPU can hold the group's claim; on one CPU nothing would
+    // end this wait.
+    if (smp::online_cpus() < 2) return false;
+    static_cast<void>(smp::check_class_wait("group completion wait under a spin lock"));
+    RuntimeQuiesceHost host;
+    const bool held = host.kernel_lock_held();
+    auto mark = host.now_ns();
+    // The state is read under the kernel lock, which the claimer needs to
+    // finish: release it between reads.
+    while (!done())
+    {
+        if (!held) return false;
+        host.release_kernel_lock();
+        {
+            const smp::SpinningScope spinning;
+            for (usize spin = 0; spin < 64; ++spin)
+            {
+                host.serve();
+                arch::ArchOperations{}.spin_pause();
+            }
+        }
+        host.retake_kernel_lock();
+        if (const auto now = host.now_ns(); now - mark >= sched::quiesce_report_ns)
+        {
+            smp::count_check(smp::KernelCheck::quiesce_timeouts, "group completion waited 2 s");
+            mark = now;
+        }
+    }
+    return true;
 }
 
 Status validate_quiesced_leases(std::span<const sched::ThreadControlBlock> threads)
