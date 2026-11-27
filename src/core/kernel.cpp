@@ -720,9 +720,10 @@ Status Kernel::poll_network()
     if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
     if (network_poll_active_) return Status::busy("Ethernet poll is not reentrant");
     {
-        // Frames a send could not hand to the NIC go first, in order.
+        // Frames a send could not hand to the NIC go first, in order; what
+        // the ring still refuses is offered again after this pass reaped it.
         const smp::RankedSpinLock<smp::LockRank::net_stack>::Guard stack(net_stack_);
-        if (!flush_transmit_backlog_locked()) interrupt::post_event(interrupt::EventSource::network);
+        static_cast<void>(flush_transmit_backlog_locked());
     }
     struct PollScope
     {
@@ -801,6 +802,13 @@ Status Kernel::poll_network()
     const auto state = native_ethernet_executor_.state();
     if (state.receive_backlog)
         interrupt::post_event(EventSource::network);
+    {
+        // The pass reaped finished transmits: the backlog gets the freed
+        // ring slots now. Frames the ring still refuses wait for the next
+        // pass (a transmit completion or the idle tick), not a busy loop.
+        const smp::RankedSpinLock<smp::LockRank::net_stack>::Guard stack(net_stack_);
+        static_cast<void>(flush_transmit_backlog_locked());
+    }
     if (network_probe_.armed() && !state.retired)
         network_probe_.step(network_interface_, native_tcp_, now, iss,
                             [](std::string_view text) {
