@@ -201,7 +201,10 @@ void group_and_release_retirement(Kernel &kernel)
         if (terminated)
         {
             CHECK(native::private_process_kill(kernel,process(kernel,g),g.pid,9)==0);
-            expect(!native::step(kernel)); // Fatal cleanup also performs real orphan reaping.
+            // The kill sets a pending exit (spec 4.8): the step picks the
+            // thread, which exits the group at the delivery point; the next
+            // step's real orphan reaping removes it and finds nothing to run.
+            expect(native::step(kernel) && !native::step(kernel));
             expect(kernel.scheduler().find(g.pid)==nullptr && kernel.scheduler().find_thread(g.pid,g.pid)==nullptr);
         }
         else
