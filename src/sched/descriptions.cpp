@@ -113,6 +113,14 @@ Status PinnedDescription::reset()
     if (!owner || !std::exchange(referenced_, false)) return {};
     return owner->release_description(id);
 }
+PinnedDescription::~PinnedDescription()
+{
+    // The pin may hold the last reference (a sibling closed the slot): a
+    // failed provider, socket or PTY release is recorded like a close's.
+    auto *owner = owner_;
+    const auto id = id_;
+    if (auto status = reset(); !status && owner) owner->record_resource_failure(status, -1, id, 0, false);
+}
 
 void SchedulerState::count_pipe_endpoints(const OpenFileDescription &description, int delta)
 {
@@ -198,15 +206,20 @@ Status SchedulerState::retain_description(u16 id)
     // it, so nothing retains it meanwhile.
     if (auto status = first->retain(); !status.ok())
         return status;
-    const OfdGuard table(ofd_table_);
-    auto *open = open_description(id);
-    if (!open || open->node != first)
     {
-        smp::count_check(smp::KernelCheck::audit_repairs, "description changed during its first retain");
-        return Status::busy("open description changed during its first retain");
+        const OfdGuard table(ofd_table_);
+        auto *open = open_description(id);
+        if (open && open->node == first)
+        {
+            if (!open->references++) count_pipe_endpoints(*open, +1);
+            return Status::success();
+        }
     }
-    if (!open->references++) count_pipe_endpoints(*open, +1);
-    return Status::success();
+    // The description changed meanwhile: give the node reference back,
+    // again outside the table lock.
+    smp::count_check(smp::KernelCheck::audit_repairs, "description changed during its first retain");
+    record_resource_failure(first->release(), -1, id, 0, false);
+    return Status::busy("open description changed during its first retain");
 }
 Status SchedulerState::release_description(u16 id)
 {

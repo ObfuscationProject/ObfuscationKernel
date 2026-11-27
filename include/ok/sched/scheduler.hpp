@@ -610,7 +610,7 @@ class PinnedDescription final
     PinnedDescription(const PinnedDescription &) = delete;
     PinnedDescription &operator=(const PinnedDescription &) = delete;
     PinnedDescription &operator=(PinnedDescription &&) = delete;
-    ~PinnedDescription() { reset(); }
+    ~PinnedDescription();
     [[nodiscard]] OpenFileDescription *get() const noexcept { return open_; }
     [[nodiscard]] OpenFileDescription *operator->() const noexcept { return open_; }
     [[nodiscard]] explicit operator bool() const noexcept { return open_ != nullptr; }
@@ -630,6 +630,9 @@ class PinnedDescription final
 // Construction and dispatch are protected for use by BasicScheduler.
 class SchedulerState
 {
+    // Records the status of a last release it runs when it goes.
+    friend class PinnedDescription;
+
   protected:
     SchedulerState();
     ~SchedulerState() = default;
