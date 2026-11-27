@@ -7,6 +7,7 @@
 // CPUs; no AP starts, no IPI is sent and no guest runs (scope=model).
 #include "ok/sched/group_quiesce.hpp"
 #include "ok/smp/kernel_lock.hpp"
+#include "race_coverage.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -145,7 +146,9 @@ bool model_frozen(u64 pid) noexcept { return frozen_scheduler && frozen_schedule
 // it, then the post-user relock and its frozen check, which skips dispatch
 // and goes to put_prev. The claimer's wait releases the kernel lock; without
 // that the siblings could never reach put_prev. Each round ends with the
-// exec-failure thaw: every sibling is queued again, none was lost.
+// exec-failure thaw: every sibling is queued again, none was lost. Rounds
+// continue past the usual budget until every path occurred
+// (race_coverage.hpp).
 void exec_quiesces_user_siblings()
 {
     Fixture f;
@@ -153,7 +156,7 @@ void exec_quiesces_user_siblings()
     const ThreadId tids[] = {pid, f.add_thread(pid), f.add_thread(pid), f.add_thread(pid)};
     frozen_scheduler = &f.scheduler;
     smp::bkl_frozen_check = model_frozen;
-    constexpr usize rounds = 4000;
+    test::CoverageRounds rounds{4000, 40000};
     std::atomic<bool> stop{false};
     std::atomic<usize> frozen_skips{0}, dispatches{0}, released{0}, waited{0};
     std::vector<std::thread> siblings;
@@ -189,7 +192,10 @@ void exec_quiesces_user_siblings()
         const smp::ScopedHostedCpu hosted{0};
         ModelHost host{&released};
         usize round = 0;
-        while (round < rounds)
+        const auto covered = [&] {
+            return waited.load() > 0 && released.load() > 0 && frozen_skips.load() > 0 && dispatches.load() > 0;
+        };
+        while (round < rounds.rounds() || rounds.next(covered()))
         {
             smp::bkl_lock();
             const auto picked = f.scheduler.pick(0);
@@ -224,11 +230,18 @@ void exec_quiesces_user_siblings()
             smp::bkl_unlock();
             // The siblings' picks and user stretches overlap the next claim.
             for (usize i = 0; i < (round % 7) * 600; ++i) std::atomic_signal_fence(std::memory_order_seq_cst);
-            std::this_thread::yield();
+            // A nudged extension round leaves the siblings time to pick and
+            // enter their user stretches before the next claim.
+            if (rounds.nudged()) test::nudge();
+            else std::this_thread::yield();
         }
     }
     stop.store(true, std::memory_order_release);
     for (auto &sibling : siblings) sibling.join();
+    std::printf("exec_quiesce rounds=%zu min_rounds=%zu waited=%zu released=%zu frozen_skips=%zu dispatches=%zu\n",
+                rounds.rounds(), rounds.minimum(), waited.load(), released.load(), frozen_skips.load(),
+                dispatches.load());
+    std::fflush(stdout);
     for (const auto tid : tids)
     {
         CHECK(f.thread(pid, tid).on_cpu == no_cpu && f.entries(pid, tid) == 1);
@@ -241,8 +254,6 @@ void exec_quiesces_user_siblings()
     // The kernel lock was released for siblings in user mode, and some of
     // them came back to find their group frozen.
     CHECK(waited.load() > 0 && released.load() > 0 && frozen_skips.load() > 0 && dispatches.load() > 0);
-    std::printf("exec_quiesce rounds=%zu waited=%zu released=%zu frozen_skips=%zu dispatches=%zu\n", rounds,
-                waited.load(), released.load(), frozen_skips.load(), dispatches.load());
 }
 
 // A sibling held in user mode by CPU 1 until the test lets it return.
@@ -463,13 +474,18 @@ void sigcont_with_probe()
 // a child and publishes it under the task table after checking its parent.
 // Whatever the order, no published child of a killed parent escapes: each
 // one either was enumerated (it has pending_exit) or its publish saw the
-// parent's pending exit and was undone.
+// parent's pending exit and was undone. Rounds continue past the usual
+// budget until both outcomes occurred (race_coverage.hpp).
 void fork_versus_group_kill()
 {
-    constexpr usize rounds = 2000;
+    test::CoverageRounds rounds{2000, 20000};
     usize refused = 0, killed_children = 0;
-    for (usize round = 0; round < rounds; ++round)
+    for (usize round = 0; rounds.next(refused > 0 && killed_children > 0); ++round)
     {
+        // A nudged extension round delays the fork while no publish was
+        // refused, else the kill.
+        const bool nudged = rounds.nudged();
+        const bool fork_late = nudged && refused == 0, kill_late = nudged && refused != 0;
         Fixture f;
         const auto parent = f.process();
         std::atomic<bool> go{false};
@@ -478,6 +494,7 @@ void fork_versus_group_kill()
         std::thread forker([&] {
             const smp::ScopedHostedCpu hosted{0};
             while (!go.load(std::memory_order_acquire)) {}
+            if (fork_late) test::nudge();
             auto made = f.scheduler.fork_process(parent, false);
             CHECK(made);
             f.thread(made.value()).native_active = true;
@@ -488,6 +505,7 @@ void fork_versus_group_kill()
             const smp::ScopedHostedCpu hosted{1};
             while (!go.load(std::memory_order_acquire)) {}
             if (round % 3 == 0) std::this_thread::yield();
+            if (kill_late) test::nudge();
             const TaskTableLock::Guard table{f.scheduler.task_table_lock()};
             std::array<ProcessId, max_processes> members{};
             usize count = 0;
@@ -513,9 +531,11 @@ void fork_versus_group_kill()
             ++killed_children;
         }
     }
+    std::printf("fork_vs_group_kill rounds=%zu min_rounds=%zu refused=%zu killed_children=%zu\n", rounds.rounds(),
+                rounds.minimum(), refused, killed_children);
+    std::fflush(stdout);
     expect_clean_checks();
     CHECK(refused > 0 && killed_children > 0);
-    std::printf("fork_vs_group_kill rounds=%zu refused=%zu killed_children=%zu\n", rounds, refused, killed_children);
 }
 
 // stop/continue against wakes (spec 4.9): CPU 1 runs the thread and parks it
@@ -569,11 +589,17 @@ void stop_continue_versus_wake()
             CHECK(f.scheduler.continue_process(pid));
         }
     });
-    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    // Until every side made progress (race_coverage.hpp).
+    const auto ran = test::run_until_covered(std::chrono::milliseconds(1500), std::chrono::seconds(30), [&] {
+        return picks.load() > 100 && wakes.load() > 100 && stops.load() > 100;
+    });
     stop.store(true, std::memory_order_release);
     runner.join();
     waker.join();
     job.join();
+    std::printf("stop_continue_vs_wake ms=%zu picks=%zu wakes=%zu stops=%zu\n", ran, picks.load(), wakes.load(),
+                stops.load());
+    std::fflush(stdout);
     const auto &thread = f.thread(pid);
     CHECK(thread.on_cpu == no_cpu);
     if (thread.state == ProcessState::runnable) CHECK(f.entries(pid, pid) == 1);
@@ -581,7 +607,6 @@ void stop_continue_versus_wake()
     CHECK(f.scheduler.audit_queues() == 0);
     expect_clean_checks();
     CHECK(picks.load() > 100 && wakes.load() > 100 && stops.load() > 100);
-    std::printf("stop_continue_vs_wake picks=%zu wakes=%zu stops=%zu\n", picks.load(), wakes.load(), stops.load());
 }
 } // namespace
 
