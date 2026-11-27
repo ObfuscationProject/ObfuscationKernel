@@ -35,7 +35,11 @@ its review). The module ABI is not bumped.
   checked, the step asks it under the post-user relock. A frozen thread skips
   trap handling, sections and dispatch: a trapped syscall stays pending (the
   frame keeps it), a timer tick is counted, a fault is taken again later, and
-  `put_prev` takes the thread off its CPU without queueing it.
+  `put_prev` takes the thread off its CPU without queueing it. A kept
+  syscall carries `syscall_deferred` and its MIPS branch-delay-slot exclusion
+  (`syscall_delay_slot`) in its TCB: after a thaw it is dispatched as the
+  trap it was (never with a stored hotplug result, the delay-slot exclusion
+  intact, not admitted to a section).
 - **Exec** (`loader.cpp`): `quiesce_group(exec)` first, before anything is
   read from user memory, so nothing captured before the wait needs
   revalidating. Every refusal thaws the group (`ExecThaw` →
@@ -48,10 +52,23 @@ its review). The module ABI is not bumped.
   exec claim with its commit.
 - **Exit** (`finish` in `src/user/runtime.cpp`, `quiesce_for_exit` in
   `smp.cpp`): a thread of the group claims exit for itself and waits; a CPU
-  that runs no user thread (its kernel loop: `Kernel::kill_process`, boot)
-  claims for no thread and may wait, since nothing waits for it; a thread of
-  another process never waits: it finishes a group none of whose threads is
-  on a CPU at once (a fork child it undoes) and otherwise sets a pending exit.
+  that runs no user thread (its kernel loop: `Kernel::kill_process`, boot, a
+  legacy scan's delivery) claims as `kernel_claimer(cpu)`, an identity above
+  every task id and distinct per CPU, and may wait, since nothing waits for
+  it; a thread of another process never waits: it finishes a group none of
+  whose threads is on a CPU at once (a fork child it undoes) and otherwise
+  sets a pending exit. An exit claim taken while a pending exit is recorded
+  exits with that status (`GroupClaim::owed`, then the signal state's
+  record, as at the delivery point): an `exit_group(0)` that loses the race
+  with an accepted SIGKILL reports the kill (Linux `do_group_exit` after
+  `SIGNAL_GROUP_EXIT`).
+- **Rescue kill** (`terminate_native_process`, called by
+  `Kernel::kill_process` on CPU 0's kernel loop). It finishes the group under
+  its own CPU's claim. If another CPU's transition holds the group (an exit,
+  or an exec that the kill now ends at its commit check), it waits, releasing
+  the BKL between checks, until that CPU completed the exit, so the rescue
+  command can reap; on one CPU, where nothing could end that wait, it returns
+  `busy`.
 - **Pending exit and the delivery point.** `request_group_exit` (under the
   target's `task`): `pending_exit` with its status (SIGKILL overrides an
   earlier fatal default), a probe on every waiting thread, a queue entry for
@@ -89,7 +106,13 @@ its review). The module ABI is not bumped.
   (the owner check at park). Generation's "qualified" decision and the
   timer admission use the recorded class (`private_wait_interruptible`); for
   a parked thread the old predicate `private_signal_admit_blocked` runs as its
-  shadow, and a disagreement counts `admit_shadow_mismatch`.
+  shadow, and a disagreement counts `admit_shadow_mismatch`. Because the
+  owner records the class with that same predicate at park, the shadow
+  compares the predicate with itself on the same objects at two times: it
+  checks that a parked thread's wait objects did not change (only its owner
+  or a quiescer may change them), not that an independently recorded class
+  agrees with the predicate. `admit_shadow_mismatch = 0` is evidence for that
+  invariant only.
 - **The signal audit.** The per-step probe scan (`probe_interrupted_waits`)
   is gone. Every 256th CPU 0 pass, next to the queue audit, the same scan
   runs as an audit (`audit_signal_probes`): a parked, unprobed thread whose
@@ -103,8 +126,13 @@ its review). The module ABI is not bumped.
 - **Lifetime operations** (spec 4.12). Fork publishes its child with
   `publish_fork`: under the task table, the parent's task lock refuses a
   parent with a pending exit or an exit claim; the child is undone and the
-  call stays pending (the parent exits at its next pick). A thread can no
-  longer join a group with a pending exit or a transition
+  call stays pending (the parent exits at its next pick). Before the
+  publication, a Linux parent whose calling thread has an unblocked pending
+  signal with a terminating default (a `kill(-pgrp, SIGTERM)` queued while
+  it ran user code) is condemned (`private_fork_condemn`: `deferred_fatal`
+  and the pending exit, as generation's fatal shortcut), so the child is
+  undone (Linux `copy_process` refuses a fork with a signal pending). A
+  thread can no longer join a group with a pending exit or a transition
   (`create_thread_prepared` gives `interrupted`).
 - **Deleted**: `prepare_eviction`, `commit_eviction`, `evict_thread`,
   `validate_evicted_leases`, `EvictionPlan`, `cpu_entries` and their
@@ -141,6 +169,20 @@ its review). The module ABI is not bumped.
   (`quiesced_only`); otherwise it becomes a pending exit.
 - **Fork restart.** An aborted fork publication leaves the call pending
   rather than restarting it: its parent exits before it returns to user mode.
+  The spec aborts on any "pending group-fatal signal"; the code condemns a
+  parent with a pending terminating default at publication and then aborts
+  on the pending exit. A pending *caught* signal does not abort the fork (no
+  `-ERESTARTNOINTR` restart exists): the child is published and does not
+  receive a group signal sent before it existed (left for WP7b).
+- **Rescue kill waits.** Spec 4.8 has `Kernel::kill_process` use the
+  pending-exit path. It still finishes the target synchronously on CPU 0's
+  kernel loop, which runs no thread of any group and holds only the BKL,
+  released while it waits, so no wait chain can form through it; with a
+  transition of the group in flight it waits for that CPU's exit to
+  complete (above), keeping the rescue command's immediate reap.
+- **The shadow checks unchanged objects, not an independent class** (see
+  the interruptible class above): recording the class at the 22 arm sites
+  is left for WP7b, which deletes the predicate.
 - **No `exiting` run flag** is set; the exit claim marks the transition.
 - **No `admit_shadow_skipped` counter**: armed threads are decided by their
   record without a shadow, and no new evidence field was added.
