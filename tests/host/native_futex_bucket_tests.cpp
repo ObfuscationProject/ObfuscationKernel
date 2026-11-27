@@ -209,6 +209,26 @@ void signal_against_wake(Kernel &kernel)
     CHECK(native::interrupt_futex_wait(kernel, record(timed), publish) == native::FutexInterrupt::completed);
     CHECK(published == 1 && record(timed).bucket == none);
     CHECK(resume(kernel, group, 1) == i64{-110});
+    // A timed wait is interrupted before its EINTR is published: an expiry
+    // that lands during the publication (no kernel lock once the step leaves
+    // it) finds the wait complete and cannot make the signal fail.
+    const auto racing = wait(kernel, group, 1, base, true);
+    const auto expiring = [&] {
+        ++published;
+        expire(kernel, mock::now + 17);
+        return true;
+    };
+    CHECK(native::interrupt_futex_wait(kernel, record(racing), expiring) == native::FutexInterrupt::interrupted);
+    CHECK(published == 2 && completion(kernel, group, 1) == sched::WaitCompletion::interrupted);
+    CHECK(record(racing).bucket == none);
+    CHECK(native::cancel_futex(kernel, racing, "interrupted", -4));
+    // A timed wait whose publication fails is already interrupted; the
+    // caller stops the runtime.
+    const auto unpublished = wait(kernel, group, 1, base, true);
+    CHECK(native::interrupt_futex_wait(kernel, record(unpublished), [] { return false; }) ==
+          native::FutexInterrupt::failed);
+    CHECK(completion(kernel, group, 1) == sched::WaitCompletion::interrupted);
+    CHECK(native::cancel_futex(kernel, unpublished));
     // A failed publication leaves the wait pending and reports it.
     const auto lost = wait(kernel, group, 1, base);
     CHECK(native::interrupt_futex_wait(kernel, record(lost), [] { return false; }) == native::FutexInterrupt::failed);

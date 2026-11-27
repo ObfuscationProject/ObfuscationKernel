@@ -1086,13 +1086,19 @@ enum class FutexInterrupt : u8
     failed,      // The publication or the interrupt failed.
 };
 // The signal side of spec 4.5, at the owner's probed dispatch. Under the
-// bucket that lists the wait, it leaves the queue; while it is still pending
-// `publish` writes the interrupted call's outcome into the owner's frame
-// (its syscall origin validates only while the wait is pending) and the
-// ticket is interrupted. A wait some other completion reached first is left
-// to the resume, which produces that result; the signal stays pending. With
-// the kernel lock held no timeout expires between the pending check and the
-// interrupt, so `failed` means a lost publication (the runtime stops).
+// bucket that lists the wait, it leaves the queue, and while it is still
+// pending `publish` writes the interrupted call's outcome into the owner's
+// frame and the ticket is interrupted. A wait some other completion reached
+// first is left to the resume, which produces that result; the signal stays
+// pending. `failed` means a lost publication (the runtime stops).
+//
+// Every completion of an untimed wait other than this one holds its bucket
+// (WAKE, WAKE_OP, REQUEUE) or runs while the owner is off its CPU (the
+// quiescer's cancel), so the pending check, the publication and the
+// interrupt cannot be split; only an untimed wait restarts, and its restart
+// permit validates only while the wait is pending. The expiry of a timed
+// wait holds `task` alone, so a timed wait is interrupted first and its
+// EINTR published after: an expiry that lands in between finds it complete.
 template <typename Publish>
 FutexInterrupt interrupt_futex_wait(Kernel &kernel, FutexWait &wait, Publish &&publish)
 {
@@ -1100,7 +1106,12 @@ FutexInterrupt interrupt_futex_wait(Kernel &kernel, FutexWait &wait, Publish &&p
     if (index == FutexBucketTable::none) return FutexInterrupt::completed;
     futex_buckets.unlink(index, wait);
     auto outcome = FutexInterrupt::completed;
-    if (kernel.scheduler().wait_pending(wait.ticket))
+    if (wait.timeout.armed())
+    {
+        if (kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::interrupted))
+            outcome = std::forward<Publish>(publish)() ? FutexInterrupt::interrupted : FutexInterrupt::failed;
+    }
+    else if (kernel.scheduler().wait_pending(wait.ticket))
         outcome = std::forward<Publish>(publish)() &&
                           kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::interrupted)
                       ? FutexInterrupt::interrupted
