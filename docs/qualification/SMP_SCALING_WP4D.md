@@ -209,7 +209,33 @@ its review). The module ABI is not bumped.
   its trapped syscall; a breach after the quiesce stops the runtime and
   thaws the group; exit beats exec (a kill from CPU 1 during the wait);
   exit_group with a sibling on CPU 1; the leaseless leader and the hotplug
-  request cases.
+  request cases. It builds with `OK_HOSTED_LOCK_MODEL` and `OK_LOCK_DEBUG`
+  and requires no lock violation and no class-rule check. The `step_*` cases
+  run the sibling's actual `native::step` on the CPU 1 host thread: its pick,
+  its user entry through `enter_unlocked` (the BKL released around a mock
+  trap that returns once the group is frozen), the post-user relock, the
+  frozen check and `put_prev`, while CPU 0's exec holds the BKL and releases
+  it for its wait. For a syscall, timer and page-fault trap the refused exec
+  thaws the sibling with nothing dispatched (`frozen_skips` and `group_waits`
+  counted once each), and the sibling's next step dispatches the kept
+  syscall exactly once as its trap (`syscall_deferred`, and on mips/mips64
+  the branch-delay-slot exclusion in `syscall_delay_slot`) or enters user
+  mode again; a committed exec erases a sibling quiesced by its own step.
+  Further cases: an `exit_group(0)` after an accepted SIGKILL exits with
+  SIGKILL; two kernel-side claimers are distinct (`exit_held`, not `held`);
+  a rescue kill on CPU 0 waits for CPU 1's exit of the group and is `busy`
+  on one CPU.
+- `test_native_job_control.py` (`fork_with_pending_fatal`): a group SIGTERM
+  queued on a running Linux parent condemns it at its fork's publication
+  (the child is undone, the parent exits with SIGTERM at its pick); with
+  SIGTERM caught the child is published. Reverting the publication check
+  makes the case fail.
+- OS (paired change, `os.patch`): `tests/musl/smp_stress.c`'s fork cycle
+  child starts a thread spinning in user mode, placed away from its own CPU
+  when the affinity allows, and then execs (rounds 0 and 2 mod 4), exits
+  (round 1) or is killed with SIGKILL by the worker (round 3, which checks
+  `WTERMSIG == SIGKILL`), so every SMP stress gate ends two-thread groups
+  whose other thread may run on another CPU. The PASS line is unchanged.
 - The signal models that applied a fatal decision with the deleted pass now
   deliver the pending exit as the target's next pick would
   (`tests/host/native_pending_exit.hpp`): native group signals, process
@@ -265,7 +291,40 @@ host test only. Logs under `smp-scaling/waveB/WP4d/logs`.
   saw). Every check counter was zero in the failed runs too.
 - Evidence in those runs: `OK_SMP_WAKE exit_deliveries` 36 to 39 per stress
   run at 4 vCPUs (the stress probe's killed hotplug writers exit at their
-  group's pick); `group_waits=0` and `frozen_skips=0` everywhere: no OS
-  workload execs or exits a group while a sibling runs on another CPU, so
-  the quiesce wait and the frozen check have model evidence only
-  (`test_group_transition.py`, `test_native_exec_eviction.py`).
+  group's pick); `group_waits=0` and `frozen_skips=0` everywhere, since no
+  OS workload then exec'd or exited a group while a sibling ran on another
+  CPU. The review fixes below add that workload.
+
+### Validation of the review fixes
+
+Kernel sources at a65bebd (docs only after it); OS private copy b8dceae plus
+`os.patch`. Logs under `smp-scaling/waveB/WP4d/fix/logs`. The host ran
+another package's QEMU lanes at the same time (load average up to 53).
+
+- Hosted: the full `scripts/hosted_suite.py` with the toolchain root: 174
+  passed, 0 failed, 59 not run. The quarantined runners fail at the same
+  step and check at a65bebd and at d7fde31 (`linux_udp_sockname` passes on
+  both); their runner logs are kept. `test_native_signal_production.py`
+  (an "inputs" runner, x86_64) fails in both modes at d7fde31, at 1079f58
+  and at a65bebd on the same stale expectations, which predate WP4d
+  (`kill(0, SIGUSR1)` and native `kill(pid, SIGUSR1)` now succeed instead of
+  `-95`); with those three checks and `native_kill_contract` skipped in a
+  scratch copy, every other case, WP4d's `native_kill_lifecycle` included,
+  passes in debug and release.
+- Kernel: debug `xmake test` at `-smp 1` on all ten profiles and at 2 and 4
+  on x86_64, aarch64 and rv64: 16 of 16 `OK_TEST_PASS`. The first x86_64
+  `-smp 4` lane failed in boot (CPU 3's TSC measured unsynced at load 53,
+  `reason=secondary-start-failed`); its rerun passed with 4 of 4 CPUs
+  online. Release kernels build on all ten profiles.
+- Native distro boot on all ten profiles: `DISTRO10 fail=0`.
+- Gates at 2 vCPUs on x86_64, aarch64 and rv64: `--user-hotplug` in debug
+  and release, the futex probe, `--smp_hotplug_test=y --require-hotplug`
+  and `smp_sections=n`; the CPU sysfs probe on x86_64 at 2 and on arm32 at
+  1. All pass with every check counter zero (`admit_shadow_mismatch`,
+  `quiesce_timeouts`, `audit_repairs`, `poll_audit_ready` included),
+  `unqueued=0`, `max_lock_depth` 5 in debug and 0 in release. The first
+  x86_64 debug SDK export failed in xmake (it could not run `ld` for
+  `boot16.bin`); the three x86_64 debug runs passed on a fresh build tree.
+- Hardware evidence of the group quiesce now exists: every stress run has
+  `group_waits` = `frozen_skips` > 0 (15 to 90 per run at 2 vCPUs, release
+  kernels included) and `exit_deliveries` 60 to 65.
