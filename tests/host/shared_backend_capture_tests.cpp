@@ -104,9 +104,11 @@ void capability_guards()
 // retries in the new space; a refusal with the space unchanged stays fatal.
 static sched::ProcessResources *replaced_resources{};
 static usize replaced_spaces{};
-static Result<hw::Trap> replacing_entry(hw::AddressSpace &space, hw::UserFrame &, const hw::KernelEntryStackView &,
+static bool entry_succeeds{};
+static Result<hw::Trap> replacing_entry(hw::AddressSpace &space, hw::UserFrame &frame, const hw::KernelEntryStackView &view,
                                         memory::KernelEntryStackHandle, u64, u64)
 {
+    if (entry_succeeds) return hw::enter_owned(space, frame, view);
     if (replaced_resources)
     {
         const sched::AddressSpaceGate::Hold hold{replaced_resources->mm};
@@ -133,7 +135,16 @@ void replaced_space_retries()
         CHECK(replace != (process.resources().native_space.generation == original.generation));
         CHECK(f.pool.deactivate_entry(f.thread().entry_stack, {f.pid, f.pid}, 0));
         replaced_resources = nullptr;
-        if (replace) ++replaced_spaces;
+        if (!replace) continue;
+        // The retry at the next dispatch: a new activation enters the new space.
+        entry_succeeds = true;
+        view = f.pool.activate_entry(f.thread().entry_stack, {f.pid, f.pid}, 0); CHECK(view);
+        const auto retried = backend.enter(*f.scheduler, process, f.thread(), view.value());
+        CHECK(retried && retried.value().space().generation == original.generation + 1);
+        CHECK(retried.value().trap().kind == hw::TrapKind::syscall);
+        CHECK(f.pool.deactivate_entry(f.thread().entry_stack, {f.pid, f.pid}, 0));
+        entry_succeeds = false;
+        ++replaced_spaces;
     }
 }
 int main()
