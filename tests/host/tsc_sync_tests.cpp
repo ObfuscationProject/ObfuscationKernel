@@ -107,7 +107,7 @@ constexpr tsc::Policy policy{.rounds = 64, .attempts = 4, .slack = 200, .max_err
 // (at most half the widest possible round, and never above max_error).
 void require_bounded(const Pair &pair, const tsc::Outcome &outcome)
 {
-    assert(outcome.verdict != tsc::Verdict::unsynced);
+    assert(outcome.verdict != tsc::Verdict::unsynced && outcome.failure == tsc::Failure::none);
     const u64 widest = (pair.outbound + pair.inbound + 2 * pair.noise) / 2 + 1;
     assert(outcome.initial.error <= widest && outcome.final.error <= widest);
     assert(outcome.final.error <= policy.max_error && outcome.tolerance <= policy.slack + policy.max_error);
@@ -154,6 +154,11 @@ void names()
     assert(tsc::worse(tsc::Verdict::sync, tsc::Verdict::offset) == tsc::Verdict::offset);
     assert(tsc::worse(tsc::Verdict::unsynced, tsc::Verdict::adjusted) == tsc::Verdict::unsynced);
     assert(tsc::worse(tsc::Verdict::adjusted, tsc::Verdict::sync) == tsc::Verdict::adjusted);
+    assert(tsc::name(tsc::Failure::none) == "none");
+    assert(tsc::name(tsc::Failure::silent) == "silent");
+    assert(tsc::name(tsc::Failure::loose) == "loose");
+    assert(tsc::name(tsc::Failure::refused) == "refused");
+    assert(tsc::name(tsc::Failure::uncorrected) == "uncorrected");
 }
 
 void decisions()
@@ -163,6 +168,7 @@ void decisions()
         Pair pair{.has_adjust = true};
         const auto outcome = tsc::synchronize(pair, policy);
         assert(outcome.verdict == tsc::Verdict::sync && pair.adjust_calls == 0 && pair.offset_calls == 0);
+        assert(outcome.failure == tsc::Failure::none);
         assert(pair.rounds == policy.rounds && outcome.initial.rounds == policy.rounds);
         assert(tsc::magnitude(outcome.initial.offset) <= outcome.initial.error + policy.slack);
     }
@@ -219,32 +225,35 @@ void decisions()
         Pair pair{.skew = 5'000'000, .offset_accepted = false};
         const auto outcome = tsc::synchronize(pair, policy);
         assert(outcome.verdict == tsc::Verdict::unsynced && outcome.offset == 0 && pair.software == 0);
+        assert(outcome.failure == tsc::Failure::refused);
     }
     {
         // Silent from the start: no estimate, no correction.
         Pair pair{.skew = 5'000'000, .has_adjust = true, .answers = 0};
         const auto outcome = tsc::synchronize(pair, policy);
         assert(outcome.verdict == tsc::Verdict::unsynced && !outcome.initial.valid());
-        assert(pair.adjust_calls == 0 && pair.offset_calls == 0);
+        assert(pair.adjust_calls == 0 && pair.offset_calls == 0 && outcome.failure == tsc::Failure::silent);
     }
     {
         // Silent partway through the first measurement: still no estimate.
         Pair pair{.skew = 5'000'000, .answers = 10};
         const auto outcome = tsc::synchronize(pair, policy);
         assert(outcome.verdict == tsc::Verdict::unsynced && !outcome.initial.valid() && pair.offset_calls == 0);
+        assert(outcome.failure == tsc::Failure::silent);
     }
     {
         // Silent while verifying the adjustment: unverified, and no offset.
         Pair pair{.skew = 5'000'000, .has_adjust = true, .answers = policy.rounds + 3};
         const auto outcome = tsc::synchronize(pair, policy);
         assert(outcome.verdict == tsc::Verdict::unsynced && outcome.initial.valid() && !outcome.final.valid());
-        assert(outcome.adjusted != 0 && pair.offset_calls == 0);
+        assert(outcome.adjusted != 0 && pair.offset_calls == 0 && outcome.failure == tsc::Failure::silent);
     }
     {
         // Silent while verifying the offset.
         Pair pair{.skew = 5'000'000, .answers = policy.rounds + 3};
         const auto outcome = tsc::synchronize(pair, policy);
         assert(outcome.verdict == tsc::Verdict::unsynced && outcome.offset != 0);
+        assert(!outcome.final.valid() && outcome.failure == tsc::Failure::silent);
     }
     {
         // One clean round among outliers is enough.
@@ -305,12 +314,14 @@ void decisions()
         const auto outcome = tsc::synchronize(pair, policy);
         assert(outcome.verdict == tsc::Verdict::unsynced && outcome.adjusted == -outcome.initial.offset);
         assert(pair.adjust_calls == 1 && pair.offset_calls == 0 && pair.rounds == policy.rounds);
+        assert(outcome.failure == tsc::Failure::silent);
     }
     {
         // The same for a late software offset.
         Pair pair{.skew = 5'000'000, .offset_answers = false};
         const auto outcome = tsc::synchronize(pair, policy);
         assert(outcome.verdict == tsc::Verdict::unsynced && pair.offset_calls == 1 && pair.rounds == policy.rounds);
+        assert(outcome.failure == tsc::Failure::silent);
     }
     {
         // A late answer to an adjustment that did not take: still no second
@@ -318,6 +329,7 @@ void decisions()
         Pair pair{.skew = -9'000'000, .has_adjust = true, .adjust_takes = false, .adjust_answers = false};
         const auto outcome = tsc::synchronize(pair, policy);
         assert(outcome.verdict == tsc::Verdict::unsynced && pair.offset_calls == 0 && pair.software == 0);
+        assert(outcome.failure == tsc::Failure::silent);
     }
     {
         // Every round wider than max_error: an offset that hides inside the
@@ -326,7 +338,7 @@ void decisions()
         const auto outcome = tsc::synchronize(pair, policy);
         assert(tsc::within(outcome.initial, policy.slack) && outcome.initial.error > policy.max_error);
         assert(outcome.verdict == tsc::Verdict::unsynced && pair.adjust_calls == 0 && pair.offset_calls == 0);
-        assert(pair.rounds == policy.rounds * policy.attempts);
+        assert(pair.rounds == policy.rounds * policy.attempts && outcome.failure == tsc::Failure::loose);
     }
     {
         // Wide rounds for the first two measurements only: the third is tight
@@ -351,6 +363,7 @@ void decisions()
         const auto outcome = tsc::synchronize(late, policy);
         assert(outcome.verdict == tsc::Verdict::unsynced && late.offset_calls == 1);
         assert(outcome.final.valid() && outcome.final.error > policy.max_error);
+        assert(outcome.failure == tsc::Failure::loose);
     }
     {
         // A slow rate difference is corrected like a skew...
@@ -365,6 +378,8 @@ void decisions()
         Pair pair{.skew = 1'000'000, .has_adjust = true, .drift_ppm = 50'000};
         const auto outcome = tsc::synchronize(pair, policy);
         assert(outcome.verdict == tsc::Verdict::unsynced && pair.adjust_calls == 1 && pair.offset_calls == 1);
+        // Tight measurements that still find the offset: not a timing failure.
+        assert(outcome.final.error <= policy.max_error && outcome.failure == tsc::Failure::uncorrected);
     }
 }
 

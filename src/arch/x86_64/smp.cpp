@@ -199,6 +199,31 @@ u32 boot_tsc_features{};
 // Boot CPU only: which CPUs the handshake ran for, and their verdicts.
 u32 tsc_measured{};
 tsc::Verdict tsc_verdicts[ok::smp::max_cpus]{};
+// Boot CPU only: why the latest start() of each CPU failed (start_failure).
+constinit std::string_view start_failures[ok::smp::max_cpus]{};
+
+// The report token of an unsynced handshake: absent when the CPU never
+// joined it, else from tsc::Failure.
+[[nodiscard]] constexpr std::string_view unsynced_reason(bool joined, tsc::Failure failure) noexcept
+{
+    if (!joined)
+        return "tsc-absent";
+    switch (failure)
+    {
+    case tsc::Failure::silent:
+        return "tsc-silent";
+    case tsc::Failure::loose:
+        return "tsc-loose";
+    case tsc::Failure::refused:
+        return "tsc-refused";
+    case tsc::Failure::none:
+    case tsc::Failure::uncorrected:
+        break;
+    }
+    return "tsc-uncorrected";
+}
+static_assert(unsynced_reason(false, tsc::Failure::none) == "tsc-absent" &&
+              unsynced_reason(true, tsc::Failure::loose) == "tsc-loose");
 
 u32 tsc_features() noexcept
 {
@@ -381,8 +406,13 @@ tsc::Verdict synchronize_tsc(ok::smp::CpuId cpu) noexcept
         BootLink link{channel, (features & feature_tsc_adjust) != 0, timeout};
         outcome = tsc::synchronize(link, policy);
         if (outcome.verdict != tsc::Verdict::unsynced && !link.admit())
+        {
             outcome.verdict = tsc::Verdict::unsynced;
+            outcome.failure = tsc::Failure::silent;
+        }
     }
+    start_failures[cpu] =
+        outcome.verdict == tsc::Verdict::unsynced ? unsynced_reason(ready != 0, outcome.failure) : std::string_view{};
     channel.open.store(0, std::memory_order_release);
     // One line per CPU: a hotplug restart repeats the handshake silently.
     if ((tsc_measured & (u32{1} << cpu)) == 0)
@@ -556,6 +586,7 @@ Status start(ok::smp::CpuId cpu, u64 hardware_id, uptr, uptr stack_top)
     asm volatile("mov %%cr0, %0; mov %%cr3, %1; mov %%cr4, %2" : "=r"(cr0), "=r"(cr3), "=r"(cr4));
     if (hardware_id > 0xfe || cpu == 0 || cpu >= ok::smp::max_cpus)
         return Status::invalid_argument("x86 secondary start needs an xAPIC id and a secondary slot");
+    start_failures[cpu] = {};
     if ((cr3 >> 32) != 0)
         return Status::unsupported("the boot PML4 lies above the trampoline's 4 GiB reach");
     if (stack_top > identity_limit || (stack_top & 15) != 0)
@@ -610,6 +641,11 @@ Status start(ok::smp::CpuId cpu, u64 hardware_id, uptr, uptr stack_top)
         return Status::io_error("x86 secondary TSC was not synchronized");
     }
     return Status::success();
+}
+
+std::string_view start_failure(ok::smp::CpuId cpu) noexcept
+{
+    return cpu < ok::smp::max_cpus ? start_failures[cpu] : std::string_view{};
 }
 
 std::string_view clock_sync_name() noexcept

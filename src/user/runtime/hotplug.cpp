@@ -1,7 +1,7 @@
 // User CPU hotplug and affinity (docs/modules/sysfs.md): the write route of
 // /sys/devices/system/cpu/cpuN/online, sched_getaffinity, sched_setaffinity
-// and getcpu, and the OK_SMP_HOTPLUG_USER, OK_SMP_HOTPLUG_RECORDS and
-// OK_SMP_AFFINITY_BROKEN reports.
+// and getcpu, and the OK_SMP_HOTPLUG_USER, OK_SMP_HOTPLUG_RECORDS,
+// OK_SMP_HOTPLUG_FAIL and OK_SMP_AFFINITY_BROKEN reports.
 // Everything here runs under the big kernel lock (smp-scaling WP1).
 #include "private.hpp"
 #include "ok/smp/hotplug.hpp"
@@ -196,6 +196,18 @@ void report_cpu_hotplug()
     field("dropped_waiting", statistics.dropped_waiting);
     field("dropped_done", statistics.dropped_done);
     emit("\n");
+    // Each failed request once, with its reason.
+    while (const auto failure = hotplug::take_failure())
+    {
+        emit_line("OK_SMP_HOTPLUG_FAIL scope=hardware");
+        field("failure", failure->number);
+        field("cpu", failure->cpu);
+        field("want", failure->want ? 1 : 0);
+        field("errno", static_cast<u64>(failure->error));
+        emit(" reason="); emit(failure->reason);
+        field("us", failure->us);
+        emit("\n");
+    }
 }
 } // namespace runtime_detail
 

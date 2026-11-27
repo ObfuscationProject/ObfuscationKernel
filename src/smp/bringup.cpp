@@ -122,6 +122,15 @@ void set_state(CpuId cpu, CpuState state)
 #if defined(OK_ARCH_SMP_START)
 constexpr u64 stop_timeout_ns = 2'000'000'000;
 
+// Why the latest stop or restart failed (transition_failure), CPU 0 only.
+constinit std::string_view transition_failed{};
+
+[[nodiscard]] Status failed(std::string_view reason, Status status) noexcept
+{
+    transition_failed = reason;
+    return status;
+}
+
 // Stops and restarts run one at a time: x86 starts share one trampoline page.
 // The turn is a try-only token (hotplug_turn): never waited for and outside
 // the lock-debug record, since its holder releases and retakes the kernel
@@ -397,17 +406,18 @@ Status start_secondary_cpus(Kernel &kernel)
 Status stop_secondary_cpu([[maybe_unused]] Kernel &kernel, [[maybe_unused]] CpuId cpu)
 {
 #if defined(OK_ARCH_SMP_START)
+    transition_failed = {};
     if (auto status = hotplug_request(cpu); !status)
-        return status;
+        return failed("request", status);
     const HotplugTurn turn;
     if (!turn)
-        return Status::busy("another CPU hotplug request is running");
+        return failed("turn-busy", Status::busy("another CPU hotplug request is running"));
     // The requester holds the kernel lock but only waits for another CPU
     // (its user window, its park): overlap evidence must not count it.
     const SpinningScope waiting;
     const u32 bit = u32{1} << cpu;
     if (state_of(cpu) != CpuState::online || (online_mask() & bit) == 0)
-        return Status::invalid_argument("CPU is not online");
+        return failed("not-online", Status::invalid_argument("CPU is not online"));
     auto &record = cpu_record(cpu);
     leave_faults[cpu].store(false, std::memory_order_relaxed);
     set_state(cpu, CpuState::stopping);
@@ -415,7 +425,7 @@ Status stop_secondary_cpu([[maybe_unused]] Kernel &kernel, [[maybe_unused]] CpuI
     if (auto status = kernel.scheduler().offline_cpu(cpu); !status)
     {
         set_state(cpu, CpuState::online);
-        return status;
+        return failed(status.code() == StatusCode::busy ? "mask-busy" : "scheduler", status);
     }
     drain_cpu(cpu);
     // Out of user mode: it then needs the kernel lock to finish that entry,
@@ -432,11 +442,11 @@ Status stop_secondary_cpu([[maybe_unused]] Kernel &kernel, [[maybe_unused]] CpuI
         // It may still leave later; until a restart, it takes no work:
         // Kernel::tick schedules only CPUs its topology lists as online.
         static_cast<void>(kernel.topology().mark_halted(cpu));
-        return Status::io_error("secondary CPU did not park");
+        return failed("park-timeout", Status::io_error("secondary CPU did not park"));
     }
     static_cast<void>(kernel.topology().mark_offline(cpu));
     if (leave_faults[cpu].load(std::memory_order_relaxed))
-        return Status::fault("leaving CPU still recorded a user entry or a section");
+        return failed("leave-fault", Status::fault("leaving CPU still recorded a user entry or a section"));
     return Status::success();
 #else
     return Status::unsupported("this profile starts no secondary CPUs");
@@ -446,11 +456,12 @@ Status stop_secondary_cpu([[maybe_unused]] Kernel &kernel, [[maybe_unused]] CpuI
 Status restart_secondary_cpu([[maybe_unused]] Kernel &kernel, [[maybe_unused]] CpuId cpu)
 {
 #if defined(OK_ARCH_SMP_START)
+    transition_failed = {};
     if (auto status = hotplug_request(cpu); !status)
-        return status;
+        return failed("request", status);
     const HotplugTurn turn;
     if (!turn)
-        return Status::busy("another CPU hotplug request is running");
+        return failed("turn-busy", Status::busy("another CPU hotplug request is running"));
     // The requester holds the kernel lock but only waits for another CPU
     // (the start and its clock handshake, its first IPI): overlap evidence
     // must not count it.
@@ -459,7 +470,7 @@ Status restart_secondary_cpu([[maybe_unused]] Kernel &kernel, [[maybe_unused]] C
     auto &record = cpu_record(cpu);
     if ((online_mask() & bit) != 0 || state_of(cpu) != CpuState::offline || record.stack_top == 0 ||
         !arch::smp::parked(cpu, record.hardware_id))
-        return Status::invalid_argument("CPU is not parked");
+        return failed("not-parked", Status::invalid_argument("CPU is not parked"));
     // Same stack, same start path; the counters stay cumulative.
     record.ipi_pending.store(0, std::memory_order_relaxed);
     record.reported_id.store(~uptr{0}, std::memory_order_relaxed);
@@ -467,7 +478,8 @@ Status restart_secondary_cpu([[maybe_unused]] Kernel &kernel, [[maybe_unused]] C
     if (auto status = arch::smp::start(cpu, record.hardware_id, record.stack_lower, record.stack_top); !status)
     {
         set_state(cpu, CpuState::offline);
-        return status;
+        const auto reason = arch::smp::start_failure(cpu);
+        return failed(reason.empty() ? std::string_view{"start-error"} : reason, status);
     }
     // Online once it ran C++ and reported its identity. It then rejoins the
     // mask (a running CPU joining needs no lock; only leaving does) and must
@@ -499,17 +511,27 @@ Status restart_secondary_cpu([[maybe_unused]] Kernel &kernel, [[maybe_unused]] C
         // Never online, or not the CPU it was started as: it stays outside.
         set_state(cpu, came_online ? CpuState::halted : CpuState::offline);
         arch::smp::abandon(cpu, record.hardware_id);
-        return Status::io_error("restarted CPU did not come online");
+        return failed(came_online ? "wrong-identity" : "start-timeout",
+                      Status::io_error("restarted CPU did not come online"));
     }
     if (auto status = kernel.scheduler().online_cpu(cpu); !status)
-        return status;
+        return failed("scheduler", status);
     static_cast<void>(kernel.topology().mark_starting(cpu));
     static_cast<void>(kernel.topology().mark_online(cpu));
     if (!delivered)
-        return Status::io_error("restarted CPU did not answer its IPI");
+        return failed("ipi-timeout", Status::io_error("restarted CPU did not answer its IPI"));
     return Status::success();
 #else
     return Status::unsupported("this profile starts no secondary CPUs");
+#endif
+}
+
+std::string_view transition_failure() noexcept
+{
+#if defined(OK_ARCH_SMP_START)
+    return transition_failed;
+#else
+    return {};
 #endif
 }
 

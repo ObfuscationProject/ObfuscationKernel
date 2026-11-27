@@ -220,7 +220,13 @@ read subtracts, and every correction is verified by measuring again. A CPU that
 cannot be verified (no answer, an unanswered correction, a bound that stays too
 wide, or a residual beyond the tolerance) is never admitted: it finds its
 channel closed and parks with interrupts masked before it reads the clock, and
-bring-up marks it offline.
+bring-up marks it offline. `start()` then fails, and `arch::smp::start_failure()`
+names why: `tsc-absent` (the CPU did not join within 2 s), `tsc-silent` (an
+answer took over 100 ms), `tsc-loose` (no round within 50 us), `tsc-refused`
+or `tsc-uncorrected` (`tsc::Failure`). The first three are timing: on a
+loaded QEMU TCG host the two vCPU threads are rarely scheduled together, and
+every round spans host scheduling latencies. A user hotplug restart reports
+the reason in `OK_SMP_HOTPLUG_FAIL` (docs/modules/sysfs.md).
 
 The APs share one start block in the trampoline page. It names the APIC id it
 was written for (stored as id + 1, so a cleared block matches no CPU), and the
@@ -544,7 +550,8 @@ outside user code and holding nothing, the CPU:
 The requester waits up to 2 s for the park; on a timeout it marks the
 topology entry halted, so `Kernel::tick` does not schedule on that CPU.
 Restart reuses the CPU's stack and the architecture's start path (x86 repeats
-INIT-SIPI and the TSC handshake, printing no second `OK_TSC_SYNC` line), waits
+INIT-SIPI and the TSC handshake, printing no second `OK_TSC_SYNC` line, and
+fails with the CPU parked when the handshake does not verify), waits
 for it to come online with its reported id, puts it back in the online mask,
 requires an IPI answer and then calls `scheduler.online_cpu`. Device lines are
 not rebalanced onto it. Nothing a parked CPU could touch is freed, and

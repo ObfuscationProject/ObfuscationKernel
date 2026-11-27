@@ -63,6 +63,7 @@ struct KernelBackend
     }
     Status stop(CpuId cpu) { return stop_secondary_cpu(*hotplug_kernel, cpu); }
     Status restart(CpuId cpu) { return restart_secondary_cpu(*hotplug_kernel, cpu); }
+    [[nodiscard]] std::string_view failure() const { return transition_failure(); }
     void complete(sched::WaitTicket ticket)
     {
         static_cast<void>(hotplug_kernel->scheduler().complete_wait(ticket, sched::WaitCompletion::ready));
@@ -150,6 +151,10 @@ u32 pending() noexcept
 Statistics statistics() noexcept
 {
     return service.statistics();
+}
+std::optional<Failure> take_failure() noexcept
+{
+    return service.take_failure();
 }
 } // namespace hotplug
 } // namespace ok::smp

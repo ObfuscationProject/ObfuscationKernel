@@ -20,6 +20,7 @@
 #include <concepts>
 #include <optional>
 #include <span>
+#include <string_view>
 
 namespace ok { class Kernel; }
 
@@ -109,6 +110,23 @@ struct Statistics
     u64 abandoned{}, dropped_waiting{}, dropped_done{};
 };
 
+// One failed request (a `failures` count), reported as OK_SMP_HOTPLUG_FAIL:
+// its number among the failures (1-based), the CPU and value written, the
+// errno the writer got, why (the backend's token, or "halted" for a CPU a
+// start gave up on) and how long the stop or restart ran.
+struct Failure
+{
+    u64 number{};
+    CpuId cpu{};
+    bool want{};
+    i64 error{};
+    std::string_view reason{};
+    u64 us{};
+};
+// The latest failures kept until a report takes them; older ones are lost
+// (gaps in `number`).
+inline constexpr usize failure_capacity = 8;
+
 // Why a request is refused before anything is attempted.
 enum class Refusal : u8
 {
@@ -127,6 +145,8 @@ concept Backend = requires(B &backend, const B &view, CpuId cpu, u64 id, sched::
     { backend.restart(cpu) } -> std::same_as<Status>;
     // Completes the writer's wait (ready); holds no record lock.
     { backend.complete(ticket) } -> std::same_as<void>;
+    // Why the stop or restart just run failed, as a report token.
+    { view.failure() } -> std::same_as<std::string_view>;
     // A CPU whose stop timed out: true once it parked after all, which the
     // backend records (topology offline) so that a later "1" restarts it.
     { backend.recover(cpu) } -> std::same_as<bool>;
@@ -177,7 +197,10 @@ template <Backend B> class HotplugService final
         switch (backend.refusal(request.cpu))
         {
         case Refusal::busy: ++filed_.busy; return {false, -errno_busy};
-        case Refusal::io_error: ++filed_.failures; return {false, -errno_io};
+        case Refusal::io_error:
+            ++filed_.failures;
+            note_failure_locked({.cpu = request.cpu, .want = request.want, .error = errno_io, .reason = "halted"});
+            return {false, -errno_io};
         case Refusal::none: break;
         }
         auto &record = records_[slot];
@@ -314,6 +337,15 @@ template <Backend B> class HotplugService final
         total.dropped_done += filed_.dropped_done;
         return total;
     }
+    // The oldest failure not yet reported, once; failures past the last
+    // failure_capacity ones before it are skipped.
+    [[nodiscard]] std::optional<Failure> take_failure()
+    {
+        const typename Lock::Guard guard(lock_);
+        if (failures_taken_ == failures_noted_) return std::nullopt;
+        if (failures_noted_ - failures_taken_ > failure_capacity) failures_taken_ = failures_noted_ - failure_capacity;
+        return failures_[failures_taken_++ % failure_capacity];
+    }
     // A slot's record; `spare` names the abandoned record the pass still runs.
     [[nodiscard]] Record record(usize slot)
     {
@@ -339,6 +371,19 @@ template <Backend B> class HotplugService final
         finished_[slot].store(false, std::memory_order_release);
     }
 
+    void note_failure_locked(Failure failure)
+    {
+        failure.number = ++failures_noted_;
+        failures_[(failure.number - 1) % failure_capacity] = failure;
+    }
+    // The pass, holding no record lock.
+    void note_failure(const Record &taken, std::string_view reason, u64 us)
+    {
+        const typename Lock::Guard guard(lock_);
+        note_failure_locked({.cpu = taken.cpu, .want = taken.want, .error = errno_io,
+                             .reason = reason.empty() ? std::string_view{"unknown"} : reason, .us = us});
+    }
+
     // Holding no record lock: the state is checked again, then the action
     // runs and its outcome becomes the result. The CPU state is mapped first
     // (no-op, refusal), then the Status.
@@ -352,7 +397,10 @@ template <Backend B> class HotplugService final
         switch (backend.refusal(taken.cpu))
         {
         case Refusal::busy: ++served_.busy; return -errno_busy;
-        case Refusal::io_error: ++served_.failures; return -errno_io;
+        case Refusal::io_error:
+            ++served_.failures;
+            note_failure(taken, "halted", 0);
+            return -errno_io;
         case Refusal::none: break;
         }
         const auto started = backend.now_ns();
@@ -377,9 +425,11 @@ template <Backend B> class HotplugService final
                 ++served_.wedged;
             }
             ++served_.failures;
+            note_failure(taken, backend.failure(), elapsed);
             return -errno_io;
         default: // fault (it left with a record), or an inconsistent state.
             ++served_.failures;
+            note_failure(taken, backend.failure(), elapsed);
             return -errno_io;
         }
     }
@@ -394,6 +444,9 @@ template <Backend B> class HotplugService final
     u32 wedged_{};
     Statistics filed_{};  // Writers, under the record lock.
     Statistics served_{}; // CPU 0's pass.
+    // Under the record lock: the failures noted and reported so far.
+    std::array<Failure, failure_capacity> failures_{};
+    u64 failures_noted_{}, failures_taken_{};
 };
 
 // The kernel's service (src/smp/hotplug.cpp).
@@ -404,5 +457,6 @@ void abandon(usize slot, u64 pid, u64 tid);
 // Requests filed and not yet taken; CPU 0 does not idle while one waits.
 [[nodiscard]] u32 pending() noexcept;
 [[nodiscard]] Statistics statistics() noexcept;
+[[nodiscard]] std::optional<Failure> take_failure() noexcept;
 } // namespace hotplug
 } // namespace ok::smp
