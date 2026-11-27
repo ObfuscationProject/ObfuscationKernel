@@ -27,6 +27,7 @@ Status PreparedPtyPair::validate() const
         handles_.master.slot != handles_.slave.slot || handles_.master.generation != handles_.slave.generation ||
         handles_.master.side != private_pty::Side::master || handles_.slave.side != private_pty::Side::slave)
         return Status::busy("PTY pair ownership identity changed");
+    const TtyLock::Guard tty(owner_->tty_lock_);
     if (!owner_->pty_transport_.readiness(handles_.master) || !owner_->pty_transport_.readiness(handles_.slave))
         return Status::busy("PTY pair provider ownership expired");
     return {};
@@ -42,10 +43,13 @@ Status PreparedPtyPair::cancel()
     if (!owner_) return {};
     if (auto status = validate(); !status) { preserve_failed_holder(); return status; }
     // No callbacks occur between this validation and provider/slot retirement.
-    auto retired = owner_->pty_transport_.retire(handles_.master);
-    if (!retired) { const auto status = retired.status(); preserve_failed_holder(); return status; }
-    retired = owner_->pty_transport_.retire(handles_.slave);
-    if (!retired) { const auto status = retired.status(); preserve_failed_holder(); return status; }
+    const auto retired = [&]() -> Status {
+        const TtyLock::Guard tty(owner_->tty_lock_);
+        if (auto master = owner_->pty_transport_.retire(handles_.master); !master) return master.status();
+        if (auto slave = owner_->pty_transport_.retire(handles_.slave); !slave) return slave.status();
+        return {};
+    }();
+    if (!retired) { preserve_failed_holder(); return retired; }
     if (auto status = first_->cancel(); !status) { preserve_failed_holder(); return status; }
     if (auto status = second_->cancel(); !status) { preserve_failed_holder(); return status; }
     owner_ = nullptr;
@@ -69,7 +73,10 @@ Result<PreparedPtyPair> SchedulerState::prepare_pty_pair(u64 pid, u32 flags)
     if (!first) return first.status();
     auto second = prepare_descriptor(pid);
     if (!second) return second.status();
-    auto pair = pty_transport_.create();
+    auto pair = [&] {
+        const TtyLock::Guard tty(tty_lock_);
+        return pty_transport_.create();
+    }();
     if (!pair) return pair.status();
     return PreparedPtyPair{*this, std::move(first.value()), std::move(second.value()), pair.value(), flags};
 }
@@ -232,6 +239,7 @@ Result<private_pty::Handle> SchedulerState::bind_pty_multiplexer(u16 id, u32 uid
     if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
     auto *open = open_description(id);
     if (!pty_bindable(open)) return Status::invalid_argument("PTY open needs a fresh provider-free description");
+    const TtyLock::Guard tty(tty_lock_);
     auto master = pty_transport_.create_multiplexed();
     if (!master) return master.status();
     open->pty_endpoint = master.value();
@@ -245,9 +253,13 @@ Status SchedulerState::bind_pty_slave(u16 id, private_pty::Handle slave)
     auto *open = open_description(id);
     if (!pty_bindable(open)) return Status::invalid_argument("PTY open needs a fresh provider-free description");
     if (slave.side != private_pty::Side::slave) return Status::invalid_argument("PTY open names a slave endpoint");
-    if (auto status = pty_transport_.admit_open(slave); !status) return status;
-    const auto change = pty_transport_.attach(slave);
-    open->pty_endpoint = slave;
+    private_pty::Change change{};
+    {
+        const TtyLock::Guard tty(tty_lock_);
+        if (auto status = pty_transport_.admit_open(slave); !status) return status;
+        change = pty_transport_.attach(slave);
+        open->pty_endpoint = slave;
+    }
     wake_pty(slave, change.wakes);
     return {};
 }
@@ -255,6 +267,7 @@ Result<u32> SchedulerState::pty_index(u16 id) const
 {
     const auto *open = open_description(id);
     if (!open || !open->used || !open->pty_endpoint) return Status::not_terminal("description is not a PTY master");
+    const TtyLock::Guard tty(tty_lock_);
     const auto index = pty_transport_.index(open->pty_endpoint);
     if (!index) return index.status();
     return u32{index.value()};
@@ -263,6 +276,7 @@ Status SchedulerState::set_pty_lock(u16 id, bool locked)
 {
     const auto *open = open_description(id);
     if (!open || !open->used || !open->pty_endpoint) return Status::not_terminal("description is not a PTY master");
+    const TtyLock::Guard tty(tty_lock_);
     if (auto status = pty_transport_.set_locked(open->pty_endpoint, locked); !status) return status;
     terminal_namespace_.set_locked(open->pty_endpoint.slot, open->pty_endpoint.generation, locked);
     return {};

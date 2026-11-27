@@ -13,6 +13,8 @@
 #include "ok/user/native_pty_profile.hpp"
 #include "ok/user/native_tty_profile.hpp"
 
+#include <optional>
+
 namespace ok::user::native
 {
 inline namespace runtime_detail
@@ -88,9 +90,10 @@ struct TtyEmitSink
     }
 };
 
-void tty_emit_echo(sched::Terminal &terminal)
+void tty_emit_echo(sched::SchedulerState &scheduler, sched::Terminal &terminal)
 {
     TtyEmitSink sink;
+    const sched::TtyLock::Guard tty(scheduler.tty_lock());
     static_cast<void>(terminal.ldisc.drain_echo(sink));
 }
 
@@ -200,19 +203,26 @@ bool tty_drain_outbox(Kernel &kernel)
     for (usize index = 0; index < sched::SchedulerState::terminal_count; ++index)
     {
         auto &terminal = scheduler.terminal_storage(index);
-        if (!terminal.outbox_count) continue;
+        // An entry is taken under tty and sent after it: a send may run exit
+        // and stop paths that release descriptions (lower ranks).
+        const auto take = [&]() -> std::optional<sched::TerminalOutboxEntry> {
+            const sched::TtyLock::Guard tty(scheduler.tty_lock());
+            if (!terminal.outbox_count) return std::nullopt;
+            return terminal.take_outbox();
+        };
+        auto entry = take();
+        if (!entry) continue;
         drained = true;
 #ifdef OK_PRIVATE_POLL_MASK
         // Each send may run exit and stop paths that queue again; stay bounded.
-        for (usize sent = 0; terminal.outbox_count && sent < 4 * sched::terminal_outbox_capacity; ++sent)
+        for (usize sent = 0; entry && sent < 4 * sched::terminal_outbox_capacity; ++sent, entry = take())
         {
-            const auto entry = terminal.take_outbox();
-            const auto signal = tty_native_signal(entry.signal);
-            if (entry.group) static_cast<void>(send_kernel_group_signal(kernel, entry.target, signal));
-            else static_cast<void>(send_kernel_process_signal(kernel, entry.target, signal));
+            const auto signal = tty_native_signal(entry->signal);
+            if (entry->group) static_cast<void>(send_kernel_group_signal(kernel, entry->target, signal));
+            else static_cast<void>(send_kernel_process_signal(kernel, entry->target, signal));
         }
 #else
-        while (terminal.outbox_count) static_cast<void>(terminal.take_outbox());
+        while (entry) entry = take();
 #endif
         // A master writer stopped at a full outbox (ISIG budget) may go on.
         if (index)
@@ -225,7 +235,7 @@ bool tty_drain_outbox(Kernel &kernel)
 void tty_console_input(Kernel &kernel, char value, sched::WakeSource source)
 {
     static_cast<void>(kernel.scheduler().console_input(value, source));
-    tty_emit_echo(kernel.scheduler().console_terminal());
+    tty_emit_echo(kernel.scheduler(), kernel.scheduler().console_terminal());
     tty_drain_outbox(kernel);
 }
 
@@ -245,9 +255,10 @@ i64 tty_console_write(Kernel &kernel, sched::ProcessControlBlock &process, sched
             if (parked) complete = false;
             return error(status);
         }
-    auto &terminal = kernel.scheduler().console_terminal();
+    auto &scheduler = kernel.scheduler();
+    auto &terminal = scheduler.console_terminal();
     // n_tty_write: pending echo goes out before program output.
-    tty_emit_echo(terminal);
+    tty_emit_echo(scheduler, terminal);
     std::array<std::byte, tty_chunk> input{};
     std::array<std::byte, 2 * tty_chunk> output{};
     usize written = 0;
@@ -260,6 +271,8 @@ i64 tty_console_write(Kernel &kernel, sched::ProcessControlBlock &process, sched
             if (!uaccess::copy_from_user(space, input.data(), vector.base + position, count))
                 return written ? static_cast<i64>(written) : i64{-14};
             std::span<const std::byte> pending{input.data(), count};
+            // Output processing (column state) under tty, after the copy-in.
+            const sched::TtyLock::Guard tty(scheduler.tty_lock());
             while (!pending.empty())
             {
                 // A whole expansion (at most 8 bytes, XTABS) always fits the output chunk.

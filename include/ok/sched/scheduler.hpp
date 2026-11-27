@@ -1045,6 +1045,9 @@ class SchedulerState
     static constexpr usize terminal_count = 1 + private_pty::RawPtyTable<>::pair_capacity;
     [[nodiscard]] Terminal &terminal_storage(usize index);
     [[nodiscard]] Terminal &console_terminal() { return console_terminal_; }
+    // The terminals' lock, for the runtime's console output and outbox work
+    // (memory only, never across a user copy).
+    [[nodiscard]] TtyLock &tty_lock() const { return tty_lock_; }
     [[nodiscard]] const Terminal &console_terminal() const { return console_terminal_; }
     [[nodiscard]] Result<TerminalSubject> terminal_subject(u16 description) const;
     [[nodiscard]] std::optional<TerminalRef> controlling_terminal(const ProcessControlBlock &process) const;

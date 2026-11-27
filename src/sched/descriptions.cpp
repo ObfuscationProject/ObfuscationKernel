@@ -265,14 +265,22 @@ Status SchedulerState::release_description(u16 id)
             // One open per final release. The master's last open hangs a ptmx
             // slave up and queues SIGHUP and SIGCONT for the slave session's
             // leader (Linux tty_signal_session_leader) inside the table.
-            const auto retired_pty = pty_transport_.retire(pty_endpoint);
+            // The PTY table and /dev/pts under tty; the hangup record and the
+            // wakes after it.
+            const bool master = pty_endpoint.side == private_pty::Side::master;
+            const auto retired_pty = [&] {
+                const TtyLock::Guard tty(tty_lock_);
+                auto retired = pty_transport_.retire(pty_endpoint);
+                // Linux devpts_pty_kill: /dev/pts/N goes with the master's last open.
+                if (retired && master && retired.value().master_retired)
+                    terminal_namespace_.remove(pty_endpoint.slot, pty_endpoint.generation);
+                return retired;
+            }();
             if (!retired_pty) result = retired_pty.status();
-            // Linux devpts_pty_kill: /dev/pts/N goes with the master's last open.
-            else if (pty_endpoint.side == private_pty::Side::master && retired_pty.value().master_retired)
+            else if (master && retired_pty.value().master_retired)
             {
                 remember_hangup(retired_pty.value().hangup_leader, retired_pty.value().hangup_foreground,
                                 static_cast<u16>(pty_endpoint.slot + 1));
-                terminal_namespace_.remove(pty_endpoint.slot, pty_endpoint.generation);
                 wake_waiters(ThreadWaitReason::job_control,
                              job_control_key({static_cast<u16>(pty_endpoint.slot + 1), pty_endpoint.generation}));
             }
