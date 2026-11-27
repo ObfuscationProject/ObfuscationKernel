@@ -1414,6 +1414,17 @@ bool step(Kernel &kernel)
             }
         }
     }
+    // A syscall the frozen check kept (spec 4.8) is dispatched as the trap it
+    // was: never with a stored result, and with that trap's delay-slot
+    // exclusion. It is not admitted to a section.
+    bool deferred_trap = false;
+    if (running->syscall_deferred)
+    {
+        deferred_trap = running->syscall_pending && !owned_settled;
+        if (deferred_trap) linux_udp_delay_slot = running->syscall_delay_slot;
+        running->syscall_deferred = false;
+        running->syscall_delay_slot = false;
+    }
     if (!running->syscall_pending)
     {
 #if defined(OK_NATIVE_SIGNAL_RUNTIME) && (defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__arm__) || defined(__riscv) || defined(__loongarch64) || defined(__mips__) || defined(__powerpc__) || defined(__PPC__))
@@ -1549,7 +1560,13 @@ bool step(Kernel &kernel)
         if (trap && smp::bkl_thread_frozen(chosen.pid))
         {
             smp::detail::owner_add(smp::evidence_cpus[cpu].frozen_skips);
-            if (trap.value().kind == hw::TrapKind::syscall) running->syscall_pending = true;
+            if (trap.value().kind == hw::TrapKind::syscall)
+            {
+                running->syscall_pending = true;
+                running->syscall_deferred = true;
+                running->syscall_delay_slot =
+                    linux_udp_delay_slot_excluded<lu::configured_native_profile()>(trap.value());
+            }
             else if (trap.value().kind == hw::TrapKind::timer) ++running->cpu_time_ticks;
             static_cast<void>(kernel.posix().activate(0));
             return runtime_failure.ok();
@@ -1569,6 +1586,7 @@ bool step(Kernel &kernel)
 #endif
             linux_udp_delay_slot = linux_udp_delay_slot_excluded<lu::configured_native_profile()>(trap.value());
             running->syscall_pending = true;
+            running->syscall_deferred = false;
             trapped_this_step = true;
         }
         else if (trap.value().kind == hw::TrapKind::interrupt)
@@ -1651,7 +1669,7 @@ bool step(Kernel &kernel)
         else if (const auto object = pipe_write_object(chosen.pid, chosen.tid); object.pool)
             result = resume_pipe_write(kernel, *process, object, complete);
         // Only a re-dispatch: a newly trapped syscall never takes a stored result.
-        else if (const auto stored = trapped_this_step ? std::nullopt : cpu_control_resume(*running))
+        else if (const auto stored = trapped_this_step || deferred_trap ? std::nullopt : cpu_control_resume(*running))
             result = *stored;
         else if ((process->resources().personality == Personality::native &&
                       native_unix_path_call(hw::syscall(running->native_frame), kernel.scheduler(), *process) != lu::UnixPathCall::none) ||

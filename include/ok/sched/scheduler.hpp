@@ -115,6 +115,11 @@ struct ThreadControlBlock
     arch::execution::UserFrame native_frame{};
     bool native_active{false};
     bool syscall_pending{false};
+    // A syscall trapped while its group was frozen and kept pending without
+    // dispatch (spec 4.8); its dispatch after the thaw is that trap's, with
+    // the trap's MIPS branch-delay-slot exclusion.
+    bool syscall_deferred{false};
+    bool syscall_delay_slot{false};
     DeadlineWait native_deadline{};
     WaitRegistration wait_registration{};
     u32 console_wait_epoch{}; // Original input generation survives readiness wakes.
