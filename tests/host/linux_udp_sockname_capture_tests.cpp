@@ -90,7 +90,8 @@ template <lu::Profile P> void success(Fixture<P> &f,u32 capacity,
   const auto copies=mock::copies, outputs=mock::outputs;
   auto out=query(f,f.fd,capacity?name_at:~uptr{0}); CHECK(out.status);
   expect(out.published==1 && out.value==0 && length<P>()==16);
-  expect(mock::copies==copies+1+(f.socketcall?1:0) && mock::outputs==outputs+(capacity?2:1));
+  // A socketcall adds the capture-time head copy (TcpSocketcall) and the decode copy.
+  expect(mock::copies==copies+1+(f.socketcall?2:0) && mock::outputs==outputs+(capacity?2:1));
   std::array<u8,16> bytes{}; CHECK(lu::UdpWire<P>::encode_address(bytes,{2,wanted.port,wanted.address.ipv4()}));
   for(usize i=0;i<32;++i)
     expect(mock::memory[name_at-hw::user_begin+i]==(i<std::min<usize>(capacity,16)?std::byte{bytes[i]}:std::byte{0xa7}));
@@ -123,7 +124,7 @@ template <lu::Profile P> void capacities_and_faults(Kernel &kernel,bool indirect
     const auto copies=mock::copies,outputs=mock::outputs;
     auto out=query(f,fd,0,~uptr{0}); CHECK(out.status);
     expect(out.value==error<P>(fd==0?lu::UdpErrno::e_notsock:lu::UdpErrno::e_badf));
-    expect(mock::copies==copies+(indirect?1:0) && mock::outputs==outputs);
+    expect(mock::copies==copies+(indirect?2:0) && mock::outputs==outputs);
   }
   const auto faults=[&](uptr address,uptr len,uptr read_fault,uptr write_fault,bool name_written) {
     mock::memory.fill(std::byte{0xa7}); length<P>(16);

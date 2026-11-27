@@ -455,7 +455,9 @@ handler runs under it after the continue.
   also when a timer or an owed kernel signal decided it.
 - TSTP/TTIN/TTOU in an orphaned group are discarded when they would apply: at
   generation when deliverable, otherwise when dequeued (a blocked one stays
-  pending for `rt_sigpending` and `sigtimedwait`). SIGSTOP never is.
+  pending for `rt_sigpending` and `sigtimedwait`). SIGSTOP never is: the
+  check is made in the recipient's numbering, so a native SIGSTOP (19) stops a
+  native process on MIPS, where Linux SIGSTOP is 23.
 - Init (pid 1) follows Linux `SIGNAL_UNKILLABLE` in `sig_ignored` order: a
   SIG_DFL terminating or stopping signal, KILL and STOP included, is ignored
   at generation unless the named thread blocks it; a blocked one is queued,
@@ -816,10 +818,17 @@ a same-personality exec, dropped by a personality change, which also resets
 SIGCHLD SIG_IGN), a timer retry that neither repeats its CONT nor survives the
 opposite stop, a fatal decision applied in the step that made it, and
 shutdown's terminate path with a stopped process. The ten profiles are covered
-for numbering and translation only. `test_native_child_wait_signal.py`
-(quarantined in the hosted suite, whose all-profile adapter section still
-fails at origin capture) also covers caught-signal interruption of group
-waits and RV32 `waitid` without WEXITED before that section.
+for numbering and translation only. The same runner also builds
+`tests/host/native_job_control_orphan_stop_tests.cpp` for x86_64, mips and
+mips64 and requires `NATIVE_JOB_CONTROL_ORPHAN_STOP_PASS native_stop=19
+linux_stop=<19|23> checks=<n> hosted=1 guest=0`: in an orphaned group a native
+SIGSTOP stops a native process (from itself, its parent, directed or to the
+group, or a Linux sender's SIGSTOP), native and Linux TSTP/TTIN/TTOU are
+dropped, and Linux recipients stop on Linux SIGSTOP only.
+`test_native_child_wait_signal.py` (quarantined in the hosted suite, whose
+all-profile adapter section still fails at origin capture) also covers
+caught-signal interruption of group waits and RV32 `waitid` without WEXITED
+before that section.
 
 S4 adds two runners on the actual runtime (x86_64 hosted backends):
 

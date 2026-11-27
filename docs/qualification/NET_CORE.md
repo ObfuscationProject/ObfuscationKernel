@@ -6,7 +6,9 @@ executor running through it. Slice 4: general TCP. Slice 5: IPv6 transport
 endpoints and `AF_INET6` sockets. Slice 6: readiness through wait queues.
 Slice 7: the link probe and its QEMU evidence. Follow-up
 `net-socket-gaps`: ICMP errors to sockets, socket poll and select on wait
-queues, TCP socket names. This note grows with each slice.
+queues, TCP socket names. Follow-up `net-socketcall`: TCP through legacy
+socketcall, TCP sendto/recvfrom, connect without bind. This note grows with
+each slice.
 
 ## Design
 
@@ -178,6 +180,38 @@ queues, TCP socket names. This note grows with each slice.
   calls (truncate to the capacity, report the full size, a negative length
   is EINVAL).
 
+## Socketcall, send/recv and connect without bind
+
+- TCP works through legacy socketcall(2) on the profiles that have it
+  (i386, MIPS O32, 32-bit PowerPC).
+  - Before, only accept/accept4 (selectors 5, 18) reached TCP. A TCP socket
+    could not be created, connected, named, read, written or shut down through
+    socketcall, and getsockopt (15) was EOPNOTSUPP for TCP and UDP.
+  - `TcpSocketcall` (`src/user/tcp_socketcall.hpp`) maps the selectors to the
+    direct calls; send and recv become sendto and recvfrom without an address.
+    It holds the `net/socket.c` argument counts and decodes the argument array
+    in the profile's byte order.
+  - At capture, one copied head of the array decides the owner:
+    - socket, for `SOCK_STREAM`;
+    - the descriptor calls, for a TCP descriptor;
+    - getsockopt, for a TCP or a UDP descriptor.
+
+    Everything else stays with the UDP and UNIX paths. The runtime reads the
+    descriptor and every argument from the array.
+  - musl 1.2.5 tries the direct calls first and uses socketcall only after
+    ENOSYS. This matters for libcs that call socketcall directly.
+- sendto and recvfrom on a TCP stream run as write and read with flags. They
+  used to be refused with EOPNOTSUPP, which broke musl send() and recv().
+  - Flags: `MSG_DONTWAIT` is the immediate behaviour, `MSG_NOSIGNAL`
+    suppresses SIGPIPE and `MSG_PEEK` leaves the bytes queued. Other flags
+    are EOPNOTSUPP.
+  - sendto copies and validates a destination, then ignores it.
+  - recvfrom names no source. It writes a zero source length after the data,
+    as `__sys_recvfrom` does.
+- connect on an unbound stream binds it first, as `inet_autobind` does. It
+  takes the source address the interface selects and the next free port of
+  49152-65535; EADDRNOTAVAIL when none is free. Before, it was EINVAL.
+
 ## Not yet
 
 - TCP: no window scaling, timestamps, SACK or delayed ACKs. Path MTU
@@ -190,6 +224,10 @@ queues, TCP socket names. This note grows with each slice.
   EOPNOTSUPP rather than ENOPROTOOPT; setsockopt stays unsupported). A
   second connect after a failed one whose error was reported is EISCONN
   rather than a new attempt.
+- Linux TCP calls are immediate. A blocking socket's read, write or connect
+  that would wait returns EAGAIN or EOPNOTSUPP instead of sleeping. Bind needs
+  a specified unicast address, so there is no wildcard listener. The mmsg
+  calls and socketcall recvmmsg/sendmmsg (19, 20) are not served.
 - The OS's default image keeps the static link (gateway as a permanent
   neighbour); only its `net_probe` image uses the routed interface. DHCP and
   a configurable address belong to OS services.
@@ -255,6 +293,16 @@ queues, TCP socket names. This note grows with each slice.
     ECONNREFUSED, POLLERR and the same gating for UDP.
   - `scripts/test_net_runtime.py` builds and runs these runtime suites with
     ASan/UBSan, one binary per test.
+- Socketcall, send/recv and autobind:
+  - `tcp_socketcall_tests` (in `test_net_core.py`) checks selector routing,
+    argument decoding in both byte orders and descriptor ownership on all ten
+    profiles.
+  - `tcp_immediate_runtime_tests` covers stream sendto/recvfrom with flags,
+    destinations and source lengths, and connect without bind in both
+    personalities.
+  - Guest: the paired OS `net-socketcall` fixture (`scripts/test_net_socketcall.py`)
+    runs a freestanding Linux program that drives TCP and UDP only through
+    socketcall against the scripted peer. It passes on i386, mips and ppc.
 - Probe: `net_probe_tests` runs `LinkProbe` against a scripted slirp-like
   gateway (exact marker text), also with ten percent TCP loss each way.
 - QEMU device execution (paired OS `feat/net-services`):

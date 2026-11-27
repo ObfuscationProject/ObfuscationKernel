@@ -30,9 +30,12 @@ FLAGS = {
     'ppc': ['-msoft-float', '-msdata=none'],
 }
 # Each hosted model test is its own binary with its own main.
-TESTS = ('net_ip_tests', 'net_neighbour_route_tests', 'net_interface_tests', 'tcp_window_tests', 'net_udp_tests', 'net_probe_tests')
+TESTS = ('net_ip_tests', 'net_neighbour_route_tests', 'net_interface_tests', 'tcp_window_tests', 'net_udp_tests', 'net_probe_tests',
+         'tcp_socketcall_tests')
 # Kernel sources a hosted test links besides its own file.
 SOURCES = {'net_udp_tests': ('src/net/native_udp.cpp',)}
+# Kernel headers outside include/ a hosted test reads (copied, not compiled).
+HEADERS = ('src/user/tcp_socketcall.hpp',)
 sha = lambda p: hashlib.sha256(Path(p).read_bytes()).hexdigest()
 
 def main():
@@ -49,7 +52,7 @@ def main():
     for name in (*(test + '.cpp' for test in TESTS), 'net_core_compile.cpp'):
         (source / 'tests/host').mkdir(parents=True, exist_ok=True)
         shutil.copy2(root / 'tests/host' / name, source / 'tests/host' / name)
-    for name in sorted({path for paths in SOURCES.values() for path in paths}):
+    for name in sorted({path for paths in SOURCES.values() for path in paths} | set(HEADERS)):
         (source / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(root / name, source / name)
     inputs = {str(f.relative_to(source)): sha(f) for f in sorted(source.rglob('*')) if f.is_file()}

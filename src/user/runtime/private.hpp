@@ -1188,9 +1188,15 @@ class TcpImmediateRuntime final
         // Only owned frame values and captured IDs survive copied callbacks.
         const auto saved_frame = thread.native_frame;
         const u64 pid = access.pid();
-        const auto route = access.linux_personality()
-            ? AcceptCall::route(lu::NativeBridge<lu::configured_native_profile()>::snapshot(saved_frame))
-            : lu::TcpCallRoute{access.operation(), false, 0, 0};
+        // The effective call: a legacy socketcall selector (TcpSocketcall), the
+        // copied accept route, or the direct call.
+        const auto route = [&]() -> lu::TcpCallRoute {
+            if (!access.linux_personality()) return {access.operation(), false, 0, 0};
+            const auto snapshot = lu::NativeBridge<lu::configured_native_profile()>::snapshot(saved_frame);
+            if (const auto socketcall = Socketcall::route(snapshot); socketcall.call != Call::none)
+                return {socketcall.call, true, socketcall.array, socketcall.bytes()};
+            return AcceptCall::route(snapshot);
+        }();
         TcpOriginalDescription original{kernel.scheduler(), kernel.native_tcp(), runtime_failure.bkl_sink()};
         const auto operation = [&]() -> Status
         {
@@ -1229,7 +1235,13 @@ class TcpImmediateRuntime final
             {
                 // Direct signatures own fd in a saved register, including
                 // O32. Accept socketcall selection belongs to the shared path.
-                original_fd = static_cast<i32>(static_cast<u32>(first_argument(saved_frame, access)));
+                const auto first = first_argument(saved_frame, access);
+                if (!first)
+                {
+                    auto encoded = mapped_error(access, first.status());
+                    return encoded ? publish(kernel, access, {0, encoded.value()}) : encoded.status();
+                }
+                original_fd = static_cast<i32>(static_cast<u32>(first.value()));
                 if (!access.live()) return Status::denied("TCP original capture lost image after fd head copy");
                 const auto *current = kernel.scheduler().find(pid);
                 if (!current) return Status::denied("TCP captured process disappeared before original selection");
@@ -1267,8 +1279,10 @@ class TcpImmediateRuntime final
                 return encoded ? publish(kernel, access, {0, encoded.value()}) : encoded.status();
             }
             auto result = execute(kernel, pid, access, original, request.value());
-            if (result && request.value().operation == Call::write && request.value().linux &&
-                result.value().error == lu::tcp_errno_epipe[profile])
+            const bool raises = request.value().operation == Call::write ||
+                (request.value().operation == Call::sendto &&
+                 !(static_cast<u32>(request.value().arguments[3]) & *Constants::message(lu::UdpMessage::nosignal)));
+            if (result && raises && request.value().linux && result.value().error == lu::tcp_errno_epipe[profile])
             {
                 if (!access.live()) return Status::denied("TCP SIGPIPE lost captured image/descriptor");
                 auto *current = kernel.scheduler().find(pid);
@@ -1289,12 +1303,22 @@ class TcpImmediateRuntime final
         return operation;
     }
   private:
-    static u64 first_argument(const hw::UserFrame &frame, const Access &access)
+    using Socketcall = TcpSocketcall<lu::configured_native_profile()>;
+    // The descriptor argument: a register, or the first word of a legacy
+    // socketcall's argument array.
+    static Result<u64> first_argument(const hw::UserFrame &frame, Access &access)
     {
         if (!access.linux_personality()) return hw::syscall(frame).arguments[0];
         using Codec = lu::Codec<lu::configured_native_profile()>;
-        return lu::NativeBridge<lu::configured_native_profile()>::snapshot(frame).integer[
-            Codec::profile.argument_registers[0]] & Codec::word_mask;
+        const auto snapshot = lu::NativeBridge<lu::configured_native_profile()>::snapshot(frame);
+        if (const auto route = Socketcall::route(snapshot); route.call != Call::none)
+        {
+            if (auto status = Socketcall::interval(route); !status) return status;
+            std::array<std::byte, 4> head{};
+            if (auto status = access.read(route.array, head); !status) return status;
+            return Socketcall::word(head);
+        }
+        return snapshot.integer[Codec::profile.argument_registers[0]] & Codec::word_mask;
     }
     static usize argument_count(Call call)
     {
@@ -1320,6 +1344,20 @@ class TcpImmediateRuntime final
         const auto snapshot = lu::NativeBridge<lu::configured_native_profile()>::snapshot(frame);
         const u64 sp = static_cast<u64>(frame.sp) & Codec::word_mask;
         const u64 number = snapshot.integer[Codec::profile.number_register];
+        // A legacy socketcall: every argument comes from the copied array.
+        if (const auto socketcall = Socketcall::route(snapshot); socketcall.call != Call::none)
+        {
+            if (number != access.raw_syscall() || socketcall.call != request.operation)
+                return Status::denied("Linux TCP socketcall changed after capture");
+            if (auto status = Socketcall::interval(socketcall); !status) return status;
+            std::array<std::byte, 24> words{};
+            const auto copied = std::span{words}.first(socketcall.bytes());
+            if (auto status = access.read(socketcall.array, copied); !status) return status;
+            auto arguments = Socketcall::arguments(socketcall, copied);
+            if (!arguments || !access.live()) return arguments ? Status::denied("TCP copied argument authority expired") : arguments.status();
+            request.arguments = arguments.value();
+            return request;
+        }
         const auto route = AcceptCall::route(snapshot);
         if (number != access.raw_syscall() || route.socketcall || route.operation != request.operation)
             return Status::denied("Linux TCP operation changed after capture");
@@ -1388,6 +1426,33 @@ class TcpImmediateRuntime final
         name.size = bytes.size();
         return name;
     }
+    // The source address the interface selects for a peer.
+    static Result<net::IpAddress> connect_source(Kernel &kernel, const net::IpAddress &peer)
+    {
+        if (peer.v4())
+        {
+            auto source = kernel.network_interface().source(peer.ipv4()); if (!source) return source.status();
+            return net::IpAddress{source.value()};
+        }
+        auto source = kernel.network_interface().source(peer.ipv6()); if (!source) return source.status();
+        return net::IpAddress{source.value()};
+    }
+    // Binds the next free port of the ephemeral range 49152-65535.
+    static Result<net::tcp::Endpoint> autobind(net::NativeTcpStreamService &service, net::TcpStreamHandle handle,
+                                               net::IpAddress address)
+    {
+        for (u32 attempt = 0; attempt < 16384; ++attempt)
+        {
+            const u16 port = next_ephemeral_;
+            next_ephemeral_ = port == 65535 ? u16{49152} : static_cast<u16>(port + 1);
+            const net::tcp::Endpoint local{address, port};
+            const auto status = service.bind(handle, local);
+            if (status) return local;
+            if (status.code() != StatusCode::already_exists) return status;
+        }
+        return Status::no_space("no free ephemeral TCP port");
+    }
+    static inline constinit u16 next_ephemeral_ = 49152;
     // The errno a failed connection reports (Linux tcp_v4_err, tcp_reset,
     // tcp_write_err); `none` is 0.
     static u32 tcp_failure_errno(const Request &request, net::tcp::Failure failure)
@@ -1632,9 +1697,22 @@ class TcpImmediateRuntime final
                 if (!peer) return peer.status();
                 if (!kernel.native_udp().reachable(peer.value().address))
                 { semantic_error = error(request, lu::UdpErrno::e_netunreach, 101); return Status::fault(); }
+                // An unbound stream binds first (inet_autobind, inet_hash_connect):
+                // the source address the route selects and a free ephemeral port.
+                net::tcp::Endpoint local = state.value().local;
+                if (!local.port)
+                {
+                    auto source = connect_source(kernel, peer.value().address);
+                    if (!source) { semantic_error = error(request, lu::UdpErrno::e_netunreach, 101); return Status::fault(); }
+                    auto bound = autobind(service, handle, source.value());
+                    if (!bound && bound.status().code() == StatusCode::no_space)
+                    { semantic_error = error(request, lu::UdpErrno::e_addrnotavail, 99); return Status::fault(); }
+                    if (!bound) return bound.status();
+                    local = bound.value();
+                }
                 auto now = kernel.native_tcp_now(); if (!now) return now.status();
                 if (!access.live()) return Status::denied("TCP connect lost image during clock acquisition");
-                auto iss = kernel.native_tcp_iss(state.value().local, peer.value()); if (!iss) return iss.status();
+                auto iss = kernel.native_tcp_iss(local, peer.value()); if (!iss) return iss.status();
                 if (!access.live()) return Status::denied("TCP connect lost image during entropy acquisition");
                 const auto status = service.connect(handle, peer.value(), iss.value(), now.value());
                 if (status) semantic_error = tcp_error(request, lu::tcp_errno_einprogress, 115);
@@ -1687,8 +1765,27 @@ class TcpImmediateRuntime final
             }
             // Defer unsupported operations before touching connection-only state;
             // a listener is a valid stream but not a connection handle.
-            if (request.operation != Call::shutdown && request.operation != Call::read && request.operation != Call::write)
+            const bool sendto = request.operation == Call::sendto, recvfrom = request.operation == Call::recvfrom;
+            if (request.operation != Call::shutdown && request.operation != Call::read && request.operation != Call::write &&
+                !sendto && !recvfrom)
                 return Status::unsupported("TCP operation requires the next checked continuation slice");
+            // sendto/recvfrom are write/read with flags (tcp_sendmsg, tcp_recvmsg).
+            // MSG_DONTWAIT is already the immediate behaviour; MSG_NOSIGNAL
+            // suppresses SIGPIPE and MSG_PEEK leaves the bytes queued.
+            const u32 flags = sendto || recvfrom ? static_cast<u32>(a[3]) : 0;
+            const u32 dontwait = request.linux ? *Constants::message(lu::UdpMessage::dontwait) : OK_MSG_DONTWAIT;
+            const u32 peek = request.linux ? *Constants::message(lu::UdpMessage::peek) : OK_MSG_PEEK;
+            const u32 nosignal = request.linux ? *Constants::message(lu::UdpMessage::nosignal) : OK_MSG_NOSIGNAL;
+            if ((sendto && (flags & ~(dontwait | nosignal))) || (recvfrom && (flags & ~(dontwait | peek))))
+                return Status::unsupported("TCP message flag is outside DONTWAIT, NOSIGNAL and PEEK");
+            // __sys_sendto copies a destination before sending; TCP then ignores it.
+            if (sendto && a[4])
+            {
+                const i32 length = static_cast<i32>(static_cast<u32>(a[5]));
+                if (length < 0 || length > 128) { semantic_error = error(request, lu::UdpErrno::e_inval, 22); return Status::fault(); }
+                std::array<std::byte, 128> ignored{};
+                if (length) if (auto status = access.read(a[4], std::span{ignored}.first(static_cast<usize>(length))); !status) return status;
+            }
             auto stream = service.snapshot(handle); if (!stream) return stream.status();
             if (!stream.value().endpoint || stream.value().endpoint->kind != net::tcp::HandleKind::connection)
             { semantic_error = tcp_error(request, lu::tcp_errno_enotconn, 107); return Status::fault(); }
@@ -1713,16 +1810,35 @@ class TcpImmediateRuntime final
             const usize size = a[2] < payload_.size() ? static_cast<usize>(a[2]) : payload_.size();
             if (state.state == net::tcp::State::syn_sent || state.state == net::tcp::State::syn_received)
                 return Status::would_block("TCP handshake is not complete");
-            if (request.operation == Call::read)
+            if (request.operation == Call::read || recvfrom)
             {
-                // A failed connection whose error was reported reads EOF (tcp_recvmsg, SOCK_DONE).
-                if (state.failure != net::tcp::Failure::none) return usize{0};
-                auto preview = service.peek(handle, std::span{payload_}.first(size)); if (!preview) return preview.status();
-                if (preview.value())
-                    if (auto status = access.write(a[1], {payload_.data(), preview.value()}); !status) return status;
-                auto consumed = service.read(handle, std::span{payload_}.first(preview.value()));
-                if (!consumed || consumed.value() != preview.value()) return Status::fault("TCP bytes changed after checked output");
-                return consumed;
+                auto received = [&]() -> Result<usize> {
+                    // A failed connection whose error was reported reads EOF (tcp_recvmsg, SOCK_DONE).
+                    if (state.failure != net::tcp::Failure::none) return usize{0};
+                    auto preview = service.peek(handle, std::span{payload_}.first(size)); if (!preview) return preview.status();
+                    if (preview.value())
+                        if (auto status = access.write(a[1], {payload_.data(), preview.value()}); !status) return status;
+                    if (flags & peek) return preview;
+                    auto consumed = service.read(handle, std::span{payload_}.first(preview.value()));
+                    if (!consumed || consumed.value() != preview.value()) return Status::fault("TCP bytes changed after checked output");
+                    return consumed;
+                }();
+                if (!received || !recvfrom || !a[4]) return received;
+                // TCP names no source (msg_namelen 0): __sys_recvfrom writes a
+                // zero length after the data, so a bad length fails after it.
+                // socket_option_length reads the length word named by argument 4.
+                auto length = socket_option_length(access, Request{request.operation, request.linux,
+                    {a[0], a[1], a[2], a[3], a[5], a[5]}}, semantic_error);
+                if (!length) return length.status();
+                std::array<u8, 4> raw{};
+                if (request.linux)
+                {
+                    if (auto status = lu::UdpWire<lu::configured_native_profile()>::encode_socklen(raw, 0); !status) return status;
+                }
+                std::array<std::byte, 4> zero{};
+                for (usize i = 0; i < raw.size(); ++i) zero[i] = std::byte{raw[i]};
+                if (auto status = access.write(a[5], zero); !status) return status;
+                return received;
             }
             if (state.write_shutdown || (state.state != net::tcp::State::established && state.state != net::tcp::State::close_wait))
             { semantic_error = tcp_error(request, lu::tcp_errno_epipe, 32); return Status::fault(); }

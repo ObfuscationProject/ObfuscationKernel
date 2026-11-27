@@ -321,6 +321,40 @@ void poll_until_data(Kernel &kernel, Group group, i32 fd, Peer &peer, std::span<
     expect(!caller->syscall_pending && static_cast<i64>(caller->native_frame.registers[14]) == 1 && !poll_wait(group.pid));
     std::memcpy(&entry, mock::memory.data() + 896, sizeof(entry)); expect(entry.revents == OK_POLLIN);
 }
+// sendto/recvfrom on a connected stream are write/read with flags: TCP
+// ignores a destination (after copying it) and names no source, so a
+// requested source length becomes 0 (Linux __sys_sendto, __sys_recvfrom).
+void stream_messages(Kernel &kernel, Group group, i32 fd, Peer &peer)
+{
+    const auto at = static_cast<uptr>(fd);
+    const std::array<std::byte, 3> data{std::byte{'s'}, std::byte{'n'}, std::byte{'d'}};
+    std::copy(data.begin(), data.end(), mock::memory.begin() + 128);
+    expect(invoke(kernel, group, 44, {at, payload_pointer, 3, 0x100, 0, 0}) == -95); // MSG_WAITALL
+    address(link.peer_ip, 9);
+    expect(invoke(kernel, group, 44, {at, payload_pointer, 3, 0, address_pointer, 129}) == -22);
+    expect(invoke(kernel, group, 44, {at, payload_pointer, 3, OK_MSG_NOSIGNAL | OK_MSG_DONTWAIT, address_pointer, 16}) == 3);
+    CHECK(kernel.poll_network()); extension.receive_peer(peer);
+    std::array<std::byte, 8> got{}; auto read = peer.read(got); CHECK(read);
+    expect(read.value() == 3 && got[0] == std::byte{'s'} && got[2] == std::byte{'d'});
+    const auto deliver = [&] {
+        CHECK(peer.write(data)); extension.send_peer(peer); CHECK(kernel.poll_network()); extension.receive_peer(peer);
+    };
+    const auto capacity = [](i32 value) { std::memcpy(mock::memory.data() + 1000, &value, sizeof(value)); };
+    const auto length = [] { i32 value{}; std::memcpy(&value, mock::memory.data() + 1000, sizeof(value)); return value; };
+    deliver();
+    expect(invoke(kernel, group, 45, {at, payload_pointer, 8, 0x100, 0, 0}) == -95);
+    capacity(16);
+    expect(invoke(kernel, group, 45, {at, payload_pointer, 8, OK_MSG_PEEK, address_pointer, name_length_pointer}) == 3);
+    expect(length() == 0);
+    capacity(16);
+    expect(invoke(kernel, group, 45, {at, payload_pointer, 8, OK_MSG_DONTWAIT, address_pointer, name_length_pointer}) == 3);
+    expect(length() == 0 && mock::memory[128] == std::byte{'s'});
+    expect(invoke(kernel, group, 45, {at, payload_pointer, 8, 0, 0, 0}) == -11);
+    // A negative source length is EINVAL after the bytes were taken.
+    deliver(); capacity(-1);
+    expect(invoke(kernel, group, 45, {at, payload_pointer, 8, 0, address_pointer, name_length_pointer}) == -22);
+    expect(invoke(kernel, group, 45, {at, payload_pointer, 8, 0, 0, 0}) == -11);
+}
 // The router answers an IPv6 SYN with port unreachable: the executor routes
 // the ICMPv6 error to the connection (after ipv6_exercise resolved the router).
 void icmp6_refusal(Kernel &kernel, u16 port)
@@ -392,6 +426,7 @@ void exercise(Kernel &kernel, bool linux, u16 port)
     expect(invoke(kernel, group, 0, {static_cast<uptr>(fd), payload_pointer, english.size()}) == 5);
     expect(std::equal(english.begin(), english.end(), mock::memory.begin() + 128));
     expect(invoke(kernel, group, 0, {static_cast<uptr>(fd), 0, 0}) == 0);
+    stream_messages(kernel, group, static_cast<i32>(fd), peer);
     auto duplicate = invoke(kernel, group, 32, {static_cast<uptr>(fd)}); expect(duplicate >= 3);
     expect(invoke(kernel, group, 3, {static_cast<uptr>(fd)}) == 0); expect(kernel.native_tcp().valid(handle));
     CHECK(peer.shutdown_write()); extension.send_peer(peer); CHECK(kernel.poll_network()); extension.receive_peer(peer);
@@ -544,6 +579,32 @@ void udp_refusal(Kernel &kernel, bool linux)
     expect(invoke(kernel, group, 3, {static_cast<uptr>(fd)}) == 0);
     retire(kernel, group);
 }
+// connect on an unbound stream binds it first (inet_autobind): the source
+// address the interface selects and a port of the ephemeral range.
+void autobind_connect(Kernel &kernel, bool linux)
+{
+    const auto group = create(kernel, linux);
+    const auto fd = invoke(kernel, group, 41, {2, OK_SOCK_STREAM | OK_SOCK_NONBLOCK, 6}); expect(fd >= 3);
+    const auto f = static_cast<i32>(fd);
+    auto name = name_call(kernel, group, 51, f, 16);
+    expect(name.result == 0 && name.record[2] == 0 && name.record[3] == 0);
+    address(link.peer_ip, 7400);
+    expect(invoke(kernel, group, 42, {static_cast<uptr>(fd), address_pointer, 16}) == -115);
+    name = name_call(kernel, group, 51, f, 16);
+    const u16 port = static_cast<u16>((name.record[2] << 8) | name.record[3]);
+    expect(name.result == 0 && name.length == 16 && port >= 49152);
+    expect(std::equal(link.local_ip.begin(), link.local_ip.end(), name.record.begin() + 4));
+    // A second unbound stream takes another port.
+    const auto other = invoke(kernel, group, 41, {2, OK_SOCK_STREAM | OK_SOCK_NONBLOCK, 6}); expect(other >= 3);
+    address(link.peer_ip, 7400); // name_call wrote its record over the address.
+    expect(invoke(kernel, group, 42, {static_cast<uptr>(other), address_pointer, 16}) == -115);
+    const auto second = name_call(kernel, group, 51, static_cast<i32>(other), 16);
+    expect(second.result == 0 && static_cast<u16>((second.record[2] << 8) | second.record[3]) != port);
+    CHECK(kernel.poll_network()); extension.head = extension.count = 0;
+    expect(invoke(kernel, group, 3, {static_cast<uptr>(fd)}) == 0);
+    expect(invoke(kernel, group, 3, {static_cast<uptr>(other)}) == 0);
+    retire(kernel, group);
+}
 void original_guard_closes(Kernel &kernel)
 {
     const auto group = create(kernel, false);
@@ -589,6 +650,7 @@ int main()
     icmp_refusal(kernel, true, 53003, 10, -113, Report::connect);
     icmp_refusal(kernel, true, 53004, 6, -101, Report::read);
     udp_refusal(kernel, false); udp_refusal(kernel, true);
+    autobind_connect(kernel, false); autobind_connect(kernel, true);
     const auto before = kernel.native_udp_executor().state(); expect(before.active && !before.failed);
     extension.failed = true; expect(!kernel.poll_network());
     const auto after = kernel.native_udp_executor().state(); expect(after.failed && after.readiness_sequence > before.readiness_sequence);
