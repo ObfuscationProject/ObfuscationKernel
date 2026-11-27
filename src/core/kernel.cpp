@@ -705,6 +705,7 @@ Status Kernel::transmit_datagram(std::span<const std::byte> frame)
         if (flush_transmit_backlog_locked())
         {
             const auto sent = owner->network_try_transmit(*this, frame);
+            if (sent) transmit_backlog_.count_direct();
             if (sent || sent.code() != StatusCode::would_block) return sent;
         }
         if (auto queued = transmit_backlog_.push(frame); !queued) return queued;

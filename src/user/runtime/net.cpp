@@ -1144,7 +1144,8 @@ i64 native_udp_call(Kernel &kernel, sched::ProcessControlBlock *process, sched::
         // Held for neighbour resolution: the interface transmits it later.
         if (!length.value()) return static_cast<i64>(a[2]);
         // Try-transmit: a frame the NIC cannot take now waits in the kernel's
-        // backlog; a full backlog is ENOBUFS (spec 4.13; Linux sendto does the same).
+        // backlog; a full backlog is ENOBUFS (spec 4.13). Linux would count
+        // that drop and report success unless IP_RECVERR is set.
         if (auto status = kernel.transmit_datagram({frame.data(), length.value()}); !status)
             return status.code() == StatusCode::no_space ? -OK_ENOBUFS : error(status);
         return static_cast<i64>(a[2]);

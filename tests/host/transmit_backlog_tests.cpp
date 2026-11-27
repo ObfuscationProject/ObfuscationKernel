@@ -58,6 +58,9 @@ int main()
         return {};
     }));
     CHECK(sent == (std::vector<u8>{1, 3}) && backlog.empty() && backlog.dropped() == 1 && backlog.queued() == 3);
+    CHECK(backlog.flushed() == 2 && backlog.direct() == 0);
+    backlog.count_direct();
+    CHECK(backlog.direct() == 1);
     // Wrap-around keeps the order.
     for (u8 round = 0; round < 10; ++round)
     {

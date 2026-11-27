@@ -837,6 +837,8 @@ struct UdpWaitCounters { u64 queued{}, evaluated{}, unqueued{}; };
 UdpWaitCounters udp_wait_statistics();
 // The kernel's TCP wait counters, bound when the runtime starts.
 extern const net::TcpWaitStats *tcp_wait_stats;
+// The kernel's datagram transmit backlog (OK_NET_TX), bound when the runtime starts.
+extern const net::TransmitBacklog<> *transmit_backlog_stats;
 void report_network_waits();
 // A UDP socket's poll channel (udp_receive, its slot): the receive-change
 // pass wakes it for each socket whose readiness moved, and every socket when

@@ -958,6 +958,7 @@ Status start(Kernel &kernel, fs::BootArchive archive)
     shared_capture.set_entry(enter_unlocked);
     emit_pool_stats();
     tcp_wait_stats = &kernel.native_tcp_waits().stats();
+    transmit_backlog_stats = &kernel.transmit_backlog();
     emit_entry_stack_stats();
 #ifdef OK_ENABLE_TEST_POINTS
     if (auto status = check_runtime_objects(); !status) return status;

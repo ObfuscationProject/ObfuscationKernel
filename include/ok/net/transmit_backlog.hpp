@@ -21,6 +21,10 @@ template <usize Frames = 4, usize Bytes = 1514> class TransmitBacklog final
     [[nodiscard]] u64 queued() const { return queued_; }
     [[nodiscard]] u64 refused() const { return refused_; }
     [[nodiscard]] u64 dropped() const { return dropped_; }
+    // Frames the NIC took at once (no queueing) and frames a flush handed it.
+    [[nodiscard]] u64 direct() const { return direct_; }
+    [[nodiscard]] u64 flushed() const { return flushed_; }
+    void count_direct() { ++direct_; }
 
     Status push(std::span<const std::byte> frame)
     {
@@ -49,6 +53,7 @@ template <usize Frames = 4, usize Bytes = 1514> class TransmitBacklog final
             const auto status = transmit(std::span<const std::byte>{front.bytes.data(), front.size});
             if (!status && status.code() == StatusCode::would_block) return false;
             if (!status) ++dropped_;
+            else ++flushed_;
             head_ = (head_ + 1) % Frames;
             --count_;
         }
@@ -63,6 +68,6 @@ template <usize Frames = 4, usize Bytes = 1514> class TransmitBacklog final
     };
     std::array<Frame, Frames> frames_{};
     usize head_{}, count_{};
-    u64 queued_{}, refused_{}, dropped_{};
+    u64 queued_{}, refused_{}, dropped_{}, direct_{}, flushed_{};
 };
 } // namespace ok::net

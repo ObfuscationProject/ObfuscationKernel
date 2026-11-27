@@ -532,6 +532,8 @@ class OperationScratch final
             // Held for neighbour resolution: the interface transmits it later.
             if (!built.value()) return static_cast<i64>(count);
             const auto submitted = backend.submit({frame_.data(), built.value()});
+            // A full transmit backlog is ENOBUFS (spec 4.13). Linux would count
+            // the drop and report success unless IP_RECVERR is set.
             if (!submitted && submitted.code() == StatusCode::no_space) return error<Target>(Error::e_nobufs);
             return submitted ? static_cast<i64>(count) : status_error<Target>(submitted);
         }
