@@ -77,14 +77,14 @@ void identity(Kernel &kernel, bool duplicate, bool close_first)
     leader(kernel, g);
     if (close_first) CHECK(kernel.posix().close(a.value()[0]));
     CHECK(kernel.posix().duplicate_to(b.value()[0], a.value()[0]));
-    // Dropping a description emits a spurious wake. B data cannot satisfy A.
+    // The wait still holds the description: dropping the slot's reference
+    // changes no endpoint count and wakes nobody (smp-scaling WP5; before, a
+    // spurious wake). B data cannot satisfy A.
     put(kernel, b.value()[1], 'B');
-    expect(resume(kernel, g, false) == -11);
     auto *thread = kernel.scheduler().find_thread(g.pid, g.peer);
-    const auto rearmed = thread->wait_registration.ticket();
-    expect(rearmed.generation > ticket.generation && thread->wait_registration.pending(rearmed));
-    expect(!kernel.scheduler().complete_wait(ticket, sched::WaitCompletion::ready));
+    expect(thread->wait_registration.pending(ticket));
     leader(kernel, g); put(kernel, a.value()[1], 'A');
+    expect(!thread->wait_registration.pending(ticket));
     mock::memory[129] = std::byte{0x55};
     expect(resume(kernel, g) == 1); expect(mock::memory[128] == std::byte{'A'} && mock::memory[129] == std::byte{0x55});
     expect(!native::pipe_read_object(g.pid, g.peer).pool);

@@ -596,10 +596,60 @@ class DescriptionPositionGuard final
     DescriptionPositionLock *lock_;
 };
 
+// The table of open file descriptions (rank ofd_table): allocation,
+// references, AF_UNIX endpoints, rights records and the rights collection.
+// The per-pipe buffers (rank pipe) nest inside it. Spin locks on every
+// profile, like the task locks (task_table.hpp).
+using OfdTableLock = smp::RankedSpinLock<smp::LockRank::ofd_table>;
+using PipeLock = smp::RankedSpinLock<smp::LockRank::pipe>;
+// The terminals (rank tty): the PTY table, the console terminal and its line
+// discipline. A read is prepared and previewed under it, copied out without
+// it and committed under it against the preview's revision.
+using TtyLock = smp::RankedSpinLock<smp::LockRank::tty>;
+
+class SchedulerState;
+// One pin of an open description (spec 3.6; SchedulerState::pin_descriptor).
+// Holding a reference, it releases it when it goes, which may be the
+// description's last release (a sibling closed the slot meanwhile).
+class PinnedDescription final
+{
+  public:
+    PinnedDescription() = default;
+    PinnedDescription(SchedulerState &owner, u16 id, OpenFileDescription *open, bool referenced) noexcept
+        : owner_(&owner), open_(open), id_(id), referenced_(referenced)
+    {
+    }
+    PinnedDescription(PinnedDescription &&other) noexcept
+        : owner_(std::exchange(other.owner_, nullptr)), open_(std::exchange(other.open_, nullptr)),
+          id_(std::exchange(other.id_, invalid_description)), referenced_(std::exchange(other.referenced_, false))
+    {
+    }
+    PinnedDescription(const PinnedDescription &) = delete;
+    PinnedDescription &operator=(const PinnedDescription &) = delete;
+    PinnedDescription &operator=(PinnedDescription &&) = delete;
+    ~PinnedDescription();
+    [[nodiscard]] OpenFileDescription *get() const noexcept { return open_; }
+    [[nodiscard]] OpenFileDescription *operator->() const noexcept { return open_; }
+    [[nodiscard]] explicit operator bool() const noexcept { return open_ != nullptr; }
+    [[nodiscard]] u16 id() const noexcept { return id_; }
+    [[nodiscard]] bool referenced() const noexcept { return referenced_; }
+    // Drops the pin now; its release status (for a last release) is returned.
+    Status reset();
+
+  private:
+    SchedulerState *owner_{};
+    OpenFileDescription *open_{};
+    u16 id_{invalid_description};
+    bool referenced_{};
+};
+
 // Nonvirtual shared storage/mechanisms keep each policy instantiation small.
 // Construction and dispatch are protected for use by BasicScheduler.
 class SchedulerState
 {
+    // Records the status of a last release it runs when it goes.
+    friend class PinnedDescription;
+
   protected:
     SchedulerState();
     ~SchedulerState() = default;
@@ -736,6 +786,8 @@ class SchedulerState
     [[nodiscard]] user::native::SharedMemoryFiles *shared_memory_files() const { return shared_memory_files_; }
     [[nodiscard]] net::NativeTcpStreamService *native_tcp_service() const { return native_tcp_service_; }
     Result<u16> allocate_description(OpenFileDescription description);
+    // Frees an allocated description that never got a reference.
+    void discard_description(u16 id);
     Result<DescriptorReservation> prepare_descriptor(u64 pid);
     Result<PreparedPtyPair> prepare_pty_pair(u64 pid, u32 flags = 0);
     using PreparedPtyRead = private_pty::RawPtyTable<>::PreparedRead;
@@ -746,6 +798,47 @@ class SchedulerState
     Result<PtyReadState> pty_read_state(u16 description, usize count, private_pty::ReadTimer timer = {}) const;
     Result<bool> pty_write_progress(u16 description, std::byte next) const;
     Result<usize> commit_pty_read(PreparedPtyRead &preview);
+    // The previewed bytes from `offset` on, under the tty lock; 0 once stale.
+    [[nodiscard]] usize preview_pty_read(const PreparedPtyRead &preview, std::span<std::byte> output,
+                                         usize offset = 0) const;
+    // Prepares a PTY read and copies its plan into `staged` in one tty hold.
+    // With a `preview` to fill, the bytes stay queued until commit_pty_read;
+    // without one they are dequeued in that same hold (and the peers woken).
+    Result<usize> stage_pty_read(u16 description, private_pty::Handle endpoint, usize count, bool timer_expired,
+                                 private_pty::ReadTimer timer, std::span<std::byte> staged,
+                                 std::optional<PreparedPtyRead> *preview);
+    // A PTY read as prepare and preview (tty lock), copy-out (`copy`, no lock)
+    // and commit (tty lock, revision check; spec 4.13). A commit another
+    // reader or a writer overtook (busy) is prepared again. The last attempt
+    // dequeues while it stages, so a read always progresses; only its copy-out
+    // runs after the dequeue (a fault there loses the bytes, as a pipe read's
+    // does).
+    static constexpr usize pty_read_attempts = 8;
+    template <typename Copy>
+    Result<usize> read_pty_prepared(u16 description, private_pty::Handle endpoint, usize count, bool timer_expired,
+                                    private_pty::ReadTimer timer, Copy &&copy)
+    {
+        for (usize attempt = 0;; ++attempt)
+        {
+            const bool last = attempt + 1 == pty_read_attempts;
+            std::array<std::byte, private_pty::RawPtyTable<>::queue_capacity> staged{};
+            std::optional<PreparedPtyRead> preview;
+            auto size = stage_pty_read(description, endpoint, count, timer_expired, timer, staged,
+                                       last ? nullptr : &preview);
+            if (!size) return size;
+            if (auto status = copy(std::span<const std::byte>{staged.data(), size.value()}); !status)
+            {
+                if (preview) preview->cancel();
+                return status;
+            }
+            if (last) return size;
+            auto consumed = commit_pty_read(*preview);
+            if (consumed && consumed.value() == size.value()) return size;
+            preview->cancel();
+            if (consumed) return Status::fault("PTY read commit took another size");
+            if (consumed.status().code() != StatusCode::busy) return consumed;
+        }
+    }
     // Keys may spuriously collide across pair generations. Retained handle and
     // wait-ticket validation must compare the complete generation separately.
     static constexpr u64 pty_wait_key(private_pty::Handle endpoint)
@@ -790,9 +883,47 @@ class SchedulerState
     // Each successful retain owns one reference, released exactly once. A pin
     // keeps the ID, backing node and pipe endpoint alive across fd close/reuse.
     Status retain_description(u16 id);
+    // The locked phase of a release (spec 3.6) runs under ofd_table: the
+    // reference, the slot and the pipe endpoint counts. The pipe and PTY
+    // wakes follow, then the unlocked phase: provider, socket path, TCP, UDP
+    // and shared-file releases, with no scheduler lock held.
     Status release_description(u16 id);
     Status install_descriptor(ProcessResources &resources, i32 fd, u16 description, bool close_on_exec = false);
     Status close_descriptor(ProcessResources &resources, i32 fd);
+    // pin(fd) (spec 3.6): the description slot `fd` of `resources` names, read
+    // under the files lock. `shared`: the caller's process may run another
+    // thread (more than one live thread, or an unknown caller); the pin then
+    // takes a reference under ofd_table, so a sibling's close cannot retire
+    // the description before the pin goes. A single-threaded caller skips it:
+    // only its own thread closes its slots.
+    [[nodiscard]] PinnedDescription pin_descriptor(ProcessResources &resources, i32 fd, bool shared);
+    // A slot reserved under the files lock between an open's path walk and its
+    // publication (spec 4.13; Linux get_unused_fd_flags then fd_install): two
+    // threads opening at once get different slots.
+    struct DescriptorSlot
+    {
+        i32 fd{-1};
+        u64 token{};
+        [[nodiscard]] explicit operator bool() const { return fd >= 0 && token; }
+    };
+    Result<DescriptorSlot> reserve_descriptor_slot(ProcessResources &resources, i32 minimum = 0);
+    // Publishes `description` (one reference taken here) into the reserved slot.
+    Status install_reserved_descriptor(ProcessResources &resources, DescriptorSlot &slot, u16 description,
+                                       bool close_on_exec = false);
+    // Gives an unpublished reserved slot back; nothing else changes.
+    void cancel_descriptor_slot(ProcessResources &resources, DescriptorSlot &slot);
+    // Clears every slot in [first, last] that `select` accepts (close_range,
+    // exec's close-on-exec pass) under the files lock, a batch at a time, and
+    // releases each batch's descriptions after dropping the lock (RetireList).
+    template <typename Select> Status close_descriptors(ProcessResources &resources, i32 first, i32 last, Select select);
+    Status close_descriptor_range(ProcessResources &resources, i32 first, i32 last);
+    Status close_on_exec_descriptors(ProcessResources &resources);
+    // Arms the calling thread's pipe read or write wait under the pipe lock
+    // (spec 4.3 A1). Should the condition the caller saw have changed (data,
+    // space, or the last peer gone), the wait is completed as ready at once,
+    // so its owner re-evaluates on its next dispatch.
+    // `needed`: the free bytes a write needs (its whole size when atomic).
+    Result<WaitTicket> arm_pipe_wait(ThreadWaitReason reason, u16 pipe, usize needed = 1);
     // Serialized shutdown/exit cleanup. Consume every fd/cwd edge even when a
     // release fails; no memory lock spans provider or endpoint callbacks.
     [[nodiscard]] Status drain_resources(ProcessResources &resources);
@@ -925,6 +1056,11 @@ class SchedulerState
     usize preview_console_read(const TerminalLdisc::ReadPlan &plan, std::span<std::byte> output,
                                usize offset) const;
     Status commit_console_read(const TerminalLdisc::ReadPlan &plan);
+    // The bounded fallback after overtaken commits (as the PTY read's last
+    // attempt): plans, copies into `staged` and consumes in one tty hold, so
+    // the read progresses; the caller's copy-out follows the dequeue.
+    Result<usize> stage_console_read(ProcessId pid, u32 expected_epoch, usize count, bool nonblocking,
+                                     std::span<std::byte> staged);
     // One ingress byte through the console line discipline. ISIG signals go to
     // the console outbox; echo stays in the ldisc for the runtime to emit.
     // `source` is the console's: interrupt once its UART line is bound.
@@ -938,6 +1074,9 @@ class SchedulerState
     static constexpr usize terminal_count = 1 + private_pty::RawPtyTable<>::pair_capacity;
     [[nodiscard]] Terminal &terminal_storage(usize index);
     [[nodiscard]] Terminal &console_terminal() { return console_terminal_; }
+    // The terminals' lock, for the runtime's console output and outbox work
+    // (memory only, never across a user copy).
+    [[nodiscard]] TtyLock &tty_lock() const { return tty_lock_; }
     [[nodiscard]] const Terminal &console_terminal() const { return console_terminal_; }
     [[nodiscard]] Result<TerminalSubject> terminal_subject(u16 description) const;
     [[nodiscard]] std::optional<TerminalRef> controlling_terminal(const ProcessControlBlock &process) const;
@@ -1351,6 +1490,7 @@ class SchedulerState
     void terminal_changed(TerminalRef ref);
     Result<private_pty::Handle> bind_pty_multiplexer(u16 description, u32 uid, u32 gid);
     private_pty::RawPtyTable<> pty_transport_{}; // One stable table; handles never cross scheduler domains.
+    mutable TtyLock tty_lock_{};
     ConsoleInputLease console_input_{};
     // Completed waits by CPU and source, each row written by its CPU.
     std::array<std::array<std::atomic<uptr>, wake_source_count>, smp::max_cpus> wakes_{};
@@ -1373,6 +1513,13 @@ class SchedulerState
     Status release_unix_record(UnixRightsRecord record);
     Status retire_pipe(u16 pipe);
     void consume_unix_bytes(u16 pipe, usize count, u16 record);
+    // Under the pipe lock: consumes the bytes and returns the rights record
+    // they completed, detached, for release after the lock is dropped.
+    UnixRightsRecord consume_unix_bytes_locked(u16 pipe, usize count, u16 record);
+    // Claims unused pipe buffers (under ofd_table, each reset under its lock).
+    Status claim_pipes(std::span<u16> claimed);
+    // Gives back a claimed buffer no description counts yet.
+    void unclaim_pipe(u16 pipe);
     Result<usize> commit_unix_receive(UnixReceive &receive);
     void cancel_unix_receive(UnixReceive &receive);
     enum class UnixEndpointState : u8 { unbound, bound, listening, connected };
@@ -1398,8 +1545,22 @@ class SchedulerState
     std::array<UnixEndpoint, max_unix_endpoints> unix_endpoints_{};
     u64 next_unix_endpoint_generation_{1};
     std::array<PipeBuffer, max_process_pipes> pipes_{};
+    mutable std::array<PipeLock, max_process_pipes> pipe_locks_{};
     std::array<OpenFileDescription, max_open_descriptions> descriptions_{};
     std::array<DescriptionPositionLock, max_open_descriptions> positions_{};
+    mutable OfdTableLock ofd_table_{};
+    // A description's contribution to its pipes' endpoint counts, under
+    // ofd_table and the pipe locks: `delta` +1 at its first reference, -1 at
+    // its last release.
+    void count_pipe_endpoints(const OpenFileDescription &description, int delta);
+    // The pipe endpoint counts against a scan of the table (debug kernels; a
+    // difference counts audit_repairs and the scan wins).
+    [[nodiscard]] bool pipe_endpoint_audit(u16 pipe, bool writable) const;
+    // Rights records in the pipes (SCM_RIGHTS in flight), summed from the
+    // per-pipe counts: the collection runs only while some are (spec 4.13).
+    [[nodiscard]] usize rights_in_flight() const;
+    // A slot cleared under the files lock: the TCP close notice, then the release.
+    Status retire_closed_slot(ProcessResources &resources, i32 fd, u16 description);
     u64 next_unix_receive_token_{1}; // ABI58 diagnostic name; shared by UNIX receive, TCP accept and fd installation.
     usize active_unix_receives_{}; // Shutdown admission waits for prepared resource owners.
     usize active_descriptor_reservations_{};

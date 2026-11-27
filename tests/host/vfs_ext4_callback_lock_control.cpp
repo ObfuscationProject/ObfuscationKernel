@@ -112,7 +112,7 @@ int main(int argc, char **argv)
     CHECK(disk.reentrant_busy >= 1 && disk.direct_busy == disk.reentrant_busy);
     CHECK(disk.other_cpu); disk.other_cpu->join();
     CHECK(disk.other_was_waiting && disk.other_served.load());
-    CHECK(!storage->operation_active_ && storage->operation_owner_.load() == 0);
+    CHECK(!storage->gate_.held() && storage->gate_.owner() == 0);
     CHECK(smp::cpu_mode(1) == 0);
     CHECK(testing::ext4_clock::calls() == 0);
     std::puts("PASS actual ext4 callback lock control: provider I/O unlocked, reentrant VFS and ext4 calls "

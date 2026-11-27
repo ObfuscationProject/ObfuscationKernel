@@ -119,7 +119,7 @@ void wait_for(const std::atomic<bool> &flag)
 
 bool gate_open(const Ext4FileSystem &fs)
 {
-    return !fs.operation_active_ && fs.operation_owner_.load() == 0;
+    return !fs.gate_.held() && fs.gate_.owner() == 0;
 }
 
 // Two CPUs write, read back and fsync their own files and a shared one; every
@@ -181,7 +181,7 @@ void owner_and_waiter(const Bytes &image)
     static std::atomic<bool> reentry_busy{false};
     static std::atomic<usize> owner_depth{~usize{0}};
     disk.inside_hook = [](Disk &self) {
-        CHECK(self.fs->operation_active_ && self.fs->operation_owner_.load() == 3 + 1);
+        CHECK(self.fs->gate_.held() && self.fs->gate_.owner() == 3 + 1);
         const auto nested = self.probe->query_metadata();
         reentry_busy = !nested && nested.status().code() == StatusCode::busy;
         owner_depth = smp::lock_debug_depth(smp::current_cpu());
@@ -202,7 +202,7 @@ void owner_and_waiter(const Bytes &image)
         served = true;
     });
     while ((smp::cpu_mode(4) & smp::cpu_mode_spinning) == 0) std::this_thread::yield();
-    CHECK(!served.load() && fs->operation_owner_.load() == 3 + 1);
+    CHECK(!served.load() && fs->gate_.owner() == 3 + 1);
     disk.go = true;
     owner.join();
     waiter.join();
@@ -240,7 +240,7 @@ void deferred_release(const Bytes &image)
     }
     // Deferred: no I/O and no retirement while CPU 5 still owns the gate.
     CHECK(disk.writes.load() == writes && victim->references_ == 0 &&
-          victim->phase_ == Ext4Node::Phase::detached && fs->operation_owner_.load() == 5 + 1);
+          victim->phase_ == Ext4Node::Phase::detached && fs->gate_.owner() == 5 + 1);
     disk.go = true;
     owner.join();
     CHECK(victim->phase_ == Ext4Node::Phase::vacant || victim->phase_ == Ext4Node::Phase::tombstone);
@@ -261,7 +261,7 @@ void inline_release(const Bytes &image)
     disk.fs = fs.get(); disk.probe = root;
     static std::atomic<bool> owned{false};
     disk.inside_hook = [](Disk &self) {
-        owned = self.fs->operation_owner_.load() == 2 + 1 &&
+        owned = self.fs->gate_.owner() == 2 + 1 &&
                 smp::lock_debug_depth(2) == (smp::lock_debug_enabled ? 1u : 0u);
         self.go = true;
     };

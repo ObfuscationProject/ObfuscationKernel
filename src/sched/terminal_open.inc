@@ -32,6 +32,7 @@ Result<TerminalOpenResult> SchedulerState::open_terminal(ProcessId pid, u16 id, 
         else
         {
             slave = {static_cast<u16>(ctty->index - 1), ctty->generation, private_pty::Side::slave};
+            const TtyLock::Guard tty(tty_lock_);
             if (auto status = pty_transport_.admit_open(slave); !status) return status;
         }
         break;
@@ -45,6 +46,7 @@ Result<TerminalOpenResult> SchedulerState::open_terminal(ProcessId pid, u16 id, 
     {
         const auto index = request.node.index;
         if (index >= fs::pts_capacity) return Status::not_found("no such pts entry");
+        const TtyLock::Guard tty(tty_lock_);
         const auto entry = terminal_namespace_.entry(index);
         slave = pty_transport_.slave_handle(index);
         if (!entry.present || entry.generation != request.node.generation || slave.generation != entry.generation)
@@ -115,7 +117,10 @@ Result<TerminalStatus> SchedulerState::terminal_status(u16 id) const
     case Kind::pts_slave:
     {
         index = open->pty_endpoint.slot;
-        const auto entry = terminal_namespace_.entry(index);
+        const auto entry = [&] {
+            const TtyLock::Guard tty(tty_lock_);
+            return terminal_namespace_.entry(index);
+        }();
         // A removed entry keeps its last owner and mode for open slaves.
         if (entry.generation != open->pty_endpoint.generation)
             return Status::not_terminal("pts description has no namespace entry");
@@ -157,6 +162,7 @@ bool terminal_open_pts_entry(const fs::TerminalNamespace &terminals, const priva
 Status SchedulerState::change_pts_mode(fs::TerminalNode node, u32 mode, user::Credentials caller)
 {
     fs::PtsEntryView entry{};
+    const TtyLock::Guard tty(tty_lock_);
     if (!terminal_open_pts_entry(terminal_namespace_, pty_transport_, node, entry)) return Status::not_found("pts entry is gone");
     const auto decision = fs::mode_change_policy(entry.uid, entry.gid, mode, caller);
     if (!decision.authorized) return Status::permission("only the owner can chmod a pts entry");
@@ -168,6 +174,7 @@ Status SchedulerState::change_pts_mode(fs::TerminalNode node, u32 mode, user::Cr
 Status SchedulerState::change_pts_owner(fs::TerminalNode node, u32 uid, u32 gid, user::Credentials caller)
 {
     fs::PtsEntryView entry{};
+    const TtyLock::Guard tty(tty_lock_);
     if (!terminal_open_pts_entry(terminal_namespace_, pty_transport_, node, entry)) return Status::not_found("pts entry is gone");
     const auto decision = fs::owner_change_policy(entry.uid, entry.gid, entry.mode, uid, gid, caller);
     if (!decision.authorized) return Status::permission("ownership change requires root");

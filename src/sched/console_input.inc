@@ -30,6 +30,7 @@ Result<u32> SchedulerState::claim_console(ProcessId target)
     usize live = 0;
     live += child->live_count();
     if (live != 1) return Status::denied("console claim requires one live child thread");
+    const TtyLock::Guard tty(tty_lock_);
     auto issued = console_input_.claim(caller->pid(), target);
     if (issued)
     {
@@ -43,7 +44,10 @@ Status SchedulerState::revoke_console(u32 expected_epoch)
 {
     auto *caller = console_caller();
     if (!caller) return Status::denied("console revoke requires a running user owner");
-    auto status = console_input_.revoke(caller->pid(), expected_epoch);
+    const auto status = [&] {
+        const TtyLock::Guard tty(tty_lock_);
+        return console_input_.revoke(caller->pid(), expected_epoch);
+    }();
     if (status)
     {
         hangup_console(expected_epoch);
@@ -56,6 +60,7 @@ Status SchedulerState::flush_console(u32 expected_epoch)
 {
     auto *caller = console_caller();
     if (!caller) return Status::denied("console flush requires a running user owner");
+    const TtyLock::Guard tty(tty_lock_);
     auto status = console_input_.flush(caller->pid(), caller->console_epoch_, expected_epoch);
     // A cooked line typed before the prompt must not survive the flush.
     if (status) console_terminal_.ldisc.flush_input();
@@ -87,17 +92,19 @@ tty::Termios SchedulerState::console_read_termios() const
 
 bool SchedulerState::console_readable(ProcessId pid, u32 expected_epoch) const
 {
-    return console_read_authority(pid, expected_epoch).ok() &&
-        console_terminal_.ldisc.poll_readable(console_read_termios());
+    if (!console_read_authority(pid, expected_epoch).ok()) return false;
+    const TtyLock::Guard tty(tty_lock_);
+    return console_terminal_.ldisc.poll_readable(console_read_termios());
 }
 
 // The read plan, not poll readability: a read below VMIN completes with
 // min(VMIN, count) bytes (n_tty_read).
 bool SchedulerState::console_read_ready(ProcessId pid, u32 expected_epoch, usize count) const
 {
-    return console_read_authority(pid, expected_epoch).ok() &&
-        console_terminal_.ldisc.plan_read(console_read_termios(), count, false, false).wait ==
-            TerminalLdisc::ReadWait::none;
+    if (!console_read_authority(pid, expected_epoch).ok()) return false;
+    const TtyLock::Guard tty(tty_lock_);
+    return console_terminal_.ldisc.plan_read(console_read_termios(), count, false, false).wait ==
+        TerminalLdisc::ReadWait::none;
 }
 
 // Lease membership only: background readers of a controlling console are
@@ -186,14 +193,17 @@ Status SchedulerState::acquire_terminal(TerminalRef ref, ProcessControlBlock &ca
         : target->session != 0;
     if (owned) return Status::permission("terminal already belongs to another session");
     if (!readable && mode == AcquireMode::ioctl) return Status::permission("terminal acquisition needs a readable descriptor");
-    if (ref == console_terminal_ref)
     {
-        if (console_input_.leader() != caller.pid())
-            return Status::permission("only the console lease leader may acquire it");
-        target->console_epoch = console_input_.epoch();
+        const TtyLock::Guard tty(tty_lock_);
+        if (ref == console_terminal_ref)
+        {
+            if (console_input_.leader() != caller.pid())
+                return Status::permission("only the console lease leader may acquire it");
+            target->console_epoch = console_input_.epoch();
+        }
+        target->session = caller.session_id();
+        target->foreground = caller.process_group_id();
     }
-    target->session = caller.session_id();
-    target->foreground = caller.process_group_id();
     // Linux __proc_set_tty drops tty_old_pgrp.
     caller.hangup_old_foreground_ = 0;
     caller.hangup_terminal_ = 0;
@@ -221,6 +231,7 @@ void SchedulerState::hangup_exiting_leader(ProcessControlBlock &process)
     const auto old = std::exchange(process.hangup_old_foreground_, ProcessId{});
     const auto ctty = controlling_terminal(process);
     auto *target = ctty ? terminal(*ctty) : nullptr;
+    const TtyLock::Guard tty(tty_lock_);
     if (!target)
     {
         auto &storage = terminal_storage(process.hangup_terminal_);
@@ -247,14 +258,17 @@ void SchedulerState::remember_hangup(ProcessId leader, ProcessId foreground, u16
 // session leader of its association through the outbox, then a fresh terminal.
 void SchedulerState::hangup_console(u32 epoch)
 {
-    auto &console = console_terminal_;
-    if (console.session && console.console_epoch && console.console_epoch == epoch)
     {
-        static_cast<void>(console.owe(console.session, tty::TerminalSignal::hup, false));
-        static_cast<void>(console.owe(console.session, tty::TerminalSignal::cont, false));
-        remember_hangup(console.session, console.foreground, 0);
+        const TtyLock::Guard tty(tty_lock_);
+        auto &console = console_terminal_;
+        if (console.session && console.console_epoch && console.console_epoch == epoch)
+        {
+            static_cast<void>(console.owe(console.session, tty::TerminalSignal::hup, false));
+            static_cast<void>(console.owe(console.session, tty::TerminalSignal::cont, false));
+            remember_hangup(console.session, console.foreground, 0);
+        }
+        reset_console_terminal();
     }
-    reset_console_terminal();
     wake_waiters(ThreadWaitReason::job_control, job_control_key(console_terminal_ref));
 }
 
@@ -345,6 +359,21 @@ Result<TerminalReply> SchedulerState::terminal_control(const TerminalSubject &su
     const auto *open = open_description(subject.description);
     const auto endpoint = open ? open->pty_endpoint : private_pty::Handle{};
     TerminalReply reply{};
+    if (request.operation == Op::acquire)
+    {
+        auto *caller = console_caller();
+        if (auto status = acquire_terminal(subject.terminal, *caller, open && open->readable, AcquireMode::ioctl); !status)
+            return status;
+        return reply;
+    }
+    if (request.operation == Op::set_pty_lock) // One path with the scheduler API: the PTY table and /dev/pts stay in step.
+    {
+        if (auto status = set_pty_lock(subject.description, request.scalar != 0); !status) return status;
+        return reply;
+    }
+    // The wakes below (terminal_changed, wake_pty, wake_waiters) take only
+    // higher ranks (wait_hash, task, run_queue).
+    const TtyLock::Guard guard(tty_lock_);
     const auto set_attributes = [&] {
         const auto old = tty.termios;
         tty.termios = request.termios;
@@ -368,13 +397,6 @@ Result<TerminalReply> SchedulerState::terminal_control(const TerminalSubject &su
     case Op::get_window:
         reply.window = tty.window;
         return reply;
-    case Op::acquire:
-    {
-        auto *caller = console_caller();
-        if (auto status = acquire_terminal(subject.terminal, *caller, open && open->readable, AcquireMode::ioctl); !status)
-            return status;
-        return reply;
-    }
     case Op::get_session:
         reply.value = static_cast<i64>(tty.session);
         return reply;
@@ -471,9 +493,6 @@ Result<TerminalReply> SchedulerState::terminal_control(const TerminalSubject &su
         reply.value = index.value();
         return reply;
     }
-    case Op::set_pty_lock: // One path with the scheduler API: the PTY table and /dev/pts stay in step.
-        if (auto status = set_pty_lock(subject.description, request.scalar != 0); !status) return status;
-        return reply;
     default:
         return Status::not_terminal("terminal request is not available");
     }
@@ -486,6 +505,9 @@ Result<TerminalLdisc::ReadPlan> SchedulerState::prepare_console_read(ProcessId p
     if (!caller || caller->pid() != pid)
         return Status::denied("console read has no current lease authority");
     if (auto status = console_read_authority(pid, expected_epoch); !status) return status;
+    // prepare and preview under the tty lock, the copy-out without it, the
+    // commit under it again with the plan's revision (spec 4.13).
+    const TtyLock::Guard tty(tty_lock_);
     const auto plan = console_terminal_.ldisc.plan_read(console_read_termios(), count, nonblocking, false);
     using Wait = TerminalLdisc::ReadWait;
     if (plan.wait == Wait::would_block) return Status::would_block("console input is not ready");
@@ -496,18 +518,40 @@ Result<TerminalLdisc::ReadPlan> SchedulerState::prepare_console_read(ProcessId p
 usize SchedulerState::preview_console_read(const TerminalLdisc::ReadPlan &plan, std::span<std::byte> output,
                                            usize offset) const
 {
+    const TtyLock::Guard tty(tty_lock_);
     return console_terminal_.ldisc.preview(plan, output, offset);
 }
 
 Status SchedulerState::commit_console_read(const TerminalLdisc::ReadPlan &plan)
 {
+    const TtyLock::Guard tty(tty_lock_);
     return console_terminal_.ldisc.consume(plan) ? Status{} : Status::busy("console input changed during the read");
+}
+
+Result<usize> SchedulerState::stage_console_read(ProcessId pid, u32 expected_epoch, usize count, bool nonblocking,
+                                                 std::span<std::byte> staged)
+{
+    const auto *caller = console_caller();
+    if (!caller || caller->pid() != pid)
+        return Status::denied("console read has no current lease authority");
+    if (auto status = console_read_authority(pid, expected_epoch); !status) return status;
+    const TtyLock::Guard tty(tty_lock_);
+    auto &ldisc = console_terminal_.ldisc;
+    const auto plan = ldisc.plan_read(console_read_termios(), count, nonblocking, false);
+    using Wait = TerminalLdisc::ReadWait;
+    if (plan.wait == Wait::would_block) return Status::would_block("console input is not ready");
+    if (plan.wait != Wait::none) return Status::would_block("console read waits for input");
+    if (plan.copy > staged.size() || ldisc.preview(plan, staged.first(plan.copy)) != plan.copy)
+        return Status::fault("console read plan exceeds its staging");
+    if (!ldisc.consume(plan)) return Status::fault("console input changed inside one tty hold");
+    return plan.copy;
 }
 
 TerminalLdisc::Input SchedulerState::console_input(char value, WakeSource source)
 {
     if (console_input_.active() && !console_authorized(console_input_.leader(), console_input_.epoch()))
         abort_console_input();
+    const TtyLock::Guard tty(tty_lock_);
     if (!console_input_.admit()) return {};
     auto &console = console_terminal_;
     const std::array<std::byte, 1> bytes{static_cast<std::byte>(value)};
@@ -538,8 +582,13 @@ void SchedulerState::cancel_console_epoch(u32 epoch)
 
 void SchedulerState::retire_console_process(ProcessId pid)
 {
-    const auto epoch = console_input_.epoch();
-    if (console_input_.retire(pid))
+    u32 epoch{};
+    const bool retired = [&] {
+        const TtyLock::Guard tty(tty_lock_);
+        epoch = console_input_.epoch();
+        return console_input_.retire(pid);
+    }();
+    if (retired)
     {
         hangup_console(epoch);
         cancel_console_epoch(epoch);
@@ -553,6 +602,7 @@ void SchedulerState::abort_console_input()
 
 Status SchedulerState::shutdown_console_status() const
 {
+    const TtyLock::Guard tty(tty_lock_);
     return console_input_.active() || console_terminal_.ldisc.buffered()
         ? Status::busy("shutdown retains a console input lease or buffered input") : Status{};
 }

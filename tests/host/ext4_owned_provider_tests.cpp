@@ -226,7 +226,7 @@ void deferred_release(const Bytes &input, bool fail, bool retained_result)
     {
         CHECK((retained_result ? found.status() : metadata.status()).code() == StatusCode::io_error);
         CHECK(fixture.fs().failed_ && victim->phase_ == Ext4Node::Phase::retiring);
-        CHECK(!victim->references_ && !fixture.fs().operation_active_);
+        CHECK(!victim->references_ && !fixture.fs().gate_.held());
         if (retained_result) CHECK(!lookup_target->references_);
         const auto mutations = fixture.disk.mutations();
         CHECK(!fixture.root().create("quarantined", NodeType::regular)); CHECK(!fixture.fs().sync());
@@ -234,7 +234,7 @@ void deferred_release(const Bytes &input, bool fail, bool retained_result)
         CHECK(fixture.disk.mutations() == mutations); ++cleanup_errors;
     }
     else
-    { CHECK(metadata && victim->phase_ == Ext4Node::Phase::vacant && !fixture.fs().operation_active_); ++deferred_drains; }
+    { CHECK(metadata && victim->phase_ == Ext4Node::Phase::vacant && !fixture.fs().gate_.held()); ++deferred_drains; }
 }
 void direct_release_failure(const Bytes &input)
 {

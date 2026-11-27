@@ -238,8 +238,10 @@ Status PosixService::exit(i32 code)
 
 u32 PosixService::umask(u32 mask)
 {
-    const auto previous = resources().file_mode_mask;
-    resources().file_mode_mask = mask & 0777u;
+    auto &owned = resources();
+    const sched::FilesLock::Lock::Guard files(owned.files_lock.lock());
+    const auto previous = owned.file_mode_mask;
+    owned.file_mode_mask = mask & 0777u;
     return previous;
 }
 

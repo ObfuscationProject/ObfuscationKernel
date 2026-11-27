@@ -90,7 +90,7 @@ memory::ObjectHandle arm(Kernel &kernel,Group g,u32 flags=0,bool address=false,u
     auto current=Access::acquire(native::syscall_origins,process(kernel,g),thread(kernel,g)); CHECK(current);
     Status failure{}; native::linux_udp::OriginalUdpDescription original{kernel.scheduler(),failure};
     native::linux_udp::ImmediateLifetimeScope lifetime{current.value(),original};
-    auto prepared=native::linux_udp_operations.prepare_blocking_receive<profile>(kernel,process(kernel,g),thread(kernel,g),current.value(),original); CHECK(prepared);
+    auto prepared=native::linux_udp_operations().prepare_blocking_receive<profile>(kernel,process(kernel,g),thread(kernel,g),current.value(),original); CHECK(prepared);
     expect(prepared.value().admission.has_value() && !prepared.value().target_result);
     expect(kernel.scheduler().open_description(g.description)->references==2);
     auto begun=native::begin_linux_udp_receive(kernel,process(kernel,g),thread(kernel,g),current.value(),original,std::move(*prepared.value().admission)); CHECK(begun);
@@ -174,7 +174,7 @@ void staged_change_and_pressure(Kernel &kernel)
         auto access=Access::acquire(native::syscall_origins,process(kernel,g),thread(kernel,g)); CHECK(access);
         Status failure{}; native::linux_udp::OriginalUdpDescription original{kernel.scheduler(),failure};
         native::linux_udp::ImmediateLifetimeScope lifetime{access.value(),original};
-        auto prepared=native::linux_udp_operations.prepare_blocking_receive<profile>(kernel,process(kernel,g),thread(kernel,g),access.value(),original); CHECK(prepared);
+        auto prepared=native::linux_udp_operations().prepare_blocking_receive<profile>(kernel,process(kernel,g),thread(kernel,g),access.value(),original); CHECK(prepared);
         if (pressure)
             for (auto &entry:native::linux_udp_receive_waits) entry={g.pid+1000, g.pid+1000, {}};
         else packet(kernel,g);
@@ -240,7 +240,7 @@ void admission_immediate_and_changed_flags(Kernel &kernel)
         auto access=Access::acquire(native::syscall_origins,process(kernel,g),thread(kernel,g)); CHECK(access);
         Status failure{}; native::linux_udp::OriginalUdpDescription original{kernel.scheduler(),failure};
         native::linux_udp::ImmediateLifetimeScope lifetime{access.value(),original};
-        auto prepared=native::linux_udp_operations.prepare_blocking_receive<profile>(kernel,process(kernel,g),thread(kernel,g),access.value(),original); CHECK(prepared);
+        auto prepared=native::linux_udp_operations().prepare_blocking_receive<profile>(kernel,process(kernel,g),thread(kernel,g),access.value(),original); CHECK(prepared);
         expect(!prepared.value().admission && prepared.value().target_result);
         expect(*prepared.value().target_result==(mode==0?3:mode==2?error(E::e_opnotsupp):error(E::e_again)));
         expect(access.value().live() && !native::linux_udp_receive_object(g.pid,g.pid).pool);
@@ -251,7 +251,7 @@ void admission_immediate_and_changed_flags(Kernel &kernel)
     auto access=Access::acquire(native::syscall_origins,process(kernel,g),thread(kernel,g)); CHECK(access);
     Status failure{}; native::linux_udp::OriginalUdpDescription original{kernel.scheduler(),failure};
     native::linux_udp::ImmediateLifetimeScope lifetime{access.value(),original};
-    auto prepared=native::linux_udp_operations.prepare_blocking_receive<profile>(kernel,process(kernel,g),thread(kernel,g),access.value(),original); CHECK(prepared);
+    auto prepared=native::linux_udp_operations().prepare_blocking_receive<profile>(kernel,process(kernel,g),thread(kernel,g),access.value(),original); CHECK(prepared);
     CHECK(kernel.posix().fcntl(g.fd,posix::f_SETFL,posix::o_NONBLOCK));
     auto begun=native::begin_linux_udp_receive(kernel,process(kernel,g),thread(kernel,g),access.value(),original,std::move(*prepared.value().admission)); CHECK(begun);
     expect(begun.value().kind==native::LinuxUdpReceiveBeginKind::owned_completed && !begun.value().target_result);
@@ -260,7 +260,7 @@ void admission_immediate_and_changed_flags(Kernel &kernel)
     auto stale_access=Access::acquire(native::syscall_origins,process(kernel,g),thread(kernel,g)); CHECK(stale_access);
     native::linux_udp::OriginalUdpDescription stale_original{kernel.scheduler(),failure};
     native::linux_udp::ImmediateLifetimeScope stale_lifetime{stale_access.value(),stale_original};
-    auto stale_prepared=native::linux_udp_operations.prepare_blocking_receive<profile>(kernel,process(kernel,g),thread(kernel,g),stale_access.value(),stale_original); CHECK(stale_prepared);
+    auto stale_prepared=native::linux_udp_operations().prepare_blocking_receive<profile>(kernel,process(kernel,g),thread(kernel,g),stale_access.value(),stale_original); CHECK(stale_prepared);
     Admission moved{std::move(*stale_prepared.value().admission)};
     auto invalid=native::begin_linux_udp_receive(kernel,process(kernel,g),thread(kernel,g),stale_access.value(),stale_original,std::move(*stale_prepared.value().admission));
     expect(!invalid && !native::started && stale_access.value().live() && stale_original.held());
@@ -296,7 +296,7 @@ void admission_error_order(Kernel &kernel)
         const auto operation=access.value().operation();
         Status failure{}; native::linux_udp::OriginalUdpDescription original{kernel.scheduler(),failure};
         native::linux_udp::ImmediateLifetimeScope lifetime{access.value(),original};
-        auto prepared=native::linux_udp_operations.prepare_blocking_receive<profile>(kernel,p,t,access.value(),original); CHECK(prepared);
+        auto prepared=native::linux_udp_operations().prepare_blocking_receive<profile>(kernel,p,t,access.value(),original); CHECK(prepared);
         const i64 expected=mode==2 ? error(E::e_fault) : mode==3 ? error(E::e_opnotsupp) : error(E::e_badf);
         expect(!prepared.value().admission && prepared.value().target_result==expected);
         expect(access.value().live() && access.value().raw_syscall()==raw_call && access.value().operation()==operation);

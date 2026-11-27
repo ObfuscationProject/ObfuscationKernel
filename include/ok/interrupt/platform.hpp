@@ -57,6 +57,10 @@ void claim_platform_irq();
 // (serve_local_interrupts; the poll loop then calls smp::serve_while_polling).
 // A caller holding the kernel lock keeps holding it.
 bool wait_for_interrupt();
+// wait_for_interrupt() for a driver waiting on its own bound `line`: a top
+// half of another line on another CPU sends this CPU no IPI. Both return at
+// once while another CPU runs a bottom half, whose completion ends no halt.
+bool wait_for_line(IrqLine line);
 // The boot CPU's kernel loop idle (kernel lock released): as
 // wait_for_interrupt(), but a top half on another CPU does not end it. That
 // CPU drains its line itself, and the bottom halves' event posts reach CPU 0

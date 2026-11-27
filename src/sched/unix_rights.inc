@@ -33,6 +33,7 @@ bool SchedulerState::canonical_unix_description(u16 id) const
         (!open->unix_endpoint || (unix_endpoint(id) && unix_endpoint(id)->state == UnixEndpointState::connected));
 }
 
+// The caller holds the pipe lock.
 usize SchedulerState::unix_read_count(u16 pipe, usize requested, u16 &record) const
 {
     record = invalid_description;
@@ -58,15 +59,18 @@ Status SchedulerState::release_unix_record(UnixRightsRecord record)
     Status result{};
     // Remove every queue classification before invoking any provider callback.
     // The retained references themselves remain temporary external roots.
-    for (usize index = 0; index < record.count; ++index)
     {
-        auto *open = open_description(record.descriptions[index]);
-        if (!open || !open->unix_queue_references)
+        const OfdGuard table(ofd_table_);
+        for (usize index = 0; index < record.count; ++index)
         {
-            if (result) result = Status::bad_descriptor("UNIX queue edge lost its owner");
-            continue;
+            auto *open = open_description(record.descriptions[index]);
+            if (!open || !open->unix_queue_references)
+            {
+                if (result) result = Status::bad_descriptor("UNIX queue edge lost its owner");
+                continue;
+            }
+            --open->unix_queue_references;
         }
-        --open->unix_queue_references;
     }
     for (usize index = 0; index < record.count; ++index)
     {
@@ -76,11 +80,19 @@ Status SchedulerState::release_unix_record(UnixRightsRecord record)
     return result;
 }
 
+// Retires a buffer no description reads or writes any more; its rights
+// records are released after the locks are dropped.
 Status SchedulerState::retire_pipe(u16 pipe)
 {
-    if (pipe >= pipes_.size() || !pipes_[pipe].used) return {};
-    const auto records = pipes_[pipe].rights;
-    pipes_[pipe] = {}; // A callback may immediately reuse this slot.
+    if (pipe >= pipes_.size()) return {};
+    std::array<UnixRightsRecord, max_unix_records> records{};
+    {
+        const OfdGuard table(ofd_table_);
+        const PipeGuard guard(pipe_locks_[pipe]);
+        if (!pipes_[pipe].used || pipe_has_endpoint(pipe, false) || pipe_has_endpoint(pipe, true)) return {};
+        records = pipes_[pipe].rights;
+        pipes_[pipe] = {}; // A callback may immediately reuse this slot.
+    }
     Status result{};
     for (const auto &record : records) if (record.used)
     {
@@ -90,15 +102,17 @@ Status SchedulerState::retire_pipe(u16 pipe)
     return result;
 }
 
-void SchedulerState::consume_unix_bytes(u16 pipe, usize count, u16 record)
+UnixRightsRecord SchedulerState::consume_unix_bytes_locked(u16 pipe, usize count, u16 record)
 {
-    if (!count) return;
-    auto &buffer = pipes_[pipe];
+    smp::check_held(pipe_locks_[pipe], "SchedulerState::consume_unix_bytes_locked");
     UnixRightsRecord detached{};
-    if (record < buffer.rights.size())
+    if (!count) return detached;
+    auto &buffer = pipes_[pipe];
+    if (record < buffer.rights.size() && buffer.rights[record].used)
     {
         detached = buffer.rights[record];
         buffer.rights[record] = {};
+        --buffer.rights_count;
     }
     buffer.head = (buffer.head + count) % pipe_capacity;
     buffer.size -= count;
@@ -107,6 +121,17 @@ void SchedulerState::consume_unix_bytes(u16 pipe, usize count, u16 record)
     {
         remaining.start -= count;
         remaining.end -= count;
+    }
+    return detached;
+}
+
+void SchedulerState::consume_unix_bytes(u16 pipe, usize count, u16 record)
+{
+    if (!count || pipe >= pipes_.size()) return;
+    UnixRightsRecord detached{};
+    {
+        const PipeGuard guard(pipe_locks_[pipe]);
+        detached = consume_unix_bytes_locked(pipe, count, record);
     }
     wake_waiters(ThreadWaitReason::pipe_write, pipe);
     if (detached.used)
@@ -117,107 +142,159 @@ void SchedulerState::consume_unix_bytes(u16 pipe, usize count, u16 record)
     // No buffer or description pointer is used after provider callbacks.
 }
 
+// Rights move under ofd_table, then the stream's pipe lock (spec 4.13).
 Result<usize> SchedulerState::send_unix_rights(ProcessResources &resources, i32 fd,
     std::span<const std::byte> payload, std::span<const i32> descriptors, bool nonblocking)
 {
     static_cast<void>(nonblocking); // This immediate slice never arms an unresumable wait.
-    const auto *slot = resources.files.entry(fd);
-    if (!slot || !slot->used) return Status::bad_descriptor("UNIX send needs an open descriptor");
-    if (!canonical_unix_description(slot->description))
-        return Status::unsupported("rights transfer needs a canonical UNIX stream");
+    if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
     if (descriptors.size() > max_unix_rights)
         return Status::message_size("UNIX rights bound exceeded");
+    u16 description = invalid_description;
     std::array<u16, max_unix_rights> ids{};
-    for (usize index = 0; index < descriptors.size(); ++index)
     {
-        const auto *passed = resources.files.entry(descriptors[index]);
-        const auto *open = passed && passed->used ? open_description(passed->description) : nullptr;
-        if (!open || !open->references)
-            return Status::bad_descriptor("UNIX right has no live description");
-        ids[index] = passed->description;
-    }
-    if (payload.empty()) return usize{0};
-    const auto pipe = open_description(slot->description)->unix_write_pipe;
-    if (!pipe_has_endpoint(pipe, false)) return Status::broken_pipe("UNIX peer has closed");
-    auto &buffer = pipes_[pipe];
-    if (buffer.revision == ~u64{0}) return Status::overflow("stream revision cannot wrap");
-    const auto available = pipe_capacity - buffer.size;
-    if (!available) return Status::would_block("UNIX stream is full");
-    u16 record = invalid_description;
-    if (!descriptors.empty())
-    {
-        for (usize index = 0; index < buffer.rights.size(); ++index)
-            if (!buffer.rights[index].used) { record = static_cast<u16>(index); break; }
-        if (record == invalid_description) return Status::would_block("UNIX rights records are full");
-    }
-    usize retained{};
-    for (; retained < descriptors.size(); ++retained)
-        if (auto status = retain_description(ids[retained]); !status)
-        {
-            while (retained) static_cast<void>(release_description(ids[--retained]));
-            return status;
-        }
-    const auto count = payload.size() < available ? payload.size() : available;
-    for (usize index = 0; index < count; ++index)
-        buffer.data[(buffer.head + buffer.size + index) % pipe_capacity] = payload[index];
-    if (record != invalid_description)
-    {
-        buffer.rights[record] = UnixRightsRecord{.used = true, .start = buffer.size,
-            .end = buffer.size + count, .count = descriptors.size(), .descriptions = ids};
+        const FilesGuard files(resources.files_lock.lock());
+        const auto *slot = resources.files.entry(fd);
+        if (!slot || !slot->used) return Status::bad_descriptor("UNIX send needs an open descriptor");
+        description = slot->description;
         for (usize index = 0; index < descriptors.size(); ++index)
-            ++open_description(ids[index])->unix_queue_references;
+        {
+            const auto *passed = resources.files.entry(descriptors[index]);
+            ids[index] = passed && passed->used ? passed->description : invalid_description;
+        }
     }
-    buffer.size += count;
-    ++buffer.revision;
+    u16 pipe = invalid_description;
+    usize count{};
+    {
+        const OfdGuard table(ofd_table_);
+        if (!canonical_unix_description(description))
+            return Status::unsupported("rights transfer needs a canonical UNIX stream");
+        for (usize index = 0; index < descriptors.size(); ++index)
+        {
+            const auto *open = open_description(ids[index]);
+            if (!open || !open->references)
+                return Status::bad_descriptor("UNIX right has no live description");
+            // A description passed n times takes n references in this hold.
+            usize taken{};
+            for (usize other = 0; other < descriptors.size(); ++other) taken += ids[other] == ids[index];
+            if (open->references > ~usize{0} - taken)
+                return Status::overflow("open description reference limit exceeded");
+        }
+        if (payload.empty()) return usize{0};
+        pipe = open_description(description)->unix_write_pipe;
+        const PipeGuard guard(pipe_locks_[pipe]);
+        if (!pipe_has_endpoint(pipe, false)) return Status::broken_pipe("UNIX peer has closed");
+        auto &buffer = pipes_[pipe];
+        if (buffer.revision == ~u64{0}) return Status::overflow("stream revision cannot wrap");
+        const auto available = pipe_capacity - buffer.size;
+        if (!available) return Status::would_block("UNIX stream is full");
+        u16 record = invalid_description;
+        if (!descriptors.empty())
+        {
+            for (usize index = 0; index < buffer.rights.size(); ++index)
+                if (!buffer.rights[index].used) { record = static_cast<u16>(index); break; }
+            if (record == invalid_description) return Status::would_block("UNIX rights records are full");
+        }
+        // Each right holds one reference of a live description (no first
+        // retain, so no provider call) and one queue edge.
+        for (usize index = 0; index < descriptors.size(); ++index)
+        {
+            auto *open = open_description(ids[index]);
+            ++open->references;
+            ++open->unix_queue_references;
+        }
+        count = payload.size() < available ? payload.size() : available;
+        for (usize index = 0; index < count; ++index)
+            buffer.data[(buffer.head + buffer.size + index) % pipe_capacity] = payload[index];
+        if (record != invalid_description)
+        {
+            buffer.rights[record] = UnixRightsRecord{.used = true, .start = buffer.size,
+                .end = buffer.size + count, .count = descriptors.size(), .descriptions = ids};
+            ++buffer.rights_count;
+        }
+        buffer.size += count;
+        ++buffer.revision;
+    }
     wake_waiters(ThreadWaitReason::pipe_read, pipe);
     return count;
 }
 
+// The slot reservations under files, then ofd_table and the stream's pipe
+// lock for the preview and the references (files -> ofd_table -> pipe).
 Result<UnixReceive> SchedulerState::prepare_unix_receive(ProcessResources &resources, i32 fd,
     std::span<std::byte> preview, usize descriptor_capacity, bool peek, bool close_on_exec, bool nonblocking)
 {
     static_cast<void>(nonblocking);
-    const auto *slot = resources.files.entry(fd);
-    if (!slot || !slot->used) return Status::bad_descriptor("UNIX receive needs an open descriptor");
-    const auto description = slot->description;
-    if (!canonical_unix_description(description))
-        return Status::unsupported("rights receive needs a canonical UNIX stream");
-    const auto pipe = open_description(description)->pipe;
-    const auto &buffer = pipes_[pipe];
-    if (!preview.empty() && !buffer.size && pipe_has_endpoint(pipe, true))
-        return Status::would_block("UNIX stream has no buffered data");
-    if (buffer.revision == ~u64{0} || next_unix_receive_token_ == ~u64{0} ||
-        active_unix_receives_ == ~usize{0} || resources.unix_receive_operations == ~usize{0})
-        return Status::overflow("UNIX prepared operation limit exceeded");
-    if (auto status = retain_description(description); !status) return status;
-    auto token = next_descriptor_token();
-    if (!token)
-    { record_resource_failure(release_description(description), -1, description, 0, false); return token.status(); }
-    UnixReceive operation{*this, resources, description, pipe, buffer.revision,
-        token.value(), peek, close_on_exec};
-    ++active_unix_receives_;
-    ++resources.unix_receive_operations;
-    operation.bytes_ = unix_read_count(pipe, preview.size(), operation.record_);
-    for (usize index = 0; index < operation.bytes_; ++index)
-        preview[index] = buffer.data[(buffer.head + index) % pipe_capacity];
-    if (operation.record_ != invalid_description)
     {
-        const auto &record = buffer.rights[operation.record_];
-        const auto limit = descriptor_capacity < max_unix_rights ? descriptor_capacity : max_unix_rights;
-        for (i32 number = 0; number < static_cast<i32>(max_process_fds) &&
-            operation.held_count_ < record.count && operation.held_count_ < limit; ++number)
+        const FilesGuard files(resources.files_lock.lock());
+        const auto *slot = resources.files.entry(fd);
+        if (!slot || !slot->used) return Status::bad_descriptor("UNIX receive needs an open descriptor");
+        const auto description = slot->description;
+        const OfdGuard table(ofd_table_);
+        if (!canonical_unix_description(description))
+            return Status::unsupported("rights receive needs a canonical UNIX stream");
+        auto *open = open_description(description);
+        const auto pipe = open->pipe;
+        const PipeGuard guard(pipe_locks_[pipe]);
+        const auto &buffer = pipes_[pipe];
+        if (!preview.empty() && !buffer.size && pipe_has_endpoint(pipe, true))
+            return Status::would_block("UNIX stream has no buffered data");
+        if (buffer.revision == ~u64{0} || next_unix_receive_token_ == ~u64{0} ||
+            active_unix_receives_ == ~usize{0} || resources.unix_receive_operations == ~usize{0} ||
+            open->references == ~usize{0})
+            return Status::overflow("UNIX prepared operation limit exceeded");
+        if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
+        // A right the receive would hold whose description cannot take another
+        // reference fails the receive before anything changes.
+        u16 pending = invalid_description;
+        static_cast<void>(unix_read_count(pipe, preview.size(), pending));
+        if (pending != invalid_description)
         {
-            auto *target = resources.files.entry(number);
-            if (target->used || target->reservation) continue;
-            const auto id = record.descriptions[operation.held_count_];
-            if (auto status = retain_description(id); !status) return status;
-            target->reservation = operation.token_;
-            operation.fds_[operation.held_count_] = number;
-            operation.held_[operation.held_count_++] = id;
+            const auto &record = buffer.rights[pending];
+            const auto limit = descriptor_capacity < max_unix_rights ? descriptor_capacity : max_unix_rights;
+            const auto held = record.count < limit ? record.count : limit;
+            for (usize index = 0; index < held; ++index)
+            {
+                const auto *right = open_description(record.descriptions[index]);
+                usize taken{};
+                for (usize other = 0; other < held; ++other)
+                    taken += record.descriptions[other] == record.descriptions[index];
+                if (right && right->references > ~usize{0} - taken)
+                    return Status::overflow("open description reference limit exceeded");
+            }
         }
-        operation.truncated_ = operation.held_count_ != record.count;
+        ++open->references; // The operation's hold of the stream.
+        const auto token = next_unix_receive_token_++;
+        std::optional<UnixReceive> prepared;
+        prepared.emplace(UnixReceive{*this, resources, description, pipe, buffer.revision, token, peek, close_on_exec});
+        auto &operation = *prepared;
+        ++active_unix_receives_;
+        ++resources.unix_receive_operations;
+        operation.bytes_ = unix_read_count(pipe, preview.size(), operation.record_);
+        for (usize index = 0; index < operation.bytes_; ++index)
+            preview[index] = buffer.data[(buffer.head + index) % pipe_capacity];
+        if (operation.record_ != invalid_description)
+        {
+            const auto &record = buffer.rights[operation.record_];
+            const auto limit = descriptor_capacity < max_unix_rights ? descriptor_capacity : max_unix_rights;
+            for (i32 number = 0; number < static_cast<i32>(max_process_fds) &&
+                operation.held_count_ < record.count && operation.held_count_ < limit; ++number)
+            {
+                auto *target = resources.files.entry(number);
+                if (target->used || target->reservation) continue;
+                const auto id = record.descriptions[operation.held_count_];
+                auto *held = open_description(id);
+                // A right's description is live (its queue edge holds it).
+                if (!held || !held->references || held->references == ~usize{0}) break;
+                ++held->references;
+                target->reservation = operation.token_;
+                operation.fds_[operation.held_count_] = number;
+                operation.held_[operation.held_count_++] = id;
+            }
+            operation.truncated_ = operation.held_count_ != record.count;
+        }
+        return std::move(operation);
     }
-    return operation;
 }
 
 void SchedulerState::cancel_unix_receive(UnixReceive &operation)
@@ -226,13 +303,17 @@ void SchedulerState::cancel_unix_receive(UnixReceive &operation)
     const auto held = operation.held_;
     const auto count = operation.held_count_;
     auto &resources = *operation.resources_;
-    for (usize index = 0; index < count; ++index)
     {
-        auto *slot = resources.files.entry(operation.fds_[index]);
-        if (slot && slot->reservation == operation.token_) *slot = {};
+        const FilesGuard files(resources.files_lock.lock());
+        for (usize index = 0; index < count; ++index)
+        {
+            auto *slot = resources.files.entry(operation.fds_[index]);
+            if (slot && slot->reservation == operation.token_) *slot = {};
+        }
+        --resources.unix_receive_operations;
+        const OfdGuard table(ofd_table_);
+        --active_unix_receives_;
     }
-    --resources.unix_receive_operations;
-    --active_unix_receives_;
     operation.owner_ = nullptr;
     operation.resources_ = nullptr;
     operation.held_count_ = 0;
@@ -243,117 +324,160 @@ void SchedulerState::cancel_unix_receive(UnixReceive &operation)
 
 Result<usize> SchedulerState::commit_unix_receive(UnixReceive &operation)
 {
-    if (!canonical_unix_description(operation.description_) || operation.pipe_ >= pipes_.size() ||
-        !pipes_[operation.pipe_].used || pipes_[operation.pipe_].revision != operation.revision_)
-    {
-        cancel_unix_receive(operation);
-        return Status::busy("UNIX receive preview became stale");
-    }
     auto &resources = *operation.resources_;
-    for (usize index = 0; index < operation.held_count_; ++index)
-    {
-        const auto *slot = resources.files.entry(operation.fds_[index]);
-        if (!slot || slot->used || slot->reservation != operation.token_)
-        {
-            cancel_unix_receive(operation);
-            return Status::busy("UNIX receive descriptor reservation became stale");
-        }
-    }
     const auto description = operation.description_;
     const auto pipe = operation.pipe_;
     const auto record = operation.record_;
     const auto count = operation.bytes_;
     const auto peek = operation.peek_;
-    for (usize index = 0; index < operation.held_count_; ++index)
-        *resources.files.entry(operation.fds_[index]) = FileDescriptor{.used = true,
-            .close_on_exec = operation.close_on_exec_, .description = operation.held_[index], .installation = operation.token_};
-    --resources.unix_receive_operations;
-    --active_unix_receives_;
+    UnixRightsRecord detached{};
+    bool stale{};
+    const char *why{};
+    {
+        const FilesGuard files(resources.files_lock.lock());
+        const OfdGuard table(ofd_table_);
+        if (!canonical_unix_description(description) || pipe >= pipes_.size())
+        {
+            stale = true;
+            why = "UNIX receive preview became stale";
+        }
+        else
+        {
+            const PipeGuard guard(pipe_locks_[pipe]);
+            if (!pipes_[pipe].used || pipes_[pipe].revision != operation.revision_)
+            {
+                stale = true;
+                why = "UNIX receive preview became stale";
+            }
+            for (usize index = 0; !stale && index < operation.held_count_; ++index)
+            {
+                const auto *slot = resources.files.entry(operation.fds_[index]);
+                if (!slot || slot->used || slot->reservation != operation.token_)
+                {
+                    stale = true;
+                    why = "UNIX receive descriptor reservation became stale";
+                }
+            }
+            if (!stale)
+            {
+                for (usize index = 0; index < operation.held_count_; ++index)
+                    *resources.files.entry(operation.fds_[index]) = FileDescriptor{.used = true,
+                        .close_on_exec = operation.close_on_exec_, .description = operation.held_[index],
+                        .installation = operation.token_};
+                --resources.unix_receive_operations;
+                --active_unix_receives_;
+                // Held references become descriptor ownership without another fallible retain.
+                if (!peek) detached = consume_unix_bytes_locked(pipe, count, record);
+            }
+        }
+    }
+    if (stale)
+    {
+        cancel_unix_receive(operation);
+        return Status::busy(why);
+    }
     operation.owner_ = nullptr;
     operation.resources_ = nullptr;
-    // Held references become descriptor ownership without another fallible retain.
-    if (!peek) consume_unix_bytes(pipe, count, record);
+    if (!peek && count) wake_waiters(ThreadWaitReason::pipe_write, pipe);
+    if (detached.used)
+        record_resource_failure(release_unix_record(detached), -1, invalid_description, 0, false);
     record_resource_failure(release_description(description), -1, description, 0, false);
     return count;
 }
 
+// Runs only while rights are in flight. The graph is built and one queue
+// edge is detached under ofd_table, reading each pipe under its own lock;
+// the detached references are released after the lock is dropped.
 Status SchedulerState::collect_unix_rights()
 {
-    if (collecting_unix_rights_) return {};
-    collecting_unix_rights_ = true;
+    {
+        // One collection at a time; the flag is claimed under ofd_table.
+        const OfdGuard table(ofd_table_);
+        if (collecting_unix_rights_) return {};
+        collecting_unix_rights_ = true;
+    }
     Status result{};
     for (;;)
     {
-        std::array<bool, max_open_descriptions> marked{};
-        std::array<bool, max_process_pipes> reachable{};
-        for (usize id = 0; id < descriptions_.size(); ++id)
-            marked[id] = descriptions_[id].used &&
-                descriptions_[id].references > descriptions_[id].unix_queue_references;
-        bool changed{};
-        do
-        {
-            changed = false;
-            for (usize id = 0; id < descriptions_.size(); ++id)
-            {
-                if (marked[id])
-                    if (const auto *endpoint = unix_endpoint(static_cast<u16>(id)); endpoint &&
-                        endpoint->state == UnixEndpointState::listening)
-                        for (usize index = 0; index < endpoint->pending_count; ++index)
-                            if (!marked[endpoint->pending[index]])
-                            {
-                                marked[endpoint->pending[index]] = true;
-                                changed = true;
-                            }
-                if (marked[id] && canonical_unix_description(static_cast<u16>(id)))
-                {
-                    const auto pipe = descriptions_[id].pipe;
-                    reachable[pipe] = true;
-                    for (const auto &record : pipes_[pipe].rights) if (record.used)
-                        for (usize index = 0; index < record.count; ++index)
-                            if (!marked[record.descriptions[index]])
-                            {
-                                marked[record.descriptions[index]] = true;
-                                changed = true;
-                            }
-                }
-            }
-        } while (changed);
-        // An unreachable listener owns its pending endpoints through queue edges,
-        // just as an unreachable stream owns rights. Detach one before callbacks.
         u16 pending_child = invalid_description;
-        for (usize id = 0; id < descriptions_.size(); ++id)
-            if (!marked[id])
-                if (auto *endpoint = unix_endpoint(static_cast<u16>(id)); endpoint &&
-                    endpoint->state == UnixEndpointState::listening && endpoint->pending_count)
+        UnixRightsRecord detached{};
+        {
+            const OfdGuard table(ofd_table_);
+            std::array<bool, max_open_descriptions> marked{};
+            std::array<bool, max_process_pipes> reachable{};
+            for (usize id = 0; id < descriptions_.size(); ++id)
+                marked[id] = descriptions_[id].used &&
+                    descriptions_[id].references > descriptions_[id].unix_queue_references;
+            bool changed{};
+            do
+            {
+                changed = false;
+                for (usize id = 0; id < descriptions_.size(); ++id)
                 {
-                    pending_child = endpoint->pending[--endpoint->pending_count];
-                    endpoint->pending[endpoint->pending_count] = invalid_description;
-                    break;
+                    if (marked[id])
+                        if (const auto *endpoint = unix_endpoint(static_cast<u16>(id)); endpoint &&
+                            endpoint->state == UnixEndpointState::listening)
+                            for (usize index = 0; index < endpoint->pending_count; ++index)
+                                if (!marked[endpoint->pending[index]])
+                                {
+                                    marked[endpoint->pending[index]] = true;
+                                    changed = true;
+                                }
+                    if (marked[id] && canonical_unix_description(static_cast<u16>(id)))
+                    {
+                        const auto pipe = descriptions_[id].pipe;
+                        reachable[pipe] = true;
+                        const PipeGuard guard(pipe_locks_[pipe]);
+                        for (const auto &record : pipes_[pipe].rights) if (record.used)
+                            for (usize index = 0; index < record.count; ++index)
+                                if (!marked[record.descriptions[index]])
+                                {
+                                    marked[record.descriptions[index]] = true;
+                                    changed = true;
+                                }
+                    }
                 }
+            } while (changed);
+            // An unreachable listener owns its pending endpoints through queue edges,
+            // just as an unreachable stream owns rights. Detach one before callbacks.
+            for (usize id = 0; id < descriptions_.size() && pending_child == invalid_description; ++id)
+                if (!marked[id])
+                    if (auto *endpoint = unix_endpoint(static_cast<u16>(id)); endpoint &&
+                        endpoint->state == UnixEndpointState::listening && endpoint->pending_count)
+                    {
+                        pending_child = endpoint->pending[--endpoint->pending_count];
+                        endpoint->pending[endpoint->pending_count] = invalid_description;
+                    }
+            for (usize pipe = 0; pending_child == invalid_description && pipe < pipes_.size() && !detached.used; ++pipe)
+            {
+                if (reachable[pipe]) continue;
+                const PipeGuard guard(pipe_locks_[pipe]);
+                if (!pipes_[pipe].used) continue;
+                for (usize record = 0; record < pipes_[pipe].rights.size(); ++record)
+                    if (pipes_[pipe].rights[record].used)
+                    {
+                        detached = pipes_[pipe].rights[record];
+                        pipes_[pipe].rights[record] = {};
+                        --pipes_[pipe].rights_count;
+                        if (pipes_[pipe].revision != ~u64{0}) ++pipes_[pipe].revision;
+                        break;
+                    }
+            }
+        }
         if (pending_child != invalid_description)
         {
             const auto released = release_unix_pending(pending_child);
             if (result && !released) result = released;
             continue;
         }
-        u16 selected_pipe = invalid_description, selected_record = invalid_description;
-        for (usize pipe = 0; pipe < pipes_.size() && selected_pipe == invalid_description; ++pipe)
-            if (pipes_[pipe].used && !reachable[pipe])
-                for (usize record = 0; record < pipes_[pipe].rights.size(); ++record)
-                    if (pipes_[pipe].rights[record].used)
-                    {
-                        selected_pipe = static_cast<u16>(pipe);
-                        selected_record = static_cast<u16>(record);
-                        break;
-                    }
-        if (selected_pipe == invalid_description) break;
-        const auto detached = pipes_[selected_pipe].rights[selected_record];
-        pipes_[selected_pipe].rights[selected_record] = {};
-        if (pipes_[selected_pipe].revision != ~u64{0}) ++pipes_[selected_pipe].revision;
+        if (!detached.used) break;
         const auto released = release_unix_record(detached);
         if (result && !released) result = released;
         // Callback-driven reuse requires a fresh graph, never a borrowed pointer.
     }
-    collecting_unix_rights_ = false;
+    {
+        const OfdGuard table(ofd_table_);
+        collecting_unix_rights_ = false;
+    }
     return result;
 }

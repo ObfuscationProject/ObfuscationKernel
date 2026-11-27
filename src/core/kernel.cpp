@@ -684,10 +684,47 @@ Status Kernel::handle_gui_taskbar_launcher(gui::TaskbarApp app)
     return Status::success();
 }
 
+bool Kernel::flush_transmit_backlog_locked()
+{
+    smp::check_held(net_stack_, "Kernel::flush_transmit_backlog_locked");
+    auto *owner = extension();
+    if (!owner) return transmit_backlog_.empty();
+    return transmit_backlog_.flush([&](std::span<const std::byte> frame) {
+        return owner->network_try_transmit(*this, frame);
+    });
+}
+
+Status Kernel::transmit_datagram(std::span<const std::byte> frame)
+{
+    auto *owner = extension();
+    if (!owner) return Status::not_initialized("native UDP transmitter is unavailable");
+    {
+        // Try-transmit under net_stack: the NIC's ring takes the frame now or
+        // it waits in the backlog, behind any older one (spec 4.13).
+        const smp::RankedSpinLock<smp::LockRank::net_stack>::Guard stack(net_stack_);
+        if (flush_transmit_backlog_locked())
+        {
+            const auto sent = owner->network_try_transmit(*this, frame);
+            if (sent) transmit_backlog_.count_direct();
+            if (sent || sent.code() != StatusCode::would_block) return sent;
+        }
+        if (auto queued = transmit_backlog_.push(frame); !queued) return queued;
+    }
+    // The poller offers the backlog again on its next pass.
+    interrupt::post_event(interrupt::EventSource::network);
+    return {};
+}
+
 Status Kernel::poll_network()
 {
     if (shutdown_admission_closed_) return Status::denied("kernel shutdown admission is closed");
     if (network_poll_active_) return Status::busy("Ethernet poll is not reentrant");
+    {
+        // Frames a send could not hand to the NIC go first, in order; what
+        // the ring still refuses is offered again after this pass reaped it.
+        const smp::RankedSpinLock<smp::LockRank::net_stack>::Guard stack(net_stack_);
+        static_cast<void>(flush_transmit_backlog_locked());
+    }
     struct PollScope
     {
         bool &active;
@@ -765,6 +802,13 @@ Status Kernel::poll_network()
     const auto state = native_ethernet_executor_.state();
     if (state.receive_backlog)
         interrupt::post_event(EventSource::network);
+    {
+        // The pass reaped finished transmits: the backlog gets the freed
+        // ring slots now. Frames the ring still refuses wait for the next
+        // pass (a transmit completion or the idle tick), not a busy loop.
+        const smp::RankedSpinLock<smp::LockRank::net_stack>::Guard stack(net_stack_);
+        static_cast<void>(flush_transmit_backlog_locked());
+    }
     if (network_probe_.armed() && !state.retired)
         network_probe_.step(network_interface_, native_tcp_, now, iss,
                             [](std::string_view text) {

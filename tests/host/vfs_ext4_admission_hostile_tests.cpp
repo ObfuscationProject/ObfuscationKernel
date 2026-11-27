@@ -73,7 +73,7 @@ class Disk final : public driver::BlockDevice
         if (vfs)
         {
             CHECK(vfs->lock_.try_lock());
-            const bool active = vfs->operation_active_;
+            const bool active = vfs->operation_active();
             vfs->lock_.unlock();
             if (probe_active)
             {
@@ -141,7 +141,7 @@ void deferred_release_during_vfs_lookup(const Bytes &input, bool fail_cleanup)
     std::thread worker([&] { result = fixture.vfs->stat("/victim"); });
     fixture.disk.wait_paused();
     CHECK(fixture.vfs->lock_.try_lock());
-    CHECK(fixture.vfs->operation_active_);
+    CHECK(fixture.vfs->operation_active());
     fixture.vfs->lock_.unlock();
     const auto callbacks = fixture.disk.callbacks.load();
     CHECK(held.value().release());
@@ -161,7 +161,7 @@ void deferred_release_during_vfs_lookup(const Bytes &input, bool fail_cleanup)
     CHECK(queued && queued.value());
     if (fail_cleanup) fixture.disk.fail_next('w');
     fixture.disk.resume(); worker.join();
-    CHECK(!fixture.vfs->operation_active_);
+    CHECK(!fixture.vfs->operation_active());
     auto ready = fixture.vfs->take_ready_operation_wait();
     CHECK(ready && ready.value() == ticket.value());
     CHECK(registration.complete(ready.value(), sched::WaitCompletion::ready));

@@ -301,6 +301,27 @@ class AddressSpaceGate final
     smp::ServingGate<smp::LockRank::mm> gate_{};
 };
 
+// One process's `files` lock (class A, rank files): the descriptor table
+// (slots, reservations), cwd_node/cwd_mount_id/cwd and file_mode_mask. Held
+// for memory work only: a slot is read or written under it, and a provider
+// call, a description release or a user copy happens after it is dropped. A
+// spin lock on every profile, like the task locks (task_table.hpp), because
+// process records sit in the exported layout. Copying a ProcessResources
+// (fork, the record's initialization) gives the copy a fresh, free lock.
+class FilesLock final
+{
+  public:
+    using Lock = smp::RankedSpinLock<smp::LockRank::files>;
+    constexpr FilesLock() noexcept = default;
+    FilesLock(const FilesLock &) noexcept {}
+    FilesLock &operator=(const FilesLock &) noexcept { return *this; }
+    [[nodiscard]] Lock &lock() noexcept { return lock_; }
+    [[nodiscard]] bool owned_by_current_cpu() const noexcept { return lock_.owned_by_current_cpu(); }
+
+  private:
+    Lock lock_{};
+};
+
 struct ProcessResources
 {
     usize unix_receive_operations{}; // Prepared UNIX receives/accepts prevent resource retirement.
@@ -321,6 +342,7 @@ struct ProcessResources
     u32 file_mode_mask{0022};
     MemoryLimits memory_limits{};
     AddressSpaceGate mm{};
+    FilesLock files_lock{};
 };
 
 // The mm holder publishes a new handle (seqcount writer).
@@ -365,9 +387,17 @@ struct UnixRightsRecord
     usize start{}, end{}, count{};
     std::array<u16, max_unix_rights> descriptions{};
 };
+// A pipe or AF_UNIX stream buffer. Ring, counts, revision and rights records
+// are changed under the scheduler's per-pipe `pipe` lock (rank pipe).
+// `readers`/`writers` count the referenced open descriptions that read from
+// or write into it (a description counts from its first reference to its
+// last release), replacing a scan of every description.
 struct PipeBuffer
 {
     bool used{false};
+    u16 readers{0};
+    u16 writers{0};
+    u16 rights_count{0}; // Used rights records.
     u64 revision{1};
     usize head{0};
     usize size{0};

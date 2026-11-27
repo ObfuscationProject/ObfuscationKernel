@@ -18,6 +18,33 @@ class PendingDescription final : private NonCopyable
     u16 id_;
 };
 
+// A descriptor slot reserved under the files lock before the work that
+// fills it (spec 4.13): a concurrent open of a sibling thread takes another
+// slot; a failure gives it back.
+class ReservedSlot final : private NonCopyable
+{
+  public:
+    ReservedSlot(sched::SchedulerState &owner, sched::ProcessResources &resources) : owner_(owner), resources_(resources) {}
+    ~ReservedSlot() { owner_.cancel_descriptor_slot(resources_, slot_); }
+    [[nodiscard]] Status reserve(Fd minimum = 0)
+    {
+        auto reserved = owner_.reserve_descriptor_slot(resources_, minimum);
+        if (!reserved) return reserved.status();
+        slot_ = reserved.value();
+        return {};
+    }
+    [[nodiscard]] Fd fd() const { return slot_.fd; }
+    [[nodiscard]] Status publish(u16 description, bool close_on_exec)
+    {
+        return owner_.install_reserved_descriptor(resources_, slot_, description, close_on_exec);
+    }
+
+  private:
+    sched::SchedulerState &owner_;
+    sched::ProcessResources &resources_;
+    sched::SchedulerState::DescriptorSlot slot_{};
+};
+
 bool is_readable(u32 flags)
 {
     const auto access = flags & 0x3u;
@@ -70,9 +97,9 @@ Result<Fd> PosixService::openat_limited(Fd dirfd, std::string_view path, u32 fla
     auto context = path_context(dirfd, path);
     if (!context)
         return context.status();
-    auto fd = allocate_fd();
-    if (!fd)
-        return fd.status();
+    ReservedSlot fd(*scheduler_, resources());
+    if (auto status = fd.reserve(); !status)
+        return status;
     auto description = scheduler_->allocate_description({});
     if (!description)
         return description.status();
@@ -161,11 +188,10 @@ Result<Fd> PosixService::openat_limited(Fd dirfd, std::string_view path, u32 fla
         if (!bound)
             return bound.status();
         static_cast<void>(reserved->path.assign(path));
-        if (auto status = scheduler_->install_descriptor(resources(), fd.value(), description.value(),
-                                                         (flags & o_CLOEXEC) != 0);
-            !status.ok())
+        const auto number = fd.fd();
+        if (auto status = fd.publish(description.value(), (flags & o_CLOEXEC) != 0); !status.ok())
             return status;
-        return fd.value();
+        return number;
     }
     if (metadata.type == fs::NodeType::regular && metadata.size > max_regular_size)
         return Status::overflow("regular file exceeds selected open size policy");
@@ -207,11 +233,10 @@ Result<Fd> PosixService::openat_limited(Fd dirfd, std::string_view path, u32 fla
     // Diagnostic only: identity is carried by the retained node and mount.
     static_cast<void>(entry.path.assign(path));
     *reserved = entry;
-    if (auto status =
-            scheduler_->install_descriptor(resources(), fd.value(), description.value(), (flags & o_CLOEXEC) != 0);
-        !status.ok())
+    const auto number = fd.fd();
+    if (auto status = fd.publish(description.value(), (flags & o_CLOEXEC) != 0); !status.ok())
         return status;
-    return fd.value();
+    return number;
 }
 
 Result<std::array<Fd, 2>> PosixService::pipe(u32 flags)
@@ -297,22 +322,22 @@ Result<Fd> PosixService::install_native_udp(u32 handle, bool close_on_exec, bool
 {
     if (!initialized_ || !scheduler_ || !handle)
         return Status::not_initialized("native UDP descriptor owner is unavailable");
-    auto fd = allocate_fd();
-    if (!fd) return fd.status();
+    ReservedSlot fd(*scheduler_, resources());
+    if (auto status = fd.reserve(); !status) return status;
     auto description = scheduler_->allocate_description(sched::OpenFileDescription{
         .used = true, .readable = true, .writable = true,
         .flags = o_RDWR | (nonblocking ? o_NONBLOCK : 0U), .native_udp_handle = handle});
     if (!description) return description.status();
-    const auto published = scheduler_->install_descriptor(resources(), fd.value(),
-                                                          description.value(), close_on_exec);
+    const auto number = fd.fd();
+    const auto published = fd.publish(description.value(), close_on_exec);
     if (!published)
     {
         // Zero-reference reservations still belong to the caller, including
         // the endpoint; the caller closes that endpoint on this failure.
-        *scheduler_->open_description(description.value()) = {};
+        scheduler_->discard_description(description.value());
         return published;
     }
-    return fd.value();
+    return number;
 }
 
 Result<Fd> PosixService::memfd_create(std::string_view name, u32 flags)
@@ -321,8 +346,8 @@ Result<Fd> PosixService::memfd_create(std::string_view name, u32 flags)
         return Status::not_initialized("shared file descriptor owner is unavailable");
     if ((flags & ~(mfd_CLOEXEC | mfd_ALLOW_SEALING)) || !(flags & mfd_ALLOW_SEALING))
         return Status::unsupported("shared file creation requires the bounded sealing flags");
-    auto fd = allocate_fd();
-    if (!fd) return fd.status();
+    ReservedSlot fd(*scheduler_, resources());
+    if (auto status = fd.reserve(); !status) return status;
     auto &service = *scheduler_->shared_memory_files();
     auto reservation = service.reserve(name, euid(), egid());
     if (!reservation) return reservation.status();
@@ -338,15 +363,15 @@ Result<Fd> PosixService::memfd_create(std::string_view name, u32 flags)
     }
     if (auto status = scheduler_->retain_description(description.value()); !status)
     {
-        *scheduler_->open_description(description.value()) = {};
+        scheduler_->discard_description(description.value());
         static_cast<void>(service.release_description(handle.value()));
         return status;
     }
     PendingDescription pending(*scheduler_, description.value());
-    if (auto status = scheduler_->install_descriptor(resources(), fd.value(), description.value(),
-            (flags & mfd_CLOEXEC) != 0); !status)
+    const auto number = fd.fd();
+    if (auto status = fd.publish(description.value(), (flags & mfd_CLOEXEC) != 0); !status)
         return status;
-    return fd.value();
+    return number;
 }
 
 Result<DescriptorReadiness> PosixService::ready_events(Fd fd, ReadyEvents requested) const
@@ -466,10 +491,12 @@ Status PosixService::close_range(Fd first, Fd last)
 {
     if (first < 0 || last < first)
         return Status::invalid_argument("invalid close range");
+    if (scheduler_ == nullptr)
+        return Status::not_initialized("POSIX service not initialized");
+    // Slots are cleared under the files lock a batch at a time and released
+    // after it is dropped (spec 3.6 RetireList).
     const auto capped = static_cast<usize>(last) >= max_open_files ? max_open_files - 1 : static_cast<usize>(last);
-    for (usize fd = static_cast<usize>(first); fd <= capped; ++fd)
-        if (resources().files.contains(static_cast<Fd>(fd)))
-            static_cast<void>(close(static_cast<Fd>(fd)));
+    static_cast<void>(scheduler_->close_descriptor_range(resources(), first, static_cast<Fd>(capped)));
     return Status::success();
 }
 
@@ -477,21 +504,20 @@ Result<Fd> PosixService::duplicate(Fd fd, Fd minimum, u32 flags)
 {
     if (flags & ~o_CLOEXEC)
         return Status::invalid_argument("unsupported duplicate flags");
-    auto *entry = descriptor(fd);
+    // Pinned until the duplicate holds its own reference.
+    const auto pinned = pin(fd);
+    const auto *entry = pinned.get();
     if (entry == nullptr || !entry->used)
     {
         return Status::invalid_argument("bad file descriptor");
     }
-    auto target = allocate_fd(minimum);
-    if (!target)
-    {
-        return target.status();
-    }
-    if (auto status = copy_descriptor(fd, target.value(), flags); !status.ok())
-    {
+    ReservedSlot target(*scheduler_, resources());
+    if (auto status = target.reserve(minimum); !status)
         return status;
-    }
-    return target.value();
+    const auto number = target.fd();
+    if (auto status = target.publish(pinned.id(), (flags & o_CLOEXEC) != 0); !status.ok())
+        return status;
+    return number;
 }
 
 Result<Fd> PosixService::duplicate_to(Fd fd, Fd target, u32 flags)
@@ -500,10 +526,10 @@ Result<Fd> PosixService::duplicate_to(Fd fd, Fd target, u32 flags)
     {
         return Status::invalid_argument("target file descriptor out of range");
     }
-    auto *entry = descriptor(fd);
-    if (entry == nullptr || !entry->used)
     {
-        return Status::invalid_argument("bad file descriptor");
+        const auto pinned = pin(fd);
+        if (!pinned || !pinned->used)
+            return Status::invalid_argument("bad file descriptor");
     }
     if (fd == target)
         return target;
@@ -516,7 +542,9 @@ Result<Fd> PosixService::duplicate_to(Fd fd, Fd target, u32 flags)
 
 Result<usize> PosixService::read(Fd fd, std::span<std::byte> out)
 {
-    auto *entry = descriptor(fd);
+    // Pinned across the provider call: a sibling's close cannot retire it (spec 3.6).
+    auto pinned = pin(fd);
+    auto *entry = pinned.get();
     if (entry == nullptr || !entry->used || !entry->readable)
     {
         return Status::invalid_argument("file descriptor is not readable");
@@ -532,8 +560,7 @@ Result<usize> PosixService::read(Fd fd, std::span<std::byte> out)
     }
     if (entry->pty_endpoint)
     {
-        const auto *slot = resources().files.entry(fd);
-        return scheduler_->read_pty_description(slot->description, out);
+        return scheduler_->read_pty_description(pinned.id(), out);
     }
     if (entry->pipe != sched::invalid_description)
         return scheduler_->read_pipe(entry->pipe, out, (entry->flags & o_NONBLOCK) != 0);
@@ -600,7 +627,9 @@ Result<usize> PosixService::read_node(FileDescriptor &entry, std::span<std::byte
 
 Result<usize> PosixService::write(Fd fd, std::span<const std::byte> in)
 {
-    auto *entry = descriptor(fd);
+    // Pinned across the provider call: a sibling's close cannot retire it (spec 3.6).
+    auto pinned = pin(fd);
+    auto *entry = pinned.get();
     if (entry == nullptr || !entry->used || !entry->writable)
     {
         return Status::invalid_argument("file descriptor is not writable");
@@ -625,8 +654,7 @@ Result<usize> PosixService::write(Fd fd, std::span<const std::byte> in)
     }
     if (entry->pty_endpoint)
     {
-        const auto *slot = resources().files.entry(fd);
-        return scheduler_->write_pty_description(slot->description, in);
+        return scheduler_->write_pty_description(pinned.id(), in);
     }
     if (entry->pipe != sched::invalid_description)
         return scheduler_->write_pipe(entry->unix_write_pipe != sched::invalid_description
@@ -649,14 +677,17 @@ Result<usize> PosixService::write(Fd fd, std::span<const std::byte> in)
     // The offset, or end of file with O_APPEND, stays this write's until the
     // offset moves past the written bytes.
     sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
-    usize offset = entry->offset;
     if ((entry->flags & o_APPEND) != 0)
     {
-        auto metadata = entry->node->query_metadata();
-        if (!metadata)
-            return metadata.status();
-        offset = metadata.value().size;
+        // Atomic O_APPEND (spec 4.13): the provider reads the end of file and
+        // writes there in one step, against every other description's write.
+        auto appended = entry->node->append(in);
+        if (!appended)
+            return appended.status();
+        entry->offset = appended.value() + in.size();
+        return in.size();
     }
+    usize offset = entry->offset;
     if (in.size() > ~usize{0} - offset)
         return Status::overflow("write offset overflow");
     if (auto status = entry->node->write(offset, in); !status.ok())
@@ -669,7 +700,9 @@ Result<usize> PosixService::write(Fd fd, std::span<const std::byte> in)
 
 Status PosixService::fsync(Fd fd)
 {
-    auto *entry = descriptor(fd);
+    // Pinned across the provider call: a sibling's close cannot retire it (spec 3.6).
+    auto pinned = pin(fd);
+    auto *entry = pinned.get();
     if (!entry || !entry->used)
         return Status::bad_descriptor("bad file descriptor");
     if (entry->native_shared_file)
@@ -680,7 +713,9 @@ Status PosixService::fsync(Fd fd)
 }
 Status PosixService::sync_persistent(Fd fd)
 {
-    auto *entry = descriptor(fd);
+    // Pinned across the provider call: a sibling's close cannot retire it (spec 3.6).
+    auto pinned = pin(fd);
+    auto *entry = pinned.get();
     if (!entry || !entry->used)
         return Status::bad_descriptor("bad file descriptor");
     if (entry->native_shared_file || !entry->node)
@@ -689,7 +724,9 @@ Status PosixService::sync_persistent(Fd fd)
 }
 Status PosixService::ftruncate(Fd fd, usize size)
 {
-    auto *entry = descriptor(fd);
+    // Pinned across the provider call: a sibling's close cannot retire it (spec 3.6).
+    auto pinned = pin(fd);
+    auto *entry = pinned.get();
     if (!entry || !entry->used || !entry->writable)
         return Status::bad_descriptor("file descriptor is not writable");
     if (entry->native_shared_file)
@@ -713,7 +750,9 @@ Status PosixService::truncate(std::string_view path, usize size)
 }
 Result<usize> PosixService::pread(Fd fd, std::span<std::byte> out, usize offset)
 {
-    auto *entry = descriptor(fd);
+    // Pinned across the provider call: a sibling's close cannot retire it (spec 3.6).
+    auto pinned = pin(fd);
+    auto *entry = pinned.get();
     if (!entry || !entry->used)
         return Status::bad_descriptor("bad file descriptor");
     if (entry->native_shared_file)
@@ -749,7 +788,9 @@ Result<usize> PosixService::pwrite(Fd fd, std::span<const std::byte> in, usize o
 template <PositionedWritePolicy Policy>
 Result<usize> PosixService::pwrite_with_policy(Fd fd, std::span<const std::byte> in, usize offset, u64 maximum_offset)
 {
-    auto *entry = descriptor(fd);
+    // Pinned across the provider call: a sibling's close cannot retire it (spec 3.6).
+    auto pinned = pin(fd);
+    auto *entry = pinned.get();
     if (!entry || !entry->used)
         return Status::bad_descriptor("bad file descriptor");
     if (entry->native_shared_file)
@@ -813,7 +854,9 @@ template Result<usize> PosixService::pwrite_with_policy<PositionedWritePolicy::l
 
 Result<usize> PosixService::readv(Fd fd, std::span<const IoVector> vectors)
 {
-    const auto *stream = descriptor(fd);
+    // Pinned across every read below (each read pins again).
+    const auto pinned = pin(fd);
+    const auto *stream = pinned.get();
     if (stream && stream->used && stream->readable && stream->unix_write_pipe != sched::invalid_description)
     {
         // One stream consumption preserves the first ancillary-record boundary
@@ -840,7 +883,7 @@ Result<usize> PosixService::readv(Fd fd, std::span<const IoVector> vectors)
         }
         return result;
     }
-    const auto *shared = descriptor(fd);
+    const auto *shared = pinned.get();
     if (shared && shared->used && shared->native_shared_file)
     {
         std::array<std::byte, sched::pipe_capacity> gathered{};
@@ -875,7 +918,7 @@ Result<usize> PosixService::readv(Fd fd, std::span<const IoVector> vectors)
             return total == 0 ? Result<usize>{Status::invalid_argument("readv buffer is null")} : Result<usize>{total};
         }
         const auto output = std::span<std::byte>{reinterpret_cast<std::byte *>(vector.base), vector.length};
-        const auto *entry = descriptor(fd);
+        const auto *entry = pinned.get();
         // Once a vector has made progress, returning a short read must not
         // leave the caller blocked while reporting a positive byte count.
         auto result = total && entry && entry->readable && entry->pipe != sched::invalid_description
@@ -896,7 +939,9 @@ Result<usize> PosixService::readv(Fd fd, std::span<const IoVector> vectors)
 
 Result<usize> PosixService::writev(Fd fd, std::span<const IoVector> vectors)
 {
-    auto *entry = descriptor(fd);
+    // Pinned across the provider call: a sibling's close cannot retire it (spec 3.6).
+    auto pinned = pin(fd);
+    auto *entry = pinned.get();
     if (entry && entry->used && entry->native_shared_file)
     {
         std::array<std::byte, sched::pipe_capacity> gathered{};
@@ -965,7 +1010,9 @@ Result<usize> PosixService::writev(Fd fd, std::span<const IoVector> vectors)
 
 Result<usize> PosixService::seek(Fd fd, i64 offset, SeekWhence whence)
 {
-    auto *entry = descriptor(fd);
+    // Pinned across the provider call: a sibling's close cannot retire it (spec 3.6).
+    auto pinned = pin(fd);
+    auto *entry = pinned.get();
     if (entry && entry->used && entry->pty_endpoint)
         return Status::not_seekable("raw PTY descriptions are not seekable");
     if (entry == nullptr || !entry->used || entry->console || entry->input_console ||
@@ -1026,7 +1073,9 @@ Result<usize> PosixService::seek(Fd fd, i64 offset, SeekWhence whence)
 
 Result<i64> PosixService::fcntl(Fd fd, u32 command, u64 argument)
 {
-    auto *entry = descriptor(fd);
+    // Pinned across the provider call: a sibling's close cannot retire it (spec 3.6).
+    auto pinned = pin(fd);
+    auto *entry = pinned.get();
     if (entry == nullptr || !entry->used)
     {
         return Status::bad_descriptor("bad file descriptor");
@@ -1053,10 +1102,17 @@ Result<i64> PosixService::fcntl(Fd fd, u32 command, u64 argument)
         return duplicated ? Result<i64>{static_cast<i64>(duplicated.value())} : Result<i64>{duplicated.status()};
     }
     case f_GETFD:
-        return resources().files.entry(fd)->close_on_exec ? fd_CLOEXEC : 0;
-    case f_SETFD:
-        resources().files.entry(fd)->close_on_exec = (argument & fd_CLOEXEC) != 0;
+    case f_SETFD: {
+        // The slot's flag, under the files lock (the slot itself may have
+        // been closed since the pin).
+        auto &owned = resources();
+        const sched::FilesLock::Lock::Guard files(owned.files_lock.lock());
+        auto *slot = owned.files.entry(fd);
+        if (!slot || !slot->used) return Status::bad_descriptor("bad file descriptor");
+        if (command == f_GETFD) return slot->close_on_exec ? fd_CLOEXEC : 0;
+        slot->close_on_exec = (argument & fd_CLOEXEC) != 0;
         return 0;
+    }
     case f_GETFL: {
         const sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
         return static_cast<i64>(entry->flags);
@@ -1087,7 +1143,8 @@ Result<i64> PosixService::fcntl(Fd fd, u32 command, u64 argument)
 
 Result<i64> PosixService::ioctl(Fd fd, u64, u64)
 {
-    auto *entry = descriptor(fd);
+    const auto pinned = pin(fd);
+    const auto *entry = pinned.get();
     if (entry == nullptr || !entry->used)
         return Status::bad_descriptor("bad file descriptor");
     // Raw generic requests never dereference caller pointers. User adapters
@@ -1140,13 +1197,14 @@ FileStatus PosixService::terminal_file_status(const sched::TerminalStatus &termi
 
 Result<FileStatus> PosixService::fstat(Fd fd) const
 {
-    auto *entry = descriptor(fd);
+    // Pinned across the provider and service queries below.
+    const auto pinned = pin(fd);
+    const auto *entry = pinned.get();
     if (entry == nullptr || !entry->used)
     {
         return Status::invalid_argument("bad file descriptor");
     }
-    const auto *slot = resources().files.entry(fd);
-    if (auto terminal = scheduler_->terminal_status(slot->description); terminal)
+    if (auto terminal = scheduler_->terminal_status(pinned.id()); terminal)
         return terminal_file_status(terminal.value());
     if (entry->pty_endpoint)
         return FileStatus{.type = fs::NodeType::device,
@@ -1168,7 +1226,7 @@ Result<FileStatus> PosixService::fstat(Fd fd) const
             .blocks = metadata.value().size / 512, .attributes = attributes,
             .provider = FileStatusProvider::volatile_shared_file};
     }
-    if (slot && slot->used && scheduler_->is_unix_socket(slot->description))
+    if (scheduler_->is_unix_socket(pinned.id()))
         return FileStatus{.type = fs::NodeType::socket, .mode = fs::mode_socket | 0600u,
                           .link_count = 1, .block_size = fs::metadata_block_size};
     if (entry->pipe != sched::invalid_description)

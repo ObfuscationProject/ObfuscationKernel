@@ -26,10 +26,6 @@ Result<u16> SchedulerState::allocate_description(OpenFileDescription description
         return Status::invalid_argument("PTY descriptions are bound by a prepared pair or a PTY open");
     if (description.unix_endpoint)
     {
-        const auto handle = description.unix_endpoint;
-        const auto &endpoint = unix_endpoints_[handle.slot];
-        if (!endpoint.used || endpoint.generation != handle.generation || endpoint.description != invalid_description)
-            return Status::bad_descriptor("pathname UNIX description has no reserved endpoint");
         if (description.node || description.native_udp_handle || description.native_tcp_handle ||
             description.native_shared_file || description.console || description.input_console)
             return Status::invalid_argument("pathname UNIX description cannot combine providers");
@@ -45,9 +41,6 @@ Result<u16> SchedulerState::allocate_description(OpenFileDescription description
             description.pipe != invalid_description || description.unix_write_pipe != invalid_description ||
             description.console || description.input_console)
             return Status::invalid_argument("shared file description cannot combine providers");
-        for (const auto &existing : descriptions_)
-            if (existing.used && existing.native_shared_file == description.native_shared_file)
-                return Status::already_exists("shared file owner already belongs to an open description");
     }
     if (description.native_tcp_handle)
     {
@@ -56,12 +49,25 @@ Result<u16> SchedulerState::allocate_description(OpenFileDescription description
         if (description.native_udp_handle || description.native_shared_file || description.unix_endpoint || description.node || description.pipe != invalid_description ||
             description.unix_write_pipe != invalid_description || description.console || description.input_console)
             return Status::invalid_argument("TCP description cannot combine providers");
-        for (const auto &existing : descriptions_)
-            if (existing.used && existing.native_tcp_handle == description.native_tcp_handle)
-                return Status::already_exists("TCP owner already belongs to an open description");
     }
     if (description.native_udp_handle && !native_udp_service_)
         return Status::not_initialized("native UDP description has no endpoint owner");
+    // The provider owners were asked above; the table itself under ofd_table.
+    const OfdTableLock::Guard table(ofd_table_);
+    if (description.unix_endpoint)
+    {
+        const auto &endpoint = unix_endpoints_[description.unix_endpoint.slot];
+        if (!endpoint.used || endpoint.generation != description.unix_endpoint.generation ||
+            endpoint.description != invalid_description)
+            return Status::bad_descriptor("pathname UNIX description has no reserved endpoint");
+    }
+    for (const auto &existing : descriptions_)
+    {
+        if (description.native_shared_file && existing.used && existing.native_shared_file == description.native_shared_file)
+            return Status::already_exists("shared file owner already belongs to an open description");
+        if (description.native_tcp_handle && existing.used && existing.native_tcp_handle == description.native_tcp_handle)
+            return Status::already_exists("TCP owner already belongs to an open description");
+    }
     for (usize i = 3; i < descriptions_.size(); ++i)
         if (!descriptions_[i].used)
         {
@@ -74,109 +80,238 @@ Result<u16> SchedulerState::allocate_description(OpenFileDescription description
         }
     return Status::system_file_limit("open file description table full");
 }
+namespace
+{
+using OfdGuard = OfdTableLock::Guard;
+using PipeGuard = PipeLock::Guard;
+using FilesGuard = FilesLock::Lock::Guard;
+
+// The descriptions one files-lock hold took out of their slots, released
+// after the lock is dropped (spec 3.6). A pass over more slots than fit stops
+// at its cursor, releases the batch and continues there (the Linux
+// close_range shape); exec's close-on-exec pass and close_range use it.
+template <usize Capacity> struct RetireList
+{
+    std::array<u16, Capacity> descriptions{};
+    std::array<i32, Capacity> fds{};
+    usize count{};
+    [[nodiscard]] bool full() const { return count == Capacity; }
+    void push(i32 fd, u16 description)
+    {
+        fds[count] = fd;
+        descriptions[count++] = description;
+    }
+};
+inline constexpr usize retire_batch = 32;
+} // namespace
+
+Status PinnedDescription::reset()
+{
+    auto *owner = std::exchange(owner_, nullptr);
+    const auto id = std::exchange(id_, invalid_description);
+    open_ = nullptr;
+    if (!owner || !std::exchange(referenced_, false)) return {};
+    return owner->release_description(id);
+}
+PinnedDescription::~PinnedDescription()
+{
+    // The pin may hold the last reference (a sibling closed the slot): a
+    // failed provider, socket or PTY release is recorded like a close's.
+    auto *owner = owner_;
+    const auto id = id_;
+    if (auto status = reset(); !status && owner) owner->record_resource_failure(status, -1, id, 0, false);
+}
+
+void SchedulerState::count_pipe_endpoints(const OpenFileDescription &description, int delta)
+{
+    smp::check_held(ofd_table_, "SchedulerState::count_pipe_endpoints");
+    const auto adjust = [&](u16 pipe, bool writer) {
+        if (pipe >= pipes_.size()) return;
+        const PipeGuard guard(pipe_locks_[pipe]);
+        auto &count = writer ? pipes_[pipe].writers : pipes_[pipe].readers;
+        count = static_cast<u16>(count + delta);
+    };
+    if (description.readable) adjust(description.pipe, false);
+    if (description.writable)
+        adjust(description.unix_write_pipe != invalid_description ? description.unix_write_pipe : description.pipe, true);
+}
+
 Status SchedulerState::install_descriptor(ProcessResources &resources, i32 fd, u16 description, bool close_on_exec)
 {
     smp::check_exclusive("SchedulerState::install_descriptor");
     smp::check_drained(resources_owner(resources), "SchedulerState::install_descriptor");
     if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
     auto *slot = resources.files.entry(fd);
-    auto *open = open_description(description);
-    if (slot == nullptr || open == nullptr)
+    if (slot == nullptr || open_description(description) == nullptr)
         return Status::invalid_argument("invalid descriptor binding");
-    if (slot->reservation)
-        return Status::busy("descriptor belongs to a prepared operation");
-    if (open->reservation)
-        return Status::busy("canonical description belongs to a prepared operation");
+    {
+        const FilesGuard files(resources.files_lock.lock());
+        if (slot->reservation)
+            return Status::busy("descriptor belongs to a prepared operation");
+    }
+    {
+        const OfdGuard table(ofd_table_);
+        if (const auto *open = open_description(description); !open || open->reservation)
+            return Status::busy("canonical description belongs to a prepared operation");
+    }
     auto token = next_descriptor_token(); if (!token) return token.status();
     // Retain first: dup2 may replace the last other reference to this description.
     if (auto status = retain_description(description); !status.ok())
         return status;
-    if (slot->used)
-        static_cast<void>(close_descriptor(resources, fd));
-    *slot = FileDescriptor{.used = true, .close_on_exec = close_on_exec, .description = description,
-        .installation = token.value()};
+    FileDescriptor previous{};
+    {
+        const FilesGuard files(resources.files_lock.lock());
+        if (!slot->reservation)
+        {
+            previous = *slot;
+            *slot = FileDescriptor{.used = true, .close_on_exec = close_on_exec, .description = description,
+                .installation = token.value()};
+        }
+        else
+            previous.reservation = slot->reservation;
+    }
+    if (previous.reservation)
+    {
+        record_resource_failure(release_description(description), fd, description, 0, false);
+        return Status::busy("descriptor belongs to a prepared operation");
+    }
+    if (previous.used)
+        static_cast<void>(retire_closed_slot(resources, fd, previous.description));
     return Status::success();
 }
 Status SchedulerState::retain_description(u16 id)
 {
     smp::check_exclusive("SchedulerState::retain_description");
     if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
-    auto *open = open_description(id);
-    if (!open)
-        return Status::bad_descriptor("invalid open description");
-    if (open->reservation)
-        return Status::busy("unpublished description cannot be externally retained");
-    if (open->references == ~usize{0})
-        return Status::overflow("open description reference limit exceeded");
-    if (open->references == 0 && open->node)
-        if (auto status = open->node->retain(); !status.ok())
-            return status;
-    ++open->references;
-    return Status::success();
+    fs::Node *first{};
+    {
+        const OfdGuard table(ofd_table_);
+        auto *open = open_description(id);
+        if (!open)
+            return Status::bad_descriptor("invalid open description");
+        if (open->reservation)
+            return Status::busy("unpublished description cannot be externally retained");
+        if (open->references == ~usize{0})
+            return Status::overflow("open description reference limit exceeded");
+        if (open->references || !open->node)
+        {
+            if (!open->references++) count_pipe_endpoints(*open, +1);
+            return Status::success();
+        }
+        first = open->node;
+    }
+    // The first reference of a node description retains the node, outside the
+    // table lock: a provider's retain may enter its gate. A description
+    // without references is reachable only by the operation that allocated
+    // it, so nothing retains it meanwhile.
+    if (auto status = first->retain(); !status.ok())
+        return status;
+    {
+        const OfdGuard table(ofd_table_);
+        auto *open = open_description(id);
+        if (open && open->node == first)
+        {
+            if (!open->references++) count_pipe_endpoints(*open, +1);
+            return Status::success();
+        }
+    }
+    // The description changed meanwhile: give the node reference back,
+    // again outside the table lock.
+    smp::count_check(smp::KernelCheck::audit_repairs, "description changed during its first retain");
+    record_resource_failure(first->release(), -1, id, 0, false);
+    return Status::busy("open description changed during its first retain");
 }
 Status SchedulerState::release_description(u16 id)
 {
     smp::check_exclusive("SchedulerState::release_description");
-    auto *open = open_description(id);
-    if (!open || !open->references)
-        return Status::bad_descriptor("open description has no reference to release");
-    Status result = Status::success();
-    --open->references;
-    const auto pipe = open->pipe;
-    const auto unix_write_pipe = open->unix_write_pipe;
-    if (open->references == 0 && id >= 3)
+    // Locked phase: the reference, the endpoint counts and the slot.
+    OpenFileDescription retired{};
+    bool last{};
+    u16 pipe = invalid_description, unix_write_pipe = invalid_description;
     {
-        const auto node = open->node;
-        const auto endpoint = open->native_udp_handle;
-        const auto stream = open->native_tcp_handle;
-        const auto shared_file = open->native_shared_file;
-        const auto unix_endpoint = open->unix_endpoint;
-        const auto pty_endpoint = open->pty_endpoint;
-        // Consume the exact external edge before a fallible provider callback.
-        // A callback cannot resurrect this old OFD or erase a newly reused slot.
-        *open = {};
+        const OfdGuard table(ofd_table_);
+        auto *open = open_description(id);
+        if (!open || !open->references)
+            return Status::bad_descriptor("open description has no reference to release");
+        --open->references;
+        // Only a last reference changes what the pipes' peers see (their
+        // endpoint counts): a pin or a duplicate going wakes nobody.
+        if (!open->references)
+        {
+            pipe = open->pipe;
+            unix_write_pipe = open->unix_write_pipe;
+            count_pipe_endpoints(*open, -1);
+        }
+        if (open->references == 0 && id >= 3)
+        {
+            // Consume the exact external edge before a fallible provider callback.
+            // A callback cannot resurrect this old OFD or erase a newly reused slot.
+            retired = *open;
+            last = true;
+            *open = {};
+        }
+    }
+    Status result = Status::success();
+    if (last)
+    {
+        const auto node = retired.node;
+        const auto endpoint = retired.native_udp_handle;
+        const auto stream = retired.native_tcp_handle;
+        const auto shared_file = retired.native_shared_file;
+        const auto unix_endpoint = retired.unix_endpoint;
+        const auto pty_endpoint = retired.pty_endpoint;
         if (pty_endpoint)
         {
             // One open per final release. The master's last open hangs a ptmx
             // slave up and queues SIGHUP and SIGCONT for the slave session's
             // leader (Linux tty_signal_session_leader) inside the table.
-            const auto retired = pty_transport_.retire(pty_endpoint);
-            if (!retired) result = retired.status();
-            // Linux devpts_pty_kill: /dev/pts/N goes with the master's last open.
-            else if (pty_endpoint.side == private_pty::Side::master && retired.value().master_retired)
+            // The PTY table and /dev/pts under tty; the hangup record and the
+            // wakes after it.
+            const bool master = pty_endpoint.side == private_pty::Side::master;
+            const auto retired_pty = [&] {
+                const TtyLock::Guard tty(tty_lock_);
+                auto retired = pty_transport_.retire(pty_endpoint);
+                // Linux devpts_pty_kill: /dev/pts/N goes with the master's last open.
+                if (retired && master && retired.value().master_retired)
+                    terminal_namespace_.remove(pty_endpoint.slot, pty_endpoint.generation);
+                return retired;
+            }();
+            if (!retired_pty) result = retired_pty.status();
+            else if (master && retired_pty.value().master_retired)
             {
-                remember_hangup(retired.value().hangup_leader, retired.value().hangup_foreground,
+                remember_hangup(retired_pty.value().hangup_leader, retired_pty.value().hangup_foreground,
                                 static_cast<u16>(pty_endpoint.slot + 1));
-                terminal_namespace_.remove(pty_endpoint.slot, pty_endpoint.generation);
                 wake_waiters(ThreadWaitReason::job_control,
                              job_control_key({static_cast<u16>(pty_endpoint.slot + 1), pty_endpoint.generation}));
             }
             wake_pty(pty_endpoint, private_pty::wake_all);
         }
+        // Unlocked phase: provider, socket path, shared-file, TCP and UDP
+        // releases run with no scheduler lock held.
         if (unix_endpoint)
             result = release_unix_endpoint(unix_endpoint);
         if (node)
         {
-            const auto retired = node->release();
-            if (result && !retired) result = retired;
+            const auto released = node->release();
+            if (result && !released) result = released;
         }
         if (shared_file)
         {
-            const auto retired = shared_memory_files_ ? shared_memory_files_->release_description(shared_file)
+            const auto released = shared_memory_files_ ? shared_memory_files_->release_description(shared_file)
                 : Status::not_initialized("shared file owner is unavailable");
-            if (result && !retired) result = retired;
+            if (result && !released) result = released;
         }
         if (stream)
         {
-            const auto retired = native_tcp_service_ ? native_tcp_service_->close(stream)
+            const auto released = native_tcp_service_ ? native_tcp_service_->close(stream)
                 : Status::not_initialized("TCP endpoint owner is unavailable");
-            if (result && !retired) result = retired;
+            if (result && !released) result = released;
         }
         if (endpoint)
         {
-            const auto retired = native_udp_service_ ? native_udp_service_->close(endpoint)
-                                                      : Status::not_initialized("UDP endpoint owner is unavailable");
-            if (result && !retired) result = retired;
+            const auto released = native_udp_service_ ? native_udp_service_->close(endpoint)
+                                                       : Status::not_initialized("UDP endpoint owner is unavailable");
+            if (result && !released) result = released;
         }
     }
     auto wake_and_retire = [&](u16 index) {
@@ -185,8 +320,8 @@ Status SchedulerState::release_description(u16 id)
         wake_waiters(ThreadWaitReason::pipe_write, index);
         if (!pipe_has_endpoint(index, false) && !pipe_has_endpoint(index, true))
         {
-            const auto retired = retire_pipe(index);
-            if (result && !retired) result = retired;
+            const auto released = retire_pipe(index);
+            if (result && !released) result = released;
         }
     };
     if (pipe < pipes_.size())
@@ -195,26 +330,158 @@ Status SchedulerState::release_description(u16 id)
         if (unix_write_pipe != pipe)
             wake_and_retire(unix_write_pipe);
     }
-    if (!collecting_unix_rights_)
+    // The rights collection runs only while rights are in flight (spec 4.13).
+    if (!collecting_unix_rights_ && rights_in_flight())
     {
         const auto collected = collect_unix_rights();
         if (result && !collected) result = collected;
     }
     return result;
 }
+Status SchedulerState::retire_closed_slot(ProcessResources &resources, i32 fd, u16 description)
+{
+    if (native_tcp_service_)
+    {
+        bool stream{};
+        {
+            const OfdGuard table(ofd_table_);
+            const auto *open = open_description(description);
+            stream = open && open->native_tcp_handle;
+        }
+        if (stream) native_tcp_service_->descriptor_closed(&resources, fd, description);
+    }
+    return release_description(description);
+}
 Status SchedulerState::close_descriptor(ProcessResources &resources, i32 fd)
 {
     smp::check_exclusive("SchedulerState::close_descriptor");
     smp::check_drained(resources_owner(resources), "SchedulerState::close_descriptor");
     auto *slot = resources.files.entry(fd);
-    if (slot == nullptr || !slot->used)
-        return Status::invalid_argument("bad file descriptor");
-    const auto description = slot->description;
-    *slot = {};
-    const auto *open = open_description(description);
-    if (open && open->native_tcp_handle && native_tcp_service_)
-        native_tcp_service_->descriptor_closed(&resources, fd, description);
-    return release_description(description);
+    u16 description = invalid_description;
+    {
+        const FilesGuard files(resources.files_lock.lock());
+        if (slot == nullptr || !slot->used)
+            return Status::invalid_argument("bad file descriptor");
+        description = slot->description;
+        *slot = {};
+    }
+    return retire_closed_slot(resources, fd, description);
+}
+template <typename Select>
+Status SchedulerState::close_descriptors(ProcessResources &resources, i32 first, i32 last, Select select)
+{
+    smp::check_exclusive("SchedulerState::close_descriptors");
+    if (first < 0) first = 0;
+    if (last >= static_cast<i32>(max_process_fds)) last = static_cast<i32>(max_process_fds) - 1;
+    Status result{};
+    for (i32 cursor = first; cursor <= last;)
+    {
+        RetireList<retire_batch> batch{};
+        {
+            const FilesGuard files(resources.files_lock.lock());
+            for (; cursor <= last && !batch.full(); ++cursor)
+            {
+                auto *slot = resources.files.entry(cursor);
+                if (!slot || !slot->used || !select(*slot)) continue;
+                batch.push(cursor, slot->description);
+                *slot = {};
+            }
+        }
+        for (usize index = 0; index < batch.count; ++index)
+        {
+            const auto released = retire_closed_slot(resources, batch.fds[index], batch.descriptions[index]);
+            if (result && !released) result = released;
+        }
+    }
+    return result;
+}
+Status SchedulerState::close_descriptor_range(ProcessResources &resources, i32 first, i32 last)
+{
+    return close_descriptors(resources, first, last, [](const FileDescriptor &) { return true; });
+}
+Status SchedulerState::close_on_exec_descriptors(ProcessResources &resources)
+{
+    return close_descriptors(resources, 0, static_cast<i32>(max_process_fds) - 1,
+                             [](const FileDescriptor &slot) { return slot.close_on_exec; });
+}
+PinnedDescription SchedulerState::pin_descriptor(ProcessResources &resources, i32 fd, bool shared)
+{
+    u16 id = invalid_description;
+    {
+        const FilesGuard files(resources.files_lock.lock());
+        const auto *slot = resources.files.entry(fd);
+        if (!slot || !slot->used) return {};
+        id = slot->description;
+        if (!shared) return PinnedDescription{*this, id, open_description(id), false};
+        // ofd_table nests inside files: the slot cannot change before the
+        // reference is taken.
+        const OfdGuard table(ofd_table_);
+        auto *open = open_description(id);
+        if (!open || !open->references || open->references == ~usize{0}) return {};
+        ++open->references;
+        return PinnedDescription{*this, id, open, true};
+    }
+}
+Result<SchedulerState::DescriptorSlot> SchedulerState::reserve_descriptor_slot(ProcessResources &resources, i32 minimum)
+{
+    if (minimum < 0) return Status::invalid_argument("negative minimum descriptor");
+    auto token = next_descriptor_token(); if (!token) return token.status();
+    const FilesGuard files(resources.files_lock.lock());
+    for (i32 fd = minimum; fd < static_cast<i32>(max_process_fds); ++fd)
+        if (!resources.files.contains(fd))
+        {
+            resources.files.entry(fd)->reservation = token.value();
+            return DescriptorSlot{fd, token.value()};
+        }
+    return Status::process_file_limit("file descriptor table full");
+}
+Status SchedulerState::install_reserved_descriptor(ProcessResources &resources, DescriptorSlot &reserved,
+                                                   u16 description, bool close_on_exec)
+{
+    smp::check_exclusive("SchedulerState::install_reserved_descriptor");
+    if (shutdown_admission_closed_) return Status::denied("scheduler shutdown admission is closed");
+    auto *slot = resources.files.entry(reserved.fd);
+    if (!reserved || !slot) return Status::invalid_argument("invalid descriptor reservation");
+    {
+        const OfdGuard table(ofd_table_);
+        if (const auto *open = open_description(description); !open || open->reservation)
+            return Status::busy("canonical description belongs to a prepared operation");
+    }
+    if (auto status = retain_description(description); !status) return status;
+    {
+        const FilesGuard files(resources.files_lock.lock());
+        if (!slot->used && slot->reservation == reserved.token)
+        {
+            *slot = FileDescriptor{.used = true, .close_on_exec = close_on_exec, .description = description,
+                .installation = reserved.token};
+            reserved = {};
+            return Status::success();
+        }
+    }
+    record_resource_failure(release_description(description), reserved.fd, description, 0, false);
+    return Status::busy("descriptor reservation was lost before publication");
+}
+void SchedulerState::cancel_descriptor_slot(ProcessResources &resources, DescriptorSlot &reserved)
+{
+    if (!reserved) return;
+    const FilesGuard files(resources.files_lock.lock());
+    if (auto *slot = resources.files.entry(reserved.fd); slot && !slot->used && slot->reservation == reserved.token)
+        *slot = {};
+    reserved = {};
+}
+Result<WaitTicket> SchedulerState::arm_pipe_wait(ThreadWaitReason reason, u16 pipe, usize needed)
+{
+    if (pipe >= pipes_.size()) return Status::invalid_argument("invalid pipe");
+    const PipeGuard guard(pipe_locks_[pipe]);
+    auto ticket = register_current_wait(reason, pipe);
+    if (!ticket) return ticket;
+    const auto &buffer = pipes_[pipe];
+    const bool ready = !buffer.used || (reason == ThreadWaitReason::pipe_read
+                                            ? buffer.size != 0 || !buffer.writers
+                                            : pipe_capacity - buffer.size >= needed || !buffer.readers);
+    if (ready)
+        static_cast<void>(complete_wait(ticket.value(), WaitCompletion::ready, WakeSource::thread));
+    return ticket;
 }
 void SchedulerState::release_resources(ProcessResources &resources)
 {
@@ -274,7 +541,7 @@ Status SchedulerState::drain_resources(ProcessResources &resources)
     return consume_resources(resources);
 }
 
-bool SchedulerState::pipe_has_endpoint(u16 pipe, bool writable) const
+bool SchedulerState::pipe_endpoint_audit(u16 pipe, bool writable) const
 {
     for (const auto &description : descriptions_)
         if (description.used && description.references != 0 &&
@@ -285,12 +552,67 @@ bool SchedulerState::pipe_has_endpoint(u16 pipe, bool writable) const
             return true;
     return false;
 }
+// The caller holds the pipe lock, or reads under the kernel lock.
+bool SchedulerState::pipe_has_endpoint(u16 pipe, bool writable) const
+{
+    if (pipe >= pipes_.size()) return false;
+    const bool counted = (writable ? pipes_[pipe].writers : pipes_[pipe].readers) != 0;
+    // The scan reads the description table, which is valid only under
+    // ofd_table or the kernel lock (debug kernels only). A caller holding
+    // just the pipe lock (ofd_table is a lower rank) outside the kernel lock
+    // skips it rather than compare against a moving table.
+    const bool scan_valid = ofd_table_.owned_by_current_cpu() || !smp::exclusive_armed.load(std::memory_order_relaxed) ||
+        smp::kernel_lock.owned_by_current_cpu();
+    if constexpr (smp::lock_debug_enabled)
+        if (scan_valid && pipes_[pipe].used && pipe_endpoint_audit(pipe, writable) != counted)
+        {
+            smp::count_check(smp::KernelCheck::audit_repairs, "pipe endpoint count differs from the table");
+            return !counted;
+        }
+    return counted;
+}
+usize SchedulerState::rights_in_flight() const
+{
+    usize total{};
+    for (const auto &buffer : pipes_) total += buffer.rights_count;
+    return total;
+}
 Result<PipeReadiness> SchedulerState::pipe_readiness(u16 pipe) const
 {
-    if (pipe >= pipes_.size() || !pipes_[pipe].used)
+    if (pipe >= pipes_.size())
+        return Status::bad_descriptor("invalid pipe");
+    const PipeGuard guard(pipe_locks_[pipe]);
+    if (!pipes_[pipe].used)
         return Status::bad_descriptor("invalid pipe");
     return PipeReadiness{.buffered = pipes_[pipe].size, .available = pipe_capacity - pipes_[pipe].size,
                          .readers = pipe_has_endpoint(pipe, false), .writers = pipe_has_endpoint(pipe, true)};
+}
+Status SchedulerState::claim_pipes(std::span<u16> claimed)
+{
+    const OfdGuard table(ofd_table_);
+    usize found{};
+    for (usize i = 0; i < pipes_.size() && found != claimed.size(); ++i)
+        if (!pipes_[i].used) claimed[found++] = static_cast<u16>(i);
+    if (found != claimed.size())
+        return Status::system_file_limit("pipe table full");
+    for (const auto pipe : claimed)
+    {
+        const PipeGuard guard(pipe_locks_[pipe]);
+        pipes_[pipe] = PipeBuffer{.used = true};
+    }
+    return {};
+}
+void SchedulerState::unclaim_pipe(u16 pipe)
+{
+    if (pipe >= pipes_.size()) return;
+    const OfdGuard table(ofd_table_);
+    const PipeGuard guard(pipe_locks_[pipe]);
+    if (!pipes_[pipe].readers && !pipes_[pipe].writers && !pipes_[pipe].rights_count) pipes_[pipe] = {};
+}
+void SchedulerState::discard_description(u16 id)
+{
+    const OfdGuard table(ofd_table_);
+    if (auto *open = open_description(id); open && !open->references) *open = {};
 }
 Result<std::array<i32, 2>> SchedulerState::create_pipe(ProcessResources &resources, bool close_on_exec, u32 status_flags)
 {
@@ -299,33 +621,43 @@ Result<std::array<i32, 2>> SchedulerState::create_pipe(ProcessResources &resourc
     // Global pipe/file resources precede descriptor-slot admission, as in
     // Linux create_pipe_files followed by get_unused_fd_flags. No state is
     // published until every bounded capacity check succeeds.
-    usize count = 0;
-    for (usize i = 3; i < descriptions_.size(); ++i)
-        if (!descriptions_[i].used)
-            ++count;
-    if (count < 2)
-        return Status::system_file_limit("pipe needs two open descriptions");
-    u16 pipe = invalid_description;
-    for (usize i = 0; i < pipes_.size(); ++i)
-        if (!pipes_[i].used)
+    {
+        const OfdGuard table(ofd_table_);
+        usize count = 0;
+        for (usize i = 3; i < descriptions_.size(); ++i)
+            if (!descriptions_[i].used)
+                ++count;
+        if (count < 2)
+            return Status::system_file_limit("pipe needs two open descriptions");
+    }
+    std::array<u16, 1> pipe{invalid_description};
+    if (auto status = claim_pipes(pipe); !status) return status;
+    std::array<DescriptorSlot, 2> slots{};
+    for (auto &slot : slots)
+    {
+        auto reserved = reserve_descriptor_slot(resources);
+        if (!reserved)
         {
-            pipe = static_cast<u16>(i);
-            break;
+            for (auto &taken : slots) cancel_descriptor_slot(resources, taken);
+            unclaim_pipe(pipe[0]);
+            return reserved.status().code() == StatusCode::process_file_limit
+                ? Status::process_file_limit("pipe needs two free descriptors") : reserved.status();
         }
-    if (pipe == invalid_description)
-        return Status::system_file_limit("pipe table full");
-    std::array<i32, 2> fds{};
-    count = 0;
-    for (i32 fd = 0; fd < static_cast<i32>(max_process_fds) && count != 2; ++fd)
-        if (!resources.files.contains(fd))
-            fds[count++] = fd;
-    if (count != 2)
-        return Status::process_file_limit("pipe needs two free descriptors");
-    pipes_[pipe] = PipeBuffer{.used = true};
-    auto reader = allocate_description(OpenFileDescription{.used = true, .readable = true, .flags = status_flags, .pipe = pipe});
-    auto writer = allocate_description(OpenFileDescription{.used = true, .writable = true, .flags = status_flags | 1u, .pipe = pipe});
-    static_cast<void>(install_descriptor(resources, fds[0], reader.value(), close_on_exec));
-    static_cast<void>(install_descriptor(resources, fds[1], writer.value(), close_on_exec));
+        slot = reserved.value();
+    }
+    const std::array<i32, 2> fds{slots[0].fd, slots[1].fd};
+    auto reader = allocate_description(OpenFileDescription{.used = true, .readable = true, .flags = status_flags, .pipe = pipe[0]});
+    auto writer = allocate_description(OpenFileDescription{.used = true, .writable = true, .flags = status_flags | 1u, .pipe = pipe[0]});
+    if (!reader || !writer)
+    {
+        if (reader) discard_description(reader.value());
+        if (writer) discard_description(writer.value());
+        for (auto &taken : slots) cancel_descriptor_slot(resources, taken);
+        unclaim_pipe(pipe[0]);
+        return !reader ? reader.status() : writer.status();
+    }
+    static_cast<void>(install_reserved_descriptor(resources, slots[0], reader.value(), close_on_exec));
+    static_cast<void>(install_reserved_descriptor(resources, slots[1], writer.value(), close_on_exec));
     return fds;
 }
 Result<std::array<i32, 2>> SchedulerState::create_unix_socketpair(ProcessResources &resources,
@@ -333,52 +665,61 @@ Result<std::array<i32, 2>> SchedulerState::create_unix_socketpair(ProcessResourc
 {
     if (status_flags & 0x3u)
         return Status::invalid_argument("socket status flags contain an access mode");
-    usize free_descriptions = 0;
-    for (usize i = 3; i < descriptions_.size(); ++i)
-        if (!descriptions_[i].used) ++free_descriptions;
-    if (free_descriptions < 2)
-        return Status::system_file_limit("socket pair needs two open descriptions");
+    {
+        const OfdGuard table(ofd_table_);
+        usize free_descriptions = 0;
+        for (usize i = 3; i < descriptions_.size(); ++i)
+            if (!descriptions_[i].used) ++free_descriptions;
+        if (free_descriptions < 2)
+            return Status::system_file_limit("socket pair needs two open descriptions");
+    }
     std::array<u16, 2> buffers{invalid_description, invalid_description};
-    usize found = 0;
-    for (usize i = 0; i < pipes_.size() && found != 2; ++i)
-        if (!pipes_[i].used) buffers[found++] = static_cast<u16>(i);
-    if (found != 2)
+    if (auto status = claim_pipes(buffers); !status)
         return Status::system_file_limit("socket pair needs two stream buffers");
-    std::array<i32, 2> fds{};
-    found = 0;
-    for (i32 fd = 0; fd < static_cast<i32>(max_process_fds) && found != 2; ++fd)
-        if (!resources.files.contains(fd)) fds[found++] = fd;
-    if (found != 2)
-        return Status::process_file_limit("socket pair needs two free descriptors");
-
-    pipes_[buffers[0]] = PipeBuffer{.used = true};
-    pipes_[buffers[1]] = PipeBuffer{.used = true};
+    const auto unclaim = [&] {
+        unclaim_pipe(buffers[0]);
+        unclaim_pipe(buffers[1]);
+    };
+    std::array<DescriptorSlot, 2> slots{};
+    for (auto &slot : slots)
+    {
+        auto reserved = reserve_descriptor_slot(resources);
+        if (!reserved)
+        {
+            for (auto &taken : slots) cancel_descriptor_slot(resources, taken);
+            unclaim();
+            return reserved.status().code() == StatusCode::process_file_limit
+                ? Status::process_file_limit("socket pair needs two free descriptors") : reserved.status();
+        }
+        slot = reserved.value();
+    }
+    const std::array<i32, 2> fds{slots[0].fd, slots[1].fd};
     auto first = allocate_description(OpenFileDescription{.used = true, .readable = true, .writable = true,
         .flags = 2u | status_flags, .pipe = buffers[0], .unix_write_pipe = buffers[1]});
     auto second = allocate_description(OpenFileDescription{.used = true, .readable = true, .writable = true,
         .flags = 2u | status_flags, .pipe = buffers[1], .unix_write_pipe = buffers[0]});
     if (!first || !second)
     {
-        if (first) *open_description(first.value()) = {};
-        if (second) *open_description(second.value()) = {};
-        pipes_[buffers[0]] = {};
-        pipes_[buffers[1]] = {};
+        if (first) discard_description(first.value());
+        if (second) discard_description(second.value());
+        for (auto &taken : slots) cancel_descriptor_slot(resources, taken);
+        unclaim();
         return !first ? first.status() : second.status();
     }
-    if (auto status = install_descriptor(resources, fds[0], first.value(), close_on_exec); !status)
+    if (auto status = install_reserved_descriptor(resources, slots[0], first.value(), close_on_exec); !status)
     {
-        *open_description(first.value()) = {};
-        *open_description(second.value()) = {};
-        pipes_[buffers[0]] = {};
-        pipes_[buffers[1]] = {};
+        discard_description(first.value());
+        discard_description(second.value());
+        for (auto &taken : slots) cancel_descriptor_slot(resources, taken);
+        unclaim();
         return status;
     }
-    if (auto status = install_descriptor(resources, fds[1], second.value(), close_on_exec); !status)
+    if (auto status = install_reserved_descriptor(resources, slots[1], second.value(), close_on_exec); !status)
     {
+        cancel_descriptor_slot(resources, slots[1]);
         static_cast<void>(close_descriptor(resources, fds[0]));
-        *open_description(second.value()) = {};
-        pipes_[buffers[0]] = {};
-        pipes_[buffers[1]] = {};
+        discard_description(second.value());
+        unclaim();
         return status;
     }
     return fds;
@@ -386,56 +727,75 @@ Result<std::array<i32, 2>> SchedulerState::create_unix_socketpair(ProcessResourc
 Result<usize> SchedulerState::read_pipe(u16 pipe, std::span<std::byte> out, bool nonblocking)
 {
     smp::check_exclusive("SchedulerState::read_pipe");
-    if (pipe >= pipes_.size() || !pipes_[pipe].used)
+    if (pipe >= pipes_.size())
         return Status::invalid_argument("invalid pipe");
-    if (out.empty())
-        return usize{0};
-    auto &buffer = pipes_[pipe];
-    if (buffer.size == 0)
+    UnixRightsRecord detached{};
+    usize count{};
     {
-        if (!pipe_has_endpoint(pipe, true))
+        const PipeGuard guard(pipe_locks_[pipe]);
+        auto &buffer = pipes_[pipe];
+        if (!buffer.used)
+            return Status::invalid_argument("invalid pipe");
+        if (out.empty())
             return usize{0};
-        if (!nonblocking)
-            static_cast<void>(block_current(ThreadWaitReason::pipe_read, pipe));
-        return Status::would_block("pipe has no buffered data");
+        if (buffer.size == 0)
+        {
+            if (!pipe_has_endpoint(pipe, true))
+                return usize{0};
+            // A1: armed under the pipe lock that guards the emptiness.
+            if (!nonblocking)
+                static_cast<void>(block_current(ThreadWaitReason::pipe_read, pipe));
+            return Status::would_block("pipe has no buffered data");
+        }
+        if (buffer.revision == ~u64{0})
+            return Status::overflow("stream revision cannot wrap");
+        u16 record = invalid_description;
+        count = unix_read_count(pipe, out.size(), record);
+        for (usize i = 0; i < count; ++i)
+            out[i] = buffer.data[(buffer.head + i) % pipe_capacity];
+        detached = consume_unix_bytes_locked(pipe, count, record);
     }
-    if (buffer.revision == ~u64{0})
-        return Status::overflow("stream revision cannot wrap");
-    u16 record = invalid_description;
-    const auto count = unix_read_count(pipe, out.size(), record);
-    for (usize i = 0; i < count; ++i)
-        out[i] = buffer.data[(buffer.head + i) % pipe_capacity];
-    consume_unix_bytes(pipe, count, record);
+    wake_waiters(ThreadWaitReason::pipe_write, pipe);
+    if (detached.used)
+        record_resource_failure(release_unix_record(detached), -1, invalid_description, 0, false);
     return count;
 }
 Result<usize> SchedulerState::write_pipe(u16 pipe, std::span<const std::byte> in, bool nonblocking,
                                           bool atomic_request)
 {
-    auto result = write_pipe_fragment(pipe, in, atomic_request && in.size() <= pipe_capacity);
+    const bool atomic = atomic_request && in.size() <= pipe_capacity;
+    auto result = write_pipe_fragment(pipe, in, atomic);
     if (!result && result.status().code() == StatusCode::would_block && !nonblocking)
-        static_cast<void>(block_current(ThreadWaitReason::pipe_write, pipe));
+        static_cast<void>(arm_pipe_wait(ThreadWaitReason::pipe_write, pipe, atomic ? in.size() : 1));
     return result;
 }
 Result<usize> SchedulerState::write_pipe_fragment(u16 pipe, std::span<const std::byte> in, bool atomic_request)
 {
     smp::check_exclusive("SchedulerState::write_pipe_fragment");
-    if (pipe >= pipes_.size() || !pipes_[pipe].used)
+    if (pipe >= pipes_.size())
         return Status::invalid_argument("invalid pipe");
-    if (in.empty())
-        return usize{0};
-    if (!pipe_has_endpoint(pipe, false))
-        return Status::broken_pipe("pipe has no readers");
-    auto &buffer = pipes_[pipe];
-    if (buffer.revision == ~u64{0})
-        return Status::overflow("stream revision cannot wrap");
-    const auto available = pipe_capacity - buffer.size;
-    if (available == 0 || (atomic_request && in.size() > available))
-        return Status::would_block("pipe buffer is full");
-    const auto count = in.size() < available ? in.size() : available;
-    for (usize i = 0; i < count; ++i)
-        buffer.data[(buffer.head + buffer.size + i) % pipe_capacity] = in[i];
-    buffer.size += count;
-    ++buffer.revision;
+    usize count{};
+    {
+        const PipeGuard guard(pipe_locks_[pipe]);
+        auto &buffer = pipes_[pipe];
+        if (!buffer.used)
+            return Status::invalid_argument("invalid pipe");
+        if (in.empty())
+            return usize{0};
+        if (!pipe_has_endpoint(pipe, false))
+            return Status::broken_pipe("pipe has no readers");
+        if (buffer.revision == ~u64{0})
+            return Status::overflow("stream revision cannot wrap");
+        const auto available = pipe_capacity - buffer.size;
+        if (available == 0 || (atomic_request && in.size() > available))
+            return Status::would_block("pipe buffer is full");
+        count = in.size() < available ? in.size() : available;
+        for (usize i = 0; i < count; ++i)
+            buffer.data[(buffer.head + buffer.size + i) % pipe_capacity] = in[i];
+        buffer.size += count;
+        ++buffer.revision;
+    }
+    // A2: the data is visible under the pipe lock before the channel is woken.
     wake_waiters(ThreadWaitReason::pipe_read, pipe);
     return count;
 }

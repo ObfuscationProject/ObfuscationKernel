@@ -314,6 +314,194 @@ static void check_irq_router_concurrency()
     CHECK(router.controller_errors() == 0 && router.spurious() == 0);
 }
 
+// A model of the x86 I/O APIC: edge lines stay unmasked across their bottom
+// half (loses_masked_edges), so an edge during the handlers marks the line
+// pending again while it runs.
+class EdgeModelIrqChip final
+{
+  public:
+    Status initialize() { return chip_.initialize(); }
+    Status configure(interrupt::IrqLine line, interrupt::IrqTrigger trigger) { return chip_.configure(line, trigger); }
+    Status mask(interrupt::IrqLine line) { return chip_.mask(line); }
+    Status unmask(interrupt::IrqLine line) { return chip_.unmask(line); }
+    Status acknowledge(interrupt::IrqLine line) { return chip_.acknowledge(line); }
+    Status end_of_interrupt(interrupt::IrqLine line) { return chip_.end_of_interrupt(line); }
+    [[nodiscard]] usize line_count() const { return chip_.line_count(); }
+    [[nodiscard]] std::string_view name() const { return chip_.name(); }
+    [[nodiscard]] bool loses_masked_edges() const { return true; }
+    [[nodiscard]] bool masked(interrupt::IrqLine line) const { return chip_.masked(line); }
+
+  private:
+    interrupt::ModelIrqChip chip_;
+};
+static_assert(interrupt::IrqChip<EdgeModelIrqChip>);
+
+// A handler a test holds inside its bottom half until released, and whose
+// context the test "frees" (poisons) once unbind() returned.
+struct HeldHandler
+{
+    std::atomic<bool> entered{false}, release{false}, poisoned{false}, used_after_free{false};
+    std::atomic<int> calls{0};
+    interrupt::IrqRouter<EdgeModelIrqChip> *router{nullptr};
+    interrupt::IrqLine refire{0xff};
+};
+static void held_service(void *context, interrupt::IrqLine line)
+{
+    auto &held = *static_cast<HeldHandler *>(context);
+    held.entered.store(true);
+    // An edge of the same line while its handlers run (an unmasked line).
+    if (held.refire == line && held.calls.load() == 0)
+        CHECK(held.router->top_half(line));
+    while (!held.release.load())
+        std::this_thread::yield();
+    if (held.poisoned.load())
+        held.used_after_free = true;
+    held.calls.fetch_add(1);
+}
+
+// unbind() against a handler running on another CPU: it returns only after
+// the handler returned, so the module may free the context then (spec 2, IRQ
+// rules). A drain on a third CPU that finds the line running gives its pending
+// flag back, and the running CPU serves the edge at its recheck.
+static void check_irq_unbind_waits_for_running()
+{
+    EdgeModelIrqChip chip;
+    interrupt::IrqRouter<EdgeModelIrqChip> router(chip);
+    CHECK(chip.initialize().ok());
+    constexpr int rounds = 200;
+    usize waited = 0;
+    for (int round = 0; round < rounds; ++round)
+    {
+        HeldHandler held{};
+        held.router = &router;
+        CHECK(router.bind(5, interrupt::IrqTrigger::edge, held_service, &held).ok());
+        {
+            smp::ScopedHostedCpu hosted(0);
+            CHECK(router.top_half(5));
+        }
+        std::thread drainer([&] {
+            smp::ScopedHostedCpu hosted(1);
+            CHECK(router.drain() == 1);
+        });
+        while (!held.entered.load())
+            std::this_thread::yield();
+        CHECK(router.running(5) && router.running());
+        std::atomic<bool> unbound{false};
+        std::thread unbinder([&] {
+            smp::ScopedHostedCpu hosted(2);
+            CHECK(router.unbind(5, held_service, &held).ok());
+            unbound.store(true);
+        });
+        // The handler is removed at once (a new top half is unclaimed), but
+        // unbind() keeps waiting while the old snapshot runs.
+        while (router.bound(5))
+            std::this_thread::yield();
+        for (int spin = 0; spin < 20; ++spin)
+            std::this_thread::yield();
+        CHECK(!unbound.load() && held.calls.load() == 0);
+        ++waited;
+        held.release.store(true);
+        unbinder.join();
+        // unbind() returned: no CPU runs the handler any more; free the context.
+        held.poisoned.store(true);
+        drainer.join();
+        CHECK(!held.used_after_free.load() && held.calls.load() == 1 && !router.running(5) && !router.running());
+    }
+    CHECK(waited != 0);
+
+    // The recheck: an edge during the handlers is served by the same drain,
+    // and a concurrent drain that finds the line running skips it.
+    HeldHandler edge{};
+    edge.router = &router;
+    edge.refire = 6;
+    CHECK(router.bind(6, interrupt::IrqTrigger::edge, held_service, &edge).ok());
+    {
+        smp::ScopedHostedCpu hosted(0);
+        CHECK(router.top_half(6));
+    }
+    std::atomic<usize> first{0};
+    std::thread runner([&] {
+        smp::ScopedHostedCpu hosted(1);
+        first.store(router.drain());
+    });
+    while (!edge.entered.load())
+        std::this_thread::yield();
+    // The refired edge is pending while the line runs on CPU 1.
+    while (!router.pending())
+        std::this_thread::yield();
+    {
+        smp::ScopedHostedCpu hosted(2);
+        CHECK(router.drain() == 0 && router.pending());
+    }
+    edge.release.store(true);
+    runner.join();
+    CHECK(first.load() == 2 && edge.calls.load() == 2 && router.serviced(6) == 2 && !router.running(6));
+    CHECK(!chip.masked(6));
+    {
+        smp::ScopedHostedCpu hosted(2);
+        // The flag CPU 2 gave back was the one CPU 1 served at its recheck.
+        static_cast<void>(router.drain());
+        CHECK(!router.pending() && router.serviced(6) == 2);
+    }
+    CHECK(router.unbind(6, held_service, &edge).ok());
+    CHECK(router.controller_errors() == 0);
+}
+
+// A handler that unbinds its own line does not wait for itself.
+static void self_unbinding_service(void *context, interrupt::IrqLine line);
+struct SelfUnbinding
+{
+    interrupt::IrqRouter<EdgeModelIrqChip> *router{};
+    bool unbound{};
+};
+static void self_unbinding_service(void *context, interrupt::IrqLine line)
+{
+    auto &state = *static_cast<SelfUnbinding *>(context);
+    state.unbound = state.router->unbind(line, self_unbinding_service, context).ok();
+}
+static void check_irq_self_unbind()
+{
+    EdgeModelIrqChip chip;
+    interrupt::IrqRouter<EdgeModelIrqChip> router(chip);
+    CHECK(chip.initialize().ok());
+    SelfUnbinding state{&router};
+    CHECK(router.bind(7, interrupt::IrqTrigger::level, self_unbinding_service, &state).ok());
+    smp::ScopedHostedCpu hosted(1);
+    CHECK(router.top_half(7) && router.drain() == 1 && state.unbound && !router.bound(7) && !router.running());
+}
+
+// A device that edges on every handler run (an unmasked edge line under a
+// flood): one drain runs the line's handlers twice (the run and its recheck)
+// and leaves it pending for the next drain instead of staying on it.
+struct Flooding
+{
+    interrupt::IrqRouter<EdgeModelIrqChip> *router{};
+    int calls{};
+};
+static void flooding_service(void *context, interrupt::IrqLine line)
+{
+    auto &state = *static_cast<Flooding *>(context);
+    ++state.calls;
+    CHECK(state.router->top_half(line));
+}
+static void check_irq_flood_bounded()
+{
+    EdgeModelIrqChip chip;
+    interrupt::IrqRouter<EdgeModelIrqChip> router(chip);
+    CHECK(chip.initialize().ok());
+    Flooding state{&router};
+    CHECK(router.bind(8, interrupt::IrqTrigger::edge, flooding_service, &state).ok());
+    smp::ScopedHostedCpu hosted(1);
+    CHECK(router.top_half(8));
+    CHECK(router.drain() == 2 && state.calls == 2 && router.pending() && !router.running(8));
+    CHECK(router.drain() == 2 && state.calls == 4 && router.pending());
+    CHECK(router.serviced(8) == 4 && !chip.masked(8));
+    CHECK(router.unbind(8, flooding_service, &state).ok());
+    // The flag the last run left is served without a handler.
+    CHECK(router.drain() <= 1 && !router.pending() && state.calls == 4);
+    CHECK(router.controller_errors() == 0);
+}
+
 static void check_wait_queue()
 {
     sched::WaitQueue<2> queue;
@@ -743,6 +931,9 @@ int main()
     check_irq_retarget_away();
     check_irq_follow_against_leave();
     check_irq_router_concurrency();
+    check_irq_unbind_waits_for_running();
+    check_irq_self_unbind();
+    check_irq_flood_bounded();
     check_wait_queue();
     check_wait_queue_enlist();
     check_wake_source();

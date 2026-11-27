@@ -402,8 +402,26 @@ inline namespace runtime_detail
 // socket's wait queue, readiness evaluations, and waiters that found their
 // queue full; once any socket wait was queued.
 constinit const net::TcpWaitStats *tcp_wait_stats{};
+constinit const net::TransmitBacklog<> *transmit_backlog_stats{};
+// How datagram sends reached the NIC (OK_NET_TX, spec 4.13 try-transmit):
+// taken at once, queued in the backlog, handed over by a later flush,
+// refused with a full backlog (ENOBUFS), dropped by the NIC, still queued;
+// once any datagram was offered. Read without net_stack at report time.
+void report_transmit_backlog()
+{
+    const auto *backlog = transmit_backlog_stats;
+    if (!backlog || (!backlog->direct() && !backlog->queued() && !backlog->refused())) return;
+    emit_line("OK_NET_TX scope=hardware direct="); emit_number(backlog->direct());
+    emit(" queued="); emit_number(backlog->queued());
+    emit(" flushed="); emit_number(backlog->flushed());
+    emit(" refused="); emit_number(backlog->refused());
+    emit(" dropped="); emit_number(backlog->dropped());
+    emit(" pending="); emit_number(backlog->size());
+    emit("\n");
+}
 void report_network_waits()
 {
+    report_transmit_backlog();
     const auto tcp = tcp_wait_stats ? *tcp_wait_stats : net::TcpWaitStats{};
     const auto udp = udp_wait_statistics();
     if (!tcp.queued && !tcp.unqueued && !udp.queued && !udp.unqueued) return;

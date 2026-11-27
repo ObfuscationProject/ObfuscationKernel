@@ -107,24 +107,15 @@ u16 name_hash(std::string_view name)
 }
 constexpr std::array<usize, 13> lfn_offsets{1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
 } // namespace
-FatFileSystem::Guard::Guard(FatFileSystem &owner) : fs(owner)
+// The volume's fs_provider gate (spec 4.13): one operation at a time; a
+// re-entry on the owning CPU is busy, another CPU waits serving interrupts.
+FatFileSystem::Guard::Guard(FatFileSystem &owner) : fs(owner), status(owner.gate_.enter())
 {
-    smp::ScopedSpinLock guard(fs.lock_);
-    if (fs.busy_)
-        status = Status::busy("FAT operation already active");
-    else
-    {
-        fs.busy_ = true;
-        status = {};
-    }
+    if (!status) status = Status::busy("FAT operation already active");
 }
 FatFileSystem::Guard::~Guard()
 {
-    if (status)
-    {
-        smp::ScopedSpinLock guard(fs.lock_);
-        fs.busy_ = false;
-    }
+    if (status) fs.gate_.leave();
 }
 bool FatFileSystem::bit(u32 c) const
 {

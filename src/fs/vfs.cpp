@@ -182,6 +182,31 @@ bool valid_component(std::string_view name)
 }
 } // namespace
 
+namespace
+{
+// The owning VFS's ram_topology lock for a scope (spec 4.13): taken before
+// any RAM node lock by every entry change and by every lookup step that
+// retains a child. A node no VFS configured (a hosted fixture's) has none.
+class TopologyGuard final
+{
+  public:
+    explicit TopologyGuard(smp::RankedSpinLock<smp::LockRank::ram_topology> *lock) noexcept
+        : lock_(lock)
+    {
+        if (lock_) lock_->lock();
+    }
+    ~TopologyGuard()
+    {
+        if (lock_) lock_->unlock();
+    }
+    TopologyGuard(const TopologyGuard &) = delete;
+    TopologyGuard &operator=(const TopologyGuard &) = delete;
+
+  private:
+    smp::RankedSpinLock<smp::LockRank::ram_topology> *lock_;
+};
+} // namespace
+
 usize RamNode::child_index(std::string_view name) const
 {
     for (usize i = 0; i < child_count_; ++i)
@@ -228,6 +253,7 @@ Status RamNode::expose_borrowed_identity()
 }
 Status RamNode::attach_child(RamNode &child, std::string_view name)
 {
+    const TopologyGuard topology(owner_ ? &owner_->ram_topology_ : nullptr);
     smp::ScopedSpinLock guard(lock_);
     if (metadata_.type != NodeType::directory)
         return Status::not_directory("parent is not a directory");
@@ -250,6 +276,7 @@ Status RamNode::attach_child(RamNode &child, std::string_view name)
 }
 Status RamNode::detach_child(std::string_view name)
 {
+    const TopologyGuard topology(owner_ ? &owner_->ram_topology_ : nullptr);
     smp::ScopedSpinLock guard(lock_);
     if (metadata_.type != NodeType::directory)
         return Status::not_directory("parent is not a directory");
@@ -282,6 +309,7 @@ Status RamNode::link(std::string_view name, Node &target)
         return Status::permission("directories cannot be hard linked");
     if (!valid_component(name))
         return Status::invalid_argument("invalid hard link name");
+    const TopologyGuard topology(owner_ ? &owner_->ram_topology_ : nullptr);
     smp::ScopedSpinLock guard(lock_);
     smp::ScopedSpinLock inode_guard(inode.lock_);
     if (metadata_.type != NodeType::directory)
@@ -306,8 +334,10 @@ Status RamNode::rename(std::string_view old_name, Node &destination, std::string
     if (!valid_component(old_name) || !valid_component(new_name))
         return Status::invalid_argument("invalid rename component");
     auto &new_parent = static_cast<RamNode &>(destination);
-    // Namespace calls are serialized by VirtualFileSystem. Keep both directory
-    // locks ordered for readers while the directory entries change together.
+    // One ram_topology hold makes the rename atomic against every lookup and
+    // entry change of this filesystem. Keep both directory locks ordered for
+    // readers while the directory entries change together.
+    const TopologyGuard topology(owner_ ? &owner_->ram_topology_ : nullptr);
     RamNode *first = reinterpret_cast<uptr>(this) < reinterpret_cast<uptr>(&new_parent) ? this : &new_parent;
     RamNode *second = first == this ? &new_parent : this;
     first->lock_.lock();
@@ -421,6 +451,20 @@ Result<FileBuffer> RamNode::read(usize offset, usize count) const
 Status RamNode::write(usize offset, std::span<const std::byte> data)
 {
     smp::ScopedSpinLock guard(lock_);
+    return write_locked(offset, data);
+}
+
+// The end of file and the write under one node lock hold.
+Result<usize> RamNode::append(std::span<const std::byte> data)
+{
+    smp::ScopedSpinLock guard(lock_);
+    const auto offset = metadata_.size;
+    if (auto status = write_locked(offset, data); !status) return status;
+    return offset;
+}
+
+Status RamNode::write_locked(usize offset, std::span<const std::byte> data)
+{
     if (readonly_)
         return Status::denied("file has read-only archive backing");
     if (metadata_.type != NodeType::regular && metadata_.type != NodeType::device &&
@@ -476,6 +520,8 @@ Result<FixedString<96>> RamNode::directory_path(const Node &root) const
         return Status::not_found("directory belongs to another filesystem");
     if (metadata_.type != NodeType::directory)
         return Status::not_directory("node is not a directory");
+    // The walk up parent_ links needs a stable topology.
+    const TopologyGuard topology(owner_ ? &owner_->ram_topology_ : nullptr);
     FixedString<96> suffix;
     auto *current = this;
     for (usize depth = 0; depth < max_ram_nodes; ++depth)
@@ -528,6 +574,9 @@ Node *RamNode::find_child(std::string_view child)
 template <typename Operation>
 Result<Node *> RamNode::with_child_identity(std::string_view child, Operation &&operation)
 {
+    // The lookup step retains (or exposes) the child it found while the
+    // topology cannot change (spec 4.13).
+    const TopologyGuard topology(owner_ ? &owner_->ram_topology_ : nullptr);
     for (;;)
     {
         lock_.lock();
@@ -630,12 +679,16 @@ Result<DirectoryListing> RamNode::list(DirectoryReadIntent) const
     return result;
 }
 
-Result<u64> VirtualFileSystem::enter_operation(OperationContention *contention) const
+Result<u64> VirtualFileSystem::enter_operation(OperationContention *contention, OperationMode mode) const
 {
     // The namespace stays under the kernel lock; a section never enters it.
     smp::check_exclusive("VirtualFileSystem::enter_operation");
+    // The gate is only tried: an exclusive holder (a mount) or a re-entry on
+    // this CPU is contention the caller defers, as before.
+    const bool entered = mode == OperationMode::exclusive ? namespace_.try_enter_exclusive()
+                                                          : namespace_.try_enter_shared();
     smp::ScopedSpinLock guard(lock_);
-    if (operation_active_)
+    if (!entered)
     {
         if (contention)
         {
@@ -645,16 +698,22 @@ Result<u64> VirtualFileSystem::enter_operation(OperationContention *contention) 
         return Status::busy("VFS operation requires deferred retry");
     }
     if (operation_serial_ == ~u64{0})
+    {
+        if (mode == OperationMode::exclusive) namespace_.leave_exclusive();
+        else namespace_.leave_shared();
         return Status::overflow("VFS operation serial exhausted");
-    operation_active_ = true;
+    }
     return ++operation_serial_;
 }
 
-void VirtualFileSystem::leave_operation(u64 serial) const
+void VirtualFileSystem::leave_operation(u64) const
 {
+    if (namespace_.owned_exclusive_by_current_cpu()) namespace_.leave_exclusive();
+    else if (namespace_.owned_by_current_cpu()) namespace_.leave_shared();
+    else return;
+    // The last holder makes the deferred operations ready.
     smp::ScopedSpinLock guard(lock_);
-    if (!operation_active_ || serial != operation_serial_) return;
-    operation_active_ = false;
+    if (operation_active()) return;
     for (auto &wait : operation_waits_)
         if (wait.phase == OperationWaitPhase::waiting) wait.phase = OperationWaitPhase::ready;
 }
@@ -664,7 +723,7 @@ Result<bool> VirtualFileSystem::queue_operation_wait(sched::WaitTicket ticket)
     if (!ticket.owner || !ticket.thread || !ticket.generation)
         return Status::invalid_argument("VFS operation wait ticket");
     smp::ScopedSpinLock guard(lock_);
-    if (!operation_active_) return false;
+    if (!operation_active()) return false;
     OperationWait *available{};
     for (auto &wait : operation_waits_)
     {
@@ -707,7 +766,7 @@ Result<bool> VirtualFileSystem::queue_certified_operation_wait(OperationContenti
         return Status::denied("certified VFS enqueue has no exact contention owner");
     smp::ScopedSpinLock guard(lock_);
     // A successor operation is not the operation this failed attempt observed.
-    if (!operation_active_ || operation_serial_ != serial) return false;
+    if (!operation_active() || operation_serial_ != serial) return false;
     OperationWait *available{};
     for (auto &wait : operation_waits_)
     {
@@ -828,7 +887,7 @@ RamNode *VirtualFileSystem::ram_node(Node *node)
 
 Status VirtualFileSystem::mount_borrowed(std::string_view path, Node &root)
 {
-    OperationGuard operation(*this);
+    OperationGuard operation(*this, nullptr, OperationMode::exclusive);
     if (!operation) return operation.status();
     auto root_metadata = root.query_metadata();
     if (!root_metadata)
@@ -894,7 +953,7 @@ Status VirtualFileSystem::mount_borrowed(std::string_view path, Node &root)
 
 Result<VfsMountHandle> VirtualFileSystem::mount_owned(std::string_view path, MountedRootReference root)
 {
-    OperationGuard operation(*this);
+    OperationGuard operation(*this, nullptr, OperationMode::exclusive);
     // Parameter destruction follows local guard destruction. Consume explicitly
     // so every fallible cleanup still belongs to this operation's admission.
     auto finish_root = [&](Result<VfsMountHandle> result) -> Result<VfsMountHandle> {
@@ -955,7 +1014,7 @@ Result<VfsMountHandle> VirtualFileSystem::mount_owned(std::string_view path, Mou
 
 Result<VfsMountHandle> VirtualFileSystem::mount_ram_owned(std::string_view path, u32 mode, u32 uid, u32 gid)
 {
-    OperationGuard operation(*this);
+    OperationGuard operation(*this, nullptr, OperationMode::exclusive);
     if (!operation) return operation.status();
     if (path.empty() || path.front() != '/' || (path.size() > 1 && path.back() == '/') ||
         path.find("//") != std::string_view::npos || (mode & ~mode_permission_mask))
@@ -1050,7 +1109,7 @@ Status VirtualFileSystem::retire_ram_tree(RamNode &root)
 Status VirtualFileSystem::preflight_owned_mounts(std::span<const OwnedMountExpectation> expected) const
 {
     smp::ScopedSpinLock guard(lock_);
-    if (operation_active_)
+    if (operation_active())
         return Status::busy("mount inventory has an active namespace operation");
     if (expected.size() > mounts_.size())
         return Status::invalid_argument("mount inventory exceeds attachment capacity");
@@ -1108,7 +1167,7 @@ Status VirtualFileSystem::mount_snapshot(u32 slot, MountSnapshot &output) const
     if (slot >= mount_snapshot_capacity)
         return Status::invalid_argument("mount snapshot slot exceeds capacity");
     smp::ScopedSpinLock guard(lock_);
-    if (operation_active_)
+    if (operation_active())
         return Status::busy("mount snapshot has an active namespace operation");
     MountSnapshot snapshot{};
     snapshot.generation = 1;
@@ -1163,7 +1222,7 @@ Status VirtualFileSystem::mount_snapshot(u32 slot, MountSnapshot &output) const
 
 Status VirtualFileSystem::detach(VfsMountHandle mount)
 {
-    OperationGuard operation(*this);
+    OperationGuard operation(*this, nullptr, OperationMode::exclusive);
     if (!operation) return operation.status();
     if (mount.owner_ != this || !mount.id_ || mount.id_ > mounts_.size())
         return Status::bad_descriptor("mount handle is unavailable");
@@ -1215,7 +1274,7 @@ Status VirtualFileSystem::shutdown_reference_status() const
 {
     smp::ScopedSpinLock guard(lock_);
     if (!mount_cleanup_failure_) return mount_cleanup_failure_;
-    if (operation_active_ || socket_path_references_)
+    if (operation_active() || socket_path_references_)
         return Status::busy("VFS shutdown retains a namespace operation or socket path");
     for (const auto &wait : operation_waits_)
         if (wait.phase != OperationWaitPhase::unused)
@@ -1450,7 +1509,7 @@ Result<PathReference> VirtualFileSystem::create_unlocked(const ResolveContext &c
 
 Status VirtualFileSystem::import_archive_directory(std::string_view path, u32 mode)
 {
-    OperationGuard operation(*this);
+    OperationGuard operation(*this, nullptr, OperationMode::exclusive);
     if (!operation) return operation.status();
     if ((mode & ~boot_archive_directory_mode_mask) || path.size() < 2 || path.size() >= 128 ||
         path.front() != '/' || path.back() == '/' || path.find("//") != std::string_view::npos ||
@@ -1523,7 +1582,7 @@ Status VirtualFileSystem::import_archive_directory(std::string_view path, u32 mo
 Status VirtualFileSystem::create_readonly_file(std::string_view path, std::span<const std::byte> data, u32 mode,
                                                bool replace)
 {
-    OperationGuard operation(*this);
+    OperationGuard operation(*this, nullptr, OperationMode::exclusive);
     if (!operation) return operation.status();
     auto resolved = resolve_unlocked({}, path, FinalComponent::parent);
     if (!resolved)
@@ -1546,7 +1605,10 @@ Status VirtualFileSystem::create_readonly_file(std::string_view path, std::span<
         auto *old_buffer = node->writable_storage();
         auto status = node->configure_readonly(leaf.view(), data, mode);
         if (status.ok())
+        {
+            smp::ScopedSpinLock pool(ram_pool_);
             release_file_buffer(old_buffer);
+        }
         return status;
     }
     auto *node = allocate_node(leaf.view(), NodeType::regular, true);
@@ -2189,6 +2251,8 @@ Result<bool> VirtualFileSystem::protects_mount(Node &node)
 
 RamNode *VirtualFileSystem::allocate_node(std::string_view name, NodeType type, bool readonly)
 {
+    // The node and file-buffer pools (ram_pool_, a leaf; node locks nest inside).
+    smp::ScopedSpinLock pool(ram_pool_);
     for (auto &node : nodes_)
     {
         if (!node.reusable())

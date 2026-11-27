@@ -180,8 +180,13 @@ void lifecycle(Kernel &kernel, bool thumb)
     }
     mock::memory[captured.pc - instruction_bytes(thumb) - hw::user_begin] = std::byte{0xff};
     expect(native::syscall_origins.validate_restart(permit.value(), id, captured, wait));
-    // Numeric fd reuse wakes A spuriously. Rearm keeps capture and pinned A.
+    // Numeric fd reuse: the wait still holds A, so replacing the slot changes
+    // no endpoint count and wakes nobody (smp-scaling WP5; before, a spurious
+    // wake). A spurious completion (B data cannot satisfy A) rearms, keeping
+    // the capture and pinned A.
     leader(kernel, g); CHECK(kernel.posix().duplicate_to(b.value()[0], a.value()[0])); put(kernel, b.value()[1], 'B');
+    expect(thread->wait_registration.pending(wait.ticket) && binding(kernel, g).ticket.generation == wait.ticket.generation);
+    expect(kernel.scheduler().complete_wait(wait.ticket, sched::WaitCompletion::ready));
     const auto entries = mock::entries; expect(native::step(kernel)); expect(mock::entries == entries);
     const auto rearmed = binding(kernel, g);
     expect(origin(kernel, g) == id && rearmed.ticket.generation > wait.ticket.generation);

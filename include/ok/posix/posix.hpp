@@ -10,6 +10,7 @@
 #include <array>
 #include <span>
 #include <string_view>
+#include <utility>
 
 namespace ok::posix
 {
@@ -156,6 +157,32 @@ struct UnameInfo
     FixedString<32> release{"0.1.0"};
     FixedString<32> version{"debug"};
     FixedString<32> machine{"unknown"};
+};
+
+// A path walk's context whose start (a dirfd's or the cwd's directory) is
+// retained for the walk (spec 3.7), so a sibling thread's close or chdir
+// cannot release that node while the walk still uses it.
+class HeldResolveContext final : public fs::ResolveContext
+{
+  public:
+    HeldResolveContext(fs::ResolveContext context, fs::Node *retained) noexcept
+        : fs::ResolveContext(context), retained_(retained)
+    {
+    }
+    HeldResolveContext(HeldResolveContext &&other) noexcept
+        : fs::ResolveContext(other), retained_(std::exchange(other.retained_, nullptr))
+    {
+    }
+    HeldResolveContext(const HeldResolveContext &) = delete;
+    HeldResolveContext &operator=(const HeldResolveContext &) = delete;
+    HeldResolveContext &operator=(HeldResolveContext &&) = delete;
+    ~HeldResolveContext()
+    {
+        if (retained_) static_cast<void>(retained_->release());
+    }
+
+  private:
+    fs::Node *retained_{};
 };
 
 class PosixService final
@@ -381,8 +408,15 @@ class PosixService final
     [[nodiscard]] sched::ThreadLocalState &thread_local_state();
     [[nodiscard]] FileDescriptor *descriptor(Fd fd);
     [[nodiscard]] const FileDescriptor *descriptor(Fd fd) const;
+    // pin(fd) (spec 3.6): the description, held by a reference while the
+    // caller's process may run another thread that could close the slot.
+    [[nodiscard]] sched::PinnedDescription pin(Fd fd) const;
     [[nodiscard]] Result<Fd> allocate_fd(Fd minimum = 0);
-    [[nodiscard]] Result<fs::ResolveContext> path_context(Fd dirfd, std::string_view path);
+    // A cwd read whose retain a concurrent chdir overtook is repeated this often.
+    static constexpr usize cwd_retain_attempts = 8;
+    [[nodiscard]] Result<HeldResolveContext> path_context(Fd dirfd, std::string_view path);
+    // The cwd as a retained start (none for a process without one).
+    [[nodiscard]] Result<HeldResolveContext> cwd_context(fs::ResolveContext context = {});
     [[nodiscard]] Status copy_descriptor(Fd source, Fd target, u32 flags);
     [[nodiscard]] static bool node_backed(const FileDescriptor &entry);
     // Reads at the description's offset and moves it; the caller holds its position lock.
@@ -417,7 +451,8 @@ template <DirectoryPolicy Policy, typename Consumer>
     }
 Result<usize> PosixService::enumerate_directory(Fd fd, Consumer &&consumer)
 {
-    auto *description = descriptor(fd);
+    auto pinned = pin(fd);
+    auto *description = pinned.get();
     if (!description || !description->used)
         return Status::bad_descriptor("bad directory descriptor");
     if (!description->node)

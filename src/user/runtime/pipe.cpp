@@ -175,7 +175,7 @@ i64 resume_pipe_read(Kernel &kernel, sched::ProcessControlBlock &process,
     auto read = kernel.scheduler().read_pipe(wait.pipe, {buffer.data(), wait.count}, true);
     if (!read && read.status().code() == StatusCode::would_block && !(description->flags & posix::o_NONBLOCK))
     {
-        auto registration = kernel.scheduler().register_current_wait(sched::ThreadWaitReason::pipe_read, wait.pipe);
+        auto registration = kernel.scheduler().arm_pipe_wait(sched::ThreadWaitReason::pipe_read, wait.pipe);
         if (!registration)
         {
             const auto result = error(registration.status());
@@ -228,7 +228,7 @@ i64 begin_pipe_read(Kernel &kernel, sched::ProcessControlBlock &process, sched::
     { cancel_pipe_read(kernel, object); return error(status); }
     wait.pid = process.pid(); wait.tid = tid; wait.output = output; wait.count = count; wait.vectors = vectors;
     wait.fd = fd; wait.description = description_id; wait.pipe = description->pipe;
-    auto registration = kernel.scheduler().register_current_wait(sched::ThreadWaitReason::pipe_read, wait.pipe);
+    auto registration = kernel.scheduler().arm_pipe_wait(sched::ThreadWaitReason::pipe_read, wait.pipe);
     if (!registration)
     { cancel_pipe_read(kernel, object); return error(registration.status()); }
     wait.ticket = registration.value();
@@ -375,6 +375,15 @@ Status gather_pipe_write(const hw::AddressSpace &space, std::span<std::byte> byt
     }
     return copied == bytes.size() ? Status::success() : Status::fault("short pipe write suffix");
 }
+// The free bytes a parked write waits for: all of an atomic (small, non-UNIX)
+// write, one byte otherwise (spec 4.3 A1 recheck in arm_pipe_wait).
+usize pipe_write_needed(Kernel &kernel, const PipeWriteWait &wait)
+{
+    const auto *description = kernel.scheduler().open_description(wait.description);
+    const bool atomic = wait.count <= sched::pipe_capacity && description &&
+                        description->unix_write_pipe == sched::invalid_description;
+    return atomic ? wait.count : 1;
+}
 Result<usize> attempt_pipe_write(Kernel &kernel, sched::ProcessControlBlock &process, const PipeWriteWait &wait)
 {
     auto &space = process.resources().native_space;
@@ -483,7 +492,7 @@ i64 resume_pipe_write(Kernel &kernel, sched::ProcessControlBlock &process,
         (!write && write.status().code() == StatusCode::would_block && blocking))
     {
         const auto before_rearm = pipe_write_origin_binding(object, wait);
-        auto registration = kernel.scheduler().register_current_wait(sched::ThreadWaitReason::pipe_write, wait.pipe);
+        auto registration = kernel.scheduler().arm_pipe_wait(sched::ThreadWaitReason::pipe_write, wait.pipe, pipe_write_needed(kernel, wait));
         if (!registration)
         {
             const auto result = pipe_write_terminal_result(wait, error(registration.status()));
@@ -539,7 +548,7 @@ i64 begin_pipe_write(Kernel &kernel, sched::ProcessControlBlock &process, sched:
     if (auto status = kernel.scheduler().retain_description(description_id); !status)
     { cancel_pipe_write(kernel, object); return pipe_write_terminal_result(initial, error(status)); }
     auto &wait = *resolved.value(); wait = initial;
-    auto registration = kernel.scheduler().register_current_wait(sched::ThreadWaitReason::pipe_write, wait.pipe);
+    auto registration = kernel.scheduler().arm_pipe_wait(sched::ThreadWaitReason::pipe_write, wait.pipe, pipe_write_needed(kernel, wait));
     if (!registration)
     { const auto result = pipe_write_terminal_result(wait, error(registration.status())); cancel_pipe_write(kernel, object); return result; }
     wait.ticket = registration.value(); wait.request = wait.ticket.generation;

@@ -176,6 +176,7 @@ class Ext4Node final : public Node
     Result<Node *> lookup_child_retained(std::string_view child) override;
     Result<FileBuffer> read(usize offset, usize count) const override;
     Status write(usize offset, std::span<const std::byte> data) override;
+    Result<usize> append(std::span<const std::byte> data) override;
     Status truncate(usize size) override;
     Status sync() override;
     // Every provider call takes the filesystem's operation gate.
@@ -258,7 +259,6 @@ class Ext4FileSystem final
     friend class Ext4Node;
     Status begin_operation(const Ext4Node *node, bool mounting = false);
     // Identity lock held and the gate free: this CPU owns it.
-    void claim_operation_locked();
     Status finish_operation();
     Status drain_detached();
     void detach(Ext4Node &node);
@@ -381,10 +381,10 @@ class Ext4FileSystem final
     std::array<Group, 32> group_layout_{};
     std::array<Ext4Node, 128> nodes_{};
     mutable smp::SpinLock identity_lock_{};
-    bool operation_active_{false};
-    // The gate's owner, CPU + 1 (0 = free): written under identity_lock_,
-    // read without it by a CPU waiting for the gate.
-    std::atomic<u32> operation_owner_{0};
+    // The operation gate (rank fs_provider): one operation at a time across
+    // CPUs. Opened by its holder with identity_lock_ held, after it drained
+    // the detached nodes; a release that finds it held leaves them to it.
+    smp::ServingGate<smp::LockRank::fs_provider> gate_{};
 };
 
 // Pure candidate qualification for the existing plain, nonjournalled subset.

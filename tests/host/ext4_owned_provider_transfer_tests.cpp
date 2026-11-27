@@ -88,7 +88,7 @@ void transfer(const Bytes &input, bool create, bool via_vfs)
     gate.wait_returned();
     // The operation has returned but its result is still held by the producer.
     // Actual namespace removal therefore races the in-flight caller handoff.
-    CHECK(!fs.operation_active_); CHECK(root->remove("handoff", false));
+    CHECK(!fs.gate_.held()); CHECK(root->remove("handoff", false));
     CHECK(root->lookup_child_retained("handoff").status().code() == StatusCode::not_found);
     gate.accept(); provider.join();
     auto *node = static_cast<Ext4Node *>(via_vfs ? received_path->node() : received.value());
