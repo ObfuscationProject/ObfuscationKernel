@@ -177,10 +177,16 @@ Status PosixService::chdir(std::string_view path)
         return status;
     }
     auto &owned = resources();
-    auto *previous = owned.cwd_node;
-    owned.cwd_node = node;
-    owned.cwd_mount_id = mount;
-    owned.cwd.clear();
+    fs::Node *previous{};
+    {
+        // The cwd fields change under the files lock; the old reference is
+        // released after it.
+        const sched::FilesLock::Lock::Guard files(owned.files_lock.lock());
+        previous = owned.cwd_node;
+        owned.cwd_node = node;
+        owned.cwd_mount_id = mount;
+        owned.cwd.clear();
+    }
     // Old cleanup consumes its pin even on failure; the new cwd already owns
     // its independent pin and cannot retain a dangling previous reference.
     return previous ? previous->release() : Status::success();
@@ -201,7 +207,8 @@ Result<std::string_view> PosixService::current_directory()
 
 Status PosixService::fchdir(Fd fd)
 {
-    auto *entry = descriptor(fd);
+    auto pinned = pin(fd);
+    auto *entry = pinned.get();
     if (entry == nullptr || !entry->used || entry->node == nullptr)
         return Status::bad_descriptor("bad directory file descriptor");
     auto metadata = entry->node->query_metadata();
@@ -216,11 +223,15 @@ Status PosixService::fchdir(Fd fd)
     if (auto status = entry->node->retain(); !status.ok())
         return status;
     auto &owned = resources();
-    auto *previous = owned.cwd_node;
-    owned.cwd_node = entry->node;
-    owned.cwd_mount_id = entry->mount_id;
-    // A detached directory remains an object reference; getcwd may fail.
-    owned.cwd.clear();
+    fs::Node *previous{};
+    {
+        const sched::FilesLock::Lock::Guard files(owned.files_lock.lock());
+        previous = owned.cwd_node;
+        owned.cwd_node = entry->node;
+        owned.cwd_mount_id = entry->mount_id;
+        // A detached directory remains an object reference; getcwd may fail.
+        owned.cwd.clear();
+    }
     return previous ? previous->release() : Status::success();
 }
 
@@ -251,7 +262,8 @@ Status PosixService::faccessat(Fd dirfd, std::string_view path, u32 mode, u32 fl
     {
         if (dirfd != at_FDCWD)
         {
-            const auto *entry = descriptor(dirfd);
+            const auto pinned = pin(dirfd);
+            const auto *entry = pinned.get();
             if (!entry || !entry->used)
                 return Status::bad_descriptor("bad access descriptor");
             // Special descriptions do not yet carry qualified owner metadata.
@@ -265,7 +277,9 @@ Status PosixService::faccessat(Fd dirfd, std::string_view path, u32 mode, u32 fl
             return permitted(fs::Metadata{.type = metadata.type, .mode = metadata.mode,
                                            .uid = metadata.uid, .gid = metadata.gid});
         }
-        if (auto *cwd = resources().cwd_node)
+        auto held = cwd_context();
+        if (!held) return held.status();
+        if (auto *cwd = held.value().start.node)
         {
             auto metadata = vfs_->query_metadata(*cwd);
             return metadata ? permitted(metadata.value()) : metadata.status();
@@ -308,14 +322,15 @@ fs::ModeChangeResult PosixService::change_mode_fd(Fd fd, u32 mode)
 {
     if (!initialized_ || !vfs_)
         return fs::ModeChangeResult::failure(Status::not_initialized("POSIX service not initialized"));
-    auto *entry = descriptor(fd);
+    auto pinned = pin(fd);
+    auto *entry = pinned.get();
     if (!entry || !entry->used)
         return fs::ModeChangeResult::failure(Status::bad_descriptor("bad mode-change descriptor"));
-    if (const auto pts = scheduler_->pts_node(resources().files.entry(fd)->description); pts)
+    if (const auto pts = scheduler_->pts_node(pinned.id()); pts)
         return fs::ModeChangeResult::failure(scheduler_->change_pts_mode(pts.value(), mode, user_credentials()));
     if (!entry->node)
         return fs::ModeChangeResult::unavailable();
-    // The open description owns this node throughout the serialized operation.
+    // The pin keeps the description, and so its node, across the call.
     return entry->node->change_mode(mode, user_credentials());
 }
 
@@ -330,7 +345,9 @@ fs::ModeChangeResult PosixService::change_mode_at(Fd dirfd, std::string_view pat
         if (dirfd != at_FDCWD)
             return change_mode_fd(dirfd, mode);
         // A held cwd remains the target after rename or namespace detachment.
-        if (auto *cwd = resources().cwd_node)
+        auto held = cwd_context();
+        if (!held) return fs::ModeChangeResult::failure(held.status());
+        if (auto *cwd = held.value().start.node)
             return cwd->change_mode(mode, user_credentials());
         path = "/";
     }
@@ -354,12 +371,13 @@ fs::ModeChangeResult PosixService::change_owner_fd(Fd fd, u32 uid, u32 gid)
 {
     if (!initialized_ || !vfs_)
         return fs::ModeChangeResult::failure(Status::not_initialized("POSIX service not initialized"));
-    auto *entry = descriptor(fd);
+    auto pinned = pin(fd);
+    auto *entry = pinned.get();
     if (!entry || !entry->used)
         return fs::ModeChangeResult::failure(Status::bad_descriptor("bad ownership-change descriptor"));
     if (euid() != user::root_uid)
         return fs::ModeChangeResult::failure(Status::permission("ownership change requires root"));
-    if (const auto pts = scheduler_->pts_node(resources().files.entry(fd)->description); pts)
+    if (const auto pts = scheduler_->pts_node(pinned.id()); pts)
         return fs::ModeChangeResult::failure(scheduler_->change_pts_owner(pts.value(), uid, gid, user_credentials()));
     if (!entry->node) return fs::ModeChangeResult::unavailable();
     return entry->node->change_owner(uid, gid, user_credentials());
@@ -374,7 +392,9 @@ fs::ModeChangeResult PosixService::change_owner_at(Fd dirfd, std::string_view pa
     if (path.empty() && (flags & at_EMPTY_PATH))
     {
         if (dirfd != at_FDCWD) return change_owner_fd(dirfd, uid, gid);
-        if (auto *cwd = resources().cwd_node)
+        auto held = cwd_context();
+        if (!held) return fs::ModeChangeResult::failure(held.status());
+        if (auto *cwd = held.value().start.node)
         {
             if (euid() != user::root_uid)
                 return fs::ModeChangeResult::failure(Status::permission("ownership change requires root"));
@@ -424,7 +444,8 @@ Status PosixService::utimensat(Fd dirfd, std::string_view path, fs::TimestampCha
     };
     if (path.empty())
     {
-        auto *description = descriptor(dirfd);
+        auto pinned = pin(dirfd);
+        auto *description = pinned.get();
         if (!description || !description->used || !description->node)
             return Status::bad_descriptor("timestamp change needs an open file");
         return apply(*description->node);
@@ -444,7 +465,8 @@ Result<fs::FilesystemStatistics> PosixService::statfs(Fd dirfd, std::string_view
         return Status::not_initialized("POSIX service not initialized");
     if (path.empty())
     {
-        auto *description = descriptor(dirfd);
+        auto pinned = pin(dirfd);
+        auto *description = pinned.get();
         if (!description || !description->used || !description->node)
             return Status::bad_descriptor("statfs needs an open file");
         return description->node->filesystem_statistics();
@@ -487,9 +509,11 @@ Result<FileStatus> PosixService::statat(Fd dirfd, std::string_view path, u32 fla
     {
         if (dirfd != at_FDCWD)
             return fstat(dirfd);
-        if (auto *cwd = resources().cwd_node)
+        auto held = cwd_context();
+        if (!held) return held.status();
+        if (auto *cwd = held.value().start.node)
         {
-            // ProcessResources owns this identity in the serialized caller.
+            // Retained for the query (a sibling's chdir cannot release it).
             // Empty-path status requires no search or reconstructed pathname.
             auto queried = vfs_->query_metadata(*cwd);
             if (!queried)

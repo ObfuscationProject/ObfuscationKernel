@@ -189,13 +189,14 @@ const PosixService::FileDescriptor *PosixService::descriptor(Fd fd) const
     return scheduler_ == nullptr || slot == nullptr || !slot->used ? nullptr
                                                                    : scheduler_->open_description(slot->description);
 }
-sched::PinnedDescription PosixService::pin(Fd fd)
+sched::PinnedDescription PosixService::pin(Fd fd) const
 {
     if (scheduler_ == nullptr) return {};
     // Only the caller's own thread closes a single-threaded process's slots.
     const auto bound = caller();
     const bool shared = !bound.process || bound.process->live_count() > 1;
-    return scheduler_->pin_descriptor(resources(), fd, shared);
+    // The pin changes only the description's reference, never the table.
+    return scheduler_->pin_descriptor(const_cast<sched::ProcessResources &>(resources()), fd, shared);
 }
 Result<Fd> PosixService::allocate_fd(Fd minimum)
 {
@@ -206,7 +207,41 @@ Result<Fd> PosixService::allocate_fd(Fd minimum)
             return static_cast<Fd>(i);
     return Status::process_file_limit("file descriptor table full");
 }
-Result<fs::ResolveContext> PosixService::path_context(Fd dirfd, std::string_view path)
+Result<HeldResolveContext> PosixService::cwd_context(fs::ResolveContext context)
+{
+    auto &owned = resources();
+    for (usize attempt = 0; attempt < cwd_retain_attempts; ++attempt)
+    {
+        fs::PathHandle start{};
+        {
+            const sched::FilesLock::Lock::Guard files(owned.files_lock.lock());
+            start = {owned.cwd_node, owned.cwd_mount_id};
+        }
+        context.start = start;
+        if (!start.node)
+            return HeldResolveContext{context, nullptr};
+        const auto retained = start.node->retain();
+        bool current{};
+        {
+            const sched::FilesLock::Lock::Guard files(owned.files_lock.lock());
+            current = owned.cwd_node == start.node && owned.cwd_mount_id == start.mount_id;
+        }
+        if (retained && current)
+            return HeldResolveContext{context, start.node};
+        if (retained) static_cast<void>(start.node->release());
+        else if (current) return retained;
+    }
+    return Status::busy("current directory kept changing during the path walk setup");
+}
+
+// The walk's start is retained for the walk (spec 3.7). A dirfd's node is
+// retained through the pin, which keeps the description (and its node
+// reference) live meanwhile. The cwd is read under the files lock and
+// retained outside it (a provider's retain may enter its gate), then
+// rechecked: a chdir in between gives the stale reference back and the read
+// is repeated. Provider nodes live in their filesystem's pool while it is
+// mounted, and a mount that holds a cwd cannot be detached.
+Result<HeldResolveContext> PosixService::path_context(Fd dirfd, std::string_view path)
 {
     if (!initialized_ || !vfs_)
         return Status::not_initialized("POSIX service not initialized");
@@ -214,13 +249,11 @@ Result<fs::ResolveContext> PosixService::path_context(Fd dirfd, std::string_view
         return Status::not_found("empty pathname");
     fs::ResolveContext context{.credentials = credentials(), .check_search = true};
     if (path.front() == '/')
-        return context;
+        return HeldResolveContext{context, nullptr};
     if (dirfd == at_FDCWD)
-    {
-        context.start = {resources().cwd_node, resources().cwd_mount_id};
-        return context;
-    }
-    auto *entry = descriptor(dirfd);
+        return cwd_context(context);
+    auto pinned = pin(dirfd);
+    auto *entry = pinned.get();
     if (!entry || !entry->used || !entry->node)
         return Status::bad_descriptor("bad directory file descriptor");
     auto metadata = entry->node->query_metadata();
@@ -228,8 +261,10 @@ Result<fs::ResolveContext> PosixService::path_context(Fd dirfd, std::string_view
         return metadata.status();
     if (metadata.value().type != fs::NodeType::directory)
         return Status::not_directory("file descriptor is not a directory");
+    if (auto status = entry->node->retain(); !status)
+        return status;
     context.start = {entry->node, entry->mount_id};
-    return context;
+    return HeldResolveContext{context, entry->node};
 }
 
 Result<fs::PathReference> PosixService::resolve_node(Fd dirfd, std::string_view path, fs::FinalComponent policy)
@@ -242,9 +277,10 @@ Result<fs::PathReference> PosixService::resolve_node(Fd dirfd, std::string_view 
 
 Status PosixService::copy_descriptor(Fd source, Fd target, u32 flags)
 {
-    auto *entry = resources().files.entry(source);
-    if (scheduler_ == nullptr || entry == nullptr || !entry->used)
+    // The source stays pinned until the target holds its own reference.
+    const auto pinned = pin(source);
+    if (scheduler_ == nullptr || !pinned || !pinned->used)
         return Status::invalid_argument("bad file descriptor");
-    return scheduler_->install_descriptor(resources(), target, entry->description, (flags & o_CLOEXEC) != 0);
+    return scheduler_->install_descriptor(resources(), target, pinned.id(), (flags & o_CLOEXEC) != 0);
 }
 } // namespace ok::posix

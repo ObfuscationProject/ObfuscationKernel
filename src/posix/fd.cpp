@@ -504,7 +504,9 @@ Result<Fd> PosixService::duplicate(Fd fd, Fd minimum, u32 flags)
 {
     if (flags & ~o_CLOEXEC)
         return Status::invalid_argument("unsupported duplicate flags");
-    auto *entry = descriptor(fd);
+    // Pinned until the duplicate holds its own reference.
+    const auto pinned = pin(fd);
+    const auto *entry = pinned.get();
     if (entry == nullptr || !entry->used)
     {
         return Status::invalid_argument("bad file descriptor");
@@ -513,7 +515,7 @@ Result<Fd> PosixService::duplicate(Fd fd, Fd minimum, u32 flags)
     if (auto status = target.reserve(minimum); !status)
         return status;
     const auto number = target.fd();
-    if (auto status = target.publish(resources().files.entry(fd)->description, (flags & o_CLOEXEC) != 0); !status.ok())
+    if (auto status = target.publish(pinned.id(), (flags & o_CLOEXEC) != 0); !status.ok())
         return status;
     return number;
 }
@@ -524,10 +526,10 @@ Result<Fd> PosixService::duplicate_to(Fd fd, Fd target, u32 flags)
     {
         return Status::invalid_argument("target file descriptor out of range");
     }
-    auto *entry = descriptor(fd);
-    if (entry == nullptr || !entry->used)
     {
-        return Status::invalid_argument("bad file descriptor");
+        const auto pinned = pin(fd);
+        if (!pinned || !pinned->used)
+            return Status::invalid_argument("bad file descriptor");
     }
     if (fd == target)
         return target;
@@ -852,7 +854,9 @@ template Result<usize> PosixService::pwrite_with_policy<PositionedWritePolicy::l
 
 Result<usize> PosixService::readv(Fd fd, std::span<const IoVector> vectors)
 {
-    const auto *stream = descriptor(fd);
+    // Pinned across every read below (each read pins again).
+    const auto pinned = pin(fd);
+    const auto *stream = pinned.get();
     if (stream && stream->used && stream->readable && stream->unix_write_pipe != sched::invalid_description)
     {
         // One stream consumption preserves the first ancillary-record boundary
@@ -879,7 +883,7 @@ Result<usize> PosixService::readv(Fd fd, std::span<const IoVector> vectors)
         }
         return result;
     }
-    const auto *shared = descriptor(fd);
+    const auto *shared = pinned.get();
     if (shared && shared->used && shared->native_shared_file)
     {
         std::array<std::byte, sched::pipe_capacity> gathered{};
@@ -914,7 +918,7 @@ Result<usize> PosixService::readv(Fd fd, std::span<const IoVector> vectors)
             return total == 0 ? Result<usize>{Status::invalid_argument("readv buffer is null")} : Result<usize>{total};
         }
         const auto output = std::span<std::byte>{reinterpret_cast<std::byte *>(vector.base), vector.length};
-        const auto *entry = descriptor(fd);
+        const auto *entry = pinned.get();
         // Once a vector has made progress, returning a short read must not
         // leave the caller blocked while reporting a positive byte count.
         auto result = total && entry && entry->readable && entry->pipe != sched::invalid_description
@@ -1098,10 +1102,17 @@ Result<i64> PosixService::fcntl(Fd fd, u32 command, u64 argument)
         return duplicated ? Result<i64>{static_cast<i64>(duplicated.value())} : Result<i64>{duplicated.status()};
     }
     case f_GETFD:
-        return resources().files.entry(fd)->close_on_exec ? fd_CLOEXEC : 0;
-    case f_SETFD:
-        resources().files.entry(fd)->close_on_exec = (argument & fd_CLOEXEC) != 0;
+    case f_SETFD: {
+        // The slot's flag, under the files lock (the slot itself may have
+        // been closed since the pin).
+        auto &owned = resources();
+        const sched::FilesLock::Lock::Guard files(owned.files_lock.lock());
+        auto *slot = owned.files.entry(fd);
+        if (!slot || !slot->used) return Status::bad_descriptor("bad file descriptor");
+        if (command == f_GETFD) return slot->close_on_exec ? fd_CLOEXEC : 0;
+        slot->close_on_exec = (argument & fd_CLOEXEC) != 0;
         return 0;
+    }
     case f_GETFL: {
         const sched::DescriptionPositionGuard position(scheduler_->position_lock(entry));
         return static_cast<i64>(entry->flags);
@@ -1132,7 +1143,8 @@ Result<i64> PosixService::fcntl(Fd fd, u32 command, u64 argument)
 
 Result<i64> PosixService::ioctl(Fd fd, u64, u64)
 {
-    auto *entry = descriptor(fd);
+    const auto pinned = pin(fd);
+    const auto *entry = pinned.get();
     if (entry == nullptr || !entry->used)
         return Status::bad_descriptor("bad file descriptor");
     // Raw generic requests never dereference caller pointers. User adapters
@@ -1185,13 +1197,14 @@ FileStatus PosixService::terminal_file_status(const sched::TerminalStatus &termi
 
 Result<FileStatus> PosixService::fstat(Fd fd) const
 {
-    auto *entry = descriptor(fd);
+    // Pinned across the provider and service queries below.
+    const auto pinned = pin(fd);
+    const auto *entry = pinned.get();
     if (entry == nullptr || !entry->used)
     {
         return Status::invalid_argument("bad file descriptor");
     }
-    const auto *slot = resources().files.entry(fd);
-    if (auto terminal = scheduler_->terminal_status(slot->description); terminal)
+    if (auto terminal = scheduler_->terminal_status(pinned.id()); terminal)
         return terminal_file_status(terminal.value());
     if (entry->pty_endpoint)
         return FileStatus{.type = fs::NodeType::device,
@@ -1213,7 +1226,7 @@ Result<FileStatus> PosixService::fstat(Fd fd) const
             .blocks = metadata.value().size / 512, .attributes = attributes,
             .provider = FileStatusProvider::volatile_shared_file};
     }
-    if (slot && slot->used && scheduler_->is_unix_socket(slot->description))
+    if (scheduler_->is_unix_socket(pinned.id()))
         return FileStatus{.type = fs::NodeType::socket, .mode = fs::mode_socket | 0600u,
                           .link_count = 1, .block_size = fs::metadata_block_size};
     if (entry->pipe != sched::invalid_description)
